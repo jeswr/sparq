@@ -72,6 +72,54 @@ use oxttl::NQuadsParser;
 use sparq_core::Graph;
 use std::collections::HashMap;
 
+// ---------------------------------------------------------------------------
+// Text-in / text-out API ([OPUS-4.8] sq-1dd5t). A self-contained N-Quads
+// document is the interchange form RDFC-1.0 is defined over, so a `&str` ->
+// `String` entry point is the natural seam for callers that already hold
+// serialized RDF (the @jeswr/sparq RDF/JS `Dataset` wasm binding) and do not
+// want to reconstruct oxrdf term graphs across a language boundary.
+// ---------------------------------------------------------------------------
+
+/// Canonicalizes an **N-Quads document** and returns its RDFC-1.0 canonical
+/// N-Quads (canonically sorted, one quad per line, blank nodes relabelled to
+/// `c14nN`, each line `\n`-terminated). Two N-Quads documents that denote
+/// RDF-isomorphic datasets — i.e. differ only in blank-node labels and/or quad
+/// order — produce byte-identical output, which is the basis for an
+/// isomorphism-aware dataset `equals` / `contains` / content hash.
+///
+/// `input` is parsed as oxrdf-0.3 N-Quads (the default graph is written as a
+/// 3-term line; named graphs carry their graph term). RDF-1.2 triple terms are
+/// outside the W3C RDFC-1.0 data model and fail closed with
+/// [`CanonError::TripleTerm`] (use the opt-in `rdf12-triple-terms` profile).
+///
+/// ```
+/// let doc = "_:b0 <http://ex/p> _:b1 .\n_:b1 <http://ex/q> \"v\" .\n";
+/// let canon = sparq_canon::canonicalize_nquads(doc).unwrap();
+/// assert!(canon.contains("_:c14n"));
+/// // Relabelling the blank nodes yields byte-identical canonical output.
+/// let doc2 = "_:x <http://ex/p> _:y .\n_:y <http://ex/q> \"v\" .\n";
+/// assert_eq!(canon, sparq_canon::canonicalize_nquads(doc2).unwrap());
+/// ```
+pub fn canonicalize_nquads(input: &str) -> Result<String, CanonError> {
+    let quads = parse_nquads_03(input)?;
+    canonicalize_quads(&quads)
+}
+
+/// Parses an oxrdf-0.3 N-Quads document into [`Quad`]s (the input side of
+/// [`canonicalize_nquads`]). Surfaced so a caller that needs the parsed quads
+/// (e.g. to also issue identifiers) does not re-implement the parse.
+pub fn parse_nquads(input: &str) -> Result<Vec<Quad>, CanonError> {
+    parse_nquads_03(input)
+}
+
+fn parse_nquads_03(input: &str) -> Result<Vec<Quad>, CanonError> {
+    let mut quads = Vec::new();
+    for item in NQuadsParser::new().for_slice(input.as_bytes()) {
+        quads.push(item.map_err(|e| CanonError::Bridge(e.to_string()))?);
+    }
+    Ok(quads)
+}
+
 /// **NON-STANDARD, opt-in (`rdf12-triple-terms` feature).** Native RDF-1.2
 /// triple-term canonicalization profile — see the [module docs](rdf12) and the
 /// crate-level banner. Not W3C RDFC-1.0.
@@ -459,6 +507,45 @@ mod tests {
             canonicalize_triples(&[t]),
             Err(CanonError::TripleTerm)
         ));
+    }
+
+    /// [OPUS-4.8] sq-1dd5t: the text-in/text-out `canonicalize_nquads` entry point
+    /// (what the @jeswr/sparq RDF/JS `Dataset` wasm binding calls). Two N-Quads
+    /// documents that are RDF-isomorphic but differ in blank-node labels AND quad
+    /// order canonicalize to byte-identical output; a label-only diff that is NOT
+    /// isomorphic (an extra edge) does not.
+    #[test]
+    fn canonicalize_nquads_isomorphism() {
+        let a = "_:b0 <http://ex/p> _:b1 .\n_:b1 <http://ex/q> \"v\" .\n";
+        // Relabelled blank nodes + reordered lines — same dataset up to isomorphism.
+        let b = "_:y <http://ex/q> \"v\" .\n_:x <http://ex/p> _:y .\n";
+        let ca = canonicalize_nquads(a).unwrap();
+        let cb = canonicalize_nquads(b).unwrap();
+        assert_eq!(ca, cb, "isomorphic N-Quads must canonicalize identically");
+        assert!(
+            ca.contains("_:c14n"),
+            "blank nodes relabelled to c14nN: {ca}"
+        );
+
+        // A genuinely different graph (extra edge) must NOT match.
+        let c = "_:x <http://ex/p> _:y .\n_:y <http://ex/q> \"v\" .\n_:x <http://ex/r> \"w\" .\n";
+        assert_ne!(ca, canonicalize_nquads(c).unwrap());
+    }
+
+    /// Named graphs round-trip through the text bridge (the graph term is carried).
+    #[test]
+    fn canonicalize_nquads_named_graph() {
+        let doc = "_:b0 <http://ex/p> \"v\" <http://ex/g> .\n";
+        let c = canonicalize_nquads(doc).unwrap();
+        assert!(c.contains("<http://ex/g>"), "graph name preserved: {c}");
+        assert!(c.contains("_:c14n0"));
+    }
+
+    /// An empty document canonicalizes to the empty string (the empty dataset).
+    #[test]
+    fn canonicalize_nquads_empty() {
+        assert_eq!(canonicalize_nquads("").unwrap(), "");
+        assert_eq!(canonicalize_nquads("\n\n").unwrap(), "");
     }
 
     #[test]

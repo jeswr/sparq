@@ -842,3 +842,35 @@ shapeClass ex:Person {
         assert!(bad.is_err(), "a malformed SCS document must return Err, not panic");
     }
 }
+
+// ---- [OPUS-4.8] sq-1dd5t (#1047): the real wasm32 `canonicalizeNQuads` export ----
+//
+// The src/canon.rs `#[cfg(test)] mod tests` run NATIVELY (asserting against the
+// `sparq_canon` fn the export delegates to — `JsError::new` panics off-wasm), so they
+// never touch the actual `#[wasm_bindgen]` free function. These drive the genuine wasm32
+// export through the JS boundary: the `String -> String` marshalling and the `Err`
+// (JsError) path the @jeswr/sparq RDF/JS `Dataset` relies on for toCanonical/equals/contains.
+#[cfg(feature = "canon")]
+mod canon {
+    use super::*;
+    use sparq_wasm::canonicalize_nquads;
+
+    /// Two N-Quads documents that are RDF-isomorphic but differ in blank-node labels AND
+    /// quad order canonicalize, across the wasm boundary, to byte-identical output with
+    /// `_:c14nN` labels.
+    #[wasm_bindgen_test]
+    fn canonicalize_nquads_isomorphic() {
+        let a = "_:b0 <http://ex/p> _:b1 .\n_:b1 <http://ex/q> \"v\" .\n";
+        let b = "_:y <http://ex/q> \"v\" .\n_:x <http://ex/p> _:y .\n";
+        let ca = canonicalize_nquads(a).expect("canonicalize a");
+        let cb = canonicalize_nquads(b).expect("canonicalize b");
+        assert_eq!(ca, cb, "isomorphic datasets canonicalize identically");
+        assert!(ca.contains("_:c14n"), "relabelled to c14nN: {ca}");
+    }
+
+    /// A malformed N-Quads document crosses the boundary as the `Err` (JsError) arm, not a trap.
+    #[wasm_bindgen_test]
+    fn canonicalize_nquads_malformed_is_err() {
+        assert!(canonicalize_nquads("_:b0 <http://ex/p>").is_err());
+    }
+}

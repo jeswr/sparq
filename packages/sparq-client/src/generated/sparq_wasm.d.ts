@@ -435,6 +435,21 @@ export class Store {
     readonly size: number;
 }
 
+/**
+ * Canonicalizes an **N-Quads document** and returns its RDFC-1.0 canonical
+ * N-Quads (canonically sorted, one quad per line, blank nodes relabelled to
+ * `_:c14nN`, each line `\n`-terminated). Two N-Quads documents that denote
+ * RDF-isomorphic datasets — i.e. differ only in blank-node labels and/or quad
+ * order — produce byte-identical output, so a caller can hash / compare the
+ * result for an isomorphism-aware dataset `equals` / `contains` / content hash.
+ *
+ * `input` is parsed as N-Quads (the default graph is a 3-term line; named
+ * graphs carry their graph term). A malformed document, or one containing an
+ * RDF-1.2 triple term (outside the W3C RDFC-1.0 data model), returns the `Err`
+ * (`JsError`) arm rather than trapping.
+ */
+export function canonicalizeNQuads(input: string): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -442,6 +457,7 @@ export interface InitOutput {
     readonly __wbg_quadchunks_free: (a: number, b: number) => void;
     readonly __wbg_solutioncursor_free: (a: number, b: number) => void;
     readonly __wbg_store_free: (a: number, b: number) => void;
+    readonly canonicalizeNQuads: (a: number, b: number) => [number, number, number, number];
     readonly quadchunks_next: (a: number) => [number, number];
     readonly solutioncursor_batchSize: (a: number) => number;
     readonly solutioncursor_next: (a: number) => [number, number];
@@ -478,9 +494,9 @@ export interface InitOutput {
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __externref_drop_slice: (a: number, b: number) => void;
-    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }
 
