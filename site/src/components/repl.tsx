@@ -11,6 +11,13 @@ import {
   Braces,
   Download,
   PlugZap,
+  Telescope,
+  Gauge,
+  History,
+  Layers,
+  FolderOpen,
+  FilePlus2,
+  Save,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -26,13 +33,15 @@ import { cn } from "@/lib/utils";
 import {
   loadSparq,
   loadIntoStore,
-  prewarmSparq,
+  prewarmSparqWhenIdle,
   storeToNQuads,
   datasetSize,
   extractTable,
   resultsToCsv,
   resultsToTsv,
   formatSparqlJson,
+  serializeGraphAsJsonLd,
+  type JsonLdMode,
   type SparqlResults,
   type WasmStore,
 } from "@/lib/sparq-wasm";
@@ -41,6 +50,10 @@ import {
   classifyQueryForm,
   isGraphForm,
   modeSupportsForm,
+  NAMED_GRAPH_STATS_QUERY,
+  DEFAULT_GRAPH_COUNT_QUERY,
+  parseGraphStats,
+  type GraphStat,
   type QueryForm,
   type RunMode,
 } from "@/lib/repl-dataset";
@@ -57,13 +70,43 @@ import { SparqlEditor } from "@/components/sparql-editor";
 // [OPUS-4.8] sq-8uew — Turtle/N-Triples syntax highlighting for the CONSTRUCT/DESCRIBE graph.
 // [OPUS-4.8] sq-gb4o (#805) — pretty/indented Turtle (with a raw N-Triples toggle) for the graph.
 import { TurtleResult } from "@/components/rdf-highlight";
+// [OPUS-4.8] sq-oy1f.7 — JSON-LD output mode: the read-only JSON-LD syntax-highlight renderer
+// for the CONSTRUCT/DESCRIBE graph serialised via the wasm engine's JSON-LD writer.
+import { JsonLdHighlight } from "@/components/jsonld-editor";
 // [OPUS-4.8] sq-2mke — endpoint mode: the Connect panel + the SPARQL 1.1 Protocol client.
 import { ConnectPanel } from "@/components/connect-panel";
 // [OPUS-4.8] sq-9ij6 — endpoint mode: the live subscriptions view (SSE result deltas).
 import { SubscriptionsView } from "@/components/subscriptions-view";
 // [OPUS-4.8] sq-he72 — endpoint mode: the server health / capabilities panel (metrics + VoID/SD).
 import { ServerHealthPanel } from "@/components/server-health-panel";
-import { type EndpointConfig, runEndpointQuery } from "@sparq/client";
+import {
+  type EndpointConfig,
+  type Workspace,
+  type WorkspaceSourceMeta,
+  newWorkspace,
+  runEndpointQuery,
+} from "@sparq/client";
+// [OPUS-4.8] sq-atb0 — the persistent cross-session workspace panel + its hook + the
+// site-side wasm-Store ⇄ snapshot bridge.
+import { WorkspacePanel } from "@/components/workspace-panel";
+import { useWorkspaces } from "@/lib/use-workspaces";
+import {
+  snapshotStore,
+  restoreStoreFromSnapshot,
+} from "@/lib/workspace-snapshot";
+// [OPUS-4.8] sq-ixc3.10 — the keyboard-first spine. The REPL is the workbench, so it
+// CONTRIBUTES its operational verbs (run / EXPLAIN / connect / export / import / switch-
+// workspace) plus the live named graphs + recent queries to the Cmd-K command palette via the
+// shell-mounted registry. The pure command-model helpers (recent-query ring, graph/query
+// labels) live in the unit-tested `@/lib/palette-commands`.
+import { useRegisterPaletteCommands } from "@/components/palette-commands";
+import {
+  pushRecentQuery,
+  previewQuery,
+  graphLabel,
+  type PaletteCommand,
+  type RecentQuery,
+} from "@/lib/palette-commands";
 
 // [OPUS-4.8] sq-vfbm — the REPL now dispatches across the whole lean-bundle query
 // surface, so the result state carries one variant per shape of answer: a solution
@@ -121,6 +164,16 @@ export function Repl() {
   );
   const storeRef = React.useRef<WasmStore | null>(null);
 
+  // [OPUS-4.8] sq-ixc3.10 — the keyboard-first spine's live inputs.
+  //   • recentQueries: a session-only ring of the most-recently-RUN distinct queries, newest
+  //     first (pure ring in `@/lib/palette-commands`). Re-selecting one drops it back into the
+  //     editor. Session-only by design: it is workbench scratch, not persisted state.
+  //   • namedGraphs: the dataset's NAMED graph IRIs, re-read from the live store off the same
+  //     `datasetVersion` the dataset panel uses, so the palette's "Named graphs" group tracks
+  //     the loaded data. The palette command opens the dataset viewer focused on the data.
+  const [recentQueries, setRecentQueries] = React.useState<RecentQuery[]>([]);
+  const [namedGraphs, setNamedGraphs] = React.useState<GraphStat[]>([]);
+
   // [OPUS-4.8] sq-2mke — endpoint mode. When `endpointActive`, queries route to a running
   // SPARQL 1.1 Protocol endpoint over the shared `@sparq/client` HTTP client instead of the
   // in-tab WASM store. The config (URL + optional bearer token) is lifted here so `run()`
@@ -130,6 +183,21 @@ export function Repl() {
     url: "http://127.0.0.1:3030/sparql",
     token: "",
   });
+
+  // [OPUS-4.8] sq-atb0 — the persistent cross-session workspace state. `workspaces` owns the
+  // resolved persistence backend (Tauri disk / browser localStorage / in-memory) and the CRUD
+  // surface; `currentWorkspaceId` is the open workspace (null = an unsaved scratch session);
+  // `sources` accumulates the import metadata (local + url) of every source loaded this session
+  // so a saved workspace can re-draw its source list and re-fetch its URL sources. The dataset
+  // itself is persisted as an N-Quads SNAPSHOT (the save/open cache), not re-ingested on open.
+  const workspaces = useWorkspaces();
+  const [currentWorkspaceId, setCurrentWorkspaceId] = React.useState<string | null>(
+    null,
+  );
+  const [sources, setSources] = React.useState<WorkspaceSourceMeta[]>([]);
+  const [workspaceBusy, setWorkspaceBusy] = React.useState(false);
+  // Guards the one-shot startup re-hydration so it runs at most once per mount.
+  const rehydratedRef = React.useRef(false);
 
   // Build (or rebuild) the store from RDF text + format. Centralises error handling so
   // every load path (default, picker, upload, URL) reports failures the same way.
@@ -150,29 +218,47 @@ export function Repl() {
     [],
   );
 
-  // Pre-warm the engine AND parse the default dataset eagerly on mount, off the render
-  // path. The first "Run query" then runs against an already-built store with no cold
-  // start. A failure resets the indicator so a later run can retry via ensureStore.
+  // [OPUS-4.8] sq-4296 (#935 / #981) — pre-warm the engine AND parse the default dataset on
+  // the next browser-IDLE slot, not synchronously during mount. The REPL renders on the home
+  // page and /try; firing the ~2.8 MB engine wasm fetch while the component mounts would
+  // compete with the initial paint / first-input readiness. `prewarmSparqWhenIdle` defers the
+  // fetch via `requestIdleCallback` (with a `setTimeout` fallback) so the page is interactive
+  // FIRST, then the wasm loads in the background. The first "Run query" still awaits the
+  // memoised `loadSparq()` via `ensureStore`, so an interaction before the idle warm-up
+  // completes joins the in-flight load — it never calls into an uninitialised wasm.
   React.useEffect(() => {
     let cancelled = false;
     setEngine("warming");
-    prewarmSparq()
-      .then(async () => {
-        if (cancelled || storeRef.current) return;
-        await buildStore(DEFAULT_DATASET.text, DEFAULT_DATASET.format);
-      })
-      .then(() => {
-        if (!cancelled) setEngine("ready");
-      })
-      .catch((e) => {
+    const handle = prewarmSparqWhenIdle({
+      onReady: () => {
+        if (cancelled || storeRef.current) {
+          if (!cancelled) setEngine("ready");
+          return;
+        }
+        // The engine is ready; build the default dataset off the render path, then mark ready.
+        buildStore(DEFAULT_DATASET.text, DEFAULT_DATASET.format)
+          .then(() => {
+            if (!cancelled) setEngine("ready");
+          })
+          .catch((e) => {
+            if (cancelled) return;
+            setEngine("error");
+            toast.error("Engine failed to load", {
+              description: e instanceof Error ? e.message : String(e),
+            });
+          });
+      },
+      onError: (e) => {
         if (cancelled) return;
         setEngine("error");
         toast.error("Engine failed to load", {
           description: e instanceof Error ? e.message : String(e),
         });
-      });
+      },
+    });
     return () => {
       cancelled = true;
+      handle.cancel();
     };
   }, [buildStore]);
 
@@ -228,12 +314,27 @@ export function Repl() {
     }
   }, [endpointConfig, sparql]);
 
+  // [OPUS-4.8] sq-ixc3.10 — remember a just-run query for the command palette's "Recent
+  // queries" group. De-duplicated + capped + session-only by the pure ring helper.
+  const recordRecent = React.useCallback((query: string) => {
+    setRecentQueries((prev) => pushRecentQuery(prev, query, Date.now()));
+  }, []);
+
   // [OPUS-4.8] sq-vfbm — dispatch across the whole lean-bundle query surface. EXPLAIN /
   // ANALYZE modes render the planner's plan text (every form for EXPLAIN; SELECT/ASK for
   // ANALYZE). Otherwise we classify the SPARQL form and route to the matching wasm export:
   // SELECT/ASK -> query (JSON), CONSTRUCT/DESCRIBE -> queryQuads (N-Triples), and an Update
   // keyword -> updateInPlace (mutates the in-tab store; we re-count the dataset after).
-  const run = React.useCallback(async () => {
+  const run = React.useCallback(async (overrideMode?: RunMode) => {
+    // [OPUS-4.8] sq-ixc3.10 — the command palette runs a SPECIFIC mode (Run / EXPLAIN /
+    // ANALYZE) without first flipping the mode-tab state and racing this read; an explicit
+    // `overrideMode` wins over the current tab. The button path calls `run()` with no
+    // argument, so it keeps using the selected tab exactly as before.
+    const runMode = overrideMode ?? mode;
+    // [OPUS-4.8] sq-ixc3.10 — record the query text in the recent ring for the spine. Done
+    // up front (covers run / EXPLAIN / ANALYZE / endpoint) so the palette always offers what
+    // you actually ran, even if the run then errors.
+    recordRecent(sparql);
     // [OPUS-4.8] sq-2mke — when endpoint mode is active, the query runs on the remote
     // server, not the in-tab store. EXPLAIN / ANALYZE remain a WASM-only planner view, so
     // a "run" in endpoint mode always executes the query (the mode tabs are grayed).
@@ -252,8 +353,8 @@ export function Repl() {
       const form = classifyQueryForm(sparql);
       setState({ kind: "running" });
 
-      if (mode === "explain" || mode === "analyze") {
-        const analyze = mode === "analyze";
+      if (runMode === "explain" || runMode === "analyze") {
+        const analyze = runMode === "analyze";
         const t0 = performance.now();
         const plan = analyze ? store.explainAnalyze(sparql) : store.explain(sparql);
         const ms = performance.now() - t0;
@@ -297,11 +398,11 @@ export function Repl() {
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setState({ kind: "error", message });
-      toast.error(mode === "run" ? "Query failed" : "EXPLAIN failed", {
+      toast.error(runMode === "run" ? "Query failed" : "EXPLAIN failed", {
         description: message,
       });
     }
-  }, [ensureStore, sparql, mode, endpointActive, runEndpoint]);
+  }, [ensureStore, sparql, mode, endpointActive, runEndpoint, recordRecent]);
 
   // Switch to a built-in dataset: reload the store, reset the count + active descriptor.
   const selectBuiltin = React.useCallback(
@@ -312,6 +413,9 @@ export function Repl() {
         await buildStore(ds.text, ds.format);
         setActiveBuiltinId(ds.id);
         setActive({ label: ds.label, description: ds.description });
+        // [OPUS-4.8] sq-atb0 — a built-in dataset REPLACES the store, so it resets the imported-
+        // source list: there are no user imports to re-list (the data lives in the snapshot).
+        setSources([]);
         setState({ kind: "idle" });
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
@@ -329,6 +433,7 @@ export function Repl() {
       format: string,
       label: string,
       mode: "replace" | "add",
+      origin?: { kind: "local" | "url"; url?: string },
     ) => {
       try {
         const Store = await loadSparq();
@@ -356,6 +461,21 @@ export function Repl() {
           });
         }
         setActiveBuiltinId(null);
+        // [OPUS-4.8] sq-atb0 — record this import as workspace source metadata. A "replace"
+        // load starts a fresh source list; an "add" appends. `origin` defaults to a local file
+        // when the caller did not say (the only callers that omit it are programmatic loads).
+        const meta: WorkspaceSourceMeta = {
+          kind: origin?.kind ?? "local",
+          label,
+          url: origin?.kind === "url" ? origin.url : undefined,
+          format,
+          bytes:
+            typeof TextEncoder !== "undefined"
+              ? new TextEncoder().encode(text).length
+              : text.length,
+          importedAt: Date.now(),
+        };
+        setSources((prev) => (mode === "add" ? [...prev, meta] : [meta]));
         setState({ kind: "idle" });
         toast.success("Dataset loaded", {
           // Count the WHOLE dataset (default + named graphs), not just the default.
@@ -369,6 +489,206 @@ export function Repl() {
     },
     [buildStore, size],
   );
+
+  // [OPUS-4.8] sq-atb0 — apply a loaded workspace to the live REPL: re-hydrate the wasm store
+  // from the workspace's N-Quads SNAPSHOT (the save/open cache — no re-ingest from source),
+  // restore the editor state (query + run mode + endpoint view, never a bearer token), and
+  // re-draw the imported-source list. Becomes the open workspace.
+  const applyWorkspace = React.useCallback(
+    async (ws: Workspace) => {
+      const store = await restoreStoreFromSnapshot(ws.dataSnapshot);
+      storeRef.current = store;
+      setSize(datasetSize(store));
+      setDatasetVersion((v) => v + 1);
+      setActiveBuiltinId(null);
+      setActive({
+        label: ws.name,
+        description: `Restored from workspace "${ws.name}" (${ws.sources.length} source${
+          ws.sources.length === 1 ? "" : "s"
+        }).`,
+      });
+      setSources(ws.sources);
+      setSparql(ws.editor.query);
+      setMode(ws.editor.mode);
+      setEndpointActive(ws.editor.endpointActive);
+      if (ws.editor.endpointUrl) {
+        // Restore the endpoint URL but NEVER a token — a restored endpoint session re-prompts.
+        setEndpointConfig((c) => ({ url: ws.editor.endpointUrl ?? c.url, token: "" }));
+      }
+      setCurrentWorkspaceId(ws.id);
+      setState({ kind: "idle" });
+    },
+    [],
+  );
+
+  // [OPUS-4.8] sq-atb0 — assemble a Workspace record from the current REPL state: the
+  // whole-dataset N-Quads snapshot, the imported-source metadata, and the editor state (no
+  // token). Reused by both Save (overwrite) and Save-as (new id).
+  const buildWorkspaceRecord = React.useCallback(
+    (base: Workspace): Workspace => {
+      const store = storeRef.current;
+      return {
+        ...base,
+        sources,
+        dataSnapshot: store ? snapshotStore(store) : undefined,
+        editor: {
+          query: sparql,
+          mode,
+          endpointActive,
+          endpointUrl: endpointActive ? endpointConfig.url : undefined,
+        },
+      };
+    },
+    [sources, sparql, mode, endpointActive, endpointConfig.url],
+  );
+
+  // Open a stored workspace by id (from the switcher).
+  const openWorkspace = React.useCallback(
+    async (id: string) => {
+      setWorkspaceBusy(true);
+      try {
+        const ws = await workspaces.load(id);
+        if (!ws) {
+          toast.error("Workspace not found", {
+            description: "It may have been deleted in another tab.",
+          });
+          return;
+        }
+        await applyWorkspace(ws);
+        await workspaces.setLastOpened(ws.id);
+        toast.success("Workspace opened", { description: ws.name });
+      } catch (e) {
+        toast.error("Could not open workspace", {
+          description: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        setWorkspaceBusy(false);
+      }
+    },
+    [workspaces, applyWorkspace],
+  );
+
+  // Overwrite the open workspace with the current state.
+  const saveWorkspace = React.useCallback(async () => {
+    if (currentWorkspaceId === null) return;
+    setWorkspaceBusy(true);
+    try {
+      const existing = await workspaces.load(currentWorkspaceId);
+      const base = existing ?? newWorkspace("Workspace", sparql);
+      await workspaces.save(buildWorkspaceRecord({ ...base, id: currentWorkspaceId }));
+      toast.success("Workspace saved");
+    } catch (e) {
+      toast.error("Could not save workspace", {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }, [currentWorkspaceId, workspaces, buildWorkspaceRecord, sparql]);
+
+  // Save the current state as a NEW named workspace (becomes the open one).
+  const saveWorkspaceAs = React.useCallback(
+    async (name: string) => {
+      setWorkspaceBusy(true);
+      try {
+        const record = buildWorkspaceRecord(newWorkspace(name, sparql));
+        await workspaces.save(record);
+        setCurrentWorkspaceId(record.id);
+        toast.success("Workspace created", { description: name });
+      } catch (e) {
+        toast.error("Could not save workspace", {
+          description: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        setWorkspaceBusy(false);
+      }
+    },
+    [buildWorkspaceRecord, workspaces, sparql],
+  );
+
+  // Rename the open workspace.
+  const renameWorkspace = React.useCallback(
+    async (name: string) => {
+      if (currentWorkspaceId === null) return;
+      setWorkspaceBusy(true);
+      try {
+        const existing = await workspaces.load(currentWorkspaceId);
+        if (!existing) return;
+        await workspaces.save({ ...existing, name });
+        toast.success("Workspace renamed", { description: name });
+      } catch (e) {
+        toast.error("Could not rename workspace", {
+          description: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        setWorkspaceBusy(false);
+      }
+    },
+    [currentWorkspaceId, workspaces],
+  );
+
+  // Delete a stored workspace; if it was the open one, drop back to a scratch session.
+  const deleteWorkspace = React.useCallback(
+    async (id: string) => {
+      setWorkspaceBusy(true);
+      try {
+        await workspaces.remove(id);
+        if (id === currentWorkspaceId) {
+          setCurrentWorkspaceId(null);
+          await workspaces.setLastOpened(null);
+        }
+        toast.success("Workspace deleted");
+      } catch (e) {
+        toast.error("Could not delete workspace", {
+          description: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        setWorkspaceBusy(false);
+      }
+    },
+    [workspaces, currentWorkspaceId],
+  );
+
+  // Start a fresh scratch session: reload the default dataset, reset the editor + sources, and
+  // detach from any open workspace (nothing is deleted).
+  const newScratchSession = React.useCallback(async () => {
+    setCurrentWorkspaceId(null);
+    await workspaces.setLastOpened(null);
+    setSources([]);
+    setSparql(EXAMPLE_QUERIES[0].sparql);
+    setMode("run");
+    setActiveBuiltinId(DEFAULT_DATASET.id);
+    setActive({
+      label: DEFAULT_DATASET.label,
+      description: DEFAULT_DATASET.description,
+    });
+    try {
+      await buildStore(DEFAULT_DATASET.text, DEFAULT_DATASET.format);
+    } catch {
+      // The pre-warm effect / ensureStore will rebuild the default on the next run.
+    }
+    setState({ kind: "idle" });
+  }, [workspaces, buildStore]);
+
+  // [OPUS-4.8] sq-atb0 — startup re-hydration: once the persistence backend has resolved, if a
+  // last-opened workspace exists, restore it (its snapshot + editor state). Runs at most once
+  // per mount (the ref guard), and only after the engine pre-warm has built the default store,
+  // so applying the snapshot replaces a known-good store. A failure is non-fatal — the user
+  // keeps the default scratch session.
+  React.useEffect(() => {
+    if (rehydratedRef.current) return;
+    if (!workspaces.ready || workspaces.initialId === null) return;
+    if (engine !== "ready") return;
+    rehydratedRef.current = true;
+    void (async () => {
+      try {
+        const ws = await workspaces.load(workspaces.initialId as string);
+        if (ws) await applyWorkspace(ws);
+      } catch {
+        // Keep the scratch session if re-hydration fails.
+      }
+    })();
+  }, [workspaces.ready, workspaces.initialId, engine, workspaces, applyWorkspace]);
 
   const busy = state.kind === "running";
   const controlsDisabled = engine === "warming" || engine === "cold";
@@ -392,6 +712,236 @@ export function Repl() {
   React.useEffect(() => {
     if (endpointActive && mode !== "run") setMode("run");
   }, [endpointActive, mode]);
+
+  // [OPUS-4.8] sq-ixc3.10 — keep the palette's "Named graphs" group in sync with the live
+  // store. We re-read the NAMED graph IRIs (+ counts) off the same `datasetVersion` the dataset
+  // panel keys off, using the engine's own queries (no new Store API, no baked figure). In
+  // endpoint mode the remote server owns its data, so there are no in-tab named graphs to list.
+  React.useEffect(() => {
+    const store = storeRef.current;
+    if (!store || endpointActive) {
+      setNamedGraphs([]);
+      return;
+    }
+    try {
+      const namedJson = JSON.parse(store.query(NAMED_GRAPH_STATS_QUERY)) as SparqlResults;
+      const defaultJson = JSON.parse(store.query(DEFAULT_GRAPH_COUNT_QUERY)) as SparqlResults;
+      // parseGraphStats returns the default graph first, then named graphs; the palette only
+      // lists the NAMED ones (the default graph is opened via the "Browse dataset" action).
+      const stats = parseGraphStats(defaultJson, namedJson).filter((s) => !s.isDefault);
+      setNamedGraphs(stats);
+    } catch {
+      setNamedGraphs([]);
+    }
+  }, [datasetVersion, endpointActive]);
+
+  // [OPUS-4.8] sq-ixc3.10 — assemble the OPERATIONAL command set the REPL contributes to the
+  // Cmd-K spine and register it for as long as the REPL is mounted. The list is memoised off the
+  // live state it reads, so the palette always reflects the current workbench (mode availability,
+  // open workspace, loaded graphs, recent queries) without prop-drilling. `runQuery` jumps to a
+  // mode then runs; the editor/import/connect/export verbs reuse the SAME callbacks the panels do.
+  const runWithMode = React.useCallback(
+    (m: RunMode) => {
+      // Reflect the chosen mode in the tab strip AND run it immediately — `run` takes the mode
+      // explicitly, so there is no state-then-run race.
+      setMode(m);
+      void run(m);
+    },
+    [run],
+  );
+
+  const paletteCommands = React.useMemo<PaletteCommand[]>(() => {
+    const cmds: PaletteCommand[] = [];
+
+    // ── Actions: the verbs (run / EXPLAIN / connect / export / import / workspace) ──────────
+    cmds.push({
+      id: "repl.run",
+      group: "Actions",
+      title: "Run query",
+      blurb: endpointActive ? "Execute on the connected endpoint" : "Execute on the in-tab engine",
+      keywords: ["run", "execute", "query", "go"],
+      icon: Play,
+      disabled: busy,
+      run: () => runWithMode("run"),
+    });
+    // EXPLAIN / ANALYZE drive the in-tab planner — unavailable in endpoint mode or for Updates.
+    const planUnsupported = endpointActive || !modeSupportsForm("explain", form);
+    cmds.push({
+      id: "repl.explain",
+      group: "Actions",
+      title: "Run EXPLAIN",
+      blurb: "Show the query plan without executing it",
+      keywords: ["explain", "plan", "planner", "optimize"],
+      icon: Telescope,
+      disabled: busy || planUnsupported,
+      run: () => runWithMode("explain"),
+    });
+    cmds.push({
+      id: "repl.analyze",
+      group: "Actions",
+      title: "Run EXPLAIN ANALYZE",
+      blurb: "Plan + execute with a per-operator trace (SELECT/ASK)",
+      keywords: ["analyze", "analyse", "trace", "profile", "explain"],
+      icon: Gauge,
+      disabled: busy || endpointActive || !modeSupportsForm("analyze", form),
+      run: () => runWithMode("analyze"),
+    });
+    cmds.push({
+      id: "repl.connect",
+      group: "Actions",
+      title: endpointActive ? "Disconnect from endpoint" : "Connect to a SPARQL endpoint",
+      blurb: endpointActive
+        ? "Switch back to the in-tab WASM engine"
+        : "Run against a running sparq-server (SPARQL 1.1 Protocol)",
+      keywords: ["connect", "disconnect", "endpoint", "server", "remote", "http"],
+      icon: PlugZap,
+      run: () => setEndpointActive((v) => !v),
+    });
+    // Export the current SELECT result set (only when one is on screen).
+    const haveSelect = state.kind === "select";
+    cmds.push({
+      id: "repl.export.csv",
+      group: "Actions",
+      title: "Export results as CSV",
+      blurb: haveSelect ? undefined : "Run a SELECT first to export its rows",
+      keywords: ["export", "download", "csv", "results", "save"],
+      icon: Download,
+      disabled: !haveSelect,
+      run: () => {
+        if (state.kind === "select")
+          downloadText("sparql-results.csv", resultsToCsv(state.results), "text/csv");
+      },
+    });
+    cmds.push({
+      id: "repl.export.tsv",
+      group: "Actions",
+      title: "Export results as TSV",
+      blurb: haveSelect ? undefined : "Run a SELECT first to export its rows",
+      keywords: ["export", "download", "tsv", "results", "save"],
+      icon: Download,
+      disabled: !haveSelect,
+      run: () => {
+        if (state.kind === "select")
+          downloadText(
+            "sparql-results.tsv",
+            resultsToTsv(state.results),
+            "text/tab-separated-values",
+          );
+      },
+    });
+    cmds.push({
+      id: "repl.export.json",
+      group: "Actions",
+      title: "Export results as JSON",
+      blurb: haveSelect ? undefined : "Run a SELECT first to export its rows",
+      keywords: ["export", "download", "json", "results", "save", "sparql-results"],
+      icon: Download,
+      disabled: !haveSelect,
+      run: () => {
+        if (state.kind === "select")
+          downloadText(
+            "sparql-results.json",
+            formatSparqlJson(state.results),
+            "application/sparql-results+json",
+          );
+      },
+    });
+    cmds.push({
+      id: "repl.browse",
+      group: "Actions",
+      title: "Browse the loaded dataset",
+      blurb: "Open the dataset viewer (default + named graphs)",
+      keywords: ["browse", "view", "dataset", "data", "triples", "import"],
+      icon: Database,
+      disabled: endpointActive || size === null,
+      run: () => setViewerOpen(true),
+    });
+    cmds.push({
+      id: "repl.new",
+      group: "Actions",
+      title: "New scratch session",
+      blurb: "Reset to the default dataset + example query",
+      keywords: ["new", "scratch", "reset", "fresh", "clear"],
+      icon: FilePlus2,
+      run: () => void newScratchSession(),
+    });
+    cmds.push({
+      id: "repl.save",
+      group: "Actions",
+      title: "Save workspace",
+      blurb:
+        currentWorkspaceId === null
+          ? "No open workspace — use Save as instead"
+          : "Overwrite the open workspace",
+      keywords: ["save", "workspace", "persist", "store"],
+      icon: Save,
+      disabled: !workspaces.ready || workspaceBusy || currentWorkspaceId === null,
+      run: () => void saveWorkspace(),
+    });
+
+    // ── Recent queries: re-load a recently-run query into the editor ───────────────────────
+    for (const r of recentQueries) {
+      const preview = previewQuery(r.query);
+      cmds.push({
+        id: `repl.recent.${r.ranAt}`,
+        group: "Recent queries",
+        title: preview,
+        keywords: ["recent", "history", "query", preview],
+        icon: History,
+        run: () => setSparql(r.query),
+      });
+    }
+
+    // ── Named graphs: open the dataset viewer focused on the loaded data ────────────────────
+    for (const g of namedGraphs) {
+      if (g.iri === null) continue; // named graphs always carry an IRI (default filtered out)
+      const iri = g.iri;
+      cmds.push({
+        id: `repl.graph.${iri}`,
+        group: "Named graphs",
+        title: graphLabel(iri),
+        blurb: `${iri} · ${g.count} triple${g.count === 1 ? "" : "s"}`,
+        keywords: ["graph", "named graph", iri],
+        icon: Layers,
+        run: () => setViewerOpen(true),
+      });
+    }
+
+    // ── Workspaces: switch to any stored workspace by name ─────────────────────────────────
+    for (const w of workspaces.list) {
+      if (w.id === currentWorkspaceId) continue; // already open
+      cmds.push({
+        id: `repl.workspace.${w.id}`,
+        group: "Workspaces",
+        title: `Switch to “${w.name}”`,
+        blurb: w.approxTriples > 0 ? `${w.approxTriples} triples` : undefined,
+        keywords: ["workspace", "switch", "open", w.name],
+        icon: FolderOpen,
+        disabled: !workspaces.ready || workspaceBusy,
+        run: () => void openWorkspace(w.id),
+      });
+    }
+
+    return cmds;
+  }, [
+    endpointActive,
+    busy,
+    form,
+    state,
+    size,
+    currentWorkspaceId,
+    workspaceBusy,
+    workspaces.ready,
+    workspaces.list,
+    recentQueries,
+    namedGraphs,
+    runWithMode,
+    newScratchSession,
+    saveWorkspace,
+    openWorkspace,
+  ]);
+
+  useRegisterPaletteCommands("repl", paletteCommands);
 
   return (
     <Card>
@@ -430,6 +980,24 @@ export function Repl() {
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        {/* [OPUS-4.8] sq-atb0 — the persistent cross-session workspace panel: save / open the
+            loaded dataset (as a snapshot) + the imported-source list + the SPARQL editor state,
+            so a session survives an app/browser restart. Backend resolves to Tauri disk on the
+            desktop app, browser localStorage on GitHub Pages, or an in-memory session fallback. */}
+        <WorkspacePanel
+          ready={workspaces.ready}
+          backend={workspaces.backend}
+          list={workspaces.list}
+          currentId={currentWorkspaceId}
+          onOpen={(id) => void openWorkspace(id)}
+          onSave={() => void saveWorkspace()}
+          onSaveAs={(name) => void saveWorkspaceAs(name)}
+          onNew={() => void newScratchSession()}
+          onRename={(name) => void renameWorkspace(name)}
+          onDelete={(id) => void deleteWorkspace(id)}
+          busy={workspaceBusy}
+        />
+
         <ConnectPanel
           config={endpointConfig}
           onConfigChange={setEndpointConfig}
@@ -487,7 +1055,7 @@ export function Repl() {
         />
 
         <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={run} disabled={busy}>
+          <Button onClick={() => void run()} disabled={busy}>
             {busy ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
@@ -710,10 +1278,10 @@ function ResultPanel({ state }: { state: RunState }) {
       );
     }
     return (
-      <TurtleResult
-        text={state.ntriples}
+      <GraphResult
+        ntriples={state.ntriples}
         query={state.query}
-        className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 text-[12.5px] leading-relaxed"
+        triples={state.triples}
       />
     );
   }
@@ -727,6 +1295,192 @@ function ResultPanel({ state }: { state: RunState }) {
   if (state.kind !== "select") return null;
 
   return <SelectResult results={state.results} />;
+}
+
+// [OPUS-4.8] sq-oy1f.3 / sq-oy1f.7 — the CONSTRUCT / DESCRIBE result-graph view with an
+// OUTPUT-FORMAT selector. The default is the existing pretty-Turtle / raw-N-Triples view
+// (`TurtleResult`). The JSON-LD modes serialise the SAME result triples through the wasm
+// engine's OWN JSON-LD writer (never a TS reshaper): "Expanded" / "Flattened" / "Compacted
+// (prefixes)" drive `Store.serialize`'s document forms (#900/#923); "Compaction (@context)"
+// drives `Store.serializeCompact` — the full W3C JSON-LD 1.1 Compaction Algorithm against a
+// user-supplied `@context` (sq-oy1f.5, #957). Both bindings are in the site's `serialize-rdf`
+// bundle. The serialise runs lazily on format switch (off the query path) and is memoised, so
+// re-selecting a format never re-serialises; a serialise error surfaces inline (the
+// `serializeCompact` binding rejects a non-object `@context` with a clear message).
+type GraphFormat =
+  | "turtle"
+  | JsonLdMode; // "expanded" | "flattened" | "compacted" | "compact"
+
+const GRAPH_FORMAT_TABS: { value: GraphFormat; label: string; title: string }[] = [
+  { value: "turtle", label: "Turtle", title: "Pretty Turtle / raw N-Triples (the engine's graph result)" },
+  { value: "expanded", label: "JSON-LD (expanded)", title: "W3C JSON-LD 1.1 expanded document form" },
+  { value: "flattened", label: "JSON-LD (flattened)", title: "W3C JSON-LD 1.1 flattened document form" },
+  { value: "compacted", label: "JSON-LD (prefixes)", title: "JSON-LD with a prefix-only @context (CURIE abbreviation)" },
+  { value: "compact", label: "JSON-LD (Compaction)", title: "Full W3C JSON-LD 1.1 Compaction against your @context" },
+];
+
+// A sensible starting @context for the full-Compaction mode: the well-known vocabularies the
+// built-in datasets use. The user edits it freely; an empty `{}` yields an expanded-shaped
+// document with no abbreviation (the wasm binding still runs the algorithm, losslessly).
+const DEFAULT_COMPACTION_CONTEXT = `{
+  "@vocab": "http://xmlns.com/foaf/0.1/",
+  "ex": "http://example.org/",
+  "knows": { "@id": "http://xmlns.com/foaf/0.1/knows", "@type": "@id" }
+}`;
+
+type JsonLdRender =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "ready"; doc: string }
+  | { kind: "error"; message: string };
+
+function GraphResult({
+  ntriples,
+  query,
+  triples,
+}: {
+  ntriples: string;
+  query: string;
+  triples: number;
+}) {
+  const [format, setFormat] = React.useState<GraphFormat>("turtle");
+  const [context, setContext] = React.useState(DEFAULT_COMPACTION_CONTEXT);
+  const [render, setRender] = React.useState<JsonLdRender>({ kind: "idle" });
+
+  // A fresh result graph (a re-run yields new `ntriples`): snap back to the Turtle view and
+  // drop any cached JSON-LD render, so a new result never shows the previous query's output.
+  React.useEffect(() => {
+    setFormat("turtle");
+    setRender({ kind: "idle" });
+  }, [ntriples]);
+
+  // Serialise on demand whenever a JSON-LD format is active (or the @context changes for the
+  // full-Compaction mode). The serialise is async (it spins up an ephemeral wasm store), so a
+  // stale-result guard (`cancelled`) prevents an out-of-order render landing after a re-select.
+  React.useEffect(() => {
+    if (format === "turtle") return;
+    let cancelled = false;
+    setRender({ kind: "running" });
+    serializeGraphAsJsonLd(ntriples, format, context)
+      .then((doc) => {
+        if (!cancelled) setRender({ kind: "ready", doc });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setRender({
+          kind: "error",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+    // `context` only feeds the "compact" mode, but keying off it for every JSON-LD format is
+    // harmless (the other modes ignore it) and keeps the dependency list honest.
+  }, [ntriples, format, context]);
+
+  return (
+    <div className="space-y-2" data-result-kind="graph">
+      <GraphFormatTabs format={format} onChange={setFormat} />
+
+      {/* The full-Compaction mode is driven by a caller-supplied @context; the others are not. */}
+      {format === "compact" ? (
+        <div className="space-y-1">
+          <label
+            htmlFor="repl-jsonld-context"
+            className="text-xs font-medium text-muted-foreground"
+          >
+            JSON-LD <code className="font-mono">@context</code> (full W3C 1.1 Compaction)
+          </label>
+          <textarea
+            id="repl-jsonld-context"
+            value={context}
+            onChange={(e) => setContext(e.target.value)}
+            spellCheck={false}
+            rows={6}
+            aria-label="JSON-LD @context for full Compaction"
+            className="w-full resize-y rounded-lg border bg-muted/40 p-2.5 font-mono text-[12.5px] leading-relaxed outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+          />
+          <p className="text-[11px] text-muted-foreground">
+            The engine applies the full W3C JSON-LD 1.1 Compaction Algorithm against this{" "}
+            <code className="font-mono">@context</code> — term definitions,{" "}
+            <code className="font-mono">@vocab</code>, type / language /{" "}
+            <code className="font-mono">@container</code> coercion,{" "}
+            <code className="font-mono">@reverse</code>, and{" "}
+            <code className="font-mono">@id</code>/<code className="font-mono">@type</code>{" "}
+            aliasing. It must be a JSON object; an empty{" "}
+            <code className="font-mono">{"{}"}</code> yields an expanded-shaped document.
+          </p>
+        </div>
+      ) : null}
+
+      {format === "turtle" ? (
+        <TurtleResult
+          text={ntriples}
+          query={query}
+          className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 text-[12.5px] leading-relaxed"
+        />
+      ) : render.kind === "error" ? (
+        <pre
+          data-graph-view="error"
+          className="overflow-x-auto rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"
+        >
+          {render.message}
+        </pre>
+      ) : render.kind === "ready" ? (
+        <JsonLdHighlight
+          text={render.doc}
+          data-graph-view="jsonld"
+          className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 text-[12.5px] leading-relaxed"
+        />
+      ) : (
+        <p
+          data-graph-view="running"
+          className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground"
+        >
+          Serialising {triples} triple{triples === 1 ? "" : "s"} as JSON-LD on the wasm engine…
+        </p>
+      )}
+    </div>
+  );
+}
+
+// [OPUS-4.8] sq-oy1f.7 — the graph output-format selector. Same `role="tablist"` design-token
+// pattern as the Run/EXPLAIN ModeTabs + the SELECT ResultViewTabs, so every selector in the
+// REPL reads as one family.
+function GraphFormatTabs({
+  format,
+  onChange,
+}: {
+  format: GraphFormat;
+  onChange: (f: GraphFormat) => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Graph output format"
+      className="inline-flex flex-wrap gap-0.5 rounded-lg border bg-muted/40 p-0.5"
+    >
+      {GRAPH_FORMAT_TABS.map((t) => (
+        <button
+          key={t.value}
+          type="button"
+          role="tab"
+          aria-selected={format === t.value}
+          title={t.title}
+          onClick={() => onChange(t.value)}
+          className={cn(
+            "rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+            format === t.value
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 // [OPUS-4.8] sq-x0kp — the structured SELECT results view (GUI MVP item 2). It carries a

@@ -23,6 +23,8 @@ import init, { Store } from "./pkg/sparq_wasm.js";
 await init();
 
 const store = Store.load(turtleText, "turtle"); // "ntriples" | "nquads" | "trig" | "jsonld"*
+const empty = new Store();                       // empty + mutable; build up via updateInPlace
+const based = Store.loadWithBase(doc, "turtle", "http://ex/dir/"); // resolve relative IRIs
 store.size;            // number of triples
 store.heapBytes();     // rough in-memory footprint
 
@@ -51,6 +53,33 @@ const n = store.count("SELECT ?s WHERE { ?s a <http://ex/Person> }"); // lazy, n
   `shacl` feature exposes a stateless `Store.validate(data, shapes, format)`
   (a drop-in for `rdf-validate-shacl`), also OFF by default. The `count()` family is
   **lazy** — counted straight from the sorted indexes with no per-solution row.
+- **Opt-in serialiser.** The `serialize-rdf` feature (OFF by default) exposes
+  `Store.serialize(format, pretty, indent, abbreviate, prefixes?)` — the store's contents
+  as a **Turtle** (default graph), **TriG** (whole dataset), or **JSON-LD** (whole dataset)
+  document, in the engine's pretty (Turtle/TriG: sorted, blank-line-separated; JSON-LD:
+  re-indented) shape or the compact/minified writer. JSON-LD `format` is `"jsonld"`
+  (expanded by default) or `"jsonld-expanded"` / `"jsonld-flattened"` /
+  `"jsonld-compacted"`; `abbreviate` is Turtle/TriG-only (JSON-LD compaction is the
+  `jsonld-compacted` form). The optional `prefixes` argument is a `[[prefix, iri], …]` JS
+  array: when omitted the engine's well-known defaults are used (byte-for-byte the prior
+  behaviour); when supplied it drives Turtle/TriG `@prefix` compaction and the JSON-LD
+  compacted `@context`, so a caller can serialise under its own prefix policy (e.g. the
+  site's `COMMON_PREFIXES` with `https://schema.org/`, or a query's declared `PREFIX`
+  lines) and get byte-parity output. It calls straight through to `sparq-engine`'s writers,
+  so the output is byte-identical to the native serialiser; the lean bundle carries no
+  serializer code. JSON-LD serialise-OUT needs only `serialize-rdf` (the `jsonld` feature is
+  for INGEST). The sibling `Store.serializeCompact(context, pretty, indent?)` (same feature)
+  runs the **full W3C JSON-LD 1.1 Compaction Algorithm** against a caller `@context` JSON
+  string (term defs / `@vocab` / coercion / `@reverse`) — richer than the prefix-only
+  `jsonld-compacted` form, and lossless; a non-object `context` throws.
+- **Opt-in SHACL Compact Syntax parse.** The `scs` feature (OFF by default; implies
+  `shacl` + `serialize-rdf`) exposes `Store.parseShaclCompact(text, base?)` — parses a
+  [SHACL Compact Syntax](https://www.w3.org/TR/shacl12-compact-syntax/) document into the
+  equivalent SHACL **shapes graph** and returns it as a pretty **Turtle** string (the SCS
+  *input* direction for the playground's "Compact → shapes" mode). It REUSES the
+  `Store.serialize` engine writer above (no second serialiser), so the bytes match
+  `serialize("turtle", true, "  ", true)`; the parsed shapes validate data identically to
+  the equivalent Turtle shapes. A malformed document throws a `JsError` with the source line.
 - **Persistence is native-only** — the native `Graph::save` / `open` /
   `save_compressed` family and the mmap-backed map-in path are **deliberately not
   exported**: they need a POSIX filesystem and `mmap`, which a browser/edge wasm

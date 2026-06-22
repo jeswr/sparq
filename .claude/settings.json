@@ -16,6 +16,12 @@
         "matcher": "Bash",
         "hooks": [
           {
+            "type": "command",
+            "command": "python3 scripts/check-pr-arm-base.py",
+            "timeout": 40,
+            "statusMessage": "Stacked-PR arm guard: checking PR base is main…"
+          },
+          {
             "type": "agent",
             "agent": "sparq-perf-reviewer",
             "model": "opus",

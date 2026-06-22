@@ -77,6 +77,38 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "shacl")]
 mod shacl;
 
+// [OPUS-4.8] sq-fe1s: the opt-in `Store::serialize(format, …)` RDF-writer binding.
+// Behind the non-default `serialize-rdf` feature so the lean bundle carries zero
+// serializer code; the module adds a `#[wasm_bindgen] impl Store` method to the
+// `Store` below, calling straight through to `sparq-engine`'s pretty Turtle / TriG
+// writers (byte-identical to the native serialiser).
+#[cfg(feature = "serialize-rdf")]
+mod serialize;
+
+// [OPUS-4.8] sq-quly (#796): the opt-in `Store::parseShaclCompact(text, base?)`
+// SHACL-Compact-Syntax parse binding. Behind the non-default `scs` feature (which
+// implies `shacl` + `serialize-rdf`) so the lean bundle carries zero SCS/serializer
+// code; the module adds a `#[wasm_bindgen] impl Store` method that parses SCS into a
+// shapes Graph via `sparq-shacl` and emits it through the existing `Store::serialize`
+// engine-writer path (no new serialiser).
+#[cfg(feature = "scs")]
+mod scs;
+
+// [OPUS-4.8] sq-1dd5t (#1047): the opt-in RDFC-1.0 `canonicalizeNQuads(nquads)` free
+// function (the @jeswr/sparq RDF/JS `Dataset` consumes it for isomorphism-aware
+// toCanonical / equals / contains). Behind the non-default `canon` feature so the lean
+// bundle carries zero canonicalization code; the module exports a `#[wasm_bindgen]` free
+// function (not a `Store` method — canonicalization is over an arbitrary quad set, which
+// may be a foreign RDF/JS dataset, not necessarily this store's contents).
+#[cfg(feature = "canon")]
+mod canon;
+
+// Re-export the free function at the crate root so it is reachable as
+// `sparq_wasm::canonicalizeNQuads` from the headless wasm test (tests/web.rs) and any
+// rlib consumer; `#[wasm_bindgen]` already registers it in the generated JS surface.
+#[cfg(feature = "canon")]
+pub use canon::canonicalize_nquads;
+
 /// An immutable, dictionary-encoded RDF store queryable with SPARQL.
 #[wasm_bindgen]
 pub struct Store {
@@ -191,6 +223,32 @@ impl QuadChunks {
 
 #[wasm_bindgen]
 impl Store {
+    /// [OPUS-4.8] sq-ty78o (#1114): a public **empty, mutable** store — the ergonomic
+    /// `new Store()` constructor.
+    ///
+    /// Until now the only way to obtain a `Store` was a static [`load`](Self::load) /
+    /// [`loadDataset`](Self::load_dataset) / [`loadCompressed`](Self::load_compressed)
+    /// factory, so a JS caller who wanted to start from nothing and build the graph up with
+    /// [`updateInPlace`](Self::update_in_place) / [`applyDelta`](Self::apply_delta) had to
+    /// reach for `Store.load("", "turtle")`. This exposes the natural `new Store()` spelling,
+    /// returning an empty graph that is immediately mutable through the engine's delta overlay.
+    ///
+    /// **Named graphs work out of the box.** The overlay creates a named graph on the first
+    /// insert that targets it, so `new Store()` then
+    /// `updateInPlace("INSERT DATA { GRAPH <g> { … } }")` followed by a `GRAPH ?g { … }`
+    /// query returns the inserted rows — no dataset-mode flag is required for an *empty*
+    /// store. (Dataset mode matters only when *loading* an existing document whose named
+    /// graphs would otherwise be folded into the default graph — use
+    /// [`loadDataset`](Self::load_dataset) for that.) Equivalent to `Store.load("", "turtle")`,
+    /// surfaced as a `constructor`.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Result<Store, JsError> {
+        // An empty Turtle document yields an empty default graph whose delta overlay can
+        // create named graphs on the first `GRAPH`-targeted insert (round-trip verified).
+        let graph = Graph::load_str("", "turtle").map_err(|e| JsError::new(&e))?;
+        Ok(Store { graph })
+    }
+
     /// Parses an RDF document into a store. `format`: `"turtle"` | `"ntriples"` |
     /// `"nquads"` | `"trig"` | `"jsonld"` (also `"json-ld"` / `"application/ld+json"`,
     /// available only when the crate is built with the OPT-IN `jsonld` feature — the
@@ -225,6 +283,26 @@ impl Store {
     #[wasm_bindgen(js_name = loadCompressed)]
     pub fn load_compressed(text: &str, format: &str) -> Result<Store, JsError> {
         let graph = Graph::load_str_compressed(text, format).map_err(|e| JsError::new(&e))?;
+        Ok(Store { graph })
+    }
+
+    /// [OPUS-4.8] sq-f66jz (#1115): like [`load`](Self::load) but resolves the document's
+    /// RELATIVE IRIs against `base`.
+    ///
+    /// A document fetched from a URL (or a SHACL shapes graph / W3C test manifest addressed
+    /// by its location) often carries relative IRIs and no `@base` of its own; `base` is the
+    /// base IRI those resolve against — e.g. `loadWithBase("<a> <p> <o> .", "turtle",
+    /// "http://example.org/dir/")` interns `<http://example.org/dir/a>` etc. A document-level
+    /// `@base` directive still overrides the supplied `base` (standard Turtle/TriG scoping).
+    /// The line-based formats (`"ntriples"` / `"nquads"`) allow only absolute IRIs, so `base`
+    /// has no effect on them. An invalid `base` (not a syntactically valid IRI) is rejected
+    /// with a `JsError`. Calls straight through to `sparq_core::Graph::load_str_with_base`,
+    /// so the resolution is byte-identical to the native loader. Named graphs are folded into
+    /// the default graph (as [`load`](Self::load)); there is no dataset-preserving base
+    /// variant at this layer yet.
+    #[wasm_bindgen(js_name = loadWithBase)]
+    pub fn load_with_base(text: &str, format: &str, base: &str) -> Result<Store, JsError> {
+        let graph = Graph::load_str_with_base(text, format, base).map_err(|e| JsError::new(&e))?;
         Ok(Store { graph })
     }
 
@@ -852,6 +930,80 @@ mod tests {
             assert_eq!(raw.query(q).unwrap(), cmp.query(q).unwrap(), "compressed JSON differs for: {q}");
         }
         assert!(cmp.heap_bytes() <= raw.heap_bytes());
+    }
+
+    // ---- [OPUS-4.8] sq-ty78o (#1114): the empty `new Store()` constructor ----
+
+    /// `Store::new()` yields an empty, mutable store (the `new Store()` path), and a
+    /// `GRAPH`-targeted `updateInPlace` insert then a `GRAPH ?g` query round-trips — the
+    /// named-graph gap the issue reported, fixed purely by the missing constructor (the
+    /// overlay creates the named graph on first insert, no dataset flag needed for an empty
+    /// store). The `Ok` arm of `new`/`update_in_place` runs natively; the real `wasm32`
+    /// export is exercised in `tests/web.rs::new_store_named_graph_roundtrip`.
+    #[test]
+    fn new_store_empty_then_named_graph_roundtrip() {
+        let mut store = Store::new().unwrap();
+        assert_eq!(store.size(), 0, "a new Store() is empty");
+        store
+            .update_in_place(
+                "INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
+            )
+            .unwrap();
+        // The named graph is queryable: GRAPH ?g returns the inserted row with ?g bound.
+        let json = store
+            .query("SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }")
+            .unwrap();
+        assert!(
+            json.contains("\"value\":\"http://ex/g\""),
+            "named graph round-trips through new Store(): {json}"
+        );
+        // Equivalent to load("", "turtle"): both start empty and accept the same insert.
+        let mut viaload = Store::load("", "turtle").unwrap();
+        viaload
+            .update_in_place("INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> }")
+            .unwrap();
+        assert_eq!(viaload.size(), 1);
+    }
+
+    // ---- [OPUS-4.8] sq-f66jz (#1115): base-IRI load (`loadWithBase`) ----
+
+    /// `Store::loadWithBase` resolves relative IRIs against the supplied base — the gap the
+    /// issue reported (the core `load_str_with_base` existed but was unexposed). A relative
+    /// subject/object becomes an absolute IRI under the base, and a bogus base is rejected.
+    /// The `Ok` arm runs natively; the real `wasm32` export and the `Err` arm are covered in
+    /// `tests/web.rs::load_with_base_resolves_relative`.
+    #[test]
+    fn load_with_base_resolves_relative_iris() {
+        let store =
+            Store::load_with_base("<a> <p> <../up/o> .", "turtle", "http://ex/dir/").unwrap();
+        assert_eq!(store.size(), 1);
+        let json = store.query("SELECT ?s ?o WHERE { ?s ?p ?o }").unwrap();
+        // <a> resolves under the base dir; <../up/o> resolves one level up.
+        assert!(
+            json.contains("\"value\":\"http://ex/dir/a\""),
+            "relative subject resolved against base: {json}"
+        );
+        assert!(
+            json.contains("\"value\":\"http://ex/up/o\""),
+            "relative object resolved (..) against base: {json}"
+        );
+        // A document-level @base overrides the supplied base (standard Turtle scoping).
+        let overridden = Store::load_with_base(
+            "@base <http://other/> . <a> <p> <o> .",
+            "turtle",
+            "http://ex/",
+        )
+        .unwrap();
+        let j2 = overridden.query("SELECT ?s WHERE { ?s ?p ?o }").unwrap();
+        assert!(
+            j2.contains("\"value\":\"http://other/a\""),
+            "@base overrides: {j2}"
+        );
+        // A syntactically invalid base IRI is an error (mapped to a JsError on wasm).
+        assert!(
+            Graph::load_str_with_base("<a> <p> <o> .", "turtle", "not a iri").is_err(),
+            "an invalid base IRI must error"
+        );
     }
 
     // ---- sq-0ptd (gh-54): string-function retention in the wasm build ----

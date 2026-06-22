@@ -18,14 +18,26 @@
 name: site-e2e
 
 on:
+  # [OPUS-4.8] sq-5f1s4 — self-guarding path filter: this lane's `npm ci` resolves the
+  # `site` workspace member from the REPO-ROOT lockfile + manifest (site/ is an npm
+  # workspace member; the per-member lock was dropped — see the install step). A change to
+  # the root `package-lock.json`/`package.json` (e.g. a sibling member bumping a hoisted
+  # dep, or a lock regeneration) can break `npm ci` here, but the old `site/**`-only filter
+  # would NOT re-run the lane to catch it — and BOTH legs here are path-filtered, so there
+  # is no unfiltered main-push catch-all either (unlike js.yml). That is the exact
+  # gui.yml/#1081 blind-spot class, so the root workspace inputs are listed too.
   pull_request:
     paths:
       - "site/**"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/site-e2e.yml"
   push:
     branches: [main]
     paths:
       - "site/**"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/site-e2e.yml"
 
 # Least-privilege default (Scorecard TokenPermissions): read-only; this lane never writes.

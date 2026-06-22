@@ -99,4 +99,13 @@ impl PodEpochs {
         *e += 1;
         *e
     }
+
+    /// [OPUS-4.8] (sq-o5bi) Sets a pod's epoch to an exact value while RECONSTRUCTING the
+    /// vector from a backup artifact ([`crate::backup::import`]). Crate-private + `backup`-only:
+    /// the only legal caller is the importer rebuilding the recorded epoch vector before it
+    /// seeds the restored ring — published vectors are still never mutated in normal operation.
+    #[cfg(feature = "backup")]
+    pub(crate) fn set(&mut self, pod: PodId, epoch: Epoch) {
+        self.map.insert(pod, epoch);
+    }
 }

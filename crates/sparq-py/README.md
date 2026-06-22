@@ -45,6 +45,11 @@ g.ask("PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }")   # -> True
   CONSTRUCT (`construct` → `(s, p, o)` Term triples), DESCRIBE (`describe`,
   concise-bounded-description semantics). Named graphs from N-Quads/TriG or updates
   are queryable via `GRAPH`.
+- **Load Turtle / N-Triples / N-Quads / TriG / JSON-LD.** `Graph.load(source,
+  format=...)` (default: inferred from the `.ttl`/`.nt`/`.nq`/`.trig`/`.jsonld`
+  extension, else `"turtle"`). **JSON-LD is on by default** (`format="jsonld"` and a
+  `.jsonld` path both work, `@graph` named graphs preserved) — a wheel built with
+  `--no-default-features` drops it (then `format="jsonld"` errors).
 - **SPARQL Update, applied in place** — INSERT/DELETE DATA, DELETE/INSERT … WHERE,
   CLEAR/DROP/CREATE/ADD/COPY/MOVE. Named graphs are fully supported (GRAPH-scoped
   data and templates, USING (NAMED), graph management). `update()` / `reason()` /

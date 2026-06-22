@@ -221,6 +221,7 @@ impl KeyEncoder {
 mod tests {
     use super::*;
     use oxrdf::{BlankNode, Literal, NamedNode};
+    use sha2::Sha256;
 
     fn iri(s: &str) -> Term {
         Term::NamedNode(NamedNode::new(s).unwrap())
@@ -439,5 +440,78 @@ mod tests {
             with_tag, without_tag,
             "the domain tag must affect the encoded key"
         );
+    }
+
+    // === Byte-stability known-answer (KAT) guard. [OPUS-4.8] sq-jkcj.
+    //
+    // The `sha2` 0.10 -> 0.11 dependency bump changed the crate's *API* (the
+    // `Digest`/`Output` types: `GenericArray` -> `hybrid-array::Array`), NOT the
+    // SHA-2 *algorithm*. The other determinism tests above check only RELATIONAL
+    // properties (same term => same key; distinct terms => distinct keys), which a
+    // silent change in the underlying hash bytes would still satisfy. This test
+    // pins the EXACT output bytes so any future drift in the hash line, the
+    // `encode_term` construction, or oxrdf's N-Triples rendering fails closed.
+    //
+    // This is a dependency-maintenance regression guard. It is NOT a ZK/MPC
+    // soundness or privacy claim: the hidden-value join's security rests on the
+    // protocol and the (semi-honest, NOT externally audited -- see sq-qhy4)
+    // analysis, not on these fixed vectors.
+    #[test]
+    fn sha2_byte_stability_known_answers() {
+        use std::fmt::Write;
+        // (1) Bare SHA-256 / SHA-512 algorithm-identity vectors (NIST / RFC 6234
+        // empty-string KATs). These pin that the `sha2` crate behind the 0.11 API
+        // still computes the standard SHA-2 cores.
+        let mut hex256 = String::new();
+        for b in <Sha256 as Digest>::digest(b"") {
+            let _ = write!(hex256, "{:02x}", b);
+        }
+        assert_eq!(
+            hex256, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "SHA-256(\"\") must be byte-identical across the sha2 0.10 -> 0.11 bump"
+        );
+        let mut hex512 = String::new();
+        for b in <Sha512 as Digest>::digest(b"") {
+            let _ = write!(hex512, "{:02x}", b);
+        }
+        assert_eq!(
+            hex512,
+            "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+             47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+            "SHA-512(\"\") must be byte-identical across the sha2 0.10 -> 0.11 bump"
+        );
+
+        // (2) End-to-end `encode_term` field-element KATs for fixed terms. These
+        // pin the full domain-separated construction
+        // reduce_mod_p(SHA-512(DOMAIN_TAG || ntriples(term))) to exact values, so a
+        // change to the tag, the truncation, the field reduction, or the oxrdf
+        // N-Triples rendering is caught. Values computed independently (Python
+        // hashlib) against the same construction.
+        let cases: [(Term, u64); 4] = [
+            (iri("http://example.org/alice"), 125_816_213_822_204_096),
+            (
+                Term::Literal(Literal::new_simple_literal("alice")),
+                1_818_932_659_386_263_799,
+            ),
+            (
+                Term::Literal(Literal::new_typed_literal(
+                    "1",
+                    NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+                )),
+                672_429_347_926_891_200,
+            ),
+            (
+                Term::Literal(Literal::new_language_tagged_literal("hi", "en").unwrap()),
+                1_254_318_331_484_379_694,
+            ),
+        ];
+        for (term, expected) in &cases {
+            assert_eq!(
+                encode_term(term).value(),
+                *expected,
+                "encode_term({}) drifted from its committed byte-stable value",
+                term
+            );
+        }
     }
 }

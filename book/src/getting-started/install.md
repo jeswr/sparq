@@ -1,42 +1,16 @@
-<!-- [OPUS-4.8] sq-h0tr — scaffold page. Prose distilled from README.md
-"Quickstart" + CONTRIBUTING.md "The gate" (no lorem, no hard-coded perf numbers).
-The include-wiring bead (sq-im8u) may later single-source the command blocks from
-the canonical files. -->
+<!-- [OPUS-4.8] sq-im8u — single-source include wrapper. The quickstart command block is
+{{#include}}d verbatim from the canonical README.md `quickstart-cli` anchor, and the library
+example is {{#rustdoc_include}}d from the tested examples/quickstart.rs (sq-384j) — so neither
+can drift. Only one-line intros and the contributor-gate block (whose canonical prose lives in
+CONTRIBUTING.md) are written here; no prose is duplicated from the README. -->
 
 # Install & build from source
 
 sparq is a Rust workspace. The minimum supported Rust version (MSRV) is tracked in CI; a recent
-stable toolchain works.
+stable toolchain works. Build the release binaries, then query a file, build a persistent on-disk
+store, or run the HTTP server:
 
-## Build
-
-```sh
-cargo build --release
-```
-
-## Query a file
-
-Turtle, N-Triples, N-Quads, or TriG — optionally `.gz` / `.bz2` / `.zst` compressed:
-
-```sh
-cargo run --release -p sparq-cli -- query data.ttl turtle \
-  'SELECT ?s ?o WHERE { ?s <http://schema.org/name> ?o } LIMIT 10'
-```
-
-## Build a persistent on-disk store once, then query it without loading into RAM
-
-```sh
-cargo run --release -p sparq-cli -- build data.nt ntriples ./idx
-cargo run --release -p sparq-cli -- query-mmap ./idx 'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }'
-```
-
-## Run the HTTP server
-
-A W3C SPARQL 1.1 Protocol server on `:3030`:
-
-```sh
-cargo run --release -p sparq-server -- --addr 127.0.0.1:3030 --format turtle data.ttl
-```
+{{#include ../../../README.md:quickstart-cli}}
 
 ## Use it as a library
 
@@ -69,4 +43,5 @@ cargo fmt --check
 ```
 
 See [`CONTRIBUTING.md`](https://github.com/jeswr/sparq/blob/main/CONTRIBUTING.md) for the full
-contributor workflow and the conformance ratchet details.
+contributor workflow and the conformance ratchet details — that file is the canonical source for
+the gate.

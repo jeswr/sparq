@@ -34,7 +34,13 @@ browser. (The wasm bundle bytes are tracked per-commit on the perf dashboard,
   vocabulary-dictionary negotiation with a sparq server — content-addressed
   dictionary caching, background warm-up, pluggable dict-capable decoder.
 - Results as RDF/JS Query-spec `Bindings` (Map-like, `.get(variable)`), terms as
-  spec-compliant RDF/JS `Term`s (typed against `@rdfjs/types`).
+  spec-compliant RDF/JS `Term`s (typed against `@rdfjs/types`); an
+  **Oxigraph-compatible** accessor (`querySolutions()` → `Map<string, Term>[]`,
+  `Bindings.toMap()`) ports Oxigraph result-processing code unchanged.
+- The named **`Dataset`** export implements the **full RDF/JS `Dataset`
+  interface** (the set algebra `union`/`intersection`/`difference`/… on top of
+  `DatasetCore`), with the binary set ops **interoperating with foreign RDF/JS
+  datasets** (N3.js, `@rdfjs/dataset`), not just our own.
 
 ## Install / build
 
@@ -121,6 +127,12 @@ const fromQuads = await SparqStore.fromQuads([
 // SPARQL Update (the engine rebuilds its immutable index; the handle swaps in place)
 store.update('PREFIX ex: <http://ex/> INSERT DATA { ex:carol ex:name "Carol" }');
 
+// Oxigraph-compatible SELECT results: an array of plain Map<string, Term>
+// (drop-in for Oxigraph's `Store.query` — `binding.get("s").value`)
+for (const binding of store.querySolutions('SELECT ?s WHERE { ?s ?p ?o } LIMIT 10')) {
+  console.log(binding.get('s').value);
+}
+
 // Raw SPARQL 1.1 JSON results, skipping JS-side term materialisation
 const json = JSON.parse(store.queryJson('SELECT * WHERE { ?s ?p ?o } LIMIT 10'));
 
@@ -158,6 +170,88 @@ for (const r of report.results) {
 
 store.free(); // release wasm memory (also `using store = …` via Symbol.dispose)
 ```
+
+### `Dataset` — the full RDF/JS `Dataset` algebra, importable from a `<script type="module">`
+
+For an RDF/JS-`Dataset`-shaped surface (rather than the SPARQL-first
+`SparqStore`), import the named **`Dataset`** export. It implements the **full
+RDF/JS [`Dataset`](https://rdf.js.org/dataset-spec/) interface** — the
+`DatasetCore` members (`add` / `delete` / `has` / `match` / `size` /
+`[Symbol.iterator]`) **plus** the set algebra and iteration helpers
+(`union` / `intersection` / `difference` / `addAll` / `deleteMatches` /
+`contains` / `equals` / `filter` / `map` / `forEach` / `some` / `every` /
+`reduce` / `import` / `toStream` / `toArray` / `toString` / `toCanonical`) — with
+the **full SPARQL surface one accessor away** (`dataset.store`).
+
+The binary set ops are **library-agnostic**: `union(other)`,
+`intersection(other)`, `difference(other)`, `addAll`, `contains` and `equals`
+accept either another sparq `Dataset` **or any foreign RDF/JS dataset/store**
+(e.g. an [`N3.Store`](https://github.com/rdfjs/N3.js) or
+[`@rdfjs/dataset`](https://github.com/rdfjs/dataset)) — detected through the
+`[Symbol.iterator]` every RDF/JS dataset exposes, with a fast native path when
+the operand is our own:
+
+```js
+import { Dataset } from '@jeswr/sparq';
+import { Store as N3Store } from 'n3';
+
+const a = await Dataset.fromString('<http://ex/a> <http://ex/p> <http://ex/b> .', 'ntriples');
+const n3 = new N3Store(/* … RDF/JS quads from N3 … */);
+a.union(n3);         // works across libraries (foreign operand)
+a.intersection(n3);  // ditto
+a.difference(n3);
+a.contains(n3);
+a.equals(n3);
+```
+
+> `toCanonical` returns the **RDFC-1.0** (RDF Dataset Canonicalization) canonical
+> N-Quads — blank nodes relabelled to `_:c14nN`, lines canonically sorted — so two
+> datasets that are RDF-isomorphic (differ only in blank-node labels and/or quad
+> order) canonicalise byte-identically. `equals` is isomorphism-aware (it compares
+> canonical forms) and `contains` recognises a relabelled subgraph (a blank-node
+> homomorphism), so "differences in blank node labels are ignored" per the RDF/JS
+> spec. Backed by the engine's RDFC-1.0 implementation surfaced over wasm. (RDF-1.2
+> triple terms are outside the W3C RDFC-1.0 data model and `toCanonical` throws on
+> them.)
+
+Because the instance methods are
+synchronous, you obtain an instance through an **async factory** —
+`Dataset.create()` / `Dataset.fromString()` / `Dataset.fromQuads()` — each of
+which `await`s the wasm engine first. That is the lazy-load point: the
+~MB `.wasm` is fetched on the first `await Dataset.…`, never on import, and the
+cold start is paid at most once per page.
+
+This is what makes the GitHub-issue ESM snippet (#981) work — you can import the
+name directly in a browser `<script type="module">` from any ESM CDN, and the
+engine streams in only when you first build a dataset:
+
+```html
+<script type="module">
+  // From an ESM CDN (or a bundler import) — the ~MB wasm is lazily fetched by
+  // the first `Dataset.fromString(...)`, not by the import below.
+  import { Dataset, DataFactory as DF } from "https://esm.sh/@jeswr/sparq";
+
+  const ds = await Dataset.fromString(
+    "<http://ex/a> <http://ex/name> \"Alice\" .",
+    "ntriples",
+  );
+  console.log(ds.size); // 1
+
+  ds.add(DF.quad(DF.namedNode("http://ex/b"), DF.namedNode("http://ex/name"), DF.literal("Bob")));
+  for (const q of ds.match(null, DF.namedNode("http://ex/name"), null)) {
+    console.log(q.subject.value, q.object.value);
+  }
+
+  // Drop to the SPARQL engine when DatasetCore is not enough:
+  console.log(ds.store.queryBoolean("ASK { ?s ?p ?o }")); // true
+  ds.free();
+</script>
+```
+
+If you only need the low-level engine handle, the wasm-pack `--target web` glue
+is itself a real ESM module — `import init, { Store } from ".../wasm/sparq_wasm.js";
+await init();` — but `Dataset` (and `SparqStore`) is the ergonomic, memoised-init
+entry to prefer in an app.
 
 ### Talking to a sparq server: dictionary-fetch protocol
 

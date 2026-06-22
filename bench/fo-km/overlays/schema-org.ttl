@@ -1,0 +1,61 @@
+# schema-org.ttl — the schema.org-as-top-level foundational overlay.
+#
+# [OPUS-4.8] FO-KM benchmark, Metric 1 (epic sq-mztg8). Design record:
+# research/foundational-ontology-km-benchmark.md §4 (PR #1106). 🤖 SPARQ agent.
+#
+# Types the four PKG classes under schema.org's top categories + inlines the MINIMAL
+# schema.org class fragment so an rdfs/owl-rl closure ENTAILS the schema.org-typed facts.
+#
+# FO source: schema.org (the "fluent but metaphysics-free" pole — highest LLM-fluency,
+# already partly in the PKG via pkg:Task rdfs:subClassOf schema:Action). Namespace
+# http://schema.org/ (matches the namespace pkg.ttl uses). Taxonomy verified against
+# schema.org (schema.org/docs/full.html):
+#   schema:Action        rdfs:subClassOf schema:Thing      (a SEPARATE branch, NOT under CreativeWork)
+#   schema:CreativeWork  rdfs:subClassOf schema:Thing
+#   schema:Claim         rdfs:subClassOf schema:CreativeWork
+#   schema:DigitalDocument rdfs:subClassOf schema:CreativeWork
+#   schema:HowTo         rdfs:subClassOf schema:CreativeWork
+#
+# THE CATEGORIAL SPLIT this overlay draws (and the no-FO arm does NOT):
+#   pkg:Task     -> schema:Action          (already asserted in pkg.ttl; redeclared here
+#                                            so the overlay is self-contained for closure)
+#   pkg:Finding  -> schema:Claim           -> schema:CreativeWork
+#   pkg:Source   -> schema:DigitalDocument -> schema:CreativeWork
+#   pkg:Technique-> schema:HowTo           -> schema:CreativeWork
+# HONEST BOUNDARY: schema.org has NO endurant/perdurant or continuant/occurrent axis —
+# schema:Action sits directly under schema:Thing, parallel to (not categorially opposed
+# to) schema:CreativeWork. So this arm answers the "information artifact" union
+# (schema:CreativeWork covers Finding/Source/Technique) but it CANNOT answer a
+# process-vs-object partition the way gUFO/DUL can. That asymmetry is intentional and
+# discriminating — it isolates "does any top-level typing matter" from "does a
+# metaphysical axis matter" (design §3).
+
+@prefix pkg:    <https://sparq.dev/ns/pkg#> .
+@prefix schema: <http://schema.org/> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix pkgfo:  <https://sparq.dev/ns/pkg/fo#> .
+
+pkgfo:schema-org-overlay a owl:Ontology ;
+  rdfs:label "schema.org-as-top overlay for the PKG"@en-GB ;
+  rdfs:comment "Foundational typing of the PKG classes under schema.org top categories; inlines the minimal schema.org class fragment for closure."@en-GB ;
+  rdfs:seeAlso <http://schema.org/> .
+
+# --- the minimal schema.org class fragment (TBox) ---------------------------
+schema:Thing           a owl:Class ; rdfs:label "Thing"@en .
+schema:Action          a owl:Class ; rdfs:label "Action"@en ;
+  rdfs:subClassOf schema:Thing .
+schema:CreativeWork    a owl:Class ; rdfs:label "CreativeWork"@en ;
+  rdfs:subClassOf schema:Thing .
+schema:Claim           a owl:Class ; rdfs:label "Claim"@en ;
+  rdfs:subClassOf schema:CreativeWork .
+schema:DigitalDocument a owl:Class ; rdfs:label "DigitalDocument"@en ;
+  rdfs:subClassOf schema:CreativeWork .
+schema:HowTo           a owl:Class ; rdfs:label "HowTo"@en ;
+  rdfs:subClassOf schema:CreativeWork .
+
+# --- the PKG-class -> schema.org-category overlay (the lever) ---------------
+pkg:Task      rdfs:subClassOf schema:Action .
+pkg:Finding   rdfs:subClassOf schema:Claim .
+pkg:Source    rdfs:subClassOf schema:DigitalDocument .
+pkg:Technique rdfs:subClassOf schema:HowTo .

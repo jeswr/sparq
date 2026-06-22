@@ -112,7 +112,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install typos
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: typos@1.47.2
       - name: typos (markdown doc surface only)
@@ -276,6 +276,47 @@ jobs:
         run: shellcheck scripts/ci-free-disk.sh scripts/tests/test_ci_free_disk.sh
       - name: Self-test ci-free-disk.sh (set -u safety + existence guards + #462 fold)
         run: bash scripts/tests/test_ci_free_disk.sh
+      # [OPUS-4.8] sq-4vo9m: the per-tick disk guard (df-check + merged-worktree prune +
+      # gated main-target reclaim) that stops the autonomous loop from filling the work box
+      # to ENOSPC. Validated HERE (hermetic: the harness PATH-shadows df/pgrep and sandboxes
+      # the main checkout / worktree-gc, so it touches no real disk/worktree) — it has no
+      # runtime in CI itself, but a regression in its gated-escalation / busy-build-guard /
+      # state→exit / non-fatal-delegation logic must be caught before it is trusted to broom
+      # the work box. Both the script's own pure-predicate self-test AND the end-to-end
+      # harness run; HARD (no "advisory"/"informational") so ci-summary gates on it.
+      - name: shellcheck disk-guard.sh + its self-test
+        run: shellcheck scripts/disk-guard.sh scripts/tests/test_disk_guard.sh
+      - name: Self-test disk-guard.sh (threshold math + state→exit-code, hermetic)
+        run: bash scripts/disk-guard.sh --dry-run-self-test
+      - name: Self-test disk-guard.sh (gated escalation + busy-build guard, end-to-end)
+        run: bash scripts/tests/test_disk_guard.sh
+      # [OPUS-4.8] sq-h34dc: worktree-gc.sh's COMPLETED-but-unmerged reclaim (--reclaim-completed)
+      # removes clean+pushed wf_/agent- worktrees with no live owning task — strictly more
+      # aggressive than the default MERGED-or-GONE broom, so its safety (opt-in, workflow-named
+      # only, KEEP-if-dirty/unpushed/in-use) is pinned by a hermetic harness that builds real git
+      # repos + worktrees and spawns a live in-use process. The script's own pure self-test (the
+      # is_workflow_branch predicate + in-use probe callability) runs too. HARD (no
+      # "advisory"/"informational") so ci-summary gates on it. (shellcheck of worktree-gc.sh is
+      # new here — it now carries the load-bearing in-use guard.)
+      - name: shellcheck worktree-gc.sh + its completed-reclaim self-test
+        run: shellcheck scripts/worktree-gc.sh scripts/tests/test_worktree_gc_completed.sh
+      - name: Self-test worktree-gc.sh (pure predicates incl. is_workflow_branch, hermetic)
+        run: bash scripts/worktree-gc.sh --dry-run-self-test
+      - name: Self-test worktree-gc.sh (completed-reclaim opt-in + workflow-only + in-use guard, end-to-end)
+        run: bash scripts/tests/test_worktree_gc_completed.sh
+      # [OPUS-4.8] sq-13uyp: the per-tick merged-bead reconcile sweep — closes bd-OPEN beads
+      # whose fix already MERGED so they stop wasting frontier dispatches (it COMPLEMENTS
+      # push-frontier's open-PR exclusion, sq-7mwun). Its correctness rests on a conservative
+      # EXACT-token match (the `sq-ixc3.1` must-NOT-match-`sq-ixc3.11` guard) and a
+      # never-auto-close gate for epics / umbrella-parents / needs:user beads — a regression in
+      # either would mass-close or mis-close real backlog, so both the pure self-test AND the
+      # end-to-end harness run HARD here, before the sweep is trusted.
+      - name: shellcheck reconcile-merged-beads.sh + its self-test
+        run: shellcheck scripts/reconcile-merged-beads.sh scripts/tests/test_reconcile_merged_beads.sh
+      - name: Self-test reconcile-merged-beads.sh (boundary match + gating, hermetic)
+        run: bash scripts/reconcile-merged-beads.sh --dry-run-self-test
+      - name: Self-test reconcile-merged-beads.sh (exact-match + gating + apply/idempotency, end-to-end)
+        run: bash scripts/tests/test_reconcile_merged_beads.sh
       # [OPUS-4.8] sq-neq8: hermetic self-test of the coverage-ratchet gate's PURE logic
       # (max-remeasure aggregation sq-x4jy + floor-monotonicity sq-neq8) so a regression in
       # the gate ITSELF is caught here, before the gate is trusted to guard real coverage.
@@ -293,6 +334,34 @@ jobs:
         run: python3 scripts/check-install-action-tool.py --self-test
       - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
         run: python3 scripts/check-install-action-tool.py
+      # [OPUS-4.8] sq-u59rq: the stacked-PR arm guard. A deterministic PreToolUse command-hook
+      # (.claude/settings.json, sibling to the perf-reviewer) that DENIES `gh pr merge … --auto`
+      # when the PR's baseRefName ≠ main — so we never squash-merge a stacked PR into its base
+      # branch (content misses main, head branch auto-deletes; observed #1023 → re-landed as
+      # #1028). The guard's logic lives only in the harness hook (it is not a file lint), so it
+      # is validated HERE by its hermetic self-test — command-parsing + base-comparison +
+      # fail-OPEN-on-error — with NO network/gh dependency (the base lookup is injected). Mirrors
+      # coverage-gate.py / check-install-action-tool.py --self-test (stdlib-only, no deps).
+      - name: Self-test stacked-PR arm guard (command parse + base check + fail-open)
+        run: python3 scripts/check-pr-arm-base.py --self-test
+      # [OPUS-4.8] sq-53cq: anti-drift guard for the two-hop dashboard publish. The in-repo
+      # source-of-truth bench/dashboard/* reaches the live site via bench.yml's "Seed Pages
+      # dashboard" step (a HAND-CODED `for f in …` copy list onto benchmark-data) then
+      # pages.yml's dev/ fold. The footgun: add a NEW asset to bench/dashboard/ (as happened
+      # with competitors.json) and forget the seed list, and it lands in-repo but NEVER reaches
+      # the served dashboard — silently. This gate asserts every served-class bench/dashboard
+      # asset is WIRED into the publisher (in the seed loop, or the root-redirect copy), so a
+      # new asset can't be un-published. It does NOT diff against the live benchmark-data copy
+      # (that copy LAGS by design — re-seeded only on main pushes — so a strict diff would red
+      # every honest dashboard PR); it guards the durable WIRING invariant. *.md provenance docs
+      # + the on-branch-generated data.js are excluded (documented in the script header). The
+      # self-test pins the gate's own logic; the second step ENFORCES it. GATING (no
+      # advisory/informational token): deterministic, in-repo, no network — trivially safe to
+      # gate, and it catches a real silent-drop class. Stdlib-only (mirrors the lints above).
+      - name: Self-test dashboard publish-wiring gate (pure logic)
+        run: python3 scripts/check-dashboard-publish-wiring.py --self-test
+      - name: "Enforce every served bench/dashboard asset is wired into the Pages publisher — GATING"
+        run: python3 scripts/check-dashboard-publish-wiring.py
       # [OPUS-4.8] sq-d8or: the built-docs-site link gate (scripts/check-site-links.sh) is
       # invoked on the publish path in pages.yml (after `next build`), where the static export
       # exists. Its remap of the /sparq GitHub-Pages base path + its TEETH (a broken internal
@@ -303,7 +372,7 @@ jobs:
       - name: shellcheck check-site-links.sh + its self-test
         run: shellcheck scripts/check-site-links.sh scripts/tests/test_check_site_links.sh
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: lychee@0.23.0
       - name: Self-test check-site-links.sh (basePath remap + broken-link teeth)
@@ -351,6 +420,31 @@ jobs:
       # trusted. (Measured numbers are runtime-only / NON-CANONICAL by design.)
       - name: Self-test agent-telemetry harness (parser + cache-ratio + cost math)
         run: python3 scripts/agent-telemetry/tests/test_agent_telemetry.py
+      # [OPUS-4.8] sq-mztg8.2 (epic sq-mztg8, FO-bridge Phase 4): the PKG write-path
+      # YAML-LD authoring compiler (crates/sparq-kb/ingest/yamlld_compile.py) lets the
+      # AGENTS.md Findings tier be authored in a compact, IRI-free *.yaml.ld and
+      # deterministically compiled to schema.org-typed PKG Turtle. Its stdlib-only
+      # subset reader + the guarded V() concept-token resolver (AMBIGUOUS / unresolvable
+      # token -> HARD compile error, never a silent wrong IRI) are regression-covered by
+      # a hermetic stdlib-unittest suite (NO PyYAML, NO subprocess, NO network). Run here
+      # so a resolver/parser regression reds CI. (The compiled tier's SHACL conformance +
+      # round-trip equivalence to the hand-authored tier is the Rust gate
+      # `sparq-kb --features validate --test yamlld_write_path`.)
+      - name: Self-test PKG write-path YAML-LD compiler (sq-mztg8.2)
+        run: python3 scripts/tests/test_yamlld_compile.py
+      # [OPUS-4.8] sq-lhwo.4 (epic sq-lhwo): the firm ast-grep+outline token A/B harness
+      # (scripts/agent-telemetry/ast-grep-outline/) under the shared §5 protocol. Its
+      # statistics + §5.6 verdict-object emitter (Wilcoxon signed-rank + bootstrap CI +
+      # break-even N* + the kill criteria) and the read-payload measurer are
+      # regression-covered by hermetic stdlib-unittest suites (NO scipy/numpy, NO network,
+      # NO ast-grep needed — the live ast-grep smoke test self-skips if absent). Run here
+      # so a regression in the VERDICT GATING (e.g. a proxy/partial-quality run wrongly
+      # reaching recommend_adopt, or the Wilcoxon/break-even math) reds CI before the
+      # harness is trusted. (Measured numbers are runtime-only / NON-CANONICAL by design.)
+      - name: Self-test ast-grep+outline A/B stats + verdict emitter (sq-lhwo.4)
+        run: python3 scripts/agent-telemetry/ast-grep-outline/tests/test_ab_stats.py
+      - name: Self-test ast-grep+outline A/B read-payload measurer (sq-lhwo.4)
+        run: python3 scripts/agent-telemetry/ast-grep-outline/tests/test_measure_ab.py
       # [OPUS-4.8] sq-f04e: gen-js-sbom.sh DERIVES a standalone per-member lock via
       # scripts/derive-workspace-member-lock.mjs, then cyclonedx-npm shells out to `npm ls
       # --omit=dev`. A workspace-to-workspace dep edge (a `link: true` node — a published member
@@ -362,10 +456,20 @@ jobs:
       # which BOTH `npm ls --omit=dev` and the full `npm ls` exit 0, while the runtime (--omit=dev)
       # closure stays exactly the real runtime dep set (no dev-link leak into the published SBOM
       # surface). HARD job (no "advisory" token) — a regression reds the ci-summary gate.
-      - name: shellcheck gen-js-sbom.sh + the derive-lock self-test
-        run: shellcheck scripts/gen-js-sbom.sh scripts/tests/test_derive_workspace_member_lock.sh
+      - name: shellcheck gen-js-sbom.sh + the derive-lock self-tests
+        run: shellcheck scripts/gen-js-sbom.sh scripts/tests/test_derive_workspace_member_lock.sh scripts/tests/test_js_sbom_external_devdep.sh
       - name: "Self-test derive-workspace-member-lock.mjs (workspace-link materialization — sq-f04e)"
         run: bash scripts/tests/test_derive_workspace_member_lock.sh
+      # [OPUS-4.8] sq-pl1p (sq-f04e/#887 + #922 class): sq-f04e hardened only the workspace-LINK
+      # dep case. An EXTERNAL (registry) devDependency added to a PUBLISHED member (js/) projects its
+      # full transitive closure into the derived lock; a real dev-dep tree's unsatisfied peerDeps make
+      # cyclonedx-npm's FULL `npm ls` exit 254 (the #922 break). The fix keeps the runtime SBOM strict
+      # (--omit=dev prunes the dev tree) and passes --ignore-npm-errors on the DEV SBOM only (still
+      # enumerating the full set; superset honesty guard in gen-js-sbom.sh). This hermetic self-test
+      # (synthetic root lock, no network, node+npm only) pins the runtime-strict + dev-break-is-real +
+      # runtime-honesty teeth. HARD job (no "advisory" token) — a regression reds the ci-summary gate.
+      - name: "Self-test js-sbom lane vs external dev-deps on a published member (sq-pl1p)"
+        run: bash scripts/tests/test_js_sbom_external_devdep.sh
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:

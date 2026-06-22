@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML), Graph Store read AND write (PUT/POST/DELETE on graph resources, RDF/XML bodies accepted), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -190,6 +190,21 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   that complementary hole. Pass `None` on either to opt back out of that guard.
 - Re-exports for cache layers/tests: `PinnedGen`, `GLOBAL_POD: &str`
   (`"urn:sparq:pod:global"`), and `sparq_serve::{Epoch, PodEpochs, PodId}`.
+- **Response-bytes result cache** (opt-in, `sparq-serve`'s `result-cache` feature,
+  OFF by default — [OPUS-4.8] sq-jluc). A serving-layer cache from a request
+  *identity* to the pre-serialized response body, distinct from `sparq-engine`'s
+  in-engine algebra-keyed `result-cache`. Public surface (feature-gated):
+  `sparq_serve::{ResultCache, CacheConfig, ScopeKey, ReadFootprint, LeaseOutcome,
+  CacheStats}`. **Key = canonical-query × visibility-scope × per-pod epoch-vector**
+  (`ResultCache::lease`/`get`): the **scope** is the identity of the accessible
+  graph set (`ScopeKey::of_graphs(AuthIndex::accessible(session, mode))`), **never**
+  the WebID — bytes cached for one access scope can never be served to another (an
+  access-control correctness invariant, *not* a privacy guarantee). Invalidation is
+  per-pod epoch bumps (`ReadFootprint::Pods`) or the global generation
+  (`ReadFootprint::Unbounded`); single-flight leases dedup a stampede; a byte-budget
+  LRU + admission bound keeps it from caching oversize/streaming bodies. Wiring it
+  into the axum endpoint and the canonical perf-validation are follow-ups (the perf
+  targets need a canonical host).
 - Serializer/negotiation helpers (always compiled, no `server` feature): module
   `sparq_server::negotiate` — `fn negotiate(accept: Option<&str>) -> Format`,
   `fn negotiate_graph(accept: Option<&str>) -> GraphFormat`; module
@@ -210,7 +225,7 @@ CONSTRUCT/DESCRIBE):
 | --- | --- | --- |
 | SELECT | `application/sparql-results+json` (default) / `+xml` / `text/csv` / `text/tab-separated-values` | matching results media |
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` |
-| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` | matching RDF media; N-Triples, prefix-compacting Turtle, or RDF/XML <!-- [OPUS-4.8] sq-rt6v --> |
+| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` / `application/ld+json` (the `jsonld` feature — **default-on**) | matching RDF media; N-Triples, prefix-compacting Turtle, RDF/XML, <!-- [OPUS-4.8] sq-rt6v --> or flattened JSON-LD <!-- [OPUS-4.8] sq-oy1f.1/.4 --> |
 
 ```sh
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/sparql-results+xml' \
@@ -221,7 +236,23 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: text/turtle' \
 # RDF/XML:
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/rdf+xml' \
      --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
+# JSON-LD (flattened) — default-on, works on the standard build: [OPUS-4.8] sq-oy1f.1/.4
+curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
+     --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
 ```
+
+> **JSON-LD content negotiation (`jsonld` feature — default-on, [OPUS-4.8] sq-oy1f.4).** The
+> server speaks `application/ld+json` out of the box (the `jsonld` feature is in the default set —
+> a maintainer-directed exception to opt-in-by-default). `application/ld+json` joins the
+> q-value-aware RDF negotiation in BOTH directions: a CONSTRUCT/DESCRIBE or a Graph-Store-Protocol
+> read with `Accept: application/ld+json` is served as the engine's *flattened* JSON-LD (a
+> `{"@graph": […]}` node-object document that `toRdf`-round-trips to the same graph), and a GSP
+> `PUT`/`POST` with `Content-Type: application/ld+json` is parsed into the store via the engine's
+> JSON-LD parser. Toggleable off via `--no-default-features --features server`: then
+> `application/ld+json` is unrecognised — an `Accept` for it falls back to a supported graph format
+> (never a 406 — the endpoint always has a representation), and a write body in it is a plain `415`
+> — byte-identical to a JSON-LD-disabled build. What is default-on now: JSON-LD parse + serialise
+> (flattened) + content-negotiation; full conneg-conformance ratcheting is on the sq-oy1f roadmap.
 
 **2. EXPLAIN a query plan (no execution) or analyze (execute + per-operator trace).**
 `text/plain` response. Use `explain` / `explain=plan` (or `Accept: text/x-sparq-explain`)
@@ -315,14 +346,17 @@ gauge count SSE streams and WS subscriptions together.
 
 ```sh
 # READ (GET/HEAD): serialises the addressed graph in the Accept-negotiated RDF syntax
-# (default N-Triples; also text/turtle = prefix-compacting Turtle, application/rdf+xml = RDF/XML)
+# (default N-Triples; also text/turtle = prefix-compacting Turtle, application/rdf+xml = RDF/XML,
+#  and application/ld+json = flattened JSON-LD with `--features jsonld` [OPUS-4.8] sq-oy1f.1)
 curl http://127.0.0.1:3030/sparql/graph?default                 # GSP indirect (default graph)
 curl 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g'     # GSP indirect (named graph)
 curl http://127.0.0.1:3030/graphs/whatever                      # GSP direct (request URI is the graph IRI)
 curl -H 'Accept: application/rdf+xml' http://127.0.0.1:3030/sparql/graph?default   # RDF/XML read [OPUS-4.8] sq-rt6v
+curl -H 'Accept: application/ld+json' http://127.0.0.1:3030/sparql/graph?default   # JSON-LD read (--features jsonld) [OPUS-4.8] sq-oy1f.1
 
 # WRITE (sq-gxsj): body is RDF, format by Content-Type
-#   (turtle | n-triples | n-quads | trig | application/rdf+xml [OPUS-4.8] sq-rt6v)
+#   (turtle | n-triples | n-quads | trig | application/rdf+xml [OPUS-4.8] sq-rt6v
+#    | application/ld+json with `--features jsonld` [OPUS-4.8] sq-oy1f.1)
 # PUT = REPLACE graph contents (201 if created, 204 if replaced):
 curl -X PUT 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g' \
      -H 'content-type: text/turtle' --data '<http://ex/s> <http://ex/p> <http://ex/o> .'
@@ -332,6 +366,23 @@ curl -X POST 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g' \
 # DELETE = DROP the graph (204; 404 if a named graph is absent; ?default → CLEAR DEFAULT, always 204):
 curl -X DELETE 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g'
 
+# PATCH = atomic, graph-scoped in-place MODIFY (sq-hj4n; 204 on success). Two body dialects:
+#   1) application/sparql-update (ALWAYS-ON) — the body IS a SPARQL Update, applied atomically
+#      through the same writer, with its WHERE dataset scoped to the addressed graph:
+curl -X PATCH 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g' \
+     -H 'content-type: application/sparql-update' \
+     --data 'DELETE DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } } ;
+             INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o2> } }'
+#   2) text/n3 (Solid N3-Patch, OPT-IN: needs the `n3-patch` build feature AND --n3-patch / SPARQ_N3_PATCH=1;
+#      else 415). A solid:InsertDeletePatch translated into ONE atomic graph-scoped DELETE/INSERT … WHERE:
+curl -X PATCH 'http://127.0.0.1:3030/sparql/graph?default' \
+     -H 'content-type: text/n3' --data '@prefix solid: <http://www.w3.org/ns/solid/terms#>.
+@prefix ex: <http://ex/>.
+_:p a solid:InsertDeletePatch;
+  solid:where   { ?s ex:name "Alice" . };
+  solid:deletes { ?s ex:age 30 . };
+  solid:inserts { ?s ex:age 31 . }.'
+
 curl http://127.0.0.1:3030/health                               # -> "ok"
 curl http://127.0.0.1:3030/metrics                              # Prometheus text exposition (gated by --auth-token-read; sq-9jrx)
 
@@ -340,6 +391,21 @@ curl http://127.0.0.1:3030/metrics                              # Prometheus tex
 # on-disk store so a logical erasure is followed by real erasure. 200 ok; 409 if in-memory
 # (no --persist, nothing to purge); 503 on a transient durable-write error (retryable):
 curl -X POST -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/admin/compact
+
+# Online consistent-snapshot backup + restore (feature `backup`, default OFF). POST-only, WRITE-gated.
+# Backup streams a single self-describing artifact of the LIVE store WHILE SERVING (no stop-the-world):
+curl -X POST -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/admin/backup -o snapshot.spqb
+# Restore atomically installs a store rehydrated from that artifact (in-memory; fail-closed):
+curl -X POST -H 'Authorization: Bearer <TOKEN>' --data-binary @snapshot.spqb http://127.0.0.1:3030/admin/restore
+# On a --persist server, opt into write-through so the restore survives a restart (else 409):
+curl -X POST -H 'Authorization: Bearer <TOKEN>' --data-binary @snapshot.spqb 'http://127.0.0.1:3030/admin/restore?persist=true'
+# Restore on start (bootstrap a fresh node / PITR base):  sparq-server --restore snapshot.spqb
+#   …into a durable store (survives restart):             sparq-server --persist DIR --restore snapshot.spqb --restore-persist
+# Incremental change-stream / point-in-time recovery (PITR): a DELTA between a retained
+# generation N and the current generation (replayed forward onto the matching base):
+curl -X POST -H 'Authorization: Bearer <TOKEN>' 'http://127.0.0.1:3030/admin/backup/delta?from=0' -o d0.spqd
+# Recover to the chosen point: restore the base, then replay the delta chain (oldest first):
+sparq-server --restore snapshot.spqb --restore-delta d0.spqd --restore-delta d1.spqd
 ```
 
 `/metrics` is hand-rolled Prometheus text exposition (no metrics dependency); the
@@ -372,13 +438,92 @@ scrubs the engine's own on-disk segments + dictionary; it cannot reach bytes alr
 (filesystem snapshots, COW history, external backups) — those are the operator's responsibility
 (see `compliance/privacy/retention-erasure-runbook.md` §7a/§7b).
 
+**`POST /admin/backup` + `POST /admin/restore` — online consistent snapshot backup/restore
+(feature `backup`, default OFF; `sq-o5bi`).** An ONLINE point-in-time backup of the live serving
+store, distinct from the offline `sparq-cli save` (stop-the-world, index rebuild) and from the
+`--persist` per-graph WAL. **`/admin/backup`** pins the CURRENT generation lock-free and serialises
+it off the immutable `Arc` — so it runs **while serving**: readers never block the writer and the
+writer never blocks readers throughout. The response is **one self-describing artifact** (Stardog
+backup-ID model, "Option A"): a small textual header recording the generation number (= the single
+writer's seq), the per-pod epoch vectors, the triple count and a body integrity digest, then the
+full dataset (default + named graphs) as N-Quads. **`/admin/restore`** imports such an artifact and
+**atomically installs** a freshly-built ring+writer rehydrated from it — readers in flight keep
+serving from the old store until they release their pin; every read/update after the swap sees the
+restored store. **Fail-closed:** a corrupt / truncated / version-mismatched / non-artifact body is
+rejected (`400`) and the live store is left **untouched** (the new core is built fully before the
+swap). Both routes are **POST-only** and gated by the **write** token (the admin gate). Responses:
+backup `200` (`application/octet-stream`); restore `200` on success, `400` on a rejected artifact.
+
+**Restore into a live durable store (`sq-ft7u`).** On a `--persist` server, a plain
+`/admin/restore` (no opt-in) is **`409`** — an in-memory-only swap on a durable server would be
+silently lost on the next restart (a footgun). Add **`?persist=true`** to write the restore
+**THROUGH to the durable directory**, so it **survives a restart** (the on-disk base becomes the
+restored image). The durable swap runs **on the single writer thread** (sequenced with updates — no
+lock, no race with a concurrent durable commit) and is **crash-safe**: the imported image is written
+to a sibling and swapped in with a **two-rename directory swap** (parent dir fsync'd between renames)
+that an interrupted crash heals deterministically (`Graph::restore_into_durable` reuses the exact WAL
+compaction swap + `recover_compaction` healer). **Fail-closed throughout:** the artifact is imported
++ validated **before** any on-disk change, so a corrupt artifact is `400` with the durable store
+**untouched** and no swap-sibling leftovers; a swap I/O error leaves the OLD store intact and the
+writer alive. `?persist=true` on an **in-memory** server is `409` (no durable dir). **Restore-on-start:**
+`--restore <FILE>` / `SPARQ_RESTORE` seeds the in-memory store before binding (bootstrap for
+horizontal-scaling stage-2 + PITR base); with `--persist DIR` it is **refused unless** you add
+**`--restore-persist`** / `SPARQ_RESTORE_PERSIST=1`, which writes the artifact through to `DIR`
+crash-safely on start. **Honest scope:** **at-rest encryption of the artifact is out of scope** — the
+integrity digest detects accidental corruption, not tampering, and is not a confidentiality or
+authenticity guarantee; protect the artifact at the storage tier.
+
+**`POST /admin/backup/delta?from=N` + `--restore-delta` — incremental change-stream / PITR
+(same `backup` feature; `sq-bu1a`).** The Option-A backup above is the BASE half of a
+point-in-time-recovery story; this is the incremental companion. **`/admin/backup/delta`** streams
+a single self-describing **delta artifact** (distinct magic `SPARQ-BACKUP-DELTA`) keyed off the
+generation/writer-seq: a header recording the `from-generation` N → the current `to-generation`
+plus the per-pod epoch vector at `to`, then the **quad-set change** (inserted + deleted quads, each
+as N-Quads) between those two generations. `from` must still be **retained** by the ring — without
+the `time-travel` feature only the last few generations (the concurrency window) are retained, so a
+`from` older than that is `410 Gone` (widen retention with `time-travel`); a missing/invalid `from`
+is `400`. To recover to a chosen point, restore the base then **replay the delta chain forward**:
+`sparq-server --restore base.spqb --restore-delta d0.spqd --restore-delta d1.spqd …` (oldest
+first; or `SPARQ_RESTORE_DELTA`). **Fail-closed:** a corrupt / version-mismatched / out-of-order /
+gapped delta aborts the whole recovery and the live store is untouched (import + full replay happen
+before any swap). **Honest scope:** deltas are **same-lineage** only — the chain must be the writer
+history of that base (blank-node labels are stable within a lineage, which is what the quad-set diff
+relies on); cross-lineage diffing is unsupported. At-rest encryption is out of scope, same as the
+base.
+
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
 `application/sparql-update` operation uses — so they share its atomicity, snapshot
 consistency, blocking-on-commit semantics, the `Sparq-Generation` header (time-travel
 feature), AND its **auth gate** (a GSP write is as powerful as an UPDATE, so `PUT`/`POST`/
-`DELETE` are gated by `--auth-token` exactly like an UPDATE; `GET`/`HEAD` are reads). A
+`DELETE`/`PATCH` are gated by `--auth-token` exactly like an UPDATE; `GET`/`HEAD` are reads). A
 malformed body → `400`; an unsupported body Content-Type → `415`.
+
+**`PATCH` — atomic, graph-scoped in-place modify (`sq-hj4n`, gh-916).** A `PATCH` on a graph
+resource applies an atomic modify to the addressed graph, with two body dialects:
+
+- **`application/sparql-update` (ALWAYS-ON, no feature):** the body IS a SPARQL Update, applied
+  atomically through the shared writer. It is **scoped** to the addressed graph by defaulting the
+  update's WHERE dataset to that graph (the SPARQL 1.1 Protocol §2.2 `using-graph-uri` mechanism).
+  **Honest scope:** this scopes what the WHERE *reads*; an operation that explicitly names a
+  *different* graph (`INSERT DATA { GRAPH <other> { … } }`, or an in-body `WITH`/`USING`) still
+  targets where it says — and supplying the override alongside an in-body `USING`/`WITH` on a
+  *named*-graph PATCH is the §2.2 conflict `400`. For `?default` the scoping is a no-op (the default
+  graph is already the WHERE default). Success → `204`.
+- **`text/n3` (OPT-IN — the `n3-patch` build feature AND `--n3-patch` / `SPARQ_N3_PATCH=1`):** a
+  Solid-style **N3-Patch** (`solid:InsertDeletePatch` with `solid:where` / `solid:deletes` /
+  `solid:inserts` formulas), translated into ONE atomic graph-scoped SPARQL Update (every block
+  wrapped in `GRAPH <g> { … }` for a named graph). With a `solid:where` it is a pattern-based
+  `DELETE/INSERT … WHERE`; without one it is ground `DELETE DATA`/`INSERT DATA` — either way one
+  writer submission. Validation: exactly one patch resource, each formula property at most once, at
+  least one of `deletes`/`inserts`, and no blank node in `deletes`/`where` (only `inserts` may mint
+  one) → otherwise `400`. **Double opt-in** (build feature + runtime flag) mirrors `tpf`/`shacl`:
+  with the feature **off** the N3-Patch parser + dispatch are `#[cfg]`-stripped (a `text/n3` body is
+  then a plain `415`, byte-identical to before, and no new dependency / no `sparq-core` /
+  `sparq-engine` / wasm impact); with the feature **on** but the flag **off** a `text/n3` body is
+  also `415`. The N3 parsing rides `oxttl`'s `N3Parser` — already a server dependency — so even
+  feature-on adds NO new crate. Success → `204`. `PATCH` is a WRITE, gated by `--auth-token` like an
+  UPDATE.
 
 **5b. Container (ghcr.io).** Published on every release tag (`ghcr.io/jeswr/sparq-server`,
 distroless). The image sets `SPARQ_ALLOW_REMOTE=1` so the `0.0.0.0` bind it needs (loopback
@@ -426,9 +571,21 @@ advertise itself as a discoverable federation node by serving two read-only RDF 
   Description](https://www.w3.org/TR/sparql11-service-description/) generated from the server's
   **actual** capabilities (sq-qfcb), never a hard-coded fiction:
     - `sd:Service` + `sd:endpoint` (the request `Host`'s `/sparql`);
-    - `sd:supportedLanguage` — `SPARQL11Query` always; `SPARQL11Update` **only when an anonymous
-      client can run one** (it is suppressed when a `--auth-token` write gate is configured,
+    - `sd:supportedLanguage` — `SPARQL11Query` always, **plus** the SPARQL-1.2-SD
+      version-agnostic `SPARQLQuery` (sq-2msb); `SPARQL11Update` + `SPARQLUpdate` **only when an
+      anonymous client can run one** (suppressed when a `--auth-token` write gate is configured,
       because then an unauthenticated SD reader cannot use Update);
+    - `sd:supportedVersion` (sq-2msb, gh-917) — the SPARQL language **versions** this build
+      conformance-verifies, as `sparql:version-*` IRIs (`http://www.w3.org/ns/sparql#`). SPARQL
+      1.2 SD moves version negotiation off `sd:Language` onto `sd:supportedVersion`, so a
+      1.2-aware federation client can discover triple-term / `dir`-lang support without probing.
+      sparq advertises `version-1.0`, `version-1.1` and the **full** `version-1.2` (not the
+      `version-1.2-basic` profile) because the engine passes the complete W3C SPARQL 1.0/1.1/1.2
+      suites at 100% (`conformance-report.md`). **HONESTY GATE**: there is no `sparql12`/`rdf12`
+      cargo feature — SPARQL 1.2 is compiled into the base engine — so this is keyed off the
+      DOCUMENTED conformance state (`descriptors::CONFORMANCE_VERIFIED_VERSIONS`), never a `cfg!`
+      or an aspiration; were any 1.2 group to regress to a partial pass, the honest edit is to
+      drop to `version-1.2-basic` (or omit 1.2) in that one constant;
     - `sd:resultFormat` — the four SPARQL-results serialisations (JSON/XML/CSV/TSV) plus the RDF
       graph serialisations the CONSTRUCT/DESCRIBE/GSP-read path emits (Turtle/N-Triples/RDF-XML),
       and `sd:inputFormat` — the RDF serialisations the GSP write path parses (Turtle/N-Triples/
@@ -992,6 +1149,32 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   published snapshot, and a recovered write is durable across a restart — covered for a transient
   burst, a permanent jam, AND (sq-bif.14) an INTERLEAVED recover→fail→recover sequence whose final
   durable set is exactly the successful writes (no refused write resurrects).
+- **Online backup/restore — opt-in `backup` feature (default OFF).** Build with
+  `--features backup` to mount the WRITE-gated, POST-only `/admin/backup` (stream a
+  self-describing snapshot artifact of the live store WITHOUT stopping the world) and
+  `/admin/restore` (atomically install a store rehydrated from one, **fail-closed** on a
+  corrupt/mismatched artifact). On an in-memory server the restore is RAM-only; on a `--persist`
+  server it is `409` UNLESS you opt in with `?persist=true`, which writes the restore THROUGH to the
+  durable dir (crash-safe, fail-closed) so it survives a restart (`sq-ft7u`).
+  `--restore <FILE>` / `SPARQ_RESTORE` runs the same restore on start (bootstrap a fresh
+  replica / PITR base); with `--persist` it is refused unless `--restore-persist` /
+  `SPARQ_RESTORE_PERSIST=1` is set (then it writes through to the durable dir on start). DISTINCT from the offline `sparq-cli
+  save` and from the `--persist` WAL. **At-rest encryption of the artifact is out of scope** —
+  the body digest detects accidental corruption, not tampering. Without the feature the routes +
+  the `--restore` setting are compiled out AND the serving core stays the plain `ring`/`writer`
+  pair — the `ArcSwap<ServingCore>` that backs the atomic online restore is `backup`-gated, so the
+  DEFAULT read path is byte-identical to before #941 (no extra atomic load when `backup` is OFF;
+  sq-0g6g resolved in the lean direction). (sq-o5bi.)
+- **Incremental change-stream / PITR — same `backup` feature (sq-bu1a).** The base backup above
+  is the BASE half of point-in-time recovery; `/admin/backup/delta?from=N` streams an incremental
+  **delta artifact** (distinct `SPARQ-BACKUP-DELTA` kind) — the quad-set change between a *retained*
+  generation N and the current one, keyed off the generation/writer-seq range + the epoch vector at
+  `to`. Recover to a chosen point by restoring the base then replaying the chain forward:
+  `--restore base --restore-delta d0 --restore-delta d1 …` (oldest first; or `SPARQ_RESTORE_DELTA`).
+  **Fail-closed** on a corrupt / out-of-order / gapped chain (import + full replay before any swap);
+  `from` not retained is `410` (widen retention with `time-travel`). **Same-lineage only** — the
+  chain must be the writer history of that base (the diff relies on lineage-stable blank-node
+  labels). At-rest encryption out of scope, same as the base.
 - **Time-travel memory cost is real.** Each retained generation is a *full* `Graph` today
   (~780 MB/generation at 1M triples); size `--time-travel-generations` accordingly.
 - **Error bodies.** Every error is structured JSON `{"error": "..."}` with

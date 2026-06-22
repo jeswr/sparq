@@ -108,6 +108,10 @@
 //!                             endpoint `POST /shacl/validate`: POST a shapes graph, the server validates
 //!                             its loaded data graph against it. Read-only. Off by default
 //!                                                                        [off, env SPARQ_SHACL=1]
+//!   --n3-patch                [OPUS-4.8 sq-hj4n] (feature `n3-patch`) enable the OPT-IN Solid N3-Patch
+//!                             (`text/n3`) dialect on the Graph-Store-Protocol `PATCH` method. The
+//!                             always-on `application/sparql-update` PATCH dialect needs no flag.
+//!                             Off by default                            [off, env SPARQ_N3_PATCH=1]
 //!   --verbose                 per-request logging (TraceLayer)
 //!   --log-full-requests       [OPUS-4.8 sq-toze.34] OPT OUT of request-log redaction: log the
 //!                             raw request URI (incl. the full `?query=` SPARQL text) verbatim.
@@ -185,6 +189,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the CLI only ever widens what env granted (never silently narrows it).
     let mut service_allow_cli: Vec<String> = Vec::new();
     let mut service_allow_file: Option<String> = None;
+    // [OPUS-4.8] sq-bu1a: track whether --restore-delta was given on the CLI so the FIRST flag
+    // OVERRIDES any SPARQ_RESTORE_DELTA env list (matching --restore's flag-overrides-env contract)
+    // rather than appending to it.
+    #[cfg(feature = "backup")]
+    let mut restore_delta_from_cli = false;
     // [OPUS-4.8] sq-o7o0: collect first-party CORS origin allowlist entries from the CLI;
     // UNIONed with the SPARQ_CORS_ALLOW_ORIGIN env baseline + an optional
     // --cors-allow-origin-file, after the arg loop (additive — CLI only widens).
@@ -322,6 +331,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 config.persist_dir = Some(std::path::PathBuf::from(dir));
             }
+            // [OPUS-4.8] sq-o5bi: RESTORE-ON-START from a backup artifact (the bootstrap
+            // primitive for horizontal-scaling stage-2 + the base of PITR). Off by default
+            // (env SPARQ_RESTORE=<file>). Fail-closed: a corrupt artifact aborts startup.
+            #[cfg(feature = "backup")]
+            "--restore" => {
+                let file = args.next().ok_or("--restore requires an artifact file path")?;
+                if file.is_empty() {
+                    return Err("--restore must not be empty".into());
+                }
+                config.restore = Some(std::path::PathBuf::from(file));
+            }
+            // [OPUS-4.8] sq-bu1a: POINT-IN-TIME-RECOVERY — replay an incremental DELTA artifact
+            // forward onto the --restore base. Repeatable (oldest first); each must be a
+            // sparq delta artifact. Requires --restore. Fail-closed: a corrupt / out-of-order /
+            // gapped delta aborts startup. Off by default (env SPARQ_RESTORE_DELTA=<files>).
+            #[cfg(feature = "backup")]
+            "--restore-delta" => {
+                let file = args.next().ok_or("--restore-delta requires an artifact file path")?;
+                if file.is_empty() {
+                    return Err("--restore-delta must not be empty".into());
+                }
+                // First CLI flag clears any env-provided list (flag overrides env).
+                if !restore_delta_from_cli {
+                    config.restore_delta.clear();
+                    restore_delta_from_cli = true;
+                }
+                config.restore_delta.push(std::path::PathBuf::from(file));
+            }
+            // [OPUS-4.8] sq-ft7u: RESTORE-INTO-DURABLE on start. Combined with --persist DIR +
+            // --restore FILE, write the artifact THROUGH to the durable dir crash-safely, so the
+            // restored dataset survives a restart (instead of refusing the --restore/--persist
+            // combination). Off by default (env SPARQ_RESTORE_PERSIST=1). See README.
+            #[cfg(feature = "backup")]
+            "--restore-persist" => config.restore_persist = true,
             // [OPUS-4.8] sq-o4qf: opt in to binding a non-loopback address. Without this (and
             // without SPARQ_ALLOW_REMOTE), a non-loopback --addr is refused unless the whole
             // surface is authenticated (--auth-token AND --auth-token-read) — see bind_posture.
@@ -366,6 +409,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // loaded data graph against it. Read-only. Off by default (env SPARQ_SHACL=1).
             #[cfg(feature = "shacl")]
             "--shacl" => config.shacl = true,
+            // [OPUS-4.8] sq-hj4n (gh-916): OPT-IN Solid N3-Patch (text/n3) PATCH dialect on the
+            // Graph-Store-Protocol graph route. The always-on application/sparql-update PATCH
+            // dialect needs no flag; this enables the OPTIONAL text/n3 one. Off by default
+            // (env SPARQ_N3_PATCH=1).
+            #[cfg(feature = "n3-patch")]
+            "--n3-patch" => config.n3_patch = true,
             // [OPUS-4.8] sq-4w18: SERVICE egress allowlist. Repeatable: each value adds one
             // host (`sparql.example.org`) or suffix wildcard (`*.example.org`). With NO
             // allowlist (the default) every SERVICE clause is refused (default-DENY-all).
@@ -415,6 +464,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [OPUS-4.8] sq-hj4n: surface the OPT-IN N3-Patch PATCH dialect flag (feature n3-patch).
+                let n3_patch = if cfg!(feature = "n3-patch") {
+                    " [--n3-patch]"
+                } else {
+                    ""
+                };
+                // [OPUS-4.8] sq-o5bi / sq-ft7u: surface the OPT-IN restore flags (feature backup).
+                let backup = if cfg!(feature = "backup") {
+                    " [--restore FILE] [--restore-persist]"
+                } else {
+                    ""
+                };
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
@@ -422,7 +483,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl} \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch}{backup} \
                      [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH] [--verbose] \
                      [--log-full-requests] [DATA_FILE]\n  \
                      or: sparq-server --health-probe [--health-probe-addr HOST:PORT]\n\n  \
@@ -451,6 +512,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      SERVICE <iri> reaches NOTHING unless the host is allowlisted via \
                      --service-allow / --service-allow-file / SPARQ_SERVICE_ALLOW \
                      (exact host or *.suffix wildcard) — an SSRF guard.\n  \
+                     RESTORE (the `backup` build feature): --restore FILE (env SPARQ_RESTORE) \
+                     rehydrates the store from a backup artifact on start. Without --persist it is \
+                     in-memory only. With --persist DIR, ADD --restore-persist (env \
+                     SPARQ_RESTORE_PERSIST=1) to write the restore THROUGH to the durable dir \
+                     crash-safely so it survives a restart; without it the --restore/--persist \
+                     combination is refused. The online route POST /admin/restore mirrors this: \
+                     on a --persist server it needs ?persist=true (else 409).\n  \
                      CORS: NO CORS headers by default (a cross-origin browser fetch cannot read \
                      responses). For a FIRST-PARTY browser app on another origin, allowlist its \
                      exact origin(s) via --cors-allow-origin ORIGIN (repeatable) / \
@@ -553,6 +621,106 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Graph::load_str("", "turtle").map_err(|e| format!("init: {e}"))?
         }
     };
+    // [OPUS-4.8] sq-o5bi / sq-ft7u: RESTORE-ON-START. When --restore <FILE> / SPARQ_RESTORE is set,
+    // the backup artifact REPLACES the seed graph (fail-closed: a corrupt/mismatched artifact aborts
+    // startup with a clean error).
+    //
+    // WITHOUT --restore-persist (the historical default): in-memory only — the combination with
+    // --persist is REFUSED (an in-memory-only restore on a durable server would be silently lost on
+    // the next restart).
+    //
+    // WITH --restore-persist (sq-ft7u) AND --persist DIR: the artifact is written THROUGH to the
+    // durable dir crash-safely (`Graph::restore_into_durable`) BEFORE the store is opened, so the
+    // restored dataset survives a restart (the on-disk base IS the restored image). `try_with_config`
+    // then opens the already-restored durable dir.
+    #[cfg(feature = "backup")]
+    let graph = match (&config.restore, &config.persist_dir, config.restore_persist) {
+        // --restore + --persist + --restore-persist: write the artifact through to the durable dir.
+        (Some(file), Some(dir), true) => {
+            // [OPUS-4.8] sq-bu1a + sq-ft7u: PITR delta replay INTO a durable store is out of scope
+            // in v1 (the durable write-through swaps the base image only; replaying a delta chain
+            // into a --persist dir needs its own crash-safe path). Refuse the combination loudly
+            // rather than silently dropping the operator's --restore-delta chain.
+            if !config.restore_delta.is_empty() {
+                return Err(
+                    "--restore-delta (point-in-time recovery) cannot be combined with \
+                     --restore-persist in v1: replaying a delta chain into the durable store is \
+                     not yet supported; restore the base only, or use an in-memory --restore"
+                        .into(),
+                );
+            }
+            eprintln!(
+                "restoring durable store at {} from backup artifact {} (write-through) ...",
+                dir.display(),
+                file.display()
+            );
+            let f = std::fs::File::open(file)
+                .map_err(|e| format!("--restore: cannot open {}: {e}", file.display()))?;
+            let (fresh, meta) = sparq_serve::backup_import(std::io::BufReader::new(f))
+                .map_err(|e| format!("--restore: rejected {} ({e})", file.display()))?;
+            // Crash-safe two-rename swap of the durable dir to the restored image (fail-closed:
+            // a corrupt artifact already aborted above; an interrupted swap is healed on open).
+            Graph::restore_into_durable(dir, fresh)
+                .map_err(|e| format!("--restore-persist: durable restore into {} failed: {e}", dir.display()))?;
+            eprintln!(
+                "restored durable store from artifact taken at generation {} ({} triples) — survives restart",
+                meta.generation, meta.triples
+            );
+            // `try_with_config` opens the now-restored durable dir; the seed graph is ignored.
+            Graph::load_str("", "turtle").map_err(|e| format!("init: {e}"))?
+        }
+        // --restore WITHOUT --persist: the historical in-memory restore (RAM-only).
+        (Some(file), None, _) => {
+            eprintln!("restoring in-memory store from backup artifact {} ...", file.display());
+            let f = std::fs::File::open(file)
+                .map_err(|e| format!("--restore: cannot open {}: {e}", file.display()))?;
+            let (mut g, meta) = sparq_serve::backup_import(std::io::BufReader::new(f))
+                .map_err(|e| format!("--restore: rejected {} ({e})", file.display()))?;
+            eprintln!(
+                "restored from artifact taken at generation {} ({} triples)",
+                meta.generation, meta.triples
+            );
+            // [OPUS-4.8] sq-bu1a: POINT-IN-TIME RECOVERY — replay the --restore-delta chain forward
+            // onto the base. Fail-closed: a corrupt / out-of-order / gapped delta aborts startup.
+            if !config.restore_delta.is_empty() {
+                let mut decoded = Vec::with_capacity(config.restore_delta.len());
+                for d in &config.restore_delta {
+                    let df = std::fs::File::open(d)
+                        .map_err(|e| format!("--restore-delta: cannot open {}: {e}", d.display()))?;
+                    let delta = sparq_serve::backup_import_delta(std::io::BufReader::new(df))
+                        .map_err(|e| format!("--restore-delta: rejected {} ({e})", d.display()))?;
+                    decoded.push(delta);
+                }
+                let recovered = sparq_serve::backup_replay(&mut g, &meta, decoded.iter())
+                    .map_err(|e| format!("--restore-delta: replay failed ({e})"))?;
+                eprintln!(
+                    "replayed {} delta artifact(s) — recovered to generation {} ({} triples)",
+                    config.restore_delta.len(),
+                    recovered.generation,
+                    recovered.triples
+                );
+            }
+            g
+        }
+        // --restore + --persist WITHOUT --restore-persist: refused (footgun, see above).
+        (Some(_), Some(_), false) => {
+            return Err(
+                "--restore and --persist cannot be combined unless --restore-persist is set \
+                 (an in-memory-only restore on a durable server would be silently lost on \
+                 restart; --restore-persist writes the restore through to the durable dir)"
+                    .into(),
+            );
+        }
+        // No --restore: the seed graph as built above.
+        (None, _, _) => {
+            // [OPUS-4.8] sq-bu1a: --restore-delta is meaningless without a --restore base; refuse
+            // it loudly rather than silently ignoring an operator's PITR intent.
+            if !config.restore_delta.is_empty() {
+                return Err("--restore-delta requires --restore (a base artifact to replay onto)".into());
+            }
+            graph
+        }
+    };
     eprintln!("loaded {} triples", graph.len());
     eprintln!(
         "guards: query-timeout={} update-where-timeout={} header-read-timeout={} body-read-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
@@ -611,6 +779,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         None => eprintln!("persistence: OFF — in-memory only (updates are LOST on restart; pass --persist DIR to enable)"),
     }
+    // [OPUS-4.8] sq-o5bi / sq-ft7u: surface the online backup/restore posture at startup, including
+    // whether the restore (on-start or via /admin/restore?persist=true) writes THROUGH to the
+    // durable store so it survives a restart.
+    #[cfg(feature = "backup")]
+    eprintln!(
+        "backup/restore: ON (admin routes POST /admin/backup + /admin/backup/delta + \
+         /admin/restore, write-gated; online snapshot, no stop-the-world){}{}{}",
+        match &config.restore {
+            Some(f) => format!(" — restored on start from {}", f.display()),
+            None => String::new(),
+        },
+        // [OPUS-4.8] sq-bu1a: surface a replayed PITR delta chain in the posture line.
+        if config.restore_delta.is_empty() {
+            String::new()
+        } else {
+            format!(" + {} delta(s) replayed (PITR)", config.restore_delta.len())
+        },
+        // [OPUS-4.8] sq-ft7u: surface the restore-into-durable posture (write-through vs refusal).
+        if config.persist_dir.is_some() {
+            if config.restore_persist {
+                " — restore-into-durable ENABLED (--restore-persist / ?persist=true writes through to the persist dir; survives restart)"
+            } else {
+                " — restore-into-durable OFF (a /admin/restore needs ?persist=true on this --persist server, else 409)"
+            }
+        } else {
+            ""
+        }
+    );
     // [OPUS-4.8] sq-4w18: surface the SERVICE egress posture at startup so an operator
     // sees whether (and where) federation can reach. Only meaningful with the `service`
     // build feature; without it a SERVICE clause errors at execution regardless.

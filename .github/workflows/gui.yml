@@ -44,15 +44,27 @@ name: gui
 
 on:
   pull_request:
+    # [OPUS-4.8] The `site build + typecheck` job here consumes `site/` (its static export +
+    # the bundle-wasm-esm script) and `js/` (the @jeswr/sparq source it bundles), and resolves
+    # workspace deps from the root lockfile — so changes to ANY of those can break it. They were
+    # previously omitted, so a `site/`+lockfile regression (an unresolved `fzstd` in the ESM
+    # bundle) slipped onto `main` undetected and only surfaced on a PR whose `gate` re-scans the
+    # merge ref. List every input the jobs read.
     paths:
       - "gui/**"
       - "packages/sparq-client/**"
+      - "site/**"
+      - "js/**"
+      - "package-lock.json"
       - ".github/workflows/gui.yml"
   push:
     branches: [main]
     paths:
       - "gui/**"
       - "packages/sparq-client/**"
+      - "site/**"
+      - "js/**"
+      - "package-lock.json"
       - ".github/workflows/gui.yml"
 
 # Least-privilege default (Scorecard TokenPermissions): read-only; this lane never writes.
@@ -157,6 +169,69 @@ jobs:
       - name: Site static export build (consumes @sparq/client)
         working-directory: site
         run: npm run build
+
+  # [OPUS-4.8] sq-ixc3.8 / sq-ixc3.9 — the DISTINCT operational GUI frontend (gui/app).
+  #
+  # This is the load-bearing deliverable of the GUI-foundation work: the workbench frontend is a
+  # SEPARATE Next.js app (NOT the marketing site), static-exported for BOTH the Tauri desktop
+  # webview (root-relative) AND a hosted "Try the GUI live" web target (sub-path). It runs the
+  # in-tab WASM engine, so the build embeds the lean shacl,jsonld bundle (built first). GATING
+  # (no `advisory` keyword): it is TS + a static export, fully reproducible on a Linux runner
+  # without any webview system libraries, so a break here is a real regression.
+  gui-app:
+    name: "operational GUI frontend (build + lint + typecheck, both targets)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The GUI frontend embeds the in-tab engine, so the wasm bundle must be built first
+      # (the same shacl,jsonld bundle the site syncs).
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Cache cargo
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: gui-app-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build wasm bundle (shacl,jsonld)
+        working-directory: js
+        run: npm run build:wasm
+
+      - name: Install workspace dependencies
+        run: npm install
+
+      - name: GUI frontend lint
+        working-directory: gui/app
+        run: npm run lint
+
+      - name: GUI frontend typecheck
+        working-directory: gui/app
+        run: npm run typecheck
+
+      # The hosted "Try the GUI live" web target (sub-path basePath).
+      - name: GUI frontend static export (web target)
+        working-directory: gui/app
+        run: npm run build:web
+
+      # The Tauri desktop webview target (root-relative). Proves the SAME frontend exports for
+      # both hosts off the single NEXT_PUBLIC_BASE_PATH switch.
+      - name: GUI frontend static export (Tauri target)
+        working-directory: gui/app
+        run: npm run build:tauri
 
   # [OPUS-4.8] sq-bu69 — per-platform Tauri build + clippy matrix.
   #
@@ -308,20 +383,23 @@ jobs:
         run: cargo install wasm-pack --locked
 
       # Build the frontend the Tauri webview embeds. The shell's `cargo build` embeds whatever
-      # is in `site/out` at COMPILE TIME, so the frontend MUST be built first. The site export
-      # is root-relative (NEXT_PUBLIC_BASE_PATH='') because a Tauri webview serves from the
-      # custom-protocol root, not GitHub Pages' /sparq basePath (gui/README.md).
-      - name: Build the lean WASM bundle (the in-tab engine)
+      # is in `gui/app/out` at COMPILE TIME (sq-ixc3.8 repointed `frontendDist` to the DISTINCT
+      # operational frontend, NOT the marketing site), so the frontend MUST be built first. The
+      # export is root-relative (build:tauri sets NEXT_PUBLIC_BASE_PATH='') because a Tauri
+      # webview serves from the custom-protocol root, not a /sparq basePath (gui/README.md).
+      #
+      # The GUI frontend embeds the in-tab engine, so it needs the shacl,jsonld bundle (its
+      # SHACL tool + JSON-LD ingest) — build the full bundle, not the lean one.
+      - name: Build the WASM bundle (shacl,jsonld; the in-tab engine)
         working-directory: js
         run: |
           npm install
-          npm run build:wasm:lean
+          npm run build:wasm
 
-      - name: Build the site static export (root-relative; embedded by the shell)
-        working-directory: site
+      - name: Build the GUI frontend static export (root-relative; embedded by the shell)
         run: |
           npm install
-          NEXT_PUBLIC_BASE_PATH='' npm run build
+          (cd gui/app && npm run build:tauri)
 
       # Build the desktop shell binary (debug). With site/out present, tauri_build embeds the
       # frontend into the `sparq-gui` binary tauri-driver will launch.

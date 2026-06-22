@@ -31,10 +31,16 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   (`application/sparql-update` → `204`, atomic), including the protocol dataset-override params.
 - **Named graphs + Graph Store Protocol** — a full RDF dataset (`GRAPH` patterns, cross-graph
   joins, `FROM`/`FROM NAMED`, graph-scoped updates through the same writer) plus GSP `GET`/`HEAD`
-  read and `PUT`/`POST`/`DELETE` write (indirect `?graph=`/`?default` or direct request-URI).
+  read and `PUT`/`POST`/`DELETE`/`PATCH` write (indirect `?graph=`/`?default` or direct request-URI).
+  A `PATCH` applies an **atomic, graph-scoped in-place modify**: an always-on
+  `application/sparql-update` body (executed atomically through the same writer, with its WHERE
+  dataset scoped to the addressed graph), and — behind the OPT-IN `n3-patch` feature + `--n3-patch`
+  flag — a Solid-style `text/n3` **N3-Patch** (`solid:InsertDeletePatch`).
 - **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE and
-  GSP read in N-Triples / prefix-Turtle / RDF-XML; streamed SELECT bodies. Plus **EXPLAIN /
-  EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style **WebSocket + SSE** live SELECT diffs.
+  GSP read in N-Triples / prefix-Turtle / RDF-XML / **JSON-LD** (`application/ld+json` — the
+  `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); streamed
+  SELECT bodies. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style
+  **WebSocket + SSE** live SELECT diffs.
 - **Durable persistence** — `--persist <DIR>` makes the on-disk index the source of truth (off by
   default, in-memory). See "Durable persistence".
 - **Authentication** — optional `--auth-token <TOKEN>` Bearer write gate (constant-time; mirrors
@@ -47,25 +53,23 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   (`?generation=N` snapshot pinning), `geo` (`geof:` functions), `service` (SERVICE federation,
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
   `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
-  (`POST /shacl/validate`), `audit-log`/`access-audit` (access trails), `zlib-ng` (faster gzip).
+  (`POST /shacl/validate`), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
+  `backup` (no-stop-the-world `/admin/backup` snapshot + PITR delta `/admin/backup/delta` +
+  `/admin/restore`; on `--persist`, `?persist=true`/`--restore-persist` writes the restore through to
+  disk crash-safely so it survives a restart), `audit-log`/`access-audit`, `zlib-ng`.
+- **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4, epic sq-oy1f) — the `jsonld` feature is in the
+  server's **default** set: `application/ld+json` joins q-value-aware RDF conneg out of the box, **both
+  directions** (flattened JSON-LD on CONSTRUCT/DESCRIBE/GSP-read; `oxjsonld` GSP write body). Off via
+  `--no-default-features --features server` (→ 406 read, 415 write). Full conneg ratcheting is roadmap.
 
 ## Security posture (essentials — full detail in the SKILL)
 
 By default: **no auth, loopback-only.** Hardening is opt-in but honest where it matters.
 
-- **Auth × bind matrix.** A non-loopback bind is refused unless `--allow-remote` is set, and a
-  write-token counts as "auth present" for that decision **only when reads are also gated**
-  (`--auth-token-read`) — a write-token alone still leaves reads open on a remote bind. The 401 is
-  byte-identical for a missing vs a wrong token. The Bearer gate is one shared secret with no
-  per-user identity — for real authz front it with a gateway or [`sparq-solid`](../sparq-solid), over TLS.
+- **Auth × bind matrix.** A non-loopback bind is refused unless `--allow-remote` is set, and a write-token counts as "auth present" for that decision **only when reads are also gated** (`--auth-token-read`) — a write-token alone still leaves reads open on a remote bind. The 401 is byte-identical for a missing vs a wrong token. The Bearer gate is one shared secret with no per-user identity — for real authz front it with a gateway or [`sparq-solid`](../sparq-solid), over TLS.
 - **Error responses do not leak internals** — every error is a generic `{"error":"…"}` class (never the caller's input, an RDF fragment, a path, or a token); detail to the log, class to the body (regression-guarded by `tests/hardening.rs`). An unmatched route is a categorised `404 {"error":"not found"}` (the message never echoes the requested path).
-- **Stable retry contract** — **transient** (`429`/`503`): retry; **permanent** (`4xx`): fix the
-  request — a `413` row/byte cap is a permanent honest refusal, **not** a silent truncation;
-  **defect** (`500`): surface, don't hot-retry. Versioned table in the `status_contract` crate doc.
-- **SERVICE federation** is OFF in the default build; with `--features service` it is
-  **default-DENY-all** (egress allowlist enforced before any socket, on the resolved IP —
-  DNS-rebinding-safe). DoS guards on by default (query timeout, body cap, concurrency shed, 20×
-  gzip-ratio cap, panic→`500`); **no rate limit** — add one in the gateway.
+- **Stable retry contract** — **transient** (`429`/`503`): retry; **permanent** (`4xx`): fix the request — a `413` row/byte cap is a permanent honest refusal, **not** a silent truncation; **defect** (`500`): surface, don't hot-retry. Versioned table in the `status_contract` crate doc.
+- **SERVICE federation** is OFF in the default build; with `--features service` it is **default-DENY-all** (egress allowlist enforced before any socket, on the resolved IP — DNS-rebinding-safe). DoS guards on by default (query timeout, body cap, concurrency shed, 20× gzip-ratio cap, panic→`500`); **no rate limit** — add one in the gateway.
 - **Request-log redaction (ON by default with `--verbose`)** — a `GET /sparql?query=…` URL can
   carry PII, so the query string becomes a length + non-reversible fingerprint
   (`--log-full-requests` opts out). **Honest boundary:** this is log-CONTENT redaction, **not**
@@ -85,19 +89,14 @@ By default: **no auth, loopback-only.** Hardening is opt-in but honest where it 
 Readers pin the current immutable generation; writers commit batches as new generations
 ([`sparq-serve`](../sparq-serve/README.md)). **This single writer IS the write ceiling, by design**
 — a feature for the interactive single-resource-write workload, not a gap. An in-engine
-distributed/sharded writer is an **explicit Phase-2 non-goal**; the external-topology design (gh-52
-/ PSS ADR-0012, in [`research/`](../../research/adr-horizontal-scaling.md)) has **no engine code**.
+distributed/sharded writer is an **explicit Phase-2 non-goal** ([`research/`](../../research/adr-horizontal-scaling.md), gh-52 / PSS ADR-0012; no engine code).
 
 ## Durable persistence (`--persist DIR`)
 
 `--persist <DIR>` makes the on-disk index the durable source of truth (QLever's `--persist-updates`):
-every update is WAL-fsync'd **before the `204` ack**, so a restart replays the WAL with no rebuild.
-A rejected update is never persisted; a durable-write failure refuses the write with a **retryable
-`503`** (never acked, writer stays alive — fail-closed). The persisted delta is the resolved acked
-value, so non-deterministic updates (`NOW()`/`RAND()`/`LOAD`) persist exactly what the client saw.
-WAL compaction (`POST /admin/compact` or offline `sparq-cli compact`) physically purges deleted
-bytes — incl. orphaned literal values — for erasure-completeness, but **cannot** reach bytes copied
-off-box (snapshots, backups — operator's responsibility). See the SKILL for the compaction details.
+every update is WAL-fsync'd **before the `204` ack** (restart replays the WAL, no rebuild); a rejected update is never persisted, a durable-write failure refuses with a **retryable `503`** (fail-closed), and WAL compaction (`POST /admin/compact` / `sparq-cli compact`) purges deleted bytes for erasure-completeness but **cannot** reach off-box copies (snapshots/backups) — see the SKILL.
+
+**Restore into a live durable store** (`backup` feature): a `POST /admin/restore?persist=true` (or `--restore FILE --restore-persist` on start) REPLACES the durable store's contents with a backup artifact, written through to `DIR` so it survives a restart. The swap runs on the single writer thread, crash-safely (a two-rename directory swap healed deterministically on the next open), and is **fail-closed**: a corrupt artifact is rejected with the live store untouched. Without `?persist=true`, a `--persist` server refuses the restore (`409`) — an in-memory-only restore would be silently lost on restart.
 
 ## 📚 Learn more
 

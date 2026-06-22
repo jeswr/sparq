@@ -27,6 +27,40 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
+# [OPUS-4.8] sq-0wo9e.1 (epic sq-0wo9e, design research/structure-aware-vectorisation.md §5.A/§2):
+# the P0 structure-aware-vectorisation PREPROCESSING + SAMPLING-LOGIC layer. OPT-IN and OFF by
+# default. It is the ONLY feature that pulls `sparq-reason` + `sparq-introspect` into this crate's
+# graph, so the default `sparq-vectors` build (and the core query path) carry ZERO structure-prep
+# code and gain no new required deps. Gates `structure.rs`: (a) closure-before-vectorise —
+# materialise the sparq-reason RDFS/OWL-RL closure BEFORE the vectoriser sees the graph, so
+# entailed type/subClassOf/domain/range triples are real facts the encoder reads; (b)
+# type-constrained negative sampling (Krompass et al. 2015) — a reusable `NegativeSampler` that
+# corrupts a positive triple only to domain/range-consistent entities (read from sparq-introspect),
+# with an `Unconstrained`/`TypeConstrained` ON/OFF ABLATION switch so adoption is measurement-gated.
+# It TRAINS NOTHING (sparq-vectors has no KGE training path — embeddings are out-of-process) and
+# serves no exact answer; the trainer that consumes these negatives is a tracked follow-up.
+structure = ["dep:sparq-reason", "dep:sparq-introspect"]
+# [OPUS-4.8] sq-0wo9e.8 (epic sq-0wo9e, design research/structure-aware-vectorisation.md §P6 +
+# sq-0wo9e.8): the MEASUREMENT FOUNDATION on top of the P0 structure-prep layer — a THIN in-tree
+# shallow-KGE trainer (DistMult) that CONSUMES the P0 closure + type-constrained NegativeSampler to
+# produce embeddings, plus the P6 EVAL HARNESS (standard FILTERED link-prediction MRR/Hits@k, the
+# {closure}×{type-neg vs uniform} ON/OFF ablation matrix, a long-tail frequency breakdown, and a
+# synthetic gUFO slice). OPT-IN and OFF by default; it IMPLIES `structure` (so it reuses the same
+# sparq-reason + sparq-introspect deps and adds NO new dependency — the trainer is hand-rolled
+# CPU-only SGD, no ML crate). With it OFF the default `sparq-vectors` build (and the core query path)
+# carry ZERO trainer/eval code and gain no new deps. It TRAINS a research-grade model only to
+# MEASURE the priors — it makes no accuracy claim and serves no exact answer.
+kge = ["structure"]
+# [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e, design research/structure-aware-vectorisation.md §2 + §7):
+# P2 — the SHACL/OWL PRIOR EXTRACTOR (`shacl_priors.rs`). Reads enum (`sh:in`) / datatype
+# (`sh:datatype`) / cardinality (`sh:min,maxCount`, `owl:FunctionalProperty`) priors out of a parsed
+# `sparq-shacl` shapes model (read-only — no SHACL changes) into the codebook + pooling layout the
+# structure-aware encoders consume. OPT-IN and OFF by default; it IMPLIES `structure` and is the ONLY
+# feature that pulls `sparq-shacl` (and, transitively, the engine on native) into this crate's graph,
+# so neither the default build nor the lean `structure` feature gains a SHACL/engine dependency. The
+# enum CODEBOOK encoder and the QUDT UNIT normaliser themselves ship under `structure` (pure, no
+# SHACL dep); only the *reader* that mines them from shapes needs sparq-shacl.
+structure-shacl = ["structure", "dep:sparq-shacl"]
 # [OPUS-4.8] sq-1wc1: predicate-constrained (filtered) ANN — the RDF-native vector
 # differentiator. A SPARQL BGP carves out a candidate dict-id set (the "visit mask") and the
 # nearest-neighbour search returns only neighbours inside it. OPT-IN and OFF by default; it is a
@@ -108,6 +142,19 @@ spargebra = { workspace = true, optional = true }
 # async runtime into the tree) — mirrors sparq-nlq's `live` reqwest dependency exactly.
 # rustls-tls so there is no system-OpenSSL build dependency.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+# [OPUS-4.8] sq-0wo9e.1: the closure-before-vectorise step + the type-constraint extractor for the
+# `structure` feature only. Both are OPTIONAL and ONLY pulled in by `structure`, so the default
+# build (and anything not opting in) never compiles them — `sparq-vectors` stays a pure
+# storage+ANN crate by default and the lean-core constraint holds. `sparq-reason` materialises the
+# RDFS/OWL-RL closure (already property-tested incremental == from-scratch); `sparq-introspect`
+# mines declared + observed domain/range. Neither pulls the engine.
+sparq-reason = { path = "../sparq-reason", version = "0.1.0", optional = true }
+sparq-introspect = { path = "../sparq-introspect", version = "0.1.0", optional = true }
+# [OPUS-4.8] sq-0wo9e.3: the P2 SHACL/OWL prior extractor reads a parsed shapes model. OPTIONAL and
+# ONLY pulled in by `structure-shacl`, so the default build (and the lean `structure` feature) never
+# compile it — `sparq-vectors` stays free of any SHACL/engine dependency unless this reader is opted
+# in. sparq-shacl is itself an opt-in crate that nothing in the workspace depends on by default.
+sparq-shacl = { path = "../sparq-shacl", version = "0.1.0", optional = true }
 
 # [OPUS-4.8] sq-88c6: DEV-only. The `hybrid_search` example/tests fuse this crate's ANN
 # (`VectorIndex::nearest_term`) with `sparq-sim`'s structural similarity
@@ -155,6 +202,22 @@ required-features = ["approx-ann"]
 [[example]]
 name = "capture_surface_vector"
 required-features = ["vec-predicate"]
+
+# [OPUS-4.8] sq-0wo9e.8: the P0 ablation runner exercises the `kge` trainer + eval harness, so it
+# needs `kge`. Registering the requirement keeps `cargo build --all-targets` (default features) green
+# when the feature is out of the build — the example body is gated behind `#[cfg(feature = "kge")]`.
+[[example]]
+name = "kge_ablation"
+required-features = ["kge"]
+
+# [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the P1 typed-encoder ablation harness uses the
+# `structure`-gated `encode` module, so it needs the `structure` feature. Registering the
+# requirement keeps `cargo build --all-targets` (default features) green when the feature is out of
+# the build (the body would otherwise fail to resolve `sparq_vectors::encode`). It is an
+# encoder-quality ablation runner only — no library code, no new dependency.
+[[example]]
+name = "bench_typed_encoders"
+required-features = ["structure"]
 
 # [OPUS-4.8] sq-hkud (epic sq-toze, gap MS-G4) — register the `kani` cfg so the
 # `#[cfg(kani)]` bounded-proof harness in `store.rs` does not trip `-D warnings`

@@ -5,6 +5,13 @@
 //! media types, payload shapes, ASK booleans and HTTP status semantics. This is structured
 //! so the official W3C SPARQL Protocol test suite could be pointed at the running endpoint
 //! (see the crate README for how to run conformance).
+//!
+//! [OPUS-4.8] (sq-1b390) Gate the whole suite on the `server` feature. It spins the real axum
+//! server and uses the `server`-gated `sparq_server::router` / `AppState` API, so under
+//! `--no-default-features --all-targets` (the pure-serialiser-library build) this file must
+//! compile OUT — otherwise `clippy --no-default-features --all-targets` breaks on the
+//! unresolved axum / serde_json / router imports. 🤖 SPARQ agent.
+#![cfg(feature = "server")]
 
 use sparq_core::Graph;
 use sparq_server::{router, AppState};
@@ -710,17 +717,41 @@ async fn gsp_post_no_selector_creates_fresh_graph() {
         "fresh-graph triple not queryable: {q}");
 }
 
-/// An unsupported method on a graph resource is a 405 with an Allow header listing the
-/// supported GSP verbs.
+/// An unsupported method (not GET/HEAD/PUT/POST/DELETE/PATCH) on a graph resource is a 405 with an
+/// Allow header listing the supported GSP verbs — now INCLUDING PATCH ([OPUS-4.8] sq-hj4n, gh-916:
+/// PATCH is a real GSP method, not a 405). The full PATCH behaviour is exercised in
+/// `tests/gsp_patch.rs`.
 #[tokio::test]
-async fn gsp_patch_is_405_with_allow() {
+async fn gsp_unsupported_method_is_405_with_allow() {
     let base = spawn().await;
     let resp = client()
-        .request(reqwest::Method::PATCH, format!("{base}/sparql/graph?default"))
+        .request(reqwest::Method::OPTIONS, format!("{base}/sparql/graph?default"))
         .send().await.unwrap();
     assert_eq!(resp.status(), 405);
     let allow = resp.headers()["allow"].to_str().unwrap();
-    assert!(allow.contains("PUT") && allow.contains("POST") && allow.contains("DELETE") && allow.contains("GET"));
+    assert!(
+        allow.contains("PUT")
+            && allow.contains("POST")
+            && allow.contains("DELETE")
+            && allow.contains("GET")
+            && allow.contains("PATCH"),
+        "Allow must list all GSP verbs incl PATCH: {allow}"
+    );
+}
+
+/// [OPUS-4.8] (sq-hj4n, gh-916) A PATCH on a graph resource is NO LONGER a 405 — it is a real GSP
+/// method. A PATCH with no recognised body Content-Type is a 415 (the PATCH route was reached and
+/// classified the body), proving PATCH is handled rather than method-not-allowed.
+#[tokio::test]
+async fn gsp_patch_is_handled_not_405() {
+    let base = spawn().await;
+    let resp = client()
+        .request(reqwest::Method::PATCH, format!("{base}/sparql/graph?default"))
+        .body("anything")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 415, "PATCH is handled (415 unsupported body), not 405");
 }
 
 #[tokio::test]

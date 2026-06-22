@@ -53,6 +53,22 @@ assert_eq!(map.get("x").map(String::as_str), Some("c14n0"));
 
 `canonicalize_quads` / `issue_quads` are aliases (the `rdf_canon`-style names).
 
+### Text in, text out (`canonicalize_nquads`)
+
+When you already hold serialized RDF — e.g. across a language boundary — skip the
+oxrdf term plumbing: `canonicalize_nquads(&str) -> Result<String, _>` parses an
+N-Quads document and returns its canonical N-Quads (`parse_nquads` exposes the parse
+alone). This is the seam the `@jeswr/sparq` RDF/JS `Dataset` uses for
+isomorphism-aware `toCanonical` / `equals` / `contains`, surfaced over wasm as the
+`canonicalizeNQuads(nquads)` binding behind `sparq-wasm`'s opt-in `canon` feature.
+
+```rust
+let canon = sparq_canon::canonicalize_nquads(
+    "_:b0 <http://ex/p> _:b1 .\n_:b1 <http://ex/q> \"v\" .\n",
+).unwrap();
+assert!(canon.contains("_:c14n"));
+```
+
 ### Non-default hash profile
 
 The spec default is SHA-256. To use the SHA-384 profile (or any
@@ -88,13 +104,72 @@ if you want them without canonicalizing.
 
 `CanonError` has three variants:
 
-- `TripleTerm` — the dataset contains an RDF 1.2 triple term as an object;
-  these are outside RDFC-1.0's data model and cannot be canonicalized.
+- `TripleTerm` — the dataset contains an RDF 1.2 triple term as an object; these
+  are outside W3C RDFC-1.0's data model, so the **standard** paths fail closed.
+  Enable the opt-in `rdf12-triple-terms` profile (below) to canonicalize them.
 - `Canonicalization(String)` — `rdf-canon` rejected the dataset. This includes
   the **HNDQ call-limit guard**: RDFC-1.0 has pathological-input blow-ups, so a
   poison graph trips the limit and fails closed rather than running unbounded.
 - `Bridge(String)` — an internal serialize/parse error (should not occur for
   well-formed RDFC-1.0-model input; surfaced rather than swallowed).
+
+## ⚠️ Opt-in NON-STANDARD RDF 1.2 triple-term profile
+
+**OFF by default; NOT W3C RDFC-1.0.** RDFC-1.0 is an RDF-1.1-only spec with no
+notion of triple terms; their canonicalization is **unsettled upstream**
+([w3c/rdf-star-wg#114](https://github.com/w3c/rdf-star-wg/issues/114)). With the
+feature OFF, behaviour is byte-identical to the standard surface (triple terms
+still raise `CanonError::TripleTerm`; the W3C suite still passes).
+
+Enable the cargo feature to opt in to a **separate, clearly non-standard** v2
+profile. It natively re-implements the RDFC-1.0 algorithm over oxrdf 0.3 and
+**descends the Hash-N-Degree-Quads gossip into `Term::Triple` objects**, so blank
+nodes nested inside triple terms are relabelled to `c14nN`. On triple-term-free
+input it is byte-identical to the standard path (asserted against every W3C suite
+vector — the strongest correctness anchor).
+
+```toml
+sparq-canon = { path = "crates/sparq-canon", features = ["rdf12-triple-terms"] }
+```
+
+```rust
+// NON-STANDARD profile (SHA-256). Canonicalizes triple terms incl. nested bnodes.
+let nq = sparq_canon::canonicalize_rdf12(&dataset)?;          // quads -> N-Quads
+let cg = sparq_canon::canonicalize_triples_rdf12(&triples)?;  // one graph
+let m  = sparq_canon::issue_dataset_rdf12(&dataset)?;         // issuer map
+
+// Hash-profile parity with the standard path: each v2 entry point has a
+// `*_with::<D: Digest>` sibling (SHA-384 = parity target).
+let nq384 = sparq_canon::canonicalize_rdf12_with::<sha2::Sha384>(&dataset)?;
+let cg384 = sparq_canon::canonicalize_triples_rdf12_with::<sha2::Sha384>(&triples)?;
+let m384  = sparq_canon::issue_dataset_rdf12_with::<sha2::Sha384>(&dataset)?;
+```
+
+**Boundary / honesty:** SHA-256 is the default; a `*_with::<D: Digest>` sibling of
+each v2 entry point selects another hash (notably `sha2::Sha384`) for parity with
+the standard path's `canonicalize_quads_with`. The non-generic entry points are
+SHA-256 and byte-identical to before; a different `D` may produce a different
+(still canonical, isomorphism-stable under that `D`) relabelling. Triple terms
+appear only as objects in oxrdf 0.3 (a triple's subject is `NamedOrBlankNode`), so
+nesting descends strictly through the object position; the HNDQ poison-graph call
+limit still fails closed. This is a sparq-local extension, **not** a W3C standard
+— do not represent its output as W3C RDFC-1.0.
+
+**Soundness audit + distinguishing-power regression (sq-mu1cd / sq-63g0).** An
+adversarial audit of the nested-bnode descent found the profile **sound** on every
+constructed nested-bnode case (0 defects / 5 refuted suspicions): triple-term-
+internal bnodes share one HNDQ position marker (object position + the outer
+predicate), yet distinct nested structure never collapses, because the final
+serialization re-renders the real `Term::Triple` with c14n labels and the issuer
+map separates genuinely-distinct bnodes via the first-degree descent. The audit's
+sharper non-isomorphic vectors are pinned as permanent regression tests
+(`tests/rdf12_triple_term_canon.rs` §5) — asymmetric / anchored inner swap,
+inner-subject vs inner-object leaf, depth-1 vs depth-2 nesting, self-loop
+inner-subject vs inner-object — each first **brute-force-proven non-isomorphic** by
+an independent oracle before asserting the canon differs, so a future
+`hash_n_degree_quads` / `hash_related_blank_node` refactor that introduced a
+false-equal would be caught. The whether-the-marker-needs-a-sub-discriminator
+question is a spec-clarity / robustness matter, not a latent defect.
 
 ## Conformance
 
@@ -112,7 +187,18 @@ through this crate's own public API. See `crates/sparq-canon/tests/`.
 
 ## Status
 
-Verified against `sparq-canon` 0.1.0 source on branch `feat-rdfc-public-api`
-(2026-06-15). The RDFC-1.0 algorithm is `rdf-canon` 0.15.3 (W3C-suite validated);
-`sparq-canon` is the single-sourced bridge + public API. `publish = false`,
-non-default workspace member — nothing in sparq's default graph depends on it.
+Verified against `sparq-canon` 0.1.0 source. The standard RDFC-1.0 path is
+`rdf-canon` 0.15.3 (W3C-suite validated); `sparq-canon` is the single-sourced
+bridge + public API. The opt-in, off-by-default `rdf12-triple-terms` profile
+(sq-hslb [OPUS-4.8]) is a native RDFC-1.0 re-implementation extended to RDF 1.2
+triple terms — **non-standard** (W3C RDFC-1.0 is RDF-1.1-only) — now with a
+`*_with::<D: Digest>` hash-profile sibling on every entry point for SHA-384
+parity (sq-5i1d [OPUS-4.8]). The `canonicalize_nquads` / `parse_nquads` text seam
+and the `sparq-wasm` opt-in `canon` feature (`canonicalizeNQuads` binding for the
+`@jeswr/sparq` RDF/JS `Dataset`) are sq-1dd5t [OPUS-4.8]; that wasm consumer pulls
+`sparq-canon` with `default-features = false` (the crate now disables
+`sparq-core`'s default `parallel` and re-enables it via its own default `parallel`
+feature, so native builds are byte-identical and the wasm build drops rayon).
+`publish = false`, non-default workspace member — nothing in sparq's default graph
+depends on it, so the default build and lean wasm artifact are byte-identical with
+or without it.

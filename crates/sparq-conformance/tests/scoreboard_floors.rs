@@ -85,6 +85,67 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-solid/tests/common/mod.rs",
         "ACP_SCENARIO_FLOOR",
     ),
+    // [OPUS-4.8] sq-t58w.8 — the Solid WAC + ACP DIFFERENTIAL ORACLE ratchets. Both
+    // rows mirror the SAME hard divergence-count floor const (`DIVERGENCE_FLOOR = 0`)
+    // declared in `tests/differential_oracle.rs` (the oracle landed under sq-t58w.7).
+    // Unlike the scenario-count floors above (which rise as the corpus grows), the
+    // only acceptable divergence count is 0, so this floor is the fixed 0 — and this
+    // guard pins the central scoreboard's `ratchet_floor: 0` to that source const so
+    // the two can never silently diverge.
+    (
+        "Solid WAC differential oracle",
+        "crates/sparq-solid/tests/differential_oracle.rs",
+        "DIVERGENCE_FLOOR",
+    ),
+    (
+        "Solid ACP differential oracle",
+        "crates/sparq-solid/tests/differential_oracle.rs",
+        "DIVERGENCE_FLOOR",
+    ),
+    // [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 toRdf + fromRdf ratchets. The
+    // floor consts (`pub const TORDF_FLOOR` / `FROMRDF_FLOOR`) live in this same
+    // crate's `tests/jsonld_suite.rs` (behind the opt-in `jsonld-suite` feature);
+    // the guard reads them textually — exactly like the SHACL/geo/Solid floors —
+    // so the central scoreboard's `ratchet_floor` can never drift from what the
+    // runner asserts. (`const_floor_in` already tolerates the `pub ` prefix.)
+    (
+        "W3C JSON-LD 1.1 toRdf",
+        "crates/sparq-conformance/tests/jsonld_suite.rs",
+        "TORDF_FLOOR",
+    ),
+    (
+        "W3C JSON-LD 1.1 fromRdf",
+        "crates/sparq-conformance/tests/jsonld_suite.rs",
+        "FROMRDF_FLOOR",
+    ),
+    // [OPUS-4.8] sq-3uos5 — the W3C JSON-LD 1.1 `compact` ratchet (extends sq-oy1f.2).
+    // `pub const COMPACT_FLOOR` lives in the same `tests/jsonld_suite.rs`; the guard
+    // reads it textually so the central scoreboard's `ratchet_floor` can never drift
+    // from what the runner asserts.
+    (
+        "W3C JSON-LD 1.1 compact",
+        "crates/sparq-conformance/tests/jsonld_suite.rs",
+        "COMPACT_FLOOR",
+    ),
+    // [OPUS-4.8] sq-oy1f.19 — the W3C JSON-LD 1.1 `frame` ratchet over the SEPARATE
+    // w3c/json-ld-framing suite. `pub const FRAME_FLOOR` lives in the same
+    // `tests/jsonld_suite.rs`; the guard reads it textually so the central
+    // scoreboard's `ratchet_floor` can never drift from what the runner asserts.
+    (
+        "W3C JSON-LD 1.1 frame",
+        "crates/sparq-conformance/tests/jsonld_suite.rs",
+        "FRAME_FLOOR",
+    ),
+    // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite decision-parity ratchet.
+    // The floor const (`pub const ODRL_SUITE_FLOOR`) lives top-level in
+    // `sparq-policy`'s `tests/odrl_test_suite.rs`; the guard reads it textually
+    // (the `pub ` prefix is already tolerated) so the central scoreboard's
+    // `ratchet_floor` can never drift from what the runner asserts.
+    (
+        "SolidLab ODRL Test Suite",
+        "crates/sparq-policy/tests/odrl_test_suite.rs",
+        "ODRL_SUITE_FLOOR",
+    ),
 ];
 
 #[test]
@@ -94,10 +155,16 @@ fn central_floors_match_crate_local_sources() {
             .iter()
             .find(|s| s.label == *label)
             .unwrap_or_else(|| panic!("scoreboard registry missing suite {label:?}"));
-        // It must be a crate-test suite (not a binary one).
+        // It must be a crate-test suite (not a binary one). [OPUS-4.8] sq-oy1f.2:
+        // the feature-gated JSON-LD lane is a `FeatureGatedCrateTest` — still a
+        // crate-local `cargo test` whose floor lives in source, so it is covered
+        // by the same textual floor-sync guard.
         assert!(
-            matches!(suite.runner, Runner::CrateTest { .. }),
-            "{label} should be a CrateTest suite in the registry"
+            matches!(
+                suite.runner,
+                Runner::CrateTest { .. } | Runner::FeatureGatedCrateTest { .. }
+            ),
+            "{label} should be a (feature-gated) CrateTest suite in the registry"
         );
         let source_floor = const_floor_in(src, const_name);
         assert_eq!(
@@ -115,7 +182,12 @@ fn central_floors_match_crate_local_sources() {
 #[test]
 fn all_crate_test_suites_are_guarded() {
     for suite in SUITES {
-        if matches!(suite.runner, Runner::CrateTest { .. }) {
+        // [OPUS-4.8] sq-oy1f.2: cover both the plain and the feature-gated
+        // crate-test runners — neither may escape the floor-sync guard.
+        if matches!(
+            suite.runner,
+            Runner::CrateTest { .. } | Runner::FeatureGatedCrateTest { .. }
+        ) {
             assert!(
                 CRATE_LOCAL_FLOORS.iter().any(|(label, _, _)| *label == suite.label),
                 "registry CrateTest suite {:?} has no floor-sync guard in CRATE_LOCAL_FLOORS",
@@ -138,10 +210,20 @@ fn scoreboard_renders_all_suites() {
             suite.label
         );
     }
-    // The consolidation claim: SHACL + GeoSPARQL (sq-ncvq.16) and Solid WAC/ACP
-    // (sq-j174) now appear in this central report.
+    // The consolidation claim: SHACL + GeoSPARQL (sq-ncvq.16), Solid WAC/ACP
+    // decision parity (sq-j174), and the Solid WAC/ACP differential oracles
+    // (sq-t58w.8) now all appear in this central report.
     assert!(md.contains("W3C SHACL core"));
     assert!(md.contains("OGC GeoSPARQL"));
     assert!(md.contains("Solid WAC decision parity"));
     assert!(md.contains("Solid ACP decision parity"));
+    assert!(md.contains("Solid WAC differential oracle"));
+    assert!(md.contains("Solid ACP differential oracle"));
+    // [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 toRdf + fromRdf ratchets.
+    assert!(md.contains("W3C JSON-LD 1.1 toRdf"));
+    assert!(md.contains("W3C JSON-LD 1.1 fromRdf"));
+    // [OPUS-4.8] sq-3uos5 — the W3C JSON-LD 1.1 compact ratchet.
+    assert!(md.contains("W3C JSON-LD 1.1 compact"));
+    // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite decision-parity ratchet.
+    assert!(md.contains("SolidLab ODRL Test Suite"));
 }

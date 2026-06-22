@@ -108,7 +108,10 @@ corpus exercises (32/32 fixtures round-trip graph-isomorphically): directives,
 `shape`/`shapeClass`, full path expressions, `[min..max]`, `nodeKind`, bare-IRI
 `sh:datatype`-vs-`sh:class`, `@`shape-refs (`sh:node`), `param=value`, `!` (`sh:not`),
 `|` (`sh:or`), nested `{...}` shapes (`sh:node`), and `[ ... ]` arrays (`sh:in` /
-`sh:ignoredProperties`). The wasm `Store` binding is deferred (sq-quly).
+`sh:ignoredProperties`). The browser/JS surface exposes this as the opt-in
+`Store.parseShaclCompact(text, base?)` wasm binding (sq-quly) — SCS text → the shapes
+graph as a Turtle string, behind `sparq-wasm`'s non-default `scs` feature; see the
+`javascript-wasm` skill for the JS API.
 
 `ShapesModel` (`sparq_shacl::ShapesModel`):
 
@@ -121,6 +124,7 @@ pub fn ShapesModel::parse(shapes_graph: &Graph) -> ShapesModel;   // parse once,
 ```rust
 pub conforms: bool;                         // true iff results is empty (spec sh:conforms — counts EVERY result)
 pub results: Vec<ValidationResult>;
+pub diagnostics: Vec<ShapeDiagnostic>;      // skipped-constraint diagnostics (e.g. uncompilable sh:pattern); never affect `conforms`
 pub fn conforms_violations_only(&self) -> bool;                       // ignore sh:Warning / sh:Info
 pub fn results_with_severity<'a>(&'a self, severity: &'a str)         // full IRI, e.g. ".../shacl#Warning"
     -> impl Iterator<Item = &'a ValidationResult>;
@@ -357,7 +361,24 @@ the conformance primitive `conforms(data, shapes, shape_node) -> ConformanceChec
 drives the `sht:EvalNodeExpr` suite — all evaluation entries pass; a companion
 harness (`tests/w3c_node_expr_constraints.rs`) drives the suite's two `sht:Validate`
 entries (`sh:expression` / `sh:nodeByExpression`) end-to-end (both self-skip when
-the suite is not fetched).
+the suite is not fetched). Because those W3C harnesses self-skip on a fresh
+checkout, the node-expression **function operators** are also pinned by a
+fixture-independent unit suite (`tests/node_expr_operators.rs`, sq-qcnn) that drives
+every built-in (`concat`/`count`/`sum`/`min`/`max`/`distinct`/`if`/`exists`/`limit`/
+`offset`/`flatMap`/`orderBy`/`findFirst`/`matchAll`/`remove`/`instancesOf`/
+`nodesMatching`/`var` + custom `sh:SPARQLFunction`) through the public
+`eval_node_expression` seam and asserts hand-derived result sets — so the operator
+semantics are gated even when the suite is absent. The SCS parser's fail-closed
+error paths and the SHACL-SPARQL §5.2/§6 edge cases get the same treatment
+(`tests/scs_error_paths.rs` under `scs`, `tests/sparql_edge_cases.rs`). The
+pre-binding's deep-algebra arms (`push_values_down` over Group / Slice / Distinct /
+Reduced / OrderBy / Minus-left / LeftJoin-left) and the fail-closed runtime-error
+paths (an inexpressible blank-node focus, a `SERVICE`-clause runtime query error) are
+pinned directly by the in-`src/sparql.rs` unit module (`sparql::tests`, sq-qcnn.1):
+each modifier arm is asserted both structurally (the `VALUES` table lands BELOW the
+modifier at the deepest leaf, so `$this`/`$value`/`$param` stays in scope) and
+semantically (a real validator over real data yields the SHACL-spec-correct
+conforms/violations).
 
 ## Gotchas / feature flags / prerequisites
 
@@ -393,6 +414,14 @@ the suite is not fetched).
   contributes no results; the rest of validation still runs. `validate` never returns
   a `Result`/panics on bad shapes — so a silently-empty report can mean "no targets"
   rather than "conforms".
+- **An uncompilable `sh:pattern` is SKIPPED, not fail-closed (sq-lz99x).** The Rust
+  `regex` crate has no lookahead/lookbehind — neither does the XML Schema regex flavour
+  the SHACL spec ties `sh:pattern` to — so e.g. `^(?!(TODO|TBD)).*` does not compile.
+  That constraint is skipped (it reports no violations) and surfaced once in
+  `report.diagnostics` (a `ShapeDiagnostic` carrying the shape, component, and the
+  `regex` crate's error), so the skip is not silent. Earlier this wrongly flagged
+  EVERY value. To express a "must NOT start with X" check, use a POSITIVE-match
+  `sh:sparql` `REGEX(?str, "^\\s*(TODO|...)")` constraint (flag when it matches) instead.
 - **Results are NOT deduplicated** across traversal routes / component occurrences — a
   nested shape reached via two parents reports twice (intentional, matches the suite).
 - **Recursion is treated as conforming.** Re-entering the same (focus, shape) pair

@@ -31,6 +31,14 @@ sparq-reason = { path = "../sparq-reason", version = "0.1.0", default-features =
 # deps, or runtime cost — sparq-policy is NOT forced onto the default build. Research
 # track (the single-node bridge of epic sq-3183), NOT a production cutover.
 sparq-policy = { path = "../sparq-policy", version = "0.1.0", default-features = false, optional = true }
+# [OPUS-4.8] sq-pfae PoC (issue #940): the trust-graph admission gate. OPTIONAL +
+# behind the `trust-graph` feature (OFF by default), so the default sparq-solid build
+# carries ZERO trust-graph code, deps, or runtime cost — it behaves EXACTLY as WAC/ACP
+# do now (strict additivity, design §2.2 G6). RESEARCH prototype (`sparq-trust` is
+# publish=false; the ZK estate it composes with is externally unaudited, sq-qhy4), NOT
+# a production cutover. Path-only (no crates.io version): the `trust-graph` feature is a
+# research-only feature and is not part of sparq-solid's published feature set.
+sparq-trust = { path = "../sparq-trust", optional = true }
 oxrdf.workspace = true
 spargebra.workspace = true
 rustc-hash.workspace = true
@@ -49,3 +57,50 @@ odrl-bridge = ["dep:sparq-policy"]
 # refresh/retraction ledger (sq-dpk4): the count is consumed atomically at exercise and
 # re-checked (read-only) on refresh, dropping the grant once the budget is spent.
 count-enforcement = ["odrl-bridge", "sparq-policy/count-enforcement"]
+
+# [OPUS-4.8] sq-pfae PoC (issue #940): the trust-graph admission stratum. OFF by
+# default — with the feature off, sparq-solid is BYTE-IDENTICAL to WAC/ACP today (the
+# strict-additivity property G6, design §2.2). With it on, `PodStore` gains ONE new
+# feature-gated method ([`PodStore::admit_trust_credential_and_materialize`]) that runs
+# the `sparq-trust` admission gate over a presented credential and injects the
+# issuer-tagged admitted-fact-derived `auth:*` grants into `<urn:sparq:auth>` AHEAD of
+# (on top of) the unchanged materialiser — exactly the ODRL-bridge grant-injection
+# pattern. RESEARCH prototype, NOT a security guarantee; no privacy/unlinkability (the
+# ZK estate is externally unaudited, sq-qhy4). See the crate README + the access-control
+# SKILL for the honest scope.
+trust-graph = ["dep:sparq-trust"]
+
+# [OPUS-4.8] sq-pfae.3 (issue #940): forward `sparq-trust`'s OPT-IN `did` feature so a
+# sparq-solid integrator can bind a trust rule's issuer key from a `trust:issuerDid`
+# (`did:key` offline self-cert / pluggable `did:web`) via `sparq_trust::resolve_rule_keys`,
+# narrowing the operator-asserted-key forgery vector D′. Default-OFF and additive over
+# `trust-graph` — it adds only the resolver surface; no new runtime method. See the
+# `sparq-trust` `did` rustdoc for the honest scope (self-cert ≠ trust anchor; did:web is
+# only as strong as host/TLS control; no privacy).
+trust-graph-did = ["trust-graph", "sparq-trust/did"]
+
+# [OPUS-4.8] sq-pfae PoC: the trust-graph end-to-end test (tests/trust_graph.rs, fully
+# `#![cfg(feature = "trust-graph")]`) drives the admission gate through the real
+# PodStore. These are dev-only — they do not touch the default build or publish. Scoped
+# to NON-wasm32 [OPUS-4.8 sq-7agop]: the `trust-graph` ZK estate (the arkworks stack →
+# `rand 0.8 → getrandom 0.2`) is native-only and not wasm-portable, so excluding it from
+# the wasm32 dev-graph lets `tests/wasm_materialize.rs` build under `wasm-pack test`
+# without dragging a wasm-incompatible getrandom into the test graph.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+sparq-trust = { path = "../sparq-trust" }
+sparq-zk = { path = "../sparq-zk" }
+
+# [OPUS-4.8] sq-7agop: wasm32 build+smoke check (regression guard for the cfg-gated
+# `std::time::Instant` in `materialize_*`). `tests/wasm_materialize.rs` runs the REAL
+# materialize path in a genuine wasm32 runtime via `wasm-pack test --node`, asserting it
+# no longer traps (it panicked on `Instant::now()` before the fix). These are DEV-ONLY
+# wasm32-target deps — they do NOT enter the runtime/published graph and native builds
+# link none of them:
+#  - getrandom/wasm_js: the crate's transitive `oxrdf → rand → getrandom` needs a wasm
+#    RNG backend selected before it compiles for wasm32 (the workspace `.cargo/config.toml`
+#    sets the matching `--cfg getrandom_backend="wasm_js"`). A downstream host bundle
+#    selects the backend itself at runtime (see README §WASM support), as `sparq-wasm` does.
+#  - wasm-bindgen-test: the headless test harness (pairs with the 0.2.x wasm-bindgen line).
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen-test = "0.3"

@@ -18,6 +18,13 @@ sparq-core = { path = "../sparq-core", default-features = false }
 sparq-engine = { path = "../sparq-engine", default-features = false }
 oxrdf.workspace = true
 wasm-bindgen = "0.2"
+# [OPUS-4.8] sq-l5kr: only linked behind the opt-in `serialize-rdf` feature, for the
+# `Store::serialize(.., prefixes?)` binding to read a caller-supplied JS `[[prefix, iri], …]`
+# array. `js-sys` is already in the wasm graph (wasm-bindgen / getrandom pull it), so this is
+# NOT a new external dependency; it is wasm-portable (not in the wasm-deps-guard forbidden
+# set). OPTIONAL so the lean default bundle — which has no `serialize` method — links zero of
+# it and stays byte-identical.
+js-sys = { version = "0.3", optional = true }
 # [OPUS-4.8] sq-yqi1 (#162): SHACL validation in the browser, OPT-IN behind the
 # `shacl` feature (OFF by default). The DEFAULT bundle carries zero SHACL code, so the
 # lean baseline (and the wasm-deps-guard, which checks the default graph) is unchanged.
@@ -26,11 +33,27 @@ wasm-bindgen = "0.2"
 # bundle. This is the (a) WASM consumer of #162 — the (c) HTTP endpoint is separate.
 sparq-shacl = { path = "../sparq-shacl", default-features = false, optional = true }
 
+# [OPUS-4.8] sq-1dd5t (#1047): expose RDFC-1.0 (RDF Dataset Canonicalization) to the
+# @jeswr/sparq RDF/JS `Dataset` (toCanonical / equals / contains), OPT-IN behind the
+# `canon` feature (OFF by default). `default-features = false` drops `sparq-core`'s
+# `parallel` (rayon — no wasm threads); the RDFC-1.0 algorithm itself (`rdf-canon`) is
+# single-threaded. The DEFAULT bundle carries zero canonicalization code so the lean
+# `wasm_bundle_bytes` baseline is byte-identical; the site/published build turns it on.
+sparq-canon = { path = "../sparq-canon", default-features = false, optional = true }
+
 # oxrdf pulls `rand`/getrandom (blank-node ids). On wasm there is no OS RNG, so
 # select getrandom's browser backend (crypto.getRandomValues). The matching
 # `--cfg getrandom_backend="wasm_js"` is set in .cargo/config.toml.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
+# [OPUS-4.8] sq-1dd5t: the `canon` feature pulls `sparq-canon`, whose `rdf-canon` ->
+# oxrdf-0.2 bridge transitively pulls getrandom 0.2 (via rand 0.8). getrandom 0.2 uses
+# its `js` feature (NOT the 0.3 `wasm_js` cfg) to select the browser backend, so without
+# it the wasm build fails to compile (`the wasm*-unknown-unknown targets are not
+# supported by default`). Pin the browser backend ON for getrandom 0.2 too. This is a
+# build-graph shim only (no new top-level dependency on the lean default bundle —
+# getrandom 0.2 enters the graph only when `canon`/`sparq-canon` is enabled).
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"], optional = true }
 
 [features]
 default = []
@@ -44,6 +67,14 @@ shacl = ["dep:sparq-shacl"]
 # [OPUS-4.8] sq-yqi1: also compile SHACL Advanced Features (sh:rule) into the binding.
 # Implies `shacl`; OFF by default.
 shacl-af = ["shacl", "sparq-shacl/shacl-af"]
+# [OPUS-4.8] sq-quly (#796): expose `sparq-shacl`'s SHACL Compact Syntax (SCS) parser
+# as the `Store::parseShaclCompact(text, base?)` wasm binding — SCS text → the shapes
+# graph serialised as Turtle. OFF by default so the lean bundle is byte-identical to
+# before. Implies BOTH `shacl` (forwards to `sparq-shacl/scs`, which lives under that
+# dep) AND `serialize-rdf` (the binding REUSES the existing `Store::serialize` engine
+# writer to emit the shapes graph as Turtle — it rolls no new serializer). The site
+# REPL build (js `build:wasm`) turns it on.
+scs = ["shacl", "serialize-rdf", "sparq-shacl/scs"]
 # [OPUS-4.8] sq-dvyi: JSON-LD ingest in the browser, OPT-IN behind the `jsonld` feature
 # (OFF by default). Forwards to sparq-core's `jsonld` feature so the `oxjsonld` parser is
 # only linked when enabled. The DEFAULT (lean) bundle — the one scripts/ci-bench.sh tracks
@@ -58,6 +89,23 @@ jsonld = ["sparq-core/jsonld"]
 # `sparq-engine/regex` and get them back (CONTAINS/STRSTARTS/STRENDS/LCASE/... are always
 # present — they are not behind this feature). OFF by default; the lean bundle is unchanged.
 regex = ["sparq-engine/regex"]
+# [OPUS-4.8] sq-fe1s: expose `sparq-engine`'s pretty Turtle / TriG writers as the
+# `Store::serialize(format, …)` wasm binding (so a browser store can emit a readable
+# Turtle/TriG document of its contents, not just the flat N-Triples `queryQuads` returns).
+# Forwards to `sparq-engine/serialize-rdf` (which carries the whole serializer matrix and
+# pulls NO new dependency). OFF by default so the lean `wasm_bundle_bytes` baseline is
+# byte-identical to before; the site REPL build (js `build:wasm`) turns it on.
+# [OPUS-4.8] sq-l5kr: also pulls `js-sys` so the `prefixes?` arg (a caller-supplied
+# `[[prefix, iri], …]` JS array) can be read; `js-sys` is already in the wasm graph, so this
+# adds no new external dependency, and stays OFF the lean default bundle.
+serialize-rdf = ["sparq-engine/serialize-rdf", "dep:js-sys"]
+# [OPUS-4.8] sq-1dd5t (#1047): expose RDFC-1.0 (RDF Dataset Canonicalization) as the
+# `canonicalizeNQuads(nquads)` free function the @jeswr/sparq RDF/JS `Dataset` uses for
+# blank-node-isomorphism-aware `toCanonical` / `equals` / `contains`. Pulls `sparq-canon`
+# (single-sourced RDFC-1.0 over `rdf-canon`) and the getrandom-0.2 browser-backend shim
+# its oxrdf-0.2 bridge needs on wasm. OFF by default so the lean bundle is byte-identical;
+# the published `@jeswr/sparq` bundle (js `build:wasm`) turns it on.
+canon = ["dep:sparq-canon", "dep:getrandom02"]
 
 [dev-dependencies]
 # [OPUS-4.8] sq-9qz6 pt2 — headless wasm test harness. Exercises the #[wasm_bindgen]

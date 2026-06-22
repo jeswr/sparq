@@ -56,14 +56,15 @@ assert_eq!(d.matched_rules.len(), 1);  // the granting permission, for audit
 ## The model
 
 - **`Policy`** — `permissions: Vec<Rule>`, `prohibitions: Vec<Rule>`, optional `iri`. `Set`/`Offer`/`Agreement` parse identically (subtype affects contracting, not single-node eval).
-- **`Rule`** — `action: Action`, `target`/`assignee`/`assigner: Option<String>`, `constraints: Vec<Constraint>`, `duties: Vec<Duty>` (duties on permissions only).
-- **`Action`** — full IRI. `odrl:use` is the **umbrella** action: a permission for `use` permits *any* requested action. All others match by exact IRI.
-- **`Constraint`** — `(left: leftOperand-IRI, operator, right: Value)`. The request supplies the *actual* value for `left` in its `context`; the constraint's `right` is the bound.
+- **`Rule`** — `action: Action`, `target`/`assignee`/`assigner: Option<String>`, `constraints: Vec<Constraint>`, `logical_constraints: Vec<LogicalConstraint>`, `duties: Vec<Duty>` (duties on permissions only). The atomic `constraints` and the compound `logical_constraints` are **all** ANDed.
+- **`Action`** — full IRI. `odrl:use` is the ODRL **umbrella** action: a permission for `use` permits any requested action *in the `use` subtree of the [ODRL 2.2 action hierarchy](https://www.w3.org/TR/odrl-vocab/)* — i.e. everything **except** the disjoint ownership-`transfer` subtree (`odrl:sell`/`odrl:give`/`odrl:transfer`). So a `use` permission grants `read`/`write`/`modify`/… but **not** `sell`. All non-`use` actions match by exact IRI. [OPUS-4.8] sq-euhr3.
+- **`Constraint`** — atomic `(left: leftOperand-IRI, operator, right: Value)`. The request supplies the *actual* value for `left` in its `context`; the constraint's `right` is the bound.
+- **`LogicalConstraint`** — a compound `odrl:LogicalConstraint`: a `LogicalOperator` (`And`/`Or`/`Xone`) over a set of operand `ConstraintNode`s (each atomic **or** nested compound). [OPUS-4.8] sq-a0zef.
 - **`Duty`** — an obligation (`action`) that must be in the request's `discharged_duties` set, or the permission is denied.
 
 ## Evaluation semantics (fail-closed)
 
-1. A `Rule` **matches** when its action permits the request action, its `target`/`assignee` (if set) agree, and **every** `Constraint` is satisfied (logical AND).
+1. A `Rule` **matches** when its action permits the request action (per the ODRL action hierarchy — `use` subsumes its sub-actions but not the `transfer` subtree), its `target`/`assignee` (if set) agree (by IRI equality **or collection membership** — see below), and **every** atomic `Constraint` **and** compound `LogicalConstraint` is satisfied (all ANDed).
 2. A `Permission` grants iff it matches **and** all its `Duty`s are discharged.
 3. A matching `Prohibition` **overrides** any permission (carve-out — ODRL Formal Semantics conflict default).
 4. **DENY by default:** no matching+discharged permission, or any matching prohibition ⇒ DENY. An empty/malformed policy denies everything; a constraint with no request value, an unknown operator, or a structurally incomplete constraint all fail closed.
@@ -92,7 +93,45 @@ assert!(evaluate(&policy, &req).allow); // a sub-region of the named region gran
 
 ## Building the request
 
-`Request::new(action_iri)` then chain `.on(target)`, `.by(party)`, `.with(left_operand_iri, Value)` for each context dimension (`dateTime`, `purpose`, `recipient`, `count`, `spatial`, …), `.with_purpose_subsumption(narrower, broader)` / `.with_purpose_taxonomy([(n, b), …])` per asserted subsumption edge (the DPV-purpose taxonomy / spatial region trees, above — one closure for both taxonomic dimensions), and `.discharge(duty_action_iri)` per discharged duty. `Value` is `Iri` | `Str` | `Num(f64)` | `DateTime(String)`. For purpose specifically, prefer the first-class `.for_purpose(Value)` (sugar over `.with(ODRL_PURPOSE, ..)`; read it back via `req.purpose()`); for the evaluation time prefer `.at(instant)` (sugar over `.with(ODRL_DATETIME, Value::DateTime(..))`; read it back via `req.request_time()`).
+`Request::new(action_iri)` then chain `.on(target)`, `.by(party)`, `.with(left_operand_iri, Value)` for each context dimension (`dateTime`, `purpose`, `recipient`, `count`, `spatial`, …), `.with_purpose_subsumption(narrower, broader)` / `.with_purpose_taxonomy([(n, b), …])` per asserted subsumption edge (the DPV-purpose taxonomy / spatial region trees, above — one closure for both taxonomic dimensions), `.with_party_membership(party, collection)` / `.with_asset_membership(asset, collection)` (and bulk `…_memberships([…])`) per ODRL collection-membership edge (above), and `.discharge(duty_action_iri)` per discharged duty. `Value` is `Iri` | `Str` | `Num(f64)` | `DateTime(String)`. For purpose specifically, prefer the first-class `.for_purpose(Value)` (sugar over `.with(ODRL_PURPOSE, ..)`; read it back via `req.purpose()`); for the evaluation time prefer `.at(instant)` (sugar over `.with(ODRL_DATETIME, Value::DateTime(..))`; read it back via `req.request_time()`).
+
+## The `odrl:use` umbrella + ODRL action hierarchy — [OPUS-4.8] sq-euhr3
+
+`odrl:use` is the ODRL "umbrella" action, but it does **not** subsume *every* action — only those the [ODRL 2.2 vocabulary](https://www.w3.org/TR/odrl-vocab/) places `odrl:includedIn use` (39 actions transitively: `read`, `display`, `print`, `play`, `modify`, `delete`, `aggregate`, `reproduce`, …). The one disjoint top-level branch is the ownership-`transfer` subtree — `odrl:sell` and `odrl:give` are `includedIn odrl:transfer`, **not** `use` — so a `use` permission grants a `read`/`write` request but is **inactive** for a `sell`/`give`/`transfer` request.
+
+- This is `Action::permits`: `use` permits a requested action iff it is `use` itself or *not* in the transfer subtree (the `is_transfer_subtree` set: `transfer`/`sell`/`give`); every other action — including non-vocabulary actions such as `odrl:write` — is treated as a use-subtree action (the broad "use this asset" reading). It matches the SolidLab reference evaluator (suite cases 007/008/009 Active vs 010/017 Inactive).
+- A **non-`use`** action still matches only its own IRI exactly (`read` does not cover `write`).
+
+## `odrl:PartyCollection` / `odrl:AssetCollection` membership — [OPUS-4.8] sq-k7itg
+
+A rule whose `odrl:assignee` is an `odrl:PartyCollection` (or whose `odrl:target` is an `odrl:AssetCollection`) matches a request whose **party** (or **asset**) is a *member* of that collection — `member odrl:partOf collection` — not only a request whose party/asset IS the collection IRI. The membership relation is **request-supplied** evidence (read out of the state-of-the-world graph), declared with `.with_party_membership(party, collection)` / `.with_asset_membership(asset, collection)` (and the bulk `.with_party_memberships([…])` / `.with_asset_memberships([…])`).
+
+- **Sound / fail-closed:** membership draws ONLY on the caller-supplied set — **never inferred**. With no membership edge, assignee/target matching is byte-for-byte the exact-IRI base case, so a non-member is denied and access is never widened. The edge must name the rule's exact collection (membership in a *different* collection does not match).
+
+```rust,ignore
+use sparq_policy::{evaluate, Request};
+// policy: ex:partyCollection (a PartyCollection) may read ex:x.
+let req = Request::new("http://www.w3.org/ns/odrl/2/read")
+    .on("http://example.org/x").by("http://example.org/alice")
+    .with_party_membership("http://example.org/alice", "http://example.org/partyCollection");
+assert!(evaluate(&policy, &req).allow); // alice is a member → granted
+```
+
+## `odrl:LogicalConstraint` — `and` / `or` / `xone` compound constraints — [OPUS-4.8] sq-a0zef
+
+A rule's `odrl:constraint` may point at a compound `odrl:LogicalConstraint` — a combinator (`odrl:and`/`odrl:or`/`odrl:xone`) over a *set* of operand constraints (each itself atomic **or** a nested `LogicalConstraint`, so an `or` of `and`s — a disjunction of time windows — is supported). The parser routes these into `Rule::logical_constraints`; the evaluator ANDs them with the atomic `constraints`.
+
+- **`odrl:and`** — satisfied iff **every** operand holds. **`odrl:or`** — iff **at least one** holds. **`odrl:xone`** — iff **exactly one** holds.
+- **Fail-closed (load-bearing):** each operand is three-valued (`Satisfied`/`DefinitelyUnsatisfied`/`Unprovable` for missing evidence). An `and`/`xone` is **never** claimed `Satisfied` on an `Unprovable` operand — a compound with an unprovable operand does not silently pass (an `and` with an unprovable operand and no definite-false is `Unprovable` → no grant; a `xone` with any unprovable operand is `Unprovable`). An empty/malformed compound (e.g. an `or` over only an unknown-operator operand) fails closed.
+
+```rust,ignore
+use sparq_policy::{evaluate, Request};
+// policy: read permitted when (dateTime > 2024-01-01) AND (dateTime < 2024-12-31).
+let req = Request::new("http://www.w3.org/ns/odrl/2/read").on("urn:asset/x")
+    .at("2024-06-15T12:00:00Z");
+assert!(evaluate(&policy, &req).allow); // inside the AND-window
+// no time evidence → the AND is unprovable → fail-closed (no grant).
+```
 
 ## `odrl:purpose` enforcement (faithful, fail-closed) — [OPUS-4.8] sq-q56r
 
@@ -183,7 +222,7 @@ assert!(out.granted);
 assert!(!store.accessible(&Session { agent: Some("https://alice.ex/card#me"), client: None }, Mode::Read).is_empty());
 ```
 
-**Action → mode** (the ODRL *request* action; conservative — narrowest mode only): `read`/`display`/`present`/`print`/`play` → `acl:Read`; `append` → `acl:Append`; `modify`/`delete`/`write` → `acl:Write`; **anything else (incl. the `odrl:use` umbrella) is unmapped → no grant**. `use` is left unmapped because it subsumes every action (mapping it would have to pick the widest mode) — request `odrl:read` explicitly; a `use` permission still grants that concrete request.
+**Action → mode** (the ODRL *request* action; conservative — narrowest mode only): `read`/`display`/`present`/`print`/`play` → `acl:Read`; `append` → `acl:Append`; `modify`/`delete`/`write` → `acl:Write`; **anything else (incl. the `odrl:use` umbrella) is unmapped → no grant**. `use` is left unmapped because it subsumes a whole subtree of actions (mapping it would have to pick the widest mode) — request `odrl:read` explicitly; a `use` permission still grants that concrete request (provided the request action is in the `use` subtree — not `sell`/`give`/`transfer`).
 
 **Fail-closed:** a grant is materialized only on a *definite Permit* AND a *mappable action* AND a *concrete party (WebID) + target graph*. A Deny, unsatisfied constraint, undischarged duty, unmapped action, or partyless/targetless request materializes **nothing**.
 
@@ -282,6 +321,39 @@ let (matched, retracted) =
 // definite withdrawal → retracted == 1 (deny gone, access restored if an allow exists);
 // ambiguous re-eval (no constraint evidence) → retracted == 0 (deny KEPT, fail-closed).
 ```
+
+## Conformance — SolidLab ODRL Test Suite — [OPUS-4.8] sq-tmsd6
+
+The evaluator is ratcheted against the MIT-licensed
+[SolidLab ODRL Test Suite](https://github.com/SolidLabResearch/ODRL-Test-Suite)
+(crate-local runner `crates/sparq-policy/tests/odrl_test_suite.rs`). Each of the 68
+self-describing Turtle cases references — by UUID — a policy / request /
+state-of-the-world / *expected compliance report*; the runner loads the policy
+through the real `parse_policy_str`, derives a real `Request`, evaluates it through
+the real `evaluate`, and asserts the decision matches the oracle the expected
+report encodes:
+
+| expected rule report | `report:activationState` | expected decision |
+|---|---|---|
+| `report:PermissionReport` | `report:Active` | ALLOW |
+| `report:ProhibitionReport` | `report:Active` | DENY (prohibition fires) |
+| either kind | `report:Inactive` | DENY |
+
+At the pinned suite revision **67/68 pass** (floor `ODRL_SUITE_FLOOR`, may only
+RISE; mirrored in the central conformance scoreboard). The constraint-matching batch
+([OPUS-4.8] sq-euhr3 / sq-k7itg / sq-a0zef) raised the floor from 59 to 67 by
+implementing — through the real `evaluate` path — `odrl:LogicalConstraint`
+(`odrl:and`/`odrl:or`/`odrl:xone`, incl. nesting) compound constraints,
+`odrl:PartyCollection` / `odrl:AssetCollection` membership matching, and the
+`odrl:use` action hierarchy (`use` subsumes its sub-actions but **not** the
+ownership-`transfer` subtree — so a `use` permission is Active for `read`/`write` but
+Inactive for `sell`). The **1** remaining case is a documented **not-implemented**
+divergence — a duty whose discharge state is unknown (`report:NonSet`); sparq is
+fail-closed (a duty must be explicitly discharged) where SolidLab treats a
+not-violated duty as active. It does NOT count as a failure and does NOT gate. Fetch
+with `bash scripts/fetch-odrl-suite.sh` (the data is never committed); the runner
+self-skips cleanly when the fetched dir is absent. Run:
+`cargo test -p sparq-policy --test odrl_test_suite -- --nocapture`.
 
 ## Learn more
 

@@ -1,0 +1,81 @@
+[package]
+name = "sparq-trust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Trust-graph authorisation PoC for sparq-solid: a default-OFF admission gate that admits issuer-signed, trusted-source-scoped credential facts ahead of the WAC/ACP materialiser (research prototype; NOT a security guarantee)"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# Research-stage proof-of-concept (epic sq-pfae, issue #940). The ZK estate it
+# composes with is externally UNAUDITED (sq-qhy4); this crate verifies an issuer
+# signature but does NOT deliver unlinkable/anonymous presentation. NOT published.
+publish = false
+
+# [OPUS-4.8] docs.rs: build with all features + the `docsrs` cfg.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# OPT-IN by construction. NOTHING in the workspace's default build depends on this
+# crate: `sparq-solid` pulls it in ONLY behind its default-OFF `trust-graph` feature,
+# so the lean core (sparq-core / sparq-engine / sparq-reason) and the default
+# sparq-solid build are byte-identical with or without it (the strict-additivity
+# property G6 of research/solid-trust-graph-authz-design.md §2.2). It depends only on
+# what the admission gate needs — RDFC-1.0 canon, the issuer-sig primitive, the SHACL
+# validator, the N3 reasoner, and the shipped sparq-solid materialiser.
+# DEFAULT-OFF features. The crate stays lean by default; `did` pulls the only extra
+# dependency (`serde_json`, used solely to parse a fetched `did:web` DID document) and
+# is OFF unless a caller explicitly opts in (sq-pfae.3). The `did:key`/`did:web` self-
+# certifying decode (multibase/multicodec/base58/varint) is dependency-free hand-rolled,
+# so the feature's whole cost is the JSON parser for the optional `did:web` path.
+[features]
+default = []
+# DID resolution + issuer-key binding (`did:key` offline self-cert + pluggable `did:web`).
+did = ["dep:serde_json"]
+# [OPUS-4.8] sq-pfae.5 — the trust-document STORAGE/AUTHORING model: server-wide vs
+# per-`.acr` documents (per-`.acr` NARROWS, never broadens), monotone document
+# versioning + revocation, and the admission cache key (evidence hash + policy version)
+# that composes with the sparq-solid epoch cache. Pure-Rust over the deps already
+# present (sparq-zk commitment for the evidence hash, std hashing) — NO new dependency,
+# so the lean default build is byte-identical with it OFF.
+store = []
+# The sparq sec-prop: EXTENSION vocabulary (`secprop` module + `secprop-ext.ttl`):
+# the orthogonal proof-system dimensions + the assurance/audit-status axis the
+# vendored `sec-prop:` ontology lacks (sq-5oru9; design §4.2). Dependency-free — it
+# is `const &str` data + a TTL drift test, strictly additive (no new dep, no new edge
+# onto the lean default build).
+secprop-vocab = []
+# [OPUS-4.8] sq-pfae.6 — the delegation stratum's AUDIT half: render an invocation-bound
+# delegation chain + effective capability as a minimal W3C PROV-O audit graph
+# (`prov:actedOnBehalfOf` lineage + the effective grant as `auth:*` RDF), with the
+# human/AI principal classification §4.2 names as an attested attribute on the delegate.
+# Pure-Rust over `oxrdf` (already a dep) + the `delegation` module — NO new dependency and,
+# deliberately, NO `sparq-prov` edge (that would drag `sparq-engine` onto this crate's dep
+# graph; the audit is a small fixed triple set emitted directly). Strictly additive: the
+# lean default build is byte-identical with it OFF.
+delegation-prov = []
+
+[dependencies]
+sparq-core = { path = "../sparq-core", default-features = false }
+sparq-reason = { path = "../sparq-reason", default-features = false }
+# RDFC-1.0 canonical unit the ZK estate already commits over (step 1 of the gate).
+sparq-canon = { path = "../sparq-canon" }
+# The CHECKED issuer signature over the RDFC-1.0 commitment (step 2). The ZK estate
+# is research-grade and externally UNAUDITED (sq-qhy4) — see the crate docs.
+sparq-zk = { path = "../sparq-zk" }
+# The `forShape` statement-type primitive (forPredicate desugars to it; step 3).
+sparq-shacl = { path = "../sparq-shacl", default-features = false }
+oxrdf.workspace = true
+# OPTIONAL — `did` feature only. Parses a fetched `did:web` DID document (JSON). The
+# `did:key` path needs no JSON; the default build pulls neither.
+serde_json = { version = "1", optional = true }
+
+# Test-only: parse-validate the published machine-readable vocabulary
+# `ontologies/trust/trust.ttl` so the Turtle a working group reads stays valid
+# Turtle (sq-pfae.2). Not a runtime dependency — the lean default build is unaffected.
+[dev-dependencies]
+oxttl.workspace = true

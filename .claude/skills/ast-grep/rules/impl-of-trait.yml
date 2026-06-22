@@ -1,0 +1,15 @@
+# [OPUS-4.8] ast-grep rule: find every `impl <Trait> for <T>` regardless of how the
+# trait path is qualified (Display / fmt::Display / std::fmt::Display all match).
+# A bare `--pattern 'impl Display for $T'` MISSES these because ast-grep matches the
+# syntax as written and the path is a single scoped node. See ../SKILL.md §2.3.
+#
+# USE:
+#   ast-grep scan --rule .claude/skills/ast-grep/rules/impl-of-trait.yml crates/
+# RETARGET: change the `regex:` final segment (e.g. '(^|::)Iterator$').
+id: impl-of-trait
+language: rust
+rule:
+  kind: impl_item            # an `impl ... { }` block
+  has:
+    field: trait             # the trait being implemented (absent on inherent impls)
+    regex: '(^|::)Display$'  # final path segment == Display, any qualification

@@ -1,12 +1,45 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "[OPUS-4.8] sq-2e93 — default capability for the sparq GUI main window: the minimal core-window permissions plus the file-open dialog (for loading an RDF file from disk into the native store, the MVP 'real local store' path). Least-privilege: no shell, no arbitrary FS, no HTTP — the engine runs in-process over IPC.",
+  "description": "[OPUS-4.8] sq-2e93 / sq-ixc3.6 — default capability for the sparq GUI main window: the minimal core-window permissions, the file-open dialog (for loading an RDF file from disk into the native store), and a LEAST-PRIVILEGE filesystem grant scoped to the app's local-data `workspaces/` dir ONLY (durable on-disk workspace persistence, epic sq-ixc3). No shell, no HTTP, NO arbitrary FS — every fs permission is path-scoped to $APPLOCALDATA/workspaces; the engine runs in-process over IPC.",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    {
+      "identifier": "fs:allow-read-text-file",
+      "allow": [{ "path": "$APPLOCALDATA/workspaces/**" }]
+    },
+    {
+      "identifier": "fs:allow-write-text-file",
+      "allow": [{ "path": "$APPLOCALDATA/workspaces/**" }]
+    },
+    {
+      "identifier": "fs:allow-remove",
+      "allow": [{ "path": "$APPLOCALDATA/workspaces/**" }]
+    },
+    {
+      "identifier": "fs:allow-mkdir",
+      "allow": [
+        { "path": "$APPLOCALDATA/workspaces" },
+        { "path": "$APPLOCALDATA/workspaces/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-exists",
+      "allow": [
+        { "path": "$APPLOCALDATA/workspaces" },
+        { "path": "$APPLOCALDATA/workspaces/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-read-dir",
+      "allow": [
+        { "path": "$APPLOCALDATA/workspaces" },
+        { "path": "$APPLOCALDATA/workspaces/**" }
+      ]
+    }
   ]
 }

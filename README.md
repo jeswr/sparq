@@ -10,10 +10,17 @@
   <img src="https://img.shields.io/badge/status-experimental-yellow.svg" alt="Status: experimental">
 </p>
 
+<!-- sq-im8u: the `lead` anchor below is single-sourced into book/src/introduction.md via
+     mdBook {{#include}}. Keep the anchored paragraph link-portable (ABSOLUTE URLs only — no
+     repo-relative links) so it renders correctly both here and under the mdBook mount. The
+     ANCHOR/ANCHOR_END markers MUST stay one-per-line: mdBook excludes only the exact marker
+     line, so any prose on the marker line leaks into the include. [OPUS-4.8] -->
+<!-- ANCHOR: lead -->
 **sparq** is a lightning-fast [RDF](https://www.w3.org/TR/rdf12-concepts/) triplestore and
 [SPARQL 1.1](https://www.w3.org/TR/sparql11-query/) / [1.2](https://www.w3.org/TR/sparql12-query/)
 engine, written in Rust — usable as a library, CLI, HTTP server, and from Python and
 JavaScript/WASM.
+<!-- ANCHOR_END: lead -->
 
 > **Status: experimental research engine.** The API is unstable and pre-1.0. Conformance against
 > the W3C SPARQL, SHACL, and inference suites is tracked by CI ratchets that only ever go up —
@@ -26,6 +33,10 @@ JavaScript/WASM.
 
 ## 🚀 Quickstart
 
+<!-- sq-im8u: the `quickstart-cli` anchor is single-sourced into
+     book/src/getting-started/install.md. Shell only, no links, so it is fully portable across
+     the README and mdBook mounts. Keep the ANCHOR markers one-per-line. [OPUS-4.8] -->
+<!-- ANCHOR: quickstart-cli -->
 ```sh
 cargo build --release
 
@@ -40,6 +51,7 @@ cargo run --release -p sparq-cli -- query-mmap ./idx 'SELECT (COUNT(*) AS ?n) WH
 # W3C SPARQL Protocol HTTP server on :3030
 cargo run --release -p sparq-server -- --addr 127.0.0.1:3030 --format turtle data.ttl
 ```
+<!-- ANCHOR_END: quickstart-cli -->
 
 As a library:
 

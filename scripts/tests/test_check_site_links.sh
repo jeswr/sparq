@@ -43,11 +43,15 @@ trap 'rm -rf "$TMP"' EXIT
 GOOD="${TMP}/good"
 mkdir -p "${GOOD}/about" "${GOOD}/surface/sparql"
 
-# Home page: links the bare root, a route, an anchor on this page, a relative sibling.
+# Home page: links the bare root, a route, an anchor on this page, a relative sibling, AND a
+# CROSS-PAGE path+fragment link (/sparq/about/#section-b) — [OPUS-4.8] sq-bpoey: this is the
+# shape the redesign's /capabilities/#<theme> anchors take, and the case the gate must resolve
+# to the target route's index.html (it reddened pages.yml after PR #1003 before rule 0 existed).
 cat > "${GOOD}/index.html" <<'HTML'
 <!doctype html><html><head><title>home</title></head><body>
   <a href="/sparq/">root</a>
   <a href="/sparq/about/">about</a>
+  <a href="/sparq/about/#section-b">about · section b (cross-page fragment)</a>
   <a href="/sparq/surface/sparql/">sparql surface</a>
   <a href="#section-a">jump</a>
   <h2 id="section-a">Section A</h2>
@@ -58,6 +62,7 @@ cat > "${GOOD}/about/index.html" <<'HTML'
 <!doctype html><html><head><title>about</title></head><body>
   <a href="/sparq/">home</a>
   <a href="/sparq/surface/sparql/">sparql</a>
+  <h2 id="section-b">Section B</h2>
 </body></html>
 HTML
 
@@ -110,6 +115,26 @@ if bash "$GATE" "$ANCHOR" >/tmp/site-links-anchor.log 2>&1; then
   exit 1
 else
   echo "PASS: dangling #anchor is caught (exit non-zero)"
+fi
+
+# --------------------------------------------------------------------------- #
+# Case 4 (should-FAIL): a dangling CROSS-PAGE fragment must fail. [OPUS-4.8] sq-bpoey —
+# rule 0 resolves /sparq/<route>#<frag> to <route>/index.html for the fragment lookup; this
+# pins that the resolution still has TEETH (a fragment that does not exist on the *target*
+# page is caught), not just that valid cross-page fragments pass (Case 1).
+# --------------------------------------------------------------------------- #
+XFRAG="${TMP}/xfrag"
+cp -r "$GOOD" "$XFRAG"
+cat >> "${XFRAG}/index.html" <<'HTML'
+<a href="/sparq/about/#no-such-section">dangling cross-page fragment</a>
+HTML
+
+if bash "$GATE" "$XFRAG" >/tmp/site-links-xfrag.log 2>&1; then
+  echo "FAIL: a dangling cross-page fragment was NOT caught (rule 0 lost its teeth):"
+  sed 's/^/    /' /tmp/site-links-xfrag.log
+  exit 1
+else
+  echo "PASS: dangling cross-page fragment is caught (exit non-zero)"
 fi
 
 echo "All check-site-links self-tests passed."

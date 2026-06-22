@@ -1,0 +1,75 @@
+{
+  "_comment": "[OPUS-4.8] issue #1080 — compacted-AST A/B frozen task set. 10 CODE tasks over the Rust workspace that require understanding+modifying STRUCTURE (not lookups). Each task is graded against gold_keys (item names / line spans / call-site locations / handling points). Cells are independent: each task asks for a precise EDIT PLAN + the structural facts, gradeable without mutating shared files. Class: summarise|add-variant|rename|sig-change.",
+  "tasks": [
+    {
+      "id": "T01-summarise-exec",
+      "class": "summarise",
+      "file": "crates/sparq-engine/src/exec.rs",
+      "prompt": "Summarise the STRUCTURE of crates/sparq-engine/src/exec.rs: list its top-level modules/items and the major impl blocks, and identify the 5 biggest functional areas (e.g. join exec, aggregation, sorting, expression eval). Give an approximate line region for each area.",
+      "gold_keys": ["expression", "eval", "aggreg", "sort", "join", "Value", "ArithOp", "exec"]
+    },
+    {
+      "id": "T02-summarise-dict",
+      "class": "summarise",
+      "file": "crates/sparq-core/src/dict.rs",
+      "prompt": "Summarise the STRUCTURE of crates/sparq-core/src/dict.rs: the main public type(s), the Stored enum, the TermParts enum, and the encode/decode/intern surface. Name the key items and give approximate line regions.",
+      "gold_keys": ["Dict", "Stored", "TermParts", "intern", "encode", "decode"]
+    },
+    {
+      "id": "T03-summarise-join",
+      "class": "summarise",
+      "file": "crates/sparq-mpc/src/join.rs",
+      "prompt": "Summarise the STRUCTURE of crates/sparq-mpc/src/join.rs: the GlobalJoin trait, the DisclosedKeyJoin and HiddenValueJoin impls, the batched join path, and the test module. Name the key items and their approximate line regions.",
+      "gold_keys": ["GlobalJoin", "DisclosedKeyJoin", "HiddenValueJoin", "batched_join", "secure_equal", "join_two"]
+    },
+    {
+      "id": "T04-addvariant-mpcerror",
+      "class": "add-variant",
+      "file": "crates/sparq-mpc/src/partial.rs",
+      "prompt": "We want to add a new variant `Timeout(String)` to the MpcError enum in crates/sparq-mpc/src/partial.rs. Produce the EDIT PLAN: where the enum is defined (line), what other items must be updated to keep it compiling (Display/Error impls, any exhaustive matches on MpcError), and list each such site (file + approximate line + what to add).",
+      "gold_keys": ["partial.rs", "enum MpcError", "Display", "match", "Timeout"]
+    },
+    {
+      "id": "T05-addvariant-arithop",
+      "class": "add-variant",
+      "file": "crates/sparq-engine/src/exec.rs",
+      "prompt": "We want to add a `Modulo` variant to the ArithOp enum in crates/sparq-engine/src/exec.rs. Produce the EDIT PLAN: the enum definition line, and every place that matches on ArithOp (or constructs it) that must handle the new variant. List each site with approximate line and what to add.",
+      "gold_keys": ["ArithOp", "match", "Add", "Sub", "Mul", "Div"]
+    },
+    {
+      "id": "T06-rename-renderkey",
+      "class": "rename",
+      "file": "crates/sparq-mpc/src/join.rs",
+      "prompt": "Rename the free function `render_key` to `format_join_key` in crates/sparq-mpc/src/join.rs. Produce the EDIT PLAN: the definition site (line) and EVERY call site (file + line) that must be updated. Be complete — do not miss any.",
+      "gold_keys": ["render_key", "join.rs", "definition", "call"]
+    },
+    {
+      "id": "T07-rename-securetequal",
+      "class": "rename",
+      "file": "crates/sparq-mpc/src/join.rs",
+      "prompt": "Rename the method `secure_equal` to `oblivious_equal` on HiddenValueJoin in crates/sparq-mpc/src/join.rs. Produce the EDIT PLAN: the definition site and every call site (line numbers) within the crate that must be updated. Note: there is also a `secure_equal_shared` — say whether it should be renamed and why/why not.",
+      "gold_keys": ["secure_equal", "secure_equal_shared", "join.rs", "method", "call"]
+    },
+    {
+      "id": "T08-sigchange-globaljoin",
+      "class": "sig-change",
+      "file": "crates/sparq-mpc/src/join.rs",
+      "prompt": "We want to change the GlobalJoin trait method `join` to take an extra `&MpcBudget` parameter. Produce the EDIT PLAN: the trait definition line, every impl of GlobalJoin::join that must update its signature (file + line), and every call site of `.join(` on a GlobalJoin that must pass the new argument.",
+      "gold_keys": ["GlobalJoin", "trait", "DisclosedKeyJoin", "impl", "join"]
+    },
+    {
+      "id": "T09-summarise-source",
+      "class": "summarise",
+      "file": "crates/sparq-fedclient/src/source.rs",
+      "prompt": "Summarise the STRUCTURE of crates/sparq-fedclient/src/source.rs: the main source/endpoint types, the trait(s) they implement, the request/execution surface, and the test module. Name the key items and approximate line regions.",
+      "gold_keys": ["Source", "endpoint", "impl", "trait", "test"]
+    },
+    {
+      "id": "T10-sigchange-owl",
+      "class": "sig-change",
+      "file": "crates/sparq-reason/src/owl.rs",
+      "prompt": "Summarise the STRUCTURE of crates/sparq-reason/src/owl.rs and identify the main reasoning entry-point function(s) and the rule/axiom types. If we wanted to add a new OWL rule, name the function(s) that would need editing and their approximate line regions.",
+      "gold_keys": ["owl", "rule", "axiom", "reason", "impl", "fn"]
+    }
+  ]
+}

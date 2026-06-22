@@ -1,0 +1,10 @@
+# [OPUS-4.8] sq-2m6zm.4 — runtime A/B artifacts carry NON-CANONICAL numbers
+# (work-box / proxy) and are fully regenerable by run.sh. Never commit them; the
+# committed artifacts are the harness CODE + the frozen tasks + PREREG + manifest.
+results.json
+grades.json
+verdict.json
+# [OPUS-4.8] sq-ve5dy — real-transcript 3-arm A/B runtime artifacts (regenerable).
+tok_*.json
+answers*.json
+tokens_real_out.json

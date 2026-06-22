@@ -35,7 +35,14 @@ required-features = ["server"]
 # sparq-engine directly — see crates/sparq-wasm/Cargo.toml), so the heavy async deps
 # are never part of the bundle. Kept behind a feature so a consumer can depend on the
 # pure serializer library (XML/CSV/TSV) without dragging in the runtime.
-default = ["server"]
+# [OPUS-4.8] (sq-oy1f.4, MAINTAINER-DIRECTED DEFAULT-ON EXCEPTION) `jsonld` is in the default
+# set: the server speaks `application/ld+json` in BOTH directions (CONSTRUCT/DESCRIBE + GSP-read
+# EMIT, GSP-write ACCEPT) out of the box (the user-prioritised sq-oy1f epic). Deliberate exception
+# to opt-in-by-default — JSON-LD is the dominant linked-data interchange format and the server
+# binary has no bundle-size floor. Still TOGGLEABLE: `--no-default-features --features server`
+# (or just `server`) drops JSON-LD and `application/ld+json` becomes unrecognised (406/415) as
+# before. The `--no-default-features` (pure serialiser library) build is unaffected.
+default = ["server", "jsonld"]
 # [OPUS-4.8] (sq-vpx4) Compiles internal TEST SEAMS — currently the durable-write
 # failure-injection hook on the `--persist` seal path, exposed via
 # `AppState::with_config_inject_durable_failure` for the graceful-degradation
@@ -165,11 +172,67 @@ brtpf = ["tpf"]
 # `SPARQ_SHACL=1` (`ServerConfig::shacl`), mirroring `tpf` / `federation-descriptors`;
 # validation is a READ over the store, so it is gated by the read auth like any GET.
 shacl = ["server", "dep:sparq-shacl"]
+# [OPUS-4.8] (sq-hj4n, gh-916) `n3-patch` (default OFF) adds the OPTIONAL Solid-style N3-Patch
+# (`solid:InsertDeletePatch`, media type `text/n3`) dialect to the Graph-Store-Protocol `PATCH`
+# method. With it on, a `PATCH` carrying a `text/n3` body is parsed into its `solid:deletes` /
+# `solid:inserts` / `solid:where` formulas and translated into ONE atomic graph-scoped SPARQL
+# Update submitted through the SAME sequenced group-commit writer the `application/sparql-update`
+# PATCH path uses (so it inherits atomicity + the auth gate). The N3 parsing rides the `oxttl`
+# `N3Parser` — `oxttl` is ALREADY a server dependency (the GSP read-side Turtle serialiser), so
+# this pulls NO new dependency. The OTHER PATCH dialect (`application/sparql-update` body) is
+# ALWAYS-ON and is NOT behind this feature. Without the `n3-patch` feature the N3-Patch parser +
+# its dispatch arm are `#[cfg]`-stripped: a `text/n3` PATCH body is then a plain `415` and the
+# crate is byte-identical to before — sparq-core / sparq-engine / the wasm bundle untouched
+# either way (sparq-wasm depends on sparq-core/-engine directly, never on sparq-server). STILL OFF
+# AT RUNTIME by default even when compiled in — the operator must additionally set `--n3-patch` /
+# `SPARQ_N3_PATCH=1` (`ServerConfig::n3_patch`), mirroring `tpf` / `shacl` / `federation-descriptors`.
+n3-patch = ["server"]
+# [OPUS-4.8] (sq-o5bi) `backup` (default OFF) mounts the OPT-IN ONLINE consistent-snapshot
+# backup/restore admin routes: `POST /admin/backup` streams a single self-describing artifact
+# of the CURRENTLY-PINNED generation (triples + per-pod epoch vectors + writer seq) WHILE
+# SERVING (no stop-the-world — the export reads an already-immutable `Arc<Generation>`, so
+# readers never block the writer and the writer never blocks readers), and `POST /admin/restore`
+# atomically installs a freshly-built ring+writer rehydrated from such an artifact (fail-closed on
+# a corrupt/mismatched artifact). A `--restore <FILE>` / `SPARQ_RESTORE` startup setting runs the
+# same restore on start (the bootstrap primitive for horizontal-scaling stage-2 + the base of
+# PITR). The feature turns on sparq-serve's own `backup` feature (the artifact format +
+# export/import live there); it adds no new dependency beyond that. DISTINCT from the offline
+# `sparq-cli save` (stop-the-world, index rebuild) and from the `--persist` per-graph WAL.
+# At-rest ENCRYPTION of the artifact is a SEPARATE concern, out of scope. Both routes are
+# WRITE/admin-gated (the existing `--auth-token` admin gate). Without the feature the routes +
+# the restore setting are `#[cfg]`-stripped, so a build without it is byte-identical to before.
+# Needs `server`.
+# [OPUS-4.8] (sq-0g6g) `dep:arc-swap` is brought in ONLY here — the swappable serving core
+# (`ArcSwap<ServingCore>`) that enables the atomic online restore exists solely under `backup`.
+# The default `server` build holds the ring/writer directly (byte-identical to pre-#941) and
+# never depends on arc-swap, so the default serving read path stays lean.
+backup = ["server", "dep:arc-swap", "sparq-serve/backup"]
+# [OPUS-4.8] (sq-oy1f.1, epic sq-oy1f) `jsonld` (default OFF) wires JSON-LD 1.1
+# (`application/ld+json`) into the server's RDF content negotiation, both directions:
+#   * EMIT — a SPARQL CONSTRUCT/DESCRIBE or a Graph-Store-Protocol GET with
+#     `Accept: application/ld+json` is served as JSON-LD (the engine's *flattened* form),
+#     participating in the existing q-value-aware Accept negotiation; and
+#   * ACCEPT — a GSP PUT/POST (or the SHACL shapes-body reader, which shares the same media-type
+#     matrix) with `Content-Type: application/ld+json` is parsed into the store via the engine's
+#     JSON-LD parser.
+# It turns on `sparq-core/jsonld` (the `oxjsonld` parser that `Graph::load_str` dispatches the
+# "jsonld" token to) and `sparq-engine/serialize-rdf` (the `write_jsonld` serialiser). Both are
+# native-pure (no wasm impact — sparq-wasm depends on sparq-core/-engine directly, never on
+# sparq-server). Without the feature the `GraphFormat::JsonLd` variant, its negotiation arm and
+# its write-body arm are `#[cfg]`-stripped, so an `application/ld+json` request gets the same
+# 406/415 it did before and the default build is byte-identical. Needs `server`.
+jsonld = ["server", "sparq-core/jsonld", "sparq-engine/serialize-rdf"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
+# [OPUS-4.8] (sq-o5bi, sq-0g6g) The swappable serving core (ring + writer) lives behind an
+# `ArcSwap` so an online restore can atomically install a rehydrated core while readers load
+# lock-free — the same arc-swap the ring uses internally. `backup`-feature ONLY: the default
+# serving path holds ring/writer directly (byte-identical to pre-#941), so without `backup` the
+# server never depends on arc-swap. The serialiser-only build and the wasm graph never see it.
+arc-swap = { version = "1", optional = true }
 sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 # The concurrent-serving core (Wave A, research/concurrent-serving.md §6): the
 # lock-free generation ring pins read snapshots; the single sequenced writer

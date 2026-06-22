@@ -1,0 +1,771 @@
+//! # NON-STANDARD RDF-1.2 triple-term canonicalization profile (`rdf12-triple-terms`)
+//!
+//! **⚠️ NON-STANDARD. This is NOT W3C RDFC-1.0.** [RDFC-1.0] is defined for the
+//! RDF-1.1 data model only; it has **no** notion of RDF-1.2 triple terms
+//! (`<<( s p o )>>` as an object), and the consequences of triple terms for
+//! canonicalization are **unsettled upstream** (see [w3c/rdf-star-wg#114]). The
+//! profile here is sparq's own opt-in extension. The standard
+//! [`crate::canonicalize`] / [`crate::canonicalize_triples`] paths, and the W3C
+//! `rdf-canon` test suite, keep meaning **exactly** what they mean today: they
+//! still fail closed with [`CanonError::TripleTerm`] on any triple-term input.
+//!
+//! [RDFC-1.0]: https://www.w3.org/TR/rdf-canon/
+//! [w3c/rdf-star-wg#114]: https://github.com/w3c/rdf-star-wg/issues/114
+//!
+//! ## What it does
+//!
+//! It is a **native** re-implementation of the RDFC-1.0 algorithm (issuer state,
+//! Hash First Degree Quads, Hash Related Blank Node, **Hash N-Degree Quads**)
+//! directly over sparq's oxrdf-0.3 term model, **extended** so the n-degree
+//! gossip descends through [`oxrdf::Term::Triple`] objects: a blank node nested
+//! inside a triple term (at any depth) is enrolled, gossiped, and relabelled
+//! exactly like a top-level blank node. The serialization re-uses oxrdf-0.3's
+//! canonical `Display` (the `<<( … )>>` triple-term token form and the
+//! `"…"@lang--dir` directional-language form of RDF-1.2 N-Quads), so the token
+//! rules are single-sourced in oxttl/oxrdf rather than hand-rolled here.
+//!
+//! Because the algorithm is structurally the RDFC-1.0 algorithm, on **any input
+//! without triple terms** it produces byte-identical output to the standard
+//! `rdf-canon`-backed path; that agreement is the strongest correctness anchor
+//! and is asserted in the crate's tests against the W3C suite vectors.
+//!
+//! ## Triple terms only appear as objects
+//!
+//! In oxrdf 0.3 a [`Triple`]'s subject is a `NamedOrBlankNode` and only its
+//! object may be a `Term::Triple`. So nesting descends strictly through the
+//! **object** position; a nested blank node is, positionally, part of the
+//! **object** of the top-level quad that contains the triple term, and is
+//! gossiped with the object position marker `o` against that quad's predicate.
+//!
+//! ## Boundary
+//!
+//! - SHA-256 is the default (the spec hash). A `*_with::<D: Digest>` profile
+//!   (e.g. [`canonicalize_rdf12_with`]) lets a caller select a different hash —
+//!   notably SHA-384 (`sha2::Sha384`) for parity with the standard delegated
+//!   path's [`crate::canonicalize_quads_with`]. The non-generic entry points
+//!   are SHA-256 and produce byte-identical output to before. Because all
+//!   intermediate RDFC-1.0 hashes are emitted as lowercase hex of the full
+//!   digest, the chosen `D` flows through first-degree, related, and n-degree
+//!   hashing uniformly; the canonical *labels* (`c14nN`) and their *order* are
+//!   determined by hash comparison, so a different `D` can yield a different
+//!   relabelling while every input remains isomorphism-stable under that `D`.
+//! - Dataset-level (quads, named graphs) and single-graph (triples) entry
+//!   points are both provided, each with a `*_with` hash-generic sibling.
+//! - The HNDQ poison-graph call limit is enforced (default 4000) and surfaces as
+//!   [`CanonError::Canonicalization`], so pathological inputs fail closed.
+//!
+//! [OPUS-4.8] sq-hslb — full non-standard RDF-1.2 triple-term canon profile;
+//! sq-5i1d — `*_with::<D: Digest>` hash-profile parity (SHA-384).
+//! Fable unavailable; flag for re-review when Fable returns.
+
+use crate::CanonError;
+use digest::Digest;
+use oxrdf::{BlankNode, GraphName, NamedOrBlankNode, Quad, Term, Triple};
+use sha2::Sha256;
+use std::collections::BTreeMap;
+
+/// The default HNDQ call limit (matches the standard `rdf-canon` path's guard).
+const DEFAULT_HNDQ_CALL_LIMIT: usize = 4000;
+
+// ---------------------------------------------------------------------------
+// Public entry points (the v2, non-standard profile).
+// ---------------------------------------------------------------------------
+
+/// **NON-STANDARD.** Canonicalizes an RDF-1.2 dataset (a slice of [`Quad`]s),
+/// **including triple terms**, into its canonical N-Quads document under the
+/// sparq `rdf12-triple-terms` profile (SHA-256).
+///
+/// On triple-term-free input this is byte-identical to the standard
+/// [`crate::canonicalize`]. With triple terms it additionally relabels blank
+/// nodes nested inside triple-term objects via the HNDQ descent.
+///
+/// This is **not** W3C RDFC-1.0 (RDF-1.2 canonicalization is unsettled
+/// upstream); see the [module docs](self).
+pub fn canonicalize_rdf12(dataset: &[Quad]) -> Result<String, CanonError> {
+    canonicalize_rdf12_with::<Sha256>(dataset)
+}
+
+/// **NON-STANDARD.** Like [`canonicalize_rdf12`] but parameterized over the
+/// RDFC-1.0 hash function `D` ([`crate::Digest`]). The profile default is
+/// SHA-256 ([`canonicalize_rdf12`]); pass `sha2::Sha384` to select the SHA-384
+/// profile, for parity with the standard delegated path's
+/// [`crate::canonicalize_quads_with`].
+///
+/// The relabelling and line order are determined by hash comparison, so a
+/// different `D` may produce a different (but still canonical and
+/// isomorphism-stable) `c14nN` assignment; the SHA-256 default
+/// ([`canonicalize_rdf12`]) is byte-identical to before.
+pub fn canonicalize_rdf12_with<D: Digest>(dataset: &[Quad]) -> Result<String, CanonError> {
+    let issued = issue_dataset_rdf12_with::<D>(dataset)?;
+    Ok(serialize_canonical(dataset, &issued))
+}
+
+/// **NON-STANDARD.** The issued-identifier map (input blank-node label →
+/// canonical `c14nN` label) for an RDF-1.2 dataset under the
+/// `rdf12-triple-terms` profile (SHA-256). See [`canonicalize_rdf12`].
+pub fn issue_dataset_rdf12(
+    dataset: &[Quad],
+) -> Result<std::collections::HashMap<String, String>, CanonError> {
+    issue_dataset_rdf12_with::<Sha256>(dataset)
+}
+
+/// **NON-STANDARD.** Like [`issue_dataset_rdf12`] but parameterized over the
+/// RDFC-1.0 hash function `D` ([`crate::Digest`]). See
+/// [`canonicalize_rdf12_with`].
+pub fn issue_dataset_rdf12_with<D: Digest>(
+    dataset: &[Quad],
+) -> Result<std::collections::HashMap<String, String>, CanonError> {
+    let state = CanonState::compute::<D>(dataset)?;
+    Ok(state.canonical_issuer.issued.into_iter().collect())
+}
+
+/// **NON-STANDARD.** Canonicalizes one graph's content (a slice of [`Triple`]s,
+/// treated as the default graph), **including triple terms**, into a
+/// [`crate::CanonicalGraph`] under the `rdf12-triple-terms` profile.
+///
+/// On triple-term-free input this agrees byte-for-byte with the standard
+/// [`crate::canonicalize_triples`]. See the [module docs](self) for the
+/// non-standard caveat.
+pub fn canonicalize_triples_rdf12(triples: &[Triple]) -> Result<crate::CanonicalGraph, CanonError> {
+    canonicalize_triples_rdf12_with::<Sha256>(triples)
+}
+
+/// **NON-STANDARD.** Like [`canonicalize_triples_rdf12`] but parameterized over
+/// the RDFC-1.0 hash function `D` ([`crate::Digest`]). See
+/// [`canonicalize_rdf12_with`].
+pub fn canonicalize_triples_rdf12_with<D: Digest>(
+    triples: &[Triple],
+) -> Result<crate::CanonicalGraph, CanonError> {
+    let dataset: Vec<Quad> = triples
+        .iter()
+        .map(|t| {
+            Quad::new(
+                t.subject.clone(),
+                t.predicate.clone(),
+                t.object.clone(),
+                GraphName::DefaultGraph,
+            )
+        })
+        .collect();
+    let issued = issue_dataset_rdf12_with::<D>(&dataset)?;
+    let lines = canonical_lines(&dataset, &issued);
+    // Re-parse each canonical default-graph line back into a triple so the
+    // returned `triples` carry the canonical (`c14nN`) labels, matching the
+    // standard single-graph API's contract.
+    let mut triples_out: Vec<Triple> = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let mut parsed = None;
+        for item in oxttl::NQuadsParser::new().for_slice(line.as_bytes()) {
+            let q = item.map_err(|e| CanonError::Bridge(e.to_string()))?;
+            parsed = Some(Triple::new(q.subject, q.predicate, q.object));
+        }
+        triples_out.push(parsed.ok_or_else(|| {
+            CanonError::Bridge(format!(
+                "canonical line did not parse as one quad: {}",
+                line
+            ))
+        })?);
+    }
+    Ok(crate::CanonicalGraph {
+        lines,
+        triples: triples_out,
+    })
+}
+
+/// **NON-STANDARD.** Canonicalizes a [`sparq_core::Graph`]'s content, including
+/// triple terms, under the `rdf12-triple-terms` profile. See
+/// [`canonicalize_triples_rdf12`].
+pub fn canonicalize_graph_content_rdf12(
+    g: &sparq_core::Graph,
+) -> Result<crate::CanonicalGraph, CanonError> {
+    canonicalize_graph_content_rdf12_with::<Sha256>(g)
+}
+
+/// **NON-STANDARD.** Like [`canonicalize_graph_content_rdf12`] but parameterized
+/// over the RDFC-1.0 hash function `D` ([`crate::Digest`]). See
+/// [`canonicalize_rdf12_with`].
+pub fn canonicalize_graph_content_rdf12_with<D: Digest>(
+    g: &sparq_core::Graph,
+) -> Result<crate::CanonicalGraph, CanonError> {
+    // `graph_triples` materializes the stored triples as-is, keeping any
+    // triple-term objects intact (the standard *canonicalize* paths reject
+    // triple terms downstream, not here), so it is the right source for the v2
+    // profile too.
+    let triples = crate::graph_triples(g)?;
+    canonicalize_triples_rdf12_with::<D>(&triples)
+}
+
+// ---------------------------------------------------------------------------
+// Canonicalization state (RDFC-1.0 §4.2), extended to triple terms.
+// Structurally mirrors zkp-ld `rdf-canon` 0.15.3 (the path the standard W3C
+// suite validates) so the two agree on triple-term-free input.
+// ---------------------------------------------------------------------------
+
+/// RDFC-1.0 §4.3 blank-node identifier issuer.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct IdentifierIssuer {
+    prefix: String,
+    counter: usize,
+    /// input label → issued label.
+    issued: BTreeMap<String, String>,
+    /// zero-padded issuance index → input label, so a BTreeMap value iteration
+    /// recovers §4.4(6) issuance order without a parallel Vec.
+    order: BTreeMap<String, String>,
+}
+
+impl IdentifierIssuer {
+    fn new(prefix: &str) -> Self {
+        Self {
+            prefix: prefix.to_string(),
+            counter: 0,
+            issued: BTreeMap::new(),
+            order: BTreeMap::new(),
+        }
+    }
+
+    fn get(&self, existing: &str) -> Option<String> {
+        self.issued.get(existing).cloned()
+    }
+
+    /// RDFC-1.0 §4.5 Issue Identifier.
+    fn issue(&mut self, existing: &str) -> String {
+        if let Some(id) = self.get(existing) {
+            return id;
+        }
+        let issued = format!("{}{}", self.prefix, self.counter);
+        self.issued.insert(existing.to_string(), issued.clone());
+        self.order
+            .insert(format!("{:020}", self.counter), existing.to_string());
+        self.counter += 1;
+        issued
+    }
+}
+
+/// Map alias used throughout: a hash → the bnode labels that produced it.
+type HashToBnodes = BTreeMap<String, Vec<String>>;
+
+/// RDFC-1.0 §4.2 canonicalization state, extended for triple terms.
+struct CanonState {
+    /// bnode label → the quads it is a component of (recursively through
+    /// triple terms). The same quad is recorded once per *distinct* bnode it
+    /// contains, matching the standard algorithm.
+    bnode_to_quads: BTreeMap<String, Vec<Quad>>,
+    canonical_issuer: IdentifierIssuer,
+}
+
+impl CanonState {
+    fn compute<D: Digest>(dataset: &[Quad]) -> Result<Self, CanonError> {
+        let mut state = CanonState {
+            bnode_to_quads: BTreeMap::new(),
+            canonical_issuer: IdentifierIssuer::new("c14n"),
+        };
+        state.build_bnode_to_quads(dataset);
+
+        // §4.4(3) first-degree hashes.
+        let mut hash_to_bnodes: HashToBnodes = BTreeMap::new();
+        for n in state.bnode_to_quads.keys() {
+            let h = state.hash_first_degree_quads::<D>(n)?;
+            hash_to_bnodes.entry(h).or_default().push(n.clone());
+        }
+
+        // §4.4(4) unique first-degree hashes → issue canonical labels.
+        let mut shared: HashToBnodes = BTreeMap::new();
+        for (h, list) in &hash_to_bnodes {
+            if list.len() == 1 {
+                state.canonical_issuer.issue(&list[0]);
+            } else {
+                shared.insert(h.clone(), list.clone());
+            }
+        }
+
+        // §4.4(5) shared hashes → HNDQ.
+        let mut counter = HndqCallCounter::new(DEFAULT_HNDQ_CALL_LIMIT);
+        for list in shared.values() {
+            let mut hash_path_list: Vec<HndqResult> = Vec::new();
+            for n in list {
+                if state.canonical_issuer.get(n).is_some() {
+                    continue;
+                }
+                let mut temp = IdentifierIssuer::new("b");
+                temp.issue(n);
+                let result = state.hash_n_degree_quads::<D>(n, &temp, &mut counter)?;
+                hash_path_list.push(result);
+            }
+            hash_path_list.sort_by(|a, b| a.hash.cmp(&b.hash));
+            for result in &hash_path_list {
+                // Issue canonical labels in temporary-issuance order (§4.4 5.3.1).
+                for existing in result.issuer.order.values() {
+                    state.canonical_issuer.issue(existing);
+                }
+            }
+        }
+
+        Ok(state)
+    }
+
+    // ---- §4.4(2) build the bnode→quads map, recursing into triple terms ----
+
+    fn build_bnode_to_quads(&mut self, dataset: &[Quad]) {
+        for quad in dataset {
+            // Collect every distinct bnode label that is a component of this
+            // quad (subject/object/graph + any depth of triple-term nesting),
+            // and record the quad once for each.
+            let mut labels: Vec<String> = Vec::new();
+            collect_bnodes_subject(&quad.subject, &mut labels);
+            collect_bnodes_term(&quad.object, &mut labels);
+            if let GraphName::BlankNode(b) = &quad.graph_name {
+                push_unique(&mut labels, b.as_str());
+            }
+            for l in labels {
+                self.bnode_to_quads.entry(l).or_default().push(quad.clone());
+            }
+        }
+    }
+
+    fn quads_for(&self, identifier: &str) -> Option<&Vec<Quad>> {
+        self.bnode_to_quads.get(identifier)
+    }
+
+    // ---- §4.6 Hash First Degree Quads (triple-term aware) ----
+
+    fn hash_first_degree_quads<D: Digest>(&self, reference: &str) -> Result<String, CanonError> {
+        let quads = self
+            .quads_for(reference)
+            .ok_or_else(|| CanonError::Canonicalization("quads not found for bnode".into()))?;
+        let mut nquads: Vec<String> = quads
+            .iter()
+            .map(|q| {
+                let relabelled = relabel_quad_first_degree(q, reference);
+                serialize_quad_line(&relabelled)
+            })
+            .collect();
+        nquads.sort();
+        Ok(hash_hex::<D>(nquads.concat().as_bytes()))
+    }
+
+    // ---- §4.8 Hash N-Degree Quads (triple-term aware) ----
+
+    fn hash_n_degree_quads<D: Digest>(
+        &self,
+        identifier: &str,
+        path_issuer: &IdentifierIssuer,
+        counter: &mut HndqCallCounter,
+    ) -> Result<HndqResult, CanonError> {
+        counter.add()?;
+        let mut issuer = path_issuer.clone();
+
+        // §4.8(1) Hn: related hash → related bnode labels.
+        let mut h_n: HashToBnodes = BTreeMap::new();
+        let quads = self
+            .quads_for(identifier)
+            .ok_or_else(|| CanonError::Canonicalization("quads not found for bnode".into()))?;
+
+        // §4.8(3) for each quad, for each related bnode component (recursing
+        // through triple terms), hash-related-blank-node into Hn.
+        for quad in quads {
+            // subject position
+            let mut subj_bnodes: Vec<String> = Vec::new();
+            collect_bnodes_subject(&quad.subject, &mut subj_bnodes);
+            for related in &subj_bnodes {
+                if related != identifier {
+                    let h = self.hash_related_blank_node::<D>(
+                        related,
+                        quad,
+                        &issuer,
+                        Position::Subject,
+                    )?;
+                    h_n.entry(h).or_default().push(related.clone());
+                }
+            }
+            // object position (includes bnodes nested inside a triple term)
+            let mut obj_bnodes: Vec<String> = Vec::new();
+            collect_bnodes_term(&quad.object, &mut obj_bnodes);
+            for related in &obj_bnodes {
+                if related != identifier {
+                    let h = self.hash_related_blank_node::<D>(
+                        related,
+                        quad,
+                        &issuer,
+                        Position::Object,
+                    )?;
+                    h_n.entry(h).or_default().push(related.clone());
+                }
+            }
+            // graph position
+            if let GraphName::BlankNode(b) = &quad.graph_name {
+                let related = b.as_str();
+                if related != identifier {
+                    let h =
+                        self.hash_related_blank_node::<D>(related, quad, &issuer, Position::Graph)?;
+                    h_n.entry(h).or_default().push(related.to_string());
+                }
+            }
+        }
+
+        // §4.8(4,5) build data-to-hash.
+        let mut data_to_hash = String::new();
+        for (related_hash, blank_node_list) in h_n {
+            data_to_hash.push_str(&related_hash);
+            let mut chosen_path = String::new();
+            let mut chosen_issuer: Option<IdentifierIssuer> = None;
+
+            // §4.8(5.4) permutations.
+            for perm in permutations(&blank_node_list) {
+                let mut issuer_copy = issuer.clone();
+                let mut path = String::new();
+                let mut recursion_list: Vec<String> = Vec::new();
+                let mut skip = false;
+
+                for related in &perm {
+                    if let Some(cid) = self.canonical_issuer.get(related) {
+                        path.push_str(&format!("_:{}", cid));
+                    } else {
+                        if issuer_copy.get(related).is_none() {
+                            recursion_list.push(related.clone());
+                        }
+                        path.push_str(&format!("_:{}", issuer_copy.issue(related)));
+                    }
+                    if !chosen_path.is_empty()
+                        && path.len() >= chosen_path.len()
+                        && path >= chosen_path
+                    {
+                        skip = true;
+                        break;
+                    }
+                }
+                if skip {
+                    continue;
+                }
+
+                for related in &recursion_list {
+                    let result = self.hash_n_degree_quads::<D>(related, &issuer_copy, counter)?;
+                    path.push_str(&format!("_:{}", issuer_copy.issue(related)));
+                    path.push('<');
+                    path.push_str(&result.hash);
+                    path.push('>');
+                    issuer_copy = result.issuer;
+                    if !chosen_path.is_empty()
+                        && path.len() >= chosen_path.len()
+                        && path >= chosen_path
+                    {
+                        skip = true;
+                        break;
+                    }
+                }
+                if skip {
+                    continue;
+                }
+
+                if chosen_path.is_empty() || path < chosen_path {
+                    chosen_path = path;
+                    chosen_issuer = Some(issuer_copy);
+                }
+            }
+
+            data_to_hash.push_str(&chosen_path);
+            if let Some(ci) = chosen_issuer {
+                issuer = ci;
+            }
+        }
+
+        Ok(HndqResult {
+            hash: hash_hex::<D>(data_to_hash.as_bytes()),
+            issuer,
+        })
+    }
+
+    // ---- §4.7 Hash Related Blank Node ----
+
+    fn hash_related_blank_node<D: Digest>(
+        &self,
+        related: &str,
+        quad: &Quad,
+        issuer: &IdentifierIssuer,
+        position: Position,
+    ) -> Result<String, CanonError> {
+        let mut input = match position {
+            Position::Graph => "g".to_string(),
+            Position::Subject => format!("s{}", quad.predicate),
+            Position::Object => format!("o{}", quad.predicate),
+        };
+        let identifier = match self.canonical_issuer.get(related) {
+            Some(id) => format!("_:{}", id),
+            None => match issuer.get(related) {
+                Some(id) => format!("_:{}", id),
+                None => self.hash_first_degree_quads::<D>(related)?,
+            },
+        };
+        input.push_str(&identifier);
+        Ok(hash_hex::<D>(input.as_bytes()))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Position {
+    Subject,
+    Object,
+    Graph,
+}
+
+#[derive(Debug)]
+struct HndqResult {
+    hash: String,
+    issuer: IdentifierIssuer,
+}
+
+/// Poison-graph guard: caps total HNDQ invocations (RDFC-1.0 §4.8 worst case is
+/// super-polynomial). Mirrors the standard path's default limit so the v2
+/// profile fails closed identically.
+struct HndqCallCounter {
+    count: usize,
+    limit: usize,
+}
+
+impl HndqCallCounter {
+    fn new(limit: usize) -> Self {
+        Self { count: 0, limit }
+    }
+    fn add(&mut self) -> Result<(), CanonError> {
+        self.count += 1;
+        if self.count > self.limit {
+            Err(CanonError::Canonicalization(format!(
+                "HNDQ call limit ({}) exceeded (poison graph)",
+                self.limit
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bnode collection + relabelling, recursing through triple terms.
+// ---------------------------------------------------------------------------
+
+fn push_unique(labels: &mut Vec<String>, label: &str) {
+    if !labels.iter().any(|l| l == label) {
+        labels.push(label.to_string());
+    }
+}
+
+fn collect_bnodes_subject(subject: &NamedOrBlankNode, out: &mut Vec<String>) {
+    if let NamedOrBlankNode::BlankNode(b) = subject {
+        push_unique(out, b.as_str());
+    }
+}
+
+fn collect_bnodes_term(term: &Term, out: &mut Vec<String>) {
+    match term {
+        Term::BlankNode(b) => push_unique(out, b.as_str()),
+        Term::Triple(t) => {
+            collect_bnodes_subject(&t.subject, out);
+            collect_bnodes_term(&t.object, out);
+        }
+        _ => {}
+    }
+}
+
+/// RDFC-1.0 §4.6 (3.1.1) special relabelling: a bnode equal to the reference
+/// becomes `a`, any other bnode becomes `z`. Applied recursively through triple
+/// terms so nested bnodes get the same special-identifier treatment.
+fn relabel_quad_first_degree(quad: &Quad, reference: &str) -> Quad {
+    Quad::new(
+        relabel_subject(&quad.subject, reference),
+        quad.predicate.clone(),
+        relabel_term(&quad.object, reference),
+        relabel_graph(&quad.graph_name, reference),
+    )
+}
+
+fn relabel_subject(subject: &NamedOrBlankNode, reference: &str) -> NamedOrBlankNode {
+    match subject {
+        NamedOrBlankNode::BlankNode(b) => {
+            NamedOrBlankNode::BlankNode(special_label(b.as_str(), reference))
+        }
+        other => other.clone(),
+    }
+}
+
+fn relabel_term(term: &Term, reference: &str) -> Term {
+    match term {
+        Term::BlankNode(b) => Term::BlankNode(special_label(b.as_str(), reference)),
+        Term::Triple(t) => Term::Triple(Box::new(Triple::new(
+            relabel_subject(&t.subject, reference),
+            t.predicate.clone(),
+            relabel_term(&t.object, reference),
+        ))),
+        other => other.clone(),
+    }
+}
+
+fn relabel_graph(graph: &GraphName, reference: &str) -> GraphName {
+    match graph {
+        GraphName::BlankNode(b) => GraphName::BlankNode(special_label(b.as_str(), reference)),
+        other => other.clone(),
+    }
+}
+
+fn special_label(label: &str, reference: &str) -> BlankNode {
+    if label == reference {
+        BlankNode::new_unchecked("a")
+    } else {
+        BlankNode::new_unchecked("z")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Final serialization with canonical labels.
+// ---------------------------------------------------------------------------
+
+/// §5 serialize: relabel every bnode to its canonical `c14nN`, sort the lines
+/// in code-point order, concatenate (one `\n`-terminated line per quad).
+fn serialize_canonical(
+    dataset: &[Quad],
+    issued: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut doc = String::new();
+    for line in canonical_lines(dataset, issued) {
+        doc.push_str(&line);
+        doc.push('\n');
+    }
+    doc
+}
+
+/// The canonical N-Quads lines (each `… .`, NO trailing newline — matching the
+/// standard `CanonicalGraph::lines` contract), sorted in code-point order and
+/// **deduplicated**: RDF is a set, so identical quads (which canonicalize to the
+/// same line) collapse, exactly as the `rdf-canon` `Dataset` path does.
+fn canonical_lines(
+    dataset: &[Quad],
+    issued: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let mut lines: Vec<String> = dataset
+        .iter()
+        .map(|q| {
+            let relabelled = Quad::new(
+                relabel_subject_canonical(&q.subject, issued),
+                q.predicate.clone(),
+                relabel_term_canonical(&q.object, issued),
+                relabel_graph_canonical(&q.graph_name, issued),
+            );
+            canonical_line_no_newline(&relabelled)
+        })
+        .collect();
+    lines.sort();
+    lines.dedup();
+    lines
+}
+
+/// A canonical N-Quads line WITHOUT the trailing ` .\n` separator — the
+/// `CanonicalGraph::lines` form. (The hashing path uses [`serialize_quad_line`],
+/// which keeps the ` .\n` the RDFC-1.0 spec hashes over.)
+fn canonical_line_no_newline(quad: &Quad) -> String {
+    match &quad.graph_name {
+        GraphName::DefaultGraph => {
+            format!("{} {} {} .", quad.subject, quad.predicate, quad.object)
+        }
+        graph => format!(
+            "{} {} {} {} .",
+            quad.subject, quad.predicate, quad.object, graph
+        ),
+    }
+}
+
+fn issued_label(label: &str, issued: &std::collections::HashMap<String, String>) -> BlankNode {
+    match issued.get(label) {
+        Some(c) => BlankNode::new_unchecked(c.clone()),
+        // Unlabelled bnode (shouldn't happen for a fully canonicalized dataset);
+        // keep the input label rather than panic so the failure is visible.
+        None => BlankNode::new_unchecked(label),
+    }
+}
+
+fn relabel_subject_canonical(
+    subject: &NamedOrBlankNode,
+    issued: &std::collections::HashMap<String, String>,
+) -> NamedOrBlankNode {
+    match subject {
+        NamedOrBlankNode::BlankNode(b) => {
+            NamedOrBlankNode::BlankNode(issued_label(b.as_str(), issued))
+        }
+        other => other.clone(),
+    }
+}
+
+fn relabel_term_canonical(term: &Term, issued: &std::collections::HashMap<String, String>) -> Term {
+    match term {
+        Term::BlankNode(b) => Term::BlankNode(issued_label(b.as_str(), issued)),
+        Term::Triple(t) => Term::Triple(Box::new(Triple::new(
+            relabel_subject_canonical(&t.subject, issued),
+            t.predicate.clone(),
+            relabel_term_canonical(&t.object, issued),
+        ))),
+        other => other.clone(),
+    }
+}
+
+fn relabel_graph_canonical(
+    graph: &GraphName,
+    issued: &std::collections::HashMap<String, String>,
+) -> GraphName {
+    match graph {
+        GraphName::BlankNode(b) => GraphName::BlankNode(issued_label(b.as_str(), issued)),
+        other => other.clone(),
+    }
+}
+
+/// One canonical N-Quads line, `… .\n`, using oxrdf-0.3's canonical `Display`
+/// (which renders triple terms as `<<( … )>>` and directional literals as
+/// `"…"@lang--dir` per RDF-1.2 N-Quads). Default-graph quads omit the graph
+/// term (3-term line), matching the standard serializer.
+fn serialize_quad_line(quad: &Quad) -> String {
+    match &quad.graph_name {
+        GraphName::DefaultGraph => {
+            format!("{} {} {} .\n", quad.subject, quad.predicate, quad.object)
+        }
+        graph => {
+            format!(
+                "{} {} {} {} .\n",
+                quad.subject, quad.predicate, quad.object, graph
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers.
+// ---------------------------------------------------------------------------
+
+/// Lowercase-hex of `D`'s digest over `data`. The RDFC-1.0 algorithm is
+/// parameterized over its hash function; `D` is threaded through every hashing
+/// step (first-degree, related, n-degree) so the canonical labels are computed
+/// entirely under the caller's chosen hash. SHA-256 (`canonicalize_rdf12`) is
+/// the spec default; SHA-384 (`canonicalize_rdf12_with::<Sha384>`) the parity
+/// target.
+fn hash_hex<D: Digest>(data: &[u8]) -> String {
+    let digest = D::digest(data);
+    let mut s = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter() {
+        s.push_str(&format!("{:02x}", byte));
+    }
+    s
+}
+
+/// All permutations of `items` (RDFC-1.0 §4.8 5.4). Lists here are the bnodes
+/// sharing one related hash; the spec's factorial blow-up is bounded by the
+/// HNDQ call limit applied in the recursion.
+fn permutations(items: &[String]) -> Vec<Vec<String>> {
+    if items.is_empty() {
+        return vec![vec![]];
+    }
+    let mut out = Vec::new();
+    for i in 0..items.len() {
+        let mut rest = items.to_vec();
+        let head = rest.remove(i);
+        for mut p in permutations(&rest) {
+            p.insert(0, head.clone());
+            out.push(p);
+        }
+    }
+    out
+}

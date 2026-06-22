@@ -47,7 +47,13 @@
     "docs/**/*.md",
     "crates/**/*.md",
     "research/**/*.md",
-    "zk/**/*.md"
+    "zk/**/*.md",
+    // [OPUS-4.8] sq-lhwo.1: the metrics-harness README. Added to the HARD
+    // markdownlint (structural) glob. NOT added to the lychee internal-links scope
+    // yet: it links forward to research/agent-effectiveness-program.md +
+    // research/dogfooding-sparq-knowledge-graph.md, which land via PRs #1064/#1063 —
+    // adding it to lychee before those merge would dangle. Add it there once they do.
+    "metrics/**/*.md"
   ],
   "ignores": [
     "node_modules",
@@ -56,6 +62,11 @@
     "**/target",
     "vendor",
     "**/vendor",
-    "zk/xpath/vendor"
+    "zk/xpath/vendor",
+    // Vendored third-party ontologies (sparql-zkp-ontologies, ISWC 2025;
+    // MIT-licensed as of 2026-06-21, see the directory LICENSE + PROVENANCE.md).
+    // Reproduced verbatim and not reformatted; treat the whole vendored tree as
+    // third-party (same rationale as vendor/). [OPUS-4.8]
+    "crates/sparq-trust/ontologies/zkp-sparql"
   ]
 }

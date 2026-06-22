@@ -1,0 +1,9 @@
+# [OPUS-4.8] sq-ixc3.8 — build artifacts for the operational GUI frontend.
+/.next/
+/out/
+/node_modules/
+next-env.d.ts
+*.tsbuildinfo
+
+# The wasm bundle is synced in from js/wasm at build time (a build artifact, not source).
+/public/wasm/

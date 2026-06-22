@@ -98,6 +98,12 @@ jobs:
             docker:
               - 'Dockerfile'
               - '**/Dockerfile'
+              # [OPUS-4.8] sq-5f1s4 — `.dockerignore` shapes the `context: .` build the
+              # docker-smoke job runs (it decides what `COPY . .` includes). A
+              # `.dockerignore`-only PR that breaks the build context would otherwise set
+              # docker_changed=false and skip the smoke at PR time (the gui.yml/#1081
+              # blind-spot class). container-scan.yml already lists it; match that here.
+              - '.dockerignore'
               - 'scripts/docker-smoke.sh'
               - '.github/workflows/ci.yml'
       - name: Decide rust_changed (safe-by-default off the PR path)
@@ -159,7 +165,7 @@ jobs:
       # side) lets a residual transient binary race self-heal. SHA-pinned install
       # action (a pin already vetted elsewhere in this workflow).
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: nextest
       # [OPUS-4.8] Build + ARCHIVE the whole workspace test set once. `--all-targets`
@@ -312,7 +318,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: nextest
       - name: Download nextest archive
@@ -413,7 +419,7 @@ jobs:
           done
 
   wasm:
-    name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm + sparq-text-wasm + sparq-shacl-wasm)
+    name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm + sparq-text-wasm + sparq-shacl-wasm + sparq-solid)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
@@ -588,6 +594,21 @@ jobs:
       # job summary so a future bloat is visible in the log.
       - name: Measure sparq-introspect wasm bundle size (informational)
         run: ./scripts/introspect-wasm-size.sh | tee -a "$GITHUB_STEP_SUMMARY"
+      # [OPUS-4.8] sq-7agop: the opt-in Solid access-control layer compiles to wasm32 AND
+      # now RUNS there. `materialize_wac`/`materialize_acp` previously called
+      # `std::time::Instant::now()` unconditionally (for the informational `stats.millis`),
+      # which PANICS on wasm32-unknown-unknown (no monotonic clock) — the crate compiled
+      # but TRAPPED at runtime. The timing is now cfg-gated off on wasm32 (reports `0.0`).
+      # clippy on the wasm32 target first (the native lint job compiles for the HOST triple
+      # and never sees wasm32-cfg'd paths), then the headless `wasm-pack test --node` smoke
+      # (crates/sparq-solid/tests/wasm_materialize.rs) drives the REAL materialize path in a
+      # genuine wasm runtime so the trap can never silently regress — `cargo build --target
+      # wasm32` alone never RUNS materialize. The crate's transitive oxrdf→rand→getrandom
+      # uses the wasm_js backend selected by .cargo/config.toml.
+      - name: clippy (wasm32 target, sparq-solid, deny warnings)
+        run: cargo clippy -p sparq-solid --target wasm32-unknown-unknown --all-targets -- -D warnings
+      - name: Headless wasm tests (sparq-solid materialize, wasm-pack test --node)
+        run: wasm-pack test --node crates/sparq-solid
 
   # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
   # panic-surface tests) is run by the dedicated `python.yml` workflow ("Python
@@ -617,6 +638,28 @@ jobs:
       # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
       - name: clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # [OPUS-4.8] sq-4sbk: clippy -D warnings, WORKSPACE-WIDE, with `--all-features` — the
+      # clippy sibling of the two-state rustdoc gate below. The default-features clippy above
+      # NEVER compiles code inside default-OFF `#[cfg(feature = "…")]` modules (result-cache,
+      # txn, vectorized, service, fedplan, fedclient, odrl-bridge, …), so a clippy lint inside
+      # an opt-in feature module slips the central gate and only surfaces — if at all — via a
+      # feature-matrix.yml leg that happens to enable that exact feature (the legs there clippy
+      # per-crate `-p <crate> --features <set>`). This workspace-wide `--all-features` pass
+      # catches such lints centrally AND the cross-crate feature-unification interactions that a
+      # per-crate `-p` leg structurally cannot see (a default-feature edit that only mis-lints
+      # once the unified all-features build turns another crate's feature on). VERIFIED SOUND on
+      # main before being made gating (sq-4sbk crux check): the workspace has NO `compile_error!`
+      # mutual-exclusion guard and NO `not(feature=…)` *compile-time* assert that breaks under
+      # unification — `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+      # compiles every opt-in crate (sparq-hdt/-gpu/-py/-fedplan-mpc included) and is CLEAN.
+      # The network features (`live`/`embeddings`) only COMPILE reqwest here; no socket is
+      # opened (clippy does not run tests), so they are safe in this lint-only pass. Cost: the
+      # lint job already builds the workspace twice over (default clippy + two rustdoc passes);
+      # this adds only the off-by-default feature code on a warm target dir — a modest increment,
+      # not a second full build (the bulk of the dependency + first-party graph is already
+      # compiled by the default-features clippy above).
+      - name: clippy (deny warnings, workspace — all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # [OPUS-4.8] sq-8gsv: rustdoc -D warnings, WORKSPACE-WIDE. A broken/private intra-doc
       # link (e.g. a public item linking to a crate-private const/fn, or an unresolved
       # `[`Foo`]` that renders as literal text) is a rustdoc warning — NOT a clippy/build
@@ -894,6 +937,140 @@ jobs:
             solid-conformance.out
             conformance-scoreboard.md
 
+  odrl-conformance:
+    # [OPUS-4.8] sq-tmsd6 — SolidLab ODRL Test Suite conformance RATCHET, a
+    # DEDICATED gating job alongside SPARQL / inference / SHACL / GeoSPARQL / Solid /
+    # JSON-LD. The runner is crate-local in sparq-policy
+    # (crates/sparq-policy/tests/odrl_test_suite.rs): each of the 68 self-describing
+    # ODRL cases is driven through the REAL parse_policy_str + evaluate path and
+    # compared against the case's expected compliance report (the oracle:
+    # report:activationState ⇒ ALLOW/DENY). The suite data is FETCHED (gitignored,
+    # mirroring the SPARQL/SHACL/JSON-LD fetch-then-run split), so this job clones
+    # the pinned suite, runs the runner with --nocapture, and re-checks the printed
+    # `ODRL suite scenarios pass N / fail M / not-implemented K (floor F)` line as
+    # the same belt-and-braces `>= floor` gate the other ratchet jobs use. The
+    # runner's own `assert!(pass >= ODRL_SUITE_FLOOR)` is the primary gate. Honest
+    # baseline: 59/68 pass; the 9 remaining are a documented not-implemented bucket
+    # (LogicalConstraint/odrl:and, party/asset collections, the odrl:use
+    # umbrella-action divergence, duty-unknown) that never fails the gate. Never
+    # lower the ratchet (raise ODRL_SUITE_FLOOR as the fragment grows).
+    name: SolidLab ODRL conformance (ratchet — pass >= 59)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Fetch SolidLab ODRL Test Suite (pinned)
+        run: bash scripts/fetch-odrl-suite.sh
+      - name: Run SolidLab ODRL decision-parity suite
+        # The runner asserts its own pinned floor; capture the output so the grep
+        # gate below re-checks the pass count.
+        run: |
+          cargo test -p sparq-policy --test odrl_test_suite -- --nocapture \
+            | tee odrl-conformance.out
+      - name: Enforce ratchet (pass count must not regress)
+        run: |
+          ODRL_FLOOR=59
+          # runner prints: "ODRL suite scenarios pass <n> / fail <m> / not-implemented <k> (floor <f>)"
+          ODRL_PASS=$(grep -oE 'ODRL suite scenarios pass [0-9]+ / fail' odrl-conformance.out | grep -oE '[0-9]+' | head -1)
+          echo "SolidLab ODRL scenarios pass: ${ODRL_PASS:-unknown} (floor $ODRL_FLOOR)"
+          [ -n "$ODRL_PASS" ] && [ "$ODRL_PASS" -ge "$ODRL_FLOOR" ] || { echo "::error::SolidLab ODRL regressed below the ratchet (${ODRL_PASS:-?} < $ODRL_FLOOR)"; exit 1; }
+      - name: Emit consolidated conformance scoreboard
+        # Render the ONE central scoreboard index (all suites + floors across crates)
+        # into this job's step summary, so the ODRL job surfaces where it sits in the
+        # whole conformance picture.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: odrl-conformance
+          path: |
+            odrl-conformance.out
+            conformance-scoreboard.md
+
+  jsonld-conformance:
+    # [OPUS-4.8] sq-oy1f.2 / sq-3uos5 / sq-oy1f.19 — W3C JSON-LD 1.1 conformance
+    # RATCHET (toRdf + fromRdf + compact + frame), a DEDICATED gating job alongside
+    # SPARQL / inference / SHACL / GeoSPARQL / Solid. The runner is crate-local
+    # (crates/sparq-conformance/tests/jsonld_suite.rs) but behind the OPT-IN
+    # `jsonld-suite` feature (forwards to sparq-core/jsonld +
+    # sparq-engine/serialize-rdf), so it runs ONLY here — the generic
+    # `cargo test --workspace` shards build it feature-OFF (a single self-SKIP test,
+    # zero oxjsonld/writer code linked: the lean-core posture). This job fetches the
+    # pinned w3c/json-ld-api suite (toRdf/fromRdf/compact) AND the SEPARATE pinned
+    # w3c/json-ld-framing suite (frame), runs the runner with the feature ON +
+    # --nocapture, and re-checks the printed `TOTAL toRdf|fromRdf|compact|frame
+    # <pass> …` lines as the same belt-and-braces `>= floor` gate. The runner's own
+    # `assert!(pass >= FLOOR)` is the primary gate. Honest baseline: NOT 100%
+    # conformant (remote-context / option / negative divergences are documented gaps;
+    # compact is RDF→compacted-JSON-LD via the native Compaction Algorithm gated on a
+    # lossless round-trip; frame is RDF→framed-JSON-LD via the native Framing
+    # Algorithm gated on RDF-equivalence to the normative expected output, each with
+    # its own honest below-floor divergence + skip buckets); expand/flatten are
+    # reported as not-implemented buckets and never fail the gate. Never lower the
+    # ratchet (raise TORDF_FLOOR / FROMRDF_FLOOR / COMPACT_FLOOR / FRAME_FLOOR as
+    # oxjsonld + the native writer/compactor/framer improve).
+    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 51, compact >= 186, frame >= 61)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Fetch W3C JSON-LD 1.1 API test suite (toRdf/fromRdf/compact, pinned)
+        run: ./scripts/fetch-jsonld-tests.sh
+      - name: Fetch W3C JSON-LD 1.1 Framing test suite (frame, pinned)
+        # [OPUS-4.8] sq-oy1f.19 — framing is a SEPARATE W3C repo (w3c/json-ld-framing).
+        run: ./scripts/fetch-jsonld-framing-tests.sh
+      - name: Run JSON-LD toRdf + fromRdf + compact + frame suites (jsonld-suite feature ON)
+        # The runner asserts its own pinned floors; capture the scoreboard so the
+        # grep gate below re-checks the pass counts.
+        run: |
+          cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite -- --nocapture \
+            | tee jsonld-conformance.out
+      - name: Enforce ratchet (pass counts must not regress)
+        run: |
+          TORDF_FLOOR=413
+          FROMRDF_FLOOR=51
+          # [OPUS-4.8] sq-oy1f.16 — RAISED 163 → 186 after #978's compaction
+          # faithfulness fixes (re-measured: 186 pass). Mirror the toRdf/fromRdf
+          # belt-and-braces grep gate.
+          COMPACT_FLOOR=186
+          # [OPUS-4.8] sq-oy1f.19 — the frame ratchet (RDF → framed JSON-LD over the
+          # w3c/json-ld-framing suite; normative-answer-equivalence). Same grep shape.
+          FRAME_FLOOR=61
+          # runner prints: "TOTAL toRdf <pass> <fail> <skip> (floor F)"
+          TORDF_PASS=$(grep -E '^TOTAL toRdf ' jsonld-conformance.out | awk '{print $3}' | head -1)
+          FROMRDF_PASS=$(grep -E '^TOTAL fromRdf ' jsonld-conformance.out | awk '{print $3}' | head -1)
+          COMPACT_PASS=$(grep -E '^TOTAL compact ' jsonld-conformance.out | awk '{print $3}' | head -1)
+          FRAME_PASS=$(grep -E '^TOTAL frame ' jsonld-conformance.out | awk '{print $3}' | head -1)
+          echo "JSON-LD toRdf pass: ${TORDF_PASS:-unknown} (floor $TORDF_FLOOR); fromRdf pass: ${FROMRDF_PASS:-unknown} (floor $FROMRDF_FLOOR); compact pass: ${COMPACT_PASS:-unknown} (floor $COMPACT_FLOOR); frame pass: ${FRAME_PASS:-unknown} (floor $FRAME_FLOOR)"
+          [ -n "$TORDF_PASS" ] && [ "$TORDF_PASS" -ge "$TORDF_FLOOR" ] || { echo "::error::JSON-LD toRdf regressed below the ratchet (${TORDF_PASS:-?} < $TORDF_FLOOR)"; exit 1; }
+          [ -n "$FROMRDF_PASS" ] && [ "$FROMRDF_PASS" -ge "$FROMRDF_FLOOR" ] || { echo "::error::JSON-LD fromRdf regressed below the ratchet (${FROMRDF_PASS:-?} < $FROMRDF_FLOOR)"; exit 1; }
+          [ -n "$COMPACT_PASS" ] && [ "$COMPACT_PASS" -ge "$COMPACT_FLOOR" ] || { echo "::error::JSON-LD compact regressed below the ratchet (${COMPACT_PASS:-?} < $COMPACT_FLOOR)"; exit 1; }
+          [ -n "$FRAME_PASS" ] && [ "$FRAME_PASS" -ge "$FRAME_FLOOR" ] || { echo "::error::JSON-LD frame regressed below the ratchet (${FRAME_PASS:-?} < $FRAME_FLOOR)"; exit 1; }
+      - name: Emit consolidated conformance scoreboard
+        # Render the ONE central scoreboard index (all suites + floors across crates)
+        # into this job's step summary, so the JSON-LD job surfaces where it sits in
+        # the whole conformance picture.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: jsonld-conformance
+          path: |
+            jsonld-conformance.out
+            conformance-scoreboard.md
+
   inference-conformance:
     # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL
     # (W3C OWL WG test cases), the w3c/N3 community-group suite, and
@@ -993,7 +1170,7 @@ jobs:
         # [OPUS-4.8] sq-tool-pin: taiki-e/install-action picks the tool from its @<tool> ref;
         # SHA-pinning (our code-scanning=0 policy) drops that ref, so an explicit `with: tool:`
         # is MANDATORY — without it install-action installs NOTHING and `cargo llvm-cov` ENOENTs.
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # cargo-llvm-cov
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov
       - name: Test-presence gate (fast, no compile)
@@ -1111,7 +1288,7 @@ jobs:
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action — the @<tool> ref is dropped by the SHA pin, so without this the
         # tool is silently NOT installed and `cargo llvm-cov` ENOENTs (see per-commit job).
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # cargo-llvm-cov
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov
       - name: Test-presence gate
@@ -1180,7 +1357,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # cargo-mutants
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # cargo-mutants
         with:
           tool: cargo-mutants@25.3.1
       - name: Run cargo-mutants per crate + ratchet against the baseline
@@ -1280,7 +1457,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-geiger
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: cargo-geiger
         continue-on-error: true

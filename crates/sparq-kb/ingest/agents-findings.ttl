@@ -1,0 +1,182 @@
+# agents-findings.ttl — GENERATED from agents-findings.yaml.ld by
+# crates/sparq-kb/ingest/yamlld_compile.py (FO-bridge Phase 4, sq-mztg8.2).
+# DO NOT HAND-EDIT — edit the .yaml.ld authoring source and recompile.
+# 🤖 SPARQ agent [OPUS-4.8]. Conforms to pkg.shapes.ttl (0 violations).
+
+@prefix cito: <http://purl.org/spar/cito/> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix fabio: <http://purl.org/spar/fabio/> .
+@prefix kb: <https://sparq.dev/ns/pkg/kb#> .
+@prefix pkg: <https://sparq.dev/ns/pkg#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix secx: <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix sigimpl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# === Concepts (the V()-resolution catalog) ===
+
+kb:topic-merge-discipline a skos:Concept ;
+  skos:inScheme pkg:Topics ;
+  skos:prefLabel "Merge discipline"@en-GB ;
+  skos:definition "The PR + ci-summary gate + review-resolution + arming model that governs how a change lands on main."@en-GB .
+
+kb:topic-subagent-rules a skos:Concept ;
+  skos:inScheme pkg:Topics ;
+  skos:prefLabel "Sub-agent standing rules"@en-GB ;
+  skos:definition "The standing rules every dispatched sub-agent follows (the shared contract + worktree isolation + the proceed-without-greenlight rule)."@en-GB .
+
+kb:topic-zk-discipline a skos:Concept ;
+  skos:inScheme pkg:Topics ;
+  skos:prefLabel "ZK/MPC claim + circuit discipline"@en-GB ;
+  skos:definition "The honesty + gate-count discipline specific to the sparq-zk* / sparq-mpc estate."@en-GB .
+
+# === Sources ===
+
+kb:doc-agents-md a pkg:Source , pkg:Document , fabio:Expression ;
+  dcterms:title "AGENTS.md — the sparq agent charter (how we work)"@en-GB ;
+  dcterms:identifier "AGENTS.md" ;
+  dcterms:format "text/markdown" ;
+  pkg:exploredStatus pkg:Explored ;
+  pkg:followUpPriority 0 ;
+  pkg:confidence 1.0 ;
+  dcterms:subject kb:topic-merge-discipline ;
+  dcterms:subject kb:topic-subagent-rules .
+
+# === Findings (the @graph) ===
+
+kb:find-merge-ci-summary-gate a pkg:Finding ;
+  rdfs:label "A PR merges only when ci-summary is green and every review thread is resolved"@en-GB ;
+  pkg:about kb:topic-merge-discipline ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "Changes land on main via PRs, not direct push; the single required check is ci-summary (it aggregates every workflow and passes only when all pass); merge only when ci-summary is green AND all review threads — especially Copilot's — are resolved, then squash-merge and delete the branch."@en-GB ;
+  pkg:confidence 0.98 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-agents-md ;
+  cito:citesAsEvidence kb:doc-agents-md ;
+  dcterms:source "AGENTS.md#contribution-workflow--prs-reviews-resolved-the-ci-summary-gate" ;
+  dcterms:subject kb:topic-merge-discipline .
+
+kb:find-zk-circuit-gate a pkg:Finding ;
+  rdfs:label "A ZK-circuit change re-runs forge_gates + differential_fuzz + the gate-count snapshot and re-opens the soundness audit"@en-GB ;
+  pkg:about kb:topic-zk-discipline ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "Touching sparq-zk / sparq-zk-compose re-runs forge_gates + differential_fuzz and the gate-count snapshot (gate_count.rs + gate_count_snapshot.json); snapshot_covers_top_level_circuits (Gate G5) and snapshot_covers_every_member fail without a toolchain if a new circuit lacks a baseline; re-baseline via bench/zk-compose/scripts/gate_counts.sh and re-open the soundness audit."@en-GB ;
+  pkg:confidence 0.95 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-agents-md ;
+  cito:citesAsEvidence kb:doc-agents-md ;
+  dcterms:source "AGENTS.md#post-batch-re-evaluation-checklist--what-to-re-run-after-a-change" ;
+  dcterms:subject kb:topic-zk-discipline ;
+  dcterms:subject kb:topic-merge-discipline .
+
+kb:find-zk-member-checklist a pkg:Finding ;
+  rdfs:label "Adding/removing a zk/compose member needs the gate-count snapshot updated and the Rust gate run, not just nargo test"@en-GB ;
+  pkg:about kb:topic-zk-discipline ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "A zk/compose member is a bin Noir package using compose_core; on add/remove you must (1) update gate_count_snapshot.json's members map with the real circuit_size from bb gates and re-baseline, and (2) run cargo nextest run -p sparq-zk-compose (NOT just nargo test) — the membership-and-count gate lives in the Rust suite, so nargo test passing is not evidence the gate passes."@en-GB ;
+  pkg:confidence 0.95 ;
+  pkg:assurance secx:Proven ;
+  prov:wasDerivedFrom kb:doc-agents-md ;
+  cito:citesAsEvidence kb:doc-agents-md ;
+  dcterms:source "AGENTS.md#zk-circuit-member-checklist--adding-or-removing-a-zkcompose-member" ;
+  dcterms:subject kb:topic-zk-discipline .
+
+kb:find-zk-privacy-claims-gate a pkg:Finding ;
+  rdfs:label "Any ZK/MPC privacy or soundness claim must stay hedged/negative — the privacy-claims gate is a HARD ci-summary job"@en-GB ;
+  pkg:about kb:topic-zk-discipline ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "The v1 ZK verifier is pending external accredited-cryptographer sign-off (sq-qhy4) and sparq-mpc is honest-majority semi-honest only, so no doc/README/SKILL/site line may state a ZK/MPC privacy-or-soundness property as settled fact without the not-yet-sound caveat; scripts/check-privacy-claims.sh (the HARD privacy-claims job in docs-quality.yml, gated by ci-summary) fails the build on an unhedged hit unless the line carries privacy-claims-allow: <why>."@en-GB ;
+  pkg:confidence 0.97 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-agents-md ;
+  cito:citesAsEvidence kb:doc-agents-md ;
+  dcterms:source "AGENTS.md#post-batch-re-evaluation-checklist--what-to-re-run-after-a-change" ;
+  dcterms:subject kb:topic-zk-discipline ;
+  dcterms:subject kb:topic-merge-discipline .
+
+kb:find-zk-arming-model a pkg:Finding ;
+  rdfs:label "A verified-clean non-perf PR auto-arms; never arm auto-merge on a stacked PR whose base is not main"@en-GB ;
+  pkg:about kb:topic-merge-discipline ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "Honesty/correctness/scope are automated by adversarial-verify + ci-summary, so a verified-clean, non-perf-affecting PR auto-arms; a perf-affecting PR gets the sparq-perf-reviewer PreToolUse gate before arming; and NEVER arm auto-merge on a stacked PR (base != main) — GitHub squash-merges it into the stacked base and its content never reaches main (enforced by scripts/check-pr-arm-base.py)."@en-GB ;
+  pkg:confidence 0.93 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-agents-md ;
+  cito:citesAsEvidence kb:doc-agents-md ;
+  dcterms:source "AGENTS.md#contribution-workflow--prs-reviews-resolved-the-ci-summary-gate" ;
+  dcterms:subject kb:topic-merge-discipline .
+
+kb:find-subagent-shared-contract a pkg:Finding ;
+  rdfs:label "Every dispatched sub-agent follows the shared contract; task briefs state the task only"@en-GB ;
+  pkg:about kb:topic-subagent-rules ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "The sub-agent shared contract is the single source of truth for the standing rules every dispatched sub-agent follows; the six role-agent system prompts carry it, so a dispatcher does not repeat it — a task brief states the task only (bead, target crate/surface, task-specific constraint) and otherwise says follow the shared contract."@en-GB ;
+  pkg:confidence 0.97 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-agents-md ;
+  cito:citesAsEvidence kb:doc-agents-md ;
+  dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
+  dcterms:subject kb:topic-subagent-rules .
+
+kb:find-subagent-worktree-isolation a pkg:Finding ;
+  rdfs:label "Every mutating sub-agent runs in its OWN isolated worktree+branch, never the shared main checkout"@en-GB ;
+  pkg:about kb:topic-subagent-rules ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "Any sub-agent that writes files, runs git checkout -b, or commits MUST work in an isolated git worktree (isolation: worktree) and MUST NOT branch-switch the shared /home/ubuntu/sparq checkout — two mutating agents on one checkout race (observed 2026-06-20: two agents lost uncommitted work); read-only search/analysis/review agents may share the main checkout for a warm cache."@en-GB ;
+  pkg:confidence 0.96 ;
+  pkg:assurance secx:Proven ;
+  prov:wasDerivedFrom kb:doc-agents-md ;
+  cito:citesAsEvidence kb:doc-agents-md ;
+  dcterms:source "AGENTS.md#worktree-isolation--every-mutating-agent-gets-its-own-worktreebranch" ;
+  dcterms:subject kb:topic-subagent-rules .
+
+kb:find-subagent-staging a pkg:Finding ;
+  rdfs:label "Sub-agents stage only changed files by explicit path; never git add -A and never stage .beads/"@en-GB ;
+  pkg:about kb:topic-subagent-rules ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "Stage ONLY the files you change, by explicit path; NEVER git add -A and NEVER stage .beads/ — beads re-export is the orchestrator's job on its own chore-beads-resync branch (it conflicts at merge if folded into a feature branch); revert any beads churn that appears in your tree."@en-GB ;
+  pkg:confidence 0.96 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-agents-md ;
+  cito:citesAsEvidence kb:doc-agents-md ;
+  dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
+  dcterms:subject kb:topic-subagent-rules .
+
+kb:find-subagent-no-push-selfid a pkg:Finding ;
+  rdfs:label "Sub-agents commit in-worktree (no push/merge), gate in-worktree without weakening a gate, and self-identify in every comment"@en-GB ;
+  pkg:about kb:topic-subagent-rules ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "A sub-agent commits in-worktree and reports — the orchestrator pushes, opens the PR, and merges (exception: sparq-merge-fixer); it gates in-worktree scoped to affected crates and NEVER disables/regex-weakens/blanket-excludes a gate to go green; and it begins every issue/PR/comment with the SPARQ-agent self-identification blockquote."@en-GB ;
+  pkg:confidence 0.95 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-agents-md ;
+  cito:citesAsEvidence kb:doc-agents-md ;
+  dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
+  dcterms:subject kb:topic-subagent-rules .
+
+kb:find-subagent-proceed-no-greenlight a pkg:Finding ;
+  rdfs:label "Sub-agents proceed without the maintainer's greenlight, documenting the default and filing a feedback issue"@en-GB ;
+  pkg:about kb:topic-subagent-rules ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "The standing rule binds the orchestrator, every sub-agent, and the autonomous-scheduler: never stall waiting for a greenlight — proceed on a design/decision-blocked bead with the best-judgment default, document it (PR body / bead / issue), and open a feedback issue; the only valid blocker is an external credential an agent literally cannot obtain, and this never overrides honesty/soundness discipline."@en-GB ;
+  pkg:confidence 0.94 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-agents-md ;
+  cito:citesAsEvidence kb:doc-agents-md ;
+  dcterms:source "AGENTS.md#standing-rule--proceed-without-waiting-for-the-maintainers-greenlight-2026-06-21" ;
+  dcterms:subject kb:topic-subagent-rules .
+
+kb:find-subagent-provenance-honesty a pkg:Finding ;
+  rdfs:label "Sub-agents tag [OPUS-4.8] + the Opus trailer and keep ZK/MPC + perf claims gate-safe"@en-GB ;
+  pkg:about kb:topic-subagent-rules ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "Add the [OPUS-4.8] inline marker on new code/notes plus the Co-Authored-By: Claude Opus 4.8 (1M context) commit trailer; keep mentions gate-safe — the privacy-claims gate is live (never an unqualified ZK/MPC soundness claim), no hard-coded performance numbers in markdown, and the typos gate flags ordinary doc words to reword."@en-GB ;
+  pkg:confidence 0.93 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-agents-md ;
+  cito:citesAsEvidence kb:doc-agents-md ;
+  dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
+  dcterms:subject kb:topic-subagent-rules ;
+  dcterms:subject kb:topic-zk-discipline .

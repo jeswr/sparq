@@ -23,10 +23,23 @@ use engine::EngineState;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // [OPUS-4.8] sq-ixc3.6 (epic sq-ixc3) — register the filesystem plugin so the webview's
+        // workspace store (@sparq/client `TauriWorkspaceStore`) can persist each workspace to
+        // `<app-local-data>/workspaces/*.json` and survive an app restart. The capability
+        // (capabilities/default.json) scopes this to `$APPLOCALDATA/workspaces` ONLY — the
+        // plugin grants no path the capability does not explicitly allow. With the plugin
+        // unregistered the webview's runtime `fs` lookup fails and the GUI degrades to the
+        // browser localStorage backend.
+        .plugin(tauri_plugin_fs::init())
         // The single native store, shared across all command invocations.
         .manage(EngineState::new())
         .invoke_handler(tauri::generate_handler![
             engine::load,
+            // [OPUS-4.8] sq-ixc3.13 — the Import drawer's native loader: decode a pasted
+            // document (`load_text`) or a disk file (`load_path`, incl. compressed + native-
+            // only HDT) into N-Quads for the in-tab store to merge.
+            engine::load_text,
+            engine::load_path,
             engine::query,
             engine::query_quads,
             engine::update_in_place,

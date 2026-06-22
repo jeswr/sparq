@@ -21,6 +21,15 @@ extend-exclude = [
   "Cargo.lock",
   "zk/xpath/vendor",
   "*.svg",
+  # Vendored third-party ontologies (sparql-zkp-ontologies, ISWC 2025; MIT-licensed
+  # as of 2026-06-21): reproduced verbatim with British spelling + many author
+  # surnames; treat as vendored. [OPUS-4.8]
+  "crates/sparq-trust/ontologies/zkp-sparql",
+  # [OPUS-4.8] sq-2m6zm.2: the GENERATED PKG ingest graph projects verbatim bd issue
+  # titles (incl. beads whose title is literally about a typo, e.g. "succee", and raw
+  # commit SHAs like "ba9c281") + skill front-matter — projected source data, not
+  # hand-written prose, so it is excluded like other generated artifacts.
+  "crates/sparq-kb/ingest/pkg-instances.ttl",
 ]
 
 [default]
@@ -88,6 +97,7 @@ Fo = "Fo"               # wrapped "For/Of" fragment in a table
 Thm = "Thm"             # "Theorem" abbreviation
 IST = "IST"             # acronym in a table
 Rotat = "Rotat"         # "RotatE" KG-embedding model name (wraps to "Rotat")
+struc = "struc"         # [OPUS-4.8] "struc2vec" structural-role embedding method name (typos splits on the digit, flags "struc"->"struct")
 criticals = "criticals"  # audit jargon: "the audit's criticals"
 unparseable = "unparseable" # accepted variant spelling used in skills docs
 unstalled = "unstalled"  # "proceeding unstalled" (= not stalled) — intentional

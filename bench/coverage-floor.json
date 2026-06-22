@@ -73,7 +73,8 @@
       "note": "[OPUS-4.8] sq-bif.1: OPT-IN W3C PROV-O lineage. CONSTRUCT/UPDATE lineage core is default-on; measured WITH --features reason (the sparq-reason proof-tree -> PROV-O bridge module + its tests/reason_prov.rs). Measured line% 96.70 (762/788); floor = floor(measured) - 2 margin. Conservative work-box seed; CI is the ratchet of record."
     },
     "sparq-reason": {
-      "floor": 82
+      "floor": 87,
+      "note": "[OPUS-4.8] sq-wtjol+sq-fodw5 (sq-qcnn follow-ups): killed 6 OWL inconsistencies() list-pair-enumeration mutants (AllDisjointClasses cax-adc / AllDifferent eq-diff2/3 / AllDisjointProperties prp-adp offset arithmetic; the residual 6 survivors are provably-equivalent defensive-bound `guard < 10_000` + short-circuit `&&` guards) and raised n3/mod.rs past 85% (backward-chaining list/formula projection + standardize-apart depth recursion + fact-store list walk, log:includes virtual rdf:first/rest containment incl. the deferred-rotation branch, per-firing existential skolemization, IEEE INF/NaN math propagation vs finite-NaN domain-error). Earlier sq-qcnn (#980): the inconsistencies() clash routine, N3 builtin reverse modes + fail-closed paths, the log: formula-scope family, the public API entry points, and the N3/Turtle parser edge+error paths. Lifted measured line% 88.80 -> 89.23 (default-feature `cargo llvm-cov -p sparq-reason`, matching scripts/coverage.sh); n3/mod.rs 82.64 -> 85.17; floor = floor(measured) - 2 margin. Conservative work-box seed; CI's --check-robust is the ratchet of record."
     },
     "sparq-reason-wasm": {
       "floor": 0,
@@ -95,7 +96,8 @@
       "note": "[OPUS-4.8] sq-4vao: behavioural tests for the lowest-covered modules (subscription reevaluate_step/subscribe_init diff + refusal classes, budget->SSE-status + RDF-1.2 triple-term encoding, the json_error/sanitized_error info-leak envelope, the GSP escape_iri/body-decode helpers, and the SPARQL-Protocol dataset-override rewrite) lifted measured line% 86.38 -> 88.14; floor = floor(measured) - 2 margin."
     },
     "sparq-shacl": {
-      "floor": 90
+      "floor": 93,
+      "note": "[OPUS-4.8] sq-qcnn / sq-qcnn.1: measured with DEFAULT features (the per-commit tier — no measure() case arm; the opt-in shacl-af/scs surfaces are compiled out of a default build, so func.rs/scs.rs do not count toward this default-feature number). Raised 90 -> 93 by sq-qcnn (#993) SHACL-SPARQL §5.2/§6 coverage; sq-qcnn.1 then lifted sparql.rs 79% -> 94% with an in-src unit-test module (sparql::tests) over the DARK push_values_down deep-algebra arms (Group/Slice/Distinct/Reduced/OrderBy/Minus-left/LeftJoin-left, structural + semantic) and the fail-closed error paths of ask_violates/select_validate/PreparedSparql::evaluate/pre_bind_ask/PreparedValidator::build (non-SELECT/ASK skip, mismatched validator, inexpressible blank-node value, SERVICE runtime-query-error). Measured default-feature line% 95.48 (3798/3978); floor = floor(measured) - 2 = 93 (unchanged — floors only rise). The shacl-af func.rs and scs.rs gains are behind their opt-in features and so do NOT lift this default-feature floor. Conservative work-box seed; CI's --check-robust is the ratchet of record."
     },
     "sparq-shacl-wasm": {
       "floor": 0,

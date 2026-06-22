@@ -40,6 +40,37 @@ semver_check = true
 # `vX.Y.Z`, which fires release.yml unchanged.
 git_tag_name = "v{{ version }}"
 
+# [OPUS-4.8] sq-owci — tolerate the four tracked-yet-gitignored artifacts on a fresh checkout.
+# WHY THIS EXISTS: on every `push: main`, `release-plz release-pr` (the Release-PR job in
+# .github/workflows/release-plz.yml) ABORTED its `determine next versions` step with
+#   "the working directory of this project has uncommitted changes. If these files are both
+#    committed and in .gitignore, either delete them or remove them from .gitignore.
+#    [".beads/interactions.jsonl", "bench/wikidata-8b/STATUS.md",
+#     "inference-conformance-report.md", "zk/compose/STATUS.md"]"
+# (live: run 27867775455). release-plz reuses cargo's VCS dirty-check, which treats a file that
+# is BOTH committed AND matched by a .gitignore rule as "uncommitted" — independently of any
+# real source change. On a fresh CI checkout those four files are the ONLY thing it flags, so the
+# Release-PR step failed on every main push, perennially marking this (non-gating) workflow red
+# and masking real CI signal (the `tag` job is unaffected — `release-plz release` does no such
+# check, hence it has always succeeded).
+#
+# allow_dirty = true makes `release-plz release-pr`/`update` proceed despite a dirty tree (per
+# release-plz config docs). It is SAFE here and does NOT mask a release regression: the four
+# offending paths are committed-but-ignored, so there is no diff content to fold into the
+# Release-PR — release-plz still computes versions from the conventional-commit history exactly
+# as before, it just stops treating the ignore-rule shadow as a blocker.
+#
+# [OPUS-4.8] sq-l8imt UPDATE: the root-cause repo-hygiene fix has now landed for 3 of the 4
+# paths — bench/wikidata-8b/STATUS.md and zk/compose/STATUS.md are untracked (git rm --cached,
+# still .gitignore'd as generated reports), and inference-conformance-report.md is removed from
+# .gitignore (AGENTS.md §"Conformance" says it IS committed). The 4th, .beads/interactions.jsonl,
+# is a runtime log under the orchestrator/maintainer-only .beads/ tree; untracking it (git rm
+# --cached .beads/interactions.jsonl) is left as a maintainer action. UNTIL that single remaining
+# untrack is done, this file is still committed-AND-ignored, so allow_dirty stays as the safety
+# net (harmless to keep — see sq-l8imt). After the maintainer untracks it, `git ls-files -ci
+# --exclude-standard` will be empty and allow_dirty may optionally be reverted.
+allow_dirty = true
+
 # --- Tag-only handoff to release.yml (activated by the release-plz WORKFLOW) -----------
 # [OPUS-4.8] sq-v286.4 (the workflow bead this file's header defers "activation" to;
 # .github/workflows/release-plz.yml). The two keys below are what make the `release-plz

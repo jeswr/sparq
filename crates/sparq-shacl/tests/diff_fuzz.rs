@@ -712,6 +712,9 @@ fn key_normalisation_is_consistent() {
             default_message: String::new(),
             details: vec![],
         }],
+        // [OPUS-4.8] (sq-lz99x) report now carries skipped-constraint diagnostics;
+        // none here (this fixture is a hand-built result, not a real validation).
+        diagnostics: vec![],
     };
     let sk = sparq_keys(&report);
     let rr = RefReport {

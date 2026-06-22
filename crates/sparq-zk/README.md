@@ -12,16 +12,18 @@ elements, leaf orderings, witness input sets) are exactly what the later Noir
 circuits and proof composition will consume — bit-compatible with
 `noir-lang/poseidon` and validated against the W3C `rdf-canon` test suite.
 
-> **Internal crate — not published** to crates.io (`publish = false`). Circuits
-> and proof composition are later deliverables; **no soundness or privacy claim**
-> is made for this pipeline today (see the ZK verifier soundness status in the
-> repo's security records). A field-native value-hook term/literal encoding change
-> is **PLANNED** (research-grade, NOT implemented, audit-gated) — it is registered
-> as an open external-audit obligation, see gap-register **CR-G8** / `sq-qhy4`.
-> <!-- [OPUS-4.8] privacy-claims-allow: forward pointer to an unimplemented, audit-gated encoding change registered as an OPEN obligation; asserts no soundness/privacy property; sq-qhy4 / CR-G8 -->
+> **Internal crate — not published** to crates.io (`publish = false`). Circuits and
+> proof composition are later deliverables; **no soundness or privacy claim** is made
+> for this pipeline today. Config-only **commitment-method registry** (`commit::CommitmentMethod`:
+> CLOSED fail-closed selection over `zk:scheme` — `string-canonical` default · `dual-leaf` ·
+> the OFF-by-default `commitment-value-only` research dial; sq-zzxt) records the method but adds no
+> circuit. The opt-in `dual-leaf` host value encoders (`dual_leaf::{encode_literal, encode_double, encode_decimal}`
+> — integer/double/decimal classes, fail-closed; mirror the `filter_value_dl_*` members; sq-xojl + sq-2ezsx, full pipeline `sq-j506`) carry the #769-accepted
+> **INV-VL downgrade** (value↔lexical agreement is trusted-issuer-honesty — open audit obligation
+> **CR-G8** / `sq-qhy4`). The OFF-circuit issuer-signature seam is the OPEN `sig::IssuerSignatureScheme` trait (sq-1hsl, `SchnorrBjjScheme` the byte-unchanged default impl) — additive, asserting no soundness claim.
+> <!-- [OPUS-4.8] privacy-claims-allow: opt-in audit-gated encoding + config/seam plumbing, registered as an OPEN obligation; asserts no soundness/privacy property; sq-qhy4 / CR-G8 -->
 
-Design: [`research/zkp-query-proofs-plan.md`](../../research/zkp-query-proofs-plan.md).
-Contributing: [`AGENTS.md`](../../AGENTS.md).
+Design: [`research/zkp-query-proofs-plan.md`](../../research/zkp-query-proofs-plan.md). Contributing: [`AGENTS.md`](../../AGENTS.md).
 
 ## License
 

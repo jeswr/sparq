@@ -15,9 +15,26 @@
 # trailingSlash:true), so every INTERNAL link in the emitted HTML is an absolute path like
 #   /sparq/about/   (and the bare root link /sparq/).
 # On disk those resolve to <out>/about/index.html and <out>/index.html — i.e. the `/sparq`
-# prefix must be stripped to land in the export root. Two --remap rules do exactly that:
+# prefix must be stripped to land in the export root. Three --remap rules do exactly that:
+#   0. file://<out>/sparq/<path>#<frag> -> file://<out>/<path>/index.html#<frag>
+#                                       (a CROSS-PAGE path+fragment link, see [OPUS-4.8] sq-bpoey)
 #   1. file://<out>/sparq/(.*)  -> file://<out>/$1          (every /sparq/<path> link)
 #   2. file://<out>/sparq       -> file://<out>/index.html  (the bare /sparq root link)
+#
+# [OPUS-4.8] sq-bpoey — RULE 0 is load-bearing for cross-page anchor links like
+# `/sparq/capabilities/#privacy` (homepage theme grid + the removed /surface/* redirect stubs
+# point at /capabilities/#<theme>). With `--root-dir`, lychee resolves a *directory* link that
+# carries a fragment to the bare directory path (e.g. file://<out>/capabilities) and then,
+# crucially, does NOT fall through to that directory's index.html when locating the `#fragment`
+# heading — so it reports "Cannot find fragment" for EVERY such link. (Verified empirically
+# against the CI lychee 0.23.0: a `/dir/#frag`, a `/dir#frag`, AND a `/dir/` form all fail; only
+# an explicit `/dir/index.html#frag` resolves.) Adding a trailing slash before the fragment in
+# the emitted link — as one might expect under trailingSlash:true — does NOT help; the fix must
+# rewrite the directory to its index.html for the fragment lookup. Rule 0 runs FIRST so it owns
+# the path+fragment case; rule 1 then handles every remaining (fragment-free) /sparq/<path> link.
+# This is the regression that reddened the pages.yml link-check after PR #1003 introduced the
+# first cross-page fragment links on the site (the self-test below only covered same-page #anchors).
+#
 # (lychee normalises a trailing-slash dir link to the slashless path before matching, so the
 # two rules together cover both forms — verified empirically: 0 errors over the full export,
 # and an injected dead link is caught.)
@@ -54,6 +71,7 @@ lychee \
   --include-fragments \
   --no-progress \
   --root-dir "$OUT_ABS" \
+  --remap "file://${OUT_ABS}/sparq/([^#]+)#(.+) file://${OUT_ABS}/\$1/index.html#\$2" \
   --remap "file://${OUT_ABS}/sparq/(.*) file://${OUT_ABS}/\$1" \
   --remap "file://${OUT_ABS}/sparq file://${OUT_ABS}/index.html" \
   --exclude-path "${OUT_ABS}/dev" \

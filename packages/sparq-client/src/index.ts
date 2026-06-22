@@ -213,9 +213,100 @@ export async function loadSparq(opts: LoadSparqOptions = {}): Promise<WasmStoreC
  * {@link loadSparq} promise, so the cold start happens at most once. Returns a promise that
  * resolves when the engine is ready (or rejects on a load failure, which resets the cache
  * so a later call can retry).
+ *
+ * Note this kicks the fetch off IMMEDIATELY (synchronously from the call site). For the
+ * "load async AFTER the page paints" posture the maintainer asked for (#935 / #981 — keep
+ * the ~300 kB wasm off the critical path so the page is interactive FIRST), prefer
+ * {@link prewarmSparqWhenIdle}, which defers the fetch to the next browser-idle slot.
  */
 export function prewarmSparq(opts: LoadSparqOptions = {}): Promise<unknown> {
   return loadSparq(opts);
+}
+
+/** The handle {@link prewarmSparqWhenIdle} returns so a caller can cancel a not-yet-fired
+ * idle prewarm (e.g. a React effect cleanup on unmount). Calling it before the idle slot
+ * fires prevents the wasm fetch from being kicked off; calling it after is a no-op. */
+export interface IdlePrewarmHandle {
+  /** Cancel the pending idle prewarm if it has not fired yet. */
+  cancel(): void;
+}
+
+/**
+ * [OPUS-4.8] sq-4296 (#935 / #981) — pre-warm the wasm engine LAZILY, on the next
+ * browser-idle slot, so the ~300 kB engine wasm never competes with the initial page paint.
+ *
+ * This is the "load async after the page loads" mechanism: instead of firing the wasm fetch
+ * synchronously while a wasm-using component mounts (which the maintainer flagged as blocking
+ * page load), it schedules the fetch via `requestIdleCallback` — so the browser finishes
+ * layout / paint / first-input readiness FIRST, then fetches + instantiates the wasm in the
+ * background. The page is interactive before the wasm finishes loading; the (memoised)
+ * {@link loadSparq} promise is reused, so any later on-demand `await loadSparq()` (e.g. the
+ * first "Run query") simply joins the in-flight or already-resolved load — never a second
+ * cold start, never a call into an uninitialised wasm.
+ *
+ * `requestIdleCallback` is feature-detected: where it is unavailable (Safari < 16.4, the SSR
+ * pass, the static-export prerender) it falls back to a short `setTimeout(…, 1)`, which still
+ * yields to the paint before fetching. The optional `timeout` (default 2000 ms) caps how long
+ * the idle wait may stretch under sustained main-thread work, so the engine still warms on a
+ * busy page. Returns an {@link IdlePrewarmHandle} whose `cancel()` unschedules a not-yet-fired
+ * prewarm — pass it to a React effect cleanup so an unmount before the idle slot does no work.
+ *
+ * `onReady` / `onError` are optional readiness callbacks the (memoised) load resolves into, so
+ * a component can flip its engine pill to "ready" / "error" without re-importing `loadSparq`.
+ */
+export function prewarmSparqWhenIdle(
+  opts: LoadSparqOptions & {
+    timeout?: number;
+    onReady?: () => void;
+    onError?: (err: unknown) => void;
+  } = {},
+): IdlePrewarmHandle {
+  const { timeout = 2000, onReady, onError, ...loadOpts } = opts;
+  let cancelled = false;
+
+  const fire = (): void => {
+    if (cancelled) return;
+    loadSparq(loadOpts).then(
+      () => {
+        if (!cancelled) onReady?.();
+      },
+      (err) => {
+        if (!cancelled) onError?.(err);
+      },
+    );
+  };
+
+  // Schedule on the next idle slot so the page paints / becomes interactive first. Outside a
+  // browser (SSR / static prerender) `requestIdleCallback` is undefined; a short timeout
+  // there still yields to any paint before the fetch is kicked off.
+  type RIC = (cb: () => void, opts?: { timeout?: number }) => number;
+  type CIC = (handle: number) => void;
+  const ric =
+    typeof window !== "undefined"
+      ? (window as unknown as { requestIdleCallback?: RIC }).requestIdleCallback
+      : undefined;
+  const cic =
+    typeof window !== "undefined"
+      ? (window as unknown as { cancelIdleCallback?: CIC }).cancelIdleCallback
+      : undefined;
+
+  if (typeof ric === "function") {
+    const id = ric(fire, { timeout });
+    return {
+      cancel() {
+        cancelled = true;
+        if (typeof cic === "function") cic(id);
+      },
+    };
+  }
+
+  const id = setTimeout(fire, 1);
+  return {
+    cancel() {
+      cancelled = true;
+      clearTimeout(id);
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +455,57 @@ export async function sparqShaclValidate(
         "Rebuild sparq-wasm with --features shacl.",
     );
   }
-  return JSON.parse(validate(data, shapes, format)) as ShaclReport;
+  // [OPUS-4.8] sq-800o — LOST-RECEIVER fix. The line above only EXISTENCE-checks a detached
+  // method reference (so a lean, no-`shacl` bundle still yields the clear error above). It must
+  // NOT be the thing we CALL: wasm-bindgen's `Store.validate` body does
+  // `wasm.store_validate(this.__wbg_ptr, …)`, so invoking the detached `validate(…)` runs with
+  // `this === undefined` and throws `Cannot read properties of undefined (reading '__wbg_ptr')`.
+  // Invoke it BOUND to the `store` receiver so `this.__wbg_ptr` resolves to the live store.
+  return JSON.parse(store.validate(data, shapes, format)) as ShaclReport;
+}
+
+/**
+ * [OPUS-4.8] sq-pyn7 (#796) — parse a **SHACL Compact Syntax** (SCS) document into a SHACL
+ * **shapes graph**, returned as pretty Turtle, entirely in-tab via the `scs`-enabled wasm
+ * bundle. This is the SCS *input* counterpart of the playground's serialiser
+ * (`shapesToCompact`, the Turtle → SCS *display* direction): it takes compact text and gives
+ * back the Turtle shapes graph that {@link sparqShaclValidate} then consumes — so a user can
+ * author shapes in the terser compact notation and validate data against them unchanged.
+ *
+ * Like {@link sparqShaclValidate} this is a stateless one-shot exposed as an instance method
+ * on the wasm `Store`, so it needs any receiver — an empty store is the cheapest. The optional
+ * `base` resolves relative IRIs in the SCS document; `loadOpts` is forwarded to
+ * {@link loadSparq} so a GUI host can pass its own `basePath`.
+ *
+ * A clear error is thrown if the loaded bundle was built without the `scs` feature (no
+ * `parseShaclCompact` binding) — the lean SPARQL REPL bundle omits it — so a caller can
+ * distinguish "no SCS in this bundle" from an SCS *parse* error (the latter is a `JsError`
+ * carrying the parser's message + 1-based line).
+ */
+export async function sparqParseShaclCompact(
+  text: string,
+  base?: string,
+  loadOpts: LoadSparqOptions = {},
+): Promise<string> {
+  const Store = await loadSparq(loadOpts);
+  // Stateless one-shot, but exposed as an instance method — the empty store is just the
+  // receiver (the binding does not consult its triples).
+  const store = Store.load("", "turtle");
+  // Defensive lean-bundle check: the tracked generated d.ts is the site's `scs`-enabled
+  // bundle, so `parseShaclCompact` is type-declared as present, but the bundle actually LOADED
+  // at runtime is decided by the asset URL. A lean bundle omits the binding, so probe a
+  // possibly-undefined view first to yield a clear error rather than a "not a function" crash.
+  const parse = (store as { parseShaclCompact?: WasmStore["parseShaclCompact"] })
+    .parseShaclCompact;
+  if (typeof parse !== "function") {
+    throw new Error(
+      "This wasm bundle was built without the SHACL Compact Syntax feature (no " +
+        "parseShaclCompact binding). Rebuild sparq-wasm with --features scs.",
+    );
+  }
+  // Invoke BOUND to the `store` receiver (the same lost-receiver fix as `validate` above:
+  // a detached `parse(…)` would run with `this === undefined` and throw on `this.__wbg_ptr`).
+  return store.parseShaclCompact(text, base ?? null);
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +673,41 @@ export {
   parsePrometheusMetrics,
   shortenIri,
 } from "./server-health.js";
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-atb0 — the persistent cross-session WORKSPACE model + persistence
+// abstraction. The framework-agnostic data shape of a named workspace (its imported sources,
+// the whole-dataset N-Quads save/open snapshot, and the saved SPARQL editor state) plus the
+// ONE `WorkspaceStore` interface with three runtime-selected backends — Tauri on-disk (when a
+// Tauri webview exposes the fs plugin), browser `localStorage` (the static-export path), and
+// an in-memory session fallback. No Tauri/DOM dependency: each tier is feature-detected. No
+// secret (a bearer token) is ever persisted. Consumed by the site's REPL workspace panel and
+// portable to the Tauri GUI unchanged.
+// ---------------------------------------------------------------------------
+
+export {
+  type Workspace,
+  type WorkspaceSummary,
+  type WorkspaceSourceMeta,
+  type WorkspaceEditorState,
+  type WorkspaceRunMode,
+  type WorkspaceBackend,
+  type WorkspaceStore,
+  type WorkspaceStoreOptions,
+  type KeyValueStorage,
+  type TauriFsApi,
+  WORKSPACE_SCHEMA,
+  WebWorkspaceStore,
+  MemoryWorkspaceStore,
+  TauriWorkspaceStore,
+  createWorkspaceStore,
+  detectWebStorage,
+  isTauriRuntime,
+  newWorkspace,
+  parseWorkspace,
+  workspaceId,
+  workspaceSummary,
+} from "./workspace.js";
 
 /** Renders a term for display, with a compact datatype/lang suffix. */
 export function formatTerm(t: SparqlTerm | undefined): string {

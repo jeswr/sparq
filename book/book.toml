@@ -1,11 +1,13 @@
-# [OPUS-4.8] sq-h0tr — mdBook guide scaffold for the sparq docs site.
+# [OPUS-4.8] sq-h0tr / sq-im8u — mdBook guide scaffold for the sparq docs site.
 #
-# This is the SCAFFOLD only (book.toml + SUMMARY.md + a few real content pages).
-# Single-source {{#include}} wiring of guide pages from README/SKILL.md is a
-# FOLLOW-UP bead (sq-im8u); tested-example {{#rustdoc_include}} embedding is
-# sq-384j. The pages here are intentionally short, hand-written prose distilled
-# from the existing AGENTS.md/README/SKILL content (not lorem), so the tree is
-# real and renders, and the include-wiring bead can replace the prose in place.
+# Scaffold (book.toml + SUMMARY.md + the content pages) from sq-h0tr; as of sq-im8u
+# the content pages are thin {{#include}} wrappers that single-source their prose
+# (build-time content injection) from the canonical README.md / skills/<surface>/SKILL.md
+# `ANCHOR` regions, so the guide cannot drift from the source of truth. Tested-example
+# {{#rustdoc_include}} embedding (the library snippet) is sq-384j. The only original
+# prose left in book/src is SUMMARY.md + one-line section intros; the capability
+# link-TABLE keeps mount-portable absolute URLs (see capabilities.md header for why it
+# is not included from the README's repo-relative Features list).
 #
 # Reproducible build (CI pins the exact mdbook version — see .github/workflows/docs.yml):
 #   mdbook build book      # → book/book/ (the rendered site)

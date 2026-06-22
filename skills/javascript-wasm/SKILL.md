@@ -51,24 +51,29 @@ npm test        # node --test against the built dist/
 
 ```ts
 // Construction (all async; each runs wasm init() once, memoised)
+static empty(): Promise<SparqStore>                                        // empty + mutable; grow via update()/addQuads() (named graphs work out of the box)
 static fromString(data: string, format?: RdfFormat, opts?: SparqStoreOptions): Promise<SparqStore>
 static fromQuads(quads: Iterable<RDF.Quad>, opts?: SparqStoreOptions): Promise<SparqStore>     // serialised to N-Quads internally
 static fromCompressed(bytes: Uint8Array, format?: RdfFormat,
                       opts?: SparqStoreOptions & { codec?: 'zstd' | 'gzip' }): Promise<SparqStore>
+// Sync variants (engine must already be initialised — see fromStringSync): emptySync(), fromStringSync(...), fromQuadsSync(...)
 
 type RdfFormat = 'turtle' | 'ntriples' | 'nquads' | 'trig' | 'jsonld'; // jsonld: a JSON-LD @graph is preserved with { dataset: true }
-interface SparqStoreOptions { compressed?: boolean; dataset?: boolean; } // NOT combinable
+interface SparqStoreOptions { compressed?: boolean; dataset?: boolean; baseIri?: string; } // compressed/dataset/baseIri NOT mutually combinable
 
 // Reading
 get size(): number                                  // deduped triples in the DEFAULT graph
 heapBytes(): number                                 // rough wasm-side footprint
 query(sparql): Bindings[] | boolean                 // dispatches: SELECT->Bindings[], ASK->boolean
 queryBindings(sparql): Bindings[]                    // SELECT -> one Bindings per solution
+querySolutions(sparql): Map<string, Term>[]          // SELECT -> OXIGRAPH-shaped: array of plain Map (drop-in for oxigraph Store.query)
+querySolutionsStream(sparql): Generator<Map<string,Term>> // streaming querySolutions
 queryBoolean(sparql): boolean                        // ASK (native path; rejects non-ASK)
 queryJson(sparql): string                            // raw SPARQL 1.1 JSON string (SELECT or ASK)
 queryQuads(sparql): Quad[]                            // CONSTRUCT/DESCRIBE -> RDF/JS quads (default graph); rejects SELECT/ASK
 queryQuadsString(sparql): string                     // CONSTRUCT/DESCRIBE -> raw N-Triples (valid Turtle subset)
 count(sparql): number                                // solution count, no materialisation
+serialize(format?, opts?: SerializeOptions): string  // store -> Turtle/TriG/JSON-LD doc string (serialize-rdf bundle); dump() is an alias
 queryBindingsStream(sparql): Generator<Bindings>     // stream solutions, for...of / for await...of
 queryQuadsStream(sparql, batchSize?): Generator<Quad> // stream CONSTRUCT/DESCRIBE quads (default batchSize 1024)
 queryJsonChunks(sparql): Generator<string>           // raw ~64 KiB JSON chunks (concat == queryJson)
@@ -88,11 +93,13 @@ removeQuads(quads): void                             // applyDelta([], quads) �
 free(): void                                         // also Symbol.dispose
 ```
 
-`Bindings` (RDF/JS Query-spec, Map-like): `.get('var') -> RDF.Term | undefined`, `.has`, `.keys()`, `.values()`, `.entries()`, `.size`, `.equals`, immutable `.set/.delete/.filter/.map/.merge`, iterable. Terms: `.termType` (`'NamedNode' | 'Literal' | 'BlankNode' | ...`), `.value`, plus `.language` / `.datatype` on literals.
+`Bindings` (RDF/JS Query-spec, Map-like): `.get('var') -> RDF.Term | undefined`, `.has`, `.keys()`, `.values()`, `.entries()`, `.size`, `.equals`, immutable `.set/.delete/.filter/.map/.merge`, iterable, plus `.toMap() -> Map<string, Term>` (the Oxigraph-shaped bare-string-keyed view — #1123). Terms: `.termType` (`'NamedNode' | 'Literal' | 'BlankNode' | ...`), `.value`, plus `.language` / `.datatype` on literals.
+
+`Dataset` (named export — the full RDF/JS [`Dataset`](https://rdf.js.org/dataset-spec/) over the engine; async factories `Dataset.create/fromString/fromQuads`): `DatasetCore` (`add/delete/has/match/size/[Symbol.iterator]`) PLUS the algebra `union/intersection/difference/addAll/deleteMatches/contains/equals/filter/map/forEach/some/every/reduce/import/toStream/toArray/toString/toCanonical`. The binary set ops (`union/intersection/difference/addAll/contains/equals`) are INTEROP-aware — the operand may be another sparq `Dataset` OR any foreign RDF/JS dataset/store (N3.Store, @rdfjs/dataset), detected via `[Symbol.iterator]`. Full SPARQL surface one accessor away via `dataset.store`. (`toCanonical/equals/contains` are RDFC-1.0 blank-node-ISOMORPHISM-aware — `toCanonical` emits canonical `_:c14nN` N-Quads, `equals` compares canonical forms, `contains` matches a relabelled subgraph; backed by the engine's RDFC-1.0 surfaced over the opt-in `canon` wasm feature.)
 
 Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNode`, `blankNode`, `literal`, `variable`, `quad`, ...) and term classes `NamedNode/BlankNode/Literal/Variable/DefaultGraph/Quad`; `init` (idempotent wasm bootstrap); compression helpers `decompress / decompressToString / sniffCodec`; SPARQL helpers `termFromSparqlJson / termToNT / quadsToNQuads / detectQueryForm / SparqlJsonRowsParser`; and the `SparqDictionaryClient` (server dictionary-fetch protocol).
 
-Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.validate(data, shapes, format)` (SHACL report as a JSON **string**, shacl bundle only), `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
+Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.validate(data, shapes, format)` (SHACL report as a JSON **string**, shacl bundle only), `.serialize(format, pretty, indent, abbreviate, prefixes?)` (the store's contents as a Turtle / TriG / JSON-LD **string**, serialize-rdf bundle only — see below), `.parseShaclCompact(text, base?)` (SHACL Compact Syntax → the shapes graph as a Turtle **string**, scs bundle only — see below), `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
 
 ## Common recipes
 
@@ -109,6 +116,21 @@ for await (const row of store.queryBindingsStream('SELECT ?s ?o WHERE { ?s ?p ?o
 ```js
 store.match(null, DF.namedNode('http://ex/name'), null);     // -> Quad[]
 store.countQuads(null, DF.namedNode('http://ex/name'));      // -> 2 (no materialisation)
+```
+
+**Build a store from nothing ([OPUS-4.8] sq-ty78o / #1114).** `SparqStore.empty()` (or the raw `new Store()`) yields an empty, mutable store; grow it with `update()` / `addQuads()`. Named graphs work out of the box — the overlay creates a named graph on the first targeted insert, so an empty store needs no `dataset` flag to accept `INSERT DATA { GRAPH … }` (dataset mode only matters when *loading* a document whose named graphs would fold).
+
+```js
+const store = await SparqStore.empty();
+store.update('INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }');
+store.queryBindings('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }'); // [{ g: http://ex/g }]
+```
+
+**Resolve relative IRIs against a base ([OPUS-4.8] sq-f66jz / #1115).** Pass `{ baseIri }` to `fromString` (or raw `Store.loadWithBase(text, format, base)`) for a document fetched from a URL (or a shapes graph / manifest) that carries relative IRIs and no `@base`. A document-level `@base` still overrides it; line-based formats ignore it; an invalid base throws. Not combinable with `dataset` / `compressed`.
+
+```js
+const s = await SparqStore.fromString('<a> <p> <../up/o> .', 'turtle', { baseIri: 'http://ex/dir/' });
+// <a> -> http://ex/dir/a ; <../up/o> -> http://ex/up/o
 ```
 
 **Mutate in place (O(batch), no index rebuild).**
@@ -147,6 +169,42 @@ const nt = store.queryQuadsString('DESCRIBE <http://ex/bob>'); // raw N-Triples 
 
 The raw `Store.queryQuads` / `queryQuadsChunks` (returning N-Triples strings) remain available for zero term-materialisation.
 
+**Serialise / dump the store ([OPUS-4.8] sq-u78ol / #1117 / #1129, serialize-rdf bundle only).** The high-level **`SparqStore.serialize(format?, opts?)`** (with a `dump(format?, opts?)` alias) is the primary entry point — an options-object wrapper over the raw `Store.serialize(...)` below (`opts: { pretty?, indent?, abbreviate?, prefixes? }`, all defaulted: pretty Turtle, two-space indent, abbreviated, engine default prefixes). It throws a clear "requires a serialize-rdf-enabled wasm bundle" error on a lean bundle (rather than a cryptic "not a function").
+
+```js
+const ttl = store.serialize('turtle');                                   // pretty Turtle, default opts
+const trig = store.dump('trig');                                         // dump() == serialize()
+const mine = store.serialize('turtle', { prefixes: [['ex', 'http://ex/']] }); // caller prefix policy (#1129)
+const full = store.serialize('turtle', { abbreviate: false });           // full <…> IRIs, no @prefix header
+```
+
+The raw wasm `Store.serialize(format, pretty, indent, abbreviate, prefixes?)` (positional) is the same engine writer. Where `queryQuads` writes a CONSTRUCT/DESCRIBE *result graph* as flat N-Triples, `serialize(...)` writes the **store itself** as a readable Turtle (default graph), TriG (whole dataset, named graphs as `GRAPH <g> { … }` blocks), or JSON-LD (whole dataset) **string**. `pretty=true` indents the output (Turtle/TriG: the sorted, blank-line-separated `prettyTurtle` shape; JSON-LD: a structurally re-indented document); `indent` is the indent unit (`null`/`undefined` ⇒ two spaces, ignored when `pretty=false`). For Turtle/TriG, `abbreviate=true` emits a sorted `@prefix` header and compacts IRIs to `prefix:local`, `false` keeps full `<…>` IRIs. `prefixes` is an OPTIONAL `[[prefix, iri], …]` array selecting the compaction prefix map: omit it (`undefined`/`null`) for the engine's well-known defaults (`rdf`/`rdfs`/`xsd`/`owl`/`schema` → `http://schema.org/`/`foaf`/`dc`/`skos`/`sh`) — **byte-for-byte the prior behaviour** — or pass your OWN policy (the [`COMMON_PREFIXES`](../../packages/sparq-client/src/sparql-prefixes.ts) registry with `https://schema.org/` + `dcterms`/`prov`/`geo`/`void`/`ex` → `http://example.org/`, or a query's `declaredPrefixBindings(...)`) to drive `@prefix`/`@context` compaction under that policy and get byte-parity output. It applies to Turtle/TriG (with `abbreviate=true`) and the JSON-LD `jsonld-compacted` `@context`; a malformed entry throws. `format` (case-insensitive) is `'turtle'` (`'ttl'`/`'text/turtle'`), `'trig'` (`'application/trig'`), or **JSON-LD**: `'jsonld'` (`'json-ld'`/`'application/ld+json'`) emits the **expanded** form by default, and `'jsonld-expanded'` / `'jsonld-flattened'` / `'jsonld-compacted'` pick the [JSON-LD 1.1 document form](../data-formats/SKILL.md) explicitly. For JSON-LD `abbreviate` is **ignored** — IRI abbreviation is chosen by the `jsonld-compacted` form (which carries a prefix `@context`). An unrecognised `format` (or a malformed `prefixes`) throws. All three formats route through the SAME engine writer the native CLI/HTTP surface uses (so JS consumes the engine writer rather than hand-formatting JSON-LD). Compiled in only with the opt-in `serialize-rdf` bundle feature (see below); the lean bundle omits it. (JSON-LD serialise-OUT needs no extra feature — only `serialize-rdf`; the `jsonld` feature is INGEST-only.) **`jsonld-compacted` vs `serializeCompact` (full Compaction).** The wasm `serialize` `'jsonld-compacted'` form is the *prefix-only* `@context` (it abbreviates IRIs to `prefix:local` CURIEs from the `prefixes` map). For the **full W3C JSON-LD 1.1 Compaction Algorithm** against a caller-supplied `@context` (term definitions / `@vocab` / type-language-`@container` coercion / `@reverse` / `@id`/`@type` aliasing / value+node+IRI compaction), use the sibling **`serializeCompact(context, pretty, indent?)`** binding (sq-oy1f.5) — `context` is the `@context` **JSON text** (e.g. `'{"@vocab":"http://schema.org/"}'`), `pretty`/`indent` mirror `serialize`. It routes through `sparq_engine::serialize::graph_to_jsonld_compact` (still dependency-free, see the [data-formats SKILL](../data-formats/SKILL.md)) and is **lossless** (a JSON-LD→RDF round-trip reconstructs the triples). A non-object / malformed `context` throws. Same `serialize-rdf` bundle feature; absent on the lean bundle.
+
+```js
+// Full Compaction against a caller @context (NOT the prefix-only 'jsonld-compacted' form):
+const doc = store.serializeCompact('{"@vocab":"http://schema.org/"}', true, '  ');
+// → bare @vocab-relative predicate keys ("name", "knows"), the @context echoed.
+```
+
+```js
+const ttl = store.serialize('turtle', true, '  ', true);          // pretty Turtle, 2-space indent, default prefixes
+const trig = store.serialize('trig', true, null, true);            // pretty TriG over the whole dataset
+const jsonld = store.serialize('jsonld-compacted', true, '  ', true); // pretty JSON-LD, compacted @context
+// Caller-supplied prefix policy (e.g. the site's COMMON_PREFIXES → https://schema.org/, ex: → example.org):
+const mine = store.serialize('turtle', true, '  ', true, [['ex', 'http://example.org/'], ['schema', 'https://schema.org/']]);
+```
+
+**Parse SHACL Compact Syntax (raw wasm `Store.parseShaclCompact`, scs bundle only).** `parseShaclCompact(text, base?)` parses a [SHACL Compact Syntax](https://www.w3.org/TR/shacl12-compact-syntax/) (SCS) document into the equivalent SHACL **shapes graph** and returns it as a pretty **Turtle string** — the SCS *input* direction (the `'Compact → shapes'` mode for the `/try` playground). `base` (optional) is the base IRI relative IRIs and the `owl:Ontology` subject resolve against; `undefined`/`null` uses the SCS no-`BASE` convention (`urn:x-base:default`), and a document-level `BASE` directive overrides it. It reuses the `Store.serialize('turtle', true, '  ', true)` engine writer above (no second serialiser), so the bytes match that call; the shapes it yields validate data **identically** to the equivalent hand-written Turtle shapes (it is the same triples `validate` consumes), covering the grammar the W3C `shacl12-cs` corpus exercises. It is **stateless** (ignores the receiver's triples). A malformed SCS document throws a `JsError` carrying the 1-based source line.
+
+```js
+import init, { Store } from '@jeswr/sparq/wasm/sparq_wasm.js'; // the raw wasm Store
+await init();
+const store = Store.load('', 'turtle');                       // stateless; receiver ignored
+const shapesTurtle = store.parseShaclCompact(
+  'PREFIX ex: <http://example.org/>\nshapeClass ex:Person {\n  ex:name xsd:string [1..1] .\n}\n');
+// shapesTurtle is a pretty-Turtle shapes graph; feed it back to store.validate(...) or display it.
+```
+
 **EXPLAIN / EXPLAIN ANALYZE (query-plan introspection, raw wasm only).** Same plan text the Rust API (`sparq_engine::explain`) and the HTTP endpoint (`?explain` / `?explain=analyze`, or `Accept: text/x-sparq-explain`) return — returned to JS as a plain string. `explain` is a planning-only dry run (no execution; every query form); `explainAnalyze` runs the query (SELECT/ASK only) and appends a per-operator row-count trace.
 
 ```js
@@ -173,6 +231,27 @@ const violations = report.results.filter(
 
 The raw `Store.validate(data, shapes, format)` returns the same report as a JSON **string** (`JSON.parse` it yourself). `focusNode`/`value`/`sourceShape` are N-Triples term strings; `path` is a SHACL Turtle path expression; `severity`/`sourceConstraintComponent` are full IRIs; `message` is the first `sh:message` text (or a generated default). `path`/`value`/`message` are `null` when absent. Only a graph parse failure throws; malformed shapes are skipped, not surfaced. For large data graphs validate server-side via the `sparq-server` HTTP `validate` endpoint instead (the other half of the #162 decision). See the `shacl-validation` skill for the engine's SHACL coverage.
 
+**Raw wasm `Store`: init (`initSync` vs async default), errors, and `.free()` (#1127).** The wasm-pack `--target web` glue (`../wasm/sparq_wasm.js`) is a real ESM module that exports a **default async `init`** plus a synchronous **`initSync`** — one of the two MUST run before any `Store.*` static (`SparqStore`/`Dataset` do this for you via the package's memoised `init()`; you only call these when using the raw `Store` directly).
+
+```js
+import init, { initSync, Store } from '@jeswr/sparq/wasm/sparq_wasm.js';
+
+// (a) async default — the normal path. In the browser/Deno it fetches the .wasm
+// relative to the module; pass explicit bytes/URL to override.
+await init();                                   // or: await init({ module_or_path: bytes })
+// (b) initSync — when you ALREADY hold the compiled module/bytes (no top-level await,
+// e.g. a bundler that inlines the wasm, or a Cloudflare-Worker WebAssembly.Module import).
+initSync({ module_or_path: wasmModuleOrBytes });
+
+const store = Store.load('<a> <b> <c> .', 'ntriples');
+```
+
+- **When to use which.** Prefer the high-level `@jeswr/sparq` entry (`SparqStore`/`Dataset`), whose `init()` picks the right path per environment (Node reads the bytes off disk; browser/Deno `fetch`es) and memoises it — so the ~MB `.wasm` is paid at most once. Drop to `init`/`initSync` only when you import the raw `Store` glue directly: async `init()` for the common fetch-relative case, `initSync(...)` only when you have the module/bytes in hand and want no `await`.
+- **`init()`/`initSync()` not called first → `Store.*` throws** a wasm-bindgen "must call init" error. Calling `init()` again is idempotent.
+- **Format strings** for `Store.load`/`loadDataset`/`loadCompressed` are the same case-sensitive set the engine accepts: `turtle` (`ttl`/`text/turtle`), `ntriples` (`n-triples`/`nt`), `nquads` (`n-quads`/`nq`), `trig`, and `jsonld` (`json-ld`/`application/ld+json`, opt-in `jsonld` bundle). An **unrecognised format is an `Err`/throw** — it is NOT silently parsed as Turtle (so a `'jsonld'` load on the lean bundle throws rather than mis-parsing).
+- **Errors are JS exceptions.** Every fallible `Store` method (`load*`, `query`, `ask`, `update`, `applyDelta`, `validate`, …) maps a Rust `Err(String)` to a thrown `Error` (wasm-bindgen `JsError`) carrying the engine message (parse error with position, malformed SPARQL, an unrecognised format, a query form routed to the wrong method — e.g. CONSTRUCT through `query`). Wrap calls in `try/catch`; there are no silent failures.
+- **`.free()` — when and on what.** wasm linear memory is NOT GC'd: call `.free()` on every `Store` you create, AND on each cursor object (`QueryChunks` / the `queryCursor` / `queryQuadsChunks` handles) once drained or abandoned. After `.free()` the handle (and any cursor it spawned) must not be touched. In the high-level wrapper use `store.free()` or `using store = await SparqStore.from…()` (`Symbol.dispose`); for the raw `Store`, `break`ing out of a streaming `for…of` over a cursor still requires freeing that cursor. Leaking handles grows the 4 GB wasm heap until the tab/process OOMs.
+
 ## Gotchas / feature flags / prerequisites
 
 - **ESM only, Node >= 18.** The package is `"type": "module"`; `init()` is idempotent and runs automatically on the first `SparqStore.from*` call (in Node it reads the wasm bytes from disk; in the browser/Deno it `fetch`es relative to the module). One runtime dep: `fzstd` (~8 KB, dynamically imported only when decoding zstd).
@@ -180,6 +259,8 @@ The raw `Store.validate(data, shapes, format)` returns the same report as a JSON
 - **`REGEX` / `REPLACE` are compiled out** of the wasm build (the engine's non-default `regex` cargo feature is off to keep the bundle small). Use `CONTAINS`/`STRSTARTS`/`STRENDS`/... or a custom wasm build with `--features regex`.
 - **SHACL is on `SparqStore.validate` (typed) AND raw `Store.validate` (JSON string), shipped by default.** The published bundle is built with `--features shacl`, so `validate` works out of the box. SHACL is **not free in the binary** — it pulls in the SHACL engine + `regex` + the `sh:sparql` query path, which roughly **doubles** the `.wasm` (measured ~1.21 MiB → ~2.19 MiB, +~1.0 MiB / +85%, pre-gzip). Size-sensitive consumers can build the lean variant (`npm run build:wasm:lean`, equivalently `wasm-pack build … --release` with no `--features`), which omits SHACL — `SparqStore.validate` then throws a clear "requires a SHACL-enabled wasm bundle" error. Use `--features shacl-af` to also compile `sh:rule`. Validation is in-process and best for small documents (~10–100 triples); large graphs should use the server-side HTTP `validate` path.
 - **JSON-LD ingest (`'jsonld'`) is shipped in the published bundle but is an OPT-IN cargo feature.** The published `@jeswr/sparq` bundle is built with `--features shacl,jsonld` (the js `build:wasm` script), so `fromString(_, 'jsonld')` works out of the box. JSON-LD is **not free in the binary** — it links the `oxjsonld` parser (~0.35 MiB raw `cargo build`, pre-`wasm-opt`), so the **lean default bundle** (`build:wasm:lean` / `cargo build -p sparq-wasm` with no `--features`) omits it to stay under the perf-gate `wasm_bundle_bytes` floor. On the lean bundle a `'jsonld'` load is not recognised as JSON-LD. Turtle / N-Triples / N-Quads / TriG are always present (no feature needed).
+- **`serialize` / `dump` need the `serialize-rdf` bundle feature.** Exposed on BOTH the high-level `SparqStore.serialize(format?, opts?)` (with a `dump` alias) and the raw `Store.serialize(...)` ([OPUS-4.8] sq-u78ol / #1117 / #1129). The published `@jeswr/sparq` bundle is built with `--features shacl,jsonld,serialize-rdf` (the js `build:wasm` script), so `serialize(...)` works out of the box. It is **not free in the binary** — it links `sparq-engine`'s serializer matrix (the pretty Turtle / TriG writers) — so the **lean default bundle** (`build:wasm:lean` / `cargo build -p sparq-wasm` with no `--features`) omits it. On the lean bundle `SparqStore.serialize`/`dump` throw a clear "requires a serialize-rdf-enabled wasm bundle" error (and the raw `Store.serialize` method is absent).
+- **`Store.parseShaclCompact` needs the `scs` bundle feature.** The published `@jeswr/sparq` bundle is built with `--features shacl,jsonld,serialize-rdf,scs` (the js `build:wasm` script), so `parseShaclCompact(...)` works out of the box. The `scs` feature implies `shacl` + `serialize-rdf` (it REUSES the `serialize` engine writer to emit the shapes Turtle — no second serialiser) and forwards to `sparq-shacl/scs` (a hand-rolled parser, **no new dependency**). The **lean default bundle** (`build:wasm:lean` / `cargo build -p sparq-wasm` with no `--features`) omits it, so the lean `.wasm` is unchanged; on the lean bundle the `parseShaclCompact` method is absent. (Raw `Store` only for now; the playground "Compact → shapes" input mode and any typed `SparqStore` wrapper are tracked separately.)
 - **`options.dataset` is not combinable with `options.compressed`** — there is no compressed dataset loader yet (the constructor throws). `compact-index` (3 permutations, ~half the memory) is auto-selected for wasm32 regardless; `compressed` adds block compression on top.
 - **`size` / `heapBytes` report the DEFAULT graph only.** For dataset totals use `countQuads()` (its graph wildcard spans named graphs).
 - **Mutation is overlay-based.** `update()` / `applyDelta()` write through an append-only delta overlay: the dictionary only grows, and deletes are tombstones until the wasm store is reloaded. Blank nodes in `applyDelta`/`removeQuads` are matched **by label** (so bnode triples can be retracted — impossible via SPARQL `DELETE DATA`).

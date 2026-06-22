@@ -32,14 +32,33 @@
 name: docs
 
 on:
+  # [OPUS-4.8] sq-5f1s4 / sq-im8u — self-guarding path filter: the build embeds source it does
+  # NOT live next to. `book/src/getting-started/install.md` does
+  # `{{#rustdoc_include ../../../crates/sparq-engine/examples/quickstart.rs:quickstart}}`, and
+  # (as of sq-im8u) the guide pages `{{#include}}` canonical prose from `README.md`
+  # (`lead`/`quickstart-cli` anchors) and `skills/{zk-query-proofs,mpc}/SKILL.md`
+  # (`scaffold-caveat` anchors). `mdbook build`/`mdbook test` resolve those anchors, so if an
+  # anchor were renamed/removed (or the included example stopped compiling) and the filter only
+  # watched `book/**`, the break would land on main undetected — no `book/`-touching commit
+  # would re-run this lane to catch it (the gui.yml/#1081 blind-spot class). So every embedded
+  # source is listed too. (mdBook EXITs 0 on a broken include — the build step greps the log
+  # for `[ERROR]` — so re-running THIS lane on a source edit is the only thing that catches it.)
   push:
     branches: [main]
     paths:
       - "book/**"
+      - "crates/sparq-engine/examples/quickstart.rs"
+      - "README.md"
+      - "skills/zk-query-proofs/SKILL.md"
+      - "skills/mpc/SKILL.md"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "book/**"
+      - "crates/sparq-engine/examples/quickstart.rs"
+      - "README.md"
+      - "skills/zk-query-proofs/SKILL.md"
+      - "skills/mpc/SKILL.md"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -56,12 +75,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       # Pinned, prebuilt mdbook (GitHub Releases binary — reproducible + fast, no
       # cargo compile). Explicit `tool:` is required by the sq-ur7o install-action lint.
       - name: Install mdbook (pinned)
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: mdbook@0.4.40
 

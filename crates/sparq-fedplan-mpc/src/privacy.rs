@@ -232,7 +232,10 @@ mod tests {
         // Everything else stays private by default — even on a descriptor that DID mark
         // something public.
         assert!(!d.may_disclose("http://ex/salary"));
-        assert_eq!(d.disclosability("http://ex/salary"), Disclosability::Private);
+        assert_eq!(
+            d.disclosability("http://ex/salary"),
+            Disclosability::Private
+        );
         // The opaque attestation id is recorded (NOT verified) and the reserved field round-trips.
         assert_eq!(d.attestation_key_id(), Some("did:key:z6Mk-issuer"));
         assert_eq!(d.participates(), Some(true));

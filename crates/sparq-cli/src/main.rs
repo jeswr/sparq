@@ -806,6 +806,14 @@ fn cmd_query_mmap(args: &[String]) {
 /// `parse_to_triples` falls back to Turtle for ANY unrecognised string, so the CLI must
 /// gate on this set itself to honour the "unsupported format → non-zero exit" contract.
 fn is_known_format(format: &str) -> bool {
+    // [OPUS-4.8] (sq-oy1f.4) JSON-LD input is recognised in the DEFAULT build (the `jsonld`
+    // feature is in the CLI default set — a maintainer-directed exception). Without the feature
+    // (`--no-default-features`) the `oxjsonld` parser is not linked, so the JSON-LD tokens are
+    // NOT "known" and a `jsonld` input format errors (exit 2) rather than mis-parsing as Turtle.
+    #[cfg(feature = "jsonld")]
+    if matches!(format, "jsonld" | "json-ld" | "application/ld+json") {
+        return true;
+    }
     matches!(
         format,
         "hdt"
@@ -828,8 +836,12 @@ fn is_known_format(format: &str) -> bool {
 
 /// [OPUS-4.8] Report an unknown `--format` value and exit 2 (usage error).
 fn die_unknown_format(format: &str) -> ! {
+    // [OPUS-4.8] (sq-oy1f.4) `jsonld` is named in the default build (the `jsonld` feature is in
+    // the CLI default set); a `--no-default-features` build omits it from the list.
     eprintln!(
-        "unknown format '{format}' (known: turtle | ntriples | nquads | trig{})",
+        "unknown format '{}' (known: turtle | ntriples | nquads | trig{}{})",
+        format,
+        if cfg!(feature = "jsonld") { " | jsonld" } else { "" },
         if cfg!(feature = "hdt") { " | hdt" } else { "" }
     );
     std::process::exit(2);
@@ -885,8 +897,18 @@ fn load_quiet(path: &str, format: &str) -> sparq_core::Graph {
         use std::io::Read;
         let mut text = String::new();
         open_reader(path).and_then(|mut r| r.read_to_string(&mut text)).unwrap_or_else(|e| die(e.to_string()));
-        // N-Quads / TriG carry named graphs — load them as a dataset so GRAPH queries work.
-        if matches!(format, "nquads" | "n-quads" | "trig" | "application/trig") {
+        // N-Quads / TriG (and — [OPUS-4.8] sq-oy1f.4 — JSON-LD, whose `@graph` carries named
+        // graphs) load as a DATASET so GRAPH queries and full-dataset re-serialisation (`dump …
+        // jsonld`) see the named graphs instead of folding them into the default graph.
+        #[cfg(feature = "jsonld")]
+        let dataset = matches!(
+            format,
+            "nquads" | "n-quads" | "trig" | "application/trig"
+                | "jsonld" | "json-ld" | "application/ld+json"
+        );
+        #[cfg(not(feature = "jsonld"))]
+        let dataset = matches!(format, "nquads" | "n-quads" | "trig" | "application/trig");
+        if dataset {
             sparq_core::Graph::load_dataset(&text, format).unwrap_or_else(|e| die(e))
         } else {
             sparq_core::Graph::load_str(&text, format).unwrap_or_else(|e| die(e))
@@ -922,19 +944,53 @@ fn load(path: &str, format: &str) -> sparq_core::Graph {
 /// expanded form; `jsonld-flattened` / `jsonld-compacted` select the other 1.1 document forms.
 /// [OPUS-4.8] (sq-ixc3.3) `jsonld-pretty[-expanded|-flattened|-compacted]` emit the same
 /// JSON-LD documents in an indented, multi-line shape (whitespace-only over the minified writer).
-/// Behind the opt-in `serialize-rdf` cargo feature.
+/// [OPUS-4.8] (sq-oy1f.5) `jsonld-compact` (+ `jsonld-compact-pretty`) emit the FULL W3C
+/// JSON-LD 1.1 Compaction Algorithm against a caller `@context` supplied via `--context <file>`
+/// (term definitions / `@vocab` / type-language-`@container` coercion / `@reverse` / aliasing),
+/// not the prefix-only `jsonld-compacted` form. Behind the opt-in `serialize-rdf` cargo feature.
 #[cfg(feature = "serialize-rdf")]
 fn cmd_dump(args: &[String]) {
     let (path, in_fmt, out_fmt) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(i), Some(o)) => (p.as_str(), i.as_str(), o.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli dump <file[.gz|.bz2|.zst]> <in-format> <out-format>\n  out-format: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples | jsonld[-expanded|-flattened|-compacted] | jsonld-pretty[-expanded|-flattened|-compacted]");
+            eprintln!("usage: sparq-cli dump <file[.gz|.bz2|.zst]> <in-format> <out-format> [--context <ctx.jsonld>]\n  out-format: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples | jsonld[-expanded|-flattened|-compacted] | jsonld-pretty[-expanded|-flattened|-compacted] | jsonld-compact[-pretty] (needs --context)");
             std::process::exit(2);
         }
+    };
+    // [OPUS-4.8] (sq-oy1f.5) `--context <file>`: the JSON-LD `@context` for full 1.1 Compaction.
+    // Scanned from the args (the CLI is positional, not clap); only the `jsonld-compact` out-
+    // formats consult it. A present `--context` with no value is a usage error.
+    let context_path: Option<&str> = match args.iter().position(|a| a == "--context") {
+        None => None,
+        Some(i) => Some(args.get(i + 1).map(String::as_str).unwrap_or_else(|| {
+            eprintln!("--context needs a value (a JSON-LD @context file)");
+            std::process::exit(2);
+        })),
     };
     let g = load_quiet(path, in_fmt);
     use sparq_engine::serialize::JsonLdForm;
     let serialized = match out_fmt {
+        // [OPUS-4.8] (sq-oy1f.5) FULL W3C JSON-LD 1.1 Compaction against the `--context` file.
+        "jsonld-compact" | "json-ld-compact" | "jsonld-compact-pretty" | "json-ld-compact-pretty" => {
+            let ctx_path = context_path.unwrap_or_else(|| {
+                eprintln!("out-format '{out_fmt}' needs a `@context`: pass --context <file.jsonld>");
+                std::process::exit(2);
+            });
+            let ctx_text = std::fs::read_to_string(ctx_path).unwrap_or_else(|e| {
+                eprintln!("error reading context file {ctx_path}: {e}");
+                std::process::exit(1);
+            });
+            let ctx = sparq_engine::serialize::parse_context_json(&ctx_text).unwrap_or_else(|| {
+                eprintln!("context file {ctx_path} is not a JSON object (a JSON-LD @context)");
+                std::process::exit(1);
+            });
+            if out_fmt.ends_with("-pretty") {
+                let opts = sparq_engine::serialize::JsonLdPrettyOptions::default();
+                sparq_engine::serialize::graph_to_jsonld_compact_pretty(&g, &ctx, &opts)
+            } else {
+                sparq_engine::serialize::graph_to_jsonld_compact(&g, &ctx)
+            }
+        }
         "turtle" | "ttl" => sparq_engine::serialize::graph_to_turtle(&g),
         // [OPUS-4.8] (sq-ixc3.2) idiomatic, deterministic pretty Turtle / TriG.
         "turtle-pretty" | "ttl-pretty" => sparq_engine::serialize::graph_to_turtle_pretty(&g),
@@ -983,7 +1039,7 @@ fn cmd_dump(args: &[String]) {
             sparq_engine::triples_to_ntriples(&triples)
         }
         other => {
-            eprintln!("unknown out-format '{other}' (known: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples | jsonld[-expanded|-flattened|-compacted] | jsonld-pretty[-expanded|-flattened|-compacted])");
+            eprintln!("unknown out-format '{other}' (known: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples | jsonld[-expanded|-flattened|-compacted] | jsonld-pretty[-expanded|-flattened|-compacted] | jsonld-compact[-pretty] (needs --context))");
             std::process::exit(2);
         }
     };

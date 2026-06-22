@@ -34,12 +34,15 @@ assert_eq!(count, 1);
   decoder around your file and stream it in — sparq does not content-sniff or auto-decompress
   ([guide](../../skills/data-formats/SKILL.md)).
 - **Triple-pattern scans** — look up any triple pattern over the loaded graph.
-- **Incremental updates** — insert and delete triples in place, with an optional
-  write-ahead log.
+- **Incremental updates** — start from `Graph::new()` / `Graph::default()` (an empty graph) and
+  `insert_triple(s, p, o)` / `remove_triple(s, p, o)` a single triple from `oxrdf` terms, or apply
+  a whole batch with `apply_delta` — in place, with an optional write-ahead log.
 - **Out-of-core store** — query datasets larger than RAM from a memory-mapped on-disk store,
   with optional block compression and near-zero resident heap.
 - **Named graphs & RDF 1.2** — full quad storage and
   [triple terms](https://www.w3.org/TR/rdf12-concepts/).
+- **Thread-safe sharing** — `Graph` is `Send + Sync`, so one store serves many server threads;
+  the opt-in `shared` feature adds an ergonomic `SharedGraph` handle for axum/actix state.
 
 ## 📚 Learn more
 

@@ -5,7 +5,7 @@ use crate::model::{
     sh, Component, ComponentDef, PreparedComponentValidator, Shape, ShapesModel, Target,
 };
 use crate::path::Path;
-use crate::report::ValidationResult;
+use crate::report::{ShapeDiagnostic, ValidationResult};
 use crate::sparql::{ComponentResultFields, PreparedValidator};
 use crate::view::GraphView;
 use oxrdf::{Literal, Term};
@@ -21,7 +21,10 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 /// OCCURRENCE (e.g. two sh:class violations on one value) and per traversal route
 /// (a nested shape reached through two parents reports twice). Duplicate focus
 /// nodes from overlapping targets ARE collapsed (in `focus_nodes`).
-pub(crate) fn validate_graph(data: &Graph, shapes: &ShapesModel) -> Vec<ValidationResult> {
+pub(crate) fn validate_graph(
+    data: &Graph,
+    shapes: &ShapesModel,
+) -> (Vec<ValidationResult>, Vec<ShapeDiagnostic>) {
     let mut v = Validator {
         data: GraphView::new(data),
         shapes,
@@ -30,6 +33,7 @@ pub(crate) fn validate_graph(data: &Graph, shapes: &ShapesModel) -> Vec<Validati
         min_reentry: usize::MAX,
         regexes: FxHashMap::default(),
         uvf_targets: FxHashMap::default(),
+        diagnostics: Vec::new(),
     };
     let mut out = Vec::new();
     for &sid in &shapes.targeted {
@@ -37,7 +41,7 @@ pub(crate) fn validate_graph(data: &Graph, shapes: &ShapesModel) -> Vec<Validati
             v.validate_shape(sid, &focus, &mut out);
         }
     }
-    out
+    (out, v.diagnostics)
 }
 
 /// [OPUS-4.8] (sq-d1dw, `shacl-af`) True iff `node` conforms to the shape `sid`
@@ -57,6 +61,7 @@ pub(crate) fn conforms_node(data: &Graph, shapes: &ShapesModel, sid: usize, node
         min_reentry: usize::MAX,
         regexes: FxHashMap::default(),
         uvf_targets: FxHashMap::default(),
+        diagnostics: Vec::new(),
     };
     v.conforms(node, sid)
 }
@@ -80,6 +85,11 @@ struct Validator<'a> {
     /// (the constraint needs every target node of the shape, but is evaluated once
     /// per focus node — compute the target scan once).
     uvf_targets: FxHashMap<usize, Vec<Term>>,
+    /// [OPUS-4.8] (sq-lz99x) Non-fatal author-time diagnostics for constraints
+    /// that were SKIPPED because they could not be evaluated (currently: an
+    /// uncompilable `sh:pattern` regex). De-duplicated per (shape, pattern, flags)
+    /// so a skip is reported once, not once per value/focus node.
+    diagnostics: Vec<ShapeDiagnostic>,
 }
 
 impl<'a> Validator<'a> {
@@ -346,20 +356,31 @@ impl<'a> Validator<'a> {
                 }
             }
             Component::Pattern { source, flags } => {
-                let re = self.regex_for(source, flags.as_deref());
-                for v in values {
-                    let ok = match (&re, string_repr(v)) {
-                        (Some(re), Some(s)) => re.is_match(&s),
-                        _ => false,
-                    };
-                    if !ok {
-                        out.push(self.result(
-                            sid,
-                            focus,
-                            Some(v.clone()),
-                            "PatternConstraintComponent",
-                            format!("Value does not match pattern \"{source}\""),
-                        ));
+                // [OPUS-4.8] (sq-lz99x) An uncompilable `sh:pattern` (e.g. an
+                // unbalanced bracket, or a `(?!...)` lookahead the Rust `regex`
+                // crate does not support — neither does the XML Schema regex
+                // flavour the W3C spec ties `sh:pattern` to) yields no regex.
+                // SKIP the constraint (the crate's lenient ill-formed-shape
+                // policy) and record a diagnostic, instead of fail-closed
+                // flagging EVERY value as a violation.
+                match self.regex_for(source, flags.as_deref()) {
+                    None => self.note_pattern_skipped(sid, source, flags.as_deref()),
+                    Some(re) => {
+                        for v in values {
+                            let ok = match string_repr(v) {
+                                Some(s) => re.is_match(&s),
+                                None => false,
+                            };
+                            if !ok {
+                                out.push(self.result(
+                                    sid,
+                                    focus,
+                                    Some(v.clone()),
+                                    "PatternConstraintComponent",
+                                    format!("Value does not match pattern \"{source}\""),
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -1167,21 +1188,67 @@ impl<'a> Validator<'a> {
         let key = format!("{}\u{0}{}", source, flags.unwrap_or(""));
         self.regexes
             .entry(key)
-            .or_insert_with(|| {
-                let mut inline = String::new();
-                for f in flags.unwrap_or("").chars() {
-                    if matches!(f, 'i' | 'm' | 's' | 'x' | 'U') {
-                        inline.push(f);
-                    }
-                }
-                let pat = if inline.is_empty() {
-                    source.to_string()
-                } else {
-                    format!("(?{inline}){source}")
-                };
-                regex::Regex::new(&pat).ok()
-            })
+            .or_insert_with(|| regex::Regex::new(&compose_pattern(source, flags)).ok())
             .clone()
+    }
+
+    /// [OPUS-4.8] (sq-lz99x) Records a diagnostic for an uncompilable
+    /// `sh:pattern` that was SKIPPED, de-duplicated per (shape, pattern, flags) so
+    /// it is reported once regardless of how many focus nodes / values the shape
+    /// has. The recorded message carries the `regex` crate's own compile error
+    /// (recomputed here — only on the rare skip path), which names the unsupported
+    /// construct (e.g. look-around).
+    fn note_pattern_skipped(&mut self, sid: usize, source: &str, flags: Option<&str>) {
+        let shape = self.shapes.shapes[sid].node.clone();
+        let component = sh("PatternConstraintComponent");
+        let needle = format!("\"{source}\"");
+        let already = self.diagnostics.iter().any(|d| {
+            d.source_shape == shape
+                && d.source_component == component
+                && d.message.contains(&needle)
+        });
+        if already {
+            return;
+        }
+        let detail = match regex::Regex::new(&compose_pattern(source, flags)) {
+            Err(e) => e.to_string(),
+            // Unreachable: this is only called when `regex_for` returned None, but
+            // be defensive rather than panic.
+            Ok(_) => "the pattern did not compile".to_string(),
+        };
+        let flag_note = match flags {
+            Some(f) if !f.is_empty() => format!(" (flags \"{f}\")"),
+            _ => String::new(),
+        };
+        self.diagnostics.push(ShapeDiagnostic {
+            source_shape: shape,
+            source_component: component,
+            message: format!(
+                "sh:pattern \"{source}\"{flag_note} did not compile and was SKIPPED \
+                 (the constraint reports no violations); the Rust regex engine has no \
+                 lookahead/lookbehind, matching the XML Schema regex flavour the SHACL \
+                 spec ties sh:pattern to. regex error: {detail}"
+            ),
+        });
+    }
+}
+
+/// [OPUS-4.8] (sq-lz99x) Builds the final regex source for a `sh:pattern` /
+/// `sh:flags` pair: the supported XPath-regex flags (`i`/`m`/`s`/`x`/`U`) are
+/// turned into a leading inline `(?...)` group. Shared by [`Validator::regex_for`]
+/// (compile + match) and [`Validator::note_pattern_skipped`] (recompute the error)
+/// so both see byte-identical input.
+fn compose_pattern(source: &str, flags: Option<&str>) -> String {
+    let mut inline = String::new();
+    for f in flags.unwrap_or("").chars() {
+        if matches!(f, 'i' | 'm' | 's' | 'x' | 'U') {
+            inline.push(f);
+        }
+    }
+    if inline.is_empty() {
+        source.to_string()
+    } else {
+        format!("(?{inline}){source}")
     }
 }
 

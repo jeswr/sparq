@@ -38,6 +38,11 @@ use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
 
+// [OPUS-4.8] (sq-o5bi, sq-0g6g) `ArcSwap` is the swap mechanism for the ONLINE restore and is
+// pulled in ONLY under the `backup` feature — the default serving core is the plain
+// `ring`/`writer` pair (byte-identical to pre-#941), so the default read path never touches it.
+#[cfg(feature = "backup")]
+use arc_swap::ArcSwap;
 use sparq_core::Graph;
 use sparq_engine::QueryBudget;
 use sparq_serve::{
@@ -515,6 +520,40 @@ pub struct ServerConfig {
     /// ALL updates. `None` (the default) is the historical purely in-memory server — updates are
     /// lost on restart. Set by the binary's `--persist <DIR>` flag / `SPARQ_PERSIST_DIR` env.
     pub persist_dir: Option<std::path::PathBuf>,
+    /// [OPUS-4.8] (sq-o5bi) RESTORE-ON-START artifact path. When `Some(file)`, the binary
+    /// imports the backup artifact at `file` and seeds the in-memory serving store from it
+    /// BEFORE binding (fail-closed: a corrupt/mismatched artifact aborts startup with a clean
+    /// error). This is the bootstrap primitive for horizontal-scaling stage-2 (a fresh replica
+    /// hydrates from a backup) and the base of point-in-time recovery. `None` (the default) is
+    /// the historical behaviour (seed from the data file / empty). Mutually exclusive with an
+    /// existing `--persist` durable store in v1 (the binary refuses the combination). This field
+    /// exists only with the `backup` cargo feature; a build without it compiles no restore code.
+    /// Set by the binary's `--restore <FILE>` flag / `SPARQ_RESTORE` env.
+    #[cfg(feature = "backup")]
+    pub restore: Option<std::path::PathBuf>,
+    /// [OPUS-4.8] (sq-bu1a) POINT-IN-TIME-RECOVERY delta chain replayed forward onto the
+    /// `restore` base on start. When non-empty (and `restore` is `Some`), the binary imports the
+    /// base, then replays these incremental delta artifacts in order BEFORE binding, so the
+    /// in-memory store starts at the chain's last `to-generation` — a chosen recovery point.
+    /// Fail-closed: a corrupt / version-mismatched / out-of-order / gapped delta aborts startup
+    /// with a clean error (the same discipline as the base restore). Each path is one
+    /// `sparq_serve::backup_export_delta` output, oldest first. Empty (the default) = restore the
+    /// base only. Ignored unless `restore` is also set. This field exists only with the `backup`
+    /// cargo feature. Set by the binary's repeatable `--restore-delta <FILE>` flag /
+    /// `SPARQ_RESTORE_DELTA` env (a path list).
+    #[cfg(feature = "backup")]
+    pub restore_delta: Vec<std::path::PathBuf>,
+    /// [OPUS-4.8] (sq-ft7u) RESTORE-INTO-DURABLE opt-in for the restore-on-start path. When
+    /// `true` AND both [`restore`](Self::restore) and [`persist_dir`](Self::persist_dir) are set,
+    /// the restore-on-start writes the artifact THROUGH to the durable `--persist` directory
+    /// crash-safely, so the restored dataset SURVIVES A RESTART (the on-disk base becomes the
+    /// restored image). `false` (the default) keeps the historical contract: `--restore` and
+    /// `--persist` are MUTUALLY EXCLUSIVE (the binary refuses the combination), because an
+    /// in-memory-only restore on a durable server would be silently lost on the next restart.
+    /// This field exists only with the `backup` cargo feature; a build without it compiles no
+    /// restore code. Set by the binary's `--restore-persist` flag / `SPARQ_RESTORE_PERSIST=1` env.
+    #[cfg(feature = "backup")]
+    pub restore_persist: bool,
     /// [OPUS-4.8] (sq-d3d8, epic sq-3183) OPT-IN federation discovery descriptors. When
     /// `true`, the server serves a W3C VoID dataset description at `GET /.well-known/void`
     /// and a SPARQL 1.1 Service Description for a `GET /sparql` with no `query` parameter
@@ -577,6 +616,20 @@ pub struct ServerConfig {
     /// is a READ over the store, so the endpoint is gated by the read auth like any GET.
     #[cfg(feature = "shacl")]
     pub shacl: bool,
+    /// [OPUS-4.8] (sq-hj4n, gh-916) OPT-IN Solid-style **N3-Patch** (`text/n3`) dialect for the
+    /// Graph-Store-Protocol `PATCH` method. When `true`, a `PATCH` whose body is `text/n3` (a
+    /// `solid:InsertDeletePatch`) is parsed into its `solid:deletes` / `solid:inserts` /
+    /// `solid:where` formulas and applied as ONE atomic graph-scoped SPARQL Update through the same
+    /// sequenced writer the always-on `application/sparql-update` `PATCH` body uses. `false` (the
+    /// default) leaves it off: a `text/n3` `PATCH` body is `415` (the always-on
+    /// `application/sparql-update` `PATCH` dialect is unaffected — it never depends on this flag).
+    ///
+    /// This field exists only with the `n3-patch` cargo feature (like [`tpf`](Self::tpf) under
+    /// `tpf`); a build without that feature compiles no N3-Patch code and pays zero cost. Set by
+    /// the binary's `--n3-patch` flag / `SPARQ_N3_PATCH=1` env. A `PATCH` is a WRITE, so it is
+    /// gated by `--auth-token` exactly like an UPDATE.
+    #[cfg(feature = "n3-patch")]
+    pub n3_patch: bool,
 }
 
 impl Default for ServerConfig {
@@ -652,6 +705,16 @@ impl Default for ServerConfig {
             cors_allow: crate::cors_config::CorsAllowlist::default(),
             // [OPUS-4.8] sq-7cxr: safe default — no persistence dir = in-memory (back-compat).
             persist_dir: None,
+            // [OPUS-4.8] sq-o5bi: no restore-on-start by default (seed from data file / empty).
+            #[cfg(feature = "backup")]
+            restore: None,
+            // [OPUS-4.8] sq-bu1a: no PITR delta chain by default (base-only restore).
+            #[cfg(feature = "backup")]
+            restore_delta: Vec::new(),
+            // [OPUS-4.8] sq-ft7u: restore-into-durable OFF by default — `--restore` + `--persist`
+            // stay mutually exclusive unless the operator opts in with `--restore-persist`.
+            #[cfg(feature = "backup")]
+            restore_persist: false,
             // [OPUS-4.8] sq-d3d8: safe default — federation discovery descriptors OFF even
             // when the feature is compiled in (the operator opts in deliberately).
             #[cfg(feature = "federation-descriptors")]
@@ -673,6 +736,11 @@ impl Default for ServerConfig {
             // SPARQ_SHACL=1).
             #[cfg(feature = "shacl")]
             shacl: false,
+            // [OPUS-4.8] sq-hj4n: safe default — the OPT-IN N3-Patch PATCH dialect is OFF even when
+            // the feature is compiled in (the operator opts in deliberately via --n3-patch /
+            // SPARQ_N3_PATCH=1). The always-on application/sparql-update PATCH dialect is unaffected.
+            #[cfg(feature = "n3-patch")]
+            n3_patch: false,
         }
     }
 }
@@ -873,6 +941,30 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("SPARQ_PERSIST_DIR") {
             cfg.persist_dir = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
         }
+        // [OPUS-4.8] sq-o5bi: SPARQ_RESTORE seeds the in-memory store from a backup artifact
+        // at startup (the binary's --restore flag overrides it). An empty value is "unset".
+        // Only present with the `backup` feature.
+        #[cfg(feature = "backup")]
+        if let Ok(v) = std::env::var("SPARQ_RESTORE") {
+            cfg.restore = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
+        }
+        // [OPUS-4.8] sq-bu1a: SPARQ_RESTORE_DELTA is a platform-path-separator-delimited list of
+        // incremental delta artifacts replayed forward onto the --restore base (PITR), oldest
+        // first. Repeated --restore-delta flags override it. Only present with the `backup` feature.
+        #[cfg(feature = "backup")]
+        if let Ok(v) = std::env::var("SPARQ_RESTORE_DELTA") {
+            cfg.restore_delta = std::env::split_paths(&v)
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect();
+        }
+        // [OPUS-4.8] sq-ft7u: SPARQ_RESTORE_PERSIST truthy ("1"/"true"/"yes"/"on") makes the
+        // restore-on-start write THROUGH to the durable `--persist` dir (so it survives a restart)
+        // instead of the historical refusal of the --restore + --persist combination. Off by
+        // default. Only present with the `backup` feature; the binary's --restore-persist overrides.
+        #[cfg(feature = "backup")]
+        if let Ok(v) = std::env::var("SPARQ_RESTORE_PERSIST") {
+            cfg.restore_persist = env_truthy(&v);
+        }
         // [OPUS-4.8] sq-d3d8: SPARQ_FEDERATION_DESCRIPTORS truthy ("1"/"true"/"yes"/"on")
         // serves the VoID + Service-Description discovery endpoints. Off by default. Only
         // present with the `federation-descriptors` feature.
@@ -902,6 +994,13 @@ impl ServerConfig {
         #[cfg(feature = "shacl")]
         if let Ok(v) = std::env::var("SPARQ_SHACL") {
             cfg.shacl = env_truthy(&v);
+        }
+        // [OPUS-4.8] sq-hj4n: SPARQ_N3_PATCH truthy ("1"/"true"/"yes"/"on") enables the OPT-IN
+        // Solid N3-Patch PATCH dialect (text/n3). Off by default. Only present with the
+        // `n3-patch` feature.
+        #[cfg(feature = "n3-patch")]
+        if let Ok(v) = std::env::var("SPARQ_N3_PATCH") {
+            cfg.n3_patch = env_truthy(&v);
         }
         Ok(cfg)
     }
@@ -1758,6 +1857,44 @@ impl ApplyUpdates for ServerApplier {
             None => Ok(()),
         }
     }
+
+    /// [OPUS-4.8] (sq-ft7u) RESTORE-INTO-DURABLE. Replace the `--persist` durable store's contents
+    /// with the freshly-imported (already-validated) `fresh` graph, crash-safely, and return the
+    /// snapshot the ring should publish so reads serve the restored data. Runs on the WRITER THREAD
+    /// (the only thread that mutates the durable store), so the on-disk swap never races a commit.
+    ///
+    /// Sequence: release the OLD durable graph's WAL handle (close its log), then
+    /// [`Graph::restore_into_durable`] writes `fresh`'s image to a sibling, two-rename-swaps it over
+    /// `dir` (parent fsync'd between the renames), re-opens the new base memory-mapped with a fresh
+    /// WAL, and drops the old base — the EXACT crash-safe protocol the in-process compaction uses,
+    /// healed by `recover_compaction` on the next open if a crash interrupts it. We adopt the
+    /// re-opened directory-backed graph as the new durable store (so subsequent updates WAL-append
+    /// to it), and return an independent in-memory snapshot of it for the ring to publish.
+    ///
+    /// FAIL-CLOSED: `fresh` is fully built before this runs; if the swap fails before the first
+    /// rename the OLD durable store is untouched, and a crash mid-swap heals to old-or-new. An
+    /// in-memory applier (no durable store) is a clean `Err` — there is no durable dir to write
+    /// through, so the in-memory restore path (the ring/writer swap) is used instead.
+    fn restore_durable(&mut self, fresh: Graph) -> Result<Graph, String> {
+        let durable = self.durable.as_mut().ok_or_else(|| {
+            "restore-into-durable requested on an applier with no --persist store".to_string()
+        })?;
+        // The directory the OLD durable graph is backed by; the swap targets it.
+        let dir = durable
+            .graph
+            .persist_dir()
+            .ok_or_else(|| "durable graph is not directory-backed".to_string())?;
+        // Release the OLD durable graph's WAL handle before the directory swap (its `wal.log` is
+        // about to be renamed away with `dir`); the crash-safe swap re-opens a fresh handle.
+        durable.graph.close_wal();
+        let restored = Graph::restore_into_durable(&dir, fresh)
+            .map_err(|e| format!("restore-into-durable swap failed: {e}"))?;
+        // Adopt the re-opened, directory-backed restored store; subsequent updates WAL-append to it.
+        // The published snapshot is an independent in-memory image of the restored content.
+        let published = restored.snapshot().into_graph();
+        durable.graph = restored;
+        Ok(published)
+    }
 }
 
 /// Shared server state: the dataset under query, served from a sparq-serve
@@ -1777,14 +1914,69 @@ impl ApplyUpdates for ServerApplier {
 /// §4.3/§4.4 pathologies: the 5.4 s/32 s pinned-snapshot writer stall and reclaim-poll
 /// degradation under reader churn. `compact_every` went with it: the writer's per-batch
 /// fork rebuilds a folded base, so overlays never accumulate across batches.
-#[derive(Clone)]
-pub struct AppState {
+/// [OPUS-4.8] (sq-o5bi, sq-0g6g) The swappable serving core: the generation ring + the single
+/// sequenced writer that publishes onto it. **`backup`-feature only.** It exists solely so an
+/// online RESTORE can atomically install a freshly-built ring+writer rehydrated from a backup
+/// artifact while readers keep loading lock-free — the same lock-free-read discipline the ring
+/// itself uses internally. Under `backup`, [`AppState`] holds this behind an [`ArcSwap`], so a
+/// read pays one extra `ArcSwap::load` (the same cost class as the ring's own `current()`).
+///
+/// Without `backup` (the DEFAULT) there is no swap mechanism at all: [`AppState`] holds the
+/// `ring`/`writer` pair directly, exactly as it did before #941, so the default read path is
+/// byte-identical to `main` and never loads an `ArcSwap` in `AppState` (sq-0g6g resolved in the
+/// lean direction — the cost is paid only when you opt into `backup`).
+#[cfg(feature = "backup")]
+struct ServingCore {
     /// The generation ring (Wave A1): lock-free `current()`, bounded retention.
     ring: Arc<GenerationRing<Graph>>,
     /// The single sequenced writer (Wave A2): the sole publisher of generations.
     /// `submit` blocks for the group-commit window + batch application, so update
     /// handlers call it on the blocking pool.
-    writer: Arc<Writer<String>>,
+    writer: Arc<Writer<String, Graph>>,
+}
+
+/// [OPUS-4.8] (sq-o5bi) Builds the ring's retention config from the server config — the default
+/// concurrency-only retention, or, under the `time-travel` feature, the extended retention so
+/// `?generation=N` has history to serve. Shared by the constructor and the online restore so a
+/// restored ring inherits exactly the same retention posture as the original.
+fn build_ring_config(config: &ServerConfig) -> sparq_serve::RingConfig {
+    #[cfg(not(feature = "time-travel"))]
+    {
+        let _ = config; // the default config ignores the server config
+        sparq_serve::RingConfig::default()
+    }
+    #[cfg(feature = "time-travel")]
+    {
+        sparq_serve::RingConfig {
+            time_travel: Some(sparq_serve::TimeTravelConfig {
+                max_generations: config.time_travel_generations,
+                max_age: config.time_travel_max_age,
+            }),
+            ..sparq_serve::RingConfig::default()
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    /// The generation ring (Wave A1): lock-free `current()`, bounded retention.
+    ///
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) DEFAULT representation — held directly, byte-identical to
+    /// pre-#941. Under the `backup` feature the ring (and the writer below) move behind the
+    /// swappable [`ServingCore`] so an online restore can atomically install a rehydrated pair.
+    #[cfg(not(feature = "backup"))]
+    ring: Arc<GenerationRing<Graph>>,
+    /// The single sequenced writer (Wave A2): the sole publisher of generations.
+    /// `submit` blocks for the group-commit window + batch application, so update
+    /// handlers call it on the blocking pool.
+    #[cfg(not(feature = "backup"))]
+    writer: Arc<Writer<String, Graph>>,
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) `backup`-only: the swappable serving core (ring + writer).
+    /// See [`ServingCore`]. Loaded lock-free on every read/update; replaced atomically only by an
+    /// online restore. This `ArcSwap` indirection exists solely to enable that atomic swap and is
+    /// compiled out of the default build entirely.
+    #[cfg(feature = "backup")]
+    core: Arc<ArcSwap<ServingCore>>,
     config: Arc<ServerConfig>,
     /// Committed generation number, advanced after every successful update. Subscription
     /// connections hold a `watch::Receiver` and re-evaluate when it changes; the watch
@@ -1874,16 +2066,7 @@ impl AppState {
 
         // Default ring (concurrency retention only); the opt-in `time-travel`
         // feature extends retention so `?generation=N` has history to serve.
-        #[cfg(not(feature = "time-travel"))]
-        let ring_config = sparq_serve::RingConfig::default();
-        #[cfg(feature = "time-travel")]
-        let ring_config = sparq_serve::RingConfig {
-            time_travel: Some(sparq_serve::TimeTravelConfig {
-                max_generations: config.time_travel_generations,
-                max_age: config.time_travel_max_age,
-            }),
-            ..sparq_serve::RingConfig::default()
-        };
+        let ring_config = build_ring_config(&config);
         let ring = Arc::new(GenerationRing::with_config(seed, ring_config));
         // [OPUS-4.8] sq-4w18: share the config Arc with the writer so its update path
         // enforces the same SERVICE egress allowlist (a federated `INSERT … WHERE` is
@@ -1922,8 +2105,14 @@ impl AppState {
             None => None,
         };
         Ok(Self {
+            // [OPUS-4.8] (sq-o5bi, sq-0g6g) DEFAULT: hold ring+writer directly (pre-#941). Under
+            // `backup`: wrap them in the swappable `ServingCore` so an online restore can swap.
+            #[cfg(not(feature = "backup"))]
             ring,
+            #[cfg(not(feature = "backup"))]
             writer,
+            #[cfg(feature = "backup")]
+            core: Arc::new(ArcSwap::from_pointee(ServingCore { ring, writer })),
             config,
             commits: Arc::new(tokio::sync::watch::channel(0).0),
             subs: Arc::new(crate::subscriptions::SubscriptionCounters::default()),
@@ -1942,7 +2131,54 @@ impl AppState {
     /// by an in-flight update. Hold the returned `Arc` for as long as the response is
     /// being produced; `gen.snapshot()` is the immutable [`Graph`] to evaluate against.
     pub fn current(&self) -> PinnedGen {
-        self.ring.current()
+        self.ring().current()
+    }
+
+    /// [OPUS-4.8] (sq-o5bi) Pins the current generation for an ONLINE backup export: a
+    /// lock-free `Arc<Generation>` the `backup` route serialises off-thread while the writer
+    /// keeps publishing forward (the snapshot is frozen by its `Arc`, never by a lock). Same
+    /// pin as [`current`](Self::current); a distinct name makes the backup call site explicit.
+    #[cfg(feature = "backup")]
+    pub fn pin_for_backup(&self) -> PinnedGen {
+        self.ring().current()
+    }
+
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) The generation ring. DEFAULT: a direct reference to the
+    /// `ring` field — byte-identical to pre-#941 (no `ArcSwap` on the read path). Under `backup`:
+    /// resolved through the swappable [`ServingCore`], whose loaded `Arc` lives for the call. Every
+    /// ring read (`current`, `at`) routes through here, so the two representations stay behind one
+    /// accessor and the call sites are identical in both feature states. `#[inline(always)]` makes
+    /// the default accessor a zero-cost field borrow.
+    #[cfg(not(feature = "backup"))]
+    #[inline(always)]
+    fn ring(&self) -> &GenerationRing<Graph> {
+        &self.ring
+    }
+
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) `backup`-only ring accessor: clones the ring `Arc` out of the
+    /// loaded serving core so the returned handle outlives the transient `ArcSwap` load guard. The
+    /// clone is one atomic refcount bump (the swap mechanism's marginal cost); it exists only on the
+    /// opt-in path.
+    #[cfg(feature = "backup")]
+    #[inline(always)]
+    fn ring(&self) -> Arc<GenerationRing<Graph>> {
+        self.core.load().ring.clone()
+    }
+
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) The sequenced writer. DEFAULT: a direct reference to the
+    /// `writer` field — byte-identical to pre-#941. Under `backup`: cloned out of the swappable
+    /// [`ServingCore`] (one atomic refcount bump) so the handle outlives the load guard.
+    #[cfg(not(feature = "backup"))]
+    #[inline(always)]
+    fn writer(&self) -> &Writer<String, Graph> {
+        &self.writer
+    }
+
+    /// [OPUS-4.8] (sq-o5bi, sq-0g6g) `backup`-only writer accessor (see [`ring`](Self::ring)).
+    #[cfg(feature = "backup")]
+    #[inline(always)]
+    fn writer(&self) -> Arc<Writer<String, Graph>> {
+        self.core.load().writer.clone()
     }
 
     /// Pins the retained generation numbered `number` (time travel): `None` when it
@@ -1950,7 +2186,7 @@ impl AppState {
     /// [`sparq_serve::GenerationRing::at`].
     #[cfg(feature = "time-travel")]
     pub fn at(&self, number: u64) -> Option<PinnedGen> {
-        self.ring.at(number)
+        self.ring().at(number)
     }
 
     /// Applies a SPARQL Update through the sequenced writer: the update joins the
@@ -1974,7 +2210,7 @@ impl AppState {
         // default-graph / dynamically-scoped writes still fall back to the global pod
         // (conservative, never under-invalidating). See [`touched_pods`].
         let touched = touched_pods(sparql);
-        match self.writer.submit(sparql.to_string(), touched) {
+        match self.writer().submit(sparql.to_string(), touched) {
             Ok(number) => {
                 // Monotonic max: batch-mates share a generation number and may ack in
                 // any order relative to a later batch's submitters.
@@ -2013,11 +2249,225 @@ impl AppState {
     /// stays alive and reads keep being served from the last published snapshot. Blocking: call
     /// it on the blocking pool.
     pub fn compact(&self) -> Result<(), String> {
-        match self.writer.maintain() {
+        match self.writer().maintain() {
             Ok(res) => res,
             Err(WriteError::Shutdown) => Err("update writer has shut down".to_string()),
             // `maintain` only ever returns `Ok(_)` or `Shutdown` from the writer.
             Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// [OPUS-4.8] (sq-o5bi) Exports an ONLINE consistent snapshot of the current generation to
+    /// `out` as a single self-describing backup artifact (sparq-serve's Option-A format). It
+    /// pins the current generation lock-free ([`pin_for_backup`](Self::pin_for_backup)) and
+    /// serialises off that immutable `Arc` — so it runs **while serving**, never stopping the
+    /// writer and never blocking readers. CPU/IO-bound (serialises the whole dataset): call it
+    /// on the blocking pool.
+    #[cfg(feature = "backup")]
+    pub fn export_backup<W: std::io::Write>(&self, out: &mut W) -> Result<(), String> {
+        let pin = self.pin_for_backup();
+        sparq_serve::backup_export(&pin, out).map_err(|e| e.to_string())
+    }
+
+    /// [OPUS-4.8] (sq-o5bi, sq-ft7u) ONLINE RESTORE: rehydrates the serving store from a backup
+    /// artifact. **Fail-closed**: a corrupt/mismatched artifact returns `Err` and the live store is
+    /// left UNTOUCHED (the artifact is imported + validated fully BEFORE anything is swapped; if
+    /// import fails there is nothing to swap in).
+    ///
+    /// IN-MEMORY server (`persist_dir == None`): atomically installs a freshly-built ring+writer
+    /// into the swappable serving core. Readers in flight keep serving from the OLD core (its `Arc`
+    /// survives until they release their pin); every read/update after the swap loads the new core.
+    /// The restored content lives only in RAM — it does NOT survive a restart (the historical
+    /// in-memory restore).
+    ///
+    /// `--persist` DURABLE server (`persist_dir == Some(dir)`): only when `persist` is set (the
+    /// `--restore-persist` / `?persist=true` opt-in) does the restore write THROUGH to the durable
+    /// dir so it SURVIVES A RESTART — via the private `restore_into_durable_through` path.
+    /// WITHOUT the opt-in a durable server REFUSES the restore (an in-memory-only swap would be
+    /// silently lost on a restart — a footgun), surfaced as an `Err` the route maps to 409.
+    ///
+    /// `persist == true` on an IN-MEMORY server is an `Err` (there is no durable dir to write
+    /// through). Blocking (import parses + indexes the whole dataset): call it on the blocking pool.
+    #[cfg(feature = "backup")]
+    pub fn restore_from<R: std::io::Read>(&self, input: R, persist: bool) -> Result<u64, String> {
+        match (self.config.persist_dir.is_some(), persist) {
+            // Durable server + persist opt-in: write the restore THROUGH to the durable store.
+            (true, true) => self.restore_into_durable_through(input),
+            // Durable server WITHOUT the opt-in: refuse (an in-memory swap would be lost on
+            // restart — a footgun). The route maps this `Err` to 409.
+            (true, false) => Err(
+                "this is a --persist (durable) server: a restore must opt in to write-through \
+                 (?persist=true / --restore-persist) so it survives a restart; an in-memory-only \
+                 restore would be silently lost on the next restart and is refused"
+                    .to_string(),
+            ),
+            // In-memory server + persist opt-in: there is no durable dir to write through.
+            (false, true) => Err(
+                "restore ?persist=true requires a --persist (durable) server; this server is \
+                 in-memory (no durable directory to write the restore through to)"
+                    .to_string(),
+            ),
+            // In-memory server, in-memory restore: the historical ring/writer core swap.
+            (false, false) => self.restore_in_memory(input),
+        }
+    }
+
+    /// [OPUS-4.8] (sq-o5bi) IN-MEMORY restore: build the entire new core BEFORE touching the live
+    /// one (fail-closed), then atomically swap it in. The restored content is RAM-only — it does
+    /// NOT survive a restart (the historical in-memory restore; `restore_from(.., persist=false)`
+    /// on an in-memory server). Returns the artifact's source generation for operator correlation.
+    #[cfg(feature = "backup")]
+    fn restore_in_memory<R: std::io::Read>(&self, input: R) -> Result<u64, String> {
+        // Build the entire new core BEFORE touching the live one — fail-closed.
+        let (graph, meta) = sparq_serve::backup_import(input).map_err(|e| e.to_string())?;
+        self.install_restored_graph(graph);
+        Ok(meta.generation)
+    }
+
+    /// [OPUS-4.8] (sq-bu1a) ONLINE point-in-time RESTORE: rehydrates from a BASE artifact, then
+    /// REPLAYS an ordered chain of incremental DELTA artifacts forward onto it to reach a chosen
+    /// recovery point, and atomically installs the result — the change-stream / PITR companion to
+    /// [`restore_from`](Self::restore_from). `base` is the base artifact; `deltas` is the ordered
+    /// sequence of delta artifact byte-blobs (each [`sparq_serve::backup_export_delta`] output),
+    /// oldest first.
+    ///
+    /// **Fail-closed, same discipline as the base restore:** the base is imported, every delta is
+    /// decoded and the whole chain is replayed onto a private graph BEFORE any swap. A corrupt /
+    /// version-mismatched / out-of-order / gapped artifact aborts the whole operation (`Err`) and
+    /// the LIVE store is left untouched — there is no partial install. The chain must be
+    /// same-lineage with the base (see `sparq_serve::backup_delta` for that boundary). Returns the
+    /// recovered SOURCE generation/writer-seq (the last delta's `to`, or the base's generation for
+    /// an empty chain) for operator correlation. In-memory only (a `--persist` server is refused —
+    /// the durable write-through opt-in applies to the base [`restore_from`](Self::restore_from)
+    /// only in v1), blocking: call on the blocking pool.
+    #[cfg(feature = "backup")]
+    pub fn restore_from_with_deltas(
+        &self,
+        base: &[u8],
+        deltas: &[Vec<u8>],
+    ) -> Result<u64, String> {
+        self.guard_restore_supported()?;
+        // Import + replay onto a PRIVATE graph first — fail-closed before any swap.
+        let (mut graph, base_meta) = sparq_serve::backup_import(base).map_err(|e| e.to_string())?;
+        let decoded: Vec<sparq_serve::Delta> = deltas
+            .iter()
+            .map(|d| sparq_serve::backup_import_delta(&d[..]))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        let recovered = sparq_serve::backup_replay(&mut graph, &base_meta, decoded.iter())
+            .map_err(|e| e.to_string())?;
+        self.install_restored_graph(graph);
+        Ok(recovered.generation)
+    }
+
+    /// [OPUS-4.8] (sq-bu1a) Shared restore precondition: the PITR delta path is in-memory-only in
+    /// v1 (replaying a delta chain into a `--persist` durable directory needs its own crash-safe
+    /// swap, a recorded follow-up; the base `restore_from` already has the write-through path).
+    #[cfg(feature = "backup")]
+    fn guard_restore_supported(&self) -> Result<(), String> {
+        if self.config.persist_dir.is_some() {
+            return Err(
+                "point-in-time restore (--restore-delta) is not supported on a --persist (durable) \
+                 server in v1; it replaces the in-memory serving store only"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-bu1a) Shared restore install: builds a fresh ring+writer around the
+    /// rehydrated `graph` and atomically swaps it in. Readers in flight keep serving from the OLD
+    /// core (its `Arc` survives until they release their pin); every read/update after the swap
+    /// loads the new core. The restored ring restarts at generation 0; the recorded source
+    /// generation is returned by the callers for operator correlation.
+    #[cfg(feature = "backup")]
+    fn install_restored_graph(&self, graph: Graph) {
+        let ring_config = build_ring_config(&self.config);
+        let ring = Arc::new(GenerationRing::with_config(graph, ring_config));
+        let applier = ServerApplier::new(self.config.clone());
+        let writer = Arc::new(Writer::spawn(ring.clone(), applier, WriterConfig::default()));
+        // Atomic swap: subsequent loads see the new ring+writer; the old core's writer thread
+        // joins once its last in-flight reader/Arc drops (Writer's Drop drains + joins).
+        self.core.store(Arc::new(ServingCore { ring, writer }));
+        // Advance the commit watch so active subscriptions re-evaluate against the restored store.
+        let restored_gen = self.current().number();
+        self.commits.send_replace(restored_gen);
+    }
+
+    /// [OPUS-4.8] (sq-bu1a) Exports an INCREMENTAL DELTA between a RETAINED generation `from` and
+    /// the CURRENT generation to `out` (sparq-serve's self-describing delta format) — the
+    /// change-stream / PITR producer. Pins both generations lock-free (so it runs **while
+    /// serving**) and serialises the quad-set difference off those immutable `Arc`s.
+    ///
+    /// `from` must still be RETAINED by the ring: with `time-travel` OFF only the last K
+    /// generations are retained (the concurrency window), so practical incremental backup wants
+    /// the `time-travel` feature to widen the retention window. `Ok(None)` means `from` is no
+    /// longer retained (aged out, or never published) — the caller maps that to a 410/404, exactly
+    /// like `?generation=N`. `Ok(Some(meta))` is the exported delta's metadata. CPU/IO-bound
+    /// (serialises both generations): call on the blocking pool.
+    #[cfg(feature = "backup")]
+    pub fn export_delta_from<W: std::io::Write>(
+        &self,
+        from: u64,
+        out: &mut W,
+    ) -> Result<Option<sparq_serve::DeltaMeta>, String> {
+        let to = self.pin_for_backup();
+        // The current generation is always retained; `from` must be too. `ring().at` needs the
+        // retention window — without `time-travel` only the K-generation concurrency floor is kept.
+        let from_gen = match self.ring().at(from) {
+            Some(g) => g,
+            None => return Ok(None),
+        };
+        if from >= to.number() {
+            return Err(format!(
+                "delta `from` generation {} must be earlier than the current generation {}",
+                from,
+                to.number()
+            ));
+        }
+        sparq_serve::backup_export_delta(&from_gen, &to, out)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) RESTORE-INTO-LIVE-DURABLE-STORE (`--persist` write-through). Imports +
+    /// validates the artifact into a fresh `Graph` (fail-closed — done BEFORE the live store is
+    /// touched), then routes the durable swap THROUGH THE EXISTING WRITER THREAD
+    /// (`Writer::restore`): the writer commits any in-flight batch first, then replaces the durable
+    /// on-disk store with the imported image crash-safely (`Graph::restore_into_durable` — the same
+    /// two-rename swap the compaction uses, healed by `recover_compaction` on the next open) and
+    /// publishes the restored snapshot as a new generation. Because the swap runs on the single
+    /// writer thread it NEVER races a concurrent durable commit — no lock on the hot path, and no
+    /// ordering hazard: quiescing the durable writer is achieved by SEQUENCING the swap on that
+    /// very thread, not by tearing it down. After a restart (reopen `dir`) the restored triples are
+    /// present (the on-disk base IS the restored image).
+    ///
+    /// Fail-closed: a corrupt artifact fails the import → the writer is never asked to swap, the
+    /// durable store is untouched. A swap I/O error leaves the OLD durable store intact (the swap
+    /// is rollback-safe) and the writer alive; reads keep flowing from the last published snapshot.
+    /// Returns the artifact's source generation (for operator correlation), as the in-memory path.
+    #[cfg(feature = "backup")]
+    fn restore_into_durable_through<R: std::io::Read>(&self, input: R) -> Result<u64, String> {
+        // Import + FULLY validate the artifact first (fail-closed — nothing on disk is touched yet).
+        let (graph, meta) = sparq_serve::backup_import(input).map_err(|e| e.to_string())?;
+        // Route the crash-safe durable swap through the existing writer thread (sequenced with
+        // updates; no concurrent durable mutation possible). It publishes the restored snapshot.
+        match self.writer().restore(graph) {
+            Ok(Ok(number)) => {
+                // Re-evaluate active subscriptions against the restored (now-published) generation.
+                self.commits.send_if_modified(|g| {
+                    if number > *g {
+                        *g = number;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                Ok(meta.generation)
+            }
+            // A durable-swap failure: the OLD store is intact, the writer is alive (fail-closed).
+            Ok(Err(e)) => Err(format!("restore-into-durable failed (store unchanged): {}", e)),
+            Err(e) => Err(format!("restore-into-durable: update writer unavailable: {}", e)),
         }
     }
 
@@ -2072,6 +2522,20 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/compact", post(admin_compact))
         // Prometheus metrics (T22).
         .route("/metrics", get(metrics_endpoint));
+    // [OPUS-4.8] sq-o5bi: OPT-IN online consistent-snapshot backup/restore admin routes.
+    // Compiled only with the `backup` feature; both are POST-only + WRITE/admin-gated.
+    // `/admin/backup` streams a self-describing artifact of the live store WITHOUT stopping
+    // the world; `/admin/restore` atomically installs a ring+writer rehydrated from one
+    // (fail-closed on a corrupt/mismatched artifact, in-memory server only). See [`admin_backup`]
+    // / [`admin_restore`].
+    #[cfg(feature = "backup")]
+    let routes = routes
+        .route("/admin/backup", post(admin_backup))
+        .route("/admin/restore", post(admin_restore))
+        // [OPUS-4.8] sq-bu1a: the INCREMENTAL change-stream / PITR producer. `?from=N` streams the
+        // delta between RETAINED generation N and the current generation; restore-forward replay is
+        // driven by the binary's `--restore` + `--restore-delta` (see main.rs), not a route.
+        .route("/admin/backup/delta", post(admin_backup_delta));
     // [OPUS-4.8] sq-d3d8 (epic sq-3183): OPT-IN federation discovery — the VoID dataset
     // description at /.well-known/void. Compiled only with the `federation-descriptors`
     // feature; even then the handler refuses (404) unless the config flag is set. The SD is
@@ -2274,6 +2738,10 @@ fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option
 ///     feature that is sparq-geo's `geof:` registry, read back through
 ///     [`sparq_engine::FunctionRegistry::iris`] so the list can never drift from what runs;
 ///     without it, no extension functions are registered, so the list is empty.
+///   * `sparql_versions` (sq-2msb) — the `sparql:version-*` IRIs the engine conformance-verifies
+///     (`descriptors::CONFORMANCE_VERIFIED_VERSIONS`), advertised via `sd:supportedVersion`. There
+///     is NO `sparql12`/`rdf12` cargo feature — SPARQL 1.2 evaluation is in the base engine — so
+///     this is keyed off the DOCUMENTED conformance state, not a `cfg!`; see that constant.
 #[cfg(feature = "federation-descriptors")]
 fn service_capabilities(config: &ServerConfig) -> crate::descriptors::Capabilities {
     // Anonymous Update is possible iff no write-token gates the write surface.
@@ -2297,11 +2765,20 @@ fn service_capabilities(config: &ServerConfig) -> crate::descriptors::Capabiliti
     // genuinely serves lineage can flip this honestly without a vocabulary change; until then it
     // stays `false`. Set explicitly (not via `..default()`) so the honesty stays visible here.
     let provenance = false;
+    // [OPUS-4.8] sq-2msb (gh-917): the SPARQL language versions to advertise via
+    // `sd:supportedVersion`. Sourced from the single documented conformance constant (not a
+    // `cfg!` — SPARQL 1.2 is always compiled into the base engine), so the honesty gate lives in
+    // exactly one place and this binary advertises precisely the versions its W3C suites pass.
+    let sparql_versions = crate::descriptors::CONFORMANCE_VERIFIED_VERSIONS
+        .iter()
+        .map(|v| (*v).to_string())
+        .collect();
     crate::descriptors::Capabilities {
         update,
         federated_query,
         extension_functions,
         provenance,
+        sparql_versions,
     }
 }
 
@@ -2388,7 +2865,14 @@ fn negotiate_tpf(accept: Option<&str>) -> GraphFormat {
             let f = negotiate_graph(Some(a));
             // negotiate_graph defaults to N-Triples on an unrecognised header; for TPF a bare
             // `*/*` (or anything unmatched) should land on Turtle.
-            if a.contains("n-triples") || a.contains("turtle") || a.contains("rdf+xml") {
+            // [OPUS-4.8] sq-oy1f.1: an explicit JSON-LD request is honoured too (only matchable
+            // when the `jsonld` feature is on; `negotiate_graph` returns Turtle/N-Triples without
+            // it, so the substring is harmless when the feature is off).
+            if a.contains("n-triples")
+                || a.contains("turtle")
+                || a.contains("rdf+xml")
+                || a.contains("ld+json")
+            {
                 f
             } else {
                 GraphFormat::Turtle
@@ -2551,11 +3035,9 @@ async fn tpf_endpoint(
     );
 
     let fmt = negotiate_tpf(headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()));
-    let body = match fmt {
-        GraphFormat::NTriples => crate::graph::triples_to_ntriples(&triples),
-        GraphFormat::Turtle => crate::graph::triples_to_turtle(&triples),
-        GraphFormat::RdfXml => crate::graph::triples_to_rdfxml(&triples),
-    };
+    // [OPUS-4.8] sq-oy1f.1: route through the shared graph serialiser so the JSON-LD arm is
+    // covered uniformly (and the match stays exhaustive when the `jsonld` feature is on).
+    let body = serialise_graph_triples(&triples, fmt);
     text_response(StatusCode::OK, fmt.content_type(), body, head_only)
 }
 
@@ -3190,13 +3672,17 @@ fn resolve_pin(
     if number == current.number() {
         return Ok(current);
     }
-    state.ring.at(number).ok_or_else(|| {
+    // [OPUS-4.8] (sq-o5bi, sq-0g6g) Resolve the ring once via the accessor: DEFAULT this is a
+    // direct field reference (byte-identical to pre-#941); under `backup` it is one clone out of
+    // the swappable serving core. Binding it locally keeps `at` + `oldest_retained` on one ring.
+    let ring = state.ring();
+    ring.at(number).ok_or_else(|| {
         json_error(
             StatusCode::GONE,
             &format!(
                 "generation {number} has aged out of the retention window (oldest retained: {}, current: {}); \
                  raise --time-travel-generations / --time-travel-max-age to keep more history",
-                state.ring.oldest_retained(),
+                ring.oldest_retained(),
                 current.number()
             ),
         )
@@ -3710,6 +4196,210 @@ async fn admin_compact(State(state): State<AppState>, headers: HeaderMap) -> Res
         Err(_) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "compaction worker panicked",
+        ),
+    }
+}
+
+/// [OPUS-4.8] (sq-o5bi) `POST /admin/backup` — ONLINE consistent snapshot backup of the live
+/// serving store. Returns a single self-describing backup artifact (sparq-serve's Option-A
+/// format: a textual header recording the generation/writer-seq + per-pod epoch vectors + the
+/// triple count + a body digest, then the full dataset as N-Quads) as
+/// `application/octet-stream`.
+///
+/// - **Online — no stop-the-world.** The export pins the CURRENT generation lock-free and
+///   serialises off that immutable `Arc` on the blocking pool, so readers never block the
+///   writer and the writer never blocks readers throughout.
+/// - **Gated** behind the WRITE auth token (the existing admin gate) — it reads the WHOLE
+///   dataset, so it is treated as a privileged admin operation, not an open read.
+/// - POST-only (the route is registered POST-only; other verbs get a 405).
+///
+/// Distinct from the offline `sparq-cli save` (stop-the-world, index rebuild) and from the
+/// `--persist` per-graph WAL. At-rest ENCRYPTION of the artifact is a separate concern, out
+/// of scope.
+#[cfg(feature = "backup")]
+async fn admin_backup(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Write) {
+        return resp;
+    }
+    let st = state.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let mut buf = Vec::new();
+        st.export_backup(&mut buf).map(|()| buf)
+    });
+    match task.await {
+        Ok(Ok(bytes)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, bytes.len())
+            .header(
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"sparq-backup.spqb\"",
+            )
+            .body(axum::body::Body::from(bytes))
+            .unwrap(),
+        // A serialisation/IO failure: the live store is untouched (export only reads).
+        // [OPUS-4.8] (sq-kfel) the error may embed internals; withhold from the body.
+        Ok(Err(e)) => sanitized_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "backup",
+            "backup export failed",
+            &e,
+        ),
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "backup worker panicked"),
+    }
+}
+
+/// [OPUS-4.8] (sq-o5bi, sq-ft7u) `POST /admin/restore` — ONLINE restore of the serving store from
+/// a backup artifact POSTed in the request body.
+///
+/// - **In-memory server** (no `--persist`): atomically installs a freshly rehydrated ring+writer
+///   into the swappable serving core; readers in flight keep serving from the old core until they
+///   release their pin, and every read/update after the swap sees the restored store. RAM-only —
+///   the restored content does NOT survive a process restart.
+/// - **`--persist` durable server** with the write-through opt-in (`?persist=true`): writes the
+///   restore THROUGH to the durable dir so it SURVIVES A RESTART (sq-ft7u). The swap runs on the
+///   single writer thread, crash-safely (the two-rename `Graph::restore_into_durable`, healed by
+///   `recover_compaction`). WITHOUT `?persist=true` a durable server REFUSES the restore (409): an
+///   in-memory-only swap would be silently lost on the next restart, which is a footgun.
+/// - `?persist=true` on an in-memory server → 409 (no durable dir to write through).
+///
+/// **Fail-closed.** A corrupt/mismatched/non-artifact body is rejected (400) and the live store is
+/// left UNTOUCHED — the artifact is imported + validated fully before anything is swapped, and the
+/// durable swap itself is rollback-safe. **Gated** behind the WRITE auth token (the existing admin
+/// gate); POST-only.
+#[cfg(feature = "backup")]
+async fn admin_restore(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    body: Bytes,
+) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Write) {
+        return resp;
+    }
+    // [OPUS-4.8] (sq-ft7u) Opt in to writing the restore THROUGH to the durable `--persist` store
+    // (so it survives a restart) via `?persist=true` (truthy: "1"/"true"/"yes"/"on"). Default off:
+    // a restore is in-memory-only unless the operator explicitly asks for write-through.
+    let persist = params.get("persist").map(|v| env_truthy(v)).unwrap_or(false);
+    let durable = state.config().persist_dir.is_some();
+    // 409 cases (the request is incompatible with the server's durability posture) are decided
+    // HERE so any `Err` from `restore_from` below is unambiguously a corrupt/import problem (400).
+    if durable && !persist {
+        return json_error(
+            StatusCode::CONFLICT,
+            "this is a --persist (durable) server: pass ?persist=true to write the restore through \
+             to the durable store (so it survives a restart); an in-memory-only restore on a \
+             durable server would be silently lost on the next restart and is refused",
+        );
+    }
+    if !durable && persist {
+        return json_error(
+            StatusCode::CONFLICT,
+            "?persist=true requires a --persist (durable) server; this server is in-memory (there \
+             is no durable directory to write the restore through to)",
+        );
+    }
+    let st = state.clone();
+    let task = tokio::task::spawn_blocking(move || st.restore_from(&body[..], persist));
+    match task.await {
+        Ok(Ok(source_generation)) => text_response(
+            StatusCode::OK,
+            "text/plain; charset=utf-8",
+            format!(
+                "restore complete (artifact taken at generation {})\n",
+                source_generation
+            ),
+            false,
+        ),
+        // A fail-closed import error (corrupt / mismatched / non-artifact): the live store is
+        // unchanged. It is a client-supplied-body problem, so a 400. The detail is withheld
+        // from the body (it may quote artifact internals); the operator gets it in the log.
+        Ok(Err(e)) => sanitized_error(
+            StatusCode::BAD_REQUEST,
+            "restore",
+            "restore rejected (corrupt or incompatible backup artifact)",
+            &e,
+        ),
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "restore worker panicked"),
+    }
+}
+
+/// [OPUS-4.8] (sq-bu1a) `POST /admin/backup/delta?from=N` — the INCREMENTAL change-stream / PITR
+/// producer. Streams a single self-describing DELTA artifact (sparq-serve's delta format: a header
+/// keying the `from-generation` N → the current `to-generation`, plus the per-pod epoch vector at
+/// `to` and the inserted/deleted quad bodies as N-Quads) as `application/octet-stream`. Replayed
+/// forward onto the matching base artifact, the delta advances a restore to a later point in the
+/// writer history — point-in-time recovery.
+///
+/// - **Online — no stop-the-world.** Both generations are pinned lock-free and the diff is
+///   serialised off those immutable `Arc`s on the blocking pool.
+/// - **`from` must be a RETAINED generation.** Without the `time-travel` feature only the last few
+///   generations (the concurrency window) are retained, so a `from` older than that yields 410 Gone
+///   (aged out) — exactly like `?generation=N` on `/sparql`. The `time-travel` feature widens the
+///   retention window so further-back deltas are available.
+/// - **Gated** behind the WRITE admin token (it reads the whole dataset); POST-only.
+///
+/// At-rest ENCRYPTION of the artifact is a separate concern, out of scope (same as the base).
+#[cfg(feature = "backup")]
+async fn admin_backup_delta(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Write) {
+        return resp;
+    }
+    let from = match params.get("from").map(|s| s.trim().parse::<u64>()) {
+        Some(Ok(n)) => n,
+        Some(Err(_)) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "delta backup requires a numeric `from` generation",
+            )
+        }
+        None => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "delta backup requires a `from` generation query parameter (?from=N)",
+            )
+        }
+    };
+    let st = state.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let mut buf = Vec::new();
+        st.export_delta_from(from, &mut buf).map(|meta| (meta, buf))
+    });
+    match task.await {
+        // `from` is no longer retained (aged out / never published): 410 Gone, mirroring time-travel.
+        Ok(Ok((None, _))) => json_error(
+            StatusCode::GONE,
+            "the `from` generation is no longer retained (aged out of the retention window); \
+             enable the time-travel feature to widen retention",
+        ),
+        Ok(Ok((Some(meta), bytes))) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, bytes.len())
+            // [OPUS-4.8] positional format args (CodeQL rust/unused-variable false-positive).
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"sparq-delta-{}-{}.spqd\"",
+                    meta.from_generation, meta.to_generation
+                ),
+            )
+            .body(axum::body::Body::from(bytes))
+            .unwrap(),
+        // A range/serialisation error (e.g. `from` >= current): the store is untouched (read-only).
+        Ok(Err(e)) => sanitized_error(
+            StatusCode::BAD_REQUEST,
+            "backup-delta",
+            "delta backup rejected",
+            &e,
+        ),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "backup-delta worker panicked",
         ),
     }
 }
@@ -4338,13 +5028,20 @@ async fn graph_store(
         Method::PUT => gsp_put(state, graph, headers, &body).await,
         Method::POST => gsp_post(state, graph, headers, &body).await,
         Method::DELETE => gsp_delete(state, graph).await,
-        // PATCH is not part of the Graph Store HTTP Protocol.
+        // [OPUS-4.8] (sq-hj4n, gh-916) PATCH = a graph-scoped, atomic in-place modify. Two body
+        // dialects: an always-on `application/sparql-update` body (executed atomically through the
+        // same sequenced writer the /sparql update path uses, scoped to this graph), and — only
+        // with the `n3-patch` feature AND the `--n3-patch` runtime flag — a Solid-style `text/n3`
+        // N3-Patch body. An unsupported PATCH content type is a `415`.
+        Method::PATCH => gsp_patch(state, graph, headers, &body).await,
+        // Any other method is not part of the Graph Store HTTP Protocol.
         _ => method_not_allowed(&[
             Method::GET,
             Method::HEAD,
             Method::PUT,
             Method::POST,
             Method::DELETE,
+            Method::PATCH,
         ]),
     };
     #[cfg(feature = "audit-log")]
@@ -4381,6 +5078,12 @@ fn rdf_format_for(content_type: &str) -> Option<BodyFormat> {
         "application/n-triples" | "text/plain" => Some(BodyFormat::Core("ntriples")),
         "application/n-quads" => Some(BodyFormat::Core("nquads")),
         "application/trig" => Some(BodyFormat::Core("trig")),
+        // [OPUS-4.8] sq-oy1f.1: JSON-LD request body, OPT-IN behind the `jsonld` feature (which
+        // turns on `sparq-core/jsonld`, the `oxjsonld` parser `Graph::load_str` dispatches the
+        // "jsonld" token to). Without the feature this arm is compiled out, so an
+        // `application/ld+json` body is a plain `415` — byte-identical to before.
+        #[cfg(feature = "jsonld")]
+        "application/ld+json" => Some(BodyFormat::Core("jsonld")),
         // [OPUS-4.8] sq-rt6v: RDF/XML request body.
         "application/rdf+xml" => Some(BodyFormat::RdfXml),
         // No explicit Content-Type: default to Turtle (a superset of N-Triples), matching
@@ -4389,6 +5092,20 @@ fn rdf_format_for(content_type: &str) -> Option<BodyFormat> {
         _ => None,
     }
 }
+
+/// [OPUS-4.8] sq-oy1f.1: the `415` message for an unsupported GSP write-body media type. With
+/// the `jsonld` feature ON it names `application/ld+json` among the accepted dialects; OFF it
+/// names only the always-available RDF syntaxes (an `application/ld+json` body is then a plain
+/// `415`), so the advertised contract matches what the build actually parses.
+#[cfg(feature = "jsonld")]
+const GSP_WRITE_BODY_415: &str =
+    "GSP write body must be RDF: Content-Type 'text/turtle', 'application/n-triples', \
+     'application/n-quads', 'application/trig', 'application/rdf+xml' or 'application/ld+json'";
+/// [OPUS-4.8] sq-oy1f.1: the feature-OFF `415` message — JSON-LD is not parseable in this build.
+#[cfg(not(feature = "jsonld"))]
+const GSP_WRITE_BODY_415: &str =
+    "GSP write body must be RDF: Content-Type 'text/turtle', 'application/n-triples', \
+     'application/n-quads', 'application/trig' or 'application/rdf+xml'";
 
 /// Parses a GSP request body into canonical N-Triples (the term syntax accepted verbatim
 /// inside a SPARQL `INSERT DATA` block), validating the RDF in the process. The `sparq-core`
@@ -4409,7 +5126,7 @@ fn body_to_ntriples(
         None => {
             return Err(json_error(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "GSP write body must be RDF: Content-Type 'text/turtle', 'application/n-triples', 'application/n-quads', 'application/trig' or 'application/rdf+xml'",
+                GSP_WRITE_BODY_415,
             ))
         }
     };
@@ -4653,6 +5370,188 @@ async fn gsp_delete(state: &AppState, graph: GraphRef) -> Response {
     }
 }
 
+/// [OPUS-4.8] (sq-hj4n, gh-916) `PATCH <graph>` — apply an ATOMIC, graph-scoped in-place modify
+/// to the addressed graph. Two body dialects, classified by `Content-Type`:
+///
+///   * **`application/sparql-update`** (ALWAYS-ON, no feature, no new dep) — the body IS a SPARQL
+///     Update. It is applied atomically through the SAME sequenced group-commit writer the
+///     `/sparql` `application/sparql-update` path uses, so the whole multi-operation body lands in
+///     ONE durable generation. It is **scoped** to the addressed graph by defaulting the update's
+///     WHERE dataset to that graph (the SPARQL 1.1 Protocol §2.2 `using-graph-uri` mechanism, via
+///     the in-tree [`rewrite_update`]). HONEST SCOPE: this scopes what the WHERE *reads*; an
+///     operation that names a DIFFERENT graph explicitly (`INSERT DATA { GRAPH <other> { … } }` /
+///     a `WITH`/`USING` clause) still writes/reads where it says, exactly as SPARQL specifies —
+///     supplying the override alongside an in-string `USING`/`WITH` is a `400` (§2.2), the existing
+///     protocol behaviour. For the default graph the override is a no-op (the default graph is
+///     already the WHERE default). Success → `204`.
+///
+///   * **`text/n3`** (OPT-IN, behind the `n3-patch` cargo feature AND the `--n3-patch` runtime
+///     flag) — a Solid-style N3-Patch (`solid:InsertDeletePatch`). Parsed into its
+///     `solid:deletes` / `solid:inserts` / `solid:where` formulas and translated into ONE atomic
+///     graph-scoped SPARQL Update (every block wrapped in `GRAPH <g> { … }` for a named graph),
+///     submitted through the same writer. Success → `204`. With the feature OFF this arm is
+///     `#[cfg]`-stripped entirely, so a `text/n3` body is a plain `415`. With the feature ON but
+///     the runtime flag OFF it is also `415` (double-opt-in, mirroring `tpf`/`shacl`).
+///
+/// Any other `Content-Type` is a `415`. A `PATCH` is a WRITE, gated like an UPDATE; the auth gate
+/// already ran in [`graph_store`] before this handler.
+async fn gsp_patch(
+    state: &AppState,
+    graph: GraphRef,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Response {
+    // [OPUS-4.8] sq-hj4n: inflate a `Content-Encoding: gzip` body under the decompression-ratio
+    // cap (zip-bomb guard) before parsing it, exactly as the GSP PUT/POST write paths do.
+    let body = match decode_request_body(body, headers, state.config()) {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
+    let ct = content_type(headers);
+    let mt = ct.split(';').next().unwrap_or("").trim();
+    match mt {
+        // ----- ALWAYS-ON dialect: a SPARQL Update body, scoped to the addressed graph. -----
+        "application/sparql-update" => {
+            let update = match std::str::from_utf8(&body) {
+                Ok(u) => u,
+                Err(_) => return bad_request("request body is not valid UTF-8"),
+            };
+            // Scope the update's WHERE dataset to the addressed named graph (§2.2 using-graph-uri,
+            // reusing the in-tree rewrite). The default graph is already the WHERE default → no
+            // override. `rewrite_update` rejects a conflict with an in-string USING/WITH (400) and
+            // a malformed update (400), sanitizing the detail.
+            let over = match &graph {
+                GraphRef::Default => UsingOverride::default(),
+                GraphRef::Named(iri) => UsingOverride {
+                    default: vec![iri.clone()],
+                    named: Vec::new(),
+                },
+            };
+            match rewrite_update(update, &over) {
+                // Reuse the shared update path: atomic group-commit, 204 on success, the same
+                // budget/timeout/sanitized-rejection discipline as the /sparql update body.
+                Ok(rewritten) => run_update(state, rewritten).await,
+                Err(resp) => resp,
+            }
+        }
+        // ----- OPT-IN dialect: Solid N3-Patch. Compiled out entirely without the feature. -----
+        #[cfg(feature = "n3-patch")]
+        "text/n3" => gsp_patch_n3(state, graph, &body).await,
+        // Anything else (including `text/n3` when the feature is off) is an unsupported media type.
+        _ => json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            n3_patch_unsupported_media_msg(),
+        ),
+    }
+}
+
+/// [OPUS-4.8] (sq-hj4n) The `415` message for an unsupported `PATCH` body media type. With the
+/// `n3-patch` feature on, `text/n3` is offered (so it is named); with the feature off it is not.
+/// Two literals (not a runtime `if`) so the message is exactly right per build, and the
+/// feature-off message never advertises a dialect the build cannot serve.
+#[cfg(feature = "n3-patch")]
+fn n3_patch_unsupported_media_msg() -> &'static str {
+    "PATCH body must be a graph patch: Content-Type 'application/sparql-update' \
+     (always available) or 'text/n3' (Solid N3-Patch, when --n3-patch is enabled)"
+}
+
+/// [OPUS-4.8] (sq-hj4n) The feature-OFF `415` message — names only the always-on dialect.
+#[cfg(not(feature = "n3-patch"))]
+fn n3_patch_unsupported_media_msg() -> &'static str {
+    "PATCH body must be a graph patch: Content-Type 'application/sparql-update'"
+}
+
+/// [OPUS-4.8] (sq-hj4n, gh-916) Applies a Solid N3-Patch (`text/n3`) body to the addressed graph.
+/// Compiled ONLY behind the `n3-patch` feature. Honours the `--n3-patch` runtime flag: with it off
+/// the dialect is `415` even though the feature is compiled in (the double-opt-in posture). Parses
+/// the body, builds ONE atomic graph-scoped SPARQL Update, and submits it through the shared
+/// writer (atomic, 204 on success).
+#[cfg(feature = "n3-patch")]
+async fn gsp_patch_n3(state: &AppState, graph: GraphRef, body: &Bytes) -> Response {
+    // Double-opt-in: the feature is compiled in, but the operator must also flip the runtime flag.
+    if !state.config().n3_patch {
+        return json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "the Solid N3-Patch (text/n3) PATCH dialect is disabled on this server; enable it with \
+             --n3-patch / SPARQ_N3_PATCH=1, or send an 'application/sparql-update' PATCH body",
+        );
+    }
+    // The base IRI relative references resolve against — the addressed named graph's IRI (or None
+    // for the default graph), exactly as the GSP RDF-body write path does (`base_iri`).
+    let base = base_iri(&graph);
+    let patch = match crate::n3_patch::parse(body, base) {
+        Ok(p) => p,
+        // [OPUS-4.8] (sq-cz89/sq-j9zs) The parse error can quote the offending body token —
+        // withhold it from the client (the operator gets the detail in the server log) via the
+        // same sanitized-error discipline the other body-parse paths use.
+        Err(e) => {
+            return sanitized_error(
+                StatusCode::BAD_REQUEST,
+                "n3-patch-parse",
+                &e.to_string(),
+                &e.detail(),
+            )
+        }
+    };
+    // Build ONE atomic SPARQL Update from the parsed formulas, graph-scoped via the exact
+    // `graph_data_block` helper the rest of the GSP write path uses (so a named-graph patch wraps
+    // each block in `GRAPH <g> { … }`, the default graph is bare).
+    let update = build_n3_patch_update(&graph, &patch);
+    // Submit through the shared writer: atomic group-commit, 204 on success, the same
+    // budget/timeout/sanitized-rejection discipline as every other update entry point.
+    run_update(state, update).await
+}
+
+/// [OPUS-4.8] (sq-hj4n) Assembles the ATOMIC, graph-scoped SPARQL Update for a parsed N3-Patch.
+///
+/// * With a `solid:where` clause → a single pattern-based `DELETE { … } INSERT { … } WHERE { … }`
+///   (one atomic modify; the empty blocks are omitted). The `WHERE` block reads the addressed
+///   graph (`GRAPH <g> { … }` for a named graph), so the variables bind against that graph only.
+/// * Without a `where` clause (ground triples) → `DELETE DATA { … } ; INSERT DATA { … }` (the
+///   DATA-form the GSP write path already uses for concrete triples), the two ops in ONE update so
+///   they commit in ONE generation. The delete runs before the insert (an N3-Patch that deletes a
+///   triple and re-inserts a changed one is then correct).
+///
+/// Each block is wrapped in `GRAPH <g> { … }` for a named graph, or left bare for the default
+/// graph — reusing [`graph_data_block`], the exact helper `gsp_put`/`gsp_post` use.
+#[cfg(feature = "n3-patch")]
+fn build_n3_patch_update(graph: &GraphRef, patch: &crate::n3_patch::N3Patch) -> String {
+    if patch.has_where {
+        // Pattern-based modify: DELETE { … } INSERT { … } WHERE { … }. Omit empty templates.
+        let mut update = String::new();
+        if !patch.deletes.is_empty() {
+            update.push_str("DELETE { ");
+            update.push_str(&graph_data_block(graph, &patch.deletes));
+            update.push_str(" }\n");
+        }
+        if !patch.inserts.is_empty() {
+            update.push_str("INSERT { ");
+            update.push_str(&graph_data_block(graph, &patch.inserts));
+            update.push_str(" }\n");
+        }
+        update.push_str("WHERE { ");
+        update.push_str(&graph_data_block(graph, &patch.conditions));
+        update.push_str(" }");
+        update
+    } else {
+        // Ground DATA-form: DELETE DATA { … } ; INSERT DATA { … } — both in one atomic update.
+        let mut ops: Vec<String> = Vec::new();
+        if !patch.deletes.is_empty() {
+            ops.push(format!(
+                "DELETE DATA {{ {} }}",
+                graph_data_block(graph, &patch.deletes)
+            ));
+        }
+        if !patch.inserts.is_empty() {
+            ops.push(format!(
+                "INSERT DATA {{ {} }}",
+                graph_data_block(graph, &patch.inserts)
+            ));
+        }
+        ops.join(" ;\n")
+    }
+}
+
 /// Whether the addressed graph currently exists / is non-empty in the current generation.
 /// For a named graph this is `ASK { GRAPH <g> { ?s ?p ?o } }`; for the default graph,
 /// `ASK { ?s ?p ?o }`. Note the engine has no separate "empty named graph exists" bit
@@ -4715,6 +5614,10 @@ fn serialise_graph_triples(triples: &[oxrdf::Triple], gfmt: GraphFormat) -> Stri
         GraphFormat::NTriples => crate::graph::triples_to_ntriples(triples),
         GraphFormat::Turtle => crate::graph::triples_to_turtle(triples),
         GraphFormat::RdfXml => crate::graph::triples_to_rdfxml(triples),
+        // [OPUS-4.8] sq-oy1f.1: JSON-LD (flattened) — only reachable when the `jsonld` feature
+        // is on (the variant does not exist otherwise, so the match stays exhaustive).
+        #[cfg(feature = "jsonld")]
+        GraphFormat::JsonLd => crate::graph::triples_to_jsonld(triples),
     }
 }
 

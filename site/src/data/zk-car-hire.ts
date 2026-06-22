@@ -97,7 +97,7 @@ export const CIRCUIT_FAMILY: CircuitRow[] = [
   {
     name: "hidden_issuer_d4",
     role: "signed by a trusted issuer, without revealing which key",
-    gates: 16932,
+    gates: 16946,
     live: false,
   },
   {

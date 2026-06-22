@@ -258,6 +258,28 @@ pinning     = "gen_sameas.py is a deterministic pure function of (K,N,M) (no RNG
 records_to  = "stdout (TSV); CI emits sameas_size<N>_{closure_s,query_us,closure_triples} into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/owl-sameas/expected.tsv"
 status      = "ok"
 
+# [OPUS-4.8] sq-evb1: EL classification micro-bench for the opt-in sparq-reason-el crate. The
+# EL-fragment analogue of deep-taxonomy/owl-sameas (those gate the RL reasoner; this gates the
+# consequence-based EL classifier). Two closed-form workloads over the SAME public
+# Classifier::classify API: a deep subClassOf chain (transitive lattice, d·(d+1)/2 subsumptions)
+# and a CR4 existential-traversal chain (d+1 A_i⊑B subsumptions OWL 2 RL CANNOT reach). Both are
+# SELF-ASSERTING (the example asserts the closed-form closure sizes), so a silent classifier
+# under-derivation fails LOUDLY — the deterministic, load-robust correctness gate; wall-clock is
+# trend-only. Hermetic: the TBox is generated in-process (pure function of DEPTH, no dataset).
+[[benchmark]]
+id          = "reason-el-classify"
+name        = "sparq-reason-el — OWL 2 EL classification (chain + CR4 existential traversal)"
+category    = "inference"
+measures    = "classification wall time over a DEPTH-parameterised in-process TBox, for two workloads: `chain` (a DEPTH-deep rdfs:subClassOf chain — complete transitive lattice, closed form derived_subsumptions = DEPTH·(DEPTH+1)/2) and `cr4` (a DEPTH-long ∃r.-successor chain with `∃r.B ⊑ B` back-propagation — closed form A_i⊑B_derivations = DEPTH+1, the existential-traversal closure OWL 2 RL silently cannot derive). The example carries a SELF-ASSERTING closure-size gate: both closed forms are asserted in-process (deterministic) so an EL classifier regression — incl. silent under-derivation — fails LOUDLY"
+invoke      = "cargo run -p sparq-reason-el --example classify_bench --release [DEPTH]   # DEPTH defaults to 2000; self-contained, no dataset to fetch"
+source      = "crates/sparq-reason-el/examples/classify_bench.rs (the runner + in-process generator); crates/sparq-reason-el/src/{lib.rs,classify.rs,normal.rs,extract.rs} (the classified surface — Classifier::classify, CR1-CR5 saturation)"
+dataset     = "in-process: a DEPTH-deep subClassOf chain (chain workload) and a DEPTH-long ∃r.-successor chain + `∃r.B ⊑ B` (cr4 workload), both a pure function of DEPTH (no RNG/network/toolchain, byte-deterministic). DEPTH=2000 default: chain closure 2,001,000 subsumptions, cr4 closure 2,001 — sub-second total. gitignored+regenerable (nothing written to disk)"
+quiet_box_sensitive = true  # classify wall-clock trend-only, NOT in scripts/perf-gate.py; the closed-form closure-size assertions (d·(d+1)/2 chain subsumptions; d+1 cr4 A_i⊑B subsumptions) ARE a hard correctness gate (deterministic, load-robust; catches EL classifier regressions incl. silent under-derivation a single query misses)
+pinning     = "the in-process generator is a deterministic pure function of DEPTH (no RNG, byte-identical); the closed-form closure sizes (chain DEPTH·(DEPTH+1)/2; cr4 DEPTH+1) are asserted in-example, each VERIFIED by running (depth 5 -> 15/6; depth 2000 -> 2001000/2001), not guessed"
+records_to  = "stdout (trend-only wall time + the asserted closure sizes); structural assertions live in the example itself (classify_bench.rs)"
+featured    = false  # [OPUS-4.8] sq-evb1: capability micro-bench (MVP EL classifier), not a head-to-head competitor card — dashboard promotion deferred to a maintainer.
+status      = "ok"
+
 [[benchmark]]
 id          = "selective-bindjoin"
 name        = "Selective (index-nested-loop / bind) join"
@@ -568,6 +590,27 @@ records_to  = "stdout (us per phase)"
 featured    = false
 status      = "ok"
 
+# [OPUS-4.8] sq-mztg8 — FO-KM Metric 1 harness: agent KM-task accuracy + cost over the PKG
+# typed under different foundational-ontology overlays, loaded via pkg-query --extra-graph
+# + --close owl-rl. NOT a perf claim — ships the harness (arms + overlays + tasks), not the
+# verdict; the A/B numbers + analysis are PR #1108 (bench/fo-km/{RESULTS.md,analyze.py}).
+[[benchmark]]
+id          = "fo-km"
+name        = "Foundational-ontology KM-task A/B (Metric 1) over the PKG"
+category    = "inference"
+measures    = "per-arm agent KM-task accuracy (gold count/keys per task) + token cost across no-FO / gUFO / DOLCE-DUL / schema.org overlays; each FO-typed query answered under owl-rl closure of the overlay's rdfs:subClassOf axioms, the no-FO arm cannot answer (the FO-win construction). NOT a perf claim — the closure-build CPU/wall cost is non-canonical and never charged as a token cost"
+invoke      = "python3 bench/fo-km/validate_tasks.py   # proves every task discriminates (each FO arm answers expected count, no-FO returns 0; needs the `close` feature). Per-arm: cargo run -p sparq-kb --features close --bin pkg-query -- --extra-graph bench/fo-km/overlays/<arm>.ttl --close owl-rl --sparql '<FO-typed query from tasks.jsonl>'"
+source      = "bench/fo-km/{README.md,tasks.jsonl,build_tasks.py,validate_tasks.py,overlays/*.ttl}; crates/sparq-kb (pkg-query --extra-graph, load_pkg_with_extra / close::load_pkg_closed_with_extra)"
+dataset     = "the shipped PKG (crates/sparq-kb PKG_ONTOLOGY + PKG_INSTANCES) plus one minimal FO-taxonomy overlay TTL per arm (bench/fo-km/overlays/, vendored in-repo); 16 stratified FO-exercising tasks (bench/fo-km/tasks.jsonl)"
+quiet_box_sensitive = false  # result-fidelity (accuracy / gold-count match), not wall-clock; closure-build cost is non-canonical
+pinning     = "tasks.jsonl + the overlay TTLs are committed; regenerate tasks via build_tasks.py"
+records_to  = "bench/fo-km/RESULTS.md (PR #1108)"
+# featured = false: internal Metric-1 harness; ships the harness, not the verdict (the A/B run +
+# pre-registered kill-criteria are the orchestrator's next step). Dashboard promotion is a
+# DISPOSITION deferred to a maintainer (no perf claim; design research/foundational-ontology-km-benchmark.md §7).
+featured    = false
+status      = "ok"
+
 # =============================================================================
 # ZK — commitment pipeline, trace seam, circuit gate counts, prove/verify
 # =============================================================================
@@ -785,6 +828,31 @@ dataset     = "50,000 x 32-dim vectors from a seeded splitmix64 PRNG, generated 
 quiet_box_sensitive = true
 pinning     = "N=50000, DIM=32, K=10, QUERIES=200 consts in the test; seeds fixed (0xC0FFEE data, 0xDECAF queries)"
 records_to  = "stderr (--nocapture); source of the sparq-vectors README numbers"
+status      = "ok"
+
+# [OPUS-4.8] sq-6tley (relates sq-0wo9e.8/sq-0wo9e.9): the KGE P0 ablation on EC2.
+# RESULT-CAPTURE is the whole point of this entry. A prior run (i-09e73) trained all three
+# datasets fine but the results were LOST: `cargo run` streams hundreds of "Compiling <dep>"
+# lines through ec2-bench's line-by-line console emitter, which overflows the 64KB serial
+# buffer that `get-console-output` retains, pushing the final MRR/Hits@k tables out. So this
+# invoke (a) BUILDS the example first (compile noise off the result path), (b) runs the
+# PREBUILT binary to a file per dataset, (c) emits ONLY the compact final ablation table for
+# each dataset between `=== SPARQ_BENCH_RESULT <ds> ===` / `=== END SPARQ_BENCH_RESULT <ds> ===`
+# sub-markers via grep, so the bytes that reach the console fit the buffer with room to spare.
+# Datasets: synthetic always; optionally a colon-separated SPARQ_KGE_DATASETS list of real KG
+# files (e.g. WN18RR / FB15k-237 N-Triples), each run via the example's SPARQ_KGE_DATASET arm.
+[[benchmark]]
+id          = "kge-ablation"
+name        = "Structure-aware KGE — P0 closure x type-constrained-negatives link-prediction ablation (sq-0wo9e)"
+category    = "query"
+measures    = "filtered link-prediction MRR / Hits@1 / Hits@3 / Hits@10 (mean +/- std over 5 seeds) across the 2x2 P0 ablation matrix {closure on/off} x {uniform, type-constrained negatives}, under both DistMult (symmetric) and ComplEx (asymmetric — read deltas here), with a head-vs-tail breakdown, per dataset"
+invoke      = "cargo build -p sparq-vectors --release --features kge --example kge_ablation 2>&1 | tail -3\nKGEBIN=target/release/examples/kge_ablation\nrun_kge() { ds=$1; tag=$(basename $ds); out=/root/kge-$tag.out; echo === SPARQ_BENCH_RESULT kge $tag ===; if [ $ds = synthetic ]; then $KGEBIN >$out 2>&1; else SPARQ_KGE_DATASET=$ds $KGEBIN >$out 2>&1; fi; grep -E '^(#|==|closure=|    head |  [(]ablation failed)' $out || tail -40 $out; echo === END SPARQ_BENCH_RESULT $tag ===; }\nrun_kge synthetic\nIFS=: ; for d in ${SPARQ_KGE_DATASETS:-}; do case $d in ?*) run_kge $d;; esac; done"
+source      = "crates/sparq-vectors/examples/kge_ablation.rs (the runnable P0 ablation); crates/sparq-vectors/src/{train,eval}.rs (DistMult/ComplEx trainer + filtered link-prediction harness); feature = kge (implies structure); design research/structure-aware-vectorisation.md (P0/P6)"
+dataset     = "SYNTHETIC always (in-process: a WN18RR-style structured-relational slice + a gUFO slice from seeded PRNGs, no download). REAL datasets are OPT-IN via SPARQ_KGE_DATASETS=/path/a.nt:/path/b.nt (e.g. WN18RR + FB15k-237 N-Triples); absent it, only the synthetic arm runs"
+quiet_box_sensitive = true  # MRR/Hits@k are INDICATIVE on a non-canonical box; no figure is baked into a committed doc (per the example's own header). Re-measure on a canonical machine, on a REAL dataset, under ComplEx, multi-seed, before adopting any prior.
+pinning     = "5 seeds from seed0=20260620 (args: [entities] [people] [seed0]); EvalConfig::small with epochs=150 dim=64 negatives_per_positive=16 (set in the example); read inter-cell deltas off the ASYMMETRIC ComplEx run only (DistMult is near-random on these ~100%-directional slices)"
+records_to  = "serial console only (no SSH key / no S3 on pss): the FULL per-dataset run goes to /root/kge-<ds>.out on the box; ONLY the compact final ablation table per dataset is echoed between '=== SPARQ_BENCH_RESULT <ds> ===' / '=== END SPARQ_BENCH_RESULT <ds> ===' so it fits the 64KB get-console-output buffer (the fix for sq-6tley). NOT a perf-gate input"
+featured    = false  # research measurement harness for epic sq-0wo9e (INDICATIVE, non-canonical, no baked figure) — intentionally NOT a capability dashboard card (G3 escape hatch, design §2.1)
 status      = "ok"
 
 [[benchmark]]

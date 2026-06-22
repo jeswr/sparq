@@ -27,7 +27,7 @@ import { cn } from "@/lib/utils";
 import {
   loadSparq,
   loadIntoStore,
-  prewarmSparq,
+  prewarmSparqWhenIdle,
   datasetSize,
   formatTerm,
   type SparqlResults,
@@ -78,20 +78,24 @@ export function DataFormatsDemo() {
   const [parse, setParse] = React.useState<ParseState>({ kind: "idle" });
   const [gzip, setGzip] = React.useState<GzipState>({ kind: "idle" });
 
-  // Pre-warm the wasm engine on mount so the first Parse pays no cold start. Shares the
-  // single loadSparq promise with the rest of the site.
+  // [OPUS-4.8] sq-4296 (#935 / #981) — pre-warm the wasm engine on the next browser-IDLE slot
+  // (not synchronously during mount) so the ~300 kB+ engine never blocks the initial page
+  // paint. Shares the single memoised loadSparq promise with the rest of the site, so the
+  // first Parse joins the in-flight load rather than re-paying a cold start.
   React.useEffect(() => {
     let cancelled = false;
     setEngine("warming");
-    prewarmSparq()
-      .then(() => {
+    const handle = prewarmSparqWhenIdle({
+      onReady: () => {
         if (!cancelled) setEngine("ready");
-      })
-      .catch(() => {
+      },
+      onError: () => {
         if (!cancelled) setEngine("error");
-      });
+      },
+    });
     return () => {
       cancelled = true;
+      handle.cancel();
     };
   }, []);
 

@@ -55,6 +55,50 @@ def test_load_named_graphs_nquads():
     assert graph.ask("ASK { GRAPH <http://ex/g1> { ?s ?p ?o } }")
 
 
+# JSON-LD is default-on in the Python wheel (sq-oy1f.20): a default-features build
+# wires sparq-core/jsonld, so both the format alias and the .jsonld extension work
+# with no flag. A --no-default-features wheel would drop these (fail-closed); the
+# CI builds default-on, so this exercises the real default surface.
+JSONLD = """
+{
+  "@context": {"ex": "http://ex/"},
+  "@id": "ex:alice",
+  "ex:knows": {"@id": "ex:bob"},
+  "ex:age": 30
+}
+"""
+
+
+def test_load_jsonld_format_alias():
+    graph = sparq.Graph.load(JSONLD, format="jsonld")
+    assert len(graph) == 2  # ex:knows + ex:age
+    assert graph.ask("ASK { <http://ex/alice> <http://ex/knows> <http://ex/bob> }")
+
+
+def test_load_jsonld_extension_inferred(tmp_path):
+    p = tmp_path / "data.jsonld"
+    p.write_text(JSONLD)
+    graph = sparq.Graph.load(p)  # format inferred from .jsonld
+    assert len(graph) == 2
+    assert graph.ask(
+        'ASK { <http://ex/alice> <http://ex/age> 30 }'
+    )
+
+
+def test_load_jsonld_named_graph():
+    # @graph with an outer @id is a named graph, preserved + queryable via GRAPH.
+    doc = """
+    {
+      "@context": {"ex": "http://ex/"},
+      "@id": "ex:g1",
+      "@graph": [{"@id": "ex:c", "ex:p": {"@id": "ex:d"}}]
+    }
+    """
+    graph = sparq.Graph.load(doc, format="json-ld")  # hyphenated alias too
+    assert len(graph) == 0  # default graph empty; the triple is in ex:g1
+    assert graph.ask("ASK { GRAPH <http://ex/g1> { <http://ex/c> <http://ex/p> ?o } }")
+
+
 def test_load_parse_error():
     with pytest.raises(ValueError):
         sparq.Graph.load("this is not turtle @@@")

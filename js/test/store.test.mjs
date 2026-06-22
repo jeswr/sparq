@@ -524,3 +524,104 @@ test('queryQuads() round-trips datatyped, escaped and IRI-object terms', async (
   const num = quads.find((q) => q.predicate.value === 'http://ex/n');
   assert.equal(num.object.datatype.value, `${XSD}decimal`);
 });
+
+// [OPUS-4.8] sq-ty78o (#1114): the empty `SparqStore.empty()` constructor — build a store
+// from nothing and grow it with update(), including a named-graph block (the round-trip the
+// issue reported, gated only by the previously-missing wasm constructor).
+test('empty() builds a mutable store; named-graph updates round-trip', async () => {
+  const store = await SparqStore.empty();
+  assert.equal(store.size, 0);
+  // Default-graph insert grows the store.
+  store.update('INSERT DATA { <http://ex/a> <http://ex/p> "v" }');
+  assert.equal(store.size, 1);
+  // Named-graph INSERT then GRAPH ?g query returns the inserted row (no dataset flag needed).
+  store.update('INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }');
+  const rows = store.queryBindings('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].get('g').value, 'http://ex/g');
+});
+
+test('emptySync() builds an empty store (engine already initialised)', async () => {
+  // Ensure the wasm engine is up (emptySync() does not await init()).
+  await SparqStore.empty();
+  const store = SparqStore.emptySync();
+  assert.equal(store.size, 0);
+  store.addQuads([
+    DF.quad(DF.namedNode('http://ex/a'), DF.namedNode('http://ex/p'), DF.literal('v')),
+  ]);
+  assert.equal(store.size, 1);
+});
+
+// [OPUS-4.8] sq-f66jz (#1115): the baseIri option resolves a document's relative IRIs.
+test('fromString with baseIri resolves relative IRIs', async () => {
+  const store = await SparqStore.fromString('<a> <p> <../up/o> .', 'turtle', {
+    baseIri: 'http://ex/dir/',
+  });
+  assert.equal(store.size, 1);
+  const rows = store.queryBindings('SELECT ?s ?o WHERE { ?s ?p ?o }');
+  assert.equal(rows[0].get('s').value, 'http://ex/dir/a');
+  assert.equal(rows[0].get('o').value, 'http://ex/up/o');
+});
+
+test('fromStringSync with baseIri resolves relative IRIs', async () => {
+  await SparqStore.empty(); // ensure wasm init
+  const store = SparqStore.fromStringSync('<a> <p> <o> .', 'turtle', { baseIri: 'http://ex/' });
+  const rows = store.queryBindings('SELECT ?s WHERE { ?s ?p ?o }');
+  assert.equal(rows[0].get('s').value, 'http://ex/a');
+});
+
+test('baseIri rejects an invalid base, and is not combinable with dataset/compressed', async () => {
+  await assert.rejects(
+    SparqStore.fromString('<a> <p> <o> .', 'turtle', { baseIri: 'not a iri' }),
+    /base|iri/i,
+  );
+  await assert.rejects(
+    SparqStore.fromString('<a> <p> <o> .', 'turtle', { baseIri: 'http://ex/', dataset: true }),
+    /baseIri/,
+  );
+  await assert.rejects(
+    SparqStore.fromString('<a> <p> <o> .', 'turtle', { baseIri: 'http://ex/', compressed: true }),
+    /baseIri/,
+  );
+});
+
+// [OPUS-4.8] sq-u78ol (#1117 / #1129): serialize() / dump() expose the store's contents as a
+// Turtle / TriG / JSON-LD document (the wasm serialize-rdf writer, surfaced on the wrapper).
+test('serialize() writes Turtle; round-trips to the same triple count', async () => {
+  const store = await load();
+  const ttl = store.serialize('turtle');
+  assert.ok(ttl.length > 0);
+  assert.ok(ttl.includes('@prefix'), 'abbreviated by default'); // well-known prefixes present
+  // dump() is an alias for serialize().
+  assert.equal(store.dump('turtle'), ttl);
+  // Round-trip: re-parse the serialised Turtle -> same number of triples.
+  const reparsed = await SparqStore.fromString(ttl, 'turtle');
+  assert.equal(reparsed.size, store.size);
+});
+
+test('serialize() honours abbreviate=false and a custom prefix map (#1129)', async () => {
+  const store = await SparqStore.fromString('<http://ex/s> <http://ex/p> <http://ex/o> .', 'turtle');
+  // No abbreviation: full <...> IRIs, no @prefix header.
+  const full = store.serialize('turtle', { abbreviate: false });
+  assert.ok(!full.includes('@prefix'), 'no prefix header when abbreviate=false');
+  assert.ok(full.includes('<http://ex/s>'), 'full IRIs preserved');
+  // Caller-supplied prefix map drives @prefix compaction (#1129).
+  const compact = store.serialize('turtle', { prefixes: [['ex', 'http://ex/']] });
+  assert.ok(compact.includes('@prefix ex:'), 'caller prefix declared');
+  assert.ok(compact.includes('ex:s'), 'IRI compacted to the caller prefix');
+});
+
+test('serialize("trig") emits named graphs as GRAPH blocks', async () => {
+  const store = await SparqStore.fromString(
+    '<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .\n',
+    'nquads',
+    { dataset: true },
+  );
+  const trig = store.serialize('trig');
+  assert.ok(trig.includes('GRAPH'), 'TriG carries the named graph as a GRAPH block');
+});
+
+test('serialize() rejects an unknown format', async () => {
+  const store = await load();
+  assert.throws(() => store.serialize('rdfxml'), /serialize|format/i);
+});

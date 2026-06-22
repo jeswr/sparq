@@ -45,6 +45,16 @@ Transcript JSONL files live under Claude Code's session directory (e.g.
 `~/.claude/projects/<project>/<session>.jsonl` and the per-task `*.output` files).
 Stdlib-only; no third-party dependencies and nothing added to `sparq-core`/`-engine`.
 
+### Sibling: the per-PR/task metrics-collection harness
+
+This script is the **token-accounting engine** that the per-PR/task metrics harness
+[`metrics_row.py`](./metrics_row.py) **reuses** (it never re-derives token counts).
+`metrics_row.py` joins this telemetry with `gh` + `roborev` + `bd` into one structured
+row per PR — first-shot-success, ref-event-derived rework, review pushback, CI
+first-pass, and the cache-discounted effective-input tokens — and the captured
+baseline + the shared A/B protocol live under [`../../metrics/`](../../metrics/README.md)
+(bead `sq-lhwo.1`). Start there to run an A/B; the row schema is defined in that README.
+
 ### Cost is opt-in and never hard-coded
 
 The tool does **not** bake in vendor prices — they drift, and a stale price inside a

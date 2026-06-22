@@ -115,3 +115,52 @@ test("an ASK query renders the boolean result, not a table", async ({ page }) =>
 
   expect(consoleErrors, `console errors: ${consoleErrors.join("\n")}`).toEqual([]);
 });
+
+// [OPUS-4.8] sq-oy1f.7 — the CONSTRUCT result graph's JSON-LD OUTPUT MODES. The graph result
+// (`GraphResult` in repl.tsx) defaults to the pretty-Turtle view but offers a format selector
+// whose JSON-LD modes serialise the SAME result triples through the wasm engine's own JSON-LD
+// writer: "Expanded"/"Flattened"/"Compacted (prefixes)" via `Store.serialize`, and
+// "Compaction (@context)" via `Store.serializeCompact` (the full W3C JSON-LD 1.1 Compaction
+// against a user-supplied @context, sq-oy1f.5). This drives a CONSTRUCT, switches to the
+// expanded JSON-LD form, then to the full-Compaction form with the default @context, asserting
+// each renders a real JSON-LD document with zero console errors. Anchored on the stable
+// `data-result-kind="graph"` / `data-graph-view="jsonld"` attributes — no copy-scraping.
+test("a CONSTRUCT result graph serialises to JSON-LD via the output-format selector", async ({
+  page,
+}) => {
+  const consoleErrors = trackConsoleErrors(page);
+  await gotoReady(page);
+
+  // Pick the built-in CONSTRUCT example (derives a symmetric :friendOf graph), then run it.
+  await page.getByRole("button", { name: "CONSTRUCT friend-of graph" }).click();
+  await page.getByRole("button", { name: "Run query" }).click();
+
+  // The graph result panel appears; it defaults to the pretty-Turtle view.
+  const panel = page.locator('[data-result-kind="graph"]');
+  await expect(panel).toBeVisible({ timeout: 30_000 });
+  await expect(panel.locator('[data-turtle-view="pretty"]')).toBeVisible();
+
+  // Switch to the expanded JSON-LD output form. The serialise runs on the wasm engine.
+  await panel.getByRole("tab", { name: "JSON-LD (expanded)" }).click();
+  const jsonldView = panel.locator('[data-graph-view="jsonld"]');
+  await expect(jsonldView).toBeVisible({ timeout: 30_000 });
+  // The expanded form is an array of node objects keyed by full-IRI predicates with `@id`s.
+  await expect(jsonldView).toContainText("@id");
+  await expect(jsonldView).toContainText("friendOf");
+  // The Turtle view is no longer the active rendering.
+  await expect(panel.locator('[data-turtle-view]')).toHaveCount(0);
+
+  // Switch to the full W3C JSON-LD 1.1 Compaction mode — the @context textarea appears, and
+  // the document is recompacted against the default @context (which maps `ex:`/foaf terms).
+  await panel.getByRole("tab", { name: "JSON-LD (Compaction)" }).click();
+  await expect(
+    page.getByLabel("JSON-LD @context for full Compaction"),
+  ).toBeVisible();
+  const compacted = panel.locator('[data-graph-view="jsonld"]');
+  await expect(compacted).toBeVisible({ timeout: 30_000 });
+  // The compaction collapses the friend-of predicate to a `@context` term and emits `@context`.
+  await expect(compacted).toContainText("@context");
+
+  // The whole interaction (two engine serialises) produced zero console errors.
+  expect(consoleErrors, `console errors: ${consoleErrors.join("\n")}`).toEqual([]);
+});

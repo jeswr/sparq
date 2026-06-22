@@ -88,7 +88,7 @@ Gate counts below are the **deterministic** committed snapshot
 `1.0.0-beta.21`; 3% regression tolerance absorbs ~0.5–0.75% cross-platform variance).
 Members independently re-run on this box matched the snapshot to the gate:
 `filter_int_d2 = 17416`, `revoke_unset_d10 = 899`, `scan_k1_n16_r4 = 5991`,
-`hidden_issuer_d4 = 16932`, and — for this revision — the four newly-added members
+`hidden_issuer_d4 = 16946`, and — for this revision — the four newly-added members
 `filter_signed_int_d2 = 17416`, `filter_signed_int_d4 = 17416`,
 `filter_decimal_i3_f2 = 17416`, and `holder_set_d4 = 10650`. The bench mirror
 `bench/zk-compose/gate_counts_latest.json` is regenerated from the same snapshot
@@ -112,7 +112,7 @@ the catalog and the regression gate cannot drift.
 | `filter_f64_d1..d4` | 17416 | Same token-binding cost as `filter_int` (tie) |
 | `filter_signed_int_d2` / `_d4` | 17416 | Signed `xsd:integer`; same canonical-token blake3 binding — tie, flat in magnitude-digit count |
 | `filter_decimal_i3_f2` | 17416 | `xsd:decimal` (3 int + 2 frac digits); same token binding — tie |
-| `hidden_issuer_d4` | 16932 | In-circuit signature verification — heaviest non-scan / non-filter operator |
+| `hidden_issuer_d4` | 16946 | In-circuit signature verification — heaviest non-scan / non-filter operator (incl. the sq-ru0yx M-1 challenge-reduction no-wrap bound, +14) |
 | `scan_k1_n64_r4` | 14923 | |
 | `join_eq_na16_nb64` / `na64_nb16` | 12885 | Equal by bucket-size symmetry |
 | `scan_k2_n16_r8` | 11261 | |
@@ -140,7 +140,7 @@ scalar-mul plus the depth-4 set-membership fold (≈ +316 gates over `holder_pok
 
 1. **Scan is the heavy end** (`scan_k2_n64_r8 = 34821`): the per-graph Poseidon2
    commitment recompute plus the completeness double-loop dominate.
-2. **In-circuit signature verification is expensive** (`hidden_issuer_d4 = 16932`):
+2. **In-circuit signature verification is expensive** (`hidden_issuer_d4 = 16946`):
    two ~251-bit twisted-Edwards scalar muls implemented in explicit Field constraints
    (the `embedded_curve_*` blackboxes are Grumpkin — the wrong curve). This is the
    single heaviest non-scan / non-filter operator — *comparable to a full filter

@@ -38,6 +38,17 @@ on:
         description: "Artifact shape: 'archive' (versioned tar.gz/zip + docs, for release.yml) or 'binary' (bare per-tier binary, for dist.yml)."
         required: true
         type: string
+      # [OPUS-4.8] sq-gl3cf: the version token used in the `archive`-mode PKG name. Threaded from
+      # release.yml's `setup` job so a workflow_dispatch release names archives by the dispatch tag
+      # (on dispatch, this workflow's own `github.ref_name` is the BRANCH, which would mis-name
+      # every archive). Empty default => callers that pass nothing (dist.yml) fall back to
+      # `github.ref_name`, preserving the prior behavior exactly. `binary` mode names by tier only,
+      # so it does not consume this input.
+      version:
+        description: "Release version token for the archive PKG name (defaults to github.ref_name when empty)."
+        required: false
+        type: string
+        default: ""
 
 # Default read-only; the matrix job opts into the OIDC + attestation writes it needs (below).
 # A reusable workflow's effective permissions are the INTERSECTION of this declaration and the
@@ -92,7 +103,7 @@ jobs:
       # INTO the released binary, so the shipped artifact is self-describing for post-build audit
       # (`cargo audit bin <file>` / `auditable info <file>`). Negligible size cost; no runtime overhead.
       - name: Install cargo-auditable
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: cargo-auditable
       - name: Build sparq-cli + sparq-server (${{ matrix.cpu || 'default-cpu' }})
@@ -117,11 +128,17 @@ jobs:
       # sparq-server). The archive name is unchanged (`sparq-cli-<ver>-<tier>`) to keep the
       # release SHA256SUMS / asset naming consistent — release.yml downloads `pkg-*` wholesale
       # and sums every file, so it is agnostic to the archive's internal contents.
+      # [OPUS-4.8] sq-gl3cf: the `<ver>` token is the threaded `version` input when the caller
+      # supplies it (release.yml's resolved version, correct on dispatch), else GITHUB_REF_NAME
+      # (unchanged behavior for callers that pass nothing).
       - name: Package (binaries + README + LICENSE + CHANGELOG)
         if: inputs.mode == 'archive'
         shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
-          PKG="sparq-cli-${GITHUB_REF_NAME}-${{ matrix.tier }}"
+          VER="${VERSION:-$GITHUB_REF_NAME}"
+          PKG="sparq-cli-${VER}-${{ matrix.tier }}"
           mkdir -p "pkg/$PKG"
           cp "target/${{ matrix.target }}/release/sparq-cli${{ matrix.ext }}" "pkg/$PKG/"
           cp "target/${{ matrix.target }}/release/sparq-server${{ matrix.ext }}" "pkg/$PKG/"

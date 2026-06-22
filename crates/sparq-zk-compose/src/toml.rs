@@ -38,6 +38,19 @@ pub enum ProverTomlError {
     // [OPUS-4.8] sq-7lrq: signed/decimal proving path; witness-omitted recoverable
     // failure (no panic in a public fn).
     FilterSignedMissingWitness,
+    /// A [`ProofInputs::FilterValueDl`] (DUAL-LEAF value lane) was passed to the
+    /// general `prover_toml_for`: its private witness is two FIELD elements
+    /// (`value_hook` + `lexical_component`), a different shape from the digit-byte
+    /// witnesses the general entry threads, so the value-lane Prover.toml is
+    /// emitted by the DEDICATED [`filter_value_dl_prover_toml`] instead. This keeps
+    /// the general entry's signature unchanged (the value lane is opt-in,
+    /// `dual-leaf` feature). [OPUS-4.8] sq-xojl.
+    ///
+    /// [OPUS-4.8] sq-2ezsx: the same applies to the `xsd:double`
+    /// ([`filter_value_dl_f64_prover_toml`]) and `xsd:decimal`
+    /// ([`filter_value_dl_decimal_prover_toml`]) sibling members.
+    #[cfg(feature = "dual-leaf")]
+    FilterValueDlUseDedicatedFn,
 }
 
 impl std::fmt::Display for ProverTomlError {
@@ -56,8 +69,119 @@ impl std::fmt::Display for ProverTomlError {
                  it from build_filter_signed_int / build_filter_decimal and pass it \
                  via prover_toml_for's filter_signed_witness arg"
             ),
+            #[cfg(feature = "dual-leaf")]
+            ProverTomlError::FilterValueDlUseDedicatedFn => write!(
+                f,
+                "dual-leaf value-lane FILTER Prover.toml is emitted by the dedicated \
+                 filter_value_dl_prover_toml(challenge, operand_enc, op, bound, \
+                 datatype_const, expected, value_hook, lexical_component) — its private \
+                 witness is two field elements, not digit bytes"
+            ),
         }
     }
+}
+
+/// Render the `Prover.toml` body for a DUAL-LEAF value-lane FILTER proof
+/// (`filter_value_dl_int`, [OPUS-4.8] sq-xojl). Order MUST match
+/// `zk/compose/filter_value_dl_int/src/main.nr`:
+/// challenge, operand_enc, op, bound, datatype_const, expected (public), then
+/// value_hook, lexical_component (private). The two private witnesses are FIELD
+/// elements: `value_hook` is the numeric value handle, `lexical_component` is the
+/// OFF-circuit blake3 lexical hash carried as a free witness (the member binds it
+/// via the leaf, never hashes it — the gate win). DOCUMENTED RISK: this carries
+/// the INV-VL downgrade (value↔lexical agreement is trusted-issuer-honesty; #769
+/// accepted, CR-G8 / sq-qhy4); NOT externally audited.
+#[cfg(feature = "dual-leaf")]
+#[allow(clippy::too_many_arguments)]
+pub fn filter_value_dl_prover_toml(
+    challenge: &FieldHex,
+    operand_enc: &FieldHex,
+    op: u32,
+    bound: u64,
+    datatype_const: &FieldHex,
+    expected: bool,
+    value_hook: &FieldHex,
+    lexical_component: &FieldHex,
+) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("challenge = \"{}\"\n", challenge.0));
+    s.push_str(&format!("operand_enc = \"{}\"\n", operand_enc.0));
+    s.push_str(&format!("op = \"{}\"\n", op));
+    s.push_str(&format!("bound = \"{}\"\n", bound));
+    s.push_str(&format!("datatype_const = \"{}\"\n", datatype_const.0));
+    s.push_str(&format!("expected = {}\n", expected));
+    s.push_str(&format!("value_hook = \"{}\"\n", value_hook.0));
+    s.push_str(&format!("lexical_component = \"{}\"\n", lexical_component.0));
+    s
+}
+
+/// Render the `Prover.toml` body for a DUAL-LEAF `xsd:double` value-lane FILTER
+/// proof (`filter_value_dl_f64`, [OPUS-4.8] sq-2ezsx). Order MUST match
+/// `zk/compose/filter_value_dl_f64/src/main.nr`: challenge, operand_enc, op,
+/// b_bits, datatype_const, expected (public), then value_hook, lexical_component
+/// (private). `value_hook` is the IEEE-754 double bit pattern (as a field);
+/// `b_bits` is the FILTER's constant double's bit pattern. The member
+/// canonicalises the IEEE bits IN-CIRCUIT (B4), so a `value_hook` for `-0.0` or a
+/// NaN binds the same leaf as its canonical form. DOCUMENTED RISK: INV-VL
+/// downgrade (CR-G8 / sq-qhy4); NOT externally audited.
+#[cfg(feature = "dual-leaf")]
+#[allow(clippy::too_many_arguments)]
+pub fn filter_value_dl_f64_prover_toml(
+    challenge: &FieldHex,
+    operand_enc: &FieldHex,
+    op: u32,
+    b_bits: u64,
+    datatype_const: &FieldHex,
+    expected: bool,
+    value_hook: &FieldHex,
+    lexical_component: &FieldHex,
+) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("challenge = \"{}\"\n", challenge.0));
+    s.push_str(&format!("operand_enc = \"{}\"\n", operand_enc.0));
+    s.push_str(&format!("op = \"{}\"\n", op));
+    s.push_str(&format!("b_bits = \"{}\"\n", b_bits));
+    s.push_str(&format!("datatype_const = \"{}\"\n", datatype_const.0));
+    s.push_str(&format!("expected = {}\n", expected));
+    s.push_str(&format!("value_hook = \"{}\"\n", value_hook.0));
+    s.push_str(&format!("lexical_component = \"{}\"\n", lexical_component.0));
+    s
+}
+
+/// Render the `Prover.toml` body for a DUAL-LEAF `xsd:decimal` value-lane FILTER
+/// proof (`filter_value_dl_decimal`, [OPUS-4.8] sq-2ezsx). Order MUST match
+/// `zk/compose/filter_value_dl_decimal/src/main.nr`: challenge, operand_enc, op,
+/// bound_neg, bound_scaled, datatype_const, expected (public), then value_neg,
+/// value_hook_scaled, lexical_component (private). The value handle is the SIGNED
+/// scaled magnitude at the canonical scale (sign in `value_neg`, magnitude in
+/// `value_hook_scaled`); the scale is folded into `datatype_const` (the B4 bind).
+/// DOCUMENTED RISK: INV-VL downgrade (CR-G8 / sq-qhy4); NOT externally audited.
+#[cfg(feature = "dual-leaf")]
+#[allow(clippy::too_many_arguments)]
+pub fn filter_value_dl_decimal_prover_toml(
+    challenge: &FieldHex,
+    operand_enc: &FieldHex,
+    op: u32,
+    bound_neg: bool,
+    bound_scaled: u64,
+    datatype_const: &FieldHex,
+    expected: bool,
+    value_neg: bool,
+    value_hook_scaled: &FieldHex,
+    lexical_component: &FieldHex,
+) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("challenge = \"{}\"\n", challenge.0));
+    s.push_str(&format!("operand_enc = \"{}\"\n", operand_enc.0));
+    s.push_str(&format!("op = \"{}\"\n", op));
+    s.push_str(&format!("bound_neg = {}\n", bound_neg));
+    s.push_str(&format!("bound_scaled = \"{}\"\n", bound_scaled));
+    s.push_str(&format!("datatype_const = \"{}\"\n", datatype_const.0));
+    s.push_str(&format!("expected = {}\n", expected));
+    s.push_str(&format!("value_neg = {}\n", value_neg));
+    s.push_str(&format!("value_hook_scaled = \"{}\"\n", value_hook_scaled.0));
+    s.push_str(&format!("lexical_component = \"{}\"\n", lexical_component.0));
+    s
 }
 
 impl std::error::Error for ProverTomlError {}
@@ -502,6 +626,23 @@ pub fn prover_toml_for(
             );
             (id.clone(), toml)
         }
+        // [OPUS-4.8] sq-xojl: DUAL-LEAF value-lane FILTER. Its private witness is two
+        // FIELD elements (value_hook + lexical_component), a different shape from the
+        // digit-byte witnesses this general entry threads, so the value-lane
+        // Prover.toml is emitted by the dedicated `filter_value_dl_prover_toml` (which
+        // keeps this signature unchanged for the opt-in `dual-leaf` feature). Surface
+        // a recoverable error here, never a panic.
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDl { .. } => {
+            return Err(ProverTomlError::FilterValueDlUseDedicatedFn);
+        }
+        // [OPUS-4.8] sq-2ezsx: the double + decimal value-lane siblings also carry
+        // FIELD-element private witnesses, so they use the dedicated fns
+        // (`filter_value_dl_f64_prover_toml` / `filter_value_dl_decimal_prover_toml`).
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlF64 { .. } | ProofInputs::FilterValueDlDecimal { .. } => {
+            return Err(ProverTomlError::FilterValueDlUseDedicatedFn);
+        }
         // [OPUS-4.8] sq-bwwl / sq-r2s8 (step 4 proving path): hidden cross-credential
         // JOIN. The public inputs (commit_a/commit_b/join_commitment/slot_a/slot_b)
         // come from `inputs`; the PRIVATE witnesses
@@ -818,5 +959,96 @@ mod toml_glue_tests {
         assert_ne!(a.to_string(), b.to_string());
         assert!(a.to_string().contains("join_eq"));
         assert!(b.to_string().contains("FilterSignedWitness"));
+    }
+
+    // [OPUS-4.8] sq-2ezsx: the double + decimal dedicated Prover.toml renderers
+    // emit the public + private fields in the EXACT `main` declaration order of
+    // their member, with the FIELD-element private witnesses. These cover the
+    // NON-cryptographic serialization plumbing only (NOT-yet-sound, sq-qhy4).
+
+    #[cfg(feature = "dual-leaf")]
+    #[test]
+    fn filter_value_dl_f64_toml_shape_and_order() {
+        let toml = filter_value_dl_f64_prover_toml(
+            &fh("0x01"), // challenge
+            &fh("0x02"), // operand_enc
+            3,           // op (ge)
+            0x4008000000000000, // b_bits (3.0)
+            &fh("0x03"), // datatype_const
+            true,        // expected
+            &fh("0x04"), // value_hook (IEEE bits)
+            &fh("0x05"), // lexical_component
+        );
+        let lines: Vec<&str> = toml.lines().collect();
+        // Declaration order: challenge, operand_enc, op, b_bits, datatype_const,
+        // expected, then the two private field witnesses.
+        assert!(lines[0].starts_with("challenge = "));
+        assert!(lines[1].starts_with("operand_enc = "));
+        assert!(lines[2].starts_with("op = "));
+        assert!(lines[3].starts_with("b_bits = "));
+        assert!(lines[4].starts_with("datatype_const = "));
+        assert!(lines[5] == "expected = true");
+        assert!(lines[6].starts_with("value_hook = "));
+        assert!(lines[7].starts_with("lexical_component = "));
+    }
+
+    #[cfg(feature = "dual-leaf")]
+    #[test]
+    fn filter_value_dl_decimal_toml_shape_and_order() {
+        let toml = filter_value_dl_decimal_prover_toml(
+            &fh("0x01"), // challenge
+            &fh("0x02"), // operand_enc
+            3,           // op (ge)
+            false,       // bound_neg
+            10000,       // bound_scaled (100.00 at fd=2)
+            &fh("0x03"), // datatype_const
+            true,        // expected
+            true,        // value_neg
+            &fh("0x04"), // value_hook_scaled
+            &fh("0x05"), // lexical_component
+        );
+        let lines: Vec<&str> = toml.lines().collect();
+        // Declaration order: challenge, operand_enc, op, bound_neg, bound_scaled,
+        // datatype_const, expected, then the three private witnesses.
+        assert!(lines[0].starts_with("challenge = "));
+        assert!(lines[1].starts_with("operand_enc = "));
+        assert!(lines[2].starts_with("op = "));
+        assert!(lines[3] == "bound_neg = false");
+        assert!(lines[4].starts_with("bound_scaled = "));
+        assert!(lines[5].starts_with("datatype_const = "));
+        assert!(lines[6] == "expected = true");
+        assert!(lines[7] == "value_neg = true");
+        assert!(lines[8].starts_with("value_hook_scaled = "));
+        assert!(lines[9].starts_with("lexical_component = "));
+    }
+
+    /// The double + decimal value-lane inputs route to the dedicated-fn error in
+    /// the general `prover_toml_for` (their FIELD-element witnesses do not fit the
+    /// general entry's digit-byte threading), never a panic.
+    #[cfg(feature = "dual-leaf")]
+    #[test]
+    fn prover_toml_for_dual_leaf_value_classes_is_recoverable_error() {
+        for inputs in [
+            ProofInputs::FilterValueDlF64 {
+                id: CircuitId::FilterValueDlF64,
+                operand_enc: fh("0x02"),
+                op: FilterOp::Ge,
+                b_bits: 0x4008000000000000,
+                datatype_const: fh("0x03"),
+                expected: true,
+            },
+            ProofInputs::FilterValueDlDecimal {
+                id: CircuitId::FilterValueDlDecimal,
+                operand_enc: fh("0x02"),
+                op: FilterOp::Ge,
+                bound_neg: false,
+                bound_scaled: 10000,
+                datatype_const: fh("0x03"),
+                expected: true,
+            },
+        ] {
+            let r = prover_toml_for(&inputs, &fh("0x01"), &[], &[], &[], None, None);
+            assert_eq!(r, Err(ProverTomlError::FilterValueDlUseDedicatedFn));
+        }
     }
 }

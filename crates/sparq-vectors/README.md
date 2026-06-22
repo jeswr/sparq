@@ -14,9 +14,9 @@ One f32 embedding per dictionary term id, in a flat memory-mapped `.spqv` file (
 design). Query top-`k` by cosine with an exact brute-force scan or a persistent on-disk
 DiskANN/Vamana graph by default, or an in-RAM HNSW index behind the opt-in `approx-ann`
 feature (the only third-party ANN dependency; **recall < 1.0**). Embeddings are produced
-**outside** the engine; the crate verbalizes entities to text, embeds via a
-provider-agnostic trait, and fuses with another ranked signal for hybrid search. It is a
-**separate crate** — nothing in the workspace (or the wasm build) depends on it.
+**outside** the engine; the crate verbalizes entities to text, embeds via a provider-agnostic
+trait, and fuses with another ranked signal for hybrid search. It is a **separate crate** —
+nothing in the workspace (or the wasm build) depends on it.
 
 ## 🚀 Quickstart
 
@@ -53,65 +53,66 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   persistent on-disk `DiskAnnIndex` in the default build; the in-RAM HNSW `VectorIndex`
   behind the **opt-in `approx-ann`** feature, the **only** third-party-ANN dependency
   (`instant-distance`). **Approximate search has recall `< 1.0`** (measured against
-  `nearest_exact`) — only the exact path is answer-exact; the approximate path is never
-  claimed as exact.
+  `nearest_exact`) — only the exact path is answer-exact, never the approximate one.
 - **Predicate-constrained ANN (opt-in `filtered-ann`)** — restrict the search to the
   dict-ids a SPARQL BGP admits via an `IdMask` (lean, no new dependency). Composed with
-  `approx-ann`, filtered over-fetch fills `k` whenever `k` admitted vectors exist *and
-  the backend surfaces them* — **honest caveat:** over-fetch fixes *under-fill*, not the
-  approximate index's inherent misses (recall stays `< 1.0`, asserted in
-  `tests/overfetch.rs`).
+  `approx-ann`, filtered over-fetch fills `k` whenever `k` admitted vectors exist *and the
+  backend surfaces them* — **honest caveat:** over-fetch fixes *under-fill*, not the
+  approximate index's inherent misses (recall stays `< 1.0`, `tests/overfetch.rs`).
 - **k-NN inside SPARQL (opt-in `vec-predicate`)** — `vec:nearest` / `vec:search` magic
   predicates via a spargebra-algebra rewrite (the engine is unchanged). A constrained
   neighbour variable is searched as a *filtered* ANN over its join-connected sub-BGP,
   with the derived `IdMask` cached by sub-BGP + graph fingerprint (any graph change
-  misses the cache, so a stale mask is never served). A per-query cost model chooses
-  pre- vs post-filter; both return the **byte-identical** top-k.
+  misses the cache). A per-query cost model picks pre- vs post-filter; both return the
+  **byte-identical** top-k.
 - **Graph-staleness guard** — `.spqv`/`.spqg` headers embed a dictionary **fingerprint**
-  (thread-count-stable: re-loading the same RDF at a different `RAYON_NUM_THREADS`
-  fingerprints identically). The checked query paths reject a mismatch instead of serving
+  (thread-count-stable). The checked query paths reject a mismatch instead of serving
   wrong neighbours. **Id-keyed staleness contract (sq-wlzi):** a passing `check_graph` is
   **necessary but not sufficient** — to serve a persisted store, `Graph::save` its graph
   and reopen **that** (`Graph::open`, frozen id order); **never** re-parse the source RDF
   (pinned in `tests/staleness_contract.rs`).
 - **Incremental add / remove / update (opt-in `delta`)** — a `.spqv` is build-once-immutable; the
-  `delta` feature adds an **in-RAM delta sidecar** (`add`/`remove`/`update` → append map + tombstones)
-  that `get`/`iter`/search transparently union (honouring tombstones), generation-tied to the base
-  (sq-32i5). `compact` folds it into a from-scratch-equivalent base. **In-RAM only** (lost on drop; `compact` is the durability path); a persisted delta is a tracked follow-up. No new dep. See rustdoc/SKILL.
+  `delta` feature adds a **delta sidecar** (`add`/`remove`/`update` → append map + tombstones) that
+  `get`/`iter`/search transparently union, generation-tied to the base (sq-32i5); `compact` folds it
+  into a from-scratch-equivalent base. `save_delta`/`open_with_delta` persist+replay it to a
+  crash-durable `.spqd` so mutations survive a restart. No new dep. See rustdoc/SKILL.
 - **Verbalization, quantization, hybrid fusion** — `verbalize` / `embed_entities` render
-  per-entity text (multilingual, char-budgeted, single named graph at a time);
-  `ScalarQuantizer` (4×) and `ProductQuantizer` for large stores; `fuse_rrf` /
-  `hybrid_search` combine vectors with another ranked signal (e.g.
-  [`sparq-sim`](../sparq-sim)).
+  per-entity text (multilingual, char-budgeted); `ScalarQuantizer` (4×) and
+  `ProductQuantizer` for large stores; `fuse_rrf` / `hybrid_search` combine vectors with
+  another ranked signal (e.g. [`sparq-sim`](../sparq-sim)).
 - **Bring-your-own embeddings** — `import_npy` / `import_numeric_dump` load an
   externally-computed matrix straight into a `.spqv` keyed by dict id (no model
   in-process, no new dependency). **Fail-closed**: any dtype / byte-order / shape /
-  length / non-finite-row mismatch is an `Err`, never a silent reinterpretation, and the
+  length / non-finite-row mismatch is an `Err`, never a silent reinterpretation; the
   declared `.npy` header is bounded before any body allocation.
 - **Live embeddings (opt-in)** — the default build is **socket-free**. The non-default
   `provider` feature carries the OpenAI-compatible `/v1/embeddings` shape with a
   caller-supplied `Transport`; `embeddings` adds a concrete reqwest client +
   `RemoteEmbedder::from_env(dim)`. Never enters the wasm bundle.
+- **Structure-aware vectorisation (opt-in `structure` / `structure-shacl`; measurement behind `kge`)** — research-grade.
+  **P0:** `close_for_vectorise` materialises the `sparq-reason` closure **before** vectorising; a `NegativeSampler` emits type-constrained corruptions (Krompass 2015) with an **on/off ablation**.
+  **P1/P2:** typed-literal encoders — `route`r, **order-preserving** `NumericEncoder`, `BooleanEncoder`,
+  `DateEncoder`, enum `Codebook`, `SchemaHeader` (metric guard); QUDT unit-`normalise` (`1000 m` ≡ `1 km`);
+  **`structure-shacl`** adds the `ShaclPriors` reader (enum/datatype/cardinality from `sparq-shacl`).
+  **P3:** `TaxonomyDag` + `EuclideanTaxonomyEncoder` (Euclidean default; hyperbolic **only past** the measured-distortion `GeometryGate`) + an **answer-safe** `DisjointnessOracle` (train-time repulsion + serve-time hard mask dropping *provably-disjoint* candidates only).
+  **P4:** `ground` — a per-request modality dispatcher (subgraph / typed sub-vector / NL / typed value), **profile-relative** completeness + ABSTAT-style minimality; ambiguous → the exact subgraph.
+  **`kge`** (implies `structure`, no new dep — hand-rolled SGD): a thin CPU-only trainer (symmetric
+  **DistMult** / asymmetric **ComplEx**) + a **filtered link-prediction** `{closure}×{type-neg}` ablation (`run_ablation*`). **No accuracy claim**; INDICATIVE only — read deltas off ComplEx (DistMult is symmetric → near-random on directional data).
 
 ## 📚 Learn more
 
-- **How-to** — [`skills/vector-search/SKILL.md`](../../skills/vector-search/SKILL.md)
-  (label / verbalized / hybrid pipelines, DiskANN, quantization, bulk import, the full
-  API surface and the `.spqv` / `.spqg` formats).
+- **How-to** — [`skills/vector-search/SKILL.md`](../../skills/vector-search/SKILL.md) (label /
+  verbalized / hybrid pipelines, DiskANN, quantization, bulk import, API surface, `.spqv`/`.spqg`).
 - **API reference** — [docs.rs/sparq-vectors](https://docs.rs/sparq-vectors).
 - **Design** — [`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md).
-- **Accuracy & throughput** — not baked into docs; the recall / DiskANN / PQ /
-  throughput gates are `cargo test`s (`tests/recall.rs`, `tests/diskann.rs`,
-  `tests/quant.rs`, `tests/throughput.rs`), with live numbers on the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
-- **Verified against an established ANN library (sq-6te5)** — `tests/ref_lib_verify.rs`
-  anchors the approximate recall against **hnswlib** (the FAISS/hnswlib reference): it loads
-  a committed real-hnswlib capture (`tests/fixtures/hnswlib_ref.tsv`), checks that
-  `nearest_exact` reproduces the captured numpy exact-kNN oracle, and that DiskANN (and HNSW
-  under `approx-ann`) clears hnswlib's own recall on that shared oracle. Runs in CI with **no
-  native deps** — the corpus is regenerated deterministically on both sides. The **live**
-  hnswlib re-capture (`scripts/capture_hnswlib_ref.py`) is `#[ignore]`d and gather-only (needs
-  numpy + hnswlib). Recall figures are work-box NON-CANONICAL.
+- **Accuracy & throughput** — not baked into docs; the recall / DiskANN / PQ / throughput gates
+  are `cargo test`s (`tests/recall.rs`, `diskann.rs`, `quant.rs`, `throughput.rs`), with live
+  numbers on the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+- **Verified against an established ANN library (sq-6te5)** — `tests/ref_lib_verify.rs` anchors
+  recall against **hnswlib** via a committed capture (`tests/fixtures/hnswlib_ref.tsv`):
+  `nearest_exact` reproduces the numpy exact-kNN oracle, and DiskANN (and HNSW under `approx-ann`)
+  clears hnswlib's recall. Runs in CI with **no native deps** (deterministic corpus); the live
+  re-capture (`scripts/capture_hnswlib_ref.py`) is `#[ignore]`d. Recall figures NON-CANONICAL.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License
