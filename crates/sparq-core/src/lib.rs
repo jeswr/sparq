@@ -10,6 +10,11 @@ pub mod dictspill;
 #[cfg(feature = "mmap")]
 pub mod extsort;
 mod nt;
+// [OPUS-4.8] sq-yj76l (gh #1121): the opt-in `SharedGraph` server-sharing handle. OFF by
+// default so the lean default / wasm build never links it (it is `std::sync` only — no new
+// dep — but the surface stays out of the default API).
+#[cfg(feature = "shared")]
+pub mod shared;
 pub mod store;
 pub mod temporal;
 
@@ -130,6 +135,19 @@ impl std::ops::Deref for GraphSnapshot {
         &self.graph
     }
 }
+
+// [OPUS-4.8] (sq-yj76l, gh #1121) GUARANTEE — for all feature states — that a `Graph` and its
+// read-only `GraphSnapshot` stay `Send` + `Sync`, so they can be shared across the threads of a
+// multi-threaded server (axum/actix) directly or via [`shared::SharedGraph`]. This is a
+// zero-cost compile-time check: adding a future non-`Send`/non-`Sync` field (e.g. an `Rc` or a
+// bare interior-mutable cell) to `Graph` would fail the build HERE rather than silently breaking
+// downstream multi-threaded users. The `mmap`/`dict-spill`-gated fields (`File`, `Mmap`,
+// `TxnJournal`) are themselves `Send + Sync`, so this holds with every feature on too.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Graph>();
+    assert_send_sync::<GraphSnapshot>();
+};
 
 /// Backing storage for the numeric-value cache (`numerics[id-1]` = f64 value of term
 /// `id`, NaN for non-numeric): owned dense in RAM, mmap'd from disk (out-of-core), or
