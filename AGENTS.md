@@ -6,7 +6,7 @@
 
 sparq is a from-scratch **RDF triplestore and SPARQL 1.1 engine in Rust** — dictionary-encoded, six sorted permutation indexes, parallel + streaming execution, RDFS/OWL-RL/N3 inference, an out-of-core (mmap) mode with a compressed on-disk format, a WebAssembly build, and a W3C-conformant HTTP server. The engine is published across several surfaces:
 
-- **Rust crates** (crates.io): `sparq-core`, `sparq-engine` (core), `sparq-cli`, `sparq-server`, plus opt-in capability crates (`sparq-reason`, `sparq-shacl`, `sparq-geo`, `sparq-text`, `sparq-rsp`, `sparq-hdt`, `sparq-solid`, ...).
+- **Rust crates** (crates.io): `sparq-core`, `sparq-engine` (core), `sparq-cli`, `sparq-server`, plus opt-in capability crates (`sparq-reason`, `sparq-reason-el`, `sparq-shacl`, `sparq-geo`, `sparq-text`, `sparq-rsp`, `sparq-hdt`, `sparq-solid`, ...). `sparq-reason-el` is a **separate** opt-in crate (depending on it is the opt-in): an OWL 2 EL consequence-based classifier that computes the **complete** `rdfs:subClassOf` subsumption lattice OWL 2 RL (`sparq-reason`) is sound but silently incomplete for — see [`skills/inference/SKILL.md`](skills/inference/SKILL.md).
 - **npm**: `@jeswr/sparq` — RDF/JS-typed API over the wasm build, zero runtime deps.
 - **PyPI**: `sparq-rdf` (import name `sparq`) — pyo3/maturin bindings.
 
@@ -25,7 +25,7 @@ Read [`skills/SKILL.md`](skills/SKILL.md) first — it is the router skill that 
 - [`skills/javascript-wasm/SKILL.md`](skills/javascript-wasm/SKILL.md) — the `@jeswr/sparq` npm package.
 - [`skills/python/SKILL.md`](skills/python/SKILL.md) — the `sparq` Python package.
 
-The capability surfaces (reasoning, SHACL, full-text, vector, GeoSPARQL, streaming RSP-QL, RDFC-1.0 dataset canonicalization, ZK query proofs, MPC, GenAI retrieval) each have their own `skills/<surface>/SKILL.md` — the router in [`skills/SKILL.md`](skills/SKILL.md) enumerates them.
+The capability surfaces (reasoning — RDFS/OWL-RL/N3 in `sparq-reason` plus the opt-in OWL 2 EL classifier in `sparq-reason-el`, both covered by [`skills/inference/SKILL.md`](skills/inference/SKILL.md) — SHACL, full-text, vector, GeoSPARQL, streaming RSP-QL, RDFC-1.0 dataset canonicalization, ZK query proofs, MPC, GenAI retrieval) each have their own `skills/<surface>/SKILL.md` — the router in [`skills/SKILL.md`](skills/SKILL.md) enumerates them.
 
 If your agent runtime supports the Agent Skills standard, these load via progressive disclosure (name+description first, body on demand). If not, just read the SKILL.md files directly.
 
@@ -366,7 +366,7 @@ This is the standing orchestration loop that ties the sections above together. R
 > To stay event-driven, **keep a CI watcher armed on every in-flight PR** (`gh run watch <run-id> --exit-status` in the background) so its completion notifies you and you can act immediately — do not let a green PR sit undiscovered until the next sweep. If you ever find yourself thinking "the next loop tick will merge this," that's the bug: merge it now. When a sweep does fire, it should usually find little to do because the event-driven path already handled it.
 
 0. **Reconcile first (cheap, every pass).** `git worktree list` + `gh pr list`; reap finished-but-unnotified worktree agents (a committed branch + no live `cargo` process = done → open its PR); merge any PR that is `ci-summary`-green **and** has all review threads resolved (squash, delete branch, then watch main CI); rebase any PR gone stale/red. (See *Orchestration cadence* + *Contribution workflow*.)
-   - **Disk guard (run EVERY tick — `scripts/disk-guard.sh --apply`).** <!-- [OPUS-4.8] sq-4vo9m per-tick disk guard --> The autonomous loop spawns one worktree-isolated agent per bead, each accumulating a multi-GB `target/`, so disk re-fills every wave — left unguarded the work box hit 99% / ENOSPC and crashed a `--workspace` verify build mid-run. So each tick run `scripts/disk-guard.sh --apply`: it `df`-checks `/` (warns when **< 20 G** free, escalates **< 10 G**), then **delegates the merged-worktree prune to `worktree-gc.sh`** (which only ever removes a worktree whose HEAD is in `origin/main` or whose branch is gone-on-origin, with no dirty/unpushed work — **never an active one**, never the main checkout). When the disk is genuinely **CRITICAL** (< 10 G) and you opt in (`--reclaim-main-target`), it also drops the **orchestrator main checkout's `target/`** — regenerable, because impl agents build in their OWN worktrees — but only after confirming no live `cargo`/`rustc` build references the main checkout (so it can never abort an in-flight build). It is **non-fatal** (a guard tick never aborts the sweep) and **dry-run by default** (it only mutates with `--apply`); its advisory exit code encodes the disk state (0 OK / 10 WARN / 20 CRITICAL). The `autonomous-scheduler` runs this same guard before each wave and **backs off dispatch under pressure** (WARN → ≤ 1 new agent; CRITICAL → dispatch nothing that wave, let the prune/reclaim take effect, re-measure next tick). (See the script catalog below; supersedes the bare "run `worktree-gc.sh --apply` at idle" advice — the guard wraps it and adds the per-tick `df` check + escalation.)
+   - **Disk guard (run EVERY tick — `scripts/disk-guard.sh --apply`).** <!-- [OPUS-4.8] sq-4vo9m per-tick disk guard --> The autonomous loop spawns one worktree-isolated agent per bead, each accumulating a multi-GB `target/`, so disk re-fills every wave — left unguarded the work box hit 99% / ENOSPC and crashed a `--workspace` verify build mid-run. So each tick run `scripts/disk-guard.sh --apply`: it `df`-checks `/` (warns when **< 20 G** free, escalates **< 10 G**), then **delegates the worktree prune to `worktree-gc.sh`** (which only ever removes a worktree whose HEAD is in `origin/main` or whose branch is gone-on-origin, with no dirty/unpushed work — **never an active one**, never the main checkout — and, with the `--reclaim-completed` path the guard passes through by default (sq-h34dc), also a **completed-but-unmerged** workflow worktree that is clean, fully pushed, workflow-named, and not in use). When the disk is genuinely **CRITICAL** (< 10 G) and you opt in (`--reclaim-main-target`), it also drops the **orchestrator main checkout's `target/`** — regenerable, because impl agents build in their OWN worktrees — but only after confirming no live `cargo`/`rustc` build references the main checkout (so it can never abort an in-flight build). It is **non-fatal** (a guard tick never aborts the sweep) and **dry-run by default** (it only mutates with `--apply`); its advisory exit code encodes the disk state (0 OK / 10 WARN / 20 CRITICAL). The `autonomous-scheduler` runs this same guard before each wave and **backs off dispatch under pressure** (WARN → ≤ 1 new agent; CRITICAL → dispatch nothing that wave, let the prune/reclaim take effect, re-measure next tick). (See the script catalog below; supersedes the bare "run `worktree-gc.sh --apply` at idle" advice — the guard wraps it and adds the per-tick `df` check + escalation.)
    - **Reconcile merged-but-still-open beads (run EVERY tick — `scripts/reconcile-merged-beads.sh`).** <!-- [OPUS-4.8] sq-13uyp reconcile merged beads --> push-frontier's in-flight exclusion (sq-7mwun) subtracts beads with an **OPEN** PR, but it misses a bead whose fix already **MERGED** and was simply never `bd close`d — that bead stays on the launchable frontier and an agent gets dispatched only to find the work done (2026-06-21 sq-bpoey: merged via #1017, left open, ~32k tokens wasted). This script is the **COMPLEMENT** to that exclusion: for each OPEN bead it greps the **MERGED** signal (merged-PR titles + head-branches via `gh pr list --state merged`, plus `origin/main` commit subjects) for the bead's **exact dotted id token** and reports the matches as close-candidates (bead id + the merging `#N`/commit). Together: sq-7mwun handles OPEN-PR (in-flight) beads, sq-13uyp handles MERGED-but-bead-still-open beads — both keep the frontier free of beads that must not be re-dispatched. It is **conservative** (exact-token match only — `sq-ixc3.1` never matches `sq-ixc3.11`; OPEN-status beads only) and **NEVER auto-closes an epic, an umbrella-parent (≥ 1 dependent), or a `needs:user`/`needs:maintainer`/decision bead** — those are reported for **manual review** instead. **Default is dry-run** (report only; mutates nothing); the orchestrator reviews the candidates and applies the closes separately (`--apply` closes matched non-gated beads with note `reconcile: fix merged via #N`). It is idempotent and **fail-safe** (a per-bead lookup error skips that bead; an empty merged signal closes nothing). Pinned by `scripts/tests/test_reconcile_merged_beads.sh`. (See the script catalog below.)
 1. **Charter cross-pollination.** *Pull:* fetch each sibling charter (`gh api repos/<sibling>/contents/AGENTS.md --jq .content | base64 -d`) + the open cross-pollination issues on this repo; fold genuinely-portable conventions into THIS file — **adapted to sparq** (cargo/clippy `-D warnings` + the W3C-conformance + best-ever-perf ratchets as the gate; roborev/codex as the reviewer; beads; the crate/wasm/CLI/HTTP/Py/JS surfaces) — via a PR, conservatively; then close/comment the issue. *Push:* for any convention this charter gains that a sibling lacks, file an issue (or PR) on the sibling repo. *Watch:* poll the cross-repo threads YOU opened/commented on (the sibling's issues + PRs) for follow-up replies and answer them, self-identifying as the SPARQ agent. No-op when there is no charter drift and no open thread awaits a reply. (See *Cross-pollinate the charter with sibling repos*.)
 2. **Screen + triage inbound work — open issues, code-scanning alerts, deps, roborev.**
@@ -494,7 +494,7 @@ no network); the Python close-script carries a `--self-test`.
   gets silently re-improvised. (This is why this entry, the *STANDING RULE* link, and the skill
   frontmatter all exist — closing the old gap where the scheduler header claimed an AGENTS.md
   link the Maintenance-loop section did not yet carry.)
-- **`scripts/worktree-gc.sh [--dry-run | --apply]`** (sq-6xdr) — a **manual / idle-time**
+- **`scripts/worktree-gc.sh [--dry-run | --apply] [--reclaim-completed]`** (sq-6xdr, sq-h34dc) — a **manual / idle-time**
   broom for the harness's `.claude/worktrees/` dirs. The harness creates one git worktree
   per agent but never auto-removes a finished one, so they pile up (366+ this session) and
   each carries a multi-GB `target/` build dir that fills the disk. The script enumerates
@@ -509,15 +509,27 @@ no network); the Python close-script carries a `--self-test`.
   and a `du -sh` reclaimable-size estimate; `--apply` does `git worktree remove --force`
   the safe set then `git worktree prune`. Run `--apply` **at idle, not while sibling agents
   are building** (the predicate cannot misclassify a busy worktree, but removing one
-  mid-build aborts that build). When in doubt it KEEPS.
+  mid-build aborts that build). When in doubt it KEEPS. **`--reclaim-completed`** (opt-in here,
+  ON when invoked via `disk-guard.sh`; sq-h34dc) widens the broom to also sweep a
+  **completed-but-unmerged** workflow worktree — CLEAN + no unpushed commits + workflow-named
+  (`wf_`/`agent-`/`worktree-wf_`/`worktree-agent-`; a human-named `feat/` branch is never swept)
+  + not in use (a `/proc/<pid>/cwd` scan that KEEPs any tree a live process touches, and keeps
+  when it cannot tell); `--apply` re-verifies clean+not-in-use at the point of removal (TOCTOU
+  insurance). The default MERGED-or-GONE predicate is unchanged.
 - **`scripts/disk-guard.sh [--dry-run | --apply] [--reclaim-main-target]`** (sq-4vo9m) — the
   **per-tick disk guard**: the floor that stops the autonomous loop from filling the work box
   (one worktree-isolated agent per bead, each a multi-GB `target/`, re-fills disk every wave;
   unguarded it hit 99% / ENOSPC and crashed a verify build). Each invocation (1) reads
   `df -BG /` and classifies **OK / WARN (< 20 G) / CRITICAL (< 10 G)**; (2) **delegates** the
-  merged-worktree prune to `worktree-gc.sh` — it does **not** reimplement that safe predicate,
-  so the "never an active/unmerged/dirty worktree, never the main checkout" guarantees are the
-  same; and (3) only when **CRITICAL** *and* you pass `--reclaim-main-target` *and* no live
+  worktree prune to `worktree-gc.sh` — it does **not** reimplement that safe predicate, so the
+  "never an active/unmerged/dirty worktree, never the main checkout" guarantees are the same; it
+  passes `--reclaim-completed` through **by default** (`--no-reclaim-completed` to disable, sq-h34dc)
+  so the broom also reclaims **completed-but-unmerged workflow worktrees** — a clean, fully-pushed,
+  workflow-named (`wf_`/`agent-`/…) tree whose PR has not yet merged and whose branch is not yet
+  deleted — which the bare MERGED-or-GONE predicate left to pile up (observed: ~229 G of them);
+  live worktrees stay doubly protected (the harness LOCK ⇒ structural keep, plus an in-use
+  `/proc/<pid>/cwd` probe that keeps any tree a live process is using); and (3) only when
+  **CRITICAL** *and* you pass `--reclaim-main-target` *and* no live
   `cargo`/`rustc` build references the main checkout, drops the orchestrator main checkout's
   regenerable `target/`. **Default is dry-run** (measures + dry-run-prunes + prints the plan);
   `--apply` performs the prune (and, gated as above, the reclaim). It is **non-fatal** (runs
