@@ -283,6 +283,32 @@ follow-up — only the **agent flavor** (no API key) ships here.
 > only points at it. The win is scoped to **PKG-answerable** questions by construction —
 > a miss is an honest abstain, not a fabricated answer.
 
+## Authoring new Findings — the write-path (`sq-mztg8.2`)
+
+[OPUS-4.8] The `pkg:Finding` tier this skill queries is **authored**, not hand-written as
+raw Turtle. To add or edit a Finding, edit the compact, IRI-free YAML-LD source
+`crates/sparq-kb/ingest/agents-findings.yaml.ld` (generalising the shipped
+`sec-prop.yaml.ld` pattern), then recompile:
+
+```bash
+python3 crates/sparq-kb/ingest/ingest_pkg.py \
+  --beads .beads/issues.jsonl --skills-dir skills \
+  --findings-yamlld crates/sparq-kb/ingest/agents-findings.yaml.ld \
+  --out crates/sparq-kb/ingest/pkg-instances.ttl
+```
+
+A **deterministic** compiler (`ingest/yamlld_compile.py`) — not an LLM — expands the typed
+`@graph` to schema.org-typed PKG Turtle. You write fluent author keys + concept TOKENS
+(e.g. `about: merge-discipline`), never IRIs or `xsd:` datatypes. The **guarded `V()`**
+resolver grounds each TOKEN against the file's `concepts:` catalog (lexical: local-name or
+normalised `prefLabel`); an **ambiguous TOKEN is a HARD compile error** — the write-path
+analogue of the read-path abstain, so a mis-resolution fails loud rather than emitting a
+silent wrong IRI. The compiled tier is gated for **0 SHACL violations + triple-for-triple
+round-trip** against the prior hand-authored tier
+(`cargo test -p sparq-kb --features validate --test yamlld_write_path`; the compiler's
+parser + resolver are self-tested by `scripts/tests/test_yamlld_compile.py`). See
+`research/fo-llm-bridge.md` §3.4 / §6 Phase 4.
+
 ## When NOT to use this
 
 - The fact is **not in the head slice** (PKG is a Phase-1 subset) → an empty/partial
@@ -309,3 +335,7 @@ follow-up — only the **agent flavor** (no API key) ships here.
   (`cargo test -p sparq-kb --features query`; add `--features close` for the closure test).
 - Ontology + data: `crates/sparq-kb/ontology/pkg/pkg.ttl`,
   `crates/sparq-kb/ingest/pkg-instances.ttl`.
+- Write-path (`sq-mztg8.2`): authoring source
+  `crates/sparq-kb/ingest/agents-findings.yaml.ld`, deterministic compiler
+  `crates/sparq-kb/ingest/yamlld_compile.py`, gates
+  `crates/sparq-kb/tests/yamlld_write_path.rs` + `scripts/tests/test_yamlld_compile.py`.

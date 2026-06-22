@@ -9,65 +9,66 @@
 
 ## 🚀 Quickstart
 
-The crate ships four Turtle artifacts as `&str` constants (default build is a pure data +
+The crate ships Turtle artifacts as `&str` constants (default build is a pure data +
 Rust-vocab crate — no engine code):
 
 ```text
 sparq_kb::PKG_ONTOLOGY   // ontology/pkg/pkg.ttl      — the reuse-first PKG vocabulary
 sparq_kb::PKG_SHAPES     // shapes/pkg.shapes.ttl     — the SHACL write-time guardrails
 sparq_kb::PKG_EXAMPLE    // examples/pkg-example.ttl  — a tiny instance file
+sparq_kb::PKG_FINDINGS   // ingest/agents-findings.ttl — the write-path-compiled tier
 sparq_kb::PKG_INSTANCES  // ingest/pkg-instances.ttl  — the Phase-1 ingested graph
 sparq_kb::vocab::*       // the pkg: IRIs as constants, pinned against the Turtle
 ```
 
 Dogfood the guardrails with sparq's own SHACL engine (opt-in `validate` feature):
-
-```text
-cargo test -p sparq-kb --features validate -- --nocapture
-```
-
-This loads the ontology + example instances, runs `pkg.shapes.ttl` via `sparq-shacl`, and
-asserts the valid Findings/Tasks PASS while the deliberately invalid ones (missing
-source/confidence, out-of-enum status, stale dependency edge) are REPORTED.
+`cargo test -p sparq-kb --features validate` loads the ontology + example instances, runs
+`pkg.shapes.ttl` via `sparq-shacl`, and asserts the valid Findings/Tasks PASS while the
+deliberately invalid ones (missing source/confidence, out-of-enum status, stale edge) are
+REPORTED.
 
 ## 🧪 Phase-1 ingestion PoC (`sq-2m6zm.2`)
 
-`ingest/ingest_pkg.py` is the **structured-parse** ingestion pipeline over the
-head docs (the highest read-frequency × formalisability slice — **not** a full
-corpus capture):
+`ingest/ingest_pkg.py` is the **structured-parse** ingestion pipeline over the head docs
+(the highest read-frequency × formalisability slice — **not** a full corpus capture):
 
-- `.beads/issues.jsonl` → `pkg:Task` triples — a **mechanical** projection of the `bd`
-  model (status / type / priority / labels / typed edges; `bd blocks` → §2.2
-  `pkg:dependsOn`, `parent-child` → `dcterms:isPartOf`, `research/<doc>.md` spec-ref →
-  `dcterms:relation` a `pkg:Source`). `bd` stays source-of-record; the PKG mirrors it.
+- `.beads/issues.jsonl` → `pkg:Task` — a **mechanical** projection of the `bd` model
+  (status / type / priority / labels / typed edges; `bd blocks` → §2.2 `pkg:dependsOn`,
+  `parent-child` → `dcterms:isPartOf`, `research/<doc>.md` → `dcterms:relation` a
+  `pkg:Source`). `bd` stays source-of-record; the PKG mirrors it.
 - the heaviest `skills/*/SKILL.md` **front-matter** → `pkg:Source` + `pkg:Technique`, plus
-  `ingest/agents-findings.ttl` (`pkg:Finding`s from `AGENTS.md`) appended verbatim.
+  the **write-path** Findings tier (`sq-mztg8.2`, below).
 
-Regenerate the committed `ingest/pkg-instances.ttl` from the repo root:
+**Write-path (FO-bridge Phase 4, `sq-mztg8.2`):** the `AGENTS.md` Findings tier is
+**authored** in a compact, IRI-free `ingest/agents-findings.yaml.ld` (generalising the
+shipped `sec-prop.yaml.ld` pattern) and **deterministically compiled** to schema.org-typed
+PKG Turtle by `ingest/yamlld_compile.py` — a compiler, not an LLM. Concept TOKENS (e.g.
+`about: merge-discipline`) resolve via the **guarded `V()`** against the `concepts:`
+catalog; an **ambiguous token is a HARD compile error** (fail-closed — never a silent wrong
+IRI). Regenerate from the repo root:
 
 ```text
 python3 crates/sparq-kb/ingest/ingest_pkg.py \
   --beads .beads/issues.jsonl --skills-dir skills \
-  --findings crates/sparq-kb/ingest/agents-findings.ttl \
+  --findings-yamlld crates/sparq-kb/ingest/agents-findings.yaml.ld \
   --out crates/sparq-kb/ingest/pkg-instances.ttl
 ```
 
 **SHACL conformance is the gate**: the ingest **conforms with 0 violations**
-(`--features validate --test ingest_shacl`). The `bd` backlog's stale closed→open
-dependency edges are **guardrail-excluded** by the script (to
-`pkg-instances.ttl.stale-edges.tsv`, not silently dropped); `stale_edge_is_caught_by_the_guardrail`
-proves the §4.4 constraint fires. Example lookups (`--test ingest_query`) answer real
-questions returning the minimal engine-computed triples.
+(`--features validate`). Stale closed→open `bd` edges are **guardrail-excluded** (to
+`*.stale-edges.tsv`, not dropped); `stale_edge_is_caught_by_the_guardrail` proves the
+§4.4 constraint fires. The write-path's compiled Findings tier is itself gated for
+**SHACL conformance + triple-for-triple round-trip** vs the hand-authored tier
+(`--test yamlld_write_path`; compiler self-test `scripts/tests/test_yamlld_compile.py`).
 
 ## 🔬 bd-bridge eval — can sparq REPLACE bd? (`sq-2m6zm.5`)
 
-Can sparq replace `bd` for task-tracking + structural queries in RDF/SPARQL? The honest,
-non-sycophantic answer (`tests/bd_bridge_eval.rs`, over the real backlog) is **BRIDGE, do
-not replace** — the read-model meets **0/4** of the §4.5 gate. The **bd→RDF read-model**
-(`ingest_pkg.py`) projects every issue to a faithful, SHACL-conformant `pkg:Task` and
-exercises three structural queries `bd`'s flat CLI cannot do: transitive blocked-by chains
-(`pkg:dependsOn+`), the §4.1 ready-frontier, and the **knowledge↔task JOIN** — which `bd`
-**cannot express at all**.
+Can sparq replace `bd`? The honest answer (`tests/bd_bridge_eval.rs`, over the real
+backlog) is **BRIDGE, do not replace** — the read-model meets **0/4** of the §4.5 gate.
+The **bd→RDF read-model** (`ingest_pkg.py`) projects every issue to a SHACL-conformant
+`pkg:Task` and runs three structural queries `bd`'s flat CLI cannot: transitive
+blocked-by chains (`pkg:dependsOn+`), the §4.1 ready-frontier, and the **knowledge↔task
+JOIN** — which `bd` **cannot express at all**.
 
 | # | §4.5 replacement criterion | Met? | What `bd` does that the read-model does not |
 |---|---|---|---|
@@ -76,9 +77,8 @@ exercises three structural queries `bd`'s flat CLI cannot do: transitive blocked
 | c | ready-query latency ≈ `bd ready` (offline) | ❌ | `bd ready` is offline, sub-second, no spin-up; sparq pays graph-load per process; nlq/frontier unexposed over CLI/HTTP |
 | d | SessionStart / CLI ergonomics ≈ `bd` | ❌ | `bd` is a mature CLI + hooks + autoclose CI; sparq exposes raw SPARQL + VoID only |
 
-**Verdict: BRIDGE.** Keep `bd` as source-of-record and mirror it into the KG — the bridge
-captures all demo value; replacing the write/merge/latency/CLI estate buys none of it.
-Asserted in `part2_four_criterion_replacement_gate` so no future change silently flips it.
+**Verdict: BRIDGE.** Keep `bd` as source-of-record and mirror it into the KG — replacing
+the write/merge/latency/CLI estate buys nothing (`part2_four_criterion_replacement_gate`).
 
 ## ✨ Features
 
@@ -95,25 +95,25 @@ Asserted in `part2_four_criterion_replacement_gate` so no future change silently
 - **Opt-in by construction** — default build is data + constants only; the
   `validate` feature is the only thing that pulls in `sparq-core` + `sparq-shacl`.
 - **No-drift guard** — `vocab.rs` is byte-pinned against `pkg.ttl` by a sync test.
-- **NL-tool envelope** (`query` feature, `sq-ve5dy`) — `query::nl_tool` runs a query
-  and returns the **executed SPARQL + resolved IRIs + grounding confidence** so the
-  caller can verify the answer was computed, not guessed; `pkg-query --json` emits it.
-  The `model: haiku` agent-flavor sub-agent (`.claude/agents/sparq-pkg-nl.md`) drives
-  it so the orchestrator pays cheap-model tokens for the verbose middle.
+- **Write-path authoring** (`sq-mztg8.2`) — author Findings in a compact, IRI-free
+  `*.yaml.ld`; a **deterministic** compiler (`yamlld_compile.py`) expands them to typed
+  PKG Turtle, resolving concept TOKENS via the **guarded `V()`** (ambiguous = hard error).
+- **NL-tool envelope** (`query` feature, `sq-ve5dy`) — `query::nl_tool` returns the
+  **executed SPARQL + resolved IRIs + grounding confidence** so the caller can verify the
+  answer was computed, not guessed (`pkg-query --json`). The `model: haiku` agent-flavor
+  sub-agent (`.claude/agents/sparq-pkg-nl.md`) pays cheap-model tokens for the middle.
 
 ## 📚 Learn more
 
-- Design record: `research/dogfooding-sparq-knowledge-graph.md` (PR #1063) — the
-  reuse-first ontology (§2), SHACL guardrails (§2.4, §4.4), bd-bridge + §4.5 replacement
-  gate (§4), and the falsifiable token-A/B protocol (§5).
+- Design record: `research/dogfooding-sparq-knowledge-graph.md` (PR #1063) — ontology
+  (§2), SHACL guardrails (§2.4, §4.4), bd-bridge gate (§4), token-A/B protocol (§5).
 - `ontology/pkg/PROVENANCE.md` — the per-term reuse + verified `skos:closeMatch`
-  alignment record; precedent: `crates/sparq-trust/ontologies/zkp-sparql/` +
-  `crates/sparq-trust/src/vocab.rs` (ship-an-ontology + Rust-constants pattern).
-- Epic `sq-2m6zm`: ontology/shapes `.1`; ingestion PoC above `.2`; the **query-the-PKG**
-  helper + skill (introspect→ground→ask via `pkg-query`, `.claude/skills/query-pkg/SKILL.md`)
-  `.3`; the bd-bridge eval + replacement gate above `.5`. Next: token-A/B (`.4`).
-- `pkg-query --extra-graph <path>` (repeatable) loads extra Turtle alongside the PKG; its
-  triples join `--close owl-rl` — the FO-KM benchmark seam (`sq-mztg8` Metric 1; `bench/fo-km/`).
+  alignment record; precedent: `crates/sparq-trust/ontologies/zkp-sparql/`.
+- Epic `sq-2m6zm`: ontology/shapes `.1`; ingestion PoC `.2`; the **query-the-PKG** helper
+  + skill (`pkg-query`, `.claude/skills/query-pkg/SKILL.md`) `.3`; bd-bridge eval `.5`.
+  Write-path: `research/fo-llm-bridge.md` §3.4 / §6 Phase 4 (`sq-mztg8.2`).
+- `pkg-query --extra-graph <path>` loads extra Turtle alongside the PKG; its triples join
+  `--close owl-rl` — the FO-KM benchmark seam (`sq-mztg8` Metric 1; `bench/fo-km/`).
 
 ## License
 
