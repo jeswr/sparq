@@ -220,6 +220,25 @@ pub trait ApplyUpdates: Send + 'static {
     fn maintain(&mut self) -> Result<(), String> {
         Ok(())
     }
+
+    /// [OPUS-4.8] (sq-ft7u) RESTORE the applier's durable side from a freshly-built, already-
+    /// validated `fresh` snapshot, and return the new published snapshot the ring should serve.
+    /// Runs on the WRITER THREAD (the only thread that touches the durable store), sequenced
+    /// through the same queue as updates — so the durable swap never races a commit and the
+    /// served lineage is replaced atomically by the publish the caller does with the returned
+    /// snapshot. UNLIKE [`maintain`](Self::maintain), this CHANGES the live triple set (it
+    /// replaces the whole store), so the writer publishes a new generation from the return value.
+    ///
+    /// The default is a no-op error: an applier with no durable side (the in-memory server) has
+    /// no on-disk store to write through, so it uses the ring/writer-swap restore path instead.
+    /// An applier with a `--persist` durable mirror overrides this to perform the crash-safe
+    /// on-disk swap (e.g. via `Graph::restore_into_durable`) and adopt the re-opened store.
+    ///
+    /// `Err(msg)` is a restore failure that leaves the writer alive and the OLD durable store
+    /// intact (the durable swap is fail-closed); the caller is told and nothing is published.
+    fn restore_durable(&mut self, _fresh: Self::Snapshot) -> Result<Self::Snapshot, String> {
+        Err("restore_durable is not supported by this applier (no durable store)".to_string())
+    }
 }
 
 /// Why a submitted update did not land in a published generation.
@@ -271,13 +290,23 @@ struct Msg<U> {
 /// compaction). Maintenance is sequenced through the SAME single queue as updates, so it
 /// runs strictly between batches on the one thread that owns the durable store — no lock,
 /// no concurrent access to the durable graph, no reordering relative to in-flight writes.
-enum Cmd<U> {
+enum Cmd<U, S> {
     /// A normal update submission.
     Update(Msg<U>),
     /// Run [`ApplyUpdates::maintain`] on the writer thread; the result is sent back on the
     /// channel so the caller can block for completion. Publishes NO generation (maintenance
     /// preserves the live snapshot exactly).
     Maintain(SyncSender<Result<(), String>>),
+    /// [OPUS-4.8] (sq-ft7u) RESTORE the durable store from the freshly-built, already-validated
+    /// snapshot `fresh` on the writer thread, then PUBLISH the restored snapshot as a new
+    /// generation so the ring serves it. Sequenced through the same queue as updates, so the
+    /// durable swap runs strictly between batches — never concurrently with a commit. The ack
+    /// carries the published generation number (or the restore error). UNLIKE `Maintain`, this
+    /// CHANGES the live triple set (it replaces the whole store), so a generation IS published.
+    Restore {
+        fresh: Box<S>,
+        ack: SyncSender<Result<u64, String>>,
+    },
 }
 
 /// The single sequenced writer (§6.5): owns the one thread allowed to call
@@ -287,13 +316,19 @@ enum Cmd<U> {
 /// both submission methods take `&self`. Dropping the writer closes the queue,
 /// commits any in-flight batch (graceful drain — pending sync submitters still
 /// get their generation number), and joins the thread.
-pub struct Writer<U: Send + 'static> {
+///
+/// [OPUS-4.8] (sq-ft7u) The second type parameter `S` is the applier's SNAPSHOT type (e.g. the
+/// server's `Graph`): it is the payload of the out-of-band [`restore`](Self::restore) op, which
+/// installs a freshly-built snapshot as the new served lineage (the durable-restore primitive).
+/// It is inferred from the applier at [`spawn`](Self::spawn), so existing call sites that name
+/// only `Writer<U>` keep compiling via the `S = ()` default (no restore payload).
+pub struct Writer<U: Send + 'static, S: Send + Sync + 'static = ()> {
     /// `Some` until drop; dropping the sender is what tells the thread to drain.
-    tx: Option<mpsc::Sender<Cmd<U>>>,
+    tx: Option<mpsc::Sender<Cmd<U, S>>>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl<U: Send + 'static> Writer<U> {
+impl<U: Send + 'static, S: Send + Sync + 'static> Writer<U, S> {
     /// Spawns the writer thread over `ring`, owning `applier` as its snapshot
     /// production strategy.
     pub fn spawn<A>(
@@ -302,9 +337,9 @@ impl<U: Send + 'static> Writer<U> {
         config: WriterConfig,
     ) -> Self
     where
-        A: ApplyUpdates<Update = U>,
+        A: ApplyUpdates<Update = U, Snapshot = S>,
     {
-        let (tx, rx) = mpsc::channel::<Cmd<U>>();
+        let (tx, rx) = mpsc::channel::<Cmd<U, S>>();
         let thread = thread::Builder::new()
             .name("sparq-serve-writer".into())
             .spawn(move || run(ring, applier, config, rx))
@@ -365,6 +400,29 @@ impl<U: Send + 'static> Writer<U> {
         done_rx.recv().map_err(|_| WriteError::Shutdown)
     }
 
+    /// [OPUS-4.8] (sq-ft7u) RESTORE the durable store from the freshly-built, already-validated
+    /// snapshot `fresh` ON THE WRITER THREAD, then PUBLISH the restored snapshot as a new
+    /// generation, and **block until it completes** — returning the published generation number
+    /// (or the restore error). Routed through the SAME queue as updates, so the durable swap
+    /// ([`ApplyUpdates::restore_durable`]) runs strictly between batches on the single thread that
+    /// owns the durable store — never concurrently with a commit, never reordered across an
+    /// in-flight write. UNLIKE [`maintain`](Self::maintain) it CHANGES the live triple set, so a
+    /// new generation IS published from the restored snapshot (the ring then serves it). A restore
+    /// failure leaves the writer alive and the OLD durable store intact (the underlying swap is
+    /// fail-closed): `Err(Shutdown)` if the writer is gone, else the inner `Result` is the outcome.
+    pub fn restore(&self, fresh: S) -> Result<Result<u64, String>, WriteError> {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        self.tx
+            .as_ref()
+            .expect("sender present until drop")
+            .send(Cmd::Restore {
+                fresh: Box::new(fresh),
+                ack: ack_tx,
+            })
+            .map_err(|_| WriteError::Shutdown)?;
+        ack_rx.recv().map_err(|_| WriteError::Shutdown)
+    }
+
     /// Fire-and-forget submission: queues the update and returns immediately.
     /// `Err(Shutdown)` if the writer is gone; otherwise the outcome (including a
     /// possible [`WriteError::Rejected`]) is not reported — callers that need
@@ -390,7 +448,7 @@ impl<U: Send + 'static> Writer<U> {
     }
 }
 
-impl<U: Send + 'static> Drop for Writer<U> {
+impl<U: Send + 'static, S: Send + Sync + 'static> Drop for Writer<U, S> {
     fn drop(&mut self) {
         // Closing the channel ends the thread's loop after it drains + commits
         // whatever batch is in flight (the disconnect also closes an open window
@@ -404,12 +462,19 @@ impl<U: Send + 'static> Drop for Writer<U> {
     }
 }
 
+/// [OPUS-4.8] (sq-ft7u) A restore request held until the in-flight batch commits: the
+/// freshly-built snapshot to install + the ack channel for the published generation number.
+type PendingRestore<A> = (
+    <A as ApplyUpdates>::Snapshot,
+    SyncSender<Result<u64, String>>,
+);
+
 /// The writer thread: collect a batch per group-commit window, commit, repeat.
 fn run<A: ApplyUpdates>(
     ring: Arc<GenerationRing<A::Snapshot>>,
     mut applier: A,
     config: WriterConfig,
-    rx: Receiver<Cmd<A::Update>>,
+    rx: Receiver<Cmd<A::Update, A::Snapshot>>,
 ) {
     let max_batch = config.max_batch.max(1);
     loop {
@@ -427,6 +492,11 @@ fn run<A: ApplyUpdates>(
                 let _ = done.send(applier.maintain());
                 continue;
             }
+            // [OPUS-4.8] (sq-ft7u) Restore arrived with no pending batch: run it now.
+            Cmd::Restore { fresh, ack } => {
+                run_restore(&ring, &mut applier, *fresh, ack);
+                continue;
+            }
         };
         let deadline = Instant::now() + config.window;
         let mut batch = vec![first];
@@ -437,6 +507,10 @@ fn run<A: ApplyUpdates>(
         // so a compaction observes exactly the writes that preceded it. The request is held
         // here and serviced once the batch is committed below.
         let mut pending_maintain: Option<SyncSender<Result<(), String>>> = None;
+        // [OPUS-4.8] (sq-ft7u) Likewise a RESTORE request that arrives mid-window closes the
+        // window: the in-flight batch is committed FIRST (strict FIFO), then the durable store is
+        // replaced — so a restore never races, or is reordered against, a concurrent update.
+        let mut pending_restore: Option<PendingRestore<A>> = None;
         while batch.len() < max_batch {
             let now = Instant::now();
             if now >= deadline {
@@ -447,6 +521,10 @@ fn run<A: ApplyUpdates>(
                 Ok(Cmd::Maintain(done)) => {
                     pending_maintain = Some(done);
                     break; // close the window; commit the batch, then run maintenance
+                }
+                Ok(Cmd::Restore { fresh, ack }) => {
+                    pending_restore = Some((*fresh, ack));
+                    break; // close the window; commit the batch, then run the restore
                 }
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => {
@@ -470,10 +548,36 @@ fn run<A: ApplyUpdates>(
         if let Some(done) = pending_maintain {
             let _ = done.send(applier.maintain());
         }
+        // [OPUS-4.8] (sq-ft7u) Run the restore AFTER the preceding batch is committed + published
+        // (strict FIFO — the restore observes every write that arrived before it, then replaces
+        // the store), then ack the caller. A restore failure leaves the writer alive (it is
+        // reported via the returned `Result`, not by tearing down the writer).
+        if let Some((fresh, ack)) = pending_restore {
+            run_restore(&ring, &mut applier, fresh, ack);
+        }
         if disconnected {
             return;
         }
     }
+}
+
+/// [OPUS-4.8] (sq-ft7u) Run a durable RESTORE on the writer thread and PUBLISH the restored
+/// snapshot as a new generation so the ring serves it. The applier's
+/// [`restore_durable`](ApplyUpdates::restore_durable) performs the crash-safe on-disk swap and
+/// returns the snapshot to publish; on its `Err` nothing is published and the OLD store is intact
+/// (the swap is fail-closed). The publish uses an empty epoch-touched set: a full-store restore
+/// invalidates everything, and the generation bump alone re-evaluates active subscriptions.
+fn run_restore<A: ApplyUpdates>(
+    ring: &GenerationRing<A::Snapshot>,
+    applier: &mut A,
+    fresh: A::Snapshot,
+    ack: SyncSender<Result<u64, String>>,
+) {
+    let result = match applier.restore_durable(fresh) {
+        Ok(snapshot) => Ok(ring.publish(snapshot, std::iter::empty::<PodId>()).number()),
+        Err(e) => Err(e),
+    };
+    let _ = ack.send(result);
 }
 
 /// Splits one window's batch into maximal runs of pairwise-commuting data

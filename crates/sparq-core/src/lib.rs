@@ -3061,23 +3061,66 @@ impl Graph {
     /// re-opened memory-mapped from the new base with a fresh, empty WAL.
     #[cfg(feature = "mmap")]
     fn persist_swap(&mut self, dir: &std::path::Path) -> Result<(), String> {
-        let new_dir = dir.with_extension("compact-new");
-        let old_dir = dir.with_extension("compact-old");
-        std::fs::remove_dir_all(&new_dir).ok();
-        std::fs::remove_dir_all(&old_dir).ok();
-        self.wal = None; // close the log before the directory swap
-        self.save(&new_dir).map_err(|e| e.to_string())?;
-        fsync_dir(&new_dir).map_err(|e| e.to_string())?;
-        let parent = dir.parent().unwrap_or_else(|| std::path::Path::new("."));
-        std::fs::rename(dir, &old_dir).map_err(|e| e.to_string())?;
-        fsync_dir(parent).map_err(|e| e.to_string())?;
-        std::fs::rename(&new_dir, dir).map_err(|e| e.to_string())?;
-        fsync_dir(parent).map_err(|e| e.to_string())?;
-        // Re-open memory-mapped from the new base (fresh, empty WAL); only then drop the old
-        // files (open mmaps keep unlinked files alive on unix).
-        *self = Graph::open(dir).map_err(|e| e.to_string())?;
-        std::fs::remove_dir_all(&old_dir).ok();
+        // Close THIS graph's WAL before the directory swap (its `wal.log` is about to be renamed
+        // away with `dir`), then run the shared crash-safe swap, writing `self`'s CURRENT image as
+        // the new base. Adopt the re-opened directory-backed graph in place. [OPUS-4.8] (sq-ft7u)
+        self.wal = None;
+        let reopened = swap_dir_to_new_base(dir, |new_dir| self.save(new_dir))
+            .map_err(|e| e.to_string())?;
+        *self = reopened;
         Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) PUBLIC crash-safe RESTORE-INTO-DURABLE seam. Atomically REPLACE the
+    /// durable contents of the directory-backed store at `dir` with `fresh`'s image, reusing the
+    /// EXACT same rollback-safe two-rename protocol as the internal compaction swap (the helper
+    /// `persist_swap` also calls — there is one crash-safe swap implementation, not two). Returns
+    /// the directory-backed [`Graph`] re-opened memory-mapped from the new base (a fresh, empty
+    /// WAL), so the caller's subsequent updates WAL-append to the restored store.
+    ///
+    /// This is the durable counterpart to the server's online in-memory restore: the caller imports
+    /// (and thus FULLY validates) the backup artifact into `fresh` BEFORE calling this, so the swap
+    /// only ever runs over a known-good image.
+    ///
+    /// CRASH-SAFETY + FAIL-CLOSED. The protocol is: write `fresh`'s image to `<dir>.compact-new`
+    /// and fsync that directory (durable before it can become canonical); rename `dir` ->
+    /// `<dir>.compact-old` (parent fsync); rename `<dir>.compact-new` -> `dir` (parent fsync);
+    /// re-open memory-mapped from the new base; drop `<dir>.compact-old`. There is a window where
+    /// the canonical `dir` does not exist (between the two renames); a crash there is HEALED
+    /// deterministically on the next `open` (which runs the compaction recovery from the surviving
+    /// `.compact-new` / `.compact-old` sibling), so `dir` ends up old-or-new — NEVER corrupt or
+    /// partially written. If anything fails BEFORE the first rename (e.g. writing the new base),
+    /// `dir` is untouched: the old durable store survives intact.
+    ///
+    /// PRECONDITION (caller's responsibility): NO other handle may be mutating `dir` (WAL-appending)
+    /// concurrently — the caller must quiesce the durable writer that owns `dir` before invoking
+    /// this, exactly as the in-process compaction swap runs only on the single writer thread.
+    #[cfg(feature = "mmap")]
+    pub fn restore_into_durable(
+        dir: &std::path::Path,
+        fresh: Graph,
+    ) -> std::io::Result<Graph> {
+        swap_dir_to_new_base(dir, |new_dir| fresh.save(new_dir))
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) The directory this graph is durably backed by (its `--persist` dir),
+    /// or `None` for an in-memory graph. The companion to [`restore_into_durable`](Self::restore_into_durable):
+    /// a caller doing an in-place durable restore reads the backing dir, then closes the WAL
+    /// (see [`close_wal`](Self::close_wal)) before swapping the directory over to the new base.
+    #[cfg(feature = "mmap")]
+    pub fn persist_dir(&self) -> Option<std::path::PathBuf> {
+        self.wal.as_ref().map(|w| w.dir.clone())
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) Close (drop) this graph's write-ahead-log handle, if any. Used right
+    /// before a directory swap that renames the backing dir away (the WAL's `wal.log` lives under
+    /// it), exactly as the internal compaction swap does — the swap then re-opens a fresh handle.
+    /// A no-op for an in-memory graph. Safe to call on a graph whose dir is about to be replaced
+    /// by [`restore_into_durable`](Self::restore_into_durable); the graph keeps serving reads from
+    /// its in-memory image, it simply stops appending to the (about-to-be-renamed) log.
+    #[cfg(feature = "mmap")]
+    pub fn close_wal(&mut self) {
+        self.wal = None;
     }
 
     /// [OPUS-4.8] (sq-x32t, epic sq-toze.33) ERASURE-GRADE VACUUM. Like [`compact`](Self::compact)
@@ -3178,6 +3221,49 @@ fn fsync_dir(dir: &std::path::Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// [OPUS-4.8] (sq-ft7u) The ONE crash-safe directory-base swap, factored out of
+/// [`persist_swap`](Graph::persist_swap) so the public [`restore_into_durable`](Graph::restore_into_durable)
+/// reuses the IDENTICAL rollback-safe protocol rather than copy-pasting it. `write_new_base` is
+/// handed the (cleared) `<dir>.compact-new` sibling and must write the desired new durable image
+/// there (e.g. `graph.save(new_dir)`). On success the new base is canonical at `dir` and a graph
+/// re-opened memory-mapped from it (fresh, empty WAL) is returned.
+///
+/// The protocol (matching the design recorded on `persist_swap`):
+///   1. clear any stale siblings, then write the new base to `<dir>.compact-new` and fsync that
+///      DIRECTORY (so it is durable before it can become canonical);
+///   2. rename `dir` -> `<dir>.compact-old`, fsync the parent (the rename is durable);
+///   3. rename `<dir>.compact-new` -> `dir`, fsync the parent;
+///   4. re-open from the new base, THEN drop `<dir>.compact-old` (open mmaps keep unlinked files
+///      alive on unix, so the re-open must precede the cleanup).
+///
+/// FAIL-CLOSED: if `write_new_base` (or its fsync) fails — i.e. anything BEFORE the first rename —
+/// `dir` is never touched, so the old durable store survives intact. A crash DURING the two
+/// renames is healed by [`recover_compaction`] on the next [`open`](Graph::open), which promotes
+/// `compact-new` or rolls back to `compact-old` — `dir` is never lost.
+#[cfg(feature = "mmap")]
+fn swap_dir_to_new_base<F>(dir: &std::path::Path, write_new_base: F) -> std::io::Result<Graph>
+where
+    F: FnOnce(&std::path::Path) -> std::io::Result<()>,
+{
+    let new_dir = dir.with_extension("compact-new");
+    let old_dir = dir.with_extension("compact-old");
+    std::fs::remove_dir_all(&new_dir).ok();
+    std::fs::remove_dir_all(&old_dir).ok();
+    // Build + sync the new base FIRST. A failure here leaves `dir` untouched (fail-closed) —
+    // the two renames below have not started, so the old durable store is intact.
+    write_new_base(&new_dir)?;
+    fsync_dir(&new_dir)?;
+    let parent = dir.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::rename(dir, &old_dir)?;
+    fsync_dir(parent)?;
+    std::fs::rename(&new_dir, dir)?;
+    fsync_dir(parent)?;
+    // Re-open memory-mapped from the new base (fresh, empty WAL); only then drop the old files.
+    let reopened = Graph::open(dir)?;
+    std::fs::remove_dir_all(&old_dir).ok();
+    Ok(reopened)
 }
 
 /// [OPUS-4.8] (review 1593) Recover an INTERRUPTED [`compact`](Graph::compact) directory swap
@@ -8911,6 +8997,65 @@ mod tests {
         assert!(!dir.with_extension("compact-old").exists());
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) The PUBLIC `restore_into_durable` seam: replacing a directory-backed
+    /// store's contents with a fresh image must (a) round-trip the fresh live triple set after the
+    /// swap AND after a reopen (the on-disk base IS the restored image), and (b) leave NO sibling
+    /// cruft. The restored graph must also be WAL-backed (a subsequent durable update survives a
+    /// reopen), proving the re-open carried a real WAL.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn restore_into_durable_round_trips_and_is_wal_backed() {
+        let dir = std::env::temp_dir().join(format!("sparq_restore_durable_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        // Establish an ORIGINAL durable store with one triple.
+        Graph::load_str("<http://ex/orig> <http://ex/p> <http://ex/o> .", "ntriples")
+            .unwrap()
+            .save(&dir)
+            .unwrap();
+        assert_eq!(Graph::open(&dir).unwrap().len(), 1);
+
+        // Restore a DIFFERENT, larger fresh image THROUGH to the durable dir.
+        let mut fresh = Graph::load_str(
+            "<http://ex/r1> <http://ex/p> <http://ex/o1> .\n\
+             <http://ex/r2> <http://ex/p> <http://ex/o2> .",
+            "ntriples",
+        )
+        .unwrap();
+        // A named graph too, to exercise the whole sub-tree write.
+        fresh
+            .apply_delta_nquads(
+                "<http://ex/n> <http://ex/q> <http://ex/w> <http://ex/g> .",
+                "",
+            )
+            .unwrap();
+        let restored = Graph::restore_into_durable(&dir, fresh).unwrap();
+        // The original triple is GONE; the restored set is present (round-trip of the live set).
+        let live = dump_terms(&restored);
+        assert!(!live.iter().any(|(s, _, _)| s.contains("/orig")), "original content replaced");
+        assert!(live.iter().any(|(s, _, _)| s.contains("/r1")), "restored content present");
+        assert_eq!(restored.len(), 2, "two default-graph triples after restore");
+        // No sibling leftovers from the swap.
+        assert!(!dir.with_extension("compact-new").exists());
+        assert!(!dir.with_extension("compact-old").exists());
+
+        // The restored graph is genuinely WAL-backed: a durable update + a fresh reopen sees it.
+        let mut g = restored;
+        g.apply_delta_nquads("<http://ex/post> <http://ex/p> <http://ex/v> .", "").unwrap();
+        drop(g);
+        let reopened = Graph::open(&dir).unwrap();
+        let live2 = dump_terms(&reopened);
+        assert!(live2.iter().any(|(s, _, _)| s.contains("/r1")), "restored content survives reopen");
+        assert!(live2.iter().any(|(s, _, _)| s.contains("/post")), "post-restore update is WAL-durable");
+        assert!(!live2.iter().any(|(s, _, _)| s.contains("/orig")), "original never resurrects");
+        let g_name = Term::NamedNode(NamedNode::new_unchecked("http://ex/g".to_string()));
+        let named = reopened
+            .named_graph(&g_name)
+            .expect("the restored named graph survives the reopen");
+        assert_eq!(named.len(), 1, "the named graph holds its one triple after reopen");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// [OPUS-4.8] (review 1593) A durable CLEAR of a directory-backed graph must SURVIVE a
