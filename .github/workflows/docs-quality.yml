@@ -112,7 +112,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install typos
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: typos@1.47.2
       - name: typos (markdown doc surface only)
@@ -358,7 +358,7 @@ jobs:
       - name: shellcheck check-site-links.sh + its self-test
         run: shellcheck scripts/check-site-links.sh scripts/tests/test_check_site_links.sh
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: lychee@0.23.0
       - name: Self-test check-site-links.sh (basePath remap + broken-link teeth)
