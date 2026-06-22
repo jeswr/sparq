@@ -60,6 +60,15 @@ pub mod ingest;
 pub mod poseidon2;
 mod poseidon2_constants;
 pub mod registry;
+// [OPUS-4.8] sq-bevd3 (Phase 3, epic sq-0dksu): the PER-METHOD security-properties
+// annotation graph + the over-claim guards (no `Proven` on a positive property while
+// sq-qhy4 is open; completeness; source-layer non-transfer). OPT-IN behind the
+// `secprop-annotations` cargo feature (OFF by default): the default build is
+// byte-unchanged and the module is compiled out. RECORDS claims + their epistemic
+// basis; asserts NO soundness/privacy property (estate NOT externally audited,
+// sq-qhy4).
+#[cfg(feature = "secprop-annotations")]
+pub mod secprop;
 pub mod sig;
 pub mod trace;
 pub mod verify;
