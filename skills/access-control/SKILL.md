@@ -448,6 +448,20 @@ public surface is `sparq_trust::{vocab, policy, admit, wire}` — see
 [issue #940](https://github.com/jeswr/sparq/issues/940); landing via design PR
 <https://github.com/jeswr/sparq/pull/951>).
 
+**Trust-document storage / authoring model** (the **opt-in `store` feature**, `sq-pfae.5`,
+design §3.2). `sparq_trust::store::TrustStore` decides *where* trust rules live and *which
+version* is in force: a **server-wide default** (the ceiling) plus zero-or-more **per-`.acr`
+documents** (`TrustLayer::{ServerWide, Container}`), where a per-`.acr` document may only
+**NARROW, never broaden** the server default — it can tighten a freshness window or restrict
+scope, but can NOT trust a `(source, statement-type)` the server default did not
+(`TrustStore::effective_rules`, the load-bearing soundness property). Documents are
+Control-gated (same `TrustDocument::new`-requires-`ControlGate` channel as `.acl`/`.acr`),
+**monotonically versioned** (a stale `put` is rejected), and revoked by removal. The
+`AdmissionCacheKey` = (evidence hash + policy version) composes with the sparq-solid epoch
+cache: a re-materialise bumps the epoch, a trust-document edit/revoke bumps the
+`policy_version` for affected targets — so a cached admission verdict is never served stale.
+Pure-Rust, no new dependency; OFF in the default build.
+
 **Honest scope (read first).** This is a RESEARCH prototype, **NOT a security guarantee**. It
 does **not** provide privacy, unlinkability, or anonymity: the credential is admitted in the
 clear and the holder binding authenticates the WebID in the clear (the non-anonymous degraded

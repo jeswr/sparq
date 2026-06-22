@@ -347,6 +347,21 @@ jobs:
             crate: sparq-mpc
             features: insecure-test-rng
             test: true
+          # [OPUS-4.8] sq-pfae.5: the trust-document STORAGE/AUTHORING model. The whole
+          # `store` module + the `tests/trust_store_cache_key.rs` integration suite are
+          # `#[cfg(feature = "store")]` behind `default = []`, so the default build/clippy/
+          # test (and ci.yml's archive) compile them EMPTY and run ZERO of the store unit
+          # tests + the 3 cache-key/narrowing integration tests. This leg compiles the module,
+          # runs `clippy --all-targets -D warnings` with the feature ON (the real gate), and
+          # runs `cargo test`, which drives the REAL TrustStore + admit path (cache-key
+          # invalidation on policy edit/revoke, per-`.acr` freshness narrowing, distinct
+          # evidence hashes). `store` is std-only (no new dep — it reuses the sparq-zk
+          # commitment + std hashing), so this is a fast leg. Verified: `cargo nextest list -p
+          # sparq-trust --features store` lists the 7 store unit tests + 3 integration tests.
+          - name: sparq-trust (store)
+            crate: sparq-trust
+            features: store
+            test: true
           # [OPUS-4.8] sq-h3uk: the ODRL->AUTH_GRAPH bridge (pulls the optional
           # sparq-policy ODRL evaluator) — keeps the opt-in ON path from rotting.
           - name: sparq-solid (odrl-bridge)

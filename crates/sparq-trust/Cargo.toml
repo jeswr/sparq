@@ -36,6 +36,13 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 # DID resolution + issuer-key binding (`did:key` offline self-cert + pluggable `did:web`).
 did = ["dep:serde_json"]
+# [OPUS-4.8] sq-pfae.5 — the trust-document STORAGE/AUTHORING model: server-wide vs
+# per-`.acr` documents (per-`.acr` NARROWS, never broadens), monotone document
+# versioning + revocation, and the admission cache key (evidence hash + policy version)
+# that composes with the sparq-solid epoch cache. Pure-Rust over the deps already
+# present (sparq-zk commitment for the evidence hash, std hashing) — NO new dependency,
+# so the lean default build is byte-identical with it OFF.
+store = []
 
 [dependencies]
 sparq-core = { path = "../sparq-core", default-features = false }
