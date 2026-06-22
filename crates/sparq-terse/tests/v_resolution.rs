@@ -17,11 +17,16 @@ fn graph() -> Graph {
     let ttl = r#"
         @prefix ex: <http://example.org/> .
         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
         ex:cardEst   a ex:Topic ; rdfs:label "cardinality estimation" .
         ex:joinOrder a ex:Topic ; rdfs:label "join order optimisation" .
         ex:cat       a ex:Animal ; rdfs:label "Cat" .
         ex:catalog   a ex:Thing ; rdfs:label "Catalogue" .
         ex:finding1  ex:about ex:cardEst .
+        # sq-26fdp regression: two concepts share the token "discipline"; one prefLabel is
+        # punctuated. A V() of the verbatim punctuated label must resolve unambiguously.
+        ex:mergeDisc a ex:Topic ; skos:prefLabel "Merge discipline" .
+        ex:zkDisc    a ex:Topic ; skos:prefLabel "ZK/MPC claim + circuit discipline" .
     "#;
     Graph::load_str(ttl, "turtle").expect("graph parses")
 }
@@ -52,6 +57,36 @@ fn lexical_exact_match_resolves_and_splices_canonical_iri() {
     assert_eq!(r.iri, "http://example.org/cardEst");
     assert_eq!(r.method, Method::Lexical);
     assert!(r.confidence > 0.0);
+}
+
+#[test]
+fn verbatim_punctuated_preflabel_resolves_through_the_public_surface() {
+    // sq-26fdp: V("ZK/MPC claim + circuit discipline") is a VERBATIM prefLabel that shares
+    // the token "discipline" with a sibling concept. Before the fix the token path scored
+    // both equally and the §6 envelope loud-failed AMBIGUOUS on a phrase that IS an exact
+    // label. The exact-prefLabel-first match must now splice the right IRI, unambiguously.
+    let g = graph();
+    let ctx = ResolveCtx::lexical(&g);
+    let exp = terse_to_sparql_with(
+        "SELECT ?f WHERE { ?f <http://example.org/about> V(\"ZK/MPC claim + circuit discipline\") }",
+        &ctx,
+        |_p| None,
+    )
+    .expect("a verbatim prefLabel must resolve, not loud-fail as ambiguous");
+
+    assert!(
+        exp.canonical_sparql.contains("<http://example.org/zkDisc>"),
+        "expected the zk-discipline IRI, got: {}",
+        exp.canonical_sparql
+    );
+    assert!(!exp.canonical_sparql.contains("V("), "no V() must remain");
+    assert_eq!(exp.resolutions.len(), 1);
+    let r = &exp.resolutions[0];
+    assert_eq!(r.iri, "http://example.org/zkDisc");
+    assert_eq!(r.method, Method::Lexical);
+    assert_eq!(r.score, 1.0);
+    assert!(r.runner_up.is_none(), "the verbatim label is the sole candidate");
+    assert_eq!(r.confidence, 1.0);
 }
 
 #[test]

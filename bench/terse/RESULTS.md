@@ -73,15 +73,18 @@ arms, so it does not differentiate the levers.)
    behind the cache breakpoint. **Caveat:** the saving sits right at the 20% bar and is
    a **proxy on the input side only**; the verdict is **CONDITIONAL** and must be
    upgraded by the full-session transcript fan-out before unconditional adoption.
-2. **Lever 3 (`V()`) does NOT clear the quality bar** — and this is the load-bearing
-   honest result. `V()` resolves clean prefLabels perfectly (`V("merge discipline")` →
-   the right topic, score 1.0), but on the punctuation-heavy prefLabel
-   `"ZK/MPC claim + circuit discipline"` the lexical linker scores two topics equally
-   on the shared token "discipline" and the soundness envelope **loud-fails as
-   ambiguous** rather than guess. That is the envelope *working* (loud-fail beats
-   silent-wrong), but it means the lever drops `parses`/F1/`resolution_correctness`
-   below arm A on the frozen set, so `recommend_adopt = false`. **`V()` is a
-   convenience for clean-label phrases, not a drop-in replacement for an explicit IRI.**
+2. **Lever 3 (`V()`) resolves verbatim prefLabels; still measure-gated on the rest.**
+   `V()` resolves clean prefLabels perfectly (`V("merge discipline")` → the right topic,
+   score 1.0). The original run loud-failed on the punctuation-heavy prefLabel
+   `"ZK/MPC claim + circuit discipline"`: the lexical linker scored two topics equally on
+   the shared token "discipline" and the soundness envelope **loud-failed as ambiguous**
+   rather than guess. `sq-26fdp` fixed that — the linker now exact-matches a full
+   prefLabel (case/whitespace-normalised, punctuation preserved) **before** token overlap,
+   so a verbatim prefLabel binds at score 1.0 and `resolution_correctness` recovers to 1.0
+   on re-run. The envelope is **unchanged** for genuinely fuzzy phrases (a non-label phrase
+   that merely shares tokens with several concepts still loud-fails — envelope *working*,
+   loud-fail beats silent-wrong). **`V()` is still a convenience that must be checked
+   (echoed IRI + score + confidence), not a blind drop-in for an explicit IRI.**
 3. **The negative stratum behaved correctly in every arm** — absent statuses/topics
    returned the empty answer-set (no manufactured rows), and `V()` over a phrase absent
    from the PKG (`V("Quantum supremacy")`) **loud-failed** rather than mis-binding
@@ -93,10 +96,11 @@ arms, so it does not differentiate the levers.)
   upgrades fidelity from `input-authoring-proxy` to `full-session-transcript`; only then
   can lever 1's CONDITIONAL recommend become unconditional. Tracked as bead `sq-bmpzd`
   (the fidelity design call is GH issue #1173).
-- Lever 3 would need a tightened lexical linker that exact-matches a full prefLabel
-  **before** falling to token overlap (so a verbatim prefLabel never goes ambiguous) — or
-  the vector fallback enabled. Tracked as bead `sq-26fdp`. Until then, lever 3 stays
-  **measure-gated / not-adopted**.
+- Lever 3's verbatim-prefLabel gap is **fixed** (`sq-26fdp`): the lexical linker now
+  exact-matches a full prefLabel **before** falling to token overlap, so a verbatim
+  prefLabel never goes ambiguous; the re-run restores lever-3 `resolution_correctness` to
+  1.0. The vector fallback (for genuinely fuzzy, non-verbatim phrases) remains the separate,
+  opt-in path. Broad lever-3 adoption still rides the full quality/token A/B verdict.
 
 ## Honest caveats (read before citing)
 
