@@ -115,7 +115,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: cargo-cyclonedx
       # [OPUS-4.8] sq-toze.27 (GS-3): Node for the JS/npm SBOM of the published WASM client.
@@ -478,7 +478,7 @@ jobs:
       - name: Generate SHA256SUMS
         run: cd assets && sha256sum -- * > SHA256SUMS
       - name: Create release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           # [OPUS-4.8] sq-gl3cf: attach to the RESOLVED tag. The action defaults tag_name to
           # `github.ref`, which on a workflow_dispatch is the branch (wrong) — pin it to the
