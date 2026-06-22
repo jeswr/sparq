@@ -55,6 +55,10 @@ export {
   prewarmSparqWhenIdle,
   type IdlePrewarmHandle,
   sparqShaclValidate,
+  // [OPUS-4.8] sq-pyn7 (#796) — the SCS *input* helper: parse a SHACL Compact Syntax document
+  // into a Turtle shapes graph via the `scs`-enabled wasm `Store.parseShaclCompact`, the
+  // counterpart of the `shapesToCompact` Turtle→SCS serialiser.
+  sparqParseShaclCompact,
   streamQueryRows,
   // [OPUS-4.8] sq-x0kp — the framework-agnostic results-formatting core (table extraction,
   // CSV/TSV export, raw-JSON pretty-print, ASK discrimination) the REPL result panel draws.

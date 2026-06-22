@@ -139,3 +139,38 @@ test("the Compact syntax button renders the shapes graph in SHACL Compact Syntax
 
   expect(consoleErrors, `console errors: ${consoleErrors.join("\n")}`).toEqual([]);
 });
+
+test("the SCS-input example parses compact shapes and validates the data against them", async ({
+  page,
+}) => {
+  // [OPUS-4.8] sq-pyn7 (#796) — the SCS *input* path: the shapes editor switches to Compact
+  // mode and its SHACL Compact Syntax text is parsed to a Turtle shapes graph via the wasm
+  // `Store.parseShaclCompact` binding BEFORE validation. This guards that the compact-authored
+  // Person shape flags `ex:carol`'s string age exactly as the equivalent Turtle shape would.
+  const consoleErrors = trackConsoleErrors(page);
+  await gotoReady(page);
+
+  // Select the "Compact-syntax shapes (SCS input)" example — it flips the shapes-input toggle
+  // to Compact and loads SCS into the shapes editor.
+  await page.getByRole("button", { name: "Compact-syntax shapes (SCS input)" }).click();
+  // The shapes-input radiogroup now reports Compact as the checked option.
+  await expect(
+    page.getByRole("radio", { name: "Compact" }),
+  ).toHaveAttribute("aria-checked", "true");
+
+  await page.getByRole("button", { name: "Validate" }).click();
+
+  // The SCS is parsed to a shapes graph and the data validated against it: a non-conformant
+  // report with the datatype violation (a string ex:age where the SCS requires xsd:integer).
+  const report = page.locator('[data-testid="shacl-report"]');
+  await expect(report).toBeVisible({ timeout: 30_000 });
+  await expect(report.locator("[data-conforms]")).toHaveAttribute(
+    "data-conforms",
+    "false",
+  );
+  await expect(
+    report.locator('[data-component="DatatypeConstraintComponent"]'),
+  ).toHaveCount(1);
+
+  expect(consoleErrors, `console errors: ${consoleErrors.join("\n")}`).toEqual([]);
+});
