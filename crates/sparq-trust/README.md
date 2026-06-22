@@ -68,28 +68,28 @@ view; `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
   monotone versioning (stale rejected) + revocation; the `AdmissionCacheKey` (evidence hash + policy
   version) composes with the sparq-solid epoch cache (edit/revoke invalidates the verdict). No new dep.
 - **Static / dynamic admission split** (`admit_static` + `derive_conditional_grants`, `sq-xc4y`) —
-  decides the **session-independent** class (signature, type-scope, scope) once at materialise-time
-  and defers the **per-request** class (holder + freshness) to an `auth:ConditionalGrant` re-checked
-  per request (shipped sq-0q7n path) — never frozen into the view.
-- **The invocation-binding gate** (`delegation`, `sq-l5og`) — verify a carried ZCAP/UCAN-style
-  delegation chain (each hop a CHECKED delegator signature over delegator/delegate **keys** +
-  capability + expiry), enforce monotone attenuation (`child ⊆ parent`), and bind **authenticated
-  invoker == the chain's terminal delegate, key-proven per request** via a fresh-challenge PoP.
-  Folding each hop's `delegate_key` into the signed preimage defeats the key-substitution
-  stolen-chain replay; the forgery matrix runs end-to-end.
+  decides the **session-independent** class (signature, type-scope, scope) once at materialise-time and
+  defers the **per-request** class (holder + freshness) to an `auth:ConditionalGrant` re-checked per request.
+- **The invocation-binding gate** (`delegation`, `sq-l5og`) — verify a carried ZCAP/UCAN-style delegation
+  chain (each hop a CHECKED delegator signature over delegator/delegate **keys** + capability + expiry),
+  enforce monotone attenuation (`child ⊆ parent`), and bind **authenticated invoker == the chain's terminal
+  delegate, key-proven per request** via a fresh-challenge PoP. Folding each hop's `delegate_key` into the
+  signed preimage defeats the key-substitution stolen-chain replay; the forgery matrix runs end-to-end.
 - **Delegation PROV-O audit** (`delegation_prov`, **opt-in `delegation-prov`**, `sq-pfae.6`) — render an
   invocation-bound chain as a minimal W3C PROV-O graph: `prov:actedOnBehalfOf` per hop, the human/AI
-  principal as an attested attribute (`trust:HumanPrincipal`/`AiAgent`, §4.2), the effective grant as
-  `auth:*` RDF. Pure `oxrdf`, NO `sparq-prov` edge. A record, never authority: emitted *after* the gate,
-  it only describes authority already conferred (never broader).
-- **DID issuer-key binding** (`did`, **opt-in `did` feature**, `sq-pfae.3`) — a rule may name its issuer
-  by `trust:issuerDid` instead of `trust:issuerKey` hex. `DidKeyResolver` decodes a `did:key` offline;
-  `DidWebResolver` reads a `did:web` document via a **pluggable** fetcher (no HTTP client on the default
-  build). **Narrows** the operator-asserted-key forgery vector D′ (not an absolute anchor).
+  principal as an attested attribute (`trust:HumanPrincipal`/`AiAgent`, §4.2), the effective grant as `auth:*`
+  RDF. Pure `oxrdf`, NO `sparq-prov` edge. A record, never authority: emitted *after* the gate (never broader).
+- **DID issuer-key binding** (`did`, **opt-in `did` feature**, `sq-pfae.3`) — a rule may name its issuer by
+  `trust:issuerDid` instead of `trust:issuerKey` hex. `DidKeyResolver` decodes a `did:key` offline;
+  `DidWebResolver` reads `did:web` via a **pluggable** fetcher (no default HTTP client). **Narrows** D′ (no absolute anchor).
 - **Security-properties vocabulary** (`secprop`, **opt-in `secprop-vocab`**, `sq-5oru9`) — the sparq
-  **`sec-prop:` extension** (constants + [`secprop-ext.ttl`](ontologies/zkp-sparql/secprop-ext.ttl)): the
-  orthogonal proof-system dimensions + the **assurance / audit-status axis** the vendored `sec-prop:` lacks
-  (extend, not fork). Records a claim + basis, NOT a proof; default `Claimed`, no `Proven` while `sq-qhy4` open.
+  **`sec-prop:` extension** (constants + [`secprop-ext.ttl`](ontologies/zkp-sparql/secprop-ext.ttl)): orthogonal
+  proof-system dimensions + the **assurance / audit-status axis** the vendored `sec-prop:` lacks (extend, not
+  fork). Records a claim + basis, NOT a proof; default `Claimed`, no `Proven` while `sq-qhy4` open.
+- **N3 proof-admissibility** (`admissibility`, **opt-in `secprop-admissibility`**, `sq-ufsi9`) — the §4.3 ODRL →
+  admissible-proof-set reduction (`strongerThan`-closure / `atLeast` / `overDimension` / `satisfies`) as a
+  RUNNABLE N3 ruleset on `sparq-reason`, with the Rust **default-deny** universal (`admissible`). Reasons over
+  ANNOTATIONS, not crypto: `requiresAssurance gteq Proven` empties the admissible set today (`sq-qhy4`).
 
 ## Honest scope — what this does and does NOT do
 

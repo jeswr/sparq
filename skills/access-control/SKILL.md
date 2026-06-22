@@ -541,8 +541,9 @@ single-use) plus the machine-reasonable **assurance / audit-status axis** that t
 `https://w3id.org/zkp-sparql/sec-prop#` namespace** (extend, do not fork; design
 `research/security-properties-ontology-design.md` §4.1). It is **data + Rust constants only** (a
 `const &str` registry + the canonical [`secprop-ext.ttl`](../../crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl),
-pinned together by a drift test) — it is **not** a reasoner, an ODRL profile, or a per-method
-annotation graph (those are the downstream Phase 2/3/4 beads `sq-ufsi9`/`sq-bevd3`/`sq-uor3g`).
+pinned together by a drift test) — it is **not** an ODRL profile or a per-method annotation graph
+(those are the downstream Phase 3/4 beads `sq-bevd3`/`sq-uor3g`). The Phase 2 **N3 admissibility
+reasoner** over this vocabulary now ships — see below.
 
 The **assurance axis is the honesty mechanism**: `Proven ⊐ Claimed ⊐ Conjectured`, one axis
 orthogonal to every property. The **default** assurance for a sparq-asserted ZK property is
@@ -551,6 +552,35 @@ sparq ZK method may be labelled `secx:Proven` while the external accredited-cryp
 (`sq-qhy4`) is open.** The vocabulary **records** a claim and its epistemic basis; it is **NOT** a
 proof of any property. DPV alignment is *Light* (#1002 Option 2): `skos:closeMatch` cross-refs to
 W3C DPV `CryptographicMethods` where a near-match exists, not a full regulation→requirement chain.
+
+### N3 proof-admissibility ruleset — opt-in `secprop-admissibility` ([OPUS-4.8] sq-ufsi9, Phase 2)
+
+The `sparq_trust::admissibility` module (behind the **default-OFF `secprop-admissibility`** feature,
+which enables `secprop-vocab`) is the §4.3 **ODRL → admissible-proof-set reduction** run as a
+genuinely **runnable Notation3 ruleset** on `sparq-reason`'s N3 engine
+([`reason_n3_terms`](../inference/SKILL.md)) — not pseudocode. Two parts (design §4.3.2):
+
+1. a **level-order fact base** — each dimension's `⊐` order as `secx:strongerThan` facts,
+   transitively closed by one N3 rule, then lifted to the reflexive `secx:atLeast` partial order
+   (`LEVEL_ORDERS` + `CLOSURE_RULES`);
+2. a **discharge rule** — method `M` satisfies a `gteq` constraint `C` iff `M`'s asserted level for
+   `C`'s dimension is `secx:atLeast` `C`'s required level (`DISCHARGE_RULE`); the leftOperand→dimension
+   map is one `secx:overDimension` fact per leftOperand.
+
+```rust
+use sparq_trust::admissible;                              // --features secprop-admissibility
+let a = admissible(method_iri, &constraint_iris, policy_n3, method_annotations_n3)?;
+assert!(!a.admissible);  a.unsatisfied;                   // the constraints M fails (honest "why not")
+```
+
+The reasoner is **monotone** (it only derives `secx:satisfies`); the **"satisfies every constraint"**
+universal (default-deny) is a **Rust side-condition** over the materialised facts (`admissible`), *not*
+in-reasoner negation — the same discipline as the `admit` gate's freshness/holder side-conditions, and
+for the same soundness reason. It reasons over **annotations, not crypto**: `requiresAssurance gteq
+secx:Proven` mechanically **empties** the admissible set for the whole sparq ZK estate today (`sq-qhy4`
+open), and `requiresPostQuantumForgery gteq …` removes the DL-signature methods — the value is a
+**principled refusal** ("no admissible proof") over silently serving a non-conforming one. The §4.3.3
+worked example is the golden test: empty under Alice's strict preference, non-empty under the relaxed one.
 
 ## Related skills
 

@@ -552,6 +552,24 @@ jobs:
             crate: sparq-trust
             features: secprop-vocab
             test: true
+          # [OPUS-4.8] sq-ufsi9 (epic sq-0dksu, Phase 2): the N3 proof-admissibility
+          # ruleset over `sparq-reason` (the §4.3 ODRL → admissible-proof-set
+          # reduction). The `admissibility` module + its `admissibility::tests` unit
+          # suite + the `secprop_admissibility.rs` golden integration suite
+          # (`#![cfg(feature = "secprop-admissibility")]`) are ALL behind the default-OFF
+          # `secprop-admissibility` feature, so ci.yml's default-feature `nextest archive`
+          # compiles them EMPTY and runs ZERO of them — the silent-skip gap (#1171) this
+          # leg closes. The feature is dependency-free (N3-text data + a thin driver over
+          # the `sparq-reason` edge the crate already carries), so this leg is cheap and
+          # reaches every admissibility test. Verified locally: `cargo test -p sparq-trust
+          # --features secprop-admissibility` runs the 6 `admissibility::tests` unit tests
+          # + the 3 `secprop_admissibility.rs` golden tests (empty under the strict
+          # preference, non-empty under the relaxed one); `clippy --all-targets -D
+          # warnings` is clean in every state.
+          - name: sparq-trust (secprop-admissibility)
+            crate: sparq-trust
+            features: secprop-admissibility
+            test: true
           # [OPUS-4.8] sq-leg8n: the sparq-terse opt-in LLM-ergonomic SPARQL surface
           # (epic sq-2m6zm, design research/llm-ergonomic-sparql-surface.md). Only the
           # `vectors` leg lives here: it pulls sparq-core/sparq-nlq/sparq-vectors and runs the
