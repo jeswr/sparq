@@ -12,9 +12,14 @@ use sparq_core::dict::{Dict, Id};
 
 mod classify;
 mod extract;
+#[cfg(feature = "hasse")]
+mod hasse;
 mod normal;
 #[cfg(feature = "rbox")]
 mod rbox;
+
+#[cfg(feature = "hasse")]
+pub use hasse::{classify_hasse_graph, DirectHierarchy};
 
 const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
@@ -47,8 +52,10 @@ pub struct Report {
 /// over the source dict ids. Built by [`Classifier::classify`]; the triple-emitting
 /// [`classify_graph`] wraps the same computation.
 pub struct ClassHierarchy {
-    /// `subClassOf[c]` = the named super-classes of dict class `c` (every class subsuming it,
-    /// not just direct super-classes — transitive reduction is Phase E3, bead sq-s2nob).
+    /// `subClassOf[c]` = the named super-classes of dict class `c` (every class subsuming it —
+    /// the full transitive closure, which `is_subclass_of` queries directly). The DIRECT-subsumer
+    /// (transitive-reduction) Hasse diagram is the separate `hasse` feature's `DirectHierarchy`
+    /// (Phase E3, bead sq-s2nob); the closure is kept here because subsumption queries need it.
     subsumers: FxHashMap<Id, Vec<Id>>,
     /// Dict ids of the unsatisfiable named classes (`⊑ owl:Nothing`).
     unsatisfiable: Vec<Id>,
@@ -83,6 +90,14 @@ impl ClassHierarchy {
     /// [`classify_graph`], which materializes the lattice as triples.
     pub fn report(&self) -> Report {
         self.report
+    }
+
+    /// Iterator over `(class dict id, complete named-subsumer slice)` for every classified class
+    /// with a proper super-class. The slice is the full transitive closure `S(C)` (sorted by dict
+    /// id). Consumed by the `hasse` transitive-reduction (Phase E3) to build the Hasse diagram.
+    #[cfg(feature = "hasse")]
+    pub(crate) fn subsumer_sets(&self) -> impl Iterator<Item = (Id, &[Id])> {
+        self.subsumers.iter().map(|(&c, sups)| (c, sups.as_slice()))
     }
 }
 
