@@ -258,6 +258,28 @@ pinning     = "gen_sameas.py is a deterministic pure function of (K,N,M) (no RNG
 records_to  = "stdout (TSV); CI emits sameas_size<N>_{closure_s,query_us,closure_triples} into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/owl-sameas/expected.tsv"
 status      = "ok"
 
+# [OPUS-4.8] sq-evb1: EL classification micro-bench for the opt-in sparq-reason-el crate. The
+# EL-fragment analogue of deep-taxonomy/owl-sameas (those gate the RL reasoner; this gates the
+# consequence-based EL classifier). Two closed-form workloads over the SAME public
+# Classifier::classify API: a deep subClassOf chain (transitive lattice, d·(d+1)/2 subsumptions)
+# and a CR4 existential-traversal chain (d+1 A_i⊑B subsumptions OWL 2 RL CANNOT reach). Both are
+# SELF-ASSERTING (the example asserts the closed-form closure sizes), so a silent classifier
+# under-derivation fails LOUDLY — the deterministic, load-robust correctness gate; wall-clock is
+# trend-only. Hermetic: the TBox is generated in-process (pure function of DEPTH, no dataset).
+[[benchmark]]
+id          = "reason-el-classify"
+name        = "sparq-reason-el — OWL 2 EL classification (chain + CR4 existential traversal)"
+category    = "inference"
+measures    = "classification wall time over a DEPTH-parameterised in-process TBox, for two workloads: `chain` (a DEPTH-deep rdfs:subClassOf chain — complete transitive lattice, closed form derived_subsumptions = DEPTH·(DEPTH+1)/2) and `cr4` (a DEPTH-long ∃r.-successor chain with `∃r.B ⊑ B` back-propagation — closed form A_i⊑B_derivations = DEPTH+1, the existential-traversal closure OWL 2 RL silently cannot derive). The example carries a SELF-ASSERTING closure-size gate: both closed forms are asserted in-process (deterministic) so an EL classifier regression — incl. silent under-derivation — fails LOUDLY"
+invoke      = "cargo run -p sparq-reason-el --example classify_bench --release [DEPTH]   # DEPTH defaults to 2000; self-contained, no dataset to fetch"
+source      = "crates/sparq-reason-el/examples/classify_bench.rs (the runner + in-process generator); crates/sparq-reason-el/src/{lib.rs,classify.rs,normal.rs,extract.rs} (the classified surface — Classifier::classify, CR1-CR5 saturation)"
+dataset     = "in-process: a DEPTH-deep subClassOf chain (chain workload) and a DEPTH-long ∃r.-successor chain + `∃r.B ⊑ B` (cr4 workload), both a pure function of DEPTH (no RNG/network/toolchain, byte-deterministic). DEPTH=2000 default: chain closure 2,001,000 subsumptions, cr4 closure 2,001 — sub-second total. gitignored+regenerable (nothing written to disk)"
+quiet_box_sensitive = true  # classify wall-clock trend-only, NOT in scripts/perf-gate.py; the closed-form closure-size assertions (d·(d+1)/2 chain subsumptions; d+1 cr4 A_i⊑B subsumptions) ARE a hard correctness gate (deterministic, load-robust; catches EL classifier regressions incl. silent under-derivation a single query misses)
+pinning     = "the in-process generator is a deterministic pure function of DEPTH (no RNG, byte-identical); the closed-form closure sizes (chain DEPTH·(DEPTH+1)/2; cr4 DEPTH+1) are asserted in-example, each VERIFIED by running (depth 5 -> 15/6; depth 2000 -> 2001000/2001), not guessed"
+records_to  = "stdout (trend-only wall time + the asserted closure sizes); structural assertions live in the example itself (classify_bench.rs)"
+featured    = false  # [OPUS-4.8] sq-evb1: capability micro-bench (MVP EL classifier), not a head-to-head competitor card — dashboard promotion deferred to a maintainer.
+status      = "ok"
+
 [[benchmark]]
 id          = "selective-bindjoin"
 name        = "Selective (index-nested-loop / bind) join"
