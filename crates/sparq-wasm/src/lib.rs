@@ -94,6 +94,21 @@ mod serialize;
 #[cfg(feature = "scs")]
 mod scs;
 
+// [OPUS-4.8] sq-1dd5t (#1047): the opt-in RDFC-1.0 `canonicalizeNQuads(nquads)` free
+// function (the @jeswr/sparq RDF/JS `Dataset` consumes it for isomorphism-aware
+// toCanonical / equals / contains). Behind the non-default `canon` feature so the lean
+// bundle carries zero canonicalization code; the module exports a `#[wasm_bindgen]` free
+// function (not a `Store` method — canonicalization is over an arbitrary quad set, which
+// may be a foreign RDF/JS dataset, not necessarily this store's contents).
+#[cfg(feature = "canon")]
+mod canon;
+
+// Re-export the free function at the crate root so it is reachable as
+// `sparq_wasm::canonicalizeNQuads` from the headless wasm test (tests/web.rs) and any
+// rlib consumer; `#[wasm_bindgen]` already registers it in the generated JS surface.
+#[cfg(feature = "canon")]
+pub use canon::canonicalize_nquads;
+
 /// An immutable, dictionary-encoded RDF store queryable with SPARQL.
 #[wasm_bindgen]
 pub struct Store {

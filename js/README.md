@@ -204,9 +204,15 @@ a.contains(n3);
 a.equals(n3);
 ```
 
-> `contains`/`equals`/`toCanonical` compare quads by their concrete terms
-> (blank nodes by **label**); full RDFC-1.0 blank-node canonicalisation is not
-> yet applied. For blank-node-free datasets the comparison is exact.
+> `toCanonical` returns the **RDFC-1.0** (RDF Dataset Canonicalization) canonical
+> N-Quads — blank nodes relabelled to `_:c14nN`, lines canonically sorted — so two
+> datasets that are RDF-isomorphic (differ only in blank-node labels and/or quad
+> order) canonicalise byte-identically. `equals` is isomorphism-aware (it compares
+> canonical forms) and `contains` recognises a relabelled subgraph (a blank-node
+> homomorphism), so "differences in blank node labels are ignored" per the RDF/JS
+> spec. Backed by the engine's RDFC-1.0 implementation surfaced over wasm. (RDF-1.2
+> triple terms are outside the W3C RDFC-1.0 data model and `toCanonical` throws on
+> them.)
 
 Because the instance methods are
 synchronous, you obtain an instance through an **async factory** —

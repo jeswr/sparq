@@ -16,7 +16,7 @@
 // at compile time that this shipped artifact type is structurally identical to the shared
 // `@sparq/client` surface, so the single-source-of-truth relationship is CI-guarded from the
 // `js/` side too and the two copies cannot silently diverge.
-import initWasm, { Store as WasmStore } from '../wasm/sparq_wasm.js';
+import initWasm, { Store as WasmStore, canonicalizeNQuads } from '../wasm/sparq_wasm.js';
 
 let ready: Promise<void> | undefined;
 
@@ -41,4 +41,9 @@ export function init(): Promise<void> {
   return ready;
 }
 
-export { WasmStore };
+// [OPUS-4.8] sq-1dd5t (#1047): RDFC-1.0 (RDF Dataset Canonicalization) free function the
+// RDF/JS `Dataset` uses for isomorphism-aware toCanonical / equals / contains. Available
+// because the published `@jeswr/sparq` wasm bundle (js `build:wasm`) enables the `canon`
+// Cargo feature; the engine must be `init()`-ed before calling it (it is, by the time a
+// `Dataset` instance exists — the async factories await `init()`).
+export { WasmStore, canonicalizeNQuads };
