@@ -1,38 +1,40 @@
-# agents-findings.ttl — GENERATED from agents-findings.yaml.ld by
-# crates/sparq-kb/ingest/yamlld_compile.py (FO-bridge Phase 4, sq-mztg8.2).
-# DO NOT HAND-EDIT — edit the .yaml.ld authoring source and recompile.
-# 🤖 SPARQ agent [OPUS-4.8]. Conforms to pkg.shapes.ttl (0 violations).
+# agents-findings.ttl — hand-authored PKG Findings extracted from AGENTS.md
+#
+# [OPUS-4.8] sq-2m6zm.2 (epic sq-2m6zm); design record
+# research/dogfooding-sparq-knowledge-graph.md §1.3/§6 (PR #1063). 🤖 SPARQ agent —
+# the Phase-1 PKG ingestion PoC. Written while Fable unavailable; flag for re-review
+# when Fable returns.
+#
+# EXTRACTION METHOD: HAND-AUTHORED from the structured headings + the gate matrix
+# table of AGENTS.md (the top-of-corpus, highest read-frequency doc). This is the
+# highest-accuracy extraction tier — a human (this agent) read the named sections and
+# wrote each Finding to conform to pkg:FindingShape: a source (prov:wasDerivedFrom the
+# AGENTS.md Source), a numeric pkg:confidence, a secx: assurance basis, and a
+# non-filler sigimpl:justification. The section/anchor each Finding came from is
+# recorded via dcterms:source so a query can answer "which section says this".
+#
+# It is a HEAD slice, NOT a full capture of AGENTS.md — see the PoC honesty report.
+# The two questions this slice answers (the design's §6 worked examples):
+#   Q1 "what's the merge discipline for a ZK PR?"
+#   Q2 "which standing rules apply to sub-agents?"
 
-@prefix cito: <http://purl.org/spar/cito/> .
+@prefix pkg:     <https://sparq.dev/ns/pkg#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
-@prefix fabio: <http://purl.org/spar/fabio/> .
-@prefix kb: <https://sparq.dev/ns/pkg/kb#> .
-@prefix pkg: <https://sparq.dev/ns/pkg#> .
-@prefix prov: <http://www.w3.org/ns/prov#> .
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix secx: <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix fabio:   <http://purl.org/spar/fabio/> .
+@prefix cito:    <http://purl.org/spar/cito/> .
+@prefix schema:  <http://schema.org/> .
 @prefix sigimpl: <https://w3id.org/zkp-sparql/sig-impl#> .
-@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
-@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix secx:    <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix kb:      <https://sparq.dev/ns/pkg/kb#> .
 
-# === Concepts (the V()-resolution catalog) ===
-
-kb:topic-merge-discipline a skos:Concept ;
-  skos:inScheme pkg:Topics ;
-  skos:prefLabel "Merge discipline"@en-GB ;
-  skos:definition "The PR + ci-summary gate + review-resolution + arming model that governs how a change lands on main."@en-GB .
-
-kb:topic-subagent-rules a skos:Concept ;
-  skos:inScheme pkg:Topics ;
-  skos:prefLabel "Sub-agent standing rules"@en-GB ;
-  skos:definition "The standing rules every dispatched sub-agent follows (the shared contract + worktree isolation + the proceed-without-greenlight rule)."@en-GB .
-
-kb:topic-zk-discipline a skos:Concept ;
-  skos:inScheme pkg:Topics ;
-  skos:prefLabel "ZK/MPC claim + circuit discipline"@en-GB ;
-  skos:definition "The honesty + gate-count discipline specific to the sparq-zk* / sparq-mpc estate."@en-GB .
-
-# === Sources ===
+# =============================================================================
+# Source — AGENTS.md (the head doc; the project's single source of truth for "how
+# we work"). pkg:Source needs an explored-status + a dcterms:title (SourceShape).
+# =============================================================================
 
 kb:doc-agents-md a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "AGENTS.md — the sparq agent charter (how we work)"@en-GB ;
@@ -41,11 +43,26 @@ kb:doc-agents-md a pkg:Source , pkg:Document , fabio:Expression ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 0 ;
   pkg:confidence 1.0 ;
-  dcterms:subject kb:topic-merge-discipline ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-merge-discipline , kb:topic-subagent-rules .
 
-# === Findings (the @graph) ===
+# Topics (pure SKOS — the dcterms:subject targets).
+kb:topic-merge-discipline a skos:Concept ; skos:inScheme pkg:Topics ;
+  skos:prefLabel "Merge discipline"@en-GB ;
+  skos:definition "The PR + ci-summary gate + review-resolution + arming model that governs how a change lands on main."@en-GB .
+kb:topic-subagent-rules a skos:Concept ; skos:inScheme pkg:Topics ;
+  skos:prefLabel "Sub-agent standing rules"@en-GB ;
+  skos:definition "The standing rules every dispatched sub-agent follows (the shared contract + worktree isolation + the proceed-without-greenlight rule)."@en-GB .
+kb:topic-zk-discipline a skos:Concept ; skos:inScheme pkg:Topics ;
+  skos:prefLabel "ZK/MPC claim + circuit discipline"@en-GB ;
+  skos:definition "The honesty + gate-count discipline specific to the sparq-zk* / sparq-mpc estate."@en-GB .
 
+# =============================================================================
+# Q1 — "what's the merge discipline for a ZK PR?"
+# The minimal answer is the union of these Findings (each is sourced + confident +
+# assured + non-filler, so each conforms to FindingShape).
+# =============================================================================
+
+# F1.1 — the base PR gate (applies to every PR, ZK or not).
 kb:find-merge-ci-summary-gate a pkg:Finding ;
   rdfs:label "A PR merges only when ci-summary is green and every review thread is resolved"@en-GB ;
   pkg:about kb:topic-merge-discipline ;
@@ -58,6 +75,7 @@ kb:find-merge-ci-summary-gate a pkg:Finding ;
   dcterms:source "AGENTS.md#contribution-workflow--prs-reviews-resolved-the-ci-summary-gate" ;
   dcterms:subject kb:topic-merge-discipline .
 
+# F1.2 — the ZK-specific gate row (the gate matrix entry for the ZK verifier/circuits).
 kb:find-zk-circuit-gate a pkg:Finding ;
   rdfs:label "A ZK-circuit change re-runs forge_gates + differential_fuzz + the gate-count snapshot and re-opens the soundness audit"@en-GB ;
   pkg:about kb:topic-zk-discipline ;
@@ -68,9 +86,9 @@ kb:find-zk-circuit-gate a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#post-batch-re-evaluation-checklist--what-to-re-run-after-a-change" ;
-  dcterms:subject kb:topic-zk-discipline ;
-  dcterms:subject kb:topic-merge-discipline .
+  dcterms:subject kb:topic-zk-discipline , kb:topic-merge-discipline .
 
+# F1.3 — the ZK circuit-member checklist (the two Rust-side steps adding/removing a member).
 kb:find-zk-member-checklist a pkg:Finding ;
   rdfs:label "Adding/removing a zk/compose member needs the gate-count snapshot updated and the Rust gate run, not just nargo test"@en-GB ;
   pkg:about kb:topic-zk-discipline ;
@@ -83,6 +101,7 @@ kb:find-zk-member-checklist a pkg:Finding ;
   dcterms:source "AGENTS.md#zk-circuit-member-checklist--adding-or-removing-a-zkcompose-member" ;
   dcterms:subject kb:topic-zk-discipline .
 
+# F1.4 — the privacy-claims honesty gate (the ZK/MPC-specific HARD gate that bites a ZK PR's docs).
 kb:find-zk-privacy-claims-gate a pkg:Finding ;
   rdfs:label "Any ZK/MPC privacy or soundness claim must stay hedged/negative — the privacy-claims gate is a HARD ci-summary job"@en-GB ;
   pkg:about kb:topic-zk-discipline ;
@@ -93,9 +112,9 @@ kb:find-zk-privacy-claims-gate a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#post-batch-re-evaluation-checklist--what-to-re-run-after-a-change" ;
-  dcterms:subject kb:topic-zk-discipline ;
-  dcterms:subject kb:topic-merge-discipline .
+  dcterms:subject kb:topic-zk-discipline , kb:topic-merge-discipline .
 
+# F1.5 — the arming model caveat that bites a ZK PR (perf + stacked-base).
 kb:find-zk-arming-model a pkg:Finding ;
   rdfs:label "A verified-clean non-perf PR auto-arms; never arm auto-merge on a stacked PR whose base is not main"@en-GB ;
   pkg:about kb:topic-merge-discipline ;
@@ -108,6 +127,13 @@ kb:find-zk-arming-model a pkg:Finding ;
   dcterms:source "AGENTS.md#contribution-workflow--prs-reviews-resolved-the-ci-summary-gate" ;
   dcterms:subject kb:topic-merge-discipline .
 
+# =============================================================================
+# Q2 — "which standing rules apply to sub-agents?"
+# The minimal answer is the union of these Findings (the shared contract + the two
+# framing standing rules). Each conforms to FindingShape.
+# =============================================================================
+
+# F2.1 — the shared contract is the single source of truth (terse briefs).
 kb:find-subagent-shared-contract a pkg:Finding ;
   rdfs:label "Every dispatched sub-agent follows the shared contract; task briefs state the task only"@en-GB ;
   pkg:about kb:topic-subagent-rules ;
@@ -120,6 +146,7 @@ kb:find-subagent-shared-contract a pkg:Finding ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
   dcterms:subject kb:topic-subagent-rules .
 
+# F2.2 — worktree isolation (the non-negotiable mechanics, rule #1).
 kb:find-subagent-worktree-isolation a pkg:Finding ;
   rdfs:label "Every mutating sub-agent runs in its OWN isolated worktree+branch, never the shared main checkout"@en-GB ;
   pkg:about kb:topic-subagent-rules ;
@@ -132,6 +159,7 @@ kb:find-subagent-worktree-isolation a pkg:Finding ;
   dcterms:source "AGENTS.md#worktree-isolation--every-mutating-agent-gets-its-own-worktreebranch" ;
   dcterms:subject kb:topic-subagent-rules .
 
+# F2.3 — staging discipline (rule #2: never git add -A, never stage .beads/).
 kb:find-subagent-staging a pkg:Finding ;
   rdfs:label "Sub-agents stage only changed files by explicit path; never git add -A and never stage .beads/"@en-GB ;
   pkg:about kb:topic-subagent-rules ;
@@ -144,6 +172,7 @@ kb:find-subagent-staging a pkg:Finding ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
   dcterms:subject kb:topic-subagent-rules .
 
+# F2.4 — no push/no merge + self-id + gate in-worktree (rules #3/#4/#6).
 kb:find-subagent-no-push-selfid a pkg:Finding ;
   rdfs:label "Sub-agents commit in-worktree (no push/merge), gate in-worktree without weakening a gate, and self-identify in every comment"@en-GB ;
   pkg:about kb:topic-subagent-rules ;
@@ -156,6 +185,7 @@ kb:find-subagent-no-push-selfid a pkg:Finding ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
   dcterms:subject kb:topic-subagent-rules .
 
+# F2.5 — the proceed-without-greenlight standing rule (binds every sub-agent).
 kb:find-subagent-proceed-no-greenlight a pkg:Finding ;
   rdfs:label "Sub-agents proceed without the maintainer's greenlight, documenting the default and filing a feedback issue"@en-GB ;
   pkg:about kb:topic-subagent-rules ;
@@ -168,6 +198,7 @@ kb:find-subagent-proceed-no-greenlight a pkg:Finding ;
   dcterms:source "AGENTS.md#standing-rule--proceed-without-waiting-for-the-maintainers-greenlight-2026-06-21" ;
   dcterms:subject kb:topic-subagent-rules .
 
+# F2.6 — model provenance + honesty gates the sub-agent must keep safe (rules #5/#7).
 kb:find-subagent-provenance-honesty a pkg:Finding ;
   rdfs:label "Sub-agents tag [OPUS-4.8] + the Opus trailer and keep ZK/MPC + perf claims gate-safe"@en-GB ;
   pkg:about kb:topic-subagent-rules ;
@@ -178,5 +209,4 @@ kb:find-subagent-provenance-honesty a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
-  dcterms:subject kb:topic-subagent-rules ;
-  dcterms:subject kb:topic-zk-discipline .
+  dcterms:subject kb:topic-subagent-rules , kb:topic-zk-discipline .

@@ -37,6 +37,12 @@ import os
 import re
 import sys
 
+# The deterministic YAML-LD authoring compiler (FO-bridge Phase 4, sq-mztg8.2). The
+# write-path Findings tier is now AUTHORED in agents-findings.yaml.ld and compiled here
+# (replacing the raw-Turtle agents-findings.ttl tier) — see yamlld_compile.py.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from yamlld_compile import compile_yaml_ld  # noqa: E402
+
 PKG = "https://sparq.dev/ns/pkg#"
 KB = "https://sparq.dev/ns/pkg/kb#"
 
@@ -296,7 +302,13 @@ def main():
     ap.add_argument("--beads", required=True)
     ap.add_argument("--skills-dir", required=True)
     ap.add_argument("--findings", default=None,
-                    help="hand-authored AGENTS.md findings .ttl to append verbatim")
+                    help="LEGACY: a pre-rendered findings .ttl to append verbatim "
+                         "(the raw-Turtle tier; superseded by --findings-yamlld)")
+    ap.add_argument("--findings-yamlld", default=None,
+                    help="the WRITE-PATH authoring source (a *.yaml.ld Findings doc, "
+                         "FO-bridge Phase 4 sq-mztg8.2): deterministically COMPILED to "
+                         "the schema.org-typed PKG Turtle and appended. An ambiguous "
+                         "concept token fails the compile (reds the ingest).")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -305,8 +317,9 @@ def main():
         "# crates/sparq-kb/ingest/ingest_pkg.py; do not hand-edit).\n"
         "# [OPUS-4.8] sq-2m6zm.2 (epic sq-2m6zm). 🤖 SPARQ agent — PKG ingestion PoC.\n"
         "# Structured-parse of .beads/issues.jsonl (-> pkg:Task) + heaviest skills'\n"
-        "# front-matter (-> pkg:Source/pkg:Technique). Hand-authored AGENTS.md Findings\n"
-        "# are appended from ingest/agents-findings.ttl. Conforms to pkg.shapes.ttl\n"
+        "# front-matter (-> pkg:Source/pkg:Technique). The AGENTS.md Findings tier is\n"
+        "# AUTHORED in ingest/agents-findings.yaml.ld and deterministically COMPILED by\n"
+        "# yamlld_compile.py (FO-bridge Phase 4, sq-mztg8.2). Conforms to pkg.shapes.ttl\n"
         "# (0 violations); the bd backlog's stale closed->open edges are EXCLUDED (see\n"
         "# the script header + the SHACL honesty report).\n\n"
     )
@@ -319,12 +332,28 @@ def main():
     parts.extend(skill_lines)
 
     out_text = "\n".join(parts) + "\n"
-    if args.findings:
+    findings_n = 0
+    # WRITE-PATH (preferred): compile the YAML-LD authoring source deterministically.
+    # An ambiguous/unresolvable concept token raises CompileError -> the ingest reds,
+    # which is the fail-closed contract (never a silent wrong IRI). The compiled tier
+    # carries its OWN @prefix header (it is a standalone Turtle document), and the PKG
+    # loader parses documents independently, so prefix scope does not leak.
+    if args.findings_yamlld:
+        with open(args.findings_yamlld, encoding="utf-8") as f:
+            compiled = compile_yaml_ld(f.read())
+        out_text += (
+            "\n# === Findings (COMPILED from agents-findings.yaml.ld; "
+            "FO-bridge Phase 4) ===\n" + compiled
+        )
+        findings_n = compiled.count("a pkg:Finding")
+    # LEGACY: a pre-rendered findings .ttl appended verbatim (the old raw-Turtle tier).
+    elif args.findings:
         with open(args.findings, encoding="utf-8") as f:
+            blob = f.read()
             out_text += (
-                "\n# === Findings (hand-authored from AGENTS.md; appended verbatim) ===\n"
-                + f.read()
+                "\n# === Findings (pre-rendered .ttl; appended verbatim) ===\n" + blob
             )
+            findings_n = blob.count("a pkg:Finding")
 
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(out_text)
@@ -342,7 +371,7 @@ def main():
         f"[ingest] tasks={bstats['tasks']} deps_emitted={bstats['deps_emitted']} "
         f"stale_excluded={bstats['stale_excluded']} "
         f"research_docs={bstats['research_docs']} spec_links={bstats['spec_links']} "
-        f"skills={sstats['skills']} -> {args.out}",
+        f"skills={sstats['skills']} findings={findings_n} -> {args.out}",
         file=sys.stderr,
     )
     print(f"[ingest] stale-edge sidecar -> {sidecar}", file=sys.stderr)
