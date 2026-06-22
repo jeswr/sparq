@@ -71,6 +71,13 @@ record a replayable fixture as you go.
   to a real in-graph source (resolution rate 1.0, zero fabricated refs); a binding with no
   provenance is reported as **"no source recorded"**, never guessed.
   <!-- [OPUS-4.8] sq-2489d.1 -->
+- **Answer-qualification — hedge + abstention** ([`qualify`](src/qualify.rs), opt-in via
+  `--features citations` + `NlqConfig::qualify`, default **off**) — `Nlq::ask_qualified`
+  folds the answer's supporting `pkg:assurance`/`pkg:confidence` (the same Phase-1 join)
+  **weakest-link** into a verb hedge + verbal band, and below a `min_confidence` floor
+  **abstains** ("insufficient confidence to answer"). The band *reflects asserted
+  assurance* — **not** a calibrated confidence (no reliability measurement exists yet).
+  <!-- [OPUS-4.8] sq-2489d.2 -->
 - **`Llm` trait — record/replay, offline CI** — `ReplayLlm` serves recorded pairs (the
   CI path); `RecordingLlm<L>` wraps any backend and `save()`s a fixture; `AnthropicLlm`
   is a thin blocking Messages-API client behind the non-default `live` feature.

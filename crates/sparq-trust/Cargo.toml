@@ -43,6 +43,21 @@ did = ["dep:serde_json"]
 # present (sparq-zk commitment for the evidence hash, std hashing) — NO new dependency,
 # so the lean default build is byte-identical with it OFF.
 store = []
+# The sparq sec-prop: EXTENSION vocabulary (`secprop` module + `secprop-ext.ttl`):
+# the orthogonal proof-system dimensions + the assurance/audit-status axis the
+# vendored `sec-prop:` ontology lacks (sq-5oru9; design §4.2). Dependency-free — it
+# is `const &str` data + a TTL drift test, strictly additive (no new dep, no new edge
+# onto the lean default build).
+secprop-vocab = []
+# [OPUS-4.8] sq-pfae.6 — the delegation stratum's AUDIT half: render an invocation-bound
+# delegation chain + effective capability as a minimal W3C PROV-O audit graph
+# (`prov:actedOnBehalfOf` lineage + the effective grant as `auth:*` RDF), with the
+# human/AI principal classification §4.2 names as an attested attribute on the delegate.
+# Pure-Rust over `oxrdf` (already a dep) + the `delegation` module — NO new dependency and,
+# deliberately, NO `sparq-prov` edge (that would drag `sparq-engine` onto this crate's dep
+# graph; the audit is a small fixed triple set emitted directly). Strictly additive: the
+# lean default build is byte-identical with it OFF.
+delegation-prov = []
 
 [dependencies]
 sparq-core = { path = "../sparq-core", default-features = false }

@@ -122,10 +122,22 @@
 
 pub mod admit;
 pub mod delegation;
+/// PROV-O delegation audit for human + AI agents (the P5 audit half, `sq-pfae.6`): render
+/// an invocation-bound delegation chain + effective capability as a minimal W3C PROV-O
+/// graph (`prov:actedOnBehalfOf` lineage + the effective grant as `auth:*` RDF), with the
+/// human/AI principal classification the design §4.2 names as an attested attribute on the
+/// delegate. Behind the default-OFF `delegation-prov` feature: nothing in the lean default
+/// build depends on it (no new dependency — pure `oxrdf`, no `sparq-prov` edge).
+#[cfg(feature = "delegation-prov")]
+#[cfg_attr(docsrs, doc(cfg(feature = "delegation-prov")))]
+pub mod delegation_prov;
 #[cfg(feature = "did")]
 #[cfg_attr(docsrs, doc(cfg(feature = "did")))]
 pub mod did;
 pub mod policy;
+#[cfg(feature = "secprop-vocab")]
+#[cfg_attr(docsrs, doc(cfg(feature = "secprop-vocab")))]
+pub mod secprop;
 /// The trust-document storage / authoring model — server-wide vs per-`.acr` documents,
 /// versioning, revocation, and the admission cache key that composes with the
 /// sparq-solid epoch cache (the P4 model, `sq-pfae.5`). Behind the default-OFF `store`
@@ -142,6 +154,11 @@ pub use admit::{
 pub use delegation::{
     effective_against_current, hop_message, invoke, Capability, DelegationChain, DelegationHop,
     EffectiveCapability, Invocation, InvocationDenied,
+};
+#[cfg(feature = "delegation-prov")]
+pub use delegation_prov::{
+    audit_invocation, is_auth_action, AuditConfig, DelegationAudit, PrincipalClassification,
+    PrincipalKind,
 };
 #[cfg(feature = "did")]
 pub use did::{
