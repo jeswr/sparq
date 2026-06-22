@@ -1,0 +1,100 @@
+# literature.shapes.ttl — the literature-tier SHACL guardrails (GenAI-KB Phase 5)
+#
+# [OPUS-4.8] sq-2489d.5 (epic sq-2489d). 🤖 SPARQ agent — provenance-driven GenAI KB.
+# Written while Fable unavailable; flag for re-review when Fable returns.
+#
+# Implements research/provenance-driven-genai-kb.md §4.5 ("New literature-tier shapes
+# worth adding"). These are the EXTRA write-gate shapes for the LOW-TRUST machine-
+# extraction tier — they layer ON TOP of pkg.shapes.ttl (which already mandates a
+# source + confidence + assurance + non-filler justification on every pkg:Finding).
+#
+# The load-bearing honesty discipline (§4.3 "the extraction-quality boundary"):
+#   1. A machine-extracted Finding must NEVER stamp secx:Proven on someone else's paper
+#      claim — it sits on the secx:Conjectured tier (a cheap model hallucinates).
+#   2. It carries a confidence CEILING (machine extraction is not high-confidence).
+#   3. Its typed evidence citation (cito:citesAsEvidence) must RESOLVE to a pkg:Source
+#      actually in the graph — no dangling citation (the deterministic grounding-resolver
+#      enforces this at extraction time; the shape is the durable write-gate backstop).
+#
+# A Finding is "machine-extracted" iff it is prov:wasAttributedTo a pkg:MachineAgent
+# (the extraction agent, e.g. agent:haiku-extractor). Hand-authored Findings are NOT
+# attributed to a pkg:MachineAgent, so these shapes do not constrain them — a hand
+# author may still assert secx:Proven with high confidence.
+
+@prefix sh:      <http://www.w3.org/ns/shacl#> .
+@prefix pkg:     <https://sparq.dev/ns/pkg#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix cito:    <http://purl.org/spar/cito/> .
+@prefix secx:    <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+# =============================================================================
+# MachineFindingShape — the extra constraints on a machine-extracted Finding.
+# Targets the secx:Conjectured / confidence-ceiling / dangling-citation rules of §4.5.
+# =============================================================================
+
+pkg:MachineFindingShape a sh:NodeShape ;
+  # Target every Finding attributed to a machine agent (the extraction tier). The
+  # sh:targetSubjectsOf would catch any prov:wasAttributedTo; we want only the MACHINE
+  # tier, so the target is class-scoped by a sh:sparql below — but the simplest portable
+  # target is the pkg:Finding class plus a guard FILTER on each constraint. SHACL-Core
+  # has no "class AND has-some-property" target, so we target pkg:Finding and make each
+  # constraint a no-op for non-machine Findings via a FILTER EXISTS guard.
+  sh:targetClass pkg:Finding ;
+
+  # RULE 1 — a machine-extracted Finding must NOT carry secx:Proven. A cheap model must
+  # never stamp "proven" on someone else's paper claim (§4.3). Fires when the Finding is
+  # machine-attributed AND asserts secx:Proven.
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "a machine-extracted Finding must not stamp secx:Proven (it sits on the secx:Conjectured tier)" ;
+    sh:select """
+      PREFIX pkg:  <https://sparq.dev/ns/pkg#>
+      PREFIX prov: <http://www.w3.org/ns/prov#>
+      PREFIX secx: <https://w3id.org/zkp-sparql/sec-prop#>
+      SELECT $this WHERE {
+        $this prov:wasAttributedTo ?agent .
+        ?agent a pkg:MachineAgent .
+        $this pkg:assurance secx:Proven .
+      }"""
+  ] ;
+
+  # RULE 2 — confidence ceiling on the machine tier. A machine-extracted Finding must
+  # carry pkg:confidence <= the ceiling (0.7). The 0.7 ceiling is a write-gate guard,
+  # not a calibrated number (calibration is Phase 6 / sq-t5f3l); it encodes "a cheap
+  # extractor is not high-confidence" declaratively.
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "a machine-extracted Finding must carry pkg:confidence <= 0.7 (the low-trust ceiling)" ;
+    sh:select """
+      PREFIX pkg:  <https://sparq.dev/ns/pkg#>
+      PREFIX prov: <http://www.w3.org/ns/prov#>
+      SELECT $this WHERE {
+        $this prov:wasAttributedTo ?agent .
+        ?agent a pkg:MachineAgent .
+        $this pkg:confidence ?c .
+        FILTER(?c > 0.7)
+      }"""
+  ] ;
+
+  # RULE 3 — no dangling evidence citation. Every cito:citesAsEvidence on a machine-
+  # extracted Finding must resolve to a node typed pkg:Source IN THIS GRAPH. This is the
+  # durable backstop for the deterministic grounding-resolver (which fails closed at
+  # extraction time); a Finding that survived extraction but whose source vanished is
+  # caught here.
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "a machine-extracted Finding's cito:citesAsEvidence must resolve to a pkg:Source in the graph (no dangling citation)" ;
+    sh:select """
+      PREFIX pkg:  <https://sparq.dev/ns/pkg#>
+      PREFIX prov: <http://www.w3.org/ns/prov#>
+      PREFIX cito: <http://purl.org/spar/cito/>
+      SELECT $this WHERE {
+        $this prov:wasAttributedTo ?agent .
+        ?agent a pkg:MachineAgent .
+        $this cito:citesAsEvidence ?cited .
+        FILTER NOT EXISTS { ?cited a pkg:Source }
+      }"""
+  ] .

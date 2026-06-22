@@ -84,34 +84,34 @@ the write/merge/latency/CLI estate buys nothing (`part2_four_criterion_replaceme
 
 - **Reuse-first ontology** — generalises the vendored `zkp-sparql`
   `sig-impl:Assertion` reified-claim pattern into `pkg:Finding`; reuses PROV-O, SKOS,
-  DCAT, **DQV** (quality axis — `pkg:confidence`/`pkg:assurance` as named
-  `dqv:QualityMeasurement`/`dqv:Metric`/`dqv:Dimension`; DQV is a W3C **Note**, caveat
-  recorded), FaBiO/FRBR/DC, **CiTO** (`cito:extends`/`cito:usesMethodIn` technique links),
-  schema.org, and nanopublications. Only ~4 bespoke terms are net-new (`pkg:exploredStatus`,
-  `pkg:followUpPriority`, `pkg:confidence`, `pkg:couldBeMergedWith`) plus the
-  `pkg:dependsOn`/`pkg:blockedBy` `owl:inverseOf` pair; DQV/CiTO shrink that surface. Full
-  reuse + alignment record in [`ontology/pkg/PROVENANCE.md`](ontology/pkg/PROVENANCE.md).
+  DCAT, **DQV** (`pkg:confidence`/`pkg:assurance` as named `dqv:QualityMeasurement`/
+  `dqv:Metric`; DQV is a W3C **Note**, caveat recorded), FaBiO/FRBR/DC, **CiTO**, schema.org,
+  and nanopublications. ~4 bespoke terms net-new plus the `pkg:dependsOn`/`pkg:blockedBy`
+  `owl:inverseOf` pair. Full record in [`ontology/pkg/PROVENANCE.md`](ontology/pkg/PROVENANCE.md).
 - **SHACL guardrails** — `pkg.shapes.ttl` makes a source + a confidence value + an
   assurance basis + non-filler content **mandatory** on every `pkg:Finding`, and
   enforces a valid status / bounded priority / no-stale-edge on every `pkg:Task`.
+- **Literature-ingestion scaffolding** (`literature` feature, `sq-2489d.5`) — the
+  `[connector]→[extract (record/replay)]→[ground]→[emit TTL]→[SHACL gate]→[sidecar]`
+  pipeline on **committed fixtures, ZERO network/model calls**; the grounding-resolver
+  **quarantines** (never drops) rejects; machine tier capped at `secx:Conjectured`.
 - **Opt-in by construction** — default build is data + constants only; the
   `validate` feature is the only thing that pulls in `sparq-core` + `sparq-shacl`.
 - **No-drift guard** — `vocab.rs` is byte-pinned against `pkg.ttl` by a sync test.
 - **Write-path authoring** (`sq-mztg8.2`) — author Findings in a compact, IRI-free
   `*.yaml.ld`; a **deterministic** `yamlld_compile.py` expands them to typed PKG Turtle via the **guarded `V()`** (ambiguous concept TOKEN = hard error).
 - **NL-tool envelope** (`query` feature, `sq-ve5dy`) — `query::nl_tool` returns the
-  **executed SPARQL + resolved IRIs + grounding confidence** so the caller can verify the
-  answer (`pkg-query --json`); the `model: haiku` sub-agent pays cheap-model tokens.
+  **executed SPARQL + resolved IRIs + grounding confidence** (`pkg-query --json`) so the
+  caller can verify the answer was not fabricated.
 
 ## 📚 Learn more
 
-- Design record: `research/dogfooding-sparq-knowledge-graph.md` (PR #1063) — ontology
-  (§2), SHACL guardrails (§2.4, §4.4), bd-bridge gate (§4), token-A/B protocol (§5).
+- Design records: `research/dogfooding-sparq-knowledge-graph.md` (PR #1063) +
+  `research/provenance-driven-genai-kb.md` (§4/§5 literature-ingestion, `sq-2489d.5`).
 - `ontology/pkg/PROVENANCE.md` — the per-term reuse + verified `skos:closeMatch`
   alignment record; precedent: `crates/sparq-trust/ontologies/zkp-sparql/`.
 - Epic `sq-2m6zm`: ontology/shapes `.1`; ingestion PoC `.2`; the **query-the-PKG** helper
-  + skill (`pkg-query`, `.claude/skills/query-pkg/SKILL.md`) `.3`; bd-bridge eval `.5`.
-  Write-path: `research/fo-llm-bridge.md` §3.4 / §6 Phase 4 (`sq-mztg8.2`).
+  + skill (`.claude/skills/query-pkg/SKILL.md`) `.3`; bd-bridge `.5`; write-path `sq-mztg8.2`.
 - `pkg-query --extra-graph <path>` loads extra Turtle alongside the PKG; its triples join
   `--close owl-rl` — the FO-KM benchmark seam (`sq-mztg8` Metric 1; `bench/fo-km/`).
 

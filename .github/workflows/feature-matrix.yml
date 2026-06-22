@@ -483,13 +483,15 @@ jobs:
           #       leg exercises the `not(close)` arm; THIS leg compiles + clippies the
           #       `close` arm (the one that actually pulls sparq-reason and materialises
           #       the closure), so neither code path rots.
-          # `close` implies `query` (⊃ `validate`), so it is the crate's MAXIMAL feature
-          # set today and equivalent to `--all-features` for sparq-kb. It adds only the
-          # already-built sparq-reason dep (sparq-reason depends solely on sparq-core, in
-          # the `query` build), so the leg is cheap. Verified locally on this branch:
-          # `cargo test -p sparq-kb --features close` runs all of `query`'s suites PLUS
-          # the previously-skipped close test (query_canned: 9 vs 8 under `query`), and
-          # `clippy --all-targets -D warnings` is clean with the feature ON.
+          # `close` implies `query` (⊃ `validate`). It is NO LONGER the crate's maximal
+          # feature set: sq-2489d.5 added `literature` (independent of `close`/`query`), so
+          # `--all-features` = `close,literature` and the `literature` leg below is a
+          # SEPARATE required leg. `close` adds only the already-built sparq-reason dep
+          # (depends solely on sparq-core, in the `query` build), so the leg is cheap.
+          # Verified locally on this branch: `cargo test -p sparq-kb --features close` runs
+          # all of `query`'s suites PLUS the previously-skipped close test (query_canned:
+          # 9 vs 8 under `query`), and `clippy --all-targets -D warnings` is clean with the
+          # feature ON.
           - name: sparq-kb (validate)
             crate: sparq-kb
             features: validate
@@ -498,9 +500,33 @@ jobs:
             crate: sparq-kb
             features: query
             test: true
-          - name: sparq-kb (close, implies query — maximal feature set)
+          - name: sparq-kb (close, implies query)
             crate: sparq-kb
             features: close
+            test: true
+          # [OPUS-4.8] sq-2489d.5 (GenAI-KB Phase 5): the opt-in literature-ingestion
+          # scaffolding (connector adapter + record/replay extract trait + deterministic
+          # grounding-resolver + the pipeline emitting machine-tier PROV-O Findings). The
+          # `literature` feature is INDEPENDENT of `query`/`close` (it pulls only
+          # serde_json, NOT the engine), so it needs its OWN leg — `close` does not cover
+          # it. The KEY net-new test is `tests/literature_pipeline.rs`, which is
+          # `#![cfg(all(feature = "literature", feature = "validate"))]`: it runs the
+          # pipeline over the committed fixtures (ZERO network/model calls) AND runs the
+          # SHACL gate (pkg.shapes.ttl + literature.shapes.ttl) over the EMITTED TTL —
+          # proving the emitted machine-tier graph conforms AND that the literature shapes
+          # FIRE on a deliberately-injected Proven over-claim. A bare `--features
+          # literature` leg would compile that whole test body EMPTY and run ZERO of it
+          # (the #1171 silent-skip gap this lane exists to close), so this leg passes BOTH
+          # features. Verified locally on this branch: `cargo nextest list -p sparq-kb
+          # --features literature,validate` shows the 5 literature_pipeline tests + the 11
+          # literature-module unit tests (16 of the 25 lib tests are literature::*), and
+          # `cargo test -p sparq-kb --features literature,validate` runs all 5 integration
+          # tests; `clippy --all-targets --features literature,validate -- -D warnings` is
+          # clean. (The shared steps interpolate `--features ${{ matrix.features }}`, so
+          # the comma-joined set runs as one cargo invocation.)
+          - name: sparq-kb (literature + validate — fixtures pipeline + SHACL gate)
+            crate: sparq-kb
+            features: literature,validate
             test: true
           # [OPUS-4.8] sq-leg8n: the sparq-terse opt-in LLM-ergonomic SPARQL surface
           # (epic sq-2m6zm, design research/llm-ergonomic-sparql-surface.md). Only the
