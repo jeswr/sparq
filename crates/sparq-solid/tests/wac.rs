@@ -1,6 +1,7 @@
 //! WAC correctness: hand-computed expected access for the fixture pod
 //! (crates/sparq-solid/src/fixture.rs — see the subtree semantics table there).
 
+use oxrdf::NamedNode;
 use sparq_core::Graph;
 use sparq_solid::{wac_fixture, Mode, PodStore, Session};
 
@@ -122,4 +123,45 @@ fn wac_write_enforcement_matches_grants() {
     assert!(can(&mut s, Some(ALICE), None, Mode::Write, acl)); // via Control->write
     assert!(!can(&mut s, Some(BOB), None, Mode::Write, acl));
     assert!(s.update_as(&Session { agent: Some(BOB), client: None, issuer: None, now: None }, &ins(acl)).is_err());
+}
+
+/// [OPUS-4.8] sq-i7k08 — the public `WAC-Allow` header builder ([`PodStore::wac_allow`])
+/// advertises exactly the modes each principal holds on the resource's graph, and is
+/// fail-closed. Exercises the REAL `accessible()` path (not a mock) and pins the
+/// `user="…",public="…"` format against the hand-computed fixture access matrix above.
+#[test]
+fn wac_allow_header_advertises_held_modes() {
+    let mut s = store();
+    let sess = |agent: Option<&'static str>| Session { agent, client: None, issuer: None, now: None };
+    let res = |g: &str| NamedNode::new(g).expect("valid IRI");
+
+    // 1. Private resource: ALICE owns Read+Write+Control via the root acl:default (matrix
+    //    #1); public holds nothing — so the public field is empty, never widened.
+    let priv0 = res("https://pod.ex/priv0/c4/g0/d0.ttl");
+    assert_eq!(s.wac_allow(&sess(Some(ALICE)), &priv0), r#"user="read write control",public="""#);
+    // 2. …and a non-owner (BOB) holds nothing on it — fully fail-closed (matrix #2).
+    assert_eq!(s.wac_allow(&sess(Some(BOB)), &priv0), r#"user="",public="""#);
+    assert_eq!(s.wac_allow(&Session::default(), &priv0), r#"user="",public="""#);
+
+    // 3. Public subtree (matrix #3): everyone — incl. an anonymous request — learns the
+    //    public Read grant; the owner additionally sees their own Write/Control.
+    let pub1 = res("https://pod.ex/pub1/c0/g0/d0.ttl");
+    assert_eq!(s.wac_allow(&sess(Some(ALICE)), &pub1), r#"user="read write control",public="read""#);
+    assert_eq!(s.wac_allow(&sess(Some(BOB)), &pub1), r#"user="read",public="read""#);
+    assert_eq!(s.wac_allow(&Session::default(), &pub1), r#"user="read",public="read""#);
+
+    // 4. Group resource with NEAREST-ACL shadowing (matrix #4/#5): the team group
+    //    (BOB, CAROL) holds Read+Write; ALICE is shadowed out → empty; public empty.
+    let team2 = res("https://pod.ex/team2/c3/g0/d0.ttl");
+    assert_eq!(s.wac_allow(&sess(Some(BOB)), &team2), r#"user="read write",public="""#);
+    assert_eq!(s.wac_allow(&sess(Some(CAROL)), &team2), r#"user="read write",public="""#);
+    assert_eq!(s.wac_allow(&sess(Some(ALICE)), &team2), r#"user="",public="""#);
+
+    // 5. A resource OUTSIDE every grant set → both fields empty (fail-closed).
+    let unknown = res("https://pod.ex/no/such/doc.ttl");
+    assert_eq!(s.wac_allow(&sess(Some(ALICE)), &unknown), r#"user="",public="""#);
+
+    // 6. Fail-closed before materialization: an un-materialized store grants nothing.
+    let mut bare = PodStore::new(Graph::load_dataset(&wac_fixture(), "nquads").expect("fixture loads"));
+    assert_eq!(bare.wac_allow(&sess(Some(ALICE)), &pub1), r#"user="",public="""#);
 }
