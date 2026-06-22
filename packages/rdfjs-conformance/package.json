@@ -19,7 +19,7 @@
   "sideEffects": false,
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/"
+    "test": "node --test"
   },
   "keywords": [
     "rdf",
