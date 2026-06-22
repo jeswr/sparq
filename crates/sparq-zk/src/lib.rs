@@ -31,6 +31,10 @@
 //! - [`verify`] — the verifier-side static re-check (plan §2.4 layer 3):
 //!   independent re-derivation of fragment patterns and cross-graph join
 //!   obligations from the query text.
+//! - `vc_bridge` — the OFF-circuit W3C VC ingest bridge (OPT-IN, behind the
+//!   `vc-bridge` feature): verify a source VC's Data-Integrity proof
+//!   (`eddsa-rdfc-2022` / `ecdsa-rdfc-2019`) at the host, then re-commit + record
+//!   the `zk:sourceCryptosuite` provenance (sq-9c5e, design §5).
 //!
 //! NOTHING in the sparq workspace depends on this crate; default builds and
 //! the wasm artifact are byte-identical with or without it.
@@ -71,6 +75,16 @@ pub mod registry;
 pub mod secprop;
 pub mod sig;
 pub mod trace;
+// [OPUS-4.8] sq-9c5e: OFF-circuit W3C Verifiable-Credential ingest bridge —
+// verify a source VC's Data-Integrity proof (`eddsa-rdfc-2022` / `ecdsa-rdfc-2019`)
+// at the HOST, then re-commit + record `zk:sourceCryptosuite` provenance. OPT-IN
+// behind the `vc-bridge` cargo feature (OFF by default): the default build pulls
+// no Ed25519/ECDSA/SHA-256 dependency and this module is compiled out. The
+// `zk:sourceCryptosuite` registry slot itself is always present. Provenance-only;
+// the query proof does NOT re-verify the VC proof in-circuit (design §5.3). NOT
+// externally audited (sq-qhy4).
+#[cfg(feature = "vc-bridge")]
+pub mod vc_bridge;
 pub mod verify;
 
 pub use field::Fr;
