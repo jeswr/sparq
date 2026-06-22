@@ -181,6 +181,56 @@ Materialize the authorization view from the access-control documents, then enfor
 The materialized view is itself just triples — *"who can read G?"* is one SPARQL
 pattern: `GRAPH <urn:sparq:auth> { ?who <https://sparq.dev/ns/auth#read> ?doc }`.
 
+## Request-pipeline integration for a Solid server (incl. WAC-Allow headers) — issue #1126
+
+`examples/quickstart.rs` shows the load → `materialize_wac` → `query_as`/`accessible`
+loop. A Solid **request handler** wraps that with three steps: (1) build a `Session`
+from the authenticated request, (2) gate the request with `accessible(...)` /
+`query_as(...)`, (3) emit a [`WAC-Allow`](https://solidproject.org/TR/wac#wac-allow)
+response header advertising the modes the agent (and the public) hold on the target
+resource. There is **no public `WAC-Allow` helper in the crate yet** (tracked as a
+follow-up); it is a few lines over the existing `accessible` API, shown here so a
+server can drop it in. The header lists the modes available to `user` (the
+authenticated agent) and to `public` (an anonymous `Session::default()`):
+
+```rust
+use sparq_solid::{Mode, PodStore, Session};
+use oxrdf::NamedNode;
+
+// One `Session` per request; `client`/`issuer` come from the auth layer (None = any).
+fn session_from_request<'a>(webid: Option<&'a str>, origin: Option<&'a str>) -> Session<'a> {
+    Session { agent: webid, client: origin, issuer: None, now: None }
+}
+
+// Does this session have `mode` on the graph backing `resource`? (fail-closed)
+fn may(store: &mut PodStore, s: &Session, mode: Mode, resource: &NamedNode) -> bool {
+    store.accessible(s, mode).iter().any(|g| g == resource)
+}
+
+// RFC-style WAC-Allow: `user="read write",public="read"` — only the modes actually held.
+fn wac_allow(store: &mut PodStore, s: &Session, resource: &NamedNode) -> String {
+    let modes = [(Mode::Read, "read"), (Mode::Write, "write"),
+                 (Mode::Append, "append"), (Mode::Control, "control")];
+    let held = |sess: &Session| -> String {
+        modes.iter()
+            .filter(|(m, _)| may(store, sess, *m, resource))
+            .map(|(_, name)| *name).collect::<Vec<_>>().join(" ")
+    };
+    let anon = Session::default();
+    format!(r#"user="{}",public="{}""#, held(s), held(&anon))
+}
+```
+
+Per request: `session_from_request(...)` → `may(&mut store, &s, Mode::Read, &resource)`
+to allow/deny (a deny is `403`/`404` per your fail-closed policy) → set the response's
+`WAC-Allow` header to `wac_allow(&mut store, &s, &resource)`. `accessible` is an O(1)
+hash check over the materialized index (it caches per session), so the four-mode sweep
+is cheap. **Scope caveat:** sparq-solid is a *library-level* authoriser — there is no
+HTTP surface here (no `Link`/`acl:` resource discovery, no `.well-known`), so mapping a
+**request path to its named graph** (`resource`) and authenticating the WebID are the
+server's job (see `research/sparq-solid-scope.md` §4). The header builder above is
+illustrative, not a conformance-tested helper.
+
 ## Capability notes (WAC + ACP)
 
 - **WAC** (`.acl`) — `acl:agent` (WebID), `acl:agentClass foaf:Agent` (public) /

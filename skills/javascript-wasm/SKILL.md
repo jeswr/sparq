@@ -200,6 +200,27 @@ const violations = report.results.filter(
 
 The raw `Store.validate(data, shapes, format)` returns the same report as a JSON **string** (`JSON.parse` it yourself). `focusNode`/`value`/`sourceShape` are N-Triples term strings; `path` is a SHACL Turtle path expression; `severity`/`sourceConstraintComponent` are full IRIs; `message` is the first `sh:message` text (or a generated default). `path`/`value`/`message` are `null` when absent. Only a graph parse failure throws; malformed shapes are skipped, not surfaced. For large data graphs validate server-side via the `sparq-server` HTTP `validate` endpoint instead (the other half of the #162 decision). See the `shacl-validation` skill for the engine's SHACL coverage.
 
+**Raw wasm `Store`: init (`initSync` vs async default), errors, and `.free()` (#1127).** The wasm-pack `--target web` glue (`../wasm/sparq_wasm.js`) is a real ESM module that exports a **default async `init`** plus a synchronous **`initSync`** — one of the two MUST run before any `Store.*` static (`SparqStore`/`Dataset` do this for you via the package's memoised `init()`; you only call these when using the raw `Store` directly).
+
+```js
+import init, { initSync, Store } from '@jeswr/sparq/wasm/sparq_wasm.js';
+
+// (a) async default — the normal path. In the browser/Deno it fetches the .wasm
+// relative to the module; pass explicit bytes/URL to override.
+await init();                                   // or: await init({ module_or_path: bytes })
+// (b) initSync — when you ALREADY hold the compiled module/bytes (no top-level await,
+// e.g. a bundler that inlines the wasm, or a Cloudflare-Worker WebAssembly.Module import).
+initSync({ module_or_path: wasmModuleOrBytes });
+
+const store = Store.load('<a> <b> <c> .', 'ntriples');
+```
+
+- **When to use which.** Prefer the high-level `@jeswr/sparq` entry (`SparqStore`/`Dataset`), whose `init()` picks the right path per environment (Node reads the bytes off disk; browser/Deno `fetch`es) and memoises it — so the ~MB `.wasm` is paid at most once. Drop to `init`/`initSync` only when you import the raw `Store` glue directly: async `init()` for the common fetch-relative case, `initSync(...)` only when you have the module/bytes in hand and want no `await`.
+- **`init()`/`initSync()` not called first → `Store.*` throws** a wasm-bindgen "must call init" error. Calling `init()` again is idempotent.
+- **Format strings** for `Store.load`/`loadDataset`/`loadCompressed` are the same case-sensitive set the engine accepts: `turtle` (`ttl`/`text/turtle`), `ntriples` (`n-triples`/`nt`), `nquads` (`n-quads`/`nq`), `trig`, and `jsonld` (`json-ld`/`application/ld+json`, opt-in `jsonld` bundle). An **unrecognised format is an `Err`/throw** — it is NOT silently parsed as Turtle (so a `'jsonld'` load on the lean bundle throws rather than mis-parsing).
+- **Errors are JS exceptions.** Every fallible `Store` method (`load*`, `query`, `ask`, `update`, `applyDelta`, `validate`, …) maps a Rust `Err(String)` to a thrown `Error` (wasm-bindgen `JsError`) carrying the engine message (parse error with position, malformed SPARQL, an unrecognised format, a query form routed to the wrong method — e.g. CONSTRUCT through `query`). Wrap calls in `try/catch`; there are no silent failures.
+- **`.free()` — when and on what.** wasm linear memory is NOT GC'd: call `.free()` on every `Store` you create, AND on each cursor object (`QueryChunks` / the `queryCursor` / `queryQuadsChunks` handles) once drained or abandoned. After `.free()` the handle (and any cursor it spawned) must not be touched. In the high-level wrapper use `store.free()` or `using store = await SparqStore.from…()` (`Symbol.dispose`); for the raw `Store`, `break`ing out of a streaming `for…of` over a cursor still requires freeing that cursor. Leaking handles grows the 4 GB wasm heap until the tab/process OOMs.
+
 ## Gotchas / feature flags / prerequisites
 
 - **ESM only, Node >= 18.** The package is `"type": "module"`; `init()` is idempotent and runs automatically on the first `SparqStore.from*` call (in Node it reads the wasm bytes from disk; in the browser/Deno it `fetch`es relative to the module). One runtime dep: `fzstd` (~8 KB, dynamically imported only when decoding zstd).
