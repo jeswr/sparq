@@ -8,6 +8,12 @@ mod authindex;
 // gate): it depends only on the always-present ACP path. The corpus lives in
 // tests/conformance_acp.rs.
 pub mod conformance;
+// [OPUS-4.8] issue #992 Phase-1 (sq-snopa.1/.2/.3): the per-resource WAC DECISION layer —
+// `PodStore::decide`/`decide_batch`/`resolve_acl`, the typed fail-closed `AclStatus`, and
+// the `accessTo`-vs-`default` `AclScope`. Always compiled (no feature gate): it adds no
+// dependency, reusing only `AuthIndex::accessible` + the loader's container-chain walk —
+// so it mirrors `wac_allow`'s always-present public-API placement (#1154).
+mod decide;
 pub mod fixture;
 mod loader;
 mod materialize;
@@ -35,6 +41,8 @@ pub mod wac_conformance;
 pub use authindex::{pair_principal, triple_principal, AuthIndex, Mode, Session};
 // [OPUS-4.8] sq-3jtd.9: the ACP conformance harness entry types.
 pub use conformance::{AcpScenario, AcrBuilder, Decision, Expect, ScenarioReport};
+// [OPUS-4.8] issue #992 Phase-1 (sq-snopa.1/.2/.3): the per-resource WAC decision types.
+pub use decide::{AclScope, AclStatus, EffectiveAcl, WacDecision};
 // [OPUS-4.8] sq-3jtd.8: the WAC conformance harness entry types (the decision/expectation
 // /report vocabulary is the shared `conformance::{Decision, Expect, ScenarioReport}`).
 pub use wac_conformance::{AclBuilder, AuthBuilder, WacScenario};
@@ -435,6 +443,109 @@ impl PodStore {
             }
         }
         held.join(" ")
+    }
+
+    /// [OPUS-4.8] issue #992 FR-1 (sq-snopa.1) — the per-REQUEST access-control decision:
+    /// **may `principal` do `mode` on `resource`?** Returns a typed [`WacDecision`]
+    /// (`allow`, `granted_modes`, `governing_acl`, `scope`, fail-closed `status`).
+    ///
+    /// This is the point-query an LDP resource server asks per request, NOT graph
+    /// filtering. Where [`PodStore::query_as`] / [`PodStore::accessible`] return the *set*
+    /// of authorized graphs, `decide` answers the single `(principal, resource, mode)`
+    /// question and pairs the verdict with the governing-ACL provenance the server needs
+    /// for its `Link: rel="acl"` / `WAC-Allow` surfaces.
+    ///
+    /// It reuses the SAME machinery — the verdict is the fail-closed
+    /// [`AuthIndex::accessible`] oracle (the `∪ allow ∖ ∪ deny` per-mode set), the ACL
+    /// discovery is the loader's container-chain walk ([`PodStore::resolve_acl`]) — so a
+    /// `decide` allow can never be wider than `query_as` would grant.
+    ///
+    /// # Fail-closed (FR-6, sq-snopa.2 — never fail OPEN)
+    ///
+    /// Every uncertainty path denies. The typed [`WacDecision::status`] lets a server map
+    /// the deny to the right HTTP code — **401/403** for a definitive deny
+    /// ([`AclStatus::Resolved`] without the mode, or [`AclStatus::NoAcl`]); a **retryable
+    /// 503** for an operational one ([`AclStatus::Unloaded`] — the view was never
+    /// materialized; [`AclStatus::Transient`] — e.g. a malformed resource IRI) — but the
+    /// `allow == false` is already correct regardless of the status. See [`AclStatus`].
+    ///
+    /// `resource` is the named-graph IRI backing the LDP resource (mapping the request
+    /// PATH to it is the server's job — `sparq-solid` is a library-level authoriser with
+    /// no HTTP surface; see `research/sparq-solid-scope.md` §4).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sparq_solid::{AclScope, AclStatus, Mode, PodStore, Session};
+    ///
+    /// let nquads = r#"
+    /// <https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hi" <https://pod.ex/notes/n1> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .
+    /// "#;
+    /// let mut store = PodStore::new(sparq_core::Graph::load_dataset(nquads, "nquads")?);
+    /// store.materialize_wac()?;
+    ///
+    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
+    /// let d = store.decide(&alice, "https://pod.ex/notes/n1", Mode::Read);
+    /// assert!(d.allow && d.status == AclStatus::Resolved);
+    /// assert_eq!(d.scope, Some(AclScope::Default)); // inherited from the root .acl
+    /// // anonymous has no grant → an authoritative deny (403), not a transient one.
+    /// let anon = store.decide(&Session::default(), "https://pod.ex/notes/n1", Mode::Read);
+    /// assert!(!anon.allow && anon.status == AclStatus::Resolved);
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn decide(&self, session: &Session, resource: &str, mode: Mode) -> WacDecision {
+        let index = decide::AclIndex::build(&self.graph);
+        decide::decide_one(&index, &self.auth, session, resource, mode)
+    }
+
+    /// [OPUS-4.8] issue #992 FR-1 (sq-snopa.1) — [`PodStore::decide`] for a BATCH of
+    /// `(resource, mode)` requests as one `principal`, building the structural ACL index
+    /// ONCE and reusing it for every request (the LDP server's "decide a page of
+    /// resources" call). Each element's [`WacDecision`] is independent and fail-closed
+    /// exactly as [`PodStore::decide`]; the result vector is parallel to the input.
+    pub fn decide_batch(&self, session: &Session, requests: &[(&str, Mode)]) -> Vec<WacDecision> {
+        let index = decide::AclIndex::build(&self.graph);
+        requests
+            .iter()
+            .map(|(resource, mode)| decide::decide_one(&index, &self.auth, session, resource, *mode))
+            .collect()
+    }
+
+    /// [OPUS-4.8] issue #992 FR-7 (sq-snopa.3) — resolve the EFFECTIVE governing ACL for a
+    /// resource in ONE indexed call: the up-the-container-chain `.acl`/`.acr` discovery +
+    /// `acl:default` inheritance, returning the governing ACL IRI + `accessTo`-vs-`default`
+    /// scope ([`EffectiveAcl`]) — instead of N HTTP round-trips up the chain.
+    ///
+    /// The resource's OWN ACL (`<resource>.acl`/`.acr`) wins with [`AclScope::AccessTo`];
+    /// otherwise the NEAREST ancestor container that has an ACL governs by
+    /// [`AclScope::Default`] (Solid container-`default` inheritance). `None` when no ACL
+    /// exists anywhere up to the pod root (an un-protected resource — the caller should
+    /// fail closed). The walk is exactly the loader's slash-semantics `parent_iri` chain,
+    /// so this per-resource discovery and the materialize-time inheritance can never
+    /// disagree. Feeds [`PodStore::decide`]'s `governing_acl`/`scope` (and FR-5 later).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sparq_solid::{AclScope, PodStore};
+    ///
+    /// let nquads = r#"
+    /// <https://pod.ex/notes/n1#it> <https://ex.dev/ns#k> "v" <https://pod.ex/notes/n1> .
+    /// <https://pod.ex/.acl#a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/.acl> .
+    /// "#;
+    /// let store = PodStore::new(sparq_core::Graph::load_dataset(nquads, "nquads")?);
+    /// let eff = store.resolve_acl("https://pod.ex/notes/n1").expect("inherited acl");
+    /// assert_eq!(eff.acl.as_str(), "https://pod.ex/.acl");
+    /// assert_eq!(eff.scope, AclScope::Default);
+    /// assert!(store.resolve_acl("https://other.ex/x").is_none()); // no ACL anywhere
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn resolve_acl(&self, resource: &str) -> Option<EffectiveAcl> {
+        decide::AclIndex::build(&self.graph).resolve_acl(resource)
     }
 
     fn session_sets(&mut self, s: &Session, mode: Mode) -> &SessionSets {

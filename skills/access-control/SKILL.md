@@ -124,6 +124,37 @@ Materialize the authorization view from the access-control documents, then enfor
   (`user="…",public="…"`) advertising the modes the session (and the public) hold on a
   resource ([OPUS-4.8] sq-i7k08); fail-closed, only the modes actually held. See the
   request-pipeline section below.
+- `store.decide(&Session, resource: &str, Mode) -> WacDecision` /
+  `decide_batch(&Session, &[(&str, Mode)]) -> Vec<WacDecision>` — **per-REQUEST WAC
+  decision** ([OPUS-4.8] issue #992 FR-1, sq-snopa.1): the point-query *"may principal X do
+  mode M on resource R?"* an LDP resource server asks (NOT graph filtering). Returns
+  `WacDecision { allow, granted_modes: Vec<Mode>, governing_acl: Option<NamedNode>, scope:
+  Option<AclScope>, status: AclStatus }`. The verdict reuses the SAME fail-closed
+  `AuthIndex::accessible` oracle, so a `decide` allow is never wider than `query_as` would
+  grant; `granted_modes` carries the full mode set in one decision (build a `WAC-Allow`
+  body without four sweeps). `decide_batch` builds the structural ACL index ONCE for a page
+  of resources. Always-present API (no cargo gate; mirrors `wac_allow`).
+- `AclStatus` — the **typed fail-closed load/error contract** (FR-6, sq-snopa.2): a server
+  maps `Resolved` (authoritative — `allow` is the real verdict; a deny is **403**), `NoAcl`
+  (no governing ACL anywhere up the chain — definitive **403/401**), `Unloaded` (a governing
+  ACL exists but `materialize_*` was never run — a **retryable 503**), and `Transient`
+  (a typed transient error, e.g. a malformed resource IRI — a **retryable 503**).
+  `AclStatus::is_retryable()` separates the 503s from the definitive denies. **It never
+  fails OPEN:** `allow == false` for every non-`Resolved` status, independent of whether the
+  caller inspects `status` — absent ⇒ deny, present-but-unloaded ⇒ deny, transient ⇒ deny.
+- `store.resolve_acl(resource: &str) -> Option<EffectiveAcl>` — **ACL-discovery walk in ONE
+  indexed call** (FR-7, sq-snopa.3): the up-the-container-chain `.acl`/`.acr` discovery +
+  `acl:default` inheritance, returning `EffectiveAcl { acl: NamedNode, scope: AclScope }` —
+  `AccessTo` when the resource has its OWN ACL, `Default` when it inherits from the nearest
+  ancestor container — instead of N round-trips. The walk is exactly the loader's
+  slash-semantics `parent_iri` chain, so per-resource discovery and the materialize-time
+  inheritance can never disagree; `None` ⇒ un-protected ⇒ fail closed. Feeds `decide`'s
+  `governing_acl`/`scope` (and FR-5 provenance later). **Honest scope:** Phase-1 implements
+  the WAC `accessTo` + container-`default` subset of [issue #992](https://github.com/jeswr/sparq/issues/992)
+  (FR-1/6/7) — the per-resource decision + fail-closed contract + ACL walk; it is NOT the
+  full WAC HTTP surface (FR-4's `POST /authz/*` on `sparq-server` is the separate sq-snopa.6
+  architecture call), and the `decide` `scope` is the ACL-*document* discovery scope, while
+  whether a grant within that ACL applies is the verdict the oracle computes.
 - `store.materialize_odrl_permission(&Policy, &Request) -> BridgeOutcome` — **opt-in**
   (`odrl-bridge` feature, OFF by default; [OPUS-4.8] sq-h3uk): run the `sparq-policy` ODRL
   evaluator and, on a *definite Permit*, materialize the equivalent `principal auth:<mode>
