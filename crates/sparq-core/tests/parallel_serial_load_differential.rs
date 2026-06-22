@@ -211,6 +211,11 @@ fn synthetic_nt() -> (String, Vec<[Term; 3]>) {
     // Every remaining record shape, plus an exact-duplicate line and a shared-term crosser.
     nt.push_str("<http://ex/s0> <http://ex/label> \"caf\\u00e9 \\\"q\\\"\"@fr .\n");
     reference.push([iri("http://ex/s0"), iri("http://ex/label"), lang("café \"q\"", "fr")]);
+    // [OPUS-4.8] (sq-langcase / #1119) A MIXED-CASE language tag: the byte parser must lowercase
+    // it (`en-US` -> `en-us`) to agree with the oxttl streaming/serial paths AND this reference
+    // (whose tag is the canonical lowercase form). Pins the casing-normalisation parity here too.
+    nt.push_str("<http://ex/s0> <http://ex/label> \"hello\"@en-US .\n");
+    reference.push([iri("http://ex/s0"), iri("http://ex/label"), lang("hello", "en-us")]);
     nt.push_str("<http://ex/s1> <http://ex/note> \"a plain string\" .\n");
     reference.push([iri("http://ex/s1"), iri("http://ex/note"), lit("a plain string")]);
     nt.push_str("_:b0 <http://ex/about> <http://ex/s2> .\n");

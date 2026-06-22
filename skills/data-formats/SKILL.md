@@ -422,6 +422,14 @@ cargo build -p sparq-cli --features serialize-rdf
   is a heap-stack pushdown automaton and cannot recurse the native stack. The SPARQL parser has
   the matching `MAX_RECURSION_DEPTH = 128` cap (groups/expressions/paths/collections/triple
   terms). 128 is far deeper than any real data/query nests.
+- **Language tags are normalised to lowercase on ingest.** A `@lang` tag is stored ASCII-lowercased
+  across **every** format and path — Turtle/TriG/N-Quads via `oxttl`, and the byte-level
+  N-Triples/N-Quads fast parser (`sparq-core::nt`). RDF 1.1/1.2 language tags are case-insensitive,
+  so `"x"@en-US` and `"x"@en-us` are the **same** RDF term and intern to one dict id (matching
+  `oxrdf::Literal::new_language_tagged_literal`). This makes ingest format-INDEPENDENT: the same
+  triple written as N-Triples or as Turtle yields the identical stored term (it did **not** before —
+  the byte path used to preserve the written case while every `oxttl` path lowercased it; KamiQuasi
+  #1119 / sq-langcase). The RDF 1.2 `--ltr`/`--rtl` direction is unaffected (already lowercase).
 - **`build_external` / `open` / `save` require the `mmap` feature** (native only). The
   N-Triples external path also honors `SPARQ_SHARDED_DICT` (default on with ≥2 threads)
   and, with the `dict-spill` feature + `SPARQ_DICT_SPILL` env, bounds peak build RSS by
