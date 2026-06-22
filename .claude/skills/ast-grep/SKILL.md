@@ -22,19 +22,33 @@ view: tree-sitter structural matching with `file:line` hits, zero runtime deps.
 > (see the bottom of this file), not by this skill. Use the recipes; do **not**
 > cite an unmeasured saving.
 >
-> **Honest scope (a firm real-token A/B has now settled this — §5).** ast-grep +
-> outline are **precision / completeness tools, measured NOT to save tokens** — the
-> firm A/B (`bench/pkg-dogfood/RESULTS-astgrep.md`) found going outline/ast-grep-FIRST
-> on a code-structure question is **slightly MORE expensive end-to-end** than a scoped
-> `Read`. ast-grep's edge over a *competent* `grep -rn` is **precision and
-> completeness**: it skips the same token inside comments/strings and matches *shapes*
-> a line-regex cannot (`$X.map($$$).collect()`, a call with a specific arg), and in the
-> A/B that bought a small **quality** nudge on call-site completeness — **not** a raw
-> byte/token cut. The **one** lever that survives the firm A/B is outlining **only**
-> the skeleton of a *very large single file* to avoid reading it whole (§2.1, §4) — a
-> genuine per-file reduction. Reach for ast-grep when grep's false positives or its
-> inability to express a structure actually bite, or when you must NOT miss an
-> impl/call-site; do **not** reach for it to cut tokens.
+> **Honest scope — the verdict splits by the SHAPE of the task (two firm real-token
+> A/Bs settle it; §5).** Whether a structural view saves tokens depends on the
+> question class:
+> - **Scoped code-structure LOOKUP** ("where / how is X", "every impl of T"): ast-grep
+>   + outline are **precision / completeness tools, measured NOT to save tokens** — the
+>   firm A/B (`bench/pkg-dogfood/RESULTS-astgrep.md`) found going outline/ast-grep-FIRST
+>   on a lookup is **slightly MORE expensive end-to-end** than a scoped `Read`. Their
+>   edge over a *competent* `grep -rn` is **precision and completeness**: they skip the
+>   same token inside comments/strings and match *shapes* a line-regex cannot
+>   (`$X.map($$$).collect()`, a call with a specific arg), and in that A/B that bought a
+>   small **quality** nudge on call-site completeness — **not** a raw token cut. For a
+>   lookup, reach for ast-grep when grep's false positives or its inability to express a
+>   structure actually bite, or when you must NOT miss an impl/call-site; do **not**
+>   reach for it to cut tokens.
+> - **Whole-file-SHAPE understanding, or a structural edit / codemod over a LARGE
+>   file:** generating a **compacted-AST skeleton FIRST** and working over it **IS a
+>   measured token-saver** — a second firm A/B (`bench/ast-compact/RESULTS.md`) found
+>   the compacted-AST-first arm cheaper at equal quality on the large majority of such
+>   tasks, with the win **growing with file size / structural breadth**. See the recipe
+>   in §2.6 and the decision rule below.
+>
+> **Decision rule:** *scoped lookup answerable by a narrow read → just `Read`* (don't
+> pay the structural-view setup tax; both A/Bs show it slightly hurts on a small,
+> already-narrow task); *whole-file shape, or a cross-file structural edit/codemod over
+> a large file → build the compacted-AST skeleton (§2.6) first.* The narrow
+> "outline only a very large single file's skeleton to locate a span" lever (§2.1, §4)
+> is the lookup-side floor of this same rule.
 
 ## 0. Install + verify FIRST (and the `sg` collision — non-negotiable)
 
@@ -85,6 +99,7 @@ query-type → tool map (`research/agent-effectiveness-program.md` §2.2):
 | an exact string / error text / a log line / a TODO marker | **Grep** | zero false-negatives, no setup, fails *loudly*; ast-grep would over-think it |
 | every **impl of a trait** / every **call site** of a fn / a **code shape** / a codemod | **ast-grep** | matches the parse tree, so it skips the same token inside comments/strings and is robust to whitespace/wrapping that defeats line-regex |
 | a file's **skeleton** (its fns/types/signatures) before deciding what to read | **outline** (editor outline / ast-grep signature recipe §2.1) | answer-sized view of a 1000-line file without its bytes |
+| the **whole shape** of a large file, or a **structural edit / codemod** spanning it (summarise it, add an enum variant + audit every match site, change a trait sig across a crate) | **compacted-AST skeleton FIRST** (§2.6 `compact_ast.sh`), then `Read` only unresolved spans | measured token-saver on this class (`bench/ast-compact/RESULTS.md`): you reason over a one-line-per-item skeleton, not the file's bulk |
 | **who calls / where defined / type-of / rename-safely** (resolved symbol graph) | **LSP** (`find_usages`, go-to-def, rename) | resolved edges — zero false positives, follows re-exports & generics that ast-grep's *syntactic* match cannot resolve |
 | the actual **logic / control flow / a specific section** you've already located | **Read** (offset+limit on the located lines) | once outline/ast-grep/LSP gave you `file:line`, read only that span |
 
@@ -100,11 +115,19 @@ Decision flow for "understand this code":
    path-qualification gotcha in §2.3).
 4. **Exact literal**? → Grep. Don't reach for a parser to find `"unsupported
    datatype"`.
+5. **Whole-file shape, or a structural edit / codemod over a *large* file**
+   (summarise its structure, add a variant + audit every match arm, change a
+   trait method signature across a crate)? → build a **compacted-AST skeleton**
+   (§2.6) and work over *that*, reading raw bytes only for spans the skeleton
+   can't resolve. Measured a token-saver on this class (§5, second A/B) —
+   distinct from the scoped lookup in step 1, where you should just `Read`.
 
 The honest boundary: if a file is **short** (≲200 lines) and you need most of it,
-just `Read` it — the outline round-trip is pure overhead. ast-grep wins on
-*large* files and *workspace-wide "all the X"* questions, exactly where a full
-read is most wasteful.
+just `Read` it — the outline / compacted-view round-trip is pure overhead. The
+structural views win on *large* files — for a scoped **lookup** their edge is
+precision/completeness (not cost; §5 first A/B), but for **whole-file-shape or a
+structural edit/codemod** over a large file the compacted-AST skeleton is also a
+**token** win (§5 second A/B), exactly where a full read is most wasteful.
 
 ## 2. Recipes (every one verified on THIS repo)
 
@@ -225,6 +248,46 @@ Only add `--update-all` once the preview is exactly right. A structural rewrite
 is safer than `sed` because it edits parse nodes, not lines — but still review
 the diff and re-run the build/clippy gate (`AGENTS.md`) afterwards.
 
+### 2.6 Compacted-AST skeleton FIRST — for whole-file-shape / structural-edit / codemod over a LARGE file
+
+When the unit of work is the **whole shape** of a large file — summarise its
+structure, add an enum variant and audit every match arm that must handle it,
+rename a method and find every call site, change a trait method signature across
+its impl + all callers — generate a **compacted-AST skeleton** and *work over
+that* instead of reading the file's bytes. This is a **measured token-saver** on
+this task class (`bench/ast-compact/RESULTS.md`); it is **not** for a scoped
+lookup (§1 step 1 — just `Read` that), and it slightly hurts on a small,
+already-narrow task. The win **grows with file size and structural breadth**.
+
+The repo ships the generator as
+[`bench/ast-compact/compact_ast.sh`](../../../bench/ast-compact/compact_ast.sh):
+it emits every load-bearing item (`struct` / `enum` / `trait` / `impl` / `fn` /
+`pub fn` / `macro_rules!`) as one `LINE: <signature>` line, sorted and deduped —
+a one-line-per-item structural dump of the file's shape, no bodies.
+
+```bash
+# Generate the compacted skeleton of a large file and work over IT first:
+bash bench/ast-compact/compact_ast.sh crates/sparq-engine/src/exec.rs   # -> "<line>  <signature>" per item
+```
+
+Workflow:
+
+1. **Generate the skeleton** for each large file in scope. A multi-thousand-line
+   file collapses to a few-dozen-to-few-hundred-line item list — the shape, not
+   the bulk.
+2. **Reason / plan the edit over the skeleton.** For "add a variant + handle it
+   everywhere" or "change a trait sig across the crate", pair the skeleton with a
+   structural `ast-grep` query (a `match $$$` audit, a `$RECV.method($$$)`
+   call-site enumeration — §2.2–§2.4) so you find **every** site without reading
+   each file whole.
+3. **`Read` raw bytes only for the spans the skeleton can't resolve** — the exact
+   body you must edit, via `offset`+`limit` on the line the skeleton gave you.
+
+The skeleton is the dependency-free workspace-wide artifact; an editor/LSP
+**document outline** gives the same per-file shape with symbol nesting when you
+have it. Either way, do not `Read` the whole file to plan a structural edit over
+it.
+
 ## 3. Quick troubleshooting
 
 - **0 hits but you expected some?** Your `--pattern` is probably matching a
@@ -238,12 +301,15 @@ the diff and re-run the build/clippy gate (`AGENTS.md`) afterwards.
 
 ## 4. Outline-before-read discipline (applies with or without ast-grep)
 
-Independent of any tool, and the **one lever the firm §5 A/B leaves standing** —
-outlining **only** the skeleton of a *very large single file* to avoid reading it
-whole is a genuine per-file reduction (a 1683-line file's signatures are a small
-fraction of its body). Note the firm A/B's scope: this is about *one large file*; the
-broader "outline/ast-grep-FIRST as a standing strategy" was measured **more** expensive
-end-to-end (§5), so do not over-extend this into "outlining always saves tokens".
+Independent of any tool: outlining **only** the skeleton of a *very large single
+file* to avoid reading it whole is a genuine per-file reduction (a 1683-line file's
+signatures are a small fraction of its body) — the lever the **lookup** A/B leaves
+standing, and the lookup-side floor of the broader compacted-AST rule. Mind the
+scope of each A/B (§5): for a scoped **lookup**, "outline/ast-grep-FIRST as a standing
+strategy" was measured **more** expensive end-to-end, so do not over-extend it into
+"outlining a lookup always saves tokens". The token win is on a **different** class —
+**whole-file-shape understanding and structural edits/codemods over large files**,
+where the compacted-AST skeleton (§2.6) is a measured saver (`bench/ast-compact/RESULTS.md`).
 
 > **For one *large* file (> ~200 lines) whose relevant span you must locate, get an
 > outline/skeleton (functions + signatures) FIRST and read only the section(s) you
@@ -268,9 +334,16 @@ signature recipe (the dependency-free, workspace-wide fallback).
 > change tracked as its own bead — that surface is protected (auto-mode blocks
 > agent-config self-modification), so do **not** edit it from here.
 
-## 5. Is this actually worth it? — the firm A/B verdict
+## 5. Is this actually worth it? — the firm A/B verdicts (split by task class)
 
-**The firm real-token A/B has now RUN (sq-0fb3f), and the verdict is: NOT a
+Two firm real-token A/Bs settle this, on **two different question classes**, with
+**opposite** verdicts. The rule that survives both: *scoped lookup → just `Read`;
+whole-file shape or a structural edit/codemod over a large file → compacted-AST
+skeleton first.*
+
+### 5.1 Scoped code-structure LOOKUP — NOT a token-saver (sq-0fb3f)
+
+**The firm real-token A/B has RUN (sq-0fb3f), and the verdict for a lookup is: NOT a
 token-saver.** The sanctioned record is
 [`bench/pkg-dogfood/RESULTS-astgrep.md`](../../../bench/pkg-dogfood/RESULTS-astgrep.md)
 (numbers live there; non-canonical work-box telemetry, never frozen into this file).
@@ -284,14 +357,43 @@ tokens (`1.0·fresh + 0.1·cache_read + 1.25·cache_creation`) with a paired qua
 - B's only edge was a **small quality nudge** on call-site **completeness** (A→B on
   that one kind). Completeness, not cost.
 
-**Conclusion:** outline/ast-grep-FIRST is **not** a token-saver end-to-end — the
-install + structural queries + verification reads cost more than a scoped `Read`. Use
-ast-grep + outline as **precision / completeness** tools (enumerate ALL impls/call-sites
-where a `Read`/`grep` might miss one; express a shape a line-regex cannot), not to cut
-tokens. The **narrow exception** that survives: outlining ONLY the skeleton of a *very
-large single file* beats reading it whole (§4).
+**Conclusion (for a LOOKUP):** outline/ast-grep-FIRST is **not** a token-saver
+end-to-end — the install + structural queries + verification reads cost more than a
+scoped `Read`. For a lookup, use ast-grep + outline as **precision / completeness**
+tools (enumerate ALL impls/call-sites where a `Read`/`grep` might miss one; express a
+shape a line-regex cannot), not to cut tokens. The **narrow exception** that survives:
+outlining ONLY the skeleton of a *very large single file* beats reading it whole (§4).
 
-**History — the 2nd proxy reversal.** Before the firm A/B, a directional **byte
+### 5.2 Whole-file-shape / structural-edit / codemod — a compacted-AST skeleton FIRST IS a token-saver (sq-cdqdn)
+
+A **second** firm A/B (issue #1080 / sq-cdqdn) tested the maintainer's lever on a
+**different** class — produce a **compacted-AST representation** (the
+`bench/ast-compact/compact_ast.sh` one-line-per-item skeleton) that the agent **works
+over and manipulates**, reading raw bytes only for unresolved spans — versus the plain
+`Grep`/`Read` baseline, on **whole-file-understanding and structural-edit/codemod
+planning over large Rust files** (summarise a multi-thousand-line file; add an enum
+variant + audit every match arm; rename a method + find every call site; change a trait
+method signature across its impl + all callers). Same telemetry method (real
+cache-discounted effective input tokens mined from fresh sub-agent transcripts), N=10
+frozen tasks. The sanctioned record is
+[`bench/ast-compact/RESULTS.md`](../../../bench/ast-compact/RESULTS.md) (numbers live
+there; non-canonical work-box telemetry, never frozen into this file):
+
+- The **compacted-AST-first** arm was **cheaper at equal quality on the large majority
+  of tasks** — the **opposite** direction to §5.1.
+- The win **scales with file size and structural breadth**: biggest on a trait-signature
+  change spanning a crate and an add-variant-with-exhaustive-match-audit; smallest on a
+  tiny rename — where, as in §5.1, the compacted-view setup tax is **not** amortised and
+  the baseline `Read` was slightly cheaper.
+
+**Conclusion (for WHOLE-FILE-SHAPE / a structural edit / a codemod over a large file):**
+generate the compacted-AST skeleton (§2.6) FIRST and work over it — it is a measured
+token-saver because the file's *bytes* dwarf its *skeleton* when the unit of work is the
+whole shape. This **does not contradict §5.1; it complements it** — §5.1 measured
+*lookups* against a scoped `Read`; this measured *whole-file/codemod* work, a different
+question, and the compacted view wins there.
+
+**History — the 2nd proxy reversal (§5.1).** Before the firm A/B, a directional **byte
 proxy** (sq-lhwo.2) — a model-free file-read byte comparison over a few "where/how is
 X" tasks — produced an "outline is the big lever" signal. That proxy **overstated** it:
 counting outline-skeleton bytes vs whole-file bytes ignores the install cost, the
