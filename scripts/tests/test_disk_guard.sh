@@ -164,6 +164,23 @@ write_idle_pgrep; write_df_free 200; mk_target
 run_guard 0 --dry-run
 if grep -q '^INVOKED' "$WT_GC_LOG"; then note_pass; else note_fail "worktree prune was NOT invoked on an OK tick"; fi
 
+# --------------------------------------------------------------------------- #
+# 7b. COMPLETED-RECLAIM PASS-THROUGH (sq-h34dc) — by default disk-guard delegates with
+#     --reclaim-completed (so the per-tick sweep also reclaims completed-but-unmerged workflow
+#     worktrees); --no-reclaim-completed omits it (old MERGED/GONE-only behaviour).
+# --------------------------------------------------------------------------- #
+: >"$WT_GC_LOG"
+write_idle_pgrep; write_df_free 200; mk_target
+run_guard 0 --dry-run
+if grep -q 'INVOKED.*--reclaim-completed' "$WT_GC_LOG"; then note_pass; else
+  note_fail "default tick did NOT pass --reclaim-completed to worktree-gc.sh"; fi
+
+: >"$WT_GC_LOG"
+write_idle_pgrep; write_df_free 200; mk_target
+run_guard 0 --dry-run --no-reclaim-completed
+if grep -q '^INVOKED' "$WT_GC_LOG" && ! grep -q -- '--reclaim-completed' "$WT_GC_LOG"; then note_pass; else
+  note_fail "--no-reclaim-completed still passed --reclaim-completed (or skipped the prune)"; fi
+
 # erroring worktree-gc ⇒ guard still exits on the disk-state code (non-fatal delegation)
 cat >"${SCRIPTS}/worktree-gc.sh" <<'EOF'
 #!/usr/bin/env bash
