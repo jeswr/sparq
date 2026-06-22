@@ -13,7 +13,8 @@ envelope — *a convenience that shows its work, never an oracle that hides it*.
 
 ## 🚀 Quickstart
 
-Phase 1 — the verifiable transpiler skeleton (default build, lean: only `spargebra`):
+Phase 1 + 3 — the verifiable transpiler + the `K:<name>` keyword layer (default build,
+lean: only `spargebra`):
 
 ```rust
 use sparq_terse::terse_to_sparql;
@@ -22,6 +23,13 @@ use sparq_terse::terse_to_sparql;
 // (re-parse under spargebra) guarantees the emission is conformant.
 let exp = terse_to_sparql("SELECT ?s WHERE { ?s <http://ex/p> ?o }")?;
 assert_eq!(exp.canonical_sparql, "SELECT ?s WHERE { ?s <http://ex/p> ?o }");
+
+// Lever 1: a K:<name> keyword expands to its frozen IRI (no PREFIX line needed); the
+// expansion is echoed in exp.keywords and lands in canonical_sparql.
+let exp = terse_to_sparql("SELECT ?f WHERE { ?f K:type K:Finding ; K:derivedFrom ?s }")?;
+assert!(exp.canonical_sparql.contains("<http://www.w3.org/ns/prov#wasDerivedFrom>"));
+// An unknown keyword or a clash with a real `PREFIX K:` is a HARD error, never a guess.
+assert!(terse_to_sparql("ASK { ?s K:notAKeyword ?o }").is_err());
 
 // A V("...") construct in the default build fails LOUDLY (needs the `vectors` feature).
 assert!(terse_to_sparql("SELECT ?f WHERE { ?f <http://ex/about> V(\"cats\") }").is_err());
@@ -57,6 +65,14 @@ for r in &exp.resolutions {
 - **Silent-rewrite canary** (design §6.7). Every emission is re-parsed under the
   unmodified `spargebra` parser; a non-parsing output is `TerseError::CanaryFailed`,
   never handed back. Canonical input is emitted byte-identical (no silent rewrite).
+- **The `K:<name>` keyword layer** (lever 1, default build, design §3.1). A small,
+  fixed, versioned legend (`legend()`, `LEGEND_VERSION`) of the PKG hot
+  predicates/classes — `K:derivedFrom` → `<…prov#wasDerivedFrom>` — expanded pre-parse
+  so an agent skips the `PREFIX` line. Every expansion is echoed in `Expansion.keywords`;
+  an unknown keyword (`TerseError::UnknownKeyword`, with did-you-mean) and a clash with a
+  real `PREFIX K:` (`TerseError::KeywordPrefixCollision`) are HARD errors, never a guess.
+  Publish the legend once behind the prompt-cache breakpoint with `legend_card()` (the
+  token win is a *caching* property — design §1.6).
 - **`V("phrase")` lexical-first concept resolution** (`vectors` feature, design §3.3).
   The deterministic, no-model `sparq-nlq` lexical linker is the PRIMARY path; the
   staleness-guarded `sparq-vectors` search is a FALLBACK for genuinely fuzzy phrases.
@@ -80,8 +96,10 @@ for r in &exp.resolutions {
   `nearest_term_exact_checked`), `crates/sparq-vectors/src/store.rs`
   (`VectorStore::check_graph`).
 - Epic `sq-2m6zm` (dogfood sparq as a Project Knowledge Graph): this surface is
-  `sq-leg8n` (Phase 1 skeleton + Phase 2 `V()`); Phases 3–6 (keyword layer, the A/B,
-  server/CLI exposure) are tracked follow-ups.
+  `sq-leg8n` (Phase 1 skeleton + Phase 2 `V()`) and `sq-vfeme` (Phase 3 keyword layer);
+  Phases 4–6 (the did-you-mean diagnostic, the A/B verdict, server/CLI exposure) are
+  tracked follow-ups. The keyword set is **frozen at v1**, conditional on the Phase-5 A/B
+  measuring a real cache-discounted win before broad adoption (design §3.1/§5).
 
 ## License
 
