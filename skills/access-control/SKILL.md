@@ -481,6 +481,28 @@ implemented: it binds each hop's `delegate_key` into the delegator-signed preima
 key-substitution stolen-chain replay — but it does **not** claim full non-replayability, because
 the delegator's own key is still operator-asserted (`sq-pfae.3`); see the crate README *Honest scope*.
 
+### Security-properties vocabulary — opt-in `secprop-vocab` ([OPUS-4.8] sq-5oru9, epic sq-0dksu)
+
+The `sparq_trust::secprop` module (behind the **default-OFF `secprop-vocab`** cargo feature) is the
+sparq **`sec-prop:` extension** vocabulary: the orthogonal proof-system dimensions (ZK-type,
+soundness, completeness, hiding/binding, anonymity, setup, interactivity, selective disclosure,
+single-use) plus the machine-reasonable **assurance / audit-status axis** that the vendored
+`sec-prop:` ontology (the ISWC 2025 ZKP-SPARQL paper's vocabulary,
+`crates/sparq-trust/ontologies/zkp-sparql/`) lacks — **under the same
+`https://w3id.org/zkp-sparql/sec-prop#` namespace** (extend, do not fork; design
+`research/security-properties-ontology-design.md` §4.1). It is **data + Rust constants only** (a
+`const &str` registry + the canonical [`secprop-ext.ttl`](../../crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl),
+pinned together by a drift test) — it is **not** a reasoner, an ODRL profile, or a per-method
+annotation graph (those are the downstream Phase 2/3/4 beads `sq-ufsi9`/`sq-bevd3`/`sq-uor3g`).
+
+The **assurance axis is the honesty mechanism**: `Proven ⊐ Claimed ⊐ Conjectured`, one axis
+orthogonal to every property. The **default** assurance for a sparq-asserted ZK property is
+`secx:Claimed` (decision #1001 Option A) with audit status `secx:ExternalSignOffPending` — and **no
+sparq ZK method may be labelled `secx:Proven` while the external accredited-cryptographer audit
+(`sq-qhy4`) is open.** The vocabulary **records** a claim and its epistemic basis; it is **NOT** a
+proof of any property. DPV alignment is *Light* (#1002 Option 2): `skos:closeMatch` cross-refs to
+W3C DPV `CryptographicMethods` where a near-match exists, not a full regulation→requirement chain.
+
 ## Related skills
 
 - [`http-server`](../http-server/SKILL.md) — the sparq SPARQL HTTP server has **no**

@@ -84,36 +84,36 @@ view. `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
   issuer by `trust:issuerDid` instead of `trust:issuerKey` hex. `DidKeyResolver` decodes a `did:key`
   offline; `DidWebResolver` reads a `did:web` document via a **pluggable** fetcher (no HTTP client on
   the default build). **Narrows** the operator-asserted-key forgery vector D′ (not an absolute anchor).
+- **Security-properties vocabulary** (`secprop`, **opt-in `secprop-vocab`**, `sq-5oru9`) — the sparq
+  **`sec-prop:` extension** (constants + [`secprop-ext.ttl`](ontologies/zkp-sparql/secprop-ext.ttl)): the
+  orthogonal proof-system dimensions + the **assurance / audit-status axis** the vendored `sec-prop:` lacks,
+  same namespace (extend, not fork). Records a claim + its epistemic basis — NOT a proof; default assurance
+  `Claimed` (#1001), no sparq ZK method `Proven` while the audit (`sq-qhy4`) is open.
 
 ## Honest scope — what this does and does NOT do
 
 - **No privacy / unlinkability / anonymity.** The credential is admitted **in the clear**; the
-  verifier learns the exact value (`age 25`, not "≥ 18"). This does **not** match ZKAPs-grade
-  unlinkable presentation.
+  verifier learns the exact value (`age 25`, not "≥ 18"). This does **not** match ZKAPs-grade unlinkable presentation.
 - **Holder binding is the clear-WebID, non-anonymous degraded path** (`sq-wvne`):
-  `credentialSubject == Session.agent` authenticates the WebID in the clear — documented, not
-  silently "solved". Presentations stay linkable by requester identity.
+  `credentialSubject == Session.agent` authenticates the WebID in the clear — not silently "solved"; presentations stay linkable by requester identity.
 - **Issuer keys: operator-asserted by default; DID-bindable (opt-in, `sq-pfae.3`).** The default
-  `trust:issuerKey` hex binding is the live forgery vector D′ (§3.3); the `did` feature binds it from
-  a `trust:issuerDid` instead, which **narrows** D′ but is no absolute anchor (`did:key` self-cert;
-  `did:web` only as strong as host/TLS).
+  `trust:issuerKey` hex binding is the live forgery vector D′ (§3.3); the `did` feature binds from a
+  `trust:issuerDid` instead — **narrows** D′ but no absolute anchor (`did:key` self-cert; `did:web` host/TLS).
 - **Delegation invocation is the clear-WebID, non-anonymous path too** (`sq-l5og`): the gate
   authenticates the invoker AS the terminal delegate's WebID in the clear. The `delegate_key` binding
   defeats the key-substitution stolen-chain replay but **not** full non-replayability; deep-chain
   *incremental* revocation stays open (rustdoc has the full reasoning).
-- **Open problems respected as documented limitations:** `sq-tu4e` (no in-reasoner NAF;
-  `revoked` is input-only) and `sq-wvne` (ZK privacy) are **out of PoC scope**; `sq-xc4y` is RESOLVED
-  by the static/dynamic split; `sq-l5og` is **specified, enforced, and tested**.
-- **Strict additivity (G6):** with `sparq-solid`'s `trust-graph` feature OFF the crate is not
-  compiled and `sparq-solid` behaves exactly as WAC/ACP do today (byte-identical).
+- **Open problems respected as documented limitations:** `sq-tu4e` (no in-reasoner NAF; `revoked`
+  input-only) + `sq-wvne` (ZK privacy) are **out of PoC scope**; `sq-xc4y` RESOLVED (static/dynamic split); `sq-l5og` **specified + enforced + tested**.
+- **Strict additivity (G6):** with `sparq-solid`'s `trust-graph` feature OFF the crate is not compiled — `sparq-solid` behaves exactly as WAC/ACP do today (byte-identical).
 
 ## 📚 Learn more
 
-- The machine-readable vocabulary [`trust.ttl`](ontologies/trust/trust.ttl) +
-  [`SEMANTICS.md`](ontologies/trust/SEMANTICS.md) two-stratum semantics note (`sq-pfae.2`), and the
-  design record `research/solid-trust-graph-authz-design.md` (§3.2 storage model; §6.0 PoC spec; §7
-  honest limits) — [issue #940](https://github.com/jeswr/sparq/issues/940). The host crate
-  [`sparq-solid`](../sparq-solid/README.md). `cargo doc -p sparq-trust --all-features` for full docs.
+- The machine-readable [`trust.ttl`](ontologies/trust/trust.ttl) +
+  [`SEMANTICS.md`](ontologies/trust/SEMANTICS.md) (`sq-pfae.2`) + the
+  [`secprop-ext.ttl`](ontologies/zkp-sparql/secprop-ext.ttl) sec-prop: extension; design records
+  `research/solid-trust-graph-authz-design.md` (§3.2 storage; §6.0 PoC) + `…/security-properties-ontology-design.md`
+  (secprop §4.2) — [#940](https://github.com/jeswr/sparq/issues/940). `cargo doc -p sparq-trust --all-features`.
 
 ## License
 
