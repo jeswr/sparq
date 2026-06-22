@@ -43,8 +43,9 @@ type Interchangeable<A, B> = Assignable<A, B> extends true
 type Expect<T extends true> = T;
 
 // The `Store` instance surface, the `SolutionCursor` it returns, and the static (constructor)
-// surface — the `load` / `loadDataset` / `loadCompressed` factories `@jeswr/sparq`'s
-// `SparqStore` invokes — must all match across the two copies.
+// surface — the `new Store()` constructor plus the `load` / `loadWithBase` / `loadDataset` /
+// `loadCompressed` factories `@jeswr/sparq`'s `SparqStore` invokes — must all match across the
+// two copies.
 type _StoreConforms = Expect<Interchangeable<ShippedStore, SharedStore>>;
 type _CursorConforms = Expect<Interchangeable<ShippedCursor, SharedCursor>>;
 type _StoreCtorConforms = Expect<Interchangeable<typeof ShippedStore, typeof SharedStore>>;

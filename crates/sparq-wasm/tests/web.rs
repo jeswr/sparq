@@ -411,6 +411,54 @@ fn apply_delta_batch() {
         .unwrap());
 }
 
+// ---- [OPUS-4.8] sq-ty78o (#1114): the empty `new Store()` constructor, in real wasm ----
+
+/// `new Store()` (the wasm `constructor`) builds an empty, mutable store, and a
+/// `GRAPH`-targeted `updateInPlace` insert then a `GRAPH ?g` query round-trips THROUGH THE
+/// REAL wasm export — the named-graph gap the issue reported, closed by the constructor.
+#[wasm_bindgen_test]
+fn new_store_named_graph_roundtrip() {
+    let mut store = Store::new().expect("new Store() must succeed");
+    assert_eq!(store.size(), 0, "a new Store() is empty");
+    store
+        .update_in_place(
+            "INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
+        )
+        .expect("named-graph INSERT DATA must apply to an empty store");
+    let json = store
+        .query("SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }")
+        .expect("GRAPH query must run");
+    assert!(
+        json.contains("\"value\":\"http://ex/g\""),
+        "named graph round-trips through new Store(): {json}"
+    );
+}
+
+// ---- [OPUS-4.8] sq-f66jz (#1115): base-IRI load (`loadWithBase`), in real wasm ----
+
+/// `Store::loadWithBase` resolves relative IRIs against the base through the real wasm
+/// export, and a syntactically invalid base surfaces as the `JsError` Err arm (not a trap).
+#[wasm_bindgen_test]
+fn load_with_base_resolves_relative() {
+    let store = Store::load_with_base("<a> <p> <../up/o> .", "turtle", "http://ex/dir/")
+        .expect("base-IRI load must succeed");
+    assert_eq!(store.size(), 1);
+    let json = store.query("SELECT ?s ?o WHERE { ?s ?p ?o }").unwrap();
+    assert!(
+        json.contains("\"value\":\"http://ex/dir/a\""),
+        "relative subject resolved against base: {json}"
+    );
+    assert!(
+        json.contains("\"value\":\"http://ex/up/o\""),
+        "relative object resolved against base: {json}"
+    );
+    // An invalid base IRI is the `Err` (JsError) arm across the boundary, not a trap.
+    assert!(
+        Store::load_with_base("<a> <p> <o> .", "turtle", "not a iri").is_err(),
+        "an invalid base IRI must return Err, not panic"
+    );
+}
+
 // ---- [OPUS-4.8] sq-fe1s: the opt-in `serialize` binding, in real wasm ----
 //
 // These exercise the REAL exported `Store::serialize(format, pretty, indent, abbreviate)`
