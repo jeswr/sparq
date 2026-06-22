@@ -749,6 +749,45 @@ is also set (mirrors `tpf` / `federation-descriptors`). Without the feature, zer
 no SHACL code — `sparq-core`/the wasm bundle are untouched); with the feature but not the flag,
 `/shacl/validate` is `404`. Reads are gated by `--auth-token-read` like any GET.
 
+**5f. Terse transpiler endpoint (OPT-IN, `sq-vczh2`, epic `sq-2m6zm`; feature `terse`).** Transpile
+a **terse** query (the `K:<name>` keyword layer over canonical SPARQL) into the **canonical,
+conformant SPARQL** it expands to, returning the **verifiable expansion** — NOT an answer. This is
+the LLM-ergonomic surface from `research/llm-ergonomic-sparql-surface.md` §4: the network contract
+is the auditable expansion the agent can inspect, never an opaque oracle.
+
+- `POST /terse/transpile` — the request **body** is the terse query text (read verbatim as UTF-8,
+  gzip-decoded under the same zip-bomb cap). The server runs the LEAN `sparq_terse::terse_to_sparql`
+  (the `K:<name>` keyword layer + the silent-rewrite canary) and returns JSON:
+  `{ "canonical_sparql", "keywords": [{ "keyword", "iri", "legendVersion" }], "resolutions": [],
+  "warnings": [], "legendVersion" }`.
+- The whole **contract** is `canonical_sparql` — standard SPARQL the agent then runs through the
+  normal `/sparql` path. The endpoint **never executes** the query and never reads the store.
+- **Loud-fail**, never a silent guess: an unknown `K:<name>` keyword, a `PREFIX K:` collision, or
+  non-conformant input (the canary) is a `400` carrying the transpiler's own message; a non-`POST`
+  method is a `405`.
+- `resolutions` is always `[]` in this server build: `V("phrase")` concept resolution needs a
+  graph-bound resolver + an embedder (the crate's `vectors` feature), a **future** extension, so a
+  `V(...)` construct is a `400` here rather than guessed. **Caveat (`sq-26fdp`):** the lexical
+  linker can loud-fail a phrase that IS a verbatim `skos:prefLabel` when it shares a token with a
+  sibling — a known soundness-conservative behaviour, fix tracked separately.
+
+```sh
+cargo run -p sparq-server --features terse -- data.ttl --terse
+# expand the K: keyword layer to canonical SPARQL (the agent then runs canonical_sparql at /sparql)
+curl -X POST --data-binary 'SELECT ?s WHERE { ?s K:derivedFrom ?o }' \
+  http://127.0.0.1:3030/terse/transpile
+# → {"canonical_sparql":"SELECT ?s WHERE { ?s <http://www.w3.org/ns/prov#wasDerivedFrom> ?o }",
+#    "keywords":[{"keyword":"derivedFrom","iri":"http://www.w3.org/ns/prov#wasDerivedFrom",
+#    "legendVersion":"pkg-keywords/v1"}],"resolutions":[],"warnings":[],"legendVersion":"pkg-keywords/v1"}
+```
+
+**Double opt-in**, OFF by default: compiled only with the `terse` cargo feature **and** served only
+when `--terse` / `SPARQ_TERSE=1` is also set (mirrors `shacl` / `tpf`). Without the feature, zero
+cost (no route, no terse code — `sparq-core`/`sparq-engine`/the wasm bundle untouched); with the
+feature but not the flag, `/terse/transpile` is `404`. Transpiling is query-shaped, so it is gated
+by `--auth-token-read` like a GET. The CLI exposes the same transpiler as `sparq-cli terse` (see the
+`cli` skill).
+
 **6. Hardening — flags / env / library.** Each flag overrides its `SPARQ_*` env var; the
 env overrides the default.
 

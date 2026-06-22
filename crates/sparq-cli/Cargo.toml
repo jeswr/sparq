@@ -62,6 +62,18 @@ hdt = ["dep:sparq-hdt"]
 # SAFE because the CLI is native-only and never in the sparq-wasm graph, so the C dep can
 # never reach the wasm bundle. The default flate2 backend stays pure-Rust miniz_oxide.
 zlib-ng = ["flate2/zlib-ng", "sparq-hdt?/zlib-ng"]
+# [OPUS-4.8] (sq-vczh2, epic sq-2m6zm, design research/llm-ergonomic-sparql-surface.md §4) `terse`
+# (default OFF) adds the `terse <terse-query>` subcommand: it transpiles a *terse* query (the
+# `K:<name>` keyword layer over canonical SPARQL) and prints the CANONICAL SPARQL it expands to PLUS
+# the keyword expansions / warnings / legend version, as JSON — the same verifiable contract the
+# server's `POST /terse/transpile` endpoint returns. It never executes the query: the agent runs the
+# printed `canonical_sparql` through `query` (or pipes it to `--query`). Forwards the LEAN
+# `sparq-terse` build (no `vectors`): the keyword layer is fully on; a `V("phrase")` construct
+# loud-FAILS (exit 2) rather than guessing — concept resolution is a future `vectors`-gated
+# extension (the V() ambiguity caveat is tracked by sq-26fdp). OFF by default — a build without
+# the feature carries no terse code and the subcommand is absent. Enable with
+# `cargo build -p sparq-cli --features terse`.
+terse = ["dep:sparq-terse"]
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the
@@ -91,6 +103,11 @@ mimalloc = { version = "0.1", optional = true }
 sparq-reason = { path = "../sparq-reason", version = "0.1.0" }
 # Opt-in HDT ingestion (the `hdt` feature; see [features] for why it is not default).
 sparq-hdt = { path = "../sparq-hdt", version = "0.1.0", optional = true }
+# [OPUS-4.8] (sq-vczh2) Behind the opt-in `terse` feature only: the verifiable LLM-ergonomic
+# transpiler (`sparq_terse::terse_to_sparql`) for the `terse` subcommand. Pulled WITHOUT its
+# `vectors` feature, so this is the LEAN build (depends only on `spargebra`, already in the CLI's
+# tree). OFF by default — a build without the `terse` feature carries no terse code.
+sparq-terse = { path = "../sparq-terse", version = "0.1.0", optional = true }
 oxttl.workspace = true
 oxrdf.workspace = true
 # Streaming decompression: gzip + bzip2, and zstd (the fast, parallel-friendly bulk

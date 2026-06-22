@@ -3332,6 +3332,7 @@ dependencies = [
  "sparq-hdt",
  "sparq-reason",
  "sparq-server",
+ "sparq-terse",
  "zstd",
 ]
 
@@ -3659,6 +3660,7 @@ dependencies = [
  "sparq-introspect",
  "sparq-serve",
  "sparq-shacl",
+ "sparq-terse",
  "tokio",
  "tokio-tungstenite",
  "tower",
