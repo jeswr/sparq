@@ -84,10 +84,13 @@ the write/merge/latency/CLI estate buys nothing (`part2_four_criterion_replaceme
 
 - **Reuse-first ontology** — generalises the vendored `zkp-sparql`
   `sig-impl:Assertion` reified-claim pattern into `pkg:Finding`; reuses PROV-O,
-  SKOS, DCAT, FaBiO/FRBR/DC, CiTO, schema.org, and nanopublications. Only ~4 terms
-  are genuinely net-new (`pkg:exploredStatus`, `pkg:followUpPriority`,
-  `pkg:confidence`, `pkg:couldBeMergedWith`) plus the single `pkg:dependsOn`
-  `owl:inverseOf` `pkg:blockedBy` pair (there is **no** `pkg:blocks`). Full reuse +
+  SKOS, DCAT, **DQV** (the quality axis — `pkg:confidence`/`pkg:assurance` as named
+  `dqv:QualityMeasurement`/`dqv:Metric`/`dqv:Dimension`), FaBiO/FRBR/DC, **CiTO**
+  (citation + technique `cito:extends`/`cito:usesMethodIn`), schema.org, and
+  nanopublications. Only ~4 bespoke terms are net-new (`pkg:exploredStatus`,
+  `pkg:followUpPriority`, `pkg:confidence`, `pkg:couldBeMergedWith`) plus the single
+  `pkg:dependsOn` `owl:inverseOf` `pkg:blockedBy` pair (no `pkg:blocks`); DQV/CiTO
+  shrink, not grow, that surface. DQV is a W3C **Note** (caveat recorded). Full reuse +
   live-ontology-alignment record in [`ontology/pkg/PROVENANCE.md`](ontology/pkg/PROVENANCE.md).
 - **SHACL guardrails** — `pkg.shapes.ttl` makes a source + a confidence value + an
   assurance basis + non-filler content **mandatory** on every `pkg:Finding`, and

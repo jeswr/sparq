@@ -121,6 +121,28 @@ SELECT ?label ?source ?section ?assurance ?conf WHERE {
     param: None,
 };
 
+/// GROUND — the **DQV-modelled** quality axis (sq-2489d.3): for every reified
+/// `dqv:QualityMeasurement`, the subject it was `dqv:computedOn`, the `dqv:Metric` it
+/// `dqv:isMeasurementOf`, and its `dqv:value`. This answers the same epistemic-weight
+/// question as the [`FINDING_PROVENANCE`] `pkg:confidence` column, but via the standard
+/// DQV model — so the confidence axis is queryable as named, distinct metrics, not one
+/// overloaded scalar. Over a graph that records only the `pkg:confidence` shorthand (no
+/// reified measurement) this returns zero rows — the shorthand still answers via
+/// [`FINDING_PROVENANCE`]; the two are complementary, never contradictory.
+pub const FINDING_QUALITY_DQV: CannedQuery = CannedQuery {
+    name: "finding-quality-dqv",
+    about: "GROUND: the DQV quality measurements (subject + metric + value) — the modelled confidence axis",
+    sparql: r#"
+PREFIX dqv: <http://www.w3.org/ns/dqv#>
+SELECT ?subject ?metric ?value WHERE {
+  ?m a dqv:QualityMeasurement ;
+     dqv:computedOn ?subject ;
+     dqv:isMeasurementOf ?metric ;
+     dqv:value ?value .
+} ORDER BY DESC(?value)"#,
+    param: None,
+};
+
 /// GROUND — "which sources are still UNEXPLORED, so follow-up can be targeted?" Sources
 /// whose `pkg:exploredStatus` is anything other than `pkg:Explored`, ordered by
 /// follow-up priority. (Over the current Phase-1 ingest every source is `Explored`, so
@@ -244,6 +266,7 @@ pub const ALL: &[&CannedQuery] = &[
     &SCHEMA_PROPERTIES,
     &FINDINGS_ABOUT,
     &FINDING_PROVENANCE,
+    &FINDING_QUALITY_DQV,
     &UNEXPLORED_SOURCES,
     &SOURCE_STATUS,
     &TASK_DEPENDS_ON,
