@@ -277,6 +277,59 @@ fn did_web_bound_issuer_grants_read_through_an_in_memory_document() {
 }
 
 #[test]
+fn claim_level_trusts_source_for_composes_with_a_did_key_bound_issuer() {
+    // The `sq-pfae.4` claim-level relational form (`<gov> trust:trustsSourceFor schema:age`)
+    // names its issuer by `trust:issuerDid` on the SAME source node — so the foundational
+    // primitive and the DID-resolved key binding (`sq-pfae.3`) compose: resolve_rule_keys
+    // binds the key, and the unchanged gate grants read end-to-end.
+    let (_sk, pk) = gov_key();
+    let did = did_key_for(&pk);
+    let s = || NamedOrBlankNode::NamedNode(iri(GOV_ISSUER));
+    let policy = vec![
+        Triple::new(
+            s(),
+            iri(vocab::RDF_TYPE),
+            Term::NamedNode(iri(vocab::SOURCE_CLASS)),
+        ),
+        Triple::new(
+            s(),
+            iri(vocab::TRUSTS_SOURCE_FOR),
+            Term::NamedNode(iri(SCHEMA_AGE)),
+        ),
+        Triple::new(
+            s(),
+            iri(vocab::ISSUER_DID),
+            Term::Literal(Literal::new_simple_literal(&did)),
+        ),
+        Triple::new(s(), iri(vocab::SCOPE), Term::NamedNode(iri(RESOURCE_X))),
+        Triple::new(
+            s(),
+            iri(vocab::FRESH_WITHIN),
+            Term::Literal(Literal::new_typed_literal(
+                "P30D",
+                iri("http://www.w3.org/2001/XMLSchema#duration"),
+            )),
+        ),
+    ];
+    let rules = resolve_rule_keys(
+        &policy,
+        &DidKeyResolver,
+        ControlGate::assert_control_gated(),
+    )
+    .unwrap();
+    assert_eq!(rules.len(), 1, "one trustsSourceFor statement ⇒ one rule");
+    assert_eq!(
+        rules[0].issuer_key, pk,
+        "the source's trust:issuerDid resolves to the gov verifying key"
+    );
+    let grants = run(&rules);
+    assert!(
+        read_granted(&grants, JESSE),
+        "the claim-level trustsSourceFor form + a did:key-bound issuer grants read end-to-end"
+    );
+}
+
+#[test]
 fn did_web_with_no_usable_key_rejects_the_policy() {
     let did = "did:web:gov.example";
     let url = DidWebResolver::<MapFetcher>::document_url("gov.example").unwrap();

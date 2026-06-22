@@ -53,11 +53,13 @@ view. `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
 
 - **The minimal `trust:` ontology** (`vocab`) — the 10-term core (`TrustPolicy`, `TrustRule`,
   `trustsSourceFor`, `source`, `forShape`, `Source`, `issuerKey`, `scope`, `freshWithin`,
-  `admitted`) + `issuerDid` + the one `forPredicate → forShape` desugaring. Published as Turtle
+  `admitted`) + `issuerDid` + the `forPredicate → forShape` desugaring. Published as Turtle
   ([`trust.ttl`](ontologies/trust/trust.ttl), semantics in [`SEMANTICS.md`](ontologies/trust/SEMANTICS.md));
   a sync test pins it to the Rust constants. **All `trust:` IRIs are NON-STANDARD** — a WG would rehome them.
 - **Fail-closed policy parsing** (`policy`) — a trust policy not presented through the
-  Control-gated channel admits nothing (a type-level `ControlGate`).
+  Control-gated channel admits nothing (a type-level `ControlGate`). Accepts the reified
+  `trust:TrustRule` form AND the claim-level `trust:trustsSourceFor` relational form (per-(source,
+  statement-type) trust — the compact replacement for ACP's type-only `acp:vc`, `sq-pfae.4`).
 - **The admission gate** (`admit`) — canonicalise (`sparq-canon` RDFC-1.0), verify the **checked**
   issuer signature over the commitment (`sparq-zk`, never a self-asserted triple), enforce
   statement-type scoping via a real SHACL shape (`sparq-shacl`), freshness, and the clear-WebID
@@ -70,10 +72,10 @@ view. `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
   `auth:ConditionalGrant` re-checked per request (shipped sq-0q7n path) — never frozen into the view.
 - **The invocation-binding gate** (`delegation`, `sq-l5og`) — verify a carried ZCAP/UCAN-style
   delegation chain (each hop a CHECKED delegator signature over delegator/delegate **keys** +
-  capability + expiry), enforce monotone attenuation (`child ⊆ parent`), and bind
-  **authenticated invoker == the chain's terminal delegate, key-proven per request** via a
-  fresh-challenge PoP. Folding each hop's `delegate_key` into the signed preimage defeats the
-  key-substitution stolen-chain replay; the forgery matrix runs end-to-end.
+  capability + expiry), enforce monotone attenuation (`child ⊆ parent`), and bind **authenticated
+  invoker == the chain's terminal delegate, key-proven per request** via a fresh-challenge PoP.
+  Folding each hop's `delegate_key` into the signed preimage defeats the key-substitution
+  stolen-chain replay; the forgery matrix runs end-to-end.
 - **DID issuer-key binding** (`did`, **opt-in `did` feature**, `sq-pfae.3`) — a rule may name its
   issuer by `trust:issuerDid` instead of `trust:issuerKey` hex. `DidKeyResolver` decodes a
   self-certifying `did:key` offline; `DidWebResolver` reads the key from a `did:web` document via a
@@ -88,32 +90,30 @@ view. `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
 - **Holder binding is the clear-WebID, non-anonymous degraded path** (`sq-wvne`):
   `credentialSubject == Session.agent` authenticates the WebID in the clear — documented, not
   silently "solved". Presentations stay linkable by requester identity. (Its materialise-time
-  composition, `sq-xc4y`, is RESOLVED by the static/dynamic split; the *clear-WebID* privacy
-  limitation is separate and remains.)
+  composition, `sq-xc4y`, is RESOLVED by the static/dynamic split; the *clear-WebID* limitation remains.)
 - **Issuer keys: operator-asserted by default; DID-bindable (opt-in, `sq-pfae.3`).** The default
   `trust:issuerKey` hex binding is the live forgery vector D′ (§3.3); the `did` feature binds it from
-  a `trust:issuerDid` instead, which **narrows** D′ but is no absolute trust anchor (`did:key` is
-  self-cert; `did:web` only as strong as host/TLS).
+  a `trust:issuerDid` instead, which **narrows** D′ but is no absolute anchor (`did:key` self-cert;
+  `did:web` only as strong as host/TLS).
 - **Delegation invocation is the clear-WebID, non-anonymous path too** (`sq-l5og`): the gate
   authenticates the invoker AS the terminal delegate's WebID in the clear — **not**
-  anonymous/unlinkable. The `delegate_key` binding defeats the key-substitution stolen-chain replay,
-  but **not** full non-replayability: the delegate key is only as trustworthy as the delegator key
-  that attests it (DID-bindable now via the `did` feature, `sq-pfae.3`; deep-chain *incremental*
-  revocation stays open). Full reasoning in the rustdoc.
+  anonymous/unlinkable. The `delegate_key` binding defeats the key-substitution stolen-chain replay
+  but **not** full non-replayability (the delegate key is only as trustworthy as the delegator key
+  that attests it; DID-bindable via the `did` feature; deep-chain *incremental* revocation stays
+  open — rustdoc has the full reasoning).
 - **Open problems respected as documented limitations:** `sq-tu4e` (no in-reasoner NAF;
   `revoked` is input-only) and `sq-wvne` (ZK privacy) are **out of PoC scope**; `sq-xc4y` is
   RESOLVED by the static/dynamic split; `sq-l5og` is **specified, enforced, and tested**.
 - **Strict additivity (G6):** with `sparq-solid`'s `trust-graph` feature OFF, the crate is not
-  compiled and `sparq-solid` behaves exactly as WAC/ACP do today.
+  compiled and `sparq-solid` behaves exactly as WAC/ACP do today (byte-identical).
 
 ## 📚 Learn more
 
 - The machine-readable vocabulary [`trust.ttl`](ontologies/trust/trust.ttl) and its
   [`SEMANTICS.md`](ontologies/trust/SEMANTICS.md) normative two-stratum semantics note (`sq-pfae.2`).
-- The design record `research/solid-trust-graph-authz-design.md` (§6.0 the PoC spec; §7 the
-  honest limitations) — [issue #940](https://github.com/jeswr/sparq/issues/940).
-- The host crate: [`sparq-solid`](../sparq-solid/README.md) (the WAC/ACP substrate this extends);
-  `cargo doc -p sparq-trust --all-features` for the full module-level docs (incl. the `did` module).
+- The design record `research/solid-trust-graph-authz-design.md` (§6.0 PoC spec; §7 honest limits) —
+  [issue #940](https://github.com/jeswr/sparq/issues/940); the host crate
+  [`sparq-solid`](../sparq-solid/README.md). `cargo doc -p sparq-trust --all-features` for full docs.
 
 ## License
 

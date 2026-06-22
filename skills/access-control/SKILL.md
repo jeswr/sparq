@@ -413,6 +413,22 @@ RDFC-1.0 canonicalise (`sparq-canon`) → a **checked** issuer signature over th
 (`sparq-zk`, never a self-asserted triple) → statement-type scoping via a real SHACL shape
 (`sparq-shacl`) → freshness (a per-request check) → the clear-WebID holder binding.
 
+**Two equivalent policy-authoring forms (`parse_policy` / `resolve_rule_keys` accept both;
+`sq-pfae.4`).** A Control-gated trust policy may name a rule either way, and both desugar to the
+SAME `Vec<TrustRule>` the gate consumes:
+- **Reified** — a `trust:TrustRule` node grouping `trust:source` + `trust:forShape`/`forPredicate`
+  + `trust:scope` + `trust:freshWithin` (+ key). Keeps scope/freshness **per-rule**.
+- **Claim-level relational** (`trust:trustsSourceFor`, the foundational primitive, design §2.3.1)
+  — a `trust:Source` node carries `trust:trustsSourceFor <shape-or-predicate>` directly, alongside
+  its shared key + `trust:scope` + `trust:freshWithin`; EACH `trustsSourceFor` statement is one
+  rule. This is the compact *per-(source, statement-type)* form that **replaces ACP's type-only,
+  unimplemented `acp:vc` matcher** with claim-level trust. The object is a `sh:NodeShape` node
+  (carried like `forShape`) or a predicate IRI (desugared like `forPredicate`); a blank-node source
+  is rejected fail-closed. It composes with the opt-in `did` key binding (`trust:issuerDid` on the
+  source node). Every soundness side-condition (checked signature, type-scope, holder binding,
+  reserved-predicate guard) is identical to the reified form — the claim-level form is NOT a weaker
+  admission path.
+
 - **`admit_trust_credential_static(credential, rules, target, abac_rule_n3)`** — the
   **materialise-time** path (the `sq-xc4y` static/dynamic split). It runs only the
   session-INDEPENDENT class (signature, type-scope, scope) and installs each derived grant as an

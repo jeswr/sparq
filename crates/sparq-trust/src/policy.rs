@@ -2,8 +2,28 @@
 //!
 //! Parses a trust-policy RDF graph (authored in the **Control-gated channel**, the
 //! same trusted channel as `.acl`/`.acr` — design §3.2) into a `Vec<TrustRule>`.
-//! Each rule reifies one admission condition: `source` + `issuer_key` + `shape` +
+//! Each rule carries one admission condition: `source` + `issuer_key` + `shape` +
 //! `scope` + `fresh_within`.
+//!
+//! ## Two equivalent authoring forms (both → the SAME `Vec<TrustRule>`)
+//!
+//! - **Reified** (`trust:TrustRule`) — a rule node groups `trust:source` +
+//!   `trust:forShape`/`trust:forPredicate` + `trust:scope` + `trust:freshWithin` (+ key).
+//!   This keeps `trust:scope`/`trust:freshWithin` **per-rule**, so one source may be
+//!   trusted with different windows on different resources.
+//! - **Claim-level relational** (`trust:trustsSourceFor`) — the foundational primitive
+//!   (design §2.3.1): a `trust:Source` node carries
+//!   `trust:trustsSourceFor <shape-or-predicate>` directly, alongside its key +
+//!   `trust:scope` + `trust:freshWithin`. EACH `trustsSourceFor` statement is one rule;
+//!   the source's key/scope/freshness are **shared** across its statement-types. This is
+//!   the compact form that maps onto — and replaces — ACP's type-only, unimplemented
+//!   `acp:vc` matcher with *per-(source, statement-type)* trust (the `sq-pfae.4` gap).
+//!   The `trustsSourceFor` object is a `sh:NodeShape` node (carried like `forShape`) or a
+//!   predicate IRI (desugared like `forPredicate`).
+//!
+//! Both forms produce the identical `TrustRule` the admission gate consumes, so the gate,
+//! the DID-resolved key binding, and every soundness side-condition are unchanged: only
+//! the surface syntax differs. A graph may mix both.
 //!
 //! ## Fail-closed Control-gating (design §3.2 / §3.3 item 3)
 //!
@@ -133,11 +153,14 @@ impl std::error::Error for PolicyError {}
 /// [`ControlGate`] is required: a policy that did not arrive through the trusted
 /// channel cannot reach this function (§3.2, fail-closed).
 ///
-/// Each `trust:TrustRule` node must carry: `trust:source`, `trust:issuerKey`,
-/// exactly one of `trust:forShape` / `trust:forPredicate` (the latter desugared
-/// here), `trust:scope`, and `trust:freshWithin`. A rule missing any property is a
-/// hard [`PolicyError::IncompleteRule`] — a partially-specified rule never silently
-/// admits.
+/// Accepts BOTH authoring forms (see the module docs): each `trust:TrustRule` node must
+/// carry `trust:source`, `trust:issuerKey`, exactly one of `trust:forShape` /
+/// `trust:forPredicate` (the latter desugared here), `trust:scope`, and
+/// `trust:freshWithin`; and each `trust:Source` node bearing a
+/// `trust:trustsSourceFor <shape-or-predicate>` statement must carry `trust:issuerKey`,
+/// `trust:scope`, and `trust:freshWithin` (one rule per `trustsSourceFor` statement). A
+/// rule missing any required property is a hard [`PolicyError::IncompleteRule`] — a
+/// partially-specified rule never silently admits.
 pub fn parse_policy(policy: &[Triple], _gate: ControlGate) -> Result<Vec<TrustRule>, PolicyError> {
     parse_rules(policy, &operator_asserted_key)
 }
@@ -226,23 +249,139 @@ pub fn resolve_rule_keys(
 }
 
 fn parse_rules(policy: &[Triple], key_for: &KeyResolver) -> Result<Vec<TrustRule>, PolicyError> {
-    // Collect every node typed `trust:TrustRule`.
-    let mut rule_nodes: Vec<Term> = Vec::new();
+    let mut out: Vec<TrustRule> = Vec::new();
+
+    // Form A — the **reified** rule: a node typed `trust:TrustRule` grouping
+    // `source` + `forShape`/`forPredicate` + `scope` + `freshWithin` (+ key).
     for t in policy {
         if t.predicate.as_str() == vocab::RDF_TYPE {
             if let Term::NamedNode(o) = &t.object {
                 if o.as_str() == vocab::TRUST_RULE {
-                    rule_nodes.push(subject_term(&t.subject));
+                    out.push(parse_one_rule(&subject_term(&t.subject), policy, key_for)?);
                 }
             }
         }
     }
 
-    let mut out = Vec::with_capacity(rule_nodes.len());
-    for node in rule_nodes {
-        out.push(parse_one_rule(&node, policy, key_for)?);
+    // Form B — the **claim-level relational** form (the foundational `trustsSourceFor`
+    // primitive, design §2.3.1; the direct replacement for ACP's type-only `acp:vc`):
+    // a `trust:Source` node carries `trust:trustsSourceFor <shape-or-predicate>`
+    // alongside its key + `trust:scope` + `trust:freshWithin`. EACH `trustsSourceFor`
+    // statement on that source node is ONE admission rule (a source trusted for two
+    // statement-types yields two rules), all over the source's shared key/scope/freshness.
+    // The source node is BOTH the `trust:source` (the named attesting authority) and the
+    // qualifier-bearing subject — collapsing the rule reification into the source itself
+    // (design §2.3.2, the "fold `trust:source` into `trustsSourceFor`" compaction made
+    // concrete). A reified `trust:TrustRule` node is not a `trust:Source`, so the two
+    // forms never double-count the same rule.
+    for (source_node, shape_obj) in trusts_source_for_statements(policy) {
+        out.push(parse_claim_rule(&source_node, &shape_obj, policy, key_for)?);
     }
+
     Ok(out)
+}
+
+/// Collect every `(source, shape-object)` pair asserted by a `trust:trustsSourceFor`
+/// triple, in policy order — the claim-level statements (Form B). One rule is parsed per
+/// pair, so a source trusted for several statement-types produces several rules.
+fn trusts_source_for_statements(policy: &[Triple]) -> Vec<(Term, Term)> {
+    policy
+        .iter()
+        .filter(|t| t.predicate.as_str() == vocab::TRUSTS_SOURCE_FOR)
+        .map(|t| (subject_term(&t.subject), t.object.clone()))
+        .collect()
+}
+
+/// Parse one claim-level statement (Form B): a `source trust:trustsSourceFor shape_obj`
+/// pair, over the source node's shared key + `trust:scope` + `trust:freshWithin`. The
+/// source node's own IRI is the rule's `trust:source` (a blank-node source is rejected —
+/// a named attesting authority must have a stable identity to tag admitted facts with).
+/// `shape_obj` is the statement-type: a `sh:NodeShape` node (carry its closure, like
+/// `forShape`) OR a predicate IRI (desugar, like `forPredicate`). Fails closed exactly as
+/// [`parse_one_rule`]: any missing qualifier is a [`PolicyError::IncompleteRule`].
+fn parse_claim_rule(
+    source_node: &Term,
+    shape_obj: &Term,
+    policy: &[Triple],
+    key_for: &KeyResolver,
+) -> Result<TrustRule, PolicyError> {
+    let rule_id = || node_label(source_node);
+
+    // The source node IS the named attesting authority — it must be an IRI.
+    let Term::NamedNode(source) = source_node else {
+        return Err(PolicyError::IncompleteRule {
+            rule: rule_id(),
+            missing: "a named trust:Source (trustsSourceFor on a blank node is rejected)",
+        });
+    };
+
+    // The issuer key is read off the SAME source node (`trust:issuerKey` hex or
+    // `trust:issuerDid`), shared across every shape this source is trusted for.
+    let issuer_key = key_for(source_node, policy)?;
+
+    // `trust:scope` + `trust:freshWithin` qualify the source's trust (per-source here;
+    // the reified form keeps them per-rule). Both are mandatory — fail closed.
+    let scope = object_iri(source_node, vocab::SCOPE, policy).ok_or_else(|| {
+        PolicyError::IncompleteRule {
+            rule: rule_id(),
+            missing: "trust:scope",
+        }
+    })?;
+    let fresh_term = object_of(source_node, vocab::FRESH_WITHIN, policy).ok_or_else(|| {
+        PolicyError::IncompleteRule {
+            rule: rule_id(),
+            missing: "trust:freshWithin",
+        }
+    })?;
+    let fresh_lex = term_lexical(&fresh_term);
+    let fresh_within_secs =
+        parse_xsd_duration_secs(&fresh_lex).ok_or(PolicyError::BadDuration(fresh_lex))?;
+
+    let shape = shape_from_trusts_object(shape_obj, policy);
+
+    Ok(TrustRule {
+        source: source.clone(),
+        issuer_key,
+        shape,
+        scope,
+        fresh_within_secs,
+    })
+}
+
+/// Resolve a `trust:trustsSourceFor` object into a [`ShapeRef`]: a predicate IRI is
+/// desugared to the normative single-predicate node-shape (exactly the `forPredicate`
+/// rewrite — design §2.3.3), while a node naming a `sh:NodeShape` carries its closure of
+/// defining triples (exactly the `forShape` primitive). A bare IRI is treated as a
+/// predicate UNLESS the policy types it `sh:NodeShape`, in which case its shape closure is
+/// carried — so `trustsSourceFor <ageShape>` (with `<ageShape> a sh:NodeShape`) and
+/// `trustsSourceFor schema:age` both work.
+fn shape_from_trusts_object(obj: &Term, policy: &[Triple]) -> ShapeRef {
+    // A node explicitly typed `sh:NodeShape` is a shape: carry its closure (forShape path).
+    let is_node_shape = policy.iter().any(|t| {
+        subject_term(&t.subject) == *obj
+            && t.predicate.as_str() == vocab::RDF_TYPE
+            && matches!(&t.object, Term::NamedNode(n) if n.as_str() == vocab::SH_NODE_SHAPE)
+    });
+    if is_node_shape {
+        return ShapeRef {
+            root: obj.clone(),
+            triples: shape_closure(obj, policy),
+        };
+    }
+    // Otherwise an IRI object is a predicate: desugar it (forPredicate path).
+    if let Term::NamedNode(p) = obj {
+        let (root, triples) = vocab::desugar_for_predicate(p);
+        return ShapeRef {
+            root: shape_root_to_term(root),
+            triples,
+        };
+    }
+    // A blank-node object that is not typed sh:NodeShape: carry its closure anyway (an
+    // inline shape with no explicit type) so an inline `[ sh:targetSubjectsOf … ]` works.
+    ShapeRef {
+        root: obj.clone(),
+        triples: shape_closure(obj, policy),
+    }
 }
 
 fn parse_one_rule(
@@ -461,5 +600,196 @@ mod tests {
         assert_eq!(parse_xsd_duration_secs("garbage"), None);
         assert_eq!(parse_xsd_duration_secs("P"), None);
         assert_eq!(parse_xsd_duration_secs("P30"), None);
+    }
+
+    // --- the claim-level `trust:trustsSourceFor` relational form (Form B, sq-pfae.4) ---
+
+    use oxrdf::{Literal, NamedOrBlankNode};
+    use sparq_zk::sig::{public_key_to_hex, SecretKey};
+
+    const GOV: &str = "https://gov.example/issuer";
+    const SCHEMA_AGE: &str = "http://schema.org/age";
+    const SCHEMA_NAME: &str = "http://schema.org/name";
+    const RES: &str = "https://pod.ex/resourceX";
+
+    fn nn(s: &str) -> NamedNode {
+        NamedNode::new(s).unwrap()
+    }
+
+    fn key_hex() -> String {
+        public_key_to_hex(&SecretKey::from_seed(0xC0FFEE).public_key())
+    }
+
+    /// A `trust:Source` node carrying `n_shapes` `trustsSourceFor predicate` statements
+    /// plus a shared `issuerKey` + `scope` + `freshWithin` — the claim-level form.
+    fn source_trusts(source: &str, predicates: &[&str], with_key: bool) -> Vec<Triple> {
+        let s = || NamedOrBlankNode::NamedNode(nn(source));
+        let mut g = vec![Triple::new(
+            s(),
+            nn(vocab::RDF_TYPE),
+            Term::NamedNode(nn(vocab::SOURCE_CLASS)),
+        )];
+        for p in predicates {
+            g.push(Triple::new(
+                s(),
+                nn(vocab::TRUSTS_SOURCE_FOR),
+                Term::NamedNode(nn(p)),
+            ));
+        }
+        if with_key {
+            g.push(Triple::new(
+                s(),
+                nn(vocab::ISSUER_KEY),
+                Term::Literal(Literal::new_simple_literal(key_hex())),
+            ));
+        }
+        g.push(Triple::new(s(), nn(vocab::SCOPE), Term::NamedNode(nn(RES))));
+        g.push(Triple::new(
+            s(),
+            nn(vocab::FRESH_WITHIN),
+            Term::Literal(Literal::new_typed_literal(
+                "P30D",
+                nn("http://www.w3.org/2001/XMLSchema#duration"),
+            )),
+        ));
+        g
+    }
+
+    #[test]
+    fn trusts_source_for_predicate_parses_to_one_rule() {
+        let g = source_trusts(GOV, &[SCHEMA_AGE], true);
+        let rules = parse_policy(&g, ControlGate::assert_control_gated()).unwrap();
+        assert_eq!(rules.len(), 1, "one trustsSourceFor statement ⇒ one rule");
+        let r = &rules[0];
+        assert_eq!(
+            r.source.as_str(),
+            GOV,
+            "the source node IS the named source"
+        );
+        assert_eq!(r.scope.as_str(), RES);
+        assert_eq!(r.fresh_within_secs, 30 * 86_400);
+        // The predicate desugars to the normative single-predicate shape (forPredicate path).
+        assert!(
+            r.shape
+                .triples
+                .iter()
+                .any(|t| t.predicate.as_str() == vocab::SH_TARGET_SUBJECTS_OF
+                    && matches!(&t.object, Term::NamedNode(o) if o.as_str() == SCHEMA_AGE)),
+            "the trustsSourceFor predicate desugared to a sh:targetSubjectsOf shape"
+        );
+    }
+
+    #[test]
+    fn trusts_source_for_fans_out_one_rule_per_statement_type() {
+        // A source trusted for TWO statement-types yields TWO rules, sharing the key/scope.
+        let g = source_trusts(GOV, &[SCHEMA_AGE, SCHEMA_NAME], true);
+        let rules = parse_policy(&g, ControlGate::assert_control_gated()).unwrap();
+        assert_eq!(rules.len(), 2, "two trustsSourceFor statements ⇒ two rules");
+        assert!(rules.iter().all(|r| r.source.as_str() == GOV));
+        // Both desugared shapes are present (age and name), one per rule.
+        let targets: Vec<String> = rules
+            .iter()
+            .flat_map(|r| r.shape.triples.iter())
+            .filter(|t| t.predicate.as_str() == vocab::SH_TARGET_SUBJECTS_OF)
+            .filter_map(|t| match &t.object {
+                Term::NamedNode(o) => Some(o.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(targets.contains(&SCHEMA_AGE.to_string()));
+        assert!(targets.contains(&SCHEMA_NAME.to_string()));
+    }
+
+    #[test]
+    fn trusts_source_for_node_shape_carries_its_closure() {
+        // trustsSourceFor a node EXPLICITLY typed sh:NodeShape carries the shape closure
+        // (the forShape path), not the desugaring.
+        let shape = "https://pod.ex/.acr#ageShape";
+        let s = || NamedOrBlankNode::NamedNode(nn(GOV));
+        let mut g = source_trusts(GOV, &[], true);
+        g.push(Triple::new(
+            s(),
+            nn(vocab::TRUSTS_SOURCE_FOR),
+            Term::NamedNode(nn(shape)),
+        ));
+        // Define the shape: a sh:NodeShape targeting subjects-of schema:age.
+        g.push(Triple::new(
+            NamedOrBlankNode::NamedNode(nn(shape)),
+            nn(vocab::RDF_TYPE),
+            Term::NamedNode(nn(vocab::SH_NODE_SHAPE)),
+        ));
+        g.push(Triple::new(
+            NamedOrBlankNode::NamedNode(nn(shape)),
+            nn(vocab::SH_TARGET_SUBJECTS_OF),
+            Term::NamedNode(nn(SCHEMA_AGE)),
+        ));
+        let rules = parse_policy(&g, ControlGate::assert_control_gated()).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(
+            matches!(&rules[0].shape.root, Term::NamedNode(n) if n.as_str() == shape),
+            "the shape root is the named sh:NodeShape (forShape path), not a fresh blank node"
+        );
+        assert!(
+            rules[0]
+                .shape
+                .triples
+                .iter()
+                .any(|t| t.predicate.as_str() == vocab::SH_TARGET_SUBJECTS_OF),
+            "the node-shape closure is carried"
+        );
+    }
+
+    #[test]
+    fn trusts_source_for_missing_scope_is_incomplete_fail_closed() {
+        // Drop the scope triple → fail-closed IncompleteRule (never a silent admit).
+        let mut g = source_trusts(GOV, &[SCHEMA_AGE], true);
+        g.retain(|t| t.predicate.as_str() != vocab::SCOPE);
+        let err = parse_policy(&g, ControlGate::assert_control_gated());
+        assert!(
+            matches!(err, Err(PolicyError::IncompleteRule { missing, .. }) if missing.contains("scope")),
+            "a trustsSourceFor source with no scope is rejected fail-closed: {err:?}"
+        );
+    }
+
+    #[test]
+    fn trusts_source_for_missing_key_is_incomplete_fail_closed() {
+        let g = source_trusts(GOV, &[SCHEMA_AGE], false); // no issuerKey
+        let err = parse_policy(&g, ControlGate::assert_control_gated());
+        assert!(
+            matches!(err, Err(PolicyError::IncompleteRule { .. })),
+            "a trustsSourceFor source with no issuer key is rejected fail-closed: {err:?}"
+        );
+    }
+
+    #[test]
+    fn trusts_source_for_on_a_blank_node_is_rejected() {
+        // A blank-node source has no stable identity to tag admitted facts with.
+        let b = NamedOrBlankNode::BlankNode(oxrdf::BlankNode::new("src").unwrap());
+        let g = vec![
+            Triple::new(
+                b.clone(),
+                nn(vocab::TRUSTS_SOURCE_FOR),
+                Term::NamedNode(nn(SCHEMA_AGE)),
+            ),
+            Triple::new(
+                b.clone(),
+                nn(vocab::ISSUER_KEY),
+                Term::Literal(Literal::new_simple_literal(key_hex())),
+            ),
+            Triple::new(b.clone(), nn(vocab::SCOPE), Term::NamedNode(nn(RES))),
+            Triple::new(
+                b,
+                nn(vocab::FRESH_WITHIN),
+                Term::Literal(Literal::new_typed_literal(
+                    "P30D",
+                    nn("http://www.w3.org/2001/XMLSchema#duration"),
+                )),
+            ),
+        ];
+        let err = parse_policy(&g, ControlGate::assert_control_gated());
+        assert!(
+            matches!(err, Err(PolicyError::IncompleteRule { missing, .. }) if missing.contains("named")),
+            "trustsSourceFor on a blank-node source is rejected fail-closed: {err:?}"
+        );
     }
 }
