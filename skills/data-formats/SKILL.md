@@ -92,6 +92,33 @@ pub fn from_parts(dict: Dict, triples: Vec<[Id; 3]>) -> Graph
 // EXTERNAL-MEMORY build (needs `mmap`): stream-parse, spill sorted runs to disk,
 // k-way merge — bounded RAM for datasets larger than memory. `chunk` = triples per run.
 pub fn build_external<R: std::io::Read + Send>(reader: R, format: &str, dir: &Path, chunk: usize) -> Result<(), String>
+
+// Empty, in-memory graph — the trivial infallible constructor (no `load_str("", …)`
+// workaround, no error handling). `default()` and `new()` are interchangeable.
+pub fn new() -> Graph                 // also: Graph::default()
+```
+
+`sparq_core::Graph` — single-triple mutation from `oxrdf` terms (the ergonomic one-triple
+case over `apply_delta`; each position takes anything that converts into a `Term`:
+`NamedNode` / `Literal` / `BlankNode` / a `Term`). Set-valued (re-insert / absent-remove is a
+no-op) and, for a directory-backed graph, WAL-logged + fsync'd — same semantics as `apply_delta`.
+For several triples at once prefer ONE `apply_delta` batch (one WAL append) over a loop:
+
+```rust
+use sparq_core::Graph;
+use oxrdf::{NamedNode, Literal, Term};
+
+let mut g = Graph::new();
+g.insert_triple(
+    NamedNode::new_unchecked("http://ex/alice"),
+    NamedNode::new_unchecked("http://schema.org/name"),
+    Term::Literal(Literal::new_simple_literal("Alice")),
+)?;
+g.remove_triple(
+    NamedNode::new_unchecked("http://ex/alice"),
+    NamedNode::new_unchecked("http://schema.org/name"),
+    Term::Literal(Literal::new_simple_literal("Alice")),
+)?; // absent ⇒ no-op, never an error
 ```
 
 `sparq_core::Graph` — cheap snapshots / forks (the serving pattern):
@@ -387,10 +414,18 @@ cargo build -p sparq-cli --features serialize-rdf
 
 ## Gotchas / feature flags / prerequisites
 
-- **Format strings are matched literally.** Accepted: `"turtle"`/`"ttl"`,
-  `"ntriples"`/`"n-triples"`, `"nquads"`/`"n-quads"`, `"trig"`/`"application/trig"`.
-  `parse_to_triples` (and the `_with_base` variants) treat any **unknown** format as
-  Turtle (the `_ =>` arm) — pass the exact string.
+- **Format strings are matched literally — an unknown format is REJECTED, not
+  guessed.** Accepted aliases:
+  `"turtle"`/`"ttl"`/`"text/turtle"`/`"application/turtle"`,
+  `"ntriples"`/`"n-triples"`/`"nt"`/`"application/n-triples"`,
+  `"nquads"`/`"n-quads"`/`"nq"`/`"application/n-quads"`, `"trig"`/`"application/trig"`
+  (and the `"jsonld"`/`"json-ld"`/`"application/ld+json"` set when the `jsonld` feature is
+  on). `parse_to_triples` (and the `_with_base` variants), `load_dataset`/`load_dataset_serial`
+  gate on these explicit alias sets: any unknown/typo'd string returns
+  `Err("unknown RDF format \"…\" (known: …)")` naming the bad format — it does **not**
+  silently fall back to Turtle/TriG (the old `_ =>` catch-all was removed in sq-m2pc /
+  sq-01yr; verify: `cargo test -p sparq-core parse_to_triples_rejects_unknown_format
+  load_dataset_rejects_unknown_format`). Pass the exact string.
 - **Parallel paths need the `parallel` feature** (on by default natively). The parallel
   fast path applies to N-Triples and Turtle in `load_str`; `load_reader_parallel`'s
   pipelined parser is **N-Triples only** (other formats silently fall back to serial
@@ -422,6 +457,14 @@ cargo build -p sparq-cli --features serialize-rdf
   is a heap-stack pushdown automaton and cannot recurse the native stack. The SPARQL parser has
   the matching `MAX_RECURSION_DEPTH = 128` cap (groups/expressions/paths/collections/triple
   terms). 128 is far deeper than any real data/query nests.
+- **Language tags are normalised to lowercase on ingest.** A `@lang` tag is stored ASCII-lowercased
+  across **every** format and path — Turtle/TriG/N-Quads via `oxttl`, and the byte-level
+  N-Triples/N-Quads fast parser (`sparq-core::nt`). RDF 1.1/1.2 language tags are case-insensitive,
+  so `"x"@en-US` and `"x"@en-us` are the **same** RDF term and intern to one dict id (matching
+  `oxrdf::Literal::new_language_tagged_literal`). This makes ingest format-INDEPENDENT: the same
+  triple written as N-Triples or as Turtle yields the identical stored term (it did **not** before —
+  the byte path used to preserve the written case while every `oxttl` path lowercased it; KamiQuasi
+  #1119 / sq-langcase). The RDF 1.2 `--ltr`/`--rtl` direction is unaffected (already lowercase).
 - **`build_external` / `open` / `save` require the `mmap` feature** (native only). The
   N-Triples external path also honors `SPARQ_SHARDED_DICT` (default on with ≥2 threads)
   and, with the `dict-spill` feature + `SPARQ_DICT_SPILL` env, bounds peak build RSS by

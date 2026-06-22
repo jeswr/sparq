@@ -543,6 +543,17 @@ pub struct ServerConfig {
     /// `SPARQ_RESTORE_DELTA` env (a path list).
     #[cfg(feature = "backup")]
     pub restore_delta: Vec<std::path::PathBuf>,
+    /// [OPUS-4.8] (sq-ft7u) RESTORE-INTO-DURABLE opt-in for the restore-on-start path. When
+    /// `true` AND both [`restore`](Self::restore) and [`persist_dir`](Self::persist_dir) are set,
+    /// the restore-on-start writes the artifact THROUGH to the durable `--persist` directory
+    /// crash-safely, so the restored dataset SURVIVES A RESTART (the on-disk base becomes the
+    /// restored image). `false` (the default) keeps the historical contract: `--restore` and
+    /// `--persist` are MUTUALLY EXCLUSIVE (the binary refuses the combination), because an
+    /// in-memory-only restore on a durable server would be silently lost on the next restart.
+    /// This field exists only with the `backup` cargo feature; a build without it compiles no
+    /// restore code. Set by the binary's `--restore-persist` flag / `SPARQ_RESTORE_PERSIST=1` env.
+    #[cfg(feature = "backup")]
+    pub restore_persist: bool,
     /// [OPUS-4.8] (sq-d3d8, epic sq-3183) OPT-IN federation discovery descriptors. When
     /// `true`, the server serves a W3C VoID dataset description at `GET /.well-known/void`
     /// and a SPARQL 1.1 Service Description for a `GET /sparql` with no `query` parameter
@@ -700,6 +711,10 @@ impl Default for ServerConfig {
             // [OPUS-4.8] sq-bu1a: no PITR delta chain by default (base-only restore).
             #[cfg(feature = "backup")]
             restore_delta: Vec::new(),
+            // [OPUS-4.8] sq-ft7u: restore-into-durable OFF by default — `--restore` + `--persist`
+            // stay mutually exclusive unless the operator opts in with `--restore-persist`.
+            #[cfg(feature = "backup")]
+            restore_persist: false,
             // [OPUS-4.8] sq-d3d8: safe default — federation discovery descriptors OFF even
             // when the feature is compiled in (the operator opts in deliberately).
             #[cfg(feature = "federation-descriptors")]
@@ -941,6 +956,14 @@ impl ServerConfig {
             cfg.restore_delta = std::env::split_paths(&v)
                 .filter(|p| !p.as_os_str().is_empty())
                 .collect();
+        }
+        // [OPUS-4.8] sq-ft7u: SPARQ_RESTORE_PERSIST truthy ("1"/"true"/"yes"/"on") makes the
+        // restore-on-start write THROUGH to the durable `--persist` dir (so it survives a restart)
+        // instead of the historical refusal of the --restore + --persist combination. Off by
+        // default. Only present with the `backup` feature; the binary's --restore-persist overrides.
+        #[cfg(feature = "backup")]
+        if let Ok(v) = std::env::var("SPARQ_RESTORE_PERSIST") {
+            cfg.restore_persist = env_truthy(&v);
         }
         // [OPUS-4.8] sq-d3d8: SPARQ_FEDERATION_DESCRIPTORS truthy ("1"/"true"/"yes"/"on")
         // serves the VoID + Service-Description discovery endpoints. Off by default. Only
@@ -1834,6 +1857,44 @@ impl ApplyUpdates for ServerApplier {
             None => Ok(()),
         }
     }
+
+    /// [OPUS-4.8] (sq-ft7u) RESTORE-INTO-DURABLE. Replace the `--persist` durable store's contents
+    /// with the freshly-imported (already-validated) `fresh` graph, crash-safely, and return the
+    /// snapshot the ring should publish so reads serve the restored data. Runs on the WRITER THREAD
+    /// (the only thread that mutates the durable store), so the on-disk swap never races a commit.
+    ///
+    /// Sequence: release the OLD durable graph's WAL handle (close its log), then
+    /// [`Graph::restore_into_durable`] writes `fresh`'s image to a sibling, two-rename-swaps it over
+    /// `dir` (parent fsync'd between the renames), re-opens the new base memory-mapped with a fresh
+    /// WAL, and drops the old base — the EXACT crash-safe protocol the in-process compaction uses,
+    /// healed by `recover_compaction` on the next open if a crash interrupts it. We adopt the
+    /// re-opened directory-backed graph as the new durable store (so subsequent updates WAL-append
+    /// to it), and return an independent in-memory snapshot of it for the ring to publish.
+    ///
+    /// FAIL-CLOSED: `fresh` is fully built before this runs; if the swap fails before the first
+    /// rename the OLD durable store is untouched, and a crash mid-swap heals to old-or-new. An
+    /// in-memory applier (no durable store) is a clean `Err` — there is no durable dir to write
+    /// through, so the in-memory restore path (the ring/writer swap) is used instead.
+    fn restore_durable(&mut self, fresh: Graph) -> Result<Graph, String> {
+        let durable = self.durable.as_mut().ok_or_else(|| {
+            "restore-into-durable requested on an applier with no --persist store".to_string()
+        })?;
+        // The directory the OLD durable graph is backed by; the swap targets it.
+        let dir = durable
+            .graph
+            .persist_dir()
+            .ok_or_else(|| "durable graph is not directory-backed".to_string())?;
+        // Release the OLD durable graph's WAL handle before the directory swap (its `wal.log` is
+        // about to be renamed away with `dir`); the crash-safe swap re-opens a fresh handle.
+        durable.graph.close_wal();
+        let restored = Graph::restore_into_durable(&dir, fresh)
+            .map_err(|e| format!("restore-into-durable swap failed: {e}"))?;
+        // Adopt the re-opened, directory-backed restored store; subsequent updates WAL-append to it.
+        // The published snapshot is an independent in-memory image of the restored content.
+        let published = restored.snapshot().into_graph();
+        durable.graph = restored;
+        Ok(published)
+    }
 }
 
 /// Shared server state: the dataset under query, served from a sparq-serve
@@ -1871,7 +1932,7 @@ struct ServingCore {
     /// The single sequenced writer (Wave A2): the sole publisher of generations.
     /// `submit` blocks for the group-commit window + batch application, so update
     /// handlers call it on the blocking pool.
-    writer: Arc<Writer<String>>,
+    writer: Arc<Writer<String, Graph>>,
 }
 
 /// [OPUS-4.8] (sq-o5bi) Builds the ring's retention config from the server config — the default
@@ -1909,7 +1970,7 @@ pub struct AppState {
     /// `submit` blocks for the group-commit window + batch application, so update
     /// handlers call it on the blocking pool.
     #[cfg(not(feature = "backup"))]
-    writer: Arc<Writer<String>>,
+    writer: Arc<Writer<String, Graph>>,
     /// [OPUS-4.8] (sq-o5bi, sq-0g6g) `backup`-only: the swappable serving core (ring + writer).
     /// See [`ServingCore`]. Loaded lock-free on every read/update; replaced atomically only by an
     /// online restore. This `ArcSwap` indirection exists solely to enable that atomic swap and is
@@ -2109,14 +2170,14 @@ impl AppState {
     /// [`ServingCore`] (one atomic refcount bump) so the handle outlives the load guard.
     #[cfg(not(feature = "backup"))]
     #[inline(always)]
-    fn writer(&self) -> &Writer<String> {
+    fn writer(&self) -> &Writer<String, Graph> {
         &self.writer
     }
 
     /// [OPUS-4.8] (sq-o5bi, sq-0g6g) `backup`-only writer accessor (see [`ring`](Self::ring)).
     #[cfg(feature = "backup")]
     #[inline(always)]
-    fn writer(&self) -> Arc<Writer<String>> {
+    fn writer(&self) -> Arc<Writer<String, Graph>> {
         self.core.load().writer.clone()
     }
 
@@ -2208,22 +2269,55 @@ impl AppState {
         sparq_serve::backup_export(&pin, out).map_err(|e| e.to_string())
     }
 
-    /// [OPUS-4.8] (sq-o5bi) ONLINE RESTORE: rehydrates the serving store from a backup artifact
-    /// and atomically installs the freshly-built ring+writer into the swappable serving core.
-    /// Readers in flight keep serving from the OLD core (its `Arc` survives until they release
-    /// their pin); every read/update issued AFTER the swap loads the new core. **Fail-closed**:
-    /// a corrupt/mismatched artifact returns `Err` and the live store is left UNTOUCHED (the new
-    /// core is built fully — import + ring + writer spawn — before the swap; if import fails
-    /// there is nothing to swap in).
+    /// [OPUS-4.8] (sq-o5bi, sq-ft7u) ONLINE RESTORE: rehydrates the serving store from a backup
+    /// artifact. **Fail-closed**: a corrupt/mismatched artifact returns `Err` and the live store is
+    /// left UNTOUCHED (the artifact is imported + validated fully BEFORE anything is swapped; if
+    /// import fails there is nothing to swap in).
     ///
-    /// **Scope (v1, honest):** in-memory restore only. A `--persist` durable server is refused
-    /// here (`Err`) — replacing a live WAL-backed durable directory needs its own crash-safe
-    /// swap and is a recorded follow-up; the in-memory restore is the bootstrap primitive the
-    /// horizontal-scaling stage-2 + PITR base want. Blocking (import parses + indexes the whole
-    /// dataset, then spawns a writer thread): call it on the blocking pool.
+    /// IN-MEMORY server (`persist_dir == None`): atomically installs a freshly-built ring+writer
+    /// into the swappable serving core. Readers in flight keep serving from the OLD core (its `Arc`
+    /// survives until they release their pin); every read/update after the swap loads the new core.
+    /// The restored content lives only in RAM — it does NOT survive a restart (the historical
+    /// in-memory restore).
+    ///
+    /// `--persist` DURABLE server (`persist_dir == Some(dir)`): only when `persist` is set (the
+    /// `--restore-persist` / `?persist=true` opt-in) does the restore write THROUGH to the durable
+    /// dir so it SURVIVES A RESTART — via the private `restore_into_durable_through` path.
+    /// WITHOUT the opt-in a durable server REFUSES the restore (an in-memory-only swap would be
+    /// silently lost on a restart — a footgun), surfaced as an `Err` the route maps to 409.
+    ///
+    /// `persist == true` on an IN-MEMORY server is an `Err` (there is no durable dir to write
+    /// through). Blocking (import parses + indexes the whole dataset): call it on the blocking pool.
     #[cfg(feature = "backup")]
-    pub fn restore_from<R: std::io::Read>(&self, input: R) -> Result<u64, String> {
-        self.guard_restore_supported()?;
+    pub fn restore_from<R: std::io::Read>(&self, input: R, persist: bool) -> Result<u64, String> {
+        match (self.config.persist_dir.is_some(), persist) {
+            // Durable server + persist opt-in: write the restore THROUGH to the durable store.
+            (true, true) => self.restore_into_durable_through(input),
+            // Durable server WITHOUT the opt-in: refuse (an in-memory swap would be lost on
+            // restart — a footgun). The route maps this `Err` to 409.
+            (true, false) => Err(
+                "this is a --persist (durable) server: a restore must opt in to write-through \
+                 (?persist=true / --restore-persist) so it survives a restart; an in-memory-only \
+                 restore would be silently lost on the next restart and is refused"
+                    .to_string(),
+            ),
+            // In-memory server + persist opt-in: there is no durable dir to write through.
+            (false, true) => Err(
+                "restore ?persist=true requires a --persist (durable) server; this server is \
+                 in-memory (no durable directory to write the restore through to)"
+                    .to_string(),
+            ),
+            // In-memory server, in-memory restore: the historical ring/writer core swap.
+            (false, false) => self.restore_in_memory(input),
+        }
+    }
+
+    /// [OPUS-4.8] (sq-o5bi) IN-MEMORY restore: build the entire new core BEFORE touching the live
+    /// one (fail-closed), then atomically swap it in. The restored content is RAM-only — it does
+    /// NOT survive a restart (the historical in-memory restore; `restore_from(.., persist=false)`
+    /// on an in-memory server). Returns the artifact's source generation for operator correlation.
+    #[cfg(feature = "backup")]
+    fn restore_in_memory<R: std::io::Read>(&self, input: R) -> Result<u64, String> {
         // Build the entire new core BEFORE touching the live one — fail-closed.
         let (graph, meta) = sparq_serve::backup_import(input).map_err(|e| e.to_string())?;
         self.install_restored_graph(graph);
@@ -2243,8 +2337,9 @@ impl AppState {
     /// the LIVE store is left untouched — there is no partial install. The chain must be
     /// same-lineage with the base (see `sparq_serve::backup_delta` for that boundary). Returns the
     /// recovered SOURCE generation/writer-seq (the last delta's `to`, or the base's generation for
-    /// an empty chain) for operator correlation. In-memory only (a `--persist` server is refused),
-    /// blocking: call on the blocking pool.
+    /// an empty chain) for operator correlation. In-memory only (a `--persist` server is refused —
+    /// the durable write-through opt-in applies to the base [`restore_from`](Self::restore_from)
+    /// only in v1), blocking: call on the blocking pool.
     #[cfg(feature = "backup")]
     pub fn restore_from_with_deltas(
         &self,
@@ -2265,14 +2360,15 @@ impl AppState {
         Ok(recovered.generation)
     }
 
-    /// [OPUS-4.8] (sq-bu1a) Shared restore precondition: in-memory-only in v1 (a `--persist`
-    /// durable directory needs its own crash-safe swap, a recorded follow-up).
+    /// [OPUS-4.8] (sq-bu1a) Shared restore precondition: the PITR delta path is in-memory-only in
+    /// v1 (replaying a delta chain into a `--persist` durable directory needs its own crash-safe
+    /// swap, a recorded follow-up; the base `restore_from` already has the write-through path).
     #[cfg(feature = "backup")]
     fn guard_restore_supported(&self) -> Result<(), String> {
         if self.config.persist_dir.is_some() {
             return Err(
-                "restore is not supported on a --persist (durable) server in v1; \
-                 it replaces the in-memory serving store only"
+                "point-in-time restore (--restore-delta) is not supported on a --persist (durable) \
+                 server in v1; it replaces the in-memory serving store only"
                     .to_string(),
             );
         }
@@ -2332,6 +2428,47 @@ impl AppState {
         sparq_serve::backup_export_delta(&from_gen, &to, out)
             .map(Some)
             .map_err(|e| e.to_string())
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) RESTORE-INTO-LIVE-DURABLE-STORE (`--persist` write-through). Imports +
+    /// validates the artifact into a fresh `Graph` (fail-closed — done BEFORE the live store is
+    /// touched), then routes the durable swap THROUGH THE EXISTING WRITER THREAD
+    /// (`Writer::restore`): the writer commits any in-flight batch first, then replaces the durable
+    /// on-disk store with the imported image crash-safely (`Graph::restore_into_durable` — the same
+    /// two-rename swap the compaction uses, healed by `recover_compaction` on the next open) and
+    /// publishes the restored snapshot as a new generation. Because the swap runs on the single
+    /// writer thread it NEVER races a concurrent durable commit — no lock on the hot path, and no
+    /// ordering hazard: quiescing the durable writer is achieved by SEQUENCING the swap on that
+    /// very thread, not by tearing it down. After a restart (reopen `dir`) the restored triples are
+    /// present (the on-disk base IS the restored image).
+    ///
+    /// Fail-closed: a corrupt artifact fails the import → the writer is never asked to swap, the
+    /// durable store is untouched. A swap I/O error leaves the OLD durable store intact (the swap
+    /// is rollback-safe) and the writer alive; reads keep flowing from the last published snapshot.
+    /// Returns the artifact's source generation (for operator correlation), as the in-memory path.
+    #[cfg(feature = "backup")]
+    fn restore_into_durable_through<R: std::io::Read>(&self, input: R) -> Result<u64, String> {
+        // Import + FULLY validate the artifact first (fail-closed — nothing on disk is touched yet).
+        let (graph, meta) = sparq_serve::backup_import(input).map_err(|e| e.to_string())?;
+        // Route the crash-safe durable swap through the existing writer thread (sequenced with
+        // updates; no concurrent durable mutation possible). It publishes the restored snapshot.
+        match self.writer().restore(graph) {
+            Ok(Ok(number)) => {
+                // Re-evaluate active subscriptions against the restored (now-published) generation.
+                self.commits.send_if_modified(|g| {
+                    if number > *g {
+                        *g = number;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                Ok(meta.generation)
+            }
+            // A durable-swap failure: the OLD store is intact, the writer is alive (fail-closed).
+            Ok(Err(e)) => Err(format!("restore-into-durable failed (store unchanged): {}", e)),
+            Err(e) => Err(format!("restore-into-durable: update writer unavailable: {}", e)),
+        }
     }
 
     /// A receiver of the committed generation number for a subscription connection (T23).
@@ -4112,37 +4249,58 @@ async fn admin_backup(State(state): State<AppState>, headers: HeaderMap) -> Resp
     }
 }
 
-/// [OPUS-4.8] (sq-o5bi) `POST /admin/restore` — ONLINE restore of the serving store from a
-/// backup artifact POSTed in the request body. On success it atomically installs a freshly
-/// rehydrated ring+writer into the swappable serving core; readers in flight keep serving from
-/// the old core until they release their pin, and every read/update after the swap sees the
-/// restored store.
+/// [OPUS-4.8] (sq-o5bi, sq-ft7u) `POST /admin/restore` — ONLINE restore of the serving store from
+/// a backup artifact POSTed in the request body.
 ///
-/// - **Fail-closed.** A corrupt/mismatched/non-artifact body is rejected (400) and the live
-///   store is left UNTOUCHED — the new core is built fully (import + ring + writer) before the
-///   swap, so a failed import swaps nothing in.
-/// - **Gated** behind the WRITE auth token (the existing admin gate); POST-only.
-/// - **In-memory only (v1).** A `--persist` durable server is refused (409) — replacing a live
-///   WAL-backed durable directory needs its own crash-safe swap (a recorded follow-up). The
-///   in-memory restore is the bootstrap primitive for horizontal-scaling stage-2 + PITR.
+/// - **In-memory server** (no `--persist`): atomically installs a freshly rehydrated ring+writer
+///   into the swappable serving core; readers in flight keep serving from the old core until they
+///   release their pin, and every read/update after the swap sees the restored store. RAM-only —
+///   the restored content does NOT survive a process restart.
+/// - **`--persist` durable server** with the write-through opt-in (`?persist=true`): writes the
+///   restore THROUGH to the durable dir so it SURVIVES A RESTART (sq-ft7u). The swap runs on the
+///   single writer thread, crash-safely (the two-rename `Graph::restore_into_durable`, healed by
+///   `recover_compaction`). WITHOUT `?persist=true` a durable server REFUSES the restore (409): an
+///   in-memory-only swap would be silently lost on the next restart, which is a footgun.
+/// - `?persist=true` on an in-memory server → 409 (no durable dir to write through).
+///
+/// **Fail-closed.** A corrupt/mismatched/non-artifact body is rejected (400) and the live store is
+/// left UNTOUCHED — the artifact is imported + validated fully before anything is swapped, and the
+/// durable swap itself is rollback-safe. **Gated** behind the WRITE auth token (the existing admin
+/// gate); POST-only.
 #[cfg(feature = "backup")]
 async fn admin_restore(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     body: Bytes,
 ) -> Response {
     if let Some(resp) = auth_gate(state.config(), &headers, Operation::Write) {
         return resp;
     }
-    if state.config().persist_dir.is_some() {
+    // [OPUS-4.8] (sq-ft7u) Opt in to writing the restore THROUGH to the durable `--persist` store
+    // (so it survives a restart) via `?persist=true` (truthy: "1"/"true"/"yes"/"on"). Default off:
+    // a restore is in-memory-only unless the operator explicitly asks for write-through.
+    let persist = params.get("persist").map(|v| env_truthy(v)).unwrap_or(false);
+    let durable = state.config().persist_dir.is_some();
+    // 409 cases (the request is incompatible with the server's durability posture) are decided
+    // HERE so any `Err` from `restore_from` below is unambiguously a corrupt/import problem (400).
+    if durable && !persist {
         return json_error(
             StatusCode::CONFLICT,
-            "restore is not supported on a --persist (durable) server in v1; \
-             it replaces the in-memory serving store only",
+            "this is a --persist (durable) server: pass ?persist=true to write the restore through \
+             to the durable store (so it survives a restart); an in-memory-only restore on a \
+             durable server would be silently lost on the next restart and is refused",
+        );
+    }
+    if !durable && persist {
+        return json_error(
+            StatusCode::CONFLICT,
+            "?persist=true requires a --persist (durable) server; this server is in-memory (there \
+             is no durable directory to write the restore through to)",
         );
     }
     let st = state.clone();
-    let task = tokio::task::spawn_blocking(move || st.restore_from(&body[..]));
+    let task = tokio::task::spawn_blocking(move || st.restore_from(&body[..], persist));
     match task.await {
         Ok(Ok(source_generation)) => text_response(
             StatusCode::OK,

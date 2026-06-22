@@ -144,6 +144,67 @@ test('toString is N-Quads; toCanonical is sorted + deterministic', async () => {
   a.free(); b.free();
 });
 
+// --- RDFC-1.0 blank-node canonicalisation (sq-1dd5t / #1047) --------------------------------------
+// toCanonical / equals / contains must be RDF-DATASET-ISOMORPHISM-aware: two datasets that
+// differ ONLY in blank-node labels (and/or quad order) are the same dataset and must compare
+// equal / canonicalise identically. Before sq-1dd5t these were label-sensitive.
+
+// Two isomorphic graphs whose blank-node labels differ (and triple order is permuted).
+const BNODE_A = `@prefix ex: <http://ex/> .
+[] ex:p _:shared . _:shared ex:q "v" .`;
+const BNODE_B = `@prefix ex: <http://ex/> .
+_:other ex:q "v" . [] ex:p _:other .`;
+
+test('toCanonical: isomorphic blank-node graphs canonicalise identically (relabelled to c14nN)', async () => {
+  const a = await Dataset.fromString(BNODE_A, 'turtle');
+  const b = await Dataset.fromString(BNODE_B, 'turtle');
+  const ca = a.toCanonical();
+  assert.equal(ca, b.toCanonical(), 'isomorphic graphs must produce byte-identical canonical N-Quads');
+  assert.ok(ca.includes('_:c14n'), 'blank nodes relabelled to the RDFC-1.0 c14nN form');
+  // A genuinely different graph (extra edge) must NOT canonicalise the same.
+  const c = await Dataset.fromString(`${BNODE_A}\n_:extra ex:r "w" .`, 'turtle');
+  assert.notEqual(ca, c.toCanonical());
+  a.free(); b.free(); c.free();
+});
+
+test('equals: isomorphic blank-node datasets compare equal (label-insensitive)', async () => {
+  const a = await Dataset.fromString(BNODE_A, 'turtle');
+  const b = await Dataset.fromString(BNODE_B, 'turtle');
+  assert.ok(a.equals(b), 'datasets differing only in bnode labels must be equal');
+  assert.ok(b.equals(a), 'equals is symmetric');
+  // Not equal when the structure differs.
+  const more = await Dataset.fromString(`${BNODE_A}\n[] ex:r "w" .`, 'turtle');
+  assert.ok(!a.equals(more));
+  a.free(); b.free(); more.free();
+});
+
+test('equals: a foreign (N3.Store) isomorphic blank-node dataset compares equal', async () => {
+  const a = await Dataset.fromString(BNODE_A, 'turtle');
+  const foreign = n3Store(BNODE_B); // foreign lib, different bnode labels
+  assert.ok(a.equals(foreign), 'isomorphism-aware equals works across libraries');
+  a.free();
+});
+
+test('contains: an isomorphic blank-node subgraph is contained (relabel-insensitive)', async () => {
+  const a = await Dataset.fromString(BNODE_A, 'turtle');
+  // The same first edge but with a DIFFERENT bnode label — still a contained subgraph.
+  const sub = await Dataset.fromString('@prefix ex: <http://ex/> . [] ex:p _:zzz . _:zzz ex:q "v" .', 'turtle');
+  assert.ok(a.contains(sub), 'a relabelled isomorphic subgraph must be contained');
+  // A blank-node graph that is NOT a subgraph (extra edge that a does not have) is not contained.
+  const notSub = await Dataset.fromString('@prefix ex: <http://ex/> . _:n ex:p _:m . _:m ex:nope "x" .', 'turtle');
+  assert.ok(!a.contains(notSub));
+  a.free(); sub.free(); notSub.free();
+});
+
+test('contains: ground + blank-node mix — superset relationship honoured', async () => {
+  const a = await Dataset.fromString(`${ABC}\n@prefix ex: <http://ex/> .\n[] ex:p _:b . _:b ex:q "v" .`, 'turtle');
+  const groundSub = await Dataset.fromString('@prefix ex: <http://ex/> . ex:a ex:p ex:b .', 'turtle');
+  assert.ok(a.contains(groundSub), 'a ground subgraph is still contained');
+  const bnodeSub = await Dataset.fromString('@prefix ex: <http://ex/> . [] ex:p _:x . _:x ex:q "v" .', 'turtle');
+  assert.ok(a.contains(bnodeSub), 'a relabelled blank-node subgraph is contained');
+  a.free(); groundSub.free(); bnodeSub.free();
+});
+
 // --- INTEROP: FOREIGN operand (N3.js) — the maintainer's hard requirement -------------------------
 
 test('union (foreign N3.Store): combines + dedupes across libraries', async () => {

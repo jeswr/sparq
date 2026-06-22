@@ -23,6 +23,8 @@ import init, { Store } from "./pkg/sparq_wasm.js";
 await init();
 
 const store = Store.load(turtleText, "turtle"); // "ntriples" | "nquads" | "trig" | "jsonld"*
+const empty = new Store();                       // empty + mutable; build up via updateInPlace
+const based = Store.loadWithBase(doc, "turtle", "http://ex/dir/"); // resolve relative IRIs
 store.size;            // number of triples
 store.heapBytes();     // rough in-memory footprint
 

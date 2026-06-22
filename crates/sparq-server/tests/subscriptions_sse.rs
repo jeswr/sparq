@@ -13,6 +13,13 @@
 //! (4) dropping the stream releases the global slot (no leak); (5) bad-query refusals
 //! surface as real HTTP error statuses BEFORE the stream opens; (6) [OPUS-4.8] sq-bxog
 //! (Copilot #120) an initial result over the row cap is a 413 (matching `/sparql`), NOT a 503.
+//!
+//! [OPUS-4.8] (sq-1b390) Gate the whole suite on the `server` feature. It spins the real axum
+//! server and uses the `server`-gated `sparq_server::router` / `AppState` API, so under
+//! `--no-default-features --all-targets` (the pure-serialiser-library build) this file must
+//! compile OUT — otherwise `clippy --no-default-features --all-targets` breaks on the
+//! unresolved axum / serde_json / router imports. 🤖 SPARQ agent.
+#![cfg(feature = "server")]
 
 use std::time::Duration;
 

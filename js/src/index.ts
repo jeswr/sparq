@@ -2,6 +2,8 @@ export {
   SparqStore,
   type RdfFormat,
   type SparqStoreOptions,
+  type SerializeFormat,
+  type SerializeOptions,
   type ValidationReport,
   type ValidationResult,
 } from './store.js';

@@ -1,11 +1,22 @@
-<!-- [OPUS-4.8] sq-h0tr — scaffold page. Distilled from the README "Features" list
-(no lorem). The ZK / MPC entries KEEP the research-scaffold / not-externally-audited
-caveats from the source — do not relabel them as sound or maliciously secure (privacy-claims-allow: meta-instruction WARNING against relabeling as sound/maliciously-secure, not an achieved-property claim; sq-toze.35)
-(privacy-claims gate). The include-wiring bead (sq-im8u) will single-source each
-capability description from its skills/<surface>/SKILL.md.
-[OPUS-4.8] sq-tfpq / issue #813 — Update row now links SPARQL 1.2 Update alongside 1.1
-and a short note documents the 1.2 triple-term delta (no new ops); honest scoping kept
-(engine write tests, not a formal conformance run). -->
+<!-- [OPUS-4.8] sq-im8u — single-source include wiring. The two research-scaffold
+maturity caveats are {{#include}}d verbatim from their canonical skills/*/SKILL.md
+`scaffold-caveat` anchors (build-time content injection), so they cannot drift and
+their not-yet-audited / not-yet-hardened hedges stay intact at the source (privacy-claims
+gate; sq-toze.35 / sq-qhy4). Do not weaken the included hedges or restate the guarantees
+inline here.
+
+The capability link-TABLE below and the SPARQL-Update note are deliberately NOT included
+from the README's Features list: the README links per-surface guides with REPO-RELATIVE
+paths (`skills/<x>/SKILL.md`) — required there by the lychee internal-links gate — and
+mdBook rewrites a relative link relative to THIS page's mount, so an included copy would
+resolve to a non-existent `getting-started/skills/...` and 404 under GitHub Pages. The
+table therefore uses mount-portable ABSOLUTE GitHub URLs; it is a navigation matrix
+(mount-point-specific link targets), not duplicated prose. Single-sourcing the table
+itself is tracked as a follow-up (would require a README-side portable-link form the
+lychee gate does not currently permit).
+[OPUS-4.8] sq-tfpq / issue #813 — Update row links SPARQL 1.2 Update alongside 1.1 and a
+short note documents the 1.2 triple-term delta (no new ops); honest scoping kept (engine
+write tests, not a formal conformance run). -->
 
 # Capabilities at a glance
 
@@ -50,18 +61,20 @@ against a formal SPARQL 1.2 conformance suite.
 
 Two capabilities are **research scaffolds**. They are honest models of the protocols, but they do
 **not** yet provide the cryptographic guarantee a relying party would need. Treat any engineering
-numbers as indicative, not as an audited cryptographic guarantee.
+numbers as indicative, not as an audited cryptographic guarantee. The two maturity caveats below
+are single-sourced verbatim (build-time `{{#include}}`) from their canonical guides, so they
+cannot drift from the source of truth — see the
+[zk-query-proofs guide](https://github.com/jeswr/sparq/blob/main/skills/zk-query-proofs/SKILL.md),
+the [mpc guide](https://github.com/jeswr/sparq/blob/main/skills/mpc/SKILL.md), and
+[SECURITY.md](https://github.com/jeswr/sparq/blob/main/SECURITY.md) for the full scope.
 
-- **Zero-knowledge query proofs** — models proving a query result is correct without revealing the
-  data. The v1 verifier is **research-grade and not externally audited**; it provides **no**
-  soundness guarantee to a relying party pending external audit. See the
-  [security caveat](https://github.com/jeswr/sparq/blob/main/SECURITY.md) and the
-  [zk-query-proofs guide](https://github.com/jeswr/sparq/blob/main/skills/zk-query-proofs/SKILL.md).
-- **Federated MPC** — models evaluating SPARQL across parties with multi-party computation. It is
-  honest-majority semi-honest, **not** maliciously secure. <!-- privacy-claims-allow: NEGATIVE caveat — explicitly denies malicious security (semi-honest only); sq-qhy4 -->
-  See
-  [SECURITY.md](https://github.com/jeswr/sparq/blob/main/SECURITY.md) and the
-  [mpc guide](https://github.com/jeswr/sparq/blob/main/skills/mpc/SKILL.md).
+**Zero-knowledge query proofs** —
+
+{{#include ../../../skills/zk-query-proofs/SKILL.md:scaffold-caveat}}
+
+**Federated MPC** —
+
+{{#include ../../../skills/mpc/SKILL.md:scaffold-caveat}}
 
 ## Interfaces
 

@@ -7,7 +7,14 @@ description: Prove and verify a SPARQL query result over committed RDF Verifiabl
 
 Zero-knowledge proofs that a SPARQL query result is correct over RDF held in named-graph Verifiable Credentials. **`sparq-zk`** (stage 1) canonicalizes (RDFC10) and commits each named graph to a Poseidon2-BN254 commitment `C(G)`, encodes terms, and signs commitments with a Schnorr-over-Baby-JubJub issuer key. **`sparq-zk-compose`** (stage 2) builds per-property Noir circuit inputs (BGP **scan** + hidden-operand integer **FILTER**), drives `nargo`/`bb` to produce/verify proofs, and bundles everything into a serializable `ProofManifest` that a relying party verifies against its own trust anchors (issuer key-set, status list, fresh nonce).
 
+<!-- sq-im8u: the `scaffold-caveat` anchor is single-sourced into
+     book/src/getting-started/capabilities.md via mdBook {{#include}}. Load-bearing honesty
+     caveat; keep the anchored line link-portable (bead refs + inline code only, no
+     repo-relative links) so it renders under both mounts. Keep the ANCHOR markers
+     one-per-line — mdBook excludes only the exact marker line. [OPUS-4.8] -->
+<!-- ANCHOR: scaffold-caveat -->
 > **Research-stage / experimental — NOT-yet-sound.** The composition verifier's soundness is the subject of an open audit (sq-qhy4 / sq-9hrn; remediation epic sq-1s2): a passing proof is NOT a guarantee the SPARQL statement holds under an adversarial prover. Read the "Honest scope" section before relying on a guarantee — only `Simple` entailment is proved; circuit members are fixed buckets. The query fragment covers BGP scans, integer FILTER (and the integer-valued `xsd:double` fragment), and a single-prover hidden cross-credential JOIN.
+<!-- ANCHOR_END: scaffold-caveat -->
 
 ## Prerequisites
 

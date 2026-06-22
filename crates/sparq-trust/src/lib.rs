@@ -41,6 +41,12 @@
 //! - [`wire`] — feed admitted facts into the N3 reasoner ahead of the materialiser;
 //!   read off the derived `auth:*` grants ([`wire::derive_grants`]) OR the per-grant
 //!   DYNAMIC conditions for a conditional grant ([`wire::derive_conditional_grants`]).
+//! - `did` (OPT-IN, default-OFF `did` feature) — pluggable DID resolution
+//!   (`did:key` offline self-cert + a pluggable `did:web` fetcher) that binds a
+//!   `trust:issuerDid` to the issuer verifying key the gate already checks, narrowing
+//!   the operator-asserted-key forgery vector D′ (`sq-pfae.3`). A plain code-span here
+//!   (not an intra-doc link) so the default-feature doc build does not reference a
+//!   feature-gated item.
 //!
 //! ## Opt-in by construction (strict additivity — design §2.2 G6)
 //!
@@ -72,10 +78,13 @@
 //!   by requester identity. A ZKAPs-equivalent presentation would have to REPLACE
 //!   clear-WebID holder binding with an in-ZK holder-PoP plus a nullifier — an
 //!   architecture change, not a composition step.
-//! - **Issuer keys are operator-asserted.** sparq has no DID resolver yet
-//!   (`sq-pfae.3`), so the `trust:issuerKey → verifying-key` binding is supplied
-//!   directly rather than resolver-verified — the live forgery vector D′ (§3.3). This
-//!   is honest, but **not** an end-to-end trust path.
+//! - **Issuer keys are operator-asserted by default; DID-bindable opt-in (`sq-pfae.3`).**
+//!   The default `trust:issuerKey → verifying-key` binding is supplied directly — the live
+//!   forgery vector D′ (§3.3). The **opt-in `did` feature** lets a rule bind its key from a
+//!   `trust:issuerDid` instead (the `did` module: `did:key` offline self-cert + a pluggable
+//!   `did:web` fetcher), which **narrows** D′ but is no absolute anchor (`did:key` is
+//!   self-certifying; `did:web` only as strong as host/TLS) — still not a fully end-to-end
+//!   trust path.
 //!
 //! ## Open problems this PoC RESPECTS as documented limitations (never silently solved)
 //!
@@ -98,7 +107,8 @@
 //!   and intersects against the **current** delegator grant (never a delegation-time
 //!   snapshot). What stays open and is documented, not silently solved: deep-chain
 //!   *incremental* revocation (full re-materialisation only — the §4.4 stale-authority
-//!   window is bounded, not closed) and DID-resolver key binding (`sq-pfae.3`).
+//!   window is bounded, not closed). DID-resolver key binding (`sq-pfae.3`) is now
+//!   addressed by the opt-in `did` module (narrows, does not eliminate, forgery vector D′).
 //! - **`sq-tu4e`** — no in-reasoner NAF over derived facts: `revoked` is an
 //!   **input-only** per-request guard; there is **no deny-on-disagreement** rule.
 //! - **`sq-wvne`** — ZKAPs-grade unlinkable presentation needs a 3-part ZK composite:
@@ -112,7 +122,29 @@
 
 pub mod admit;
 pub mod delegation;
+/// PROV-O delegation audit for human + AI agents (the P5 audit half, `sq-pfae.6`): render
+/// an invocation-bound delegation chain + effective capability as a minimal W3C PROV-O
+/// graph (`prov:actedOnBehalfOf` lineage + the effective grant as `auth:*` RDF), with the
+/// human/AI principal classification the design §4.2 names as an attested attribute on the
+/// delegate. Behind the default-OFF `delegation-prov` feature: nothing in the lean default
+/// build depends on it (no new dependency — pure `oxrdf`, no `sparq-prov` edge).
+#[cfg(feature = "delegation-prov")]
+#[cfg_attr(docsrs, doc(cfg(feature = "delegation-prov")))]
+pub mod delegation_prov;
+#[cfg(feature = "did")]
+#[cfg_attr(docsrs, doc(cfg(feature = "did")))]
+pub mod did;
 pub mod policy;
+#[cfg(feature = "secprop-vocab")]
+#[cfg_attr(docsrs, doc(cfg(feature = "secprop-vocab")))]
+pub mod secprop;
+/// The trust-document storage / authoring model — server-wide vs per-`.acr` documents,
+/// versioning, revocation, and the admission cache key that composes with the
+/// sparq-solid epoch cache (the P4 model, `sq-pfae.5`). Behind the default-OFF `store`
+/// feature: nothing in the lean default build depends on it.
+#[cfg(feature = "store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "store")))]
+pub mod store;
 pub mod vocab;
 pub mod wire;
 
@@ -123,5 +155,20 @@ pub use delegation::{
     effective_against_current, hop_message, invoke, Capability, DelegationChain, DelegationHop,
     EffectiveCapability, Invocation, InvocationDenied,
 };
+#[cfg(feature = "delegation-prov")]
+pub use delegation_prov::{
+    audit_invocation, is_auth_action, AuditConfig, DelegationAudit, PrincipalClassification,
+    PrincipalKind,
+};
+#[cfg(feature = "did")]
+pub use did::{
+    did_key_for, Did, DidDocumentFetcher, DidError, DidKeyResolver, DidResolver, DidWebResolver,
+};
 pub use policy::{parse_policy, ControlGate, PolicyError, ShapeRef, TrustRule};
+#[cfg(feature = "did")]
+pub use policy::{resolve_rule_keys, IssuerBinding};
+#[cfg(feature = "store")]
+pub use store::{
+    AdmissionCacheKey, PolicyVersion, StoreError, TrustDocument, TrustLayer, TrustStore,
+};
 pub use wire::{derive_conditional_grants, derive_grants, ConditionalGrant};

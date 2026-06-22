@@ -411,6 +411,54 @@ fn apply_delta_batch() {
         .unwrap());
 }
 
+// ---- [OPUS-4.8] sq-ty78o (#1114): the empty `new Store()` constructor, in real wasm ----
+
+/// `new Store()` (the wasm `constructor`) builds an empty, mutable store, and a
+/// `GRAPH`-targeted `updateInPlace` insert then a `GRAPH ?g` query round-trips THROUGH THE
+/// REAL wasm export — the named-graph gap the issue reported, closed by the constructor.
+#[wasm_bindgen_test]
+fn new_store_named_graph_roundtrip() {
+    let mut store = Store::new().expect("new Store() must succeed");
+    assert_eq!(store.size(), 0, "a new Store() is empty");
+    store
+        .update_in_place(
+            "INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
+        )
+        .expect("named-graph INSERT DATA must apply to an empty store");
+    let json = store
+        .query("SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }")
+        .expect("GRAPH query must run");
+    assert!(
+        json.contains("\"value\":\"http://ex/g\""),
+        "named graph round-trips through new Store(): {json}"
+    );
+}
+
+// ---- [OPUS-4.8] sq-f66jz (#1115): base-IRI load (`loadWithBase`), in real wasm ----
+
+/// `Store::loadWithBase` resolves relative IRIs against the base through the real wasm
+/// export, and a syntactically invalid base surfaces as the `JsError` Err arm (not a trap).
+#[wasm_bindgen_test]
+fn load_with_base_resolves_relative() {
+    let store = Store::load_with_base("<a> <p> <../up/o> .", "turtle", "http://ex/dir/")
+        .expect("base-IRI load must succeed");
+    assert_eq!(store.size(), 1);
+    let json = store.query("SELECT ?s ?o WHERE { ?s ?p ?o }").unwrap();
+    assert!(
+        json.contains("\"value\":\"http://ex/dir/a\""),
+        "relative subject resolved against base: {json}"
+    );
+    assert!(
+        json.contains("\"value\":\"http://ex/up/o\""),
+        "relative object resolved against base: {json}"
+    );
+    // An invalid base IRI is the `Err` (JsError) arm across the boundary, not a trap.
+    assert!(
+        Store::load_with_base("<a> <p> <o> .", "turtle", "not a iri").is_err(),
+        "an invalid base IRI must return Err, not panic"
+    );
+}
+
 // ---- [OPUS-4.8] sq-fe1s: the opt-in `serialize` binding, in real wasm ----
 //
 // These exercise the REAL exported `Store::serialize(format, pretty, indent, abbreviate)`
@@ -792,5 +840,37 @@ shapeClass ex:Person {
         // An unterminated shape block is a parse error.
         let bad = store.parse_shacl_compact("shape <#S> {\n", None);
         assert!(bad.is_err(), "a malformed SCS document must return Err, not panic");
+    }
+}
+
+// ---- [OPUS-4.8] sq-1dd5t (#1047): the real wasm32 `canonicalizeNQuads` export ----
+//
+// The src/canon.rs `#[cfg(test)] mod tests` run NATIVELY (asserting against the
+// `sparq_canon` fn the export delegates to — `JsError::new` panics off-wasm), so they
+// never touch the actual `#[wasm_bindgen]` free function. These drive the genuine wasm32
+// export through the JS boundary: the `String -> String` marshalling and the `Err`
+// (JsError) path the @jeswr/sparq RDF/JS `Dataset` relies on for toCanonical/equals/contains.
+#[cfg(feature = "canon")]
+mod canon {
+    use super::*;
+    use sparq_wasm::canonicalize_nquads;
+
+    /// Two N-Quads documents that are RDF-isomorphic but differ in blank-node labels AND
+    /// quad order canonicalize, across the wasm boundary, to byte-identical output with
+    /// `_:c14nN` labels.
+    #[wasm_bindgen_test]
+    fn canonicalize_nquads_isomorphic() {
+        let a = "_:b0 <http://ex/p> _:b1 .\n_:b1 <http://ex/q> \"v\" .\n";
+        let b = "_:y <http://ex/q> \"v\" .\n_:x <http://ex/p> _:y .\n";
+        let ca = canonicalize_nquads(a).expect("canonicalize a");
+        let cb = canonicalize_nquads(b).expect("canonicalize b");
+        assert_eq!(ca, cb, "isomorphic datasets canonicalize identically");
+        assert!(ca.contains("_:c14n"), "relabelled to c14nN: {ca}");
+    }
+
+    /// A malformed N-Quads document crosses the boundary as the `Err` (JsError) arm, not a trap.
+    #[wasm_bindgen_test]
+    fn canonicalize_nquads_malformed_is_err() {
+        assert!(canonicalize_nquads("_:b0 <http://ex/p>").is_err());
     }
 }

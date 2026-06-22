@@ -35,8 +35,9 @@
  * SHACL `validate`, streaming cursors, …) stays one accessor away.
  */
 import type * as RDF from '@rdfjs/types';
-import { quadsToNQuads } from './sparql.js';
+import { quadsToNQuads, termToNT } from './sparql.js';
 import { SparqStore, type RdfFormat, type SparqStoreOptions } from './store.js';
+import { canonicalizeNQuads } from './wasm.js';
 
 /** RDF/JS `match()` term position: a concrete term, or `null`/`undefined` for a wildcard. */
 type MatchTerm = RDF.Term | null | undefined;
@@ -238,31 +239,53 @@ export class Dataset implements RDF.Dataset {
   }
 
   /**
-   * Whether this dataset is a SUPERSET of `quads` (every quad of `quads` is present here).
-   * INTEROP: `quads` may be a sparq {@link Dataset} or any foreign RDF/JS dataset / `Quad[]`.
+   * Whether this dataset is a SUPERSET of `quads` — every quad of `quads` is present here, with
+   * **blank nodes normalized** per the RDF/JS spec (matched by RDF-dataset isomorphism, not by
+   * label). INTEROP: `quads` may be a sparq {@link Dataset} or any foreign RDF/JS dataset /
+   * `Quad[]`.
    *
-   * NOTE the RDF/JS spec says blank nodes "will be normalized"; this implementation compares
-   * quads by their concrete terms (blank-node LABELS), not by full RDF-dataset isomorphism. For
-   * the common no-blank-node case the result is exact; with blank nodes it is label-sensitive
-   * (see {@link toCanonical}). Tracked by bead sq-1dd5t.
+   * [OPUS-4.8] sq-1dd5t (#1047): now isomorphism-aware. When the operand carries no blank nodes
+   * the fast exact-label membership test is used (blank-node relabelling cannot matter). When it
+   * does, containment is "`E` maps into `D`": there is a consistent assignment of `E`'s blank
+   * nodes to `D`'s terms such that every quad of `E` becomes a quad of `D` (ground terms fixed).
+   * So a subgraph whose blank nodes are relabelled — even an isomorphic copy — is recognised as
+   * contained. This is the blank-node homomorphism the spec's "differences in blank node labels
+   * are ignored" entails; it is found by a bounded backtracking search ({@link containsByMapping}).
    */
   contains(quads: QuadSource): boolean {
-    for (const q of toIterable(quads)) if (!this.has(q)) return false;
-    return true;
+    const otherQuads = toQuadArray(quads);
+    // Fast, exact path: with no blank nodes in the operand, label equality IS the test.
+    if (!anyBlankNode(otherQuads)) {
+      for (const q of otherQuads) if (!this.has(q)) return false;
+      return true;
+    }
+    return containsByMapping(this.toArray(), otherQuads);
   }
 
   /**
-   * Whether this dataset contains the SAME quads as `quads` (mutual containment). INTEROP:
-   * `quads` may be a sparq {@link Dataset} or any foreign RDF/JS dataset / `Quad[]`.
+   * Whether this dataset denotes the SAME RDF dataset as `quads` — mutual containment, with
+   * **blank nodes normalized** (RDF-dataset isomorphism). INTEROP: `quads` may be a sparq
+   * {@link Dataset} or any foreign RDF/JS dataset / `Quad[]`.
    *
-   * Same blank-node caveat as {@link contains}: equality is by concrete terms, not full
-   * RDF-dataset isomorphism (bead sq-1dd5t).
+   * [OPUS-4.8] sq-1dd5t (#1047): equality is now decided by RDFC-1.0 — two datasets are equal
+   * iff their canonical N-Quads are byte-identical — so two isomorphic datasets that differ only
+   * in blank-node labels (and/or quad order) compare equal. When neither side carries blank
+   * nodes this short-circuits to the fast exact-label set comparison.
    */
   equals(quads: QuadSource): boolean {
-    const other = new QuadSet(quads);
-    if (other.size !== this.size) return false;
-    for (const q of this) if (!other.has(q)) return false;
-    return true;
+    const otherQuads = toQuadArray(quads);
+    if (!anyBlankNode(otherQuads) && !this.#hasBlankNode()) {
+      const other = new QuadSet(otherQuads);
+      if (other.size !== this.size) return false;
+      for (const q of this) if (!other.has(q)) return false;
+      return true;
+    }
+    return this.toCanonical() === canonicalizeNQuads(quadsToNQuads(otherQuads));
+  }
+
+  /** Whether any quad of this dataset carries a blank node in any position. */
+  #hasBlankNode(): boolean {
+    return anyBlankNode(this.toArray());
   }
 
   // --- Dataset: iteration helpers ----------------------------------------------------------------
@@ -360,17 +383,19 @@ export class Dataset implements RDF.Dataset {
   }
 
   /**
-   * An N-Quads serialisation with the per-quad lines sorted (a deterministic, repeatable string).
-   * This is NOT a full RDFC-1.0 / URDNA2015 canonicalisation — blank-node labels are NOT
-   * relabelled to a canonical form, so two isomorphic datasets that differ only in blank-node
-   * labels canonicalise differently. For datasets WITHOUT blank nodes the output is a true
-   * canonical form. Full blank-node canonicalisation is tracked by bead sq-1dd5t.
+   * The dataset's **RDFC-1.0** (RDF Dataset Canonicalization / URDNA2015 successor) canonical
+   * N-Quads — the form the RDF/JS spec defines `toCanonical` against. Blank-node labels are
+   * **relabelled to a canonical form** (`_:c14nN`) and the quad lines are canonically sorted, so
+   * two datasets that are RDF-isomorphic (differ only in blank-node labels and/or quad order)
+   * produce byte-identical output. This is the basis for dataset hashing, equality and diffing.
+   *
+   * [OPUS-4.8] sq-1dd5t (#1047): computed by the engine's RDFC-1.0 implementation
+   * (`sparq-canon` → the W3C-suite-validated `rdf-canon`) surfaced through the wasm
+   * `canonicalizeNQuads` binding — no longer the label-sensitive sorted-N-Quads approximation.
+   * RDF-1.2 triple terms are outside the W3C RDFC-1.0 data model and throw.
    */
   toCanonical(): string {
-    return this.toArray()
-      .map((q) => quadsToNQuads([q]))
-      .sort()
-      .join('');
+    return canonicalizeNQuads(quadsToNQuads(this.toArray()));
   }
 
   // --- lifecycle ---------------------------------------------------------------------------------
@@ -412,6 +437,139 @@ function toIterable(quads: QuadSource): Iterable<RDF.Quad> {
 function toQuadArray(quads: QuadSource | RDF.Quad[]): RDF.Quad[] {
   return Array.isArray(quads) ? quads : [...quads];
 }
+
+/** Whether any quad in `quads` carries a `BlankNode` in subject, predicate, object or graph. */
+function anyBlankNode(quads: Iterable<RDF.Quad>): boolean {
+  for (const q of quads) {
+    if (
+      q.subject.termType === 'BlankNode' ||
+      q.object.termType === 'BlankNode' ||
+      q.graph.termType === 'BlankNode'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * [OPUS-4.8] sq-1dd5t: decides blank-node-aware containment — whether `pattern` (the `contains`
+ * operand) maps into `data` (this dataset): is there a consistent assignment μ of `pattern`'s
+ * blank nodes to `data`'s terms such that μ(`pattern`) ⊆ `data`? Ground terms are fixed; only the
+ * operand's blank nodes are variables. This is exactly the "differences in blank node labels are
+ * ignored" of the RDF/JS `contains` spec — a relabelled (even isomorphic) subgraph is contained.
+ *
+ * Found by a backtracking search: the operand's quads are ordered most-constrained-first (fewest
+ * candidate matches in `data`) and assigned one at a time, propagating μ. Subgraph matching is
+ * NP-hard in the worst case, so the search is bounded by {@link CONTAINS_STEP_BUDGET}; on
+ * exceeding it the method FAILS CLOSED (returns `false`) rather than running unbounded — a
+ * conservative answer for a pathological operand, never a wrong `true`.
+ */
+function containsByMapping(data: readonly RDF.Quad[], pattern: readonly RDF.Quad[]): boolean {
+  // Index `data` by its concrete terms so a candidate lookup for one operand quad is cheap.
+  const dataKeys = new Set<string>();
+  for (const q of data) dataKeys.add(quadKey(q));
+
+  // Operand quads that are fully ground must already be present verbatim.
+  const open: RDF.Quad[] = [];
+  for (const q of pattern) {
+    if (quadHasBlank(q)) open.push(q);
+    else if (!dataKeys.has(quadKey(q))) return false;
+  }
+  if (open.length === 0) return true;
+
+  // Candidate sets: for each open operand quad, the data quads it could map onto (same ground
+  // positions; blank positions are wildcards here, pinned during the search).
+  const candidates: RDF.Quad[][] = open.map((pq) =>
+    data.filter((dq) => quadMatchesPattern(dq, pq)),
+  );
+  // Most-constrained-first: assign the operand quad with the fewest candidates earliest.
+  const order = open.map((_, i) => i).sort((a, b) => candidates[a]!.length - candidates[b]!.length);
+
+  const mapping = new Map<string, string>(); // operand bnode label -> data term key (`_:x` / IRI / literal NT)
+  let steps = 0;
+
+  const search = (k: number): boolean => {
+    if (k === order.length) return true;
+    if (++steps > CONTAINS_STEP_BUDGET) return false;
+    const idx = order[k]!;
+    const pq = open[idx]!;
+    for (const dq of candidates[idx]!) {
+      const undo: string[] = [];
+      if (unify(pq, dq, mapping, undo)) {
+        if (search(k + 1)) return true;
+      }
+      for (const key of undo) mapping.delete(key); // backtrack
+    }
+    return false;
+  };
+  return search(0);
+}
+
+/** Tries to extend `mapping` so operand quad `pq` maps onto data quad `dq`; records new keys in `undo`. */
+function unify(pq: RDF.Quad, dq: RDF.Quad, mapping: Map<string, string>, undo: string[]): boolean {
+  return (
+    unifyTerm(pq.subject, dq.subject, mapping, undo) &&
+    unifyTerm(pq.object, dq.object, mapping, undo) &&
+    unifyTerm(pq.graph, dq.graph, mapping, undo)
+    // predicate is always an IRI (no blank nodes), so it is compared structurally by quadMatchesPattern
+  );
+}
+
+/** Unifies one operand term `pt` with the data term `dt`, binding `pt` if it is a blank node. */
+function unifyTerm(pt: RDF.Term, dt: RDF.Term, mapping: Map<string, string>, undo: string[]): boolean {
+  if (pt.termType !== 'BlankNode') return termKey(pt) === termKey(dt);
+  const dtKey = termKey(dt);
+  const bound = mapping.get(pt.value);
+  if (bound !== undefined) return bound === dtKey;
+  mapping.set(pt.value, dtKey);
+  undo.push(pt.value);
+  return true;
+}
+
+/** Whether a data quad `dq` could match operand quad `pq` on its NON-blank (fixed) positions. */
+function quadMatchesPattern(dq: RDF.Quad, pq: RDF.Quad): boolean {
+  return (
+    posMatches(pq.subject, dq.subject) &&
+    termKey(pq.predicate) === termKey(dq.predicate) &&
+    posMatches(pq.object, dq.object) &&
+    posMatches(pq.graph, dq.graph)
+  );
+}
+
+/** A blank operand position matches any data term of a compatible KIND; a fixed one must be equal. */
+function posMatches(pt: RDF.Term, dt: RDF.Term): boolean {
+  if (pt.termType === 'BlankNode') return dt.termType === 'BlankNode'; // bnode maps only to a bnode
+  return termKey(pt) === termKey(dt);
+}
+
+function quadHasBlank(q: RDF.Quad): boolean {
+  return (
+    q.subject.termType === 'BlankNode' ||
+    q.object.termType === 'BlankNode' ||
+    q.graph.termType === 'BlankNode'
+  );
+}
+
+/** A stable string key for a term (the N-Triples form is exact for IRIs/literals; bnodes keyed by label). */
+function termKey(t: RDF.Term): string {
+  return t.termType === 'BlankNode'
+    ? `_:${t.value}`
+    : t.termType === 'DefaultGraph'
+      ? ''
+      : termToNT(t);
+}
+
+function quadKey(q: RDF.Quad): string {
+  return `${termKey(q.subject)} ${termKey(q.predicate)} ${termKey(q.object)} ${termKey(q.graph)}`;
+}
+
+/**
+ * Step budget for the {@link containsByMapping} blank-node backtracking search. Subgraph matching
+ * is NP-hard, so a pathological operand could otherwise run unbounded; on exceeding this the
+ * search fails closed (returns `false`). Generous for the realistic small-operand `contains` use.
+ */
+const CONTAINS_STEP_BUDGET = 200_000;
 
 /**
  * A membership set over quads keyed on their N-Quads serialisation — the basis for the

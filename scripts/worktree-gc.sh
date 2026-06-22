@@ -3,6 +3,7 @@
 # Authored by Opus 4.8 (Fable unavailable; flag for re-review when Fable returns).
 #
 # worktree-gc.sh [--dry-run | --apply] [--root <dir>] [--main <path>] [--base <ref>]
+#                [--reclaim-completed]
 #
 # WHY: the Claude Code harness creates a fresh git worktree per agent under
 # `.claude/worktrees/` but NEVER auto-removes a finished agent's worktree. They pile up
@@ -28,9 +29,28 @@
 #       by the self-test. We also only ever consider worktrees physically under <root>
 #       (default the harness `.claude/worktrees/` dir): allow-list by location, not deny-list.
 #
+# COMPLETED-BUT-UNMERGED RECLAIM (--reclaim-completed; OFF by default — bead sq-h34dc):
+#   A *completed* workflow worktree is one whose agent finished and PUSHED its PR branch, but
+#   whose PR is not yet merged (and the branch not yet deleted on origin). Such a worktree is
+#   CLEAN and has NO unpushed commits, yet it fails (a) MERGED-or-GONE — so the default broom
+#   KEEPS it forever and it starves the disk (observed 2026-06-22: ~229G of these piled up,
+#   one 33G, until a manual prune). With --reclaim-completed the broom ALSO reclaims a worktree
+#   when ALL of:
+#     (b) CLEAN and (c) NO UNPUSHED COMMITS  — its work is already on origin, nothing to lose;
+#     (e) WORKFLOW-NAMED: its branch matches the harness pattern (wf_* / agent-* / the
+#         `worktree-wf_*` / `worktree-agent-*` synthetic-branch forms) — a human-named branch
+#         is NEVER swept by this path; AND
+#     (f) NOT IN USE: no live process has its cwd or an open file handle inside the worktree
+#         (the load-bearing new guard — an in-flight agent that is momentarily clean+pushed
+#         between commits is KEPT). When the in-use probe cannot tell, it reports IN USE → KEEP.
+#   This path is OPT-IN precisely because it removes a tree whose PR may still be OPEN; the
+#   default predicate (MERGED-or-GONE) is unchanged, so a plain `worktree-gc.sh` is as
+#   conservative as before. `disk-guard.sh` passes --reclaim-completed through on its sweep.
+#
 # Any worktree that is locked, prunable (its dir is already gone), bare, detached with
-# unreachable HEAD, dirty, has unpushed commits, or whose branch is neither merged nor gone
-# is KEPT and reported with the reason it was kept. When in doubt, KEEP.
+# unreachable HEAD, dirty, has unpushed commits, is in use, or whose branch is neither merged
+# nor gone (and not an eligible completed-workflow tree) is KEPT and reported with the reason
+# it was kept. When in doubt, KEEP.
 #
 # DEFAULT IS --dry-run: prints the safe-to-remove set with a per-worktree reason and a
 #   reclaimable-size estimate (du -sh of each safe dir + a total). Touches nothing.
@@ -50,6 +70,9 @@
 #   scripts/worktree-gc.sh                      # dry-run (default): list safe-to-remove + size
 #   scripts/worktree-gc.sh --apply              # actually remove the safe set, then prune
 #   scripts/worktree-gc.sh --base origin/main   # change the "merged" base ref (default)
+#   scripts/worktree-gc.sh --reclaim-completed  # ALSO reclaim completed-but-unmerged workflow
+#                                               #   worktrees (clean+pushed+not-in-use); dry-run
+#   scripts/worktree-gc.sh --apply --reclaim-completed   # ... and actually remove them
 #   scripts/worktree-gc.sh --dry-run-self-test  # hermetic self-test (no git mutation)
 set -euo pipefail
 
@@ -86,6 +109,23 @@ under_root() {
   case "$p/" in
     "$root"/*) return 0 ;;
     *)         return 1 ;;
+  esac
+}
+
+# is_workflow_branch <branch>
+#   True (0) iff <branch> is a harness-created workflow/agent branch — the only branches the
+#   completed-but-unmerged reclaim (--reclaim-completed) may sweep. Pure string match (no git,
+#   no fs) so it is unit-testable. Covers the live shapes the harness produces:
+#     wf_<id> / agent-<id>                       (a real PR branch named for the workflow)
+#     worktree-wf_<id> / worktree-agent-<id>     (the synthetic per-worktree branch git creates
+#                                                  when the harness does not name one itself)
+#   A human-authored branch (feat/…, fix/…, ci/…, or a bare bead-id branch) is NOT matched and
+#   is therefore NEVER eligible for the completed-reclaim path — only MERGED-or-GONE removes it.
+is_workflow_branch() {
+  local b="$1"
+  case "$b" in
+    wf_*|agent-*|worktree-wf_*|worktree-agent-*) return 0 ;;
+    *)                                           return 1 ;;
   esac
 }
 
@@ -155,12 +195,56 @@ wt_head_reachable_from_remote() {
     | grep -q .
 }
 
-# classify_reason <wt> <base> : echo a single token describing the SAFE basis, or a KEEP
-# reason. Exit 0 ⇒ safe to remove; exit 1 ⇒ keep. This is the predicate in one place.
-#   safe tokens : MERGED  | BRANCH-GONE
-#   keep  tokens: dirty | unpushed=<n> | detached-unreachable | not-merged-not-gone | unreadable
+# wt_in_use <wt> : 0 (IN USE) iff a live process appears to be using the worktree. This is the
+# load-bearing guard for the completed-reclaim path: an in-flight agent that is momentarily
+# CLEAN and fully PUSHED (between commits) must not be reclaimed out from under it.
+#
+# Primary mechanism: a `/proc/<pid>/cwd` scan — portable (no external tool), and the cwd of a
+# running agent shell is the single most reliable "this tree is live" signal (the harness runs
+# each agent WITH its worktree as cwd). We resolve <wt> to its real path and report IN USE if
+# any process's cwd resolves to <wt> or a path strictly beneath it.
+# Fallback: if /proc is unavailable but `lsof` is, use `lsof +D <wt>` — broader still, it
+# catches any OPEN FILE HANDLE under the tree, not just a cwd. If NEITHER is available we cannot
+# tell ⇒ report IN USE (return 0) so we KEEP — a false "in use" only forgoes a reclaim (safe);
+# a false "idle" could delete a live tree, so the probe errs toward IN USE.
+wt_in_use() {
+  local wt="$1" real pid cwd creal
+  real="$(cd "$wt" 2>/dev/null && pwd -P)" || real="${wt%/}"
+  real="${real%/}"
+
+  if [ -d /proc ]; then
+    for pid in /proc/[0-9]*; do
+      cwd="$(readlink "$pid/cwd" 2>/dev/null)" || continue
+      [ -n "$cwd" ] || continue
+      cwd="${cwd%/}"
+      # exact match or strictly beneath the worktree (prefix-safe via the trailing slash).
+      if [ "$cwd" = "$real" ]; then return 0; fi
+      case "$cwd/" in "$real"/*) return 0 ;; esac
+      # also catch a process whose cwd is the symlinky <wt> form rather than its realpath.
+      creal="${wt%/}"
+      if [ "$cwd" = "$creal" ]; then return 0; fi
+      case "$cwd/" in "$creal"/*) return 0 ;; esac
+    done
+    return 1   # /proc scanned, no live cwd inside the tree ⇒ NOT in use
+  fi
+
+  # No /proc: fall back to lsof if present; else we cannot tell ⇒ conservatively IN USE.
+  if command -v lsof >/dev/null 2>&1; then
+    lsof +D "$real" >/dev/null 2>&1 && return 0
+    return 1
+  fi
+  return 0   # cannot determine ⇒ assume IN USE ⇒ KEEP
+}
+
+# classify_reason <wt> <base> <reclaim_completed> : echo a single token describing the SAFE
+# basis, or a KEEP reason. Exit 0 ⇒ safe to remove; exit 1 ⇒ keep. The predicate in one place.
+# <reclaim_completed> (0/1, default 0) enables the completed-but-unmerged workflow-worktree
+# path — when off, behaviour is identical to before (MERGED-or-GONE only).
+#   safe tokens : MERGED  | BRANCH-GONE | COMPLETED-PUSHED
+#   keep  tokens: dirty | unpushed=<n> | gone-but-head-local-only | in-use
+#                 | not-merged-not-gone | not-merged-not-workflow
 classify_reason() {
-  local wt="$1" base="$2" branch unpushed
+  local wt="$1" base="$2" reclaim_completed="${3:-0}" branch unpushed
   # (b) CLEAN — independent of everything else; a dirty tree is always KEEP.
   if ! wt_is_clean "$wt"; then echo "dirty"; return 1; fi
 
@@ -177,6 +261,18 @@ classify_reason() {
   if wt_branch_gone "$wt" "$branch"; then
     if wt_head_reachable_from_remote "$wt"; then echo "BRANCH-GONE"; return 0; fi
     echo "gone-but-head-local-only"; return 1
+  fi
+
+  # (e)+(f) COMPLETED-BUT-UNMERGED reclaim (opt-in): we reach here only when the tree is CLEAN
+  # and has NO unpushed commits (its work is safely on origin) but is neither merged nor gone —
+  # i.e. a finished agent whose PR is still open. Reclaim it iff explicitly enabled AND it is a
+  # harness workflow branch AND no live process is using it; otherwise KEEP as before.
+  if [ "$reclaim_completed" = "1" ]; then
+    if is_workflow_branch "$branch"; then
+      if wt_in_use "$wt"; then echo "in-use"; return 1; fi
+      echo "COMPLETED-PUSHED"; return 0
+    fi
+    echo "not-merged-not-workflow"; return 1
   fi
 
   echo "not-merged-not-gone"; return 1
@@ -213,6 +309,27 @@ self_test() {
   LBL="a path that merely shares a prefix is rejected"
   _expect_false under_root "${R}-evil/agent-x" "$R"
 
+  # is_workflow_branch: only harness wf_/agent- branches are eligible for completed-reclaim.
+  LBL="wf_ branch is a workflow branch"
+  _expect_true  is_workflow_branch "wf_d3d8da8f-85c-1"
+  LBL="agent- branch is a workflow branch"
+  _expect_true  is_workflow_branch "agent-foo"
+  LBL="synthetic worktree-wf_ branch is a workflow branch"
+  _expect_true  is_workflow_branch "worktree-wf_d3d8da8f-85c-1"
+  LBL="synthetic worktree-agent- branch is a workflow branch"
+  _expect_true  is_workflow_branch "worktree-agent-foo"
+  LBL="a feat/ branch is NOT a workflow branch (never completed-reclaimed)"
+  _expect_false is_workflow_branch "feat/sq-evb1-reason-el"
+  LBL="a bare bead-id branch is NOT a workflow branch"
+  _expect_false is_workflow_branch "sq-m3sm-mpc-routing"
+  LBL="an empty (detached) branch is NOT a workflow branch"
+  _expect_false is_workflow_branch ""
+
+  # wt_in_use: a real probe; assert it is callable and returns a clean 0/1 (we cannot
+  # deterministically assert the live-process state of an arbitrary path here). A nonexistent
+  # path has no process with a cwd inside it ⇒ NOT in use (return 1) on a box with /proc.
+  if wt_in_use "/nonexistent/worktree/path"; then _ok "in-use probe returns (in-use)"; else _ok "in-use probe returns (idle)"; fi
+
   echo
   if [ "$fails" -eq 0 ]; then log "self-test PASSED"; return 0; fi
   die "self-test FAILED ($fails check(s))"
@@ -223,11 +340,13 @@ APPLY=0
 ROOT="$DEFAULT_ROOT"
 MAIN="$DEFAULT_MAIN"
 BASE="$DEFAULT_BASE"
+RECLAIM_COMPLETED=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run-self-test) self_test; exit 0 ;;
     --apply)             APPLY=1 ;;
     --dry-run)           APPLY=0 ;;
+    --reclaim-completed) RECLAIM_COMPLETED=1 ;;
     --root)              shift; [ "$#" -gt 0 ] || die "--root needs a value"; ROOT="$1" ;;
     --root=*)            ROOT="${1#--root=}" ;;
     --main)              shift; [ "$#" -gt 0 ] || die "--main needs a value"; MAIN="$1" ;;
@@ -235,7 +354,7 @@ while [ "$#" -gt 0 ]; do
     --base)              shift; [ "$#" -gt 0 ] || die "--base needs a value"; BASE="$1" ;;
     --base=*)            BASE="${1#--base=}" ;;
     -h|--help)           sed -n '2,60p' "$0"; exit 0 ;;
-    *)                   die "unknown argument: $1 (try --apply, --root, --main, --base, --dry-run-self-test, --help)" ;;
+    *)                   die "unknown argument: $1 (try --apply, --reclaim-completed, --root, --main, --base, --dry-run-self-test, --help)" ;;
   esac
   shift
 done
@@ -252,7 +371,7 @@ if ! git -C "$GIT_CTX" rev-parse --git-dir >/dev/null 2>&1; then
     || die "no git repository found (tried --main='$MAIN' and CWD)"
 fi
 log "enumerating worktrees from git context: $GIT_CTX"
-log "root=$ROOT  main(protected)=$MAIN  base(merged-ref)=$BASE  mode=$([ "$APPLY" -eq 1 ] && echo APPLY || echo dry-run)"
+log "root=$ROOT  main(protected)=$MAIN  base(merged-ref)=$BASE  mode=$([ "$APPLY" -eq 1 ] && echo APPLY || echo dry-run)  reclaim-completed=$([ "$RECLAIM_COMPLETED" -eq 1 ] && echo on || echo off)"
 
 # Confirm the base ref resolves (a typo'd --base would make NOTHING look merged → silent
 # under-removal, which is safe, but warn so the operator knows).
@@ -288,7 +407,7 @@ process_record() {
   if [ ! -d "$cur_path" ];     then log "KEEP  $cur_path  (path missing on disk)";       kept=$((kept+1)); return 0; fi
 
   local reason
-  if reason="$(classify_reason "$cur_path" "$BASE")"; then
+  if reason="$(classify_reason "$cur_path" "$BASE" "$RECLAIM_COMPLETED")"; then
     SAFE_DIRS+=("$cur_path")
     SAFE_REASON+=("$reason")
     SEEN_REASON_COUNT["$reason"]=$(( ${SEEN_REASON_COUNT["$reason"]:-0} + 1 ))
@@ -347,20 +466,35 @@ fi
 
 # --- --apply: remove the safe set, then prune --------------------------------------------
 log "--apply: removing ${#SAFE_DIRS[@]} safe worktree(s)..."
-removed=0; failed=0
-for wt in "${SAFE_DIRS[@]}"; do
+removed=0; failed=0; skipped_busy=0
+for i in "${!SAFE_DIRS[@]}"; do
+  wt="${SAFE_DIRS[$i]}"
+  reason="${SAFE_REASON[$i]}"
   # Re-assert the hard exclusion at the point of mutation (defence in depth — this can never
   # fire because main is dropped during enumeration, but if it ever did we abort, not delete).
   if is_protected_path "$wt" "$MAIN"; then
     die "refusing to remove protected main checkout: $wt"
   fi
+  # TOCTOU re-verify the completed-but-unmerged path: a tree that was clean+pushed+idle when we
+  # classified it could have been re-entered by a freshly-spawned agent between the scan and now.
+  # MERGED/BRANCH-GONE entries are immune (their work is already on origin), so we only re-check
+  # the COMPLETED-PUSHED set — KEEPing it if it has since gone dirty or in-use. Cheap insurance.
+  if [ "$reason" = "COMPLETED-PUSHED" ]; then
+    if ! wt_is_clean "$wt"; then
+      log "  SKIP (now dirty since scan, kept): $wt"; skipped_busy=$((skipped_busy+1)); continue
+    fi
+    if wt_in_use "$wt"; then
+      log "  SKIP (now in use since scan, kept): $wt"; skipped_busy=$((skipped_busy+1)); continue
+    fi
+  fi
   if git -C "$GIT_CTX" worktree remove --force "$wt" 2>/dev/null; then
-    log "  removed: $wt"; removed=$((removed+1))
+    log "  removed ($reason): $wt"; removed=$((removed+1))
   else
     log "  FAILED to remove (kept): $wt"; failed=$((failed+1))
   fi
 done
+[ "$skipped_busy" -eq 0 ] || log "skipped $skipped_busy completed-worktree(s) that became dirty/in-use after the scan (kept)."
 log "pruning stale worktree administrative entries..."
 git -C "$GIT_CTX" worktree prune -v 2>&1 | sed 's/^/  /' >&2 || true
-log "done: removed $removed, failed $failed, of ${#SAFE_DIRS[@]} safe candidate(s)."
+log "done: removed $removed, failed $failed, skipped-busy $skipped_busy, of ${#SAFE_DIRS[@]} safe candidate(s)."
 [ "$failed" -eq 0 ]

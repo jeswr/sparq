@@ -10,6 +10,11 @@ pub mod dictspill;
 #[cfg(feature = "mmap")]
 pub mod extsort;
 mod nt;
+// [OPUS-4.8] sq-yj76l (gh #1121): the opt-in `SharedGraph` server-sharing handle. OFF by
+// default so the lean default / wasm build never links it (it is `std::sync` only — no new
+// dep — but the surface stays out of the default API).
+#[cfg(feature = "shared")]
+pub mod shared;
 pub mod store;
 pub mod temporal;
 
@@ -130,6 +135,19 @@ impl std::ops::Deref for GraphSnapshot {
         &self.graph
     }
 }
+
+// [OPUS-4.8] (sq-yj76l, gh #1121) GUARANTEE — for all feature states — that a `Graph` and its
+// read-only `GraphSnapshot` stay `Send` + `Sync`, so they can be shared across the threads of a
+// multi-threaded server (axum/actix) directly or via [`shared::SharedGraph`]. This is a
+// zero-cost compile-time check: adding a future non-`Send`/non-`Sync` field (e.g. an `Rc` or a
+// bare interior-mutable cell) to `Graph` would fail the build HERE rather than silently breaking
+// downstream multi-threaded users. The `mmap`/`dict-spill`-gated fields (`File`, `Mmap`,
+// `TxnJournal`) are themselves `Send + Sync`, so this holds with every feature on too.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Graph>();
+    assert_send_sync::<GraphSnapshot>();
+};
 
 /// Backing storage for the numeric-value cache (`numerics[id-1]` = f64 value of term
 /// `id`, NaN for non-numeric): owned dense in RAM, mmap'd from disk (out-of-core), or
@@ -1066,6 +1084,22 @@ impl Graph {
     /// `build`.
     pub fn from_parts(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
         Self::build(dict, triples)
+    }
+
+    /// [OPUS-4.8] (gh-1118) An empty, in-memory graph — the trivial, INFALLIBLE constructor.
+    ///
+    /// Equivalent to [`from_parts`](Self::from_parts)`(Dict::new(), Vec::new())` but spelled the
+    /// obvious way, so callers no longer reach for `Graph::load_str("", "turtle").unwrap()` (which
+    /// parses an empty document and forces error handling for an operation that cannot fail) or the
+    /// lower-level `from_parts` plumbing just to get an empty graph. Build it up incrementally with
+    /// [`insert_triple`](Self::insert_triple) / [`apply_delta`](Self::apply_delta), or load into it
+    /// via the `apply_delta_nquads` / `apply_delta` paths. This is an IN-MEMORY graph (no directory
+    /// association, so `apply_delta` is overlay-only — there is no write-ahead log); use
+    /// [`open`](Self::open) for a durable directory-backed graph. Also reachable as
+    /// [`Graph::default()`](Default::default).
+    #[inline]
+    pub fn new() -> Graph {
+        Self::from_parts(Dict::new(), Vec::new())
     }
 
     /// [OPUS-4.8] (sq-zz8z, gh-51) The sort key the prefix index orders graph names by: the
@@ -2550,6 +2584,47 @@ impl Graph {
         Ok(())
     }
 
+    /// [OPUS-4.8] (gh-1122) Insert a SINGLE triple from `oxrdf` terms — the ergonomic
+    /// convenience over [`apply_delta`](Self::apply_delta) for the one-triple case.
+    ///
+    /// Each position accepts anything that converts into an `oxrdf::Term` (`NamedNode`,
+    /// `Literal`, `BlankNode`, an [RDF 1.2] triple term, or a `Term` itself), so callers avoid both
+    /// building a dictionary-encoded `[[Term; 3]]` batch by hand AND assembling/escaping an
+    /// `INSERT DATA { … }` SPARQL string for what is conceptually one append. The term is interned
+    /// APPEND-ONLY and applied through the same delta-overlay path as `apply_delta`, so it inherits
+    /// the identical semantics: set-valued (re-inserting an existing triple is a no-op), O(1) work,
+    /// and — for a directory-backed graph (opened via [`open`](Self::open)) — WAL-logged + fsync'd
+    /// before it is applied. To add several triples at once, prefer one
+    /// [`apply_delta`](Self::apply_delta) batch over a loop of single inserts (one WAL append).
+    ///
+    /// [RDF 1.2]: https://www.w3.org/TR/rdf12-concepts/
+    pub fn insert_triple(
+        &mut self,
+        subject: impl Into<Term>,
+        predicate: impl Into<Term>,
+        object: impl Into<Term>,
+    ) -> Result<(), String> {
+        let triple = [subject.into(), predicate.into(), object.into()];
+        self.apply_delta(&[triple], &[])
+    }
+
+    /// [OPUS-4.8] (gh-1122) Remove a SINGLE triple from `oxrdf` terms — the retraction twin of
+    /// [`insert_triple`](Self::insert_triple), delegating to [`apply_delta`](Self::apply_delta).
+    ///
+    /// Removing a triple the graph does not contain is a NO-OP (set semantics, inherited from
+    /// `apply_delta`), never an error. As with `insert_triple`, for a directory-backed graph the
+    /// deletion is WAL-logged + fsync'd before it is applied; to retract several triples at once,
+    /// prefer one [`apply_delta`](Self::apply_delta) batch.
+    pub fn remove_triple(
+        &mut self,
+        subject: impl Into<Term>,
+        predicate: impl Into<Term>,
+        object: impl Into<Term>,
+    ) -> Result<(), String> {
+        let triple = [subject.into(), predicate.into(), object.into()];
+        self.apply_delta(&[], &[triple])
+    }
+
     /// [OPUS-4.8] (sq-ycle) Commit a whole multi-operation UPDATE body's resolved per-slot
     /// quad-delta as ONE atomic, all-or-nothing durable frame — the SINGLE commit point for
     /// `sparq_engine::apply_effects`. `records` is `(is_insert, slot, triple)` quads computed
@@ -3004,23 +3079,66 @@ impl Graph {
     /// re-opened memory-mapped from the new base with a fresh, empty WAL.
     #[cfg(feature = "mmap")]
     fn persist_swap(&mut self, dir: &std::path::Path) -> Result<(), String> {
-        let new_dir = dir.with_extension("compact-new");
-        let old_dir = dir.with_extension("compact-old");
-        std::fs::remove_dir_all(&new_dir).ok();
-        std::fs::remove_dir_all(&old_dir).ok();
-        self.wal = None; // close the log before the directory swap
-        self.save(&new_dir).map_err(|e| e.to_string())?;
-        fsync_dir(&new_dir).map_err(|e| e.to_string())?;
-        let parent = dir.parent().unwrap_or_else(|| std::path::Path::new("."));
-        std::fs::rename(dir, &old_dir).map_err(|e| e.to_string())?;
-        fsync_dir(parent).map_err(|e| e.to_string())?;
-        std::fs::rename(&new_dir, dir).map_err(|e| e.to_string())?;
-        fsync_dir(parent).map_err(|e| e.to_string())?;
-        // Re-open memory-mapped from the new base (fresh, empty WAL); only then drop the old
-        // files (open mmaps keep unlinked files alive on unix).
-        *self = Graph::open(dir).map_err(|e| e.to_string())?;
-        std::fs::remove_dir_all(&old_dir).ok();
+        // Close THIS graph's WAL before the directory swap (its `wal.log` is about to be renamed
+        // away with `dir`), then run the shared crash-safe swap, writing `self`'s CURRENT image as
+        // the new base. Adopt the re-opened directory-backed graph in place. [OPUS-4.8] (sq-ft7u)
+        self.wal = None;
+        let reopened = swap_dir_to_new_base(dir, |new_dir| self.save(new_dir))
+            .map_err(|e| e.to_string())?;
+        *self = reopened;
         Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) PUBLIC crash-safe RESTORE-INTO-DURABLE seam. Atomically REPLACE the
+    /// durable contents of the directory-backed store at `dir` with `fresh`'s image, reusing the
+    /// EXACT same rollback-safe two-rename protocol as the internal compaction swap (the helper
+    /// `persist_swap` also calls — there is one crash-safe swap implementation, not two). Returns
+    /// the directory-backed [`Graph`] re-opened memory-mapped from the new base (a fresh, empty
+    /// WAL), so the caller's subsequent updates WAL-append to the restored store.
+    ///
+    /// This is the durable counterpart to the server's online in-memory restore: the caller imports
+    /// (and thus FULLY validates) the backup artifact into `fresh` BEFORE calling this, so the swap
+    /// only ever runs over a known-good image.
+    ///
+    /// CRASH-SAFETY + FAIL-CLOSED. The protocol is: write `fresh`'s image to `<dir>.compact-new`
+    /// and fsync that directory (durable before it can become canonical); rename `dir` ->
+    /// `<dir>.compact-old` (parent fsync); rename `<dir>.compact-new` -> `dir` (parent fsync);
+    /// re-open memory-mapped from the new base; drop `<dir>.compact-old`. There is a window where
+    /// the canonical `dir` does not exist (between the two renames); a crash there is HEALED
+    /// deterministically on the next `open` (which runs the compaction recovery from the surviving
+    /// `.compact-new` / `.compact-old` sibling), so `dir` ends up old-or-new — NEVER corrupt or
+    /// partially written. If anything fails BEFORE the first rename (e.g. writing the new base),
+    /// `dir` is untouched: the old durable store survives intact.
+    ///
+    /// PRECONDITION (caller's responsibility): NO other handle may be mutating `dir` (WAL-appending)
+    /// concurrently — the caller must quiesce the durable writer that owns `dir` before invoking
+    /// this, exactly as the in-process compaction swap runs only on the single writer thread.
+    #[cfg(feature = "mmap")]
+    pub fn restore_into_durable(
+        dir: &std::path::Path,
+        fresh: Graph,
+    ) -> std::io::Result<Graph> {
+        swap_dir_to_new_base(dir, |new_dir| fresh.save(new_dir))
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) The directory this graph is durably backed by (its `--persist` dir),
+    /// or `None` for an in-memory graph. The companion to [`restore_into_durable`](Self::restore_into_durable):
+    /// a caller doing an in-place durable restore reads the backing dir, then closes the WAL
+    /// (see [`close_wal`](Self::close_wal)) before swapping the directory over to the new base.
+    #[cfg(feature = "mmap")]
+    pub fn persist_dir(&self) -> Option<std::path::PathBuf> {
+        self.wal.as_ref().map(|w| w.dir.clone())
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) Close (drop) this graph's write-ahead-log handle, if any. Used right
+    /// before a directory swap that renames the backing dir away (the WAL's `wal.log` lives under
+    /// it), exactly as the internal compaction swap does — the swap then re-opens a fresh handle.
+    /// A no-op for an in-memory graph. Safe to call on a graph whose dir is about to be replaced
+    /// by [`restore_into_durable`](Self::restore_into_durable); the graph keeps serving reads from
+    /// its in-memory image, it simply stops appending to the (about-to-be-renamed) log.
+    #[cfg(feature = "mmap")]
+    pub fn close_wal(&mut self) {
+        self.wal = None;
     }
 
     /// [OPUS-4.8] (sq-x32t, epic sq-toze.33) ERASURE-GRADE VACUUM. Like [`compact`](Self::compact)
@@ -3096,6 +3214,15 @@ impl Graph {
     }
 }
 
+/// [OPUS-4.8] (gh-1118) An empty, in-memory [`Graph`] — the trivial INFALLIBLE default. Delegates
+/// to [`Graph::new`], so `Graph::default()` and `Graph::new()` are interchangeable.
+impl Default for Graph {
+    #[inline]
+    fn default() -> Self {
+        Graph::new()
+    }
+}
+
 /// [OPUS-4.8] (review 1593) fsync a DIRECTORY so a rename of (or into) it is durable. On
 /// failure (e.g. a platform/filesystem that rejects opening a dir) it is a best-effort no-op,
 /// matching the durability the rest of the persistence path assumes.
@@ -3112,6 +3239,49 @@ fn fsync_dir(dir: &std::path::Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// [OPUS-4.8] (sq-ft7u) The ONE crash-safe directory-base swap, factored out of
+/// [`persist_swap`](Graph::persist_swap) so the public [`restore_into_durable`](Graph::restore_into_durable)
+/// reuses the IDENTICAL rollback-safe protocol rather than copy-pasting it. `write_new_base` is
+/// handed the (cleared) `<dir>.compact-new` sibling and must write the desired new durable image
+/// there (e.g. `graph.save(new_dir)`). On success the new base is canonical at `dir` and a graph
+/// re-opened memory-mapped from it (fresh, empty WAL) is returned.
+///
+/// The protocol (matching the design recorded on `persist_swap`):
+///   1. clear any stale siblings, then write the new base to `<dir>.compact-new` and fsync that
+///      DIRECTORY (so it is durable before it can become canonical);
+///   2. rename `dir` -> `<dir>.compact-old`, fsync the parent (the rename is durable);
+///   3. rename `<dir>.compact-new` -> `dir`, fsync the parent;
+///   4. re-open from the new base, THEN drop `<dir>.compact-old` (open mmaps keep unlinked files
+///      alive on unix, so the re-open must precede the cleanup).
+///
+/// FAIL-CLOSED: if `write_new_base` (or its fsync) fails — i.e. anything BEFORE the first rename —
+/// `dir` is never touched, so the old durable store survives intact. A crash DURING the two
+/// renames is healed by [`recover_compaction`] on the next [`open`](Graph::open), which promotes
+/// `compact-new` or rolls back to `compact-old` — `dir` is never lost.
+#[cfg(feature = "mmap")]
+fn swap_dir_to_new_base<F>(dir: &std::path::Path, write_new_base: F) -> std::io::Result<Graph>
+where
+    F: FnOnce(&std::path::Path) -> std::io::Result<()>,
+{
+    let new_dir = dir.with_extension("compact-new");
+    let old_dir = dir.with_extension("compact-old");
+    std::fs::remove_dir_all(&new_dir).ok();
+    std::fs::remove_dir_all(&old_dir).ok();
+    // Build + sync the new base FIRST. A failure here leaves `dir` untouched (fail-closed) —
+    // the two renames below have not started, so the old durable store is intact.
+    write_new_base(&new_dir)?;
+    fsync_dir(&new_dir)?;
+    let parent = dir.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::rename(dir, &old_dir)?;
+    fsync_dir(parent)?;
+    std::fs::rename(&new_dir, dir)?;
+    fsync_dir(parent)?;
+    // Re-open memory-mapped from the new base (fresh, empty WAL); only then drop the old files.
+    let reopened = Graph::open(dir)?;
+    std::fs::remove_dir_all(&old_dir).ok();
+    Ok(reopened)
 }
 
 /// [OPUS-4.8] (review 1593) Recover an INTERRUPTED [`compact`](Graph::compact) directory swap
@@ -6273,11 +6443,16 @@ mod tests {
 
         // 4. Literals with datatypes, language tags (incl. `--dir`), escapes, and a `.`-bearing
         //    IRI/literal — the byte parser's literal/IRI grammar must agree with oxttl's per graph.
+        //    [OPUS-4.8] (sq-langcase / #1119) The MIXED-CASE tags (`en-US`, `en-GB--ltr`) pin the
+        //    casing-normalisation parity: the byte parser must lowercase the tag to the SAME slot
+        //    oxttl produces, or this differential check fails on the language column.
         let mut lits = String::new();
         for i in 0..400 {
             let g = if i % 3 == 0 { String::new() } else { format!(" <http://g.x/{}.n>", i % 3) };
             lits.push_str(&format!(
                 "<http://ex/s{i}> <http://ex/p> \"val.{i} \\\"q\\\" x\"@en-us{g} .\n\
+                 <http://ex/s{i}> <http://ex/m> \"mixed.{i}\"@en-US{g} .\n\
+                 <http://ex/s{i}> <http://ex/d> \"dir.{i}\"@en-GB--ltr{g} .\n\
                  <http://ex/s{i}> <http://ex/n> \"{i}\"^^<http://www.w3.org/2001/XMLSchema#integer>{g} .\n"
             ));
         }
@@ -7103,6 +7278,39 @@ mod tests {
         };
         assert_eq!(named_of(&g2, "http://res/a"), Some(2), "named graph a lost a WAL-logged triple");
         assert_eq!(named_of(&g2, "http://res/b"), Some(1), "named graph b not recovered from WAL");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (gh-1122) `insert_triple` / `remove_triple` against a DIRECTORY-BACKED graph
+    /// flow through the SAME durable `apply_delta` path as a batch: each is WAL-logged + fsync'd,
+    /// so a crash-style reopen (no save/compact in between) recovers the insert and honours the
+    /// remove. This is the load-bearing durability invariant of the single-triple convenience API.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn single_triple_mutations_are_wal_durable() {
+        let dir = std::env::temp_dir().join(format!("sparq_single_triple_wal_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        Graph::load_str("", "ntriples").unwrap().save(&dir).unwrap();
+        let s = NamedNode::new_unchecked("http://ex/s");
+        let p = NamedNode::new_unchecked("http://ex/p");
+        let keep = Term::NamedNode(NamedNode::new_unchecked("http://ex/keep"));
+        let gone = Term::NamedNode(NamedNode::new_unchecked("http://ex/gone"));
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            g.insert_triple(s.clone(), p.clone(), keep.clone()).unwrap();
+            g.insert_triple(s.clone(), p.clone(), gone.clone()).unwrap();
+            // Retract one of them through the single-triple remove path.
+            g.remove_triple(s.clone(), p.clone(), gone.clone()).unwrap();
+            // Drop WITHOUT save()/compact(): only the WAL records are on disk.
+        }
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(g2.len(), 1, "exactly the un-retracted insert must recover from the WAL");
+        assert!(g2.id_of(&keep).is_some(), "the kept triple's object must be present");
+        assert!(
+            g2.pattern(Some(&Term::NamedNode(s)), Some(&p), Some(&gone)).is_none()
+                || g2.store.scan(&[None, None, None]).rows.len() == 1,
+            "the removed triple must not survive the reopen"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -8814,6 +9022,65 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// [OPUS-4.8] (sq-ft7u) The PUBLIC `restore_into_durable` seam: replacing a directory-backed
+    /// store's contents with a fresh image must (a) round-trip the fresh live triple set after the
+    /// swap AND after a reopen (the on-disk base IS the restored image), and (b) leave NO sibling
+    /// cruft. The restored graph must also be WAL-backed (a subsequent durable update survives a
+    /// reopen), proving the re-open carried a real WAL.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn restore_into_durable_round_trips_and_is_wal_backed() {
+        let dir = std::env::temp_dir().join(format!("sparq_restore_durable_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        // Establish an ORIGINAL durable store with one triple.
+        Graph::load_str("<http://ex/orig> <http://ex/p> <http://ex/o> .", "ntriples")
+            .unwrap()
+            .save(&dir)
+            .unwrap();
+        assert_eq!(Graph::open(&dir).unwrap().len(), 1);
+
+        // Restore a DIFFERENT, larger fresh image THROUGH to the durable dir.
+        let mut fresh = Graph::load_str(
+            "<http://ex/r1> <http://ex/p> <http://ex/o1> .\n\
+             <http://ex/r2> <http://ex/p> <http://ex/o2> .",
+            "ntriples",
+        )
+        .unwrap();
+        // A named graph too, to exercise the whole sub-tree write.
+        fresh
+            .apply_delta_nquads(
+                "<http://ex/n> <http://ex/q> <http://ex/w> <http://ex/g> .",
+                "",
+            )
+            .unwrap();
+        let restored = Graph::restore_into_durable(&dir, fresh).unwrap();
+        // The original triple is GONE; the restored set is present (round-trip of the live set).
+        let live = dump_terms(&restored);
+        assert!(!live.iter().any(|(s, _, _)| s.contains("/orig")), "original content replaced");
+        assert!(live.iter().any(|(s, _, _)| s.contains("/r1")), "restored content present");
+        assert_eq!(restored.len(), 2, "two default-graph triples after restore");
+        // No sibling leftovers from the swap.
+        assert!(!dir.with_extension("compact-new").exists());
+        assert!(!dir.with_extension("compact-old").exists());
+
+        // The restored graph is genuinely WAL-backed: a durable update + a fresh reopen sees it.
+        let mut g = restored;
+        g.apply_delta_nquads("<http://ex/post> <http://ex/p> <http://ex/v> .", "").unwrap();
+        drop(g);
+        let reopened = Graph::open(&dir).unwrap();
+        let live2 = dump_terms(&reopened);
+        assert!(live2.iter().any(|(s, _, _)| s.contains("/r1")), "restored content survives reopen");
+        assert!(live2.iter().any(|(s, _, _)| s.contains("/post")), "post-restore update is WAL-durable");
+        assert!(!live2.iter().any(|(s, _, _)| s.contains("/orig")), "original never resurrects");
+        let g_name = Term::NamedNode(NamedNode::new_unchecked("http://ex/g".to_string()));
+        let named = reopened
+            .named_graph(&g_name)
+            .expect("the restored named graph survives the reopen");
+        assert_eq!(named.len(), 1, "the named graph holds its one triple after reopen");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// [OPUS-4.8] (review 1593) A durable CLEAR of a directory-backed graph must SURVIVE a
     /// reopen. The pre-fix CLEAR replaced the graph with a fresh in-memory empty graph,
     /// dropping the WAL/dir association, so the on-disk base was untouched and a reopen
@@ -9362,6 +9629,105 @@ mod tests {
         assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/old")), "must roll back to the old base");
         std::fs::remove_dir_all(&base).ok();
     }
+
+    // ---- [OPUS-4.8] gh-1118 / gh-1122: ergonomic constructors + single-triple mutation ----
+
+    /// gh-1118: `Graph::new()` and `Graph::default()` both yield an EMPTY in-memory graph
+    /// (no error handling, no `load_str("", …)` workaround) and are interchangeable.
+    #[test]
+    fn new_and_default_are_empty_graphs() {
+        let n = Graph::new();
+        assert!(n.is_empty(), "Graph::new() must be empty");
+        assert_eq!(n.len(), 0, "Graph::new() must have zero triples");
+        assert!(n.named.is_empty(), "Graph::new() must have no named graphs");
+        let d = Graph::default();
+        assert!(d.is_empty(), "Graph::default() must be empty");
+        assert_eq!(d.len(), 0, "Graph::default() must have zero triples");
+        // An empty graph is immediately usable for incremental build-up.
+        let mut g = Graph::new();
+        g.insert_triple(
+            NamedNode::new_unchecked("http://ex/s"),
+            NamedNode::new_unchecked("http://ex/p"),
+            NamedNode::new_unchecked("http://ex/o"),
+        )
+        .unwrap();
+        assert_eq!(g.len(), 1);
+    }
+
+    /// gh-1122: `insert_triple` takes oxrdf terms directly, makes the triple queryable
+    /// (REAL overlay path — `id_of` resolves the interned terms and a pattern scan finds the
+    /// row), and is SET-VALUED — re-inserting the same triple is a no-op, not a duplicate.
+    #[test]
+    fn insert_triple_interns_and_is_set_valued() {
+        let mut g = Graph::new();
+        let s = NamedNode::new_unchecked("http://ex/alice");
+        let p = NamedNode::new_unchecked("http://schema.org/age");
+        let o = Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER));
+        // Mixed term kinds: NamedNode (subject), NamedNode (predicate), Literal (object).
+        g.insert_triple(s.clone(), p.clone(), o.clone()).unwrap();
+        assert_eq!(g.len(), 1);
+        // Real path: the terms are interned, so the pattern scan finds exactly this row.
+        let pat = g
+            .pattern(Some(&Term::NamedNode(s.clone())), Some(&p), Some(&o))
+            .expect("all three terms interned");
+        assert_eq!(g.store.scan(&pat).rows.len(), 1, "the inserted triple must be queryable");
+        // Set semantics: re-inserting the identical triple does not grow the graph.
+        g.insert_triple(s, p, o).unwrap();
+        assert_eq!(g.len(), 1, "re-inserting an existing triple is a no-op");
+    }
+
+    /// gh-1122: `remove_triple` retracts a present triple and is a NO-OP (never an error)
+    /// for an absent one — the retraction twin of `insert_triple`.
+    #[test]
+    fn remove_triple_retracts_and_absent_is_noop() {
+        let mut g = Graph::new();
+        let s = NamedNode::new_unchecked("http://ex/s");
+        let p = NamedNode::new_unchecked("http://ex/p");
+        let o = Term::NamedNode(NamedNode::new_unchecked("http://ex/o"));
+        let other = Term::NamedNode(NamedNode::new_unchecked("http://ex/never"));
+        g.insert_triple(s.clone(), p.clone(), o.clone()).unwrap();
+        assert_eq!(g.len(), 1);
+        // Removing an absent triple is a no-op (the object term is not even in the dict).
+        g.remove_triple(s.clone(), p.clone(), other).unwrap();
+        assert_eq!(g.len(), 1, "removing an absent triple must not change the graph");
+        // Removing the present triple retracts it.
+        g.remove_triple(s, p, o).unwrap();
+        assert!(g.is_empty(), "removing the present triple must empty the graph");
+    }
+
+    /// gh-1122: the load-bearing invariant — a graph built with `Graph::new()` +
+    /// `insert_triple` is RESULT-EQUIVALENT to the same triples parsed from Turtle text
+    /// (same materialised term set), so the convenience API is not a separate semantics.
+    #[test]
+    fn insert_triple_equivalent_to_text_load() {
+        let mut built = Graph::new();
+        let s = NamedNode::new_unchecked("http://ex/alice");
+        built
+            .insert_triple(
+                s.clone(),
+                NamedNode::new_unchecked("http://ex/name"),
+                Term::Literal(Literal::new_simple_literal("Alice")),
+            )
+            .unwrap();
+        built
+            .insert_triple(
+                s,
+                NamedNode::new_unchecked("http://ex/knows"),
+                NamedNode::new_unchecked("http://ex/bob"),
+            )
+            .unwrap();
+        let loaded = Graph::load_str(
+            "<http://ex/alice> <http://ex/name> \"Alice\" .\n\
+             <http://ex/alice> <http://ex/knows> <http://ex/bob> .",
+            "ntriples",
+        )
+        .unwrap();
+        let mut a = dump_terms(&built);
+        let mut b = dump_terms(&loaded);
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "insert_triple build must match the text-loaded graph");
+    }
 }
 
 #[cfg(test)]
@@ -9411,6 +9777,30 @@ mod dir_roundtrip_test {
         let scan = g.store.scan(&[None, None, None]);
         let t = scan.to_spo(&scan.rows.as_ref()[0]);
         assert_eq!(g.dict.term(t[2]).to_string(), "\"abc\"@en--ltr");
+    }
+
+    /// [OPUS-4.8] (sq-langcase / KamiQuasi #1119) Cross-format CONSISTENCY: loading the SAME
+    /// language-tagged triple as N-Triples, N-Quads, and Turtle must yield the SAME stored term —
+    /// a lowercased tag (`en-us`), not the format-dependent `en-US` (N-Triples) / `en-us` (Turtle)
+    /// split that existed before the byte parser was taught to normalise the tag. This is the
+    /// public-API regression for the reported bug: pick the literal object back out via the store
+    /// scan and compare its serialised form across all three load paths.
+    #[test]
+    fn language_tag_casing_consistent_across_formats() {
+        let only_obj = |g: &crate::Graph| -> String {
+            let scan = g.store.scan(&[None, None, None]);
+            let t = scan.to_spo(&scan.rows.as_ref()[0]);
+            g.dict.term(t[2]).to_string()
+        };
+        let nt = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "ntriples").unwrap();
+        let ttl = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "turtle").unwrap();
+        let nq = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "nquads").unwrap();
+        assert_eq!(only_obj(&nt), "\"hi\"@en-us", "N-Triples must lowercase the language tag");
+        assert_eq!(only_obj(&ttl), "\"hi\"@en-us", "Turtle must lowercase the language tag");
+        assert_eq!(only_obj(&nq), "\"hi\"@en-us", "N-Quads must lowercase the language tag");
+        // The three load paths agree (the format-dependent split is gone).
+        assert_eq!(only_obj(&nt), only_obj(&ttl));
+        assert_eq!(only_obj(&nt), only_obj(&nq));
     }
 
     /// Fork-after-compact must stay O(delta): compaction folds the numeric/temporal

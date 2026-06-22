@@ -70,9 +70,37 @@ count-enforcement = ["odrl-bridge", "sparq-policy/count-enforcement"]
 # SKILL for the honest scope.
 trust-graph = ["dep:sparq-trust"]
 
-[dev-dependencies]
+# [OPUS-4.8] sq-pfae.3 (issue #940): forward `sparq-trust`'s OPT-IN `did` feature so a
+# sparq-solid integrator can bind a trust rule's issuer key from a `trust:issuerDid`
+# (`did:key` offline self-cert / pluggable `did:web`) via `sparq_trust::resolve_rule_keys`,
+# narrowing the operator-asserted-key forgery vector D′. Default-OFF and additive over
+# `trust-graph` — it adds only the resolver surface; no new runtime method. See the
+# `sparq-trust` `did` rustdoc for the honest scope (self-cert ≠ trust anchor; did:web is
+# only as strong as host/TLS control; no privacy).
+trust-graph-did = ["trust-graph", "sparq-trust/did"]
+
 # [OPUS-4.8] sq-pfae PoC: the trust-graph end-to-end test (tests/trust_graph.rs, fully
 # `#![cfg(feature = "trust-graph")]`) drives the admission gate through the real
-# PodStore. These are dev-only — they do not touch the default build or publish.
+# PodStore. These are dev-only — they do not touch the default build or publish. Scoped
+# to NON-wasm32 [OPUS-4.8 sq-7agop]: the `trust-graph` ZK estate (the arkworks stack →
+# `rand 0.8 → getrandom 0.2`) is native-only and not wasm-portable, so excluding it from
+# the wasm32 dev-graph lets `tests/wasm_materialize.rs` build under `wasm-pack test`
+# without dragging a wasm-incompatible getrandom into the test graph.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 sparq-trust = { path = "../sparq-trust" }
 sparq-zk = { path = "../sparq-zk" }
+
+# [OPUS-4.8] sq-7agop: wasm32 build+smoke check (regression guard for the cfg-gated
+# `std::time::Instant` in `materialize_*`). `tests/wasm_materialize.rs` runs the REAL
+# materialize path in a genuine wasm32 runtime via `wasm-pack test --node`, asserting it
+# no longer traps (it panicked on `Instant::now()` before the fix). These are DEV-ONLY
+# wasm32-target deps — they do NOT enter the runtime/published graph and native builds
+# link none of them:
+#  - getrandom/wasm_js: the crate's transitive `oxrdf → rand → getrandom` needs a wasm
+#    RNG backend selected before it compiles for wasm32 (the workspace `.cargo/config.toml`
+#    sets the matching `--cfg getrandom_backend="wasm_js"`). A downstream host bundle
+#    selects the backend itself at runtime (see README §WASM support), as `sparq-wasm` does.
+#  - wasm-bindgen-test: the headless test harness (pairs with the 0.2.x wasm-bindgen line).
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen-test = "0.3"

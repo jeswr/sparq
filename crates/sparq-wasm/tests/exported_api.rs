@@ -81,6 +81,45 @@ fn exported_load_compressed_matches_raw() {
     assert!(cmp.heap_bytes() <= raw.heap_bytes());
 }
 
+/// [OPUS-4.8] sq-ty78o (#1114): the exported `Store::new()` (`new Store()`) builds an empty,
+/// mutable store, and a `GRAPH`-targeted `updateInPlace` then a `GRAPH ?g` query round-trips
+/// — the named-graph gap closed by the constructor. Exercises the `new`/`update_in_place`
+/// success arms natively (the coverage floor for the exported method).
+#[test]
+fn exported_new_store_named_graph_roundtrip() {
+    let mut store = Store::new().unwrap();
+    assert_eq!(store.size(), 0, "a new Store() is empty");
+    store
+        .update_in_place(
+            "INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
+        )
+        .unwrap();
+    let json = store
+        .query("SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }")
+        .unwrap();
+    assert!(
+        json.contains("\"value\":\"http://ex/g\""),
+        "named graph round-trips through the exported new Store(): {json}"
+    );
+}
+
+/// [OPUS-4.8] sq-f66jz (#1115): the exported `Store::loadWithBase` resolves relative IRIs
+/// against the base (the `Ok` arm runs natively).
+#[test]
+fn exported_load_with_base_resolves_relative() {
+    let store = Store::load_with_base("<a> <p> <../up/o> .", "turtle", "http://ex/dir/").unwrap();
+    assert_eq!(store.size(), 1);
+    let json = store.query("SELECT ?s ?o WHERE { ?s ?p ?o }").unwrap();
+    assert!(
+        json.contains("\"value\":\"http://ex/dir/a\""),
+        "relative subject resolved against base: {json}"
+    );
+    assert!(
+        json.contains("\"value\":\"http://ex/up/o\""),
+        "relative object resolved (..) against base: {json}"
+    );
+}
+
 // ---- query -> SPARQL 1.1 JSON ----------------------------------------------
 
 /// The exported `Store::query` returns a well-formed SPARQL-1.1-JSON string: head vars in

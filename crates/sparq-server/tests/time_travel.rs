@@ -16,6 +16,13 @@
 //! window), never by wall-clock `max_age` — the clock-sensitive age semantics
 //! are unit-tested in sparq-serve with an injected clock (the recorded
 //! determinism concern).
+//!
+//! [OPUS-4.8] (sq-1b390) Gate the whole suite on the `server` feature. It spins the real axum
+//! server and uses the `server`-gated `sparq_server::router` / `AppState` API, so under
+//! `--no-default-features --all-targets` (the pure-serialiser-library build) this file must
+//! compile OUT — otherwise `clippy --no-default-features --all-targets` breaks on the
+//! unresolved axum / serde_json / router imports. 🤖 SPARQ agent.
+#![cfg(feature = "server")]
 
 use sparq_core::Graph;
 use sparq_server::{router, AppState, ServerConfig};

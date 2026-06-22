@@ -395,9 +395,12 @@ curl -X POST -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/admin/comp
 # Online consistent-snapshot backup + restore (feature `backup`, default OFF). POST-only, WRITE-gated.
 # Backup streams a single self-describing artifact of the LIVE store WHILE SERVING (no stop-the-world):
 curl -X POST -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/admin/backup -o snapshot.spqb
-# Restore atomically installs a store rehydrated from that artifact (in-memory server only; fail-closed):
+# Restore atomically installs a store rehydrated from that artifact (in-memory; fail-closed):
 curl -X POST -H 'Authorization: Bearer <TOKEN>' --data-binary @snapshot.spqb http://127.0.0.1:3030/admin/restore
+# On a --persist server, opt into write-through so the restore survives a restart (else 409):
+curl -X POST -H 'Authorization: Bearer <TOKEN>' --data-binary @snapshot.spqb 'http://127.0.0.1:3030/admin/restore?persist=true'
 # Restore on start (bootstrap a fresh node / PITR base):  sparq-server --restore snapshot.spqb
+#   …into a durable store (survives restart):             sparq-server --persist DIR --restore snapshot.spqb --restore-persist
 # Incremental change-stream / point-in-time recovery (PITR): a DELTA between a retained
 # generation N and the current generation (replayed forward onto the matching base):
 curl -X POST -H 'Authorization: Bearer <TOKEN>' 'http://127.0.0.1:3030/admin/backup/delta?from=0' -o d0.spqd
@@ -449,14 +452,26 @@ serving from the old store until they release their pin; every read/update after
 restored store. **Fail-closed:** a corrupt / truncated / version-mismatched / non-artifact body is
 rejected (`400`) and the live store is left **untouched** (the new core is built fully before the
 swap). Both routes are **POST-only** and gated by the **write** token (the admin gate). Responses:
-backup `200` (`application/octet-stream`); restore `200` on success, `400` on a rejected artifact,
-`409` on a `--persist` server (in-memory restore only in v1 — replacing a live durable directory is
-a recorded follow-up). **Restore-on-start:** `--restore <FILE>` / `SPARQ_RESTORE` seeds the
-in-memory store from an artifact before binding (the bootstrap primitive for horizontal-scaling
-stage-2 + the base of point-in-time recovery; refused together with `--persist`). **Honest scope:**
-**at-rest encryption of the artifact is out of scope** — the integrity digest detects accidental
-corruption, not tampering, and is not a confidentiality or authenticity guarantee; protect the
-artifact at the storage tier.
+backup `200` (`application/octet-stream`); restore `200` on success, `400` on a rejected artifact.
+
+**Restore into a live durable store (`sq-ft7u`).** On a `--persist` server, a plain
+`/admin/restore` (no opt-in) is **`409`** — an in-memory-only swap on a durable server would be
+silently lost on the next restart (a footgun). Add **`?persist=true`** to write the restore
+**THROUGH to the durable directory**, so it **survives a restart** (the on-disk base becomes the
+restored image). The durable swap runs **on the single writer thread** (sequenced with updates — no
+lock, no race with a concurrent durable commit) and is **crash-safe**: the imported image is written
+to a sibling and swapped in with a **two-rename directory swap** (parent dir fsync'd between renames)
+that an interrupted crash heals deterministically (`Graph::restore_into_durable` reuses the exact WAL
+compaction swap + `recover_compaction` healer). **Fail-closed throughout:** the artifact is imported
++ validated **before** any on-disk change, so a corrupt artifact is `400` with the durable store
+**untouched** and no swap-sibling leftovers; a swap I/O error leaves the OLD store intact and the
+writer alive. `?persist=true` on an **in-memory** server is `409` (no durable dir). **Restore-on-start:**
+`--restore <FILE>` / `SPARQ_RESTORE` seeds the in-memory store before binding (bootstrap for
+horizontal-scaling stage-2 + PITR base); with `--persist DIR` it is **refused unless** you add
+**`--restore-persist`** / `SPARQ_RESTORE_PERSIST=1`, which writes the artifact through to `DIR`
+crash-safely on start. **Honest scope:** **at-rest encryption of the artifact is out of scope** — the
+integrity digest detects accidental corruption, not tampering, and is not a confidentiality or
+authenticity guarantee; protect the artifact at the storage tier.
 
 **`POST /admin/backup/delta?from=N` + `--restore-delta` — incremental change-stream / PITR
 (same `backup` feature; `sq-bu1a`).** The Option-A backup above is the BASE half of a
@@ -1138,9 +1153,12 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   `--features backup` to mount the WRITE-gated, POST-only `/admin/backup` (stream a
   self-describing snapshot artifact of the live store WITHOUT stopping the world) and
   `/admin/restore` (atomically install a store rehydrated from one, **fail-closed** on a
-  corrupt/mismatched artifact, in-memory server only in v1 — a `--persist` server gets `409`).
+  corrupt/mismatched artifact). On an in-memory server the restore is RAM-only; on a `--persist`
+  server it is `409` UNLESS you opt in with `?persist=true`, which writes the restore THROUGH to the
+  durable dir (crash-safe, fail-closed) so it survives a restart (`sq-ft7u`).
   `--restore <FILE>` / `SPARQ_RESTORE` runs the same restore on start (bootstrap a fresh
-  replica / PITR base; refused together with `--persist`). DISTINCT from the offline `sparq-cli
+  replica / PITR base); with `--persist` it is refused unless `--restore-persist` /
+  `SPARQ_RESTORE_PERSIST=1` is set (then it writes through to the durable dir on start). DISTINCT from the offline `sparq-cli
   save` and from the `--persist` WAL. **At-rest encryption of the artifact is out of scope** —
   the body digest detects accidental corruption, not tampering. Without the feature the routes +
   the `--restore` setting are compiled out AND the serving core stays the plain `ring`/`writer`

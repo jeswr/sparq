@@ -1,0 +1,185 @@
+[
+  {
+    "id": "t01", "stratum": "point-lookup",
+    "question": "List the bead identifiers of every Open Task.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id WHERE { ?t a pkg:Task ; pkg:status pkg:Open ; dct:identifier ?id }",
+    "concepts": {}
+  },
+  {
+    "id": "t02", "stratum": "point-lookup",
+    "question": "List the bead identifiers of every Closed Task.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id WHERE { ?t a pkg:Task ; pkg:status pkg:Closed ; dct:identifier ?id }",
+    "concepts": {}
+  },
+  {
+    "id": "t03", "stratum": "point-lookup",
+    "question": "List the identifiers of every Task whose issueType is Epic.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id WHERE { ?t a pkg:Task ; pkg:issueType pkg:Epic ; dct:identifier ?id }",
+    "concepts": {}
+  },
+  {
+    "id": "t04", "stratum": "point-lookup",
+    "question": "List the identifiers of every Task whose issueType is Bug.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id WHERE { ?t a pkg:Task ; pkg:issueType pkg:Bug ; dct:identifier ?id }",
+    "concepts": {}
+  },
+  {
+    "id": "t05", "stratum": "point-lookup",
+    "question": "List the identifiers of every Source whose exploredStatus is Explored.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id WHERE { ?s a pkg:Source ; pkg:exploredStatus pkg:Explored ; dct:identifier ?id }",
+    "concepts": {}
+  },
+  {
+    "id": "t06", "stratum": "point-lookup",
+    "question": "List the identifiers of every Task whose priority is 1.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id WHERE { ?t a pkg:Task ; pkg:priority 1 ; dct:identifier ?id }",
+    "concepts": {}
+  },
+  {
+    "id": "t07", "stratum": "point-lookup",
+    "question": "List every distinct title of a pkg:Source.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT DISTINCT ?title WHERE { ?s a pkg:Source ; dct:title ?title }",
+    "concepts": {}
+  },
+  {
+    "id": "t08", "stratum": "point-lookup",
+    "question": "List the identifiers of every Deferred Task.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id WHERE { ?t a pkg:Task ; pkg:status pkg:Deferred ; dct:identifier ?id }",
+    "concepts": {}
+  },
+
+  {
+    "id": "t09", "stratum": "multi-hop",
+    "question": "For every Task that dependsOn another Task, list the dependent identifier and the dependency identifier.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id ?dep WHERE { ?t a pkg:Task ; dct:identifier ?id ; pkg:dependsOn ?d . ?d dct:identifier ?dep }",
+    "concepts": {}
+  },
+  {
+    "id": "t10", "stratum": "multi-hop",
+    "question": "List the identifiers of the dependencies of bead sq-2mke.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?dep WHERE { ?t dct:identifier \"sq-2mke\" ; pkg:dependsOn ?d . ?d dct:identifier ?dep }",
+    "concepts": {}
+  },
+  {
+    "id": "t11", "stratum": "multi-hop",
+    "question": "List the identifiers of every Open Task that dependsOn some other Task.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT DISTINCT ?id WHERE { ?t a pkg:Task ; pkg:status pkg:Open ; dct:identifier ?id ; pkg:dependsOn ?d }",
+    "concepts": {}
+  },
+  {
+    "id": "t12", "stratum": "multi-hop",
+    "question": "List the identifiers of every Closed Task that some Task dependsOn.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT DISTINCT ?dep WHERE { ?o a pkg:Task ; pkg:dependsOn ?d . ?d pkg:status pkg:Closed ; dct:identifier ?dep }",
+    "concepts": {}
+  },
+  {
+    "id": "t13", "stratum": "multi-hop",
+    "question": "List the prefLabel of every topic that some Finding is about.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX skos: <http://www.w3.org/2004/02/skos/core#> SELECT DISTINCT ?label WHERE { ?f a pkg:Finding ; pkg:about ?topic . ?topic skos:prefLabel ?label }",
+    "concepts": {}
+  },
+  {
+    "id": "t14", "stratum": "multi-hop",
+    "question": "List the labels of every Finding about the topic whose prefLabel is 'Merge discipline'.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> SELECT ?label WHERE { ?f a pkg:Finding ; pkg:about <https://sparq.dev/ns/pkg/kb#topic-merge-discipline> ; rdfs:label ?label }",
+    "concepts": { "merge discipline": "https://sparq.dev/ns/pkg/kb#topic-merge-discipline" }
+  },
+  {
+    "id": "t15", "stratum": "multi-hop",
+    "question": "List the labels of every Finding about the topic whose prefLabel is 'Sub-agent standing rules'.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> SELECT ?label WHERE { ?f a pkg:Finding ; pkg:about <https://sparq.dev/ns/pkg/kb#topic-subagent-rules> ; rdfs:label ?label }",
+    "concepts": { "sub-agent standing rules": "https://sparq.dev/ns/pkg/kb#topic-subagent-rules" }
+  },
+  {
+    "id": "t16", "stratum": "multi-hop",
+    "question": "List the labels of every Finding about the topic whose prefLabel is 'ZK/MPC claim + circuit discipline'.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> SELECT ?label WHERE { ?f a pkg:Finding ; pkg:about <https://sparq.dev/ns/pkg/kb#topic-zk-discipline> ; rdfs:label ?label }",
+    "concepts": { "ZK/MPC claim + circuit discipline": "https://sparq.dev/ns/pkg/kb#topic-zk-discipline" }
+  },
+
+  {
+    "id": "t17", "stratum": "synthesis",
+    "question": "Count the number of Tasks per status (group by status), returning the status IRI and the count.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> SELECT ?status (COUNT(?t) AS ?n) WHERE { ?t a pkg:Task ; pkg:status ?status } GROUP BY ?status",
+    "concepts": {}
+  },
+  {
+    "id": "t18", "stratum": "synthesis",
+    "question": "Count the number of Tasks per issueType, returning the issueType IRI and the count.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> SELECT ?it (COUNT(?t) AS ?n) WHERE { ?t a pkg:Task ; pkg:issueType ?it } GROUP BY ?it",
+    "concepts": {}
+  },
+  {
+    "id": "t19", "stratum": "synthesis",
+    "question": "How many Findings are there per topic? Return each topic prefLabel and the count of Findings about it.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX skos: <http://www.w3.org/2004/02/skos/core#> SELECT ?label (COUNT(?f) AS ?n) WHERE { ?f a pkg:Finding ; pkg:about ?topic . ?topic skos:prefLabel ?label } GROUP BY ?label",
+    "concepts": {}
+  },
+  {
+    "id": "t20", "stratum": "synthesis",
+    "question": "List the identifiers of every Open Task together with its priority, ordered by identifier.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id ?p WHERE { ?t a pkg:Task ; pkg:status pkg:Open ; dct:identifier ?id ; pkg:priority ?p } ORDER BY ?id",
+    "concepts": {}
+  },
+  {
+    "id": "t21", "stratum": "synthesis",
+    "question": "List every Finding (its label) that has a verdict, together with that verdict IRI.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> SELECT ?label ?v WHERE { ?f a pkg:Finding ; rdfs:label ?label ; pkg:verdict ?v }",
+    "concepts": {}
+  },
+  {
+    "id": "t22", "stratum": "synthesis",
+    "question": "Count the distinct topics that any Finding is about.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> SELECT (COUNT(DISTINCT ?topic) AS ?n) WHERE { ?f a pkg:Finding ; pkg:about ?topic }",
+    "concepts": {}
+  },
+  {
+    "id": "t23", "stratum": "synthesis",
+    "question": "List the labels of every Finding about either the 'Merge discipline' topic or the 'Sub-agent standing rules' topic.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> SELECT ?label WHERE { ?f a pkg:Finding ; rdfs:label ?label ; pkg:about ?topic . FILTER(?topic IN (<https://sparq.dev/ns/pkg/kb#topic-merge-discipline>, <https://sparq.dev/ns/pkg/kb#topic-subagent-rules>)) }",
+    "concepts": { "merge discipline": "https://sparq.dev/ns/pkg/kb#topic-merge-discipline", "sub-agent standing rules": "https://sparq.dev/ns/pkg/kb#topic-subagent-rules" }
+  },
+  {
+    "id": "t24", "stratum": "synthesis",
+    "question": "List every Source title whose followUpPriority is 2.",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?title WHERE { ?s a pkg:Source ; pkg:followUpPriority 2 ; dct:title ?title }",
+    "concepts": {}
+  },
+
+  {
+    "id": "t25", "stratum": "negative",
+    "question": "List the identifiers of every Task whose status is pkg:Archived (a status value that does not exist in this PKG).",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id WHERE { ?t a pkg:Task ; pkg:status pkg:Archived ; dct:identifier ?id }",
+    "concepts": {}
+  },
+  {
+    "id": "t26", "stratum": "negative",
+    "question": "List the labels of every Finding about the topic whose prefLabel is 'Quantum supremacy' (a topic that does not exist in this PKG).",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX skos: <http://www.w3.org/2004/02/skos/core#> SELECT ?label WHERE { ?topic skos:prefLabel \"Quantum supremacy\"@en-gb . ?f a pkg:Finding ; pkg:about ?topic ; rdfs:label ?label }",
+    "concepts": {}
+  },
+  {
+    "id": "t27", "stratum": "negative",
+    "question": "List the identifiers of every Technique that has a pkg:verdict (no Technique in this PKG carries a verdict).",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id WHERE { ?t a pkg:Technique ; pkg:verdict ?v ; dct:identifier ?id }",
+    "concepts": {}
+  },
+  {
+    "id": "t28", "stratum": "negative",
+    "question": "List the identifiers of every Task whose priority is 99 (no Task has priority 99).",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?id WHERE { ?t a pkg:Task ; pkg:priority 99 ; dct:identifier ?id }",
+    "concepts": {}
+  },
+  {
+    "id": "t29", "stratum": "negative",
+    "question": "List the dependency identifiers of bead sq-nonexistent-xyz (a bead that is not in the PKG).",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX dct: <http://purl.org/dc/terms/> SELECT ?dep WHERE { ?t dct:identifier \"sq-nonexistent-xyz\" ; pkg:dependsOn ?d . ?d dct:identifier ?dep }",
+    "concepts": {}
+  },
+  {
+    "id": "t30", "stratum": "negative",
+    "question": "List the labels of every Finding that is about a topic whose prefLabel is 'Blockchain consensus' (a topic absent from this PKG).",
+    "gold_sparql": "PREFIX pkg: <https://sparq.dev/ns/pkg#> PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX skos: <http://www.w3.org/2004/02/skos/core#> SELECT ?label WHERE { ?topic skos:prefLabel \"Blockchain consensus\"@en-gb . ?f a pkg:Finding ; pkg:about ?topic ; rdfs:label ?label }",
+    "concepts": {}
+  }
+]

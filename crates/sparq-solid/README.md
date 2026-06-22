@@ -44,8 +44,8 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
 - **Triples-native + zero-copy enforcement** — pods, ACL/ACR docs, and the auth view are all ordinary
   named graphs ("who can read G?" is one SPARQL pattern); the default path evaluates through the engine's
   zero-copy dataset view, with a v1 `FROM NAMED` rewrite as a standard-SPARQL portability path.
-- **Write-path gating** — `update_as` / `update_as_acp` check every graph an update could mutate before
-  applying, and auto-re-materialize on `.acl`/`.acr` writes.
+- **Write-path gating + WAC-Allow** — `update_as` / `update_as_acp` check every graph an update could
+  mutate before applying; `wac_allow` builds the fail-closed `user="…",public="…"` header a server returns.
 - **ODRL bridge (opt-in `odrl-bridge`, research-track — not a production cutover)** — runs the
   [`sparq-policy`](../sparq-policy) ODRL evaluator and materializes the equivalent WAC/ACP grant (or dual
   `auth:deny*`) into the auth view — no new enforcement engine (zero ODRL code by default; see below).
@@ -73,14 +73,15 @@ asymmetric (fail-OPEN risk):** an `auth:deny*` is retracted **only** on a *defin
 
 ## WASM support
 
-`sparq-solid` (with its `sparq-reason` dep, `default-features = false`) **compiles for
-`wasm32-unknown-unknown`** (trial-build verified; no native-only deps — rayon off, `sparq-reason`'s
-parallel path gated). Its transitive `oxrdf 0.3.3 → rand → getrandom` needs the host bundle to select a
-wasm RNG backend as `sparq-wasm` does (`getrandom`'s `wasm_js` feature + the `getrandom_backend` cfg; see
-the [migration guide](../../docs/migrating-from-oxigraph.md#wasm-compilation)). **Runtime caveat:**
-`materialize_wac`/`materialize_acp` call `std::time::Instant::now()` (`stats.millis`), which **panics on
-wasm32** (no monotonic clock) — materialize traps until that call is `cfg`-gated (follow-up bead). So
-Deno-wasm / Cloudflare Workers are *compile-feasible now, run-feasible once the clock call is gated*.
+`sparq-solid` (with its `sparq-reason` dep, `default-features = false`) **compiles for AND runs on
+`wasm32-unknown-unknown`** (no native-only deps — rayon off, `sparq-reason`'s parallel path gated). Its
+transitive `oxrdf 0.3.3 → rand → getrandom` needs the host bundle to select a wasm RNG backend as
+`sparq-wasm` does (`getrandom`'s `wasm_js` feature + the `getrandom_backend` cfg; see the
+[migration guide](../../docs/migrating-from-oxigraph.md#wasm-compilation)). **Timing on wasm32:**
+`std::time::Instant` is unavailable there (no monotonic clock — `Instant::now()` panics), so
+`materialize_wac`/`materialize_acp` `cfg`-gate the wall-clock plumbing off and report `stats.millis == 0.0`
+rather than trapping (rest of `MaterializeStats` unchanged); a wasm32 runtime smoke test
+(`tests/wasm_materialize.rs`, `wasm-pack test --node`) guards it. Deno-wasm / Workers are run-feasible.
 
 ## Conformance, security & containment
 

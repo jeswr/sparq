@@ -63,6 +63,46 @@ These tasks **discriminate**: an FO arm under closure returns the gold answer; t
 arm returns 0 / can only hand-enumerate (the FO-win construction). Tasks answerable by
 plain `pkg:` terms are deliberately excluded — they would not differentiate the arms.
 
+## Running the A/B (the Metric-1 method)
+
+The measured A/B (`RESULTS.md`) is run as **one fresh Haiku NL-tool per (arm, task)** —
+4 arms × 16 tasks = 64 sub-agents. Each sub-agent gets ONLY the task's natural-language
+`question`, plus its arm's overlay path, and answers it end to end by driving `pkg-query`
+itself — **introspect → ground → ask**:
+
+```bash
+# one (arm, task) sub-agent's tool invocation (it picks the SPARQL; this is the harness it drives)
+cargo run -q -p sparq-kb --features close --bin pkg-query -- \
+  --extra-graph bench/fo-km/overlays/<arm>.ttl --close owl-rl --json \
+  --nl '<the task question>'
+```
+
+The orchestrator opens each sub-agent's brief with the attribution tag
+`[FOKM task=<id> arm=<no-fo|gufo|dolce-dul|schema-org>]` so its transcript can be mined.
+The agent never sees the gold answer or the per-arm `select` query — it must ground the NL
+question onto the overlay's vocabulary on its own (this is exactly what the LLM-fluency
+hypothesis is testing).
+
+## Scoring the run (analyze.py)
+
+`analyze.py` is the reproducible token-miner + coverage grader that turns the run's
+transcripts into the `RESULTS.md` table. From the repo root:
+
+```bash
+python3 bench/fo-km/analyze.py <transcript-dir> --tasks bench/fo-km/tasks.jsonl
+# self-check (no run on hand): print the grading contract + validate the tasks file
+python3 bench/fo-km/analyze.py
+```
+
+It (1) mines the **real cache-discounted effective input tokens** from each
+`agent-*.jsonl` transcript's `message.usage`
+(`1.0·input + 0.1·cache_read + 1.25·cache_creation`; no `count_tokens`, no char proxy),
+and (2) grades each answer deterministically (no model in the loop) — **count-coverage**
+(the gold integer appears), **entity-coverage** (every gold local-name resolves), or
+**concept-coverage** (every partition bucket count appears); an arm that legitimately
+cannot answer (its `select` is null) and honestly abstains is counted as an ABSTAIN, not
+a wrong answer. The measured verdict lives in **`RESULTS.md`** (the sanctioned numeric home).
+
 ## Authoring + validation
 
 - `build_tasks.py` regenerates `tasks.jsonl`.
@@ -72,9 +112,12 @@ plain `pkg:` terms are deliberately excluded — they would not differentiate th
 
 ## Honest scope
 
-- This is **Metric 1** (runnable on a work box at char-/result-fidelity). Metric 2 (the
-  KGE closure-prior MRR) needs a canonical/EC2 box and is a separate phase (design §5.1).
-- The **full A/B run** (scoring accuracy + token cost across all arms, with the
-  pre-registered kill-criteria) is run by the orchestrator next — this PR ships the
-  **harness**, not the verdict. The closure-build CPU/wall cost is **non-canonical** and
-  is never charged as a token cost (design §5.1).
+- This is **Metric 1** (the AGENT). It is **MEASURED** — see `RESULTS.md` for the verdict
+  (schema.org-as-top wins for the agent's KM tasks; gUFO scored *below* the no-FO
+  incumbent; the driver is LLM fluency, not formal richness — confirming the PR #1106
+  hypothesis). Metric 2 (the KGE closure-prior MRR via `eval.rs`
+  `run_ablation_multiseed_paired`) needs a canonical/EC2 box and is a separate,
+  **EC2-deferred** phase (bead **sq-p5ro8**); a formal FO could rank differently there
+  (design §5.1).
+- The closure-build CPU/wall cost is **non-canonical** and is never charged as a token
+  cost (design §5.1).

@@ -113,6 +113,19 @@ result-cache = []
 # `update_in_place_capturing` write-set capture; oxrdf/rustc-hash are already direct deps)
 # and contains no `unsafe`.
 txn = []
+# [OPUS-4.8] (sq-xj29q) Oxigraph-shaped per-solution result accessor: a borrowed,
+# zero-copy `QuerySolution` view over each `QueryResult` row, reachable through
+# `QueryResult::solutions()`. It mirrors Oxigraph's `QuerySolution` API
+# (`get` by name / `VariableRef` / position, `iter` over bound `(Variable, Term)`
+# pairs, panicking `Index`) so a Rust consumer migrating from / interoperating with
+# Oxigraph (#1124 oxrdf alignment, #1128 migration guide) can index a result
+# per-solution instead of walking the columnar `{vars, rows}` table by hand. It is a
+# pure VIEW: no second materialisation of the table, no per-row map, no cloned terms —
+# the columnar layout the engine uses for perf is unchanged. OPT-IN and OFF by default:
+# when off, zero of this code compiles and the default native + wasm builds are
+# byte-identical. Pulls in ZERO new dependencies (oxrdf — `Term`/`Variable`/
+# `VariableRef` — is already a direct dep) and contains no `unsafe`.
+query-solution = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

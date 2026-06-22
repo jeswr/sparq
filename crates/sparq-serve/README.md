@@ -46,7 +46,10 @@ cargo run -p sparq-server -- --format turtle data.ttl
   tens of nanoseconds and never block the writer; old generations are freed by
   ordinary `Arc` drop (no in-place reclaim, no reclaim-poll degradation).
 - **Single sequenced writer** — group-commit batching publishes each batch as
-  one new immutable generation; serialisability is by construction.
+  one new immutable generation; serialisability is by construction. Out-of-band
+  ops (`Writer::maintain` for durable WAL compaction; `Writer::restore` for a
+  crash-safe restore-into-durable) are sequenced through the same queue, so they
+  run strictly between batches — never racing a commit.
 - **Sync, runtime-agnostic, library-first** — no HTTP or async-runtime types;
   consumers wrap it. It must never enter `sparq-wasm`'s dependency graph.
 - **Online backup/restore** (opt-in `backup` feature, default OFF) — `backup::export`

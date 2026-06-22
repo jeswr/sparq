@@ -5484,7 +5484,9 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
 /// (within a partition rows are scanned in ascending index, so a group's first row IS its min),
 /// and the global first-seen order is re-imposed by sorting groups on min row index — exactly the
 /// serial first-seen order, so output stays byte-identical.
-fn build_groups(b: &Bindings, key_cols: &[usize]) -> (Vec<Key>, Vec<Vec<usize>>) {
+/// `key_cols[i]` is the bindings column for the i-th GROUP BY variable, or `None` when that
+/// variable is never bound (no column) — its key id is then `NO_ID` (unbound) for every row.
+fn build_groups(b: &Bindings, key_cols: &[Option<usize>]) -> (Vec<Key>, Vec<Vec<usize>>) {
     #[cfg(feature = "parallel")]
     if b.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
@@ -5497,7 +5499,7 @@ fn build_groups(b: &Bindings, key_cols: &[usize]) -> (Vec<Key>, Vec<Vec<usize>>)
             .map(|row| {
                 let mut h = rustc_hash::FxHasher::default();
                 for &c in key_cols {
-                    row[c].hash(&mut h);
+                    c.map(|i| row[i]).unwrap_or(NO_ID).hash(&mut h);
                 }
                 (h.finish() % P as u64) as u8
             })
@@ -5513,7 +5515,7 @@ fn build_groups(b: &Bindings, key_cols: &[usize]) -> (Vec<Key>, Vec<Vec<usize>>)
                     if parts[ri] as usize != p {
                         continue;
                     }
-                    let key: Key = key_cols.iter().map(|&c| row[c]).collect();
+                    let key: Key = key_cols.iter().map(|&c| c.map(|i| row[i]).unwrap_or(NO_ID)).collect();
                     match idx.get(&key) {
                         Some(&i) => out[i].2.push(ri),
                         None => {
@@ -5534,7 +5536,7 @@ fn build_groups(b: &Bindings, key_cols: &[usize]) -> (Vec<Key>, Vec<Vec<usize>>)
     let mut order: Vec<Key> = Vec::new();
     let mut members: Vec<Vec<usize>> = Vec::new();
     for (ri, row) in b.rows.iter().enumerate() {
-        let key: Key = key_cols.iter().map(|&c| row[c]).collect();
+        let key: Key = key_cols.iter().map(|&c| c.map(|i| row[i]).unwrap_or(NO_ID)).collect();
         match idx.get(&key) {
             Some(&i) => members[i].push(ri),
             None => {
@@ -5554,7 +5556,12 @@ fn group_aggregate(
     group_vars: &[Variable],
     aggregates: &[(Variable, AggregateExpression)],
 ) -> Result<Bindings, String> {
-    let key_cols: Vec<usize> = group_vars.iter().map(|v| b.col(v).expect("group var present")).collect();
+    // A GROUP BY variable that is never bound anywhere in the WHERE clause has no column in
+    // `b`. Per SPARQL 1.1 §11.1 the group key for such a variable evaluates to unbound for every
+    // solution, so all rows share the same (unbound) key on that position — they collapse into one
+    // group and the variable is unbound in the output. We model the missing column as `None` and
+    // feed `NO_ID` (unbound) for it, rather than panicking. (Regression: bead sq-vymy4.) [OPUS-4.8]
+    let key_cols: Vec<Option<usize>> = group_vars.iter().map(|v| b.col(v)).collect();
 
     // Group rows by the group-key id tuple, preserving first-seen order (parallel ≥ threshold).
     let (mut order, mut members) = build_groups(&b, &key_cols);
@@ -10814,5 +10821,78 @@ mod aggregate_empty_semantics {
     fn group_by_constant_over_empty_is_zero_rows() {
         let r = run("SELECT ?k (COUNT(*) AS ?v) WHERE { ?s ex:nomatch ?o } GROUP BY (1 AS ?k)");
         assert!(r.rows.is_empty());
+    }
+}
+
+/// `GROUP BY ?v` where `?v` is **never bound** anywhere in the WHERE clause must NOT panic.
+/// Per SPARQL 1.1 §11.1 the key for an unbound grouping variable is unbound for every solution,
+/// so all matching rows collapse into ONE group with `?v` unbound in the output. Regression for
+/// bead sq-vymy4 — the engine previously panicked with `group var present` at the `key_cols`
+/// build. [OPUS-4.8]
+#[cfg(test)]
+mod group_by_unbound_var {
+    use super::*;
+
+    /// A non-empty graph: three `ex:a`-typed subjects. The WHERE clause below matches all three,
+    /// so the input multiset is non-empty — but `?kind` is never bound.
+    fn g() -> Graph {
+        Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:x1 a ex:Thing . ex:x2 a ex:Thing . ex:x3 a ex:Thing .",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    fn run(q: &str) -> QueryResult {
+        crate::query(&g(), &format!("PREFIX ex: <http://ex/> {q}")).unwrap()
+    }
+
+    fn int_lit(n: i64) -> Term {
+        Term::Literal(oxrdf::Literal::new_typed_literal(n.to_string(), oxrdf::vocab::xsd::INTEGER))
+    }
+
+    /// The bead's exact shape: GROUP BY an unbound var with a COUNT(DISTINCT). One group, the
+    /// grouping var unbound, the count over the whole matched set. Must not panic.
+    #[test]
+    fn group_by_never_bound_var_is_one_unbound_group() {
+        let r = run("SELECT ?kind (COUNT(DISTINCT ?x) AS ?n) WHERE { ?x a ex:Thing } GROUP BY ?kind");
+        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["kind", "n"]);
+        assert_eq!(r.rows.len(), 1, "all rows share the unbound key ⇒ exactly one group");
+        // `?kind` unbound, `?n` = number of distinct ?x (3).
+        assert_eq!(r.rows[0], vec![None, Some(int_lit(3))]);
+    }
+
+    /// COUNT(*) variant — the count is the size of the (single) group, i.e. all matched rows.
+    #[test]
+    fn group_by_never_bound_var_count_star() {
+        let r = run("SELECT ?kind (COUNT(*) AS ?n) WHERE { ?x a ex:Thing } GROUP BY ?kind");
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0], vec![None, Some(int_lit(3))]);
+    }
+
+    /// A BOUND grouping var mixed with a NEVER-bound one: grouping still partitions by the bound
+    /// var (here all rows share `?x`'s type-less subject so… group by the bound `?x`), and the
+    /// unbound `?kind` is unbound in every output row. Three distinct subjects ⇒ three groups.
+    #[test]
+    fn mixed_bound_and_unbound_group_vars() {
+        let r = run("SELECT ?x ?kind (COUNT(*) AS ?n) WHERE { ?x a ex:Thing } GROUP BY ?x ?kind");
+        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["x", "kind", "n"]);
+        assert_eq!(r.rows.len(), 3, "three distinct ?x ⇒ three groups");
+        // Every row has `?kind` (the 2nd cell) unbound and a per-subject count of 1.
+        for row in &r.rows {
+            assert_eq!(row[1], None, "the never-bound ?kind must be unbound");
+            assert_eq!(row[2], Some(int_lit(1)));
+        }
+    }
+
+    /// SUM over a never-bound grouping var: one group, the unbound key, SUM is unbound (no
+    /// numeric members) — and crucially, no panic.
+    #[test]
+    fn group_by_never_bound_var_with_sum() {
+        let r = run("SELECT ?kind (SUM(?missing) AS ?total) WHERE { ?x a ex:Thing } GROUP BY ?kind");
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], None, "?kind unbound");
+        // SUM over an all-unbound column is "0"^^xsd:integer (Sum({}) = 0).
+        assert_eq!(r.rows[0][1], Some(int_lit(0)));
     }
 }

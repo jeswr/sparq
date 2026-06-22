@@ -13,15 +13,21 @@ vocabulary of `research/dogfooding-sparq-knowledge-graph.md` §2.3, with `pkg.sh
 design principle is copied verbatim from the maintainer's own `sec-prop` discipline
 (`research/security-properties-ontology-design.md`): **mint almost no net-new
 terms.** PROV-O carries who/what/when/derived-from; SKOS carries concepts/topics;
-DCAT + FaBiO/FRBR + DC carry the source catalog; CiTO carries the citation edges;
-schema.org fills gaps; nanopublications package an assertion + its provenance; and
-the vendored `zkp-sparql` `sig-impl:Assertion` pattern is **generalised** (not
-forked) into `pkg:Finding`.
+DCAT + FaBiO/FRBR + DC carry the source catalog; **DQV models the quality axis**
+(confidence/assurance as named, distinct measurements/metrics/dimensions); CiTO
+carries the citation **and technique-relation** edges; schema.org fills gaps;
+nanopublications package an assertion + its provenance; and the vendored `zkp-sparql`
+`sig-impl:Assertion` pattern is **generalised** (not forked) into `pkg:Finding`.
 
 ## Net-new vs reused
 
-**Only four terms are genuinely net-new**, plus the single task-dependency inverse
-pair and the bd/source/technique scaffolding the design names:
+**Only four bespoke predicates/classes are genuinely net-new**, plus the single
+task-dependency inverse pair and the bd/source/technique scaffolding the design names.
+The DQV adoption (sq-2489d.3) adds **no** net-new bespoke predicate — its
+dimension/metric individuals are INSTANCES of the standard DQV classes (see the *DQV
+quality model* sub-section below), and the technique-relation graph leans on the
+established CiTO terms `cito:extends` / `cito:usesMethodIn` instead of minting bespoke
+method-relation predicates, so the bespoke surface **shrinks, it does not grow**:
 
 | net-new term | why it cannot be reused |
 |---|---|
@@ -41,8 +47,11 @@ The rest reuses external vocabulary:
 | `pkg:Finding` | `rdfs:subClassOf sig-impl:Assertion , skos:Concept` |
 | `pkg:about` | `rdfs:subPropertyOf dcterms:subject` |
 | `pkg:verdict` | `rdfs:subPropertyOf sig-impl:verdict`; values `sig-impl:yes/no/partial` |
-| `pkg:assurance` | values `secx:Proven` ⊐ `secx:Claimed` ⊐ `secx:Conjectured` (see *dependency* below) |
+| `pkg:confidence` (the value) | `rdfs:subPropertyOf dqv:value`; the `dqv:value` of a named `dqv:QualityMeasurement` (kept as a convenience shorthand — see *DQV quality model* below) |
+| `pkg:assurance` | values `secx:Proven` ⊐ `secx:Claimed` ⊐ `secx:Conjectured` (see *dependency* below); also a `dqv:Metric` in the `pkg:EpistemicBasisDimension` |
+| quality measurements | `dqv:QualityMeasurement` + `dqv:isMeasurementOf` + `dqv:computedOn` + `dqv:value` + `dqv:inDimension` + `dqv:hasQualityMeasurement` |
 | supporting / refuting | `cito:supports` / `cito:citesAsEvidence` / `cito:disagreesWith` |
+| technique extends / uses-method-in | `cito:extends` / `cito:usesMethodIn` (sq-2489d.3 — replaces a bespoke method-relation predicate) |
 | provenance | `prov:wasDerivedFrom` / `wasGeneratedBy` / `wasAttributedTo` / `generatedAtTime` |
 | `pkg:discoveredFrom` | `rdfs:subPropertyOf prov:wasDerivedFrom` |
 | nanopub packaging | `np:hasAssertion` / `hasProvenance` / `hasPublicationInfo` |
@@ -52,17 +61,50 @@ The rest reuses external vocabulary:
 | `pkg:Task` | `rdfs:subClassOf schema:Action` |
 | parent-child | `dcterms:isPartOf` |
 
+### DQV quality model (sq-2489d.3) — instances, not net-new predicates
+
+The DQV adoption introduces four NAMED `pkg:`-namespaced individuals — but they are
+**instances of the standard DQV classes**, exactly as `pkg:Open` / `pkg:Unexplored`
+are `skos:Concept` instances (and they are pinned in `vocab.rs` the same way). They mint
+no new bespoke predicate:
+
+| named individual | DQV class (reused) | role |
+|---|---|---|
+| `pkg:EpistemicWeightDimension` | `dqv:Dimension` | the numeric 0..1 confidence axis (Finding belief / Source reliability) |
+| `pkg:EpistemicBasisDimension` | `dqv:Dimension` | the categorical assurance axis (proven/claimed/conjectured) — `pkg:assurance` is a `dqv:Metric` in it |
+| `pkg:ConfidenceMeasurement` | `dqv:Metric` | the metric a Finding's `pkg:confidence` measures |
+| `pkg:SourceReliabilityMeasurement` | `dqv:Metric` | the metric a Source's `pkg:confidence` measures |
+
+A subject's `pkg:confidence` is kept as a convenience shorthand (every canned query
+reads it directly, no regression) and is **also** expressible as the `dqv:value` of a
+reified `dqv:QualityMeasurement` that `dqv:isMeasurementOf` one of these metrics,
+`dqv:computedOn` the subject (the `finding-quality-dqv` canned query surfaces them; the
+example file demonstrates both forms agreeing). DQV carries
+`prov:wasGeneratedBy`/`wasAttributedTo` natively, so a measurement composes with
+`sparq-prov` for free, and `pkg:Source rdfs:subClassOf dcat:CatalogRecord` (DQV's
+anchor) was already paid.
+
+**Honest caveats (the design's §3 caveats, recorded here):** DQV is a W3C **Working
+Group Note** (2016), *not* a Recommendation — lower normative weight than
+PROV-O/SKOS/DCAT, which matters for the project's verified-stable-namespace discipline
+(open question for the maintainer in the design record §6.1: adopt as the model, or only
+`skos:closeMatch`-align?). And DQV expresses a *measurement*; it does **not** give
+confidence **propagation through joins** — the Hartig / tSPARQL gap is real and
+orthogonal, and is NOT claimed here.
+
 ## Live-ontology alignment verification (design §2.5 requirement)
 
 The design §2.5 flags that the `skos:closeMatch` alignments were cited from
 knowledge of the SPAR/W3C-community vocabularies and **must be checked against the
 live published ontology before shipping**. Each was verified against its live source
-on **2026-06-21**:
+on **2026-06-21**, and the DQV/CiTO terms of sq-2489d.3 on **2026-06-22**:
 
 | alignment used in `pkg.ttl` | live-ontology check | result |
 |---|---|---|
 | `schema:PotentialActionStatus`, `schema:ActiveActionStatus`, `schema:CompletedActionStatus`, `schema:FailedActionStatus` | `https://schema.org/ActionStatusType` | **confirmed** — all four are `ActionStatusType` enumeration members. |
 | `cito:supports`, `cito:citesAsEvidence`, `cito:disagreesWith` | `http://purl.org/spar/cito/` (SPAR CiTO) | **confirmed** at `http://purl.org/spar/cito/{supports,citesAsEvidence,disagreesWith}`. |
+| `cito:extends`, `cito:usesMethodIn` (sq-2489d.3) | `http://purl.org/spar/cito/` (SPAR CiTO) | **confirmed** (2026-06-22) at `http://purl.org/spar/cito/{extends,usesMethodIn}` — the citing entity extends ideas in / employs a method documented in the cited entity. |
+| `dqv:QualityMeasurement`, `dqv:Metric`, `dqv:Dimension`, `dqv:value`, `dqv:isMeasurementOf`, `dqv:inDimension`, `dqv:hasQualityMeasurement`, `dqv:computedOn` (sq-2489d.3) | `http://www.w3.org/ns/dqv#` (W3C DQV) | **confirmed** (2026-06-22) — namespace + all eight local names. **DQV is a W3C Working Group Note (2016-12-15), NOT a Recommendation** (recorded as an honest caveat above + design §3/§6.1). |
 | `fabio:Expression`, `fabio:ConferencePaper` | `http://purl.org/spar/fabio/` (SPAR FaBiO) | **confirmed**; FaBiO is FRBR-structured. |
 | `np:Nanopublication`, `np:hasAssertion`, `np:hasProvenance`, `np:hasPublicationInfo` | `http://www.nanopub.org/nschema#` | **confirmed** (namespace + local names). |
 | `schema:Rating` | `https://schema.org/Rating` | **confirmed** (used only as a `skos:closeMatch` soft pointer for `pkg:confidence`). |

@@ -88,7 +88,9 @@ Materialize the authorization view from the access-control documents, then enfor
 - `PodStore::new(graph) -> PodStore` — wrap a loaded dataset. Before the first
   `materialize_*` call **every** session (including the owner) sees nothing.
 - `store.materialize_wac()` / `store.materialize_acp() -> Result<MaterializeStats, _>` —
-  run the N3 rules to (re)install `<urn:sparq:auth>`.
+  run the N3 rules to (re)install `<urn:sparq:auth>`. On `wasm32-unknown-unknown` the
+  informational `MaterializeStats::millis` is reported as `0.0` (no `std::time::Instant`);
+  the auth view is identical ([OPUS-4.8] sq-7agop).
 - `store.materialize_acp_with(&AccessProvenance) -> Result<MaterializeStats, _>` —
   ([OPUS-4.8] sq-3jtd.5) ACP materialization that ALSO resolves `acp:CreatorAgent` /
   `acp:OwnerAgent` matchers against per-resource creator/owner WebIDs supplied by the
@@ -117,6 +119,11 @@ Materialize the authorization view from the access-control documents, then enfor
   `store.accessible_set(...)` / `store.view_for(...) -> DatasetView` /
   `store.auth() -> &AuthIndex` — inspect the authorized graph set or the materialized
   index directly.
+- `store.wac_allow(&Session, &NamedNode) -> String` — build the public
+  [`WAC-Allow`](https://solidproject.org/TR/wac#wac-allow) response-header value
+  (`user="…",public="…"`) advertising the modes the session (and the public) hold on a
+  resource ([OPUS-4.8] sq-i7k08); fail-closed, only the modes actually held. See the
+  request-pipeline section below.
 - `store.materialize_odrl_permission(&Policy, &Request) -> BridgeOutcome` — **opt-in**
   (`odrl-bridge` feature, OFF by default; [OPUS-4.8] sq-h3uk): run the `sparq-policy` ODRL
   evaluator and, on a *definite Permit*, materialize the equivalent `principal auth:<mode>
@@ -188,10 +195,12 @@ loop. A Solid **request handler** wraps that with three steps: (1) build a `Sess
 from the authenticated request, (2) gate the request with `accessible(...)` /
 `query_as(...)`, (3) emit a [`WAC-Allow`](https://solidproject.org/TR/wac#wac-allow)
 response header advertising the modes the agent (and the public) hold on the target
-resource. There is **no public `WAC-Allow` helper in the crate yet** (tracked as a
-follow-up); it is a few lines over the existing `accessible` API, shown here so a
-server can drop it in. The header lists the modes available to `user` (the
-authenticated agent) and to `public` (an anonymous `Session::default()`):
+resource. Step (3) is the public helper
+[`PodStore::wac_allow(&Session, &NamedNode) -> String`](https://docs.rs/sparq-solid)
+([OPUS-4.8] sq-i7k08) — it builds the RFC-style `user="…",public="…"` value over the
+existing `accessible` API (the `user` list is the authenticated session's modes; the
+`public` list is an anonymous `Session::default()`'s), fail-closed and with only the
+modes actually held:
 
 ```rust
 use sparq_solid::{Mode, PodStore, Session};
@@ -207,29 +216,22 @@ fn may(store: &mut PodStore, s: &Session, mode: Mode, resource: &NamedNode) -> b
     store.accessible(s, mode).iter().any(|g| g == resource)
 }
 
-// RFC-style WAC-Allow: `user="read write",public="read"` — only the modes actually held.
-fn wac_allow(store: &mut PodStore, s: &Session, resource: &NamedNode) -> String {
-    let modes = [(Mode::Read, "read"), (Mode::Write, "write"),
-                 (Mode::Append, "append"), (Mode::Control, "control")];
-    let held = |sess: &Session| -> String {
-        modes.iter()
-            .filter(|(m, _)| may(store, sess, *m, resource))
-            .map(|(_, name)| *name).collect::<Vec<_>>().join(" ")
-    };
-    let anon = Session::default();
-    format!(r#"user="{}",public="{}""#, held(s), held(&anon))
+// Build the WAC-Allow header value for the request, e.g. `user="read write",public="read"`.
+fn wac_allow_header(store: &mut PodStore, s: &Session, resource: &NamedNode) -> String {
+    store.wac_allow(s, resource)
 }
 ```
 
 Per request: `session_from_request(...)` → `may(&mut store, &s, Mode::Read, &resource)`
 to allow/deny (a deny is `403`/`404` per your fail-closed policy) → set the response's
-`WAC-Allow` header to `wac_allow(&mut store, &s, &resource)`. `accessible` is an O(1)
-hash check over the materialized index (it caches per session), so the four-mode sweep
-is cheap. **Scope caveat:** sparq-solid is a *library-level* authoriser — there is no
-HTTP surface here (no `Link`/`acl:` resource discovery, no `.well-known`), so mapping a
-**request path to its named graph** (`resource`) and authenticating the WebID are the
-server's job (see `research/sparq-solid-scope.md` §4). The header builder above is
-illustrative, not a conformance-tested helper.
+`WAC-Allow` header to `store.wac_allow(&s, &resource)`. `wac_allow` runs four
+`accessible` sweeps that share the per-session cache (each an O(1) hash check over the
+materialized index), so it is cheap. **Scope caveat:** sparq-solid is a *library-level*
+authoriser — there is no HTTP surface here (no `Link`/`acl:` resource discovery, no
+`.well-known`), so mapping a **request path to its named graph** (`resource`) and
+authenticating the WebID are the server's job (see `research/sparq-solid-scope.md` §4).
+`wac_allow` builds the header *value* from the authorization verdict; it is not itself a
+conformance-tested HTTP layer.
 
 ## Capability notes (WAC + ACP)
 
@@ -411,6 +413,22 @@ RDFC-1.0 canonicalise (`sparq-canon`) → a **checked** issuer signature over th
 (`sparq-zk`, never a self-asserted triple) → statement-type scoping via a real SHACL shape
 (`sparq-shacl`) → freshness (a per-request check) → the clear-WebID holder binding.
 
+**Two equivalent policy-authoring forms (`parse_policy` / `resolve_rule_keys` accept both;
+`sq-pfae.4`).** A Control-gated trust policy may name a rule either way, and both desugar to the
+SAME `Vec<TrustRule>` the gate consumes:
+- **Reified** — a `trust:TrustRule` node grouping `trust:source` + `trust:forShape`/`forPredicate`
+  + `trust:scope` + `trust:freshWithin` (+ key). Keeps scope/freshness **per-rule**.
+- **Claim-level relational** (`trust:trustsSourceFor`, the foundational primitive, design §2.3.1)
+  — a `trust:Source` node carries `trust:trustsSourceFor <shape-or-predicate>` directly, alongside
+  its shared key + `trust:scope` + `trust:freshWithin`; EACH `trustsSourceFor` statement is one
+  rule. This is the compact *per-(source, statement-type)* form that **replaces ACP's type-only,
+  unimplemented `acp:vc` matcher** with claim-level trust. The object is a `sh:NodeShape` node
+  (carried like `forShape`) or a predicate IRI (desugared like `forPredicate`); a blank-node source
+  is rejected fail-closed. It composes with the opt-in `did` key binding (`trust:issuerDid` on the
+  source node). Every soundness side-condition (checked signature, type-scope, holder binding,
+  reserved-predicate guard) is identical to the reified form — the claim-level form is NOT a weaker
+  admission path.
+
 - **`admit_trust_credential_static(credential, rules, target, abac_rule_n3)`** — the
   **materialise-time** path (the `sq-xc4y` static/dynamic split). It runs only the
   session-INDEPENDENT class (signature, type-scope, scope) and installs each derived grant as an
@@ -424,19 +442,38 @@ RDFC-1.0 canonicalise (`sparq-canon`) → a **checked** issuer signature over th
   long-lived view).
 
 Both install on top of the unchanged auth view (the ODRL-bridge precedent). The
-public surface is `sparq_trust::{vocab, policy, admit, wire}` — see
+public surface is `sparq_trust::{vocab, policy, admit, wire, delegation}` (+ the opt-in
+`delegation_prov` / `did` / `store` / `secprop` modules) — see
 [`crates/sparq-trust/README.md`](../../crates/sparq-trust/README.md) and the design record
 `research/solid-trust-graph-authz-design.md` §6.0 (tracked in
 [issue #940](https://github.com/jeswr/sparq/issues/940); landing via design PR
 <https://github.com/jeswr/sparq/pull/951>).
+
+**Trust-document storage / authoring model** (the **opt-in `store` feature**, `sq-pfae.5`,
+design §3.2). `sparq_trust::store::TrustStore` decides *where* trust rules live and *which
+version* is in force: a **server-wide default** (the ceiling) plus zero-or-more **per-`.acr`
+documents** (`TrustLayer::{ServerWide, Container}`), where a per-`.acr` document may only
+**NARROW, never broaden** the server default — it can tighten a freshness window or restrict
+scope, but can NOT trust a `(source, statement-type)` the server default did not
+(`TrustStore::effective_rules`, the load-bearing soundness property). Documents are
+Control-gated (same `TrustDocument::new`-requires-`ControlGate` channel as `.acl`/`.acr`),
+**monotonically versioned** (a stale `put` is rejected), and revoked by removal. The
+`AdmissionCacheKey` = (evidence hash + policy version) composes with the sparq-solid epoch
+cache: a re-materialise bumps the epoch, a trust-document edit/revoke bumps the
+`policy_version` for affected targets — so a cached admission verdict is never served stale.
+Pure-Rust, no new dependency; OFF in the default build.
 
 **Honest scope (read first).** This is a RESEARCH prototype, **NOT a security guarantee**. It
 does **not** provide privacy, unlinkability, or anonymity: the credential is admitted in the
 clear and the holder binding authenticates the WebID in the clear (the non-anonymous degraded
 path, `sq-wvne`). The ZK estate it composes with is externally **unaudited**
 (`sq-qhy4`, pending external accredited-cryptographer sign-off). Issuer keys are
-operator-asserted (no DID resolver yet — `sq-pfae.3`, the live forgery vector D′). Open problems
-are respected as documented limitations, never solved: `sq-tu4e` (no in-reasoner NAF over
+operator-asserted by default (`trust:issuerKey` hex, the live forgery vector D′); the **opt-in
+`did` feature** (`sq-pfae.3`) lets a rule bind its key from a `trust:issuerDid` instead —
+`sparq_trust::{DidKeyResolver, DidWebResolver, resolve_rule_keys}`, `did:key` offline self-cert +
+a pluggable `did:web` fetcher (no HTTP client forced on the default build). This **narrows** D′ but
+is no absolute anchor: `did:key` is self-certifying, `did:web` only as strong as host/TLS. Open
+problems are respected as documented limitations, never solved: `sq-tu4e` (no in-reasoner NAF over
 derived facts; `revoked` is input-only; no deny-on-disagreement) and `sq-wvne` (ZK privacy) are
 out of PoC scope. `sq-xc4y` (per-request holder/freshness admission vs the materialise-once view)
 is **RESOLVED** by the static/dynamic split: see `admit_trust_credential_static` above and design
@@ -444,6 +481,45 @@ is **RESOLVED** by the static/dynamic split: see `admit_trust_credential_static`
 implemented: it binds each hop's `delegate_key` into the delegator-signed preimage, defeating the
 key-substitution stolen-chain replay — but it does **not** claim full non-replayability, because
 the delegator's own key is still operator-asserted (`sq-pfae.3`); see the crate README *Honest scope*.
+
+**Delegation PROV-O audit for human + AI agents** (the **opt-in `delegation-prov` feature**,
+`sq-pfae.6`, design §4.2/§4.3). `sparq_trust::delegation_prov::audit_invocation(chain, effective,
+config)` renders an invocation-bound delegation chain + its surviving `EffectiveCapability` as a
+minimal **W3C PROV-O** audit graph: each hop's `delegate prov:actedOnBehalfOf delegator` (the
+on-behalf-of lineage `sparq-prov` lacks), the invocation as a `prov:Activity` the terminal delegate
+`prov:wasAssociatedWith`, and the effective grant as a `prov:Entity` `wasGeneratedBy`/`wasAttributedTo`
+the delegate carrying the `auth:*` actions over its target — the §4.3 value-add of rendering the
+delegated authority as RDF that reasons with the SAME `.acl` rules. **Human vs AI** is an **attested
+attribute** on the delegate (§4.2: an AI agent is a distinct principal holding an attenuated child of
+its human's authority) — recorded `trust:HumanPrincipal` / `trust:AiAgent` via `PrincipalClassification`.
+Two honesty boundaries: (i) it is an **audit record, never an authority source** — produced *after* a
+successful `invoke`, it can only ever describe authority that already passed the gate, and it never
+renders a grant broader than the gate conferred (when `effective_against_current` narrows the chain to
+the CURRENT delegator grant, the audit drops the revoked actions); (ii) it adds **no security property**
+and no privacy — principals are named in the clear. Pure `oxrdf` (**no `sparq-prov` dependency** — that
+would drag `sparq-engine` onto the crate's dep graph); OFF in the default build.
+
+### Security-properties vocabulary — opt-in `secprop-vocab` ([OPUS-4.8] sq-5oru9, epic sq-0dksu)
+
+The `sparq_trust::secprop` module (behind the **default-OFF `secprop-vocab`** cargo feature) is the
+sparq **`sec-prop:` extension** vocabulary: the orthogonal proof-system dimensions (ZK-type,
+soundness, completeness, hiding/binding, anonymity, setup, interactivity, selective disclosure,
+single-use) plus the machine-reasonable **assurance / audit-status axis** that the vendored
+`sec-prop:` ontology (the ISWC 2025 ZKP-SPARQL paper's vocabulary,
+`crates/sparq-trust/ontologies/zkp-sparql/`) lacks — **under the same
+`https://w3id.org/zkp-sparql/sec-prop#` namespace** (extend, do not fork; design
+`research/security-properties-ontology-design.md` §4.1). It is **data + Rust constants only** (a
+`const &str` registry + the canonical [`secprop-ext.ttl`](../../crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl),
+pinned together by a drift test) — it is **not** a reasoner, an ODRL profile, or a per-method
+annotation graph (those are the downstream Phase 2/3/4 beads `sq-ufsi9`/`sq-bevd3`/`sq-uor3g`).
+
+The **assurance axis is the honesty mechanism**: `Proven ⊐ Claimed ⊐ Conjectured`, one axis
+orthogonal to every property. The **default** assurance for a sparq-asserted ZK property is
+`secx:Claimed` (decision #1001 Option A) with audit status `secx:ExternalSignOffPending` — and **no
+sparq ZK method may be labelled `secx:Proven` while the external accredited-cryptographer audit
+(`sq-qhy4`) is open.** The vocabulary **records** a claim and its epistemic basis; it is **NOT** a
+proof of any property. DPV alignment is *Light* (#1002 Option 2): `skos:closeMatch` cross-refs to
+W3C DPV `CryptographicMethods` where a near-match exists, not a full regulation→requirement chain.
 
 ## Related skills
 

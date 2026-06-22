@@ -50,6 +50,27 @@ pub enum TerseError {
         /// The underlying staleness-check message.
         detail: String,
     },
+    /// A `K:<name>` keyword (lever 1, design §3.1) named a keyword that is **not** in the
+    /// frozen legend — surfaced loudly with the legend version + the close suggestions, rather
+    /// than inventing an expansion (design §3.1 — a keyword is never a silent guess). The
+    /// suggestions are a *diagnostic only*; they are never auto-applied.
+    UnknownKeyword {
+        /// The unknown keyword name (the part after `K:`).
+        keyword: String,
+        /// The frozen legend version against which it was unknown.
+        legend_version: String,
+        /// The closest legend names (did-you-mean), best first; may be empty.
+        suggestions: Vec<String>,
+    },
+    /// A `K:<name>` keyword (lever 1, design §3.1) collided with a **real** prefix literally
+    /// named `K` declared in the query (`PREFIX K:` / `PREFIX K: <...>`). The token is then
+    /// genuinely ambiguous between *keyword expansion* and *prefix expansion*, so the surface
+    /// refuses rather than guessing which the author meant (design §3.1 (iii) — "a keyword
+    /// that collides with a real prefixed name is a hard error, never a silent guess").
+    KeywordPrefixCollision {
+        /// The `K:<name>` keyword token whose expansion is ambiguous.
+        keyword: String,
+    },
 }
 
 impl fmt::Display for TerseError {
@@ -79,6 +100,30 @@ impl fmt::Display for TerseError {
                 f,
                 "V(\"{}\") aborted: vector store is stale vs the graph ({})",
                 phrase, detail
+            ),
+            TerseError::UnknownKeyword { keyword, legend_version, suggestions } => {
+                write!(
+                    f,
+                    "unknown keyword K:{} (not in the frozen legend {})",
+                    keyword, legend_version
+                )?;
+                if !suggestions.is_empty() {
+                    write!(f, "; did you mean ")?;
+                    for (i, s) in suggestions.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "K:{}", s)?;
+                    }
+                    write!(f, "?")?;
+                }
+                Ok(())
+            }
+            TerseError::KeywordPrefixCollision { keyword } => write!(
+                f,
+                "keyword K:{} collides with a real `PREFIX K:` declared in the query; rename \
+                 the prefix or use the full IRI — never silently guessed",
+                keyword
             ),
         }
     }

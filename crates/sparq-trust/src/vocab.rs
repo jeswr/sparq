@@ -54,6 +54,12 @@ pub const SOURCE_CLASS: &str = "https://sparq.dev/ns/trust#Source";
 /// `trust:issuerKey` — verification key the source signs with (aligns with
 /// `zk:issuerKey`).
 pub const ISSUER_KEY: &str = "https://sparq.dev/ns/trust#issuerKey";
+/// `trust:issuerDid` — the source's DID, resolved to its verifying key by a pluggable
+/// DID resolver (`did:key` / `did:web`; the `crate::did` module, opt-in `did` feature).
+/// A rule may name its issuer by `trust:issuerDid` INSTEAD of the operator-asserted
+/// `trust:issuerKey` hex — the `sq-pfae.3` issuer-key-binding term that narrows forgery
+/// vector D′.
+pub const ISSUER_DID: &str = "https://sparq.dev/ns/trust#issuerDid";
 /// `trust:scope` — where the trust rule applies (server-wide vs per-`.acr`).
 pub const SCOPE: &str = "https://sparq.dev/ns/trust#scope";
 /// `trust:freshWithin` — maximum staleness admitted (consulted against
@@ -62,6 +68,25 @@ pub const FRESH_WITHIN: &str = "https://sparq.dev/ns/trust#freshWithin";
 /// `trust:admitted` — marks a fact that passed admission (analogous to the
 /// `solidx:` internal vocab; the stratum-boundary marker).
 pub const ADMITTED: &str = "https://sparq.dev/ns/trust#admitted";
+
+// --- delegation principal kinds (§4.2 on-behalf-of; sq-pfae.6) -------------
+//
+// "Human vs AI is just an attested attribute / caveat on the delegate" (design §4.2).
+// These classify a delegation principal in the PROV-O audit the `delegation_prov`
+// module emits (opt-in `delegation-prov` feature). They are an ATTESTED ATTRIBUTE on
+// the delegate — they confer NO authority of their own (authority is the attenuated
+// capability the signed chain carries); they only let a policy / audit reader tell a
+// human principal from an AI agent acting on a human's behalf.
+
+/// `trust:HumanPrincipal` — a delegation principal that is a human (the human root /
+/// any human delegate). An attested attribute on the principal, not an authority.
+pub const HUMAN_PRINCIPAL: &str = "https://sparq.dev/ns/trust#HumanPrincipal";
+/// `trust:AiAgent` — a delegation principal that is an AI agent: a **distinct
+/// principal** (its own DID/key) holding an **attenuated child** of its human
+/// principal's authority (§4.2). An attested attribute on the delegate, not an
+/// authority — the AI agent's authority is the attenuated capability the signed chain
+/// carries, never this type.
+pub const AI_AGENT: &str = "https://sparq.dev/ns/trust#AiAgent";
 
 // --- the one convenience (sugar, NOT a primitive — §2.3.3) -----------------
 
@@ -198,6 +223,7 @@ mod tests {
             FOR_SHAPE,
             SOURCE_CLASS,
             ISSUER_KEY,
+            ISSUER_DID,
             SCOPE,
             FRESH_WITHIN,
             ADMITTED,

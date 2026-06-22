@@ -1,0 +1,9 @@
+# [OPUS-4.8] sq-bzign — runtime A/B artifacts carry NON-CANONICAL numbers (work-box /
+# proxy) and are fully regenerable by run.sh. Never commit them; the committed artifacts
+# are the harness CODE + the frozen tasks + reference queries + PREREG + RESULTS record.
+grades.json
+tokens.json
+verdict.json
+# The per-arm context cards are generated from the live crate/PKG by run.sh.
+schema-card.txt
+legend-card.txt

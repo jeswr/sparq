@@ -357,6 +357,86 @@ impl PodStore {
         Arc::clone(&self.session_sets(s, mode).set)
     }
 
+    /// Build the value of a [`WAC-Allow`](https://solidproject.org/TR/wac#wac-allow)
+    /// response header for `resource` as seen by `session` — the RFC-style
+    /// `user="…",public="…"` permission advertisement a Solid server returns on a
+    /// `GET`/`HEAD`. [OPUS-4.8] sq-i7k08.
+    ///
+    /// `user` lists the modes the **authenticated** agent (`session`) holds on the
+    /// named graph backing `resource`; `public` lists the modes an **anonymous**
+    /// caller ([`Session::default`]) holds — so an unauthenticated request still learns
+    /// what the public can do. Each list is the space-separated lower-case mode names
+    /// (`read write append control`, in that fixed order), containing **only** the modes
+    /// actually granted, and empty (`user=""`) when none are. The four
+    /// [`PodStore::accessible`] sweeps share the per-session cache, so this is an O(1)
+    /// hash check per mode over the materialized index.
+    ///
+    /// **Fail-closed**, exactly like [`PodStore::accessible`]: before the first
+    /// `materialize_*` call, for a grant-less session, or for a `resource` outside the
+    /// session's accessible set, the corresponding list is empty — never a wider one.
+    ///
+    /// **Scope (honest):** `sparq-solid` is a *library-level* authoriser with **no HTTP
+    /// surface** — mapping a request **path to its named graph** (`resource`) and
+    /// authenticating the WebID into a `Session` are the **server's** job (see
+    /// `research/sparq-solid-scope.md` §4). This builds the header *value* from the
+    /// authorization verdict; it does not parse requests, discover ACLs, or set headers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sparq_solid::{Mode, PodStore, Session};
+    /// use oxrdf::NamedNode;
+    ///
+    /// let nquads = r#"
+    /// <https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#pub> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#pub> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#pub> <http://www.w3.org/ns/auth/acl#agentClass> <http://xmlns.com/foaf/0.1/Agent> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#pub> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .
+    /// "#;
+    /// let mut store = PodStore::new(sparq_core::Graph::load_dataset(nquads, "nquads")?);
+    /// store.materialize_wac()?;
+    ///
+    /// let resource = NamedNode::new("https://pod.ex/notes/n1").map_err(|e| e.to_string())?;
+    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
+    /// // alice holds read+write; everyone (public) holds read.
+    /// assert_eq!(store.wac_allow(&alice, &resource), r#"user="read write",public="read""#);
+    /// // an anonymous request still learns the public modes (user == public here).
+    /// assert_eq!(store.wac_allow(&Session::default(), &resource), r#"user="read",public="read""#);
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn wac_allow(&mut self, session: &Session, resource: &NamedNode) -> String {
+        let user = self.modes_held(session, resource);
+        // The `public` field is what an anonymous caller (no WebID) holds — `acl:Read`
+        // granted to `foaf:Agent` etc. — independent of the authenticated session.
+        let public = self.modes_held(&Session::default(), resource);
+        format!(r#"user="{}",public="{}""#, user, public)
+    }
+
+    /// The space-separated WAC mode names `session` holds on `resource`'s graph, in the
+    /// fixed `read write append control` order — the per-field body of [`Self::wac_allow`].
+    /// Empty string when no mode is held (fail-closed). [OPUS-4.8] sq-i7k08.
+    fn modes_held(&mut self, session: &Session, resource: &NamedNode) -> String {
+        const MODES: [(Mode, &str); 4] = [
+            (Mode::Read, "read"),
+            (Mode::Write, "write"),
+            (Mode::Append, "append"),
+            (Mode::Control, "control"),
+        ];
+        let mut held = Vec::with_capacity(MODES.len());
+        for (mode, name) in MODES {
+            if self.accessible(session, mode).iter().any(|g| g == resource) {
+                held.push(name);
+            }
+        }
+        held.join(" ")
+    }
+
     fn session_sets(&mut self, s: &Session, mode: Mode) -> &SessionSets {
         let key = (
             s.agent.map(str::to_owned),

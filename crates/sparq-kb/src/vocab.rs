@@ -12,11 +12,17 @@
 //! The `ttl_pins_match_rust_constants` test below keeps the published Turtle and
 //! these Rust constants from drifting (exactly the `sparq-trust` discipline).
 //!
-//! Reuse-first: PKG mints almost NO net-new terms. The genuinely net-new ones are
-//! [`EXPLORED_STATUS`], [`FOLLOW_UP_PRIORITY`], [`CONFIDENCE`], [`COULD_BE_MERGED_WITH`],
-//! and the [`DEPENDS_ON`]/[`BLOCKED_BY`] `owl:inverseOf` pair; everything else reuses
-//! PROV-O, SKOS, DCAT, FaBiO/FRBR/DC, CiTO, schema.org, nanopublications, and the
-//! vendored `zkp-sparql` `sig-impl:`/`secx:` pattern. See PROVENANCE.md.
+//! Reuse-first: PKG mints almost NO net-new bespoke terms. The genuinely net-new ones
+//! are [`EXPLORED_STATUS`], [`FOLLOW_UP_PRIORITY`], [`CONFIDENCE`],
+//! [`COULD_BE_MERGED_WITH`], and the [`DEPENDS_ON`]/[`BLOCKED_BY`] `owl:inverseOf`
+//! pair; everything else reuses PROV-O, SKOS, DCAT, DQV, FaBiO/FRBR/DC, CiTO,
+//! schema.org, nanopublications, and the vendored `zkp-sparql` `sig-impl:`/`secx:`
+//! pattern. The DQV quality model (sq-2489d.3) adds NO net-new bespoke predicate: the
+//! [`EPISTEMIC_WEIGHT_DIMENSION`]/[`EPISTEMIC_BASIS_DIMENSION`] and
+//! [`CONFIDENCE_MEASUREMENT`]/[`SOURCE_RELIABILITY_MEASUREMENT`] constants name
+//! INSTANCES of the standard DQV classes (`dqv:Dimension` / `dqv:Metric`) — exactly as
+//! [`OPEN`] etc. name `skos:Concept` instances — and the technique-relation graph leans
+//! on the established `cito:extends` / `cito:usesMethodIn`. See PROVENANCE.md.
 //!
 //! [OPUS-4.8] sq-2m6zm.1 (epic sq-2m6zm); design record PR #1063. Flag for re-review
 //! when Fable returns. 🤖 SPARQ agent — dogfooding sparq as a project knowledge graph.
@@ -58,9 +64,11 @@ pub const SURFACES: &str = "https://sparq.dev/ns/pkg#Surfaces";
 pub const ABOUT: &str = "https://sparq.dev/ns/pkg#about";
 /// `pkg:verdict` — the Finding verdict (`rdfs:subPropertyOf sig-impl:verdict`).
 pub const VERDICT: &str = "https://sparq.dev/ns/pkg#verdict";
-/// `pkg:confidence` — **NET-NEW** numeric confidence 0..1 (Finding or Source).
+/// `pkg:confidence` — **NET-NEW** numeric confidence 0..1 (Finding or Source);
+/// `rdfs:subPropertyOf dqv:value` of a named `dqv:QualityMeasurement` (sq-2489d.3).
 pub const CONFIDENCE: &str = "https://sparq.dev/ns/pkg#confidence";
-/// `pkg:assurance` — epistemic basis (reuses `secx:Proven`/`Claimed`/`Conjectured`).
+/// `pkg:assurance` — epistemic basis (reuses `secx:Proven`/`Claimed`/`Conjectured`);
+/// also a `dqv:Metric` in [`EPISTEMIC_BASIS_DIMENSION`] (sq-2489d.3).
 pub const ASSURANCE: &str = "https://sparq.dev/ns/pkg#assurance";
 /// `pkg:discoveredFrom` — `rdfs:subPropertyOf prov:wasDerivedFrom`.
 pub const DISCOVERED_FROM: &str = "https://sparq.dev/ns/pkg#discoveredFrom";
@@ -138,6 +146,25 @@ pub const SPIKE: &str = "https://sparq.dev/ns/pkg#Spike";
 /// `pkg:Epic`.
 pub const EPIC: &str = "https://sparq.dev/ns/pkg#Epic";
 
+// --- DQV quality-model individuals (sq-2489d.3) ----------------------------
+// Instances of the standard DQV classes (`dqv:Dimension` / `dqv:Metric`); they name
+// the quality axes that `pkg:confidence` / `pkg:assurance` shorthand. NOT net-new
+// bespoke predicates — they reuse the DQV model.
+
+/// `pkg:EpistemicWeightDimension` — the `dqv:Dimension` of the numeric 0..1 confidence
+/// axis (Finding belief / Source reliability).
+pub const EPISTEMIC_WEIGHT_DIMENSION: &str = "https://sparq.dev/ns/pkg#EpistemicWeightDimension";
+/// `pkg:EpistemicBasisDimension` — the `dqv:Dimension` of the categorical assurance
+/// axis (`pkg:assurance` is a `dqv:Metric` in it).
+pub const EPISTEMIC_BASIS_DIMENSION: &str = "https://sparq.dev/ns/pkg#EpistemicBasisDimension";
+/// `pkg:ConfidenceMeasurement` — the `dqv:Metric` a Finding's `pkg:confidence` measures
+/// (in [`EPISTEMIC_WEIGHT_DIMENSION`]).
+pub const CONFIDENCE_MEASUREMENT: &str = "https://sparq.dev/ns/pkg#ConfidenceMeasurement";
+/// `pkg:SourceReliabilityMeasurement` — the `dqv:Metric` a Source's `pkg:confidence`
+/// measures (in [`EPISTEMIC_WEIGHT_DIMENSION`]).
+pub const SOURCE_RELIABILITY_MEASUREMENT: &str =
+    "https://sparq.dev/ns/pkg#SourceReliabilityMeasurement";
+
 /// Every `pkg:` IRI this module names — the full set the drift guard pins against
 /// `pkg.ttl`. Keep in sync when adding/removing a constant.
 pub const ALL: &[&str] = &[
@@ -183,6 +210,10 @@ pub const ALL: &[&str] = &[
     MILESTONE,
     SPIKE,
     EPIC,
+    EPISTEMIC_WEIGHT_DIMENSION,
+    EPISTEMIC_BASIS_DIMENSION,
+    CONFIDENCE_MEASUREMENT,
+    SOURCE_RELIABILITY_MEASUREMENT,
 ];
 
 #[cfg(test)]

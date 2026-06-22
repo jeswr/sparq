@@ -53,6 +53,22 @@ assert_eq!(map.get("x").map(String::as_str), Some("c14n0"));
 
 `canonicalize_quads` / `issue_quads` are aliases (the `rdf_canon`-style names).
 
+### Text in, text out (`canonicalize_nquads`)
+
+When you already hold serialized RDF — e.g. across a language boundary — skip the
+oxrdf term plumbing: `canonicalize_nquads(&str) -> Result<String, _>` parses an
+N-Quads document and returns its canonical N-Quads (`parse_nquads` exposes the parse
+alone). This is the seam the `@jeswr/sparq` RDF/JS `Dataset` uses for
+isomorphism-aware `toCanonical` / `equals` / `contains`, surfaced over wasm as the
+`canonicalizeNQuads(nquads)` binding behind `sparq-wasm`'s opt-in `canon` feature.
+
+```rust
+let canon = sparq_canon::canonicalize_nquads(
+    "_:b0 <http://ex/p> _:b1 .\n_:b1 <http://ex/q> \"v\" .\n",
+).unwrap();
+assert!(canon.contains("_:c14n"));
+```
+
 ### Non-default hash profile
 
 The spec default is SHA-256. To use the SHA-384 profile (or any
@@ -177,6 +193,12 @@ bridge + public API. The opt-in, off-by-default `rdf12-triple-terms` profile
 (sq-hslb [OPUS-4.8]) is a native RDFC-1.0 re-implementation extended to RDF 1.2
 triple terms — **non-standard** (W3C RDFC-1.0 is RDF-1.1-only) — now with a
 `*_with::<D: Digest>` hash-profile sibling on every entry point for SHA-384
-parity (sq-5i1d [OPUS-4.8]). `publish = false`,
-non-default workspace member — nothing in sparq's default graph depends on it, so
-the default build and wasm artifact are byte-identical with or without it.
+parity (sq-5i1d [OPUS-4.8]). The `canonicalize_nquads` / `parse_nquads` text seam
+and the `sparq-wasm` opt-in `canon` feature (`canonicalizeNQuads` binding for the
+`@jeswr/sparq` RDF/JS `Dataset`) are sq-1dd5t [OPUS-4.8]; that wasm consumer pulls
+`sparq-canon` with `default-features = false` (the crate now disables
+`sparq-core`'s default `parallel` and re-enables it via its own default `parallel`
+feature, so native builds are byte-identical and the wasm build drops rayon).
+`publish = false`, non-default workspace member — nothing in sparq's default graph
+depends on it, so the default build and lean wasm artifact are byte-identical with
+or without it.

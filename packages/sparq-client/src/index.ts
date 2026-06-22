@@ -464,6 +464,50 @@ export async function sparqShaclValidate(
   return JSON.parse(store.validate(data, shapes, format)) as ShaclReport;
 }
 
+/**
+ * [OPUS-4.8] sq-pyn7 (#796) — parse a **SHACL Compact Syntax** (SCS) document into a SHACL
+ * **shapes graph**, returned as pretty Turtle, entirely in-tab via the `scs`-enabled wasm
+ * bundle. This is the SCS *input* counterpart of the playground's serialiser
+ * (`shapesToCompact`, the Turtle → SCS *display* direction): it takes compact text and gives
+ * back the Turtle shapes graph that {@link sparqShaclValidate} then consumes — so a user can
+ * author shapes in the terser compact notation and validate data against them unchanged.
+ *
+ * Like {@link sparqShaclValidate} this is a stateless one-shot exposed as an instance method
+ * on the wasm `Store`, so it needs any receiver — an empty store is the cheapest. The optional
+ * `base` resolves relative IRIs in the SCS document; `loadOpts` is forwarded to
+ * {@link loadSparq} so a GUI host can pass its own `basePath`.
+ *
+ * A clear error is thrown if the loaded bundle was built without the `scs` feature (no
+ * `parseShaclCompact` binding) — the lean SPARQL REPL bundle omits it — so a caller can
+ * distinguish "no SCS in this bundle" from an SCS *parse* error (the latter is a `JsError`
+ * carrying the parser's message + 1-based line).
+ */
+export async function sparqParseShaclCompact(
+  text: string,
+  base?: string,
+  loadOpts: LoadSparqOptions = {},
+): Promise<string> {
+  const Store = await loadSparq(loadOpts);
+  // Stateless one-shot, but exposed as an instance method — the empty store is just the
+  // receiver (the binding does not consult its triples).
+  const store = Store.load("", "turtle");
+  // Defensive lean-bundle check: the tracked generated d.ts is the site's `scs`-enabled
+  // bundle, so `parseShaclCompact` is type-declared as present, but the bundle actually LOADED
+  // at runtime is decided by the asset URL. A lean bundle omits the binding, so probe a
+  // possibly-undefined view first to yield a clear error rather than a "not a function" crash.
+  const parse = (store as { parseShaclCompact?: WasmStore["parseShaclCompact"] })
+    .parseShaclCompact;
+  if (typeof parse !== "function") {
+    throw new Error(
+      "This wasm bundle was built without the SHACL Compact Syntax feature (no " +
+        "parseShaclCompact binding). Rebuild sparq-wasm with --features scs.",
+    );
+  }
+  // Invoke BOUND to the `store` receiver (the same lost-receiver fix as `validate` above:
+  // a detached `parse(…)` would run with `this === undefined` and throw on `this.__wbg_ptr`).
+  return store.parseShaclCompact(text, base ?? null);
+}
+
 // ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-n5aw — the framework-agnostic SPARQL EDITOR core (highlighting + prefixes).
 // Re-exported so the site (and the Tauri webview) consume the same dependency-free tokenizer
