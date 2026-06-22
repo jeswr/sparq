@@ -1,0 +1,44 @@
+[package]
+name = "sparq-reason-el"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in OWL 2 EL consequence-based classifier (normalize + CR1-CR5 saturation) for the sparq RDF engine: complete rdfs:subClassOf subsumption lattices RL cannot reach"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# [OPUS-4.8] sq-evb1: crate-local README so crates.io (package.readme) matches the docs.rs
+# front page (lib.rs include_str!("../README.md")) — same content on both registries.
+readme = "README.md"
+
+# [OPUS-4.8] sq-evb1: build docs.rs with all features so the engine-backed items render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# Opt-in OWL 2 EL classification (spike sq-wmeg / research/owl2-el-ql-reasoning-spike.md,
+# Phase E1). A SEPARATE crate so the core engine — and in particular the lean wasm build —
+# carries zero EL code, deps, or runtime cost by default. EL is engaged ONLY by depending on
+# this crate. RL (sparq-reason) is SOUND but silently INCOMPLETE for class classification
+# (it has no rule reasoning *through* an existential successor — Krötzsch ISWC 2012); EL
+# closes that gap with a deterministic least-fixpoint saturation (PTIME-complete).
+#
+# Wrap-vs-implement: there is no Rust EL reasoner to wrap at the right granularity (whelk-rs /
+# DEALER are small-scale and ride other axiom models), so the normalize -> complete pipeline
+# is implemented directly over sparq's own dict/Graph seam — the SAME (Dict, Vec<[Id;3]>)
+# substrate the RL `scm-*` rules emit into, so the output lattice is queryable by plain BGP
+# eval with no store changes.
+
+[features]
+# This crate is single-purpose; the EL classifier is always present. No default features —
+# the crate is itself the opt-in surface (depending on it is the opt-in).
+default = []
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+oxrdf.workspace = true
+rustc-hash.workspace = true

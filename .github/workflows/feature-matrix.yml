@@ -53,6 +53,14 @@
 #     socket on a runner, so they are not built/tested here.
 #   • `mimalloc` (sparq-cli, default-ON) is not opt-in; it is exercised by the default
 #     build already.
+#   • [OPUS-4.8] sq-evb1: `sparq-reason-el` (the opt-in OWL 2 EL classifier) is a
+#     SEPARATE CRATE with NO intra-crate cargo feature — depending on the crate IS the
+#     opt-in (the spike's preferred shape, keeping sparq-reason lean). Its whole surface
+#     (lib unit tests + the tests/differential.rs ELK-calculus oracle + clippy + rustdoc)
+#     is therefore built/tested by ci.yml's `cargo {build,nextest,clippy,doc} --workspace`
+#     lanes already — there is no default-OFF feature to toggle, so a feature-matrix leg
+#     (whose template is `--features <X>`) does not apply. WHEN Phase E2 (bead sq-xetf7)
+#     adds an RBox/property-chain feature, add a leg here for it.
 
 name: feature-matrix
 
