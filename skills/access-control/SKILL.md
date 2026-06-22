@@ -88,7 +88,9 @@ Materialize the authorization view from the access-control documents, then enfor
 - `PodStore::new(graph) -> PodStore` — wrap a loaded dataset. Before the first
   `materialize_*` call **every** session (including the owner) sees nothing.
 - `store.materialize_wac()` / `store.materialize_acp() -> Result<MaterializeStats, _>` —
-  run the N3 rules to (re)install `<urn:sparq:auth>`.
+  run the N3 rules to (re)install `<urn:sparq:auth>`. On `wasm32-unknown-unknown` the
+  informational `MaterializeStats::millis` is reported as `0.0` (no `std::time::Instant`);
+  the auth view is identical ([OPUS-4.8] sq-7agop).
 - `store.materialize_acp_with(&AccessProvenance) -> Result<MaterializeStats, _>` —
   ([OPUS-4.8] sq-3jtd.5) ACP materialization that ALSO resolves `acp:CreatorAgent` /
   `acp:OwnerAgent` matchers against per-resource creator/owner WebIDs supplied by the

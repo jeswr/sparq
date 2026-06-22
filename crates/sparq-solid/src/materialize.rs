@@ -14,6 +14,11 @@ use sparq_core::dict::Dict;
 use sparq_core::Graph;
 use sparq_reason::reason_n3;
 use std::fmt::Write as _;
+// `std::time::Instant` is unusable on `wasm32-unknown-unknown` — `Instant::now()`
+// panics there (no monotonic clock). The wall-clock plumbing for `stats.millis` is
+// purely informational, so it is `cfg`-gated off and reported as `0.0` on wasm32
+// rather than trapping at runtime (sq-7agop). [OPUS-4.8]
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 const COMMON_RULES: &str = include_str!("../rules/common.n3");
@@ -96,6 +101,7 @@ pub struct MaterializeStats {
 /// # Ok::<(), String>(())
 /// ```
 pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
+    #[cfg(not(target_arch = "wasm32"))]
     let t0 = Instant::now();
     strip_reserved_graphs(graph);
     // WAC has no creator/owner vocabulary; provenance is ignored (the loader skips it).
@@ -105,7 +111,10 @@ pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
     let closure = reason_n3(&mut dict, &src)?;
     let mut stats = install_auth_view(graph, &dict, &closure);
     stats.strata_facts = vec![closure.len()];
-    stats.millis = t0.elapsed().as_secs_f64() * 1e3;
+    stats.millis = elapsed_millis(
+        #[cfg(not(target_arch = "wasm32"))]
+        t0,
+    );
     Ok(stats)
 }
 
@@ -170,6 +179,7 @@ pub fn materialize_acp_with(
     graph: &mut Graph,
     provenance: &AccessProvenance,
 ) -> Result<MaterializeStats, String> {
+    #[cfg(not(target_arch = "wasm32"))]
     let t0 = Instant::now();
     strip_reserved_graphs(graph);
     let input = assemble_input(graph, System::Acp, provenance)?;
@@ -191,8 +201,25 @@ pub fn materialize_acp_with(
 
     let mut stats = install_auth_view(graph, &d3, &c3);
     stats.strata_facts = strata_facts;
-    stats.millis = t0.elapsed().as_secs_f64() * 1e3;
+    stats.millis = elapsed_millis(
+        #[cfg(not(target_arch = "wasm32"))]
+        t0,
+    );
     Ok(stats)
+}
+
+/// Wall-clock milliseconds since `t0`, or `0.0` on `wasm32-unknown-unknown` where
+/// `std::time::Instant` is unavailable (sq-7agop). `stats.millis` is purely
+/// informational (logging / benchmarking), so wasm32 simply reports no timing
+/// rather than trapping. [OPUS-4.8]
+#[cfg(not(target_arch = "wasm32"))]
+fn elapsed_millis(t0: Instant) -> f64 {
+    t0.elapsed().as_secs_f64() * 1e3
+}
+
+#[cfg(target_arch = "wasm32")]
+fn elapsed_millis() -> f64 {
+    0.0
 }
 
 /// Re-serialize a stratum's ground closure as facts for the next stratum.
