@@ -4,7 +4,8 @@
 #
 # disk-guard.sh [--dry-run | --apply] [--warn-gb N] [--critical-gb N]
 #               [--mount PATH] [--main PATH] [--root DIR] [--base REF]
-#               [--no-worktree-gc] [--reclaim-main-target] [--dry-run-self-test]
+#               [--no-worktree-gc] [--no-reclaim-completed] [--reclaim-main-target]
+#               [--dry-run-self-test]
 #
 # WHY: 2026-06-21 the work box filled to 99% (286/290G) and a wave-4 verify agent hit
 # ENOSPC mid-build (could not run `--workspace` clippy). The autonomous loop spawns one
@@ -13,8 +14,14 @@
 # finished worktrees, but it was a MANUAL / idle-time tool — nothing ran a `df` check or
 # the prune ON EACH MAINTENANCE TICK. This script is that per-tick GUARD: it
 #   (1) measures free space on the disk and classifies OK / WARN (<20G) / CRITICAL (<10G);
-#   (2) prunes provably-merged worktrees by DELEGATING to worktree-gc.sh (it does NOT
-#       reimplement the safe predicate — composition, not duplication); and
+#   (2) prunes finished worktrees by DELEGATING to worktree-gc.sh (it does NOT reimplement
+#       the safe predicate — composition, not duplication). It runs the broom with
+#       --reclaim-completed (default ON, --no-reclaim-completed to disable) so it ALSO
+#       reclaims COMPLETED-but-unmerged workflow worktrees — clean trees whose PR branch is
+#       pushed but not yet merged, with no live owning task. Without this they linger forever
+#       and starve the disk (observed 2026-06-22: ~229G of these, one 33G — bead sq-h34dc).
+#       The in-use guard inside worktree-gc.sh KEEPS any tree a live process is using, so a
+#       per-tick reclaim never touches an in-flight agent; and
 #   (3) only when CRITICAL, and only when NO live cargo/rustc build is touching the
 #       orchestrator main checkout's `target/`, reclaims that `target/` (regenerable:
 #       agents build in their OWN worktrees, so the orchestrator's `target/` is not load-
@@ -40,6 +47,7 @@
 #   scripts/disk-guard.sh                       # dry-run (default): df + dry-run prune + plan
 #   scripts/disk-guard.sh --apply               # prune the safe worktree set, then report
 #   scripts/disk-guard.sh --apply --reclaim-main-target   # also drop main target/ IF critical
+#   scripts/disk-guard.sh --no-reclaim-completed --apply  # MERGED/GONE-only prune (old behaviour)
 #   scripts/disk-guard.sh --warn-gb 30          # warn earlier
 #   scripts/disk-guard.sh --dry-run-self-test   # hermetic self-test (no fs/git mutation)
 set -uo pipefail   # NOT -e: a guard tick is best-effort and must not abort its caller.
@@ -156,28 +164,32 @@ WARN_GB="$DEFAULT_WARN_GB"
 CRITICAL_GB="$DEFAULT_CRITICAL_GB"
 RUN_WT_GC=1
 RECLAIM_MAIN_TARGET=0
+RECLAIM_COMPLETED=1   # default ON: the per-tick guard reclaims completed-but-unmerged workflow
+                     # worktrees too (sq-h34dc). worktree-gc.sh's in-use guard keeps live trees.
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --dry-run-self-test)   self_test; exit 0 ;;
-    --apply)               APPLY=1 ;;
-    --dry-run)             APPLY=0 ;;
-    --warn-gb)             shift; [ "$#" -gt 0 ] || die "--warn-gb needs a value"; WARN_GB="$1" ;;
-    --warn-gb=*)           WARN_GB="${1#--warn-gb=}" ;;
-    --critical-gb)         shift; [ "$#" -gt 0 ] || die "--critical-gb needs a value"; CRITICAL_GB="$1" ;;
-    --critical-gb=*)       CRITICAL_GB="${1#--critical-gb=}" ;;
-    --mount)               shift; [ "$#" -gt 0 ] || die "--mount needs a value"; MOUNT="$1" ;;
-    --mount=*)             MOUNT="${1#--mount=}" ;;
-    --main)                shift; [ "$#" -gt 0 ] || die "--main needs a value"; MAIN="$1" ;;
-    --main=*)              MAIN="${1#--main=}" ;;
-    --root)                shift; [ "$#" -gt 0 ] || die "--root needs a value"; ROOT="$1" ;;
-    --root=*)              ROOT="${1#--root=}" ;;
-    --base)                shift; [ "$#" -gt 0 ] || die "--base needs a value"; BASE="$1" ;;
-    --base=*)              BASE="${1#--base=}" ;;
-    --no-worktree-gc)      RUN_WT_GC=0 ;;
-    --reclaim-main-target) RECLAIM_MAIN_TARGET=1 ;;
-    -h|--help)             sed -n '2,60p' "$0"; exit 0 ;;
-    *)                     die "unknown argument: $1 (try --apply, --warn-gb, --critical-gb, --reclaim-main-target, --dry-run-self-test, --help)" ;;
+    --dry-run-self-test)     self_test; exit 0 ;;
+    --apply)                 APPLY=1 ;;
+    --dry-run)               APPLY=0 ;;
+    --warn-gb)               shift; [ "$#" -gt 0 ] || die "--warn-gb needs a value"; WARN_GB="$1" ;;
+    --warn-gb=*)             WARN_GB="${1#--warn-gb=}" ;;
+    --critical-gb)           shift; [ "$#" -gt 0 ] || die "--critical-gb needs a value"; CRITICAL_GB="$1" ;;
+    --critical-gb=*)         CRITICAL_GB="${1#--critical-gb=}" ;;
+    --mount)                 shift; [ "$#" -gt 0 ] || die "--mount needs a value"; MOUNT="$1" ;;
+    --mount=*)               MOUNT="${1#--mount=}" ;;
+    --main)                  shift; [ "$#" -gt 0 ] || die "--main needs a value"; MAIN="$1" ;;
+    --main=*)                MAIN="${1#--main=}" ;;
+    --root)                  shift; [ "$#" -gt 0 ] || die "--root needs a value"; ROOT="$1" ;;
+    --root=*)                ROOT="${1#--root=}" ;;
+    --base)                  shift; [ "$#" -gt 0 ] || die "--base needs a value"; BASE="$1" ;;
+    --base=*)                BASE="${1#--base=}" ;;
+    --no-worktree-gc)        RUN_WT_GC=0 ;;
+    --reclaim-completed)     RECLAIM_COMPLETED=1 ;;   # accepted for symmetry (already the default)
+    --no-reclaim-completed)  RECLAIM_COMPLETED=0 ;;
+    --reclaim-main-target)   RECLAIM_MAIN_TARGET=1 ;;
+    -h|--help)               sed -n '2,60p' "$0"; exit 0 ;;
+    *)                       die "unknown argument: $1 (try --apply, --warn-gb, --critical-gb, --no-reclaim-completed, --reclaim-main-target, --dry-run-self-test, --help)" ;;
   esac
   shift
 done
@@ -207,21 +219,26 @@ case "$STATE" in
   UNKNOWN)  log "disk state UNKNOWN (df unparsed) — running the safe prune anyway, skipping escalation." ;;
 esac
 
-# --- 2. prune provably-merged worktrees (delegate to worktree-gc.sh) ---------------------
-# We ALWAYS run the worktree prune (its safe predicate KEEPS anything unmerged/dirty, so it
-# is harmless when disk is fine and frees the most when it is not) — this is the per-tick
-# "prune merged worktrees" the bead asks for. We do not reimplement the predicate.
+# --- 2. prune finished worktrees (delegate to worktree-gc.sh) ----------------------------
+# We ALWAYS run the worktree prune (its safe predicate KEEPS anything unmerged/dirty/in-use, so
+# it is harmless when disk is fine and frees the most when it is not) — this is the per-tick
+# worktree prune the bead asks for. We do not reimplement the predicate. By default we pass
+# --reclaim-completed so the broom ALSO reclaims clean+pushed completed-but-unmerged workflow
+# worktrees with no live owning task (sq-h34dc) — the in-use guard inside worktree-gc.sh keeps
+# any tree a live process is using, so this never touches an in-flight agent.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WT_GC="${SCRIPT_DIR}/worktree-gc.sh"
 
 if [ "$RUN_WT_GC" -eq 1 ]; then
   if [ -x "$WT_GC" ] || [ -f "$WT_GC" ]; then
-    log "delegating worktree prune to worktree-gc.sh ($([ "$APPLY" -eq 1 ] && echo --apply || echo --dry-run)):"
+    WT_GC_EXTRA=()
+    [ "$RECLAIM_COMPLETED" -eq 1 ] && WT_GC_EXTRA+=(--reclaim-completed)
+    log "delegating worktree prune to worktree-gc.sh ($([ "$APPLY" -eq 1 ] && echo --apply || echo --dry-run)$([ "$RECLAIM_COMPLETED" -eq 1 ] && echo ' --reclaim-completed')):"
     if [ "$APPLY" -eq 1 ]; then
-      bash "$WT_GC" --apply --root "$ROOT" --main "$MAIN" --base "$BASE" || \
+      bash "$WT_GC" --apply --root "$ROOT" --main "$MAIN" --base "$BASE" "${WT_GC_EXTRA[@]+"${WT_GC_EXTRA[@]}"}" || \
         log "WARNING: worktree-gc.sh --apply returned non-zero (some worktrees kept) — non-fatal."
     else
-      bash "$WT_GC" --dry-run --root "$ROOT" --main "$MAIN" --base "$BASE" || \
+      bash "$WT_GC" --dry-run --root "$ROOT" --main "$MAIN" --base "$BASE" "${WT_GC_EXTRA[@]+"${WT_GC_EXTRA[@]}"}" || \
         log "WARNING: worktree-gc.sh --dry-run returned non-zero — non-fatal."
     fi
   else
