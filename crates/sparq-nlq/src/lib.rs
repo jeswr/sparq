@@ -22,6 +22,14 @@ pub mod constrain;
 pub mod eval;
 pub mod link;
 
+// [OPUS-4.8] sq-2489d.1 (GenAI-KB Phase 1): the cross-cutting provenance-join primitive
+// and the PKG-native citation renderer, behind the opt-in `citations` feature so the lean
+// NL→SPARQL loop carries zero provenance machinery in the default build.
+#[cfg(feature = "citations")]
+pub mod cite;
+#[cfg(feature = "citations")]
+pub mod provenance;
+
 // ---------------------------------------------------------------------------
 // The LLM boundary
 // ---------------------------------------------------------------------------
@@ -330,6 +338,25 @@ impl std::fmt::Debug for Answer {
             .field("repairs", &self.repairs)
             .field("transcript_turns", &self.transcript.len())
             .finish()
+    }
+}
+
+// [OPUS-4.8] sq-2489d.1 (GenAI-KB Phase 1, Use 3): render citations for an answer from
+// in-graph provenance. Gated behind `citations`; takes the `&Graph` the answer was
+// produced over (the `Answer` is graph-lifetime-free by design, so the caller passes it
+// back in — the same graph it called `ask` on).
+#[cfg(feature = "citations")]
+impl Answer {
+    /// Resolve every answer-row binding to its in-graph provenance and render numbered
+    /// citations (`[1]` → `prov:wasDerivedFrom` source + `dcterms:source` anchor +
+    /// `pkg:confidence`/`pkg:assurance`). Citations are emitted from provenance, **never**
+    /// generated, so each one resolves to a real in-graph source and un-sourced bindings
+    /// are reported as "no source recorded", never guessed. See [`cite`] / [`provenance`].
+    ///
+    /// `graph` must be the graph this answer was produced over (the one passed to
+    /// [`Nlq::new`]); the citation is the provenance of the binding in *that* graph.
+    pub fn citations(&self, graph: &Graph) -> cite::CitedAnswer {
+        cite::cite_result(graph, &self.result)
     }
 }
 

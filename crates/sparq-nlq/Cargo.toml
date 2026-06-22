@@ -30,6 +30,13 @@ rustdoc-args = ["--cfg", "docsrs"]
 # `live` enables AnthropicLlm (network access to the Anthropic Messages API).
 # OFF by default: CI and the eval harness run entirely on recorded fixtures.
 live = ["dep:reqwest"]
+# [OPUS-4.8] sq-2489d.1 (GenAI-KB Phase 1): `citations` enables the cross-cutting
+# provenance-join primitive (`provenance`) and the PKG-native citation renderer
+# (`cite`) + the `Answer::citations` accessor. OFF by default: keeps the lean NL→SPARQL
+# loop free of provenance machinery; the renderer is purely additive and read-only over
+# `sparq-core`. Citations are emitted from in-graph `prov:wasDerivedFrom`/`dcterms:source`
+# provenance ONLY — never guessed; absent provenance yields "no source recorded".
+citations = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

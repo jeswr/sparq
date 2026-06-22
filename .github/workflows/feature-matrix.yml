@@ -461,6 +461,18 @@ jobs:
             crate: sparq-terse
             features: vectors
             test: true
+          # [OPUS-4.8] sq-2489d.1 (GenAI-KB Phase 1): the opt-in citation renderer +
+          # cross-cutting provenance-join primitive. The feature is pure offline read-only
+          # logic (no network, unlike `live`), so it belongs in this lane — the leg runs
+          # the provenance/cite unit suites PLUS the end-to-end tests/citations.rs
+          # integration suite (it is `#![cfg(feature = "citations")]`, so it ONLY runs with
+          # the feature ON: the citation-resolution-rate-1.0 + zero-fabrication +
+          # no-source-recorded acceptance bar) and `clippy --all-targets -D warnings` in
+          # that state. The DEFAULT (feature-OFF) build is covered by the workspace lane.
+          - name: sparq-nlq (citations — provenance-join + citation renderer)
+            crate: sparq-nlq
+            features: citations
+            test: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install Rust (stable)
