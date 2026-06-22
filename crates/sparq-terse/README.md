@@ -89,17 +89,23 @@ for r in &exp.resolutions {
 ## 📚 Learn more
 
 - Design record: `research/llm-ergonomic-sparql-surface.md` (PR #1074) — the lever
-  ranking (§7), the soundness envelope (§6), and the falsifiable token/quality A/B
-  (§5, a future bead) that gates broad adoption.
+  ranking (§7), the soundness envelope (§6), and the falsifiable token/quality A/B (§5).
+- Adoption verdict (`bench/terse/RESULTS.md`, bead `sq-bzign`, PR #1174 — MEASURED,
+  work-box / NON-CANONICAL): **lever 1 (`K:`) is a conditional adopt** — clears the
+  cache-discounted token bar *and* ties plain SPARQL on quality, pending a real-transcript
+  fan-out (`sq-bmpzd`). **Lever 3 (`V()`) is do-NOT-adopt on quality** — it is **not** a
+  drop-in for an explicit IRI; in the A/B it (correctly) loud-failed on a punctuation-heavy
+  verbatim `prefLabel`, dropping resolution-correctness below 1.0 (the envelope working as
+  specified). Resolver-coverage fix tracked in `sq-26fdp`.
 - The reused machinery: `crates/sparq-nlq/src/link.rs` (lexical entity linking),
   `crates/sparq-vectors/src/ann.rs` (`nearest_exact`, the staleness-guarded
   `nearest_term_exact_checked`), `crates/sparq-vectors/src/store.rs`
   (`VectorStore::check_graph`).
 - Epic `sq-2m6zm` (dogfood sparq as a Project Knowledge Graph): this surface is
   `sq-leg8n` (Phase 1 skeleton + Phase 2 `V()`) and `sq-vfeme` (Phase 3 keyword layer);
-  Phases 4–6 (the did-you-mean diagnostic, the A/B verdict, server/CLI exposure) are
-  tracked follow-ups. The keyword set is **frozen at v1**, conditional on the Phase-5 A/B
-  measuring a real cache-discounted win before broad adoption (design §3.1/§5).
+  Phase 5 (the A/B verdict) landed in `sq-bzign` (above). Remaining follow-ups: the
+  full-session transcript fan-out (`sq-bmpzd`), the `V()` resolver-coverage fix (`sq-26fdp`),
+  and server/CLI exposure of the transpiler (`sq-vczh2`). The keyword set is **frozen at v1**.
 
 ## License
 

@@ -409,6 +409,21 @@ primary; the staleness-guarded `sparq-vectors` search is the fuzzy fallback); an
 `TerseError::StaleStore`). It reuses, not reinvents: `sparq-nlq::link::EntityLinker`
 (lexical) + `VectorStore::check_graph` + `ann::nearest_exact` (vector).
 
+**Adoption verdict (MEASURED, non-sycophantic — bead `sq-bzign`, the adoption gate, PR #1174).**
+A pre-registered, falsifiable query-authoring A/B over the real PKG (30 frozen stratified tasks,
+deterministic blind grading by the real transpiler + engine; record in `bench/terse/RESULTS.md`,
+numbers are work-box / NON-CANONICAL) gives a **per-lever** result, NOT a blanket win:
+
+- **Lever 1 (`K:<name>` keywords): conditional adopt.** Clears the cache-discounted token bar
+  *and* ties plain SPARQL on quality. Conditional only because the headline win is a *caching*
+  property, pending a full-session real-transcript fan-out (`sq-bmpzd`).
+- **Lever 3 (`V("phrase")`): do NOT adopt on quality.** `V()` is **not** a drop-in for an
+  explicit IRI — in the A/B it (correctly, by design) **loud-fails** on a punctuation-heavy
+  verbatim `prefLabel`, dropping resolution-correctness below 1.0. That is the soundness envelope
+  working as specified (loud-fail beats silent-wrong), but it means `V()` is a convenience that
+  must be checked, not trusted blind; the resolver-coverage fix is tracked in `sq-26fdp`. Prefer
+  `K:` + explicit `<iri>` for anything load-bearing.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in crates.** Neither crate is in the default build; add `sparq-introspect` /
