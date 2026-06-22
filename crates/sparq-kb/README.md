@@ -83,15 +83,14 @@ the write/merge/latency/CLI estate buys nothing (`part2_four_criterion_replaceme
 ## ✨ Features
 
 - **Reuse-first ontology** — generalises the vendored `zkp-sparql`
-  `sig-impl:Assertion` reified-claim pattern into `pkg:Finding`; reuses PROV-O,
-  SKOS, DCAT, **DQV** (the quality axis — `pkg:confidence`/`pkg:assurance` as named
-  `dqv:QualityMeasurement`/`dqv:Metric`/`dqv:Dimension`), FaBiO/FRBR/DC, **CiTO**
-  (citation + technique `cito:extends`/`cito:usesMethodIn`), schema.org, and
-  nanopublications. Only ~4 bespoke terms are net-new (`pkg:exploredStatus`,
-  `pkg:followUpPriority`, `pkg:confidence`, `pkg:couldBeMergedWith`) plus the single
-  `pkg:dependsOn` `owl:inverseOf` `pkg:blockedBy` pair (no `pkg:blocks`); DQV/CiTO
-  shrink, not grow, that surface. DQV is a W3C **Note** (caveat recorded). Full reuse +
-  live-ontology-alignment record in [`ontology/pkg/PROVENANCE.md`](ontology/pkg/PROVENANCE.md).
+  `sig-impl:Assertion` reified-claim pattern into `pkg:Finding`; reuses PROV-O, SKOS,
+  DCAT, **DQV** (quality axis — `pkg:confidence`/`pkg:assurance` as named
+  `dqv:QualityMeasurement`/`dqv:Metric`/`dqv:Dimension`; DQV is a W3C **Note**, caveat
+  recorded), FaBiO/FRBR/DC, **CiTO** (`cito:extends`/`cito:usesMethodIn` technique links),
+  schema.org, and nanopublications. Only ~4 bespoke terms are net-new (`pkg:exploredStatus`,
+  `pkg:followUpPriority`, `pkg:confidence`, `pkg:couldBeMergedWith`) plus the
+  `pkg:dependsOn`/`pkg:blockedBy` `owl:inverseOf` pair; DQV/CiTO shrink that surface. Full
+  reuse + alignment record in [`ontology/pkg/PROVENANCE.md`](ontology/pkg/PROVENANCE.md).
 - **SHACL guardrails** — `pkg.shapes.ttl` makes a source + a confidence value + an
   assurance basis + non-filler content **mandatory** on every `pkg:Finding`, and
   enforces a valid status / bounded priority / no-stale-edge on every `pkg:Task`.
@@ -99,12 +98,10 @@ the write/merge/latency/CLI estate buys nothing (`part2_four_criterion_replaceme
   `validate` feature is the only thing that pulls in `sparq-core` + `sparq-shacl`.
 - **No-drift guard** — `vocab.rs` is byte-pinned against `pkg.ttl` by a sync test.
 - **Write-path authoring** (`sq-mztg8.2`) — author Findings in a compact, IRI-free
-  `*.yaml.ld`; a **deterministic** compiler (`yamlld_compile.py`) expands them to typed
-  PKG Turtle, resolving concept TOKENS via the **guarded `V()`** (ambiguous = hard error).
+  `*.yaml.ld`; a **deterministic** `yamlld_compile.py` expands them to typed PKG Turtle via the **guarded `V()`** (ambiguous concept TOKEN = hard error).
 - **NL-tool envelope** (`query` feature, `sq-ve5dy`) — `query::nl_tool` returns the
   **executed SPARQL + resolved IRIs + grounding confidence** so the caller can verify the
-  answer was computed, not guessed (`pkg-query --json`). The `model: haiku` agent-flavor
-  sub-agent (`.claude/agents/sparq-pkg-nl.md`) pays cheap-model tokens for the middle.
+  answer (`pkg-query --json`); the `model: haiku` sub-agent pays cheap-model tokens.
 
 ## 📚 Learn more
 
