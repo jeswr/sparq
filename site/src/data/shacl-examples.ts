@@ -10,6 +10,12 @@ export interface ShaclExample {
   conforms: boolean;
   data: string;
   shapes: string;
+  /**
+   * [OPUS-4.8] sq-pyn7 (#796) — the syntax of `shapes`. Defaults to "turtle"; an example with
+   * "compact" carries its shapes graph as SHACL Compact Syntax, which the playground parses to
+   * Turtle via the wasm `Store.parseShaclCompact` binding before validating.
+   */
+  shapesMode?: "turtle" | "compact";
 }
 
 const PERSON_SHAPE = `@prefix sh:  <http://www.w3.org/ns/shacl#> .
@@ -73,5 +79,33 @@ ex:bob a ex:Person ;
   ex:age 41 .
 `,
     shapes: PERSON_SHAPE,
+  },
+  {
+    // [OPUS-4.8] sq-pyn7 (#796) — the SCS *input* example: the same Person shape authored in
+    // the terser SHACL Compact Syntax. The playground parses it to a Turtle shapes graph via
+    // the wasm `Store.parseShaclCompact` binding before validating, so `ex:age "thirty"` (a
+    // string) still fails the xsd:integer datatype constraint. `shapeClass` makes the shape
+    // its own target class — the data's `ex:carol a ex:Person` is targeted.
+    id: "compact-input",
+    label: "Compact-syntax shapes (SCS input)",
+    description:
+      "The Person shape written in SHACL Compact Syntax, parsed to a shapes graph via Store.parseShaclCompact before validating. ex:carol's string age violates xsd:integer — the same report as the equivalent Turtle shapes.",
+    conforms: false,
+    shapesMode: "compact",
+    data: `@prefix ex: <http://example.org/> .
+
+# age is a string literal, not an integer — fails sh:datatype xsd:integer.
+ex:carol a ex:Person ;
+  ex:name "Carol" ;
+  ex:age "thirty" .
+`,
+    shapes: `PREFIX ex: <http://example.org/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+shapeClass ex:Person {
+\tex:name xsd:string [1..1] .
+\tex:age xsd:integer [1..1] .
+}
+`,
   },
 ];

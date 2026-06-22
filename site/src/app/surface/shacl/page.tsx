@@ -47,8 +47,8 @@ export default function ShaclSurfacePage() {
           body: "Conformance boolean + sh:result violations, as Turtle or human text.",
         },
         {
-          title: "SHACL Compact Syntax (display)",
-          body: "Render the shapes graph in the W3C compact notation beside the validation report.",
+          title: "SHACL Compact Syntax (in + out)",
+          body: "Author shapes in the W3C compact notation (parsed in-tab to a shapes graph) and render any shapes graph back to compact form.",
         },
       ]}
       runsNote="Live in your browser tab — the validator is pure Rust over the engine compiled to the SHACL-enabled wasm bundle, so the conformance flag and per-violation report come back with no network round-trip."
@@ -64,12 +64,14 @@ export default function ShaclSurfacePage() {
             HTTP <code className="font-mono">validate</code> path.
           </p>
           <p>
-            The <strong className="text-foreground">Compact syntax</strong> view is the
-            display direction only (shapes &rarr; compact) and best-effort: the notation
+            <strong className="text-foreground">SHACL Compact Syntax</strong> works both
+            ways. The <em>input</em> direction (compact text &rarr; shapes) parses in-tab
+            via the engine&rsquo;s <code className="font-mono">parseShaclCompact</code>{" "}
+            binding &mdash; switch the shapes editor to <em>Compact</em> to author shapes
+            in the terser notation and validate against them unchanged. The{" "}
+            <em>display</em> direction (shapes &rarr; compact) is best-effort: the notation
             has no form for logical constraints or shape references, which the view lists
-            explicitly rather than dropping. The parse direction (compact text &rarr;
-            shapes) belongs in the <code className="font-mono">sparq-shacl</code> engine
-            and is tracked separately.
+            explicitly rather than dropping.
           </p>
         </>
       }

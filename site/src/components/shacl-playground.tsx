@@ -32,6 +32,7 @@ import {
   loadIntoStore,
   matchQuads,
   sparqShaclValidate,
+  sparqParseShaclCompact,
   type ShaclReport,
   type SparqlBinding,
   type SparqlTerm,
@@ -68,6 +69,13 @@ type CompactState =
 
 type EngineState = "cold" | "warming" | "ready" | "error";
 type View = "results" | "turtle" | "compact";
+
+// [OPUS-4.8] sq-pyn7 (#796) — the SHAPES-input syntax. "turtle" feeds the textarea text to
+// the validator unchanged; "compact" reads it as SHACL Compact Syntax (SCS) and parses it to
+// a Turtle shapes graph via the wasm `Store.parseShaclCompact` binding FIRST, so the user can
+// author shapes in the terser compact notation and still validate / round-trip them. This is
+// the SCS *input* direction, the counterpart of the `shapesToCompact` Turtle→SCS serialiser.
+type ShapesMode = "turtle" | "compact";
 
 // Turtle `@prefix p: <iri> .` OR SPARQL-style `PREFIX p: <iri>` declarations. The
 // shared `declaredPrefixBindings` only matches the SPARQL form; the SHACL Turtle
@@ -106,11 +114,21 @@ const DEFAULT = SHACL_EXAMPLES[0];
 export function ShaclPlayground() {
   const [data, setData] = React.useState(DEFAULT.data);
   const [shapes, setShapes] = React.useState(DEFAULT.shapes);
+  const [shapesMode, setShapesMode] = React.useState<ShapesMode>("turtle");
   const [state, setState] = React.useState<RunState>({ kind: "idle" });
   const [compact, setCompact] = React.useState<CompactState>({ kind: "idle" });
   const [engine, setEngine] = React.useState<EngineState>("cold");
   const [activeExample, setActiveExample] = React.useState<string>(DEFAULT.id);
   const [view, setView] = React.useState<View>("results");
+
+  // [OPUS-4.8] sq-pyn7 (#796) — resolve the SHAPES textarea to a Turtle shapes graph: in
+  // "turtle" mode it is the text unchanged; in "compact" mode it is SCS, parsed to Turtle via
+  // the wasm `Store.parseShaclCompact` binding (a clear error is surfaced if the loaded bundle
+  // lacks the `scs` feature, or if the SCS fails to parse). Memoised on `shapes`/`shapesMode`.
+  const resolveShapesTurtle = React.useCallback(async (): Promise<string> => {
+    if (shapesMode === "turtle") return shapes;
+    return sparqParseShaclCompact(shapes);
+  }, [shapes, shapesMode]);
 
   // [OPUS-4.8] sq-4296 (#935 / #981) — pre-warm the wasm engine on the next browser-IDLE
   // slot, not synchronously during mount, so the ~300 kB+ engine wasm never blocks the
@@ -142,7 +160,12 @@ export function ShaclPlayground() {
     setState({ kind: "running" });
     try {
       const t0 = performance.now();
-      const report = await sparqShaclValidate(data, shapes, "turtle");
+      // [OPUS-4.8] sq-pyn7 (#796) — when the shapes editor is in Compact mode the SCS text is
+      // parsed to a Turtle shapes graph FIRST (via the wasm binding), then validated exactly
+      // as a hand-written Turtle shapes graph would be — the SCS input round-trips losslessly
+      // through the same `validate` path.
+      const shapesTurtle = await resolveShapesTurtle();
+      const report = await sparqShaclValidate(data, shapesTurtle, "turtle");
       const ms = performance.now() - t0;
       setEngine("ready");
       setState({ kind: "report", report, ms });
@@ -151,7 +174,7 @@ export function ShaclPlayground() {
       setState({ kind: "error", message });
       toast.error("Validation failed", { description: message });
     }
-  }, [data, shapes]);
+  }, [data, resolveShapesTurtle]);
 
   // [OPUS-4.8] sq-pvg2 (#796) — render the SHAPES graph in SHACL Compact Syntax.
   // Parses the shapes Turtle with the same wasm engine, pulls every triple out via
@@ -161,8 +184,12 @@ export function ShaclPlayground() {
     setView("compact");
     setCompact({ kind: "running" });
     try {
+      // [OPUS-4.8] sq-pyn7 (#796) — resolve to Turtle first so the compact render works in
+      // BOTH input modes: in Compact mode this parses SCS → Turtle, then re-serialises Turtle
+      // → SCS, exercising the full round-trip; in Turtle mode it serialises the text directly.
+      const shapesTurtle = await resolveShapesTurtle();
       const Store = await loadSparq();
-      const store = loadIntoStore(Store, shapes, "turtle");
+      const store = loadIntoStore(Store, shapesTurtle, "turtle");
       const rows: SparqlBinding[] = matchQuads(store);
       const triples: ScsTriple[] = rows.flatMap((row) => {
         const { s, p, o } = row;
@@ -171,7 +198,9 @@ export function ShaclPlayground() {
           { subject: toScsTerm(s), predicate: toScsTerm(p), object: toScsTerm(o) },
         ];
       });
-      const { text, unsupported } = shapesToCompact(triples, extractPrefixes(shapes));
+      // Recover the prefix labels from the resolved Turtle (it carries the `@prefix`/PREFIX
+      // declarations in both modes — the wasm parser emits them for the SCS-derived graph too).
+      const { text, unsupported } = shapesToCompact(triples, extractPrefixes(shapesTurtle));
       setEngine("ready");
       setCompact({ kind: "done", text, unsupported });
     } catch (e) {
@@ -179,13 +208,16 @@ export function ShaclPlayground() {
       setCompact({ kind: "error", message });
       toast.error("Could not render compact syntax", { description: message });
     }
-  }, [shapes]);
+  }, [resolveShapesTurtle]);
 
   const selectExample = React.useCallback((id: string) => {
     const ex = SHACL_EXAMPLES.find((e) => e.id === id);
     if (!ex) return;
     setData(ex.data);
     setShapes(ex.shapes);
+    // [OPUS-4.8] sq-pyn7 (#796) — an example may carry its shapes as SCS (`shapesMode:
+    // "compact"`); switch the shapes-input toggle to match so it parses, not validates raw.
+    setShapesMode(ex.shapesMode ?? "turtle");
     setActiveExample(id);
     setState({ kind: "idle" });
     setCompact({ kind: "idle" });
@@ -236,12 +268,15 @@ export function ShaclPlayground() {
             />
           </div>
           <div className="space-y-1.5">
-            <label
-              htmlFor="shacl-shapes"
-              className="text-xs font-medium text-muted-foreground"
-            >
-              Shapes graph (Turtle)
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="shacl-shapes"
+                className="text-xs font-medium text-muted-foreground"
+              >
+                Shapes graph ({shapesMode === "compact" ? "Compact syntax" : "Turtle"})
+              </label>
+              <ShapesModeToggle mode={shapesMode} onChange={setShapesMode} />
+            </div>
             <textarea
               id="shacl-shapes"
               value={shapes}
@@ -249,7 +284,18 @@ export function ShaclPlayground() {
               onChange={(e) => setShapes(e.target.value)}
               rows={12}
               className="w-full resize-y rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+              aria-describedby={shapesMode === "compact" ? "shacl-shapes-scs-hint" : undefined}
             />
+            {shapesMode === "compact" && (
+              <p
+                id="shacl-shapes-scs-hint"
+                className="text-[11px] text-muted-foreground"
+              >
+                SHACL Compact Syntax — parsed to a shapes graph via the wasm{" "}
+                <code className="font-mono">Store.parseShaclCompact</code> binding before
+                validation.
+              </p>
+            )}
           </div>
         </div>
 
@@ -320,6 +366,47 @@ function EngineIndicator({ engine }: { engine: EngineState }) {
     <Badge variant="muted" aria-live="polite">
       <Loader2 className="size-3 animate-spin" /> Engine loading…
     </Badge>
+  );
+}
+
+// [OPUS-4.8] sq-pyn7 (#796) — the shapes-input syntax toggle: Turtle (the default; the text
+// is fed to the validator unchanged) vs Compact (the text is SHACL Compact Syntax, parsed to
+// a Turtle shapes graph via the wasm `Store.parseShaclCompact` binding before validation).
+function ShapesModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: ShapesMode;
+  onChange: (m: ShapesMode) => void;
+}) {
+  const options: { value: ShapesMode; label: string }[] = [
+    { value: "turtle", label: "Turtle" },
+    { value: "compact", label: "Compact" },
+  ];
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Shapes input syntax"
+      className="inline-flex rounded-lg border bg-muted/40 p-0.5"
+    >
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          role="radio"
+          aria-checked={mode === o.value}
+          onClick={() => onChange(o.value)}
+          className={cn(
+            "rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+            mode === o.value
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
