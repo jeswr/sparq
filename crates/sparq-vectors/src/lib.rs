@@ -64,6 +64,15 @@ pub mod store;
 // carries zero structure-prep code.
 #[cfg(feature = "structure")]
 pub mod structure;
+// [OPUS-4.8] sq-2489d.4 (epic sq-2489d, GenAI-KB Phase 4, design
+// research/provenance-driven-genai-kb.md §USE-1 / §5 Phase 4): the PKG→`w(t)` PROVENANCE-WEIGHT
+// reader — a read-only id-level scan of `pkg:confidence`/`pkg:assurance`/`prov:wasDerivedFrom` into
+// a per-triple provenance-quality weight, mirroring `shacl_priors.rs`. `structure` feature only; it
+// consumes only sparq-core's public id-scan API and pulls NO new dependency (it does NOT use the
+// SPARQL-backed Phase-1 join, so the engine never enters this crate's `structure` graph). The
+// default build carries zero provenance-weight code.
+#[cfg(feature = "structure")]
+pub mod provenance;
 // [OPUS-4.8] sq-0wo9e.8 (epic sq-0wo9e): the MEASUREMENT FOUNDATION — a thin shallow-KGE trainer
 // (`train`; symmetric DistMult or asymmetric ComplEx via `ModelKind`) over the P0 closure +
 // type-constrained negatives, and the filtered link-prediction eval harness (`eval`) with the
@@ -157,14 +166,18 @@ pub use structure::{
     close_for_vectorise, materialise_closure, ClosedGraph, Corrupt, NegativeSampler, SamplingMode,
     TypeConstraints,
 };
+// [OPUS-4.8] sq-2489d.4 (epic sq-2489d, GenAI-KB Phase 4): the provenance-weight surface — the
+// PKG→`w(t)` reader, its on/off ablation switch, and the tunable factors. `structure` feature only.
+#[cfg(feature = "structure")]
+pub use provenance::{ProvenanceWeights, WeightConfig, WeightMode};
 // [OPUS-4.8] sq-0wo9e.8 (epic sq-0wo9e): the DistMult trainer + filtered link-prediction eval
 // harness surface — `kge` feature only.
 #[cfg(feature = "kge")]
 pub use eval::{
-    run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, synthetic_gufo_ttl,
-    synthetic_gufo_ttl_sized, synthetic_relational_ttl, AblationCell, CellStats, EvalConfig,
-    LongTail, MeanStd, Metrics, MultiSeedCell, PairedAblation, PairedDelta, Splits,
-    SCHEMA_PREDICATES,
+    run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, run_weight_ablation,
+    synthetic_gufo_ttl, synthetic_gufo_ttl_sized, synthetic_provenance_ttl, synthetic_relational_ttl,
+    AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, PairedAblation,
+    PairedDelta, Splits, WeightAblation, SCHEMA_PREDICATES,
 };
 #[cfg(feature = "kge")]
 pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};

@@ -16,8 +16,10 @@
 
 use sparq_reason::Profile;
 use sparq_vectors::eval::{
-    run_ablation, synthetic_gufo_ttl, synthetic_relational_ttl, EvalConfig, Splits,
+    run_ablation, run_weight_ablation, synthetic_gufo_ttl, synthetic_provenance_ttl,
+    synthetic_relational_ttl, EvalConfig, Splits,
 };
+use sparq_vectors::provenance::WeightMode;
 use sparq_vectors::structure::close_for_vectorise;
 use sparq_vectors::train::{train, TrainConfig};
 use sparq_vectors::SamplingMode;
@@ -151,5 +153,79 @@ fn gufo_closure_axis_actually_changes_something() {
     assert!(
         c.entailed_triples > 0,
         "gUFO closure should derive entailed Person memberships (closure axis must bite)"
+    );
+}
+
+// ---- Phase-4 provenance-weighting (sq-2489d.4) -------------------------------------------------
+
+/// The load-bearing NO-OP invariant: over a provenance-FREE graph the ON arm is byte-identical to
+/// OFF, so the paired MRR/Hits@10 delta is EXACTLY zero. (Provenance-weighting must never change a
+/// plain graph — the design's "defaulting to 1.0 when no provenance exists" guarantee.)
+#[test]
+fn weight_ablation_is_exact_noop_on_provenance_free_graph() {
+    // The relational slice carries no PROV-O/DQV annotations at all.
+    let ttl = synthetic_relational_ttl(200, 3);
+    let cfg = EvalConfig::small(13);
+    let ab = run_weight_ablation(&ttl, "turtle", cfg, &[1, 2, 3]).unwrap();
+    // Every per-seed arm is identical → the paired delta is bit-for-bit zero.
+    assert_eq!(ab.mrr.mean, 0.0, "provenance-free MRR delta must be exactly 0");
+    assert_eq!(ab.mrr.std, 0.0, "no spread when both arms are identical");
+    assert_eq!(ab.hits10.mean, 0.0, "provenance-free Hits@10 delta must be exactly 0");
+    // And the aggregated arm metrics agree exactly.
+    assert_eq!(ab.off.mrr.mean, ab.on.mrr.mean, "arms must coincide on a plain graph");
+}
+
+/// The weight ablation runs END-TO-END on the provenance-annotated slice (parse → close → split →
+/// train ON+OFF → rank), produces a well-formed paired delta over multiple seeds, and the firm-up
+/// gate is well-defined. NO numeric lift is asserted — the bead's bar is "adopt only on measured
+/// lift, ABANDON otherwise", and this is the instrument, not a claim.
+#[test]
+fn weight_ablation_runs_on_provenance_slice() {
+    let ttl = synthetic_provenance_ttl(160, 5);
+    let mut cfg = EvalConfig::small(21);
+    cfg.train.epochs = 40;
+    let seeds = [1u64, 2, 3, 4];
+    let ab = run_weight_ablation(&ttl, "turtle", cfg, &seeds).unwrap();
+    // Both arms scored real held-out queries.
+    assert!(ab.off.mrr.n == seeds.len(), "one OFF sample per seed");
+    assert!(ab.on.mrr.n == seeds.len(), "one ON sample per seed");
+    assert!(ab.off.queries.mean > 0.0, "must score some held-out queries");
+    // The paired delta is finite and the firm-up gate is callable (its verdict — adopt/abandon — is
+    // the caller's policy; we only assert the instrument is well-formed, never a direction).
+    assert!(ab.mrr.mean.is_finite() && ab.mrr.se.is_finite());
+    let _adopt = ab.mrr_significant_at(2.0); // n>=2 → a real boolean, not trivially true
+    assert_eq!(ab.mrr.n, seeds.len());
+}
+
+/// Proof the weight actually FLOWS into training: on the annotated slice, the
+/// `WeightMode::Provenance` model's embeddings differ from the `WeightMode::Uniform` model's (the
+/// down-weighted low-assurance positives take smaller gradient steps), so the ON arm is genuinely a
+/// different model — not a silently-ignored flag. Over a provenance-free graph it would be identical
+/// (covered by the no-op test above).
+#[test]
+fn provenance_weight_changes_the_trained_model() {
+    let ttl = synthetic_provenance_ttl(140, 7);
+    let c = close_for_vectorise(&ttl, "turtle", Profile::Rdfs).unwrap();
+    let tc = sparq_vectors::TypeConstraints::mine(&c.graph);
+
+    let mut off = TrainConfig::small(SamplingMode::TypeConstrained, 9);
+    off.epochs = 30;
+    off.weight_mode = WeightMode::Uniform;
+    let mut on = off;
+    on.weight_mode = WeightMode::Provenance;
+
+    let (m_off, _) = train(&c.graph, &tc, off);
+    let (m_on, _) = train(&c.graph, &tc, on);
+    assert_eq!(m_off.dim, m_on.dim);
+    // The two models must not be identical — the provenance weight reached the SGD step.
+    let mut max_abs_diff = 0.0f32;
+    for row in 0..m_off.num_entities() {
+        for (a, b) in m_off.entity_vec(row).iter().zip(m_on.entity_vec(row).iter()) {
+            max_abs_diff = max_abs_diff.max((a - b).abs());
+        }
+    }
+    assert!(
+        max_abs_diff > 1e-4,
+        "provenance-weighting must change the trained embeddings (max|Δ|={max_abs_diff})"
     );
 }

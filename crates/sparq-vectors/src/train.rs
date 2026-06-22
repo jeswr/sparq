@@ -152,6 +152,15 @@ pub struct TrainConfig {
     /// The P0 ablation switch: [`SamplingMode::TypeConstrained`] (type-valid negatives) vs
     /// [`SamplingMode::Unconstrained`] (uniform-random negatives).
     pub sampling: SamplingMode,
+    /// [OPUS-4.8] sq-2489d.4 — the Phase-4 PROVENANCE-WEIGHTING ablation switch
+    /// ([`WeightMode`](crate::provenance::WeightMode)). Under
+    /// [`WeightMode::Provenance`](crate::provenance::WeightMode::Provenance) each positive's SGD step
+    /// is scaled by the design-§USE-1 provenance weight `w(t)` (the CKRL confidence-weighted-loss
+    /// move — a high-assurance fact contributes a full-strength gradient, a low-assurance/low-source
+    /// fact a down-weighted one); under
+    /// [`WeightMode::Uniform`](crate::provenance::WeightMode::Uniform) every weight is `1.0` and the
+    /// loop is byte-identical to the unweighted trainer (the ablation-off baseline).
+    pub weight_mode: crate::provenance::WeightMode,
     /// Master seed for init + negative draws + positive shuffle. Fixed ⇒ reproducible.
     pub seed: u64,
 }
@@ -177,6 +186,9 @@ impl TrainConfig {
             l2: 1e-4,
             negatives_per_positive: 8,
             sampling,
+            // Default OFF: an existing caller (and the P0 ablation) keeps the unweighted baseline
+            // until it explicitly opts into provenance-weighting via `weight_mode`. [OPUS-4.8]
+            weight_mode: crate::provenance::WeightMode::Uniform,
             seed,
         }
     }
@@ -429,6 +441,12 @@ pub fn train(
 
     let sampler = NegativeSampler::new(graph, constraints, config.sampling);
 
+    // [OPUS-4.8] sq-2489d.4 (Phase 4): mine the per-triple provenance weights ONCE. Under
+    // `WeightMode::Uniform` this still reads the graph but every `weight_of` returns 1.0, so the
+    // loop below is byte-identical to the unweighted trainer (the ablation-off baseline); the read
+    // is cheap (a single id-scan) and keeps the two arms sharing the same code path.
+    let prov_weights = crate::provenance::ProvenanceWeights::mine(graph);
+
     let mut epoch_loss = Vec::with_capacity(config.epochs);
     let lr = config.lr;
     let l2 = config.l2;
@@ -462,8 +480,15 @@ pub fn train(
                 .wrapping_add(pi as u64);
 
             // The training batch: 1 positive (label 1) + negatives (label 0).
-            // Positive step.
-            let (l, _) = step(config.model, &mut entity_emb, &mut rel_emb, dim, hr, rr, tr, 1.0, lr, l2);
+            // [OPUS-4.8] sq-2489d.4 (Phase 4): the CKRL confidence-weighted-loss move — scale the
+            // POSITIVE step's effective learning rate by the triple's provenance weight `w(t)` so a
+            // high-assurance fact contributes a full-strength gradient and a low-assurance/low-source
+            // fact a down-weighted one. Negatives are NOT weighted (a corruption has no provenance of
+            // its own; weighting only the positive is the canonical CKRL form). Under
+            // `WeightMode::Uniform` `w == 1.0`, so `lr * w == lr` and the step is unchanged.
+            let w = prov_weights.weight_of([h, r, t], config.weight_mode);
+            let (l, _) =
+                step(config.model, &mut entity_emb, &mut rel_emb, dim, hr, rr, tr, 1.0, lr * w, l2);
             loss_sum += l as f64;
             loss_terms += 1;
 

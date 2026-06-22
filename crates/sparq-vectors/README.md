@@ -91,13 +91,13 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   `RemoteEmbedder::from_env(dim)`. Never enters the wasm bundle.
 - **Structure-aware vectorisation (opt-in `structure` / `structure-shacl`; measurement behind `kge`)** — research-grade.
   **P0:** `close_for_vectorise` materialises the `sparq-reason` closure **before** vectorising; a `NegativeSampler` emits type-constrained corruptions (Krompass 2015) with an **on/off ablation**.
-  **P1/P2:** typed-literal encoders — `route`r, **order-preserving** `NumericEncoder`, `BooleanEncoder`,
-  `DateEncoder`, enum `Codebook`, `SchemaHeader` (metric guard); QUDT unit-`normalise` (`1000 m` ≡ `1 km`);
+  **P1/P2:** typed-literal encoders — `route`r, **order-preserving** `NumericEncoder`, `BooleanEncoder`, `DateEncoder`, enum `Codebook`, `SchemaHeader` (metric guard); QUDT unit-`normalise` (`1000 m` ≡ `1 km`);
   **`structure-shacl`** adds the `ShaclPriors` reader (enum/datatype/cardinality from `sparq-shacl`).
   **P3:** `TaxonomyDag` + `EuclideanTaxonomyEncoder` (Euclidean default; hyperbolic **only past** the measured-distortion `GeometryGate`) + an **answer-safe** `DisjointnessOracle` (train-time repulsion + serve-time hard mask dropping *provably-disjoint* candidates only).
   **P4:** `ground` — a per-request modality dispatcher (subgraph / typed sub-vector / NL / typed value), **profile-relative** completeness + ABSTAT-style minimality; ambiguous → the exact subgraph.
+  **Provenance-weighting (GenAI-KB Phase 4):** `ProvenanceWeights` mines a per-triple `w(t)∈(0,1]` from PROV-O/DQV (`pkg:confidence`/`pkg:assurance`/`prov:wasDerivedFrom`, mirroring `ShaclPriors`, **no engine dep**) to down-weight low-assurance facts in training (CKRL); `WeightMode` on/off ablation, **fail-open 1.0** on plain graphs.
   **`kge`** (implies `structure`, no new dep — hand-rolled SGD): a thin CPU-only trainer (symmetric
-  **DistMult** / asymmetric **ComplEx**) + a **filtered link-prediction** `{closure}×{type-neg}` ablation (`run_ablation*`). **No accuracy claim**; INDICATIVE only — read deltas off ComplEx (DistMult is symmetric → near-random on directional data).
+  **DistMult** / asymmetric **ComplEx**) + a **filtered link-prediction** ablation (`run_ablation*`, `run_weight_ablation`). **No accuracy claim**; INDICATIVE only — read deltas off ComplEx (DistMult is symmetric → near-random on directional data).
 
 ## 📚 Learn more
 
