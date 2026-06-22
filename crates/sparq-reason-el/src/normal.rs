@@ -16,9 +16,25 @@ use sparq_core::dict::Id;
 pub type Concept = u32;
 
 /// A role (object property) in the internal index space. Like [`Concept`] this is a dense
-/// `u32` separate from dict ids; the EL MVP does not reason over the role hierarchy (Phase
-/// E2), so a role is only ever compared for equality.
+/// `u32` separate from dict ids. Without the `rbox` feature a role is only ever compared for
+/// equality (no role hierarchy). With `rbox` (Phase E2, bead sq-xetf7) the saturator reasons
+/// over role inclusions and compositions via the [`RoleBox`] role automaton.
 pub type Role = u32;
+
+/// An RBox (role-box) axiom in normal form — the two EL+ role forms the Baader–Brandt–Lutz
+/// calculus adds on top of the four concept forms (spike §5, CR10/CR11). Only built when the
+/// `rbox` feature is on; the MVP (E1) drops every role axiom into [`crate::Report::skipped_axioms`].
+#[cfg(feature = "rbox")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RoleAxiom {
+    /// `r ⊑ s` — a simple role inclusion (`rdfs:subPropertyOf` between object properties).
+    /// `owl:TransitiveProperty(r)` is normalized to the composition `r ∘ r ⊑ r`, NOT this form.
+    Sub(Role, Role),
+    /// `r1 ∘ r2 ⊑ s` — a (binary) role composition. An `owl:propertyChainAxiom` of length `n`
+    /// is left-folded into `n-1` of these over fresh intermediate roles; a transitive role is
+    /// the special case `r ∘ r ⊑ r`; SNOMED right-identity is `r ∘ s ⊑ s`.
+    Chain(Role, Role, Role),
+}
 
 /// The internal name table: a bijection between the dense classification index space and the
 /// source dict ids, plus a counter that mints fresh (anonymous) concepts for normalization.
@@ -76,6 +92,24 @@ impl Names {
         self.role_to_dict.push(dict_id);
         self.role_by_dict.insert(dict_id, r);
         r
+    }
+
+    /// Mints a fresh anonymous role (no dict id) — used to left-fold an `owl:propertyChainAxiom`
+    /// of length `n` into `n-1` binary [`RoleAxiom::Chain`] forms over intermediate roles. The
+    /// fresh role uses a sentinel dict id (`Id::MAX`) that no real property interns to; it never
+    /// appears in an emitted link because chain heads are always named roles.
+    #[cfg(feature = "rbox")]
+    pub fn fresh_role(&mut self) -> Role {
+        let r = self.role_to_dict.len() as Role;
+        self.role_to_dict.push(Id::MAX);
+        r
+    }
+
+    /// The number of roles minted so far (the dense role-index upper bound). Used to size the
+    /// role-saturation tables in [`RoleBox`].
+    #[cfg(feature = "rbox")]
+    pub fn role_count(&self) -> usize {
+        self.role_to_dict.len()
     }
 
     /// Mints a fresh anonymous concept (a normalization name with no dict id).

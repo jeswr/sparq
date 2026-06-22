@@ -36,6 +36,15 @@ rustdoc-args = ["--cfg", "docsrs"]
 # the crate is itself the opt-in surface (depending on it is the opt-in).
 default = []
 
+# [OPUS-4.8] sq-xetf7 (Phase E2): RBox / property-chain + transitive-role saturation
+# (CR10 role inclusion + CR11 role composition, the EL+ role automaton — the SNOMED-critical
+# right-identity/transitive role reasoning). OFF by default so the E1 classifier (and the lean
+# wasm port) carry zero role-automaton code: without `rbox` every `rdfs:subPropertyOf`,
+# `owl:propertyChainAxiom` and `owl:TransitiveProperty` axiom is left unapplied (roles are
+# compared for equality only, exactly the E1 behaviour). No new dependency — reuses oxrdf +
+# rustc-hash. Spike: research/owl2-el-ql-reasoning-spike.md §5 (EL-track E2).
+rbox = []
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
