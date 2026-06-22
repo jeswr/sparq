@@ -419,7 +419,7 @@ jobs:
           done
 
   wasm:
-    name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm + sparq-text-wasm + sparq-shacl-wasm)
+    name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm + sparq-text-wasm + sparq-shacl-wasm + sparq-solid)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
@@ -594,6 +594,21 @@ jobs:
       # job summary so a future bloat is visible in the log.
       - name: Measure sparq-introspect wasm bundle size (informational)
         run: ./scripts/introspect-wasm-size.sh | tee -a "$GITHUB_STEP_SUMMARY"
+      # [OPUS-4.8] sq-7agop: the opt-in Solid access-control layer compiles to wasm32 AND
+      # now RUNS there. `materialize_wac`/`materialize_acp` previously called
+      # `std::time::Instant::now()` unconditionally (for the informational `stats.millis`),
+      # which PANICS on wasm32-unknown-unknown (no monotonic clock) — the crate compiled
+      # but TRAPPED at runtime. The timing is now cfg-gated off on wasm32 (reports `0.0`).
+      # clippy on the wasm32 target first (the native lint job compiles for the HOST triple
+      # and never sees wasm32-cfg'd paths), then the headless `wasm-pack test --node` smoke
+      # (crates/sparq-solid/tests/wasm_materialize.rs) drives the REAL materialize path in a
+      # genuine wasm runtime so the trap can never silently regress — `cargo build --target
+      # wasm32` alone never RUNS materialize. The crate's transitive oxrdf→rand→getrandom
+      # uses the wasm_js backend selected by .cargo/config.toml.
+      - name: clippy (wasm32 target, sparq-solid, deny warnings)
+        run: cargo clippy -p sparq-solid --target wasm32-unknown-unknown --all-targets -- -D warnings
+      - name: Headless wasm tests (sparq-solid materialize, wasm-pack test --node)
+        run: wasm-pack test --node crates/sparq-solid
 
   # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
   # panic-surface tests) is run by the dedicated `python.yml` workflow ("Python

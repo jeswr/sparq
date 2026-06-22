@@ -3699,6 +3699,7 @@ dependencies = [
 name = "sparq-solid"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "oxrdf 0.3.3",
  "rustc-hash 2.1.2",
  "spargebra",
@@ -3708,6 +3709,7 @@ dependencies = [
  "sparq-reason",
  "sparq-trust",
  "sparq-zk",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
