@@ -93,6 +93,21 @@ export class Bindings implements RDF.Bindings {
     return new Bindings(next);
   }
 
+  /**
+   * [OPUS-4.8] #1123 — an OXIGRAPH-shaped view of this solution: a plain `Map<string, Term>`
+   * keyed on the variable NAME (no `?`), the exact shape Oxigraph's JS `Store.query` yields per
+   * solution. This is the drop-in for Oxigraph-migration code that does `binding.get("s")` /
+   * `for (const [name, term] of binding)` — a `Bindings` already answers `.get("s")` directly,
+   * but its `[Symbol.iterator]` / `.keys()` yield RDF/JS `Variable`s (not bare strings) per the
+   * RDF/JS Query spec, so `toMap()` is the bridge when the iteration shape must match Oxigraph's
+   * `Map<string, Term>`. The conversion is O(size) and allocates one `Map` — no wasm round-trip.
+   */
+  toMap(): Map<string, RDF.Term> {
+    const map = new Map<string, RDF.Term>();
+    for (const [variable, term] of this.entriesMap.values()) map.set(variable.value, term);
+    return map;
+  }
+
   merge(other: RDF.Bindings): Bindings | undefined {
     const next = new Bindings(this.entriesMap.values());
     for (const [variable, term] of other) {
