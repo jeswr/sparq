@@ -16,6 +16,13 @@
 //!   under `spargebra`; a non-parsing emission is [`TerseError::CanaryFailed`], never
 //!   handed back). A `V("phrase")` construct in the default build fails loudly with
 //!   [`TerseError::FeatureRequired`].
+//! - **Phase 3 (default build): the `K:<name>` keyword layer (lever 1).** A small, fixed,
+//!   versioned legend ([`legend`], [`LEGEND_VERSION`]) of the PKG hot predicates/classes,
+//!   expanded pre-parse: `K:derivedFrom` becomes `<http://www.w3.org/ns/prov#wasDerivedFrom>`
+//!   so an agent need not emit a `PREFIX` line. Every expansion is echoed in
+//!   [`Expansion::keywords`]; an unknown keyword is [`TerseError::UnknownKeyword`] and a
+//!   collision with a real `PREFIX K:` is [`TerseError::KeywordPrefixCollision`] — never a
+//!   silent guess. Publish the legend behind the prompt-cache breakpoint with [`legend_card`].
 //! - **Phase 2 (`vectors` feature):** `V("phrase")` lexical-first concept resolution behind
 //!   the §6 soundness envelope — `terse_to_sparql_with` (the `vectors`-gated entry point)
 //!   expands each `V("phrase")` to the
@@ -23,10 +30,12 @@
 //!   method in [`Expansion::resolutions`], confidence-gated and staleness-guarded.
 
 mod error;
+mod keyword;
 mod resolve;
 mod transpile;
 
 pub use error::TerseError;
+pub use keyword::{legend, legend_card, legend_len, KeywordExpansion, LEGEND_VERSION};
 pub use resolve::{Method, Resolution};
 pub use transpile::{terse_to_sparql, Expansion};
 
