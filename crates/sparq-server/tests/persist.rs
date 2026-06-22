@@ -14,6 +14,13 @@
 //! sends AFTER `ServerApplier::seal` has WAL-fsync'd the batch to the durable graph (see
 //! `src/http.rs`). So by the time a 204 returns, the update is already on disk — the restart
 //! merely re-opens it.
+//!
+//! [OPUS-4.8] (sq-1b390) Gate the whole suite on the `server` feature. It spins the real axum
+//! server and uses the `server`-gated `sparq_server::router` / `AppState` API, so under
+//! `--no-default-features --all-targets` (the pure-serialiser-library build) this file must
+//! compile OUT — otherwise `clippy --no-default-features --all-targets` breaks on the
+//! unresolved axum / serde_json / router imports. 🤖 SPARQ agent.
+#![cfg(feature = "server")]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

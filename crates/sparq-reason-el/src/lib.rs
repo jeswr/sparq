@@ -12,7 +12,14 @@ use sparq_core::dict::{Dict, Id};
 
 mod classify;
 mod extract;
+#[cfg(feature = "hasse")]
+mod hasse;
 mod normal;
+#[cfg(feature = "rbox")]
+mod rbox;
+
+#[cfg(feature = "hasse")]
+pub use hasse::{classify_hasse_graph, DirectHierarchy};
 
 const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
@@ -20,13 +27,14 @@ const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
 /// A tally of what the extractor read and what it could not (so an honest
 /// "n axioms outside the EL fragment were ignored" can be surfaced).
 ///
-/// The classifier is SOUND but only COMPLETE for the EL+⊥-minus-RBox fragment it recognises
-/// (the MVP, Phase E1). Axioms using constructs outside that fragment — `owl:unionOf`,
-/// `owl:complementOf`, `owl:allValuesFrom`, cardinality, `owl:hasValue`, nominals
-/// (`owl:oneOf`), data properties, and RBox axioms (`owl:propertyChainAxiom`,
-/// `owl:TransitiveProperty`, `rdfs:subPropertyOf` between object properties) — are NOT applied
-/// and are counted in [`Report::skipped_axioms`]. RBox / property-chain saturation is Phase E2
-/// (bead sq-xetf7); nominals + concrete domains are deferred further still.
+/// The classifier is SOUND but only COMPLETE for the fragment it recognises. By default that is
+/// EL+⊥-minus-RBox (the E1 MVP); with the `rbox` feature it is EL+ (E1 + the RBox role automaton:
+/// `rdfs:subPropertyOf` role inclusions, `owl:propertyChainAxiom` chains, `owl:TransitiveProperty`
+/// — completion rules CR10/CR11). Axioms using constructs outside the active fragment —
+/// `owl:unionOf`, `owl:complementOf`, `owl:allValuesFrom`, cardinality, `owl:hasValue`, nominals
+/// (`owl:oneOf`), data properties — are NOT applied and class-axiom occurrences are counted in
+/// [`Report::skipped_axioms`]. Without `rbox`, RBox axioms are simply left unapplied (roles are
+/// compared for equality only); nominals + concrete domains are deferred further still.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Report {
     /// Distinct named classes (and ⊤/⊥ if they occur) seen by the extractor.
@@ -44,8 +52,10 @@ pub struct Report {
 /// over the source dict ids. Built by [`Classifier::classify`]; the triple-emitting
 /// [`classify_graph`] wraps the same computation.
 pub struct ClassHierarchy {
-    /// `subClassOf[c]` = the named super-classes of dict class `c` (every class subsuming it,
-    /// not just direct super-classes — transitive reduction is Phase E3, bead sq-s2nob).
+    /// `subClassOf[c]` = the named super-classes of dict class `c` (every class subsuming it —
+    /// the full transitive closure, which `is_subclass_of` queries directly). The DIRECT-subsumer
+    /// (transitive-reduction) Hasse diagram is the separate `hasse` feature's `DirectHierarchy`
+    /// (Phase E3, bead sq-s2nob); the closure is kept here because subsumption queries need it.
     subsumers: FxHashMap<Id, Vec<Id>>,
     /// Dict ids of the unsatisfiable named classes (`⊑ owl:Nothing`).
     unsatisfiable: Vec<Id>,
@@ -81,6 +91,14 @@ impl ClassHierarchy {
     pub fn report(&self) -> Report {
         self.report
     }
+
+    /// Iterator over `(class dict id, complete named-subsumer slice)` for every classified class
+    /// with a proper super-class. The slice is the full transitive closure `S(C)` (sorted by dict
+    /// id). Consumed by the `hasse` transitive-reduction (Phase E3) to build the Hasse diagram.
+    #[cfg(feature = "hasse")]
+    pub(crate) fn subsumer_sets(&self) -> impl Iterator<Item = (Id, &[Id])> {
+        self.subsumers.iter().map(|(&c, sups)| (c, sups.as_slice()))
+    }
 }
 
 /// The OWL 2 EL consequence-based classifier. Stateless wrapper — [`Classifier::classify`]
@@ -112,7 +130,21 @@ impl Classifier {
     /// subsumption [`ClassHierarchy`]. Does NOT mutate the graph; use [`classify_graph`] to
     /// materialize the lattice as triples. Single-threaded.
     pub fn classify(dict: &Dict, triples: &[[Id; 3]]) -> ClassHierarchy {
-        let (axioms, names, mut report) = extract::extract(dict, triples);
+        let extract::Extracted {
+            axioms,
+            names,
+            mut report,
+            #[cfg(feature = "rbox")]
+            role_axioms,
+        } = extract::extract(dict, triples);
+        // The role box (CR10/CR11 saturation) is built only under `rbox`; without it the
+        // saturator runs the E1 calculus (roles compared for equality only). Building it here
+        // before `names` is borrowed by `saturate` keeps role ids consistent.
+        #[cfg(feature = "rbox")]
+        let role_box = rbox::RoleBox::build(&role_axioms, names.role_count());
+        #[cfg(feature = "rbox")]
+        let sat = classify::saturate(&axioms, names.concept_count(), &role_box);
+        #[cfg(not(feature = "rbox"))]
         let sat = classify::saturate(&axioms, names.concept_count());
         let cls = classify::classify(&sat, &names);
         // Re-key the named-concept lattice onto dict ids for the public view.

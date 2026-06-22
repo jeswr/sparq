@@ -144,6 +144,7 @@ an argument via `--arg`.
 |---|---|---|
 | "What does the repo say about TOPIC?" | `findings-about` | a topic IRI |
 | "Where was this decided / what is its provenance + confidence?" | `finding-provenance` | — |
+| "What are the DQV quality measurements (subject + metric + value)?" | `finding-quality-dqv` | — |
 | "Which sources are still UNEXPLORED (target follow-up)?" | `unexplored-sources` | — |
 | "What is the explored-status of the source catalog?" | `source-status` | — |
 | "What does bead W depend on, and is each dependency done?" | `task-depends-on` | a bd id |

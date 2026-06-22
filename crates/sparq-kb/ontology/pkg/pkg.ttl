@@ -13,14 +13,22 @@
 # DESIGN PRINCIPLE (copied from the maintainer's own `sec-prop` discipline,
 # research/security-properties-ontology-design.md): the PKG mints almost NO net-new
 # terms. PROV-O carries who/what/when/derived-from; SKOS carries concepts/topics;
-# DCAT + FaBiO/FRBR + DC carry the source catalog; schema.org fills gaps; and the
-# vendored `zkp-sparql` ontologies already define the Claim + Evidence + Confidence +
-# Source pattern as `sig-impl:Assertion`. `pkg:Finding` GENERALISES that pattern; it
-# does not fork it. Only FOUR terms are genuinely net-new (`pkg:exploredStatus`,
-# `pkg:followUpPriority`, `pkg:confidence`, `pkg:couldBeMergedWith`) plus the single
-# `pkg:dependsOn` owl:inverseOf `pkg:blockedBy` pair, plus the bd-task / source /
-# technique scaffolding the design names. See PROVENANCE.md for the full reuse table
-# and the live-ontology alignment verification.
+# DCAT + FaBiO/FRBR + DC carry the source catalog; DQV models the quality axis
+# (confidence/assurance as named, distinct quality measurements/metrics/dimensions);
+# CiTO carries the typed citation + technique-relation edges; schema.org fills gaps;
+# and the vendored `zkp-sparql` ontologies already define the Claim + Evidence +
+# Confidence + Source pattern as `sig-impl:Assertion`. `pkg:Finding` GENERALISES that
+# pattern; it does not fork it. Only FOUR bespoke predicates/classes are genuinely
+# net-new (`pkg:exploredStatus`, `pkg:followUpPriority`, `pkg:confidence`,
+# `pkg:couldBeMergedWith`) plus the single `pkg:dependsOn` owl:inverseOf
+# `pkg:blockedBy` pair, plus the bd-task / source / technique scaffolding the design
+# names. The DQV adoption (sq-2489d.3) adds NO net-new bespoke predicate: it reuses the
+# standard DQV classes/properties and a small set of NAMED DQV-instance individuals
+# (the quality dimension + per-axis metrics), and the technique-relation graph leans on
+# the established CiTO terms `cito:extends` / `cito:usesMethodIn` instead of minting
+# bespoke supersede/method predicates — so the bespoke surface shrinks, it does not
+# grow. See PROVENANCE.md for the full reuse table and the live-ontology alignment
+# verification (incl. DQV's W3C-Note status).
 #
 # The `pkg:` namespace (https://sparq.dev/ns/pkg#) is a sparq-local namespace,
 # consistent with `trust:` (https://sparq.dev/ns/trust#) and `zk:`
@@ -32,6 +40,7 @@
 @prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
 @prefix dcat:    <http://www.w3.org/ns/dcat#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix dqv:     <http://www.w3.org/ns/dqv#> .
 @prefix fabio:   <http://purl.org/spar/fabio/> .
 @prefix cito:    <http://purl.org/spar/cito/> .
 @prefix frbr:    <http://purl.org/vocab/frbr/core#> .
@@ -50,14 +59,15 @@
 pkg: a owl:Ontology ;
   rdfs:label "Project Knowledge Graph (PKG) vocabulary"@en-GB ;
   dcterms:description """A reuse-first vocabulary for storing a software project's own
-knowledge — research findings with provenance + confidence, sources with an
-explored-status, concepts, algorithms/techniques (supersedes / alternative-to /
-mergeable-with / implemented-by), and the bd task model — as RDF behind a SPARQL +
-SHACL + reasoning surface. Generalises the vendored zkp-sparql sig-impl:Assertion
-reified-claim pattern into pkg:Finding; reuses PROV-O, SKOS, DCAT, FaBiO/FRBR/DC,
-CiTO, schema.org, and nanopublications. Companion: PROVENANCE.md (reuse table +
-live-ontology alignment verification) and research/dogfooding-sparq-knowledge-graph.md
-(design record, PR #1063)."""@en-GB ;
+knowledge — research findings with provenance + DQV-modelled quality (confidence +
+assurance), sources with an explored-status, concepts, algorithms/techniques
+(extends / uses-method-in / supersedes / alternative-to / mergeable-with /
+implemented-by), and the bd task model — as RDF behind a SPARQL + SHACL + reasoning
+surface. Generalises the vendored zkp-sparql sig-impl:Assertion reified-claim pattern
+into pkg:Finding; reuses PROV-O, SKOS, DCAT, DQV, FaBiO/FRBR/DC, CiTO, schema.org, and
+nanopublications. Companion: PROVENANCE.md (reuse table + live-ontology alignment
+verification) and research/dogfooding-sparq-knowledge-graph.md (design record, PR
+#1063); DQV is a W3C Working Group Note (see PROVENANCE.md)."""@en-GB ;
   rdfs:seeAlso <https://github.com/jeswr/sparq/issues/1063> ;
   rdfs:comment "sparq-local namespace; the net-new terms would be rehomed by a standardisation pass."@en-GB .
 
@@ -138,17 +148,58 @@ pkg:verdict a owl:ObjectProperty ;
   rdfs:domain pkg:Finding ;
   rdfs:range sigimpl:Verdict .
 
-# --- NET-NEW: numeric confidence axis (0..1). Aligned to schema:Rating.
+# --- NET-NEW (bespoke): numeric confidence axis (0..1). A convenience shorthand for
+#     the dqv:value of a named dqv:QualityMeasurement (see the DQV quality-model block
+#     below). Aligned to schema:Rating.
 pkg:confidence a owl:DatatypeProperty ;
   rdfs:label "confidence"@en-GB ;
-  rdfs:comment "NET-NEW. The numeric confidence (0.0..1.0) attached to a Finding (epistemic weight) or a Source (reliability). schema:Rating is rating-of-a-creative-work and DPV has no 0..1 confidence literal, so a bounded decimal is minted; aligned to schema:Rating via skos:closeMatch. Orthogonal to pkg:assurance (the epistemic-basis enum)."@en-GB ;
+  rdfs:comment "NET-NEW (bespoke). The numeric confidence (0.0..1.0) attached to a Finding (epistemic weight) or a Source (reliability). schema:Rating is rating-of-a-creative-work and DPV has no 0..1 confidence literal, so a bounded decimal is minted; aligned to schema:Rating via skos:closeMatch. KEPT as a convenience shorthand (every canned query reads it directly), but DEFINED (sq-2489d.3) as the dqv:value of a named dqv:QualityMeasurement (pkg:ConfidenceMeasurement / pkg:SourceReliabilityMeasurement) — rdfs:subPropertyOf dqv:value, so a reasoner sees a pkg:confidence as a DQV measurement value. Orthogonal to pkg:assurance (the epistemic-basis metric)."@en-GB ;
+  rdfs:subPropertyOf dqv:value ;
   rdfs:range xsd:decimal ;
   skos:closeMatch schema:Rating .
 
-pkg:assurance a owl:ObjectProperty ;
+pkg:assurance a owl:ObjectProperty , dqv:Metric ;
   rdfs:label "assurance"@en-GB ;
-  rdfs:comment "The epistemic basis of a Finding, reusing the sec-prop extension assurance axis secx:Proven / secx:Claimed / secx:Conjectured (research/security-properties-ontology-design.md §4.2.2, epic sq-0dksu). NOTE: those secx: IRIs are defined in that DESIGN record and are not yet shipped as a committed .ttl; they are referenced here by their stable w3id namespace so they unify when sq-0dksu ships. See PROVENANCE.md."@en-GB ;
+  rdfs:comment "The epistemic basis of a Finding, reusing the sec-prop extension assurance axis secx:Proven / secx:Claimed / secx:Conjectured (research/security-properties-ontology-design.md §4.2.2, epic sq-0dksu). NOTE: those secx: IRIs are defined in that DESIGN record and are not yet shipped as a committed .ttl; they are referenced here by their stable w3id namespace so they unify when sq-0dksu ships. ALSO typed (sq-2489d.3) as a dqv:Metric in the pkg:EpistemicBasisDimension — the DQV-modelled home for the assurance axis. See PROVENANCE.md."@en-GB ;
+  dqv:inDimension pkg:EpistemicBasisDimension ;
   rdfs:domain pkg:Finding .
+
+# =============================================================================
+# Quality model — DQV (sq-2489d.3). The principled, NAMED home for the quality axes
+# (confidence/assurance) that pkg:confidence/pkg:assurance shorthand. NO net-new
+# bespoke predicate is minted: these are INSTANCES of the standard DQV classes
+# (dqv:Dimension / dqv:Metric / dqv:QualityMeasurement), exactly as pkg:Open etc. are
+# instances of skos:Concept. A Finding's pkg:confidence is the dqv:value of a
+# dqv:QualityMeasurement that dqv:isMeasurementOf one of these metrics, dqv:computedOn
+# the Finding/Source. DQV carries prov:wasGeneratedBy/wasAttributedTo natively, so a
+# measurement composes with sparq-prov for free; and pkg:Source already
+# rdfs:subClassOf dcat:CatalogRecord (DQV's anchor), so the coupling is already paid.
+# HONEST: DQV is a W3C Working Group Note (2016), not a Recommendation, and it models a
+# measurement — it does NOT give confidence PROPAGATION through joins (the Hartig /
+# tSPARQL gap is real and orthogonal). See PROVENANCE.md.
+# =============================================================================
+
+# The two quality dimensions the PKG measures along (instances of dqv:Dimension).
+pkg:EpistemicWeightDimension a dqv:Dimension ;
+  skos:prefLabel "Epistemic weight"@en-GB ;
+  skos:definition "How strongly the project believes a Finding / how reliable a Source is — the 0..1 confidence axis."@en-GB .
+
+pkg:EpistemicBasisDimension a dqv:Dimension ;
+  skos:prefLabel "Epistemic basis"@en-GB ;
+  skos:definition "The KIND of grounds a Finding rests on — proven vs claimed vs conjectured (the categorical assurance axis, orthogonal to numeric weight)."@en-GB .
+
+# The named metrics in those dimensions (instances of dqv:Metric). pkg:assurance is
+# itself the categorical metric (typed dqv:Metric above); these two cover the numeric
+# weight axis for the two subjects it attaches to.
+pkg:ConfidenceMeasurement a dqv:Metric ;
+  rdfs:label "Finding-confidence metric"@en-GB ;
+  dqv:inDimension pkg:EpistemicWeightDimension ;
+  rdfs:comment "The metric a Finding's pkg:confidence measures: the agent's epistemic weight on the Finding (0..1). A reified dqv:QualityMeasurement dqv:isMeasurementOf this metric, dqv:computedOn the Finding, dqv:value the confidence decimal."@en-GB .
+
+pkg:SourceReliabilityMeasurement a dqv:Metric ;
+  rdfs:label "Source-reliability metric"@en-GB ;
+  dqv:inDimension pkg:EpistemicWeightDimension ;
+  rdfs:comment "The metric a Source's pkg:confidence measures: how reliable the source is (0..1). Same DQV shape as pkg:ConfidenceMeasurement, distinct subject + dimension role."@en-GB .
 
 pkg:discoveredFrom a owl:ObjectProperty ;
   rdfs:label "discovered from"@en-GB ;
@@ -156,13 +207,15 @@ pkg:discoveredFrom a owl:ObjectProperty ;
   rdfs:subPropertyOf prov:wasDerivedFrom .
 
 # =============================================================================
-# Algorithm / Technique — reuse dcterms:replaces / skos:related /
-# schema:SoftwareSourceCode; mint only couldBeMergedWith
+# Algorithm / Technique — reuse CiTO (cito:extends / cito:usesMethodIn) +
+# dcterms:replaces / skos:related / schema:SoftwareSourceCode; the ONLY bespoke term is
+# couldBeMergedWith, reserved for genuine merge-candidacy (sq-2489d.3: lean on the
+# established SPAR CiTO relations rather than minting bespoke method-relation predicates)
 # =============================================================================
 
 pkg:Technique a owl:Class ;
   rdfs:label "Technique"@en-GB ;
-  rdfs:comment "An algorithm / technique / method the project knows about. supersedes = dcterms:replaces (inverse dcterms:isReplacedBy); alternative-to = skos:related; could-be-merged-with = pkg:couldBeMergedWith; implemented-by = pkg:implementedBy -> schema:SoftwareSourceCode."@en-GB ;
+  rdfs:comment "An algorithm / technique / method the project knows about. The typed RELATIONS between Techniques reuse the established SPAR CiTO terms wherever they fit (sq-2489d.3), so no bespoke method-relation predicate is minted: extends = cito:extends (this technique extends ideas in another); uses-method-in = cito:usesMethodIn (employs a methodology documented in another); supersedes = dcterms:replaces (inverse dcterms:isReplacedBy); alternative-to = skos:related; implemented-by = pkg:implementedBy -> schema:SoftwareSourceCode. The bespoke pkg:couldBeMergedWith is RESERVED for the genuine, forward-looking merge-candidacy hint that CiTO has no symmetric term for."@en-GB ;
   rdfs:subClassOf skos:Concept .
 
 pkg:implementedBy a owl:ObjectProperty ;

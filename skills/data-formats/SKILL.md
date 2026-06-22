@@ -414,10 +414,18 @@ cargo build -p sparq-cli --features serialize-rdf
 
 ## Gotchas / feature flags / prerequisites
 
-- **Format strings are matched literally.** Accepted: `"turtle"`/`"ttl"`,
-  `"ntriples"`/`"n-triples"`, `"nquads"`/`"n-quads"`, `"trig"`/`"application/trig"`.
-  `parse_to_triples` (and the `_with_base` variants) treat any **unknown** format as
-  Turtle (the `_ =>` arm) — pass the exact string.
+- **Format strings are matched literally — an unknown format is REJECTED, not
+  guessed.** Accepted aliases:
+  `"turtle"`/`"ttl"`/`"text/turtle"`/`"application/turtle"`,
+  `"ntriples"`/`"n-triples"`/`"nt"`/`"application/n-triples"`,
+  `"nquads"`/`"n-quads"`/`"nq"`/`"application/n-quads"`, `"trig"`/`"application/trig"`
+  (and the `"jsonld"`/`"json-ld"`/`"application/ld+json"` set when the `jsonld` feature is
+  on). `parse_to_triples` (and the `_with_base` variants), `load_dataset`/`load_dataset_serial`
+  gate on these explicit alias sets: any unknown/typo'd string returns
+  `Err("unknown RDF format \"…\" (known: …)")` naming the bad format — it does **not**
+  silently fall back to Turtle/TriG (the old `_ =>` catch-all was removed in sq-m2pc /
+  sq-01yr; verify: `cargo test -p sparq-core parse_to_triples_rejects_unknown_format
+  load_dataset_rejects_unknown_format`). Pass the exact string.
 - **Parallel paths need the `parallel` feature** (on by default natively). The parallel
   fast path applies to N-Triples and Turtle in `load_str`; `load_reader_parallel`'s
   pipelined parser is **N-Triples only** (other formats silently fall back to serial

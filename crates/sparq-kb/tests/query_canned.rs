@@ -13,7 +13,7 @@
 use oxrdf::Term;
 use sparq_engine::QueryResult;
 use sparq_kb::query::canned::{self, CannedQuery};
-use sparq_kb::query::{ask_pkg, load_pkg};
+use sparq_kb::query::{ask_pkg, load_pkg, load_pkg_with_extra};
 
 /// Render + run a canned query (with an optional argument) over the loaded PKG.
 fn run(q: &CannedQuery, arg: Option<&str>) -> QueryResult {
@@ -67,6 +67,7 @@ fn registry_is_complete_and_named() {
         "schema-properties",
         "findings-about",
         "finding-provenance",
+        "finding-quality-dqv",
         "unexplored-sources",
         "task-depends-on",
         "task-blocks",
@@ -148,6 +149,66 @@ fn ground_finding_provenance_is_sourced_and_confident() {
             "row {i}: confidence must be in 0..1; got {conf}"
         );
     }
+}
+
+/// The DQV-modelled quality axis (sq-2489d.3) answers AT LEAST what the `pkg:confidence`
+/// shorthand answers. Over a small DQV-bearing fixture (a Finding with both the
+/// `pkg:confidence` shorthand AND a reified `dqv:QualityMeasurement`), the
+/// `finding-quality-dqv` query surfaces the measurement and its `dqv:value` MATCHES the
+/// shorthand — proving the two never contradict and the modelled axis is queryable.
+/// The fixture is loaded via the `load_pkg_with_extra` seam so the canned query runs the
+/// REAL engine path over real DQV triples, not a mock.
+#[test]
+fn ground_finding_quality_dqv_agrees_with_confidence_shorthand() {
+    const DQV_FIXTURE: &str = r#"
+@prefix pkg:     <https://sparq.dev/ns/pkg#> .
+@prefix dqv:     <http://www.w3.org/ns/dqv#> .
+@prefix sigimpl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix secx:    <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix exq:     <https://sparq.dev/ns/pkg/dqv-fixture#> .
+
+exq:src a pkg:Source ; rdfs:label "fixture source"@en-GB ; pkg:confidence 0.7 .
+exq:find a pkg:Finding ;
+  rdfs:label "fixture finding"@en-GB ;
+  sigimpl:justification "a sufficiently long non-filler justification for the fixture"@en-GB ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom exq:src ;
+  pkg:confidence 0.42 ;
+  dqv:hasQualityMeasurement exq:meas .
+exq:meas a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn exq:find ;
+  dqv:value 0.42 .
+"#;
+
+    let g = load_pkg_with_extra(&[DQV_FIXTURE]).expect("PKG + DQV fixture loads");
+    let r = ask_pkg(&g, &canned::FINDING_QUALITY_DQV.render(None)).expect("dqv query runs");
+    // The measurement is surfaced with its subject + metric + value.
+    let mut found = false;
+    for row in &r.rows {
+        let subject = term_str(&row[0]);
+        let metric = term_str(&row[1]);
+        let value = match &row[2] {
+            Some(Term::Literal(l)) => l.value().to_string(),
+            _ => String::new(),
+        };
+        if subject == "find" {
+            assert_eq!(metric, "confidencemeasurement", "metric must be the DQV metric");
+            assert_eq!(
+                value.parse::<f64>().unwrap_or(-1.0),
+                0.42,
+                "the dqv:value must MATCH the pkg:confidence shorthand"
+            );
+            found = true;
+        }
+    }
+    assert!(
+        found,
+        "the DQV quality query must surface the fixture Finding's measurement; got {} rows",
+        r.rows.len()
+    );
 }
 
 #[test]

@@ -1,18 +1,14 @@
-<!-- [OPUS-4.8] sq-h0tr — scaffold page. Hand-written prose distilled from
-README.md + AGENTS.md (no lorem, no hard-coded performance numbers). The
-include-wiring bead (sq-im8u) will replace this prose with a single-source
-{{#include}} from the canonical file once anchors are added there. -->
+<!-- [OPUS-4.8] sq-im8u — single-source include wrapper. The lead paragraph is
+{{#include}}d verbatim from the canonical README.md `lead` anchor (build-time content
+injection), so it cannot drift from the README. The only non-included content below is
+the load-bearing experimental-status caveat (a required honesty caveat — see AGENTS.md)
+and the one-line "next" navigation, whose link targets are mount-point-specific (absolute
+GitHub URLs that resolve under the Pages mount, unlike the README's repo-relative links).
+No prose is duplicated from the README. -->
 
 # Introduction
 
-**sparq** is a lightning-fast [RDF](https://www.w3.org/TR/rdf12-concepts/) triplestore and
-[SPARQL 1.1](https://www.w3.org/TR/sparql11-query/) / [1.2](https://www.w3.org/TR/sparql12-query/)
-engine, written in Rust — usable as a library, a CLI, an HTTP server, and from Python and
-JavaScript/WASM.
-
-It is a from-scratch engine: dictionary-encoded terms, six sorted permutation indexes, parallel
-and streaming execution, RDFS / OWL-RL / N3 inference, an out-of-core (mmap) mode with a
-compressed on-disk format, a WebAssembly build, and a W3C-conformant HTTP server.
+{{#include ../../README.md:lead}}
 
 > **Status: experimental research engine.** The API is unstable and pre-1.0. Conformance against
 > the W3C SPARQL, SHACL, and inference suites is tracked by CI ratchets that only ever go up.
@@ -20,16 +16,6 @@ compressed on-disk format, a WebAssembly build, and a W3C-conformant HTTP server
 > default build); when built in it is default-DENY-all egress, allowlisted per host as an SSRF
 > guard (see
 > [`research/roadmap.md`](https://github.com/jeswr/sparq/blob/main/research/roadmap.md)).
-
-## How it is published
-
-The engine core is always built; every other capability is an opt-in crate that the core does not
-depend on, so it stays lean (enforced in CI). The same query surface is mirrored across:
-
-- **Rust crates** (crates.io): `sparq-core`, `sparq-engine`, `sparq-cli`, `sparq-server`, plus the
-  opt-in capability crates.
-- **npm**: `@jeswr/sparq` — an RDF/JS-typed API over the wasm build, with zero runtime deps.
-- **PyPI**: `sparq` — pyo3 / maturin bindings (`import sparq`).
 
 ## Where to go next
 

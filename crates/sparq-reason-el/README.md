@@ -45,12 +45,21 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
 - **Same dict/Graph seam as RL** — emits the lattice as `rdfs:subClassOf` triples queryable by
   plain BGP eval; no store changes.
 - **Unsatisfiable-class detection** — `owl:disjointWith` clashes surface `C ⊑ owl:Nothing`.
-- **Honest fragment reporting** — axioms outside EL+⊥ (unionOf / cardinality / RBox / …) are
-  counted in `Report::skipped_axioms`, never silently misapplied.
+- **RBox role automaton** *(opt-in `rbox` feature, Phase E2)* — `rdfs:subPropertyOf` role
+  inclusions (**CR10**), `owl:propertyChainAxiom` + `owl:TransitiveProperty` compositions
+  (**CR11**), incl. the SNOMED-critical right-identity `r ∘ s ⊑ s`. OFF by default: zero
+  role-automaton code without it, and RBox axioms are then left unapplied (roles compared for
+  equality only).
+- **Transitive reduction → Hasse diagram** *(opt-in `hasse` feature, Phase E3)* — `DirectHierarchy`
+  reduces the full closure to the **direct (immediate) subsumers**, collapses **equivalence
+  cliques**, and `classify_hasse_graph` emits the COMPACT taxonomy (direct `rdfs:subClassOf` +
+  `owl:equivalentClass`) — O(N) Hasse edges on a deep chain instead of the O(N²) full closure.
+- **Honest fragment reporting** — class axioms outside the active fragment (unionOf /
+  cardinality / …) are counted in `Report::skipped_axioms`, never silently misapplied.
 
-**Scope (MVP, Phase E1):** EL+⊥ minus RBox. RBox / property chains / transitive roles (CR10/
-CR11) are **Phase E2**; transitive reduction + scale **E3**; concurrency **E4**; nominals +
-concrete domains are deferred. The classifier is **single-threaded**.
+**Scope:** EL+⊥ (E1, default), EL+ role reasoning (E2, `rbox`), transitive reduction (E3, `hasse`).
+Concurrency is **E4**; nominals + concrete domains are deferred. The classifier is
+**single-threaded**. Enable with `sparq-reason-el = { version = "0.1", features = ["rbox", "hasse"] }`.
 
 ## 📚 Learn more
 

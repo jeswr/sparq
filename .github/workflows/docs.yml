@@ -32,23 +32,33 @@
 name: docs
 
 on:
-  # [OPUS-4.8] sq-5f1s4 — self-guarding path filter: the build embeds source it does NOT
-  # live next to. `book/src/getting-started/install.md` does
-  # `{{#rustdoc_include ../../../crates/sparq-engine/examples/quickstart.rs:quickstart}}`,
-  # so `mdbook build` / `mdbook test` COMPILE that example. If it stopped compiling (or the
-  # `quickstart` anchor were renamed/removed) and the filter only watched `book/**`, the
-  # break would land on main undetected — no `book/`-touching commit would re-run this lane
-  # to catch it (the gui.yml/#1081 blind-spot class). So the included example is listed too.
+  # [OPUS-4.8] sq-5f1s4 / sq-im8u — self-guarding path filter: the build embeds source it does
+  # NOT live next to. `book/src/getting-started/install.md` does
+  # `{{#rustdoc_include ../../../crates/sparq-engine/examples/quickstart.rs:quickstart}}`, and
+  # (as of sq-im8u) the guide pages `{{#include}}` canonical prose from `README.md`
+  # (`lead`/`quickstart-cli` anchors) and `skills/{zk-query-proofs,mpc}/SKILL.md`
+  # (`scaffold-caveat` anchors). `mdbook build`/`mdbook test` resolve those anchors, so if an
+  # anchor were renamed/removed (or the included example stopped compiling) and the filter only
+  # watched `book/**`, the break would land on main undetected — no `book/`-touching commit
+  # would re-run this lane to catch it (the gui.yml/#1081 blind-spot class). So every embedded
+  # source is listed too. (mdBook EXITs 0 on a broken include — the build step greps the log
+  # for `[ERROR]` — so re-running THIS lane on a source edit is the only thing that catches it.)
   push:
     branches: [main]
     paths:
       - "book/**"
       - "crates/sparq-engine/examples/quickstart.rs"
+      - "README.md"
+      - "skills/zk-query-proofs/SKILL.md"
+      - "skills/mpc/SKILL.md"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "book/**"
       - "crates/sparq-engine/examples/quickstart.rs"
+      - "README.md"
+      - "skills/zk-query-proofs/SKILL.md"
+      - "skills/mpc/SKILL.md"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
