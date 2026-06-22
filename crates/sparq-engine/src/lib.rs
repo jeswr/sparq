@@ -230,6 +230,18 @@ pub mod chunk;
 #[cfg(feature = "vectorized")]
 pub use chunk::{DataChunk, SelVec, VecCmp};
 
+// [OPUS-4.8] (sq-xj29q) Oxigraph-shaped per-solution view over `QueryResult` —
+// `QueryResult::solutions()` yields borrowed, zero-copy `QuerySolution` views (per-row
+// map from `Variable` to bound `Term`: `get`, `iter`, `Index`) matching Oxigraph's
+// `QuerySolution`, WITHOUT abandoning the columnar `{vars, rows}` layout the engine
+// uses for perf. NON-DEFAULT `query-solution` feature: when off, zero of this code
+// compiles and the default native + wasm builds are byte-identical (no new
+// dependencies — oxrdf is already a direct dep; no `unsafe`).
+#[cfg(feature = "query-solution")]
+pub mod solution;
+#[cfg(feature = "query-solution")]
+pub use solution::{QuerySolution, QuerySolutionBindings, QuerySolutionIter, VarIndex};
+
 // ---- Spatial pushdown seam (sq-mg9) -----------------------------------------
 //
 // The engine is GEOMETRY-FREE: the dependency direction is sparq-geo ->

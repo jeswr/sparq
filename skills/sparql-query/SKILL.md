@@ -57,7 +57,17 @@ All entry points take `&Graph` + `&str` and return `Result<_, String>` (parse + 
 `String`). The result types:
 
 - `pub struct QueryResult { pub vars: Vec<oxrdf::Variable>, pub rows: Vec<Vec<Option<oxrdf::Term>>> }`
-  — `len()` / `is_empty()` count solution rows.
+  — `len()` / `is_empty()` count solution rows. The layout is **columnar** (the `vars` header is
+  stored once, not per cell); index a cell as `result.rows[row][col]` where `col` is the position of
+  the variable in `result.vars`, `None` = unbound.
+- *(opt-in `query-solution` feature, OFF by default)* `result.solutions()` gives an
+  **Oxigraph-shaped** per-solution view — an iterator of borrowed, zero-copy `QuerySolution` values
+  (one per row, sharing the `vars` header; no second materialisation, no cloned terms). Each matches
+  Oxigraph's `QuerySolution`: `sol.get(var) -> Option<&Term>` (by `&str` name with or without a
+  leading `?`, by `oxrdf::VariableRef`/`&Variable`, or by positional `usize`; `None` = absent or
+  unbound), `sol.iter()` over the bound `(VariableRef, &Term)` pairs (unbound cells skipped),
+  `&sol[var]` (panicking `Index`), plus `variables()` / `values()` / `len()` / `is_empty()`. Use it
+  for ergonomic Rust Oxigraph interop / migration; the underlying `{vars, rows}` layout is unchanged.
 - `pub struct QueryBudget { pub deadline: Option<Instant> /*native only*/, pub max_rows: Option<usize>, pub max_bytes: Option<usize> }`
   — `QueryBudget::unlimited()` is the no-op default. `max_rows` caps the working-set ROW count;
   `max_bytes` (`sq-s5is`) is the byte-accounted companion — it prices row WIDTH
