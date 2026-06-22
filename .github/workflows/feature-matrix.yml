@@ -529,7 +529,17 @@ jobs:
           # the feature ON: the citation-resolution-rate-1.0 + zero-fabrication +
           # no-source-recorded acceptance bar) and `clippy --all-targets -D warnings` in
           # that state. The DEFAULT (feature-OFF) build is covered by the workspace lane.
-          - name: sparq-nlq (citations — provenance-join + citation renderer)
+          # [OPUS-4.8] sq-2489d.2 (GenAI-KB Phase 2): the SAME leg now ALSO covers
+          # answer-qualification (hedge + abstention) — the new `qualify` module's in-src
+          # unit tests AND the `tests/qualification.rs` integration suite (also
+          # `#![cfg(feature = "citations")]`: the abstention precision/recall=1.0 + monotone
+          # verbal-band reliability acceptance bar). Phase 2 is gated on the SAME `citations`
+          # feature (it reuses the Phase-1 provenance join — no second feature), so NO new
+          # leg is needed: this leg's `cargo test -p sparq-nlq --features citations
+          # --all-targets` is already a superset of every feature the new suites' cfg names,
+          # so the previously-skipped tests now EXECUTE here. Verified `cargo nextest list -p
+          # sparq-nlq --features citations` shows the qualify::tests + qualification suites.
+          - name: sparq-nlq (citations — provenance-join + citations + answer-qualification)
             crate: sparq-nlq
             features: citations
             test: true
