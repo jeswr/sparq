@@ -92,6 +92,33 @@ pub fn from_parts(dict: Dict, triples: Vec<[Id; 3]>) -> Graph
 // EXTERNAL-MEMORY build (needs `mmap`): stream-parse, spill sorted runs to disk,
 // k-way merge — bounded RAM for datasets larger than memory. `chunk` = triples per run.
 pub fn build_external<R: std::io::Read + Send>(reader: R, format: &str, dir: &Path, chunk: usize) -> Result<(), String>
+
+// Empty, in-memory graph — the trivial infallible constructor (no `load_str("", …)`
+// workaround, no error handling). `default()` and `new()` are interchangeable.
+pub fn new() -> Graph                 // also: Graph::default()
+```
+
+`sparq_core::Graph` — single-triple mutation from `oxrdf` terms (the ergonomic one-triple
+case over `apply_delta`; each position takes anything that converts into a `Term`:
+`NamedNode` / `Literal` / `BlankNode` / a `Term`). Set-valued (re-insert / absent-remove is a
+no-op) and, for a directory-backed graph, WAL-logged + fsync'd — same semantics as `apply_delta`.
+For several triples at once prefer ONE `apply_delta` batch (one WAL append) over a loop:
+
+```rust
+use sparq_core::Graph;
+use oxrdf::{NamedNode, Literal, Term};
+
+let mut g = Graph::new();
+g.insert_triple(
+    NamedNode::new_unchecked("http://ex/alice"),
+    NamedNode::new_unchecked("http://schema.org/name"),
+    Term::Literal(Literal::new_simple_literal("Alice")),
+)?;
+g.remove_triple(
+    NamedNode::new_unchecked("http://ex/alice"),
+    NamedNode::new_unchecked("http://schema.org/name"),
+    Term::Literal(Literal::new_simple_literal("Alice")),
+)?; // absent ⇒ no-op, never an error
 ```
 
 `sparq_core::Graph` — cheap snapshots / forks (the serving pattern):

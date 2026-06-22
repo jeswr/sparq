@@ -1068,6 +1068,22 @@ impl Graph {
         Self::build(dict, triples)
     }
 
+    /// [OPUS-4.8] (gh-1118) An empty, in-memory graph — the trivial, INFALLIBLE constructor.
+    ///
+    /// Equivalent to [`from_parts`](Self::from_parts)`(Dict::new(), Vec::new())` but spelled the
+    /// obvious way, so callers no longer reach for `Graph::load_str("", "turtle").unwrap()` (which
+    /// parses an empty document and forces error handling for an operation that cannot fail) or the
+    /// lower-level `from_parts` plumbing just to get an empty graph. Build it up incrementally with
+    /// [`insert_triple`](Self::insert_triple) / [`apply_delta`](Self::apply_delta), or load into it
+    /// via the `apply_delta_nquads` / `apply_delta` paths. This is an IN-MEMORY graph (no directory
+    /// association, so `apply_delta` is overlay-only — there is no write-ahead log); use
+    /// [`open`](Self::open) for a durable directory-backed graph. Also reachable as
+    /// [`Graph::default()`](Default::default).
+    #[inline]
+    pub fn new() -> Graph {
+        Self::from_parts(Dict::new(), Vec::new())
+    }
+
     /// [OPUS-4.8] (sq-zz8z, gh-51) The sort key the prefix index orders graph names by: the
     /// string returned by SPARQL `STR(?g)`. For a named-node graph (the only kind a dataset's
     /// `GRAPH ?g` ever binds) that is the IRI itself; defined for any `Term` so the index is
@@ -2550,6 +2566,47 @@ impl Graph {
         Ok(())
     }
 
+    /// [OPUS-4.8] (gh-1122) Insert a SINGLE triple from `oxrdf` terms — the ergonomic
+    /// convenience over [`apply_delta`](Self::apply_delta) for the one-triple case.
+    ///
+    /// Each position accepts anything that converts into an `oxrdf::Term` (`NamedNode`,
+    /// `Literal`, `BlankNode`, an [RDF 1.2] triple term, or a `Term` itself), so callers avoid both
+    /// building a dictionary-encoded `[[Term; 3]]` batch by hand AND assembling/escaping an
+    /// `INSERT DATA { … }` SPARQL string for what is conceptually one append. The term is interned
+    /// APPEND-ONLY and applied through the same delta-overlay path as `apply_delta`, so it inherits
+    /// the identical semantics: set-valued (re-inserting an existing triple is a no-op), O(1) work,
+    /// and — for a directory-backed graph (opened via [`open`](Self::open)) — WAL-logged + fsync'd
+    /// before it is applied. To add several triples at once, prefer one
+    /// [`apply_delta`](Self::apply_delta) batch over a loop of single inserts (one WAL append).
+    ///
+    /// [RDF 1.2]: https://www.w3.org/TR/rdf12-concepts/
+    pub fn insert_triple(
+        &mut self,
+        subject: impl Into<Term>,
+        predicate: impl Into<Term>,
+        object: impl Into<Term>,
+    ) -> Result<(), String> {
+        let triple = [subject.into(), predicate.into(), object.into()];
+        self.apply_delta(&[triple], &[])
+    }
+
+    /// [OPUS-4.8] (gh-1122) Remove a SINGLE triple from `oxrdf` terms — the retraction twin of
+    /// [`insert_triple`](Self::insert_triple), delegating to [`apply_delta`](Self::apply_delta).
+    ///
+    /// Removing a triple the graph does not contain is a NO-OP (set semantics, inherited from
+    /// `apply_delta`), never an error. As with `insert_triple`, for a directory-backed graph the
+    /// deletion is WAL-logged + fsync'd before it is applied; to retract several triples at once,
+    /// prefer one [`apply_delta`](Self::apply_delta) batch.
+    pub fn remove_triple(
+        &mut self,
+        subject: impl Into<Term>,
+        predicate: impl Into<Term>,
+        object: impl Into<Term>,
+    ) -> Result<(), String> {
+        let triple = [subject.into(), predicate.into(), object.into()];
+        self.apply_delta(&[], &[triple])
+    }
+
     /// [OPUS-4.8] (sq-ycle) Commit a whole multi-operation UPDATE body's resolved per-slot
     /// quad-delta as ONE atomic, all-or-nothing durable frame — the SINGLE commit point for
     /// `sparq_engine::apply_effects`. `records` is `(is_insert, slot, triple)` quads computed
@@ -3093,6 +3150,15 @@ impl Graph {
             fresh.named.push((name.clone(), sub_fresh));
         }
         Ok(fresh)
+    }
+}
+
+/// [OPUS-4.8] (gh-1118) An empty, in-memory [`Graph`] — the trivial INFALLIBLE default. Delegates
+/// to [`Graph::new`], so `Graph::default()` and `Graph::new()` are interchangeable.
+impl Default for Graph {
+    #[inline]
+    fn default() -> Self {
+        Graph::new()
     }
 }
 
@@ -7106,6 +7172,39 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// [OPUS-4.8] (gh-1122) `insert_triple` / `remove_triple` against a DIRECTORY-BACKED graph
+    /// flow through the SAME durable `apply_delta` path as a batch: each is WAL-logged + fsync'd,
+    /// so a crash-style reopen (no save/compact in between) recovers the insert and honours the
+    /// remove. This is the load-bearing durability invariant of the single-triple convenience API.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn single_triple_mutations_are_wal_durable() {
+        let dir = std::env::temp_dir().join(format!("sparq_single_triple_wal_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        Graph::load_str("", "ntriples").unwrap().save(&dir).unwrap();
+        let s = NamedNode::new_unchecked("http://ex/s");
+        let p = NamedNode::new_unchecked("http://ex/p");
+        let keep = Term::NamedNode(NamedNode::new_unchecked("http://ex/keep"));
+        let gone = Term::NamedNode(NamedNode::new_unchecked("http://ex/gone"));
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            g.insert_triple(s.clone(), p.clone(), keep.clone()).unwrap();
+            g.insert_triple(s.clone(), p.clone(), gone.clone()).unwrap();
+            // Retract one of them through the single-triple remove path.
+            g.remove_triple(s.clone(), p.clone(), gone.clone()).unwrap();
+            // Drop WITHOUT save()/compact(): only the WAL records are on disk.
+        }
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(g2.len(), 1, "exactly the un-retracted insert must recover from the WAL");
+        assert!(g2.id_of(&keep).is_some(), "the kept triple's object must be present");
+        assert!(
+            g2.pattern(Some(&Term::NamedNode(s)), Some(&p), Some(&gone)).is_none()
+                || g2.store.scan(&[None, None, None]).rows.len() == 1,
+            "the removed triple must not survive the reopen"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[cfg(feature = "mmap")]
     #[test]
     fn save_open_mmap_roundtrip() {
@@ -9361,6 +9460,105 @@ mod tests {
         let g = Graph::open(&dir).unwrap();
         assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/old")), "must roll back to the old base");
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    // ---- [OPUS-4.8] gh-1118 / gh-1122: ergonomic constructors + single-triple mutation ----
+
+    /// gh-1118: `Graph::new()` and `Graph::default()` both yield an EMPTY in-memory graph
+    /// (no error handling, no `load_str("", …)` workaround) and are interchangeable.
+    #[test]
+    fn new_and_default_are_empty_graphs() {
+        let n = Graph::new();
+        assert!(n.is_empty(), "Graph::new() must be empty");
+        assert_eq!(n.len(), 0, "Graph::new() must have zero triples");
+        assert!(n.named.is_empty(), "Graph::new() must have no named graphs");
+        let d = Graph::default();
+        assert!(d.is_empty(), "Graph::default() must be empty");
+        assert_eq!(d.len(), 0, "Graph::default() must have zero triples");
+        // An empty graph is immediately usable for incremental build-up.
+        let mut g = Graph::new();
+        g.insert_triple(
+            NamedNode::new_unchecked("http://ex/s"),
+            NamedNode::new_unchecked("http://ex/p"),
+            NamedNode::new_unchecked("http://ex/o"),
+        )
+        .unwrap();
+        assert_eq!(g.len(), 1);
+    }
+
+    /// gh-1122: `insert_triple` takes oxrdf terms directly, makes the triple queryable
+    /// (REAL overlay path — `id_of` resolves the interned terms and a pattern scan finds the
+    /// row), and is SET-VALUED — re-inserting the same triple is a no-op, not a duplicate.
+    #[test]
+    fn insert_triple_interns_and_is_set_valued() {
+        let mut g = Graph::new();
+        let s = NamedNode::new_unchecked("http://ex/alice");
+        let p = NamedNode::new_unchecked("http://schema.org/age");
+        let o = Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER));
+        // Mixed term kinds: NamedNode (subject), NamedNode (predicate), Literal (object).
+        g.insert_triple(s.clone(), p.clone(), o.clone()).unwrap();
+        assert_eq!(g.len(), 1);
+        // Real path: the terms are interned, so the pattern scan finds exactly this row.
+        let pat = g
+            .pattern(Some(&Term::NamedNode(s.clone())), Some(&p), Some(&o))
+            .expect("all three terms interned");
+        assert_eq!(g.store.scan(&pat).rows.len(), 1, "the inserted triple must be queryable");
+        // Set semantics: re-inserting the identical triple does not grow the graph.
+        g.insert_triple(s, p, o).unwrap();
+        assert_eq!(g.len(), 1, "re-inserting an existing triple is a no-op");
+    }
+
+    /// gh-1122: `remove_triple` retracts a present triple and is a NO-OP (never an error)
+    /// for an absent one — the retraction twin of `insert_triple`.
+    #[test]
+    fn remove_triple_retracts_and_absent_is_noop() {
+        let mut g = Graph::new();
+        let s = NamedNode::new_unchecked("http://ex/s");
+        let p = NamedNode::new_unchecked("http://ex/p");
+        let o = Term::NamedNode(NamedNode::new_unchecked("http://ex/o"));
+        let other = Term::NamedNode(NamedNode::new_unchecked("http://ex/never"));
+        g.insert_triple(s.clone(), p.clone(), o.clone()).unwrap();
+        assert_eq!(g.len(), 1);
+        // Removing an absent triple is a no-op (the object term is not even in the dict).
+        g.remove_triple(s.clone(), p.clone(), other).unwrap();
+        assert_eq!(g.len(), 1, "removing an absent triple must not change the graph");
+        // Removing the present triple retracts it.
+        g.remove_triple(s, p, o).unwrap();
+        assert!(g.is_empty(), "removing the present triple must empty the graph");
+    }
+
+    /// gh-1122: the load-bearing invariant — a graph built with `Graph::new()` +
+    /// `insert_triple` is RESULT-EQUIVALENT to the same triples parsed from Turtle text
+    /// (same materialised term set), so the convenience API is not a separate semantics.
+    #[test]
+    fn insert_triple_equivalent_to_text_load() {
+        let mut built = Graph::new();
+        let s = NamedNode::new_unchecked("http://ex/alice");
+        built
+            .insert_triple(
+                s.clone(),
+                NamedNode::new_unchecked("http://ex/name"),
+                Term::Literal(Literal::new_simple_literal("Alice")),
+            )
+            .unwrap();
+        built
+            .insert_triple(
+                s,
+                NamedNode::new_unchecked("http://ex/knows"),
+                NamedNode::new_unchecked("http://ex/bob"),
+            )
+            .unwrap();
+        let loaded = Graph::load_str(
+            "<http://ex/alice> <http://ex/name> \"Alice\" .\n\
+             <http://ex/alice> <http://ex/knows> <http://ex/bob> .",
+            "ntriples",
+        )
+        .unwrap();
+        let mut a = dump_terms(&built);
+        let mut b = dump_terms(&loaded);
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "insert_triple build must match the text-loaded graph");
     }
 }
 
