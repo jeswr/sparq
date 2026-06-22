@@ -570,6 +570,21 @@ jobs:
             crate: sparq-trust
             features: secprop-admissibility
             test: true
+          # [OPUS-4.8] sq-bevd3 (epic sq-0dksu, Phase 3): the per-method
+          # security-properties ANNOTATION GRAPH + over-claim guards in sparq-zk. The
+          # `secprop` module, its unit tests (the 3 guards + the drift/honesty checks),
+          # and the `secprop_annotations.rs` integration suite
+          # (`#![cfg(feature = "secprop-annotations")]`) are ALL behind the default-OFF
+          # `secprop-annotations` feature, so ci.yml's default-feature lane compiles
+          # them EMPTY and runs ZERO of them — the silent-skip gap (#1171) this leg
+          # closes. The feature pulls only `oxttl` (already a workspace dep). Verified
+          # locally: `cargo test -p sparq-zk --features secprop-annotations` runs the
+          # 11 `secprop::tests` + the `secprop_annotations.rs` integration tests, and
+          # `clippy --all-targets -D warnings` is clean in every state.
+          - name: sparq-zk (secprop-annotations — per-method annotation graph + over-claim guards)
+            crate: sparq-zk
+            features: secprop-annotations
+            test: true
           # [OPUS-4.8] sq-leg8n: the sparq-terse opt-in LLM-ergonomic SPARQL surface
           # (epic sq-2m6zm, design research/llm-ergonomic-sparql-surface.md). Only the
           # `vectors` leg lives here: it pulls sparq-core/sparq-nlq/sparq-vectors and runs the

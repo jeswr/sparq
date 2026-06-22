@@ -81,6 +81,22 @@ pub const SECX_AUDIT_STATUS: &str = "https://w3id.org/zkp-sparql/sec-prop#auditS
 pub const SECX_ASSUMPTION: &str = "https://w3id.org/zkp-sparql/sec-prop#assumption";
 /// `secx:auditEvidence` — `rdfs:seeAlso` to the audit doc / gap-register row.
 pub const SECX_AUDIT_EVIDENCE: &str = "https://w3id.org/zkp-sparql/sec-prop#auditEvidence";
+/// `secx:scope` — the layer an assertion is realised at ([`SECX_QUERY_PROOF_LAYER`]
+/// — the default when omitted — vs [`SECX_SOURCE_LAYER_ONLY`]). A source-layer-only
+/// property must NOT satisfy a query-proof constraint (the §5a non-transfer rule).
+pub const SECX_SCOPE: &str = "https://w3id.org/zkp-sparql/sec-prop#scope";
+
+// ── the scope axis (§5a rule 2 — source-layer non-transfer marker) ────────────
+
+/// `secx:PropertyScope` — the scope-axis class.
+pub const SECX_PROPERTY_SCOPE: &str = "https://w3id.org/zkp-sparql/sec-prop#PropertyScope";
+/// `secx:QueryProofLayer` — re-verifiable in the sparq query proof (the DEFAULT
+/// scope when [`SECX_SCOPE`] is omitted).
+pub const SECX_QUERY_PROOF_LAYER: &str = "https://w3id.org/zkp-sparql/sec-prop#QueryProofLayer";
+/// `secx:SourceLayerOnly` — a property of the SOURCE credential's cryptosuite that
+/// does NOT transfer to the query proof (`zk:sourceCryptosuite` is provenance, not
+/// an in-proof property; design §5.3).
+pub const SECX_SOURCE_LAYER_ONLY: &str = "https://w3id.org/zkp-sparql/sec-prop#SourceLayerOnly";
 
 // ── the assurance axis (§4.2.2): Proven ⊐ Claimed ⊐ Conjectured ──────────────
 
@@ -328,6 +344,11 @@ pub const ALL_SECPROP_IRIS: &[&str] = &[
     SECX_AUDIT_STATUS,
     SECX_ASSUMPTION,
     SECX_AUDIT_EVIDENCE,
+    SECX_SCOPE,
+    // scope axis
+    SECX_PROPERTY_SCOPE,
+    SECX_QUERY_PROOF_LAYER,
+    SECX_SOURCE_LAYER_ONLY,
     // assurance axis
     SECX_ASSURANCE_LEVEL,
     SECX_PROVEN,

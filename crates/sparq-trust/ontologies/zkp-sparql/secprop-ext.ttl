@@ -121,6 +121,31 @@ secx:auditEvidence a owl:AnnotationProperty ;
   rdfs:comment "Points at the audit doc / gap-register row backing the audit-status (e.g. the sq-qhy4 audit)."@en-GB ;
   rdfs:domain secx:PropertyAssertion .
 
+secx:scope a owl:ObjectProperty ;
+  rdfs:label "scope"@en-GB ;
+  rdfs:comment "The layer at which the asserted property is realised: secx:QueryProofLayer (re-verifiable in the sparq query proof — the default when omitted) or secx:SourceLayerOnly (a property of the SOURCE credential's cryptosuite that does NOT transfer to the query proof). A source-layer-only property MUST NOT satisfy a query-proof constraint (design §5a rule 2; the non-transfer guard)."@en-GB ;
+  rdfs:domain secx:PropertyAssertion ;
+  rdfs:range secx:PropertyScope .
+
+# ─── scope axis (§5a rule 2 — the source-layer non-transfer marker) ───────────
+# A property realised only at the SOURCE credential layer (e.g. BBS cross-show
+# unlinkability of an INPUT credential) does NOT carry to the sparq QUERY proof:
+# `zk:sourceCryptosuite` is PROVENANCE, not a re-verifiable in-proof property
+# (ZK config design §5.3). The admissibility ruleset (Phase 2/5) refuses to let a
+# secx:SourceLayerOnly assertion satisfy a query-proof constraint. Omitting
+# secx:scope means secx:QueryProofLayer (the conservative default: the property is
+# only claimed about the proof sparq actually emits).
+secx:PropertyScope a owl:Class, rdfs:Class ;
+  rdfs:label "Property scope"@en-GB ;
+  rdfs:comment "The layer a property assertion is scoped to (query-proof vs source-credential only)."@en-GB .
+
+secx:QueryProofLayer a secx:PropertyScope ;
+  rdfs:label "Query-proof layer"@en-GB ;
+  rdfs:comment "Re-verifiable in the sparq query proof. The DEFAULT scope when secx:scope is omitted."@en-GB .
+secx:SourceLayerOnly a secx:PropertyScope ;
+  rdfs:label "Source-layer only"@en-GB ;
+  rdfs:comment "A property of the SOURCE credential's cryptosuite that does NOT transfer to the query proof (zk:sourceCryptosuite is provenance, not an in-proof property; §5.3). Such an assertion must not satisfy a query-proof constraint."@en-GB .
+
 # ─────────────── the assurance axis individuals (§4.2.2) ─────────────────────
 # Proven ⊐ Claimed ⊐ Conjectured. The SAME discharge machinery as a property
 # dimension: `requiresAssurance gteq Proven` mechanically removes every unaudited

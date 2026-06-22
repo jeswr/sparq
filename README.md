@@ -77,6 +77,17 @@ The engine **core** is always built; every other capability is an opt-in crate t
 does not depend on (so it stays lean — enforced in CI). Each capability links its how-to and the
 standard it implements.
 
+<!-- sq-g4h0c: the `features-core` anchor below is the SINGLE SOURCE for the docs guide's
+     "Capabilities at a glance" list — it is {{#include}}d into
+     book/src/getting-started/capabilities.md. Keep the per-surface `skills/<x>/SKILL.md`
+     links REPO-RELATIVE (the lychee internal-links gate requires that); the book's
+     `link-fixup` preprocessor (scripts/mdbook-rewrite-links.py) rewrites them to portable
+     github.com/jeswr/sparq/blob/main URLs at build time. The two research-scaffold bullets
+     (ZK / MPC) and the Interfaces bullet are intentionally OUTSIDE this anchor: the book
+     expands them from their own canonical anchors (the SKILL.md `scaffold-caveat` includes
+     for the load-bearing honesty caveats, and the `interfaces` anchor below). Keep the
+     ANCHOR/ANCHOR_END markers one-per-line. [OPUS-4.8] -->
+<!-- ANCHOR: features-core -->
 - **SPARQL query** — run [SPARQL 1.1](https://www.w3.org/TR/sparql11-query/) and
   [1.2](https://www.w3.org/TR/sparql12-query/) over your data
   ([guide](skills/sparql-query/SKILL.md)).
@@ -112,6 +123,7 @@ standard it implements.
 - **RDF Dataset Canonicalization** — deterministic, blank-node-relabelled canonical form for
   hashing/signing/diffing with [RDFC-1.0](https://www.w3.org/TR/rdf-canon/)
   ([guide](skills/rdf-canon/SKILL.md)).
+<!-- ANCHOR_END: features-core -->
 - **Zero-knowledge query proofs** *(research scaffold — NOT yet sound)* — model proving a query
   result is correct without revealing the data ([guide](skills/zk-query-proofs/SKILL.md)). The v1
   verifier provides **no** soundness guarantee to a relying party pending external audit — see the
@@ -119,12 +131,19 @@ standard it implements.
 - **Federated MPC** *(research scaffold — no security guarantee yet)* — model evaluating SPARQL
   across parties with multi-party computation ([guide](skills/mpc/SKILL.md)); honest-majority
   semi-honest, **not** maliciously secure ([SECURITY.md](SECURITY.md)). <!-- privacy-claims-allow: negative caveat ("not maliciously secure"); sq-toze.35 -->
+<!-- sq-g4h0c: the `interfaces` anchor is the SINGLE SOURCE for the docs guide's
+     "Interfaces" line (book/src/getting-started/capabilities.md {{#include}}s it). Repo-
+     relative `skills/<x>/SKILL.md` links are kept for the lychee gate and rewritten to
+     portable URLs by the book's `link-fixup` preprocessor. Keep the markers one-per-line.
+     [OPUS-4.8] -->
+<!-- ANCHOR: interfaces -->
 - **Interfaces** — a [CLI](skills/cli/SKILL.md), a
   [SPARQL 1.1 Protocol](https://www.w3.org/TR/sparql11-protocol/) +
   [Graph Store HTTP Protocol](https://www.w3.org/TR/sparql11-http-rdf-update/)
   [HTTP server](skills/http-server/SKILL.md), a WebAssembly /
   [JavaScript build](skills/javascript-wasm/SKILL.md), and a
   [Python package](skills/python/SKILL.md).
+<!-- ANCHOR_END: interfaces -->
 
 > Agent skills — how to use sparq from Claude Code and other AI agents — are
 > in the [usage-skills router](skills/SKILL.md).

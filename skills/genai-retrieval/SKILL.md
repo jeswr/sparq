@@ -144,6 +144,9 @@ Nlq::repair_prompt_for(&self, question, failed_sparql, error) -> String
 // the grounding prompt. Usable standalone:
 sparq_nlq::link::EntityLinker::build(graph: &Graph, expand_k: usize, max_links: usize)
 EntityLinker::link(&self, question: &str) -> Linking
+// link() tries a verbatim FULL-LABEL match first (case/whitespace-normalised, punctuation
+// preserved): when the whole input IS an entire label it binds that one entity exactly
+// (sq-26fdp), so a verbatim prefLabel never goes ambiguous; otherwise the token n-gram path runs.
 // Linking { entities: Vec<LinkedEntity>, relations: Vec<LinkedRelation> }
 //   LinkedEntity { mention, iri: NamedNode, label, exact: bool, similar: Vec<NamedNode> }
 //   LinkedRelation { mention, iri: NamedNode, triples: u64 }
@@ -462,12 +465,18 @@ numbers are work-box / NON-CANONICAL) gives a **per-lever** result, NOT a blanke
 - **Lever 1 (`K:<name>` keywords): conditional adopt.** Clears the cache-discounted token bar
   *and* ties plain SPARQL on quality. Conditional only because the headline win is a *caching*
   property, pending a full-session real-transcript fan-out (`sq-bmpzd`).
-- **Lever 3 (`V("phrase")`): do NOT adopt on quality.** `V()` is **not** a drop-in for an
-  explicit IRI — in the A/B it (correctly, by design) **loud-fails** on a punctuation-heavy
-  verbatim `prefLabel`, dropping resolution-correctness below 1.0. That is the soundness envelope
-  working as specified (loud-fail beats silent-wrong), but it means `V()` is a convenience that
-  must be checked, not trusted blind; the resolver-coverage fix is tracked in `sq-26fdp`. Prefer
-  `K:` + explicit `<iri>` for anything load-bearing.
+- **Lever 3 (`V("phrase")`): verbatim labels now resolve; still check, not trust.** The
+  original A/B loud-failed on a punctuation-heavy verbatim `prefLabel`
+  (`"ZK/MPC claim + circuit discipline"`) because the token-overlap linker split it on the
+  shared token `discipline` and (correctly, by the envelope) refused to guess between two
+  equally-scored topics. `sq-26fdp` fixes that: the linker now tries an **exact, case- and
+  whitespace-normalised, punctuation-preserving full-label match FIRST**, so a phrase that IS
+  an entire label binds unambiguously at score 1.0 before token-overlap runs; re-running the
+  A/B restores lever-3 `resolution_correctness` to **1.0**. The soundness envelope is
+  unchanged for genuinely fuzzy phrases (a phrase that is *not* a whole label and merely
+  shares tokens with several concepts still loud-fails). `V()` remains a convenience that must
+  be checked (echoed IRI + score + confidence), not trusted blind; prefer `K:` + explicit
+  `<iri>` for anything load-bearing.
 
 ## Gotchas / feature flags / prerequisites
 

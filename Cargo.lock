@@ -3822,6 +3822,7 @@ dependencies = [
  "blake3",
  "getrandom 0.4.2",
  "oxrdf 0.3.3",
+ "oxttl 0.2.3",
  "spargebra",
  "sparq-canon",
  "sparq-core",
