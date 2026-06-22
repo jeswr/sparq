@@ -6425,11 +6425,16 @@ mod tests {
 
         // 4. Literals with datatypes, language tags (incl. `--dir`), escapes, and a `.`-bearing
         //    IRI/literal — the byte parser's literal/IRI grammar must agree with oxttl's per graph.
+        //    [OPUS-4.8] (sq-langcase / #1119) The MIXED-CASE tags (`en-US`, `en-GB--ltr`) pin the
+        //    casing-normalisation parity: the byte parser must lowercase the tag to the SAME slot
+        //    oxttl produces, or this differential check fails on the language column.
         let mut lits = String::new();
         for i in 0..400 {
             let g = if i % 3 == 0 { String::new() } else { format!(" <http://g.x/{}.n>", i % 3) };
             lits.push_str(&format!(
                 "<http://ex/s{i}> <http://ex/p> \"val.{i} \\\"q\\\" x\"@en-us{g} .\n\
+                 <http://ex/s{i}> <http://ex/m> \"mixed.{i}\"@en-US{g} .\n\
+                 <http://ex/s{i}> <http://ex/d> \"dir.{i}\"@en-GB--ltr{g} .\n\
                  <http://ex/s{i}> <http://ex/n> \"{i}\"^^<http://www.w3.org/2001/XMLSchema#integer>{g} .\n"
             ));
         }
@@ -9754,6 +9759,30 @@ mod dir_roundtrip_test {
         let scan = g.store.scan(&[None, None, None]);
         let t = scan.to_spo(&scan.rows.as_ref()[0]);
         assert_eq!(g.dict.term(t[2]).to_string(), "\"abc\"@en--ltr");
+    }
+
+    /// [OPUS-4.8] (sq-langcase / KamiQuasi #1119) Cross-format CONSISTENCY: loading the SAME
+    /// language-tagged triple as N-Triples, N-Quads, and Turtle must yield the SAME stored term —
+    /// a lowercased tag (`en-us`), not the format-dependent `en-US` (N-Triples) / `en-us` (Turtle)
+    /// split that existed before the byte parser was taught to normalise the tag. This is the
+    /// public-API regression for the reported bug: pick the literal object back out via the store
+    /// scan and compare its serialised form across all three load paths.
+    #[test]
+    fn language_tag_casing_consistent_across_formats() {
+        let only_obj = |g: &crate::Graph| -> String {
+            let scan = g.store.scan(&[None, None, None]);
+            let t = scan.to_spo(&scan.rows.as_ref()[0]);
+            g.dict.term(t[2]).to_string()
+        };
+        let nt = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "ntriples").unwrap();
+        let ttl = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "turtle").unwrap();
+        let nq = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "nquads").unwrap();
+        assert_eq!(only_obj(&nt), "\"hi\"@en-us", "N-Triples must lowercase the language tag");
+        assert_eq!(only_obj(&ttl), "\"hi\"@en-us", "Turtle must lowercase the language tag");
+        assert_eq!(only_obj(&nq), "\"hi\"@en-us", "N-Quads must lowercase the language tag");
+        // The three load paths agree (the format-dependent split is gone).
+        assert_eq!(only_obj(&nt), only_obj(&ttl));
+        assert_eq!(only_obj(&nt), only_obj(&nq));
     }
 
     /// Fork-after-compact must stay O(delta): compaction folds the numeric/temporal

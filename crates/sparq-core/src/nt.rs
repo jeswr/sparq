@@ -451,6 +451,20 @@ const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
 const RDF_DIR_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString";
 
+/// [OPUS-4.8] (sq-langcase / #1119) ASCII-lowercases a parsed language tag, BORROWING the input
+/// when it is already all-lowercase (the common case) so the no-uppercase fast path stays
+/// allocation-free. RDF language tags are ASCII (`(PN_CHARS_BASE)('-' alnum*)*` plus the RDF 1.2
+/// `--ltr`/`--rtl` direction), so `make_ascii_lowercase` is the correct, locale-independent fold —
+/// the SAME normalisation `oxrdf`/`oxttl` apply, keeping the byte parser's stored language slot
+/// byte-identical to the oxttl paths' for the same tag.
+fn lowercase_lang(raw: &str) -> Cow<'_, str> {
+    if raw.bytes().any(|c| c.is_ascii_uppercase()) {
+        Cow::Owned(raw.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(raw)
+    }
+}
+
 fn literal(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
     let (vstart, vend, vesc, after) = scan_delim(b, i, b'"')?;
     let value = decode(&b[vstart..vend], vesc)?;
@@ -474,9 +488,23 @@ fn literal(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
             }
             // RDF 1.2 `@lang--dir` keeps the combined slot (the dict's stored encoding)
             // but is typed rdf:dirLangString.
-            let lang = str_of(&b[lstart..j])?;
-            let dt = if lang.contains("--") { RDF_DIR_LANG_STRING } else { RDF_LANG_STRING };
-            Ok((dict.intern_lit(&value, dt, Some(lang)), j))
+            let raw = str_of(&b[lstart..j])?;
+            let dt = if raw.contains("--") { RDF_DIR_LANG_STRING } else { RDF_LANG_STRING };
+            // [OPUS-4.8] (sq-langcase / KamiQuasi #1119) NORMALISE the language tag to ASCII
+            // lowercase, matching the oxttl/oxrdf paths (`Literal::new_language_tagged_literal`
+            // lowercases via `make_ascii_lowercase`; oxttl's Turtle/N-Quads/TriG recognisers call
+            // `language.to_ascii_lowercase()` before interning). RDF 1.1/1.2 language tags are
+            // case-INSENSITIVE, so `"x"@en-US` and `"x"@en-us` are the SAME RDF term and must
+            // intern to the SAME dict id (term identity is byte-equality of the stored slot).
+            // Without this the byte-level N-Triples/N-Quads fast path preserved the written case
+            // while every oxttl path lowercased it — a format-dependent inconsistency (a Turtle
+            // doc lowercased, the same triple in N-Triples did not) AND a latent term-identity
+            // bug (case-variant tags interned as two distinct terms). The `--dir` suffix is only
+            // ever `ltr`/`rtl` (already lowercase) so lowercasing the whole slot is equivalent to
+            // lowercasing just the BCP47 language part. The all-lowercase case (the overwhelming
+            // majority) borrows with no allocation; only a tag carrying uppercase pays one alloc.
+            let lang = lowercase_lang(raw);
+            Ok((dict.intern_lit(&value, dt, Some(&lang)), j))
         }
         // simple literal -> xsd:string
         _ => Ok((dict.intern_lit(&value, XSD_STRING, None), after)),
@@ -579,6 +607,81 @@ mod tests {
         assert_eq!(t.len(), 2);
         assert_eq!(d.term(t[0][2]), iri("http://ex/o"));
         assert_eq!(d.term(t[1][2]), Term::Literal(Literal::new_simple_literal("v")));
+    }
+
+    // [OPUS-4.8] (sq-langcase / KamiQuasi #1119) The byte-level N-Triples/N-Quads parser
+    // NORMALISES language tags to ASCII lowercase, matching every oxttl path (the Turtle /
+    // N-Quads / TriG recognisers + `oxrdf::Literal::new_language_tagged_literal`). Previously the
+    // byte path PRESERVED the written case (`en-US`) while oxttl lowercased it (`en-us`), giving a
+    // format-dependent result for the SAME triple. RDF 1.1/1.2 language tags are case-insensitive,
+    // so the lowercased slot is the canonical RDF term — and the regression target is twofold:
+    // (a) cross-format consistency, (b) `"x"@en-US` and `"x"@en-us` interning to the SAME id.
+    #[test]
+    fn language_tag_lowercased_to_match_oxttl() {
+        let nt = b"<http://ex/s> <http://ex/p> \"hi\"@en-US .\n";
+        let mut d = Dict::new();
+        let t = parse_chunk(nt, &mut d).unwrap();
+        assert_eq!(t.len(), 1);
+        // The stored term carries the lowercased tag — byte-identical to what oxttl produces.
+        let want = Term::Literal(Literal::new_language_tagged_literal_unchecked("hi", "en-us"));
+        assert_eq!(d.term(t[0][2]), want);
+        // And it equals what the checked oxrdf constructor (which lowercases) yields from the
+        // mixed-case tag, i.e. the byte parser and the oxttl/oxrdf paths agree.
+        let oxttl_like =
+            Term::Literal(Literal::new_language_tagged_literal("hi", "en-US").unwrap());
+        assert_eq!(d.term(t[0][2]), oxttl_like);
+    }
+
+    #[test]
+    fn case_variant_language_tags_intern_to_same_id() {
+        // Two lines whose ONLY difference is the language-tag case must content-address to one id
+        // (term identity is case-insensitive on the tag) — they did NOT before this fix.
+        let nt = b"<http://ex/s> <http://ex/p> \"hi\"@en-US .\n<http://ex/s2> <http://ex/p> \"hi\"@en-us .\n";
+        let mut d = Dict::new();
+        let t = parse_chunk(nt, &mut d).unwrap();
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0][2], t[1][2], "case-variant language tags must share one dict id");
+    }
+
+    #[test]
+    fn directional_language_tag_lowercases_lang_part_only() {
+        // RDF 1.2 `@lang--dir`: the BCP47 language part lowercases; the direction (`ltr`/`rtl`,
+        // already lowercase) is unchanged. The stored slot must match the oxttl encoding exactly.
+        let nt = b"<http://ex/s> <http://ex/p> \"hi\"@en-US--ltr .\n";
+        let mut d = Dict::new();
+        let t = parse_chunk(nt, &mut d).unwrap();
+        assert_eq!(t.len(), 1);
+        let want = Term::Literal(
+            Literal::new_directional_language_tagged_literal_unchecked(
+                "hi",
+                "en-us",
+                oxrdf::BaseDirection::Ltr,
+            ),
+        );
+        assert_eq!(d.term(t[0][2]), want);
+    }
+
+    // The N-Quads byte fast path interns S/P/O through the SAME `literal` path, so it lowercases
+    // too — guarding against a future divergence between the two byte loaders.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn nquads_language_tag_lowercased() {
+        let nq = b"<http://ex/s> <http://ex/p> \"hi\"@en-US <http://ex/g> .\n";
+        let buckets = parse_quads_chunk(nq).unwrap();
+        assert_eq!(buckets.len(), 1);
+        let (_g, dict, triples) = &buckets[0];
+        let want = Term::Literal(Literal::new_language_tagged_literal_unchecked("hi", "en-us"));
+        assert_eq!(dict.term(triples[0][2]), want);
+    }
+
+    #[test]
+    fn already_lowercase_language_tag_unchanged() {
+        // The common all-lowercase tag is untouched (and the fast borrow path is exercised).
+        let nt = b"<http://ex/s> <http://ex/p> \"hi\"@fr .\n";
+        let mut d = Dict::new();
+        let t = parse_chunk(nt, &mut d).unwrap();
+        let want = Term::Literal(Literal::new_language_tagged_literal_unchecked("hi", "fr"));
+        assert_eq!(d.term(t[0][2]), want);
     }
 
     #[test]
