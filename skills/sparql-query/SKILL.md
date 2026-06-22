@@ -415,6 +415,26 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   let r3 = cache.get_or_eval(&graph, &q, version, &QueryBudget::unlimited())?; // miss (fresh)
   # Ok::<(), String>(())
   ```
+- **Sharing one `Graph` across server threads** — a `sparq_core::Graph` (and its read-only
+  `GraphSnapshot`) is **`Send + Sync`** (guaranteed by a compile-time assertion in `sparq-core`), so
+  it can be shared across the async handlers of an axum/actix/tower server directly with
+  `Arc<RwLock<Graph>>`. To skip that boilerplate, enable the non-default **`shared` cargo feature**
+  on `sparq-core` (bead `sq-yj76l`, gh #1121) for `shared::SharedGraph` — a cheaply-cloneable handle
+  (`SharedGraph::new(graph)` / `.clone()` is an `Arc` bump) with three access paths: `.snapshot()`
+  hands out a cheap immutable point-in-time `GraphSnapshot` you query **lock-free** for the request
+  (the recommended read-heavy path — the write lock is held only for the O(overlay) snapshot clone),
+  while `.read()` / `.write()` give RAII `RwLock` guards for ad-hoc locked access. It is `std::sync`
+  only (no new dependency) and off by default, so the lean default / wasm build pays nothing.
+
+  ```rust
+  // Cargo.toml: sparq-core = { version = "0.1", features = ["shared"] }
+  use sparq_core::shared::SharedGraph;
+  let shared = SharedGraph::new(graph);          // drop into axum `State`, clone per handler
+  let snap = shared.snapshot();                  // cheap immutable view; query it lock-free
+  let _n = snap.len();
+  shared.write().apply_delta(&[], &[])?;          // exclusive write lock only for the mutation
+  # Ok::<(), String>(())
+  ```
 - **MVCC / ACID transaction isolation** is the non-default `txn` cargo feature (bead `sq-it1x`):
   `txn::TransactionManager::new(graph)` owns one logical graph and hands out **snapshot-isolation**
   read transactions (`begin_read()` → a cheap point-in-time view that derefs to `&Graph`, immune to

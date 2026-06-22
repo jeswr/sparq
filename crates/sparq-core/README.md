@@ -41,6 +41,8 @@ assert_eq!(count, 1);
   with optional block compression and near-zero resident heap.
 - **Named graphs & RDF 1.2** — full quad storage and
   [triple terms](https://www.w3.org/TR/rdf12-concepts/).
+- **Thread-safe sharing** — `Graph` is `Send + Sync`, so one store serves many server threads;
+  the opt-in `shared` feature adds an ergonomic `SharedGraph` handle for axum/actix state.
 
 ## 📚 Learn more
 
