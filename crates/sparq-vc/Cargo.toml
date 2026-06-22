@@ -1,0 +1,66 @@
+[package]
+name = "sparq-vc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "W3C Data Integrity (eddsa-rdfc-2022) verify + sign over RDFC-1.0, with did:key/did:web resolution — the vetted, standards-interop half of verifiable RDF"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# Research/interop crate (issue #908, bead sq-ylbrq). The vetted, STANDARDS-INTEROP
+# complement to the deliberately non-interop ZK estate (sparq-zk): authenticity +
+# integrity + non-repudiation over RDF, NOT confidentiality and NOT zero-knowledge.
+# Not published while the surface settles.
+publish = false
+
+# [OPUS-4.8] docs.rs: build with all features so the did:web surface is documented.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# OPT-IN BY CONSTRUCTION. NOTHING in the workspace's default build depends on this
+# crate: it is a standalone, non-default member (like `sparq-canon` / `sparq-zk`), so
+# `sparq-core`/`sparq-engine` and the wasm artifact are byte-identical with or without
+# it. Pull it in explicitly only when you need W3C Data Integrity verify/sign. It speaks
+# the SAME oxrdf 0.3 term model as the rest of sparq, and reuses `sparq-canon`'s single
+# RDFC-1.0 bridge — the canonical unit the proof binds to — so the canon seam stays
+# single-sourced. [OPUS-4.8] sq-ylbrq.
+[dependencies]
+# RDFC-1.0 canonical N-Quads — the canonical unit eddsa-rdfc-2022 hashes and signs.
+sparq-canon = { path = "../sparq-canon" }
+# sparq term model (oxrdf 0.3 re-export) + store Graph (sign a named graph / store).
+sparq-core = { path = "../sparq-core", default-features = false }
+oxrdf.workspace = true
+
+# VETTED Ed25519 (dalek). This is the WHOLE point of this crate vs the ZK estate's
+# Schnorr-over-Baby-JubJub: eddsa-rdfc-2022 is standard Ed25519 (RFC 8032), the curve
+# the W3C `z6Mk…` did:key multicodec (0xed01) names. `default-features = false` keeps it
+# lean; `rand_core` enables keypair generation for signing.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+# OS CSPRNG for fresh signing-key generation (the verify path needs no RNG).
+rand_core = { version = "0.6", features = ["getrandom"] }
+# Base58btc for the multibase `z` did:key id + proofValue. Vetted, tiny, no transitive deps.
+bs58 = "0.5"
+# SHA-256 for the eddsa-rdfc-2022 hashData (proof-config-hash || transformed-doc-hash).
+# Pinned to 0.10 to match the sha2 already in the tree (sparq-canon / the W3C suite).
+sha2 = "0.10"
+
+# OPTIONAL — the `did-web` feature only. Parses a fetched did:web DID document (JSON).
+# The default build (did:key + verify/sign over RDF) needs NO JSON parser.
+serde_json = { version = "1", optional = true }
+
+[features]
+# Lean default: did:key (offline self-certifying), eddsa-rdfc-2022 verify + sign over RDF.
+default = []
+# [OPUS-4.8] did:web DID-document resolution. Adds the JSON parser for the fetched
+# document; the HTTP fetch itself is a PLUGGABLE `DidDocumentFetcher` seam (this crate
+# ships NO HTTP client, so it forces no reqwest/ureq onto anyone and stays offline-testable).
+did-web = ["dep:serde_json"]
+
+[dev-dependencies]
+# Sign-then-verify round-trip tests parse N-Triples fixtures.
+oxttl.workspace = true
+hex = "0.4"
