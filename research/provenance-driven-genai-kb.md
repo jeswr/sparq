@@ -498,8 +498,12 @@ P3/P5/P6 (`sparq-kb`), and P4 (`sparq-vectors`) parallelise without merge conten
 
 - `/home/ubuntu/sparq/crates/sparq-kb/ontology/pkg/pkg.ttl` — `pkg:Finding`/`confidence`/
   `assurance`/`discoveredFrom`/`couldBeMergedWith`; reuses `prov:`/`cito:`/`fabio:`/`np:`/
-  `dcat:`/`skos:`; **no `dqv:`** (the gap)
-- `/home/ubuntu/sparq/crates/sparq-kb/ontology/pkg/PROVENANCE.md` — reuse table (omits DQV)
+  `dcat:`/`skos:`/`dqv:`. **DQV adopted by Phase 3 (sq-2489d.3)**: `pkg:confidence` is now
+  `rdfs:subPropertyOf dqv:value` of a named `dqv:QualityMeasurement`, `pkg:assurance` a
+  `dqv:Metric`, and the technique-graph leans on `cito:extends`/`cito:usesMethodIn` — the
+  §3 gap is closed.
+- `/home/ubuntu/sparq/crates/sparq-kb/ontology/pkg/PROVENANCE.md` — reuse table (DQV row +
+  *DQV quality model* sub-section + W3C-Note caveat, added by sq-2489d.3)
 - `/home/ubuntu/sparq/crates/sparq-kb/src/vocab.rs` — predicate constants (byte-pin test)
 - `/home/ubuntu/sparq/crates/sparq-kb/src/query/canned.rs` — `FINDINGS_ABOUT` /
   `FINDING_PROVENANCE` already SELECT confidence + source + assurance
