@@ -54,6 +54,12 @@ pub const SOURCE_CLASS: &str = "https://sparq.dev/ns/trust#Source";
 /// `trust:issuerKey` — verification key the source signs with (aligns with
 /// `zk:issuerKey`).
 pub const ISSUER_KEY: &str = "https://sparq.dev/ns/trust#issuerKey";
+/// `trust:issuerDid` — the source's DID, resolved to its verifying key by a pluggable
+/// DID resolver (`did:key` / `did:web`; the `crate::did` module, opt-in `did` feature).
+/// A rule may name its issuer by `trust:issuerDid` INSTEAD of the operator-asserted
+/// `trust:issuerKey` hex — the `sq-pfae.3` issuer-key-binding term that narrows forgery
+/// vector D′.
+pub const ISSUER_DID: &str = "https://sparq.dev/ns/trust#issuerDid";
 /// `trust:scope` — where the trust rule applies (server-wide vs per-`.acr`).
 pub const SCOPE: &str = "https://sparq.dev/ns/trust#scope";
 /// `trust:freshWithin` — maximum staleness admitted (consulted against
@@ -198,6 +204,7 @@ mod tests {
             FOR_SHAPE,
             SOURCE_CLASS,
             ISSUER_KEY,
+            ISSUER_DID,
             SCOPE,
             FRESH_WITHIN,
             ADMITTED,

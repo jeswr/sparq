@@ -437,8 +437,12 @@ does **not** provide privacy, unlinkability, or anonymity: the credential is adm
 clear and the holder binding authenticates the WebID in the clear (the non-anonymous degraded
 path, `sq-wvne`). The ZK estate it composes with is externally **unaudited**
 (`sq-qhy4`, pending external accredited-cryptographer sign-off). Issuer keys are
-operator-asserted (no DID resolver yet — `sq-pfae.3`, the live forgery vector D′). Open problems
-are respected as documented limitations, never solved: `sq-tu4e` (no in-reasoner NAF over
+operator-asserted by default (`trust:issuerKey` hex, the live forgery vector D′); the **opt-in
+`did` feature** (`sq-pfae.3`) lets a rule bind its key from a `trust:issuerDid` instead —
+`sparq_trust::{DidKeyResolver, DidWebResolver, resolve_rule_keys}`, `did:key` offline self-cert +
+a pluggable `did:web` fetcher (no HTTP client forced on the default build). This **narrows** D′ but
+is no absolute anchor: `did:key` is self-certifying, `did:web` only as strong as host/TLS. Open
+problems are respected as documented limitations, never solved: `sq-tu4e` (no in-reasoner NAF over
 derived facts; `revoked` is input-only; no deny-on-disagreement) and `sq-wvne` (ZK privacy) are
 out of PoC scope. `sq-xc4y` (per-request holder/freshness admission vs the materialise-once view)
 is **RESOLVED** by the static/dynamic split: see `admit_trust_credential_static` above and design

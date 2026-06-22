@@ -55,9 +55,13 @@ impl ControlGate {
 pub struct TrustRule {
     /// `trust:source` — the named attesting authority IRI.
     pub source: NamedNode,
-    /// `trust:issuerKey` — the verification key the source signs with (parsed from
-    /// the `zk:`-aligned hex key material; v1 supplies the key DIRECTLY because there
-    /// is no DID resolver yet — P2 / `sq-pfae.3`, the live forgery vector D′ of §3.3).
+    /// The verification key the source signs with. Bound either from operator-asserted
+    /// `trust:issuerKey` hex (the default [`parse_policy`] path — the live forgery vector
+    /// D′ of §3.3) OR from a `trust:issuerDid` resolved by a `did::DidResolver` via
+    /// `resolve_rule_keys` (the opt-in `did` feature, `sq-pfae.3` — narrows D′; plain
+    /// code-spans, not intra-doc links, so the default-feature doc build does not reference
+    /// feature-gated items). The admission gate consumes this concrete key identically
+    /// regardless of how it was bound.
     pub issuer_key: PublicKey,
     /// `trust:forShape` — the statement-type SHACL node-shape (a `forPredicate P`
     /// rule is desugared into this at load; see [`crate::vocab::desugar_for_predicate`]).
@@ -94,6 +98,10 @@ pub enum PolicyError {
     IncompleteRule { rule: String, missing: &'static str },
     /// The `trust:issuerKey` literal/IRI did not parse as a verification key.
     BadIssuerKey(String),
+    /// The `trust:issuerDid` (or its resolved key) failed to resolve (`sq-pfae.3`). Carries
+    /// the DID and the resolver's reason. Fail-closed: a rule whose DID does not resolve
+    /// admits nothing.
+    BadIssuerDid { did: String, reason: String },
     /// The `trust:freshWithin` literal was not a parseable `xsd:duration`.
     BadDuration(String),
 }
@@ -109,6 +117,9 @@ impl std::fmt::Display for PolicyError {
                 write!(f, "trust rule <{}> is missing {}", rule, missing)
             }
             PolicyError::BadIssuerKey(k) => write!(f, "trust:issuerKey did not parse: {}", k),
+            PolicyError::BadIssuerDid { did, reason } => {
+                write!(f, "trust:issuerDid <{}> did not resolve: {}", did, reason)
+            }
             PolicyError::BadDuration(d) => {
                 write!(f, "trust:freshWithin is not xsd:duration: {}", d)
             }
@@ -128,7 +139,7 @@ impl std::error::Error for PolicyError {}
 /// hard [`PolicyError::IncompleteRule`] — a partially-specified rule never silently
 /// admits.
 pub fn parse_policy(policy: &[Triple], _gate: ControlGate) -> Result<Vec<TrustRule>, PolicyError> {
-    parse_rules(policy)
+    parse_rules(policy, &operator_asserted_key)
 }
 
 /// The fail-closed analogue used in tests: parse WITHOUT a [`ControlGate`]. Always
@@ -138,7 +149,83 @@ pub fn try_parse_ungated(_policy: &[Triple]) -> Result<Vec<TrustRule>, PolicyErr
     Err(PolicyError::NotControlGated)
 }
 
-fn parse_rules(policy: &[Triple]) -> Result<Vec<TrustRule>, PolicyError> {
+/// Resolve a rule node's issuer key. A strategy fn so the operator-asserted-hex path
+/// ([`parse_policy`]) and the DID-resolving path ([`resolve_rule_keys`]) share ALL other
+/// per-rule parsing (scope / freshness / shape) — only the key binding differs.
+type KeyResolver<'a> = dyn Fn(&Term, &[Triple]) -> Result<PublicKey, PolicyError> + 'a;
+
+/// The operator-asserted key binding (today's behaviour): the rule's `trust:issuerKey`
+/// hex is parsed directly. This is the live forgery vector D′ — the operator pastes the
+/// key — kept as the default so the lean build needs no DID resolver.
+fn operator_asserted_key(node: &Term, policy: &[Triple]) -> Result<PublicKey, PolicyError> {
+    let key_term =
+        object_of(node, vocab::ISSUER_KEY, policy).ok_or_else(|| PolicyError::IncompleteRule {
+            rule: node_label(node),
+            missing: "trust:issuerKey",
+        })?;
+    let key_hex = term_lexical(&key_term);
+    public_key_from_hex(&key_hex).ok_or_else(|| PolicyError::BadIssuerKey(key_hex.clone()))
+}
+
+/// How a trust rule binds its issuer's verifying key. Either the operator pastes the
+/// key directly (`trust:issuerKey` hex — the live forgery vector D′), or the rule names
+/// the issuer by `trust:issuerDid` and a resolver binds the key (`sq-pfae.3`). The DID
+/// form **narrows** D′ — it does not eliminate it (a `did:key` is self-certifying, a
+/// `did:web` is only as strong as host/TLS control; see [`crate::did`]).
+#[cfg(feature = "did")]
+#[cfg_attr(docsrs, doc(cfg(feature = "did")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssuerBinding {
+    /// `trust:issuerKey` — operator-asserted verifying-key hex (the default path).
+    OperatorAssertedKey,
+    /// `trust:issuerDid` — the DID string a resolver binds to a verifying key.
+    Did(String),
+}
+
+/// Parse a Control-gated trust policy whose rules may name their issuer by
+/// **`trust:issuerDid`** (resolved via `resolver`) as an alternative to the
+/// operator-asserted `trust:issuerKey` hex, producing the same `Vec<TrustRule>` the
+/// admission gate consumes (`sq-pfae.3`).
+///
+/// For each `trust:TrustRule`: if it carries `trust:issuerDid`, the DID is resolved to a
+/// verifying key via `resolver` (`did:key` offline / `did:web` via the resolver's
+/// fetcher); otherwise it falls back to `trust:issuerKey` hex. A rule carrying **neither**
+/// is a [`PolicyError::IncompleteRule`]; a DID that fails to resolve is a
+/// [`PolicyError::BadIssuerDid`] — **fail-closed**, so an unresolvable issuer admits
+/// nothing. Everything else (scope, freshness, shape) parses exactly as [`parse_policy`].
+///
+/// Possession of a [`ControlGate`] is still required (§3.2): the issuer-key BINDING is
+/// strengthened, but the policy itself must still arrive through the trusted channel —
+/// DID resolution narrows forgery vector D′, it does not relax the Control-gating root.
+#[cfg(feature = "did")]
+#[cfg_attr(docsrs, doc(cfg(feature = "did")))]
+pub fn resolve_rule_keys(
+    policy: &[Triple],
+    resolver: &dyn crate::did::DidResolver,
+    _gate: ControlGate,
+) -> Result<Vec<TrustRule>, PolicyError> {
+    let key_for = move |node: &Term, policy: &[Triple]| -> Result<PublicKey, PolicyError> {
+        // Prefer trust:issuerDid (the resolver-bound, D′-narrowing path).
+        if let Some(did_term) = object_of(node, vocab::ISSUER_DID, policy) {
+            let did_str = term_lexical(&did_term);
+            return resolver.resolve_str(&did_str).map_err(|e| PolicyError::BadIssuerDid {
+                did: did_str,
+                reason: e.to_string(),
+            });
+        }
+        // Fall back to the operator-asserted hex key.
+        if object_of(node, vocab::ISSUER_KEY, policy).is_some() {
+            return operator_asserted_key(node, policy);
+        }
+        Err(PolicyError::IncompleteRule {
+            rule: node_label(node),
+            missing: "trust:issuerDid or trust:issuerKey",
+        })
+    };
+    parse_rules(policy, &key_for)
+}
+
+fn parse_rules(policy: &[Triple], key_for: &KeyResolver) -> Result<Vec<TrustRule>, PolicyError> {
     // Collect every node typed `trust:TrustRule`.
     let mut rule_nodes: Vec<Term> = Vec::new();
     for t in policy {
@@ -153,12 +240,16 @@ fn parse_rules(policy: &[Triple]) -> Result<Vec<TrustRule>, PolicyError> {
 
     let mut out = Vec::with_capacity(rule_nodes.len());
     for node in rule_nodes {
-        out.push(parse_one_rule(&node, policy)?);
+        out.push(parse_one_rule(&node, policy, key_for)?);
     }
     Ok(out)
 }
 
-fn parse_one_rule(node: &Term, policy: &[Triple]) -> Result<TrustRule, PolicyError> {
+fn parse_one_rule(
+    node: &Term,
+    policy: &[Triple],
+    key_for: &KeyResolver,
+) -> Result<TrustRule, PolicyError> {
     let rule_id = || node_label(node);
 
     // trust:source — a named attesting authority.
@@ -168,15 +259,9 @@ fn parse_one_rule(node: &Term, policy: &[Triple]) -> Result<TrustRule, PolicyErr
             missing: "trust:source",
         })?;
 
-    // trust:issuerKey — hex key material (operator-asserted; no DID resolver — §3.3 D′).
-    let key_term =
-        object_of(node, vocab::ISSUER_KEY, policy).ok_or_else(|| PolicyError::IncompleteRule {
-            rule: rule_id(),
-            missing: "trust:issuerKey",
-        })?;
-    let key_hex = term_lexical(&key_term);
-    let issuer_key =
-        public_key_from_hex(&key_hex).ok_or_else(|| PolicyError::BadIssuerKey(key_hex.clone()))?;
+    // The issuer verifying key — operator-asserted hex (`trust:issuerKey`) or
+    // DID-resolved (`trust:issuerDid`), depending on the supplied strategy.
+    let issuer_key = key_for(node, policy)?;
 
     // trust:scope — exact-or-ancestor resource/container IRI.
     let scope =

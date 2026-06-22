@@ -1,8 +1,9 @@
 //! Parse-validation of the published machine-readable vocabulary
-//! `ontologies/trust/trust.ttl` (sq-pfae.2). The Turtle a working group reads MUST
-//! stay valid Turtle and MUST declare exactly the ten core terms + the one sugar
-//! term. The `vocab::tests::ttl_pins_match_rust_constants` unit test additionally
-//! pins the IRIs against the Rust constants; this test is the *syntactic* guard.
+//! `ontologies/trust/trust.ttl` (sq-pfae.2, extended for the `trust:issuerDid`
+//! issuer-key-binding term in sq-pfae.3). The Turtle a working group reads MUST
+//! stay valid Turtle and MUST declare the core terms + the one sugar term. The
+//! `vocab::tests::ttl_pins_match_rust_constants` unit test additionally pins the IRIs
+//! against the Rust constants; this test is the *syntactic* guard.
 //!
 //! [OPUS-4.8] sq-pfae.2 (issue #940). 🤖 SPARQ agent — trust-graph authorisation.
 
@@ -25,12 +26,12 @@ fn trust_ttl_is_valid_turtle() {
     );
 }
 
-/// Every one of the eleven term IRIs (ten core + the one sugar) is declared in the
-/// Turtle as a subject. This is a coarse presence check independent of the unit-test
-/// constant pinning, so a refactor of `vocab.rs` cannot silently drop a published
-/// term from the gate.
+/// Every term IRI (ten core + the `trust:issuerDid` binding term + the one sugar) is
+/// declared in the Turtle as a subject. This is a coarse presence check independent of
+/// the unit-test constant pinning, so a refactor of `vocab.rs` cannot silently drop a
+/// published term from the gate.
 #[test]
-fn trust_ttl_declares_all_eleven_terms() {
+fn trust_ttl_declares_all_core_terms() {
     use oxrdf::NamedOrBlankNode;
 
     const NS: &str = "https://sparq.dev/ns/trust#";
@@ -42,6 +43,7 @@ fn trust_ttl_declares_all_eleven_terms() {
         "source",
         "forShape",
         "issuerKey",
+        "issuerDid",
         "scope",
         "freshWithin",
         "admitted",
