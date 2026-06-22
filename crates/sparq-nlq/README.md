@@ -63,6 +63,14 @@ record a replayable fixture as you go.
   [`QueryBudget`] (default **bounded**: 10 s, 1M rows; opting out is explicit).
 - **Full provenance** — `Answer` carries the final query, result, repair count, and the
   **full transcript**; `prompt_for` / `repair_prompt_for` are public + deterministic.
+- **Citations from provenance** ([`cite`](src/cite.rs) / [`provenance`](src/provenance.rs),
+  opt-in via `--features citations`, default **off**) — `Answer::citations(&graph)`
+  resolves each answer-row binding to its in-graph `prov:wasDerivedFrom` source +
+  `dcterms:source` anchor + `pkg:confidence` / `pkg:assurance`, rendering numbered
+  footnotes. Citations are **emitted from provenance, never generated**, so each resolves
+  to a real in-graph source (resolution rate 1.0, zero fabricated refs); a binding with no
+  provenance is reported as **"no source recorded"**, never guessed.
+  <!-- [OPUS-4.8] sq-2489d.1 -->
 - **`Llm` trait — record/replay, offline CI** — `ReplayLlm` serves recorded pairs (the
   CI path); `RecordingLlm<L>` wraps any backend and `save()`s a fixture; `AnthropicLlm`
   is a thin blocking Messages-API client behind the non-default `live` feature.
