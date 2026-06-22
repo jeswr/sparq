@@ -109,6 +109,18 @@ export class Dataset implements RDF.Dataset {
     return new Dataset(SparqStore.fromQuadsSync(quads, { dataset: true }));
   }
 
+  /**
+   * [OPUS-4.8] sq-iwhl8 (#1116) — a SYNCHRONOUS dataset factory, the building block for the
+   * RDF/JS {@link RDF.DatasetCoreFactory} / {@link RDF.DatasetFactory} ({@link datasetFactory})
+   * the conformance harness drives. Like {@link fromQuads} but WITHOUT `await init()`: the wasm
+   * engine must ALREADY be initialised (a prior `await init()` / `await Dataset.create()` has
+   * resolved), so the spec's synchronous `dataset(quads?)` factory shape can be satisfied. Prefer
+   * the async {@link create} / {@link fromQuads} for first construction.
+   */
+  static fromQuadsSync(quads: Iterable<RDF.Quad> = []): Dataset {
+    return Dataset.of(quads);
+  }
+
   // --- DatasetCore -------------------------------------------------------------------------------
 
   /**
@@ -372,6 +384,22 @@ export class Dataset implements RDF.Dataset {
     this.free();
   }
 }
+
+/**
+ * [OPUS-4.8] sq-iwhl8 (#1116) — the RDF/JS **`DatasetCoreFactory`** AND **`DatasetFactory`**
+ * (the latter extends the former; the sparq {@link Dataset} is a full `Dataset`, so one object
+ * satisfies both). Its single `dataset(quads?)` method is SYNCHRONOUS per the spec, so the wasm
+ * engine must already be initialised — `await init()` (or any `await Dataset.create()` /
+ * `Dataset.fromString(...)`) before the first `dataset()` call, exactly as the synchronous
+ * `Dataset` members require. This is what the RDF/JS conformance harness drives as a
+ * `DatasetFactory`.
+ */
+export const datasetFactory: RDF.DatasetCoreFactory<RDF.Quad, RDF.Quad, Dataset> &
+  RDF.DatasetFactory<RDF.Quad, RDF.Quad, Dataset> = {
+  dataset(quads?: Iterable<RDF.Quad>): Dataset {
+    return Dataset.fromQuadsSync(quads ?? []);
+  },
+};
 
 // --- interop helpers -----------------------------------------------------------------------------
 

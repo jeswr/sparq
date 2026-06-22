@@ -17,6 +17,7 @@ import {
   type SparqlJsonResults,
   type SparqlJsonTerm,
 } from './sparql.js';
+import { SparqSource } from './source.js';
 import { DataFactory, Quad, Variable } from './terms.js';
 import { init, WasmStore } from './wasm.js';
 
@@ -501,6 +502,18 @@ export class SparqStore {
     this.applyDelta([], quads);
   }
 
+  /**
+   * [OPUS-4.8] sq-iwhl8 (#1116) — a view of this store as an RDF/JS **`Source`** / **`Sink`** /
+   * **`Store`** (the Stream spec, https://rdf.js.org/stream-spec/): `match(...)` yields a quad
+   * `Stream` (events, not the synchronous `Quad[]` this class returns), and `import` / `remove` /
+   * `removeMatches` / `deleteGraph` consume/mutate via streams. The backing store stays the
+   * source of truth; the adapter only re-views its primitives as the streaming interface, so a
+   * sparq store drops into any RDF/JS Stream pipeline.
+   */
+  asSource(): SparqSource {
+    return new SparqSource(this);
+  }
+
   /** Releases the wasm-side memory. The store must not be used afterwards. */
   free(): void {
     this.#inner.free();
@@ -511,4 +524,4 @@ export class SparqStore {
   }
 }
 
-export { Bindings, DataFactory };
+export { Bindings, DataFactory, SparqSource };
