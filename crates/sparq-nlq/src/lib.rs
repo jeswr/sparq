@@ -29,6 +29,12 @@ pub mod link;
 pub mod cite;
 #[cfg(feature = "citations")]
 pub mod provenance;
+// [OPUS-4.8] sq-2489d.2 (GenAI-KB Phase 2): answer-qualification (hedge + abstention) over
+// the SAME provenance join — reads `pkg:assurance`/`pkg:confidence` into a weakest-link
+// verb hedge + verbal band + a `min_confidence` abstention floor. Gated on `citations`
+// because it consumes the Phase-1 provenance primitive (no second join machinery).
+#[cfg(feature = "citations")]
+pub mod qualify;
 
 // ---------------------------------------------------------------------------
 // The LLM boundary
@@ -242,6 +248,17 @@ pub struct NlqConfig {
     /// and a caller who wants tighter grounding (accepting that empty-answer questions
     /// then need it off) sets it `true`. [OPUS-4.8] sq-9yjp
     pub check_dictionary: bool,
+    /// **Answer-qualification knob** (GenAI-KB Phase 2, `sq-2489d.2`; `--features
+    /// citations`). When `Some`, [`Nlq::ask_qualified`] folds the answer's supporting
+    /// `pkg:assurance`/`pkg:confidence` provenance into an [`qualify::AnswerQualification`]
+    /// (verb hedge + verbal band + a `min_confidence` abstention floor) alongside the
+    /// `Answer`. `None` (default) leaves the loop a pure NL→SPARQL run — qualification is
+    /// purely additive and read-only, exactly like `citations`. Gated on the `citations`
+    /// feature because it reuses the Phase-1 provenance join (no second join machinery).
+    /// Does NOT change the prompt string, so it is fixture-compatible — unlike
+    /// [`link_entities`](Self::link_entities), flipping it needs no re-record. [OPUS-4.8]
+    #[cfg(feature = "citations")]
+    pub qualify: Option<qualify::QualifyConfig>,
 }
 
 impl Default for NlqConfig {
@@ -277,6 +294,10 @@ impl Default for NlqConfig {
             link_expand_k: 3,
             max_links: 8,
             check_dictionary: false,
+            // Qualification off by default: additive + fixture-compatible, opt in when you
+            // want hedged/abstaining answers over a provenance-bearing graph. [OPUS-4.8]
+            #[cfg(feature = "citations")]
+            qualify: None,
         }
     }
 }
@@ -357,6 +378,20 @@ impl Answer {
     /// [`Nlq::new`]); the citation is the provenance of the binding in *that* graph.
     pub fn citations(&self, graph: &Graph) -> cite::CitedAnswer {
         cite::cite_result(graph, &self.result)
+    }
+
+    /// Qualify this answer from in-graph provenance (GenAI-KB Phase 2, `sq-2489d.2`):
+    /// fold the supporting bindings' `pkg:assurance` / `pkg:confidence` weakest-link into a
+    /// verb hedge + verbal confidence band, and, below `config.min_confidence`, abstain.
+    /// Reflects asserted assurance — **not** a calibrated confidence (see
+    /// [`qualify::AnswerQualification`]). `graph` must be the graph this answer was
+    /// produced over (the one passed to [`Nlq::new`]).
+    pub fn qualify(
+        &self,
+        graph: &Graph,
+        config: &qualify::QualifyConfig,
+    ) -> qualify::AnswerQualification {
+        qualify::qualify_result(graph, &self.result, config)
     }
 }
 
@@ -599,6 +634,36 @@ impl<'g> Nlq<'g> {
         }
         unreachable!("loop returns from its last round")
     }
+
+    /// [`ask`](Self::ask) THEN qualify the answer from in-graph provenance (GenAI-KB
+    /// Phase 2, `sq-2489d.2`). Runs the loop unchanged, then folds the answer's supporting
+    /// `pkg:assurance`/`pkg:confidence` into an [`qualify::AnswerQualification`] using
+    /// [`NlqConfig::qualify`] (or [`qualify::QualifyConfig::default`] when that is `None`,
+    /// so the call always yields a qualification). The hedge/abstention is **post-hoc and
+    /// read-only** — it never alters the query, the execution, or the transcript, so it
+    /// composes cleanly with the existing loop and the recorded fixtures. [OPUS-4.8]
+    #[cfg(feature = "citations")]
+    pub fn ask_qualified(&self, question: &str) -> Result<QualifiedAnswer, NlqError> {
+        let answer = self.ask(question)?;
+        let cfg = self.config.qualify.clone().unwrap_or_default();
+        let qualification = answer.qualify(self.graph, &cfg);
+        Ok(QualifiedAnswer {
+            answer,
+            qualification,
+        })
+    }
+}
+
+/// An [`Answer`] paired with its provenance-derived [`qualify::AnswerQualification`]
+/// (GenAI-KB Phase 2, `sq-2489d.2`). Returned by [`Nlq::ask_qualified`]; the
+/// `qualification` reflects asserted assurance — **not** a calibrated confidence. [OPUS-4.8]
+#[cfg(feature = "citations")]
+#[derive(Debug)]
+pub struct QualifiedAnswer {
+    /// The underlying loop answer — unchanged by qualification.
+    pub answer: Answer,
+    /// The hedge + band + abstention decision over the answer's supporting provenance.
+    pub qualification: qualify::AnswerQualification,
 }
 
 /// Extracts the SPARQL query from a completion: the first ```sparql fenced block,
