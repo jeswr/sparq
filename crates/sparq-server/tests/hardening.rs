@@ -2,6 +2,13 @@
 //! concurrency shedding, panic recovery and the SELECT row cap. Each test boots the real
 //! hardened router on an ephemeral port and drives it over HTTP, asserting both the HTTP
 //! status semantics and the structured JSON error bodies.
+//!
+//! [OPUS-4.8] (sq-1b390) Gate the whole suite on the `server` feature. It spins the real axum
+//! server and uses the `server`-gated `sparq_server::router` / `AppState` API, so under
+//! `--no-default-features --all-targets` (the pure-serialiser-library build) this file must
+//! compile OUT — otherwise `clippy --no-default-features --all-targets` breaks on the
+//! unresolved axum / serde_json / router imports. 🤖 SPARQ agent.
+#![cfg(feature = "server")]
 
 use std::time::Duration;
 

@@ -12,6 +12,13 @@
 //!
 //! Only one global subscriber may be installed per process, so BOTH cases run against ONE
 //! subscriber in a single `#[tokio::test]`; the capture buffer is cleared between cases.
+//!
+//! [OPUS-4.8] (sq-1b390) Gate the whole suite on the `server` feature. It spins the real axum
+//! server and uses the `server`-gated `sparq_server::router` / `AppState` API, so under
+//! `--no-default-features --all-targets` (the pure-serialiser-library build) this file must
+//! compile OUT — otherwise `clippy --no-default-features --all-targets` breaks on the
+//! unresolved axum / serde_json / router imports. 🤖 SPARQ agent.
+#![cfg(feature = "server")]
 
 use std::sync::{Arc, Mutex};
 
