@@ -7,7 +7,16 @@ description: Run a SPARQL query across multiple mutually-distrusting RDF data ho
 
 `sparq-mpc` lets a set of mutually-distrusting **holders**, each owning private RDF named graphs, jointly answer ONE SPARQL query over the *union* of their data while minimising what each holder reveals. Today it delivers a real per-holder local evaluator, a crypto-free join on disclosed global IRIs, and an honest-majority Shamir secret-sharing backend that powers secure cumulative aggregates and a hidden-value (private-key) join. The reconstruction path is **honest-majority with tamper DETECTION + abort** — and **robust correction where the `(n, t)` redundancy allows** — over RS-consistency-checked opens; the degree-`2t` equality open is **detection-only above `n = 2t + 1`**, and semi-honest is the floor when a given configuration carries no redundancy. It is **not** dishonest-majority and **not** full malicious security; each backend reports its exact level via `BackendInfo.malicious_security`.
 
+<!-- sq-im8u: the `scaffold-caveat` anchor is single-sourced into
+     book/src/getting-started/capabilities.md via mdBook {{#include}}. Load-bearing honesty
+     caveat; keep the anchored line link-portable (inline code + bead refs only, no
+     repo-relative links) so it renders under both mounts. Keep the ANCHOR markers
+     one-per-line — mdBook excludes only the exact marker line.
+     privacy-claims-allow: NEGATIVE caveat block (explicitly "not full malicious security",
+     semi-honest floor, ZK proof not implemented) — not an achieved-property claim; sq-qhy4. [OPUS-4.8] -->
+<!-- ANCHOR: scaffold-caveat -->
 > **Maturity (read first).** EARLY / RESEARCH, **native-only** (deliberately not in the wasm build). The Shamir layer's reconstruction is **RS-consistency-checked**: it detects (and, with enough redundancy, robustly corrects) actively-tampered shares and reports the exact guarantee via `BackendInfo.malicious_security` — but the degree-`2t` equality open in the hidden-value join is **not** hardened at `n = 2t+1` (see *Gotchas*). The primitives run as an **in-process simulation** (one process plays all parties) for correctness/cost counting, AND over a **REAL multi-process loopback transport** (`transport` module — each party its own process over `127.0.0.1`; all four `QueryClass` cells incl. the multi-round oblivious shuffle/sort run on the wire) for MEASURED wall-clock + bytes-on-wire. The **collaborative ZK proof** of correctness + issuer-attestation is **not implemented**: those methods return `MpcError::NotYetImplemented` naming their gate. No fake crypto anywhere. See *Gotchas* for the full envelope.
+<!-- ANCHOR_END: scaffold-caveat -->
 
 ## Quickstart
 
