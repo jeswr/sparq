@@ -396,6 +396,24 @@ jobs:
             crate: sparq-trust
             features: store
             test: true
+          # [OPUS-4.8] sq-pfae.6: the delegation stratum's PROV-O AUDIT half. The whole
+          # `delegation_prov` module + the `tests/delegation_prov_audit.rs` integration suite
+          # are `#[cfg(feature = "delegation-prov")]` / `#![cfg(feature = "delegation-prov")]`
+          # behind `default = []`, so the default build/clippy/test (and ci.yml's
+          # `--workspace --all-targets` archive, which passes NO `--features`) compile them
+          # EMPTY and run ZERO of the 7 module unit tests + the 4 audit integration tests. This
+          # leg compiles the module, runs `clippy --all-targets -D warnings` with the feature
+          # ON (the real gate), and runs `cargo test` — which drives the REAL invoke() →
+          # effective_against_current() → audit_invocation() path (on-behalf-of lineage, the
+          # human/AI principal attestation, and the load-bearing SAFETY invariant: the audit
+          # never renders a grant broader than the gate conferred). `delegation-prov` is
+          # std-only over oxrdf (NO new dep, NO sparq-prov edge), so this is a fast leg.
+          # Verified: `cargo nextest list -p sparq-trust --features delegation-prov` lists the
+          # 7 delegation_prov unit tests + the 4 delegation_prov_audit integration tests.
+          - name: sparq-trust (delegation-prov)
+            crate: sparq-trust
+            features: delegation-prov
+            test: true
           # [OPUS-4.8] sq-h3uk: the ODRL->AUTH_GRAPH bridge (pulls the optional
           # sparq-policy ODRL evaluator) — keeps the opt-in ON path from rotting.
           - name: sparq-solid (odrl-bridge)

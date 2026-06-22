@@ -442,7 +442,8 @@ SAME `Vec<TrustRule>` the gate consumes:
   long-lived view).
 
 Both install on top of the unchanged auth view (the ODRL-bridge precedent). The
-public surface is `sparq_trust::{vocab, policy, admit, wire}` — see
+public surface is `sparq_trust::{vocab, policy, admit, wire, delegation}` (+ the opt-in
+`delegation_prov` / `did` / `store` / `secprop` modules) — see
 [`crates/sparq-trust/README.md`](../../crates/sparq-trust/README.md) and the design record
 `research/solid-trust-graph-authz-design.md` §6.0 (tracked in
 [issue #940](https://github.com/jeswr/sparq/issues/940); landing via design PR
@@ -480,6 +481,23 @@ is **RESOLVED** by the static/dynamic split: see `admit_trust_credential_static`
 implemented: it binds each hop's `delegate_key` into the delegator-signed preimage, defeating the
 key-substitution stolen-chain replay — but it does **not** claim full non-replayability, because
 the delegator's own key is still operator-asserted (`sq-pfae.3`); see the crate README *Honest scope*.
+
+**Delegation PROV-O audit for human + AI agents** (the **opt-in `delegation-prov` feature**,
+`sq-pfae.6`, design §4.2/§4.3). `sparq_trust::delegation_prov::audit_invocation(chain, effective,
+config)` renders an invocation-bound delegation chain + its surviving `EffectiveCapability` as a
+minimal **W3C PROV-O** audit graph: each hop's `delegate prov:actedOnBehalfOf delegator` (the
+on-behalf-of lineage `sparq-prov` lacks), the invocation as a `prov:Activity` the terminal delegate
+`prov:wasAssociatedWith`, and the effective grant as a `prov:Entity` `wasGeneratedBy`/`wasAttributedTo`
+the delegate carrying the `auth:*` actions over its target — the §4.3 value-add of rendering the
+delegated authority as RDF that reasons with the SAME `.acl` rules. **Human vs AI** is an **attested
+attribute** on the delegate (§4.2: an AI agent is a distinct principal holding an attenuated child of
+its human's authority) — recorded `trust:HumanPrincipal` / `trust:AiAgent` via `PrincipalClassification`.
+Two honesty boundaries: (i) it is an **audit record, never an authority source** — produced *after* a
+successful `invoke`, it can only ever describe authority that already passed the gate, and it never
+renders a grant broader than the gate conferred (when `effective_against_current` narrows the chain to
+the CURRENT delegator grant, the audit drops the revoked actions); (ii) it adds **no security property**
+and no privacy — principals are named in the clear. Pure `oxrdf` (**no `sparq-prov` dependency** — that
+would drag `sparq-engine` onto the crate's dep graph); OFF in the default build.
 
 ### Security-properties vocabulary — opt-in `secprop-vocab` ([OPUS-4.8] sq-5oru9, epic sq-0dksu)
 
