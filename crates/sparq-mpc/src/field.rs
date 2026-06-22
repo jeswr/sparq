@@ -33,8 +33,25 @@
 /// The field modulus `p = 2^61 - 1` (a Mersenne prime).
 pub const P: u64 = (1u64 << 61) - 1;
 
+/// [OPUS-4.8] sq-mnv5 — the Tonelli–Shanks shortcut exponent `(p + 1) / 4`, valid
+/// because `p ≡ 3 (mod 4)` (concretely `p = 2^61 − 1 ≡ 7 (mod 8)`). For any
+/// quadratic residue `c`, `c^((p+1)/4)` is a square root of `c` — i.e. `d² = c`.
+/// This is the public, in-circuit-cheap square-root the random-bit sub-protocol
+/// ([`crate::compare`] square-protocol) needs to derive the sign bit of a
+/// secret-shared random `a` from the OPENED public square `c = a²`. The exponent
+/// is a **public constant**, and its only use ([`Fp::sqrt_residue`]) is applied to
+/// a **public** opened value, so no secret-dependent timing is involved.
+pub const SQRT_EXP: u64 = (P + 1) / 4;
+
 /// An element of `F_p`, always kept canonical in `[0, P)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// [OPUS-4.8] sq-u8a8: derives [`zeroize::Zeroize`] so a secret-bearing `Fp`
+/// (a Shamir share value, the cleartext MAC key `α`, a masking coefficient) can
+/// be scrubbed from memory by the containers that own it. `Fp` is `Copy`, so it
+/// cannot itself implement `Drop`/`ZeroizeOnDrop`; the zeroize-on-drop happens in
+/// the owning secret container (e.g. `MacSession`, `MacKey`). This is memory
+/// HYGIENE — `Zeroize` adds a scrub method, it changes no arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, zeroize::Zeroize)]
 pub struct Fp(u64);
 
 // Inherent `add`/`sub`/`mul`/`neg` are deliberate: field arithmetic reads
@@ -106,13 +123,43 @@ impl Fp {
     /// Multiplicative inverse via Fermat's little theorem: `a^(p-2) mod p`.
     /// Panics if `self` is zero (zero has no inverse) — callers (Lagrange
     /// interpolation) only ever invert non-zero differences of distinct points.
+    ///
+    /// [OPUS-4.8] sq-7ltf: this routes through [`Fp::pow_ct`] (a fixed-iteration,
+    /// branchless square-and-multiply), so the inverse is **constant-time in the
+    /// inverted value `self`** by construction — there is no data-dependent
+    /// multiply branch on the base. The exponent (`P − 2`) is a public constant,
+    /// so its bit pattern is public regardless; routing through `pow_ct` removes
+    /// the *value*-dependent timing that a future secret-value inversion would
+    /// otherwise expose. This closes the latent `Fp::pow` hazard (CR-G5) for the
+    /// inversion path without changing any arithmetic result. The panic on zero
+    /// is a public-domain contract (zero is rejected before any frame crosses the
+    /// wire; see `transport.rs`), not a secret-dependent branch.
     pub fn inv(self) -> Fp {
         assert!(self.0 != 0, "Fp::inv of zero");
-        self.pow(P - 2)
+        self.pow_ct(P - 2)
     }
 
-    /// Modular exponentiation by square-and-multiply.
-    pub fn pow(self, mut exp: u64) -> Fp {
+    /// **Variable-time** modular exponentiation by square-and-multiply.
+    ///
+    /// [OPUS-4.8] sq-7ltf: this is the classic data-dependent square-and-multiply
+    /// — `if exp & 1 == 1 { acc = acc.mul(base) }` branches on the **exponent's
+    /// bits**, so its timing leaks the exponent's bit pattern / Hamming weight.
+    ///
+    /// # Public-exponent contract
+    ///
+    /// This function is **non-constant-time in the exponent** and MUST only be
+    /// called with a **PUBLIC** exponent. The side-channel analysis (CR-G5) found
+    /// every present caller satisfies this: the only direct caller is the robust
+    /// Berlekamp–Welch decoder, which raises a public evaluation point to the
+    /// **public** error-correction parameter `e` (`robust.rs`). Inversion does
+    /// **not** use this path — it uses [`Fp::pow_ct`] so it is constant-time in
+    /// the base by construction. If a **secret** exponent is ever needed, use
+    /// [`Fp::pow_ct`] instead; never widen this function's callers to secret
+    /// exponents.
+    ///
+    /// The `_vartime` suffix is the load-bearing marker: it makes the
+    /// non-constant-time property visible at every call site.
+    pub fn pow_vartime(self, mut exp: u64) -> Fp {
         let mut base = self;
         let mut acc = Fp::one();
         while exp > 0 {
@@ -123,6 +170,89 @@ impl Fp {
             exp >>= 1;
         }
         acc
+    }
+
+    /// Fixed-iteration, branchless modular exponentiation.
+    ///
+    /// [OPUS-4.8] sq-7ltf: a square-and-multiply that runs a **fixed 64
+    /// iterations** (one per `u64` exponent bit) and selects the conditional
+    /// multiply with [`subtle::ConditionallySelectable`] instead of an `if`. There is no
+    /// data-dependent branch on the base value, so the routine is **constant-time
+    /// in the base `self`** — closing the latent `Fp::pow` hazard for any caller
+    /// that exponentiates a secret-bearing field element. It is **not** asserted
+    /// constant-time in the *exponent*: the `exp.bit(i)` extraction reads the
+    /// exponent bits, and the iteration count is fixed at 64 regardless, but the
+    /// loop body does not vary with the secret base. (`subtle` is a manifest dep,
+    /// adopted in sq-u8a8 as a defensive constant-time primitive.)
+    ///
+    /// Used by [`Fp::inv`] (public exponent `P − 2`); also available should a
+    /// future secret-value exponentiation be required.
+    pub fn pow_ct(self, exp: u64) -> Fp {
+        use subtle::{ConditionallySelectable, ConstantTimeEq};
+        let mut base = self;
+        let mut acc = Fp::one();
+        // Fixed 64 iterations — one per bit of the u64 exponent. No early exit,
+        // so the trip count is independent of the base and of the exponent's
+        // magnitude.
+        for i in 0..u64::BITS {
+            // bit = 1 iff the i-th exponent bit is set; constant-time extraction.
+            let bit = ((exp >> i) & 1).ct_eq(&1);
+            // Branchless: acc' = bit ? acc·base : acc.
+            let multiplied = acc.mul(base);
+            acc = Fp::conditional_select(&acc, &multiplied, bit);
+            base = base.mul(base);
+        }
+        acc
+    }
+
+    /// [OPUS-4.8] sq-u8a8: constant-time equality on the canonical representative,
+    /// via [`subtle::ConstantTimeEq`]. Because every `Fp` is kept canonical in
+    /// `[0, P)`, comparing the `u64` values in constant time is equivalent to
+    /// `self == other` but does not leak (through timing) whether the two values
+    /// differ in their low or high bits.
+    ///
+    /// This is a **defensive PRIMITIVE**, not a replacement for any existing
+    /// comparison. The side-channel analysis (CR-G5) found every equality on the
+    /// MPC protocol paths is over PUBLIC / opened values — the masked product
+    /// `m == 0` (which is exactly the disclosed match/zero bit), the verdict bit,
+    /// and public threshold bits — so NO live `==` is secret-dependent and none is
+    /// changed. `ct_eq` exists so a FUTURE secret-vs-secret field comparison can be
+    /// constant-time by construction. The returned [`subtle::Choice`] is `1` iff
+    /// `self == other`, identical to the boolean `==`.
+    pub fn ct_eq(self, other: Fp) -> subtle::Choice {
+        use subtle::ConstantTimeEq;
+        self.0.ct_eq(&other.0)
+    }
+
+    /// [OPUS-4.8] sq-mnv5 — a square root of `self` for the `p ≡ 3 (mod 4)`
+    /// shortcut: `self^((p+1)/4)`. If `self` is a quadratic residue this returns a
+    /// `d` with `d² = self` (one of the two roots `±d`); if `self` is a
+    /// NON-residue the identity does not hold, so the caller MUST verify
+    /// `d.mul(d) == self` and treat a mismatch as "not a residue" (the random-bit
+    /// sub-protocol only ever calls this on `c = a²`, which is a residue by
+    /// construction, and re-checks anyway — fail-closed).
+    ///
+    /// # Public-value contract
+    ///
+    /// This routes through [`Fp::pow_vartime`] with the **public** exponent
+    /// [`SQRT_EXP`]. It MUST only be called on a **public / opened** `self` (as the
+    /// square-protocol does: it is applied to the opened `c = a²`, never to a
+    /// secret share), so the variable-time exponentiation leaks nothing secret —
+    /// the base and the exponent are both public.
+    pub fn sqrt_residue(self) -> Fp {
+        self.pow_vartime(SQRT_EXP)
+    }
+}
+
+/// [OPUS-4.8] sq-7ltf: constant-time conditional select on the canonical
+/// representative. Because every `Fp` is kept canonical in `[0, P)`, selecting
+/// between two canonical `u64` values yields a canonical `Fp`; the underlying
+/// `u64::conditional_select` (from `subtle`) is branchless. This is the
+/// primitive [`Fp::pow_ct`] uses to make the conditional multiply branchless.
+impl subtle::ConditionallySelectable for Fp {
+    #[inline]
+    fn conditional_select(a: &Fp, b: &Fp, choice: subtle::Choice) -> Fp {
+        Fp(u64::conditional_select(&a.0, &b.0, choice))
     }
 }
 
@@ -183,6 +313,99 @@ mod tests {
             let a = Fp::new(v);
             assert_eq!(a.mul(a.inv()), Fp::one(), "inv of {v}");
         }
+    }
+
+    // [OPUS-4.8] sq-u8a8: the constant-time equality primitive returns the SAME
+    // boolean as the plain `==` on a spread of representative inputs (equal,
+    // unequal, boundary values). This is the "CT-eq agrees with the prior `==`"
+    // gate from the bead — proving the hygiene primitive does not change any
+    // comparison outcome.
+    #[test]
+    fn ct_eq_agrees_with_value_eq() {
+        use subtle::ConstantTimeEq;
+        let samples = [0u64, 1, 2, 7, 12345, P / 2, P - 2, P - 1];
+        for &a in &samples {
+            for &b in &samples {
+                let fa = Fp::new(a);
+                let fb = Fp::new(b);
+                let ct: bool = fa.ct_eq(fb).into();
+                assert_eq!(ct, fa == fb, "ct_eq disagrees with == for {a} vs {b}");
+                // Also exercise the underlying u64 CT primitive directly.
+                let raw: bool = fa.value().ct_eq(&fb.value()).into();
+                assert_eq!(raw, fa == fb);
+            }
+        }
+    }
+
+    // [OPUS-4.8] sq-u8a8: a compile-and-behaviour check that `Fp` implements
+    // `Zeroize` and that scrubbing leaves the additive identity (so a secret-
+    // bearing `Fp` owned by a container can be wiped).
+    #[test]
+    fn fp_zeroizes_to_zero() {
+        use zeroize::Zeroize;
+        let mut x = Fp::new(0x1234_5678_9abc);
+        x.zeroize();
+        assert_eq!(x, Fp::zero(), "zeroized Fp must be the additive identity");
+    }
+
+    // [OPUS-4.8] sq-7ltf: the constant-time (branchless, fixed-iteration)
+    // exponentiation `pow_ct` must compute the SAME field element as the
+    // variable-time square-and-multiply `pow_vartime` for a spread of bases and
+    // exponents (including the inversion exponent `P-2`, zero, one, and large
+    // exponents that exercise the high bits). This proves the CT rewrite changes
+    // no arithmetic — the latent-gap fix is behaviour-preserving.
+    #[test]
+    fn pow_ct_agrees_with_pow_vartime() {
+        let bases = [0u64, 1, 2, 3, 7, 12345, P / 2, P - 2, P - 1];
+        let exps = [0u64, 1, 2, 3, 8, 63, 64, 1000, P - 2, P - 1, u64::MAX];
+        for &b in &bases {
+            for &e in &exps {
+                let fb = Fp::new(b);
+                assert_eq!(
+                    fb.pow_ct(e),
+                    fb.pow_vartime(e),
+                    "pow_ct vs pow_vartime disagree for base={b} exp={e}"
+                );
+            }
+        }
+    }
+
+    // [OPUS-4.8] sq-7ltf: `inv` (which now routes through `pow_ct`) still produces
+    // a true multiplicative inverse for boundary and random-ish values.
+    #[test]
+    fn inv_via_pow_ct_is_multiplicative_inverse() {
+        for v in [1u64, 2, 3, 7, 12345, P / 2, P - 2, P - 1] {
+            let a = Fp::new(v);
+            assert_eq!(a.mul(a.inv()), Fp::one(), "inv (via pow_ct) of {v}");
+        }
+    }
+
+    // [OPUS-4.8] sq-mnv5: the `p ≡ 3 (mod 4)` square-root shortcut. For every
+    // quadratic RESIDUE c = a², `c.sqrt_residue()` must square back to c (d² == c),
+    // and the precondition p ≡ 3 (mod 4) — which the shortcut relies on — holds for
+    // p = 2^61 − 1. The random-bit sub-protocol only ever calls this on c = a².
+    #[test]
+    fn sqrt_residue_squares_back_for_residues() {
+        // Precondition the shortcut rests on.
+        assert_eq!(P % 4, 3, "the (p+1)/4 sqrt shortcut needs p ≡ 3 (mod 4)");
+        for a in [1u64, 2, 3, 7, 12345, 1 << 30, P / 3, P / 2, P - 1] {
+            let fa = Fp::new(a);
+            let c = fa.mul(fa); // a residue by construction
+            let d = c.sqrt_residue();
+            assert_eq!(
+                d.mul(d),
+                c,
+                "sqrt_residue(a²) must square back to a² for a={a}"
+            );
+            // The recovered root is ±a (the two square roots of a²).
+            assert!(
+                d == fa || d == fa.neg(),
+                "sqrt_residue(a²) must be ±a for a={a} (got {})",
+                d.value()
+            );
+        }
+        // Zero is its own (trivial) root.
+        assert_eq!(Fp::zero().sqrt_residue(), Fp::zero());
     }
 
     #[test]

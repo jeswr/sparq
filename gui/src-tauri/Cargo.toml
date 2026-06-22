@@ -1,0 +1,106 @@
+# [OPUS-4.8] sq-2e93 — Tauri 2 desktop SHELL for the sparq GUI (MVP scaffold).
+#
+# This is the foundation scaffold the GUI design record (research/gui-design.md §1/§3)
+# recommends: a Tauri 2 app whose Rust backend links the engine library crates DIRECTLY
+# (sparq-engine + sparq-core), escaping the WASM tab limits (rayon, no ~2 GiB ceiling,
+# native FS via save/open later). The webview reuses the existing Next.js/React frontend.
+#
+# HONESTY: this is a SCAFFOLD, not a shipped app. Tauri's webview needs system libraries
+# (webkit2gtk on Linux, WebView2 on Windows, WKWebView on macOS) that are NOT present on
+# every dev box, so a full `cargo build` of this crate is validated in the path-scoped
+# `.github/workflows/gui.yml` CI lane (which installs those deps), not necessarily locally.
+# `cargo metadata` resolves the dependency graph without those libs.
+#
+# WORKSPACE: this crate has its OWN empty [workspace] table (below), so it is a standalone
+# crate root EXCLUDED from the repo's main `cargo build --workspace` / clippy gate. That
+# keeps Tauri's heavy, system-lib-dependent tree out of the required CI gate, which runs on
+# runners without webkit. It still depends on the engine crates by RELATIVE PATH, so it
+# tracks the workspace versions.
+
+[package]
+name = "sparq-gui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Tauri 2 desktop shell for the sparq RDF + SPARQL engine (MVP scaffold)."
+repository = "https://github.com/jeswr/sparq"
+# Inherit the workspace MSRV floor so the GUI can't silently require a newer toolchain
+# than the engine it links.
+rust-version = "1.88"
+publish = false
+
+# Standalone crate root: an empty [workspace] table detaches this crate from the repo's
+# top-level workspace so the main `cargo build --workspace` / `clippy --workspace` gate
+# never tries to compile Tauri's webkit-dependent tree. It is also listed in the root
+# Cargo.toml `exclude` as belt-and-suspenders.
+[workspace]
+
+[lib]
+# The mobile-ready Tauri 2 shape: a `_lib` cdylib/staticlib plus the rlib for the binary.
+# Even though mobile is a later spike-gated track, scaffolding the lib/bin split now keeps
+# the door open without a restructure.
+name = "sparq_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# [OPUS-4.8] sq-ixc3.13 — native-only HDT (Header-Dictionary-Triples) ingest via the opt-in
+# sparq-hdt crate. OFF by default for the SAME reasons the CLI keeps it opt-in (crates/
+# sparq-cli/Cargo.toml): sparq-hdt's MSRV (1.87, the wrapped `hdt` crate) and the dead-weight
+# decode stack. The desktop release build turns it ON (`cargo build --features hdt`) so the
+# Import drawer can ingest `.hdt` / `.hdt.gz` archives the wasm read-replica fundamentally
+# cannot. The webview-target build (Pages "Try the GUI live") never links this crate at all.
+default = []
+hdt = ["dep:sparq-hdt"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+# [OPUS-4.8] sq-ixc3.6 (epic sq-ixc3) — the Tauri filesystem plugin ACTIVATES the durable
+# on-disk workspace-persistence path (@sparq/client `TauriWorkspaceStore`, packages/sparq-
+# client/src/workspace.ts). It is registered in `lib.rs` and its capability is scoped
+# (capabilities/default.json) to `$APPLOCALDATA/workspaces` + `/**` ONLY — least-privilege:
+# NO arbitrary FS, no other base dir. Without it the desktop GUI cleanly degrades to the
+# browser localStorage backend even inside the webview. Already present in Cargo.lock as a
+# TRANSITIVE dep of tauri-plugin-dialog; promoting it to a direct dependency lets us `init()`
+# it. (No perf claim — bench/work-box numbers are non-canonical.)
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The direct native engine link — the whole point of choosing Tauri over a packaged-web
+# shell (research/gui-design.md §1). The desktop app IS a Rust binary, so it depends on the
+# engine library crates by path and runs the FULL native store (threads, no wasm ceiling),
+# not the WASM read-replica. `jsonld` matches the formats the site's wasm bundle ingests.
+# [OPUS-4.8] sq-ixc3.13 — `serialize-rdf` turns on the engine's N-Quads writer
+# (`graph_to_nquads`), the named-graph-preserving wire format the Import drawer's native
+# loader hands a parsed disk/URL/HDT document back to the in-tab store as.
+sparq-core = { path = "../../crates/sparq-core", features = ["jsonld"] }
+sparq-engine = { path = "../../crates/sparq-engine", features = ["serialize-rdf"] }
+
+# [OPUS-4.8] sq-ixc3.13 — opt-in native-only HDT reader (loads .hdt[.gz] straight into a
+# sparq Graph; the wasm read-replica cannot). Pulled in only under this crate's `hdt` feature.
+sparq-hdt = { path = "../../crates/sparq-hdt", optional = true }
+
+# [OPUS-4.8] sq-ixc3.13 — streaming decompression for the native disk loader: gzip + bzip2 +
+# zstd, the SAME codec matrix the CLI's `open_reader` handles (crates/sparq-cli/src/main.rs).
+# This is the "compressed" half of the bead — a `.nt.gz` / `.ttl.bz2` / `.nq.zst` file is
+# decoded by the native engine (no ~2 GiB wasm-tab ceiling) before it is parsed.
+flate2 = "1"
+bzip2 = "0.6"
+zstd = "0.13"
+
+# Inherit the workspace memory-safety posture (the unsafe-rust-attestation skill): this
+# crate writes no `unsafe`.
+[lints.rust]
+unsafe_code = "forbid"
+
+# Keep release builds optimised; mirror the workspace release shape but allow unwinding so
+# a Rust panic surfaces as a Tauri error dialog rather than aborting the whole app.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"

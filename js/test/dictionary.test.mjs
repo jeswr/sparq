@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { zstdCompressSync, zstdDecompressSync } from 'node:zlib';
+import { decompress as fzstdDecompress } from 'fzstd';
 import {
   dictIdOf,
   parseZstdDictId,
@@ -9,6 +9,12 @@ import {
   SPARQ_DICTIONARY_HEADER,
   verifyDictId,
 } from '../dist/index.js';
+// zstd fixtures are synthesised in pure JS (Raw_Block frames, dictId 0) rather
+// than via node:zlib's native zstdCompressSync, which is absent on Node 20 and
+// experimental/version-coupled thereafter (bead sq-fz8s). The protocol logic is
+// driven by the Sparq-Dictionary response header, not the frame's own bytes, so
+// raw frames exercise both the plain and dictionary-decode paths identically.
+import { zstdRawFrame } from './helpers/zstd-fixtures.mjs';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -19,9 +25,18 @@ const DICT = enc.encode(
 );
 const BODY = '{"head":{"vars":["o"]},"results":{"bindings":[{"o":{"type":"uri","value":"http://example.org/vocab#x"}}]}}';
 
-/** Node-zlib-backed dict-capable decoder (what zstd-wasm provides in browsers). */
-const nodeDictDecoder = (body, dictionary) =>
-  new Uint8Array(zstdDecompressSync(body, { dictionary: Buffer.from(dictionary) }));
+/**
+ * A dict-capable decoder stand-in (what zstd-wasm provides in browsers). The
+ * client routes a response to this hook purely because the `Sparq-Dictionary`
+ * header named a dictionary; the `dictionary` argument is therefore threaded
+ * through (and asserted present) even though our Raw_Block fixtures reference
+ * none — matching the real contract, in which a dict-capable backend is what
+ * makes the dictionary path engage at all.
+ */
+const dictAwareDecoder = (body, dictionary) => {
+  assert.ok(dictionary instanceof Uint8Array && dictionary.length > 0);
+  return fzstdDecompress(body);
+};
 
 /**
  * A mock origin implementing the server side of the protocol: dictionary
@@ -45,10 +60,12 @@ async function mockOrigin({ corruptDictionary = false } = {}) {
     if (held.split(/,\s*/).includes(dictId)) {
       log.push('dict-compressed');
       headers[SPARQ_DICTIONARY_HEADER] = dictId;
-      return new Response(zstdCompressSync(Buffer.from(BODY), { dictionary: Buffer.from(DICT) }), { headers });
+      // The Sparq-Dictionary header — not the frame bytes — drives the client
+      // onto the dict-capable decode hook, so a plain Raw_Block fixture suffices.
+      return new Response(zstdRawFrame(enc.encode(BODY)), { headers });
     }
     log.push('plain');
-    return new Response(zstdCompressSync(Buffer.from(BODY)), { headers });
+    return new Response(zstdRawFrame(enc.encode(BODY)), { headers });
   };
   return { dictId, log, fetchImpl };
 }
@@ -64,7 +81,7 @@ test('content addressing: dictIdOf / truncated verifyDictId', async () => {
 
 test('protocol round-trip: plain first request, warmed-up dictionary on the second', async () => {
   const { dictId, log, fetchImpl } = await mockOrigin();
-  const client = new SparqDictionaryClient({ fetch: fetchImpl, decodeWithDictionary: nodeDictDecoder });
+  const client = new SparqDictionaryClient({ fetch: fetchImpl, decodeWithDictionary: dictAwareDecoder });
 
   // First request: nothing held -> plain zstd, decoded by the bundled fzstd.
   const first = await client.fetch('https://sparq.example/sparql?query=...');
@@ -96,7 +113,7 @@ test('without a dict-capable decoder the client never advertises (stays plain)',
 
 test('a corrupted dictionary fails content verification and is never trusted', async () => {
   const { fetchImpl } = await mockOrigin({ corruptDictionary: true });
-  const client = new SparqDictionaryClient({ fetch: fetchImpl, decodeWithDictionary: nodeDictDecoder });
+  const client = new SparqDictionaryClient({ fetch: fetchImpl, decodeWithDictionary: dictAwareDecoder });
   await client.fetch('https://sparq.example/sparql');
   await client.idle();
   assert.deepEqual(client.dictionaryIds, []); // rejected, not cached
@@ -107,7 +124,7 @@ test('a corrupted dictionary fails content verification and is never trusted', a
 
 test('addDictionary seeds a persisted dictionary (verified against the claimed id)', async () => {
   const { dictId, log, fetchImpl } = await mockOrigin();
-  const client = new SparqDictionaryClient({ fetch: fetchImpl, decodeWithDictionary: nodeDictDecoder });
+  const client = new SparqDictionaryClient({ fetch: fetchImpl, decodeWithDictionary: dictAwareDecoder });
   await client.addDictionary(DICT, dictId);
   const res = await client.fetch('https://sparq.example/sparql');
   assert.equal(res.dictionary, dictId); // dictionary path engaged on the FIRST request
@@ -123,12 +140,12 @@ test('non-compressed and platform-decoded bodies pass through untouched', async 
 });
 
 test('parseZstdDictId reads the frame-header Dictionary_ID', () => {
-  // Node's raw-content dictionary embeds no dictID: 0 (= "names none").
-  assert.equal(parseZstdDictId(new Uint8Array(zstdCompressSync(Buffer.from(BODY)))), 0);
-  assert.equal(
-    parseZstdDictId(new Uint8Array(zstdCompressSync(Buffer.from(BODY), { dictionary: Buffer.from(DICT) }))),
-    0,
-  );
+  // A frame that names no dictionary reads as 0 (= "names none"), like the
+  // raw-content dictionaries this protocol uses.
+  assert.equal(parseZstdDictId(zstdRawFrame(enc.encode(BODY))), 0);
+  // A frame whose header DOES carry a Dictionary_ID reads it back (our helper
+  // emits a single-segment 2-byte DID field for 0xBEEF here).
+  assert.equal(parseZstdDictId(zstdRawFrame(enc.encode(BODY), { dictId: 0xbeef })), 0xbeef);
   // Hand-crafted RFC 8878 header: magic, FHD with DID_Field_Size=2 (0x02),
   // not single-segment -> 1 Window_Descriptor byte, then DID 0xBEEF LE.
   assert.equal(parseZstdDictId(new Uint8Array([0x28, 0xb5, 0x2f, 0xfd, 0x02, 0x00, 0xef, 0xbe])), 0xbeef);

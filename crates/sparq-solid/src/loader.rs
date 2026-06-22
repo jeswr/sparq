@@ -6,8 +6,18 @@
 //! triples granting themselves access. The inputs are: `.acl`/`.acr` graphs, group
 //! documents referenced via `acl:agentGroup` (fragment stripped), and the synthesized
 //! structural facts below.
+//!
+//! [OPUS-4.8] sq-3jtd.5: the `.acl`/`.acr`/group graphs ARE emitted verbatim, so they are a
+//! second smuggling surface. The reasoner's derivation-internal vocabulary — the `solidx:`
+//! namespace (`solidx:creator|owner|appliesToResource|isResource|isWebId|…`) — must only be
+//! produced by THIS loader (from trusted structural metadata + the caller-supplied
+//! `AccessProvenance`) or derived by the rules; a forged `solidx:` fact inside a control
+//! document would otherwise grant access (cross-resource privilege escalation / policy
+//! redirection). So [`is_reserved_derivation_predicate`] hard-rejects any control-graph or
+//! group-document triple whose predicate is in `solidx:` space — the analogue of the
+//! `urn:sparq:` reserved-principal guard ([`validate_principal_iri`]).
 
-use crate::{AUTH_GRAPH, SOLIDX_NS};
+use crate::{AccessProvenance, AUTH_GRAPH, SOLIDX_NS};
 use oxrdf::Term;
 use rustc_hash::FxHashSet;
 use sparq_core::Graph;
@@ -21,6 +31,9 @@ const ACL_AGENT_GROUP: &str = "http://www.w3.org/ns/auth/acl#agentGroup";
 const ACL_ORIGIN: &str = "http://www.w3.org/ns/auth/acl#origin";
 const ACP_AGENT: &str = "http://www.w3.org/ns/solid/acp#agent";
 const ACP_CLIENT: &str = "http://www.w3.org/ns/solid/acp#client";
+// [OPUS-4.8] sq-3jtd.6: acp:issuer is a pair/triple-principal ingredient too, so its
+// values go through the same reserved-encoding validation as agents/clients/origins.
+const ACP_ISSUER: &str = "http://www.w3.org/ns/solid/acp#issuer";
 const VCARD_MEMBER: &str = "http://www.w3.org/2006/vcard/ns#hasMember";
 
 /// Reserved IRI space: the auth view, the rewrite sentinel, minted pair/candidate/grant
@@ -44,6 +57,25 @@ fn validate_principal_iri(iri: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// [OPUS-4.8] sq-3jtd.5: Predicates in the `solidx:` namespace are the reasoner's
+/// DERIVATION-INTERNAL vocabulary (`solidx:creator`, `solidx:owner`,
+/// `solidx:appliesToResource`, `solidx:isResource`, `solidx:inDoc`, `solidx:isWebId`,
+/// `solidx:provForResource`, …). Those facts are synthesized by THIS loader from
+/// trusted inputs (structural metadata + the caller-supplied [`AccessProvenance`]) or
+/// derived by the N3 rules — they must NEVER originate from access-control-document
+/// content. A writer who can place a triple inside an `.acr`/`.acl` they control could
+/// otherwise smuggle a forged `<r> solidx:creator <self>` (cross-resource privilege
+/// escalation) or `<pol> solidx:appliesToResource <secret>` (policy redirection) that
+/// the rules cannot distinguish from a loader-synthesized trusted fact.
+///
+/// So any control-graph (or group-document) triple whose PREDICATE is in `solidx:`
+/// space is DROPPED before it reaches the reasoner — the direct analogue of the
+/// `urn:sparq:` reserved-principal guard in [`validate_principal_iri`]. The trusted
+/// channel for creator/owner facts is [`AccessProvenance`] and nothing else.
+fn is_reserved_derivation_predicate(t: &[Term; 3]) -> bool {
+    matches!(&t[1], Term::NamedNode(n) if n.as_str().starts_with(SOLIDX_NS))
 }
 
 /// Drop ALL named graphs in the reserved IRI space — including a pre-existing
@@ -120,10 +152,20 @@ fn subject_repr(t: &Term, gix: usize) -> String {
     s
 }
 
-/// Assemble the full facts source: structural facts + the access-control graphs.
-/// Errors if any agent/client/origin value collides with the reserved principal
-/// encoding (see [`validate_principal_iri`]).
-pub(crate) fn assemble_input(graph: &Graph, system: System) -> Result<String, String> {
+/// Assemble the full facts source: structural facts + the access-control graphs +
+/// (ACP only) the TRUSTED per-resource creator/owner facts from `provenance`.
+/// Errors if any agent/client/origin/creator/owner value collides with the reserved
+/// principal encoding (see [`validate_principal_iri`]).
+///
+/// [OPUS-4.8] sq-3jtd.5: `provenance` is the trusted channel for `acp:CreatorAgent` /
+/// `acp:OwnerAgent`. Its `<r> solidx:creator|owner <webid>` facts are synthesized HERE,
+/// from the caller-supplied map ONLY — never read from the resource graphs (design doc
+/// §2.4). For WAC (no creator/owner vocabulary) `provenance` is ignored.
+pub(crate) fn assemble_input(
+    graph: &Graph,
+    system: System,
+    provenance: &AccessProvenance,
+) -> Result<String, String> {
     let mut out = String::new();
     let suffix = if system == System::Wac { ACL_SUFFIX } else { ACR_SUFFIX };
     let own_pred = if system == System::Wac { "ownAcl" } else { "ownAcr" };
@@ -172,6 +214,12 @@ pub(crate) fn assemble_input(graph: &Graph, system: System) -> Result<String, St
     for (gix, iri, sub) in &control_graphs {
         let mut in_doc: FxHashSet<String> = FxHashSet::default();
         for t in graph_triples(sub) {
+            // [OPUS-4.8] sq-3jtd.5: hard-reject any forged derivation-internal fact
+            // (`solidx:creator|owner|appliesToResource|…`) smuggled into the control
+            // document — only the loader/rules may produce `solidx:` facts.
+            if is_reserved_derivation_predicate(&t) {
+                continue;
+            }
             write_term(&mut out, &t[0], *gix);
             out.push(' ');
             write_term(&mut out, &t[1], *gix);
@@ -192,6 +240,11 @@ pub(crate) fn assemble_input(graph: &Graph, system: System) -> Result<String, St
                 continue;
             }
             for t in graph_triples(sub) {
+                // [OPUS-4.8] sq-3jtd.5: same derivation-internal guard for group
+                // documents — a forged `solidx:` fact here would feed the reasoner too.
+                if is_reserved_derivation_predicate(&t) {
+                    continue;
+                }
                 write_term(&mut out, &t[0], gix);
                 out.push(' ');
                 write_term(&mut out, &t[1], gix);
@@ -210,6 +263,25 @@ pub(crate) fn assemble_input(graph: &Graph, system: System) -> Result<String, St
     for iri in &principal_iris {
         validate_principal_iri(iri)?;
     }
+    // [OPUS-4.8] sq-3jtd.5: TRUSTED creator/owner facts (ACP only). Emitted ONLY from the
+    // caller-supplied provenance map — never from pod content (design doc §2.4). The
+    // WebIDs go through the SAME reserved-encoding validation as agents/clients/issuers
+    // (they become candidate agents in the rules) and are marked isWebId so the
+    // candidate-generation lattice picks them up.
+    if system == System::Acp {
+        for (resource, creator, owner) in provenance.iter() {
+            if let Some(c) = creator {
+                validate_principal_iri(c)?;
+                webids.insert(c.to_owned());
+                let _ = writeln!(out, "<{resource}> <{SOLIDX_NS}creator> <{c}> .");
+            }
+            if let Some(o) = owner {
+                validate_principal_iri(o)?;
+                webids.insert(o.to_owned());
+                let _ = writeln!(out, "<{resource}> <{SOLIDX_NS}owner> <{o}> .");
+            }
+        }
+    }
     for a in &webids {
         let _ = writeln!(out, "<{a}> <{SOLIDX_NS}isWebId> true .");
     }
@@ -217,8 +289,8 @@ pub(crate) fn assemble_input(graph: &Graph, system: System) -> Result<String, St
 }
 
 /// Concrete agents + group documents mentioned by an access-control triple; every
-/// pair-principal ingredient (agents, group members, origins, clients) is recorded for
-/// reserved-encoding validation.
+/// pair/triple-principal ingredient (agents, group members, origins, clients, issuers)
+/// is recorded for reserved-encoding validation.
 fn collect_agents(
     t: &[Term; 3],
     webids: &mut FxHashSet<String>,
@@ -233,7 +305,7 @@ fn collect_agents(
             }
             principal_iris.insert(o.as_str().to_owned());
         }
-        ACL_ORIGIN | ACP_CLIENT => {
+        ACL_ORIGIN | ACP_CLIENT | ACP_ISSUER => {
             principal_iris.insert(o.as_str().to_owned());
         }
         ACL_AGENT_GROUP => {

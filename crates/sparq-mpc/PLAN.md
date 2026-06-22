@@ -227,6 +227,13 @@ not a silent hole (architecture §4.2 guarantee (D), §5.2 Q2; sq-uu0u DESIGN
    / `reconstruct_disclosed` SIGNATURES and all callers stay put (`backend.rs`).
    REJECTED for *this* increment: it needs preprocessing + a fresh soundness
    argument and is a whole backend, not a Shamir-layer change.
+   *Tracked by:* `sq-j5ok` (the dishonest-majority SPDZ/MASCOT/Overdrive backend
+   design record — MASCOT-OT vs Overdrive-AHE triples, what it adds vs Shamir,
+   the `BackendInfo` preprocessing/PQ/trusted-setup fields), `sq-km34` (the IT-MAC
+   on the degree-`2t` equality/mult open at the minimal `n = 2t+1`, promoting
+   `secure_equal` `SemiHonestOnly → Abort`), and `sq-4i39` (the
+   `BackendInfo.requires_preprocessing` offline-cost field). Design record:
+   `research/mpc-malicious-security-design.md`.
 
 2. **Poseidon2 / Schnorr share-commitments for the M4 attestation layer.**
    Binding a *reconstructed* (or shared) value to an issuer-signed commitment
@@ -238,10 +245,20 @@ not a silent hole (architecture §4.2 guarantee (D), §5.2 Q2; sq-uu0u DESIGN
    gated on Q1 + the ZK-foundation remediation), which is a separate milestone.
    REJECTED for this increment: wrong field, would drag a heavy dependency into a
    crate that is intentionally dependency-light and wasm-excluded.
+   *Tracked by:* `sq-bjl` (the M4 collaborative-proof + distributed-attestation
+   SPIKE — the Q1 research risk), `sq-f7bu` (the buildable M4-v1: verifier-side
+   authenticated-input attestation gate, Dutta/Artemis commit-and-prove anchor),
+   and `sq-34ml` (the M4-v1 freshness/replay binding + federated
+   `reconstruct_public_inputs` layout prerequisites). Feasibility record (the
+   EdDSA-Poseidon / Schnorr-Baby-JubJub constraint sizing):
+   `research/mpc-m4-distributed-sig-feasibility.md`.
 
 Neither seam is on the v1 critical path: v1 is honest-majority, and the RS path
-already delivers (D) there. Both are tracked as beads (sq-6d6g) and named at
-their call sites so the deferral is auditable.
+already delivers (D) there. This subsection (bead `sq-6d6g`, the WI-4 doc-only
+deliverable) is the durable record of the boundary; the *implementation* of each
+seam is tracked by its successor beads named above (SPDZ → `sq-j5ok` / `sq-km34`
+/ `sq-4i39`; M4 attestation → `sq-bjl` / `sq-f7bu` / `sq-34ml`) and named at the
+call sites, so the deferral is auditable.
 
 ### M4 — Collaborative proof + distributed attestation  ⚠️ THE HARD PROBLEM (SPIKE)
 The contribution AND the principal research risk (architecture §5.2 Q1, §3.4).

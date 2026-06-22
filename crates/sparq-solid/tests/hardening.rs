@@ -23,7 +23,7 @@ fn sentinel_graph_cannot_be_smuggled() {
     s.materialize_wac().unwrap();
     let q = "SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } }";
     // a session with zero grants must see nothing — even the sentinel-named graph
-    let stranger = Session { agent: Some("https://stranger.ex/card#me"), client: None };
+    let stranger = Session { agent: Some("https://stranger.ex/card#me"), client: None, issuer: None, now: None };
     let denied_modes = s.accessible(&stranger, Mode::Write);
     assert!(denied_modes.is_empty());
     let res = s.query_as(&stranger, Mode::Write, q).unwrap();
@@ -64,25 +64,25 @@ fn reserved_session_values_fail_closed() {
     let mut s = PodStore::new(Graph::load_dataset(&wac_fixture(), "nquads").unwrap());
     s.materialize_wac().unwrap();
     let spoof = "urn:sparq:pair?agent=https://bob.ex/card#me&client=https://app.ex";
-    assert!(s.accessible(&Session { agent: Some(spoof), client: None }, Mode::Read).is_empty());
+    assert!(s.accessible(&Session { agent: Some(spoof), client: None, issuer: None, now: None }, Mode::Read).is_empty());
     assert!(s
         .accessible(
-            &Session { agent: Some("https://bob.ex/card#me"), client: Some("urn:sparq:x") },
+            &Session { agent: Some("https://bob.ex/card#me"), client: Some("urn:sparq:x"), issuer: None, now: None },
             Mode::Read
         )
         .is_empty());
     // delimiter-only values (NOT in the reserved space) must fail closed too: a WebID
     // embedding `&client=` could otherwise complete someone else's pair encoding
     let delim_agent = format!("https://x.ex/a{}https://app.ex", "&client=");
-    assert!(s.accessible(&Session { agent: Some(&delim_agent), client: None }, Mode::Read).is_empty());
+    assert!(s.accessible(&Session { agent: Some(&delim_agent), client: None, issuer: None, now: None }, Mode::Read).is_empty());
     assert!(s
         .accessible(
-            &Session { agent: Some("https://bob.ex/card#me"), client: Some(&delim_agent) },
+            &Session { agent: Some("https://bob.ex/card#me"), client: Some(&delim_agent), issuer: None, now: None },
             Mode::Read
         )
         .is_empty());
     // …while the REAL pair still works
-    let real = Session { agent: Some("https://bob.ex/card#me"), client: Some("https://app.ex") };
+    let real = Session { agent: Some("https://bob.ex/card#me"), client: Some("https://app.ex"), issuer: None, now: None };
     assert!(s
         .accessible(&real, Mode::Read)
         .iter()
@@ -96,7 +96,7 @@ fn normal_path_still_green_after_hardening() {
     s.materialize_wac().unwrap();
     let res = s
         .query_as(
-            &Session { agent: Some(ALICE), client: None },
+            &Session { agent: Some(ALICE), client: None, issuer: None, now: None },
             Mode::Read,
             "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }",
         )

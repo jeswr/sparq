@@ -5,6 +5,9 @@
 //! deterministic `HashEmbedder` (lexical, offline — see its docs) → `.spqv` finalize →
 //! HNSW build → `nearest_term`, with a same-type sanity check on the neighbours.
 
+// [OPUS-4.8] (sq-ip3a) HNSW (VectorIndex) is the approximate backend — gated behind `approx-ann`.
+#![cfg(feature = "approx-ann")]
+
 use oxrdf::{NamedNode, Term};
 use sparq_core::dict::Id;
 use sparq_core::Graph;

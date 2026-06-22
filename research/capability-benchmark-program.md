@@ -278,7 +278,7 @@ that *do* dedup will report different `#violations` for the same data ⇒ the cr
 Tier-1 implement.
 
 **(d) Suite layout.**
-```
+```text
 bench/shacl/
   gen.sh            # reuse bench/lubm/gen.sh for the data graph; emit/copy per-workload shapes
   shapes/<workload>.ttl       # 5 committed shape graphs

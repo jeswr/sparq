@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Opt-in embedding store + ANN for the sparq RDF engine: a memory-mapped per-term-id f32 vector store (.spqv), exact brute-force and HNSW approximate nearest-neighbour search, and label-embedding helpers"
+description = "Opt-in embedding store + ANN for the sparq RDF engine: a memory-mapped per-term-id f32 vector store (.spqv), exact brute-force + on-disk Vamana nearest-neighbour search (and HNSW behind the opt-in approx-ann feature), and label-embedding helpers"
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -27,6 +27,81 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
+# [OPUS-4.8] sq-0wo9e.1 (epic sq-0wo9e, design research/structure-aware-vectorisation.md §5.A/§2):
+# the P0 structure-aware-vectorisation PREPROCESSING + SAMPLING-LOGIC layer. OPT-IN and OFF by
+# default. It is the ONLY feature that pulls `sparq-reason` + `sparq-introspect` into this crate's
+# graph, so the default `sparq-vectors` build (and the core query path) carry ZERO structure-prep
+# code and gain no new required deps. Gates `structure.rs`: (a) closure-before-vectorise —
+# materialise the sparq-reason RDFS/OWL-RL closure BEFORE the vectoriser sees the graph, so
+# entailed type/subClassOf/domain/range triples are real facts the encoder reads; (b)
+# type-constrained negative sampling (Krompass et al. 2015) — a reusable `NegativeSampler` that
+# corrupts a positive triple only to domain/range-consistent entities (read from sparq-introspect),
+# with an `Unconstrained`/`TypeConstrained` ON/OFF ABLATION switch so adoption is measurement-gated.
+# It TRAINS NOTHING (sparq-vectors has no KGE training path — embeddings are out-of-process) and
+# serves no exact answer; the trainer that consumes these negatives is a tracked follow-up.
+structure = ["dep:sparq-reason", "dep:sparq-introspect"]
+# [OPUS-4.8] sq-0wo9e.8 (epic sq-0wo9e, design research/structure-aware-vectorisation.md §P6 +
+# sq-0wo9e.8): the MEASUREMENT FOUNDATION on top of the P0 structure-prep layer — a THIN in-tree
+# shallow-KGE trainer (DistMult) that CONSUMES the P0 closure + type-constrained NegativeSampler to
+# produce embeddings, plus the P6 EVAL HARNESS (standard FILTERED link-prediction MRR/Hits@k, the
+# {closure}×{type-neg vs uniform} ON/OFF ablation matrix, a long-tail frequency breakdown, and a
+# synthetic gUFO slice). OPT-IN and OFF by default; it IMPLIES `structure` (so it reuses the same
+# sparq-reason + sparq-introspect deps and adds NO new dependency — the trainer is hand-rolled
+# CPU-only SGD, no ML crate). With it OFF the default `sparq-vectors` build (and the core query path)
+# carry ZERO trainer/eval code and gain no new deps. It TRAINS a research-grade model only to
+# MEASURE the priors — it makes no accuracy claim and serves no exact answer.
+kge = ["structure"]
+# [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e, design research/structure-aware-vectorisation.md §2 + §7):
+# P2 — the SHACL/OWL PRIOR EXTRACTOR (`shacl_priors.rs`). Reads enum (`sh:in`) / datatype
+# (`sh:datatype`) / cardinality (`sh:min,maxCount`, `owl:FunctionalProperty`) priors out of a parsed
+# `sparq-shacl` shapes model (read-only — no SHACL changes) into the codebook + pooling layout the
+# structure-aware encoders consume. OPT-IN and OFF by default; it IMPLIES `structure` and is the ONLY
+# feature that pulls `sparq-shacl` (and, transitively, the engine on native) into this crate's graph,
+# so neither the default build nor the lean `structure` feature gains a SHACL/engine dependency. The
+# enum CODEBOOK encoder and the QUDT UNIT normaliser themselves ship under `structure` (pure, no
+# SHACL dep); only the *reader* that mines them from shapes needs sparq-shacl.
+structure-shacl = ["structure", "dep:sparq-shacl"]
+# [OPUS-4.8] sq-1wc1: predicate-constrained (filtered) ANN — the RDF-native vector
+# differentiator. A SPARQL BGP carves out a candidate dict-id set (the "visit mask") and the
+# nearest-neighbour search returns only neighbours inside it. OPT-IN and OFF by default; it is a
+# LEAN feature — it adds NO new dependency (the mask reuses the in-tree `rustc-hash` set) and pulls
+# in NEITHER the engine NOR any heavy crate, so the default `sparq-vectors` build (and the core
+# query path) carry zero filtered-ANN code. The feature gates `filter.rs` (the `IdMask` +
+# `FilterConfig` + exact pre-filter) and the `DiskAnnIndex::nearest_filtered*` traversal path. The
+# engine-side automatic BGP → mask wiring (a filtered form of the `vec:` predicate) is wired in
+# `rewrite.rs` and activates when this composes with `vec-predicate` (sq-bvmd, follow-up to sq-1wc1).
+filtered-ann = []
+# [OPUS-4.8] sq-pi44: incremental add / remove / update of vectors against an already-finalized
+# store via an in-RAM DELTA SIDECAR (+ `compact` to fold it back into a fresh base), so a single
+# graph change no longer forces a full re-embed + file rebuild. OPT-IN and OFF by default; a LEAN
+# feature — it adds NO new dependency (the append map + tombstone set reuse the in-tree
+# `rustc-hash`) and pulls in NEITHER the engine NOR any heavy crate, so the default `sparq-vectors`
+# build carries zero delta code. Gates `delta.rs` (the `VectorDelta` value) and the
+# `VectorStore::{add,remove,update,compact,apply_delta,take_delta,delta,has_delta}` methods; the
+# read paths (`get`/`iter`/`len`) consult the delta only under this feature. The delta is IN-RAM
+# only (lost on handle drop; `compact` is the durability path) — a persisted on-disk delta sidecar
+# is a tracked follow-up.
+delta = []
+# [OPUS-4.8] sq-ip3a (epic sq-3183, follow-up to sq-7hx6): the **approximate** ANN backend.
+# OPT-IN and OFF by default — this is the feature that pulls the heavy HNSW crate
+# (`instant-distance`) into the dependency graph. With it OFF the default `sparq-vectors` build
+# carries ZERO approximate-index code and NO heavy ANN dependency: only the exact brute-force
+# scan (`nearest_exact`) and the on-disk Vamana graph (`DiskAnnIndex`, hand-rolled, no extra dep)
+# compile. The `instant-distance` HNSW index (`VectorIndex`/`HnswConfig`) and the iterative
+# over-fetch filtered backend (`backend.rs`, when composed with `filtered-ann`) are gated here, so
+# "core stays lean": a consumer that only needs exact search never compiles a third-party ANN crate.
+# Approximate results are APPROXIMATE — recall < 1.0; the recall floor is asserted by a test, NOT
+# claimed as exactness (see backend.rs + tests/overfetch.rs).
+approx-ann = ["dep:instant-distance"]
+# [OPUS-4.8] sq-k6ex (epic sq-3183): the `vec:` magic predicates — vector KNN
+# search expressed INSIDE plain SPARQL, mirroring sparq-text's `text:` rewrite.
+# OPT-IN and OFF by default: only this feature pulls `sparq-engine` (+ spargebra)
+# into this crate's dependency graph, so the default `sparq-vectors` build — and the
+# `sparq-core`/`sparq-engine` base query path — carry ZERO `vec:`-predicate code and
+# gain no new required deps. Like `text:`, the rewrite runs entirely at the
+# spargebra-algebra level through the engine's prepared-query seam, so the engine —
+# planner, executor, wasm bundle — is completely unaware of vector search.
+vec-predicate = ["dep:sparq-engine", "dep:spargebra"]
 # API shape for a live OpenAI-compatible `/v1/embeddings` provider. The HTTP transport
 # is supplied by the CALLER (a `Transport` impl over their HTTP client of choice);
 # this crate never opens a socket. Pulls in serde_json for request/response bodies.
@@ -49,13 +124,37 @@ memmap2.workspace = true
 # HNSW (pure Rust, minimal deps, maintained). Evaluated against hnsw_rs 0.3 (heavier
 # dependency tree: anndists/simd feature plumbing); instant-distance is the smaller,
 # cleaner fit for an in-RAM index rebuilt from the mmap'd store on open.
-instant-distance.workspace = true
+# [OPUS-4.8] sq-ip3a: OPTIONAL + gated behind `approx-ann` (off by default) so the heavy ANN
+# crate does NOT enter the default build — the lean-core constraint. Exact search and the
+# hand-rolled on-disk Vamana graph need no third-party ANN dependency.
+instant-distance = { workspace = true, optional = true }
 serde_json = { version = "1", optional = true }
+# [OPUS-4.8] sq-k6ex: the `vec:` magic-predicate rewrite executes through the engine's
+# prepared-query seam (`PreparedQuery: From<spargebra::Query>`). Both deps are OPTIONAL
+# and ONLY pulled in by the `vec-predicate` feature — the default build (and anything
+# that does not opt in) never compiles the engine, so `sparq-core`/`sparq-engine` stay
+# lean and this crate stays a pure storage+ANN crate by default. `spargebra` walks/edits
+# the parsed algebra; it is already in the workspace tree via sparq-engine.
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", optional = true }
+spargebra = { workspace = true, optional = true }
 # [OPUS-4.8] Concrete HTTP transport for the non-default `embeddings` feature only.
 # Blocking by design (the embed call is synchronous and this crate must not drag an
 # async runtime into the tree) — mirrors sparq-nlq's `live` reqwest dependency exactly.
 # rustls-tls so there is no system-OpenSSL build dependency.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+# [OPUS-4.8] sq-0wo9e.1: the closure-before-vectorise step + the type-constraint extractor for the
+# `structure` feature only. Both are OPTIONAL and ONLY pulled in by `structure`, so the default
+# build (and anything not opting in) never compiles them — `sparq-vectors` stays a pure
+# storage+ANN crate by default and the lean-core constraint holds. `sparq-reason` materialises the
+# RDFS/OWL-RL closure (already property-tested incremental == from-scratch); `sparq-introspect`
+# mines declared + observed domain/range. Neither pulls the engine.
+sparq-reason = { path = "../sparq-reason", version = "0.1.0", optional = true }
+sparq-introspect = { path = "../sparq-introspect", version = "0.1.0", optional = true }
+# [OPUS-4.8] sq-0wo9e.3: the P2 SHACL/OWL prior extractor reads a parsed shapes model. OPTIONAL and
+# ONLY pulled in by `structure-shacl`, so the default build (and the lean `structure` feature) never
+# compile it — `sparq-vectors` stays free of any SHACL/engine dependency unless this reader is opted
+# in. sparq-shacl is itself an opt-in crate that nothing in the workspace depends on by default.
+sparq-shacl = { path = "../sparq-shacl", version = "0.1.0", optional = true }
 
 # [OPUS-4.8] sq-88c6: DEV-only. The `hybrid_search` example/tests fuse this crate's ANN
 # (`VectorIndex::nearest_term`) with `sparq-sim`'s structural similarity
@@ -64,3 +163,66 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # only and never enters the published dependency graph.
 [dev-dependencies]
 sparq-sim = { path = "../sparq-sim" }
+# [OPUS-4.8] sq-wlzi: DEV-only. The id-keyed-staleness-contract test (tests/staleness_contract.rs)
+# demonstrates the SOUND serving path — persist the build graph with `Graph::save`, reopen it with
+# `Graph::open` (which mmaps the FROZEN dict id order), and query the id-keyed store against THAT —
+# vs the re-parse trap (`Graph::load_str` at a different RAYON_NUM_THREADS reshuffles the dict ids,
+# so the store serves the WRONG vectors). `Graph::save`/`open` are gated behind sparq-core's `mmap`
+# feature, so we enable it for the test build ONLY. This does NOT change the published default build:
+# a dev-dependency feature is local to this crate's test/example/bench targets and never propagates
+# to downstream consumers of `sparq-vectors`.
+sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
+# [OPUS-4.8] sq-xhiv: DEV-only. The fingerprint thread-count-stability regression tests drive the
+# SAME parallel sharded dict merge the loader uses at two explicit thread counts via a scoped rayon
+# pool (`RAYON_NUM_THREADS` is read once per process, so it cannot be varied mid-test). rayon is NOT
+# a library dependency of this crate — it stays a test-only dependency and never enters the published
+# graph; the fingerprint itself depends only on sparq-core's public read API.
+rayon = { workspace = true }
+# [OPUS-4.8] (sq-k5qq) DEV-only: the throughput/diskann harnesses emit an optional,
+# strictly-additive `SPARQ_VECTORS_JSON=<path>` results document (dependency-free
+# `format!`-built JSON — no serde in the harness itself); this dev-dep parses that emit
+# back so the round-trip test catches a malformed document. `serde_json` is ALSO an
+# OPTIONAL runtime dep (the `provider`/`embeddings` features) — listing it here makes it
+# available to the test targets in BOTH feature states, independent of those features.
+serde_json = "1"
+
+# [OPUS-4.8] sq-ip3a: the bench example measures HNSW (`VectorIndex`) recall/build, so it needs the
+# approximate backend. Gating it on `approx-ann` keeps `cargo build --all-targets` (default features)
+# green when the heavy ANN crate is out of the build.
+[[example]]
+name = "bench_vectors"
+required-features = ["approx-ann"]
+
+# [OPUS-4.8] sq-dwdm: the site /surface/vector capture harness exercises the `vec:`
+# magic predicate (query_vec), so it needs `vec-predicate`. Registering the requirement
+# keeps `cargo build --all-targets` (default features) green when the feature is out of
+# the build — the example body is `#![cfg(feature = "vec-predicate")]`, so without the
+# requirement a default-feature build would strip even `main` (E0601). The file is a
+# build-and-run capture harness only — no library code, no new dependency.
+[[example]]
+name = "capture_surface_vector"
+required-features = ["vec-predicate"]
+
+# [OPUS-4.8] sq-0wo9e.8: the P0 ablation runner exercises the `kge` trainer + eval harness, so it
+# needs `kge`. Registering the requirement keeps `cargo build --all-targets` (default features) green
+# when the feature is out of the build — the example body is gated behind `#[cfg(feature = "kge")]`.
+[[example]]
+name = "kge_ablation"
+required-features = ["kge"]
+
+# [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the P1 typed-encoder ablation harness uses the
+# `structure`-gated `encode` module, so it needs the `structure` feature. Registering the
+# requirement keeps `cargo build --all-targets` (default features) green when the feature is out of
+# the build (the body would otherwise fail to resolve `sparq_vectors::encode`). It is an
+# encoder-quality ablation runner only — no library code, no new dependency.
+[[example]]
+name = "bench_typed_encoders"
+required-features = ["structure"]
+
+# [OPUS-4.8] sq-hkud (epic sq-toze, gap MS-G4) — register the `kani` cfg so the
+# `#[cfg(kani)]` bounded-proof harness in `store.rs` does not trip `-D warnings`
+# (unexpected_cfgs) on the NORMAL build. `cargo kani` sets this cfg itself when it
+# model-checks; under a plain `cargo build`/`clippy`/`test` the cfg is simply off and the
+# harness is stripped, so registering it here is the only change the normal build sees.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

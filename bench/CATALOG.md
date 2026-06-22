@@ -58,16 +58,16 @@ conventions first, then a per-category map that points at the registry, then a
 
 | category | what it covers | registry ids |
 |---|---|---|
-| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `geo-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `vector-ann-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
+| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `geo-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `vector-ann-bench`, `geo-index-bench`, `rsp-throughput`, `rsp-ql`, `vectors-throughput`, `kge-ablation`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
 | **parse** | text-format parse throughput (MB/s) | `parse-baseline` |
-| **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `hdt-load-bench`, `wikidata-8b` |
+| **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `dict-baseline`, `hdt-load-bench`, `hdt-stage-split`, `hdt-suite`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
 | **scaling** | parallel thread sweep + cross-commit/hardware tracking | `cli-scaling`, `ci-bench`, `ci-bench-ec2`, `hw-bench` |
-| **inference** | N3 / RDFS / OWL closure + incremental maintenance | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `solid-wac-bench` |
+| **inference** | N3 / RDFS / OWL closure + incremental maintenance | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench` |
 | **zk** | commitment pipeline, trace seam, circuit gates, prove/verify | `zk-commit-throughput`, `zk-trace-overhead`, `zk-compose-gates`, `zk-compose-prove-verify` |
-| **serve** | concurrent-serving + memory-tiering research spikes | `serve-spikes`, `memtier-spikes` |
+| **serve** | concurrent-serving + memory-tiering research spikes; PSS write-path parity gate | `serve-spikes`, `memtier-spikes`, `pss-update-parity` |
 | **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance` |
-| **competitors** | versioned external-engine comparison (Oxigraph / QLever / eye) + version+env capture | `competitor-gather` (registry: [`competitors.json`](./competitors.json)) |
+| **competitors** | versioned external-engine comparison (Oxigraph / QLever / Fuseki+TDB2 / eye + the SHACL/geo/FTS/vector peers) + version+env capture | `competitor-gather` (registry: [`competitors.json`](./competitors.json)) |
 
 Notes on a few that need care:
 
@@ -93,9 +93,12 @@ Notes on a few that need care:
 - **`watdiv` (WatDiv) is tiered** — see [`bench/watdiv/README.md`](./watdiv/README.md). The
   per-commit path builds+caches the real Waterloo v0.6 generator (research-use; sha256-pinned,
   g++ + Boost, RNG seed-pinned to `1u`) and runs the 16 sub-ms Basic-Testing queries on a fixed
-  SF=1 corpus (~106k triples), emitting `watdiv_<query>_<mode>_us` (trend-only) plus a HARD
-  expected-rows correctness diff (count mode). Four templates empty at SF=1 (F1/F4/C1/C2) sit in
-  `queries-heavy/` for the **EC2/nightly SF≥10 tier** (`bench/watdiv/gen.sh <SF>`).
+  SF=1 corpus (~106k triples), emitting `watdiv_sf<SF>_<query>_<mode>_us` (trend-only; the
+  `_sf<SF>` scale-factor token keeps the per-commit `watdiv_sf1_…` and nightly `watdiv_sf1000_…`
+  tiers as distinct series so the dashboard's scaling chart, sq-viby, can plot them on one axis)
+  plus a HARD expected-rows correctness diff (count mode). Four templates empty at SF=1
+  (F1/F4/C1/C2) sit in `queries-heavy/` for the **EC2/nightly SF≥10 tier**
+  (`bench/watdiv/gen.sh <SF>`).
 - **`bsbm` (Berlin SPARQL Benchmark, Explore mix) is tiered + fetch-and-cache** — see
   [`bench/bsbm/README.md`](./bsbm/README.md). Per-commit, `gen.sh` fetches the PREBUILT bsbmtools
   v0.2 distribution (JRE-only; sha256-pinned zip) and emits a deterministic `-fc -pc 300` corpus
@@ -135,9 +138,42 @@ Notes on a few that need care:
   `fts_bytes_per_doc` also has a `mode:auto` ratchet in `bench/perf-baseline.json`. CI emits
   `text_<workload>_us` + `text_build_s` (trend-only, advisory). Heavy/latency tier: `N=1000000`.
   An IR-quality BEIR axis (Recall@100 / nDCG@10) is gather-only and not yet wired (follow-up bead).
+- **`rsp-ql` is the RSP-QL STREAMING suite** — see [`bench/rsp/README.md`](./rsp/README.md). It
+  exercises `sparq-rsp` (windowed continuous SPARQL: S2R `RANGE/STEP` windows, three `EvalMode`s,
+  RSP-QL multi-window joins). Because `sparq-rsp` is **clock-free** (a window closes on the
+  pushed-timestamp watermark, not a real clock), a fixed `(triple, ts)` replay is a pure function —
+  so the gate is a **DETERMINISTIC per-window result-row count** (a STRONGER gate than any
+  wall-clock RSP benchmark). `run.sh` runs the `rsp_oracle` example (no external tool — the crate
+  is isolated, like FTS's `bench_text`) and asserts every `rsp_<scenario>_<mode>_w<k>_rows`
+  (single-window tumbling/sliding/GROUP-BY × Rebuild/PersistentDict/Delta — the identical expected
+  counts ALSO encode the **three-EvalMode-equivalence**) and `rsp_srbench_<q>_w<k>_rows` (the
+  **SRBench correctness ORACLE**: a multi-window observation⋈station-metadata join) vs
+  `expected.tsv` (exit 1 on drift). CI emits `rsp_persistentdict_triples_per_s` (trend-only,
+  advisory). **NO competitor perf column** — the RSP peers (C-SPARQL / CQELS / RSP4J) are
+  wall-clock service engines, so a throughput head-to-head is apples-to-oranges (different time
+  model); perf comparison is explicitly **out of scope**.
   Competitor honesty: **Solr/ES are NOT SPARQL competitors and stay off the dashboard**; the
   surface peer is Fuseki + `jena-text` (`http-sparql`), the kernel ref is Lucene/Anserini (labelled
   *sub-component, not an RDF benchmark*).
+- **`hdt-suite` is the HDT LOAD-AND-DECODE suite** — see [`bench/hdt/README.md`](./hdt/README.md).
+  It exercises `sparq-hdt` loading the **vendored real-world `snikmeta.hdt`** (a hdt-cpp/java-shaped
+  FourSectDict+BitmapTriples archive, 328 triples) straight into a native sparq `Graph`. Like
+  FTS/RSP the runner is a crate **example** (`bench_oracle` — `sparq-hdt` is isolated, not a
+  `sparq-cli` dependency, and is behind the `hdt` cargo feature). `run.sh` is self-asserting: it
+  gates the **load-and-decode counts** (`snikmeta_triples` / `snikmeta_terms`), **triple-pattern
+  resolution** over the decoded graph (`snikmeta_distinct_predicates` / `snikmeta_rdf_type_triples`)
+  and the **id-translation oracle** (`snikmeta_direct_eq_upstream` = direct decoder vs the
+  upstream-backed `Hdt::read` path on the same bytes) vs `expected.tsv` (exit 1 on drift),
+  complementing the differential + rejection oracles in `crates/sparq-hdt/tests/roundtrip.rs`. CI
+  emits `hdt_load_s` (advisory wall-clock) + `hdt_vs_ntgz_load_s` (an advisory **ratio** — survives
+  box contention; trend-only). **CRITICAL honest caveat:** load-and-decode-to-native is the **ONLY**
+  like-for-like axis vs **hdt-cpp / hdt-java** — `sparq-hdt` decodes HDT into sparq's own
+  `Dict`/`Graph` then queries its **own** indexes, whereas hdt-cpp/java query the compressed
+  BitmapTriples **in place**; so a **query-over-HDT head-to-head is NOT like-for-like and is OUT OF
+  SCOPE**. The `hdt-cpp` competitor (`bench/competitors.json`) is **decode-only**, gather-only via
+  docker (zero recurring CI cost). The write-side **bytes-on-disk** gate is deferred until the
+  in-memory PFC+BitmapTriples encoder (`sq-ashy`) is the production write path (encode-perf parity
+  is a non-goal today).
 - **`vector-ann-bench` is the VECTOR / ANN suite** — see
   [`bench/vector/README.md`](./vector/README.md). It exercises `sparq-vectors` (mmap'd `.spqv`
   vector store + HNSW / Vamana / PQ ANN) over a **synthetic** corpus generated **in-process** (no
@@ -180,6 +216,21 @@ Notes on a few that need care:
   `deeptax_d<DEPTH>_{closure_s,query_us,closure_triples}` (trend-only). The dashboard features it
   as a scaling suite (depth axis) with EYE external-reference baselines (cited from
   `bench/inference/eye-comparison.md`; dt100k = n/a, EYE not run).
+- **`owl-sameas` is the OWL `sameAs` equality micro-suite** (the EQUALITY analogue of
+  DeepTaxonomy) — see [`bench/owl-sameas/README.md`](./owl-sameas/README.md). `run.sh` is
+  self-asserting: per tier `N` it builds `K=4` independent `owl:sameAs` equivalence classes of `N`
+  members (a STAR of `N-1` edges) + `M=3` anchor data triples (a NEW pure-Python generator
+  `gen_sameas.py`), materializes the **OWL-RL closure** (`sparq-cli reason … owl`), runs a
+  class-membership `query.rq`, and asserts BOTH the closure triple-count (`= K·N·(N+M)`) AND the
+  query rows (`= K·N`) vs `expected.tsv` — a deterministic, load-robust gate on the `owl:sameAs`
+  union-find rewriting + expand-back path that NO other reasoning suite exercises (LUBM is
+  subClassOf/restriction/Transitive/inverseOf; DeepTaxonomy is N3 subclass transitivity). The
+  closure-size assertion is the load-bearing gate: it catches silent UNDER-derivation (a missing
+  `N²` `sameAs` pair) that a correct membership query alone would miss. Needs only `python3` (no
+  g++/javac/Docker), so it runs on the per-commit tier at a SMALL tier pair (N=8+N=32); N=256 is
+  opt-in via `SAMEAS_TIERS` for EC2/nightly. CI emits
+  `sameas_size<N>_{closure_s,query_us,closure_triples}` (trend-only). The dashboard features it as
+  a scaling suite (size axis).
 - **`wikidata-8b` is external-cost and gated.** It builds the full Wikidata
   truthy dump (~8-9.4B triples) on a 16 GB EC2 box (~$5-17). It is **blocked
   until dict-spill merges to public main** — see
@@ -218,6 +269,62 @@ Notes on a few that need care:
   HONESTY NOTE (per parent `sq-i0nm`): a gh-runner gather is noisy and not
   comparable to the EC2/quiet-box reference band — the recorded `env.quiet_box`
   flag lets the dashboard label it distinctly (see the QUIET-BOX convention above).
+- **Same-box SPARQL gather — the QLever indexed-server step** (sq-52fo). The
+  same-box competitor gather [`scripts/gather-ec2-sparql.sh`](../scripts/gather-ec2-sparql.sh)
+  compares sparq vs Oxigraph on ONE generated SP2Bench corpus (always on). QLever is
+  **opt-in** behind `GATHER_QLEVER=1` because — unlike Oxigraph/EYE — it is NOT a
+  file-in/answer-out CLI: it needs a dedicated **index build → running server → HTTP
+  query → teardown** dance. That dance lives in [`scripts/qlever-same-box.sh`](../scripts/qlever-same-box.sh),
+  which the gather invokes on the bench box. Recipe (all via the
+  `docker.io/adfreiburg/qlever:latest` image):
+  1. **index** — `IndexBuilderMain -i <base> -F ttl|nt -s <settings> < corpus` into a
+     `mktemp -d` index dir (df-guarded, hard `QLEVER_INDEX_TIMEOUT`, default 20 min);
+  2. **server** — `ServerMain -i <base> -p <port> -j <jobs>` detached with a fixed
+     `--name`, then a **bounded** readiness poll (a counted for-loop, default 2 min,
+     aborts early if the container exits) — this is the fix for the prior ~53-min hang;
+  3. **query** — one bounded HTTP POST per (query, iter), min-of-K wall micros, emitting
+     the harness's `<name>\t<rows>\t<best_us>` TSV (`ERROR` rows stay honest-n/a);
+  4. **teardown** — an **EXIT trap that always runs** (`docker rm -f` the container +
+     `rm -rf` the index dir) on success, failure, timeout, or Ctrl-C — no orphan server,
+     no leaked disk. The gather also wraps the whole recipe in an outer `timeout 1800`.
+  Run it: `GATHER_QLEVER=1 AWS_PROFILE=pss scripts/gather-ec2-sparql.sh <branch>`.
+  With `GATHER_QLEVER=0` (the default) the QLever block is a complete no-op and the
+  Oxigraph-only path is byte-for-byte unchanged. The recipe is **bench-only and
+  documented-untested in the authoring worktree** (no Docker there) — validate on the
+  next `GATHER_QLEVER=1` gather. (The separate `bench/qlever-*` suites use the upstream
+  `qlever` Python CLI instead; this same-box recipe is the standalone Docker variant.)
+- **Same-box SPARQL gather — diagnose-and-avoid-the-stall hardening of the sparq+Oxigraph
+  half** (sq-sxso). The Oxigraph half of [`scripts/gather-ec2-sparql.sh`](../scripts/gather-ec2-sparql.sh)
+  used to have NO per-step timeout and NO timestamped sentinel, so a hung step (a heavy
+  from-source `cargo build`, or a pathological SP2Bench query in Oxigraph) burned the whole
+  window with no `/root/GATHER_DONE` — the observed **"73 min, no sentinel"** stall, the same
+  class the QLever recipe above already fixed. Three measured-rooted fixes (LOCALLY REPRODUCED:
+  at only 50k triples the prebuilt Oxigraph CLI ran `q07` in ~38 s and `q08` past 60 s — so at
+  the old 250k default those unselective SP2Bench joins are minutes-long in Oxigraph, which is
+  the stall):
+  1. **Per-step timestamped logging** — every phase calls `step "…"`, which UTC-stamps a line
+     into `/var/log/gather.log` AND appends it to `/root/GATHER_STEP`. The orchestrator pulls
+     that file (and surfaces the LAST step LIVE while polling, and on the no-sentinel path), so
+     a stalled run names EXACTLY the hung phase instead of being invisible. The step log is also
+     embedded in the result envelope (`step_log`).
+  2. **Prebuilt, SHA-pinned Oxigraph CLI** (default) — `oxigraph load` into an on-disk store +
+     `oxigraph query` per `.rq` (min-of-N, JSON-results count). This removes the from-source
+     `cargo build -p sparq-bench` Oxigraph compile from the critical path (a likely build-time
+     hang on the small fallback box). Pinned to **v0.5.9** by `sha256` (aarch64 + x86_64; the
+     gather box is arm64). Set `OXI_EMBEDDED=1` for the in-process in-RAM embedded path instead
+     — the envelope records `oxigraph_mode` (`prebuilt-cli` on-disk vs `embedded` in-RAM) so the
+     load regime is never silently conflated.
+  3. **Hard per-step `timeout` + smaller configurable dataset** — each phase is wrapped in a
+     `timeout` (per-phase `STEP_*_TIMEOUT` caps) and the per-query Oxigraph loop is per-query
+     timeout-bounded (`STEP_OXI_QUERY_TIMEOUT`, default 120 s), so a pathological query records
+     `ERROR` (honest-n/a) and the gather moves on instead of hanging. The default corpus is
+     smaller (`SP2B_TRIPLES` default **100000**, was 250000) for a cheap smoke/gather; raise to
+     250000 for the full per-commit scale.
+  **HONESTY:** this is the SCRIPT-side diagnostic + avoidance hardening, authored + locally
+  reproduced on the aarch64 work box (the prebuilt-CLI load/query lane was run end to end). The
+  actual confirmation that a real gather now reaches `GATHER_DONE` without stalling **requires
+  one EC2 gather run** — that green-gather confirmation is a follow-up. Competitor numbers from
+  this gather remain **non-canonical** (ephemeral EC2 / work box), per the QUIET-BOX note above.
 
 ## Replicate everything — quickstart
 
@@ -238,9 +345,11 @@ bench/bsbm/run.sh                     # BSBM Explore -pc 300 (JRE + unzip): gen 
 bench/lubm/run.sh                     # LUBM(1) (javac + rapper): gen + OWL-RL closure + both tiers + row diff
 bench/shacl/run.sh                    # SHACL (javac + rapper): LUBM ABox x 5 shapes + violations/conforms/focus_nodes diff
 cargo build --release -p sparq-text --example bench_text && bench/fts/run.sh   # Full-text (no external tool): synthetic BM25 corpus + hit-count/bytes-per-doc diff
-cargo build --release -p sparq-vectors --example bench_vectors && bench/vector/run.sh   # Vector/ANN (no external tool): synthetic corpus + recall@10-deficit gate (HNSW/Vamana/PQ)
+cargo build --release -p sparq-vectors --example bench_vectors --features approx-ann && bench/vector/run.sh   # Vector/ANN (no external tool; --features approx-ann required — example links HNSW VectorIndex): synthetic corpus + recall@10-deficit gate (HNSW/Vamana/PQ)
 bench/geo/run.sh                      # GeoSPARQL (cargo only): fixed ~100k point corpus + within/nearest/geof: result-set-size + compliance-pass diff (counts-not-coords)
+cargo build --release -p sparq-rsp --example rsp_oracle && bench/rsp/run.sh   # RSP-QL (cargo only): clock-free fixed (triple,ts) replay + DETERMINISTIC per-window row-count gate (3 EvalModes) + SRBench correctness oracle
 bench/deep-taxonomy/run.sh            # DeepTaxonomy (python3 only): N3 closure per depth tier + closure-size + query-row gate
+bench/owl-sameas/run.sh               # OWL sameAs (python3 only): OWL-RL closure per size tier + closure-size (K·N·(N+M)) + query-row (K·N) gate
 
 # --- selective bind-join + u64 value-id probes ---
 python3 bench/selective/gen.py 500000 > bench/selective/selective.nt

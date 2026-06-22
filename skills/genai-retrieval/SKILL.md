@@ -1,6 +1,6 @@
 ---
 name: genai-retrieval
-description: Use when an LLM/agent needs to answer natural-language questions over a sparq RDF Graph with SPARQL, or to build token-budgeted retrieval/grounding context (schema card, VoID, characteristic-set join hints) about an unknown RDF dataset. Covers the sparq-nlq NL→SPARQL loop (ground→generate→validate→execute→repair, offline record/replay, optional live Anthropic backend) and sparq-introspect (schema/VoID/seed-scoped summaries + planner join hints).
+description: Use when an LLM/agent needs to answer natural-language questions over a sparq RDF Graph with SPARQL, or to build token-budgeted retrieval/grounding context (schema card, VoID, characteristic-set join hints) about an unknown RDF dataset. Covers the sparq-nlq NL→SPARQL loop (ground→generate→validate→execute→repair, offline record/replay, optional live Anthropic backend), its sparq_nlq::eval exec-accuracy harness (answer-set F1, oracle-vs-end-to-end, grounded-vs-ungrounded; live LLM test off by default), and sparq-introspect (schema/VoID/seed-scoped summaries + planner join hints).
 ---
 
 # sparq genai-retrieval
@@ -11,8 +11,9 @@ crates that compose:
 - **`sparq-introspect`** — mines the *effective schema* a graph actually uses
   (classes, per-class predicate usage, observed domain/range, characteristic sets,
   cross-class join hints, namespaces) by sorted scans over the store indexes — and
-  renders it as a **token-budgeted text "schema card"**, **VoID** (N-Triples), or
-  full **JSON** for LLM grounding / agent retrieval context.
+  renders it as a **token-budgeted text "schema card"**, **VoID** (N-Triples),
+  **SHACL node shapes** (characteristic sets → `sh:NodeShape`), or full **JSON** for
+  LLM grounding / agent retrieval context.
 - **`sparq-nlq`** — a deliberately lean **NL→SPARQL loop**: ground (with the
   introspect summary) → generate (an `Llm` behind a trait) → validate (`spargebra`
   parse) → execute (`sparq-engine` under a `QueryBudget`) → repair (≤ N rounds). The
@@ -46,6 +47,7 @@ let ix = Introspection::build(&graph);
 let card = ix.to_text_summary(2500);          // prompt-ready schema card, ≤ 2500 chars
 let json = ix.to_json();                       // full machine surface for an agent
 let void = ix.to_void("http://ex.org/dataset");// W3C VoID, as N-Triples
+let shacl = ix.to_shacl();                      // characteristic sets → SHACL node shapes (N-Triples)
 # Ok::<(), String>(())
 ```
 
@@ -77,16 +79,34 @@ for row in &answer.result.rows {                  // Vec<Vec<Option<oxrdf::Term>
 // sized for LLM grounding; tune with build_with.
 Introspection::build(graph: &Graph) -> Introspection
 Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection
+// opts.minimalize_types (default false, sq-lc3): ABSTAT-style type minimalization —
+// fold each subject's types to the most-specific via the graph's own rdfs:subClassOf
+// chains (transitive closure of in-graph edges; no ontology fetch, no OWL reasoning;
+// cycles tolerated as equivalence). A subject typed both dbo:SportsEvent and dbo:Sport
+// (SportsEvent ⊑ Sport) is then profiled ONLY under the minimal dbo:SportsEvent.
+// Applies uniformly to class extents, per-class usage, CS type histograms, observed
+// domain/range, and join hints. Additive (no new dependency); default = full profile.
 
 // Renderers.
 Introspection::to_text_summary(&self, budget_chars: usize) -> String   // schema card
 Introspection::to_json(&self) -> String                                // pretty JSON
 Introspection::to_void(&self, dataset_iri: &str) -> String             // VoID N-Triples
+Introspection::to_shacl(&self) -> String                               // CS → SHACL node shapes (N-Triples)
 Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String
 
-// Result fields (all serde-Serialize):
+// Persisted *.introspect sidecar (sq-3n4): mine once, summarise forever — reload is
+// O(output), no graph rescan. Format is exactly to_json's (plain JSON).
+Introspection::save(&self, path) -> io::Result<()>           // write sidecar (JSON)
+Introspection::load(path) -> io::Result<Introspection>       // read+parse (InvalidData on bad JSON)
+Introspection::from_json(json: &str) -> serde_json::Result<Introspection>  // in-memory inverse
+sparq_introspect::sidecar_path_for(dataset) -> PathBuf       // "g.nt" -> "g.nt.introspect"
+sparq_introspect::SIDECAR_EXTENSION: &str                    // "introspect"
+
+// Result fields (all serde Serialize + Deserialize — the sidecar round-trips them):
 //   .triples .subjects .entities : u64
 //   .classes: Vec<ClassProfile>            // by instance count, per-class predicate usage + coverage
+//     ClassPredicate.samples: Vec<String>  // (sq-3n4) per-class sample labels — a minority class
+//                                          //  shows ITS OWN values, not the predicate's global min
 //   .predicates: Vec<PredicateProfile>     // global stats + inferred/declared domain & range
 //   .characteristic_sets: CharacteristicSets
 //   .join_hints: JoinHints                 // cross-class (C, p, D) edges + triple counts
@@ -118,6 +138,17 @@ Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>
 Nlq::prompt_for(&self, question: &str) -> String          // deterministic; for building fixtures
 Nlq::repair_prompt_for(&self, question, failed_sparql, error) -> String
 
+// Index-grounded entity/relation linking (sparq-sim) — opt-in via NlqConfig.link_entities.
+// Resolves the question's proper nouns to concrete IRIs in THIS store's dictionary and
+// surfaces them (with structurally-similar siblings from sparq_sim::Sim::most_similar) in
+// the grounding prompt. Usable standalone:
+sparq_nlq::link::EntityLinker::build(graph: &Graph, expand_k: usize, max_links: usize)
+EntityLinker::link(&self, question: &str) -> Linking
+// Linking { entities: Vec<LinkedEntity>, relations: Vec<LinkedRelation> }
+//   LinkedEntity { mention, iri: NamedNode, label, exact: bool, similar: Vec<NamedNode> }
+//   LinkedRelation { mention, iri: NamedNode, triples: u64 }
+Linking::to_prompt_section(&self) -> Option<String>      // None when nothing linked
+
 // Answer { sparql: String, result: QueryResult, repairs: usize, transcript: Vec<Turn> }
 // NlqError { message: String, transcript: Vec<Turn> }  (impls Error/Display)
 // QueryResult { vars: Vec<Variable>, rows: Vec<Vec<Option<Term>>> } — re-exported by sparq-nlq.
@@ -126,7 +157,65 @@ Nlq::repair_prompt_for(&self, question, failed_sparql, error) -> String
 `NlqConfig` knobs (`Default` = the config the committed fixtures were recorded under):
 `summary_budget_chars` (4000), `max_repair_rounds` (1), `exec_timeout`
 (`Some(10s)`, native only), `max_rows` (`Some(1_000_000)`), `examples`
-(two schema-agnostic few-shots).
+(two schema-agnostic few-shots), `ground` (`true` — the grounded loop the fixtures
+were recorded under; set `false` for the ungrounded baseline the exec-accuracy
+harness measures grounding against — see below), `link_entities` (`false` — opt-in
+sparq-sim entity/relation linking appended to the grounded prompt; flipping it on a
+recorded dataset means re-recording, since the prompt string changes), `link_expand_k`
+(`3` — structurally-similar siblings per linked entity), `max_links` (`8`), and
+`check_dictionary` (`false` — the **N2 dictionary constraint**, bead `sq-9yjp`;
+see below).
+
+**N2 dictionary constraint** (`sparq_nlq::constrain`, opt-in `check_dictionary`):
+after a query parses, walk its algebra and check every predicate / `rdf:type` class
+IRI against the live dictionary (`Graph::id_of`). An ungrounded IRI matches no triple,
+so it becomes a targeted repair signal (`TurnOutcome::UngroundedTerms`) with
+nearest-namespace did-you-mean suggestions pulled from the store. Off by default: an
+empty-answer question (a valid-but-absent class) must not be "repaired", and the
+exec-accuracy harness measures raw model accuracy with it off. Strict logit-level
+**grammar-constrained decoding** is *not* implemented — it needs logit/grammar access
+the Anthropic Messages API does not expose, so it is only feasible on a local backend
+(`research/genai-nl-to-sparql.md` §11). Public surface:
+`constrain::unknown_terms(graph, &spargebra::Query) -> Vec<UnknownTerm>`,
+`constrain::dictionary_repair_message(&[UnknownTerm]) -> String`,
+`UnknownTerm { iri, role: TermRole, suggestions }`.
+
+`sparq_nlq::eval` — the **exec-accuracy harness** (the design doc's accuracy gate,
+`research/genai-design.md` §4). It grades the *executed* query the QALD way — **answer-set
+F1**, not query-string equality — and is **fully offline**: it drives `Nlq` over any
+`Llm` (in CI a `ReplayLlm` fixture or a scripted in-memory backend); nothing here
+touches the network.
+
+```rust
+use sparq_nlq::eval::{self, EvalCase, Linking, Comparison, Report};
+
+// One case = a question + the GOLD SPARQL. The gold is executed on the SAME graph at
+// scoring time (no checked-in answer blob to drift — research/genai-nl-to-sparql.md §4.3).
+EvalCase::new(question: impl Into<String>, gold_sparql: impl Into<String>) -> EvalCase
+
+// Score one (linking, grounding) configuration over the cases against `graph`.
+// For Linking::Oracle the gold query is fed straight through validate→execute and the
+// `llm` is NOT consulted (isolates the engine-side loop from model linking).
+eval::run_config(graph: &Graph, cases: &[EvalCase], llm: Box<dyn Llm>,
+                 config: NlqConfig, linking: Linking) -> Report
+
+// Drives all four cells (end-to-end | oracle) × (grounded | ungrounded). `make_llm(ground)`
+// is called once per end-to-end config (ReplayLlm is consumed by the loop, so hand out a
+// fresh fixture each call; the grounded/ungrounded prompts are distinct strings).
+eval::run_comparison(graph: &Graph, cases: &[EvalCase], base_config: &NlqConfig,
+                     make_llm: impl FnMut(bool) -> Box<dyn Llm>) -> Comparison
+
+// Linking ∈ { EndToEnd, Oracle } — reported SEPARATELY, per the design doc.
+// Report { linking, grounded: bool, cases: Vec<CaseResult>, macro_f1, exact_match,
+//          validity, total_repairs }  // macro_f1 = QALD headline metric
+// CaseResult { question, outcome: Result<CaseScore, String> }  // Err = loop failure (F1=0 vs non-empty gold)
+// CaseScore { f1: F1, sparql, repairs }
+// F1 { precision, recall, f1, intersection, predicted, gold } ; F1::is_exact() -> bool
+// AnswerSet::from_result(&QueryResult) -> AnswerSet  // order-independent multiset of rows; F1::score(pred, gold)
+// Comparison { grounded_end_to_end, ungrounded_end_to_end, grounded_oracle, ungrounded_oracle }
+// Comparison::headline_grounding_pays() -> bool  // grounded end-to-end macro-F1 > ungrounded ("grounding pays for itself")
+// Comparison::summary() -> String                // a stderr table; printed at run time, no perf numbers baked into docs
+```
 
 ## Common recipes
 
@@ -176,6 +265,51 @@ match nlq.ask("a hard question") {
 }
 ```
 
+**3b. Cite an answer from provenance (`--features citations`, default off).** When the
+graph carries PROV-O provenance (e.g. the PKG's Findings with `prov:wasDerivedFrom` +
+`dcterms:source` + `pkg:confidence`/`pkg:assurance`), `Answer::citations(&graph)` resolves
+each answer-row binding to a numbered footnote. Citations are **emitted from provenance,
+never generated** — every one resolves to a real in-graph source (resolution rate 1.0,
+zero fabricated refs), and a binding with no provenance is reported as "no source
+recorded", never guessed. [OPUS-4.8] sq-2489d.1
+
+```rust
+let answer = nlq.ask("which findings are about the merge discipline?")?;
+let cited = answer.citations(&graph);            // feature = "citations"
+for c in &cited.citations {
+    println!("{}", c.footnote());                // "[1] <source> — anchor (Claimed, conf=0.98)"
+}
+assert_eq!(cited.resolution_rate(&graph), 1.0);  // every citation resolves in-graph
+println!("{}", cited.footnotes());               // block, incl. any "no source recorded"
+// The cross-cutting primitive is also callable directly:
+//   sparq_nlq::provenance::join(&graph, &answer.result) -> Vec<ProvenanceRecord>
+//   sparq_nlq::provenance::provenance_for(&graph, &subject) -> ProvenanceRecord
+```
+
+**3c. Qualify / hedge / abstain on an answer (`--features citations`, default off).** The
+same Phase-1 provenance join also drives **answer-qualification**: fold the answer's
+supporting `pkg:assurance`/`pkg:confidence` **weakest-link** into a verb hedge + verbal
+band, and below a `min_confidence` floor **abstain**. The knob lives on `NlqConfig::qualify`
+and `Nlq::ask_qualified` returns the `Answer` plus an `AnswerQualification`. The band
+*reflects asserted assurance* — it is **NOT** a calibrated confidence; no reliability
+measurement exists yet, and none is claimed. [OPUS-4.8] sq-2489d.2
+
+```rust
+use sparq_nlq::{NlqConfig, qualify::QualifyConfig};
+let cfg = NlqConfig {                               // feature = "citations"
+    qualify: Some(QualifyConfig { min_confidence: Some(0.5), ..Default::default() }),
+    ..NlqConfig::default()
+};
+let nlq = sparq_nlq::Nlq::with_config(&graph, llm, cfg);
+let qa = nlq.ask_qualified("is ZK soundness externally signed off?")?;
+println!("{}", qa.qualification.phrase());          // "appears to be (claimed) [confidence: …]"
+if qa.qualification.abstain { /* "insufficient confidence to answer" */ }
+// Weakest-link: min supporting confidence drives the band; weakest assurance drives the
+// verb hedge; a binding with no provenance contributes the weakest rung (Missing), so it
+// can only pull toward hedging — never toward over-confidence. Post-hoc + read-only: the
+// query, execution and transcript are unchanged (so fixtures need no re-record).
+```
+
 **4. Export VoID for a dataset catalog / DCAT entry.** Output is N-Triples (a Turtle
 subset), so it re-parses with either parser:
 
@@ -184,6 +318,19 @@ let void_nt = Introspection::build(&graph).to_void("http://ex.org/dataset");
 // void:Dataset with void:triples / void:entities / void:distinctSubjects /
 // void:classes / void:properties, plus one classPartition per class and one
 // propertyPartition per predicate. NOTE: void:distinctObjects is NOT emitted.
+```
+
+**4b. Bootstrap SHACL shapes from the effective schema.** Each characteristic set becomes
+an `sh:NodeShape`; output is N-Triples (valid Turtle):
+
+```rust
+let shapes_nt = Introspection::build(&graph).to_shacl();
+// Per characteristic set: a sh:NodeShape with sh:targetClass for every class UNIVERSAL
+// to the set (count == subjects), one sh:PropertyShape (sh:path + sh:minCount 1) per
+// non-type predicate, and sh:maxCount 1 only when that predicate is single-valued across
+// the set (avg multiplicity 1). Constraints are mined from what the data asserts, so the
+// graph already validates against them — a data-grounded floor to edit, not a contract.
+// Sets with no universal class yield a reusable but target-less shape.
 ```
 
 **5. Tune the introspection for a huge or noisy KG.** Bound the histograms and tables:
@@ -210,6 +357,118 @@ let table = CsTable::new(
 # }
 ```
 
+**7. Measure NL→SPARQL exec-accuracy (answer-F1) offline.** Build a small set of
+`(question, gold SPARQL)` cases, then run all four cells and assert that grounding pays:
+
+```rust
+use sparq_nlq::eval::{run_comparison, EvalCase};
+use sparq_nlq::{NlqConfig, ReplayLlm};
+
+let cases = vec![
+    EvalCase::new("How many athletes are on each team?",
+                  "SELECT ?t (COUNT(?a) AS ?n) WHERE { ?a :team ?t } GROUP BY ?t"),
+    // … more (question, GOLD query) pairs
+];
+// `ground` flips per cell; the closure hands out a fresh fixture per end-to-end call.
+let cmp = run_comparison(&graph, &cases, &NlqConfig::default(), |ground| {
+    let f = if ground { "tests/fixtures/grounded.json" } else { "tests/fixtures/ungrounded.json" };
+    Box::new(ReplayLlm::from_file(f).unwrap())
+});
+eprintln!("{}", cmp.summary());                 // printed at run time only
+assert!(cmp.headline_grounding_pays());          // grounded end-to-end macro-F1 > ungrounded
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+What this proves (and what it does NOT): with scripted/recorded completions it validates
+the **harness** and the **mechanism** of the headline claim — answer-F1 scoring,
+oracle-vs-end-to-end and grounded-vs-ungrounded reporting, the inequality — **not** a
+real model's accuracy numbers. Those come from a `live_exec_accuracy` run (`--features
+live` + `RecordingLlm`, which needs a key + network + dataset); that test is `#[ignore]`'d
+and feature-gated **OFF**, so a model or network outage can never red the build. After a
+live run the recorded sessions become the offline regression set — and the
+record→`save`→`from_file`→identical-scores round-trip that makes them a *faithful*
+regression set is itself CI-gated (`recorded_session_saves_and_replays_as_regression_set`
+in `tests/exec_accuracy.rs`). (No claim is made here about NL→SPARQL quality beyond what
+the fixtures encode.)
+
+## sparq-terse — the verifiable LLM-ergonomic query surface (opt-in)
+
+[OPUS-4.8] `sparq-terse` (epic `sq-2m6zm`, design `research/llm-ergonomic-sparql-surface.md`,
+PR #1074) is a **pre-parse transpiler** layered over this stack: it lets an agent write the
+*concept it means* instead of guessing an opaque IRI, while only ever executing canonical,
+conformant SPARQL. It **never** touches the vendored `spargebra` grammar — the engine sees
+standard SPARQL it can inspect ("a convenience that shows its work, not an oracle").
+
+```rust,ignore
+use sparq_terse::{terse_to_sparql, terse_to_sparql_with, ResolveCtx, Method, legend_card};
+use sparq_core::Graph;
+
+// Phase 1 (default build, lean: only spargebra). Canonical SPARQL passes through
+// byte-identical AFTER the silent-rewrite canary re-parses the emission; a non-parsing
+// output is TerseError::CanaryFailed, never handed back.
+let exp = terse_to_sparql("SELECT ?s WHERE { ?s <http://ex/p> ?o }")?;
+assert_eq!(exp.canonical_sparql, "SELECT ?s WHERE { ?s <http://ex/p> ?o }");
+
+// Phase 3 / lever 1 (default build). A K:<name> keyword expands pre-parse to its frozen
+// IRI (no PREFIX line); the expansion is echoed in exp.keywords. An unknown keyword, or a
+// clash with a real `PREFIX K:`, is a HARD error (never a guess). Publish the frozen
+// legend ONCE behind the prompt-cache breakpoint with legend_card() — the token win is a
+// CACHING property (design §1.6), not query-body terseness.
+let exp = terse_to_sparql("SELECT ?f WHERE { ?f K:type K:Finding ; K:derivedFrom ?s }")?;
+assert!(exp.canonical_sparql.contains("<http://www.w3.org/ns/prov#wasDerivedFrom>"));
+
+// Phase 2 (feature = "vectors"). V("phrase") concept resolution, lexical-FIRST.
+let graph = Graph::load_str(turtle, "turtle")?;
+let ctx = ResolveCtx::lexical(&graph);                 // no model, no network (the default)
+let exp = terse_to_sparql_with(
+    "SELECT ?f WHERE { ?f <http://ex/about> V(\"cardinality estimation\") }",
+    &ctx,
+    |_phrase| None,                                    // embedder: vector fallback only
+)?;
+for r in &exp.resolutions {                            // every bind is echoed for the agent
+    println!("V(\"{}\") -> <{}>  score {:.3} conf {:.3} via {}",
+             r.phrase, r.iri, r.score, r.confidence, r.method.as_str());
+}
+# Ok::<(), sparq_terse::TerseError>(())
+```
+
+The **`K:<name>` keyword layer** (lever 1, default build, design §3.1, sq-vfeme) is the
+lean, no-model half: a small, **frozen, versioned** legend (`LEGEND_VERSION` =
+`pkg-keywords/v1`) of the PKG hot predicates/classes (`K:type`/`label`/`subClassOf`/
+`derivedFrom`/`generatedBy`/`about`/`confidence`/`dependsOn`/`status`/…), expanded pre-parse
+to `<iri>`. It is in the **default build** — independent of the `vectors` feature, and it
+composes with `V()` through `terse_to_sparql_with`. Guardrails: an unknown `K:<name>` is
+`TerseError::UnknownKeyword` (with did-you-mean, never auto-applied — that would be the
+lever-2 anti-pattern); a `K:<name>` clashing with a real `PREFIX K:` is
+`TerseError::KeywordPrefixCollision`. Every expansion is echoed in `Expansion.keywords`.
+The token win is a **caching** property — place `legend_card()` once behind the prompt-cache
+breakpoint, do not re-bill it per turn.
+
+The **§6 soundness envelope** is enforced, all opt-in and none silent: always-canonical
+output (the silent-rewrite canary); echo IRI + score + runner-up + confidence + method;
+**confidence-gated** (below the floor or inside the ambiguity margin `V()` returns
+`TerseError::Unresolved` with candidates — loud-fail beats silent-wrong, never auto-accept
+the uncertain); **lexical-first, vector-fallback** (the `sparq-nlq` lexical linker is
+primary; the staleness-guarded `sparq-vectors` search is the fuzzy fallback); and a
+**mandatory staleness guard** (a store built against a different graph generation is a hard
+`TerseError::StaleStore`). It reuses, not reinvents: `sparq-nlq::link::EntityLinker`
+(lexical) + `VectorStore::check_graph` + `ann::nearest_exact` (vector).
+
+**Adoption verdict (MEASURED, non-sycophantic — bead `sq-bzign`, the adoption gate, PR #1174).**
+A pre-registered, falsifiable query-authoring A/B over the real PKG (30 frozen stratified tasks,
+deterministic blind grading by the real transpiler + engine; record in `bench/terse/RESULTS.md`,
+numbers are work-box / NON-CANONICAL) gives a **per-lever** result, NOT a blanket win:
+
+- **Lever 1 (`K:<name>` keywords): conditional adopt.** Clears the cache-discounted token bar
+  *and* ties plain SPARQL on quality. Conditional only because the headline win is a *caching*
+  property, pending a full-session real-transcript fan-out (`sq-bmpzd`).
+- **Lever 3 (`V("phrase")`): do NOT adopt on quality.** `V()` is **not** a drop-in for an
+  explicit IRI — in the A/B it (correctly, by design) **loud-fails** on a punctuation-heavy
+  verbatim `prefLabel`, dropping resolution-correctness below 1.0. That is the soundness envelope
+  working as specified (loud-fail beats silent-wrong), but it means `V()` is a convenience that
+  must be checked, not trusted blind; the resolver-coverage fix is tracked in `sq-26fdp`. Prefer
+  `K:` + explicit `<iri>` for anything load-bearing.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in crates.** Neither crate is in the default build; add `sparq-introspect` /
@@ -220,6 +479,21 @@ let table = CsTable::new(
   `ANTHROPIC_API_KEY`, POSTs `https://api.anthropic.com/v1/messages` (blocking, 120 s
   timeout), default model `claude-sonnet-4-6` (configurable via `with_model`). CI
   only compile-checks this path; no test calls the network.
+- **`citations` feature (sparq-nlq).** OFF by default — without it the `cite` /
+  `provenance` modules and `Answer::citations` are not compiled, and the lean loop carries
+  zero provenance machinery. The renderer is read-only and **never invents a citation**:
+  it emits only `prov:wasDerivedFrom` sources the graph actually asserts (so resolution
+  rate is 1.0 by construction), and reports un-sourced bindings as "no source recorded".
+  It works on any PROV-O-annotated graph; the PKG is the lowest-friction case. [OPUS-4.8]
+- **`citations` feature ALSO gates answer-qualification** (`qualify` module,
+  `Nlq::ask_qualified`, `NlqConfig::qualify`). Reuses the SAME provenance join — no second
+  machinery. Weakest-link by design: `min` confidence + weakest assurance, so an extra
+  low/un-provenanced binding can only lower the qualification. The verbal band **reflects
+  asserted assurance — it is NOT a calibrated confidence**; a "calibrated confidence" claim
+  needs a reliability-diagram measurement on calibrated confidences, which does not exist
+  yet (deferred, `research/provenance-driven-genai-kb.md` §5 Phase 2). Qualification is
+  post-hoc + read-only (the prompt/query/transcript are unchanged), so it is
+  fixture-compatible — flipping it on needs no re-record. [OPUS-4.8] sq-2489d.2
 - **`ReplayLlm` is exact-prompt match.** Prompts are deterministic functions of the
   graph + `NlqConfig` + examples, so a miss means the prompt template, the default
   `NlqConfig`, or the dataset drifted — re-record (e.g.
@@ -235,6 +509,13 @@ let table = CsTable::new(
   ```sparql fence, a bare ``` fence, or bare query text starting `PREFIX`/`SELECT`/`ASK`.
 - **ASK answers** use the engine's unit-row encoding: zero `vars`, one empty row iff
   true (`answer.result.vars.is_empty()`, `result.len() == 1` when true).
+- **`eval` (exec-accuracy) is offline by construction and grades the answer set, not
+  the query string.** It executes both the candidate and the **gold** query on the same
+  graph and compares bind-row multisets (order-independent; empty-vs-empty scores 1, the
+  QALD true-negative convention). The *live-model* accuracy run (`live_exec_accuracy`) is
+  `#[cfg(feature = "live")]` **and** `#[ignore]`'d — it is never in the gate, so the
+  scored numbers in CI come only from scripted/recorded completions. Treat them as a
+  harness/mechanism check, not a model-quality benchmark.
 - **Summary hints are hints.** In `to_text_summary`, per-class counts/coverage are
   exact, but the trailing `→ range, e.g. sample` come from the predicate's *global*
   profile. `schema_summary_for` is struct-level scoping (filters already-mined
@@ -242,6 +523,14 @@ let table = CsTable::new(
 - **Cost.** Introspection is `O(|G| + |dict|)` (sorted scans, no GROUP BY); measured
   ~0.1 s build on 1.78M triples. LLM-excluded `ask` latency is the engine's query
   time (p50 ~10 ms at olympics scale) — the LLM round trip dominates wall clock.
+- **Graph scoping (sq-quuu).** `Introspection::build(&graph)` describes the **store of
+  the `Graph` it is handed** — the **default graph** for the top-level `&graph`, or a
+  **single named graph** when you pass that graph's sub-`Graph`. A schema card / VoID is
+  always scoped to exactly one graph; there is **no cross-graph or union-of-all-graphs
+  build**. On a quad dataset (N-Quads / TriG via `Graph::load_dataset`) each named graph
+  is a self-contained `Graph`; fetch one by name with `graph.named_graph(&name)` and
+  introspect it alone — `let card = Introspection::build(graph.named_graph(&g)?);`. Run it
+  per graph (or over the default graph) rather than expecting it to merge the quads.
 
 ## See also
 
@@ -252,4 +541,4 @@ let table = CsTable::new(
   `sparql-formal-semantics` — the verifiable/private query estate, orthogonal to this
   retrieval surface.
 </skill_md>
-<parameter name="key_apis">["Introspection::build(graph: &Graph) -> Introspection", "Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection", "Introspection::to_text_summary(&self, budget_chars: usize) -> String", "Introspection::to_json(&self) -> String", "Introspection::to_void(&self, dataset_iri: &str) -> String", "Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String", "sparq_introspect::characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet>", "trait Llm { fn complete(&self, prompt: &str) -> Result<String, String>; }", "ReplayLlm::from_file / from_json", "RecordingLlm::new(inner) + .save(path)", "live::AnthropicLlm::from_env() / with_model(model)  (feature = \"live\")", "Nlq::new(graph, Box<dyn Llm>) / with_config(graph, llm, NlqConfig)", "Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>", "Nlq::prompt_for / repair_prompt_for (deterministic, for fixtures)", "Answer { sparql, result: QueryResult, repairs, transcript }", "NlqConfig { summary_budget_chars, max_repair_rounds, exec_timeout, max_rows, examples }", "sparq_engine::cs::{CsSet, CsTable}  (sparq-engine feature = \"cs-planner\")"]
+<parameter name="key_apis">["Introspection::build(graph: &Graph) -> Introspection", "Introspection::build_with(graph: &Graph, opts: &BuildOptions) -> Introspection", "Introspection::to_text_summary(&self, budget_chars: usize) -> String", "Introspection::to_json(&self) -> String", "Introspection::to_void(&self, dataset_iri: &str) -> String", "Introspection::to_shacl(&self) -> String  (characteristic sets → W3C SHACL node shapes, N-Triples; sq-bde)", "Introspection::schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String", "Introspection::save(&self, path: impl AsRef<Path>) -> io::Result<()>", "Introspection::load(path: impl AsRef<Path>) -> io::Result<Introspection>", "Introspection::from_json(json: &str) -> serde_json::Result<Introspection>", "sparq_introspect::sidecar_path_for(dataset: impl AsRef<Path>) -> PathBuf", "sparq_introspect::SIDECAR_EXTENSION: &str", "ClassPredicate { predicate, subjects, triples, coverage, samples: Vec<String> }  (samples = per-class sample labels, sq-3n4)", "sparq_introspect::characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet>", "trait Llm { fn complete(&self, prompt: &str) -> Result<String, String>; }", "ReplayLlm::from_file / from_json", "RecordingLlm::new(inner) + .save(path)", "live::AnthropicLlm::from_env() / with_model(model)  (feature = \"live\")", "Nlq::new(graph, Box<dyn Llm>) / with_config(graph, llm, NlqConfig)", "Nlq::ask(&self, question: &str) -> Result<Answer, NlqError>", "Nlq::prompt_for / repair_prompt_for (deterministic, for fixtures)", "Answer { sparql, result: QueryResult, repairs, transcript }", "Answer::citations(&self, graph: &Graph) -> cite::CitedAnswer  (feature = \"citations\")", "Answer::qualify(&self, graph: &Graph, config: &qualify::QualifyConfig) -> qualify::AnswerQualification  (feature = \"citations\"; sq-2489d.2)", "Nlq::ask_qualified(&self, question: &str) -> Result<QualifiedAnswer, NlqError>  (feature = \"citations\"; ask + provenance hedge/abstain)", "QualifiedAnswer { answer: Answer, qualification: qualify::AnswerQualification }  (feature = \"citations\")", "sparq_nlq::qualify::qualify_result(graph: &Graph, result: &QueryResult, config: &QualifyConfig) -> AnswerQualification  (feature = \"citations\")", "sparq_nlq::qualify::qualify_records(records: &[ProvenanceRecord], config: &QualifyConfig) -> AnswerQualification  (feature = \"citations\")", "sparq_nlq::qualify::QualifyConfig { min_confidence: Option<f64>, low_band, high_band, abstain_when_unprovenanced }  (feature = \"citations\")", "sparq_nlq::qualify::AnswerQualification { assurance: Assurance, band: ConfidenceBand, min_confidence: Option<f64>, abstain: bool, supporting, unprovenanced } ; ::phrase() -> String  (reflects asserted assurance, NOT calibrated)", "sparq_nlq::qualify::Assurance::{Missing, Conjectured, Claimed, Proven} ; ::from_iri(Option<&str>) / ::weakest(Self) / ::verb_hedge() -> &str", "sparq_nlq::qualify::ConfidenceBand::{Unknown, Low, Medium, High} ; ::label() -> &str", "sparq_nlq::provenance::join(graph: &Graph, result: &QueryResult) -> Vec<ProvenanceRecord>  (feature = \"citations\")", "sparq_nlq::provenance::provenance_for(graph: &Graph, subject: &NamedNode) -> ProvenanceRecord  (feature = \"citations\")", "sparq_nlq::provenance::ProvenanceRecord { subject, sources: Vec<SourceLink>, confidence, assurance, cites_as_evidence } ; ::has_provenance() -> bool", "sparq_nlq::cite::cite_result(graph: &Graph, result: &QueryResult) -> CitedAnswer  (feature = \"citations\")", "sparq_nlq::cite::CitedAnswer { citations: Vec<Citation>, no_source_recorded: Vec<NamedNode> } ; ::footnotes() -> String / ::resolution_rate(&Graph) -> f64", "sparq_nlq::cite::Citation { number, subject, source, anchor, confidence, assurance } ; ::marker() -> String / ::footnote() -> String", "NlqConfig { summary_budget_chars, max_repair_rounds, exec_timeout, max_rows, examples, ground, link_entities, link_expand_k, max_links, check_dictionary, qualify: Option<QualifyConfig> (feature = \"citations\") }", "sparq_nlq::link::EntityLinker::build(graph: &Graph, expand_k: usize, max_links: usize)", "EntityLinker::link(&self, question: &str) -> Linking", "sparq_nlq::link::Linking { entities: Vec<LinkedEntity>, relations: Vec<LinkedRelation> } ; Linking::to_prompt_section(&self) -> Option<String>", "sparq_nlq::constrain::unknown_terms(graph: &Graph, query: &spargebra::Query) -> Vec<UnknownTerm>", "sparq_nlq::constrain::dictionary_repair_message(unknowns: &[UnknownTerm]) -> String", "sparq_nlq::constrain::UnknownTerm { iri, role: TermRole, suggestions }", "sparq_nlq::eval::EvalCase::new(question, gold_sparql)", "sparq_nlq::eval::run_config(graph, cases, llm, config, Linking) -> Report", "sparq_nlq::eval::run_comparison(graph, cases, base_config, make_llm) -> Comparison", "Comparison::headline_grounding_pays() -> bool / summary() -> String", "F1::score(&AnswerSet, &AnswerSet) -> F1 / is_exact() -> bool ; AnswerSet::from_result(&QueryResult)", "sparq_engine::cs::{CsSet, CsTable}  (sparq-engine feature = \"cs-planner\")", "sparq_terse::terse_to_sparql(src: &str) -> Result<Expansion, TerseError>  (Phase 1 pass-through + silent-rewrite canary + Phase 3 K:<name> keyword layer; V() rejected loudly)", "sparq_terse::terse_to_sparql_with(src, ctx: &ResolveCtx, embed: impl FnMut(&str) -> Option<Vec<f32>>) -> Result<Expansion, TerseError>  (feature = \"vectors\"; runs the keyword layer THEN V())", "sparq_terse::Expansion { canonical_sparql: String, resolutions: Vec<Resolution>, keywords: Vec<KeywordExpansion>, warnings: Vec<String> }", "sparq_terse::Resolution { phrase, iri, score, runner_up, runner_up_score, confidence, method: Method }", "sparq_terse::KeywordExpansion { keyword: String, iri: String, legend_version: String }  (lever 1, design §3.1, sq-vfeme)", "sparq_terse::{legend() -> Vec<(&'static str, String)>, legend_card() -> String, legend_len() -> usize, LEGEND_VERSION: &str}  (the frozen K:<name> legend + its in-context card)", "sparq_terse::ResolveCtx::lexical(graph: &Graph) / .with_vector_store(&VectorStore) / .with_gate(ResolveGate)  (feature = \"vectors\")", "sparq_terse::ResolveGate { min_score, min_confidence }  (feature = \"vectors\")", "sparq_terse::TerseError::{FeatureRequired, CanaryFailed, Unresolved, StaleStore, UnknownKeyword, KeywordPrefixCollision}"]

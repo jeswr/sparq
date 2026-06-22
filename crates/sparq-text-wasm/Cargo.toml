@@ -1,0 +1,53 @@
+# [OPUS-4.8] sq-jbe6 (W-text): the tier-b WASM bundle for sparq-text.
+#
+# A SEPARATE, lazy-loaded bundle (NOT folded into the lean `sparq-wasm` bundle): it
+# carries the owned BM25 inverted index + the `text:` magic-predicate rewrite
+# (`sparq-text`, default-on `engine` feature) plus the SPARQL engine it rewrites
+# through (`sparq-engine`). The lean default browser bundle deliberately carries
+# ZERO text-search code; the showcase site loads this bundle ONLY on
+# /surface/full-text (next/dynamic, client-only) so the landing page stays light.
+# Mirrors the per-bundle-crate pattern of `sparq-wasm` / `sparq-reason-wasm`.
+[package]
+name = "sparq-text-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+# cdylib for the wasm artifact; rlib so the pure helpers can be unit-tested natively.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# No-default-features everywhere => no rayon: the wasm build has no threads and we keep
+# the bundle minimal. `sparq-text` with default-features off drops its `parallel` (rayon)
+# feature; we turn its default-on `engine` feature back on explicitly (the `text:` magic
+# predicates rewrite through sparq-engine — the whole point of this bundle). The
+# tokenizer's `unicode-segmentation` is pure-Rust + zero transitive deps, so it compiles
+# to wasm32 unchanged: the portability spike (sq-jbe6) confirmed sparq-text's full
+# `engine` graph builds for `wasm32-unknown-unknown` — the ONLY build blocker was
+# getrandom's wasm backend (handled below, exactly as `sparq-wasm`/`sparq-reason-wasm` do).
+sparq-core = { path = "../sparq-core", default-features = false }
+sparq-engine = { path = "../sparq-engine", default-features = false }
+sparq-text = { path = "../sparq-text", default-features = false, features = ["engine"] }
+wasm-bindgen = "0.2"
+
+# oxrdf (pulled transitively) uses `rand`/getrandom (blank-node ids). On wasm there is no
+# OS RNG, so select getrandom's browser backend (crypto.getRandomValues). The matching
+# `--cfg getrandom_backend="wasm_js"` is set in the workspace .cargo/config.toml.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[features]
+default = []
+
+[dev-dependencies]
+# [OPUS-4.8] sq-jbe6 — headless wasm test harness, mirroring sparq-wasm/sparq-reason-wasm:
+# exercises the #[wasm_bindgen] JS-facing API in a REAL wasm runtime via
+# `wasm-pack test --node`. Dev-only: it must NOT enter the non-dev wasm graph.
+wasm-bindgen-test = "0.3"
+
+[package.metadata.wasm-pack.profile.release]
+# Optimise the wasm for size; the index-build path is the bundle's memory risk (the bead
+# flags it) — a tiny demo corpus keeps it bounded.
+wasm-opt = ["-Oz"]

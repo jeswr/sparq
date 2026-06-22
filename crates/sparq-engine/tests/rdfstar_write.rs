@@ -1,7 +1,7 @@
-//! [OPUS-4.8] sq-t267 — RDF 1.2 / RDF-star coverage on the WRITE/INGEST side.
+//! [OPUS-4.8] sq-t267 — RDF 1.2 triple-term coverage on the WRITE/INGEST side.
 //!
-//! `exec.rs`'s `rdf_star_*` cluster already proves strong RDF-star *read* coverage
-//! (concrete/nested triple terms, quoted-pattern variable positions, the triple
+//! `exec.rs`'s `rdf_star_*` cluster already proves strong triple-term *read* coverage
+//! (concrete/nested triple terms, triple-term-pattern variable positions, the triple
 //! built-ins). The audit found the gaps were on the WRITE side:
 //!
 //! 1. quoted/triple terms as INSERT DATA / DELETE DATA objects and inside

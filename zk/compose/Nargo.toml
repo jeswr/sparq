@@ -2,12 +2,45 @@
 members = [
     "compose_core",
     "scan_k1_n16_r4",
+    # [OPUS-4.8] sq-pzet: remaining scan (k,n,r)-lattice members the family could
+    # derive but that had no compiled package (silent-unprovability gap, sq-wto
+    # class). NOT a soundness change (verifier remains NOT-yet-sound, sq-qhy4).
+    "scan_k1_n16_r8",
+    "scan_k1_n64_r4",
+    "scan_k1_n64_r8",
+    "scan_k2_n16_r4",
     "scan_k2_n16_r8",
+    "scan_k2_n64_r4",
     "scan_k2_n64_r8",
     "filter_int_d1",
     "filter_int_d2",
     "filter_int_d3",
     "filter_int_d4",
+    # [OPUS-4.8] sq-1q9h: SIGNED xsd:integer + xsd:decimal FILTER coverage --
+    # extends filter_int (canonical NON-negative integer only) to negative
+    # integers and decimal amounts (sound operand binding; verifier composability
+    # wiring is a follow-up, like the filter_f64 building-block precedent).
+    "filter_signed_int_d2",
+    "filter_signed_int_d4",
+    "filter_decimal_i3_f2",
+    # [OPUS-4.8] sq-xojl: DUAL-LEAF value-lane FILTER member (VALUE_HOOK + lexical
+    # leaf; no in-circuit blake3). Carries the documented INV-VL downgrade (#769
+    # accepted, CR-G8 / sq-qhy4). Opt-in / research-grade; verifier-composability
+    # wiring is a follow-up (gated on the host dual-leaf encoding sq-j506 + the
+    # (method x circuit) dispatch sq-cfmv), like the filter_f64 building-block
+    # precedent. NOT externally audited.
+    "filter_value_dl_int",
+    # [OPUS-4.8] sq-2ezsx: DUAL-LEAF value-lane FILTER members for the xsd:double
+    # and xsd:decimal datatype CLASSES (sibling members of filter_value_dl_int).
+    # These are MANY-TO-ONE on the term (IEEE -0.0/+0.0, NaN payloads; decimal
+    # 5.0/5.00 at a fixed scale), so unlike the integer class they instantiate B4
+    # IN-CIRCUIT: f64 canonicalises the IEEE bits before the value bind; decimal
+    # folds the canonical scale into the public datatype_const. Same OFF-by-default
+    # `dual-leaf` feature, INV-VL downgrade (#769 accepted, CR-G8 / sq-qhy4),
+    # NOT externally audited. Verifier-composability wiring (verify_manifest
+    # dispatch) is the same follow-up as the integer member (design bead 6 / sq-j506).
+    "filter_value_dl_f64",
+    "filter_value_dl_decimal",
     "filter_f64",
     "filter_f64_d1",
     "filter_f64_d2",
@@ -16,5 +49,14 @@ members = [
     "revoke_unset_d10",
     "hidden_issuer_d4",
     "holder_pok",
+    # [OPUS-4.8] sq-3c00: hidden-holder-SET anonymity tier (Merkle holder-set
+    # membership; the holder analogue of hidden_issuer_d4). Opt-in, NOT-yet-sound
+    # (sq-qhy4) -- the verifier remains NOT-yet-sound; this is not a soundness change.
+    "holder_set_d4",
     "join_eq_na16_nb16",
+    # [OPUS-4.8] sq-pzet: remaining hidden-join graph-size members (the N=64
+    # bucket) so a join composes with an n=64 scan.
+    "join_eq_na16_nb64",
+    "join_eq_na64_nb16",
+    "join_eq_na64_nb64",
 ]

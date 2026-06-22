@@ -1,0 +1,197 @@
+# pkg.shapes.ttl — the PKG SHACL write-time guardrails
+#
+# [OPUS-4.8] sq-2m6zm.1 (epic sq-2m6zm). 🤖 SPARQ agent — dogfooding sparq as a
+# project knowledge graph. Written while Fable unavailable; flag for re-review when
+# Fable returns.
+#
+# Implements research/dogfooding-sparq-knowledge-graph.md §2.4 (FindingShape /
+# SourceShape / SupersedesShape) and §4.4 (TaskShape stale-edge constraint over
+# pkg:blockedBy). These are the WRITE-TIME GUARDRAILS (the maintainer's goal 3):
+# no discovery is stored without its source + a confidence value + a non-filler
+# justification, and a task cannot carry an out-of-enum status / out-of-range
+# priority / stale dependency edge. Gate ingestion on
+# `report.conforms_violations_only()` (sparq-shacl).
+#
+# The mandatory FindingShape constraints are the dogfooding honesty discipline:
+# pkg:confidence and pkg:assurance are required on every Finding (no discovery
+# stored without its epistemic basis); filler/placeholder prose is rejected.
+#
+# IMPORTANT (§2.2 / §4.4): the task shapes reference ONLY pkg:dependsOn and its OWL
+# inverse pkg:blockedBy — there is NO pkg:blocks — so every constraint targets a
+# DEFINED property and will actually fire.
+
+@prefix sh:      <http://www.w3.org/ns/shacl#> .
+@prefix pkg:     <https://sparq.dev/ns/pkg#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix cito:    <http://purl.org/spar/cito/> .
+@prefix sigimpl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix secx:    <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+# =============================================================================
+# FindingShape — every Finding has a source + a confidence value + an assurance
+# basis + structured (non-filler) content (§2.4)
+# =============================================================================
+
+pkg:FindingShape a sh:NodeShape ;
+  sh:targetClass pkg:Finding ;
+
+  # MANDATORY source: every Finding must cite >=1 source.
+  # prov:wasDerivedFrom (pkg:discoveredFrom is rdfs:subPropertyOf it, but SHACL does
+  # not entail subproperties, so a Finding that cites only via pkg:discoveredFrom must
+  # also carry the prov:wasDerivedFrom form — the ingestion projector materialises it;
+  # the example file uses prov:wasDerivedFrom directly).
+  sh:property [
+    sh:path prov:wasDerivedFrom ;
+    sh:minCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:message "every Finding must cite >=1 source (prov:wasDerivedFrom)"
+  ] ;
+
+  # MANDATORY confidence: exactly one decimal in [0.0, 1.0].
+  sh:property [
+    sh:path pkg:confidence ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:decimal ;
+    sh:minInclusive 0.0 ;
+    sh:maxInclusive 1.0 ;
+    sh:message "every Finding must carry exactly one pkg:confidence in [0.0, 1.0]"
+  ] ;
+
+  # MANDATORY assurance basis: one of the secx: epistemic-basis enum.
+  sh:property [
+    sh:path pkg:assurance ;
+    sh:minCount 1 ;
+    sh:in ( secx:Proven secx:Claimed secx:Conjectured ) ;
+    sh:message "every Finding must carry a pkg:assurance of secx:Proven / Claimed / Conjectured"
+  ] ;
+
+  # NON-FILLER justification: present and >=12 chars.
+  sh:property [
+    sh:path sigimpl:justification ;
+    sh:minCount 1 ;
+    sh:minLength 12 ;
+    sh:message "every Finding must carry a justification of >=12 chars"
+  ] ;
+
+  # NON-FILLER justification (the no-placeholder half): a justification must NOT
+  # START with a filler/placeholder token. Expressed as a POSITIVE-match sh:sparql
+  # constraint (flag when REGEX matches) rather than a `(?!...)` negative-lookahead
+  # sh:pattern: SPARQL/XPath-flavour regex (which both SPARQL REGEX and SHACL
+  # sh:pattern are specified against) does NOT support lookahead, and sparq-shacl's
+  # sh:pattern silently fails closed on an uncompilable pattern (dogfooding finding,
+  # see PROVENANCE.md / bead). A positive `^(TODO|...)` anchored alternation is
+  # portable across both regex flavours.
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "justification must be non-filler (no leading TODO/TBD/lorem/placeholder/FIXME)" ;
+    sh:select """
+      PREFIX pkg:     <https://sparq.dev/ns/pkg#>
+      PREFIX sigimpl: <https://w3id.org/zkp-sparql/sig-impl#>
+      SELECT $this WHERE {
+        $this sigimpl:justification ?j .
+        FILTER(REGEX(STR(?j), "^\\\\s*(TODO|TBD|lorem|placeholder|FIXME)", "i"))
+      }"""
+  ] ;
+
+  # CROSS-FIELD: a derived Finding (one that names the rule that produced it via
+  # pkg:derivedBy) must cite that rule as evidence. This catches a derived claim
+  # that drops its rule citation.
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "a derived Finding must cite the rule that produced it (cito:citesAsEvidence)" ;
+    sh:select """
+      PREFIX pkg:  <https://sparq.dev/ns/pkg#>
+      PREFIX cito: <http://purl.org/spar/cito/>
+      SELECT $this WHERE {
+        $this pkg:derivedBy ?rule .
+        FILTER NOT EXISTS { $this cito:citesAsEvidence ?r }
+      }"""
+  ] .
+
+# =============================================================================
+# SourceShape — every Source has an explored-status + a real title (§2.4)
+# =============================================================================
+
+pkg:SourceShape a sh:NodeShape ;
+  sh:targetClass pkg:Source ;
+
+  sh:property [
+    sh:path pkg:exploredStatus ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:in ( pkg:Unexplored pkg:Exploring pkg:Explored pkg:DeadEnd ) ;
+    sh:message "every Source must carry exactly one pkg:exploredStatus from the scheme"
+  ] ;
+
+  sh:property [
+    sh:path dcterms:title ;
+    sh:minCount 1 ;
+    sh:minLength 4 ;
+    sh:message "every Source must carry a dcterms:title of >=4 chars"
+  ] .
+
+# =============================================================================
+# SupersedesShape — dcterms:replaces must point at an existing Technique (§2.4,
+# catch a dangling supersedes claim)
+# =============================================================================
+
+pkg:SupersedesShape a sh:NodeShape ;
+  sh:targetClass pkg:Technique ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "dcterms:replaces must point at an existing pkg:Technique" ;
+    sh:select """
+      PREFIX pkg:     <https://sparq.dev/ns/pkg#>
+      PREFIX dcterms: <http://purl.org/dc/terms/>
+      SELECT $this WHERE {
+        $this dcterms:replaces ?o .
+        FILTER NOT EXISTS { ?o a pkg:Technique }
+      }"""
+  ] .
+
+# =============================================================================
+# TaskShape — task validity: status enum + bounded priority + no stale dependency
+# edge (§4.4)
+# =============================================================================
+
+pkg:TaskShape a sh:NodeShape ;
+  sh:targetClass pkg:Task ;
+
+  sh:property [
+    sh:path pkg:status ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:in ( pkg:Open pkg:InProgress pkg:Blocked pkg:Closed pkg:Deferred ) ;
+    sh:message "every Task must carry exactly one pkg:status from the enum"
+  ] ;
+
+  sh:property [
+    sh:path pkg:priority ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 0 ;
+    sh:maxInclusive 4 ;
+    sh:message "pkg:priority must be an integer in [0, 4]"
+  ] ;
+
+  # STALE-EDGE: a closed task must not still block an open one. Uses ONLY the
+  # §2.2 pkg:blockedBy predicate (the OWL inverse of pkg:dependsOn). This is the
+  # exact bug autonomous-scheduler-design.md cites (beads left in_progress after PR
+  # merge) expressed as a declarative constraint, not a CI script.
+  # (?o pkg:blockedBy $this) <=> ($this pkg:dependsOn ?o), owl:inverseOf §2.2.
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "a closed task must not still block an open one (stale edge)" ;
+    sh:select """
+      PREFIX pkg: <https://sparq.dev/ns/pkg#>
+      SELECT $this WHERE {
+        $this pkg:status pkg:Closed .
+        ?o pkg:blockedBy $this .
+        ?o pkg:status ?os .
+        FILTER(?os != pkg:Closed)
+      }"""
+  ] .

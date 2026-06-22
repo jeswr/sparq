@@ -6,10 +6,14 @@ suites, dashboard, test-coverage llvm-cov, test-gaps). Point-in-time measurement
 the numbers here are an audit snapshot, not a hard-coded perf claim. Work items are tracked
 in **beads** (see `bd list -l area:bench` / `-l area:test`).
 
+<!-- [OPUS-4.8] sq-knl8 (2026-06-17): total-crate count synced 25 → 31 to track the
+     current workspace (`ls crates/`); this is the TOTAL count, distinct from the
+     unsafe-posture forbid/unsafe split tracked separately in the memsafety audit. -->
+
 ## 1. Benchmark coverage
 
 ### 1.1 Package coverage — already strong
-Of 25 crates, ~20 have a perf bench (registered in `bench/benchmarks.toml` or an `examples/`
+Of 31 crates, ~20 have a perf bench (registered in `bench/benchmarks.toml` or an `examples/`
 harness). Genuine gaps / actions:
 
 - **sparq-vectors** — has `tests/throughput.rs` (HNSW build + exact-vs-HNSW query) but it is
@@ -122,7 +126,7 @@ misleadingly low and flaky.
 - **P0 stand up the coverage gate** (§2.3) WITH fixtures + conformance binaries included.
 - **P1 UPDATE SILENT/non-SILENT outcome table + request-level atomicity rollback**
   (sparq-engine). (model: WAL all-or-nothing tests)
-- **P1 RDF 1.2 / rdf-star in UPDATE, CONSTRUCT templates, and the PARALLEL Turtle chunk path**
+- **P1 RDF 1.2 triple terms in UPDATE, CONSTRUCT templates, and the PARALLEL Turtle chunk path**
   (engine+core): SELECT side strong; ingest/template/serialize + quoted-triple-at-chunk-
   boundary are gaps.
 - **P1 MPC adversarial-share negative suite + "no fake crypto" stub gate** (sparq-mpc): assert

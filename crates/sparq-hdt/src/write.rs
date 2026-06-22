@@ -68,7 +68,7 @@ fn out_container(path: &Path) -> OutContainer {
 /// Front Coding + BitmapTriples in SPO order) — the same layout [`crate::load`]
 /// reads, and the one hdt-cpp / hdt-java emit, so the result is interoperable. The
 /// sections are encoded DIRECTLY from sparq's in-memory dictionary + triples (no
-/// temporary N-Triples file, no text re-parse — see [`crate::encode`]). If `path`
+/// temporary N-Triples file, no text re-parse — see `crate::encode`). If `path`
 /// ends in `.gz` / `.zst` / `.bz2` the archive bytes are wrapped in that container
 /// (matching the reader's magic-byte sniffing); any other extension writes a bare
 /// `.hdt`.

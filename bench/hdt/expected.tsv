@@ -1,0 +1,31 @@
+# [OPUS-4.8] (sq-lrp9) HDT suite DETERMINISTIC golden values for the vendored
+# real-world snikmeta.hdt fixture (crates/sparq-hdt/tests/fixtures/snikmeta.hdt — a
+# hdt-cpp/java-shaped FourSectDict+BitmapTriples archive, NOT produced by this code
+# path; the `hdt` crate's own tests assert its 328 triples). Format: <metric>\t<count>.
+#
+# These are the LOAD-AND-DECODE-TO-NATIVE + triple-pattern-resolution gate (design
+# §3.7(a/b)) — the ONLY like-for-like axis vs hdt-cpp/java (query-over-HDT is a NON-goal;
+# see README.md). They are DERIVED by RUNNING examples/bench_oracle on the fixture (not
+# guessed); run.sh re-runs it every commit and exits 1 on any drift, exactly like LUBM's
+# row-count diff / FTS's hit-count diff. The advisory hdt_load_s / hdt_vs_ntgz_load_s rows
+# bench_oracle also emits are wall-clock (non-canonical dev box) and are NEVER asserted.
+#
+#   snikmeta_triples             stored triple count of the decoded graph (HDT's
+#                                expected-rows.tsv; the same 328 the round-trip + the hdt
+#                                crate's own tests assert).
+#   snikmeta_terms               distinct dictionary terms interned into sparq's Dict
+#                                (the id-translation produced exactly this many terms).
+#   snikmeta_distinct_predicates distinct predicates via a full SPO scan (triple-pattern
+#                                resolution over the decoded graph's own index).
+#   snikmeta_rdf_type_triples    a single bound-predicate triple-pattern resolution
+#                                (count of rdf:type triples).
+#   snikmeta_direct_eq_upstream  1 iff the default direct decoder (H1–H4) and the
+#                                upstream-backed path (Hdt::read + per-id id_to_string)
+#                                decode the SAME bytes to byte-identical graphs (the
+#                                id-translation oracle; the exhaustive form is in
+#                                crates/sparq-hdt/tests/roundtrip.rs). Anything but 1 fails.
+snikmeta_triples	328
+snikmeta_terms	205
+snikmeta_distinct_predicates	23
+snikmeta_rdf_type_triples	49
+snikmeta_direct_eq_upstream	1

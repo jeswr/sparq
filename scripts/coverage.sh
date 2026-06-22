@@ -93,6 +93,32 @@ PER_COMMIT_CRATES=(
   sparq-parse sparq-gpu sparq-wasm sparq-zk sparq-zk-compose
   sparq-vectors                # measured with the two 50k tests SKIPPED (see below)
   sparq-conformance            # low %, floor 0 (test driver) — kept for presence
+  # [OPUS-4.8] sq-bif.1: the three OPT-IN native crates that were untracked by BOTH
+  # coverage gates. Their whole surface is feature-gated (fedclient/fedplan empty by
+  # default; prov has a `reason` extra), so they MUST be measured WITH those features
+  # on — the `case` in measure() below names them, or a default-feature build would
+  # report an empty-crate number. The 4 tier-b `-wasm` crates are NOT added here:
+  # their gate-exercising surface is the `#[wasm_bindgen]` JS API that only the
+  # `wasm-pack test --node` runner reaches, so a NATIVE llvm-cov number is a
+  # misleadingly-low artifact (measured 55-79% native; same class as sparq-cli's
+  # subprocess artifact) — they are floor-0 + presence-gated in the JSONs instead.
+  sparq-fedclient sparq-fedplan sparq-prov
+  # [OPUS-4.8] sq-bif.7: the OPT-IN ODRL usage-control policy crate, untracked by BOTH
+  # gates. The STATELESS evaluator (parse/eval/compare/hierarchy) is default-on, but the
+  # stateful `odrl:count` counter stores (the `count`/`count_file`/`count_backend` modules
+  # + their tests) are `#![cfg(feature = "count-enforcement")]`. So it MUST be measured
+  # WITH --features count-enforcement (the `case` in measure() below names it) — a default
+  # build compiles that whole surface out and reports a non-representative number.
+  sparq-policy
+  # [OPUS-4.8] sq-bif.8 / sq-bif.9: two OPT-IN, standalone crates that nothing in the
+  # default build depends on, both untracked by BOTH gates. Unlike the federation/policy
+  # crates above they have NO opt-in features (sparq-algos: `default = []` only; sparq-canon:
+  # no `[features]` table), so their WHOLE surface is compiled in a default-feature build —
+  # they need NO `case` arm in measure() and are measured exactly as-is. sparq-canon's number
+  # reflects its tests/rdf_canon_suite.rs driving the full 86-entry W3C RDFC-1.0 manifest plus
+  # the focused bnode-isomorphism / oxrdf-bridge unit cases; sparq-algos' reflects the inline
+  # PageRank/centrality/community oracles plus the tests/topology_oracles.rs integration suite.
+  sparq-algos sparq-canon
 )
 # Crates whose HEAVY tests are only run in the nightly tier.
 NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nightly tier"
@@ -100,6 +126,50 @@ NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nigh
 # Tests EXCLUDED from the per-commit subset, by name (libtest --skip substring).
 # DOCUMENTED here so the exclusion is never silent.
 VECTORS_HEAVY_SKIP="recall_at_10_vs_brute_force_on_50k"   # matches HNSW + DiskANN 50k
+
+# ---- conformance-binary merge (sq-bjct, NIGHTLY tier only) [OPUS-4.8] --------
+# The W3C SPARQL + inference suites run as the sparq-conformance /
+# sparq-inference-conformance BINARIES (`cargo run`), NOT as `cargo test`. So a
+# plain `cargo llvm-cov --package sparq-core` (which only runs that crate's
+# `cargo test`) does NOT count the suites' deep exercise of sparq-core /
+# sparq-engine — their per-crate floors otherwise reflect only unit+integration
+# tests.
+#
+# In the nightly/full tiers we MERGE the two conformance binaries' coverage into
+# the sparq-core / sparq-engine reports via cargo-llvm-cov's documented
+# accumulate-then-report flow (profraw is NOT clobbered between `--no-report`
+# invocations; it only resets on `clean`):
+#   1. `cargo llvm-cov clean --workspace`            — empty the profraw dir
+#   2. `cargo llvm-cov test  --no-report -p X ...`   — capture X's unit+integration
+#      tests' profraw (no report yet)
+#   3. `cargo llvm-cov run   --no-report --bin sparq-conformance ...`            \
+#      `cargo llvm-cov run   --no-report --bin sparq-inference-conformance ...`  —
+#      capture each suite binary's profraw ON TOP of (2) without wiping it
+#   4. `cargo llvm-cov report -p X --json --summary-only` — merge ALL accumulated
+#      profraw and emit X's line% over the merged set.
+# Step 4's report for package X therefore includes every X line that any of
+# (2)/(3) executed. We `report -p X` per crate so the number stays attributed to
+# X alone (the binaries themselves stay floor-0 / presence-gated).
+#
+# This roughly DOUBLES the core/engine measurement cost (the suites are a second
+# heavy exercise on top of the tests), which is exactly why it is nightly-only —
+# the per-commit tier keeps the cheap test-only measurement unchanged.
+#
+# FIXTURE-ABSENCE BEHAVIOUR (NOT a graceful degrade): step (3)'s suite binaries
+# REQUIRE their fixtures. If `<root>/sparql` (sparq-conformance) or the inference
+# RDF-tests dir (sparq-inference-conformance) is absent, that binary prints
+# "test data not found … run scripts/fetch-*.sh first" and `std::process::exit(2)`s
+# (see crates/sparq-conformance/src/main.rs and src/bin/inference.rs) — it does NOT
+# skip-and-continue. A non-zero exit BREAKS measure_merged()'s `&&` chain, so step
+# (4)'s `report` never runs, rc!=0, and the crate is recorded UNMEASURED — the
+# step-2 test-only profraw is DISCARDED for that crate, not reported as a lower
+# number. So fixtures must be present (fetched above) for the merge to produce a
+# number at all; on absence the crate falls through to the unmeasured-row path
+# (which the robust gate then re-measures test-only). This is fail-closed, not a
+# silent lower measurement.
+CONFORMANCE_MERGE_CRATES="sparq-core sparq-engine"
+# Enable the merge only outside the cheap per-commit tier (set to 0 to force-disable).
+CONFORMANCE_MERGE="${CONFORMANCE_MERGE:-auto}"
 
 # ---- fixtures (idempotent; no-ops when already pinned) ----------------------
 if [ "$FETCH_FIXTURES" = "1" ]; then
@@ -123,8 +193,105 @@ trap 'rm -rf "$WORK"' EXIT
 declare -a ROWS=()
 TOTAL_START=$(date +%s)
 
+# [OPUS-4.8] sq-bjct: decide whether THIS crate's measurement should merge the
+# conformance binaries' coverage. Yes only when (a) the crate is one of the
+# CONFORMANCE_MERGE_CRATES, AND (b) the merge is enabled for this tier: "auto"
+# enables it for any tier except per-commit (it ~doubles core/engine cost), and an
+# explicit CONFORMANCE_MERGE=1/0 forces it on/off (1 even lets a `full`-tier ad-hoc
+# run merge; 0 disables for debugging / a fast nightly).
+want_conformance_merge() {
+  local crate="$1"
+  case " $CONFORMANCE_MERGE_CRATES " in *" $crate "*) ;; *) return 1 ;; esac
+  case "$CONFORMANCE_MERGE" in
+    0|false|no) return 1 ;;
+    1|true|yes) return 0 ;;
+    auto|*)     [ "$TIER" != "per-commit" ] && return 0 || return 1 ;;
+  esac
+}
+
+# [OPUS-4.8] sq-bjct: measure ONE crate with the conformance binaries MERGED into its
+# report (nightly tier). Uses cargo-llvm-cov's accumulate-then-report flow — see the
+# CONFORMANCE-BINARY MERGE header block for the full rationale. Emits the SAME JSON row
+# shape as measure(), tagging features += "conformance-merge" so the summary records that
+# this crate's number includes the suite binaries. On ANY failure to capture the merged
+# profraw — including fixture-absence, where a suite binary `exit(2)`s and breaks the `&&`
+# chain BEFORE step (4)'s report (see the FIXTURE-ABSENCE note in the header) — it leaves
+# rc!=0 and the caller falls through to the unmeasured-row path (the robust gate then
+# re-measures test-only). It records the crate UNMEASURED rather than a silent low number.
+measure_merged() {
+  local crate="$1"
+  local -a features=("conformance-merge")
+  local -a feat_flags=()
+  # sparq-core keeps its mmap,dict-spill security surface (see PER-CRATE QUIRKS).
+  if [ "$crate" = "sparq-core" ]; then
+    feat_flags+=(--features mmap,dict-spill); features+=("mmap" "dict-spill")
+  fi
+  local start end rc=0 json="$WORK/$crate.json" err="$WORK/$crate.err"
+  start=$(date +%s)
+  : > "$err"
+  {
+    # 1. Start from an empty profraw set so ONLY this measurement's runs count.
+    cargo llvm-cov clean --workspace &&
+    # 2. Capture the crate's own unit+integration tests (serial — same profraw-race
+    #    mitigation as measure(); see sq-x4jy). No report yet.
+    cargo llvm-cov test --no-report --package "$crate" "${feat_flags[@]}" \
+      -- --test-threads=1 &&
+    # 3. Capture each suite binary ON TOP of (2) without wiping the profraw. Reports
+    #    are written into $WORK so they never litter the repo root.
+    cargo llvm-cov run --no-report --release -p sparq-conformance \
+      --bin sparq-conformance -- --report "$WORK/conformance-report.md" &&
+    cargo llvm-cov run --no-report --release -p sparq-conformance \
+      --bin sparq-inference-conformance -- --report "$WORK/inference-report.md" &&
+    # 4. Merge ALL accumulated profraw and emit X's line% over the merged set.
+    #    NB: `report` does NOT accept --features (that is a build-time flag, applied
+    #    in steps 2-3 which chose what code was compiled); passing it here errors with
+    #    "invalid option '--features' for subcommand 'report'". The report just
+    #    summarises the accumulated profraw for package X.
+    cargo llvm-cov report --package "$crate" \
+      --summary-only --json --output-path "$json"
+  } >/dev/null 2>>"$err" || rc=$?
+  end=$(date +%s)
+
+  if [ "$rc" -ne 0 ] || [ ! -s "$json" ]; then
+    echo "  !! $crate (conformance-merge) FAILED to measure (rc=$rc) — see error tail:"
+    tail -8 "$err" | sed 's/^/     /'
+    ROWS+=("$(python3 - "$crate" "$((end-start))" <<'PY'
+import json,sys
+print(json.dumps({"crate":sys.argv[1],"seconds":int(sys.argv[2]),"measured":False}))
+PY
+)")
+    return
+  fi
+
+  local feats_json
+  feats_json=$(printf '%s\n' "${features[@]}" | python3 -c 'import sys,json;print(json.dumps([l for l in sys.stdin.read().split("\n") if l]))')
+  local row
+  row=$(python3 - "$crate" "$json" "$((end-start))" "$feats_json" <<'PY'
+import json,sys
+crate,path,secs,feats=sys.argv[1],sys.argv[2],int(sys.argv[3]),json.loads(sys.argv[4])
+d=json.load(open(path))
+t=d["data"][0]["totals"]["lines"]
+print(json.dumps({"crate":crate,"lines_pct":round(t["percent"],2),
+  "lines_covered":t["covered"],"lines_total":t["count"],
+  "seconds":secs,"features":feats,"skipped_tests":[],"measured":True}))
+PY
+)
+  ROWS+=("$row")
+  printf "  %-20s lines=%6s%%  %4ss  feat=%s\n" "$crate" \
+    "$(echo "$row" | python3 -c 'import sys,json;print(json.load(sys.stdin)["lines_pct"])')" \
+    "$((end-start))" "${features[*]}"
+}
+
 measure() {
   local crate="$1"; shift
+  # [OPUS-4.8] sq-bjct: in the nightly/full tiers, sparq-core / sparq-engine are
+  # measured with the W3C conformance binaries MERGED into the report (those suites
+  # run as BINARIES, not `cargo test`, so the plain per-crate measurement misses
+  # their deep exercise of these crates). Per-commit is unchanged.
+  if want_conformance_merge "$crate"; then
+    measure_merged "$crate"
+    return
+  fi
   local features=()           # array of feature names recorded in JSON
   local skips=()              # array of skipped-test substrings recorded in JSON
   local -a cargo_args=(--package "$crate")
@@ -159,6 +326,32 @@ measure() {
       if [ "$TIER" = "per-commit" ]; then
         subcmd="test"; test_args+=(--skip "$VECTORS_HEAVY_SKIP"); skips+=("$VECTORS_HEAVY_SKIP")
       fi ;;
+    # [OPUS-4.8] sq-bif.1: the opt-in federation/provenance crates are ENTIRELY
+    # feature-gated — a default-feature `cargo llvm-cov -p <crate>` would build an
+    # empty crate and report a meaningless number. Name the features that turn the
+    # whole surface ON so the measured line% reflects the real (feature-on) code the
+    # floor gates. (Mirrors the sparq-core `--features mmap,dict-spill` quirk above.)
+    sparq-fedclient)
+      # `fedclient` enables the module surface + REUSE seams; `fedclient-adaptive`
+      # turns on the Phase-7 adaptive re-planning module (its tests are gated on it).
+      cargo_args+=(--features fedclient,fedclient-adaptive)
+      features+=("fedclient" "fedclient-adaptive") ;;
+    sparq-fedplan)
+      # `fedplan` enables the planner; `adaptive-replan` the live re-planning module.
+      cargo_args+=(--features fedplan,adaptive-replan)
+      features+=("fedplan" "adaptive-replan") ;;
+    sparq-prov)
+      # `reason` turns on the sparq-reason proof-tree -> PROV-O lineage bridge module
+      # (its integration test, tests/reason_prov.rs, is gated on it). The CONSTRUCT/
+      # update lineage core is default-on.
+      cargo_args+=(--features reason); features+=("reason") ;;
+    # [OPUS-4.8] sq-bif.7: `count-enforcement` turns on the stateful `odrl:count`
+    # counter-store surface (the `count`/`count_file`/`count_backend` modules + their
+    # `#![cfg(feature = "count-enforcement")]` integration tests). The stateless ODRL
+    # evaluator is default-on; without this feature that whole surface is compiled out
+    # and the number is non-representative. (Mirrors the sparq-prov `reason` quirk above.)
+    sparq-policy)
+      cargo_args+=(--features count-enforcement); features+=("count-enforcement") ;;
   esac
 
   local start end rc=0 json="$WORK/$crate.json"

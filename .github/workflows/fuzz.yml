@@ -69,7 +69,15 @@ jobs:
     # hung target fails with a clear timeout rather than running away.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
+      # cargo-fuzz build. Each libFuzzer/sancov-instrumented target links a sanitizer
+      # runtime + its own `fuzz/target` tree, on a runner that starts with only ~14 GB free
+      # on `/` — the same `No space left on device` profile sq-c76x fixed in the load-aware
+      # test lane. Same in-repo, SHA-pin-free, best-effort step (absent paths no-op). See
+      # scripts/ci-free-disk.sh.
+      - name: Free runner disk before build
+        run: ./scripts/ci-free-disk.sh
       # cargo-fuzz REQUIRES nightly (libFuzzer sancov codegen / `-Zsanitizer`). Pin the
       # nightly channel by date so the lane is reproducible and a future nightly
       # regression cannot silently break it; bump the date deliberately.
@@ -96,7 +104,7 @@ jobs:
           # cache on its manifests so it is not shared with the workspace build.
           workspaces: "fuzz"
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: cargo-fuzz
       - name: Pick the per-target budget for this trigger

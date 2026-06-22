@@ -40,7 +40,7 @@
 //! positions are stored — every existing caller is byte-for-byte unchanged.
 //! Positions are **opt-in**: [`TextIndex::build_with_positions`] (or
 //! [`TextIndex::with_positions`] for the empty/delta-fed case) turns on a
-//! SEPARATE parallel structure ([`positions`](TextIndex::positions)) recording,
+//! SEPARATE parallel structure (`positions`) recording,
 //! for each (token, doc), the token's 0-based offsets within that document. The
 //! BM25 tables and the single-/multi-term [`search`](TextIndex::search) path are
 //! identical either way; only the extra map is allocated, so the cheap default
@@ -69,10 +69,59 @@
 //! contain the same documents — the incremental index stays EXACTLY equal to
 //! a rebuild (the differential property `tests/delta.rs` pins). An orphaned
 //! literal id is harmless downstream: joining it back to triples through the
-//! permutations yields zero rows. After `Graph::compact` (ids reassigned),
-//! rebuild the index.
+//! permutations yields zero rows. In-process `Graph::compact` folds the fork
+//! structure but keeps every dictionary id, so the index stays valid across it;
+//! reach for a rebuild only when a *durably*-recompacted base is reopened in a
+//! fresh process (the [`needs_rebuild`](TextIndex::needs_rebuild) case below).
+//!
+//! ## Durability / sharing: rebuild-on-boot + reconcile contract [OPUS-4.8]
+//!
+//! `TextIndex` is **in-memory, per-process, and not serialised** — there is no
+//! on-disk index format and no cross-process sharing. Under a stateless-core
+//! invariant (a server that rebuilds its in-memory state from the durable
+//! [`Graph`] on every boot — the [`Graph`]'s WAL/blob *is* the source of truth)
+//! the text index follows a **rebuild-on-boot + reconcile** contract rather than
+//! a durable format:
+//!
+//! 1. **Boot:** call [`build`](TextIndex::build) (or
+//!    [`build_with_positions`](TextIndex::build_with_positions)) over the freshly
+//!    opened graph. This is the only sound entry point after a process restart —
+//!    the index is a pure function of the dictionary, so a boot-time rebuild is
+//!    always exactly what the live index would have been.
+//! 2. **Reconcile (warm):** if a [`TextIndex`] survives in memory while the graph
+//!    keeps growing (e.g. shared across requests),
+//!    [`reconcile`](TextIndex::reconcile) brings it up to date in **O(new
+//!    terms)** by scanning only the dictionary tail appended since the last
+//!    build/reconcile — the boot-free fast path when you do not have the insert
+//!    batches to hand for [`apply_delta`](TextIndex::apply_delta). After it
+//!    returns, the index equals a fresh [`build`](TextIndex::build).
+//! 3. **Staleness self-check:**
+//!    [`is_consistent_with`](TextIndex::is_consistent_with) reports whether the
+//!    index has seen every dictionary term the graph now holds (cheap — one
+//!    `usize` compare), and [`needs_rebuild`](TextIndex::needs_rebuild) reports
+//!    the one case reconcile canNOT repair incrementally: the graph's dictionary
+//!    is **shorter** than what the index indexed, so dense ids must have been
+//!    reassigned to *different* terms — the id→document mapping is stale and a
+//!    full [`build`](TextIndex::build) is mandatory.
+//!
+//! The generation marker these methods pin to is
+//! [`indexed_dict_len`](TextIndex::indexed_dict_len): the dictionary length
+//! (count of interned terms) the index has indexed up to. Within one live
+//! [`Graph`], dictionary ids are dense (`1..=len`) and the length only ever
+//! GROWS — [`Graph::apply_delta`](sparq_core::Graph::apply_delta) appends and
+//! [`Graph::compact`](sparq_core::Graph::compact) folds the fork structure
+//! WITHOUT renumbering (every id `1..=len` keeps its term). So in-process a
+//! longer dict always means "appends only since" (reconcilable) and
+//! `is_consistent_with` is all you need. The shorter-dict case
+//! [`needs_rebuild`](TextIndex::needs_rebuild) guards is the CROSS-process one: a
+//! stateless core reopening a *durably compacted* base (whose persisted store
+//! dropped orphaned terms and renumbered) loads a shorter dictionary than a
+//! previously-built in-memory index expected — there the ids no longer line up,
+//! so reconcile is unsound and a fresh boot-time [`build`](TextIndex::build) is
+//! the contract. This marker is part of the index's state, so the incremental
+//! and rebuilt indexes the differential test compares are equal on it too.
 
-use crate::tokenize::{tokenize, tokenize_query, QueryToken};
+use crate::tokenize::{tokenize_query_with, tokenize_with, Analyzer, QueryToken};
 use oxrdf::Term;
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{Id, TermParts};
@@ -119,6 +168,22 @@ pub struct TextIndex {
     /// offsets in that doc, ascending. Only [`build_with_positions`] /
     /// [`with_positions`] turn this on; it powers [`phrase`](Self::phrase).
     positions: Option<Positions>,
+    /// Generation marker for the rebuild-on-boot + reconcile contract: the
+    /// graph dictionary length (interned-term count) this index has indexed up
+    /// to — every string literal with a dict id `<= indexed_dict_len` is
+    /// accounted for. `0` for an empty/default index. Advanced by every
+    /// [`build`](Self::build), [`reconcile`](Self::reconcile), and
+    /// [`apply_delta`](Self::apply_delta) to the graph's current `dict.len()`.
+    /// Part of the index state, so a rebuilt and an incrementally-maintained
+    /// index over the same graph compare equal on it. [OPUS-4.8]
+    indexed_dict_len: usize,
+    /// The tokenization strategy this index was built with — used for BOTH
+    /// indexing and querying so the two always agree. The default
+    /// [`Analyzer::Unicode`] reproduces the historical behaviour exactly;
+    /// [`Analyzer::CjkNgram`] is the opt-in CJK character-bigram analyzer. Part
+    /// of the index state, so two indexes built with different analyzers are not
+    /// equal. [OPUS-4.8] sq-m3ln
+    analyzer: Analyzer,
 }
 
 /// The lexical value of a string literal (plain `xsd:string` or
@@ -142,7 +207,49 @@ impl TextIndex {
     /// use [`build_with_positions`](Self::build_with_positions) for phrase
     /// search.
     pub fn build(graph: &Graph) -> TextIndex {
-        Self::build_with(graph, false)
+        Self::build_with(graph, false, Analyzer::Unicode)
+    }
+
+    /// Like [`build`](Self::build) but with an explicit [`Analyzer`] — pass
+    /// [`Analyzer::CjkNgram`] for the opt-in CJK character-bigram analyzer (a
+    /// multi-char CJK term then matches as the AND of *its* bigrams, not of its
+    /// individual ideographs). The index records its analyzer, so
+    /// [`search`](Self::search) and friends tokenize the query the same way.
+    /// No positions; combine with positions via
+    /// [`build_with_positions_analyzer`](Self::build_with_positions_analyzer).
+    /// [OPUS-4.8] sq-m3ln
+    pub fn build_with_analyzer(graph: &Graph, analyzer: Analyzer) -> TextIndex {
+        Self::build_with(graph, false, analyzer)
+    }
+
+    /// The position-enabled counterpart of
+    /// [`build_with_analyzer`](Self::build_with_analyzer): records token offsets
+    /// (so [`phrase`](Self::phrase) / [`phrase_near`](Self::phrase_near) work)
+    /// AND uses `analyzer` for tokenization. With [`Analyzer::CjkNgram`] a phrase
+    /// is over the bigram stream, so `phrase("東京都")` requires the bigrams
+    /// `東京` then `京都` consecutive — exactly the original ideograph adjacency.
+    /// [OPUS-4.8] sq-m3ln
+    pub fn build_with_positions_analyzer(graph: &Graph, analyzer: Analyzer) -> TextIndex {
+        Self::build_with(graph, true, analyzer)
+    }
+
+    /// An empty index that records token positions and uses `analyzer`, for the
+    /// incremental/delta-fed case (the [`with_positions`](Self::with_positions)
+    /// counterpart with an explicit analyzer). [OPUS-4.8] sq-m3ln
+    pub fn with_positions_analyzer(analyzer: Analyzer) -> TextIndex {
+        TextIndex { positions: Some(BTreeMap::new()), analyzer, ..Default::default() }
+    }
+
+    /// An empty index that uses `analyzer` (the `TextIndex::default()`
+    /// counterpart with an explicit analyzer), for the delta-fed case without
+    /// positions. [OPUS-4.8] sq-m3ln
+    pub fn with_analyzer(analyzer: Analyzer) -> TextIndex {
+        TextIndex { analyzer, ..Default::default() }
+    }
+
+    /// The [`Analyzer`] this index was built/seeded with. [OPUS-4.8] sq-m3ln
+    pub fn analyzer(&self) -> Analyzer {
+        self.analyzer
     }
 
     /// Like [`build`](Self::build) but additionally records token positions, so
@@ -151,7 +258,7 @@ impl TextIndex {
     /// of the BM25 tables; reach for it only when phrase search is needed.
     /// [OPUS-4.8]
     pub fn build_with_positions(graph: &Graph) -> TextIndex {
-        Self::build_with(graph, true)
+        Self::build_with(graph, true, Analyzer::Unicode)
     }
 
     /// An empty index that records token positions as documents are added
@@ -162,13 +269,23 @@ impl TextIndex {
         TextIndex { positions: Some(BTreeMap::new()), ..Default::default() }
     }
 
+    // Note: `Analyzer::default()` is `Unicode`, so `TextIndex::default()` and
+    // `with_positions()` keep the historical analyzer. [OPUS-4.8] sq-m3ln
+
     /// Whether this index records token positions (i.e. supports
     /// [`phrase`](Self::phrase)). [OPUS-4.8]
     pub fn has_positions(&self) -> bool {
         self.positions.is_some()
     }
 
-    fn build_with(graph: &Graph, positions: bool) -> TextIndex {
+    fn build_with(graph: &Graph, positions: bool, analyzer: Analyzer) -> TextIndex {
+        let mut idx = Self::build_docs(graph, positions, analyzer);
+        // Pin the generation marker to the dictionary we just scanned in full.
+        idx.indexed_dict_len = graph.dict.len();
+        idx
+    }
+
+    fn build_docs(graph: &Graph, positions: bool, analyzer: Analyzer) -> TextIndex {
         #[cfg(feature = "parallel")]
         {
             // Shard the id range; per-shard sub-indexes concatenate cleanly
@@ -183,7 +300,7 @@ impl TextIndex {
                 let parts: Vec<TextIndex> = (0..shards)
                     .into_par_iter()
                     .map(|s| {
-                        let mut idx = Self::new(positions);
+                        let mut idx = Self::new(positions, analyzer);
                         for i in (s * chunk)..((s + 1) * chunk).min(n) {
                             let id = (i + 1) as Id;
                             if let Some(text) = text_value(&graph.dict.term_parts(id)) {
@@ -193,14 +310,14 @@ impl TextIndex {
                         idx
                     })
                     .collect();
-                let mut out = Self::new(positions);
+                let mut out = Self::new(positions, analyzer);
                 for part in parts {
                     out.append_shard(part);
                 }
                 return out;
             }
         }
-        let mut idx = Self::new(positions);
+        let mut idx = Self::new(positions, analyzer);
         for (id, parts) in graph.dict.iter() {
             if let Some(text) = text_value(&parts) {
                 idx.add_doc(id, text);
@@ -209,10 +326,11 @@ impl TextIndex {
         idx
     }
 
-    /// An empty index with positions on/off.
-    fn new(positions: bool) -> TextIndex {
+    /// An empty index with positions on/off and an explicit analyzer.
+    fn new(positions: bool, analyzer: Analyzer) -> TextIndex {
         TextIndex {
             positions: positions.then(BTreeMap::new),
+            analyzer,
             ..Default::default()
         }
     }
@@ -256,7 +374,7 @@ impl TextIndex {
     /// Tokenizes `text` and adds it as document `id`. Caller guarantees `id`
     /// is not already indexed.
     fn add_doc(&mut self, id: Id, text: &str) {
-        let tokens = tokenize(text);
+        let tokens = tokenize_with(text, self.analyzer);
         self.docs.insert(id, tokens.len() as u32);
         self.total_tokens += tokens.len() as u64;
         // Record this token's position the moment we enumerate it (positions
@@ -333,6 +451,104 @@ impl TextIndex {
                 self.add_doc(id, lit.value());
             }
         }
+        // Advance the generation marker to the post-delta dictionary, exactly as
+        // a fresh `build` would — the batch may have interned more terms than it
+        // indexed (subject/predicate IRIs, non-text objects), so pin to the
+        // graph's current length, not just the literals seen here. [OPUS-4.8]
+        self.indexed_dict_len = graph.dict.len();
+    }
+
+    // ---- Rebuild-on-boot + reconcile contract --------------------------------------
+    // [OPUS-4.8] sq-oddt. See the module docs for the full contract.
+
+    /// The graph dictionary length (count of interned terms) this index has
+    /// indexed up to — the generation marker the reconcile contract pins to.
+    /// `0` for an empty/default index; advanced by every [`build`](Self::build),
+    /// [`reconcile`](Self::reconcile), and [`apply_delta`](Self::apply_delta) to
+    /// the graph's `dict.len()` at that point. Dictionary ids are dense
+    /// (`1..=len`), so this is exactly "every string literal with id ≤ this is
+    /// accounted for". [OPUS-4.8]
+    pub fn indexed_dict_len(&self) -> usize {
+        self.indexed_dict_len
+    }
+
+    /// Whether this index reflects every term the `graph`'s dictionary now holds
+    /// — i.e. it has indexed up to the graph's current length. A cheap `usize`
+    /// compare; `false` means [`reconcile`](Self::reconcile) (dict grew) or a
+    /// full [`build`](Self::build) (dict shrank — see
+    /// [`needs_rebuild`](Self::needs_rebuild)) is required to make it current.
+    ///
+    /// Pass the SAME graph the index was built/reconciled against. Cross-graph
+    /// or post-[`Graph::compact`](sparq_core::Graph::compact) comparisons are
+    /// only meaningful through [`needs_rebuild`](Self::needs_rebuild). [OPUS-4.8]
+    pub fn is_consistent_with(&self, graph: &Graph) -> bool {
+        self.indexed_dict_len == graph.dict.len()
+    }
+
+    /// Whether the index MUST be discarded and rebuilt from scratch (rather than
+    /// reconciled): the graph's dictionary is SHORTER than what the index
+    /// indexed. Within one live [`Graph`] the dictionary length only grows (even
+    /// across [`Graph::compact`](sparq_core::Graph::compact), which folds the
+    /// fork structure WITHOUT renumbering ids), so this returns `false` there. It
+    /// is the CROSS-process signal: reopening a durably-compacted base whose
+    /// persisted store dropped orphaned terms and renumbered yields a shorter
+    /// dictionary, where the index's dense id→document mapping no longer lines
+    /// up. Reconcile is append-only and cannot repair that — call
+    /// [`build`](Self::build) (or
+    /// [`build_with_positions`](Self::build_with_positions)) afresh. [OPUS-4.8]
+    pub fn needs_rebuild(&self, graph: &Graph) -> bool {
+        graph.dict.len() < self.indexed_dict_len
+    }
+
+    /// The warm fast-path of the rebuild-on-boot + reconcile contract: bring this
+    /// index up to date with `graph` by indexing ONLY the dictionary terms
+    /// appended since the last build/reconcile/delta — `O(new terms)`, not a full
+    /// rescan. Use it when a [`TextIndex`] outlives a single update and you do
+    /// not have the insert batches to hand for
+    /// [`apply_delta`](Self::apply_delta) (e.g. an index shared across requests
+    /// against a growing graph). After it returns the index equals a fresh
+    /// [`build`](Self::build) over `graph` (the same property the differential
+    /// test pins for [`apply_delta`](Self::apply_delta)).
+    ///
+    /// Returns the number of newly indexed documents (string literals); `0` when
+    /// already current. Reconcile preserves this index's positions mode: a
+    /// positions-enabled index keeps recording offsets for the new terms.
+    ///
+    /// Dictionary ids being dense and monotonic, "appended since" is exactly the
+    /// id range `(indexed_dict_len, dict.len()]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`needs_rebuild`](Self::needs_rebuild) holds (the dictionary
+    /// shrank, invalidating the id→document mapping): reconcile is an append-only
+    /// operation and cannot repair this — call [`build`](Self::build) instead.
+    /// This cannot arise from in-process
+    /// [`Graph::compact`](sparq_core::Graph::compact) (which keeps ids); guard
+    /// with [`needs_rebuild`](Self::needs_rebuild) when the index might be
+    /// applied to a reopened/durably-recompacted graph. [OPUS-4.8]
+    pub fn reconcile(&mut self, graph: &Graph) -> usize {
+        let now = graph.dict.len();
+        assert!(
+            now >= self.indexed_dict_len,
+            "TextIndex::reconcile cannot repair a shrunken dictionary (the persisted base was recompacted + renumbered); rebuild with TextIndex::build"
+        );
+        let mut added = 0;
+        // Scan only the appended tail: ids are 1-based and dense, so the new
+        // terms are exactly (indexed_dict_len, now].
+        for i in self.indexed_dict_len..now {
+            let id = (i + 1) as Id;
+            if let Some(text) = text_value(&graph.dict.term_parts(id)) {
+                // The build/apply_delta path never indexes a term twice; the
+                // tail is fresh, but guard for robustness against an unexpected
+                // overlap (keeps reconcile idempotent).
+                if !self.docs.contains_key(&id) {
+                    self.add_doc(id, text);
+                    added += 1;
+                }
+            }
+        }
+        self.indexed_dict_len = now;
+        added
     }
 
     // ---- Queries --------------------------------------------------------------------
@@ -379,7 +595,7 @@ impl TextIndex {
     /// (a phrase match is boolean adjacency, not a BM25 ranking). [OPUS-4.8]
     ///
     /// The query is analyzed by the SAME pipeline as the indexed text (UAX #29
-    /// segmentation + Unicode casefolding, via [`tokenize`]), so the phrase
+    /// segmentation + Unicode casefolding, via [`tokenize`](crate::tokenize::tokenize)), so the phrase
     /// tokens match exactly how the literals were tokenized. A trailing `*` is
     /// NOT a prefix marker here — it is segmentation punctuation, as in any
     /// document text. An empty phrase (no word tokens) matches nothing.
@@ -395,7 +611,7 @@ impl TextIndex {
             .positions
             .as_ref()
             .expect("phrase() requires a positional index: build with TextIndex::build_with_positions");
-        let tokens = tokenize(query);
+        let tokens = tokenize_with(query, self.analyzer);
         if tokens.is_empty() {
             return Vec::new();
         }
@@ -471,7 +687,7 @@ impl TextIndex {
     /// [`search`](Self::search) uses.
     ///
     /// The query is analyzed by the SAME pipeline as the indexed text (UAX #29
-    /// segmentation + Unicode casefolding, via [`tokenize`]); a trailing `*` is
+    /// segmentation + Unicode casefolding, via [`tokenize`](crate::tokenize::tokenize)); a trailing `*` is
     /// NOT a prefix marker (it is segmentation punctuation). An empty phrase (no
     /// word tokens) returns no hits. A single-token phrase is presence (gap 0,
     /// score 1.0) for any `slop`.
@@ -486,7 +702,7 @@ impl TextIndex {
         let positions = self.positions.as_ref().expect(
             "phrase_near() requires a positional index: build with TextIndex::build_with_positions",
         );
-        let tokens = tokenize(query);
+        let tokens = tokenize_with(query, self.analyzer);
         if tokens.is_empty() {
             return Vec::new();
         }
@@ -557,7 +773,7 @@ impl TextIndex {
     }
 
     fn run(&self, query: &str, all: bool) -> Vec<Hit> {
-        let mut qtokens = tokenize_query(query);
+        let mut qtokens = tokenize_query_with(query, self.analyzer);
         // A duplicated token must not double-score ("fox fox" == "fox").
         qtokens.dedup();
         let mut seen: Vec<&QueryToken> = Vec::new();

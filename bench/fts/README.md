@@ -15,10 +15,11 @@ predicates (`text:matches` AND, `text:matchesAny` OR, prefix `foo*`, `text:phras
    near query latency. Per-commit corpus N=100000 (sub-5s); the design's **1M**-literal
    axis is the heavy/latency tier (`bench/fts/gen.sh 1000000`).
 2. **IR-quality axis (BEIR)** — Recall@100 / nDCG@10 on a small BEIR cut (SciFact /
-   TREC-COVID) loaded as RDF literals vs qrels. **Status: GATHER-ONLY, NOT YET WIRED.** The
-   BEIR corpus is not redistributable in-repo, so it is a download-step (gather /
-   nightly), not a committed per-PR gate. Tracked as a follow-up bead (see below); the
-   per-commit gate is the deterministic latency-axis structure below.
+   TREC-COVID) loaded as RDF literals vs qrels, emitted as **deficits** (`1 - metric`,
+   G4). **Status: WIRED as a GATHER/DOWNLOAD step** (sq-1fz0) — see *BEIR IR-quality
+   axis* below. The BEIR corpus is not redistributable in-repo, so it is a download-step
+   (gather / nightly), **not** a committed per-PR gate. The per-PR gate stays the
+   deterministic latency-axis structure below.
 
 ## Data substrate
 
@@ -90,6 +91,14 @@ FTS_N=1000000 bench/fts/run.sh
 ci-bench hook consumes (`sparq-text` is the *isolated* FTS crate — not a `sparq-cli`
 dependency — so the runner is a crate `--example`, not a CLI subcommand).
 
+A trailing `--json <path>` additionally writes the same rows (deterministic `count` +
+advisory `us`) as a dependency-free JSON document (sq-ghjc) — STDOUT stays the pure TSV
+`run.sh` parses, so the flag never disturbs the hard count gate:
+
+```sh
+cargo run --release -p sparq-text --example bench_text -- 100000 0 3 --json fts-results.json
+```
+
 ## Competitors
 
 **Be honest: Solr / Elasticsearch are NOT SPARQL competitors** (no RDF/SPARQL surface; RDF4J
@@ -108,9 +117,43 @@ proximity/slop, BM25 k1=1.2/b=0.75) or it is unfair. A real
 `bench/competitor-results/`; docker-based competitors are inherently gather-only on a Docker
 EC2 box (no Docker on the dev box), so they add zero recurring CI cost.
 
-## Follow-up
+## BEIR IR-quality axis (gather-only, sq-1fz0)
 
-The BEIR IR-quality axis (Recall@100 / nDCG@10 as deficits, G4) is captured as a bead — it
-needs a download/gather step (corpus not redistributable in-repo) before it can become a
-deterministic gate. Until then the per-commit gate is the deterministic latency-axis
-structure (hit counts + `bytes_per_doc`) above.
+The second design axis — **Recall@100 / nDCG@10** on a small BEIR cut (SciFact / TREC-COVID
++ qrels), emitted as **deficits** (`recall_deficit_milli = round((1 - metric) * 1000)`, the
+smaller-is-better G4 shape) — is wired as a **download/gather step**, not a committed gate
+(the BEIR corpus is not redistributable in-repo). It runs on a gather box via the
+`python-lib` adapter kind:
+
+```sh
+pip install pyserini beir                              # heavy IR deps (gather box only)
+# the kernel BM25 ORACLE (lucene-anserini) on a BEIR cut + qrels:
+BEIR_CUT=scifact scripts/gather-competitors.sh --run --only lucene-anserini
+# ALSO score sparq-text on the SAME cut+qrels (apples-to-apples), via the shared scorer:
+cargo build -p sparq-text --release --example beir_text
+BEIR_CUT=scifact SPARQ_TEXT_BEIR=target/release/examples/beir_text \
+  scripts/gather-competitors.sh --run --only lucene-anserini
+```
+
+Both engines are scored by **one** scorer (`scripts/bench-adapters/beir_ir_adapter.py`)
+against the **same** qrels:
+
+- `lucene-anserini` (the kernel BM25 reference, `dashboard_engine_id: null` = **off** the
+  dashboard — it has no RDF/SPARQL surface) BM25-retrieves with Anserini (k1=1.2/b=0.75,
+  matching sparq-text) → its run is the IR-quality **oracle**.
+- `sparq-text` loads the SAME cut as RDF literals (`crates/sparq-text/examples/beir_text.rs`)
+  and retrieves with `TextIndex::search` → a TREC run scored by the same
+  `--score` path. Comparing sparq-text's deficits to the oracle's tells you the
+  IR-quality gap.
+
+The pure scoring half (TREC qrels/run parsers, `recall_at_k`, `ndcg_at_k`, deficit, and the
+sparq-input converters) is **fixture-unit-tested in CI** without pyserini/beir installed
+(`scripts/bench-adapters/test_adapters.py`, fixtures `beir_qrels.txt` / `beir_run.txt`). Each
+gather run writes a git-ignored `bench/competitor-results/<engine>-beir-ir-<cut>-<ts>.json`
+(deficits + env/version); a maintainer reviews it before any dashboard snapshot — numbers
+never land in git automatically (AGENTS.md: no hard-coded perf). These deficits are NOT a
+committed per-PR ratchet in `bench/perf-baseline.json` because the corpus is not present in
+CI to derive an honest floor.
+
+The per-PR gate remains the deterministic latency-axis structure (hit counts +
+`bytes_per_doc`) above.

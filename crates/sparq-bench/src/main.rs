@@ -8,6 +8,9 @@
 //!   sparq-bench --mem sparq|oxigraph --scale N
 //!       # internal: build one engine, print peak RSS (used by the orchestrator)
 
+// [OPUS-4.8] MS-G2 (sq-8wbn): make `// SAFETY:` mandatory on every first-party unsafe block.
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -88,6 +91,23 @@ fn main() {
         if !ok {
             std::process::exit(1);
         }
+        return;
+    }
+
+    // [OPUS-4.8] sq-ays7 — `sparq-bench bench-corpus <corpus> <format> <queries-dir> [iters]`:
+    // load a REAL featured-suite corpus (the same file `sparq-cli bench` consumes) into
+    // Oxigraph and time each `.rq` query, min-of-N, COUNT semantics — emitting the BYTE-FOR-BYTE
+    // same `<name>\t<rows>\t<best_us>` TSV contract as crates/sparq-cli run_query_suite (count
+    // mode). This is the missing same-box Oxigraph path for the featured SPARQL suites
+    // (SP2Bench/WatDiv/LUBM/BSBM): run sparq via `sparq-cli bench … count` and Oxigraph via
+    // this, on the SAME box + SAME generated corpus + SAME query files, so the two TSVs are a
+    // self-consistent same-box comparison (NOT the cross-machine gh-runner CI band).
+    if args.get(1).map(String::as_str) == Some("bench-corpus") {
+        let corpus = args.get(2).expect("usage: bench-corpus <corpus> <format> <queries-dir> [iters]");
+        let format = args.get(3).expect("usage: bench-corpus <corpus> <format> <queries-dir> [iters]");
+        let dir = args.get(4).expect("usage: bench-corpus <corpus> <format> <queries-dir> [iters]");
+        let q_iters: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(5);
+        bench_corpus_oxigraph(corpus, format, dir, q_iters);
         return;
     }
 
@@ -185,6 +205,104 @@ fn compare(scale: u32, iters: usize) {
     }
 }
 
+/// [OPUS-4.8] sq-ays7 — load a featured-suite corpus into Oxigraph and time each `.rq`
+/// query (min-of-N, COUNT semantics), emitting the SAME `<name>\t<rows>\t<best_us>` TSV
+/// contract as `sparq-cli bench … count`. The query loop mirrors run_query_suite exactly:
+/// sort the `.rq` files, read each, run `iters` times keeping the min wall-µs, report the
+/// solution count as `rows`. ERROR lines mirror the sparq path so a query Oxigraph cannot
+/// run is recorded (not silently dropped) and stays out of the comparison.
+fn bench_corpus_oxigraph(corpus: &str, format: &str, dir: &str, iters: usize) {
+    let fmt = match format.to_ascii_lowercase().as_str() {
+        "ntriples" | "nt" | "n-triples" => oxigraph::io::RdfFormat::NTriples,
+        "turtle" | "ttl" => oxigraph::io::RdfFormat::Turtle,
+        "nquads" | "nq" => oxigraph::io::RdfFormat::NQuads,
+        "trig" => oxigraph::io::RdfFormat::TriG,
+        other => {
+            eprintln!("bench-corpus: unsupported format `{other}` (ntriples|turtle|nquads|trig)");
+            std::process::exit(2);
+        }
+    };
+    let f = std::fs::File::open(corpus).unwrap_or_else(|e| {
+        eprintln!("bench-corpus: cannot open corpus {corpus}: {e}");
+        std::process::exit(1);
+    });
+    let t = Instant::now();
+    let store = oxigraph::store::Store::new().expect("oxi store");
+    store
+        .load_from_reader(fmt, std::io::BufReader::new(f))
+        .unwrap_or_else(|e| {
+            eprintln!("bench-corpus: oxigraph load failed: {e}");
+            std::process::exit(1);
+        });
+    eprintln!(
+        "# oxigraph bench-corpus: loaded {} triples from {corpus} in {:.3}s ({iters} iters/query, min)",
+        store.len().unwrap_or(0),
+        t.elapsed().as_secs_f64()
+    );
+
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| {
+            eprintln!("bench-corpus: error reading {dir}: {e}");
+            std::process::exit(1);
+        })
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "rq").unwrap_or(false))
+        .collect();
+    entries.sort();
+
+    for path in entries {
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let sparql = std::fs::read_to_string(&path).unwrap();
+        let mut best = f64::INFINITY;
+        let mut rows = 0usize;
+        let mut err: Option<String> = None;
+        for _ in 0..iters.max(1) {
+            let t = Instant::now();
+            match oxi_count_checked(&store, &sparql) {
+                Ok(n) => {
+                    rows = n;
+                    best = best.min(t.elapsed().as_secs_f64() * 1e6);
+                }
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+            }
+        }
+        match err {
+            None => println!("{name}\t{rows}\t{best:.1}"),
+            Some(e) => println!("{name}\tERROR\t{e}"),
+        }
+    }
+}
+
+// Non-panicking variant of oxi_count: returns the solution/row count or the engine error
+// string, so bench-corpus can record an ERROR line instead of aborting the whole suite.
+#[allow(deprecated)]
+fn oxi_count_checked(store: &oxigraph::store::Store, q: &str) -> Result<usize, String> {
+    match store.query(q).map_err(|e| e.to_string())? {
+        oxigraph::sparql::QueryResults::Solutions(s) => {
+            // count() consumes the iterator; a row that fails to evaluate is an error.
+            let mut n = 0usize;
+            for r in s {
+                r.map_err(|e| e.to_string())?;
+                n += 1;
+            }
+            Ok(n)
+        }
+        oxigraph::sparql::QueryResults::Boolean(_) => Ok(1),
+        oxigraph::sparql::QueryResults::Graph(g) => {
+            let mut n = 0usize;
+            for r in g {
+                r.map_err(|e| e.to_string())?;
+                n += 1;
+            }
+            Ok(n)
+        }
+    }
+}
+
 fn time_min(iters: usize, mut f: impl FnMut() -> usize) -> (Duration, usize) {
     let mut best = Duration::MAX;
     let mut rows = 0;
@@ -251,6 +369,9 @@ fn measure_mem_subprocess(engine: &str, scale: u32) -> usize {
 }
 
 fn peak_rss_bytes() -> usize {
+    // SAFETY: `rusage` is a plain C struct that is sound to zero-initialise, and
+    // `getrusage(RUSAGE_SELF, &mut ru)` writes only into the valid `&mut ru`
+    // out-param; the return is checked before any field is read. [OPUS-4.8]
     unsafe {
         let mut ru: libc::rusage = std::mem::zeroed();
         if libc::getrusage(libc::RUSAGE_SELF, &mut ru) != 0 {

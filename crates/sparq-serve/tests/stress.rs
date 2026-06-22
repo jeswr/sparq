@@ -24,7 +24,10 @@ struct MockSnapshot {
 impl MockSnapshot {
     fn new(value: u64, live: &Arc<AtomicUsize>) -> Self {
         live.fetch_add(1, Ordering::SeqCst);
-        MockSnapshot { value, live: live.clone() }
+        MockSnapshot {
+            value,
+            live: live.clone(),
+        }
     }
 }
 
@@ -57,7 +60,10 @@ fn concurrent_readers_pin_across_many_publishes_without_torn_reads() {
     let live = Arc::new(AtomicUsize::new(0));
     let ring = Arc::new(GenerationRing::with_config(
         MockSnapshot::new(0, &live),
-        RingConfig { retain: 4, ..RingConfig::default() },
+        RingConfig {
+            retain: 4,
+            ..RingConfig::default()
+        },
     ));
     let done = Arc::new(AtomicBool::new(false));
 
@@ -105,7 +111,11 @@ fn concurrent_readers_pin_across_many_publishes_without_torn_reads() {
     for i in 1..=PUBLISHES {
         let pod = PodId::new(format!("pod:{}", i % POD_FANOUT));
         let gen = ring.publish(MockSnapshot::new(i, &live), [pod]);
-        assert_eq!(gen.number(), i, "single writer must observe dense numbering");
+        assert_eq!(
+            gen.number(),
+            i,
+            "single writer must observe dense numbering"
+        );
         published += 1;
     }
     done.store(true, Ordering::Release);
@@ -127,5 +137,8 @@ fn concurrent_readers_pin_across_many_publishes_without_torn_reads() {
     drop(final_gen);
     assert_eq!(ring.live_generations(), ring.retain_bound() + 1);
     assert_eq!(live.load(Ordering::SeqCst), ring.retain_bound() + 1);
-    assert_eq!(ring.oldest_retained(), PUBLISHES - ring.retain_bound() as u64);
+    assert_eq!(
+        ring.oldest_retained(),
+        PUBLISHES - ring.retain_bound() as u64
+    );
 }

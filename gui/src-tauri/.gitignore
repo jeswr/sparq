@@ -1,0 +1,5 @@
+# [OPUS-4.8] sq-2e93 — Tauri build artifacts (generated, never committed).
+/target
+# Tauri 2 generates capability/permission schemas + the embedded-frontend assets here at
+# build time (`tauri_build::build()`); regenerated on every build.
+/gen

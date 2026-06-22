@@ -7,13 +7,18 @@
 //! each seeded with the previous closure.
 
 use crate::loader::{assemble_input, strip_reserved_graphs, System};
-use crate::{AUTH_GRAPH, AUTH_NS};
+use crate::{AccessProvenance, AUTH_GRAPH, AUTH_NS};
 use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashSet;
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
 use sparq_reason::reason_n3;
 use std::fmt::Write as _;
+// `std::time::Instant` is unusable on `wasm32-unknown-unknown` — `Instant::now()`
+// panics there (no monotonic clock). The wall-clock plumbing for `stats.millis` is
+// purely informational, so it is `cfg`-gated off and reported as `0.0` on wasm32
+// rather than trapping at runtime (sq-7agop). [OPUS-4.8]
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 const COMMON_RULES: &str = include_str!("../rules/common.n3");
@@ -25,9 +30,13 @@ const ACP_C: &str = include_str!("../rules/acp-c.n3");
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const EXCEPT_MATCHER: &str = "https://sparq.dev/ns/auth#exceptMatcher";
 /// solidx facts copied into the auth view for matchers referenced by conditional
-/// grants (the session layer evaluates `exceptMatcher`s from these).
-const MATCHER_FACTS: [&str; 2] =
-    ["https://sparq.dev/ns/solidx#acceptsAgentP", "https://sparq.dev/ns/solidx#acceptsClientP"];
+/// grants (the session layer evaluates `exceptMatcher`s from these). [OPUS-4.8]
+/// sq-3jtd.6 adds `acceptsIssuerP` — the noneOf exception check is three-dimensional.
+const MATCHER_FACTS: [&str; 3] = [
+    "https://sparq.dev/ns/solidx#acceptsAgentP",
+    "https://sparq.dev/ns/solidx#acceptsClientP",
+    "https://sparq.dev/ns/solidx#acceptsIssuerP",
+];
 
 /// What a `materialize_*` run produced: auth-view size, per-stratum closure sizes,
 /// and wall-clock time. Purely informational (logging / benchmarking) — the result
@@ -92,15 +101,20 @@ pub struct MaterializeStats {
 /// # Ok::<(), String>(())
 /// ```
 pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
+    #[cfg(not(target_arch = "wasm32"))]
     let t0 = Instant::now();
     strip_reserved_graphs(graph);
-    let input = assemble_input(graph, System::Wac)?;
+    // WAC has no creator/owner vocabulary; provenance is ignored (the loader skips it).
+    let input = assemble_input(graph, System::Wac, &AccessProvenance::new())?;
     let src = format!("{input}\n{COMMON_RULES}\n{WAC_RULES}");
     let mut dict = Dict::new();
     let closure = reason_n3(&mut dict, &src)?;
     let mut stats = install_auth_view(graph, &dict, &closure);
     stats.strata_facts = vec![closure.len()];
-    stats.millis = t0.elapsed().as_secs_f64() * 1e3;
+    stats.millis = elapsed_millis(
+        #[cfg(not(target_arch = "wasm32"))]
+        t0,
+    );
     Ok(stats)
 }
 
@@ -134,14 +148,41 @@ pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
 /// assert_eq!(stats.strata_facts.len(), 3); // accepts → rejections → grants
 ///
 /// let index = sparq_solid::AuthIndex::from_graph(&graph);
-/// let alice = sparq_solid::Session { agent: Some("https://alice.ex/card#me"), client: None };
+/// let alice = sparq_solid::Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
 /// assert_eq!(index.accessible(&alice, sparq_solid::Mode::Read).len(), 2); // n1 + notes/
 /// # Ok::<(), String>(())
 /// ```
 pub fn materialize_acp(graph: &mut Graph) -> Result<MaterializeStats, String> {
+    materialize_acp_with(graph, &AccessProvenance::new())
+}
+
+/// Materialize the ACP auth view from the `.acr` graphs PLUS the TRUSTED per-resource
+/// creator/owner facts in `provenance`, resolving `acp:CreatorAgent` / `acp:OwnerAgent`
+/// matchers ([OPUS-4.8] sq-3jtd.5).
+///
+/// The free-function form of [`crate::PodStore::materialize_acp_with`]. Identical to
+/// [`materialize_acp`] (three stratified `reason_n3` calls) except the loader also
+/// synthesizes `<r> solidx:creator|owner <webid>` facts from `provenance` — the trusted
+/// channel for "who created/owns `<r>`". These facts are **never** read from the resource
+/// graphs (design doc §2.4): a writer cannot self-grant via a forged `solidx:creator`
+/// triple in a document they control.
+///
+/// `materialize_acp(graph)` is exactly `materialize_acp_with(graph, &AccessProvenance::new())`
+/// — with no provenance, no `CreatorAgent`/`OwnerAgent` matcher ever grants (fail-closed).
+///
+/// # Errors
+///
+/// As [`materialize_acp`], and additionally if a creator/owner WebID collides with the
+/// reserved principal encoding (starts with `urn:sparq:` or contains the literal
+/// `&client=`).
+pub fn materialize_acp_with(
+    graph: &mut Graph,
+    provenance: &AccessProvenance,
+) -> Result<MaterializeStats, String> {
+    #[cfg(not(target_arch = "wasm32"))]
     let t0 = Instant::now();
     strip_reserved_graphs(graph);
-    let input = assemble_input(graph, System::Acp)?;
+    let input = assemble_input(graph, System::Acp, provenance)?;
     let mut strata_facts = Vec::new();
 
     let mut dict = Dict::new();
@@ -160,8 +201,25 @@ pub fn materialize_acp(graph: &mut Graph) -> Result<MaterializeStats, String> {
 
     let mut stats = install_auth_view(graph, &d3, &c3);
     stats.strata_facts = strata_facts;
-    stats.millis = t0.elapsed().as_secs_f64() * 1e3;
+    stats.millis = elapsed_millis(
+        #[cfg(not(target_arch = "wasm32"))]
+        t0,
+    );
     Ok(stats)
+}
+
+/// Wall-clock milliseconds since `t0`, or `0.0` on `wasm32-unknown-unknown` where
+/// `std::time::Instant` is unavailable (sq-7agop). `stats.millis` is purely
+/// informational (logging / benchmarking), so wasm32 simply reports no timing
+/// rather than trapping. [OPUS-4.8]
+#[cfg(not(target_arch = "wasm32"))]
+fn elapsed_millis(t0: Instant) -> f64 {
+    t0.elapsed().as_secs_f64() * 1e3
+}
+
+#[cfg(target_arch = "wasm32")]
+fn elapsed_millis() -> f64 {
+    0.0
 }
 
 /// Re-serialize a stratum's ground closure as facts for the next stratum.

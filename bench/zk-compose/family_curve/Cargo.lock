@@ -1026,6 +1026,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-canon"
+version = "0.1.0"
+dependencies = [
+ "digest 0.10.7",
+ "oxrdf 0.2.4",
+ "oxrdf 0.3.3",
+ "oxttl 0.1.8",
+ "oxttl 0.2.3",
+ "rdf-canon",
+ "sparq-core",
+]
+
+[[package]]
 name = "sparq-core"
 version = "0.1.0"
 dependencies = [
@@ -1066,15 +1079,14 @@ dependencies = [
  "ark-serialize",
  "ark-std",
  "blake3",
- "getrandom 0.2.17",
- "oxrdf 0.2.4",
+ "getrandom 0.4.2",
  "oxrdf 0.3.3",
- "oxttl 0.1.8",
- "oxttl 0.2.3",
- "rdf-canon",
  "spargebra",
+ "sparq-canon",
  "sparq-core",
  "sparq-engine",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -1087,6 +1099,12 @@ dependencies = [
  "serde_json",
  "sparq-zk",
 ]
+
+[[package]]
+name = "subtle"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
@@ -1407,6 +1425,20 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "zk-compose-family-curve"

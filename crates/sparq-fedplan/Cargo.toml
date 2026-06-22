@@ -1,0 +1,45 @@
+# [OPUS-4.8] sq-a35t (epic sq-3183): OPT-IN cost-based federated source selection +
+# bind-vs-hash join planning. Plans over already-fetched source DESCRIPTORS (served
+# VoID + mined characteristic-set stats) — pure, deterministic, NO network I/O.
+[package]
+name = "sparq-fedplan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Cost-based federated source selection (HiBISCuS prune + CostFed cardinality) and bind-vs-hash join planning over served source descriptors — opt-in, no network I/O"
+publish = false
+
+# OPT-IN, lean core. NOTHING in the workspace's default build depends on this crate:
+# it is a standalone member (like `sparq-canon` / `sparq-prov`), so `sparq-core`'s
+# default build and the wasm artifact are byte-identical with or without it. The
+# capability is therefore OFF BY DEFAULT at the dependency level — the leanest gating,
+# with zero core overhead when absent. A `publish = false` PLANNING crate (no runtime
+# data path, like `sparq-canon`/`sparq-prov`) is bench-exempt under gate G1.
+# [OPUS-4.8] sq-a35t, branch feat-fedplan-cost-selection.
+
+[features]
+# The whole planner is feature-gated so even a crate that DOES depend on sparq-fedplan
+# pays zero for it unless `fedplan` is enabled. OFF by default.
+default = []
+fedplan = []
+# [OPUS-4.8] sq-7s4z: live adaptive mid-execution re-planning. OFF by default; IMPLIES
+# `fedplan` (it re-invokes the static planner on the remaining plan). A build that does not
+# enable it compiles zero adaptive code — the adaptive module is `#[cfg]`-gated out.
+adaptive-replan = ["fedplan"]
+
+[dependencies]
+# Term model (oxrdf 0.3 re-export) — used only to type the public IRI surface and to
+# parse a served VoID+scs descriptor document. No sparq-core/engine dependency: this
+# slice plans over descriptors, never over a live Graph.
+oxrdf = { workspace = true }
+oxttl = { workspace = true }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+# Round-trip a descriptor parsed from the served N-Triples form.
+oxttl = { workspace = true }

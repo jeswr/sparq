@@ -115,3 +115,138 @@ impl SpatialProvider for GeoIndexProvider {
         self.indexed.contains(term)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // [OPUS-4.8] sq-9g58 coverage: the provider's decline paths — the cases
+    // where the index CANNOT serve a candidate superset and must hand the query
+    // back to the exact post-hoc `geof:` FILTER (returning `None`). These are
+    // load-bearing for ANSWER-SAFETY: a wrong (non-`None`) answer here would
+    // silently drop matches. The happy pushdown paths are covered by
+    // `tests/pushdown.rs`; these cover the guards.
+    use super::*;
+    use crate::GeoIndex;
+    use sparq_core::Graph;
+
+    fn index() -> GeoIndex {
+        let g = Graph::load_str(
+            r#"@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+               <http://ex/a> geo:asWKT "POINT(0 0)"^^geo:wktLiteral ."#,
+            "turtle",
+        )
+        .unwrap();
+        GeoIndex::build(&g)
+    }
+
+    const DEG: &str = "http://www.opengis.net/def/uom/OGC/1.0/degree";
+    const KM: &str = "http://www.opengis.net/def/uom/OGC/1.0/kilometre";
+
+    #[test]
+    fn index_accessor_borrows_the_inner_index() {
+        let p = GeoIndexProvider::new(index());
+        // The accessor returns a usable index: the one literal we loaded is
+        // present in its entries.
+        assert_eq!(p.index().entries().count(), 1);
+    }
+
+    #[test]
+    fn distance_in_angular_unit_is_declined() {
+        // A DEGREE-unit distance is euclidean coordinate distance, NOT the
+        // index's great-circle metre metric: the provider declines (None) so
+        // the exact FILTER runs. (meters_scale() is None for angular units.)
+        let p = GeoIndexProvider::new(index());
+        let q = SpatialQuery::DistanceWithin {
+            point_wkt: "POINT(0 0)",
+            radius: 1.0,
+            unit_iri: DEG,
+            inclusive: true,
+        };
+        assert!(p.candidates(&q).is_none(), "angular-unit distance must decline");
+    }
+
+    #[test]
+    fn distance_from_non_geographic_constant_is_declined() {
+        // A projected (non-geographic) centre shares no metric with the
+        // geographic index entries: center_point returns None -> decline.
+        let p = GeoIndexProvider::new(index());
+        let q = SpatialQuery::DistanceWithin {
+            // A point in EPSG:3857 (Web Mercator), a projected CRS.
+            point_wkt: "<http://www.opengis.net/def/crs/EPSG/0/3857> POINT(0 0)",
+            radius: 1.0,
+            unit_iri: KM,
+            inclusive: true,
+        };
+        assert!(p.candidates(&q).is_none(), "non-geographic centre must decline");
+    }
+
+    #[test]
+    fn distance_from_non_point_constant_is_declined() {
+        // The index's within-distance scan accepts only a single POINT centre;
+        // a polygon constant declines.
+        let p = GeoIndexProvider::new(index());
+        let q = SpatialQuery::DistanceWithin {
+            point_wkt: "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+            radius: 1.0,
+            unit_iri: KM,
+            inclusive: true,
+        };
+        assert!(p.candidates(&q).is_none(), "non-point centre must decline");
+    }
+
+    #[test]
+    fn metric_distance_from_geographic_point_is_served() {
+        // The positive case: a metric unit + geographic POINT centre is served
+        // (Some candidate set) — contrasts the decline paths above.
+        let p = GeoIndexProvider::new(index());
+        let q = SpatialQuery::DistanceWithin {
+            point_wkt: "POINT(0 0)",
+            radius: 1.0,
+            unit_iri: KM,
+            inclusive: true,
+        };
+        let got = p.candidates(&q).expect("metric+geographic must be served");
+        assert_eq!(got.len(), 1, "the one entry is within 1 km of itself");
+    }
+
+    #[test]
+    fn bbox_with_non_geographic_constant_is_declined() {
+        // A non-geographic bbox constant shares no metric with the index:
+        // decline (None) rather than wrongly drop same-CRS matches.
+        let p = GeoIndexProvider::new(index());
+        let q = SpatialQuery::BboxIntersects {
+            arg_wkt: "<http://www.opengis.net/def/crs/EPSG/0/3857> POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+        };
+        assert!(p.candidates(&q).is_none(), "non-geographic bbox must decline");
+    }
+
+    #[test]
+    fn bbox_with_geographic_constant_is_served() {
+        let p = GeoIndexProvider::new(index());
+        let q = SpatialQuery::BboxIntersects {
+            arg_wkt: "POLYGON((-1 -1, 1 -1, 1 1, -1 1, -1 -1))",
+        };
+        let got = p.candidates(&q).expect("geographic bbox must be served");
+        assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn is_indexed_distinguishes_known_from_unknown_literals() {
+        let p = GeoIndexProvider::new(index());
+        // The literal Term the index actually holds is reported indexed; a
+        // literal it never saw is not.
+        let known: Term = p
+            .index()
+            .entries()
+            .next()
+            .expect("one entry")
+            .literal
+            .clone();
+        assert!(p.is_indexed(&known), "the indexed literal is reported indexed");
+
+        let other = Term::Literal(oxrdf::Literal::new_typed_literal(
+            "POINT(99 99)",
+            oxrdf::NamedNode::new_unchecked(crate::vocab::WKT_LITERAL),
+        ));
+        assert!(!p.is_indexed(&other), "an unseen literal is not indexed");
+    }
+}

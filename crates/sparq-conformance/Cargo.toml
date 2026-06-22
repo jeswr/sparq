@@ -21,6 +21,28 @@ path = "src/main.rs"
 name = "sparq-inference-conformance"
 path = "src/bin/inference.rs"
 
+# [OPUS-4.8] sq-ncvq.16 — the CONSOLIDATED conformance scoreboard: one index of
+# EVERY ratchet across the workspace (W3C SPARQL + inference + W3C SHACL + OGC
+# GeoSPARQL). Renders the central `scoreboard` registry; runs hermetically (no
+# fetched test data). CI surfaces it in the conformance jobs' step summaries.
+[[bin]]
+name = "sparq-conformance-scoreboard"
+path = "src/bin/scoreboard.rs"
+
+[features]
+# [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 conformance lane (toRdf + fromRdf
+# ratchets, the crate-local `tests/jsonld_suite.rs` runner). OPT-IN and OFF by
+# default so the bare `cargo test -p sparq-conformance` (and the default
+# `--workspace` shards) never link the oxjsonld parser or the engine's JSON-LD
+# writer — mirroring the lean-core opt-in posture (sparq-core/jsonld and
+# sparq-engine/serialize-rdf are themselves both off by default). When OFF the
+# runner compiles to a single self-SKIP `#[test]`; when ON it drives the suite
+# through the REAL parse (oxjsonld via sparq-core) + write (serialize-rdf via
+# sparq-engine) paths and asserts the pinned floors. Forwards to both upstream
+# features and links `oxjsonld` directly (to re-parse the writer's JSON-LD output
+# back to RDF for the fromRdf semantic-equivalence comparison).
+jsonld-suite = ["sparq-core/jsonld", "sparq-engine/serialize-rdf", "dep:oxjsonld"]
+
 [dependencies]
 sparq-core = { path = "../sparq-core" }
 sparq-engine = { path = "../sparq-engine" }
@@ -33,3 +55,9 @@ rustc-hash.workspace = true
 oxrdfxml = { version = "0.2", features = ["rdf-12"] }
 quick-xml = "0.40"
 serde_json = "1"
+# [OPUS-4.8] sq-oy1f.2 — JSON-LD parser, used ONLY by the `jsonld-suite` lane to
+# re-parse the engine writer's JSON-LD output back into RDF (the fromRdf
+# semantic-equivalence oracle). Same oxigraph family already in-tree; OFF by
+# default (optional, behind `jsonld-suite`) so the default harness build never
+# links it.
+oxjsonld = { workspace = true, optional = true }

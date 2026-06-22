@@ -36,16 +36,43 @@ pub const FILTER_INT_D_VALUES: &[u32] = &[1, 2, 3, 4];
 /// ceiling (value `< 2^53`, exact `f64::from`), so larger counts have no member
 /// and `derive_filter_f64_id` returns `None` (clean error, never a wrong-D).
 pub const FILTER_F64_D_VALUES: &[u32] = &[1, 2, 3, 4];
+/// Compiled MAGNITUDE-digit counts (`md`) of the MANIFEST-COMPOSABLE
+/// `filter_signed_int` family ([OPUS-4.8] sq-7lrq, the sq-1q9h members). Same
+/// EXACT-match discipline as `filter_int` / `filter_f64`: the
+/// `filter_signed_int_d{MD}` circuit's `mag_digits: [u8; MD]` witness pins the
+/// operand's magnitude-digit count to `MD` (`filter_signed_int_check::<MD>` rebuilds
+/// the canonical `"[-]?<digits>"^^<…#integer>` token from exactly `MD` digits), so a
+/// member is provable for an operand iff its magnitude-digit count == `MD`. v1
+/// compiles `{2, 4}` (the two members sq-1q9h landed: 2-digit negative coordinates
+/// and 4-digit signed amounts). An out-of-family magnitude-digit count returns
+/// `None` from [`derive_filter_signed_int_id`] (clean error, never a wrong-MD
+/// silently-unprovable member — sq-wto). `MD <= 19` is the `u64`-magnitude ceiling.
+pub const FILTER_SIGNED_INT_MD_VALUES: &[u32] = &[2, 4];
+/// Compiled `(id, fd)` integer-/fraction-digit counts of the MANIFEST-COMPOSABLE
+/// `filter_decimal` family ([OPUS-4.8] sq-7lrq, the sq-1q9h member). The
+/// `filter_decimal_i{ID}_f{FD}` circuit pins the operand's integer-digit count to
+/// `ID` AND its fraction-digit count to `FD` (the `int_digits: [u8; ID]` /
+/// `frac_digits: [u8; FD]` witnesses), so a `(id, fd)`-shaped operand is provable
+/// ONLY by the `(ID, FD) == (id, fd)` member. v1 compiles `(3, 2)` (the
+/// `"123.45"`-shape member sq-1q9h landed); an out-of-family `(id, fd)` returns
+/// `None` from [`derive_filter_decimal_id`] (clean error, never a wrong-shape member).
+pub const FILTER_DECIMAL_ID_FD_VALUES: &[(u32, u32)] = &[(3, 2)];
 /// Compiled graph-size buckets (`n_a`/`n_b`) of the hidden-join `join_eq` family,
 /// ascending (sq-bwwl / sq-fi03). The `join_eq_na{N_A}_nb{N_B}` member re-commits
 /// each witnessed graph with `[[Field; 3]; N]` slots (the `join_eq_check<N_A,
 /// N_B>` const generics), so a graph holding `<= N` triples is provable by the
-/// smallest compiled bucket `>= N` — exactly the scan `n`-bucket discipline. v1
-/// compiles the single symmetric `join_eq_na16_nb16` member, so only the `16`
-/// bucket exists; an out-of-family size derives `None` (clean error). The
-/// verifier gate that consumes the derived id is step 4 (sq-sfsi).
+/// smallest compiled bucket `>= N` — exactly the scan `n`-bucket discipline. The
+/// [`SCAN_N_BUCKETS`]-aligned `{16, 64}` set is compiled, in all four `(n_a, n_b)`
+/// combinations (`na16_nb16`, `na16_nb64`, `na64_nb16`, `na64_nb64`), so a join
+/// can compose with a scan over either scan-`n` bucket; an out-of-family size
+/// (`> 64`) derives `None` (a clean error, never a wrong-N member). The verifier
+/// gate that consumes the derived id is `bind_joins` (step 4, sq-sfsi).
 // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): compiled join_eq graph-size buckets.
-pub const JOIN_EQ_N_BUCKETS: &[u32] = &[16];
+// [OPUS-4.8] sq-pzet (sq-8dx2): add the `64` bucket — the remaining (na, nb)
+// members so a hidden join composes with the n=64 scan bucket. NOT a soundness
+// change (the verifier remains NOT-yet-sound, sq-qhy4 / sq-9hrn / sq-1s2): the
+// in-circuit relation is `join_eq_check` verbatim, only the bucket grows.
+pub const JOIN_EQ_N_BUCKETS: &[u32] = &[16, 64];
 
 fn smallest_bucket(buckets: &[u32], need: u32) -> Option<u32> {
     buckets.iter().copied().find(|&b| b >= need)
@@ -101,6 +128,46 @@ pub fn derive_filter_f64_id(digits: u32) -> Option<CircuitId> {
     let d = digits.max(1);
     if FILTER_F64_D_VALUES.contains(&d) {
         Some(CircuitId::FilterF64 { d })
+    } else {
+        None
+    }
+}
+
+/// Derive the MANIFEST-COMPOSABLE `filter_signed_int` circuit id for a
+/// `mag_digits`-magnitude-digit SIGNED xsd:integer operand ([OPUS-4.8] sq-7lrq).
+/// EXACT-match discipline, identical to [`derive_filter_int_id`]: the
+/// `filter_signed_int_d{MD}` circuit pins the operand's MAGNITUDE-digit count to
+/// `MD` (`mag_digits: [u8; MD]`; the optional leading `-` is bound into the token
+/// but not counted in `MD`), so only the `MD == mag_digits` member is provable.
+/// Out-of-family counts (no compiled `MD == mag_digits`) return `None` — a clean
+/// error, never a wrong-MD silently-unprovable member (sq-wto).
+// [OPUS-4.8] sq-7lrq: exact magnitude-digit match for the composable signed-int family.
+pub fn derive_filter_signed_int_id(mag_digits: u32) -> Option<CircuitId> {
+    let md = mag_digits.max(1);
+    if FILTER_SIGNED_INT_MD_VALUES.contains(&md) {
+        Some(CircuitId::FilterSignedInt { md })
+    } else {
+        None
+    }
+}
+
+/// Derive the MANIFEST-COMPOSABLE `filter_decimal` circuit id for an operand with
+/// `int_digits` integer-part digits and `frac_digits` fraction digits ([OPUS-4.8]
+/// sq-7lrq). EXACT-match discipline over BOTH counts: the `filter_decimal_i{ID}_f{FD}`
+/// circuit pins the operand's integer-digit count to `ID` AND its fraction-digit
+/// count to `FD` (`int_digits: [u8; ID]` / `frac_digits: [u8; FD]`), so only the
+/// `(ID, FD) == (int_digits, frac_digits)` member is provable. The integer part is
+/// clamped to at least one digit (canonical `0.xx` has the single integer digit
+/// `"0"`); `frac_digits` is taken verbatim (a decimal's fraction count is fixed by
+/// its lexical form, including trailing zeros, which `oxrdf` preserves). An
+/// out-of-family `(id, fd)` returns `None` — a clean error, never a wrong-shape
+/// member.
+// [OPUS-4.8] sq-7lrq: exact (id, fd) digit-shape match for the composable decimal family.
+pub fn derive_filter_decimal_id(int_digits: u32, frac_digits: u32) -> Option<CircuitId> {
+    let id = int_digits.max(1);
+    let fd = frac_digits;
+    if FILTER_DECIMAL_ID_FD_VALUES.contains(&(id, fd)) {
+        Some(CircuitId::FilterDecimal { id, fd })
     } else {
         None
     }
@@ -367,6 +434,169 @@ pub fn encode_double_literal(value: u64) -> FieldHex {
     hexf(&enc)
 }
 
+/// XSD integer / decimal datatype IRIs (the signed-int / decimal filter
+/// fragments' literal types). [OPUS-4.8] sq-1q9h.
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+
+/// Build a MANIFEST-COMPOSABLE `filter_signed_int` proof for a hidden SIGNED
+/// xsd:integer operand `value` under operator `op` against the constant `bound`
+/// (also signed `i64`), with the disclosed `expected` verdict ([OPUS-4.8] sq-7lrq).
+/// `operand_enc` must be the SAME term encoding the scan proof disclosed for the
+/// operand column (binding consistency, exactly like [`build_filter_int`]).
+///
+/// Returns `(inputs, witness)` — the [`FilterSignedWitness`] carries the operand's
+/// PRIVATE sign flag + canonical MAGNITUDE digits the manifest never holds — or
+/// `None` if `value`'s MAGNITUDE digit count has no compiled
+/// `filter_signed_int_d{MD}` member ([`derive_filter_signed_int_id`] => `None`, a
+/// clean error, never a silently-unprovable wrong-MD — sq-wto). The witnessed
+/// `mag_digits` are the canonical magnitude (`|value|.to_string()`, no sign); the
+/// circuit re-derives the sign from the witnessed `neg` flag and the token. The
+/// FILTER's constant `bound` is carried sign-split as `(bound_neg, |bound|)` in the
+/// PUBLIC inputs. Thread the witness through [`crate::toml::prover_toml_for`]'s
+/// `filter_signed_witness` arg (mirrors `build_join` -> the `join_witness` arg).
+// [OPUS-4.8] sq-7lrq: composable signed xsd:integer FILTER builder.
+pub fn build_filter_signed_int(
+    operand_enc: FieldHex,
+    value: i64,
+    op: FilterOp,
+    bound: i64,
+    expected: bool,
+) -> Option<(ProofInputs, FilterSignedWitness)> {
+    let mag = value.unsigned_abs();
+    let digits = mag.to_string();
+    let id = derive_filter_signed_int_id(digits.len() as u32)?;
+    let mag_digit_bytes: Vec<u8> = digits.bytes().collect();
+    Some((
+        ProofInputs::FilterSignedInt {
+            id,
+            operand_enc,
+            op,
+            bound_neg: bound < 0,
+            bound: bound.unsigned_abs(),
+            expected,
+        },
+        FilterSignedWitness {
+            neg: value < 0,
+            int_digits: mag_digit_bytes,
+            frac_digits: Vec::new(),
+        },
+    ))
+}
+
+/// Build a MANIFEST-COMPOSABLE `filter_decimal` proof for a hidden xsd:decimal
+/// operand given its `neg` sign, canonical integer-part digit string `int_part`, and
+/// EXACTLY `frac` fraction-digit string (lexical form `[-]?<int>.<frac>`, e.g.
+/// `(false, "123", "45")` => `"123.45"`), under operator `op` against a HOST-PRESCALED
+/// constant `(bound_neg, bound_scaled)` where `bound_scaled = round(|bound| * 10^fd)`
+/// and `fd == frac.len()` ([OPUS-4.8] sq-7lrq), with the disclosed `expected` verdict.
+/// `operand_enc` must be the SAME term encoding the scan proof disclosed for the
+/// operand column (binding consistency, exactly like [`build_filter_int`]).
+///
+/// The caller supplies the operand digits as STRINGS (not a parsed number) because a
+/// decimal's lexical form fixes BOTH digit counts — including a leading integer `0`
+/// (`"0.50"`) or trailing fraction zeros (`"1.50"`) — which the committed token, and
+/// hence the member shape, must match byte-for-byte. The caller is responsible for
+/// prescaling `bound` to `bound_scaled` at `fd = frac.len()` decimal places.
+///
+/// Returns `(inputs, witness)` — the [`FilterSignedWitness`] carries the operand's
+/// PRIVATE sign flag + canonical integer-part and fraction digits — or `None` if the
+/// operand's `(int_part.len(), frac.len())` shape has no compiled
+/// `filter_decimal_i{ID}_f{FD}` member ([`derive_filter_decimal_id`] => `None`, a
+/// clean error, never a silently-unprovable wrong shape — sq-wto), or if either
+/// string contains a non-ASCII-digit byte. Thread the witness through
+/// [`crate::toml::prover_toml_for`]'s `filter_signed_witness` arg.
+// [OPUS-4.8] sq-7lrq: composable xsd:decimal FILTER builder.
+#[allow(clippy::too_many_arguments)]
+pub fn build_filter_decimal(
+    operand_enc: FieldHex,
+    neg: bool,
+    int_part: &str,
+    frac: &str,
+    op: FilterOp,
+    bound_neg: bool,
+    bound_scaled: u64,
+    expected: bool,
+) -> Option<(ProofInputs, FilterSignedWitness)> {
+    if !int_part.bytes().all(|b| b.is_ascii_digit())
+        || !frac.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let id = derive_filter_decimal_id(int_part.len() as u32, frac.len() as u32)?;
+    let int_digit_bytes: Vec<u8> = int_part.bytes().collect();
+    let frac_digit_bytes: Vec<u8> = frac.bytes().collect();
+    Some((
+        ProofInputs::FilterDecimal {
+            id,
+            operand_enc,
+            op,
+            bound_neg,
+            bound_scaled,
+            expected,
+        },
+        FilterSignedWitness {
+            neg,
+            int_digits: int_digit_bytes,
+            frac_digits: frac_digit_bytes,
+        },
+    ))
+}
+
+/// The PRIVATE witnesses a composable signed-int / decimal FILTER proof needs but
+/// the manifest never carries — the operand's sign flag + canonical digits. For
+/// [`ProofInputs::FilterSignedInt`] the digits live in [`Self::int_digits`] (the
+/// magnitude digits) and [`Self::frac_digits`] is empty; for
+/// [`ProofInputs::FilterDecimal`] both arrays carry the integer-part and fraction
+/// digits. Mirrors [`JoinWitness`]: a non-manifest witness threaded through
+/// [`crate::toml::prover_toml_for`]'s `filter_signed_witness` arg. [OPUS-4.8] sq-7lrq.
+#[derive(Debug, Clone)]
+pub struct FilterSignedWitness {
+    /// The hidden operand's sign flag (`true` = negative). For signed-int this is
+    /// bound into the canonical token via the leading `-`; for decimal likewise.
+    pub neg: bool,
+    /// Canonical digits of the operand's integer part (signed-int: the magnitude
+    /// digits; decimal: the integer-part digits). Length is the member's `MD` / `ID`.
+    pub int_digits: Vec<u8>,
+    /// Canonical fraction digits (decimal only; EMPTY for signed-int). Length is the
+    /// member's `FD`.
+    pub frac_digits: Vec<u8>,
+}
+
+/// Encode a SIGNED `xsd:integer` literal `value` (canonical lexical form
+/// `value.to_string()`, e.g. `-42` => `"-42"^^xsd:integer`) to its term
+/// encoding — the host convenience wiring a `filter_signed_int` proof to a known
+/// constant operand. The lexical form (with an optional leading `-`) matches the
+/// `filter_signed_int_check` token rebuild byte-for-byte (oxrdf passes the
+/// lexical form through verbatim). (Salt-independent for literals.)
+/// [OPUS-4.8] sq-1q9h.
+pub fn encode_signed_int_literal(value: i64) -> FieldHex {
+    let lit = oxrdf::Literal::new_typed_literal(
+        value.to_string(),
+        NamedNode::new(XSD_INTEGER).unwrap(),
+    );
+    let enc = encode_term(&Term::Literal(lit), &Fr::from(0u64))
+        .expect("integer literal is committable");
+    hexf(&enc)
+}
+
+/// Encode an `xsd:decimal` literal from its sign, integer-part digits, and
+/// EXACTLY `fd` fraction digits (lexical form `[-]?<int>.<frac>`, e.g.
+/// `(false, 123, "45")` => `"123.45"^^xsd:decimal`) to its term encoding — the
+/// host convenience wiring a `filter_decimal` proof to a known constant operand.
+/// The lexical form matches the `filter_decimal_check` token rebuild
+/// byte-for-byte. `frac` must be exactly the member's `FD` digits (zero-padded
+/// by the caller, e.g. `"50"` for `0.50`). (Salt-independent for literals.)
+/// [OPUS-4.8] sq-1q9h.
+pub fn encode_decimal_literal(neg: bool, int_part: u64, frac: &str) -> FieldHex {
+    let sign = if neg { "-" } else { "" };
+    let lexical = format!("{sign}{int_part}.{frac}");
+    let lit = oxrdf::Literal::new_typed_literal(lexical, NamedNode::new(XSD_DECIMAL).unwrap());
+    let enc = encode_term(&Term::Literal(lit), &Fr::from(0u64))
+        .expect("decimal literal is committable");
+    hexf(&enc)
+}
+
 fn subj_term(t: &oxrdf::Triple) -> Term {
     match &t.subject {
         oxrdf::NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
@@ -527,4 +757,252 @@ pub fn build_join(
             blinding: hexf(&blinding),
         },
     })
+}
+
+// [OPUS-4.8] sq-bif.6: GLUE unit tests for the circuit-family id derivation —
+// the (data shape -> compiled member) plumbing the prover AND verifier both call
+// so a proof can only fit its member. These cover the NON-cryptographic
+// composition logic ONLY (bucket selection, exact-digit-count discipline,
+// out-of-family rejection, package-name determinism); they assert NOTHING about
+// in-circuit soundness or any privacy guarantee (the verifier remains NOT-yet-sound,
+// sq-qhy4 — external accredited-cryptographer sign-off pending).
+#[cfg(test)]
+mod derive_id_tests {
+    use super::*;
+
+    // --- scan (k, n, r) bucket lattice -----------------------------------
+
+    /// `derive_scan_id` maps the largest-graph size / disclosed-row count to the
+    /// SMALLEST compiled bucket that fits, and the result is deterministic.
+    #[test]
+    fn scan_id_picks_smallest_fitting_bucket_and_is_deterministic() {
+        // n picks 16 for <=16 triples, 64 for 17..=64. r picks 4 for <=4, 8 for 5..=8.
+        let id = derive_scan_id(1, 10, 3).expect("10<=16, 3<=4 fits");
+        assert_eq!(id, CircuitId::Scan { k: 1, n: 16, r: 4 });
+        // Exactly-N (the bucket boundary) selects that bucket, not the next.
+        assert_eq!(
+            derive_scan_id(2, 16, 4),
+            Some(CircuitId::Scan { k: 2, n: 16, r: 4 }),
+            "max_graph == 16 and match_rows == 4 fit the {{16,4}} bucket exactly"
+        );
+        // One over a boundary rolls up to the next compiled bucket.
+        assert_eq!(
+            derive_scan_id(1, 17, 5),
+            Some(CircuitId::Scan { k: 1, n: 64, r: 8 }),
+            "17 triples needs n=64; 5 rows needs r=8"
+        );
+        // Determinism: same inputs -> identical id across repeated calls.
+        assert_eq!(derive_scan_id(2, 64, 8), derive_scan_id(2, 64, 8));
+    }
+
+    /// A zero size / zero match-count is clamped to the smallest live bucket
+    /// (the circuit always commits at least one slot / discloses at least the
+    /// padded row word), not rejected.
+    #[test]
+    fn scan_id_clamps_zero_to_smallest_bucket() {
+        assert_eq!(
+            derive_scan_id(1, 0, 0),
+            Some(CircuitId::Scan { k: 1, n: 16, r: 4 }),
+            "max_graph/match_rows clamp up to 1, selecting the smallest bucket"
+        );
+    }
+
+    /// Out-of-family inputs return `None` (a clean error at the call site),
+    /// never a wrong member: an uncompiled `k`, or a size past every bucket.
+    #[test]
+    fn scan_id_out_of_family_is_none() {
+        assert!(derive_scan_id(3, 10, 3).is_none(), "k=3 is not compiled");
+        assert!(derive_scan_id(0, 10, 3).is_none(), "k=0 is not compiled");
+        assert!(
+            derive_scan_id(1, 65, 3).is_none(),
+            "65 triples exceeds the largest n bucket (64)"
+        );
+        assert!(
+            derive_scan_id(1, 10, 9).is_none(),
+            "9 rows exceeds the largest r bucket (8)"
+        );
+    }
+
+    // --- filter_int / filter_f64 EXACT digit-count discipline (sq-wto) ----
+
+    /// `derive_filter_int_id` is an EXACT digit-count match: every compiled D in
+    /// `FILTER_INT_D_VALUES` yields its own member; the count drives the id.
+    #[test]
+    fn filter_int_id_exact_match_per_compiled_digit_count() {
+        for &d in FILTER_INT_D_VALUES {
+            assert_eq!(
+                derive_filter_int_id(d),
+                Some(CircuitId::FilterInt { d }),
+                "compiled D={} derives its own filter_int member",
+                d
+            );
+        }
+        // 0 clamps to the 1-digit canonical form ("0").
+        assert_eq!(derive_filter_int_id(0), Some(CircuitId::FilterInt { d: 1 }));
+    }
+
+    /// The sq-wto correctness invariant: an out-of-family digit count returns
+    /// `None` — NOT the next-larger member (which would be silently unprovable
+    /// because the `digits: [u8; D]` witness pins the count to D exactly).
+    #[test]
+    fn filter_int_id_out_of_family_is_none_not_wrong_d() {
+        // 5 is the first count past the compiled 1..=4 range — the regression
+        // the differential fuzzer (sq-61g) caught: 5 must NOT derive d=anything.
+        assert_eq!(derive_filter_int_id(5), None, "d=5 has no member (sq-wto)");
+        for d in [6u32, 10, 19, 20, 100] {
+            assert!(
+                derive_filter_int_id(d).is_none(),
+                "out-of-family digit count {} must return None, never a wrong-D member",
+                d
+            );
+        }
+    }
+
+    /// `filter_f64` shares the EXACT-match discipline with `filter_int`.
+    #[test]
+    fn filter_f64_id_exact_match_and_out_of_family_none() {
+        for &d in FILTER_F64_D_VALUES {
+            assert_eq!(derive_filter_f64_id(d), Some(CircuitId::FilterF64 { d }));
+        }
+        assert_eq!(derive_filter_f64_id(0), Some(CircuitId::FilterF64 { d: 1 }));
+        assert_eq!(derive_filter_f64_id(5), None, "no f64 member past the compiled range");
+        assert!(derive_filter_f64_id(16).is_none(), "16 digits is past the f64 family");
+    }
+
+    // --- filter_signed_int (md magnitude-digit) ---------------------------
+
+    /// `derive_filter_signed_int_id` is an EXACT magnitude-digit-count match over
+    /// the compiled `{2, 4}` set; the IN-RANGE gap (3) and out-of-family counts
+    /// both return `None` (never a wrong-MD member).
+    #[test]
+    fn filter_signed_int_id_exact_match_with_gap() {
+        for &md in FILTER_SIGNED_INT_MD_VALUES {
+            assert_eq!(
+                derive_filter_signed_int_id(md),
+                Some(CircuitId::FilterSignedInt { md })
+            );
+        }
+        // 3 is INSIDE [2,4] numerically but is NOT a compiled member — exact match.
+        assert_eq!(
+            derive_filter_signed_int_id(3),
+            None,
+            "md=3 is not compiled ({{2,4}} only); exact match returns None, not md=4"
+        );
+        // 1 clamps from 0 but is also uncompiled.
+        assert_eq!(derive_filter_signed_int_id(0), None, "md clamps to 1, which is uncompiled");
+        assert!(derive_filter_signed_int_id(5).is_none(), "md=5 out of family");
+    }
+
+    // --- filter_decimal (id, fd) pair ------------------------------------
+
+    /// `derive_filter_decimal_id` matches the `(int_digits, frac_digits)` PAIR
+    /// exactly against the compiled set; a wrong integer OR fraction count gives
+    /// `None`.
+    #[test]
+    fn filter_decimal_id_exact_pair_match() {
+        for &(id, fd) in FILTER_DECIMAL_ID_FD_VALUES {
+            assert_eq!(
+                derive_filter_decimal_id(id, fd),
+                Some(CircuitId::FilterDecimal { id, fd }),
+                "compiled ({},{}) pair derives its member",
+                id,
+                fd
+            );
+        }
+        // The lone compiled member is (3, 2). Either coordinate off => None.
+        assert_eq!(derive_filter_decimal_id(3, 2), Some(CircuitId::FilterDecimal { id: 3, fd: 2 }));
+        assert_eq!(derive_filter_decimal_id(2, 2), None, "wrong integer-digit count");
+        assert_eq!(derive_filter_decimal_id(3, 3), None, "wrong fraction-digit count");
+        assert_eq!(derive_filter_decimal_id(4, 2), None, "wrong integer-digit count");
+        // int_digits clamps to >=1 (canonical "0.xx" has one integer digit).
+        assert_eq!(
+            derive_filter_decimal_id(0, 2),
+            None,
+            "id clamps to 1; (1,2) is not the compiled (3,2) member"
+        );
+    }
+
+    // --- join_eq (n_a, n_b) bucket pair ----------------------------------
+
+    /// `derive_join_eq_id` selects the smallest fitting `JOIN_EQ_N_BUCKETS` bucket
+    /// for EACH side independently (mirrors the scan n-bucket discipline), so the
+    /// four `(16|64, 16|64)` combinations are all reachable.
+    #[test]
+    fn join_eq_id_buckets_each_side_independently() {
+        assert_eq!(derive_join_eq_id(10, 10), Some(CircuitId::JoinEq { n_a: 16, n_b: 16 }));
+        assert_eq!(derive_join_eq_id(16, 64), Some(CircuitId::JoinEq { n_a: 16, n_b: 64 }));
+        assert_eq!(derive_join_eq_id(64, 16), Some(CircuitId::JoinEq { n_a: 64, n_b: 16 }));
+        assert_eq!(derive_join_eq_id(17, 50), Some(CircuitId::JoinEq { n_a: 64, n_b: 64 }));
+        // Exactly-N boundary selects that bucket.
+        assert_eq!(derive_join_eq_id(16, 16), Some(CircuitId::JoinEq { n_a: 16, n_b: 16 }));
+        // Clamp zero to the smallest bucket on either side.
+        assert_eq!(derive_join_eq_id(0, 0), Some(CircuitId::JoinEq { n_a: 16, n_b: 16 }));
+    }
+
+    /// Either side past every compiled bucket returns `None`, never a wrong-N member.
+    #[test]
+    fn join_eq_id_out_of_family_is_none() {
+        assert!(derive_join_eq_id(65, 16).is_none(), "n_a=65 exceeds the largest bucket");
+        assert!(derive_join_eq_id(16, 65).is_none(), "n_b=65 exceeds the largest bucket");
+    }
+
+    // --- package() name determinism + distinctness -----------------------
+
+    /// `CircuitId::package()` is a pure, deterministic function of the id, and it
+    /// names DISTINCT members for distinct (family × bucket) ids — the property
+    /// the driver relies on to locate the right `zk/compose/<pkg>` directory.
+    #[test]
+    fn package_names_are_deterministic_and_distinct_per_family_and_bucket() {
+        let ids = [
+            CircuitId::Scan { k: 1, n: 16, r: 4 },
+            CircuitId::Scan { k: 2, n: 16, r: 4 },
+            CircuitId::Scan { k: 1, n: 64, r: 4 },
+            CircuitId::Scan { k: 1, n: 16, r: 8 },
+            CircuitId::FilterInt { d: 1 },
+            CircuitId::FilterInt { d: 4 },
+            CircuitId::FilterF64 { d: 1 },
+            CircuitId::FilterSignedInt { md: 2 },
+            CircuitId::FilterDecimal { id: 3, fd: 2 },
+            CircuitId::JoinEq { n_a: 16, n_b: 64 },
+            CircuitId::JoinEq { n_a: 64, n_b: 16 },
+        ];
+        // Deterministic: the same id renders the same package name every call.
+        for id in &ids {
+            assert_eq!(id.package(), id.package(), "package() is pure");
+        }
+        // Distinct: no two distinct ids collide on a package name (one directory
+        // per member — a collision would prove the wrong relation under a shared dir).
+        let mut names: Vec<String> = ids.iter().map(|i| i.package()).collect();
+        let total = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), total, "every distinct id maps to a distinct package dir");
+        // Spot-check the exact wire names the zk/compose/ directories use.
+        assert_eq!(CircuitId::Scan { k: 2, n: 64, r: 8 }.package(), "scan_k2_n64_r8");
+        assert_eq!(CircuitId::FilterInt { d: 3 }.package(), "filter_int_d3");
+        assert_eq!(CircuitId::FilterF64 { d: 2 }.package(), "filter_f64_d2");
+        assert_eq!(CircuitId::FilterSignedInt { md: 4 }.package(), "filter_signed_int_d4");
+        assert_eq!(CircuitId::FilterDecimal { id: 3, fd: 2 }.package(), "filter_decimal_i3_f2");
+        assert_eq!(CircuitId::JoinEq { n_a: 64, n_b: 64 }.package(), "join_eq_na64_nb64");
+    }
+
+    /// The scan / filter_int builders thread the SAME derive-id discipline: the
+    /// id carried in the built `ProofInputs` equals the id `derive_*` returns for
+    /// the same shape, and an out-of-family operand makes the whole build `None`.
+    #[test]
+    fn builders_carry_the_derived_id_and_propagate_out_of_family_none() {
+        // A 3-digit operand builds the filter_int_d3 member.
+        let enc = encode_int_literal(123);
+        let (inputs, digits) =
+            build_filter_int(enc, 123, FilterOp::Gt, 100, true).expect("3-digit operand has d3");
+        assert_eq!(*inputs.circuit_id(), CircuitId::FilterInt { d: 3 });
+        assert_eq!(digits, b"123", "digit witness is the canonical decimal bytes");
+        // A 5-digit operand is out of family -> the builder returns None (sq-wto),
+        // exactly as derive_filter_int_id(5) does.
+        let enc5 = encode_int_literal(12345);
+        assert!(
+            build_filter_int(enc5, 12345, FilterOp::Lt, 0, false).is_none(),
+            "5-digit operand: out-of-family build is None, never a wrong-D witness"
+        );
+    }
 }

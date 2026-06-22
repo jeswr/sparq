@@ -23,12 +23,30 @@ rustdoc-args = ["--cfg", "docsrs"]
 # Out-of-core querying (memory-mapped on-disk indexes) — on by default for the CLI.
 # mimalloc: the global allocator (T1.0). On by default; `--no-default-features --features mmap`
 # falls back to the system allocator for A/B measurement of allocator contention.
-default = ["mmap", "mimalloc", "dict-spill"]
+# [OPUS-4.8] (sq-oy1f.4, MAINTAINER-DIRECTED DEFAULT-ON EXCEPTION) `jsonld` is in the default
+# set: the native CLI parses AND re-serialises JSON-LD out of the box (the user-prioritised
+# sq-oy1f epic). This is a deliberate exception to sparq's opt-in-by-default principle — JSON-LD
+# is the dominant linked-data interchange format and the native binary has no bundle-size floor.
+# Still TOGGLEABLE: `--no-default-features --features mmap,mimalloc,dict-spill` drops it.
+default = ["mmap", "mimalloc", "dict-spill", "jsonld"]
 mmap = ["sparq-core/mmap"]
 # Spillable build-time term dictionary for `build` (bounded peak RSS; env-gated at
 # runtime via SPARQ_DICT_SPILL — default behavior is unchanged when the vars are unset).
 dict-spill = ["sparq-core/dict-spill"]
 mimalloc = ["dep:mimalloc"]
+# [OPUS-4.8] (sq-oy1f.4, epic sq-oy1f) `jsonld` — JSON-LD ingest + re-serialisation, DEFAULT ON
+# (maintainer-directed exception to opt-in-by-default; see `default` above). Forwards
+# `sparq-core/jsonld` (the `oxjsonld` parser `dump <file> jsonld …` / `load <file> jsonld` use to
+# READ a JSON-LD document) and implies `serialize-rdf` (the engine's hand-rolled JSON-LD WRITER, so
+# `dump … jsonld[-…]` EMITS one). Toggleable: drop it via `--no-default-features` to omit the
+# `oxjsonld` parser. Native-only; the lean wasm bundle keeps JSON-LD opt-in (sparq-wasm/jsonld).
+jsonld = ["sparq-core/jsonld", "serialize-rdf"]
+# [OPUS-4.8] (sq-678h) `dump <file> <in-format> <out-format>` — load an RDF document and
+# re-serialize it as Turtle / TriG / N-Quads / JSON-LD (the writer matrix). Forwards sparq-engine's
+# `serialize-rdf` feature (no new dependencies — the JSON-LD writer is a hand-rolled emitter).
+# Pulled into the default build by `jsonld` (above); a `--no-default-features` build that wants ONLY
+# the Turtle/TriG/N-Quads writers (no JSON-LD parser) can enable `serialize-rdf` on its own.
+serialize-rdf = ["sparq-engine/serialize-rdf"]
 # HDT ingestion (`<file>.hdt[.gz]` / format "hdt") via the opt-in sparq-hdt crate.
 # OFF by default for two deliberate reasons: (1) sparq-hdt's MSRV is 1.87 (the
 # wrapped hdt crate) vs this crate's workspace floor of 1.85 — a default dep
@@ -79,7 +97,7 @@ oxrdf.workspace = true
 # format — ~12x faster to decompress than bzip2, so decompression stops being the
 # ingestion bottleneck; recompress a .bz2 source once with `zstd -9 -T0`).
 flate2 = "1"
-bzip2 = "0.5"
+bzip2 = "0.6"
 zstd = "0.13"
 # Direct mmap for the compression probe (measure-first sizing of permutation indexes).
 memmap2 = { workspace = true }
@@ -91,5 +109,11 @@ memmap2 = { workspace = true }
 # as dev-deps adds nothing to the dependency tree — it just lets the integration test
 # link them. (hdt_cli.rs uses flate2 the same way under the `hdt` feature.)
 flate2 = "1"
-bzip2 = "0.5"
+bzip2 = "0.6"
 zstd = "0.13"
+# [OPUS-4.8] (sq-d7d) `bench`/`bench-mmap` emit a dependency-free JSON results document via
+# `--json <path>` (the runtime CLI adds NO serde dep — it hand-builds the JSON like
+# mpc_net_bench::cell_json). serde_json is a TEST-ONLY dep so cli_contract.rs can prove the
+# emitted document is genuinely valid, parseable JSON with the expected keys (a stronger
+# assertion than substring checks). Dev-deps never enter the shipped binary or its MSRV.
+serde_json = "1"

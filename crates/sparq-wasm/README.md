@@ -1,3 +1,4 @@
+<!-- [OPUS-4.8] sq-inzv: full-template README — the published @jeswr/sparq browser/WASM bundle. -->
 # sparq-wasm
 
 The sparq parser + triplestore + SPARQL engine compiled to WebAssembly for the
@@ -6,107 +7,112 @@ worst-case-optimal Leapfrog Triejoin for cyclic queries — single-threaded and
 with a minimal bundle (no rayon, no serde; results are serialised by hand to
 SPARQL 1.1 JSON).
 
-## Build
+> Distributed via npm, not crates.io (`publish = false`). It is the source of the
+> published npm `@jeswr/sparq` bundle, packaged via `wasm-pack`, not a Rust library
+> dependency.
+
+## 🚀 Quickstart
 
 ```sh
-# Browser (ES modules)
-wasm-pack build --target web --release
-# Node (CommonJS) — used by test/smoke.cjs
-wasm-pack build --target nodejs --release --out-dir pkg-node
+wasm-pack build --target web --release            # browser (ES modules)
+wasm-pack build --target nodejs --release --out-dir pkg-node   # Node (CommonJS)
 ```
-
-`getrandom`'s browser backend is selected via `.cargo/config.toml`
-(`--cfg getrandom_backend="wasm_js"`) plus the wasm-only `getrandom` dependency
-in `Cargo.toml` (oxrdf pulls `rand` for blank-node ids).
-
-## Use
 
 ```js
 import init, { Store } from "./pkg/sparq_wasm.js";
 await init();
 
-const store = Store.load(turtleText, "turtle"); // or "ntriples" | "nquads" | "trig"
-store.size;             // number of triples
-store.heapBytes();      // rough in-memory footprint
+const store = Store.load(turtleText, "turtle"); // "ntriples" | "nquads" | "trig" | "jsonld"*
+const empty = new Store();                       // empty + mutable; build up via updateInPlace
+const based = Store.loadWithBase(doc, "turtle", "http://ex/dir/"); // resolve relative IRIs
+store.size;            // number of triples
+store.heapBytes();     // rough in-memory footprint
 
 const json = store.query("SELECT * WHERE { ?s ?p ?o } LIMIT 10");
-const { head, results } = JSON.parse(json); // SPARQL 1.1 JSON results
-
+const { head, results } = JSON.parse(json);       // SPARQL 1.1 JSON results
 const n = store.count("SELECT ?s WHERE { ?s a <http://ex/Person> }"); // lazy, no materialise
 ```
 
-`query` supports the M2 surface: BGPs (binary + WCOJ), FILTER, OPTIONAL, UNION,
-MINUS, BIND, VALUES, aggregation (GROUP BY / HAVING), ORDER BY, DISTINCT/LIMIT/
-OFFSET, sub-SELECT.
+## ✨ Features
 
-### Streaming wins carry over to the browser
+- **SPARQL 1.1 query surface** — BGPs (binary + WCOJ), FILTER, OPTIONAL, UNION,
+  MINUS, BIND, VALUES, aggregation (GROUP BY / HAVING), ORDER BY,
+  DISTINCT/LIMIT/OFFSET, sub-SELECT. Every query *form* is exported: SELECT/ASK via
+  `query` / `ask` (plus streaming `queryCursor` / `queryChunks`) and CONSTRUCT /
+  DESCRIBE via `queryQuads` / `queryQuadsChunks` (N-Triples out). The non-regex
+  string functions (`CONTAINS`, `STRSTARTS`, `LCASE`, …) share one
+  `sparq-engine`/`sparq-core` with native, so they behave identically.
+- **`REGEX` / `REPLACE` are compiled OUT of the lean default bundle** — they live
+  behind `sparq-engine`'s default-on `regex` feature, which this crate disables to
+  keep the regex automata out of the browser bundle, so on a default build a
+  `REGEX`/`REPLACE` query is **rejected** (an `"unsupported SPARQL function"`
+  `JsError`, not a silently-empty result). Build with `--features regex`, or prefer
+  `CONTAINS` / `STRSTARTS` / `STRENDS`.
+- **Opt-in JSON-LD, SHACL, lazy counts.** `"jsonld"` parsing links `oxjsonld` and is
+  **OFF by default** to keep the lean bundle small (`--features jsonld`). The
+  `shacl` feature exposes a stateless `Store.validate(data, shapes, format)`
+  (a drop-in for `rdf-validate-shacl`), also OFF by default. The `count()` family is
+  **lazy** — counted straight from the sorted indexes with no per-solution row.
+- **Opt-in serialiser.** The `serialize-rdf` feature (OFF by default) exposes
+  `Store.serialize(format, pretty, indent, abbreviate, prefixes?)` — the store's contents
+  as a **Turtle** (default graph), **TriG** (whole dataset), or **JSON-LD** (whole dataset)
+  document, in the engine's pretty (Turtle/TriG: sorted, blank-line-separated; JSON-LD:
+  re-indented) shape or the compact/minified writer. JSON-LD `format` is `"jsonld"`
+  (expanded by default) or `"jsonld-expanded"` / `"jsonld-flattened"` /
+  `"jsonld-compacted"`; `abbreviate` is Turtle/TriG-only (JSON-LD compaction is the
+  `jsonld-compacted` form). The optional `prefixes` argument is a `[[prefix, iri], …]` JS
+  array: when omitted the engine's well-known defaults are used (byte-for-byte the prior
+  behaviour); when supplied it drives Turtle/TriG `@prefix` compaction and the JSON-LD
+  compacted `@context`, so a caller can serialise under its own prefix policy (e.g. the
+  site's `COMMON_PREFIXES` with `https://schema.org/`, or a query's declared `PREFIX`
+  lines) and get byte-parity output. It calls straight through to `sparq-engine`'s writers,
+  so the output is byte-identical to the native serialiser; the lean bundle carries no
+  serializer code. JSON-LD serialise-OUT needs only `serialize-rdf` (the `jsonld` feature is
+  for INGEST). The sibling `Store.serializeCompact(context, pretty, indent?)` (same feature)
+  runs the **full W3C JSON-LD 1.1 Compaction Algorithm** against a caller `@context` JSON
+  string (term defs / `@vocab` / coercion / `@reverse`) — richer than the prefix-only
+  `jsonld-compacted` form, and lossless; a non-object `context` throws.
+- **Opt-in SHACL Compact Syntax parse.** The `scs` feature (OFF by default; implies
+  `shacl` + `serialize-rdf`) exposes `Store.parseShaclCompact(text, base?)` — parses a
+  [SHACL Compact Syntax](https://www.w3.org/TR/shacl12-compact-syntax/) document into the
+  equivalent SHACL **shapes graph** and returns it as a pretty **Turtle** string (the SCS
+  *input* direction for the playground's "Compact → shapes" mode). It REUSES the
+  `Store.serialize` engine writer above (no second serialiser), so the bytes match
+  `serialize("turtle", true, "  ", true)`; the parsed shapes validate data identically to
+  the equivalent Turtle shapes. A malformed document throws a `JsError` with the source line.
+- **Persistence is native-only** — the native `Graph::save` / `open` /
+  `save_compressed` family and the mmap-backed map-in path are **deliberately not
+  exported**: they need a POSIX filesystem and `mmap`, which a browser/edge wasm
+  sandbox does not provide. A wasm store is built fresh each session from in-memory
+  bytes (`Store.load` / `loadCompressed`); to round-trip contents back to the host,
+  `CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }` through `queryQuads`. There is **no
+  binary snapshot format across the wasm boundary**.
+- **Single-threaded, append-only growth, 32-bit ceiling.** No `rayon` (wasm has no
+  threads here). `updateInPlace` / `applyDelta` grow the indexes and dictionary
+  **append-only** (deletes are masked, not reclaimed), so steady writing
+  monotonically grows the footprint until a rebuild (`update` returns a fresh
+  compacted store). `wasm32` linear memory caps at 4 GiB (a real tab is happier
+  under ~2 GiB) — that, not CPU, is the binding scale limit.
+- **`compact-index` for the memory-constrained target.** The wasm build keeps only
+  three permutations (SPO, POS, OSP) instead of six; `loadCompressed` block-compresses
+  them and compacts the dictionary so materially more triples fit in the same tab,
+  for a small per-scan decode (identical results). Correctness is held to the native
+  bar via differential fuzzing vs Oxigraph.
 
-The same engine optimisations apply in WASM, where memory and main-thread time are
-scarcest. The whole `count()` family is **lazy** — counted straight from the sorted
-indexes with no result row built per solution — so "how many?" UI queries stay on the
-main thread without jank. The `test/perf.cjs` harness measures lazy-count vs materialise
-latency in Node over a 400k-triple graph for LIMIT / type-count / join-count / star-count
-/ filter-count / OPTIONAL-count and their materialising counterparts. Run it for the
-numbers:
+## 📚 Learn more
 
-```sh
-node test/perf.cjs
-```
+- **How-to** — [`skills/javascript-wasm/SKILL.md`](../../skills/javascript-wasm/SKILL.md).
+- **SHACL binding** — [`skills/shacl-validation/SKILL.md`](../../skills/shacl-validation/SKILL.md)
+  and the standalone showcase bundle [`sparq-shacl-wasm`](../sparq-shacl-wasm/README.md).
+- **Performance** — bundle size (`wasm_bundle_*`) and store/dict footprint
+  (`store_bytes_per_triple` / `dict_bytes_per_term`) are tracked per-commit on the
+  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench), not in docs.
+  The `test/perf.cjs`, `test/mem.cjs`, and `test/smoke.cjs` harnesses reproduce them.
+- **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 
-The lazy-count wins built for the native engine carry over unchanged (same
-`sparq-core`/`sparq-engine`): counting a filtered pattern or an OPTIONAL is far cheaper
-than materialising it — a large saving on a memory-constrained device.
+\* `"jsonld"` (and `"json-ld"` / `"application/ld+json"`) is parsed only with the
+opt-in `jsonld` feature; Turtle / N-Triples / N-Quads / TriG need no feature.
 
-## Browser memory bound (the scale ceiling)
+## License
 
-The browser is the memory-constrained target — wasm32 linear memory caps at 4 GB and a
-real tab is happier under ~2 GB. The wasm build therefore enables `compact-index`: only
-**three** permutation indexes (SPO, POS, OSP) instead of six — every triple pattern is
-still answered by one of these three indexes, so the store holds far fewer index
-structures (some merge joins fall back to hashing). The `test/mem.cjs` harness measures the store footprint (B/triple) for `load`
-(raw) vs `loadCompressed` over synthetic N-Triples and derives the browser triple ceiling;
-the per-commit `store_bytes_per_triple` / `dict_bytes_per_term` metrics are also tracked
-on the perf dashboard (<https://jeswr.github.io/sparq/dev/bench>). Run it for the numbers:
-
-```sh
-node test/mem.cjs
-```
-
-`loadCompressed` (a) BLOCK-COMPRESSES the three permutations (delta + LEB128-varint,
-decoded per touched block), (b) compacts the dictionary's id→term storage into a single
-blob (no per-term `Box<str>`), and (c) makes the numeric-value cache SPARSE (most terms are
-IRIs/strings, and small integers inline — so the dense f64-per-term cache is mostly NaN;
-only real numeric literals are kept). Together they cut the store substantially (materially more
-triples in the same tab) for a small per-scan decode (identical results). `loadCompressed`
-is the right default when the tab's RAM, not its CPU, is the constraint. The byte-level
-parser keeps load throughput high (single-threaded —
-wasm has no rayon) without allocating an `oxrdf::Term` per term. Correctness of the
-reduced-permutation + compressed engine is held to the same bar as native (differential
-fuzz cases vs Oxigraph with `compact-index` AND the compressed store). The native build
-keeps all six permutations for maximum query speed.
-
-## Bundle size (release, wasm-opt -Oz)
-
-The build is tuned for a small bundle: the wasm artifact and its JS glue (raw and
-gzipped) are tracked per-commit on the perf dashboard
-(<https://jeswr.github.io/sparq/dev/bench>) as the `wasm_bundle_*` metrics, so they
-can't go stale here. The bundle has grown modestly over time as the engine gained
-block compression, exact >2⁵³/decimal comparison, materialisation-free counts, and the
-mmap-class storage abstraction — a small increase that buys substantially more browser
-capacity and broader conformance.
-
-The bulk is the SPARQL parser (`spargebra`/`peg`) + `oxttl`/`oxrdf` + `rand`
-(transitively, for blank-node ids, unused here). Size-reduction levers for the
-"minimal bundle" goal (future): drop the `rand` path, a leaner SPARQL parser or
-parse-on-demand, `opt-level="z"` for the wasm profile, and `twiggy`-guided
-pruning.
-
-## Test
-
-`test/smoke.cjs` loads a small graph and checks load, a triangle (WCOJ) query,
-AVG aggregation, and language-tagged literals in the JSON output:
-
-```sh
-wasm-pack build --target nodejs --release --out-dir pkg-node
-node test/smoke.cjs
-```
+[MIT](../../LICENSE).

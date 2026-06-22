@@ -20,6 +20,16 @@
 #   pinning             SHA/seed/dataset-version that must be fixed, if any
 #   records_to          where results land
 #   status              ok | stale | broken | external-cost | planning
+#   featured            OPTIONAL bool. Set `featured = false` to mark a suite an
+#                       intentionally-UNFEATURED capability suite (internal harness
+#                       / micro-bench / external-cost / spike) so the merge-time
+#                       gate G3 (scripts/check-new-bench-registered.py, soft-launch
+#                       advisory) does NOT require a FEATURED_SUITES row in
+#                       bench/dashboard/dashboard.js for it. Omit it (the default)
+#                       for a capability suite that SHOULD be promoted on the
+#                       dashboard. Non-capability families (cli-*/hw/ci/serve/
+#                       memtier/parse/compress/wikidata/…) are exempt from the
+#                       dashboard requirement without needing this flag. [OPUS-4.8]
 
 # =============================================================================
 # QUERY — engine compute + differential correctness vs reference engines
@@ -36,6 +46,21 @@ dataset     = "synthetic WatDiv-flavoured social graph, generated in-process by 
 quiet_box_sensitive = true
 pinning     = "dataset deterministic (fixed SplitMix64 seed 0x9E3779B97F4A7C15); pin --scale/--iters for comparable numbers"
 records_to  = "stdout; results table in research/BENCHMARKS.md"
+status      = "ok"
+
+# [OPUS-4.8] sq-mqvm (epic sq-3183): the opt-in sparq-algos graph-analytics surface.
+[[benchmark]]
+id          = "sparq-algos"
+name        = "Graph analytics (PageRank / centrality / community) throughput"
+category    = "scaling"
+measures    = "min-of-3 microseconds for NodeGraph build, PageRank, degree centrality, weakly-connected components, and label propagation over a generated graph (metric_us lines)"
+invoke      = "cargo run -p sparq-algos --release --example bench_algos -- 50000 8"
+source      = "crates/sparq-algos/examples/bench_algos.rs"
+dataset     = "synthetic preferential-attachment graph generated in-process (deterministic xorshift seed); args = [nodes=50000] [avg_degree=8]"
+quiet_box_sensitive = true
+featured    = false  # in-crate micro-bench for an opt-in capability crate; not a dashboard series
+pinning     = "generator deterministic (fixed xorshift seed); pin nodes/avg_degree for comparable numbers"
+records_to  = "stdout (metric_us lines); not a committed regression number"
 status      = "ok"
 
 [[benchmark]]
@@ -102,6 +127,9 @@ dataset     = "sparq-bench synthetic dump (deterministic WatDiv-flavoured social
 quiet_box_sensitive = true  # wall-clock latency; trend-only, NOT in the deterministic perf-gate (scripts/perf-gate.py)
 pinning     = "query dir + mode; dataset deterministic; queries pinned to fixed subjects so result counts are scale-stable"
 records_to  = "stdout (TSV); CI emits op_<query>_<mode>_us into benchmark-data (dev/bench) via scripts/ci-bench.sh"
+# [OPUS-4.8] sq-5o5.2: trend-only operator-latency coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 # [OPUS-4.8] sq-0jp — SP2Bench (well-known suite) at CI scale; per-commit subset + heavy tier.
@@ -139,12 +167,12 @@ id          = "watdiv"
 name        = "WatDiv (Waterloo SPARQL Diversity Benchmark) — query-shape diversity"
 category    = "query"
 measures    = "per-query min-of-iters latency (us) across count/materialize/json for the 16 per-commit Basic-Testing queries grouped by join topology — Linear (L1-L5), Star (S1-S7), Snowflake (F2/F3/F5), Complex (C3); stresses join STRUCTURE across a deliberately wide structurality range. Per-commit subset also carries a HARD expected-rows correctness diff (count mode) on the fixed corpus"
-invoke      = "cargo build --release -p sparq-cli && CORPUS=$(bench/watdiv/gen.sh 1) && ./target/release/sparq-cli bench \"$CORPUS\" ntriples bench/watdiv/queries 3 count   # also materialize|json; self-contained runner: bench/watdiv/run.sh; heavy tier: bench/watdiv/queries-heavy; CI runs the subset via scripts/ci-bench.sh -> watdiv_<query>_<mode>_us"
+invoke      = "cargo build --release -p sparq-cli && CORPUS=$(bench/watdiv/gen.sh 1) && ./target/release/sparq-cli bench \"$CORPUS\" ntriples bench/watdiv/queries 3 count   # also materialize|json; self-contained runner: bench/watdiv/run.sh; heavy tier: bench/watdiv/queries-heavy; CI runs the subset via scripts/ci-bench.sh -> watdiv_sf<SF>_<query>_<mode>_us"
 source      = "bench/watdiv/{gen.sh,run.sh,queries/*.rq,queries-heavy/*.rq,expected-rows.tsv,files/words.txt,README.md}; scripts/ci-bench.sh (watdiv hook); crates/sparq-cli/src/main.rs (run_query_suite)"
 dataset     = "REAL Waterloo DSG WatDiv v0.6 generator (research-use; fetched + built by gen.sh, sha256-pinned tarball fb8d930b…71d2, built g++ + Boost). Per-commit: SF=1 (~106k distinct N-Triples, deterministic byte-identical output via two seed patches -> seed 1u + a vendored ASCII wordlist). gitignored + regenerable (build-once-cache binary in /tmp/watdiv)"
 quiet_box_sensitive = true  # wall-clock latency trend-only, NOT in scripts/perf-gate.py; the expected-rows diff IS a hard correctness gate (deterministic, load-robust)
 pinning     = "watdiv tarball sha256 (gen.sh TARBALL_SHA256); generator RNG seed 1u (the PIN — query constants + expected-rows.tsv bind to the seed-1 SF=1 corpus); WATDIV_SF (1 per-commit); vendored files/words.txt (counts are wordlist-content-independent); queries are the published WatDiv Basic-Testing templates instantiated with fixed seed-1 constants"
-records_to  = "stdout (TSV); CI emits watdiv_<query>_<mode>_us into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/watdiv/expected-rows.tsv"
+records_to  = "stdout (TSV); CI emits watdiv_sf<SF>_<query>_<mode>_us (the _sf<SF> scale-factor token keeps per-commit SF=1 + nightly SF=1000 as distinct series for the sq-viby scaling chart) into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/watdiv/expected-rows.tsv"
 status      = "ok"
 
 # [OPUS-4.8] sq-13i family — BSBM (Berlin SPARQL Benchmark) Explore mix at CI scale; e-commerce graph.
@@ -218,6 +246,41 @@ records_to  = "stdout (TSV); CI emits deeptax_d<DEPTH>_{closure_s,query_us,closu
 status      = "ok"
 
 [[benchmark]]
+id          = "owl-sameas"
+name        = "OWL sameAs equality micro-suite — equality-reasoning closure correctness"
+category    = "inference"
+measures    = "per tier N (default N=8+N=32 per-commit; N=256 EC2/nightly): OWL-RL closure time (sameas_size<N>_closure_s), a class-membership query over the closure (sameas_size<N>_query_us), and the materialized closure triple-count (sameas_size<N>_closure_triples). run.sh carries a SELF-ASSERTING closure-size gate: closure_triples (= K·N·(N+M), K=4 classes, M=3 data triples) AND query rows (= K·N) are asserted vs expected.tsv (deterministic) so a sparq-reason owl:sameAs regression fails LOUDLY. This is the EQUALITY analogue of deep-taxonomy: it gates the union-find sameAs rewriting + expand-back path that no other reasoning suite touches (LUBM is subClassOf/restriction/Transitive/inverseOf; deep-taxonomy is N3 subclass transitivity)"
+invoke      = "cargo build --release -p sparq-cli && bench/owl-sameas/run.sh   # self-contained: gen_sameas.py builds K owl:sameAs classes of N members per tier, materialize the OWL-RL closure per tier, query.rq over it, assert expected.tsv; CI runs it via scripts/ci-bench.sh -> sameas_size<N>_{closure_s,query_us,closure_triples}. Tiers via SAMEAS_TIERS"
+source      = "bench/owl-sameas/{gen_sameas.py,gen.sh,run.sh,query.rq,expected.tsv,README.md} (gen_sameas.py is a NEW pure-Python deterministic generator, in-repo); scripts/ci-bench.sh (sameas hook); crates/sparq-cli/src/main.rs (cmd_reason owl); crates/sparq-reason/src/owl.rs (owl:sameAs union-find rewriting + expand-back)"
+dataset     = "K=4 independent owl:sameAs equivalence classes, each N individuals (a STAR of N-1 sameAs edges to the class anchor) + M=3 anchor data triples; pure-Python stdlib, NO network/toolchain, byte-deterministic (pure function of K,N,M). Per-commit tiers N=8 + N=32 (OWL-RL closures 352 / 4,480 triples, sub-second total); N=256 (closure 265,216) is opt-in via SAMEAS_TIERS for EC2/nightly. gitignored + regenerable (/tmp/owl-sameas)"
+quiet_box_sensitive = true  # closure_s/query_us wall-clock trend-only, NOT in scripts/perf-gate.py; the closure-triple-count + query-row assertions ARE a hard correctness gate (deterministic, load-robust; catches owl:sameAs reasoner regressions — incl. silent under-derivation a single query misses)
+pinning     = "gen_sameas.py is a deterministic pure function of (K,N,M) (no RNG, byte-identical); expected.tsv pins the closed-form closure sizes (K·N·(N+M)) + query rows (K·N) per tier, each VERIFIED against `sparq-cli reason … owl` (not guessed); metric `n<N>` token is numeric so the dashboard derives the size-scaling axis"
+records_to  = "stdout (TSV); CI emits sameas_size<N>_{closure_s,query_us,closure_triples} into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/owl-sameas/expected.tsv"
+status      = "ok"
+
+# [OPUS-4.8] sq-evb1: EL classification micro-bench for the opt-in sparq-reason-el crate. The
+# EL-fragment analogue of deep-taxonomy/owl-sameas (those gate the RL reasoner; this gates the
+# consequence-based EL classifier). Two closed-form workloads over the SAME public
+# Classifier::classify API: a deep subClassOf chain (transitive lattice, d·(d+1)/2 subsumptions)
+# and a CR4 existential-traversal chain (d+1 A_i⊑B subsumptions OWL 2 RL CANNOT reach). Both are
+# SELF-ASSERTING (the example asserts the closed-form closure sizes), so a silent classifier
+# under-derivation fails LOUDLY — the deterministic, load-robust correctness gate; wall-clock is
+# trend-only. Hermetic: the TBox is generated in-process (pure function of DEPTH, no dataset).
+[[benchmark]]
+id          = "reason-el-classify"
+name        = "sparq-reason-el — OWL 2 EL classification (chain + CR4 existential traversal)"
+category    = "inference"
+measures    = "classification wall time over a DEPTH-parameterised in-process TBox, for two workloads: `chain` (a DEPTH-deep rdfs:subClassOf chain — complete transitive lattice, closed form derived_subsumptions = DEPTH·(DEPTH+1)/2) and `cr4` (a DEPTH-long ∃r.-successor chain with `∃r.B ⊑ B` back-propagation — closed form A_i⊑B_derivations = DEPTH+1, the existential-traversal closure OWL 2 RL silently cannot derive). The example carries a SELF-ASSERTING closure-size gate: both closed forms are asserted in-process (deterministic) so an EL classifier regression — incl. silent under-derivation — fails LOUDLY"
+invoke      = "cargo run -p sparq-reason-el --example classify_bench --release [DEPTH]   # DEPTH defaults to 2000; self-contained, no dataset to fetch"
+source      = "crates/sparq-reason-el/examples/classify_bench.rs (the runner + in-process generator); crates/sparq-reason-el/src/{lib.rs,classify.rs,normal.rs,extract.rs} (the classified surface — Classifier::classify, CR1-CR5 saturation)"
+dataset     = "in-process: a DEPTH-deep subClassOf chain (chain workload) and a DEPTH-long ∃r.-successor chain + `∃r.B ⊑ B` (cr4 workload), both a pure function of DEPTH (no RNG/network/toolchain, byte-deterministic). DEPTH=2000 default: chain closure 2,001,000 subsumptions, cr4 closure 2,001 — sub-second total. gitignored+regenerable (nothing written to disk)"
+quiet_box_sensitive = true  # classify wall-clock trend-only, NOT in scripts/perf-gate.py; the closed-form closure-size assertions (d·(d+1)/2 chain subsumptions; d+1 cr4 A_i⊑B subsumptions) ARE a hard correctness gate (deterministic, load-robust; catches EL classifier regressions incl. silent under-derivation a single query misses)
+pinning     = "the in-process generator is a deterministic pure function of DEPTH (no RNG, byte-identical); the closed-form closure sizes (chain DEPTH·(DEPTH+1)/2; cr4 DEPTH+1) are asserted in-example, each VERIFIED by running (depth 5 -> 15/6; depth 2000 -> 2001000/2001), not guessed"
+records_to  = "stdout (trend-only wall time + the asserted closure sizes); structural assertions live in the example itself (classify_bench.rs)"
+featured    = false  # [OPUS-4.8] sq-evb1: capability micro-bench (MVP EL classifier), not a head-to-head competitor card — dashboard promotion deferred to a maintainer.
+status      = "ok"
+
+[[benchmark]]
 id          = "selective-bindjoin"
 name        = "Selective (index-nested-loop / bind) join"
 category    = "query"
@@ -228,6 +291,9 @@ dataset     = "dense follows graph (N nodes x4 edges) + rare premium leaf; gen2.
 quiet_box_sensitive = true
 pinning     = "gen.py seed fixed (random.seed(7)); pin N + fanout"
 records_to  = "stdout; tables in bench/selective/README.md; analysis research/predicate-transfer-measured.md"
+# [OPUS-4.8] sq-5o5.2: trend-only join-strategy characterization, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 [[benchmark]]
@@ -241,6 +307,9 @@ dataset     = "literal-heavy synthetic, ~5N triples (int inline / big int / deci
 quiet_box_sensitive = true
 pinning     = "deterministic generator (index-derived values); pin N"
 records_to  = "stdout (TSV)"
+# [OPUS-4.8] sq-5o5.2: trend-only value-path cost probe, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 # =============================================================================
@@ -343,6 +412,26 @@ records_to  = "stdout; analysis research/custom-parsers-baseline.md"
 status      = "ok"
 
 [[benchmark]]
+# [OPUS-4.8] (sq-9w0t) The dictionary bytes/term + dict-load-throughput baseline that
+# GATES the term-index-compression plan (research/term-index-compression.md §2-§3). The
+# B/term + composition figures are DETERMINISTIC (load-robust); throughput is quiet-box.
+id          = "dict-baseline"
+name        = "Term-index (dictionary) BASELINE harness"
+category    = "ingest"
+measures    = "dict bytes/term (arena + blob/browser mode) vs naive whole-string; per-class composition (IRI/literal/lang/blank/triple); A1 prefix/suffix split + distinct namespaces; A3 datatype-IRI + lang bytes; dict-build throughput (triples/s, terms/s, MB/s, median of 3)"
+invoke      = "cd bench/dict && cargo build --release && ./target/release/dict-baseline gen 200000 data && ./target/release/dict-baseline bench data/wikidata.nt   # also bench data/uniprot.nt; selftest for CI invariants"
+source      = "bench/dict/{README.md,Cargo.toml}, dict-baseline bin; Dict::heap_bytes()/len()/iter() in crates/sparq-core/src/dict.rs"
+dataset     = "data/ (gitignored): deterministic fixed-seed Wikidata-shaped (wd/wdt IRIs + lang/numeric/date literals) and Uniprot-shaped (long purl.uniprot.org IRIs) vocab; gen <entities> <out-dir>"
+quiet_box_sensitive = true
+pinning     = "entity count; fixed SplitMix64 seeds; fat LTO build to match shipped ingest"
+records_to  = "stdout; analysis research/term-index-compression.md §3"
+# Internal baseline micro-bench (gate-establishing measurement that feeds the ingest
+# harness + the term-index-compression plan), like parse-baseline/compress-bench — not a
+# capability dashboard card. The escape hatch in scripts/check-new-bench-registered.py §2.1.
+featured    = false
+status      = "ok"
+
+[[benchmark]]
 id          = "compress-bench"
 name        = "Compressed result-serialization (D4)"
 category    = "compression"
@@ -430,6 +519,9 @@ dataset     = "socrates (vendored), DeepTaxonomy dt1k/10k/100k (gen_deeptaxonomy
 quiet_box_sensitive = true
 pinning     = "EYE version (v11.24.4 / SWI-Prolog), pinned generators; use CLI engine-internal 'in Xs' timer for load-robust comparison"
 records_to  = "bench/inference/eye-comparison.md"
+# [OPUS-4.8] sq-5o5.2: trend-only inference-closure coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 [[benchmark]]
@@ -443,6 +535,9 @@ dataset     = "synthesized in-script: 100k individuals x depth-20 subClassOf; 2k
 quiet_box_sensitive = true
 pinning     = "in-script generators are deterministic; trans chain capped at 2k (quadratic closure)"
 records_to  = "stdout; bench/inference/eye-comparison.md (RDFS/OWL section)"
+# [OPUS-4.8] sq-5o5.2: trend-only inference-closure coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 [[benchmark]]
@@ -456,6 +551,9 @@ dataset     = "bench/qlever-olympics/olympics.nt (1.78M triples, gitignored — 
 quiet_box_sensitive = true  # single-shot timings (not best-of-N); orders of magnitude are stable
 pinning     = "olympics dataset version; synthesized TBox defined in olympics_tbox"
 records_to  = "stdout; bench/inference/incremental-bench.md"
+# [OPUS-4.8] sq-5o5.2: trend-only incremental-maintenance coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 [[benchmark]]
@@ -469,19 +567,67 @@ dataset     = "~1.1k-graph WAC fixture (+ ACP variant), built in-crate (sparq_so
 quiet_box_sensitive = true
 pinning     = "in-crate fixture is deterministic"
 records_to  = "stdout; cross-checked in bench/inference/incremental-bench.md (0.84s WAC re-run baseline)"
+# [OPUS-4.8] sq-5o5.2: trend-only Solid WAC/ACP auth-view coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion (esp. as a Solid
+# differentiator) deferred to a maintainer.
+featured    = false
+status      = "ok"
+
+# [OPUS-4.8] sq-r06h — ODRL usage-control evaluator (opt-in sparq-policy crate).
+[[benchmark]]
+id          = "policy-odrl-eval"
+name        = "sparq-policy ODRL parse + evaluate"
+category    = "inference"
+measures    = "ODRL policy parse time (RDF -> typed model via engine BGP queries); per-request evaluation latency (ALLOW / DENY-by-prohibition / DENY-by-constraint), cold + best-of-K"
+invoke      = "cargo run -p sparq-policy --example bench --release [n-permissions=200]"
+source      = "crates/sparq-policy/examples/bench.rs"
+dataset     = "synthetic ODRL Set of N permissions (assignee + target + dateTime-window + purpose constraint) + 1 prohibition, generated in-example (deterministic)"
+quiet_box_sensitive = true
+pinning     = "in-example synthetic policy is deterministic; pin N for comparable numbers"
+records_to  = "stdout (us per phase)"
+# [OPUS-4.8] sq-5o5.2: trend-only ODRL policy-eval coverage, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
+status      = "ok"
+
+# [OPUS-4.8] sq-mztg8 — FO-KM Metric 1 harness: agent KM-task accuracy + cost over the PKG
+# typed under different foundational-ontology overlays, loaded via pkg-query --extra-graph
+# + --close owl-rl. NOT a perf claim — ships the harness (arms + overlays + tasks), not the
+# verdict; the A/B numbers + analysis are PR #1108 (bench/fo-km/{RESULTS.md,analyze.py}).
+[[benchmark]]
+id          = "fo-km"
+name        = "Foundational-ontology KM-task A/B (Metric 1) over the PKG"
+category    = "inference"
+measures    = "per-arm agent KM-task accuracy (gold count/keys per task) + token cost across no-FO / gUFO / DOLCE-DUL / schema.org overlays; each FO-typed query answered under owl-rl closure of the overlay's rdfs:subClassOf axioms, the no-FO arm cannot answer (the FO-win construction). NOT a perf claim — the closure-build CPU/wall cost is non-canonical and never charged as a token cost"
+invoke      = "python3 bench/fo-km/validate_tasks.py   # proves every task discriminates (each FO arm answers expected count, no-FO returns 0; needs the `close` feature). Per-arm: cargo run -p sparq-kb --features close --bin pkg-query -- --extra-graph bench/fo-km/overlays/<arm>.ttl --close owl-rl --sparql '<FO-typed query from tasks.jsonl>'"
+source      = "bench/fo-km/{README.md,tasks.jsonl,build_tasks.py,validate_tasks.py,overlays/*.ttl}; crates/sparq-kb (pkg-query --extra-graph, load_pkg_with_extra / close::load_pkg_closed_with_extra)"
+dataset     = "the shipped PKG (crates/sparq-kb PKG_ONTOLOGY + PKG_INSTANCES) plus one minimal FO-taxonomy overlay TTL per arm (bench/fo-km/overlays/, vendored in-repo); 16 stratified FO-exercising tasks (bench/fo-km/tasks.jsonl)"
+quiet_box_sensitive = false  # result-fidelity (accuracy / gold-count match), not wall-clock; closure-build cost is non-canonical
+pinning     = "tasks.jsonl + the overlay TTLs are committed; regenerate tasks via build_tasks.py"
+records_to  = "bench/fo-km/RESULTS.md (PR #1108)"
+# featured = false: internal Metric-1 harness; ships the harness, not the verdict (the A/B run +
+# pre-registered kill-criteria are the orchestrator's next step). Dashboard promotion is a
+# DISPOSITION deferred to a maintainer (no perf claim; design research/foundational-ontology-km-benchmark.md §7).
+featured    = false
 status      = "ok"
 
 # =============================================================================
 # ZK — commitment pipeline, trace seam, circuit gate counts, prove/verify
 # =============================================================================
 
+# [OPUS-4.8] sq-5o5.1 — the `source` names crates/sparq-zk/ explicitly because this
+# standalone criterion project links it as a path dependency (bench/zk/Cargo.toml:
+# `sparq-zk = { path = "../../crates/sparq-zk" }`) and measures its commitment
+# pipeline. That crate-under-test path is what makes this bench COUNT as sparq-zk's
+# registered coverage (drift-scan.py::crate_has_registered_bench / gate-new-crate G1
+# match `source = … crates/<crate>/`); without it sparq-zk false-flagged bench-missing.
 [[benchmark]]
 id          = "zk-commit-throughput"
 name        = "sparq-zk commitment-pipeline criterion bench"
 category    = "zk"
 measures    = "triples/s + mean time: RDFC10 canon (iri/bnode x 64/256/1024), end-to-end commit, leaves+fold, Poseidon2 permutation + hash40"
 invoke      = "cd bench/zk && cargo bench"
-source      = "bench/zk/{Cargo.toml,README.md}, benches/zk_throughput.rs (groups: canon, commit, poseidon2)"
+source      = "bench/zk/{Cargo.toml,README.md}, benches/zk_throughput.rs (groups: canon, commit, poseidon2); crate under test crates/sparq-zk/ (linked via bench/zk/Cargo.toml path dep)"
 dataset     = "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain)"
 quiet_box_sensitive = true
 pinning     = "standalone cargo project (own workspace), fat LTO release profile; baseline recorded 2026-06-13 fanless M1"
@@ -501,13 +647,21 @@ pinning     = "standalone cargo project; sparq-engine built WITH the non-default
 records_to  = "criterion output; baseline table in bench/zk-trace/README.md"
 status      = "ok"
 
+# [OPUS-4.8] sq-5o5.1 — the `source` names crates/sparq-zk-compose/ explicitly: the
+# member set this bench gates is READ from that crate's regression snapshot
+# (gate_counts.sh derives MEMBERS from crates/sparq-zk-compose/tests/gate_count_snapshot.json,
+# the same source the in-crate gate_count_regression test baselines against), so this
+# bench is the registered gate-count coverage for the sparq-zk-compose prover crate.
+# That crate-under-test path is what makes it COUNT as sparq-zk-compose's coverage
+# (drift-scan.py::crate_has_registered_bench / gate-new-crate G1 match
+# `source = … crates/<crate>/`); without it sparq-zk-compose false-flagged bench-missing.
 [[benchmark]]
 id          = "zk-compose-gates"
 name        = "zk/compose circuit gate counts (bb gates)"
 category    = "zk"
 measures    = "ultra_honk circuit_size (gate count) per circuit-family member; ground-truth per noir-optimisation skill"
 invoke      = "bench/zk-compose/scripts/gate_counts.sh > bench/zk-compose/gate_counts_latest.json"
-source      = "bench/zk-compose/scripts/gate_counts.sh, README.md; circuits in zk/compose/"
+source      = "bench/zk-compose/scripts/gate_counts.sh, README.md; circuits in zk/compose/; member set read from crates/sparq-zk-compose/tests/gate_count_snapshot.json (crate under test)"
 dataset     = "compiled Noir circuits (nargo compile --workspace); no external data"
 quiet_box_sensitive = false  # gate counts are deterministic given toolchain
 pinning     = "nargo 1.0.0-beta.21, bb 5.0.0-nightly.20260324; members list fixed in script"
@@ -554,7 +708,7 @@ id          = "vector-ann-bench"
 name        = "Vector / ANN — recall@10 vs exact-kNN (HNSW / Vamana / PQ), as a deficit"
 category    = "query"
 measures    = "per-searcher recall@10 vs nearest_exact emitted as a DEFICIT (recall_deficit_milli = round((1-recall)*1000); design G4 — smaller-is-better, slots into mode:auto with zero perf-gate change), plus advisory per-query latency + HNSW build time. run.sh carries a HARD self-asserting gate: diskann/pq deficits are EXACT-gated vs expected.tsv (single-threaded fixed-seed builds => byte-deterministic) AND clear their floors; hnsw is FLOOR-gated only (instant-distance build is rayon-parallel => +/-1 deficit jitter, so exact equality would flake). The diskann/pq deficits additionally have a mode:auto ratchet (vectors_diskann_recall_at10 / vectors_pq_recall_at10 in bench/perf-baseline.json). Timing is ADVISORY (mode:noise, trend-only)"
-invoke      = "cargo build --release -p sparq-vectors --example bench_vectors && bench/vector/run.sh   # self-contained: synthetic in-process corpus (N=50000 seed=0), assert recall deficits vs expected.tsv; CI runs it via scripts/ci-bench.sh -> vectors_<searcher>_recall_at10 + vectors_<searcher>_query_us"
+invoke      = "cargo build --release -p sparq-vectors --example bench_vectors --features approx-ann && bench/vector/run.sh   # --features approx-ann is required (the example links the HNSW VectorIndex; the example declares required-features); self-contained: synthetic in-process corpus (N=50000 seed=0), assert recall deficits vs expected.tsv; CI runs it via scripts/ci-bench.sh -> vectors_<searcher>_recall_at10 + vectors_<searcher>_query_us"
 source      = "bench/vector/{gen.sh,run.sh,expected.tsv,README.md}; crates/sparq-vectors/examples/bench_vectors.rs (the G1 TSV-emitting runner; same recall measurement as tests/{recall,diskann,quant}.rs); scripts/ci-bench.sh (vector hook); competitors bench/competitors.json (ann-benchmarks python-lib: hnswlib/faiss/scann/diskann-ref)"
 dataset     = "SYNTHETIC, generated in-process (no external generator): N seeded 32-d vectors (splitmix64), HNSW/DiskANN substrate scales with N; PQ on a FIXED 10k clustered set (quant.rs regime). Per-commit N=50000 seed=0 (the same 50k x 32 set the crate recall gates use). recall@10 vs the nearest_exact brute-force ground truth is deterministic at the pinned (N, seed) for diskann/pq; hnsw has +/-1 parallel-build jitter. The big published ANN datasets (SIFT1M / GloVe-100-angular) recall-QPS Pareto is gather-tier (follow-up bead)"
 quiet_box_sensitive = true  # wall-clock query/build time trend-only, NOT in scripts/perf-gate.py; the recall-deficit diff IS a hard gate (deterministic for diskann/pq, floor-gated for hnsw)
@@ -588,6 +742,48 @@ pinning     = "N_TRIPLES const = 1_000_000"
 records_to  = "stdout"
 status      = "ok"
 
+# [OPUS-4.8] sq-q6a1 (epic sq-4wo; research/parsing-perf-delta.md M2). The bench-hdt
+# task of parse-baseline, extended with the plan §4 measurement gaps: a 3-way DIRECT
+# per-stage split (dict decode / triple+id scan / Graph::build, via the measurement-only
+# sparq_hdt::graph_from_reader_timed) plus an NT-vs-HDT A/B row (loads <file>.nt via the
+# fast Graph::load_reader_parallel). Measurement TOOLING ONLY — no decoder behaviour
+# change; the existing HDT roundtrip differential stays green.
+[[benchmark]]
+id          = "hdt-stage-split"
+name        = "HDT direct-decode 3-way stage split + NT-vs-HDT A/B"
+category    = "ingest"
+measures    = "wall s + Mtriples/s: DIRECT decode split into (a) dict decode / (b) triple+id scan / (c) Graph::build, the existing direct-vs-upstream-wavelet A/B + per-path peak RSS, and an NT-vs-HDT A/B (HDT direct vs load_reader_parallel on the same triples); median of 3"
+invoke      = "cd bench/parse && cargo build --release && ./target/release/parse-baseline gen-hdt <data.nt> <data.hdt> && ./target/release/parse-baseline bench-hdt <data.hdt>   # the <data.nt> companion drives the NT A/B row"
+source      = "bench/parse/src/main.rs (bench_hdt); crates/sparq-hdt/src/decode.rs (graph_from_reader_timed/StageTimings)"
+dataset     = "any .nt slice -> .hdt via gen-hdt; the same .nt is reloaded for the NT A/B (companion absent => A/B row skipped, not an error). bench/parse/data/ gitignored"
+quiet_box_sensitive = true
+pinning     = "dataset slice size; mimalloc + fat LTO build to match shipped ingest; ratios are the load-robust claim, not absolute MB/s"
+records_to  = "stdout (canonical runner); not baked into docs/tests"
+status      = "ok"
+
+# [OPUS-4.8] sq-lrp9 — the HDT capability suite: a DETERMINISTIC LOAD-AND-DECODE
+# count gate (triples/terms/distinct-predicates/rdf:type-resolution of the vendored
+# real-world snikmeta.hdt + a direct-vs-upstream id-translation oracle) + advisory
+# load timing (hdt_load_s + the contention-robust hdt_vs_ntgz_load_s RATIO).
+# Design: research/capability-benchmark-program.md §3.7. CRITICAL honest caveat:
+# load-and-decode-to-native is the ONLY like-for-like axis vs hdt-cpp/java —
+# sparq-hdt decodes HDT into sparq's own Dict/Graph then queries its own indexes,
+# whereas hdt-cpp/java query the compressed BitmapTriples in place — so a
+# "query over HDT" head-to-head is NOT like-for-like and is OUT OF SCOPE. The
+# hdt-cpp competitor (bench/competitors.json) is decode-only, gather-only via docker.
+[[benchmark]]
+id          = "hdt-suite"
+name        = "HDT load-and-decode (count gate + direct==upstream oracle)"
+category    = "ingest"
+measures    = "DETERMINISTIC load-and-decode counts on the vendored snikmeta.hdt — stored triples (328) / distinct dictionary terms / distinct predicates + rdf:type triple-pattern resolution over the decoded graph + the direct-vs-upstream id-translation oracle (all unit count, the HARD gate); advisory hdt_load_s + hdt_vs_ntgz_load_s ratio (trend-only, NOT gated)"
+invoke      = "cargo build --release -p sparq-hdt --example bench_oracle && bench/hdt/run.sh"
+source      = "bench/hdt/run.sh; crates/sparq-hdt/examples/bench_oracle.rs; gate bench/hdt/expected.tsv"
+dataset     = "vendored real-world snikmeta.hdt (crates/sparq-hdt/tests/fixtures; hdt-cpp/java-shaped, 328 triples) for the gate; deterministic ~250k-triple synthetic archive (HDT_BENCH_N) for the advisory timing"
+quiet_box_sensitive = true
+pinning     = "fixture is byte-fixed in-repo; counts gated in bench/hdt/expected.tsv; synthetic generator is seeded (xorshift) — only the advisory timing depends on N (HDT_BENCH_N)"
+records_to  = "stdout (run.sh, the canonical self-asserting runner); not baked into docs/tests — correctness lives in expected.tsv"
+status      = "ok"
+
 [[benchmark]]
 id          = "rsp-throughput"
 name        = "sparq-rsp continuous-query throughput"
@@ -599,6 +795,25 @@ dataset     = "synthetic sensor readings generated in-example"
 quiet_box_sensitive = true
 pinning     = "in-example generator"
 records_to  = "stdout; sparq-rsp README"
+status      = "ok"
+
+# [OPUS-4.8] sq-b1hn — the RSP-QL capability suite: a DETERMINISTIC per-window
+# result-row-count gate (sparq-rsp is clock-free, so a fixed (triple,ts) replay is
+# a pure function — a STRONGER correctness gate than any wall-clock RSP benchmark)
+# + an SRBench correctness ORACLE (multi-window observation⋈metadata join).
+# Design: research/capability-benchmark-program.md §3.6. NO competitor perf column:
+# the RSP peers (C-SPARQL/CQELS/RSP4J) are wall-clock service engines — a throughput
+# head-to-head is apples-to-oranges (different time model), so perf is OUT OF SCOPE.
+[[benchmark]]
+id          = "rsp-ql"
+name        = "RSP-QL streaming (per-window row-count gate + SRBench oracle)"
+category    = "query"
+measures    = "DETERMINISTIC per-window result-row count over a fixed (triple,ts) replay — single-window tumbling/sliding/GROUP-BY x three EvalModes (encoding the 3-EvalMode-equivalence) + SRBench correctness oracle (multi-window join); advisory rsp_persistentdict_triples_per_s (trend-only, NOT gated)"
+invoke      = "cargo build --release -p sparq-rsp --example rsp_oracle && bench/rsp/run.sh"
+source      = "bench/rsp/run.sh; crates/sparq-rsp/examples/rsp_oracle.rs; gate bench/rsp/expected.tsv"
+dataset     = "fixed (triple,ts) replay scripts pinned in-example (single-window sensor stream + SRBench-shaped LOD-weather observation/metadata streams); no external data"
+pinning     = "scripts + queries hard-coded in rsp_oracle.rs; per-window counts gated in bench/rsp/expected.tsv"
+records_to  = "stdout (run.sh, the canonical self-asserting runner); not baked into docs/tests — correctness lives in expected.tsv"
 status      = "ok"
 
 # [OPUS-4.8] sq-cu8c — vector store/HNSW throughput behind an #[ignore]d test.
@@ -615,6 +830,31 @@ pinning     = "N=50000, DIM=32, K=10, QUERIES=200 consts in the test; seeds fixe
 records_to  = "stderr (--nocapture); source of the sparq-vectors README numbers"
 status      = "ok"
 
+# [OPUS-4.8] sq-6tley (relates sq-0wo9e.8/sq-0wo9e.9): the KGE P0 ablation on EC2.
+# RESULT-CAPTURE is the whole point of this entry. A prior run (i-09e73) trained all three
+# datasets fine but the results were LOST: `cargo run` streams hundreds of "Compiling <dep>"
+# lines through ec2-bench's line-by-line console emitter, which overflows the 64KB serial
+# buffer that `get-console-output` retains, pushing the final MRR/Hits@k tables out. So this
+# invoke (a) BUILDS the example first (compile noise off the result path), (b) runs the
+# PREBUILT binary to a file per dataset, (c) emits ONLY the compact final ablation table for
+# each dataset between `=== SPARQ_BENCH_RESULT <ds> ===` / `=== END SPARQ_BENCH_RESULT <ds> ===`
+# sub-markers via grep, so the bytes that reach the console fit the buffer with room to spare.
+# Datasets: synthetic always; optionally a colon-separated SPARQ_KGE_DATASETS list of real KG
+# files (e.g. WN18RR / FB15k-237 N-Triples), each run via the example's SPARQ_KGE_DATASET arm.
+[[benchmark]]
+id          = "kge-ablation"
+name        = "Structure-aware KGE — P0 closure x type-constrained-negatives link-prediction ablation (sq-0wo9e)"
+category    = "query"
+measures    = "filtered link-prediction MRR / Hits@1 / Hits@3 / Hits@10 (mean +/- std over 5 seeds) across the 2x2 P0 ablation matrix {closure on/off} x {uniform, type-constrained negatives}, under both DistMult (symmetric) and ComplEx (asymmetric — read deltas here), with a head-vs-tail breakdown, per dataset"
+invoke      = "cargo build -p sparq-vectors --release --features kge --example kge_ablation 2>&1 | tail -3\nKGEBIN=target/release/examples/kge_ablation\nrun_kge() { ds=$1; tag=$(basename $ds); out=/root/kge-$tag.out; echo === SPARQ_BENCH_RESULT kge $tag ===; if [ $ds = synthetic ]; then $KGEBIN >$out 2>&1; else SPARQ_KGE_DATASET=$ds $KGEBIN >$out 2>&1; fi; grep -E '^(#|==|closure=|    head |  [(]ablation failed)' $out || tail -40 $out; echo === END SPARQ_BENCH_RESULT $tag ===; }\nrun_kge synthetic\nIFS=: ; for d in ${SPARQ_KGE_DATASETS:-}; do case $d in ?*) run_kge $d;; esac; done"
+source      = "crates/sparq-vectors/examples/kge_ablation.rs (the runnable P0 ablation); crates/sparq-vectors/src/{train,eval}.rs (DistMult/ComplEx trainer + filtered link-prediction harness); feature = kge (implies structure); design research/structure-aware-vectorisation.md (P0/P6)"
+dataset     = "SYNTHETIC always (in-process: a WN18RR-style structured-relational slice + a gUFO slice from seeded PRNGs, no download). REAL datasets are OPT-IN via SPARQ_KGE_DATASETS=/path/a.nt:/path/b.nt (e.g. WN18RR + FB15k-237 N-Triples); absent it, only the synthetic arm runs"
+quiet_box_sensitive = true  # MRR/Hits@k are INDICATIVE on a non-canonical box; no figure is baked into a committed doc (per the example's own header). Re-measure on a canonical machine, on a REAL dataset, under ComplEx, multi-seed, before adopting any prior.
+pinning     = "5 seeds from seed0=20260620 (args: [entities] [people] [seed0]); EvalConfig::small with epochs=150 dim=64 negatives_per_positive=16 (set in the example); read inter-cell deltas off the ASYMMETRIC ComplEx run only (DistMult is near-random on these ~100%-directional slices)"
+records_to  = "serial console only (no SSH key / no S3 on pss): the FULL per-dataset run goes to /root/kge-<ds>.out on the box; ONLY the compact final ablation table per dataset is echoed between '=== SPARQ_BENCH_RESULT <ds> ===' / '=== END SPARQ_BENCH_RESULT <ds> ===' so it fits the 64KB get-console-output buffer (the fix for sq-6tley). NOT a perf-gate input"
+featured    = false  # research measurement harness for epic sq-0wo9e (INDICATIVE, non-canonical, no baked figure) — intentionally NOT a capability dashboard card (G3 escape hatch, design §2.1)
+status      = "ok"
+
 [[benchmark]]
 id          = "gpu-bench"
 name        = "CPU vs GPU hot-path kernels (T24d experiment)"
@@ -626,6 +866,10 @@ dataset     = "synthetic column data generated in-example"
 quiet_box_sensitive = true
 pinning     = "column sizes fixed; GPU backend availability"
 records_to  = "stdout"
+# [OPUS-4.8] sq-5o5.2: trend-only CPU-vs-GPU kernel experiment, not a head-to-head competitor
+# card — featured = false is a dashboard DISPOSITION (no perf claim). Promotion (esp. as a GPU
+# differentiator) deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 [[benchmark]]
@@ -640,6 +884,14 @@ quiet_box_sensitive = true
 pinning     = "olympics dataset version; ground truth = rdf:type classes"
 records_to  = "stdout; research/genai-design.md §4 gate"
 status      = "ok"
+# [OPUS-4.8] sq-5o5.5: trend-only DISPOSITION (featured = false). The sim metrics
+# route to the GenAI capability family on the dashboard (familyOf: `sim_*` -> genai),
+# so the suite is accounted for as a trend row — but it is NOT promoted to a
+# head-to-head FEATURED_SUITES competitor card. A competitor card would make a perf
+# claim and needs a same-scale canonical-host gather (sq-v4if / competitor-gather,
+# EC2-blocked); promote-to-card is deferred to the maintainer. `featured = false`
+# is the documented escape hatch honored by gate G3 and the drift scanner (§5.D).
+featured    = false
 
 [[benchmark]]
 id          = "introspect-olympics"
@@ -653,6 +905,118 @@ quiet_box_sensitive = true
 pinning     = "dataset version"
 records_to  = "stdout; research/genai-design.md §4 gate"
 status      = "ok"
+# [OPUS-4.8] sq-5o5.6: trend-only DISPOSITION (featured = false). The introspect
+# metrics route to the GenAI capability family on the dashboard (familyOf:
+# `introspect_*` -> genai) as a trend row, but the suite is NOT a head-to-head
+# FEATURED_SUITES competitor card. Promote-to-card (which makes a perf claim +
+# needs a canonical-host gather) is deferred to the maintainer. `featured = false`
+# is the documented escape hatch honored by gate G3 and the drift scanner (§5.D).
+featured    = false
+
+# [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-nlq OFFLINE NL→SPARQL micro-bench.
+# Closes the bench-missing drift item for sparq-nlq. Pure offline: the LLM is an
+# in-example fixed-completion stub (no `live` feature, no network), so it measures
+# the crate's deterministic core — schema grounding, prompt construction, and the
+# extract→spargebra-validate→budgeted-execute loop — not an Anthropic round-trip.
+[[benchmark]]
+id          = "nlq-offline-bench"
+name        = "sparq-nlq offline NL→SPARQL loop (ground + prompt + ask)"
+category    = "query"
+measures    = "grounding (Introspection scan + token-budgeted summary render via Nlq::new), prompt_for construction (us), and one full ask loop (extract SPARQL → spargebra validate → budgeted execute) using a deterministic fixed-completion stub LLM; best-of-K"
+invoke      = "cargo run -p sparq-nlq --example bench --release [n-entities=2000]"
+source      = "crates/sparq-nlq/examples/bench.rs"
+dataset     = "synthetic typed graph generated in-example (N entities x {rdf:type, rdfs:label, ex:age}); deterministic; no external data, no network (offline stub LLM)"
+quiet_box_sensitive = true
+pinning     = "in-example synthetic graph is deterministic; pin N for comparable numbers; offline path (no `live` feature)"
+records_to  = "stdout (us per phase)"
+status      = "ok"
+# [OPUS-4.8] sq-5o5.7: trend-only DISPOSITION (featured = false). NL→SPARQL is part
+# of the GenAI estate; the nlq metrics route to the GenAI capability family on the
+# dashboard (familyOf: `nlq_*` -> genai) as a trend row. It is NOT a head-to-head
+# FEATURED_SUITES competitor card — the trend-only disposition makes NO perf claim.
+# HONESTY: LIVE exec-accuracy on a canonical host (sq-qidj / sq-g0lw, EC2-blocked) is
+# a SEPARATE concern and is NOT required to clear this dashboard-row drift.
+featured    = false
+
+# [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-serve concurrent-serving-core
+# micro-bench. Closes the bench-missing drift item for sparq-serve. Lightweight:
+# a cheap usize snapshot type isolates the ring/scheduler machinery from graph-build
+# cost (that is the engine ingest benches), so the numbers are the lock-free
+# primitives the crate exists for.
+[[benchmark]]
+id          = "serve-core-bench"
+name        = "sparq-serve generation-ring + scheduler primitives"
+category    = "serve"
+measures    = "lock-free current() reader-pin latency (ns/op), publish() snapshot-swap + epoch-bump latency (ns/op), two-lane Scheduler::run cheap/heavy round-trip (ns/op), and a concurrent arm reporting aggregate reader pins/s while a writer publishes (readers-never-block invariant)"
+invoke      = "cargo run -p sparq-serve --example bench --release"
+source      = "crates/sparq-serve/examples/bench.rs"
+dataset     = "none — synthetic in-example (usize snapshot to isolate ring/scheduler cost from graph-build); deterministic structure, NON-CANONICAL wall-clock"
+quiet_box_sensitive = true
+pinning     = "in-example op counts fixed; the cheap usize snapshot isolates the measured machinery; numbers calibrate research/concurrent-serving.md §6"
+records_to  = "stdout (ns/op per primitive)"
+status      = "ok"
+
+# [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-mpc in-process counting-tier
+# bench matrix. Closes the bench-missing drift item for sparq-mpc by registering
+# the EXISTING example harness (it pre-dated the registry). HONESTY: this is the
+# single-process counting tier — MODELLED communication (bytes/party, rounds,
+# multiplications) + the per-cell ACTUAL security guarantee, NOT measured network
+# cost (the multi-process transport is examples/mpc_net_bench.rs; LAN/WAN netem +
+# EC2 scale-out are separate beads sq-tg6b / sq-hoaj). The correctness gates that
+# co-run the REAL primitives need the seedable simulation RNG (insecure-test-rng,
+# OFF by default — the feature name is the warning; it only makes the SIMULATION
+# reproducible, never a production claim).
+[[benchmark]]
+id          = "mpc-bench-matrix"
+name        = "sparq-mpc (security-model × N × query-class) modelled-cost matrix"
+category    = "query"
+measures    = "deterministic MODELLED communication per cell — bytes/party, total bytes, sequential+batched rounds, multiplications, field elements opened/shared, offline bytes — plus the per-cell ACTUAL security guarantee, over party counts N∈{2,3,5,7} × query classes {cumulative-sum aggregate, hidden-value equi-join, oblivious shuffle, oblivious sort}; emitted as a human table + structured JSON. With insecure-test-rng the REAL primitives co-run as correctness gates (aggregate/join/shuffle/sort)"
+invoke      = "cargo run -p sparq-mpc --example mpc_bench_matrix [--features insecure-test-rng] [-- --json]   # default build prints the cost matrix + skips the seeded correctness gates; the feature adds the co-run gates"
+source      = "crates/sparq-mpc/examples/mpc_bench_matrix.rs (in-process counting tier); crates/sparq-mpc/examples/mpc_net_bench.rs (multi-process MEASURED network tier, driver for the sibling mpc_party); crates/sparq-mpc/src/bench.rs (run_matrix + correctness gates)"
+dataset     = "synthetic in-process (capped scales: join_scale=6, shuffle_scale=16) — the counting tier needs no external data"
+quiet_box_sensitive = false  # modelled bytes/rounds/mults are DETERMINISTIC (counting tier); only mpc_net_bench's wall-clock is timing
+pinning     = "DEFAULT_PARTIES {2,3,5,7}, join/shuffle scales fixed in the example; correctness-gate seed 0x5347585140D5043... fixed under insecure-test-rng (simulation reproducibility only, NEVER a production claim)"
+records_to  = "stdout (human table + JSON schema); research/mpc design record §5"
+status      = "ok"
+# [OPUS-4.8] sq-5o5.8: trend-only DISPOSITION (featured = false). This is a
+# DETERMINISTIC MODELLED-cost counting tier (bytes/rounds/mults), NOT a measured
+# wall-clock competitor card — promoting a head-to-head perf card would be
+# inappropriate (modelled, not measured). The mpc metrics route to the MPC capability
+# family on the dashboard as a trend row. HONESTY: MPC here is semi-honest-only and
+# the ZK estate is NOT externally audited — any dashboard text stays caveated and the
+# privacy-claims CI gate must pass. `featured = false` is the documented escape hatch.
+featured    = false
+
+# [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-wasm browser-bundle size.
+# Closes the bench-missing drift item for sparq-wasm. The wasm crate is a thin
+# #[wasm_bindgen] glue layer over sparq-engine (load/query/count/ask/update); its
+# QUERY logic is ALREADY measured by the CLI/operator-coverage suites over the same
+# engine, so the crate's distinct, measurable surface is its BROWSER BUNDLE SIZE —
+# a DETERMINISTIC byte count that gates the "zero wasm bundle impact" rule for
+# opt-in features. This is exactly the wasm_bundle_bytes metric ci-bench.sh already
+# emits per-commit (records_to below); this entry registers that measurement under
+# the wasm crate so the drift-scanner + CATALOG see it.
+[[benchmark]]
+id          = "wasm-bundle"
+name        = "sparq-wasm browser bundle size (deterministic byte count)"
+category    = "compression"
+measures    = "release wasm32-unknown-unknown bundle size in bytes (deterministic) — the 'zero wasm bundle impact' gate: any opt-in feature that leaks into the browser build shows up here per commit"
+invoke      = "cargo build --release -p sparq-wasm --target wasm32-unknown-unknown && wc -c < target/wasm32-unknown-unknown/release/sparq_wasm.wasm   # CI emits it as wasm_bundle_bytes via scripts/ci-bench.sh"
+source      = "crates/sparq-wasm/src/lib.rs (the #[wasm_bindgen] Store glue measured); scripts/ci-bench.sh (wasm_bundle_bytes emitter)"
+dataset     = "none — the artifact under test is the compiled wasm binary itself"
+quiet_box_sensitive = false  # byte count is fully deterministic (runner-noise-immune)
+pinning     = "release profile + wasm32-unknown-unknown target; the crate's no-default-features (no rayon) + compact 3-perm cfg pin the bundle composition"
+records_to  = "stdout (wc -c); CI emits wasm_bundle_bytes into benchmark-data (dev/bench) via scripts/ci-bench.sh (a DETERMINISTIC regression gate, NOT trend-only)"
+status      = "ok"
+# [OPUS-4.8] sq-5o5.9: featured = false records that this is a deterministic
+# browser-bundle-size BYTE GATE, NOT a query-perf head-to-head FEATURED_SUITES
+# competitor card — sparq-wasm's query logic is already measured via the
+# CLI/operator-coverage suites over the same engine. The `wasm_bundle_bytes` metric
+# routes to the Core family on the dashboard and remains the per-commit DETERMINISTIC
+# regression gate it already is (see records_to above); `featured = false` only means
+# "no competitor card", it does NOT relax that regression gate. The proposed wasm
+# query micro-bench (sq-5pnl, a NEW wasm_query_us metric) is a SEPARATE concern.
+featured    = false
 
 # =============================================================================
 # CONFORMANCE — correctness against official W3C suites (NOT perf)
@@ -682,6 +1046,9 @@ dataset     = "RDF Semantics rdf-mt / OWL 2 RL / N3 / SPARQL entailment suites, 
 quiet_box_sensitive = false
 pinning     = "fetched suite revisions (see fetch-inference-suites.sh)"
 records_to  = "stdout + inference-conformance-report.md"
+# [OPUS-4.8] sq-5o5.2: conformance scoreboard (correctness, not perf) in the inference family;
+# trend-only — featured = false is a dashboard DISPOSITION (no perf claim). Promotion deferred to a maintainer.
+featured    = false
 status      = "ok"
 
 # =============================================================================
@@ -692,8 +1059,8 @@ status      = "ok"
 id          = "serve-spikes"
 name        = "Concurrent-serving research spikes"
 category    = "serve"
-measures    = "HTTP throughput/latency closed+open loop (loadgen); result-cache hit ceiling (cache_spike); point-BGP->JSON ceiling (point_spike); snapshot cost + RSS/generation (snapshot_spike); update-stream latency+RSS stability (update_stream_spike); TTFC streaming (stream_spike); group-commit writer throughput + reader p50/p99 (writer_spike)"
-invoke      = "cd bench/serve && cargo build --release && ./target/release/<bin>   # bins: loadgen cache_spike point_spike snapshot_spike update_stream_spike stream_spike writer_spike"
+measures    = "HTTP throughput/latency closed+open loop (loadgen); result-cache hit ceiling (cache_spike); point-BGP->JSON ceiling (point_spike); snapshot cost + RSS/generation (snapshot_spike); update-stream latency+RSS stability (update_stream_spike); TTFC streaming (stream_spike); group-commit writer throughput + reader p50/p99 (writer_spike); single-writer write-throughput on the PSS update set + reference targets + optional QLever-parity gate (pss_update_throughput, sq-b4lo/gh-52)"
+invoke      = "cd bench/serve && cargo build --release --bin <bin> && ./target/release/<bin>   # bins: loadgen cache_spike point_spike snapshot_spike update_stream_spike stream_spike writer_spike pss_update_throughput   # NOTE (sq-b4lo): some older spikes (snapshot_spike/writer_spike/update_stream_spike) carry AppState API drift — build per-bin; pss_update_throughput is current"
 source      = "bench/serve/{README.md,Cargo.toml}, src/bin/*.rs"
 dataset     = "synthetic, in-spike; writer_spike uses WRITER_UPDATES env (recorded run 30000)"
 quiet_box_sensitive = true  # research spikes, NOT maintained benchmarks; re-run on target hardware before trusting absolutes
@@ -714,6 +1081,24 @@ pinning     = "standalone cargo project; compact feature = wasm 3-perm {SPO,POS,
 records_to  = "stdout; research/memory-tiering.md"
 status      = "ok"  # research spikes, not a regression gate
 
+# [OPUS-4.8] sq-b4lo / gh-52 — the WRITE-PATH companion to qlever-olympics (READ path):
+# asserts sparq's single sequenced writer is parity-or-better vs QLever-over-HTTP on the
+# PSS interactive LDP-CRUD update set (the documented N-readers/1-writer serving-contract
+# acceptance bar). Differential: fires the SAME updates at both live endpoints on one box.
+[[benchmark]]
+id          = "pss-update-parity"
+name        = "sparq vs QLever — PSS write-path parity (single-writer acceptance bar)"
+category    = "serve"
+measures    = "per-update HTTP commit latency p50/p99/max + sustained writes/s for sparq vs QLever over the SAME PSS LDP-CRUD update set; parity gate exits 1 iff sparq p99 > QLever p99 × tolerance (default 1.0 = parity-or-better, the gh-52 binding criterion)"
+invoke      = "cargo run -p sparq-server --release -- --addr 127.0.0.1:7020   # writable sparq\n              ../../.qlever-venv/bin/qlever start                            # writable QLever on :7019 (see bench/qlever-olympics/README.md)\n              python3 bench/pss-update-set/compare.py 200 --qlever-token <ACCESS_TOKEN>   # the differential gate"
+source      = "bench/pss-update-set/{compare.py,README.md}; update shapes mirror crates/sparq-server/tests/named_graphs.rs (gh-47) + bench/serve/src/bin/pss_update_throughput.rs"
+dataset     = "none — generated interactive LDP-CRUD updates (put_document / set_acl / delete_document), --iters count; NOT bulk ingest"
+quiet_box_sensitive = true
+pinning     = "both engines live on ONE box in ONE run (the only fair way to assert a RELATIVE bar); QLever numbers are machine-specific and intentionally NOT committed (repo hygiene: no hard-coded perf); record the QLever image DIGEST + host env when reporting"
+records_to  = "stdout; the parity verdict is the gate (exit 1 on regression)"
+status      = "ok"  # external-cost (needs a running QLever); the relative gate is the regression check, not a stored number
+featured    = false  # external-cost differential harness, not a dashboard-promoted capability suite
+
 # =============================================================================
 # CI — cross-commit regression tracking (github-action-benchmark)
 # =============================================================================
@@ -722,7 +1107,7 @@ status      = "ok"  # research spikes, not a regression gate
 id          = "ci-bench"
 name        = "CI cross-commit benchmark emitter (free GitHub runners)"
 category    = "scaling"
-measures    = "customSmallerIsBetter JSON: load_s, store_bytes_per_triple, dict_bytes_per_term, per-query {count,materialize,json}_us, op_<query>_<mode>_us (operator-coverage), sp2b_<query>_<mode>_us (SP2Bench subset, + hard expected-rows diff), dbpsb_<query>_<mode>_us (DBPSB/FEASIBLE subset over pinned DBpedia, + hard expected-rows diff), watdiv_<query>_<mode>_us (WatDiv SF=1 subset, + hard expected-rows diff), bsbm_<query>_<mode>_us (BSBM Explore -pc 300 subset, + hard expected-rows diff vs materialize), lubm_<query>_count_us (LUBM(1) extensional + entailed tiers via run.sh, + hard expected-rows diff on both tiers), rdfs_infer_s, wasm_bundle_bytes"
+measures    = "customSmallerIsBetter JSON: load_s, store_bytes_per_triple, dict_bytes_per_term, per-query {count,materialize,json}_us, op_<query>_<mode>_us (operator-coverage), sp2b_<query>_<mode>_us (SP2Bench subset, + hard expected-rows diff), dbpsb_<query>_<mode>_us (DBPSB/FEASIBLE subset over pinned DBpedia, + hard expected-rows diff), watdiv_sf<SF>_<query>_<mode>_us (WatDiv subset; the _sf<SF> token keeps the per-commit SF=1 + nightly SF=1000 tiers as distinct series for the sq-viby scaling chart, + hard expected-rows diff), bsbm_<query>_<mode>_us (BSBM Explore -pc 300 subset, + hard expected-rows diff vs materialize), lubm_<query>_count_us (LUBM(1) extensional + entailed tiers via run.sh, + hard expected-rows diff on both tiers), rdfs_infer_s, wasm_bundle_bytes"
 invoke      = "bash scripts/ci-bench.sh [scale_entities=200000] [out.json=bench-results.json]   # CI: .github/workflows/bench.yml on push to main"
 source      = "scripts/ci-bench.sh; .github/workflows/bench.yml"
 dataset     = "sparq-bench dump at scale_entities; queries bench/qlever-synthetic/queries + bench/operators/queries + bench/sp2b/queries (sp2b corpus via bench/sp2b/gen.sh) + bench/dbpsb/queries (pinned DBpedia cut via bench/dbpsb/fetch.sh) + bench/watdiv/queries (SF=1 corpus via bench/watdiv/gen.sh) + bench/bsbm/queries (-pc 300 corpus via bench/bsbm/gen.sh) + bench/lubm (both tiers via bench/lubm/run.sh)"

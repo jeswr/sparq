@@ -46,19 +46,44 @@
          commit — from <code>bench/dashboard/competitors.json</code>. A cell shows <code>n/a</code>
          where no competitor number was gathered at this scale (no fabricated numbers); real cited
          numbers at their own scale/machine appear as <em>external reference baselines</em> beneath
-         each suite.</p>
+         each suite. A <strong>tier badge</strong> shows whether these sparq numbers come from the
+         weekly <em>EC2/nightly</em> heavy-benchmark series (preferred when present) or the noisier
+         <em>per-commit</em> gh-runner band.</p>
       <div id="featured">loading…</div>
+    </section>
+
+    <!-- [OPUS-4.8] sq-ays7: SAME-BOX SPARQL competitor comparison. dashboard.js fills #same-box from
+         competitors.same_box_comparisons — sparq + Oxigraph (+ QLever best-effort) measured on ONE
+         ephemeral EC2 box against the SAME generated featured corpus + SAME query files in the SAME
+         min-of-N COUNT regime. This is DISTINCT from the Featured-suites table above (that sparq
+         column is the gh-runner CI band — different machine; a competitor number from this box must
+         NOT be placed next to it) and from the external-reference baselines (cited, own scale). The
+         caption pins corpus scale + EC2 type + date + commit; absolute µs are this-box-only, for
+         cross-engine ORDERING, not an absolute cross-machine reference. -->
+    <section class="card" id="same-box-card">
+      <h2>Same-box SPARQL comparison</h2>
+      <p class="hint">A self-consistent head-to-head: <strong>sparq</strong> and
+         <strong>Oxigraph</strong> (plus <strong>QLever</strong> when the best-effort Docker server
+         comes up) run on <em>one</em> ephemeral EC2 box, over the <em>same</em> generated featured
+         corpus and the <em>same</em> query files, min-of-N in COUNT mode, with solution counts
+         cross-checked. Absolute µs are <strong>this box only</strong> (a 4-vCPU Graviton, not the
+         gh-runner CI band) — read them for <em>cross-engine ordering</em>, not as a cross-machine
+         reference. <code>n/a</code> where an engine produced no timing (e.g. QLever skipped).</p>
+      <div id="same-box">loading…</div>
     </section>
 
     <!-- [OPUS-4.8] sq-rltn: capability FAMILIES — the primary, summary-first view. dashboard.js
          paints #families SYNCHRONOUSLY from window.BENCHMARK_DATA (no Chart.js, no label fetch) so
-         the WHOLE picture appears immediately and visibly covers ALL query types: a family nav chip
-         row, then one section per family (Core · SPARQL query suites · SHACL validation · GeoSPARQL ·
-         Full-Text · Vector/ANN · Reasoning), each with a latest-value-per-metric summary table.
+         the WHOLE picture appears immediately and visibly covers ALL benchmarked families: a family
+         nav chip row, then one section per family (Core · SPARQL query suites · SHACL validation ·
+         GeoSPARQL · Full-Text · Vector/ANN · Reasoning · Zero-knowledge · Solid/access-control · HDT ·
+         RSP streaming · GenAI · GPU), each with a latest-value-per-metric summary table.
          Trend charts inside each section are LAZY — built only when the section's "Trends" disclosure
          is expanded / scrolls into view (IntersectionObserver), so first paint never instantiates the
          thousands of SPARQL series. A family with no data yet still shows ("not yet reported") so the
-         coverage is honest. -->
+         coverage is honest — the ZK estate (zk / zk-trace / zk-compose) and the Solid/HDT/RSP/GenAI/GPU
+         families are registered here even though they are stdout/criterion benches that do not yet emit
+         into the per-commit feed; a metric appears the moment a ci-bench hook starts emitting it. -->
     <section class="card" id="families-card">
       <h2>Benchmark families</h2>
       <p class="hint">Every query type sparq benchmarks, grouped into capability families. The table

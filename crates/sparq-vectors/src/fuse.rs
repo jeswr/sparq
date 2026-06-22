@@ -3,7 +3,7 @@
 //! similarity — without this crate depending on the other.
 //!
 //! Both helpers take plain ranked `(item, score)` lists (best first), so any producer
-//! works: [`VectorIndex::nearest_term`](crate::VectorIndex::nearest_term) cosine,
+//! works: `VectorIndex::nearest_term` cosine,
 //! `sparq_sim::Sim::most_similar` weighted Jaccard, a lexical/BM25 list, …
 //!
 //! Which to use (industry conventions distilled in
@@ -21,7 +21,11 @@
 //! for [`hybrid_search`], which drives N retriever closures off one query `Term` and
 //! fuses their ranked `Term` lists by [`fuse_rrf`], deduplicating by `Term`:
 //!
-//! ```no_run
+//! [OPUS-4.8] (sq-ip3a) `ignore`d, not `no_run`: it references the HNSW `VectorIndex`, which is
+//! gated behind the opt-in `approx-ann` feature, so this illustration must not be compiled in the
+//! default doctest build. The executed RRF example below carries no ANN dependency.
+//!
+//! ```ignore
 //! # use sparq_core::Graph;
 //! # use sparq_vectors::{VectorStore, VectorIndex, hybrid_search, RRF_K};
 //! # use oxrdf::Term;

@@ -11,6 +11,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] sq-jxl0: wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page and every feature-gated item (`federation-descriptors`) render on docs.rs.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # Opt-in schema introspection (GenAI phase 2 — see research/genai-design.md and
 # research/genai-ontology-introspection.md). This is a SEPARATE crate so the core
 # engine carries zero introspection code; it consumes only sparq-core's PUBLIC
@@ -29,6 +35,29 @@ rustc-hash.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# [OPUS-4.8] sq-aq5: wasm-safety. The whole crate is sorted scans over sparq-core's public
+# read API — no threads, no syscalls, no wall clock — so it must compile and RUN on
+# `wasm32-unknown-unknown` (tier-b browser surface for in-tab schema cards). On wasm we
+# take sparq-core WITHOUT default features: the only default feature is `parallel` (rayon,
+# native-only thread-pool index construction) which introspect never uses — it reads
+# already-built indexes — so dropping it keeps the wasm graph lean (no rayon) and matches
+# the bundle crates' pattern. `Graph::load_str` (used by the smoke test) is not
+# `parallel`-gated; it falls back to the sequential loader when the feature is off.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+# oxrdf pulls `rand`/getrandom (blank-node ids). On wasm there is no OS RNG, so select
+# getrandom's browser backend (crypto.getRandomValues). The matching
+# `--cfg getrandom_backend="wasm_js"` is set in the workspace .cargo/config.toml — exactly
+# as the shipped wasm bundle crates (sparq-wasm / sparq-rsp-wasm / …) do.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
 [dev-dependencies]
 # Round-trips the VoID export to assert it is valid N-Triples (subset of Turtle).
 oxttl.workspace = true
+
+# [OPUS-4.8] sq-aq5 — headless wasm smoke test (`tests/wasm.rs`), mirroring the shipped
+# wasm bundle crates: exercises the real introspection pipeline (build + to_json +
+# to_text_summary + to_void(_with_cs) + characteristic_set_ids) in a GENUINE wasm32
+# runtime via `wasm-pack test --node`. Dev-only; never enters a non-dev graph.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

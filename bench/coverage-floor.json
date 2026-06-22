@@ -1,12 +1,20 @@
 {
   "_comment": [
-    "[OPUS-4.8] COVERAGE RATCHET (sq-hbg7) \u2014 committed per-crate line-coverage FLOOR, reviewed in diffs exactly like the conformance ratchet counts in .github/workflows/ci.yml. scripts/coverage-gate.py --check FAILS CI when a crate's measured line% drops below its floor.",
+    "[OPUS-4.8] COVERAGE RATCHET (sq-hbg7) \u2014 committed per-crate line-coverage FLOOR, reviewed in diffs exactly like the conformance ratchet counts in .github/workflows/ci.yml. CI runs scripts/coverage-gate.py --check-robust (sq-x4jy): it re-measures ONLY the sub-floor crates up to K=3 times and keeps the per-crate MAX (llvm-cov only undercounts), FAILING only if a crate is STILL below its floor after K independent measurements \u2014 a genuine regression.",
     "Floor = floor(measured) - 2 (min 0): a small margin so run-to-run / toolchain noise never trips the gate. The floor only ever RISES (--seed will not lower it without --allow-lower).",
     "Tiering: the FAST/MEDIUM crates are measured + gated PER-COMMIT; the heavy sparq-vectors 50k recall/diskann tests are EXCLUDED per-commit (measured in the NIGHTLY tier \u2014 see the .github/workflows/ci.yml coverage-nightly job and the per-crate notes below). No crate is silently dropped.",
     "Floors with floor:0 are crates whose llvm-cov line% is a known measurement artifact (see each note) \u2014 they are guarded by the test-PRESENCE gate (bench/coverage-presence.json) instead of the % gate.",
     "Regenerate after a deliberate coverage rise: scripts/coverage.sh && scripts/coverage-gate.py --seed target/coverage/coverage-summary.json"
   ],
   "crates": {
+    "sparq-algos": {
+      "floor": 97,
+      "note": "[OPUS-4.8] sq-bif.8: OPT-IN graph analytics (PageRank / degree centrality / WCC + label-propagation communities). Standalone crate (`default = []`, no opt-in features) measured with default features \u2014 its whole surface compiles in a default build. Measured line% 99.14 (575/580) over the inline src oracles + the new tests/topology_oracles.rs (dangling-node PageRank, disconnected/chain WCC+LP, all-singleton communities, NodeFilter::All literal path); floor = floor(measured) - 2 margin. Conservative work-box seed; CI's --check-robust is the ratchet of record."
+    },
+    "sparq-canon": {
+      "floor": 77,
+      "note": "[OPUS-4.8] sq-bif.9: OPT-IN RDFC-1.0 (RDF Dataset Canonicalization) public API. Standalone crate (no `[features]` table) measured with default features. Measured line% 79.04 (181/229) over tests/rdf_canon_suite.rs (full 86-entry W3C manifest: eval + issued-id map + negative poison-graph) + the new tests/bnode_isomorphism_and_bridge.rs (bnode-isomorphism equivalence, oxrdf-bridge triple-term/Display/literal-roundtrip edge paths); floor = floor(measured) - 2 margin. Conservative work-box seed; CI is the ratchet of record."
+    },
     "sparq-cli": {
       "floor": 0,
       "note": "subprocess artifact: tests spawn the COMPILED binary (assert_cmd / CARGO_BIN_EXE), not the instrumented profile \u2014 line% is ~0 by construction, not a real gap. Presence-gated instead."
@@ -16,10 +24,22 @@
       "note": "test-driver crate: the W3C suites run as the BINARIES (cargo run), so `cargo llvm-cov --package` (which runs cargo test) sees only a few unit tests. Low % is expected; floor 0."
     },
     "sparq-core": {
-      "floor": 78
+      "floor": 90,
+      "nightly_floor": 90,
+      "nightly_note": "[OPUS-4.8] sq-bjct: nightly_floor gates the NIGHTLY tier, whose measurement MERGES the W3C SPARQL + inference conformance BINARIES (they run as `cargo run`, not `cargo test`) into this crate's llvm-cov report — a higher number than the test-only per-commit `floor`. See scripts/coverage.sh measure_merged + the coverage-nightly job. Merged measurement 92.44% (test-only ~91.3%); floor = floor(measured) - 2 margin lands at the base floor here, so the binaries' contribution is documented + gated, not yet a higher number."
     },
     "sparq-engine": {
-      "floor": 83
+      "floor": 83,
+      "nightly_floor": 85,
+      "nightly_note": "[OPUS-4.8] sq-bjct: nightly_floor gates the NIGHTLY tier, whose measurement MERGES the W3C SPARQL + inference conformance BINARIES (they run as `cargo run`, not `cargo test`) into this crate's llvm-cov report — a higher number than the test-only per-commit `floor`. See scripts/coverage.sh measure_merged + the coverage-nightly job. Merged measurement 87.31% lifts the nightly floor to 85 (base test-only floor 83); floor = floor(measured) - 2 margin."
+    },
+    "sparq-fedclient": {
+      "floor": 89,
+      "note": "[OPUS-4.8] sq-bif.1: OPT-IN streaming federation CLIENT. Measured WITH its whole-surface features on (--features fedclient,fedclient-adaptive — see scripts/coverage.sh measure() case; a default-feature build is an empty crate). Measured line% 91.71 (4361/4753); floor = floor(measured) - 2 margin. Conservative seed measured on a non-canonical work box; the floor is the CI-enforced ratchet of record."
+    },
+    "sparq-fedplan": {
+      "floor": 94,
+      "note": "[OPUS-4.8] sq-bif.1: OPT-IN cost-based federated planner. Measured WITH --features fedplan,adaptive-replan (its surface is entirely feature-gated). Measured line% 96.04 (2307/2402); floor = floor(measured) - 2 margin. Conservative work-box seed; CI is the ratchet of record."
     },
     "sparq-geo": {
       "floor": 87
@@ -29,7 +49,7 @@
       "note": "GPU kernels need a device; CPU-only line coverage is low by design."
     },
     "sparq-hdt": {
-      "floor": 87
+      "floor": 90
     },
     "sparq-introspect": {
       "floor": 94
@@ -38,41 +58,70 @@
       "floor": 88
     },
     "sparq-nlq": {
-      "floor": 85
+      "floor": 91,
+      "note": "[OPUS-4.8] sq-1jte: behavioural tests for the lowest-covered module (constrain.rs algebra walk — UNION/MINUS/OPTIONAL/FILTER-EXISTS/BIND/IF/COALESCE/property-path variants/GRAPH/SERVICE/VALUES/CONSTRUCT/ASK/quoted-triple descent + dedup + suggestion ranking) lifted constrain.rs line% 69.31 -> 93.65 and the crate 88.52 -> 93.44; floor = floor(measured) - 2 margin."
     },
     "sparq-parse": {
       "floor": 91
     },
+    "sparq-policy": {
+      "floor": 90,
+      "note": "[OPUS-4.8] sq-bif.7: OPT-IN ODRL usage-control policy. The stateless evaluator (parse/eval/compare/hierarchy) is default-on; measured WITH --features count-enforcement (the stateful odrl:count counter-store modules count/count_file/count_backend + their #![cfg(feature)] integration tests — see scripts/coverage.sh measure() case; a default build compiles that surface out). Measured line% 92.79 (1429/1540); floor = floor(measured) - 2 margin. Conservative work-box seed; CI's --check-robust is the ratchet of record."
+    },
+    "sparq-prov": {
+      "floor": 94,
+      "note": "[OPUS-4.8] sq-bif.1: OPT-IN W3C PROV-O lineage. CONSTRUCT/UPDATE lineage core is default-on; measured WITH --features reason (the sparq-reason proof-tree -> PROV-O bridge module + its tests/reason_prov.rs). Measured line% 96.70 (762/788); floor = floor(measured) - 2 margin. Conservative work-box seed; CI is the ratchet of record."
+    },
     "sparq-reason": {
-      "floor": 81
+      "floor": 87,
+      "note": "[OPUS-4.8] sq-wtjol+sq-fodw5 (sq-qcnn follow-ups): killed 6 OWL inconsistencies() list-pair-enumeration mutants (AllDisjointClasses cax-adc / AllDifferent eq-diff2/3 / AllDisjointProperties prp-adp offset arithmetic; the residual 6 survivors are provably-equivalent defensive-bound `guard < 10_000` + short-circuit `&&` guards) and raised n3/mod.rs past 85% (backward-chaining list/formula projection + standardize-apart depth recursion + fact-store list walk, log:includes virtual rdf:first/rest containment incl. the deferred-rotation branch, per-firing existential skolemization, IEEE INF/NaN math propagation vs finite-NaN domain-error). Earlier sq-qcnn (#980): the inconsistencies() clash routine, N3 builtin reverse modes + fail-closed paths, the log: formula-scope family, the public API entry points, and the N3/Turtle parser edge+error paths. Lifted measured line% 88.80 -> 89.23 (default-feature `cargo llvm-cov -p sparq-reason`, matching scripts/coverage.sh); n3/mod.rs 82.64 -> 85.17; floor = floor(measured) - 2 margin. Conservative work-box seed; CI's --check-robust is the ratchet of record."
+    },
+    "sparq-reason-wasm": {
+      "floor": 0,
+      "note": "[OPUS-4.8] sq-bif.1: tier-b WASM bundle (cdylib+rlib). Its gate-exercising surface is the #[wasm_bindgen] JS API exercised ONLY by `wasm-pack test --node` (tests/web.rs is #[wasm_bindgen_test]); a NATIVE `cargo llvm-cov` runs 0 of those and reports a misleadingly-low ~55% over the rlib helpers alone — a measurement artifact in the same class as sparq-cli (subprocess) / sparq-gpu (device-gated). Floor 0 + PRESENCE-gated (bench/coverage-presence.json) instead of an unenforceable %; not added to scripts/coverage.sh."
     },
     "sparq-rsp": {
       "floor": 87
     },
+    "sparq-rsp-wasm": {
+      "floor": 0,
+      "note": "[OPUS-4.8] sq-bif.1: tier-b WASM bundle (cdylib+rlib). #[wasm_bindgen] JS API exercised only by `wasm-pack test --node`; native llvm-cov reports a misleadingly-low ~60% (rlib helpers only) — measurement artifact (cf. sparq-cli). Floor 0 + PRESENCE-gated; not measured by scripts/coverage.sh."
+    },
     "sparq-serve": {
-      "floor": 83
+      "floor": 92,
+      "note": "[OPUS-4.8] sq-fggn: behavioural tests for the lowest-covered modules (footprint commutativity, scheduler public surface, PodId/WriteError display) lifted measured line% 84.82 -> 94.47; floor = floor(measured) - 2 margin."
     },
     "sparq-server": {
-      "floor": 85
+      "floor": 86,
+      "note": "[OPUS-4.8] sq-4vao: behavioural tests for the lowest-covered modules (subscription reevaluate_step/subscribe_init diff + refusal classes, budget->SSE-status + RDF-1.2 triple-term encoding, the json_error/sanitized_error info-leak envelope, the GSP escape_iri/body-decode helpers, and the SPARQL-Protocol dataset-override rewrite) lifted measured line% 86.38 -> 88.14; floor = floor(measured) - 2 margin."
     },
     "sparq-shacl": {
-      "floor": 90
+      "floor": 93,
+      "note": "[OPUS-4.8] sq-qcnn / sq-qcnn.1: measured with DEFAULT features (the per-commit tier — no measure() case arm; the opt-in shacl-af/scs surfaces are compiled out of a default build, so func.rs/scs.rs do not count toward this default-feature number). Raised 90 -> 93 by sq-qcnn (#993) SHACL-SPARQL §5.2/§6 coverage; sq-qcnn.1 then lifted sparql.rs 79% -> 94% with an in-src unit-test module (sparql::tests) over the DARK push_values_down deep-algebra arms (Group/Slice/Distinct/Reduced/OrderBy/Minus-left/LeftJoin-left, structural + semantic) and the fail-closed error paths of ask_violates/select_validate/PreparedSparql::evaluate/pre_bind_ask/PreparedValidator::build (non-SELECT/ASK skip, mismatched validator, inexpressible blank-node value, SERVICE runtime-query-error). Measured default-feature line% 95.48 (3798/3978); floor = floor(measured) - 2 = 93 (unchanged — floors only rise). The shacl-af func.rs and scs.rs gains are behind their opt-in features and so do NOT lift this default-feature floor. Conservative work-box seed; CI's --check-robust is the ratchet of record."
+    },
+    "sparq-shacl-wasm": {
+      "floor": 0,
+      "note": "[OPUS-4.8] sq-bif.1: tier-b WASM bundle (cdylib+rlib). #[wasm_bindgen] JS API exercised only by `wasm-pack test --node`; native llvm-cov reports a misleadingly-low ~79% (rlib helpers only) — measurement artifact (cf. sparq-cli). Floor 0 + PRESENCE-gated; not measured by scripts/coverage.sh."
     },
     "sparq-sim": {
       "floor": 94
     },
     "sparq-solid": {
-      "floor": 84
+      "floor": 89
     },
     "sparq-text": {
-      "floor": 84
+      "floor": 90
+    },
+    "sparq-text-wasm": {
+      "floor": 0,
+      "note": "[OPUS-4.8] sq-bif.1: tier-b WASM bundle (cdylib+rlib). #[wasm_bindgen] JS API exercised only by `wasm-pack test --node`; native llvm-cov reports a misleadingly-low ~80% (rlib helpers only) — measurement artifact (cf. sparq-cli). Floor 0 + PRESENCE-gated; not measured by scripts/coverage.sh."
     },
     "sparq-vectors": {
       "floor": 91,
       "note": "per-commit floor is measured with the two *_recall_at_10_vs_brute_force_on_50k tests SKIPPED; the nightly tier measures the full set."
     },
     "sparq-wasm": {
-      "floor": 77
+      "floor": 93
     },
     "sparq-zk": {
       "floor": 88

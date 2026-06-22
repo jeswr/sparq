@@ -1,11 +1,13 @@
 // [OPUS-4.8] written while Fable 5 unavailable — re-review when Fable returns.
+// [OPUS-4.8] MS-G2 (sq-8wbn): make `// SAFETY:` mandatory on every first-party unsafe block.
+#![warn(clippy::undocumented_unsafe_blocks)]
 //! # sparq-zk-compose — ZK proof composition for sparq (stage 2)
 //!
 //! Drives the per-property Noir circuit family at `zk/compose/` into a full
 //! query-result proof, and verifies one (plan v3 §S4.E modules ii/iii).
 //!
 //! Pipeline:
-//! 1. [`build`] turns sparq-zk [`GraphCommitment`]s + a BGP pattern into a
+//! 1. [`build`] turns sparq-zk `GraphCommitment`s + a BGP pattern into a
 //!    scan [`ProofInputs`], deriving the (k, n, r) [`CircuitId`] from the data.
 //! 2. [`driver::CircuitProver`] proves it via nargo/bb subprocesses.
 //! 3. A [`ProofManifest`] carries the public inputs + bb proof to the verifier.
@@ -21,6 +23,12 @@
 pub mod build;
 // [OPUS-4.8] sq-314: derivation steps + entailment-regime enforcement.
 pub mod derivation;
+// [OPUS-4.8] sq-cfmv: fail-closed (commitment-method × circuit) dispatch matrix.
+// OPT-IN behind the `dual-leaf` feature (OFF by default). Rejects an
+// unsupported / mismatched (method, circuit) pair, never silently mis-dispatches.
+// NOT externally audited (sq-qhy4); enforces structural legality only.
+#[cfg(feature = "dual-leaf")]
+pub mod dispatch;
 pub mod driver;
 // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK host-side wiring (B2).
 pub mod holder;
@@ -32,22 +40,40 @@ pub mod verifier;
 
 pub use manifest::{
     AttestedStatusRef, BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp,
-    HiddenIndexRevocation, ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot,
-    SubProof,
+    HiddenIndexRevocation, HolderPokProof, HolderSetProof, ProofInputs, ProofManifest,
+    RevocationStatus, StatusListSnapshot, SubProof,
 };
 // [OPUS-4.8] sq-314: derivation-step capability + entailment regime end-to-end.
 pub use derivation::{regime_admits, DerivationStep, EntailmentRule};
+// [OPUS-4.8] sq-cfmv: the fail-closed (method × circuit) dispatch resolver.
+#[cfg(feature = "dual-leaf")]
+pub use dispatch::{resolve_circuit, resolve_circuit_for_scheme, DispatchError};
 pub use verifier::EntailmentPolicy;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
 // [OPUS-4.8] sq-z9l: hidden-issuer-attestation host helpers (in-circuit
 // Schnorr-over-BabyJubJub + hidden-key set membership).
+// [OPUS-4.8] sq-8k3h: `*_sparse` are the `O(n·depth)` builders for a very large
+// registry (e.g. a holder set) — BIT-IDENTICAL root + path to the dense builders,
+// so the depth-generic member is unchanged; only the host build is bounded no more.
 pub use issuer::{
-    hidden_issuer_prover_toml, key_membership_witness, key_set_root, HiddenIssuerWitness,
+    hidden_issuer_prover_toml, key_membership_witness, key_membership_witness_sparse,
+    key_set_root, key_set_root_sparse, HiddenIssuerWitness,
 };
 // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK host helpers (the
 // B2 hidden-key tier — `hpk = hsk·G` + holder-key-digest binding).
 pub use holder::{holder_pok_prover_toml, holder_pok_witness, HolderPokWitness};
+// [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier): set-membership host
+// helpers (the hidden-holder analogue of the issuer key-set helpers). Opt-in,
+// NOT-yet-sound (sq-qhy4).
+// [OPUS-4.8] sq-8k3h: `*_sparse` are the `O(n·depth)` holder-set builders for a
+// VERY LARGE holder registry — BIT-IDENTICAL root + path to the dense builders, so
+// the depth-generic `holder_set_d{depth}` member is unchanged; only the host build
+// is no longer bounded to `2^depth`.
+pub use holder::{
+    holder_set_membership_witness, holder_set_membership_witness_sparse, holder_set_prover_toml,
+    holder_set_root, holder_set_root_sparse, HolderSetWitness,
+};
 // [OPUS-4.8] audit #4: verifier-issued nonce + single-use store.
 // [OPUS-4.8] sq-aih: FileSeenNonces is the DURABLE (restart-surviving) store;
 // InMemorySeenNonces is NON-DURABLE / test-only.

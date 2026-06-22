@@ -24,7 +24,7 @@ fn wac_store() -> PodStore {
 }
 
 fn sess(agent: Option<&str>) -> Session<'_> {
-    Session { agent, client: None }
+    Session { agent, client: None, issuer: None, now: None }
 }
 
 /// How many triples a graph currently holds (0 if absent).
@@ -340,24 +340,74 @@ fn var_graph_empty_binding_is_a_permitted_noop() {
 }
 
 #[test]
-fn var_graph_with_using_clause_falls_back_to_conservative() {
-    // A USING/WITH re-scope on a variable-GRAPH op cannot be faithfully reproduced by a
-    // plain SELECT (the apply's `build_using` keeps all store named graphs for `WITH`,
-    // while a query's FROM-only dataset has an EMPTY named set), so precise resolution
-    // would UNDER-count the bound graphs. The check fails closed to the all-graphs
-    // wildcard: CAROL — who could write this exact team2-bounded delete WITHOUT the WITH
-    // clause (var_graph_precise_allows_authorized_subset) — is now denied, because she
-    // cannot write every store graph.
+fn var_graph_with_clause_resolves_precisely() {
+    // [OPUS-4.8] sq-cnor: a `WITH`/`USING` re-scope on a variable-GRAPH op is now resolved
+    // PRECISELY (no longer the conservative all-graphs fallback). The binding SELECT is handed
+    // the same active dataset the apply's `build_using` builds — for `WITH` (which re-scopes
+    // only the DEFAULT graph), `named: None` keeps all store named graphs, re-expressed as an
+    // explicit `FROM NAMED` of every store named graph. Every quad here is `GRAPH ?g`-scoped,
+    // so the `WITH` default graph never participates; `?g` resolves to exactly the team2
+    // content graphs CAROL owns — so she is now PERMITTED, just as without the WITH clause
+    // (var_graph_precise_allows_authorized_subset).
     let mut s = wac_store();
     let before = graph_len(&s, TEAM2_DOC);
+    assert!(before > 0, "team2 doc has a title triple to delete");
     let upd = format!(
         "WITH <{TEAM2_DOC}> \
          DELETE {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} }} \
          WHERE  {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} FILTER(STRSTARTS(STR(?g), \"https://pod.ex/team2/\")) }}"
     );
+    s.update_as(&sess(Some(CAROL)), &upd)
+        .expect("precise WITH-clause resolution: carol may delete titles across team2 she owns");
+    assert_eq!(graph_len(&s, TEAM2_DOC), before - 1, "title deleted from a bound team2 graph");
+}
+
+#[test]
+fn var_graph_with_clause_precise_still_denies_unwritable_binding() {
+    // The precise WITH/USING resolution must NOT confuse the re-scope with a free pass: CAROL
+    // can READ mixed4 but WRITE none of it. A `WITH`-carrying variable-GRAPH delete whose `?g`
+    // binds to the (readable, unwritable) mixed4 graphs is still DENIED, store untouched —
+    // exactly as the no-WITH precise path denies (var_graph_precise_denies_readable_but_unwritable_binding).
+    let mut s = wac_store();
+    let before = graph_len(&s, MIXED4_DOC);
+    assert!(before > 0, "mixed4 doc non-empty");
+    let upd = format!(
+        "WITH <{MIXED4_DOC}> \
+         DELETE {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} }} \
+         WHERE  {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} FILTER(STRSTARTS(STR(?g), \"https://pod.ex/mixed4/\")) }}"
+    );
     let r = s.update_as(&sess(Some(CAROL)), &upd);
-    assert!(r.is_err(), "USING/WITH variable-graph op falls back to conservative deny: {r:?}");
-    assert_eq!(graph_len(&s, TEAM2_DOC), before, "conservative fallback applied nothing");
+    assert!(r.is_err(), "WITH does not waive write-auth: carol may read but not write mixed4 -> denied: {r:?}");
+    assert_eq!(graph_len(&s, MIXED4_DOC), before, "denied WITH variable-graph delete changed nothing");
+}
+
+#[test]
+fn var_graph_with_clause_denies_binding_to_auth_view() {
+    // [OPUS-4.8] sq-cnor — the AUTH_GRAPH under-count regression guard at the PRODUCTION
+    // `check` boundary. `Dataset::build_using(named: None)` (the `WITH` re-scope) keeps EVERY
+    // store named graph in the active dataset, INCLUDING the reserved `urn:sparq:auth` view.
+    // So a `WITH … DELETE { GRAPH ?g { … } } WHERE { GRAPH ?g { ?s <auth#read> ?o } }` makes
+    // `?g` bind to the auth view and the engine WOULD write it. The prior `rescope_dataset`
+    // dropped the auth view from the materialized `FROM NAMED` set, so the precise resolver
+    // MISSED that binding — the op could be (wrongly) PERMITTED and transiently mutate the
+    // authorization view. With the auth view restored to the materialized set the binding is
+    // resolved, and since no session is ever write-granted on the auth view the op is DENIED
+    // fail-closed. The auth view must be untouched.
+    let mut s = wac_store();
+    let auth = "urn:sparq:auth";
+    let before = graph_len(&s, auth);
+    assert!(before > 0, "materialized auth view holds the WAC grant triples");
+    // `auth#read` triples exist ONLY in the auth view, so `?g` binds exactly {urn:sparq:auth}.
+    let upd = "WITH <https://pod.ex/team2/c3/g0/d0.ttl> \
+               DELETE { GRAPH ?g { ?s ?p ?o } } \
+               WHERE  { GRAPH ?g { ?s <https://sparq.dev/ns/auth#read> ?o . ?s ?p ?o } }";
+    let r = s.update_as(&sess(Some(CAROL)), upd);
+    assert!(
+        r.is_err(),
+        "a WITH var-graph op whose ?g binds to the auth view must be DENIED (no write grant on \
+         the auth view); was: {r:?}"
+    );
+    assert_eq!(graph_len(&s, auth), before, "denied op left the auth view untouched");
 }
 
 // --- [OPUS-4.8] sq-3jtd.2: fail-closed-BEFORE-apply — a DENIED update mutates NOTHING ---

@@ -58,7 +58,7 @@ jobs:
             build-mode: none
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
@@ -71,6 +71,14 @@ jobs:
           # security-and-quality runs the security queries plus the maintainability/
           # reliability quality queries — the SAST gate Scorecard's `SAST` check wants.
           queries: security-and-quality
+          # [OPUS-4.8] Config file adds a query-filter that excludes exactly one
+          # redundant, note-level quality query: `rust/unused-variable`. It is NOT a
+          # security query (security coverage is unchanged) and is redundant with the
+          # repo's real unused-variable gate — clippy `-D warnings` in ci.yml, which
+          # understands `format!` captures. CodeQL's Rust analyzer false-positives on
+          # variables used only inside `format!(...)` macro args (confirmed: positional
+          # args in PR #311 did not stop the flags). Removes FP alerts #150/#151/#170.
+          config-file: ./.github/codeql/codeql-config.yml
 
       # Buildless extraction (build-mode: none) above means no explicit build step is
       # required for Rust. If a build mode that traces compilation is adopted later,

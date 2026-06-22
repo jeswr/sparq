@@ -820,6 +820,22 @@
       "mode": "query",
       "unit": "µs"
     },
+    "hdt_load_s": {
+      "label": "HDT — load+decode .hdt to a native Graph (advisory)",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "wall-clock load+decode of the synthetic .hdt (trend-only; machine-sensitive)",
+      "mode": "load",
+      "unit": "s"
+    },
+    "hdt_vs_ntgz_load_s": {
+      "label": "HDT — gzipped-N-Triples / HDT load-time ratio (advisory)",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "ntgz_load_s / hdt_load_s on the same triples (ratio survives contention; trend-only)",
+      "mode": "ratio",
+      "unit": "ratio"
+    },
     "load_s": {
       "label": "Load — parse + index build (synthetic)",
       "suite": "Pipeline",
@@ -952,6 +968,38 @@
       "mode": "count",
       "regime": "extensional",
       "unit": "µs"
+    },
+    "nlq_ask_repairs": {
+      "label": "NL→SPARQL ask loop — repair rounds",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "repair rounds the ask loop needed (0 = stub's first SPARQL was valid + executable)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "nlq_ask_result_rows": {
+      "label": "NL→SPARQL ask loop — result rows",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "rows the full ask loop returns (GROUP BY ?type -> one row per type)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "nlq_prompt_chars": {
+      "label": "NL→SPARQL grounded prompt — char length (token-budget proxy)",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "length of the schema-grounded prompt prompt_for(question) builds; smaller = leaner",
+      "mode": "count",
+      "unit": "chars"
+    },
+    "nlq_synth_triples": {
+      "label": "NL→SPARQL synthetic graph — triple count",
+      "suite": "NL→SPARQL",
+      "dataset": "synthetic typed graph generated in-example at N=2000 entities (rdf:type/rdfs:label/ex:age per entity); deterministic, no external data, offline stub LLM (no `live` feature, no network)",
+      "query": "triples in the synthetic typed graph (3 per entity)",
+      "mode": "count",
+      "unit": "count"
     },
     "op_q01_bgp_count": {
       "label": "Operator — BGP — single triple pattern, count",
@@ -1823,6 +1871,102 @@
       "mode": "validate",
       "unit": "µs"
     },
+    "snikmeta_direct_eq_upstream": {
+      "label": "HDT direct_eq_upstream — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "1 iff direct decoder == upstream-backed path on the same bytes (oracle)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_distinct_predicates": {
+      "label": "HDT distinct_predicates — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "distinct predicates via a full SPO scan (triple-pattern resolution)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_rdf_type_triples": {
+      "label": "HDT rdf_type_triples — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "bound-predicate triple-pattern resolution (rdf:type triples)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_terms": {
+      "label": "HDT terms — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "distinct dictionary terms interned into sparq's Dict (id-translation)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "snikmeta_triples": {
+      "label": "HDT triples — load-and-decode gate",
+      "suite": "HDT",
+      "dataset": "vendored real-world snikmeta.hdt (hdt-cpp/java-shaped FourSectDict+BitmapTriples; 328 triples) for the gate; deterministic ~250k-triple synthetic archive for the advisory timing (HDT_BENCH_N)",
+      "query": "stored triples of the decoded graph (load-and-decode-to-native)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_acp_auth_triples": {
+      "label": "Solid acp_auth_triples — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "triples in the materialised ACP auth view (materialize_acp, 3 strata)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_alice_readable_graphs": {
+      "label": "Solid alice_readable_graphs — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "graphs visible to ALICE in Mode::Read (AuthIndex walk)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_authorized_rows": {
+      "label": "Solid authorized_rows — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "rows of the title query restricted to alice's authorized subset",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_full_dataset_rows": {
+      "label": "Solid full_dataset_rows — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "rows of the title query over the FULL dataset (GRAPH ?g)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_auth_triples": {
+      "label": "Solid wac_auth_triples — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "triples in the materialised WAC auth view (materialize_wac)",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_named_graphs": {
+      "label": "Solid wac_named_graphs — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "named graphs in the WAC fixture",
+      "mode": "count",
+      "unit": "count"
+    },
+    "solid_wac_quads": {
+      "label": "Solid wac_quads — WAC/ACP auth-view count",
+      "suite": "Solid",
+      "dataset": "in-crate ~1.1k-graph WAC fixture (+ ACP variant), built deterministically by sparq_solid::fixture::{wac_fixture, acp_fixture}",
+      "query": "total quads across the WAC fixture's named graphs",
+      "mode": "count",
+      "unit": "count"
+    },
     "sp2b_q01_count": {
       "label": "SP2Bench q01 — single journal's issue year (selective lookup), count",
       "suite": "SP2Bench",
@@ -2356,484 +2500,940 @@
       "query": "compiled sparq-wasm browser bundle size",
       "unit": "bytes"
     },
-    "watdiv_C1_count": {
-      "label": "WatDiv C1 — complex query, count",
+    "watdiv_sf1000_C1_count": {
+      "label": "WatDiv C1 (SF=1000) — complex query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C1_json": {
-      "label": "WatDiv C1 — complex query, json",
+    "watdiv_sf1000_C1_json": {
+      "label": "WatDiv C1 (SF=1000) — complex query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C1_materialize": {
-      "label": "WatDiv C1 — complex query, materialize",
+    "watdiv_sf1000_C1_materialize": {
+      "label": "WatDiv C1 (SF=1000) — complex query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_C2_count": {
-      "label": "WatDiv C2 — complex query, count",
+    "watdiv_sf1000_C2_count": {
+      "label": "WatDiv C2 (SF=1000) — complex query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C2_json": {
-      "label": "WatDiv C2 — complex query, json",
+    "watdiv_sf1000_C2_json": {
+      "label": "WatDiv C2 (SF=1000) — complex query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C2_materialize": {
-      "label": "WatDiv C2 — complex query, materialize",
+    "watdiv_sf1000_C2_materialize": {
+      "label": "WatDiv C2 (SF=1000) — complex query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_C3_count": {
-      "label": "WatDiv C3 — complex query, count",
+    "watdiv_sf1000_F1_count": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, count",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "count",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F1_json": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, json",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "json",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F1_materialize": {
+      "label": "WatDiv F1 (SF=1000) — snowflake query, materialize",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "materialize",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_count": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, count",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "count",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_json": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, json",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "json",
+      "unit": "µs"
+    },
+    "watdiv_sf1000_F4_materialize": {
+      "label": "WatDiv F4 (SF=1000) — snowflake query, materialize",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1000 full-scale (nightly) ≈ 100M+ triples",
+      "query": "snowflake query",
+      "mode": "materialize",
+      "unit": "µs"
+    },
+    "watdiv_sf1_C3_count": {
+      "label": "WatDiv C3 (SF=1) — complex query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_C3_json": {
-      "label": "WatDiv C3 — complex query, json",
+    "watdiv_sf1_C3_json": {
+      "label": "WatDiv C3 (SF=1) — complex query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_C3_materialize": {
-      "label": "WatDiv C3 — complex query, materialize",
+    "watdiv_sf1_C3_materialize": {
+      "label": "WatDiv C3 (SF=1) — complex query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F1_count": {
-      "label": "WatDiv F1 — snowflake query, count",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "count",
-      "unit": "µs"
-    },
-    "watdiv_F1_json": {
-      "label": "WatDiv F1 — snowflake query, json",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "json",
-      "unit": "µs"
-    },
-    "watdiv_F1_materialize": {
-      "label": "WatDiv F1 — snowflake query, materialize",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "materialize",
-      "unit": "µs"
-    },
-    "watdiv_F2_count": {
-      "label": "WatDiv F2 — snowflake query, count",
+    "watdiv_sf1_F2_count": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F2_json": {
-      "label": "WatDiv F2 — snowflake query, json",
+    "watdiv_sf1_F2_json": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F2_materialize": {
-      "label": "WatDiv F2 — snowflake query, materialize",
+    "watdiv_sf1_F2_materialize": {
+      "label": "WatDiv F2 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F3_count": {
-      "label": "WatDiv F3 — snowflake query, count",
+    "watdiv_sf1_F3_count": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F3_json": {
-      "label": "WatDiv F3 — snowflake query, json",
+    "watdiv_sf1_F3_json": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F3_materialize": {
-      "label": "WatDiv F3 — snowflake query, materialize",
+    "watdiv_sf1_F3_materialize": {
+      "label": "WatDiv F3 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_F4_count": {
-      "label": "WatDiv F4 — snowflake query, count",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "count",
-      "unit": "µs"
-    },
-    "watdiv_F4_json": {
-      "label": "WatDiv F4 — snowflake query, json",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "json",
-      "unit": "µs"
-    },
-    "watdiv_F4_materialize": {
-      "label": "WatDiv F4 — snowflake query, materialize",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
-      "query": "snowflake query",
-      "mode": "materialize",
-      "unit": "µs"
-    },
-    "watdiv_F5_count": {
-      "label": "WatDiv F5 — snowflake query, count",
+    "watdiv_sf1_F5_count": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_F5_json": {
-      "label": "WatDiv F5 — snowflake query, json",
+    "watdiv_sf1_F5_json": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_F5_materialize": {
-      "label": "WatDiv F5 — snowflake query, materialize",
+    "watdiv_sf1_F5_materialize": {
+      "label": "WatDiv F5 (SF=1) — snowflake query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L1_count": {
-      "label": "WatDiv L1 — linear query, count",
+    "watdiv_sf1_L1_count": {
+      "label": "WatDiv L1 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L1_json": {
-      "label": "WatDiv L1 — linear query, json",
+    "watdiv_sf1_L1_json": {
+      "label": "WatDiv L1 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L1_materialize": {
-      "label": "WatDiv L1 — linear query, materialize",
+    "watdiv_sf1_L1_materialize": {
+      "label": "WatDiv L1 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L2_count": {
-      "label": "WatDiv L2 — linear query, count",
+    "watdiv_sf1_L2_count": {
+      "label": "WatDiv L2 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L2_json": {
-      "label": "WatDiv L2 — linear query, json",
+    "watdiv_sf1_L2_json": {
+      "label": "WatDiv L2 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L2_materialize": {
-      "label": "WatDiv L2 — linear query, materialize",
+    "watdiv_sf1_L2_materialize": {
+      "label": "WatDiv L2 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L3_count": {
-      "label": "WatDiv L3 — linear query, count",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples",
-      "query": "linear query",
-      "mode": "count",
-      "unit": "µs"
-    },
-    "watdiv_L3_json": {
-      "label": "WatDiv L3 — linear query, json",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples",
-      "query": "linear query",
-      "mode": "json",
-      "unit": "µs"
-    },
-    "watdiv_L3_materialize": {
-      "label": "WatDiv L3 — linear query, materialize",
-      "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples",
-      "query": "linear query",
-      "mode": "materialize",
-      "unit": "µs"
-    },
-    "watdiv_L4_count": {
-      "label": "WatDiv L4 — linear query, count",
+    "watdiv_sf1_L3_count": {
+      "label": "WatDiv L3 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L4_json": {
-      "label": "WatDiv L4 — linear query, json",
+    "watdiv_sf1_L3_json": {
+      "label": "WatDiv L3 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L4_materialize": {
-      "label": "WatDiv L4 — linear query, materialize",
+    "watdiv_sf1_L3_materialize": {
+      "label": "WatDiv L3 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_L5_count": {
-      "label": "WatDiv L5 — linear query, count",
+    "watdiv_sf1_L4_count": {
+      "label": "WatDiv L4 (SF=1) — linear query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_L5_json": {
-      "label": "WatDiv L5 — linear query, json",
+    "watdiv_sf1_L4_json": {
+      "label": "WatDiv L4 (SF=1) — linear query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_L5_materialize": {
-      "label": "WatDiv L5 — linear query, materialize",
+    "watdiv_sf1_L4_materialize": {
+      "label": "WatDiv L4 (SF=1) — linear query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "linear query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S1_count": {
-      "label": "WatDiv S1 — star query, count",
+    "watdiv_sf1_L5_count": {
+      "label": "WatDiv L5 (SF=1) — linear query, count",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1, ~106k triples",
+      "query": "linear query",
+      "mode": "count",
+      "unit": "µs"
+    },
+    "watdiv_sf1_L5_json": {
+      "label": "WatDiv L5 (SF=1) — linear query, json",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1, ~106k triples",
+      "query": "linear query",
+      "mode": "json",
+      "unit": "µs"
+    },
+    "watdiv_sf1_L5_materialize": {
+      "label": "WatDiv L5 (SF=1) — linear query, materialize",
+      "suite": "WatDiv",
+      "dataset": "WatDiv SF=1, ~106k triples",
+      "query": "linear query",
+      "mode": "materialize",
+      "unit": "µs"
+    },
+    "watdiv_sf1_S1_count": {
+      "label": "WatDiv S1 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S1_json": {
-      "label": "WatDiv S1 — star query, json",
+    "watdiv_sf1_S1_json": {
+      "label": "WatDiv S1 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S1_materialize": {
-      "label": "WatDiv S1 — star query, materialize",
+    "watdiv_sf1_S1_materialize": {
+      "label": "WatDiv S1 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S2_count": {
-      "label": "WatDiv S2 — star query, count",
+    "watdiv_sf1_S2_count": {
+      "label": "WatDiv S2 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S2_json": {
-      "label": "WatDiv S2 — star query, json",
+    "watdiv_sf1_S2_json": {
+      "label": "WatDiv S2 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S2_materialize": {
-      "label": "WatDiv S2 — star query, materialize",
+    "watdiv_sf1_S2_materialize": {
+      "label": "WatDiv S2 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S3_count": {
-      "label": "WatDiv S3 — star query, count",
+    "watdiv_sf1_S3_count": {
+      "label": "WatDiv S3 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S3_json": {
-      "label": "WatDiv S3 — star query, json",
+    "watdiv_sf1_S3_json": {
+      "label": "WatDiv S3 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S3_materialize": {
-      "label": "WatDiv S3 — star query, materialize",
+    "watdiv_sf1_S3_materialize": {
+      "label": "WatDiv S3 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S4_count": {
-      "label": "WatDiv S4 — star query, count",
+    "watdiv_sf1_S4_count": {
+      "label": "WatDiv S4 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S4_json": {
-      "label": "WatDiv S4 — star query, json",
+    "watdiv_sf1_S4_json": {
+      "label": "WatDiv S4 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S4_materialize": {
-      "label": "WatDiv S4 — star query, materialize",
+    "watdiv_sf1_S4_materialize": {
+      "label": "WatDiv S4 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S5_count": {
-      "label": "WatDiv S5 — star query, count",
+    "watdiv_sf1_S5_count": {
+      "label": "WatDiv S5 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S5_json": {
-      "label": "WatDiv S5 — star query, json",
+    "watdiv_sf1_S5_json": {
+      "label": "WatDiv S5 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S5_materialize": {
-      "label": "WatDiv S5 — star query, materialize",
+    "watdiv_sf1_S5_materialize": {
+      "label": "WatDiv S5 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S6_count": {
-      "label": "WatDiv S6 — star query, count",
+    "watdiv_sf1_S6_count": {
+      "label": "WatDiv S6 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S6_json": {
-      "label": "WatDiv S6 — star query, json",
+    "watdiv_sf1_S6_json": {
+      "label": "WatDiv S6 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S6_materialize": {
-      "label": "WatDiv S6 — star query, materialize",
+    "watdiv_sf1_S6_materialize": {
+      "label": "WatDiv S6 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
       "unit": "µs"
     },
-    "watdiv_S7_count": {
-      "label": "WatDiv S7 — star query, count",
+    "watdiv_sf1_S7_count": {
+      "label": "WatDiv S7 (SF=1) — star query, count",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "count",
       "unit": "µs"
     },
-    "watdiv_S7_json": {
-      "label": "WatDiv S7 — star query, json",
+    "watdiv_sf1_S7_json": {
+      "label": "WatDiv S7 (SF=1) — star query, json",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "json",
       "unit": "µs"
     },
-    "watdiv_S7_materialize": {
-      "label": "WatDiv S7 — star query, materialize",
+    "watdiv_sf1_S7_materialize": {
+      "label": "WatDiv S7 (SF=1) — star query, materialize",
       "suite": "WatDiv",
       "dataset": "WatDiv SF=1, ~106k triples",
       "query": "star query",
       "mode": "materialize",
+      "unit": "µs"
+    },
+    "zk_canon_bnode_1024": {
+      "label": "sparq-zk RDFC10 canon — bnode graph, 1024 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC-1.0 canonicalisation (criterion mean)",
+      "mode": "canon",
+      "unit": "µs"
+    },
+    "zk_canon_bnode_256": {
+      "label": "sparq-zk RDFC10 canon — bnode graph, 256 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC-1.0 canonicalisation (criterion mean)",
+      "mode": "canon",
+      "unit": "µs"
+    },
+    "zk_canon_bnode_64": {
+      "label": "sparq-zk RDFC10 canon — bnode graph, 64 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC-1.0 canonicalisation (criterion mean)",
+      "mode": "canon",
+      "unit": "µs"
+    },
+    "zk_canon_iri_1024": {
+      "label": "sparq-zk RDFC10 canon — iri graph, 1024 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC-1.0 canonicalisation (criterion mean)",
+      "mode": "canon",
+      "unit": "µs"
+    },
+    "zk_canon_iri_256": {
+      "label": "sparq-zk RDFC10 canon — iri graph, 256 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC-1.0 canonicalisation (criterion mean)",
+      "mode": "canon",
+      "unit": "µs"
+    },
+    "zk_canon_iri_64": {
+      "label": "sparq-zk RDFC10 canon — iri graph, 64 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC-1.0 canonicalisation (criterion mean)",
+      "mode": "canon",
+      "unit": "µs"
+    },
+    "zk_commit_bnode_1024": {
+      "label": "sparq-zk end-to-end commit — bnode graph, 1024 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC10 + leaf encode + Poseidon2 fold (criterion mean)",
+      "mode": "commit",
+      "unit": "µs"
+    },
+    "zk_commit_bnode_256": {
+      "label": "sparq-zk end-to-end commit — bnode graph, 256 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC10 + leaf encode + Poseidon2 fold (criterion mean)",
+      "mode": "commit",
+      "unit": "µs"
+    },
+    "zk_commit_bnode_64": {
+      "label": "sparq-zk end-to-end commit — bnode graph, 64 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC10 + leaf encode + Poseidon2 fold (criterion mean)",
+      "mode": "commit",
+      "unit": "µs"
+    },
+    "zk_commit_iri_1024": {
+      "label": "sparq-zk end-to-end commit — iri graph, 1024 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC10 + leaf encode + Poseidon2 fold (criterion mean)",
+      "mode": "commit",
+      "unit": "µs"
+    },
+    "zk_commit_iri_256": {
+      "label": "sparq-zk end-to-end commit — iri graph, 256 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC10 + leaf encode + Poseidon2 fold (criterion mean)",
+      "mode": "commit",
+      "unit": "µs"
+    },
+    "zk_commit_iri_64": {
+      "label": "sparq-zk end-to-end commit — iri graph, 64 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "RDFC10 + leaf encode + Poseidon2 fold (criterion mean)",
+      "mode": "commit",
+      "unit": "µs"
+    },
+    "zk_commit_leaves_fold_1024": {
+      "label": "sparq-zk recommit (leaves+fold) — precomputed canon, 1024 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "leaf encode + Poseidon2 fold over precomputed canonical form (criterion mean)",
+      "mode": "commit",
+      "unit": "µs"
+    },
+    "zk_commit_leaves_fold_256": {
+      "label": "sparq-zk recommit (leaves+fold) — precomputed canon, 256 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "leaf encode + Poseidon2 fold over precomputed canonical form (criterion mean)",
+      "mode": "commit",
+      "unit": "µs"
+    },
+    "zk_commit_leaves_fold_64": {
+      "label": "sparq-zk recommit (leaves+fold) — precomputed canon, 64 triples",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain), credential scale",
+      "query": "leaf encode + Poseidon2 fold over precomputed canonical form (criterion mean)",
+      "mode": "commit",
+      "unit": "µs"
+    },
+    "zk_compose_filter_f64_gates": {
+      "label": "zk/compose filter_f64 — ultra_honk circuit gate count",
+      "suite": "Zero-knowledge",
+      "dataset": "compiled Noir circuits (zk/compose, nargo compile --workspace); bb gates -s ultra_honk",
+      "query": "deterministic circuit_size (bb gates); smaller is better",
+      "mode": "gates",
+      "unit": "gates"
+    },
+    "zk_compose_filter_int_d1_gates": {
+      "label": "zk/compose filter_int_d1 — ultra_honk circuit gate count",
+      "suite": "Zero-knowledge",
+      "dataset": "compiled Noir circuits (zk/compose, nargo compile --workspace); bb gates -s ultra_honk",
+      "query": "deterministic circuit_size (bb gates); smaller is better",
+      "mode": "gates",
+      "unit": "gates"
+    },
+    "zk_compose_filter_int_d2_gates": {
+      "label": "zk/compose filter_int_d2 — ultra_honk circuit gate count",
+      "suite": "Zero-knowledge",
+      "dataset": "compiled Noir circuits (zk/compose, nargo compile --workspace); bb gates -s ultra_honk",
+      "query": "deterministic circuit_size (bb gates); smaller is better",
+      "mode": "gates",
+      "unit": "gates"
+    },
+    "zk_compose_filter_int_d4_gates": {
+      "label": "zk/compose filter_int_d4 — ultra_honk circuit gate count",
+      "suite": "Zero-knowledge",
+      "dataset": "compiled Noir circuits (zk/compose, nargo compile --workspace); bb gates -s ultra_honk",
+      "query": "deterministic circuit_size (bb gates); smaller is better",
+      "mode": "gates",
+      "unit": "gates"
+    },
+    "zk_compose_join_eq_na16_nb16_gates": {
+      "label": "zk/compose join_eq_na16_nb16 — ultra_honk circuit gate count",
+      "suite": "Zero-knowledge",
+      "dataset": "compiled Noir circuits (zk/compose, nargo compile --workspace); bb gates -s ultra_honk",
+      "query": "deterministic circuit_size (bb gates); smaller is better",
+      "mode": "gates",
+      "unit": "gates"
+    },
+    "zk_compose_scan_k1_n16_r4_gates": {
+      "label": "zk/compose scan_k1_n16_r4 — ultra_honk circuit gate count",
+      "suite": "Zero-knowledge",
+      "dataset": "compiled Noir circuits (zk/compose, nargo compile --workspace); bb gates -s ultra_honk",
+      "query": "deterministic circuit_size (bb gates); smaller is better",
+      "mode": "gates",
+      "unit": "gates"
+    },
+    "zk_compose_scan_k2_n16_r8_gates": {
+      "label": "zk/compose scan_k2_n16_r8 — ultra_honk circuit gate count",
+      "suite": "Zero-knowledge",
+      "dataset": "compiled Noir circuits (zk/compose, nargo compile --workspace); bb gates -s ultra_honk",
+      "query": "deterministic circuit_size (bb gates); smaller is better",
+      "mode": "gates",
+      "unit": "gates"
+    },
+    "zk_compose_scan_k2_n64_r8_gates": {
+      "label": "zk/compose scan_k2_n64_r8 — ultra_honk circuit gate count",
+      "suite": "Zero-knowledge",
+      "dataset": "compiled Noir circuits (zk/compose, nargo compile --workspace); bb gates -s ultra_honk",
+      "query": "deterministic circuit_size (bb gates); smaller is better",
+      "mode": "gates",
+      "unit": "gates"
+    },
+    "zk_poseidon2_hash40": {
+      "label": "sparq-zk Poseidon2-BN254 hash — 40 elements",
+      "suite": "Zero-knowledge",
+      "dataset": "fixed 40-element input",
+      "query": "Poseidon2 sponge over 40 field elements (criterion mean)",
+      "mode": "hash",
+      "unit": "µs"
+    },
+    "zk_poseidon2_permutation": {
+      "label": "sparq-zk Poseidon2-BN254 permutation",
+      "suite": "Zero-knowledge",
+      "dataset": "fixed 4-element BN254 state",
+      "query": "one Poseidon2 permutation (criterion mean)",
+      "mode": "perm",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_bgp_chain_traced_1000": {
+      "label": "zk-trace bgp_chain — BGP chain join (follows then age), traced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP chain join (follows then age); recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_bgp_chain_untraced_1000": {
+      "label": "zk-trace bgp_chain — BGP chain join (follows then age), untraced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP chain join (follows then age); default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_bgp_star_traced_1000": {
+      "label": "zk-trace bgp_star — BGP star join (age/name/city on ?s), traced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP star join (age/name/city on ?s); recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_bgp_star_untraced_1000": {
+      "label": "zk-trace bgp_star — BGP star join (age/name/city on ?s), untraced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP star join (age/name/city on ?s); default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_bgp_triangle_traced_1000": {
+      "label": "zk-trace bgp_triangle — BGP triangle (3-way follows cycle), traced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP triangle (3-way follows cycle); recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_bgp_triangle_untraced_1000": {
+      "label": "zk-trace bgp_triangle — BGP triangle (3-way follows cycle), untraced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP triangle (3-way follows cycle); default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_count_traced_1000": {
+      "label": "zk-trace count — COUNT aggregate over age, traced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "COUNT aggregate over age; recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_count_untraced_1000": {
+      "label": "zk-trace count — COUNT aggregate over age, untraced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "COUNT aggregate over age; default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_distinct_traced_1000": {
+      "label": "zk-trace distinct — DISTINCT projection over city, traced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "DISTINCT projection over city; recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_distinct_untraced_1000": {
+      "label": "zk-trace distinct — DISTINCT projection over city, untraced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "DISTINCT projection over city; default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_filter_traced_1000": {
+      "label": "zk-trace filter — BGP + numeric FILTER(?a > 50), traced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP + numeric FILTER(?a > 50); recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_filter_untraced_1000": {
+      "label": "zk-trace filter — BGP + numeric FILTER(?a > 50), untraced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP + numeric FILTER(?a > 50); default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_optional_traced_1000": {
+      "label": "zk-trace optional — left join (OPTIONAL follows), traced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "left join (OPTIONAL follows); recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_optional_untraced_1000": {
+      "label": "zk-trace optional — left join (OPTIONAL follows), untraced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "left join (OPTIONAL follows); default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_union_traced_1000": {
+      "label": "zk-trace union — UNION of two single-pattern arms, traced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "UNION of two single-pattern arms; recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_1000entities_union_untraced_1000": {
+      "label": "zk-trace union — UNION of two single-pattern arms, untraced, 1000 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "UNION of two single-pattern arms; default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_bgp_chain_traced_100": {
+      "label": "zk-trace bgp_chain — BGP chain join (follows then age), traced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP chain join (follows then age); recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_bgp_chain_untraced_100": {
+      "label": "zk-trace bgp_chain — BGP chain join (follows then age), untraced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP chain join (follows then age); default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_bgp_star_traced_100": {
+      "label": "zk-trace bgp_star — BGP star join (age/name/city on ?s), traced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP star join (age/name/city on ?s); recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_bgp_star_untraced_100": {
+      "label": "zk-trace bgp_star — BGP star join (age/name/city on ?s), untraced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP star join (age/name/city on ?s); default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_bgp_triangle_traced_100": {
+      "label": "zk-trace bgp_triangle — BGP triangle (3-way follows cycle), traced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP triangle (3-way follows cycle); recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_bgp_triangle_untraced_100": {
+      "label": "zk-trace bgp_triangle — BGP triangle (3-way follows cycle), untraced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP triangle (3-way follows cycle); default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_count_traced_100": {
+      "label": "zk-trace count — COUNT aggregate over age, traced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "COUNT aggregate over age; recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_count_untraced_100": {
+      "label": "zk-trace count — COUNT aggregate over age, untraced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "COUNT aggregate over age; default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_distinct_traced_100": {
+      "label": "zk-trace distinct — DISTINCT projection over city, traced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "DISTINCT projection over city; recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_distinct_untraced_100": {
+      "label": "zk-trace distinct — DISTINCT projection over city, untraced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "DISTINCT projection over city; default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_filter_traced_100": {
+      "label": "zk-trace filter — BGP + numeric FILTER(?a > 50), traced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP + numeric FILTER(?a > 50); recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_filter_untraced_100": {
+      "label": "zk-trace filter — BGP + numeric FILTER(?a > 50), untraced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "BGP + numeric FILTER(?a > 50); default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_optional_traced_100": {
+      "label": "zk-trace optional — left join (OPTIONAL follows), traced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "left join (OPTIONAL follows); recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_optional_untraced_100": {
+      "label": "zk-trace optional — left join (OPTIONAL follows), untraced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "left join (OPTIONAL follows); default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_union_traced_100": {
+      "label": "zk-trace union — UNION of two single-pattern arms, traced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "UNION of two single-pattern arms; recorder armed + drained (proving path) (criterion mean)",
+      "mode": "traced",
+      "unit": "µs"
+    },
+    "zk_trace_100entities_union_untraced_100": {
+      "label": "zk-trace union — UNION of two single-pattern arms, untraced, 100 entities",
+      "suite": "Zero-knowledge",
+      "dataset": "synthetic social graph (WatDiv-flavoured, ~9 triples/entity), generated in-bench",
+      "query": "UNION of two single-pattern arms; default execution (no recorder) (criterion mean)",
+      "mode": "untraced",
       "unit": "µs"
     }
   }

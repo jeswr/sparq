@@ -110,19 +110,46 @@ def check_file(path: str) -> tuple[list[str], list[str]]:
             warnings.append(
                 f"name '{name}' is not lowercase-hyphen (Agent-Skills convention)"
             )
-        # The repo root skills/SKILL.md is an index, not a surface skill, so its
-        # directory is `skills` rather than the skill name — only check nested ones.
+        # Where `name` is expected to live differs by family:
+        #   * skills/<surface>/SKILL.md — `name` should equal the parent directory
+        #     (<surface>). The repo-root skills/SKILL.md is an index whose directory
+        #     is `skills`, so it's exempt.
+        #   * .claude/agents/<role>.md — these all sit in one `agents/` directory, so
+        #     `name` should equal the FILE stem (<role>), not the directory.
         parent = os.path.basename(os.path.dirname(os.path.abspath(path)))
-        if parent != "skills" and name != parent:
+        if parent == "agents":
+            stem = os.path.splitext(os.path.basename(path))[0]
+            if name != stem:
+                warnings.append(f"name '{name}' != file '{stem}'")
+        elif parent != "skills" and name != parent:
             warnings.append(f"name '{name}' != directory '{parent}'")
 
     return errors, warnings
 
 
+def default_paths() -> list[str]:
+    """Every frontmatter surface GitHub renders + parses (bead sq-tstv).
+
+    Two families share the exact same unquoted-colon render hazard:
+      * skills/**/SKILL.md     — the Agent-Skills surface skills.
+      * .claude/agents/*.md    — the role-specific subagent definitions; their
+        YAML frontmatter (name/description/model) is parsed identically, and an
+        unquoted colon in a `description:` value breaks it the same way (this
+        gate was extended after sparq-site.md shipped a `GitHub Pages app: …`
+        colon).
+    """
+    return sorted(
+        glob.glob("skills/**/SKILL.md", recursive=True)
+        + glob.glob(".claude/agents/*.md")
+    )
+
+
 def main() -> int:
-    paths = sys.argv[1:] or sorted(glob.glob("skills/**/SKILL.md", recursive=True))
+    paths = sys.argv[1:] or default_paths()
     if not paths:
-        print("check-skill-frontmatter: no SKILL.md files found under skills/.")
+        print(
+            "check-skill-frontmatter: no SKILL.md / .claude/agents/*.md files found."
+        )
         return 0
 
     n_bad = 0

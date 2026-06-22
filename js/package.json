@@ -33,13 +33,22 @@
     "node": ">=18"
   },
   "scripts": {
-    "build:wasm": "wasm-pack build ../crates/sparq-wasm --target web --release && rm -rf wasm && mkdir wasm && cp ../crates/sparq-wasm/pkg/sparq_wasm.js ../crates/sparq-wasm/pkg/sparq_wasm.d.ts ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm.d.ts wasm/",
+    "_copy:wasm": "rm -rf wasm && mkdir wasm && cp ../crates/sparq-wasm/pkg/sparq_wasm.js ../crates/sparq-wasm/pkg/sparq_wasm.d.ts ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm.d.ts wasm/",
+    "build:wasm": "wasm-pack build ../crates/sparq-wasm --target web --release -- --features shacl,jsonld,serialize-rdf,scs,canon && npm run _copy:wasm",
+    "build:wasm:lean": "wasm-pack build ../crates/sparq-wasm --target web --release && npm run _copy:wasm",
+    "build:reason-wasm": "wasm-pack build ../crates/sparq-reason-wasm --target web --release -- --features explain",
+    "build:rsp-wasm": "wasm-pack build ../crates/sparq-rsp-wasm --target web --release",
+    "build:text-wasm": "wasm-pack build ../crates/sparq-text-wasm --target web --release",
     "build:ts": "tsc",
     "build": "npm run build:wasm && npm run build:ts",
+    "typecheck": "tsc --noEmit",
+    "typecheck:conformance": "tsc --noEmit -p tsconfig.conformance.json",
     "test": "node --test \"test/*.test.mjs\"",
     "bench": "node bench/vs-oxigraph.mjs",
+    "check:package": "node guardrails/check-package.mjs",
     "prepack:skills": "rm -rf skills AGENTS.md && cp -R ../skills skills && cp ../AGENTS.md AGENTS.md",
-    "prepack": "npm run build && npm run prepack:skills"
+    "prepack": "npm run build && npm run prepack:skills",
+    "prepare": "node guardrails/prepare-build.mjs"
   },
   "keywords": [
     "rdf",
@@ -51,8 +60,11 @@
     "linked-data"
   ],
   "devDependencies": {
+    "@rdfjs/dataset": "^2.0.2",
     "@rdfjs/types": "^2.0.1",
-    "@types/node": "^25.9.3",
+    "@types/n3": "^1.26.1",
+    "@types/node": "^26.0.0",
+    "n3": "^1.26.0",
     "typescript": "^6.0.3"
   },
   "dependencies": {

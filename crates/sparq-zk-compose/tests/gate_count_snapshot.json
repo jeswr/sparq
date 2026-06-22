@@ -4,9 +4,19 @@
   "bb_version_baselined": "5.0.0-nightly.20260324",
   "nargo_version_baselined": "1.0.0-beta.21",
   "tolerance_pct": 3.0,
+  "_comment_sq_pzet": "[OPUS-4.8] sq-pzet (sq-8dx2): the remaining scan (k,n,r)-lattice members the family could derive but had no compiled package, plus the N=64 hidden-join buckets so a join composes with an n=64 scan. These baselines were measured on linux x86_64 (this CI box), not the darwin-arm64 the older members were baselined on, so they may read ~0.75% below a future darwin re-measure (absorbed by the 3% tolerance). NOT a soundness change: the verifier remains NOT-yet-sound (sq-qhy4 / sq-9hrn / sq-1s2). To re-baseline run bench/zk-compose/scripts/gate_counts.sh.",
+  "_comment_g5": "[OPUS-4.8] sq-ncvq.8 (Gate G5): `snapshot_covers_every_member` enforces a baseline for every `zk/compose/` proving member; `snapshot_covers_top_level_circuits` (tests/gate_count.rs) extends that coverage to EVERY `bin`-type Noir package elsewhere under `zk/` — a new top-level circuit family. Such a circuit must have either a `members` baseline row OR an `exempt_circuits` entry (with a reason), so a deployable circuit cannot ship without a gate-count baseline. Non-deployed `bin` packages (e.g. test harnesses) belong in `exempt_circuits`. Today the only top-level `bin` package outside zk/compose is xpath_unit_tests; `zk/ieee754` and `zk/xpath/xpath` are libraries (no circuit_size to gate).",
+  "exempt_circuits": {
+    "xpath_unit_tests": "[OPUS-4.8] zk/xpath/xpath_unit_tests is a type=bin test HARNESS that drives the xpath library's unit tests — NOT a deployed proving circuit, so it carries no gate-count guarantee. If it ever becomes a deployed circuit, replace this exemption with a `members` baseline (run bench/zk-compose/scripts/gate_counts.sh)."
+  },
   "members": {
     "scan_k1_n16_r4": 5991,
+    "scan_k1_n16_r8": 7038,
+    "scan_k1_n64_r4": 14923,
+    "scan_k1_n64_r8": 18850,
+    "scan_k2_n16_r4": 9254,
     "scan_k2_n16_r8": 11261,
+    "scan_k2_n64_r4": 27054,
     "scan_k2_n64_r8": 34821,
     "filter_int_d1": 17416,
     "filter_int_d2": 17416,
@@ -17,9 +27,19 @@
     "filter_f64_d2": 17416,
     "filter_f64_d3": 17416,
     "filter_f64_d4": 17416,
+    "filter_signed_int_d2": 17416,
+    "filter_signed_int_d4": 17416,
+    "filter_decimal_i3_f2": 17416,
+    "filter_value_dl_int": 3033,
+    "filter_value_dl_f64": 4157,
+    "filter_value_dl_decimal": 3070,
     "revoke_unset_d10": 899,
-    "hidden_issuer_d4": 16932,
+    "hidden_issuer_d4": 16946,
     "holder_pok": 10334,
-    "join_eq_na16_nb16": 7025
+    "holder_set_d4": 10650,
+    "join_eq_na16_nb16": 7025,
+    "join_eq_na16_nb64": 12885,
+    "join_eq_na64_nb16": 12885,
+    "join_eq_na64_nb64": 18681
   }
 }

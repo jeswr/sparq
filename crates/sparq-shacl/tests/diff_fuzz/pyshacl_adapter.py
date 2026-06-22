@@ -94,7 +94,20 @@ def run(data_ttl, shapes_ttl):
     p_focus = rdflib.URIRef(SH + "focusNode")
     p_comp = rdflib.URIRef(SH + "sourceConstraintComponent")
     p_path = rdflib.URIRef(SH + "resultPath")
+    p_detail = rdflib.URIRef(SH + "detail")
+    # [OPUS-4.8] (sq-0hj7) Collect only TOP-LEVEL results. For sh:node / logical
+    # components, pySHACL emits an outer result (the sh:node / sh:and / … against
+    # the value node, carrying sh:resultPath) AND an OPTIONAL nested `sh:detail`
+    # sub-result for the inner constraint that failed (e.g. the inner
+    # sh:minLength, focus = the value node, no path). `sh:detail` is non-normative
+    # (SHACL §3.6.2 "MAY"), and sparq-shacl keeps inner results off the comparable
+    # top-level `results` list (they live in `ValidationResult::details`). Comparing
+    # the nested sub-results would diff two engines' OPTIONAL detail policies, not a
+    # real disagreement — so we exclude any result that is the object of an sh:detail.
+    nested = set(report_graph.objects(None, p_detail))
     for res in report_graph.subjects(rdf_type, result_t):
+        if res in nested:
+            continue
         focus = report_graph.value(res, p_focus)
         comp = report_graph.value(res, p_comp)
         path = report_graph.value(res, p_path)

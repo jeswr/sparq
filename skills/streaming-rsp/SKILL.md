@@ -5,7 +5,7 @@ description: Use when running continuous/standing SPARQL over a live RDF triple 
 
 # sparq-streaming-rsp
 
-`sparq-rsp` runs **windowed continuous SPARQL** (RSP-QL-style RDF Stream Processing) over a stream of `(triple, timestamp)` elements, as a deterministic **synchronous library** — no async runtime, no wall clock, no service. You push timestamped triples; it closes windows on a watermark and fires your callback once per closed window with the SELECT / CONSTRUCT / ASK result. It is a fully isolated, opt-in crate: nothing else in the workspace depends on it, the core engine and wasm build carry zero streaming code, and there are **no cargo features** — you engage it simply by depending on the crate.
+`sparq-rsp` runs **windowed continuous SPARQL** (RSP-QL-style RDF Stream Processing) over a stream of `(triple, timestamp)` elements, as a deterministic **synchronous library** — no async runtime, no wall clock, no service. You push timestamped triples; it closes windows on a watermark and fires your callback once per closed window with the SELECT / CONSTRUCT / ASK result. It is a fully isolated, opt-in crate: nothing else in the workspace depends on it, the core engine and the **lean** `sparq-wasm` bundle carry zero streaming code (streaming ships as a *separate*, lazy-loaded `sparq-rsp-wasm` bundle — see below), and there are **no cargo features** — you engage it simply by depending on the crate.
 
 ## Quickstart
 
@@ -45,6 +45,23 @@ q.flush(|r| println!("final [{},{}) -> {:?}", r.start, r.end, r.rows))?;
 
 The whole pipeline is a pure function of the pushed `(triple, ts)` sequence: replayable, unit-testable, wasm-safe. Wrapping pushes in tokio / a thread / a browser timer is your one-liner, not this crate's dependency.
 
+### In-tab live streaming: the tier-b `sparq-rsp-wasm` ("W-rsp") bundle ([OPUS-4.8] sq-nzcb)
+
+Because `sparq-rsp` reads no wall clock and runs no async runtime, it compiles to `wasm32-unknown-unknown` and ships as a **separate, lazy-loaded** wasm bundle (`crates/sparq-rsp-wasm`) — NOT folded into the lean `sparq-wasm` triplestore bundle (the `sparq-reason-wasm` "W-reason" pattern). It exposes a single stateful JS handle, `Rsp`, for the showcase site's `/surface/streaming-rsp` page, where the **browser tab drives the logical clock**:
+
+```js
+import init, { Rsp } from "./sparq_rsp_wasm.js";
+await init();
+const q = Rsp.select("SELECT (AVG(?v) AS ?avg) WHERE { ?s <http://ex/reading> ?v }",
+                     60, 60, 0, "rstream"); // range, step, maxDelay, "rstream"|"istream"|"dstream"
+const closed = JSON.parse(q.push("<http://ex/s1>", "<http://ex/reading>", "10", 0)); // -> "[]" until a window closes
+JSON.parse(q.flush()); // end-of-stream; q.lateDropped() = arrivals too late for any window
+```
+
+Each `push(s, p, o, ts)` / `flush()` returns a JSON array of the windows that just closed: `{"start","end","results"}`, where `results` is a standard self-contained **SPARQL 1.1 JSON** results document (from the engine's serialiser). Triple terms are **Turtle** syntax — the bare-numeric shorthand (`10`, `10.5`) works, alongside `<iri>`, `"str"`, `"str"@en`, `"v"^^<dt>`, `_:b`. The bundle wraps the single-window `ContinuousQuery` SELECT form only; CONSTRUCT/ASK and `ContinuousMultiQuery` stay native for now. Zero `unsafe`, no serde, no regex (it is the leanest of the wasm bundles); the wasm-deps guard keeps the native-only heavy deps out of its graph.
+
+The numeric args `range` / `step` / `maxDelay` / `ts` (and the `lateDropped()` return) are plain JS **`number`s, not `BigInt`s** ([OPUS-4.8] sq-734a, issue #832) — pass `60`, not `60n`. Each is a whole logical-time value in `[0, 2^53-1]` (`Number.MAX_SAFE_INTEGER`, the exact-integer range of a `number`); a fractional / negative / out-of-range value is a clean error, not a thrown coercion. They map to the native crate's `u64` ticks (a `u64` wasm-bindgen param would be a `BigInt`, which is why the boundary is `number`).
+
 ## Key APIs
 
 All public items are re-exported at the crate root (`sparq_rsp::…`).
@@ -61,7 +78,7 @@ WindowSpec::count(rows: usize) -> WindowSpec            // CQL count window; pan
 enum R2S { RStream, IStream, DStream }
 
 // --- R2R materialisation strategy (Default = PersistentDict) ---
-enum EvalMode { Rebuild, PersistentDict, Delta }
+enum EvalMode { Rebuild, PersistentDict, Delta, Snapshot }
 
 // --- Continuous SELECT: WindowResult { start, end, vars: Vec<Variable>, rows: Vec<Vec<Option<Term>>> } ---
 ContinuousQuery::register(sparql: &str, spec: WindowSpec) -> Result<ContinuousQuery, String>
@@ -170,7 +187,7 @@ q.flush(|_| {})?;
 - **Empty windows are reported** (evaluated + delivered) when the watermark jumps a gap — DSTREAM needs to observe results disappear. Windows wholly closed before the first arrival's watermark are skipped (a stream starting at `ts=10⁹` won't replay a billion empties).
 - **Materialisation is set-semantic:** a window is an RDF *graph*, so the same triple at several timestamps within one window counts once. CONSTRUCT results are triple sets (exact set-diff for I/DSTREAM); SELECT results are multisets diffed by 64-bit `FxHasher` row hashes (a hash collision could theoretically suppress a diff — accepted as vanishingly unlikely).
 - **`register` rejects the wrong query form:** `ContinuousQuery` requires SELECT, `ContinuousConstruct` requires CONSTRUCT, `ContinuousAsk` requires ASK. Errors come back as `Err(String)` at registration. `push`/`flush` errors are engine evaluation errors.
-- **`with_mode` must precede the first push** (switching mode resets stream state). Default `EvalMode::PersistentDict` wins every measured scenario (1.2–5.3× over `Rebuild`) and bounds dictionary memory to the *live* window vocabulary via refcount-exact compaction. `Rebuild` bounds memory to one window. `Delta` never wins in benchmarks (kept for huge-window / cheap-eval cases).
+- **`with_mode` must precede the first push** (switching mode resets stream state). Default `EvalMode::PersistentDict` wins every measured scenario and bounds dictionary memory to the *live* window vocabulary via refcount-exact compaction. `Rebuild` bounds memory to one window. `Delta` keeps one live graph evolved by per-slide deltas (kept for huge-window / cheap-eval cases; never the benchmark winner). `Snapshot` is `Delta` plus a cheap `O(overlay)` **immutable point-in-time** `Graph::snapshot` per closed window — a logically-independent, `Send + Sync` view the engine (or your callback) can retain or publish across windows, where `Delta`'s live `&Graph` borrow cannot. Results are identical across all four modes.
 - **RSP-QL parser scope (`RspqlQuery::parse` / `ContinuousMultiQuery`):** parses `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM] <out> AS`, `FROM NAMED WINDOW <w> ON <s> [RANGE <dur> [STEP <dur>]]` (tumbling when STEP omitted), and `WINDOW <w> { … }` (rewritten to `GRAPH <w> { … }`). Durations are ISO-8601 (`PT10S`, `PT1M30S`, `PT2H`, `P1D`; **seconds resolution**, years/months/weeks rejected) or bare integers (logical ticks). IRIs may be `<…>` or prefixed names resolved against the body's `PREFIX`/`BASE`. **Scoped out** (use the programmatic `WindowSpec` instead): window *variables* (`WINDOW ?w`), `ROWS` count windows, the `t0`/`max_delay` parameters, and relative `NOW-PT…TO…` bounds. `ContinuousMultiQuery` requires ≥2 windows (use `ContinuousQuery` for one) and currently only RSTREAM; ISTREAM/DSTREAM over a multi-window join is a documented follow-up (see the crate's open beads, `bd list -l area:sparq-rsp`).
 - **Term model is `oxrdf`** (`oxrdf::Term`/`NamedNode`/`Literal`); stream elements are `[Term; 3]`. Add `oxrdf` with `features = ["rdf-12"]` to match the workspace.
 

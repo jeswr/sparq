@@ -488,7 +488,7 @@ Implement timezone adjustment functions for dateTime, date, and time types.
 
 ## Dependency Graph
 
-```
+```text
      ┌─────┐     ┌─────┐     ┌─────┐     ┌─────┐
      │  A  │     │  B  │     │  E  │     │  F  │
      │Dur. │     │DT+D │     │Unary│     │Bool │

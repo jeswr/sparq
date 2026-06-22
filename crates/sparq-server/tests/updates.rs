@@ -16,6 +16,13 @@
 //! The `#[ignore]`d benchmark at the bottom is the honest update-cost measurement on a
 //! 1M-triple graph under the ring (per-batch O(graph) fork — the recorded A2 trade):
 //!   cargo test -p sparq-server --release --test updates -- --ignored --nocapture
+//!
+//! [OPUS-4.8] (sq-1b390) Gate the whole suite on the `server` feature. It spins the real axum
+//! server and uses the `server`-gated `sparq_server::router` / `AppState` API, so under
+//! `--no-default-features --all-targets` (the pure-serialiser-library build) this file must
+//! compile OUT — otherwise `clippy --no-default-features --all-targets` breaks on the
+//! unresolved axum / serde_json / router imports. 🤖 SPARQ agent.
+#![cfg(feature = "server")]
 
 use std::time::{Duration, Instant};
 

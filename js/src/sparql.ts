@@ -4,7 +4,7 @@
  * token scanner to detect the query form (SELECT/ASK/…) without a parser.
  */
 import type * as RDF from '@rdfjs/types';
-import { BlankNode, DataFactory, Literal, NamedNode } from './terms.js';
+import { BlankNode, DataFactory, Literal, NamedNode, Quad } from './terms.js';
 
 // --- SPARQL 1.1 JSON results → RDF/JS terms -----------------------------------------------------
 
@@ -116,12 +116,64 @@ export class SparqlJsonRowsParser {
 
 // --- RDF/JS terms → N-Triples / SPARQL syntax ---------------------------------------------------
 
+/**
+ * Escapes a literal lexical form for the inside of a `"…"` N-Triples /
+ * SPARQL `STRING_LITERAL_QUOTE`. Escapes `\`, `"`, and the whole C0 control
+ * range plus DEL — the SPARQL grammar forbids a raw `#x22`/`#x5C`/`#xA`/`#xD`
+ * inside a single-quoted string, and a raw control byte (e.g. TAB or NUL) is
+ * exactly what an attacker would use to slip past a naive `"`-only escaper.
+ * `\n`/`\r`/`\t`/`\b`/`\f` use their short forms; every other control char
+ * becomes a `\uXXXX` escape.
+ *
+ * This is the SPARQL-injection guard for literal *values*: the output cannot
+ * close its own quote or emit a raw newline, so a hostile value (e.g. an
+ * ACL-derived label) stays confined to the literal token when the result is
+ * re-parsed by sparq's own SPARQL lexer.
+ */
 function escapeLiteral(value: string): string {
-  return value
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r');
+  // " \  and C0 controls (#x00–#x1F) + DEL (#x7F).
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/["\\\x00-\x1f\x7f]/g, (c) => {
+    switch (c) {
+      case '\\':
+        return '\\\\';
+      case '"':
+        return '\\"';
+      case '\n':
+        return '\\n';
+      case '\r':
+        return '\\r';
+      case '\t':
+        return '\\t';
+      case '\b':
+        return '\\b';
+      case '\f':
+        return '\\f';
+      default:
+        return `\\u${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
+    }
+  });
+}
+
+/**
+ * Percent-encodes the characters the SPARQL/Turtle `IRIREF` production forbids
+ * inside `<…>` — `< > " { } | ^` `` ` `` `\` and every codepoint in `#x00–#x20`
+ * (controls and space). Without this a hostile IRI value — most importantly one
+ * carrying a `>`, e.g. an ACL pointer IRI taken from untrusted input — could
+ * close its own `<…>` bracket and inject arbitrary SPARQL.
+ *
+ * This is the SPARQL-injection guard for IRI *values*; it matches the illegal
+ * set QLever's lexer rejects, so a value that round-trips here parses to the
+ * same single IRI term in sparq's parser. Percent-encoding is IRI-preserving:
+ * an endpoint dereferences the encoded form to the same resource.
+ */
+function escapeIri(value: string): string {
+  // IRIREF illegal set: < > " { } | ^ ` \ and #x00–#x20 (controls + space).
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[<>"{}|^`\\\x00-\x20]/g, (c) => {
+    const code = c.charCodeAt(0);
+    return `%${code.toString(16).toUpperCase().padStart(2, '0')}`;
+  });
 }
 
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
@@ -130,7 +182,7 @@ const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 export function termToNT(term: RDF.Term): string {
   switch (term.termType) {
     case 'NamedNode':
-      return `<${term.value}>`;
+      return `<${escapeIri(term.value)}>`;
     case 'BlankNode':
       return `_:${term.value}`;
     case 'Literal': {
@@ -139,7 +191,7 @@ export function termToNT(term: RDF.Term): string {
         const dir = term.direction != null && term.direction !== '' ? `--${term.direction}` : '';
         return `${quoted}@${term.language}${dir}`;
       }
-      if (term.datatype.value !== XSD_STRING) return `${quoted}^^<${term.datatype.value}>`;
+      if (term.datatype.value !== XSD_STRING) return `${quoted}^^<${escapeIri(term.datatype.value)}>`;
       return quoted;
     }
     case 'DefaultGraph':
@@ -158,12 +210,127 @@ export function quadsToNQuads(quads: Iterable<RDF.Quad>): string {
   let out = '';
   for (const quad of quads) {
     if (quad.subject.termType === 'Quad' || quad.object.termType === 'Quad') {
-      throw new Error('RDF-star quoted triples are not supported');
+      throw new Error('RDF 1.2 triple terms are not supported');
     }
     const graph = quad.graph.termType === 'DefaultGraph' ? '' : ` ${termToNT(quad.graph)}`;
     out += `${termToNT(quad.subject)} ${termToNT(quad.predicate)} ${termToNT(quad.object)}${graph} .\n`;
   }
   return out;
+}
+
+// --- N-Triples → RDF/JS quads -------------------------------------------------------------------
+
+/**
+ * Decodes the N-Triples / Turtle string-escape sequences the engine's
+ * serialiser can emit inside an `IRIREF` or a quoted literal: the single-char
+ * escapes (`\t \b \n \r \f \" \' \\`) and the numeric `\uXXXX` / `\UXXXXXXXX`
+ * forms. `pos` points just past the opening delimiter; returns the decoded
+ * value and the index of the closing `end` delimiter.
+ */
+function unescapeNT(input: string, pos: number, end: '"' | '>'): { value: string; next: number } {
+  let out = '';
+  let i = pos;
+  const n = input.length;
+  while (i < n) {
+    const c = input[i]!;
+    if (c === end) return { value: out, next: i };
+    if (c === '\\') {
+      const e = input[i + 1];
+      switch (e) {
+        case 't': out += '\t'; i += 2; break;
+        case 'b': out += '\b'; i += 2; break;
+        case 'n': out += '\n'; i += 2; break;
+        case 'r': out += '\r'; i += 2; break;
+        case 'f': out += '\f'; i += 2; break;
+        case '"': out += '"'; i += 2; break;
+        case "'": out += "'"; i += 2; break;
+        case '\\': out += '\\'; i += 2; break;
+        case 'u': {
+          out += String.fromCodePoint(parseInt(input.slice(i + 2, i + 6), 16));
+          i += 6;
+          break;
+        }
+        case 'U': {
+          out += String.fromCodePoint(parseInt(input.slice(i + 2, i + 10), 16));
+          i += 10;
+          break;
+        }
+        default:
+          throw new Error(`invalid N-Triples escape \\${e ?? ''}`);
+      }
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  throw new Error(`unterminated N-Triples ${end === '"' ? 'literal' : 'IRI'}`);
+}
+
+/** Reads one N-Triples term (IRI / blank node / literal) starting at `pos`. */
+function parseTerm(line: string, pos: number): { term: RDF.Term; next: number } {
+  const c = line[pos];
+  if (c === '<') {
+    const { value, next } = unescapeNT(line, pos + 1, '>');
+    return { term: new NamedNode(value), next: next + 1 };
+  }
+  if (c === '_' && line[pos + 1] === ':') {
+    let i = pos + 2;
+    // PN_CHARS-ish run: stop at whitespace or the line terminator dot.
+    while (i < line.length && !/[\s]/.test(line[i]!)) i++;
+    return { term: new BlankNode(line.slice(pos + 2, i)), next: i };
+  }
+  if (c === '"') {
+    const { value, next } = unescapeNT(line, pos + 1, '"');
+    let i = next + 1;
+    if (line[i] === '@') {
+      let j = i + 1;
+      while (j < line.length && /[A-Za-z0-9-]/.test(line[j]!)) j++;
+      const tag = line.slice(i + 1, j);
+      // RDF 1.2 base-direction: `@lang--dir`.
+      const dirMatch = /^(.*?)--(ltr|rtl)$/.exec(tag);
+      if (dirMatch) {
+        return { term: new Literal(value, { language: dirMatch[1]!, direction: dirMatch[2] as 'ltr' | 'rtl' }), next: j };
+      }
+      return { term: new Literal(value, tag), next: j };
+    }
+    if (line[i] === '^' && line[i + 1] === '^') {
+      const dt = parseTerm(line, i + 2);
+      return { term: new Literal(value, dt.term as RDF.NamedNode), next: dt.next };
+    }
+    return { term: new Literal(value), next: i };
+  }
+  throw new Error(`unexpected token ${JSON.stringify(c ?? '')} parsing N-Triples term`);
+}
+
+/**
+ * Parses an N-Triples document (the exact form the engine's CONSTRUCT /
+ * DESCRIBE serialiser emits — `<s> <p> <o> .`, one triple per line, absolute
+ * IRIs, canonical literal escapes) into RDF/JS {@link Quad}s in the default
+ * graph. Blank-node labels are preserved verbatim (the engine freshens
+ * template bnodes per solution, so labels are already globally unique). Blank
+ * lines are skipped; a malformed line throws.
+ */
+export function parseNTriples(nt: string): Quad[] {
+  const quads: Quad[] = [];
+  for (const raw of nt.split('\n')) {
+    const line = raw.trim();
+    if (line === '') continue;
+    const s = parseTerm(line, 0);
+    let i = s.next;
+    while (line[i] === ' ' || line[i] === '\t') i++;
+    const p = parseTerm(line, i);
+    i = p.next;
+    while (line[i] === ' ' || line[i] === '\t') i++;
+    const o = parseTerm(line, i);
+    quads.push(
+      new Quad(
+        s.term as RDF.Quad_Subject,
+        p.term as RDF.Quad_Predicate,
+        o.term as RDF.Quad_Object,
+      ),
+    );
+  }
+  return quads;
 }
 
 // --- query-form detection ------------------------------------------------------------------------
@@ -215,20 +382,6 @@ export function detectQueryForm(sparql: string): { form: QueryForm; index: numbe
     }
   }
   return undefined;
-}
-
-/**
- * Rewrites an ASK query to an equivalent `SELECT *` query. `ASK WHERE {…}`
- * and `ASK {…}` are both valid SPARQL after substituting `SELECT *`.
- *
- * Legacy helper: the engine now evaluates ASK natively (with first-solution
- * early exit), so `SparqStore` no longer rewrites — kept for callers that
- * target SELECT-only endpoints.
- */
-export function askToSelect(sparql: string): string {
-  const form = detectQueryForm(sparql);
-  if (!form || form.form !== 'ASK') throw new Error('not an ASK query');
-  return `${sparql.slice(0, form.index)}SELECT *${sparql.slice(form.index + form.length)}`;
 }
 
 export { DataFactory };

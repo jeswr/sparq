@@ -1,0 +1,169 @@
+# pkg-example.ttl — a tiny hand-written PKG instance file for dogfooding the SHACL
+# guardrails.
+#
+# [OPUS-4.8] sq-2m6zm.1 (epic sq-2m6zm). 🤖 SPARQ agent — dogfooding sparq as a
+# project knowledge graph. Written while Fable unavailable; flag for re-review when
+# Fable returns.
+#
+# Two VALID Findings + two VALID Tasks + one VALID Source + one VALID Technique,
+# plus ONE DELIBERATELY-INVALID Finding (missing source + missing confidence +
+# filler justification) and ONE DELIBERATELY-INVALID Task (out-of-enum status +
+# out-of-range priority + a stale closed->open block edge). Loading this file with
+# the ontology and validating against pkg.shapes.ttl MUST: pass the valid nodes and
+# report the invalid ones. The sparq-shacl dogfood test
+# (`crates/sparq-kb/tests/dogfood_shacl.rs`) asserts exactly that.
+
+@prefix pkg:     <https://sparq.dev/ns/pkg#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix dqv:     <http://www.w3.org/ns/dqv#> .
+@prefix fabio:   <http://purl.org/spar/fabio/> .
+@prefix cito:    <http://purl.org/spar/cito/> .
+@prefix bibo:    <http://purl.org/ontology/bibo/> .
+@prefix schema:  <http://schema.org/> .
+@prefix sigimpl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix secx:    <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:      <https://sparq.dev/ns/pkg/example#> .
+
+# =============================================================================
+# VALID Source
+# =============================================================================
+
+ex:src-neumann-moerkotte-2011 a pkg:Source , fabio:ConferencePaper ;
+  dcterms:title "Characteristic Sets for cardinality estimation"@en ;
+  dcterms:creator ex:person-neumann , ex:person-moerkotte ;
+  dcterms:issued "2011"^^xsd:gYear ;
+  bibo:doi "10.1109/ICDE.2011.5767868" ;
+  pkg:confidence 0.95 ;
+  dqv:hasQualityMeasurement ex:meas-src-reliability ;
+  pkg:exploredStatus pkg:Explored ;
+  pkg:followUpPriority 1 ;
+  dcterms:subject ex:topic-cardinality-estimation .
+
+# DQV (sq-2489d.3): the source-reliability measurement the Source's pkg:confidence
+# shorthands — distinct dqv:Metric (pkg:SourceReliabilityMeasurement) from a Finding's.
+ex:meas-src-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn ex:src-neumann-moerkotte-2011 ;
+  dqv:value 0.95 .
+
+# A topic so dcterms:subject targets resolve (pure SKOS).
+ex:topic-cardinality-estimation a skos:Concept ;
+  skos:prefLabel "Cardinality estimation"@en-GB .
+
+# =============================================================================
+# VALID Technique — supersedes (dcterms:replaces) points at an EXISTING Technique;
+# the typed method-relation edges reuse CiTO (cito:extends / cito:usesMethodIn,
+# sq-2489d.3) instead of a bespoke predicate; pkg:couldBeMergedWith is reserved for
+# genuine merge-candidacy.
+# =============================================================================
+
+ex:tech-characteristic-sets a pkg:Technique ;
+  skos:prefLabel "Characteristic-set cardinality estimation"@en-GB ;
+  dcterms:replaces ex:tech-predicate-only-histogram ;
+  cito:extends ex:tech-predicate-only-histogram ;
+  cito:usesMethodIn ex:tech-qse-shape-mining ;
+  pkg:couldBeMergedWith ex:tech-qse-shape-mining .
+
+ex:tech-predicate-only-histogram a pkg:Technique ;
+  skos:prefLabel "Predicate-only histogram"@en-GB .
+
+ex:tech-qse-shape-mining a pkg:Technique ;
+  skos:prefLabel "QSE shape mining"@en-GB .
+
+# =============================================================================
+# VALID Finding 1 — source + confidence + assurance + non-filler justification
+# =============================================================================
+
+ex:find-cs-dual-use a pkg:Finding ;
+  rdfs:label "Characteristic sets serve both planner cardinality and LLM grounding"@en-GB ;
+  pkg:about ex:tech-characteristic-sets ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "One SPO scan yields {predicate set -> count, multiplicity, observed domain/range}, reusable for both the planner and grounding cards."@en-GB ;
+  pkg:confidence 0.9 ;
+  pkg:assurance secx:Claimed ;
+  cito:citesAsEvidence ex:src-neumann-moerkotte-2011 ;
+  prov:wasDerivedFrom ex:src-neumann-moerkotte-2011 ;
+  dqv:hasQualityMeasurement ex:meas-find-cs-dual-use-conf ;
+  dcterms:subject ex:topic-cardinality-estimation .
+
+# DQV (sq-2489d.3): the reified quality measurement that pkg:confidence shorthands —
+# the named home for the confidence axis. The shorthand (pkg:confidence 0.9 above) and
+# the measurement agree (dqv:value 0.9). The measurement carries its own provenance.
+ex:meas-find-cs-dual-use-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn ex:find-cs-dual-use ;
+  dqv:value 0.9 ;
+  prov:wasAttributedTo ex:person-neumann .
+
+# =============================================================================
+# VALID Finding 2 — a refuting-edge finding, still fully sourced + confident
+# =============================================================================
+
+ex:find-kge-neutral a pkg:Finding ;
+  rdfs:label "Structure-aware KGE priors are no-ops on plain triple sets"@en-GB ;
+  pkg:about ex:tech-characteristic-sets ;
+  pkg:verdict sigimpl:partial ;
+  sigimpl:justification "Closure-on was indistinguishable from closure-off on plain .nt under ComplEx across multiple seeds; the effect fires only on ontology-rich slices."@en-GB ;
+  pkg:confidence 0.55 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom ex:src-neumann-moerkotte-2011 ;
+  cito:disagreesWith ex:src-neumann-moerkotte-2011 ;
+  dcterms:subject ex:topic-cardinality-estimation .
+
+# =============================================================================
+# INVALID Finding — DELIBERATELY missing source + missing confidence + filler
+# justification. Expected to FAIL FindingShape on: prov:wasDerivedFrom minCount,
+# pkg:confidence minCount, pkg:assurance minCount, and the non-filler pattern.
+# =============================================================================
+
+ex:find-INVALID-bare a pkg:Finding ;
+  rdfs:label "An unsourced, low-quality finding"@en-GB ;
+  sigimpl:justification "TODO"@en-GB .
+  # NO prov:wasDerivedFrom, NO pkg:confidence, NO pkg:assurance, filler justification.
+
+# =============================================================================
+# VALID Tasks — in-enum status, bounded priority, sound dependency edge
+# =============================================================================
+
+ex:task-sq-2m6zm a pkg:Task ;
+  dcterms:title "Dogfood sparq as a project knowledge graph (PKG)" ;
+  pkg:issueType pkg:Epic ;
+  pkg:status pkg:Open ;
+  pkg:priority 2 ;
+  pkg:dependsOn ex:task-sq-2m6zm-1 .
+
+ex:task-sq-2m6zm-1 a pkg:Task ;
+  dcterms:title "PKG ontology + SHACL shapes" ;
+  pkg:issueType pkg:Feature ;
+  pkg:status pkg:InProgress ;
+  pkg:priority 2 .
+
+# =============================================================================
+# INVALID Tasks — exercise all three TaskShape failure modes.
+#
+#  (a) ex:task-INVALID-closed-blocker: Closed (valid enum) but out-of-range
+#      priority 9 (fails sh:maxInclusive) AND it is the $this of the stale-edge
+#      sh:sparql constraint — it is Closed yet ex:task-open-waiter is still
+#      pkg:blockedBy it while open.
+#  (b) ex:task-INVALID-bad-status: a status NOT in the enum (fails status sh:in).
+# =============================================================================
+
+ex:task-INVALID-closed-blocker a pkg:Task ;
+  dcterms:title "A closed task that still blocks an open one" ;
+  pkg:status pkg:Closed ;
+  pkg:priority 9 .
+
+ex:task-open-waiter a pkg:Task ;
+  dcterms:title "An open task still blocked by a closed task" ;
+  pkg:status pkg:Open ;
+  pkg:priority 1 ;
+  pkg:blockedBy ex:task-INVALID-closed-blocker .
+
+ex:task-INVALID-bad-status a pkg:Task ;
+  dcterms:title "A task with a status outside the enum" ;
+  pkg:status pkg:Wibble ;
+  pkg:priority 0 .

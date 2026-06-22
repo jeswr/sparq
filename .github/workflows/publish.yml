@@ -1,0 +1,337 @@
+# Published-package provenance (GX-10 / sq-toze.24).
+#
+# Complements release.yml (#367 / sq-toze.23), which attests the GitHub-Release ARCHIVES +
+# the ghcr.io container. This workflow covers the bytes a CONSUMER actually installs:
+#   - the `@jeswr/sparq` npm client (crates/sparq-wasm wrapper in js/)
+#   - the packaged crates.io `.crate` artifacts
+#   - the `sparq-rdf` PyPI wheels (crates/sparq-py, maturin-built) — PEP-740 attestations
+#
+# HONEST SCOPE BOUNDARY (see compliance/slsa/):
+#   * npm     — native provenance via OIDC TRUSTED PUBLISHING. [OPUS-4.8] sq-v286.11: the npm
+#               job authenticates with the GitHub Actions OIDC token (id-token: write) — NO
+#               long-lived NPM_TOKEN — exchanging it for a short-lived publish credential, and
+#               npm's registry records a Sigstore-signed in-toto SLSA provenance statement bound
+#               to this workflow run. A consumer verifies with `npm audit signatures`. THIS IS A
+#               PROVENANCE-EMITTING PATH. ONE-TIME needs:user: register the npm Trusted Publisher
+#               for @jeswr/sparq (owner `jeswr`, repo `sparq`, workflow file `publish.yml`); the
+#               package must already exist, so one bootstrap publish precedes it (see npm job).
+#   * crates.io — crates.io has NO published-package provenance mechanism upstream as of this
+#               writing (no equivalent of npm `--provenance`). The tractable equivalent we CAN
+#               do is attest the packaged `.crate` artifact (the exact bytes `cargo publish`
+#               uploads) with the same `actions/attest-build-provenance` mechanism release.yml
+#               uses, and publish that attestation as a release-adjacent artifact + via Sigstore.
+#               This does NOT put a provenance link on the crates.io page (that needs upstream
+#               support) — it gives consumers an out-of-band attestation they can `gh attestation
+#               verify` against the downloaded `.crate`. The crates.io-native sub-gap stays OPEN
+#               and is tracked as an EXTERNAL sub-gap of GX-10 / sq-toze.24.
+#   * PyPI    — [OPUS-4.8] sq-toze.37. native PEP-740 attestations. `pypa/gh-action-pypi-publish`
+#               runs in this GitHub Actions OIDC context (id-token: write) and — when uploading
+#               via PyPI Trusted Publishing — generates + uploads a PEP-740 digital attestation
+#               (an in-toto/Sigstore-signed statement bound to this workflow run) ALONGSIDE each
+#               wheel/sdist. PyPI records it and shows a "Provenance" panel on the release-files
+#               page; a consumer can verify with `pypi-attestations verify` (or `gh attestation
+#               verify`). THIS IS A PROVENANCE-EMITTING PATH — the strongest of the three.
+#               BUT there is ONE maintainer prerequisite that CANNOT be wired from this repo:
+#               the PyPI project `sparq-rdf` must have a Trusted Publisher registered (PyPI →
+#               project → Publishing → "Add a new pending/published publisher": owner `jeswr`,
+#               repo `sparq`, workflow `publish.yml`, environment `pypi`). Until a maintainer
+#               does that one-time PyPI-side config, the `twine`/Trusted-Publishing upload step
+#               here will (correctly) fail to mint a token — the CI is fully wired, the PyPI
+#               account config is the only open item. See compliance/slsa/ + docs/release.md.
+#
+# TRIGGER: this is a MAINTAINER-DRIVEN publish. It fires on `release: published` (the release
+# created by release.yml is published) and on manual `workflow_dispatch`. The npm publish step
+# is what carries provenance forward: the NEXT publish a maintainer triggers emits it. Each job
+# is gated behind an input/secret so a tag alone never force-publishes (see per-job `if:`).
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      publish_npm:
+        description: "Publish @jeswr/sparq to npm with provenance"
+        type: boolean
+        default: false
+      attest_crates:
+        description: "Package + attest publishable crates (crates.io bytes)"
+        type: boolean
+        default: true
+      publish_pypi:
+        description: "Build sparq-rdf wheels + publish to PyPI with PEP-740 attestations (Trusted Publishing)"
+        type: boolean
+        default: false
+
+# Default read-only; jobs opt into the OIDC token (id-token: write) + attestation write below.
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- npm: @jeswr/sparq via OIDC TRUSTED PUBLISHING (no NPM_TOKEN) ----
+  # [OPUS-4.8] sq-v286.11 (maintainer #758): switched from a long-lived NPM_TOKEN to npm's
+  # OIDC Trusted Publishing (GA 2025-07-31, github.blog/changelog/2025-07-31). The npm CLI
+  # detects the GitHub Actions OIDC environment (granted by `id-token: write` below), exchanges
+  # the OIDC token with the registry for a short-lived publish credential, and records the
+  # Sigstore-signed SLSA provenance statement automatically — NO static token is read or stored.
+  # Runs only when a maintainer asks for it (manual input) OR on a published release.
+  #
+  # ONE-TIME needs:user step (cannot be a repo file — it is registry-side config): on npmjs.com,
+  # @jeswr/sparq must have a Trusted Publisher registered (npmjs.com/package/@jeswr/sparq/access
+  # -> "Trusted Publisher"): organization/user `jeswr`, repository `sparq`, workflow FILENAME
+  # `publish.yml` (filename only, with extension — NOT a path), environment left blank (this job
+  # uses none). npm trusted publishing requires the package to ALREADY EXIST, so the maintainer
+  # does ONE bootstrap `npm publish` with a granular token, then registers the trusted publisher
+  # and removes the token — every CI publish thereafter is tokenless. See docs/release.md.
+  npm:
+    name: npm publish (OIDC trusted publishing)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_npm)
+    permissions:
+      contents: read
+      id-token: write # OIDC token npm exchanges for a short-lived publish credential + provenance signing
+    defaults:
+      run:
+        working-directory: js
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          # registry-url is still REQUIRED: it writes the .npmrc `//registry.npmjs.org/:...`
+          # line the OIDC flow keys off (and selects the public registry the token is minted
+          # for). Under trusted publishing no NODE_AUTH_TOKEN is read — the npm CLI mints a
+          # short-lived credential from the OIDC token at publish time.
+          registry-url: "https://registry.npmjs.org"
+      # [OPUS-4.8] sq-v286.11: OIDC trusted publishing requires npm CLI >= 11.5.1. Node 22's
+      # BUNDLED npm can be older (verified locally: Node 20/22 images have shipped npm 10.x),
+      # so pin an npm that supports trusted publishing rather than relying on the bundled one.
+      # `npm@^11.5.1` is the documented floor (docs.npmjs.com/trusted-publishers).
+      - name: Pin npm CLI >= 11.5.1 (trusted-publishing floor)
+        run: |
+          npm install -g 'npm@^11.5.1'
+          npm --version
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Install npm dependencies
+        run: npm ci
+      # Publish guardrail (sq-bkag): refuse to publish a binding that would ship without its
+      # wasm engine, that drops dist/wasm from the `files` allowlist, or that lost the `prepare`
+      # git-pin build hook. Runs BEFORE publish so a broken package fails the job, not the consumer.
+      - name: Package guardrail check
+        run: npm run check:package
+      # `prepack` (build:wasm + build:ts + bundle skills) runs automatically on `npm publish`,
+      # producing the same tree `npm pack --dry-run` validates in js.yml.
+      - name: Publish to npm (OIDC trusted publishing + provenance)
+        # NO `env: NODE_AUTH_TOKEN` — trusted publishing authenticates via the GitHub Actions
+        # OIDC token (id-token: write). The npm CLI detects the OIDC environment and exchanges
+        # it for a short-lived publish credential; no long-lived NPM_TOKEN is stored anywhere.
+        # --provenance: provenance is emitted by default under trusted publishing, but the flag
+        #   is kept as an explicit belt-and-suspenders (a practitioner-reported edge case where
+        #   it was not auto-attached); it is a no-op when already on.
+        # --access public: @jeswr/sparq is a scoped package; scoped packages default to restricted.
+        run: npm publish --provenance --access public
+      # Verify the just-published version actually carries a registry provenance attestation, so a
+      # misconfigured publish (missing OIDC / old npm) fails the job instead of silently shipping an
+      # unattested package. `npm view <pkg>@<ver> dist.attestations` returns the registry-recorded
+      # attestation bundle URL + provenance predicate type when provenance was attached.
+      - name: Verify published provenance attestation
+        run: |
+          set -euo pipefail
+          ver=$(node -p "require('./package.json').version")
+          echo "Inspecting registry attestations for @jeswr/sparq@${ver}"
+          att=$(npm view "@jeswr/sparq@${ver}" dist.attestations 2>/dev/null || true)
+          echo "$att"
+          if [ -z "$att" ] || [ "$att" = "undefined" ]; then
+            echo "::error::no provenance attestation recorded for @jeswr/sparq@${ver} — publish was not provenance-bearing"
+            exit 1
+          fi
+          echo "Provenance attestation present. Consumers verify with: npm audit signatures"
+
+  # ---- crates.io: attest the packaged .crate artifacts (provenance over the publish bytes) ----
+  # crates.io has no native provenance; we attest the `cargo package` output (identical bytes to
+  # what `cargo publish` uploads) with the SAME mechanism release.yml uses. This does NOT publish
+  # to crates.io (the maintainer does that manually, in dependency order) — it produces a
+  # verifiable attestation of the artifacts and uploads them for the maintainer to verify
+  # before/after publishing. crates.io-native provenance stays an OPEN external sub-gap.
+  crates:
+    name: attest crate packages
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.attest_crates)
+    permissions:
+      contents: read
+      id-token: write # OIDC token for the Sigstore attestation
+      attestations: write # write the attestation to the repo's attestation store
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # Package every publishable crate (publish = false crates are skipped by cargo package
+      # when run per-package; we package the workspace and collect the resulting .crate files).
+      # --no-verify avoids a full from-scratch compile of every crate on the runner; the bytes
+      # are identical to `cargo publish`'s upload (publish runs verify itself). We package each
+      # publishable crate individually so a single unpublishable/dev crate cannot fail the lot.
+      - name: Package publishable crates
+        run: |
+          set -euo pipefail
+          mkdir -p crate-pkgs
+          # Crates whose Cargo.toml does NOT set `publish = false`.
+          for manifest in crates/*/Cargo.toml; do
+            if grep -q '^publish = false' "$manifest"; then
+              echo "skip (publish=false): $manifest"
+              continue
+            fi
+            pkg=$(grep -m1 '^name' "$manifest" | sed -E 's/.*"(.*)".*/\1/')
+            echo "::group::cargo package -p $pkg"
+            # --no-verify: skip the rebuild-from-extracted-tarball check (CI already builds/tests
+            # the workspace); --allow-dirty is unnecessary on a clean checkout. Failures on a
+            # single crate (e.g. an unpublished path-dep not yet on crates.io) are surfaced but
+            # do not abort the others — we record which packaged and which did not.
+            if cargo package -p "$pkg" --no-verify --locked 2>&1; then
+              find target/package -maxdepth 1 -name "${pkg}-*.crate" -exec cp {} crate-pkgs/ \;
+            else
+              echo "::warning::cargo package failed for $pkg (likely an unpublished path-dependency); skipped"
+            fi
+            echo "::endgroup::"
+          done
+          echo "Packaged crates:"; ls -l crate-pkgs/ || true
+          # Fail only if NOTHING packaged — that means the step is broken, not a single-crate skip.
+          if [ -z "$(ls -A crate-pkgs/ 2>/dev/null)" ]; then
+            echo "::error::no .crate artifacts produced"; exit 1
+          fi
+      # Same SHA-pinned attest action + version as release.yml — one signed SLSA provenance
+      # predicate per .crate, binding its digest to this workflow run.
+      - name: Attest crate-package provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: crate-pkgs/*.crate
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crate-packages
+          path: crate-pkgs/*.crate
+          if-no-files-found: error
+
+  # ---- PyPI: build the `sparq-rdf` wheels + publish with native PEP-740 attestations ----
+  # [OPUS-4.8] sq-toze.37 / GX-10. Two-stage: a build matrix produces the abi3 wheels + sdist
+  # with maturin (mirroring the docs/release.md "Python wheels" plan + python.yml's build args),
+  # then a single publish job uploads them via PyPI Trusted Publishing. Trusted Publishing runs
+  # in this workflow's GitHub OIDC context (id-token: write) so PyPI mints a short-lived token
+  # AND records a PEP-740 digital attestation (an in-toto/Sigstore-signed provenance statement)
+  # for each uploaded file — the PyPI-native equivalent of npm `--provenance`.
+  #
+  # MAINTAINER PREREQUISITE (cannot be wired from this repo — see header + docs/release.md):
+  #   The `sparq-rdf` PyPI project must have a Trusted Publisher registered (owner `jeswr`,
+  #   repo `sparq`, workflow `publish.yml`, environment `pypi`). Until that one-time PyPI-side
+  #   config exists, the upload step below fails to mint an OIDC token (by design — no static
+  #   API token is stored). The CI is fully wired; that PyPI account step is the only open item.
+  pypi-build:
+    name: build sparq-rdf wheels (${{ matrix.platform.target }})
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_pypi)
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: auto
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            manylinux: auto
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            manylinux: ""
+          # [OPUS-4.8] sq-v286.12: macos-13 was retired by GitHub. macos-15-intel is the
+          # supported Intel-Mac runner line (matches dist.yml + release.yml), so the
+          # x86_64-apple-darwin wheel arch is preserved — NOT macos-14/macos-latest, which
+          # are Apple silicon and would clash with the aarch64-apple-darwin line above.
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            manylinux: ""
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: ""
+    runs-on: ${{ matrix.platform.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # maturin-action provisions the Rust toolchain + (on Linux) the manylinux container.
+      # `python-release` profile keeps unwinding panics — the plain release profile is
+      # panic=abort, which would turn a Rust panic into a hard interpreter abort (pyproject.toml).
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.platform.target }}
+          # auto on Linux builds inside the manylinux container; empty elsewhere.
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --profile python-release --manifest-path crates/sparq-py/Cargo.toml --out dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pypi-wheel-${{ matrix.platform.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  pypi-sdist:
+    name: build sparq-rdf sdist
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_pypi)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: --manifest-path crates/sparq-py/Cargo.toml --out dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pypi-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  pypi-publish:
+    name: publish sparq-rdf to PyPI (PEP-740 attestations)
+    needs: [pypi-build, pypi-sdist]
+    runs-on: ubuntu-latest
+    # A GitHub Environment is part of the Trusted-Publisher binding (PyPI checks owner+repo+
+    # workflow+environment). It also lets a maintainer add a required reviewer / deployment
+    # protection so a publish cannot fire unattended even on a release event.
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # OIDC token PyPI Trusted Publishing exchanges + PEP-740 attestation signing
+    steps:
+      # Collect every wheel + the sdist into one dist/ tree (download-artifact merges patterns).
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: pypi-*
+          merge-multiple: true
+      - name: List collected distributions
+        run: ls -l dist/
+      # PyPI Trusted Publishing + PEP-740: with id-token: write and a registered Trusted
+      # Publisher, this action mints a short-lived PyPI token via OIDC and (attestations: true,
+      # the default) generates + uploads a PEP-740 attestation per file. No static API token.
+      # `print-hash` echoes the uploaded digests into the log for audit.
+      - name: Publish to PyPI with provenance attestations
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          attestations: true
+          print-hash: true
+          packages-dir: dist/

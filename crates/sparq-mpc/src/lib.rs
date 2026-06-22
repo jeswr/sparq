@@ -14,6 +14,18 @@
 //! `sparq-zk-compose`) and wraps it rather than replacing it (architecture
 //! §4.4).
 //!
+//! ## FIPS posture (CR-G4) [OPUS-4.8]
+//!
+//! This crate's cryptography (Shamir secret sharing + a CSPRNG masking seam over
+//! the BN254 scalar field, reusing the `sparq-zk` primitives) is **not**
+//! FIPS-approved and is **not** inside any FIPS 140-3 / CMVP-validated module.
+//! sparq makes **no FIPS claim and no CMVP claim**. The crate is `publish =
+//! false`, native-only, and not in the default dependency graph, so a
+//! FIPS-constrained operator keeps it out of FIPS scope by not opting in. (The
+//! malicious-security / collaborative-proof core is in any case DEFERRED behind
+//! honest `NotYetImplemented` stubs — see below.) See
+//! `compliance/cryptoreview/fips-posture.md`.
+//!
 //! ## What Milestone 0 actually delivers (and what it deliberately does not)
 //!
 //! This is a CONSERVATIVE scaffold. It builds ONLY the parts that are
@@ -116,6 +128,27 @@ pub mod batched;
 // salary > £100k" disclosing only the verdict. Honest-majority, semi-honest (NOT
 // malicious) — reported as OperatorClass::Comparison. See the module docs.
 pub mod compare;
+// [OPUS-4.8] sq-ka8m (sq-mnv5 residual; design Hole 4): the MALICIOUS-SECURE
+// (honest-majority, with-abort) twin of `compare`. Carries an IT-MAC through the
+// WHOLE decompose+compare chain (`MacSession::auth_mul`, §2.4 route (a)) and
+// MAC-checks the boolean verdict BEFORE opening it (`MacSession::mac_check`, §2.5),
+// so a tamper in ANY gate (forged share / wrong degree_reduce re-sharing) aborts
+// fail-closed — at the minimal n=2t+1 where RS redundancy is zero (soundness from
+// the secret α). Reported as OperatorClass::Comparison @ Malicious+Abort. See the
+// module docs and `research/mpc-malicious-security-design.md`.
+pub mod auth_compare;
+// [OPUS-4.8] sq-6fv7 (sq-ka8m residual): the MALICIOUS-SECURE twin of
+// `compare::disclose_threshold_verdict` — the federation £100k path that operates
+// on an EXISTING secret-shared sum. sq-ka8m's `auth_compare` made the cleartext
+// fresh-operand comparison malicious-secure, but the disclose path's THREE
+// decomposition opens (the square-protocol `a²`, the masked open `c = sum + r`, and
+// the boolean `verdict`) were still semi-honest (no integrity check). This module
+// routes all three through the §2.5 batched IT-MAC check: the existing sum is
+// authenticated (`MacSession::authenticate_existing`), the mask bits come from an
+// AUTHENTICATED square protocol, the masked open and the verdict are MAC-checked
+// BEFORE they are acted on, so a tamper on any of the three aborts fail-closed at
+// the minimal n=2t+1. Honest-majority, malicious-with-abort. See the module docs.
+pub mod auth_disclose;
 // [OPUS-4.8] sq-sxm: the (security model × N × query class) benchmark MATRIX
 // harness + its deterministic communication/round/multiplication counter — the
 // IN-PROCESS counting tier (Tier 1). New modules, isolated from the protocol
@@ -135,11 +168,32 @@ pub mod bench;
 // ?z_i) is the separate sq-py8h.2 and is NOT here. See the module docs for the
 // regime + semantic boundary statement.
 pub mod bounded_path;
+// [OPUS-4.8] sq-py8h.2: the HIDDEN-intermediate fixed exactly-`k` property-path
+// chain — the cryptographic core of the bounded property-path operator. Each hop's
+// match is a secret-shared `secure_equal_to_bit` (never opened); the `k` hops are
+// chained by AND (`mul_shares_raw` + `degree_reduce`, the sq-dvuc keystone) and
+// OR-folded per distinct endpoint pair; the final connected-bit drives
+// `oblivious_set_output` (padded+shuffled to B). Intermediate node-sets are never
+// reconstructed. Honest-majority / semi-honest only. See the module docs.
 pub mod field;
+// [OPUS-4.8] sq-py8h.4: hidden-key endpoint DISTINCT — collapse duplicate SECRET
+// endpoint pairs (both endpoints private keys) via the secret-control oblivious sort
+// (SortingNetwork compare-exchange decided by a never-opened secure comparator +
+// arithmetic conditional swap) + adjacent-equality scan (secret keep-bit) +
+// oblivious compaction (oblivious_set_output). The gated sub-piece of the bounded
+// property-path operator; needs the now-landed secure comparator (sq-rrz4) + degree
+// reduction (sq-dvuc). Honest-majority / semi-honest only. See the module docs.
+pub mod hidden_distinct;
+pub mod hidden_path;
 pub mod holder;
 pub mod join;
 pub mod metrics;
 pub mod partial;
+// [OPUS-4.8] sq-dl81: the domain-separated, collision-resistant Term->Fp join-key
+// encoder + the injectivity (no-false-match) contract the hidden-value join rests
+// on. Turns "the holder's untested encoding responsibility" into a documented hash
+// with a stated birthday bound plus a fail-closed collision-detection path.
+pub mod term_encode;
 // [OPUS-4.8] sq-6y92: the end-to-end federated MPC pipeline DRIVER — the glue
 // that composes holder → share → join → secure-threshold → reconstruct →
 // ProofStatement into one worked four-flatmates federated response (architecture
@@ -147,6 +201,10 @@ pub mod partial;
 // explicit. Composes EXISTING primitives only; proof.prove stays the honest stub.
 pub mod pipeline;
 pub mod proof;
+// [OPUS-4.8] sq-it50: the owned ChaCha20 CSPRNG backing SecureRng — private
+// implementation detail (not a public API), so its key schedule can be
+// ZeroizeOnDrop-scrubbed (which ecosystem rand_chacha cannot do from our side).
+mod chacha;
 // [OPUS-4.8] sq-1vt: the CSPRNG masking seam (production SecureRng + test-only
 // InsecureTestRng). The real protocol's secret-sharing randomness lives here.
 pub mod rng;
@@ -193,6 +251,27 @@ pub mod transport;
 #[cfg(test)]
 mod adversarial_tests;
 
+// [OPUS-4.8] sq-2fms: federation-level OWA / omission negative suite. Test-only.
+// The adversarial-share suite (`adversarial_tests`) pins SHARE-level tampering;
+// this is its FEDERATION-level complement: a dropped holder / truncated partial /
+// omitted row/contributor must not FORGE a valid result (a guarantee that holds
+// today — omission only loses completeness), while honestly PINNING that such an
+// omission is NOT yet cryptographically detectable pre-M4 (no §4.3-step-1
+// signed-count binding). See the module docs.
+#[cfg(test)]
+mod owa_omission_tests;
+
+// [OPUS-4.8] sq-7leq: encode the witness-validation-before-proving TEST
+// OBLIGATION for the collaborative-proof (coZK) path (re-audit §3, bead sq-9hrn).
+// Test-only. A PASSING meta-test pins the current honest fail-closed posture (the
+// deferred `prove` never proves over any witness), and an `#[ignore]`d R-WV /
+// T1–T4 suite encodes the OPEN soundness obligation against the future prover
+// (sq-f7bu/sq-bjl) so the gap is measurable, not silent. Does NOT claim the
+// collaborative path is sound (sq-qhy4 single-prover audit; multi-prover audit
+// still required). See the module docs.
+#[cfg(test)]
+mod witness_validation_tests;
+
 // [OPUS-4.8] sq-km34.1: the IT-MAC authenticated-sharing foundation surface.
 pub use authenticated::{
     auth_add, auth_add_constant, auth_scale, auth_sub, AuthenticatedShare, MacKey,
@@ -212,15 +291,45 @@ pub use bench::{
 pub use bounded_path::{
     eval_bounded_path_disclosed, BoundedRepetition, DisclosedEdges, PathForm, PathStep,
 };
-// [OPUS-4.8] sq-rrz4 + sq-g7t5: the secure-comparison surface (verdict-only
-// disclosure). sq-g7t5 adds the in-MPC bit-decomposition magnitude-bound constants
-// for `disclose_threshold_verdict` (the sum is now bit-decomposed in-MPC, never
-// reconstructed; its supported magnitude is `< 2^DECOMP_VALUE_BITS`).
-pub use compare::{
-    disclose_threshold_verdict, open_verdict, secure_greater_than, secure_threshold, COMPARE_BITS,
-    COMPARE_MAX_EXCLUSIVE, DECOMP_MASK_BITS, DECOMP_STAT_SECURITY_BITS, DECOMP_VALUE_BITS,
-    DECOMP_VALUE_MAX_EXCLUSIVE,
+// [OPUS-4.8] sq-py8h.2: the HIDDEN-intermediate exactly-`k` chain surface (the
+// cryptographic regime — intermediate node-sets never opened).
+pub use hidden_path::{
+    eval_bounded_path_hidden, eval_bounded_path_hidden_slots, eval_exact_k_chain_hidden,
+    eval_exact_k_chain_hidden_slots, HiddenBoundedPath, HiddenEdge, HiddenEdges, HiddenNode,
+    PredicatedEdge, PredicatedEdges, MAX_CHAIN_TUPLES,
 };
+// [OPUS-4.8] sq-py8h.4: the hidden-key endpoint DISTINCT surface — collapse
+// duplicate SECRET endpoint pairs (oblivious sort by a never-opened secure
+// comparator + adjacent-equality keep-bit + oblivious compaction).
+pub use hidden_distinct::{
+    distinct_hidden_pairs, distinct_hidden_pairs_oblivious, distinct_hidden_pairs_slots,
+    DistinctCost, SecretEndpointPair, MAX_DISTINCT_ROWS,
+};
+// [OPUS-4.8] sq-py8h.5: the planner guard + cost-model surface for the hidden
+// bounded property-path operator (reject statically-large unrolls, refuse a hidden
+// UNBOUNDED path fail-closed, emit modelled CommCounter cost).
+pub use hidden_path::planner::{
+    plan_hidden_bounded_path, BoundedPathPlan, HiddenPathRequest, PathUpperBound,
+};
+// [OPUS-4.8] sq-rrz4 + sq-g7t5 + sq-bgsn: the secure-comparison surface (verdict-only
+// disclosure). The in-MPC bit-decomposition magnitude-bound constants for
+// `disclose_threshold_verdict` (the sum is bit-decomposed in-MPC, never
+// reconstructed). sq-bgsn lifts the production path to the Rabbit-style full-field
+// decomposition, so the supported magnitude is now `< 2^RABBIT_VALUE_BITS = 2^60`
+// (the `RABBIT_*` constants), up from the masked-open path's `< 2^DECOMP_VALUE_BITS
+// = 2^20` (the `DECOMP_*` constants, retained for the malicious twin / tests).
+pub use compare::{
+    disclose_threshold_verdict, open_verdict, secure_equal_to_bit, secure_greater_than,
+    secure_threshold, COMPARE_BITS, COMPARE_MAX_EXCLUSIVE, DECOMP_MASK_BITS,
+    DECOMP_STAT_SECURITY_BITS, DECOMP_VALUE_BITS, DECOMP_VALUE_MAX_EXCLUSIVE, RABBIT_MASK_BITS,
+    RABBIT_VALUE_BITS, RABBIT_VALUE_MAX_EXCLUSIVE,
+};
+// [OPUS-4.8] sq-ka8m: the malicious-secure (honest-majority, with-abort) comparison
+// surface — IT-MAC-carried decompose+compare chain, verdict MAC-checked before open.
+pub use auth_compare::{malicious_greater_than, malicious_threshold, open_auth_verdict};
+// [OPUS-4.8] sq-6fv7: the malicious-secure disclose path over an EXISTING sum — the
+// three decomposition opens (a², c=sum+r, verdict) routed through the MAC-check.
+pub use auth_disclose::malicious_disclose_threshold_verdict;
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
 pub use join::{
@@ -233,6 +342,8 @@ pub use oblivious::{
     SortByResult, SortCost, SortWithKeysResult, SortingNetwork, Switch, WaksmanNetwork,
 };
 pub use partial::{HolderId, MpcError, PartialResult};
+// [OPUS-4.8] sq-dl81: the collision-resistant Term->Fp join-key encoder surface.
+pub use term_encode::{encode_term, Collision, EncodeError, KeyEncoder, DOMAIN_TAG};
 // [OPUS-4.8] sq-6y92: the federated-pipeline driver surface (architecture §4.3).
 pub use pipeline::{
     federation_holder_id, run_federated, FederatedQuery, FederatedResponse, Flatmate,
@@ -245,7 +356,7 @@ pub use oblivious_join::{
     MatchBit, ObliviousOutput, ObliviousOutputCost, OutputSlot,
 };
 pub use rng::{MpcRng, SecureRng};
-pub use robust::reconstruct_robust;
+pub use robust::{reconstruct_robust, reconstruct_robust_attributed, RobustReconstruction};
 // [OPUS-4.8] sq-km34.1: `MacSession` mints the session-global `[α]` and produces
 // authenticated sharings; `ShamirDealer::new_mac_session` is the entry point.
 pub use shamir::{MacSession, ShamirBackend, Share};

@@ -1,3 +1,4 @@
+<!-- [OPUS-4.8] sq-inzv: README brought to template. -->
 # sparq-solid
 
 <p>
@@ -6,32 +7,27 @@
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-**Solid Pod access control** over the [sparq](../../README.md) engine.
-
-Pods are stored as **named graph per document**; their WAC (`.acl`) / ACP (`.acr`)
-access-control documents stay as plain, queryable triples, and their semantics are encoded
-as **N3 rules** (run by `sparq-reason`) that materialize a queryable authorization view in
-`<urn:sparq:auth>`. Every SPARQL query is then filtered per `(WebID, client)` session to the
-authorized graph set — **fail-closed**, with zero Solid-specific code in the engine (this
-crate is a dependency of nothing in the workspace).
+**Solid Pod access control** over the [sparq](../../README.md) engine. Pods are stored as **named graph
+per document**; their WAC (`.acl`) / ACP (`.acr`) docs stay as plain, queryable triples, and their
+semantics are encoded as **N3 rules** (run by `sparq-reason`) that materialize a queryable authorization
+view in `<urn:sparq:auth>`. Every SPARQL query is then filtered per `(WebID, client)` session to the
+authorized graph set — **fail-closed**, with zero Solid-specific code in the engine (this crate is
+depended on by nothing else in the workspace).
 
 ## 🚀 Quickstart
 
 ```rust
-# // [OPUS-4.8] hidden main returns Result<(), String>: the engine's API errors are
-# // `String`, which does not impl std::error::Error, so `?` cannot widen to Box<dyn Error>.
+# // [OPUS-4.8] hidden main returns Result<(), String>: engine API errors are `String` (no Error impl).
 # fn main() -> Result<(), String> {
 use sparq_core::Graph;
 use sparq_solid::{Mode, PodStore, Session};
-
 // A pod is a dataset, one named graph per document (here the bundled fixture).
 let graph = Graph::load_dataset(&sparq_solid::wac_fixture(), "nquads")?;
 let mut store = PodStore::new(graph);
 store.materialize_wac()?; // run the N3 rules → install <urn:sparq:auth>
-
 // The SAME query, different sessions, different results — fail-closed.
 let q = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }";
-let alice = Session { agent: Some("https://alice.ex/card#me"), client: None };
+let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
 let _authorized = store.query_as(&alice, Mode::Read, q)?.rows.len();
 let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len();
 # Ok(()) }
@@ -39,38 +35,85 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
 
 ## ✨ Features
 
-- **WAC + ACP** — Web Access Control (`.acl`) and Access Control Policy (`.acr`), including
-  inheritance, agent classes, groups, the `allOf`/`anyOf`/`noneOf` combinators, and
-  normative deny-overrides. The full support matrix is in the design doc (linked below).
-- **Triples-native** — pods, ACL/ACR documents, and the materialized authorization view are
-  all ordinary named graphs; "who can read G?" is one SPARQL pattern.
-- **Zero-copy enforcement** — the default query path evaluates through the engine's zero-copy
-  dataset view (no per-query graph copy); a v1 `FROM NAMED` rewrite is kept as a portability
-  path that enforces the same policy on any standard SPARQL 1.1 engine.
-- **Write-path gating** — `update_as` / `update_as_acp` check every graph an update could
-  mutate before applying it, and auto-re-materialize on `.acl`/`.acr` writes.
+- **WAC + ACP** — Web Access Control (`.acl`) and Access Control Policy (`.acr`): inheritance, agent
+  classes, groups, `allOf`/`anyOf`/`noneOf`, the ACP `(agent, client, issuer)` principal,
+  `acp:CreatorAgent`/`acp:OwnerAgent`, normative deny-overrides.
+- **Trusted creator/owner provenance** — `acp:CreatorAgent`/`acp:OwnerAgent` resolve only against
+  per-resource WebIDs the storage layer supplies through the trusted `AccessProvenance` channel, **never**
+  graph content (the loader hard-rejects `solidx:` triples, so a writer cannot self-grant).
+- **Triples-native + zero-copy enforcement** — pods, ACL/ACR docs, and the auth view are all ordinary
+  named graphs ("who can read G?" is one SPARQL pattern); the default path evaluates through the engine's
+  zero-copy dataset view, with a v1 `FROM NAMED` rewrite as a standard-SPARQL portability path.
+- **Write-path gating + WAC-Allow** — `update_as` / `update_as_acp` check every graph an update could
+  mutate before applying; `wac_allow` builds the fail-closed `user="…",public="…"` header a server returns.
+- **ODRL bridge (opt-in `odrl-bridge`, research-track — not a production cutover)** — runs the
+  [`sparq-policy`](../sparq-policy) ODRL evaluator and materializes the equivalent WAC/ACP grant (or dual
+  `auth:deny*`) into the auth view — no new enforcement engine (zero ODRL code by default; see below).
+- **Trust-graph admission PoC (opt-in `trust-graph`, research — NOT a security guarantee)** — a
+  [`sparq-trust`](../sparq-trust) admission stratum injects an issuer-signed, trusted-source-scoped
+  credential fact ahead of the materialiser; OFF = byte-identical WAC/ACP. No privacy/ZK (`sq-qhy4` unaudited).
 
-## Security posture — fail-closed
+## ODRL → AUTH_GRAPH bridge (opt-in `odrl-bridge`)
 
-Absence of a grant means a graph is **invisible**, and a non-authorized graph is
-indistinguishable from an absent one. Before the first `materialize_*` call every session
-(including the pod owner's) sees nothing. The reasoner is fed only ACL/ACR + structural facts
-— never pod *content* — so no writable document can grant itself access; the reserved
-`urn:sparq:` namespace is rejected on input and forged `<urn:sparq:auth>` graphs are stripped
-at load. See [`SECURITY.md`](../../SECURITY.md) for the project security policy and the
-design doc for the full threat model.
+A matched ODRL `Permission` becomes a concrete `principal auth:<mode> graph` triple **appended** to
+`<urn:sparq:auth>`; the *request* action maps conservatively to the narrowest WAC mode (`odrl:use`
+deliberately **unmapped → no grant**), and a Prohibition maps to the dual `auth:deny*`. **Fail-closed:**
+a grant materializes **only** on a definite Permit + mappable action + concrete party + target (a deny
+**only** on a genuine prohibition match); a Deny, unsatisfied constraint, undischarged duty, unmapped
+action, or partyless/targetless request materializes **nothing**.
+
+**Conditions, refresh & revocation.** A *faithfully-mappable* constraint
+(`materialize_odrl_permission_conditional`) persists as a per-session-rechecked ACP `auth:ConditionalGrant`
+(recipient/assignee matchers; an inclusive `odrl:dateTime` window vs `Session::now`, **fail-closed with no
+clock**); `purpose`/`count`/strict bounds have no stateless analogue and stay **one-shot** (any unmappable
+constraint falls the whole rule back to one-shot). Bridged grants are ledger-tracked; `refresh_odrl_grant(s)`
+rebuilds the view (static baseline + replay of valid entries), retracting lapsed ones. **Deny retraction is
+asymmetric (fail-OPEN risk):** an `auth:deny*` is retracted **only** on a *definite* `Withdrawn` verdict
+(kept on `Applies`/`Ambiguous`); static grants are never in the ledger. Full mapping/replay detail in the SKILL.
+
+## WASM support
+
+`sparq-solid` (with its `sparq-reason` dep, `default-features = false`) **compiles for AND runs on
+`wasm32-unknown-unknown`** (no native-only deps — rayon off, `sparq-reason`'s parallel path gated). Its
+transitive `oxrdf 0.3.3 → rand → getrandom` needs the host bundle to select a wasm RNG backend as
+`sparq-wasm` does (`getrandom`'s `wasm_js` feature + the `getrandom_backend` cfg; see the
+[migration guide](../../docs/migrating-from-oxigraph.md#wasm-compilation)). **Timing on wasm32:**
+`std::time::Instant` is unavailable there (no monotonic clock — `Instant::now()` panics), so
+`materialize_wac`/`materialize_acp` `cfg`-gate the wall-clock plumbing off and report `stats.millis == 0.0`
+rather than trapping (rest of `MaterializeStats` unchanged); a wasm32 runtime smoke test
+(`tests/wasm_materialize.rs`, `wasm-pack test --node`) guards it. Deno-wasm / Workers are run-feasible.
+
+## Conformance, security & containment
+
+- **WAC + ACP conformance harnesses** (`sparq_solid::wac_conformance` / `conformance`) assert the
+  engine against the [WAC](https://solidproject.org/TR/wac) / [ACP](https://solidproject.org/TR/acp)
+  specs at the *library* level (data-declared `(agent, client, mode, resource) → allow|deny`). **Scope
+  (honest):** the realistic library-level oracle, **not** the Solid CTH-over-HTTP (no HTTP surface here)
+  — see `research/sparq-solid-scope.md` §4.
+- **In-repo differential oracle** (`tests/differential_oracle.rs`) runs the shared corpus through THREE
+  deciders — the engine (N3 rules), an **independent procedural reference evaluator** (`tests/reference/`,
+  no shared code) and the hand `Expect` table — asserting **zero divergence**. A correctness oracle,
+  **not** a security audit.
+- **Security posture — fail-closed.** Absence of a grant makes a graph **invisible**. The reasoner is fed
+  only ACL/ACR + structural facts — **never pod content** — so no writable document can grant itself
+  access; the reserved `urn:sparq:` namespace is rejected on input and forged `<urn:sparq:auth>` graphs
+  are stripped at load. `ldp:contains` is PSS-written opaque content, **never** derived from IRI structure
+  or read into the reasoner; containment *ancestry* drives ACL inheritance only (pinned by
+  `tests/containment_view_ownership.rs`).
 
 ## 📚 Learn more
 
-- **Design + threat model + measured baseline** —
-  [`research/solid-access-control-design.md`](../../research/solid-access-control-design.md)
-  (storage model, WAC/ACP support matrix, the strata, security boundaries).
-- **API reference** — [docs.rs/sparq-solid](https://docs.rs/sparq-solid); runnable walk-through
-  `cargo run -p sparq-solid --example quickstart --release`.
-- **Performance** — not baked into docs; the two query paths are measured side by side in
-  `cargo run -p sparq-solid --example bench --release` and on the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
-- **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
+- **How-to** — [`skills/access-control/SKILL.md`](../../skills/access-control/SKILL.md) (public API,
+  WAC/ACP notes, conformance harnesses + the differential oracle, the **request-pipeline / WAC-Allow
+  example**, ODRL-bridge mapping detail).
+- **Design + threat model** —
+  [`research/solid-access-control-design.md`](../../research/solid-access-control-design.md) (model,
+  matrix, strata, boundaries) + [scope](../../research/sparq-solid-scope.md).
+- **API reference** — [docs.rs/sparq-solid](https://docs.rs/sparq-solid); walk-through `cargo run -p
+  sparq-solid --example quickstart --release`. Migrating from Oxigraph?
+  [`docs/migrating-from-oxigraph.md`](../../docs/migrating-from-oxigraph.md).
+- **Performance / Contribute** — [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench)
+  (`--example bench`); [`AGENTS.md`](../../AGENTS.md), [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License
 

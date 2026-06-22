@@ -238,6 +238,8 @@ fn join_manifest() -> ProofManifest {
         join_edges: vec![JoinEdge { scan_a: 0, graph_a: 0, scan_b: 1, graph_b: 0, join_proof: 2 }],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     }
 }
 
@@ -340,6 +342,8 @@ fn multi_scan_manifest() -> ProofManifest {
         join_edges: vec![JoinEdge { scan_a: 1, graph_a: 0, scan_b: 2, graph_b: 0, join_proof: 3 }],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     }
 }
 
@@ -595,6 +599,8 @@ fn chain_manifest(shared_commitment: bool) -> ProofManifest {
         ],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     }
 }
 
@@ -783,6 +789,7 @@ fn full_bb_join_accept_real_proof() {
         &scan_a.witness.enc,
         &[],
         None,
+        None,
     )
     .expect("scan A toml");
     let sa_art = prover
@@ -803,6 +810,7 @@ fn full_bb_join_accept_real_proof() {
         &scan_b.witness.enc,
         &[],
         None,
+        None,
     )
     .expect("scan B toml");
     let sb_art = prover
@@ -821,6 +829,7 @@ fn full_bb_join_accept_real_proof() {
         &[],
         &[],
         Some(&built_join.witness),
+        None,
     )
     .expect("join toml emits with the witness");
     assert_eq!(j_id, CircuitId::JoinEq { n_a: 16, n_b: 16 });
@@ -864,6 +873,8 @@ fn full_bb_join_accept_real_proof() {
         join_edges: vec![JoinEdge { scan_a: 0, graph_a: 0, scan_b: 1, graph_b: 0, join_proof: 2 }],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     // The verifier nonce that all three proofs committed (CHALLENGE_HEX) is bound
     // as field 0 of every sub-proof by the audit-#1 reconstruction.

@@ -33,8 +33,17 @@ pub enum Target {
 #[derive(Debug, Clone)]
 pub enum Component {
     Class(Term),
-    Datatype(String),
-    NodeKind(String),
+    /// `sh:datatype` — the allowed-datatype set (SHACL §4.5.2). A single IRI
+    /// object is a singleton set; the SHACL-1.2 disjunctive list form
+    /// `sh:datatype ( xsd:string rdf:langString )` is the multi-element set. A
+    /// value node conforms iff it is a literal whose (well-formed) datatype is in
+    /// the set. [OPUS-4.8] (sq-vg3y) extended from a single IRI to the set form.
+    Datatype(Vec<String>),
+    /// `sh:nodeKind` — the allowed node-kind set (SHACL §4.6.1). A single IRI is a
+    /// singleton set; the SHACL-1.2 disjunctive list form
+    /// `sh:nodeKind ( sh:BlankNode sh:IRI )` is the multi-element set. A value
+    /// node conforms iff its kind matches ANY listed kind. [OPUS-4.8] (sq-vg3y).
+    NodeKind(Vec<String>),
     MinCount(u64),
     MaxCount(u64),
     MinExclusive(Term),
@@ -70,22 +79,74 @@ pub enum Component {
     },
     Closed {
         ignored: Vec<Term>,
+        /// [OPUS-4.8] (sq-vg3y) SHACL-1.2 "close by types" mode: `sh:closed
+        /// sh:ByTypes`. When `false` (`sh:closed true`), the allowed predicate set
+        /// P is the IRIs reachable from THIS shape via `sh:property/sh:path`. When
+        /// `true`, P is recomputed PER value node from its `rdf:type`s via the
+        /// `collectProperties` algorithm (SHACL §4.8.1), plus `rdf:type`.
+        by_types: bool,
     },
     HasValue(Term),
     In(Vec<Term>),
+    /// [OPUS-4.8] (sq-vg3y) `sh:memberShape` — SHACL-1.2 list-member shape
+    /// (`sh:MemberShapeConstraintComponent`, SHACL §4.x). Each value node must be a
+    /// well-formed SHACL list, and every member of that list must conform to the
+    /// referenced shape. The index is into [`ShapesModel::shapes`].
+    MemberShape(usize),
+    /// [OPUS-4.8] (sq-vg3y) `sh:uniqueMembers true` — value nodes must be SHACL
+    /// lists whose members are pairwise distinct (`sh:UniqueMembersConstraintComponent`).
+    UniqueMembers,
+    /// [OPUS-4.8] (sq-vg3y) `sh:maxListLength` — value nodes must be SHACL lists
+    /// with at most N members (`sh:MaxListLengthConstraintComponent`).
+    MaxListLength(u64),
+    /// [OPUS-4.8] (sq-vg3y) `sh:minListLength` — value nodes must be SHACL lists
+    /// with at least N members (`sh:MinListLengthConstraintComponent`).
+    MinListLength(u64),
+    /// [OPUS-4.8] (sq-vg3y) `sh:uniqueValuesFor` — the values of the listed
+    /// properties of a value node must be unique across all target nodes of the
+    /// shape (`sh:UniqueValuesForConstraintComponent`, SHACL §4.x). One or more
+    /// property IRIs (a single IRI is a singleton; a SHACL list gives a composite
+    /// key).
+    UniqueValuesFor(Vec<String>),
     /// sh:sparql — a SPARQL-based constraint (SHACL §5.2). The index is into
-    /// [`ShapesModel::sparql`].
+    /// `ShapesModel::sparql`.
     Sparql(usize),
     /// [OPUS-4.8] A SPARQL-based constraint COMPONENT (SHACL §6) that activated on
     /// this shape because the shape uses the component's parameter predicates.
-    /// `component` indexes [`ShapesModel::components`]; `args` are the bound
+    /// `component` indexes `ShapesModel::components`; `args` are the bound
     /// parameter values, parallel to the component's `parameters` (one term each
     /// — the first object found for a mandatory parameter; `None` for an absent
     /// optional one). The validator pre-binds each as `$paramName`.
     CustomSparql {
         component: usize,
         args: Vec<Option<Term>>,
+        /// [OPUS-4.8] Index into the model's `path_validators` store of a
+        /// per-shape validator with the shape's property path substituted for `$PATH`
+        /// query variable (SHACL §6.3), present only when the shape is a PROPERTY
+        /// shape, the chosen validator references `$PATH`, and the substituted
+        /// query re-parses. When set it OVERRIDES the component's shared
+        /// (path-free) validator for this occurrence; otherwise the shared
+        /// validator is used as-is (node shapes, or `$PATH`-free validators). An
+        /// index (not the value) keeps the crate-private validator type off this
+        /// public enum.
+        path_validator: Option<usize>,
     },
+    /// [OPUS-4.8] (sq-mk9n, `shacl-af`) `sh:expression` — the SHACL-AF
+    /// *Expression Constraint* (`sh:ExpressionConstraintComponent`): a value node
+    /// `v` is violated when the node expression does NOT evaluate to `{ true }`
+    /// for `v` as focus. The index is into `ShapesModel::expressions` (the
+    /// parsed node expression is held there, off the public `Component` enum).
+    #[cfg(feature = "shacl-af")]
+    Expression(usize),
+    /// [OPUS-4.8] (sq-3w6n, `shacl-af`) `sh:nodeByExpression` — the SHACL-AF
+    /// *Node-by-Expression Constraint* (`sh:NodeByExpressionConstraintComponent`):
+    /// for each value node `v`, the node expression is evaluated against `v` as
+    /// focus to a set of node-shape terms `s`; `v` is violated when it does NOT
+    /// conform to some `s`. (Like `sh:node`, but the shape is computed by the
+    /// expression rather than fixed.) The index is into
+    /// `ShapesModel::expressions` (shared store with `sh:expression`).
+    #[cfg(feature = "shacl-af")]
+    NodeByExpression(usize),
 }
 
 /// [OPUS-4.8] A declared `sh:parameter` of a SPARQL-based constraint component
@@ -102,6 +163,32 @@ pub(crate) struct ComponentParameter {
     /// `sh:optional true` — the parameter need not be present for the component
     /// to activate (a mandatory parameter must be present).
     pub optional: bool,
+}
+
+impl PreparedComponentValidator {
+    /// Whether the validator query text references the `$PATH` / `?PATH` query
+    /// variable — i.e. it must be re-parsed per property shape with the shape's
+    /// path substituted (SHACL §6.3). A cheap textual probe (the whole-token
+    /// match is done by `substitute_path_var`); a false positive only costs a
+    /// re-parse that produces the same query.
+    pub fn references_path(&self) -> bool {
+        self.raw.contains("PATH")
+    }
+
+    /// Re-parses this validator with `$PATH` / `?PATH` substituted by the SPARQL
+    /// property-path expression `pp` (SHACL §6.3 pre-binds `$PATH` to the property
+    /// shape's path). Returns `None` if the substituted query no longer parses
+    /// (ill-formed → the component occurrence is then skipped, lenient).
+    pub fn with_path(&self, pp: &str) -> Option<PreparedComponentValidator> {
+        let substituted = substitute_path_var(&self.raw, pp);
+        let prepared = crate::sparql::PreparedValidator::build(&substituted, self.is_ask)?;
+        Some(PreparedComponentValidator {
+            prepared,
+            message: self.message.clone(),
+            raw: substituted,
+            is_ask: self.is_ask,
+        })
+    }
 }
 
 /// [OPUS-4.8] A SPARQL-based constraint component declaration (SHACL §6.2): its
@@ -142,6 +229,15 @@ impl ComponentDef {
 pub(crate) struct PreparedComponentValidator {
     pub prepared: crate::sparql::PreparedValidator,
     pub message: Option<String>,
+    /// The validator's full query text (prefixes already prepended) and whether
+    /// it is an `sh:ask`. Retained so a `sh:propertyValidator` can be RE-PARSED
+    /// per property shape with the shape's path substituted for the `$PATH`
+    /// query variable (SHACL §6.3 pre-binds `$PATH` to the shape's property path,
+    /// which — being a property PATH, not a term — cannot go through the VALUES
+    /// table the other pre-bindings use, so it is a textual substitution like the
+    /// §5.2 `sh:sparql` path). `None` for blank text would never compile.
+    pub raw: String,
+    pub is_ask: bool,
 }
 
 /// A `sh:sparql` constraint's components (SHACL §5.2): the `sh:select` query,
@@ -196,6 +292,25 @@ pub struct ShapesModel {
     /// [`Component::CustomSparql`]. The registry is keyed (for activation) on the
     /// mandatory parameter predicates each component declares.
     pub(crate) components: Vec<ComponentDef>,
+    /// [OPUS-4.8] (sq-wys) Per-shape `sh:propertyValidator`s re-parsed with the
+    /// shape's path substituted for the `$PATH` query variable (SHACL §6.3),
+    /// referenced by [`Component::CustomSparql`]'s `path_validator` index. Kept
+    /// off the public `Component` enum so the (crate-private) prepared-validator
+    /// type is not exposed (same pattern as `sparql` / `expressions`).
+    pub(crate) path_validators: Vec<PreparedComponentValidator>,
+    /// [OPUS-4.8] (sq-vg3y) Precomputed `sh:closed sh:ByTypes` property closures
+    /// (SHACL-1.2 §4.8.1 `collectProperties`): for each shapes-graph node, the
+    /// IRI properties reachable via `sh:property/sh:path` transitively through
+    /// `rdfs:subClassOf` / inbound `sh:targetClass` / `sh:node`. This
+    /// shapes-graph traversal is data-independent, so it is resolved ONCE here
+    /// (only when at least one ByTypes-closed shape exists) and unioned per value
+    /// node at eval time. Empty when no shape uses `sh:closed sh:ByTypes`.
+    pub(crate) by_types_closures: FxHashMap<Term, Vec<String>>,
+    /// [OPUS-4.8] (sq-mk9n, `shacl-af`) Parsed `sh:expression` node expressions,
+    /// referenced by [`Component::Expression`]. Kept off the public `Component`
+    /// enum so the (crate-private) node-expression type is not exposed.
+    #[cfg(feature = "shacl-af")]
+    pub(crate) expressions: Vec<crate::rules::NodeExpr>,
 }
 
 impl ShapesModel {
@@ -207,6 +322,10 @@ impl ShapesModel {
             targeted: Vec::new(),
             sparql: Vec::new(),
             components: Vec::new(),
+            path_validators: Vec::new(),
+            by_types_closures: FxHashMap::default(),
+            #[cfg(feature = "shacl-af")]
+            expressions: Vec::new(),
         };
 
         // [OPUS-4.8] SHACL §6: discover SPARQL-based constraint components FIRST, so
@@ -275,6 +394,24 @@ impl ShapesModel {
             }
         }
 
+        // [OPUS-4.8] (sq-mk9n, `shacl-af`) Second pass: parse each shape's
+        // `sh:expression` node expression into a component. Done after shape
+        // discovery so a filter expression can reference any declared shape; an
+        // inline anonymous filter shape inside the expression is registered on
+        // demand here so it is parsed and conformance-checkable at eval time.
+        #[cfg(feature = "shacl-af")]
+        m.parse_expression_constraints(shapes_graph);
+
+        // [OPUS-4.8] (sq-vg3y) Resolve the data-independent `sh:closed sh:ByTypes`
+        // property closures once (only if any shape uses that mode).
+        if m.shapes.iter().any(|s| {
+            s.components
+                .iter()
+                .any(|c| matches!(c, Component::Closed { by_types: true, .. }))
+        }) {
+            m.by_types_closures = compute_by_types_closures(&g);
+        }
+
         // Validation entry points: shapes with targets.
         m.targeted = (0..m.shapes.len())
             .filter(|&i| !m.shapes[i].targets.is_empty())
@@ -282,8 +419,111 @@ impl ShapesModel {
         m
     }
 
+    /// [OPUS-4.8] (sq-vg3y) The precomputed `sh:closed sh:ByTypes` property closure
+    /// for a shapes-graph node, or `None` if the node pulls in no properties (e.g.
+    /// a data class with no shapes-graph footprint). See [`Self::by_types_closures`].
+    pub(crate) fn by_types_closure(&self, node: &Term) -> Option<&Vec<String>> {
+        self.by_types_closures.get(node)
+    }
+
+    /// [OPUS-4.8] (sq-mk9n / sq-3w6n, `shacl-af`) Parses the two SHACL-AF
+    /// node-expression constraints — `sh:expression`
+    /// (→ [`Component::Expression`]) and `sh:nodeByExpression`
+    /// (→ [`Component::NodeByExpression`]) — on every shape. Inline filter shapes
+    /// used by the expressions, and the node shapes a `sh:nodeByExpression`
+    /// expression names as a constant, are registered first (so they are
+    /// conformance-checkable), then the expressions are parsed and attached.
+    #[cfg(feature = "shacl-af")]
+    fn parse_expression_constraints(&mut self, shapes_graph: &Graph) {
+        let g = GraphView::new(shapes_graph);
+        // Collect (shape_id, expression_term, is_node_by_expr) for every shape
+        // carrying sh:expression or sh:nodeByExpression.
+        let mut pending: Vec<(usize, Term, bool)> = Vec::new();
+        for sid in 0..self.shapes.len() {
+            let node = self.shapes[sid].node.clone();
+            for expr in g.objects(&node, &sh("expression")) {
+                pending.push((sid, expr, false));
+            }
+            for expr in g.objects(&node, &sh("nodeByExpression")) {
+                pending.push((sid, expr, true));
+            }
+        }
+        // Register any inline filter shapes the expressions reference (best-effort)
+        // so `sh:filterShape` / function filter shapes resolve at eval time.
+        for (_, expr, is_nbe) in &pending {
+            self.register_expression_shapes(shapes_graph, expr, 0);
+            // A `sh:nodeByExpression` whose expression names a node shape as a
+            // constant IRI must have that shape parsed so conformance can be
+            // checked at eval time (it may not be a target-bearing root).
+            if *is_nbe && matches!(expr, Term::NamedNode(_)) {
+                self.ensure_shape(shapes_graph, expr);
+            }
+        }
+        // Parse each expression (immutable borrow) and attach the component.
+        let parsed: Vec<(usize, crate::rules::NodeExpr, bool)> = pending
+            .into_iter()
+            .filter_map(|(sid, expr, is_nbe)| {
+                crate::rules::parse_node_expr(&g, self, &expr).map(|ne| (sid, ne, is_nbe))
+            })
+            .collect();
+        for (sid, expr, is_nbe) in parsed {
+            let idx = self.expressions.len();
+            self.expressions.push(expr);
+            self.shapes[sid].components.push(if is_nbe {
+                Component::NodeByExpression(idx)
+            } else {
+                Component::Expression(idx)
+            });
+        }
+    }
+
+    /// Walks an expression term registering inline `sh:filterShape` / function
+    /// filter shapes (`shnex:`/`sh:` `findFirst`/`matchAll`/`nodesMatching`) as
+    /// shapes so they resolve. Depth-bounded against pathological cyclic graphs.
+    #[cfg(feature = "shacl-af")]
+    fn register_expression_shapes(&mut self, shapes_graph: &Graph, term: &Term, depth: usize) {
+        if depth > 64 || matches!(term, Term::Literal(_)) {
+            return;
+        }
+        let g = GraphView::new(shapes_graph);
+        const SHNEX: &str = "http://www.w3.org/ns/shacl-node-expr#";
+        for local in ["filterShape", "findFirst", "matchAll", "nodesMatching"] {
+            for pred in [format!("{SHNEX}{local}"), sh(local)] {
+                if let Some(shape_term) = g.object(term, &pred) {
+                    self.ensure_shape(shapes_graph, &shape_term);
+                }
+            }
+        }
+        // Recurse into nested operand expressions / list members.
+        for (_, obj) in g.predicate_objects(term) {
+            if matches!(obj, Term::BlankNode(_)) {
+                self.register_expression_shapes(shapes_graph, &obj, depth + 1);
+            }
+        }
+    }
+
     pub fn by_node(&self, node: &Term) -> Option<usize> {
         self.by_node.get(node).copied()
+    }
+
+    /// [OPUS-4.8] (sq-mk9n, `shacl-af`) Ensures `node` is parsed as a shape and
+    /// returns its id, parsing it on demand from `shapes_graph` if it was not
+    /// discovered by top-level root discovery. SHACL-AF node-expression *filter
+    /// shapes* (`sh:filterShape`, `shnex:findFirst`/`matchAll`/`nodesMatching`)
+    /// may be **inline anonymous** shapes (e.g. `[ sh:minInclusive 3 ]`) that
+    /// carry no `rdf:type`/target, so they are not roots; this lets the function
+    /// registry register such a shape and then check conformance against it.
+    /// `None` only if `node` is a literal (literals are never shapes).
+    #[cfg(feature = "shacl-af")]
+    pub(crate) fn ensure_shape(&mut self, shapes_graph: &Graph, node: &Term) -> Option<usize> {
+        if matches!(node, Term::Literal(_)) {
+            return None;
+        }
+        if let Some(id) = self.by_node(node) {
+            return Some(id);
+        }
+        let g = GraphView::new(shapes_graph);
+        Some(self.shape_id(&g, node))
     }
 
     /// The id of the shape rooted at `node`, parsing it (and, recursively, the
@@ -359,14 +599,20 @@ impl ShapesModel {
         for o in g.objects(node, &sh("class")) {
             c.push(Component::Class(o));
         }
+        // [OPUS-4.8] (sq-vg3y) `sh:datatype` / `sh:nodeKind` accept either a single
+        // IRI or the SHACL-1.2 disjunctive SHACL-list form (`( a b )`). `iri_set`
+        // returns the IRI set for either spelling; an empty set (e.g. a literal
+        // object, or an ill-formed list) contributes no constraint.
         for o in g.objects(node, &sh("datatype")) {
-            if let Term::NamedNode(n) = o {
-                c.push(Component::Datatype(n.as_str().to_string()));
+            let dts = iri_set(g, &o);
+            if !dts.is_empty() {
+                c.push(Component::Datatype(dts));
             }
         }
         for o in g.objects(node, &sh("nodeKind")) {
-            if let Term::NamedNode(n) = o {
-                c.push(Component::NodeKind(n.as_str().to_string()));
+            let kinds = iri_set(g, &o);
+            if !kinds.is_empty() {
+                c.push(Component::NodeKind(kinds));
             }
         }
         for (pred, ctor) in [
@@ -451,12 +697,64 @@ impl ShapesModel {
             let members = g.list(&o);
             c.push(Component::In(members));
         }
-        if matches!(g.object(node, &sh("closed")), Some(Term::Literal(l)) if l.value() == "true") {
-            let ignored = match g.object(node, &sh("ignoredProperties")) {
-                Some(list) => g.list(&list),
-                None => Vec::new(),
-            };
-            shape.components.push(Component::Closed { ignored });
+        // [OPUS-4.8] (sq-vg3y) `sh:maxListLength` / `sh:minListLength` (SHACL-1.2):
+        // value nodes must be SHACL lists with at most / at least N members.
+        for (pred, ctor) in [
+            (
+                "maxListLength",
+                Component::MaxListLength as fn(u64) -> Component,
+            ),
+            (
+                "minListLength",
+                Component::MinListLength as fn(u64) -> Component,
+            ),
+        ] {
+            for o in g.objects(node, &sh(pred)) {
+                if let Term::Literal(l) = &o {
+                    if let Ok(n) = l.value().parse::<u64>() {
+                        c.push(ctor(n));
+                    }
+                }
+            }
+        }
+        // [OPUS-4.8] (sq-vg3y) `sh:uniqueMembers true` (SHACL-1.2): SHACL-list value
+        // nodes must have pairwise-distinct members.
+        if matches!(g.object(node, &sh("uniqueMembers")), Some(Term::Literal(l)) if l.value() == "true")
+        {
+            c.push(Component::UniqueMembers);
+        }
+        // [OPUS-4.8] (sq-vg3y) `sh:uniqueValuesFor` (SHACL-1.2): one property IRI or
+        // a SHACL list of property IRIs forming a composite uniqueness key.
+        for o in g.objects(node, &sh("uniqueValuesFor")) {
+            let props = iri_set(g, &o);
+            if !props.is_empty() {
+                c.push(Component::UniqueValuesFor(props));
+            }
+        }
+        // `sh:closed`: SHACL-1.0 boolean (`true`) or SHACL-1.2 `sh:ByTypes`
+        // (close-by-types). Any other object (or `false`) is not a closing form.
+        // [OPUS-4.8] (sq-vg3y) added the `sh:ByTypes` spelling.
+        match g.object(node, &sh("closed")) {
+            Some(Term::Literal(l)) if l.value() == "true" => {
+                shape.components.push(Component::Closed {
+                    ignored: closed_ignored(g, node),
+                    by_types: false,
+                });
+            }
+            Some(Term::NamedNode(n)) if n.as_str() == sh("ByTypes") => {
+                shape.components.push(Component::Closed {
+                    ignored: closed_ignored(g, node),
+                    by_types: true,
+                });
+            }
+            _ => {}
+        }
+        // [OPUS-4.8] (sq-vg3y) `sh:memberShape` (SHACL-1.2): each value node must be
+        // a well-formed SHACL list whose members all conform to the referenced
+        // shape. Recursive (the member shape is parsed/interned like sh:node).
+        for o in g.objects(node, &sh("memberShape")) {
+            let id = self.shape_id(g, &o);
+            shape.components.push(Component::MemberShape(id));
         }
 
         // Shape-referencing components (recursive).
@@ -518,6 +816,14 @@ impl ShapesModel {
         // MANDATORY parameter predicates the shape all uses. The bound parameter
         // values (one object per parameter; `None` for an absent optional one)
         // are captured now and pre-bound as `$paramName` at evaluation time.
+        // The shape's SPARQL property-path form, used for `$PATH` pre-binding on
+        // property-shape component activations (computed once).
+        let path_pp = shape_path.as_ref().and_then(Path::to_sparql_property_path);
+        // Collect activations first: the `self.components` borrow below is
+        // immutable, so the per-shape `$PATH` re-parse (which pushes into
+        // `self.path_validators`) is deferred to after the loop.
+        let mut activations: Vec<(usize, Vec<Option<Term>>, Option<PreparedComponentValidator>)> =
+            Vec::new();
         for (cidx, comp) in self.components.iter().enumerate() {
             let mut args: Vec<Option<Term>> = Vec::with_capacity(comp.parameters.len());
             let mut activates = true;
@@ -530,11 +836,30 @@ impl ShapesModel {
                 args.push(value);
             }
             if activates && !comp.parameters.is_empty() {
-                shape.components.push(Component::CustomSparql {
-                    component: cidx,
-                    args,
+                // [OPUS-4.8] On a property shape, pre-bind `$PATH` (SHACL §6.3):
+                // re-parse the chosen validator with the shape's property-path
+                // expression substituted for the `$PATH` query variable. `$PATH`
+                // is a property PATH (not a term), so — like the §5.2 `sh:sparql`
+                // path — it is a textual substitution rather than a VALUES row.
+                let path_validator = path_pp.as_deref().and_then(|pp| {
+                    comp.validator_for(true)
+                        .filter(|v| v.references_path())
+                        .and_then(|v| v.with_path(pp))
                 });
+                activations.push((cidx, args, path_validator));
             }
+        }
+        for (cidx, args, path_validator) in activations {
+            let path_validator = path_validator.map(|v| {
+                let idx = self.path_validators.len();
+                self.path_validators.push(v);
+                idx
+            });
+            shape.components.push(Component::CustomSparql {
+                component: cidx,
+                args,
+                path_validator,
+            });
         }
 
         shape
@@ -593,6 +918,15 @@ impl ShapesModel {
     }
 }
 
+/// [OPUS-4.8] (sq-d1dw, `shacl-af`) Crate-internal accessor to the shared
+/// `sh:prefixes` collector for the SHACL-AF rules module (`sh:SPARQLRule`'s
+/// `sh:construct` reuses the same `sh:declare`/`owl:imports` prefix machinery as
+/// `sh:sparql`). Gated to the feature so it adds nothing when SHACL-AF is off.
+#[cfg(feature = "shacl-af")]
+pub(crate) fn collect_prefixes_for(g: &GraphView, prefix_roots: &[Term]) -> String {
+    collect_prefixes_from(g, prefix_roots)
+}
+
 /// [OPUS-4.8] Assembles SPARQL `PREFIX` declarations from a set of `sh:prefixes`
 /// declaration resources (SHACL §5.2.1 / §6.3): each root, directly or via
 /// `owl:imports`, declares `sh:declare` nodes carrying `sh:prefix` (short name)
@@ -636,6 +970,105 @@ fn collect_prefixes_from(g: &GraphView, prefix_roots: &[Term]) -> String {
 
 fn iri(s: &str) -> Term {
     Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+}
+
+/// [OPUS-4.8] (sq-vg3y) The set of IRIs an object denotes when a constraint
+/// parameter accepts "an IRI or a SHACL list of IRIs" (`sh:datatype` /
+/// `sh:nodeKind` / `sh:uniqueValuesFor`, SHACL-1.2). A single IRI → singleton; a
+/// SHACL-list head → its IRI members (non-IRI members dropped). Anything else →
+/// empty (no constraint contributed).
+fn iri_set(g: &GraphView, o: &Term) -> Vec<String> {
+    match o {
+        Term::NamedNode(n) => vec![n.as_str().to_string()],
+        Term::BlankNode(_) => g
+            .list(o)
+            .into_iter()
+            .filter_map(|m| match m {
+                Term::NamedNode(n) => Some(n.as_str().to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The `sh:ignoredProperties` SHACL list of a (closed) shape node, or empty.
+fn closed_ignored(g: &GraphView, node: &Term) -> Vec<Term> {
+    match g.object(node, &sh("ignoredProperties")) {
+        Some(list) => g.list(&list),
+        None => Vec::new(),
+    }
+}
+
+/// [OPUS-4.8] (sq-vg3y) Precompute the `sh:closed sh:ByTypes` `collectProperties`
+/// closure (SHACL-1.2 §4.8.1) for every node mentioned in the shapes graph. For a
+/// starting node S the closure is the union of the IRI properties reachable via
+/// `sh:property/sh:path` from S and, recursively, from S's `rdfs:subClassOf`
+/// objects, the shapes that target S via `sh:targetClass`, and the node shapes S
+/// references via `sh:node`. The traversal is cycle-guarded (each node expanded at
+/// most once per starting node) and reads ONLY the shapes graph (the per-value
+/// `rdf:type` step happens at eval time). Nodes whose closure is empty are
+/// omitted, so a `get` miss means "no properties".
+fn compute_by_types_closures(g: &GraphView) -> FxHashMap<Term, Vec<String>> {
+    // Candidate starting nodes: every subject and object in the shapes graph (a
+    // data class T is looked up here too, so we must cover object positions).
+    let mut nodes: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
+    for [s, _, o] in g.triples(None, None, None) {
+        if !matches!(s, Term::Literal(_)) {
+            nodes.insert(s);
+        }
+        if !matches!(o, Term::Literal(_)) {
+            nodes.insert(o);
+        }
+    }
+    let mut out: FxHashMap<Term, Vec<String>> = FxHashMap::default();
+    for start in nodes {
+        let mut props: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+        let mut visited: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![start.clone()];
+        while let Some(s) = stack.pop() {
+            if !visited.insert(s.clone()) {
+                continue;
+            }
+            collect_properties(g, &s, &mut props, &mut stack);
+        }
+        if !props.is_empty() {
+            out.insert(start, props.into_iter().collect());
+        }
+    }
+    out
+}
+
+/// One step of the `collectProperties` algorithm (SHACL-1.2 §4.8.1): add the IRI
+/// properties reachable from `s` via `sh:property/sh:path`, and push the nodes the
+/// recursion continues into (`rdfs:subClassOf` objects, inbound `sh:targetClass`
+/// subjects, `sh:node` objects) onto `stack`. Cycle-avoidance is the caller's
+/// `visited` set. Reads only the shapes graph.
+fn collect_properties(
+    g: &GraphView,
+    s: &Term,
+    props: &mut rustc_hash::FxHashSet<String>,
+    stack: &mut Vec<Term>,
+) {
+    const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    // IRI properties reached via sh:property/sh:path.
+    for ps in g.objects(s, &sh("property")) {
+        if let Some(Term::NamedNode(n)) = g.object(&ps, &sh("path")) {
+            props.insert(n.as_str().to_string());
+        }
+    }
+    // rdfs:subClassOf objects (superclasses).
+    for sup in g.objects(s, RDFS_SUBCLASS_OF) {
+        stack.push(sup);
+    }
+    // Shapes that target s via sh:targetClass.
+    for sub in g.subjects(&sh("targetClass"), s) {
+        stack.push(sub);
+    }
+    // Node shapes referenced via sh:node.
+    for n in g.objects(s, &sh("node")) {
+        stack.push(n);
+    }
 }
 
 /// [OPUS-4.8] SHACL §6.2: discover the `sh:ConstraintComponent` declarations in
@@ -683,12 +1116,15 @@ fn parse_component_parameters(g: &GraphView, node: &Term) -> Vec<ComponentParame
             Some(Term::NamedNode(n)) => n.as_str().to_string(),
             _ => continue,
         };
-        // The pre-bound variable name: sh:name if a literal, else the predicate's
-        // local name (after the last '#' or '/').
-        let var = match g.object(&p, &sh("name")) {
-            Some(Term::Literal(l)) => l.value().to_string(),
-            _ => local_name(&predicate),
-        };
+        // [OPUS-4.8] The pre-bound variable name is the LOCAL NAME of the
+        // parameter's `sh:path` IRI (SHACL §6.2.1: "the values of these parameters
+        // [...] pre-bound [...] using the local name of the IRI of sh:path"), NOT
+        // `sh:name` — which is only a human-readable display label. The W3C
+        // `propertyValidator-select-001` test makes this load-bearing: its
+        // parameter is `sh:path ex:lang ; sh:name "language"` yet the validator
+        // query references `$lang` (the path local name), so binding `$language`
+        // would leave `$lang` unbound and the constraint would never fire.
+        let var = local_name(&predicate);
         let optional = matches!(
             g.object(&p, &sh("optional")),
             Some(Term::Literal(l)) if l.value() == "true"
@@ -733,7 +1169,12 @@ fn parse_validator(
         Some(Term::Literal(l)) => Some(l.value().to_string()),
         _ => None,
     };
-    Some(PreparedComponentValidator { prepared, message })
+    Some(PreparedComponentValidator {
+        prepared,
+        message,
+        raw: full,
+        is_ask,
+    })
 }
 
 /// Substitutes the `$PATH` / `?PATH` query variable (a SHACL property-shape

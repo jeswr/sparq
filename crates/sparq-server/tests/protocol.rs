@@ -5,6 +5,13 @@
 //! media types, payload shapes, ASK booleans and HTTP status semantics. This is structured
 //! so the official W3C SPARQL Protocol test suite could be pointed at the running endpoint
 //! (see the crate README for how to run conformance).
+//!
+//! [OPUS-4.8] (sq-1b390) Gate the whole suite on the `server` feature. It spins the real axum
+//! server and uses the `server`-gated `sparq_server::router` / `AppState` API, so under
+//! `--no-default-features --all-targets` (the pure-serialiser-library build) this file must
+//! compile OUT — otherwise `clippy --no-default-features --all-targets` breaks on the
+//! unresolved axum / serde_json / router imports. 🤖 SPARQ agent.
+#![cfg(feature = "server")]
 
 use sparq_core::Graph;
 use sparq_server::{router, AppState};
@@ -710,17 +717,41 @@ async fn gsp_post_no_selector_creates_fresh_graph() {
         "fresh-graph triple not queryable: {q}");
 }
 
-/// An unsupported method on a graph resource is a 405 with an Allow header listing the
-/// supported GSP verbs.
+/// An unsupported method (not GET/HEAD/PUT/POST/DELETE/PATCH) on a graph resource is a 405 with an
+/// Allow header listing the supported GSP verbs — now INCLUDING PATCH ([OPUS-4.8] sq-hj4n, gh-916:
+/// PATCH is a real GSP method, not a 405). The full PATCH behaviour is exercised in
+/// `tests/gsp_patch.rs`.
 #[tokio::test]
-async fn gsp_patch_is_405_with_allow() {
+async fn gsp_unsupported_method_is_405_with_allow() {
     let base = spawn().await;
     let resp = client()
-        .request(reqwest::Method::PATCH, format!("{base}/sparql/graph?default"))
+        .request(reqwest::Method::OPTIONS, format!("{base}/sparql/graph?default"))
         .send().await.unwrap();
     assert_eq!(resp.status(), 405);
     let allow = resp.headers()["allow"].to_str().unwrap();
-    assert!(allow.contains("PUT") && allow.contains("POST") && allow.contains("DELETE") && allow.contains("GET"));
+    assert!(
+        allow.contains("PUT")
+            && allow.contains("POST")
+            && allow.contains("DELETE")
+            && allow.contains("GET")
+            && allow.contains("PATCH"),
+        "Allow must list all GSP verbs incl PATCH: {allow}"
+    );
+}
+
+/// [OPUS-4.8] (sq-hj4n, gh-916) A PATCH on a graph resource is NO LONGER a 405 — it is a real GSP
+/// method. A PATCH with no recognised body Content-Type is a 415 (the PATCH route was reached and
+/// classified the body), proving PATCH is handled rather than method-not-allowed.
+#[tokio::test]
+async fn gsp_patch_is_handled_not_405() {
+    let base = spawn().await;
+    let resp = client()
+        .request(reqwest::Method::PATCH, format!("{base}/sparql/graph?default"))
+        .body("anything")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 415, "PATCH is handled (415 unsupported body), not 405");
 }
 
 #[tokio::test]
@@ -735,23 +766,226 @@ async fn gsp_indirect_requires_graph_selector() {
 }
 
 // ---------------------------------------------------------------------------
-// dataset params accepted (no effect with a single default graph)
+// [OPUS-4.8] sq-z33x — SPARQL 1.1 Protocol §2.1.4 / §2.2 dataset-override params
+// (`default-graph-uri` / `named-graph-uri`; update `using-graph-uri` / `using-named-graph-uri`)
 // ---------------------------------------------------------------------------
+//
+// [OPUS-4.8] The engine DOES support named graphs — `GRAPH` / `FROM` / `FROM NAMED` and
+// cross-graph joins all execute (see `tests/named_graphs.rs`, sq-fh4z). On top of that, the
+// *protocol-level* dataset override — the `default-graph-uri` / `named-graph-uri` request
+// parameters (and the update `using-graph-uri` / `using-named-graph-uri` forms) — now
+// re-scopes the active dataset of the query/update per §2.1.4 / §2.2 (sq-z33x), as the
+// tests below assert.
 
+/// An RDF dataset with a default graph plus two named graphs, so the protocol dataset override
+/// has something real to re-scope the active dataset to.
+const NQ_DATASET: &str = r#"
+    <http://ex/d> <http://ex/p> <http://ex/in_default> .
+    <http://ex/a> <http://ex/p> <http://ex/in_g1> <http://ex/g1> .
+    <http://ex/b> <http://ex/p> <http://ex/in_g2> <http://ex/g2> .
+"#;
+
+/// Boots a server over [`NQ_DATASET`] (a default graph + named graphs g1, g2).
+async fn spawn_dataset() -> String {
+    let graph = Graph::load_dataset(NQ_DATASET, "nquads").unwrap();
+    let app = router(AppState::new(graph));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+/// Counts SELECT `?s ?p ?o` solution rows in a SPARQL-JSON body.
+fn json_row_count(body: &str) -> usize {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    v["results"]["bindings"].as_array().map(|a| a.len()).unwrap_or(0)
+}
+
+/// `default-graph-uri=g1` re-scopes the active default graph to ONLY g1's triple — the store's
+/// own default graph drops out (one row, the g1 triple; not the default-graph one).
 #[tokio::test]
-async fn default_graph_uri_param_is_accepted() {
-    let base = spawn().await;
-    let resp = client()
+async fn default_graph_uri_rescopes_active_dataset() {
+    let base = spawn_dataset().await;
+    let cl = client();
+
+    // Without the override: the store's default graph (1 triple).
+    let plain = cl
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), 200);
+    assert_eq!(json_row_count(&plain.text().await.unwrap()), 1);
+
+    // With `default-graph-uri=g1`: the active default graph is g1 (still 1 triple, but it is g1's).
+    let resp = cl
         .get(format!("{base}/sparql"))
         .query(&[
-            ("query", "SELECT ?s WHERE { ?s <http://ex/age> ?a }"),
-            ("default-graph-uri", "http://ex/g"),
+            ("query", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"),
+            ("default-graph-uri", "http://ex/g1"),
         ])
         .send()
         .await
         .unwrap();
-    // accepted + threaded through; with one default graph it has no effect but must not error
     assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert_eq!(json_row_count(&body), 1);
+    assert!(body.contains("http://ex/in_g1"), "expected g1's triple, got {body}");
+    assert!(!body.contains("in_default"), "store default graph must drop out: {body}");
+}
+
+/// Two `default-graph-uri` values merge into the active default graph (g1 ∪ g2 = 2 triples).
+#[tokio::test]
+async fn multiple_default_graph_uri_merge() {
+    let base = spawn_dataset().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[
+            ("query", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"),
+            ("default-graph-uri", "http://ex/g1"),
+            ("default-graph-uri", "http://ex/g2"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(json_row_count(&resp.text().await.unwrap()), 2);
+}
+
+/// `named-graph-uri=g1` makes g1 the only named graph; the active default graph is empty, so a
+/// `GRAPH ?g` query sees exactly g1's one triple and a default-graph BGP sees nothing.
+#[tokio::test]
+async fn named_graph_uri_rescopes_named_graphs() {
+    let base = spawn_dataset().await;
+    let cl = client();
+
+    let in_graph = cl
+        .get(format!("{base}/sparql"))
+        .query(&[
+            ("query", "SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } }"),
+            ("named-graph-uri", "http://ex/g1"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(in_graph.status(), 200);
+    let body = in_graph.text().await.unwrap();
+    assert_eq!(json_row_count(&body), 1);
+    assert!(body.contains("http://ex/in_g1"), "got {body}");
+
+    // The active default graph is empty under a named-only override.
+    let in_default = cl
+        .get(format!("{base}/sparql"))
+        .query(&[
+            ("query", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"),
+            ("named-graph-uri", "http://ex/g1"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(json_row_count(&in_default.text().await.unwrap()), 0);
+}
+
+/// Per §2.1.4 the protocol dataset REPLACES an in-query `FROM` clause: a query that says
+/// `FROM <g2>` but is sent with `default-graph-uri=g1` runs against g1, not g2.
+#[tokio::test]
+async fn protocol_override_replaces_in_query_from() {
+    let base = spawn_dataset().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[
+            ("query", "SELECT ?s ?p ?o FROM <http://ex/g2> WHERE { ?s ?p ?o }"),
+            ("default-graph-uri", "http://ex/g1"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("http://ex/in_g1"), "override (g1) must win over in-query FROM g2: {body}");
+    assert!(!body.contains("in_g2"), "in-query FROM g2 must be replaced: {body}");
+}
+
+/// The override also applies on the url-encoded POST form (body-carried params).
+#[tokio::test]
+async fn default_graph_uri_via_post_form() {
+    let base = spawn_dataset().await;
+    let resp = client()
+        .post(format!("{base}/sparql"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body("query=SELECT+%3Fs+%3Fp+%3Fo+WHERE+%7B+%3Fs+%3Fp+%3Fo+%7D&default-graph-uri=http://ex/g1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("http://ex/in_g1"), "POST-form override must re-scope: {body}");
+}
+
+/// A `default-graph-uri` that is not a valid absolute IRI is a 400 (caller-input validation).
+#[tokio::test]
+async fn bad_default_graph_uri_is_400() {
+    let base = spawn_dataset().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[
+            ("query", "SELECT ?s WHERE { ?s ?p ?o }"),
+            ("default-graph-uri", "not a valid iri"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+/// `using-graph-uri` re-scopes the WHERE clause of an UPDATE: an `INSERT … WHERE` that reads
+/// from g1 (via the override) copies g1's triple into the default graph.
+#[tokio::test]
+async fn using_graph_uri_rescopes_update_where() {
+    let base = spawn_dataset().await;
+    let cl = client();
+
+    // INSERT a marker into the default graph for every triple visible in the override's default
+    // graph (g1). Without `using-graph-uri` this WHERE would read the store's default graph.
+    let upd = cl
+        .post(format!("{base}/sparql?using-graph-uri=http://ex/g1"))
+        .header("content-type", "application/sparql-update")
+        .body("INSERT { <http://ex/marker> <http://ex/saw> ?o } WHERE { ?s <http://ex/p> ?o }")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upd.status(), 204, "update must succeed");
+
+    // The marker must reference g1's object, proving the WHERE read g1, not the store default.
+    let q = cl
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT ?o WHERE { <http://ex/marker> <http://ex/saw> ?o }")])
+        .send()
+        .await
+        .unwrap();
+    let body = q.text().await.unwrap();
+    assert!(body.contains("http://ex/in_g1"), "USING g1 must re-scope the WHERE: {body}");
+    assert!(!body.contains("in_default"), "WHERE must NOT read the store default graph: {body}");
+}
+
+/// Per §2.2 it is an error to supply `using-graph-uri` alongside an in-update `USING` clause: 400.
+#[tokio::test]
+async fn using_graph_uri_conflict_with_in_update_using_is_400() {
+    let base = spawn_dataset().await;
+    let resp = client()
+        .post(format!("{base}/sparql?using-graph-uri=http://ex/g1"))
+        .header("content-type", "application/sparql-update")
+        .body(
+            "INSERT { <http://ex/m> <http://ex/p> ?o } USING <http://ex/g2> \
+             WHERE { ?s <http://ex/p> ?o }",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "USING + using-graph-uri must be a protocol error");
 }
 
 // ---------------------------------------------------------------------------

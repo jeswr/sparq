@@ -45,7 +45,11 @@ fn reader_sees_zero_or_all_of_a_bulk_update() {
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
         GraphApplier::new(),
-        WriterConfig { window: Duration::from_millis(1), max_batch: 256, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 256,
+            ..WriterConfig::default()
+        },
     ));
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -79,9 +83,15 @@ fn reader_sees_zero_or_all_of_a_bulk_update() {
     let before = ring.current();
     assert_eq!(before.snapshot().len(), BASE);
 
-    let gen = writer.submit(bulk_insert(), [PodId::from("pod:bulk")]).unwrap();
+    let gen = writer
+        .submit(bulk_insert(), [PodId::from("pod:bulk")])
+        .unwrap();
     assert_eq!(gen, 1, "the bulk update is one generation");
-    assert_eq!(ring.current().snapshot().len(), BASE + BULK, "all 50k applied atomically");
+    assert_eq!(
+        ring.current().snapshot().len(),
+        BASE + BULK,
+        "all 50k applied atomically"
+    );
 
     // Keep sampling briefly after the commit so the sampler observes the new gen.
     std::thread::sleep(Duration::from_millis(20));
@@ -114,7 +124,11 @@ fn pinned_generation_survives_sustained_writes() {
     let writer = Writer::spawn(
         ring.clone(),
         GraphApplier::new(),
-        WriterConfig { window: Duration::from_millis(1), max_batch: 64, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 64,
+            ..WriterConfig::default()
+        },
     );
 
     let pinned = ring.current(); // generation 0, BASE triples

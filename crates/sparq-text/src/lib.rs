@@ -1,36 +1,7 @@
-//! sparq-text: **opt-in full-text search over literals** for the sparq RDF engine.
-//!
-//! Three layers, bottom-up:
-//!
-//! 1. [`tokenize`] — the shared tokenizer: UAX #29 Unicode word segmentation
-//!    (`unicode-segmentation`) + Unicode lowercasing. No stemming, no stopword
-//!    list, no diacritic folding — deterministic and language-neutral; query
-//!    tokens may end in `*` for prefix (autocomplete) matching.
-//! 2. [`index`] — [`TextIndex`]: an owned BM25 inverted index over the string
-//!    literals (`xsd:string` + language-tagged) of a sparq
-//!    [`Graph`](sparq_core::Graph)'s dictionary. The dictionary term id of a
-//!    literal IS its document id, so [`TextIndex::search`] /
-//!    [`search_any`](TextIndex::search_any) return literal ids that join back
-//!    to triples through the store's ordinary permutation indexes. Deltas are
-//!    mirrored incrementally via [`TextIndex::apply_delta`] (the
-//!    `GeoIndex::apply_delta` shape).
-//! 3. [`rewrite`] (default-on `engine` feature) — the `text:` magic
-//!    predicates ([`vocab`]): `?lit text:matches "query"` (AND of tokens,
-//!    `*`-suffix prefix tokens), `?lit text:matchesAny "query"` (OR),
-//!    `?lit text:phrase "foo bar"` (adjacent, in-order tokens — needs a
-//!    positions-enabled index), `?lit text:near "foo bar"` (proximity/slop:
-//!    in-order within a bounded gap, relevance-ranked — `text:slop N` sets the
-//!    gap budget), and `?lit text:score ?s` (the relevance score). [OPUS-4.8]
-//!    [`query_text`] rewrites them into
-//!    inline `VALUES` over the index's hits at the spargebra-algebra level and
-//!    executes through sparq-engine's prepared-query seam
-//!    (`PreparedQuery: From<spargebra::Query>`) — the engine itself is
-//!    untouched.
-//!
-//! No existing sparq crate depends on this one (in particular the wasm build
-//! carries zero text-search code); full-text support is engaged only by
-//! depending on `sparq-text` — mirroring how `sparq-geo` and `sparq-vectors`
-//! stay out of the default build.
+// [OPUS-4.8] sq-jxl0: single-source the crate overview from README.md so crates.io
+// (package.readme) and the docs.rs front page render identical content. The README's
+// `## Library use` fence is a compiled doctest; the `query_text` fence is `engine`-gated.
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod index;
@@ -39,6 +10,7 @@ pub mod rewrite;
 pub mod tokenize;
 
 pub use index::{Hit, TextIndex};
+pub use tokenize::Analyzer;
 #[cfg(feature = "engine")]
 pub use rewrite::{prepare_text, query_text, query_text_with_budget, rewrite_query};
 
@@ -54,7 +26,7 @@ pub mod vocab {
     pub const MATCHES_ANY: &str = "http://sparq.dev/text#matchesAny";
     /// `?lit text:phrase "foo bar"` — literals where the query's tokens appear
     /// ADJACENT and IN ORDER (a positional phrase match, not a BM25 ranking).
-    /// Requires a positions-enabled index ([`TextIndex::build_with_positions`]);
+    /// Requires a positions-enabled index (`TextIndex::build_with_positions`);
     /// the cheap default index stores no positions and is rejected at rewrite
     /// time. No `text:score` companion (a phrase match is boolean adjacency).
     /// [OPUS-4.8]
@@ -67,7 +39,7 @@ pub mod vocab {
     /// the same subject variable in the same basic graph pattern. Unlike
     /// `text:phrase` (boolean adjacency) it IS scored, so it also takes an
     /// optional `text:score ?s` companion. Requires a positions-enabled index
-    /// ([`TextIndex::build_with_positions`]); `text:near "foo bar"` at slop 0 is
+    /// (`TextIndex::build_with_positions`); `text:near "foo bar"` at slop 0 is
     /// exactly `text:phrase "foo bar"`. [OPUS-4.8]
     pub const NEAR: &str = "http://sparq.dev/text#near";
     /// `?lit text:slop N` — sets the proximity gap budget for the `text:near`

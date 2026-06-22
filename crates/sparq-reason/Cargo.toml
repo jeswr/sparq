@@ -41,5 +41,7 @@ sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = fal
 oxrdf.workspace = true
 rustc-hash.workspace = true
 rayon = { workspace = true, optional = true }
-# string:matches N3 builtin (regex). sparq-reason is native-only — never in the wasm graph.
+# string:matches N3 builtin (regex). Not in the LEAN sparq-wasm bundle, but pure-Rust and
+# wasm-portable: sparq-reason ships to the browser via the tier-b sparq-reason-wasm bundle
+# ([OPUS-4.8] sq-6qw3) — regex compiles to wasm32-unknown-unknown.
 regex = "1"

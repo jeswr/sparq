@@ -1,0 +1,48 @@
+[package]
+name = "sparq-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "ODRL usage-control policy evaluator for the sparq RDF engine: parse ODRL Permission/Prohibition/Duty rules from RDF and evaluate an access request to a fail-closed ALLOW/DENY decision (single-node base case)"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# [OPUS-4.8] sq-r06h. OPT-IN policy layer (the sparq-reason / sparq-solid isolation
+# pattern): a SEPARATE crate so the core engine carries zero ODRL/usage-control code,
+# deps, or runtime cost — it is a dependency of NOTHING in the workspace. It builds ON
+# the existing N3/EYE reasoner + the sparq-solid WAC/ACP allow/deny enforcement model.
+# Design: research/feature-research-odrl-policy.md (epic sq-3183, candidate #1).
+#
+# NOT published to crates.io yet: the single-node ODRL base case is complete, but the
+# headline federated-disclosure / ODRL→MPC composition (research doc §2) is deferred
+# (gated on ZK soundness remediation). `publish = false` keeps it out of releases until
+# that scope question is settled.
+publish = false
+
+# [OPUS-4.8] docs.rs: build with all features + the `docsrs` cfg.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io.
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", default-features = false }
+oxrdf.workspace = true
+
+[features]
+# [OPUS-4.8] sq-zi5w: STATEFUL `odrl:count` constraint enforcement — a usage-counter
+# store + an atomic exercise path that increments per use and denies once the limit is
+# reached. OFF by default (lean core): the default evaluator treats `odrl:count` as the
+# stateless numeric constraint it always was (the caller supplies the count in the
+# request context). Turning this on adds the `count` module (an injectable
+# `UsageCounterStore` trait + an in-memory `Mutex`-backed default impl), the `count_file`
+# module ([OPUS-4.8] sq-5z1q: a cross-process file+lockfile store), and the `count_backend`
+# module ([OPUS-4.8] sq-u3yo: the `AtomicCounterBackend` Redis/SQL seam + `BackendCounterStore`
+# adapter). ALL std-only — no new deps (the operator brings their own Redis/SQL client); it
+# does NOT change the stateless `evaluate` path.
+count-enforcement = []

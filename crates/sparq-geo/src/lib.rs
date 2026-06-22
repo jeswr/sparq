@@ -5,12 +5,15 @@ pub mod geof;
 pub mod gml; // [OPUS-4.8] sq-zy0: GML-SF geometry parser (geo:gmlLiteral)
 pub mod index;
 pub mod literal;
+pub mod metadata; // [OPUS-4.8] sq-mzmh: geo:dimension/isEmpty/isSimple/… metadata (OGC R9)
 #[cfg(feature = "engine")]
 pub mod provider;
 #[cfg(feature = "engine")]
 pub mod registry;
 #[cfg(feature = "reproject")]
 pub mod reproject;
+#[cfg(feature = "engine")]
+pub mod rewrite; // [OPUS-4.8] sq-9g58: GeoSPARQL query-rewrite extension (topology property forms)
 
 pub use geof::Unit;
 pub use gml::parse_gml_literal; // [OPUS-4.8]
@@ -18,10 +21,13 @@ pub use index::GeoIndex;
 pub use literal::{
     is_geometry_datatype, parse_geometry_literal, parse_wkt_literal, Crs, GeoGeometry,
 }; // [OPUS-4.8]
+pub use metadata::GeometryMetadata; // [OPUS-4.8] sq-mzmh
 #[cfg(feature = "engine")]
 pub use provider::GeoIndexProvider;
 #[cfg(feature = "engine")]
 pub use registry::geof_registry;
+#[cfg(feature = "engine")]
+pub use rewrite::{geosparql_rewrite, is_topology_property, rewrite_query}; // [OPUS-4.8] sq-9g58
 
 /// The GeoSPARQL vocabulary IRIs this crate touches.
 pub mod vocab {
@@ -41,6 +47,20 @@ pub mod vocab {
     pub const HAS_GEOMETRY: &str = "http://www.opengis.net/ont/geosparql#hasGeometry";
     /// `geo:hasDefaultGeometry` — feature -> default geometry node (GeoSPARQL 8.3).
     pub const HAS_DEFAULT_GEOMETRY: &str = "http://www.opengis.net/ont/geosparql#hasDefaultGeometry";
+    // ---- geometry-METADATA properties (GeoSPARQL 8.4; OGC R9). [OPUS-4.8] sq-mzmh ----
+    /// `geo:dimension` — topological dimension of a geometry (`xsd:integer`).
+    pub const DIMENSION: &str = "http://www.opengis.net/ont/geosparql#dimension";
+    /// `geo:coordinateDimension` — coordinate measurements per point (`xsd:integer`).
+    pub const COORDINATE_DIMENSION: &str =
+        "http://www.opengis.net/ont/geosparql#coordinateDimension";
+    /// `geo:spatialDimension` — spatial measurements per point (`xsd:integer`).
+    pub const SPATIAL_DIMENSION: &str = "http://www.opengis.net/ont/geosparql#spatialDimension";
+    /// `geo:isEmpty` — whether the geometry is the empty set (`xsd:boolean`).
+    pub const IS_EMPTY: &str = "http://www.opengis.net/ont/geosparql#isEmpty";
+    /// `geo:isSimple` — whether the geometry has no self-intersection (`xsd:boolean`).
+    pub const IS_SIMPLE: &str = "http://www.opengis.net/ont/geosparql#isSimple";
+    /// `geo:hasSerialization` — a serialization of the geometry (`geo:wktLiteral`).
+    pub const HAS_SERIALIZATION: &str = "http://www.opengis.net/ont/geosparql#hasSerialization";
     /// `geof:` — the GeoSPARQL function namespace.
     pub const GEOF_NS: &str = "http://www.opengis.net/def/function/geosparql/";
     /// `uom:` — the OGC units-of-measure namespace used by `geof:distance`.
@@ -82,3 +102,32 @@ impl std::fmt::Display for GeoError {
 }
 
 impl std::error::Error for GeoError {}
+
+#[cfg(test)]
+mod error_display_tests {
+    // [OPUS-4.8] sq-9g58 coverage: every GeoError Display arm renders its
+    // payload. These arms (CrsMismatch / NonGeographicCrs / UnknownUnit) were
+    // unexercised — Parse / Unsupported are hit by the parser/eval tests.
+    use super::GeoError;
+
+    #[test]
+    fn each_variant_renders_its_payload() {
+        let parse = GeoError::Parse("bad wkt".to_string()).to_string();
+        assert!(parse.contains("bad wkt"), "{parse}");
+
+        let crs = GeoError::CrsMismatch("urn:a".to_string(), "urn:b".to_string()).to_string();
+        assert!(crs.contains("urn:a") && crs.contains("urn:b"), "{crs}");
+
+        let non_geo = GeoError::NonGeographicCrs("urn:proj".to_string()).to_string();
+        assert!(non_geo.contains("urn:proj") && non_geo.contains("geographic"), "{non_geo}");
+
+        let unit = GeoError::UnknownUnit("urn:furlong".to_string()).to_string();
+        assert!(unit.contains("urn:furlong") && unit.contains("unit"), "{unit}");
+
+        let unsup = GeoError::Unsupported("no can do".to_string()).to_string();
+        assert!(unsup.contains("no can do"), "{unsup}");
+
+        // The error implements std::error::Error (trait-object usable).
+        let _: &dyn std::error::Error = &GeoError::Parse("x".to_string());
+    }
+}

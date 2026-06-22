@@ -1,0 +1,150 @@
+# trust.ttl — the `trust:` vocabulary (machine-readable, normative form)
+#
+# [OPUS-4.8] sq-pfae.2 (issue #940 / gh-940). 🤖 SPARQ agent — trust-graph
+# authorisation. Written while Fable unavailable; flag for re-review when Fable
+# returns.
+#
+# This is the canonical, machine-readable rendering of the ten-term minimal
+# orthogonal ontology of `research/solid-trust-graph-authz-design.md` §2.3.1, plus
+# the ONE convenience (`trust:forPredicate`) that the design admits as SUGAR, not a
+# primitive (§2.3.3). It is byte-pinned against the Rust constants in
+# `crates/sparq-trust/src/vocab.rs` by the `ttl_term_iris_match_rust_constants`
+# sync test in that module — the two MUST NOT drift.
+#
+# *** ALL `trust:` IRIs ARE NON-STANDARD, INVENTED FOR THIS PROPOSAL. ***
+# `https://sparq.dev/ns/trust#` is a PLACEHOLDER namespace to make the semantics
+# concrete; it is NOT minted, NOT resolvable, and NOT a claim of standardisation. A
+# working group taking this design forward would rename/rehome every term. See the
+# `owl:Ontology` note below and the two-stratum semantics note `SEMANTICS.md` in this
+# directory.
+
+@prefix trust: <https://sparq.dev/ns/trust#> .
+@prefix sh:    <http://www.w3.org/ns/shacl#> .
+@prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:   <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+
+# --- ontology metadata -------------------------------------------------------
+
+trust: a owl:Ontology ;
+  rdfs:label "Trust-graph authorisation vocabulary (NON-STANDARD, proposal)"@en ;
+  dcterms:description """The minimal orthogonal vocabulary for trust-graph
+authorisation over Solid/LWS: per-(source, statement-type) trust over issuer-attested
+statements that an N3 reasoner merges with the local .acl/.acr rules to derive access.
+EVERY term here is NON-STANDARD and invented for this proposal; the namespace is a
+placeholder. Companion: SEMANTICS.md (two-stratum semantics, degenerate-.acl
+equivalence, strict additivity) and research/solid-trust-graph-authz-design.md."""@en ;
+  rdfs:seeAlso <https://github.com/jeswr/sparq/issues/940> ;
+  rdfs:comment "Placeholder namespace; a WG would rename/rehome every term."@en .
+
+# =============================================================================
+# The ten-term irreducible core (design §2.3.1 / §2.3.2)
+# =============================================================================
+# Each term occupies a distinct, non-overlapping role; none can be derived from a
+# combination of the others (the irreducibility argument, §2.3.2). The
+# domain/range below are DESCRIPTIVE of the intended use, not RDFS-entailment
+# directives the admission engine relies on — admission soundness rests on the
+# CHECKED issuer signature + SHACL statement-type scoping (§3.3), never on
+# RDFS/OWL inference over attacker-supplied input.
+
+# --- classes -----------------------------------------------------------------
+
+trust:TrustPolicy a rdfs:Class, owl:Class ;
+  rdfs:label "Trust policy"@en ;
+  rdfs:comment "The policy container: a set of admission rules scoping a resource or server. The administrable unit; authored in the same Control-gated channel as .acl/.acr (§3.2)."@en ;
+  rdfs:isDefinedBy trust: .
+
+trust:TrustRule a rdfs:Class, owl:Class ;
+  rdfs:label "Trust rule"@en ;
+  rdfs:comment "One reified admission rule, grouping a source + statement-type + scope + freshness condition under a single node. Reification is what makes a rule the unit of conflict, override, and audit (§2.3.2 item 2)."@en ;
+  rdfs:isDefinedBy trust: .
+
+trust:Source a rdfs:Class, owl:Class ;
+  rdfs:label "Attesting source"@en ;
+  rdfs:comment "An attesting authority, identified by an issuer key / DID. Simultaneously the object of trust:source and the subject of trust:issuerKey (§2.3.2 item 6)."@en ;
+  rdfs:isDefinedBy trust: .
+
+# --- properties: the core relation ------------------------------------------
+
+trust:trustsSourceFor a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "trusts source for"@en ;
+  rdfs:comment "THE core relation: admit statements of this type (shape) from this source — i.e. 'trust source S for statement-type T'. The only term that expresses per-(source, statement-type) scoping; every other term names a participant in, or constrains, this relation (§2.3.2 item 3). Renders RT/PERMIS-style typed-issuer trust as RDF a Solid reasoner can merge with local rules (§2.2)."@en ;
+  rdfs:domain trust:Source ;
+  rdfs:range sh:NodeShape ;
+  rdfs:isDefinedBy trust: .
+
+# --- properties: rule participants ------------------------------------------
+
+trust:source a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "source"@en ;
+  rdfs:comment "The attesting source a trust rule names. Connects a rule to a NAMED trust:Source so one source can be referenced across many rules without key duplication (§2.3.2 item 4)."@en ;
+  rdfs:domain trust:TrustRule ;
+  rdfs:range trust:Source ;
+  rdfs:isDefinedBy trust: .
+
+trust:forShape a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "for shape"@en ;
+  rdfs:comment "Statement-type as a SHACL shape: THE one statement-type primitive (§2.3.2 item 5). A SHACL shape is the most general type constraint in the set — predicate-only, cardinality, value-range, and conjunctive constraints are all shapes. Evaluated by the shipped sparq-shacl validator as the admission side-condition; cannot be reduced backward to anything coarser. trust:forPredicate is sugar that desugars INTO this (never the reverse)."@en ;
+  rdfs:domain trust:TrustRule ;
+  rdfs:range sh:NodeShape ;
+  rdfs:isDefinedBy trust: .
+
+trust:issuerKey a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "issuer key"@en ;
+  rdfs:comment "The cryptographic binding 'source S's verification key is K' — the load-bearing gate for signature verification at admission (§3.3 item 1). Aligns with zk:issuerKey on the existing sparq-zk estate. This OPERATOR-ASSERTED form is the live forgery vector D' (§3.3): the operator pastes the key directly. Prefer trust:issuerDid (sq-pfae.3) where a resolver can bind the key, which narrows D'."@en ;
+  rdfs:domain trust:Source ;
+  rdfs:range rdfs:Resource ;
+  rdfs:isDefinedBy trust: .
+
+trust:issuerDid a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "issuer DID"@en ;
+  rdfs:comment "The source's Decentralised Identifier (DID), resolved to its verifying key by a pluggable DID resolver (did:key offline self-cert / pluggable did:web). A rule may name its issuer by trust:issuerDid INSTEAD of the operator-asserted trust:issuerKey hex — the sq-pfae.3 issuer-key-binding term that narrows forgery vector D'. did:key is self-certifying (not a trust anchor); did:web is only as strong as host/TLS control. Resolution is opt-in (sparq-trust `did` cargo feature)."@en ;
+  rdfs:domain trust:Source ;
+  rdfs:range rdfs:Resource ;
+  rdfs:isDefinedBy trust: .
+
+trust:scope a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "scope"@en ;
+  rdfs:comment "Where the trust rule applies (server-wide vs per-.acr / per-resource). Orthogonal to source and statement-type — the same (source, type) pair may be trusted for resource A but not B — so it cannot be derived from them (§2.3.2 item 8). Per-.acr rules narrow, never broaden, a server default (§3.2)."@en ;
+  rdfs:domain trust:TrustRule ;
+  rdfs:range rdfs:Resource ;
+  rdfs:isDefinedBy trust: .
+
+trust:freshWithin a rdf:Property, owl:DatatypeProperty ;
+  rdfs:label "fresh within"@en ;
+  rdfs:comment "Maximum staleness admitted, as an xsd:duration consulted against Session.now. The temporal gate, orthogonal to source/type/scope (§2.3.2 item 9). It MUST be enforced as a per-request Rust side-condition, NOT an in-reasoner predicate (§3.3) — time is not a reasoner fact."@en ;
+  rdfs:domain trust:TrustRule ;
+  rdfs:range xsd:duration ;
+  rdfs:isDefinedBy trust: .
+
+trust:admitted a rdf:Property ;
+  rdfs:label "admitted"@en ;
+  rdfs:comment "INTERNAL stratum-boundary marker: tags a fact that PASSED admission, enabling the stratified separation of admission from derivation (§2.1, §2.3.2 item 10). Analogous to the solidx: internal vocab; reserved — an external source may NOT assert it (the reserved-derivation-predicate guard, §3.3 item 2). Without it the two-stratum architecture collapses and the §3.3 soundness argument has nothing to hang on."@en ;
+  rdfs:isDefinedBy trust: .
+
+# =============================================================================
+# The ONE convenience — SUGAR, not a primitive (design §2.3.3)
+# =============================================================================
+# The SOLE purely-syntactic redundancy the de-dup pass found. Kept for ergonomics
+# but DEFINED WHOLLY BY ITS DESUGARING, so a WG standardises only trust:forShape.
+# `trust:forPredicate P` desugars (at load time) to a single-predicate forShape:
+#
+#   [] a sh:NodeShape ;
+#      sh:targetSubjectsOf P ;
+#      sh:property [ sh:path P ; sh:minCount 1 ] .
+#
+# The rewrite is lossless in the predicate-only direction and runs the genuine,
+# shipped sparq-shacl target/path mechanism (there is no sh:targetPredicate in
+# SHACL). Implemented by `sparq_trust::vocab::desugar_for_predicate`. v1 ships
+# `forPredicate` as the default surface syntax and `forShape` as the expressive
+# upgrade — but the NORMATIVE vocabulary is `forShape` alone.
+
+trust:forPredicate a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "for predicate (SUGAR)"@en ;
+  rdfs:comment "SUGAR — NOT a primitive. Shorthand for a single-predicate trust:forShape: 'admit a source for all triples on predicate P'. Defined wholly by its desugaring (§2.3.3); adds no expressivity forShape lacks. Standardise trust:forShape, not this."@en ;
+  rdfs:domain trust:TrustRule ;
+  rdfs:range rdfs:Resource ;
+  rdfs:subPropertyOf trust:forShape ;
+  rdfs:isDefinedBy trust: .

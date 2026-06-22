@@ -55,6 +55,50 @@ def test_load_named_graphs_nquads():
     assert graph.ask("ASK { GRAPH <http://ex/g1> { ?s ?p ?o } }")
 
 
+# JSON-LD is default-on in the Python wheel (sq-oy1f.20): a default-features build
+# wires sparq-core/jsonld, so both the format alias and the .jsonld extension work
+# with no flag. A --no-default-features wheel would drop these (fail-closed); the
+# CI builds default-on, so this exercises the real default surface.
+JSONLD = """
+{
+  "@context": {"ex": "http://ex/"},
+  "@id": "ex:alice",
+  "ex:knows": {"@id": "ex:bob"},
+  "ex:age": 30
+}
+"""
+
+
+def test_load_jsonld_format_alias():
+    graph = sparq.Graph.load(JSONLD, format="jsonld")
+    assert len(graph) == 2  # ex:knows + ex:age
+    assert graph.ask("ASK { <http://ex/alice> <http://ex/knows> <http://ex/bob> }")
+
+
+def test_load_jsonld_extension_inferred(tmp_path):
+    p = tmp_path / "data.jsonld"
+    p.write_text(JSONLD)
+    graph = sparq.Graph.load(p)  # format inferred from .jsonld
+    assert len(graph) == 2
+    assert graph.ask(
+        'ASK { <http://ex/alice> <http://ex/age> 30 }'
+    )
+
+
+def test_load_jsonld_named_graph():
+    # @graph with an outer @id is a named graph, preserved + queryable via GRAPH.
+    doc = """
+    {
+      "@context": {"ex": "http://ex/"},
+      "@id": "ex:g1",
+      "@graph": [{"@id": "ex:c", "ex:p": {"@id": "ex:d"}}]
+    }
+    """
+    graph = sparq.Graph.load(doc, format="json-ld")  # hyphenated alias too
+    assert len(graph) == 0  # default graph empty; the triple is in ex:g1
+    assert graph.ask("ASK { GRAPH <http://ex/g1> { <http://ex/c> <http://ex/p> ?o } }")
+
+
 def test_load_parse_error():
     with pytest.raises(ValueError):
         sparq.Graph.load("this is not turtle @@@")
@@ -456,6 +500,54 @@ def test_save_open_round_trip(tmp_path):
 def test_open_missing_dir(tmp_path):
     with pytest.raises(IOError):
         sparq.Graph.open(tmp_path / "nope")
+
+
+# --- copy -------------------------------------------------------------------
+
+
+def test_copy_is_equal_but_independent():
+    graph = g()
+    c = graph.copy()
+    assert len(c) == len(graph) == 7
+    q = "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a } ORDER BY ?a"
+    assert c.query_json(q) == graph.query_json(q)
+    # Mutating the copy does NOT touch the original ...
+    c.update("INSERT DATA { <http://ex/dave> <http://ex/age> 40 }")
+    assert len(c) == 8 and len(graph) == 7
+    assert not graph.ask("PREFIX ex: <http://ex/> ASK { ex:dave ex:age 40 }")
+    # ... and mutating the original after copying does NOT touch the copy.
+    graph.update("INSERT DATA { <http://ex/erin> <http://ex/age> 50 }")
+    assert len(graph) == 8 and len(c) == 8
+    assert not c.ask("PREFIX ex: <http://ex/> ASK { ex:erin ex:age 50 }")
+
+
+def test_copy_reason_independent():
+    graph = sparq.Graph.load(RDFS_DATA)
+    c = graph.copy()
+    c.reason("rdfs")
+    q = "PREFIX ex: <http://ex/> ASK { ex:rex a ex:Animal }"
+    assert c.ask(q)          # entailment materialised on the copy
+    assert not graph.ask(q)  # original untouched by the copy's reasoning
+
+
+def test_copy_preserves_named_graphs():
+    nq = (
+        "<http://ex/a> <http://ex/p> <http://ex/b> .\n"
+        "<http://ex/c> <http://ex/p> <http://ex/d> <http://ex/g1> .\n"
+    )
+    graph = sparq.Graph.load(nq, format="nquads")
+    c = graph.copy()
+    assert len(c) == 1  # default graph
+    assert c.ask("ASK { GRAPH <http://ex/g1> { <http://ex/c> <http://ex/p> <http://ex/d> } }")
+
+
+def test_copy_has_fresh_text_index():
+    graph = g()
+    graph.build_text_index()           # force the original's index to exist
+    c = graph.copy()
+    # The copy lazily builds its own index; text search works on it independently.
+    hits = c.text_search("alic*")
+    assert any(h[0].value == "Alice" for h in hits)
 
 
 def test_version():

@@ -396,6 +396,67 @@ impl ProductQuantizer {
         out
     }
 
+    /// [OPUS-4.8] (sq-qamd) Serializes the codebook to a self-describing little-endian byte block
+    /// — `dim, m, k` (u32 each) then every centroid value as f32 — so it can be persisted alongside
+    /// the on-disk graph and reloaded with [`from_bytes`](Self::from_bytes). The subspace layout is
+    /// recomputed from `dim`/`m` on load (it is a pure function of the two), so only the learned
+    /// centroids are stored. Round-trips exactly (no lossy step).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let n_centroid_vals: usize = self.centroids.iter().map(Vec::len).sum();
+        let mut out = Vec::with_capacity(12 + n_centroid_vals * 4);
+        out.extend_from_slice(&(self.dim as u32).to_le_bytes());
+        out.extend_from_slice(&(self.m as u32).to_le_bytes());
+        out.extend_from_slice(&(self.k as u32).to_le_bytes());
+        for sub in &self.centroids {
+            for &val in sub {
+                out.extend_from_slice(&val.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// [OPUS-4.8] (sq-qamd) Reconstructs a quantizer from [`to_bytes`](Self::to_bytes). Errors on a
+    /// truncated/over-long block or an invalid header (`m == 0`, `m > dim`, `k == 0`, `k > 256`) —
+    /// the same validity envelope [`fit`](Self::fit) enforces, so a decoded quantizer is always sound.
+    pub fn from_bytes(bytes: &[u8]) -> Result<ProductQuantizer, String> {
+        if bytes.len() < 12 {
+            return Err("PQ codebook block truncated (no header)".into());
+        }
+        let rd = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap()) as usize;
+        let (dim, m, k) = (rd(0), rd(4), rd(8));
+        if dim == 0 {
+            return Err("PQ codebook dim must be > 0".into());
+        }
+        if m == 0 || m > dim {
+            return Err(format!("PQ codebook M must be in 1..={dim} (got {m})"));
+        }
+        if k == 0 || k > 256 {
+            return Err(format!("PQ codebook K must be in 1..=256 (got {k})"));
+        }
+        let sub_offsets = subspace_offsets(dim, m);
+        let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(m);
+        let mut off = 12;
+        for s in 0..m {
+            let sub_len = sub_offsets[s + 1] - sub_offsets[s];
+            let want = k * sub_len;
+            let need = off + want * 4;
+            if bytes.len() < need {
+                return Err("PQ codebook block truncated (centroids)".into());
+            }
+            let mut sub = Vec::with_capacity(want);
+            for c in 0..want {
+                let p = off + c * 4;
+                sub.push(f32::from_le_bytes(bytes[p..p + 4].try_into().unwrap()));
+            }
+            centroids.push(sub);
+            off = need;
+        }
+        if off != bytes.len() {
+            return Err(format!("PQ codebook block has {} trailing bytes", bytes.len() - off));
+        }
+        Ok(ProductQuantizer { dim, m, k, sub_offsets, centroids })
+    }
+
     /// Encodes every vector in `store` into a flat `count × M`-byte code array (slot order,
     /// matching [`VectorStore::iter`]) plus the slot→id mapping. This is the in-RAM candidate
     /// cache for [`DiskAnnIndex`](crate::diskann::DiskAnnIndex). Errors on a dim mismatch.
@@ -594,6 +655,26 @@ pub struct EncodedStore {
 }
 
 impl EncodedStore {
+    /// [OPUS-4.8] (sq-qamd) Builds an [`EncodedStore`] from a slot→id mapping and the flat
+    /// `len × stride` code array (slot order) — the inverse of the `ids`/`codes` an encoder
+    /// produces, used to reload a persisted candidate cache. Errors if `codes.len()` is not
+    /// `ids.len() × stride` (or `stride == 0` with codes present), so a malformed block can't
+    /// produce out-of-bounds [`code`](Self::code) reads.
+    pub fn from_parts(ids: Vec<Id>, codes: Vec<u8>, stride: usize) -> Result<EncodedStore, String> {
+        if stride == 0 && !codes.is_empty() {
+            return Err("EncodedStore stride must be > 0 when codes are present".into());
+        }
+        let expect = ids.len().checked_mul(stride).ok_or("EncodedStore code length overflow")?;
+        if codes.len() != expect {
+            return Err(format!(
+                "EncodedStore codes len {} != ids {} × stride {stride}",
+                codes.len(),
+                ids.len()
+            ));
+        }
+        Ok(EncodedStore { ids, codes, stride })
+    }
+
     /// Number of encoded vectors.
     pub fn len(&self) -> usize {
         self.ids.len()
@@ -612,6 +693,11 @@ impl EncodedStore {
     /// The code bytes for `slot`.
     pub fn code(&self, slot: usize) -> &[u8] {
         &self.codes[slot * self.stride..(slot + 1) * self.stride]
+    }
+    /// [OPUS-4.8] (sq-qamd) The flat `len × stride` code array (slot order) — for persisting the
+    /// candidate cache; pair with [`from_parts`](Self::from_parts) to reload it.
+    pub fn codes(&self) -> &[u8] {
+        &self.codes
     }
     /// Iterates `(slot, id, code)` in slot order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, Id, &[u8])> + '_ {

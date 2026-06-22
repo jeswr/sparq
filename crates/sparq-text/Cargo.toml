@@ -11,6 +11,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] sq-jxl0: wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page and every feature-gated item (`engine`, `cjk`, …) render on docs.rs.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # Opt-in full-text search. This is a SEPARATE crate (the sparq-geo shape) so the core
 # engine — and in particular the wasm build — carries zero text-search code or
 # dependencies; full-text support is engaged only by depending on this crate. The
@@ -23,12 +29,24 @@ readme = "README.md"
 # `text:score` magic predicates rewritten into inline `VALUES` over the index's hits,
 # executed by sparq-engine's prepared-query seam (`PreparedQuery: From<spargebra::Query>`).
 # Disable default features for the pure index (tokenizer, TextIndex, BM25) without the
-# engine in the dependency graph.
+# engine in the dependency graph. NOTE: `engine` pulls `sparq-engine` with NO default
+# features (so rayon/regex/digest do NOT leak in via unification) — the engine pieces a
+# `text:` rewrite needs are the prepared-query seam alone. The native build re-adds the
+# engine's `regex` + `digest` builtins (so a `text:` rewrite over a query that ALSO uses
+# REGEX/hash works) and `parallel` via the default below; the wasm bundle
+# (`sparq-text-wasm`, sq-jbe6) takes `features = ["engine"]` ONLY, keeping the browser
+# bundle lean (no rayon/regex/digest). [OPUS-4.8] sq-jbe6
 # `parallel` (default on, mirroring sparq-engine): rayon-sharded dictionary scan in
-# `TextIndex::build`; the index built is identical to the serial one.
-default = ["engine", "parallel"]
+# `TextIndex::build`; the index built is identical to the serial one. Also forwards the
+# engine's own `parallel` (its parallel execution), so the native `engine`+`parallel`
+# build is byte-for-byte the engine feature set it had before. [OPUS-4.8] sq-jbe6
+# `engine-builtins` (default on): turns the engine's `regex` (SPARQL REGEX/REPLACE) +
+# `digest` (hash builtins) back on, so the native `text:` rewrite path supports the full
+# SPARQL builtin set exactly as before this split. OFF in the wasm bundle. [OPUS-4.8] sq-jbe6
+default = ["engine", "parallel", "engine-builtins"]
 engine = ["dep:sparq-engine", "dep:spargebra"]
-parallel = ["dep:rayon", "sparq-core/parallel"]
+engine-builtins = ["engine", "sparq-engine/regex", "sparq-engine/digest"]
+parallel = ["dep:rayon", "sparq-core/parallel", "sparq-engine?/parallel"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -36,8 +54,11 @@ parallel = ["dep:rayon", "sparq-core/parallel"]
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
 # Behind the `engine` feature (the dependency direction is sparq-text -> sparq-engine,
 # exactly like sparq-geo; the engine itself stays text-search-free, and so does the
-# wasm bundle).
-sparq-engine = { path = "../sparq-engine", version = "0.1.0", optional = true }
+# wasm bundle). `default-features = false` so the engine's rayon/regex/digest are NOT
+# force-on'd through unification — the native build opts them back in via the
+# `parallel` + `engine-builtins` features above, the wasm bundle leaves them off.
+# [OPUS-4.8] sq-jbe6
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", optional = true, default-features = false }
 spargebra = { workspace = true, optional = true }
 oxrdf.workspace = true
 rustc-hash.workspace = true
@@ -48,4 +69,11 @@ unicode-segmentation = "1"
 
 [dev-dependencies]
 # Deterministic random literals/deltas for the differential test + the benchmark example.
-rand = "0.9"
+# [OPUS-4.8] sq-8xug: rand-ecosystem 0.10. `random_range`/`random` moved from the
+# `Rng` trait to `RngExt` in 0.10, so the test/example imports use the prelude.
+rand = "0.10"
+# [OPUS-4.8] (sq-ghjc) Test-only: PARSE the dependency-free `bench_text --json` emit
+# back to assert it is valid JSON with the documented shape. The emit itself stays
+# serde-free (hand-built `format!`); serde_json is a dev-dependency so it never enters
+# the library, its dependents, or the wasm bundle (`sparq-text-wasm`).
+serde_json = "1"

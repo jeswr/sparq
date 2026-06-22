@@ -1,6 +1,11 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
+// [OPUS-4.8] (sq-a9cn) Opt-in materialised-view / query-result cache. NON-DEFAULT
+// `result-cache` feature — when off, zero cache code compiles and the default native +
+// wasm builds are byte-identical (no new deps).
+#[cfg(feature = "result-cache")]
+pub mod cache;
 mod construct;
 #[cfg(feature = "cs-planner")]
 pub mod cs;
@@ -19,11 +24,27 @@ mod service;
 // (threat-model B4 / sq-2v6f). [OPUS-4.8]
 #[cfg(feature = "service")]
 pub use service::with_service_egress_allow;
+// [OPUS-4.8] (sq-iu0c) Stable marker substring in every SERVICE egress-refusal engine
+// error, so a network-exposed host (sparq-server) can classify a blocked SERVICE as a
+// policy refusal (403-style) rather than a server fault (500), mirroring the existing
+// `"query budget exceeded (timeout)"` → 503 pattern.
+#[cfg(feature = "service")]
+pub use service::SERVICE_EGRESS_REFUSED_MARKER;
 // Strict allowlist-only egress policy: only listed hosts reachable (even public ones
 // off the list are refused). The network-exposed server wires this to --service-allow
 // so federation is restricted to operator-configured endpoints. [OPUS-4.8] (sq-4w18)
 #[cfg(feature = "service")]
 pub use service::with_service_egress_policy;
+// Bind-join (VALUES pushdown) block-size knob — the only OPT-IN tunable for the
+// SERVICE bound-join pushdown (on-by-default, correctness-preserving). [OPUS-4.8] (sq-sjkj)
+#[cfg(feature = "service")]
+pub use service::with_service_bound_join_block_size;
+// [OPUS-4.8] (sq-678h) RDF serializer matrix (Turtle / TriG / N-Quads writers). NON-DEFAULT
+// `serialize-rdf` feature — when off, zero serializer code compiles and the default build's
+// dependency graph is unchanged (the writers add no new deps). The always-on N-Triples writer
+// stays in `construct::triples_to_ntriples`.
+#[cfg(feature = "serialize-rdf")]
+pub mod serialize;
 mod update;
 // zk-trace seam (NON-DEFAULT `zk` feature; consumed only by `sparq-zk`).
 // When off, zero zk code is compiled — default builds and wasm are untouched.
@@ -35,11 +56,18 @@ pub use construct::{
     construct_with_budget, describe, describe_prepared, describe_prepared_with_budget,
     describe_with_budget, triples_to_ntriples,
 };
+// [OPUS-4.8] (sq-it1x) Opt-in MVCC / ACID transaction isolation. NON-DEFAULT `txn`
+// feature — when off, zero transaction code compiles and the default native + wasm builds
+// are byte-identical (no new deps). Built on the COW delta-overlay substrate
+// (`Graph::fork`/`snapshot`/`apply_delta`).
+#[cfg(feature = "txn")]
+pub mod txn;
 #[cfg(feature = "cs-planner")]
 pub use cs::{with_cs_table, CsSet, CsTable};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
 pub use update::{
-    apply_effects, update, update_in_place, update_in_place_capturing, update_in_place_with_budget,
+    apply_effects, update, update_in_place, update_in_place_atomic,
+    update_in_place_atomic_with_budget, update_in_place_capturing, update_in_place_with_budget,
     with_load_base, UpdateEffect,
 };
 
@@ -53,7 +81,8 @@ use spargebra::{Query, SparqlParser};
 /// iteration of the big scan/join loops), so enforcement is approximate but cheap:
 /// an unlimited budget (the default) costs nothing on the hot paths. When a limit
 /// trips, evaluation stops and the query fails with
-/// `"query budget exceeded (timeout)"` / `"query budget exceeded (max-rows)"`.
+/// `"query budget exceeded (timeout)"` / `"query budget exceeded (max-rows)"` /
+/// `"query budget exceeded (max-bytes)"`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QueryBudget {
     /// Wall-clock deadline. Native only: `std::time::Instant` is unusable on
@@ -65,6 +94,21 @@ pub struct QueryBudget {
     /// This is a *working-set* bound: a query whose intermediate result exceeds it
     /// is refused even if a later operator (e.g. LIMIT) would have shrunk it.
     pub max_rows: Option<usize>,
+    /// [OPUS-4.8] (sq-s5is) Upper bound, in BYTES, on the estimated working-set size of
+    /// any materialised (intermediate or final) result — the byte-accounted twin of
+    /// `max_rows`. Where `max_rows` counts ROWS and so misses a query with FEW but very
+    /// WIDE rows (many projected variables, or huge computed string literals), this bounds
+    /// the estimated heap footprint of the id-level working set: `rows × width ×
+    /// size_of::<Id>()` for each materialised intermediate, PLUS the bytes of any
+    /// query-computed terms (BIND / aggregate / CONSTRUCT scratch) interned into the
+    /// per-query local vocabulary. Checked cooperatively at the same coarse sites as
+    /// `max_rows` (operator entry / per outer-loop iteration); a query whose estimate
+    /// crosses it aborts with `"query budget exceeded (max-bytes)"`. The estimate is a
+    /// portable LOWER bound on real heap (it ignores allocator overhead and `SmallVec`
+    /// inline storage), so it is conservative in the SAME direction `max_rows` is — a blunt
+    /// anti-OOM ceiling, not an exact RSS quota. `None` (the default) disables it; it
+    /// composes with `max_rows` (whichever trips first aborts).
+    pub max_bytes: Option<usize>,
 }
 
 impl QueryBudget {
@@ -117,6 +161,14 @@ impl FunctionRegistry {
         self.map.get(iri)
     }
 
+    /// [OPUS-4.8] sq-qfcb: iterates the IRIs of every registered extension function
+    /// (unspecified order). Lets a caller advertise EXACTLY the functions actually
+    /// installed (e.g. the SPARQL Service Description's `sd:extensionFunction`) without
+    /// hand-maintaining a parallel list that could drift from the registry.
+    pub fn iris(&self) -> impl Iterator<Item = &str> {
+        self.map.keys().map(String::as_str)
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -142,6 +194,53 @@ pub fn with_functions<T>(fns: &FunctionRegistry, f: impl FnOnce() -> T) -> T {
     let _guard = exec::functions::install(fns);
     f()
 }
+
+// ---- Custom aggregate registry + window functions (sq-5qz9) -----------------
+//
+// NON-DEFAULT `window-functions` feature. Two distinct, OPT-IN extension surfaces;
+// when the feature is off, NOTHING below compiles and the default build is
+// byte-identical (these add no dependencies). [OPUS-4.8]
+#[cfg(feature = "window-functions")]
+mod aggregate;
+#[cfg(feature = "window-functions")]
+pub mod window;
+// Inline `OVER(…)` window-clause SYNTAX (sq-h564) — a source-rewrite front end over
+// the programmatic `window` pass, on the dedicated `query_over` entry point only. It
+// does NOT touch the (conformance-tracking) vendored spargebra parser. [OPUS-4.8]
+#[cfg(feature = "window-functions")]
+mod window_syntax;
+#[cfg(feature = "window-functions")]
+pub use aggregate::{
+    query_with_aggregates, query_with_aggregates_and_budget, with_aggregates, AggFn,
+    CustomAggregateRegistry,
+};
+#[cfg(feature = "window-functions")]
+pub use window_syntax::{query_over, query_over_with_budget};
+// [OPUS-4.8] (sq-a9cn) Materialised-view / query-result cache re-exports (NON-DEFAULT
+// `result-cache` feature).
+#[cfg(feature = "result-cache")]
+pub use cache::{is_cacheable, CacheStats, ResultCache};
+
+// [OPUS-4.8] (sq-hvfe) Vectorized (columnar / vector-at-a-time) execution primitives —
+// the first building block of the M4 plan (research/optimization-techniques.md). NON-DEFAULT
+// `vectorized` feature: when off, zero columnar code compiles and the default native + wasm
+// builds are byte-identical (no new dependencies — sparq-core is already a direct dep).
+#[cfg(feature = "vectorized")]
+pub mod chunk;
+#[cfg(feature = "vectorized")]
+pub use chunk::{DataChunk, SelVec, VecCmp};
+
+// [OPUS-4.8] (sq-xj29q) Oxigraph-shaped per-solution view over `QueryResult` —
+// `QueryResult::solutions()` yields borrowed, zero-copy `QuerySolution` views (per-row
+// map from `Variable` to bound `Term`: `get`, `iter`, `Index`) matching Oxigraph's
+// `QuerySolution`, WITHOUT abandoning the columnar `{vars, rows}` layout the engine
+// uses for perf. NON-DEFAULT `query-solution` feature: when off, zero of this code
+// compiles and the default native + wasm builds are byte-identical (no new
+// dependencies — oxrdf is already a direct dep; no `unsafe`).
+#[cfg(feature = "query-solution")]
+pub mod solution;
+#[cfg(feature = "query-solution")]
+pub use solution::{QuerySolution, QuerySolutionBindings, QuerySolutionIter, VarIndex};
 
 // ---- Spatial pushdown seam (sq-mg9) -----------------------------------------
 //
@@ -346,7 +445,7 @@ pub fn ask_view_with_budget(v: &DatasetView, sparql: &str, budget: &QueryBudget)
 /// [`dataset::build_active`]. `None` (the common case) means: evaluate against
 /// the store itself. Every query entry point calls this once after parsing, so
 /// the no-clause path costs exactly one `Option` check.
-fn active_dataset(graph: &Graph, q: &Query) -> Option<Graph> {
+pub(crate) fn active_dataset(graph: &Graph, q: &Query) -> Option<Graph> {
     q.dataset().map(|ds| dataset::build_active(graph, ds))
 }
 
@@ -1894,6 +1993,67 @@ mod tests {
         // A generous row budget changes nothing.
         let b = QueryBudget { max_rows: Some(1000), ..QueryBudget::unlimited() };
         assert_eq!(query_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).unwrap().len(), 8);
+    }
+
+    /// [OPUS-4.8] (sq-s5is) The byte-accounted cap prices ROW WIDTH — the dimension the
+    /// row cap misses. Two queries over the same graph have the SAME row count but
+    /// different widths; a byte cap set between their two working-set sizes admits the
+    /// narrow one and refuses the wide one, while a pure row cap (same row count) could
+    /// not tell them apart.
+    #[test]
+    fn budget_max_bytes_prices_row_width() {
+        // 9 ex:p triples → a 1-pattern BGP yields the same 9 rows whether read as
+        // `?o` (≈1 binding-id column) or `?s ?p ?o` (3 columns). With ~4 bytes/id the
+        // wide working set is ~3× the bytes of the narrow one at identical row count.
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..9 {
+            ttl.push_str(&format!("ex:s{i} ex:p ex:o{i} .\n"));
+        }
+        let wide = Graph::load_str(&ttl, "turtle").unwrap();
+        // A byte budget that comfortably fits the 3-wide BGP must NOT refuse it…
+        let generous = QueryBudget { max_bytes: Some(1 << 20), ..QueryBudget::unlimited() };
+        assert_eq!(query_with_budget(&wide, "SELECT * WHERE { ?s ?p ?o }", &generous).unwrap().len(), 9);
+        // …and a byte budget far below any 9-row working set MUST refuse with max-bytes
+        // (not max-rows: the row cap is unset here, so width is the only thing tripping).
+        let tight = QueryBudget { max_bytes: Some(4), ..QueryBudget::unlimited() };
+        let e = query_with_budget(&wide, "SELECT * WHERE { ?s ?p ?o }", &tight).unwrap_err();
+        assert!(e.contains("query budget exceeded (max-bytes)"), "got: {e}");
+        let e = query_json_with_budget(&wide, "SELECT * WHERE { ?s ?p ?o }", &tight).unwrap_err();
+        assert!(e.contains("query budget exceeded (max-bytes)"), "got: {e}");
+    }
+
+    /// [OPUS-4.8] (sq-s5is) The byte cap also prices query-COMPUTED literals (BIND /
+    /// CONCAT scratch interned into the local vocab) — the NON-row dimension the row
+    /// cap misses. A single-row result whose one computed value is a huge string trips
+    /// the byte cap even though the row count is 1.
+    #[test]
+    fn budget_max_bytes_prices_computed_literals() {
+        // One row, one BIND that builds a large string; the row cap (=10) is generous,
+        // but the computed literal's bytes blow a tight byte cap. CONCAT of two long string
+        // literals needs no feature-gated builtin, so this holds in BOTH feature states.
+        let q = "SELECT ?big WHERE { BIND(CONCAT('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') AS ?big) }";
+        let b = QueryBudget { max_rows: Some(10), max_bytes: Some(16), ..QueryBudget::unlimited() };
+        let e = query_with_budget(&g(), q, &b).unwrap_err();
+        assert!(e.contains("query budget exceeded (max-bytes)"), "got: {e}");
+        // A generous byte cap returns the single row unmodified.
+        let ok = QueryBudget { max_rows: Some(10), max_bytes: Some(1 << 20), ..QueryBudget::unlimited() };
+        assert_eq!(query_with_budget(&g(), q, &ok).unwrap().len(), 1);
+    }
+
+    /// [OPUS-4.8] (sq-s5is) An unset byte cap (the default) is a true no-op: results are
+    /// byte-identical to the unbudgeted query, and a query that EXCEEDS a generous row
+    /// cap but would fit a non-existent byte cap still errors on the row cap alone.
+    #[test]
+    fn budget_max_bytes_unset_is_noop() {
+        let q = "SELECT * WHERE { ?s ?p ?o }";
+        let only_rows = QueryBudget { max_rows: Some(100), ..QueryBudget::unlimited() };
+        assert_eq!(query_with_budget(&g(), q, &only_rows).unwrap().len(), 8);
+        assert_eq!(query_with_budget(&g(), q, &QueryBudget::unlimited()).unwrap().len(), 8);
+        assert_eq!(
+            query_json(&g(), q).unwrap(),
+            query_json_with_budget(&g(), q, &QueryBudget::unlimited()).unwrap()
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

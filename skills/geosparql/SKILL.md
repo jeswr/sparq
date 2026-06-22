@@ -53,13 +53,32 @@ pub fn parse_geometry_literal(value: &str, datatype: &str) -> Result<GeoGeometry
 pub fn is_geometry_datatype(datatype: &str) -> bool;   // geo:wktLiteral | geo:gmlLiteral
 pub struct GeoGeometry { pub crs: Crs, pub geometry: geo_types::Geometry<f64> }
 impl GeoGeometry { pub fn new(g: Geometry<f64>) -> Self;        // CRS84
-                   pub fn to_wkt_literal(&self) -> String; }    // lexical form
+                   pub fn to_wkt_literal(&self) -> String;      // lexical form
+                   pub fn metadata(&self) -> GeometryMetadata; }// OGC R9 geo: metadata props
 pub enum Crs { Crs84, Epsg4326, Other(String) }                 // .iri(), .is_geographic()
+
+// --- geo:Geometry metadata properties (OGC R9; always available) ---
+// geo:dimension / coordinateDimension / spatialDimension / isEmpty / isSimple / hasSerialization.
+pub struct GeometryMetadata { pub dimension: Option<u8>,          // topological 0/1/2 (None = empty)
+    pub coordinate_dimension: Option<u8>, pub spatial_dimension: Option<u8>,  // 2 in this 2-D profile
+    pub is_empty: bool, pub is_simple: bool, pub has_serialization: String }  // WKT lexical form
+// sparq_geo::metadata::lex::{dimension,coordinate_dimension,spatial_dimension,is_empty,is_simple,
+//   has_serialization,metadata}(value, datatype) — the lexical mirror (str + datatype IRI in).
 
 // --- geof: as the SPARQL extension-function registry (default-on `engine` feature) ---
 pub fn geof_registry() -> sparq_engine::FunctionRegistry;
 // drive with:  sparq_engine::query_with_functions(&graph, sparql, &reg) -> Result<QueryResult, String>
 //   or scope another entry point: sparq_engine::with_functions(&reg, || sparq_engine::ask(&g, q))
+
+// --- GeoSPARQL query-rewrite extension: topology PROPERTY forms (`engine` feature) ---
+// Expands `?a geo:sfWithin ?b` (sf*/eh*/rcc8*) triple patterns into
+// `(geo:hasDefaultGeometry|geo:hasGeometry)/geo:asWKT` geometry-resolution joins +
+// the matching `geof:` FILTER. Run the returned PreparedQuery UNDER geof_registry().
+// Opt-in entry point only — the standard sparq_engine entry points still match a
+// geo:sfWithin predicate as an ordinary asserted triple (W3C conformance unaffected).
+pub fn geosparql_rewrite(sparql: &str) -> Result<sparq_engine::PreparedQuery, String>;
+pub fn rewrite_query(q: spargebra::Query) -> spargebra::Query;   // algebra-level form
+pub fn is_topology_property(iri: &str) -> bool;                  // recognises the geo: topology IRIs
 
 // --- geof: as plain Rust over GeoGeometry (always available) ---
 pub fn distance(a: &GeoGeometry, b: &GeoGeometry, unit: Unit) -> Result<f64, GeoError>;
@@ -92,6 +111,16 @@ let r = query_with_functions(&g,
    SELECT ?city ?region WHERE {
      ?city <http://ex/loc> ?pt . ?region <http://ex/area> ?poly .
      FILTER(geof:sfWithin(?pt, ?poly)) }", &geof_registry()).unwrap();
+```
+
+**Topology PROPERTY form via the query-rewrite extension** — write the relation as a triple, not a FILTER; the rewrite resolves each feature's default geometry and applies the matching `geof:`:
+```rust
+let prepared = sparq_geo::geosparql_rewrite(
+  "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+   SELECT ?city WHERE { ?city geo:sfWithin <http://ex/region> }").unwrap();
+let reg = geof_registry();
+let r = sparq_engine::with_functions(&reg, || sparq_engine::query_prepared(&g, &prepared)).unwrap();
+// Needs ?city (geo:hasDefaultGeometry|geo:hasGeometry)/geo:asWKT <wktLiteral> in the data.
 ```
 
 **Chain geometry-producing + relation functions in one expression:** `geof:envelope` / `geof:buffer` return a `geo:wktLiteral` that feeds straight back into another `geof:` call:
@@ -158,7 +187,7 @@ let crs84 = to_crs84_lex(
 - **Relations are PLANAR DE-9IM** (via `geo`'s `Relate`) in coordinate/degree space, not geodesic. `geof:distance` with metric units (`metre`/`kilometre`/`mile`) requires a geographic CRS (CRS84/EPSG:4326) and is exact haversine when either operand is a point, but uses a **local equirectangular approximation between two extended geometries** (same for `geof:buffer` in metres) — accurate locally, distorted at continental scale or near the poles. `Unit::Degree`/`Radian` measure euclidean coordinate-space distance.
 - **Set ops cover the point/line/polygon matrix.** Polygon×polygon `intersection`/`union`/`difference`/`symDifference` are exact (`geo` `BooleanOps`); the point and line cases are handled where well-defined — including **1-D set subtraction** (`line−line`, `line−polygon` and their `symDifference`), done via `i_overlay`'s string-line clip plus a linear-referencing collinear-overlap subtraction (point-set semantics: crossing points are measure-zero, so `line−line` drops only collinear overlaps; `line−polygon` keeps the line strictly outside the polygon closure; `polygon−line/point` is unchanged). The only remaining `GeoError::Unsupported` set-op cases are operands the dimension dispatch can't classify (e.g. a heterogeneous `GEOMETRYCOLLECTION`). Full operand matrix in the "Set-operation operand matrix" section below.
 - **`GeoIndex` only indexes geographic-CRS, non-empty geometries** reached via `geo:asWKT` or `geo:asGML` (default graph + named graphs), with the indexed *entity* resolved through `geo:hasGeometry` / `geo:hasDefaultGeometry` when present (else the serialization subject itself). Other CRSs, empties, non-geometry-typed objects, and unparseable WKT/GML are counted in `index.skipped()` and excluded — check it to detect mis-typed data. `intersects` also requires a geographic-CRS argument.
-- **`geo:gmlLiteral` rides the SAME pipeline as WKT.** GML literals use the OGC **GML Simple-Features geometry profile** (`parse_gml_literal`): `gml:Point`/`LineString`/`Polygon` (exterior + interior rings)/`MultiPoint`/`MultiCurve`/`MultiSurface`, both GML 3 (`gml:pos`/`posList`/`exterior`) and GML 2 (`gml:coordinates`/`outerBoundaryIs`) spellings, namespace-prefix-agnostic, with `srsName`→CRS (URN/`EPSG:` forms; EPSG:4326 axis swap) matching the WKT path. A `geof:` call may mix a GML and a WKT argument. **Deferred (clean `GeoError::Unsupported`):** `gml:Envelope`, arc-segment `gml:Curve`/`gml:Surface`, and 3-D coordinates.
+- **`geo:gmlLiteral` rides the SAME pipeline as WKT.** GML literals use the OGC **GML Simple-Features geometry profile** (`parse_gml_literal`): `gml:Point`/`LineString`/`Polygon` (exterior + interior rings)/`MultiPoint`/`MultiCurve`/`MultiSurface`, both GML 3 (`gml:pos`/`posList`/`exterior`) and GML 2 (`gml:coordinates`/`outerBoundaryIs`) spellings, namespace-prefix-agnostic, with `srsName`→CRS (URN/`EPSG:` forms; EPSG:4326 axis swap) matching the WKT path. An **empty** lexical form (or a member-less aggregate such as `<gml:MultiPoint/>` / `<gml:MultiGeometry/>`) is the empty geometry (OGC R16), the GML twin of the empty `wktLiteral`. A `geof:` call may mix a GML and a WKT argument. **Beyond GML-SF (parsed additively into the same 2-D model):** `gml:Envelope` (`gml:lowerCorner`/`upperCorner` → the 5-point bbox `Polygon`); arc-segment `gml:Curve`/`gml:Surface` — `gml:LineStringSegment` (linear) plus `gml:Arc`/`gml:ArcString`/`gml:CircularArcByCenterPoint`, **densified** to a polyline at a fixed `5°`-per-chord step (`gml::ARC_STEP_DEG`); this is an APPROXIMATION (no circular-arc type in `geo_types`), so densified topology/length/area are accurate only to that resolution; and `srsDimension="3"` coordinates, whose Z ordinate is parsed then **projected out** (the model is 2-D). **Still deferred (clean `GeoError::Unsupported`):** tessellated `gml:Triangle`/`gml:TIN` patches and non-circular (elliptic/clothoid) arc interpolations.
 - **No RIF/`geor:` query rewriting, no `.hdt` write-out.** This is the GeoSPARQL *core*; see the crate's open beads (`bd list -l area:sparq-geo`) for the boundary.
 - **Server wiring:** `sparq-server` exposes exactly this behind its opt-in `geo` cargo feature (`cargo build -p sparq-server --features geo`), which installs `geof_registry()` on every SPARQL endpoint via `with_functions`. With the feature off, the server and the wasm build carry no geometry code.
 - **Reuse the registry:** `geof_registry()` is clone-cheap (`Arc`-shared fns) and `Send + Sync` — build it once (e.g. a `OnceLock`) and share across queries and threads.

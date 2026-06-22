@@ -152,6 +152,7 @@ fn bench_scan(prover: &CircuitProver, k: u32, graph_triples: usize, matches: usi
         &scan.witness.enc,
         &[],
         None,
+        None,
     )
     .expect("scan prover toml");
     assert_eq!(cid, id);
@@ -178,7 +179,7 @@ fn bench_filter_int(prover: &CircuitProver, value: u64, tag: &str) -> Row {
         _ => unreachable!(),
     };
     let (cid, toml) =
-        prover_toml_for(&filter, &FieldHex(CHALLENGE.into()), &[], &[], &digits, None)
+        prover_toml_for(&filter, &FieldHex(CHALLENGE.into()), &[], &[], &digits, None, None)
             .expect("filter_int prover toml");
     let (prove_secs, verify_secs, proof_bytes, vk_bytes) = time_member(prover, &cid, &toml, tag);
     Row { member: cid.package(), k: 0, n: 0, r: 0, d, prove_secs, verify_secs, proof_bytes, vk_bytes }
@@ -210,7 +211,7 @@ fn bench_filter_f64(prover: &CircuitProver, value: u64, tag: &str) -> Row {
         _ => unreachable!(),
     };
     let (cid, toml) =
-        prover_toml_for(&filter, &FieldHex(CHALLENGE.into()), &[], &[], &digits, None)
+        prover_toml_for(&filter, &FieldHex(CHALLENGE.into()), &[], &[], &digits, None, None)
             .expect("filter_f64 prover toml");
     let (prove_secs, verify_secs, proof_bytes, vk_bytes) = time_member(prover, &cid, &toml, tag);
     Row { member: cid.package(), k: 0, n: 0, r: 0, d, prove_secs, verify_secs, proof_bytes, vk_bytes }

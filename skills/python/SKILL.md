@@ -1,6 +1,6 @@
 ---
 name: python
-description: "Use the sparq RDF + SPARQL engine from Python (PyPI distribution `sparq-rdf`; `import sparq`). Reach for this when an agent or developer needs to load RDF (Turtle/N-Triples/N-Quads/TriG), run SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE, apply SPARQL Update, do opt-in RDFS/OWL-RL/Notation3 reasoning + OWL inconsistency checks, run BM25 full-text search (text: magic predicates), or persist/memory-map a triplestore — all via the pyo3 sparq.Graph class."
+description: "Use the sparq RDF + SPARQL engine from Python (PyPI distribution `sparq-rdf`; `import sparq`). Reach for this when an agent or developer needs to load RDF (Turtle/N-Triples/N-Quads/TriG/JSON-LD), run SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE, apply SPARQL Update, do opt-in RDFS/OWL-RL/Notation3 reasoning + OWL inconsistency checks, run BM25 full-text search (text: magic predicates), or persist/memory-map a triplestore — all via the pyo3 sparq.Graph class."
 ---
 
 # sparq (Python)
@@ -45,7 +45,7 @@ for row in res:                        # QueryResult is iterable/indexable (sequ
 
 All on the `sparq.Graph` class (the only entry point). Constructors are static methods:
 
-- `Graph.load(source, format=None) -> Graph` — `source` is an RDF string OR a file path (`str` is a path only if a file with that name exists and the string has no newline; `os.PathLike`/`pathlib.Path` is always a path). `format` ∈ `"turtle"` | `"ntriples"` | `"nquads"` | `"trig"` (default: inferred from extension `.nt`/`.nq`/`.trig`, else `"turtle"`). Named graphs from N-Quads/TriG are preserved and queryable via `GRAPH`.
+- `Graph.load(source, format=None) -> Graph` — `source` is an RDF string OR a file path (`str` is a path only if a file with that name exists and the string has no newline; `os.PathLike`/`pathlib.Path` is always a path). `format` ∈ `"turtle"` | `"ntriples"` | `"nquads"` | `"trig"` | `"jsonld"` (default: inferred from extension `.nt`/`.nq`/`.trig`/`.jsonld`, else `"turtle"`). Named graphs from N-Quads/TriG/JSON-LD are preserved and queryable via `GRAPH`. **JSON-LD is on by default** in the wheel (`format="jsonld"`, `"json-ld"`, or `"application/ld+json"`; a `.jsonld` path); a wheel built `--no-default-features` drops it and `format="jsonld"` then errors (fail-closed, not mis-parsed as Turtle).
 - `Graph.load_n3(text) -> Graph` — parse an N3 document (facts + `{ premise } => { conclusion }` rules) and forward-chain to fixpoint; the result holds the ground closure.
 - `Graph.open(dir) -> Graph` — reopen a graph persisted by `save()`; permutation indexes are memory-mapped (paged on demand, so larger-than-RAM is fine).
 - `g.save(dir) -> None` — persist indexes + dictionary into `dir` for later `Graph.open`.
@@ -61,11 +61,12 @@ All on the `sparq.Graph` class (the only entry point). Constructors are static m
 - `g.text_search(query, any=False, limit=None) -> list[(Term, float)]` — BM25 search over the default graph's string literals; best-first `(literal Term, score)`. AND of tokens by default; `any=True` is OR; `*`-suffix token = prefix match; `limit` keeps top-n.
 - `g.query_text(sparql) -> QueryResult` — SELECT that may use `text:` magic predicates (see recipe below).
 - `g.build_text_index() -> int` / `g.drop_text_index() -> None` — eagerly build (returns indexed-literal count) / free the cached full-text index.
+- `g.copy() -> Graph` — a cheap, logically-independent copy (over the core's Arc-shared structural snapshot, O(pending delta), not O(triples)); the original and the copy can then be mutated separately (`update`/`reason`/`reason_n3_with` on one leaves the other untouched). Named graphs are copied; the copy lazily rebuilds its own full-text index.
 - `len(g)` — default-graph triple count; `repr(g)` → `"Graph(N triples)"`.
 
 `QueryResult`: `.vars: list[str]`, `.rows: list[dict[str, Term]]`, plus `len(res)`, `res[i]` (negative indices/slices ok), and iteration.
 
-`Term` (frozen, value-based `==`/`hash`): `.kind` ∈ `"uri"` | `"literal"` | `"bnode"` | `"triple"` (RDF-star); `.value` (IRI / lexical form / bnode label); `.language` (literals only — the bare BCP-47 tag, else `None`); `.datatype` (literals only — always set: plain → `xsd:string`, lang-tagged → `rdf:langString`, directional → `rdf:dirLangString`; else `None`); `.direction` (RDF 1.2 base direction `"ltr"` / `"rtl"` of a directional language string — the SPARQL 1.2 `its:dir`; `None` otherwise). `str(term)` → bare `.value`; `repr(term)` → N-Triples-ish (e.g. `Term("Bob"@en)`, `Term("hi"@en--ltr)`).
+`Term` (frozen, value-based `==`/`hash`): `.kind` ∈ `"uri"` | `"literal"` | `"bnode"` | `"triple"` (RDF 1.2 triple term); `.value` (IRI / lexical form / bnode label); `.language` (literals only — the bare BCP-47 tag, else `None`); `.datatype` (literals only — always set: plain → `xsd:string`, lang-tagged → `rdf:langString`, directional → `rdf:dirLangString`; else `None`); `.direction` (RDF 1.2 base direction `"ltr"` / `"rtl"` of a directional language string — the SPARQL 1.2 `its:dir`; `None` otherwise). `str(term)` → bare `.value`; `repr(term)` → N-Triples-ish (e.g. `Term("Bob"@en)`, `Term("hi"@en--ltr)`).
 
 `sparq.__version__` is the package version string.
 
@@ -149,7 +150,7 @@ g4 = sparq.Graph.open("./mydb")
 - **`load(str)` path-vs-data heuristic:** a `str` is treated as a file path ONLY if a file by that name exists and the string has no newline; otherwise it is parsed as RDF. Pass `pathlib.Path` to force file semantics.
 - **`update()` / `reason()` / `reason_n3_with()` rebuild the immutable store (O(n) per call)** and mutate the `Graph` in place. Reasoning materialises over the **default graph**; named graphs are carried across untouched. `len(g)` counts default-graph triples only.
 - **Full-text indexes the default graph's plain + language-tagged string literals only** (typed literals like `42`/`xsd:integer` and named graphs are NOT indexed). The index is built lazily on first `text_search`/`query_text`, cached, and **invalidated by every mutating call** (`update`/`reason`/`reason_n3_with`) — the next text call rebuilds it. `query_text` without any `text:` pattern behaves exactly like `query`.
-- **`reason_n3_with(rules)`:** the graph's blank nodes are renamed under a reserved `sparqg` prefix before composition, so a blank-node label in the rules can NOT alias an existing data node. RDF-star triple terms have no N3 form and are rejected there.
+- **`reason_n3_with(rules)`:** the graph's blank nodes are renamed under a reserved `sparqg` prefix before composition, so a blank-node label in the rules can NOT alias an existing data node. RDF 1.2 triple terms have no N3 form and are rejected there.
 - **No Cargo feature flags to set as a user:** the wheel already enables `sparq-core` `mmap` (for `save`/`open`), plus `sparq-reason` and `sparq-text`. The ZK / Noir estate is NOT part of the Python surface.
 - **GIL:** long-running calls (load, query, update, reason, text search) release the GIL, so other Python threads keep running.
 

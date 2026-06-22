@@ -1,10 +1,12 @@
 //! Constraint-component evaluation: walks each targeted shape's focus nodes and
 //! emits [`ValidationResult`]s via direct graph scans (no SPARQL round-trip).
 
-use crate::model::{sh, Component, ComponentDef, Shape, ShapesModel, Target};
-use crate::sparql::{ComponentResultFields, PreparedValidator};
+use crate::model::{
+    sh, Component, ComponentDef, PreparedComponentValidator, Shape, ShapesModel, Target,
+};
 use crate::path::Path;
-use crate::report::ValidationResult;
+use crate::report::{ShapeDiagnostic, ValidationResult};
+use crate::sparql::{ComponentResultFields, PreparedValidator};
 use crate::view::GraphView;
 use oxrdf::{Literal, Term};
 use rustc_hash::FxHashMap;
@@ -19,7 +21,10 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 /// OCCURRENCE (e.g. two sh:class violations on one value) and per traversal route
 /// (a nested shape reached through two parents reports twice). Duplicate focus
 /// nodes from overlapping targets ARE collapsed (in `focus_nodes`).
-pub(crate) fn validate_graph(data: &Graph, shapes: &ShapesModel) -> Vec<ValidationResult> {
+pub(crate) fn validate_graph(
+    data: &Graph,
+    shapes: &ShapesModel,
+) -> (Vec<ValidationResult>, Vec<ShapeDiagnostic>) {
     let mut v = Validator {
         data: GraphView::new(data),
         shapes,
@@ -27,6 +32,8 @@ pub(crate) fn validate_graph(data: &Graph, shapes: &ShapesModel) -> Vec<Validati
         memo: vec![FxHashMap::default(); shapes.shapes.len()],
         min_reentry: usize::MAX,
         regexes: FxHashMap::default(),
+        uvf_targets: FxHashMap::default(),
+        diagnostics: Vec::new(),
     };
     let mut out = Vec::new();
     for &sid in &shapes.targeted {
@@ -34,7 +41,29 @@ pub(crate) fn validate_graph(data: &Graph, shapes: &ShapesModel) -> Vec<Validati
             v.validate_shape(sid, &focus, &mut out);
         }
     }
-    out
+    (out, v.diagnostics)
+}
+
+/// [OPUS-4.8] (sq-d1dw, `shacl-af`) True iff `node` conforms to the shape `sid`
+/// over `data` — i.e. validating `node` against that shape (as a standalone
+/// focus node, ignoring the shape's own targets) produces no results. The
+/// SHACL-AF rules module uses this to evaluate `sh:condition` gating: a rule
+/// fires for a focus node only when it conforms to every condition shape. Reuses
+/// the full constraint validator (Core + sh:sparql + nested shapes), so a
+/// condition may be any shape. Gated to the feature so it adds nothing when off.
+#[cfg(feature = "shacl-af")]
+pub(crate) fn conforms_node(data: &Graph, shapes: &ShapesModel, sid: usize, node: &Term) -> bool {
+    let mut v = Validator {
+        data: GraphView::new(data),
+        shapes,
+        stack: Vec::new(),
+        memo: vec![FxHashMap::default(); shapes.shapes.len()],
+        min_reentry: usize::MAX,
+        regexes: FxHashMap::default(),
+        uvf_targets: FxHashMap::default(),
+        diagnostics: Vec::new(),
+    };
+    v.conforms(node, sid)
 }
 
 struct Validator<'a> {
@@ -52,6 +81,15 @@ struct Validator<'a> {
     /// memoised only if no re-entry pointed BELOW it.
     min_reentry: usize,
     regexes: FxHashMap<String, Option<regex::Regex>>,
+    /// [OPUS-4.8] (sq-vg3y) Per-shape target-node cache for `sh:uniqueValuesFor`
+    /// (the constraint needs every target node of the shape, but is evaluated once
+    /// per focus node — compute the target scan once).
+    uvf_targets: FxHashMap<usize, Vec<Term>>,
+    /// [OPUS-4.8] (sq-lz99x) Non-fatal author-time diagnostics for constraints
+    /// that were SKIPPED because they could not be evaluated (currently: an
+    /// uncompilable `sh:pattern` regex). De-duplicated per (shape, pattern, flags)
+    /// so a skip is reported once, not once per value/focus node.
+    diagnostics: Vec<ShapeDiagnostic>,
 }
 
 impl<'a> Validator<'a> {
@@ -111,6 +149,23 @@ impl<'a> Validator<'a> {
         ok
     }
 
+    /// [OPUS-4.8] (sq-f8gu) Validate `node` against shape `sid` and RETURN the
+    /// results produced (rather than the `conforms` boolean), under the same
+    /// recursion guard. Used to collect `sh:memberShape` per-member `sh:detail`
+    /// sub-results. Re-entry of an in-progress `(node, shape)` pair yields no
+    /// results (the cycle is treated as conforming, exactly as `conforms` does),
+    /// so a cyclic member never recurses unboundedly.
+    fn member_details(&mut self, node: &Term, sid: usize) -> Vec<ValidationResult> {
+        if self.stack.iter().any(|(n, s)| n == node && *s == sid) {
+            return Vec::new();
+        }
+        self.stack.push((node.clone(), sid));
+        let mut tmp = Vec::new();
+        self.validate_shape(sid, node, &mut tmp);
+        self.stack.pop();
+        tmp
+    }
+
     fn validate_shape(&mut self, sid: usize, focus: &Term, out: &mut Vec<ValidationResult>) {
         let shape = &self.shapes.shapes[sid];
         if shape.deactivated {
@@ -145,6 +200,7 @@ impl<'a> Validator<'a> {
             severity: shape.severity.clone(),
             messages: shape.messages.clone(),
             default_message: message,
+            details: Vec::new(),
         }
     }
 
@@ -171,10 +227,15 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            Component::Datatype(dt) => {
+            // [OPUS-4.8] (sq-vg3y) A value conforms iff it is a literal whose
+            // (well-formed) datatype is ANY of the allowed datatypes — the single
+            // IRI is a singleton set, the SHACL-1.2 list form is the disjunction.
+            Component::Datatype(dts) => {
                 for v in values {
                     let ok = match v {
-                        Term::Literal(l) => l.datatype().as_str() == dt && well_formed(l),
+                        Term::Literal(l) => {
+                            dts.iter().any(|dt| l.datatype().as_str() == dt) && well_formed(l)
+                        }
                         _ => false,
                     };
                     if !ok {
@@ -183,34 +244,23 @@ impl<'a> Validator<'a> {
                             focus,
                             Some(v.clone()),
                             "DatatypeConstraintComponent",
-                            format!("Value does not have datatype <{dt}>"),
+                            iri_set_message("datatype", dts),
                         ));
                     }
                 }
             }
-            Component::NodeKind(kind) => {
+            // [OPUS-4.8] (sq-vg3y) A value conforms iff its node kind matches ANY of
+            // the allowed kinds (single IRI = singleton; SHACL-1.2 list = disjunction).
+            Component::NodeKind(kinds) => {
                 for v in values {
-                    let local = kind.strip_prefix(crate::model::SH).unwrap_or(kind);
-                    let ok = match v {
-                        Term::NamedNode(_) => {
-                            matches!(local, "IRI" | "BlankNodeOrIRI" | "IRIOrLiteral")
-                        }
-                        Term::BlankNode(_) => {
-                            matches!(local, "BlankNode" | "BlankNodeOrIRI" | "BlankNodeOrLiteral")
-                        }
-                        Term::Literal(_) => {
-                            matches!(local, "Literal" | "BlankNodeOrLiteral" | "IRIOrLiteral")
-                        }
-                        #[allow(unreachable_patterns)]
-                        _ => false,
-                    };
+                    let ok = kinds.iter().any(|kind| node_kind_matches(v, kind));
                     if !ok {
                         out.push(self.result(
                             sid,
                             focus,
                             Some(v.clone()),
                             "NodeKindConstraintComponent",
-                            format!("Value does not have node kind <{kind}>"),
+                            iri_set_message("node kind", kinds),
                         ));
                     }
                 }
@@ -306,20 +356,31 @@ impl<'a> Validator<'a> {
                 }
             }
             Component::Pattern { source, flags } => {
-                let re = self.regex_for(source, flags.as_deref());
-                for v in values {
-                    let ok = match (&re, string_repr(v)) {
-                        (Some(re), Some(s)) => re.is_match(&s),
-                        _ => false,
-                    };
-                    if !ok {
-                        out.push(self.result(
-                            sid,
-                            focus,
-                            Some(v.clone()),
-                            "PatternConstraintComponent",
-                            format!("Value does not match pattern \"{source}\""),
-                        ));
+                // [OPUS-4.8] (sq-lz99x) An uncompilable `sh:pattern` (e.g. an
+                // unbalanced bracket, or a `(?!...)` lookahead the Rust `regex`
+                // crate does not support — neither does the XML Schema regex
+                // flavour the W3C spec ties `sh:pattern` to) yields no regex.
+                // SKIP the constraint (the crate's lenient ill-formed-shape
+                // policy) and record a diagnostic, instead of fail-closed
+                // flagging EVERY value as a violation.
+                match self.regex_for(source, flags.as_deref()) {
+                    None => self.note_pattern_skipped(sid, source, flags.as_deref()),
+                    Some(re) => {
+                        for v in values {
+                            let ok = match string_repr(v) {
+                                Some(s) => re.is_match(&s),
+                                None => false,
+                            };
+                            if !ok {
+                                out.push(self.result(
+                                    sid,
+                                    focus,
+                                    Some(v.clone()),
+                                    "PatternConstraintComponent",
+                                    format!("Value does not match pattern \"{source}\""),
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -561,21 +622,35 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            Component::Closed { ignored } => {
-                let shape = &self.shapes.shapes[sid];
-                let mut allowed: Vec<String> = ignored
+            Component::Closed { ignored, by_types } => {
+                let ignored_preds: Vec<String> = ignored
                     .iter()
                     .filter_map(|t| match t {
                         Term::NamedNode(n) => Some(n.as_str().to_string()),
                         _ => None,
                     })
                     .collect();
-                for &child in &shape.property_children {
-                    if let Some(Path::Predicate(p)) = &self.shapes.shapes[child].path {
-                        allowed.push(p.clone());
+                // `sh:closed true`: the allowed set is fixed (this shape's
+                // sh:property/sh:path predicates), so compute it once. `sh:closed
+                // sh:ByTypes`: the allowed set is recomputed PER value node from its
+                // rdf:type(s) (SHACL-1.2 §4.8.1 collectProperties), so defer it.
+                // [OPUS-4.8] (sq-vg3y) added the ByTypes branch.
+                let fixed_allowed: Option<Vec<String>> = if *by_types {
+                    None
+                } else {
+                    let mut allowed = ignored_preds.clone();
+                    for &child in &self.shapes.shapes[sid].property_children {
+                        if let Some(Path::Predicate(p)) = &self.shapes.shapes[child].path {
+                            allowed.push(p.clone());
+                        }
                     }
-                }
+                    Some(allowed)
+                };
                 for v in values {
+                    let allowed = match &fixed_allowed {
+                        Some(a) => a.clone(),
+                        None => self.close_by_types_allowed(sid, v, &ignored_preds),
+                    };
                     for (p, o) in self.data.predicate_objects(v) {
                         let p_str = match &p {
                             Term::NamedNode(n) => n.as_str().to_string(),
@@ -619,6 +694,132 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+            // [OPUS-4.8] (sq-vg3y) `sh:memberShape` (SHACL-1.2): each value node must
+            // be a well-formed SHACL list whose members all conform to `member`. A
+            // non-list (or member non-conformance) is ONE top-level result on the
+            // value node. (sq-f8gu) That top-level result carries one `sh:detail`
+            // sub-result PER non-conforming member — the actual results of
+            // validating that member against the member shape. `sh:detail` is
+            // non-normative (the W3C suite compares only top-level result fields),
+            // so a non-list value (no members to validate) carries no details.
+            Component::MemberShape(member) => {
+                for v in values {
+                    let members = self.data.list_strict(v);
+                    // Collect per-member sub-results before any top-level push, so
+                    // the borrow of `self` for `member_details` is released first.
+                    let details: Vec<ValidationResult> = match &members {
+                        None => Vec::new(), // not a SHACL list — no members
+                        Some(ms) => ms
+                            .iter()
+                            .flat_map(|m| self.member_details(m, *member))
+                            .collect(),
+                    };
+                    // Violation iff the value is not a well-formed list, or any
+                    // member produced a (detail) result.
+                    if members.is_none() || !details.is_empty() {
+                        let mut r = self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "MemberShapeConstraintComponent",
+                            "List value is not a well-formed SHACL list, or a member \
+                             does not conform to the member shape"
+                                .into(),
+                        );
+                        r.details = details;
+                        out.push(r);
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-vg3y) `sh:uniqueMembers true` (SHACL-1.2): each value
+            // node must be a SHACL list whose members are pairwise distinct. A
+            // non-list, or a list with duplicate members, is one result on v.
+            // (sq-f8gu) A duplicate-bearing list carries one `sh:detail` sub-result
+            // per DUPLICATED member (each duplicated value reported once via
+            // `sh:value`); a non-list value carries no details.
+            Component::UniqueMembers => {
+                for v in values {
+                    let members = self.data.list_strict(v);
+                    let duplicates: Vec<Term> = match &members {
+                        None => Vec::new(),
+                        Some(ms) => duplicate_members(ms),
+                    };
+                    if members.is_none() || !duplicates.is_empty() {
+                        let mut r = self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "UniqueMembersConstraintComponent",
+                            "List value is not a well-formed SHACL list, or has \
+                             duplicate members"
+                                .into(),
+                        );
+                        r.details = duplicates
+                            .into_iter()
+                            .map(|d| {
+                                let mut detail = self.result(
+                                    sid,
+                                    focus,
+                                    Some(d),
+                                    "UniqueMembersConstraintComponent",
+                                    "List member is not unique".into(),
+                                );
+                                // The detail's path is the member, not the parent
+                                // shape's path — clear it to avoid a misleading
+                                // sh:resultPath on the sub-result.
+                                detail.path = None;
+                                detail
+                            })
+                            .collect();
+                        out.push(r);
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-vg3y) `sh:maxListLength` / `sh:minListLength` (SHACL-1.2):
+            // each value node must be a SHACL list with at most / at least N members.
+            Component::MaxListLength(n) => {
+                for v in values {
+                    let violates = match self.data.list_strict(v) {
+                        None => true,
+                        Some(members) => members.len() as u64 > *n,
+                    };
+                    if violates {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "MaxListLengthConstraintComponent",
+                            format!("List value is not a SHACL list with at most {n} members"),
+                        ));
+                    }
+                }
+            }
+            Component::MinListLength(n) => {
+                for v in values {
+                    let violates = match self.data.list_strict(v) {
+                        None => true,
+                        Some(members) => (members.len() as u64) < *n,
+                    };
+                    if violates {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "MinListLengthConstraintComponent",
+                            format!("List value is not a SHACL list with at least {n} members"),
+                        ));
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-vg3y) `sh:uniqueValuesFor` (SHACL-1.2): the values of the
+            // listed properties of a value node must be unique across ALL target
+            // nodes of the shape. For each value node V that shares the exact same
+            // value-set (for every listed property) with another target node Other,
+            // one result with Other as sh:value. No result if V has no values for
+            // ANY of the properties.
+            Component::UniqueValuesFor(props) => {
+                self.eval_unique_values_for(sid, focus, values, props, out)
+            }
             // [OPUS-4.8] sh:sparql — SPARQL-based constraints (SHACL §5.2). The
             // sh:select runs against the data graph with $this pre-bound to the
             // focus node; every returned solution is one violation. Note this
@@ -631,14 +832,95 @@ impl<'a> Validator<'a> {
             // activated on this shape. ASK validators run per value node
             // (ASK=false → violation); SELECT validators run per focus node
             // (each solution → violation). Parameters are pre-bound as $paramName.
-            Component::CustomSparql { component, args } => {
-                self.eval_custom_component(sid, focus, values, *component, args, out)
+            Component::CustomSparql {
+                component,
+                args,
+                path_validator,
+            } => self.eval_custom_component(
+                sid,
+                focus,
+                values,
+                *component,
+                args,
+                path_validator.map(|i| &self.shapes.path_validators[i]),
+                out,
+            ),
+            // [OPUS-4.8] (sq-mk9n, `shacl-af`) `sh:expression`
+            // (`sh:ExpressionConstraintComponent`): a value node is violated when
+            // the node expression does NOT evaluate to `{ true }` for that value.
+            #[cfg(feature = "shacl-af")]
+            Component::Expression(idx) => {
+                let data = self.data.graph();
+                let expr = &self.shapes.expressions[*idx];
+                for v in values {
+                    let result = crate::rules::eval_parsed_expr(data, self.shapes, expr, v);
+                    if !crate::rules::is_true_result(&result) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "ExpressionConstraintComponent",
+                            "Value does not satisfy the sh:expression".to_string(),
+                        ));
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-3w6n, `shacl-af`) `sh:nodeByExpression`
+            // (`sh:NodeByExpressionConstraintComponent`): for each value node `v`,
+            // the node expression is evaluated against `v` as focus to a set of
+            // node-shape terms; `v` is violated when it does NOT conform to one of
+            // them. (Per SHACL-AF, `sh:node` is the special case of a constant IRI
+            // node-shape expression.) Result-set evaluation borrows the model
+            // immutably, so the (value → shape ids) work is collected up front and
+            // the recursion-safe `conforms` (which needs `&mut self`) runs after.
+            #[cfg(feature = "shacl-af")]
+            Component::NodeByExpression(idx) => {
+                let mut checks: Vec<(Term, Vec<usize>)> = Vec::with_capacity(values.len());
+                {
+                    let data = self.data.graph();
+                    let expr = &self.shapes.expressions[*idx];
+                    for v in values {
+                        let shape_terms =
+                            crate::rules::eval_parsed_expr(data, self.shapes, expr, v);
+                        // Resolve each computed shape term to a parsed shape id. An
+                        // unparsed term (no such shape) is skipped — lenient, per
+                        // this crate's policy.
+                        let sids: Vec<usize> = shape_terms
+                            .iter()
+                            .filter_map(|s| self.shapes.by_node(s))
+                            .collect();
+                        checks.push((v.clone(), sids));
+                    }
+                }
+                for (v, sids) in checks {
+                    for s in sids {
+                        if !self.conforms(&v, s) {
+                            out.push(
+                                self.result(
+                                    sid,
+                                    focus,
+                                    Some(v.clone()),
+                                    "NodeByExpressionConstraintComponent",
+                                    "Value does not conform to the node shape computed by \
+                                 sh:nodeByExpression"
+                                        .to_string(),
+                                ),
+                            );
+                        }
+                    }
+                }
             }
         }
     }
 
     /// SHACL-SPARQL evaluation for one `sh:sparql` constraint occurrence.
-    fn eval_sparql(&mut self, sid: usize, focus: &Term, idx: usize, out: &mut Vec<ValidationResult>) {
+    fn eval_sparql(
+        &mut self,
+        sid: usize,
+        focus: &Term,
+        idx: usize,
+        out: &mut Vec<ValidationResult>,
+    ) {
         let constraint = &self.shapes.sparql[idx];
         if constraint.deactivated {
             return;
@@ -670,6 +952,7 @@ impl<'a> Validator<'a> {
                 severity: severity.clone(),
                 messages: shape_messages.clone(),
                 default_message: fields.default_message,
+                details: Vec::new(),
             },
             out,
         );
@@ -681,6 +964,7 @@ impl<'a> Validator<'a> {
     /// shape) `$PATH` pre-bound; ASK validators additionally run per VALUE NODE
     /// with `$value` pre-bound (ASK=false → one violation for that value),
     /// SELECT validators run once per focus node (§5.2 solution→result mapping).
+    #[allow(clippy::too_many_arguments)]
     fn eval_custom_component(
         &mut self,
         sid: usize,
@@ -688,13 +972,22 @@ impl<'a> Validator<'a> {
         values: &[Term],
         cidx: usize,
         args: &[Option<Term>],
+        path_validator: Option<&PreparedComponentValidator>,
         out: &mut Vec<ValidationResult>,
     ) {
         let comp: &ComponentDef = &self.shapes.components[cidx];
         let shape = &self.shapes.shapes[sid];
         let is_property_shape = shape.path.is_some();
-        let Some(validator) = comp.validator_for(is_property_shape) else {
-            return; // no usable validator for this shape kind (lenient)
+        // [OPUS-4.8] `$PATH` pre-binding (SHACL §6.3): a property shape whose
+        // chosen validator references `$PATH` carries a per-shape re-parsed
+        // validator (built at model-build time, with the shape's property-path
+        // expression substituted). Prefer it; otherwise use the shared one.
+        let validator = match path_validator {
+            Some(v) => v,
+            None => match comp.validator_for(is_property_shape) {
+                Some(v) => v,
+                None => return, // no usable validator for this shape kind (lenient)
+            },
         };
         let message = validator.message.clone();
         let component_iri = match &comp.node {
@@ -712,14 +1005,12 @@ impl<'a> Validator<'a> {
                 param_bindings.push((p.var.clone(), term.clone()));
             }
         }
-        // NOTE (scope): `$PATH` pre-binding for `sh:propertyValidator` is NOT done.
-        // `$PATH` is a SPARQL property PATH (not a term) so it cannot be supplied
-        // via the VALUES table the parameter/`$this`/`$value` bindings use, and the
-        // component's validator query is pre-parsed (shared across shapes), so the
-        // textual `$PATH` substitution the §5.2 `sh:sparql` path performs cannot be
-        // applied per-shape here. ASK validators get `$value` (the value node) and
-        // the parameters, which covers the common property-validator pattern. See
-        // the module/TODO scope note.
+        // `$PATH` (SHACL §6.3): a property PATH, not a term, so it cannot ride the
+        // VALUES table the `$this`/`$value`/`$paramName` bindings use. Instead the
+        // chosen validator is RE-PARSED per property shape with the path's SPARQL
+        // property-path form textually substituted (the `path_validator` above) —
+        // the same approach the §5.2 `sh:sparql` path takes. `$this`/`$value`/the
+        // parameters still pre-bind through VALUES below.
         let shape_path = shape.path.clone();
         let severity = shape.severity.clone();
         let shape_messages = shape.messages.clone();
@@ -752,6 +1043,7 @@ impl<'a> Validator<'a> {
                             severity: severity.clone(),
                             messages: shape_messages.clone(),
                             default_message,
+                            details: Vec::new(),
                         });
                     }
                 }
@@ -777,11 +1069,91 @@ impl<'a> Validator<'a> {
                         severity: severity.clone(),
                         messages: shape_messages.clone(),
                         default_message: fields.default_message,
+                        details: Vec::new(),
                     },
                     out,
                 );
             }
         }
+    }
+
+    /// [OPUS-4.8] (sq-vg3y) The allowed-predicate set P for `sh:closed sh:ByTypes`
+    /// at value node `v` (SHACL-1.2 §4.8.1 `collectProperties`): the IRI properties
+    /// reachable via `sh:property/sh:path` from every shape that the value node's
+    /// `rdf:type`s pull in — transitively through `rdfs:subClassOf`, inbound
+    /// `sh:targetClass`, and `sh:node` — plus `rdf:type` and the shape's own
+    /// `sh:ignoredProperties`. The shapes-graph traversal is DATA-INDEPENDENT, so
+    /// it is precomputed once per shapes node into [`ShapesModel::by_types_closure`]
+    /// at parse time; here we just union the closures for the shape's own node and
+    /// for each `rdf:type` of the value node (read from the DATA graph).
+    fn close_by_types_allowed(&self, sid: usize, v: &Term, ignored: &[String]) -> Vec<String> {
+        const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let mut allowed: rustc_hash::FxHashSet<String> = ignored.iter().cloned().collect();
+        allowed.insert(RDF_TYPE.to_string());
+        let mut add = |node: &Term| {
+            if let Some(props) = self.shapes.by_types_closure(node) {
+                allowed.extend(props.iter().cloned());
+            }
+        };
+        // The shape's own node carries sh:closed and is the rdfs:Class in the
+        // closed-003/004 tests, then every rdf:type of the value node.
+        add(&self.shapes.shapes[sid].node);
+        for ty in self.data.objects(v, RDF_TYPE) {
+            add(&ty);
+        }
+        allowed.into_iter().collect()
+    }
+
+    /// [OPUS-4.8] (sq-vg3y) `sh:uniqueValuesFor` evaluation: for each value node V
+    /// (with at least one value across the listed properties), report each OTHER
+    /// target node of this shape that has the exact same per-property value sets as
+    /// V (with that other node as `sh:value`, V's focus as `sh:focusNode`).
+    fn eval_unique_values_for(
+        &mut self,
+        sid: usize,
+        focus: &Term,
+        values: &[Term],
+        props: &[String],
+        out: &mut Vec<ValidationResult>,
+    ) {
+        // The shape's target nodes (cached once per shape, reused across foci).
+        let targets = self.unique_values_targets(sid);
+        for v in values {
+            let sig_v = value_signature(&self.data, v, props);
+            if sig_v.iter().all(|s| s.is_empty()) {
+                continue; // V has no values for any property — never a violation
+            }
+            for other in &targets {
+                if other == v {
+                    continue;
+                }
+                if value_signature(&self.data, other, props) == sig_v {
+                    out.push(
+                        self.result(
+                            sid,
+                            focus,
+                            Some(other.clone()),
+                            "UniqueValuesForConstraintComponent",
+                            "Another target node has the same values for the unique \
+                         properties"
+                                .into(),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    /// The (deduplicated) target nodes of shape `sid`, for `sh:uniqueValuesFor`.
+    /// Memoised on first use so a shape's whole-target scan happens once even
+    /// though the constraint is evaluated once per focus node.
+    fn unique_values_targets(&mut self, sid: usize) -> Vec<Term> {
+        if let Some(cached) = self.uvf_targets.get(&sid) {
+            return cached.clone();
+        }
+        let targets = self.focus_nodes(&self.shapes.shapes[sid]);
+        self.uvf_targets.insert(sid, targets.clone());
+        targets
     }
 
     #[allow(clippy::too_many_arguments)] // one call site per range component; a struct would obscure it
@@ -816,22 +1188,140 @@ impl<'a> Validator<'a> {
         let key = format!("{}\u{0}{}", source, flags.unwrap_or(""));
         self.regexes
             .entry(key)
-            .or_insert_with(|| {
-                let mut inline = String::new();
-                for f in flags.unwrap_or("").chars() {
-                    if matches!(f, 'i' | 'm' | 's' | 'x' | 'U') {
-                        inline.push(f);
-                    }
-                }
-                let pat = if inline.is_empty() {
-                    source.to_string()
-                } else {
-                    format!("(?{inline}){source}")
-                };
-                regex::Regex::new(&pat).ok()
-            })
+            .or_insert_with(|| regex::Regex::new(&compose_pattern(source, flags)).ok())
             .clone()
     }
+
+    /// [OPUS-4.8] (sq-lz99x) Records a diagnostic for an uncompilable
+    /// `sh:pattern` that was SKIPPED, de-duplicated per (shape, pattern, flags) so
+    /// it is reported once regardless of how many focus nodes / values the shape
+    /// has. The recorded message carries the `regex` crate's own compile error
+    /// (recomputed here — only on the rare skip path), which names the unsupported
+    /// construct (e.g. look-around).
+    fn note_pattern_skipped(&mut self, sid: usize, source: &str, flags: Option<&str>) {
+        let shape = self.shapes.shapes[sid].node.clone();
+        let component = sh("PatternConstraintComponent");
+        let needle = format!("\"{source}\"");
+        let already = self.diagnostics.iter().any(|d| {
+            d.source_shape == shape
+                && d.source_component == component
+                && d.message.contains(&needle)
+        });
+        if already {
+            return;
+        }
+        let detail = match regex::Regex::new(&compose_pattern(source, flags)) {
+            Err(e) => e.to_string(),
+            // Unreachable: this is only called when `regex_for` returned None, but
+            // be defensive rather than panic.
+            Ok(_) => "the pattern did not compile".to_string(),
+        };
+        let flag_note = match flags {
+            Some(f) if !f.is_empty() => format!(" (flags \"{f}\")"),
+            _ => String::new(),
+        };
+        self.diagnostics.push(ShapeDiagnostic {
+            source_shape: shape,
+            source_component: component,
+            message: format!(
+                "sh:pattern \"{source}\"{flag_note} did not compile and was SKIPPED \
+                 (the constraint reports no violations); the Rust regex engine has no \
+                 lookahead/lookbehind, matching the XML Schema regex flavour the SHACL \
+                 spec ties sh:pattern to. regex error: {detail}"
+            ),
+        });
+    }
+}
+
+/// [OPUS-4.8] (sq-lz99x) Builds the final regex source for a `sh:pattern` /
+/// `sh:flags` pair: the supported XPath-regex flags (`i`/`m`/`s`/`x`/`U`) are
+/// turned into a leading inline `(?...)` group. Shared by [`Validator::regex_for`]
+/// (compile + match) and [`Validator::note_pattern_skipped`] (recompute the error)
+/// so both see byte-identical input.
+fn compose_pattern(source: &str, flags: Option<&str>) -> String {
+    let mut inline = String::new();
+    for f in flags.unwrap_or("").chars() {
+        if matches!(f, 'i' | 'm' | 's' | 'x' | 'U') {
+            inline.push(f);
+        }
+    }
+    if inline.is_empty() {
+        source.to_string()
+    } else {
+        format!("(?{inline}){source}")
+    }
+}
+
+/// [OPUS-4.8] (sq-f8gu) The DISTINCT members of `members` that appear more than
+/// once (each duplicated value listed once, in first-seen order). Uses exact
+/// `Term` equality — the same notion `view::dedup` uses for the `sh:uniqueMembers`
+/// constraint itself — so the per-duplicate `sh:detail` sub-results agree exactly
+/// with the top-level violation decision.
+fn duplicate_members(members: &[Term]) -> Vec<Term> {
+    let mut seen: rustc_hash::FxHashSet<&Term> = rustc_hash::FxHashSet::default();
+    let mut reported: rustc_hash::FxHashSet<&Term> = rustc_hash::FxHashSet::default();
+    let mut out = Vec::new();
+    for m in members {
+        if !seen.insert(m) && reported.insert(m) {
+            out.push(m.clone());
+        }
+    }
+    out
+}
+
+/// [OPUS-4.8] (sq-vg3y) True iff value node `v` matches the single `sh:nodeKind`
+/// IRI `kind` (SHACL §4.6.1): an IRI matches sh:IRI / sh:BlankNodeOrIRI /
+/// sh:IRIOrLiteral; a blank node matches sh:BlankNode / sh:BlankNodeOrIRI /
+/// sh:BlankNodeOrLiteral; a literal matches sh:Literal / sh:BlankNodeOrLiteral /
+/// sh:IRIOrLiteral. A list-form `sh:nodeKind` is the OR over its members.
+fn node_kind_matches(v: &Term, kind: &str) -> bool {
+    let local = kind.strip_prefix(crate::model::SH).unwrap_or(kind);
+    match v {
+        Term::NamedNode(_) => matches!(local, "IRI" | "BlankNodeOrIRI" | "IRIOrLiteral"),
+        Term::BlankNode(_) => {
+            matches!(local, "BlankNode" | "BlankNodeOrIRI" | "BlankNodeOrLiteral")
+        }
+        Term::Literal(_) => matches!(local, "Literal" | "BlankNodeOrLiteral" | "IRIOrLiteral"),
+        #[allow(unreachable_patterns)]
+        _ => false,
+    }
+}
+
+/// [OPUS-4.8] (sq-vg3y) A default message for a set-valued `sh:datatype` /
+/// `sh:nodeKind` constraint (`label` = "datatype" / "node kind"): the single IRI
+/// reads naturally, the list form reads "any of <…> <…>".
+fn iri_set_message(label: &str, iris: &[String]) -> String {
+    match iris {
+        [one] => format!("Value does not have {label} <{one}>"),
+        many => {
+            let joined = many
+                .iter()
+                .map(|i| format!("<{i}>"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("Value does not have any of the allowed {label}s {joined}")
+        }
+    }
+}
+
+/// [OPUS-4.8] (sq-vg3y) The `sh:uniqueValuesFor` signature of a node: for each
+/// listed property (IN ORDER), the SORTED, deduplicated set of its data-graph
+/// values (rendered as terms). Two nodes share a key iff their signatures are
+/// equal — exact term match, so `"04"^^xsd:byte` ≠ `"4"^^xsd:integer`.
+fn value_signature(data: &GraphView, node: &Term, props: &[String]) -> Vec<Vec<String>> {
+    props
+        .iter()
+        .map(|p| {
+            let mut vs: Vec<String> = data
+                .objects(node, p)
+                .iter()
+                .map(|t| t.to_string())
+                .collect();
+            vs.sort();
+            vs.dedup();
+            vs
+        })
+        .collect()
 }
 
 /// The string a value node contributes to sh:minLength/maxLength/pattern:
@@ -1005,7 +1495,10 @@ fn timestamp(value: &str, dt: &str) -> Option<(f64, bool)> {
     if local == "dateTimeStamp" && !has_tz {
         return None;
     }
-    Some((days_from_civil(y, m, d) as f64 * 86_400.0 + secs - tz_offset_secs, has_tz))
+    Some((
+        days_from_civil(y, m, d) as f64 * 86_400.0 + secs - tz_offset_secs,
+        has_tz,
+    ))
 }
 
 /// The byte index where a date lexical's optional timezone suffix starts.
@@ -1225,27 +1718,72 @@ mod tests {
 
         // [OPUS-4.8] Stricter XSD date/time lexical validation (review 1616):
         // impossible calendar days are rejected.
-        assert!(!well_formed(&lit("2023-02-29", "date")), "Feb 29 in a non-leap year");
-        assert!(!well_formed(&lit("2024-02-30", "date")), "Feb 30 never exists");
-        assert!(!well_formed(&lit("2024-04-31", "date")), "April has 30 days");
+        assert!(
+            !well_formed(&lit("2023-02-29", "date")),
+            "Feb 29 in a non-leap year"
+        );
+        assert!(
+            !well_formed(&lit("2024-02-30", "date")),
+            "Feb 30 never exists"
+        );
+        assert!(
+            !well_formed(&lit("2024-04-31", "date")),
+            "April has 30 days"
+        );
         assert!(well_formed(&lit("2024-04-30", "date")));
-        assert!(well_formed(&lit("2000-02-29", "date")), "2000 is a leap year (÷400)");
-        assert!(!well_formed(&lit("1900-02-29", "date")), "1900 is not (÷100, ¬÷400)");
+        assert!(
+            well_formed(&lit("2000-02-29", "date")),
+            "2000 is a leap year (÷400)"
+        );
+        assert!(
+            !well_formed(&lit("1900-02-29", "date")),
+            "1900 is not (÷100, ¬÷400)"
+        );
         // dateTime requires a time component after 'T'.
-        assert!(!well_formed(&lit("2024-01-01T", "dateTime")), "missing time part");
-        assert!(!well_formed(&lit("2024-01-01TZ", "dateTime")), "empty time part");
+        assert!(
+            !well_formed(&lit("2024-01-01T", "dateTime")),
+            "missing time part"
+        );
+        assert!(
+            !well_formed(&lit("2024-01-01TZ", "dateTime")),
+            "empty time part"
+        );
         // Out-of-range hour/minute/second.
-        assert!(!well_formed(&lit("2024-01-01T25:00:00", "dateTime")), "hour 25");
-        assert!(!well_formed(&lit("2024-01-01T12:60:00", "dateTime")), "minute 60");
-        assert!(!well_formed(&lit("2024-01-01T12:00:61", "dateTime")), "second 61");
-        assert!(well_formed(&lit("2024-01-01T24:00:00", "dateTime")), "24:00:00 is legal");
-        assert!(!well_formed(&lit("2024-01-01T24:00:01", "dateTime")), "24:00:01 is not");
-        assert!(well_formed(&lit("2024-01-01T12:30:45.5", "dateTime")), "fractional seconds");
+        assert!(
+            !well_formed(&lit("2024-01-01T25:00:00", "dateTime")),
+            "hour 25"
+        );
+        assert!(
+            !well_formed(&lit("2024-01-01T12:60:00", "dateTime")),
+            "minute 60"
+        );
+        assert!(
+            !well_formed(&lit("2024-01-01T12:00:61", "dateTime")),
+            "second 61"
+        );
+        assert!(
+            well_formed(&lit("2024-01-01T24:00:00", "dateTime")),
+            "24:00:00 is legal"
+        );
+        assert!(
+            !well_formed(&lit("2024-01-01T24:00:01", "dateTime")),
+            "24:00:01 is not"
+        );
+        assert!(
+            well_formed(&lit("2024-01-01T12:30:45.5", "dateTime")),
+            "fractional seconds"
+        );
         // Out-of-range / malformed timezone.
-        assert!(!well_formed(&lit("2024-01-01T12:00:00+15:00", "dateTime")), "tz > ±14:00");
+        assert!(
+            !well_formed(&lit("2024-01-01T12:00:00+15:00", "dateTime")),
+            "tz > ±14:00"
+        );
         assert!(well_formed(&lit("2024-01-01T12:00:00+14:00", "dateTime")));
         // dateTimeStamp requires an explicit timezone; dateTime does not.
-        assert!(well_formed(&lit("2024-01-01T12:00:00", "dateTime")), "tz-less dateTime ok");
+        assert!(
+            well_formed(&lit("2024-01-01T12:00:00", "dateTime")),
+            "tz-less dateTime ok"
+        );
         assert!(
             !well_formed(&lit("2024-01-01T12:00:00", "dateTimeStamp")),
             "tz-less dateTimeStamp is NOT in its lexical space"
@@ -1276,7 +1814,10 @@ mod tests {
             Literal::new_typed_literal(v, oxrdf::NamedNode::new(xsd("dateTime")).unwrap())
         };
         assert_eq!(
-            cmp_literals(&lit("2002-10-10T12:00:00-05:00"), &lit("2002-10-10T12:00:00")),
+            cmp_literals(
+                &lit("2002-10-10T12:00:00-05:00"),
+                &lit("2002-10-10T12:00:00")
+            ),
             None
         );
     }

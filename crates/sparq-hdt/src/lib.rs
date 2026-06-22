@@ -1,39 +1,7 @@
-//! sparq-hdt: load HDT (Header Dictionary Triples) archives into a sparq [`Graph`].
-//!
-//! HDT (<https://www.rdfhdt.org/>, W3C member submission) is the de-facto binary
-//! archive format for RDF: the dictionary is Plain-Front-Coded and the triples are
-//! a bitmap-compressed adjacency list, so files are a fraction of the size of
-//! (even gzipped) N-Triples and load without text parsing. This crate wraps the
-//! maintained [`hdt`] crate's reader — which supports the standard layout written
-//! by hdt-cpp / hdt-java: FourSectionDictionary (PFC) + BitmapTriples, SPO order —
-//! and streams its dictionary + triples into a sparq graph:
-//!
-//! ```no_run
-//! let graph = sparq_hdt::load("dataset.hdt").unwrap();
-//! ```
-//!
-//! Writing back out (`Graph` -> `.hdt`) is opt-in behind the `write` cargo feature.
-//! It encodes the FourSectDict (Plain Front Coding) + BitmapTriples sections
-//! DIRECTLY from sparq's in-memory dictionary + triples (the inverse of the decoder)
-//! — no temporary N-Triples round-trip — see [`save`] and `src/encode.rs`:
-//!
-//! ```no_run
-//! # #[cfg(feature = "write")]
-//! # fn demo(graph: &sparq_core::Graph) -> Result<(), sparq_hdt::Error> {
-//! sparq_hdt::save(graph, "out.hdt")?;        // or out.hdt.gz / .hdt.zst / .hdt.bz2
-//! # Ok(()) }
-//! ```
-//!
-//! The translation works at the **id level**: each distinct HDT dictionary id is
-//! decompressed to its term string ONCE, interned into the sparq [`Dict`], and the
-//! mapping memoized in a flat per-section table — so the term set is never
-//! materialized twice and the per-triple work is three array lookups.
-//!
-//! Compressed containers — `.hdt.gz` (gzip), `.hdt.zst` (zstd) and `.hdt.bz2`
-//! (bzip2), as publishers ship them — are detected by MAGIC BYTES (not file name)
-//! and decompressed on the fly, STREAMING (the decompressed `.hdt` is never fully
-//! materialized) by every entry point; [`header`] exposes the archive's metadata
-//! triples (the H in HDT) as a queryable sparq [`Graph`].
+// [OPUS-4.8] sq-jxl0: single-source the crate overview from README.md so crates.io
+// (package.readme) and the docs.rs front page render identical content. The README's
+// quickstart fence is a `no_run` doctest (it opens a `.hdt` file that need not exist).
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use sparq_core::dict::{Dict, Id};
@@ -52,6 +20,10 @@ use std::path::Path;
 // for callers that already hold an `Hdt` (e.g. to also query its header).
 mod decode;
 pub use decode::graph_from_reader;
+// [OPUS-4.8] (sq-q6a1) Measurement-only: per-stage timed decode for bench/parse's
+// 3-way HDT split. Identical decode path; the production `graph_from_reader` times
+// nothing.
+pub use decode::{graph_from_reader_timed, StageTimings};
 
 // [OPUS-4.8] sq-2te / sq-ashy: HDT write support (sparq `Graph` -> `.hdt`). Opt-in
 // via the `write` feature (it pulls the wrapped crate's `sophia` feature for the
@@ -401,6 +373,59 @@ pub(crate) fn intern_hdt_term(dict: &mut Dict, s: &str) -> Result<Id, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error as _;
+
+    /// [OPUS-4.8] sq-cafc: the public [`Error`] type's `Display` and `source()` are part of
+    /// the crate's error contract (callers print and chain these) but were never asserted.
+    /// Each of the three variants must render its documented prefix, and `source()` must
+    /// expose the wrapped cause for the I/O variant and report `None` for the leaf `Term`
+    /// variant — so a `?`-chained caller can walk the cause chain.
+    #[test]
+    fn error_display_and_source_chain() {
+        // `Io`: renders the I/O prefix and EXPOSES the wrapped error as its `source`.
+        let io = Error::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "boom",
+        ));
+        assert!(
+            io.to_string().starts_with("I/O error reading HDT file:"),
+            "Io Display prefix, got: {io}"
+        );
+        assert!(io.source().is_some(), "Io must expose its wrapped cause");
+
+        // `Term`: renders the dictionary-term prefix and is a LEAF (no source).
+        let term = Error::Term("bad term".to_owned());
+        assert_eq!(term.to_string(), "invalid term in HDT dictionary: bad term");
+        assert!(term.source().is_none(), "Term is a leaf error");
+
+        // `From<std::io::Error>` builds the `Io` variant (the `?` conversion path).
+        let converted: Error =
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into();
+        assert!(matches!(converted, Error::Io(_)));
+        assert!(converted.to_string().contains("denied"));
+    }
+
+    /// The `Hdt` variant's `Display` + `source()` (the wrapped `hdt` decode error) are
+    /// reached on any malformed archive. Drive a real decode failure (random bytes) and,
+    /// when it surfaces as the `Hdt` variant, assert its prefix + that it chains a source.
+    #[test]
+    fn hdt_error_variant_displays_and_chains() {
+        let Err(err) = load_reader(std::io::Cursor::new(
+            b"$HDT\x01 not really an archive".to_vec(),
+        )) else {
+            panic!("garbage after the cookie must fail to decode");
+        };
+        if let Error::Hdt(_) = err {
+            assert!(
+                err.to_string().starts_with("error decoding HDT archive:"),
+                "Hdt Display prefix, got: {err}"
+            );
+            assert!(err.source().is_some(), "Hdt must expose its wrapped cause");
+        }
+        // (If the failure classified as Io/Term instead, those variants are covered by
+        // `error_display_and_source_chain`; the point here is to EXERCISE the Hdt arm,
+        // which a corrupt control-info read reaches.)
+    }
 
     /// The dictionary-string parser must map every HDT term shape onto the term
     /// sparq's own loaders would produce (checked via the N-Triples rendering).

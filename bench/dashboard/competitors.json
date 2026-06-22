@@ -47,17 +47,68 @@
   ],
 
   "schema_version": 1,
-  "gathered_at_utc": "2026-06-15",
-  "gathered_by": "static curation from in-repo sources (no live gather); see `source` on each engine/reference",
+  "gathered_at_utc": "2026-06-16",
+  "gathered_by": "STATIC in-repo references (qlever/eye) + a LIVE ephemeral-EC2 gather of the SHACL engines (sq-ays7, re-measuring the earlier sq-8dp3 gather at the current HEAD). The SHACL `values` below were measured on a one-shot ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton, Ubuntu 24.04), quiet_box=true, on repo commit f271b74, against the committed SHACL suite (bench/shacl/gen.sh 1 0 — the LUBM(1) ABox, ~103k triples, x the 5 hand-authored shape graphs in bench/shacl/shapes/). This is an EPHEMERAL GATHER POINT for cross-engine ordering, NOT the pinned reference band (the dashboard CI series runs on a GitHub-hosted runner; absolute µs across the two host classes are not directly comparable — the host class + quiet_box flag are recorded per datapoint). HONEST-N/A: oxigraph + qlever stay ABSENT from `values` — oxigraph WAS gathered live on the same box but only via the sparq-bench synthetic-compare path (a different dataset/scale/query-name set from any dashboard featured-suite metric; see oxigraph_compare_note), and qlever needs a multi-GB on-disk server that the gather does not auto-start (only the cross-machine M1 `references` numbers exist). Filling either would be apples-to-oranges, so both remain n/a.",
 
   "engines": [
     { "id": "qlever", "label": "QLever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "source": "bench/qlever-baselines.md" },
-    { "id": "oxigraph", "label": "Oxigraph", "version": "0.5.8", "env": "embedded Rust dev-dep (Cargo.lock); no committed dashboard-scale numbers", "source": "crates/sparq-bench Cargo.toml + Cargo.lock" },
+    { "id": "oxigraph", "label": "Oxigraph", "version": "0.5.8", "env": "embedded Rust dev-dep (Cargo.lock); gathered on ephemeral c7g.xlarge but on the in-process sparq-bench synthetic graph (50k entities) — a DIFFERENT dataset/regime/query-name set from any dashboard metric, so NO same-row value cell (would be apples-to-oranges); see oxigraph_compare_note", "source": "crates/sparq-bench Cargo.toml + Cargo.lock" },
     { "id": "eye", "label": "EYE", "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2", "env": "Apple M1 (fanless), macOS 25.4.0", "source": "bench/inference/eye-comparison.md" },
-    { "id": "rdfox", "label": "RDFox", "version": "not gathered (vendor/paper figures only — Oxford Semantic; AAAI-2014/ISWC-2015)", "env": "n/a — no head-to-head run in-repo", "source": "research/inference-sota.md §1.1" }
+    { "id": "rdfox", "label": "RDFox", "version": "not gathered (vendor/paper figures only — Oxford Semantic; AAAI-2014/ISWC-2015)", "env": "n/a — no head-to-head run in-repo", "source": "research/inference-sota.md §1.1" },
+    { "id": "pyshacl", "label": "pySHACL", "version": "0.31.0", "env": "ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, quiet_box=true, commit f271b74; gathered 2026-06-16 (sq-ays7)", "source": "live gather — scripts/gather-ec2.sh + report_cli_adapter.py" },
+    { "id": "jena-shacl", "label": "Apache Jena SHACL", "version": "5.2.0", "env": "ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, OpenJDK (default-jdk), quiet_box=true, commit f271b74; gathered 2026-06-16 (sq-ays7)", "source": "live gather — scripts/gather-ec2.sh + report_cli_adapter.py" }
   ],
 
-  "values": {},
+  "oxigraph_compare_note": "Oxigraph 0.5.8 WAS gathered live on the ephemeral c7g.xlarge (commit f271b74, sq-ays7) via the sparq-bench compare path (--scale 50000 --iters 4, in-process synthetic social graph, ~0.4M triples). All 7 queries agreed with sparq on solution counts (correctness cross-check passed). Min-time results (sparq vs oxigraph): load 226.77ms vs 1.011s (4.46x); scan-type 5.17ms vs 33.15ms (6.41x); star-3 16.01ms vs 165.52ms (10.34x); chain-2 132.64ms vs 995.75ms (7.51x); triangle 258.43ms vs 1.260s (4.87x); filter-age 3.76ms vs 26.39ms (7.02x); count-edges 5.1µs vs 52.13ms; optional 13.71ms vs 103.09ms (7.52x). These are recorded here for transparency but deliberately NOT mapped into a `values` cell: the dashboard's synthetic-suite metric names (q03_star3/q04_follows_name/q10_optional_age) are the sparq-bench-compare CLI suite at CI scale on a gh-runner — a different dataset/scale/regime/query-name set from this in-process compare, so aligning them would be apples-to-oranges (forbidden by the HONESTY note).",
+
+  "_comment_values": "SHACL per-workload validate latency (µs) measured on the ephemeral c7g.xlarge gather (sq-ays7, commit f271b74; re-measuring the earlier sq-8dp3 point) against the SAME data x shapes as the dashboard SHACL suite. Keyed by the dashboard metric STEM (metric name minus _us; dashboard.competitorsFor matches name-minus-_us). Unit is microseconds (matches the shacl_*_validate_us metric unit). HONESTY: cross-engine #violations were verified per workload before recording timing — sparq/jena/pyshacl AGREE on cardinality(149)/class_nodekind(125)/datatype_range(1874)/sparql_constraint(3738); on node_paths sparq+jena report 1802 (per-occurrence) while pyshacl reports 3604 (it does NOT decompose the sh:node inter-shape recursion the same way) — a SEMANTIC count difference, documented in bench/shacl/expected.tsv's per-engine caveat, so pyshacl's node_paths timing is for a DIFFERENT result count and is flagged here. Absolute µs are from a 4-vCPU Graviton, NOT the gh-runner CI band — for cross-engine ORDERING, not an absolute reference. NOTE: this is FILE-ONLY documentation (a sibling of `values`, not a member of it) so `values` stays a strict metric-stem -> {engineId: number} mapping; the dashboard.js mirror carries the same note as a JS comment above COMPETITORS_DATA.values.",
+
+  "values": {
+    "shacl_cardinality_validate":      { "pyshacl": 2770805, "jena-shacl": 1468099 },
+    "shacl_class_nodekind_validate":   { "pyshacl": 2774018, "jena-shacl": 1482460 },
+    "shacl_datatype_range_validate":   { "pyshacl": 3600595, "jena-shacl": 1666635 },
+    "shacl_node_paths_validate":       { "pyshacl": 4467148, "jena-shacl": 1788495 },
+    "shacl_sparql_constraint_validate":{ "pyshacl": 27661760, "jena-shacl": 2248361 }
+  },
+
+  "same_box_comparisons": [
+    {
+      "_comment": "[OPUS-4.8] sq-ays7 — SAME-BOX SPARQL comparison (PHASE 2): sparq + Oxigraph (+ QLever best-effort) on ONE ephemeral AWS EC2 box against the SAME generated SP2Bench-250k corpus + the SAME bench/sp2b/queries .rq files in the SAME min-of-5 COUNT regime. DISTINCT from (a) the gh-runner CI-band featured-suites `values` cells above — that sparq column is a DIFFERENT machine, so a competitor µs from this box must NOT be placed beside it; and (b) the cross-machine `references` baselines (cited, own scale/machine). Absolute µs are THIS-BOX-ONLY (4-vCPU Graviton) — for cross-engine ORDERING, not an absolute cross-machine reference. HONESTY: the gather launched sparq (sparq-cli bench, captured) then Oxigraph (sparq-bench bench-corpus) on the same box, but the orchestrator's poll loop reached its bound and the instance hit its orphan-safe cleanup trap immediately AFTER the Oxigraph command was invoked and BEFORE its TSV reached the pulled log — so NO Oxigraph timing and NO QLever timing were captured. Rather than fabricate or cross-fill, oxigraph + qlever stay null (render 'n/a') and count_match stays null (cannot verify cross-engine row agreement without the Oxigraph rows). Only sparq's real per-query (rows, best_us) are recorded. The sparq+oxigraph row-counts therefore COULD NOT be cross-checked on this run. Re-running the gather to completion (sentinel-gated, longer poll bound) would fill the oxigraph column and enable the count_match check. Keep byte-for-meaning in sync with COMPETITORS_DATA.same_box_comparisons in dashboard.js.",
+      "suite": "SP2Bench",
+      "scale": "SP2Bench 250k triples (bench/sp2b/gen.sh 250000; 27,219,138-byte Turtle)",
+      "iters": 5,
+      "git_commit": "681047f",
+      "gathered_at_utc": "2026-06-16",
+      "source": "live ephemeral-EC2 gather — scripts/gather-ec2-sparql.sh (sparq via `sparq-cli bench … 5 count`; Oxigraph via `sparq-bench bench-corpus … 5`)",
+      "env": {
+        "host_class": "ephemeral AWS EC2 c7g.xlarge (4 vCPU arm64 Graviton, Ubuntu 24.04)",
+        "quiet_box": true,
+        "gathered_at_utc": "2026-06-16",
+        "note": "Requested c7g.2xlarge fell back to c7g.xlarge (account vCPU limit of 16). Oxigraph 0.5.8 (Cargo.lock). QLever was requested (QLEVER=1) but produced no numbers on this run."
+      },
+      "engines": [
+        { "id": "sparq", "label": "sparq", "version": "git 681047f", "env": "ephemeral c7g.xlarge (4 vCPU Graviton), release build, min-of-5 COUNT" },
+        { "id": "oxigraph", "label": "Oxigraph", "version": "0.5.8", "env": "same box — n/a: bench-corpus TSV not captured before the orphan-safe cleanup trap fired" },
+        { "id": "qlever", "label": "QLever", "version": "n/a", "env": "requested (QLEVER=1) but no QLever timing produced on this run — honest n/a, not fabricated" }
+      ],
+      "rows": [
+        { "query": "q01",  "unit": "µs", "rows": 1,      "values": { "sparq": 9.2,      "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q02",  "unit": "µs", "rows": 6067,   "values": { "sparq": 6618.2,   "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q03a", "unit": "µs", "rows": 15823,  "values": { "sparq": 14525.7,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q03b", "unit": "µs", "rows": 114,    "values": { "sparq": 14355.4,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q03c", "unit": "µs", "rows": 0,      "values": { "sparq": 14140.6,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q04",  "unit": "µs", "rows": 541911, "values": { "sparq": 358604.1, "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q05b", "unit": "µs", "rows": 6933,   "values": { "sparq": 15317.7,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q07",  "unit": "µs", "rows": 48,     "values": { "sparq": 23383.4,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q08",  "unit": "µs", "rows": 358,    "values": { "sparq": 212938.1, "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q09",  "unit": "µs", "rows": 4,      "values": { "sparq": 23091.2,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q10",  "unit": "µs", "rows": 452,    "values": { "sparq": 3.8,      "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q11",  "unit": "µs", "rows": 10,     "values": { "sparq": 18652.1,  "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q12b", "unit": "µs", "rows": 1,      "values": { "sparq": 213513.8, "oxigraph": null, "qlever": null }, "count_match": null },
+        { "query": "q12c", "unit": "µs", "rows": 0,      "values": { "sparq": 4.9,      "oxigraph": null, "qlever": null }, "count_match": null }
+      ]
+    }
+  ],
 
   "references": [
     { "suite": "Synthetic (qlever-style)", "engine": "qlever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "scale": "10M synthetic (1.25M entities × 8)", "metric": "q03_star3 (3-pattern star join), count", "value": 73, "unit": "ms", "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only", "source": "bench/qlever-baselines.md", "caveat": "10M-scale on an M1 — NOT the dashboard CI scale; reference only." },

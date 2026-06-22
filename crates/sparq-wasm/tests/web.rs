@@ -265,6 +265,82 @@ fn query_quads_chunks_reassemble() {
     );
 }
 
+// ---- sq-0ptd (gh-54): string functions retained in the real wasm Store ----
+
+/// CONTAINS / STRSTARTS / LCASE are exercisable through the REAL exported `Store::query`
+/// in a genuine wasm runtime — none is compiled out for `wasm32`. This proves the trio the
+/// gh-54 audit calls out survives the wasm build end to end (the native
+/// `regression_string_functions` test asserts the same via the engine path).
+#[wasm_bindgen_test]
+fn string_functions_retained() {
+    let data = r#"@prefix ex: <http://ex/> .
+        ex:a ex:name "Alice" . ex:b ex:name "BOB" . ex:c ex:name "carol" ."#;
+    let store = Store::load(data, "turtle").unwrap();
+
+    // STRSTARTS: only "Alice" starts with "Al".
+    let j = store
+        .query(r#"PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n FILTER(STRSTARTS(?n, "Al")) }"#)
+        .unwrap();
+    assert!(j.contains("\"value\":\"Alice\""), "STRSTARTS: {j}");
+    assert_eq!(j.matches("\"n\":{").count(), 1, "STRSTARTS one row: {j}");
+
+    // CONTAINS over LCASE: "BOB"->"bob" and "carol" both contain "o".
+    let j = store
+        .query(r#"PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n FILTER(CONTAINS(LCASE(?n), "o")) }"#)
+        .unwrap();
+    assert_eq!(
+        j.matches("\"n\":{").count(),
+        2,
+        "CONTAINS(LCASE(..)) matches BOB + carol: {j}"
+    );
+
+    // LCASE as a projected (BIND) value.
+    let j = store
+        .query(
+            r#"PREFIX ex: <http://ex/> SELECT ?l WHERE { ex:b ex:name ?n BIND(LCASE(?n) AS ?l) }"#,
+        )
+        .unwrap();
+    assert!(
+        j.contains("\"value\":\"bob\""),
+        "LCASE projects lowercase: {j}"
+    );
+}
+
+/// [OPUS-4.8] sq-0ptd (gh-54): the NEGATIVE half of the audit — REGEX/REPLACE are compiled
+/// OUT of the lean default browser bundle (the `regex` feature is OFF here) — asserted on the
+/// REAL `wasm32` target where it is actually observable. `sparq-wasm` disables
+/// `sparq-engine`'s defaults, and the wasm build links only `sparq-wasm`'s own (regex-off)
+/// `sparq-engine` — it does NOT unify the rest of the workspace's default-feature
+/// `sparq-engine` deps, so regex is genuinely absent. (The mirror native unit test was
+/// removed: a native `--workspace` build unifies `sparq-engine/regex` ON via other crates,
+/// making the native negative unobservable — see the note in `lib.rs`.) Through the real
+/// exported `Store::query`, a REGEX/REPLACE query is REJECTED (the `JsError` Err arm), not
+/// silently empty. `--features regex` re-enables them (positive half: `string_functions`
+/// always-present trio above + the native `regex_present_when_enabled`).
+#[cfg(not(feature = "regex"))]
+#[wasm_bindgen_test]
+fn regex_compiled_out_by_default() {
+    let data = r#"@prefix ex: <http://ex/> . ex:a ex:name "Alice" ."#;
+    let store = Store::load(data, "turtle").unwrap();
+    assert!(
+        store
+            .query(
+                r#"PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n FILTER(REGEX(?n, "^Al")) }"#,
+            )
+            .is_err(),
+        "REGEX with the `regex` feature off must be rejected (not silently empty)"
+    );
+    // REPLACE is gated identically.
+    assert!(
+        store
+            .query(
+                r#"PREFIX ex: <http://ex/> SELECT (REPLACE(?n, "A", "X") AS ?r) WHERE { ?s ex:name ?n }"#,
+            )
+            .is_err(),
+        "REPLACE with the `regex` feature off must be rejected"
+    );
+}
+
 // ---- compressed store: identical results, smaller footprint ----
 
 /// `loadCompressed` returns byte-identical SELECT JSON to the raw store and reports a
@@ -333,4 +409,468 @@ fn apply_delta_batch() {
     assert!(!store
         .ask("PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }")
         .unwrap());
+}
+
+// ---- [OPUS-4.8] sq-ty78o (#1114): the empty `new Store()` constructor, in real wasm ----
+
+/// `new Store()` (the wasm `constructor`) builds an empty, mutable store, and a
+/// `GRAPH`-targeted `updateInPlace` insert then a `GRAPH ?g` query round-trips THROUGH THE
+/// REAL wasm export — the named-graph gap the issue reported, closed by the constructor.
+#[wasm_bindgen_test]
+fn new_store_named_graph_roundtrip() {
+    let mut store = Store::new().expect("new Store() must succeed");
+    assert_eq!(store.size(), 0, "a new Store() is empty");
+    store
+        .update_in_place(
+            "INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
+        )
+        .expect("named-graph INSERT DATA must apply to an empty store");
+    let json = store
+        .query("SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }")
+        .expect("GRAPH query must run");
+    assert!(
+        json.contains("\"value\":\"http://ex/g\""),
+        "named graph round-trips through new Store(): {json}"
+    );
+}
+
+// ---- [OPUS-4.8] sq-f66jz (#1115): base-IRI load (`loadWithBase`), in real wasm ----
+
+/// `Store::loadWithBase` resolves relative IRIs against the base through the real wasm
+/// export, and a syntactically invalid base surfaces as the `JsError` Err arm (not a trap).
+#[wasm_bindgen_test]
+fn load_with_base_resolves_relative() {
+    let store = Store::load_with_base("<a> <p> <../up/o> .", "turtle", "http://ex/dir/")
+        .expect("base-IRI load must succeed");
+    assert_eq!(store.size(), 1);
+    let json = store.query("SELECT ?s ?o WHERE { ?s ?p ?o }").unwrap();
+    assert!(
+        json.contains("\"value\":\"http://ex/dir/a\""),
+        "relative subject resolved against base: {json}"
+    );
+    assert!(
+        json.contains("\"value\":\"http://ex/up/o\""),
+        "relative object resolved against base: {json}"
+    );
+    // An invalid base IRI is the `Err` (JsError) arm across the boundary, not a trap.
+    assert!(
+        Store::load_with_base("<a> <p> <o> .", "turtle", "not a iri").is_err(),
+        "an invalid base IRI must return Err, not panic"
+    );
+}
+
+// ---- [OPUS-4.8] sq-fe1s: the opt-in `serialize` binding, in real wasm ----
+//
+// These exercise the REAL exported `Store::serialize(format, pretty, indent, abbreviate)`
+// through the wasm/JS boundary — both the document string it returns (the pretty-Turtle /
+// pretty-TriG shape) and the `JsError` arm for an unknown format. Compiled only under the
+// `serialize-rdf` feature, exactly as the binding is. The native `#[cfg(test)]` tests in
+// src/serialize.rs assert byte-parity with the engine writer; this proves the method
+// actually exports to and runs in wasm, and that the unknown-format Err arm (which DOES
+// touch `JsError::new`, untestable natively) surfaces as an `Err` rather than a trap.
+#[cfg(feature = "serialize-rdf")]
+mod serialize {
+    use super::*;
+
+    /// Pretty Turtle through the wasm `Store::serialize` returns a non-empty document with
+    /// a `@prefix` header (abbreviate=true) carrying the store's triples.
+    #[wasm_bindgen_test]
+    fn serialize_turtle_pretty() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let ttl = store
+            .serialize("turtle", true, Some("  ".to_string()), true, None)
+            .unwrap();
+        // The well-known `xsd:` prefix (used by the integer ages) is declared + compacted.
+        assert!(ttl.contains("@prefix xsd:"), "prefix header: {ttl}");
+        assert!(ttl.contains("xsd:integer"), "datatype compacted: {ttl}");
+        // The data is present (ex: is not a well-known prefix, so it stays in full form).
+        assert!(ttl.contains("<http://ex/alice>"), "subject present: {ttl}");
+        assert!(ttl.contains("\"Bob\"@en"), "lang tag preserved: {ttl}");
+    }
+
+    /// `abbreviate=false` keeps every IRI in full `<…>` form with no `@prefix` header.
+    #[wasm_bindgen_test]
+    fn serialize_turtle_no_abbreviate() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let ttl = store.serialize("turtle", true, None, false, None).unwrap();
+        assert!(!ttl.contains("@prefix"), "no header when abbreviate=false: {ttl}");
+        assert!(ttl.contains("<http://ex/alice>"), "full IRIs: {ttl}");
+    }
+
+    /// Pretty TriG over a dataset emits a `GRAPH <g> { … }` block for the named graph.
+    #[wasm_bindgen_test]
+    fn serialize_trig_named_graph() {
+        let nq = "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g1> .\n";
+        let store = Store::load_dataset(nq, "nquads").unwrap();
+        let trig = store.serialize("trig", true, None, true, None).unwrap();
+        assert!(trig.contains("GRAPH"), "named graph as a GRAPH block: {trig}");
+    }
+
+    /// An unknown format string surfaces as the `JsError` Err arm across the boundary, not
+    /// a trap — the error path JS relies on (`try { store.serialize("xml", …) } catch`).
+    #[wasm_bindgen_test]
+    fn serialize_unknown_format_is_err() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        assert!(
+            store.serialize("rdfxml", true, None, true, None).is_err(),
+            "an unrecognised format must return Err, not panic"
+        );
+    }
+
+    // ---- [OPUS-4.8] sq-ixc3.5: the JSON-LD serialise-out path, in real wasm ----
+
+    /// Pretty JSON-LD through the wasm `Store::serialize`, run in a genuine wasm32 runtime,
+    /// is byte-identical to the engine writer it delegates to
+    /// (`graph_to_jsonld_pretty_with`) — the load-bearing parity invariant proved across
+    /// the JS boundary, not just natively. Exercises all three forms.
+    #[wasm_bindgen_test]
+    fn serialize_jsonld_pretty_matches_engine() {
+        use sparq_engine::serialize::{
+            default_prefixes, graph_to_jsonld_pretty_with, JsonLdForm, JsonLdPrettyOptions,
+        };
+        use sparq_core::Graph;
+        let store = Store::load(DATA, "turtle").unwrap();
+        let g = Graph::load_str(DATA, "turtle").unwrap();
+        let opts = JsonLdPrettyOptions {
+            indent: "  ".to_string(),
+        };
+        for (fmt, form) in [
+            ("jsonld", JsonLdForm::Expanded),
+            ("jsonld-expanded", JsonLdForm::Expanded),
+            ("jsonld-flattened", JsonLdForm::Flattened),
+            ("jsonld-compacted", JsonLdForm::Compacted),
+        ] {
+            let got = store
+                .serialize(fmt, true, Some("  ".to_string()), true, None)
+                .unwrap();
+            let want = graph_to_jsonld_pretty_with(&g, form, &default_prefixes(), &opts);
+            assert_eq!(got, want, "wasm pretty JSON-LD ({fmt}) must equal the engine output");
+            assert!(got.contains('\n'), "pretty JSON-LD is indented: {got}");
+        }
+        // The compacted form carries a prefix `@context`; expanded does not — a quick
+        // shape check that the form selection actually reached the writer.
+        let compacted = store
+            .serialize("jsonld-compacted", true, None, true, None)
+            .unwrap();
+        assert!(compacted.contains("@context"), "compacted has @context: {compacted}");
+    }
+
+    // ---- [OPUS-4.8] sq-l5kr: the OPTIONAL caller-supplied prefix map, in real wasm ----
+
+    /// A caller-supplied `prefixes` array (`[[prefix, iri], …]`) drives compaction across
+    /// the JS boundary: `http://example.org/x` abbreviates to `ex:x`, and the SITE's
+    /// `https://schema.org/` (note HTTPS — `default_prefixes()` uses HTTP) is used for the
+    /// `schema` prefix. This is the new capability the native tests can't reach (a
+    /// `js_sys::Array` only exists in a real wasm runtime), and the byte-for-byte parity
+    /// with the engine writer fed the SAME pair list is the load-bearing invariant.
+    #[wasm_bindgen_test]
+    fn serialize_with_prefix_map() {
+        use sparq_core::Graph;
+        use sparq_engine::serialize::{
+            graph_to_jsonld_with, graph_to_turtle_pretty_with, prefixes_from_pairs, JsonLdForm,
+            PrettyOptions,
+        };
+        use wasm_bindgen::JsValue;
+
+        let data = "<http://example.org/x> a <https://schema.org/Thing> ;\n\
+                       <http://example.org/p> <https://schema.org/y> .\n";
+        let store = Store::load(data, "turtle").unwrap();
+
+        // Build the JS `[[prefix, iri], …]` array the binding reads.
+        let prefixes = js_sys::Array::new();
+        for (p, n) in [
+            ("ex", "http://example.org/"),
+            ("schema", "https://schema.org/"),
+        ] {
+            let pair = js_sys::Array::new();
+            pair.push(&JsValue::from_str(p));
+            pair.push(&JsValue::from_str(n));
+            prefixes.push(&pair);
+        }
+
+        // Pretty Turtle through the binding with the custom map.
+        let got = store
+            .serialize("turtle", true, Some("  ".to_string()), true, Some(prefixes.clone()))
+            .unwrap();
+        // Byte-for-byte equal to the engine writer fed the SAME pair list.
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let map = prefixes_from_pairs([
+            ("ex", "http://example.org/"),
+            ("schema", "https://schema.org/"),
+        ]);
+        let want = graph_to_turtle_pretty_with(&g, &map, &PrettyOptions::default());
+        assert_eq!(got, want, "wasm prefix-map Turtle must equal the engine output:\n{got}");
+        // The new capability: example.org abbreviates and the HTTPS schema is used.
+        assert!(got.contains("ex:x"), "ex:x abbreviated: {got}");
+        assert!(got.contains("ex:p"), "ex:p abbreviated: {got}");
+        assert!(got.contains("schema:Thing"), "https schema type: {got}");
+        assert!(
+            got.contains("@prefix schema: <https://schema.org/> ."),
+            "HTTPS schema namespace in header: {got}"
+        );
+        assert!(!got.contains("http://schema.org/"), "no default HTTP schema: {got}");
+
+        // The same custom policy reaches the JSON-LD compacted `@context`.
+        let jc = store
+            .serialize("jsonld-compacted", false, None, true, Some(prefixes))
+            .unwrap();
+        let jc_want = graph_to_jsonld_with(&g, JsonLdForm::Compacted, &map);
+        assert_eq!(jc, jc_want, "wasm prefix-map JSON-LD must equal the engine output:\n{jc}");
+        assert!(jc.contains("\"schema\":\"https://schema.org/\""), "@context https schema: {jc}");
+
+        // `None` (omitted) keeps using the engine defaults — back-compat across the boundary:
+        // `http://example.org/` is NOT a default prefix, so those IRIs stay full `<…>`.
+        let dflt = store.serialize("turtle", true, None, true, None).unwrap();
+        assert!(
+            dflt.contains("<http://example.org/x>"),
+            "None arm uses defaults (no ex: prefix), so example.org stays full: {dflt}"
+        );
+    }
+
+    /// A malformed `prefixes` entry (an element that is not a two-string array) is rejected
+    /// with an `Err` across the boundary, not a silent wrong document or a trap.
+    #[wasm_bindgen_test]
+    fn serialize_malformed_prefix_map_is_err() {
+        use wasm_bindgen::JsValue;
+        let store = Store::load(DATA, "turtle").unwrap();
+        // An element that is a bare string, not a `[prefix, iri]` array.
+        let bad = js_sys::Array::new();
+        bad.push(&JsValue::from_str("not-a-pair"));
+        assert!(
+            store.serialize("turtle", true, None, true, Some(bad)).is_err(),
+            "a malformed prefixes entry must return Err, not panic or silently drop"
+        );
+    }
+
+    // ---- [OPUS-4.8] sq-oy1f.5: full JSON-LD 1.1 Compaction (caller `@context`), real wasm ----
+
+    /// `serializeCompact(context, …)` in a genuine wasm32 runtime: a `@vocab` `@context`
+    /// drives the full Compaction Algorithm (bare `@vocab`-relative predicate keys the
+    /// prefix-only form cannot produce), the output is byte-identical to the engine writer,
+    /// and — the load-bearing invariant — the compacted document round-trips back through the
+    /// JSON-LD parser to the SAME triples. The parity assertion runs unconditionally; the
+    /// round-trip is guarded by `jsonld` (the INGEST parser).
+    #[wasm_bindgen_test]
+    fn serialize_compact_round_trips() {
+        use sparq_core::Graph;
+        use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};
+        let data = r#"<http://schema.org/x> <http://schema.org/name> "Alice" ;
+                       <http://schema.org/knows> <http://schema.org/y> ."#;
+        let store = Store::load(data, "turtle").unwrap();
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let ctx_text = r#"{"@vocab":"http://schema.org/"}"#;
+        // The pretty form is multi-line (the indenter inserts a space after each colon, so
+        // the exact no-space substrings are asserted on the MINIFIED doc below).
+        let got = store.serialize_compact(ctx_text, true, Some("  ".to_string())).unwrap();
+        assert!(got.contains('\n'), "pretty compaction is multi-line: {got}");
+        let ctx = parse_context_json(ctx_text).unwrap();
+        // Minified parity with the engine writer across the JS boundary + the @vocab shape.
+        let minified = store.serialize_compact(ctx_text, false, None).unwrap();
+        assert!(minified.contains("\"@vocab\":\"http://schema.org/\""), "context echoed: {minified}");
+        assert!(minified.contains("\"name\":"), "predicate is @vocab-relative bare term: {minified}");
+        assert_eq!(minified, graph_to_jsonld_compact(&g, &ctx), "wasm compaction == engine");
+        // A non-object context surfaces as the Err arm across the boundary, not a trap.
+        assert!(
+            store.serialize_compact("[\"not an object\"]", false, None).is_err(),
+            "a malformed @context must Err",
+        );
+        // Round-trip: the compacted doc re-parses to the same triple count (jsonld ingest).
+        #[cfg(feature = "jsonld")]
+        {
+            let reparsed = Graph::load_str(&minified, "jsonld").unwrap();
+            assert_eq!(reparsed.len(), store.size(), "compaction round-trips to the same triples");
+        }
+    }
+}
+
+// ---- [OPUS-4.8] sq-yqi1 (#162): the opt-in SHACL `validate` binding, in real wasm ----
+//
+// These exercise the REAL exported `Store::validate(data, shapes, format)` through the
+// wasm/JS boundary (the JSON string it returns and the JsError parse-error arm) — the
+// surface PSS's ADR-0014 ShaclValidator seam consumes. Compiled only under the `shacl`
+// feature, exactly as the binding is. The native `#[cfg(test)]` tests in src/shacl.rs
+// cover the JSON serialiser; this proves it actually exports to and runs in wasm.
+#[cfg(feature = "shacl")]
+mod shacl {
+    use super::*;
+
+    const SHAPES: &str = r#"
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://example.org/> .
+        @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+        ex:PersonShape a sh:NodeShape ;
+          sh:targetClass ex:Person ;
+          sh:property [
+            sh:path ex:age ;
+            sh:datatype xsd:integer ;
+            sh:minInclusive 0 ;
+            sh:message "age must be a non-negative integer" ;
+          ] ;
+          sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+    "#;
+
+    /// Conforming data validates to `{"conforms":true,"results":[]}` across the boundary.
+    #[wasm_bindgen_test]
+    fn validate_conforming() {
+        let store = Store::load("", "turtle").unwrap();
+        let data = r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice a ex:Person ; ex:age 30 ; ex:name "Alice" .
+        "#;
+        let json = store
+            .validate(data, SHAPES, "turtle")
+            .expect("validate must return a report");
+        assert_eq!(json, r#"{"conforms":true,"results":[]}"#, "{json}");
+    }
+
+    /// Violating data surfaces a constraint violation with focusNode / path / message —
+    /// the fields PSS consumes — as a parseable JSON report.
+    #[wasm_bindgen_test]
+    fn validate_violating() {
+        let store = Store::load("", "turtle").unwrap();
+        let data = r#"
+            @prefix ex: <http://example.org/> .
+            ex:bob a ex:Person ; ex:age -1 .
+        "#;
+        let json = store.validate(data, SHAPES, "turtle").unwrap();
+        assert!(json.contains(r#""conforms":false"#), "{json}");
+        assert!(
+            json.contains(r#""focusNode":"<http://example.org/bob>""#),
+            "focus node: {json}"
+        );
+        assert!(
+            json.contains(r#""path":"<http://example.org/age>""#),
+            "path: {json}"
+        );
+        assert!(
+            json.contains(r#""message":"age must be a non-negative integer""#),
+            "declared message: {json}"
+        );
+        assert!(
+            json.contains("MinInclusiveConstraintComponent"),
+            "minInclusive: {json}"
+        );
+        assert!(
+            json.contains("MinCountConstraintComponent"),
+            "minCount (missing name): {json}"
+        );
+    }
+
+    /// A malformed shapes/data graph surfaces as the JsError Err arm, not a trap.
+    #[wasm_bindgen_test]
+    fn validate_parse_error_is_err() {
+        let store = Store::load("", "turtle").unwrap();
+        let bad = store.validate("@prefix ex: <http://ex/> . ex:a ex:p", SHAPES, "turtle");
+        assert!(bad.is_err(), "a truncated data graph must return Err");
+    }
+}
+
+// ---- [OPUS-4.8] sq-quly (#796): the opt-in SCS parse binding, in real wasm ----
+//
+// These exercise the REAL exported `Store::parseShaclCompact(text, base?)` through the
+// wasm/JS boundary — both the shapes-graph Turtle string it returns AND the JsError arm
+// for a malformed SCS document (which DOES touch `JsError::new`, untestable natively).
+// Compiled only under the `scs` feature, exactly as the binding is. The native
+// `#[cfg(test)]` tests in src/scs.rs assert the engine-writer parity + that the parsed
+// shapes drive validation; this proves the method actually exports to and runs in wasm.
+#[cfg(feature = "scs")]
+mod scs {
+    use super::*;
+
+    // SCS document exercising a shapeClass + property shapes with a path, datatype and
+    // a `[1..1]` cardinality (the playground "Compact → shapes" input shape).
+    const SCS: &str = "\
+PREFIX ex: <http://example.org/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+shapeClass ex:Person {
+\tex:name xsd:string [1..1] .
+\tex:age xsd:integer .
+}
+";
+
+    /// `parseShaclCompact` parses an SCS document and returns the shapes graph as a
+    /// Turtle string carrying the key shape triples (the node-shape type, the Person
+    /// shape IRI, and both property paths) — proved across the JS boundary in a real
+    /// wasm32 runtime. The returned document re-parses through `Store.load`.
+    #[wasm_bindgen_test]
+    fn parse_shacl_compact_round_trips() {
+        let store = Store::load("", "turtle").expect("empty store loads");
+        let ttl = store
+            .parse_shacl_compact(SCS, None)
+            .expect("SCS must parse + serialise across the boundary");
+        // Key shape triples present.
+        assert!(ttl.contains("sh:NodeShape"), "node shape type: {ttl}");
+        assert!(
+            ttl.contains("<http://example.org/Person>"),
+            "Person shape IRI: {ttl}"
+        );
+        assert!(
+            ttl.contains("<http://example.org/name>"),
+            "ex:name path: {ttl}"
+        );
+        assert!(
+            ttl.contains("<http://example.org/age>"),
+            "ex:age path: {ttl}"
+        );
+        // The returned Turtle re-parses (a real, loadable shapes graph) — round-trip.
+        let reparsed = Store::load(&ttl, "turtle").expect("shapes Turtle re-parses");
+        assert!(reparsed.size() > 0, "shapes graph is non-empty");
+    }
+
+    /// The explicit `base` argument resolves a relative shape IRI when the SCS document
+    /// declares no `BASE` — the optional second arg crosses the boundary correctly.
+    #[wasm_bindgen_test]
+    fn parse_shacl_compact_uses_base_argument() {
+        let store = Store::load("", "turtle").unwrap();
+        let ttl = store
+            .parse_shacl_compact("shape <#S> {\n}\n", Some("http://b.example/".to_string()))
+            .unwrap();
+        assert!(
+            ttl.contains("<http://b.example/#S>"),
+            "base argument resolves the relative IRI: {ttl}"
+        );
+    }
+
+    /// A malformed SCS document surfaces as the `JsError` Err arm across the boundary,
+    /// not a trap — the error path JS relies on (`try { store.parseShaclCompact(...) }`).
+    #[wasm_bindgen_test]
+    fn scs_parse_error_is_err() {
+        let store = Store::load("", "turtle").unwrap();
+        // An unterminated shape block is a parse error.
+        let bad = store.parse_shacl_compact("shape <#S> {\n", None);
+        assert!(bad.is_err(), "a malformed SCS document must return Err, not panic");
+    }
+}
+
+// ---- [OPUS-4.8] sq-1dd5t (#1047): the real wasm32 `canonicalizeNQuads` export ----
+//
+// The src/canon.rs `#[cfg(test)] mod tests` run NATIVELY (asserting against the
+// `sparq_canon` fn the export delegates to — `JsError::new` panics off-wasm), so they
+// never touch the actual `#[wasm_bindgen]` free function. These drive the genuine wasm32
+// export through the JS boundary: the `String -> String` marshalling and the `Err`
+// (JsError) path the @jeswr/sparq RDF/JS `Dataset` relies on for toCanonical/equals/contains.
+#[cfg(feature = "canon")]
+mod canon {
+    use super::*;
+    use sparq_wasm::canonicalize_nquads;
+
+    /// Two N-Quads documents that are RDF-isomorphic but differ in blank-node labels AND
+    /// quad order canonicalize, across the wasm boundary, to byte-identical output with
+    /// `_:c14nN` labels.
+    #[wasm_bindgen_test]
+    fn canonicalize_nquads_isomorphic() {
+        let a = "_:b0 <http://ex/p> _:b1 .\n_:b1 <http://ex/q> \"v\" .\n";
+        let b = "_:y <http://ex/q> \"v\" .\n_:x <http://ex/p> _:y .\n";
+        let ca = canonicalize_nquads(a).expect("canonicalize a");
+        let cb = canonicalize_nquads(b).expect("canonicalize b");
+        assert_eq!(ca, cb, "isomorphic datasets canonicalize identically");
+        assert!(ca.contains("_:c14n"), "relabelled to c14nN: {ca}");
+    }
+
+    /// A malformed N-Quads document crosses the boundary as the `Err` (JsError) arm, not a trap.
+    #[wasm_bindgen_test]
+    fn canonicalize_nquads_malformed_is_err() {
+        assert!(canonicalize_nquads("_:b0 <http://ex/p>").is_err());
+    }
 }

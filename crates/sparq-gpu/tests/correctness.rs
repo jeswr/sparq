@@ -20,6 +20,14 @@ impl Rng {
     fn u32(&mut self) -> u32 {
         (self.next() >> 32) as u32
     }
+    /// Uniform in `[0, bound)`; `bound == 0` yields 0.
+    fn below(&mut self, bound: u32) -> u32 {
+        if bound == 0 {
+            0
+        } else {
+            self.u32() % bound
+        }
+    }
 }
 
 /// `Some(gpu)` or skip: prints the reason so a skipped CI run is auditable.
@@ -158,5 +166,108 @@ fn group_aggregate_matches_cpu() {
         assert_eq!(got, expect, "groups={groups}");
         let total: u64 = got.iter().map(|(c, _)| c).sum();
         assert_eq!(total, N as u64, "every row lands in exactly one group");
+    }
+}
+
+/// [OPUS-4.8] sq-goay: randomized differential oracle.
+///
+/// The tests above pin each kernel against the CPU reference on ONE fixed
+/// workload. This sweep re-seeds the generator every iteration and varies size,
+/// selectivity, group count, table load and probe domain, asserting GPU == CPU
+/// across a broad random workload distribution — the "GPU-result == CPU-result
+/// sweep over random workloads" the audit asked for. Still skips cleanly with
+/// no device, so it is a no-op (passing) on CI.
+#[test]
+fn differential_sweep_all_kernels() {
+    let Some(gpu) = gpu_or_skip("differential_sweep") else {
+        return;
+    };
+    // Sizes deliberately straddle the 256-wide workgroup and the 65535×256
+    // 1D-dispatch boundary (so the 2D-tiled dispatch path is exercised too):
+    // 1, a sub-workgroup size, an awkward prime, and one just over 65535*256.
+    // The top size's f64 column is ~128 MiB (8 B/elem) — at or below WebGPU's
+    // default 128 MiB max-storage-binding, so it fits the lowest-common device;
+    // any size whose largest buffer would overflow this adapter is skipped.
+    let sizes = [1usize, 200, 65_537, 16_777_259];
+    for (round, &n) in sizes.iter().enumerate() {
+        // Largest single buffer in a round is the f64 column (8 B/element).
+        if (n as u64) * 8 > gpu.max_storage_bytes {
+            eprintln!("[differential_sweep] n={n} exceeds device storage limit — skipping size");
+            continue;
+        }
+        let mut rng = Rng(0xA5A5_5A5A_0000_0001u64.wrapping_add(round as u64 * 0x9E37_79B9));
+
+        // --- filter_count_u32: random column, random half-open band ---------
+        {
+            let col: Vec<u32> = (0..n).map(|_| rng.u32()).collect();
+            let resident = gpu.upload_u32(&col);
+            for _ in 0..4 {
+                let a = rng.u32();
+                let b = rng.u32();
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                assert_eq!(
+                    gpu.filter_count_u32(&resident, lo, hi),
+                    cpu::filter_count_u32(&col, lo, hi),
+                    "filter_u32 n={n} lo={lo} hi={hi}"
+                );
+            }
+        }
+
+        // --- filter_count_f64_gt: random column, random thresholds ----------
+        {
+            let col: Vec<f64> = (0..n)
+                .map(|_| (rng.u32() as f64 - (u32::MAX / 2) as f64) / 1e3)
+                .collect();
+            let resident = gpu.upload_f64(&col);
+            for _ in 0..4 {
+                let t = (rng.u32() as f64 - (u32::MAX / 2) as f64) / 1e3;
+                assert_eq!(
+                    gpu.filter_count_f64_gt(&resident, t),
+                    cpu::filter_count_f64_gt(&col, t),
+                    "filter_f64 n={n} t={t}"
+                );
+            }
+        }
+
+        // --- hash_probe: random build (with duplicates) + random probe ------
+        {
+            let n_build = (n / 4).max(1);
+            let build_keys: Vec<u32> = (0..n_build)
+                .map(|_| rng.below(2 * n_build as u32))
+                .collect();
+            let payloads: Vec<u32> = (0..n_build).map(|_| rng.u32()).collect();
+            let probe: Vec<u32> = (0..n)
+                .map(|_| {
+                    let k = rng.below(4 * n_build as u32);
+                    if k == EMPTY_KEY {
+                        0
+                    } else {
+                        k
+                    }
+                })
+                .collect();
+            let slots = cpu::build_hash_table(&build_keys, &payloads);
+            let table = gpu.upload_table(&slots);
+            let probe_col = gpu.upload_u32(&probe);
+            assert_eq!(
+                gpu.hash_probe(&table, &probe_col),
+                cpu::hash_probe(&slots, &probe),
+                "hash_probe n={n}"
+            );
+        }
+
+        // --- group_aggregate: random group count, random keys/values --------
+        {
+            let groups = (rng.below(MAX_GROUPS) + 1).min(MAX_GROUPS);
+            let keys: Vec<u32> = (0..n).map(|_| rng.below(groups)).collect();
+            let vals: Vec<u32> = (0..n).map(|_| rng.u32()).collect();
+            let keys_col = gpu.upload_u32(&keys);
+            let vals_col = gpu.upload_u32(&vals);
+            assert_eq!(
+                gpu.group_aggregate(&keys_col, &vals_col, groups),
+                cpu::group_aggregate(&keys, &vals, groups),
+                "group_aggregate n={n} groups={groups}"
+            );
+        }
     }
 }

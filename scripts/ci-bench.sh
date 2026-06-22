@@ -94,6 +94,17 @@ LUBM_RUN=bench/lubm/run.sh
 # (deep-taxonomy); details: bench/deep-taxonomy/README.md. (sq-1hgz)
 DEEPTAX_RUN=bench/deep-taxonomy/run.sh
 DEEPTAX_DEPTHS="${DEEPTAX_DEPTHS:-1000 10000}"
+# [OPUS-4.8] OWL sameAs equality micro-suite (sq-msl6, design A3 + A5) — the EQUALITY reasoning
+# suite (the owl:sameAs analogue of Deep Taxonomy's subclass transitivity). Like LUBM/deep-taxonomy
+# its run.sh is the self-asserting entry point: it builds K owl:sameAs classes of N members per tier
+# (bench/owl-sameas/gen_sameas.py via bench/owl-sameas/gen.sh — pure Python, NO javac/rapper),
+# materializes the OWL-RL closure with `sparq-cli reason … owl`, runs query.rq over the closure, and
+# asserts BOTH the closure triple-count (K·N·(N+M)) AND the query row-count (K·N) vs expected.tsv
+# internally (exit 1 on any mismatch). The hook below invokes run.sh and harvests its metric TSV into
+# `sameas_size<TIER>_{closure_s,query_us,closure_triples}`. Registry: bench/benchmarks.toml (owl-sameas);
+# details: bench/owl-sameas/README.md. (sq-msl6)
+SAMEAS_RUN=bench/owl-sameas/run.sh
+SAMEAS_TIERS="${SAMEAS_TIERS:-8 32}"
 # [OPUS-4.8] SHACL VALIDATION suite (sq-7iai, design §3.1) — the cleanest competitor surface.
 # Reuses the LUBM(1) ABox as its data substrate (so it shares the javac/rapper guard) x the 5
 # committed shape graphs in bench/shacl/shapes/. Like LUBM, run.sh is the self-asserting entry
@@ -134,6 +145,46 @@ VECTOR_RUN=bench/vector/run.sh
 # DEFICIT geo_compliance_deficit (mode:auto in bench/perf-baseline.json). Registry:
 # bench/benchmarks.toml (geo-bench); details: bench/geo/README.md.
 GEO_RUN=bench/geo/run.sh
+# [OPUS-4.8] RSP-QL streaming suite (sq-b1hn, design §3.6). sparq-rsp is a CLOCK-FREE library, so a
+# fixed (triple,ts) replay is a pure function — the gate is a DETERMINISTIC per-window result-row
+# count (single-window tumbling/sliding/GROUP-BY x three EvalModes, encoding the 3-EvalMode
+# equivalence) + an SRBench correctness ORACLE (multi-window observation⋈metadata join). Like FTS
+# the runner is a crate EXAMPLE (sparq-rsp is isolated, not a sparq-cli dependency). run.sh is the
+# self-asserting entry point: it asserts every `rsp_*_rows` metric vs bench/rsp/expected.tsv (exit 1
+# on drift) and prints the `<metric>\t<value>\t<unit>` contract; the rows are the HARD gate (in
+# run.sh), the single rsp_persistentdict_triples_per_s is ADVISORY (trend-only, NOT in
+# scripts/perf-gate.py). NO competitor perf column — the RSP peers are wall-clock service engines
+# (apples-to-oranges). Registry: bench/benchmarks.toml (rsp-ql); details: bench/rsp/README.md.
+RSP_RUN=bench/rsp/run.sh
+# [OPUS-4.8] HDT load-and-decode suite (sq-lrp9, design §3.7). Like FTS/RSP the runner is a crate
+# EXAMPLE (bench_oracle) that only needs `cargo` (sparq-hdt is isolated, not a sparq-cli dependency,
+# and is behind the `hdt` cargo feature). run.sh is the self-asserting entry point: it loads the
+# VENDORED snikmeta.hdt, decodes it to a native sparq Graph, resolves triple patterns, and asserts
+# every DETERMINISTIC `count`-unit metric vs bench/hdt/expected.tsv (exit 1 on drift) — the
+# load-and-decode-to-native + triple-pattern-resolution gate (the ONLY like-for-like axis vs
+# hdt-cpp/java; query-over-HDT is OUT OF SCOPE). The advisory hdt_load_s / hdt_vs_ntgz_load_s
+# (a contention-robust RATIO) are trend-only (NOT in scripts/perf-gate.py). Registry:
+# bench/benchmarks.toml (hdt-suite); details: bench/hdt/README.md.
+HDT_RUN=bench/hdt/run.sh
+# [OPUS-4.8] Solid WAC/ACP per-commit hook (sq-k0km). Like RSP/HDT the runner is a crate
+# EXAMPLE (sparq-solid's `bench`) that only needs `cargo`. run.sh is the self-asserting entry
+# point: it materialises the in-crate WAC + ACP fixtures and asserts every DETERMINISTIC
+# STRUCTURAL count (named-graph/quad/auth-triple/authorized-row counts — a pure function of the
+# FIXED fixture, byte-stable across machines) vs bench/solid/expected.tsv (exit 1 on drift), then
+# prints the `<metric>\t<value>\tcount` contract. These light up the dashboard's Solid/access-
+# control family row (familyOf: `solid_*` -> solid). Registry: bench/benchmarks.toml
+# (solid-wac-bench); details: bench/solid/README.md.
+SOLID_RUN=bench/solid/run.sh
+# [OPUS-4.8] sparq-nlq OFFLINE NL->SPARQL per-commit hook (sq-k0km). Crate-example runner
+# (sparq-nlq's `bench`), cargo-only, FULLY OFFLINE (no network, no `live` feature). run.sh pins
+# N and asserts the DETERMINISTIC counts (synthetic triples / grounded-prompt chars / ask rows /
+# repair rounds — a pure function of N + the synthetic schema) vs bench/nlq/expected.tsv (exit 1
+# on drift), then prints the `<metric>\t<value>\t<unit>` contract. These light up the dashboard's
+# GenAI family row (familyOf: `nlq_*` -> genai). HONESTY: offline deterministic core only; the
+# sibling GenAI suites (sim-olympics-eval / introspect-olympics) need the gitignored 1.78M-triple
+# olympics.nt dataset (NOT in CI) and the GPU suite needs a GPU backend (NOT on gh runners) — both
+# are EC2/dataset-gathered, NOT wired here. Registry: bench/benchmarks.toml (nlq-offline-bench).
+NLQ_RUN=bench/nlq/run.sh
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -319,19 +370,29 @@ fi
 # [OPUS-4.8] WatDiv per-commit subset (sq-13i). Builds+caches the real Waterloo generator and
 # emits a FIXED, deterministic SF=1 corpus (N-Triples), then runs the 16 sub-ms Basic-Testing
 # queries (Linear/Star/Snowflake/Complex; the 4 SF=1-empty ones live in queries-heavy/ for the
-# EC2/nightly tier). Emits `watdiv_<query>_<mode>_us` (trend-only, NOT in scripts/perf-gate.py)
-# AND a HARD expected-rows equality check on count mode (a solution-count drift on the fixed
-# corpus is a correctness regression and fails the run). Guarded on g++ (the generator needs
-# g++ + Boost; gen.sh handles Boost) — if g++/the generator is unavailable, the whole block is
-# skipped gracefully so ci-bench still emits valid JSON for everything else. (CI keys
-# actions/cache on /tmp/watdiv so the steady state does NO rebuild — see bench/watdiv/README.md.)
+# EC2/nightly tier). Emits `watdiv_sf<SF>_<query>_<mode>_us` (trend-only, NOT in
+# scripts/perf-gate.py) AND a HARD expected-rows equality check on count mode (a solution-count
+# drift on the fixed corpus is a correctness regression and fails the run). Guarded on g++ (the
+# generator needs g++ + Boost; gen.sh handles Boost) — if g++/the generator is unavailable, the
+# whole block is skipped gracefully so ci-bench still emits valid JSON for everything else. (CI
+# keys actions/cache on /tmp/watdiv so the steady state does NO rebuild — see bench/watdiv/README.md.)
+#
+# [OPUS-4.8] (sq-1wrw) The metric stem carries the scale factor as an `_sf<SF>` token so the per-
+# commit tier (`watdiv_sf1_*`) and the EC2/nightly full-scale tier (e.g. `watdiv_sf1000_*`) form
+# DISTINCT github-action-benchmark series instead of colliding into one (gh-action-benchmark keys
+# series by metric NAME, so an SF-less stem makes the two tiers overwrite each other and a scaling
+# axis can never form). The token is exactly the `_sf<digits>` form the dashboard's scaling axis
+# parses (bench/dashboard/dashboard.js sizeAxisOf), so the engine-vs-scale-factor scaling chart
+# (sq-viby) lights up automatically. SF is digit-sanitised so the token stays a clean metric name
+# regardless of how WATDIV_SF was passed (e.g. a stray "SF=1" string).
+WATDIV_SFTOK="$(printf '%s' "$WATDIV_SF" | tr -cd '0-9')"; WATDIV_SFTOK="${WATDIV_SFTOK:-1}"
 if command -v g++ >/dev/null 2>&1 && [ -x "$WATDIV_GEN" ] && [ -d "$WATDIV_Q" ]; then
   if WATDIV_CORPUS="$(bash "$WATDIV_GEN" "$WATDIV_SF" 2>/dev/null)" && [ -s "${WATDIV_CORPUS:-}" ]; then
     for mode in count materialize json; do
       "$CLI" bench "$WATDIV_CORPUS" ntriples "$WATDIV_Q" 3 "$mode" 2>/dev/null > "$TMP/watdiv.$mode" || true
       while IFS=$'\t' read -r name rows us; do
         [ "${rows:-}" = "ERROR" ] && continue
-        [ -n "${us:-}" ] && add "watdiv_${name}_${mode}_us" us "$us"
+        [ -n "${us:-}" ] && add "watdiv_sf${WATDIV_SFTOK}_${name}_${mode}_us" us "$us"
       done < "$TMP/watdiv.$mode"
     done
     # HARD differential: count-mode solution counts must match the committed expected sizes.
@@ -448,6 +509,37 @@ if command -v python3 >/dev/null 2>&1 && [ -x "$DEEPTAX_RUN" ]; then
   fi
 else
   echo "note: deep-taxonomy skipped (python3 not on PATH)" >&2
+fi
+
+# [OPUS-4.8] OWL sameAs equality micro-suite per-commit (sq-msl6, design A3 + A5). Exactly the
+# deep-taxonomy hook shape: run.sh is the self-asserting entry point — it reuses
+# bench/owl-sameas/gen_sameas.py (via gen.sh) to build K owl:sameAs equivalence classes of N members
+# per tier, materializes the OWL-RL closure with `sparq-cli reason … owl`, runs query.rq over the
+# closure, and asserts BOTH the closure triple-count (K·N·(N+M)) AND the query row-count (K·N) vs
+# expected.tsv internally (exit 1 on any mismatch). So we invoke run.sh and harvest its metric TSV
+# (it prints `<metric>\t<value>\t<unit>` lines on stdout) into
+# `sameas_size<TIER>_{closure_s,query_us,closure_triples}` (trend-only, NOT in scripts/perf-gate.py;
+# closure_triples is a deterministic structural metric, never an alert source). Like deep-taxonomy
+# this suite needs NO heavyweight toolchain — only python3 (always present) + the built sparq-cli —
+# so it runs on the per-commit tier by default at a SMALL tier pair (N=8 + N=32; closures 352 / 4,480
+# triples, sub-second total). N=256 is opt-in via SAMEAS_TIERS for the EC2/nightly tier. Guarded on
+# python3 + run.sh present (same shape as the deep-taxonomy guard): if python3 is somehow absent it
+# is skipped gracefully so ci-bench still emits valid JSON. run.sh failing (an owl:sameAs reasoner
+# regression) fails the whole ci-bench run.
+if command -v python3 >/dev/null 2>&1 && [ -x "$SAMEAS_RUN" ]; then
+  if CLI="$CLI" ITERS=3 SAMEAS_TIERS="$SAMEAS_TIERS" bash "$SAMEAS_RUN" > "$TMP/sameas.tsv" 2>"$TMP/sameas.err"; then
+    while IFS=$'\t' read -r name value unit; do
+      [ -n "${name:-}" ] && [ -n "${value:-}" ] && add "$name" "${unit:-}" "$value"
+    done < "$TMP/sameas.tsv"
+  else
+    # run.sh exits non-zero ONLY on a hard correctness mismatch (the python3 guard above ensures
+    # the toolchain is present), so surface its diagnostics and fail the run.
+    echo "ERROR: owl-sameas run.sh failed (closure-size regression or owl:sameAs reasoner error)" >&2
+    cat "$TMP/sameas.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: owl-sameas skipped (python3 not on PATH)" >&2
 fi
 
 # [OPUS-4.8] SHACL validation suite per-commit (sq-7iai). Reuses the LUBM(1) ABox, so it shares
@@ -603,7 +695,13 @@ elif command -v cargo >/dev/null 2>&1 && [ -x "$VECTOR_RUN" ]; then
   # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE binary.
   # Let cargo's staleness detection decide (a no-op rebuild is cheap); do NOT swallow a real
   # compile failure (it must fail the gate, not silently skip the ANN recall check).
-  if ! cargo build --release -q -p sparq-vectors --example bench_vectors; then
+  # [OPUS-4.8] sq-k9o2: --features approx-ann is REQUIRED here. The example links `VectorIndex`
+  # (the in-RAM HNSW backend, `#[cfg(feature = "approx-ann")]` in src/lib.rs) and its Cargo.toml
+  # `[[example]]` block declares `required-features = ["approx-ann"]`. Naming the target WITHOUT
+  # the feature is a hard `error: target bench_vectors requires the features: approx-ann` (exit
+  # 101) — the failure that RED-ed main after #807 added that `required-features` line. The flag
+  # is crate-scoped (`-p sparq-vectors`), so it widens NO other crate's feature set.
+  if ! cargo build --release -q -p sparq-vectors --example bench_vectors --features approx-ann; then
     echo "ERROR: bench_vectors example failed to build" >&2
     exit 1
   fi
@@ -633,6 +731,213 @@ elif command -v cargo >/dev/null 2>&1 && [ -x "$VECTOR_RUN" ]; then
   fi
 else
   echo "note: vector skipped (cargo not on PATH or $VECTOR_RUN missing)" >&2
+fi
+
+# [OPUS-4.8] RSP-QL streaming per-commit hook (sq-b1hn). Like FTS/vector the runner is a crate
+# EXAMPLE (rsp_oracle) that only needs `cargo`, so to match the main-only-toolchain skip the
+# LUBM/SHACL hooks get for free — and keep the example build off per-PR CI — we PIN this hook to the
+# MAIN/local tier: it runs on push-to-main (GITHUB_REF=refs/heads/main) and on a LOCAL run
+# (GITHUB_REF unset, so devs/bench/rsp/run.sh still work), but is SKIPPED on the PR tier. The
+# DETERMINISTIC per-window row-count gate therefore runs once per merge to main. run.sh asserts every
+# `rsp_*_rows` vs expected.tsv internally (exit 1 on drift), failing the whole ci-bench run on a
+# regression exactly like LUBM/FTS. We harvest run.sh's `<metric>\t<value>\t<unit>` stdout:
+# `*_rows` are DETERMINISTIC per-window counts (emitted for the dashboard's RSP-QL card; correctness
+# is the run.sh internal gate, so these are trend rows not perf-gate ratchets), and the single
+# `rsp_persistentdict_triples_per_s` is ADVISORY throughput (trend-only, NOT in scripts/perf-gate.py).
+RSP_BIN=target/release/examples/rsp_oracle
+RSP_REF="${GITHUB_REF:-}"
+if [ -n "$RSP_REF" ] && [ "$RSP_REF" != "refs/heads/main" ]; then
+  echo "note: rsp skipped (PR tier — RSP-QL example build/run is main-only, like the javac/rapper suites)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -x "$RSP_RUN" ]; then
+  # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE binary.
+  if ! cargo build --release -q -p sparq-rsp --example rsp_oracle; then
+    echo "ERROR: rsp_oracle example failed to build" >&2
+    exit 1
+  fi
+  if RSP_BIN="$RSP_BIN" bash "$RSP_RUN" > "$TMP/rsp.tsv" 2>"$TMP/rsp.err"; then
+    while IFS=$'\t' read -r metric value unit; do
+      [ -n "${metric:-}" ] && [ -n "${value:-}" ] || continue
+      # DETERMINISTIC per-window counts + the advisory throughput: forward the metric verbatim
+      # (run.sh has already asserted the *_rows correctness gate, so these are trend rows).
+      add "$metric" "${unit:-rows}" "$value"
+    done < "$TMP/rsp.tsv"
+  else
+    echo "ERROR: rsp run.sh failed (per-window row-count regression)" >&2
+    cat "$TMP/rsp.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: rsp skipped (cargo not on PATH or $RSP_RUN missing)" >&2
+fi
+
+# [OPUS-4.8] HDT load-and-decode per-commit hook (sq-lrp9). Like RSP/FTS the runner is a crate
+# EXAMPLE (bench_oracle) that only needs `cargo`, so — to match the main-only-toolchain skip the
+# LUBM/SHACL hooks get for free and keep the example build off per-PR CI — we PIN this hook to the
+# MAIN/local tier: it runs on push-to-main (GITHUB_REF=refs/heads/main) and on a LOCAL run
+# (GITHUB_REF unset, so dev `bench/hdt/run.sh` still works), but is SKIPPED on the PR tier. The
+# DETERMINISTIC load-and-decode count gate therefore runs once per merge to main. run.sh asserts
+# every `count`-unit metric vs expected.tsv internally (exit 1 on drift), failing the whole ci-bench
+# run on a regression exactly like LUBM/FTS/RSP. We harvest run.sh's `<metric>\t<value>\t<unit>`
+# stdout: the `snikmeta_*` counts are DETERMINISTIC (emitted for the dashboard's HDT card; correctness
+# is the run.sh internal gate, so trend rows not perf-gate ratchets), and hdt_load_s /
+# hdt_vs_ntgz_load_s are ADVISORY (trend-only, NOT in scripts/perf-gate.py). A small HDT_BENCH_N keeps
+# the advisory synthetic-archive build quick; the deterministic gate is on the fixture, not N.
+HDT_BIN=target/release/examples/bench_oracle
+HDT_REF="${GITHUB_REF:-}"
+if [ -n "$HDT_REF" ] && [ "$HDT_REF" != "refs/heads/main" ]; then
+  echo "note: hdt skipped (PR tier — HDT example build/run is main-only, like the javac/rapper suites)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -x "$HDT_RUN" ]; then
+  # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE binary.
+  if ! cargo build --release -q -p sparq-hdt --example bench_oracle; then
+    echo "ERROR: bench_oracle example failed to build" >&2
+    exit 1
+  fi
+  if HDT_BIN="$HDT_BIN" HDT_BENCH_N="${HDT_BENCH_N:-100000}" bash "$HDT_RUN" > "$TMP/hdt.tsv" 2>"$TMP/hdt.err"; then
+    while IFS=$'\t' read -r metric value unit; do
+      [ -n "${metric:-}" ] && [ -n "${value:-}" ] || continue
+      # DETERMINISTIC load-and-decode counts + the advisory load/ratio rows: forward verbatim
+      # (run.sh has already asserted the count gate, so these are trend rows).
+      add "$metric" "${unit:-count}" "$value"
+    done < "$TMP/hdt.tsv"
+  else
+    echo "ERROR: hdt run.sh failed (load-and-decode count regression)" >&2
+    cat "$TMP/hdt.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: hdt skipped (cargo not on PATH or $HDT_RUN missing)" >&2
+fi
+
+# [OPUS-4.8] ZERO-KNOWLEDGE family (sq dashboard-data-feed) — feeds the dashboard's
+# Zero-knowledge family (FAMILIES key `zk`, #253) so its rows show real data instead of
+# "not yet reported". EVERY ZK metric name leads with the token `zk` so the dashboard's
+# prefix routing (familyOf: name.split('_')[0]) buckets it into the ZK family. Three feeds,
+# each grounded in an EXISTING bench (bench/benchmarks.toml zk-* registrations) — nothing
+# invented:
+#
+#  1. zk_compose_<member>_gates  — DETERMINISTIC ultra_honk circuit gate counts for the
+#     zk/compose circuit family. The headline ZK measurement. `bb gates` is the ground
+#     truth (noir-optimisation SKILL §) but needs nargo+bb (NOT installed in CI), so we
+#     harvest the COMMITTED, reproducible bench/zk-compose/gate_counts_latest.json (a fixed
+#     toolchain pins it; re-measure with bench/zk-compose/scripts/gate_counts.sh). Gate
+#     counts are toolchain-deterministic, so the committed JSON is a faithful per-commit
+#     value — emitted on EVERY tier (no toolchain guard). Trend-only/advisory here (NOT in
+#     scripts/perf-gate.py); a tightening is tracked on the dashboard.
+#  2. zk_commit_*  — sparq-zk commitment-pipeline criterion means (RDFC10 canon, end-to-end
+#     commit, leaves+fold, Poseidon2) in µs. Standalone cargo project (bench/zk), cargo-only.
+#  3. zk_trace_*  — zk-trace per-operator capture overhead criterion means (traced vs
+#     untraced, per plan shape) in µs. Standalone cargo project (bench/zk-trace), cargo-only.
+#
+# (2)+(3) are WALL-CLOCK criterion runs, so — exactly like the FTS/vector/geo hooks — they
+# are PINNED to the MAIN/local tier (run on push-to-main or a LOCAL run where GITHUB_REF is
+# unset; SKIPPED on the PR tier) to keep the criterion build+run off per-PR CI. A short
+# measurement window (criterion --measurement-time) bounds the cost. NON-CANONICAL timing:
+# the values are cross-commit TREND signals, never hard-coded into docs/tests.
+# The zk-compose prove+verify suite (bench/zk-compose/scripts/prove_verify.sh) is wall-clock
+# and needs nargo+bb, so it has NO CI-runnable bench — intentionally NOT emitted here.
+ZK_GATES_JSON=bench/zk-compose/gate_counts_latest.json
+if [ -f "$ZK_GATES_JSON" ]; then
+  # Deterministic gate counts from the committed JSON -> zk_compose_<member>_gates.
+  while IFS=$'\t' read -r member gates; do
+    [ -n "${member:-}" ] && [ -n "${gates:-}" ] && add "zk_compose_${member}_gates" gates "$gates"
+  done < <(python3 -c "import json,sys
+d=json.load(open(sys.argv[1])).get('benchmarks',{})
+for k in sorted(d):
+    print('%s\t%s' % (k, d[k]['circuit_size']))" "$ZK_GATES_JSON")
+fi
+
+ZK_HARVEST=bench/zk/criterion_harvest.py
+ZK_REF="${GITHUB_REF:-}"
+if [ -n "$ZK_REF" ] && [ "$ZK_REF" != "refs/heads/main" ]; then
+  echo "note: zk criterion suites skipped (PR tier — criterion build/run is main-only, like the fts/vector hooks)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -f "$ZK_HARVEST" ]; then
+  # sparq-zk commitment-pipeline throughput (bench/zk; standalone cargo project).
+  if (cd bench/zk && cargo bench -q -- --warm-up-time 0.5 --measurement-time 1 --sample-size 10) >/dev/null 2>"$TMP/zk.err"; then
+    while IFS=$'\t' read -r name unit value; do
+      [ -n "${name:-}" ] && [ -n "${value:-}" ] && add "$name" "${unit:-us}" "$value"
+    done < <(python3 "$ZK_HARVEST" bench/zk/target/criterion zk)
+  else
+    echo "ERROR: zk commit bench failed" >&2; cat "$TMP/zk.err" >&2 || true; exit 1
+  fi
+  # zk-trace per-operator capture overhead (bench/zk-trace; standalone cargo project,
+  # sparq-engine built WITH the non-default `zk` feature).
+  if (cd bench/zk-trace && cargo bench -q -- --warm-up-time 0.5 --measurement-time 1 --sample-size 10) >/dev/null 2>"$TMP/zkt.err"; then
+    while IFS=$'\t' read -r name unit value; do
+      [ -n "${name:-}" ] && [ -n "${value:-}" ] && add "$name" "${unit:-us}" "$value"
+    done < <(python3 "$ZK_HARVEST" bench/zk-trace/target/criterion zk)
+  else
+    echo "ERROR: zk-trace bench failed" >&2; cat "$TMP/zkt.err" >&2 || true; exit 1
+  fi
+else
+  echo "note: zk criterion suites skipped (cargo not on PATH or $ZK_HARVEST missing)" >&2
+fi
+
+# [OPUS-4.8] Solid WAC/ACP per-commit hook (sq-k0km). Crate-example runner (sparq-solid's
+# `bench`), cargo-only — so, exactly like the RSP/HDT/ZK-criterion hooks, PINNED to the
+# MAIN/local tier (run on push-to-main or a LOCAL run where GITHUB_REF is unset; SKIPPED on
+# the PR tier) to keep the example build off per-PR CI. run.sh asserts every DETERMINISTIC
+# count vs expected.tsv internally (exit 1 on drift), failing the whole ci-bench run on a
+# regression exactly like RSP/HDT. We harvest its `<metric>\t<value>\tcount` stdout; every row
+# is a DETERMINISTIC structural count emitted for the dashboard's Solid family card (correctness
+# is the run.sh internal gate, so these are trend rows, NOT perf-gate ratchets).
+SOLID_BIN=target/release/examples/bench
+SOLID_REF="${GITHUB_REF:-}"
+if [ -n "$SOLID_REF" ] && [ "$SOLID_REF" != "refs/heads/main" ]; then
+  echo "note: solid skipped (PR tier — sparq-solid example build/run is main-only, like the rsp/hdt hooks)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -x "$SOLID_RUN" ]; then
+  # Always (re)build: rust-cache restores target/, AND the example target name `bench` is shared
+  # by several crates, so build sparq-solid's IMMEDIATELY before invoking run.sh to be sure the
+  # binary on disk is this crate's.
+  if ! cargo build --release -q -p sparq-solid --example bench; then
+    echo "ERROR: sparq-solid bench example failed to build" >&2
+    exit 1
+  fi
+  if SOLID_BIN="$SOLID_BIN" bash "$SOLID_RUN" > "$TMP/solid.tsv" 2>"$TMP/solid.err"; then
+    while IFS=$'\t' read -r metric value unit; do
+      [ -n "${metric:-}" ] && [ -n "${value:-}" ] || continue
+      add "$metric" "${unit:-count}" "$value"
+    done < "$TMP/solid.tsv"
+  else
+    echo "ERROR: solid run.sh failed (auth-view count regression)" >&2
+    cat "$TMP/solid.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: solid skipped (cargo not on PATH or $SOLID_RUN missing)" >&2
+fi
+
+# [OPUS-4.8] sparq-nlq OFFLINE NL->SPARQL per-commit hook (sq-k0km). Crate-example runner
+# (sparq-nlq's `bench`), cargo-only + FULLY OFFLINE — so, like the solid/rsp/hdt hooks, PINNED
+# to the MAIN/local tier (SKIPPED on the PR tier). run.sh pins N and asserts every DETERMINISTIC
+# count vs expected.tsv internally (exit 1 on drift), failing the whole ci-bench run on a
+# regression. We harvest its `<metric>\t<value>\t<unit>` stdout for the dashboard's GenAI family
+# card (correctness is the run.sh internal gate, so these are trend rows). The sibling GenAI
+# suites (sim/introspect) need the gitignored olympics.nt (NOT in CI) and the GPU suite needs a
+# GPU backend (NOT on gh runners): both are EC2/dataset-gathered and intentionally NOT emitted.
+NLQ_BIN=target/release/examples/bench
+NLQ_REF="${GITHUB_REF:-}"
+if [ -n "$NLQ_REF" ] && [ "$NLQ_REF" != "refs/heads/main" ]; then
+  echo "note: nlq skipped (PR tier — sparq-nlq example build/run is main-only, like the solid/rsp/hdt hooks)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -x "$NLQ_RUN" ]; then
+  # Always (re)build IMMEDIATELY before run.sh: the example target name `bench` is shared by
+  # several crates (e.g. sparq-solid's, built just above), so this build resets the on-disk
+  # binary to sparq-nlq's before the runner invokes it.
+  if ! cargo build --release -q -p sparq-nlq --example bench; then
+    echo "ERROR: sparq-nlq bench example failed to build" >&2
+    exit 1
+  fi
+  if NLQ_BIN="$NLQ_BIN" bash "$NLQ_RUN" > "$TMP/nlq.tsv" 2>"$TMP/nlq.err"; then
+    while IFS=$'\t' read -r metric value unit; do
+      [ -n "${metric:-}" ] && [ -n "${value:-}" ] || continue
+      add "$metric" "${unit:-count}" "$value"
+    done < "$TMP/nlq.tsv"
+  else
+    echo "ERROR: nlq run.sh failed (offline-loop count regression)" >&2
+    cat "$TMP/nlq.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: nlq skipped (cargo not on PATH or $NLQ_RUN missing)" >&2
 fi
 
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.

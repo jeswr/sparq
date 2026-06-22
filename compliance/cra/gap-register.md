@@ -1,0 +1,44 @@
+<!-- [OPUS-4.8] EU CRA gap register. Bead sq-toze.18 (epic sq-toze). -->
+# EU CRA — gap register
+
+Open gaps only. **Severity** = impact on a clean CRA conformity story (P0 blocks an essential
+requirement; P1 a process/info requirement; P2 quality/assurance raise; P3 nice-to-have).
+Every gap carries the `bd` bead (epic `sq-toze`) that tracks the fix. Gaps already closed by
+other certification work are listed at the bottom as **resolved** so the auditor sees the full
+picture and we do not re-propose them.
+
+## CRA-specific open gaps
+
+| ID | Gap | CRA req | Sev | Remediation | Bead |
+|---|---|---|---|---|---|
+| GX-CRA-4 | **`SECURITY.md` does not yet point readers to the Article 14 runbook.** The runbook exists + is cross-referenced from controls.md / gap-register.md / evidence.md / README.md, but the canonical governance doc (`SECURITY.md`, repo root) — where a manufacturer/steward first lands — has no pointer to the downstream authority-reporting path. `SECURITY.md` is governance-owned, outside the `compliance/cra` write-scope, so the one-line pointer is a residual cross-reference leg, not an authoring gap. | Art. 14; controls.md CRA-CA.5 | P3 | Add the **one-line pointer** (exact proposed text in [`incident-reporting-runbook.md`](./incident-reporting-runbook.md) §9) to `SECURITY.md` after the "What to expect" section. **Residual (governance-owned)** — a doc cross-reference, not an external dependency. | `sq-zbb5` |
+| GX-CRA-3 | **No single named "cybersecurity policy" document.** **Addressed (sq-d43g)** — see the resolved table below. The consolidating template now exists: [`../policies/policy-cybersecurity.md`](../policies/policy-cybersecurity.md). | Art. 13 / Art. 24; controls.md CRA-CA.1/CRA-CA.6 | P2 | Authored a consolidating policy template under `compliance/policies/` (risk basis + secure-SDLC + dependency + CVD + release-signing + support). **Audit-ready** — template needs org sign-off (§13). Cross-references the SSDF/SBOM/SLSA/ISO sibling templates. | `sq-d43g` |
+
+## Cross-cutting gaps that bear on CRA (owned by other framework worktrees — cite, don't duplicate-fix)
+
+| ID | Gap | CRA req | Sev | Owner worktree | Bead |
+|---|---|---|---|---|---|
+| ~~GX-9~~ | **`dist.yml` release binaries lack a SLSA provenance attestation.** **CLOSED (sq-toze.23):** `dist.yml#build` now emits a signed in-toto SLSA provenance attestation (`actions/attest-build-provenance`, OIDC) + cargo-auditable over each per-tier binary → SLSA Build L2; the `dist` lane is now provenance-covered like `release.yml`. Verify `gh attestation verify dist/sparq-cli-<tier> --repo jeswr/sparq`. | Annex I Part II.7 (secure distribution) | P2 | slsa / sbom | `sq-toze.23` (ADDRESSED) |
+| GX-10 | **Published-package provenance — PARTIAL (sq-toze.24).** Added `.github/workflows/publish.yml`: **npm `@jeswr/sparq` now carries native Sigstore provenance** (`#npm` `npm publish --provenance` + `npm audit signatures` gate). **crates.io** `.crate` bytes get an out-of-band `attest-build-provenance` attestation (`#crates`, `gh attestation verify`), but crates.io has **no native provenance-link mechanism** upstream (external sub-gap, OPEN). **PyPI `sparq-rdf` PEP-740 lane now WIRED in CI (sq-toze.37):** `#pypi-build`/`#pypi-sdist`/`#pypi-publish` build the wheels+sdist (maturin) and upload via Trusted Publishing with native PEP-740 attestations; activates once a maintainer registers the Trusted Publisher on the PyPI project (a PyPI-account act, not a repo file). | Annex I Part II.7 | P2 | slsa / supply-chain | `sq-toze.24` + `sq-toze.37` |
+| GX-12 | **No container-image vulnerability scan (Trivy/Grype) + Dockerfile-lint (Dockle/Hadolint) lane in CI.** The CIS-Docker posture (distroless/non-root/pinned) is strong but unscanned — a vulnerable base layer could ship undetected, weakening the I.2 "no known exploitable vulnerabilities" claim for the *container* artifact. | Annex I Part I (2); Part II.1/.3 | P2 | cis | `sq-toze.31` |
+| GX-8 | **Reproducible-build — CHARACTERISED, not yet enforced.** CRA Annex I integrity (I.2(d)) is strengthened by a reproducible artifact. The honest reproducibility statement now exists ([`../slsa/reproducible-build.md`](../slsa/reproducible-build.md)): a measured double-build of `sparq-cli` is **byte-identical apart from 22 bytes**, all from **one** non-determinism source (the C-compiled `mimalloc` `__DATE__`/`__TIME__` `.rodata` banner + the build-id it perturbs). Residual to a bit-for-bit claim: `SOURCE_DATE_EPOCH`/feature-drop + a CI rebuild-and-diff ratchet. | Annex I Part I (2)(d) integrity | P2 | slsa / sbom / ssdf / openssf | `sq-toze.9` |
+
+> **Honesty note on the formal layer.** The conformity-assessment / EU-declaration-of-conformity
+> / CE-marking obligations (controls.md CRA-CA.2/CRA-CA.3) are **not** recorded as fixable gaps
+> here: they are organizational/legal acts reserved to the manufacturer/steward and **cannot be
+> self-certified by this project or an agent**. They are *audit-ready* (the technical evidence to
+> support them exists) and intentionally left to the deploying/commercialising party. Recording
+> them as "gaps with a bead" would imply sparq can close them in-tree, which it cannot.
+
+## Resolved (closed by other certification work — do not re-propose)
+
+| Former gap | Resolution | Evidence |
+|---|---|---|
+| GX-CRA-1 — no concrete support / EOL period statement | **Addressed pending ratification** (sq-f8tv): a **proposed** support & EOL policy stating a concrete support period (5 years from each release — the CRA minimum), the security-update channel, the EOL notification process (≥ 6-month advance notice), and the ties to per-release SBOM/VEX + the Article 14 runbook. **Honesty caveat:** this is audit-ready *documentation* — a PROPOSED policy, **not a binding maintainer commitment**. It takes effect only on maintainer ratification (policy §7); until then `SECURITY.md` §"Supported versions" remains the in-effect statement. The remaining step (maintainer ratification) is an organisational decision an agent cannot make. | [`support-policy.md`](./support-policy.md); controls.md II.8 / II-A.6 |
+| GX-CRA-2 — no Article 14 ENISA/CSIRT reporting runbook | **Addressed** (sq-iy3p): an **adoptable operator runbook** operationalising the Article 14 early-warning (24h) / notification (72h) / final-report (14-day vuln / 1-month incident) timeline, ENISA single-reporting-platform + CSIRT routing, report-content checklist, and coordination with the `SECURITY.md` CVD flow + SBOM/VEX. Org-specific details are `<FILL-IN>` placeholders; the *act* of reporting stays an organisational/legal duty (not a cert claim). | [`incident-reporting-runbook.md`](./incident-reporting-runbook.md); controls.md CRA-CA.5 |
+| GX-CRA-3 — no single named cybersecurity-policy document | **Addressed** (sq-d43g): the single named **cybersecurity-policy template** ([`../policies/policy-cybersecurity.md`](../policies/policy-cybersecurity.md)) for CRA Art. 24 (steward) / Art. 13 (manufacturer) — consolidating the §2 risk basis (threat-model STRIDE B1–B5), §3 secure-SDLC, §4 dependency/supply-chain, §5 coordinated disclosure + vuln-handling, §6 release-signing/provenance, §7 support/EOL, and §8–§10 roles + authority reporting, cross-referencing (not forking) the live sources (`SECURITY.md`, `CONTRIBUTING.md`, `deny.toml`, `research/threat-model.md`) and the sibling templates. **Honesty caveat:** audit-ready *documentation* — a PROPOSED policy, **not adopted**; every `<FILL-IN>` (steward/manufacturer of record, signatory, cadences) is an organizational decision, and it takes effect only on org sign-off (policy §13). Until then the cited live sources are authoritative. | [`../policies/policy-cybersecurity.md`](../policies/policy-cybersecurity.md); controls.md CRA-CA.1/CRA-CA.6 |
+| GX-1 — advisories PR-gate degraded | **Resolved** (sq-toze.2): `cargo deny check advisories` is GATING again on PR (CVSS-4.0 blocker sq-q8de fixed). The "no known exploitable vulnerability" claim now rests on a real PR-time gate. | `.github/workflows/supply-chain.yml#audit` |
+| GX-2 — no per-release SBOM + VEX | **Resolved** (sq-toze.3): per-release CycloneDX SBOM per binary + checked-in VEX, attached to the Release + SLSA-attested. | `scripts/gen-sbom-vex.sh`, `release.yml#sbom`, `supply-chain/vex.cdx.json` |
+| GX-3 — no `.well-known/security.txt` | **Resolved** (sq-toze.4): RFC 9116 `security.txt` with Contact/Policy/Canonical/Expires. | `.well-known/security.txt` |
+| GX-6 — no CONTRIBUTING secure-coding section | **Resolved** (sq-toze.7): secure-coding standard (unsafe policy, input validation, supply-chain). | `CONTRIBUTING.md` |
+| GX-7 — no cargo-auditable / cargo-vet | **Resolved** (sq-toze.8): `cargo auditable build` on releases + container; `cargo vet --locked` GATING. | `release.yml#package`, `Dockerfile`, `supply-chain.yml#vet` |

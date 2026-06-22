@@ -1,0 +1,16 @@
+{
+  "name": "sparq-gui-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "tauri-driver (WebDriver) end-to-end test harness for the sparq Tauri GUI shell — launches the built desktop binary, runs a SPARQL query in the in-tab WASM REPL, and asserts the result renders.",
+  "type": "module",
+  "scripts": {
+    "test:e2e": "node run-e2e.mjs"
+  },
+  "engines": {
+    "node": ">=18.20.0"
+  },
+  "dependencies": {
+    "webdriverio": "^9.29.0"
+  }
+}

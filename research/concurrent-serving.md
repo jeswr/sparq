@@ -602,7 +602,7 @@ adapter remains possible because the core never assumes a reactor.
 Replace the double buffer with a **generation chain**:
 
 - `ArcSwap<Generation>` where `Generation { id, graph: Arc<Graph>, epochs: PodEpochs }`.
-  Readers/streams `load()` (lock-free, ~10–20 ns) and hold the `Arc` as long as they
+  Readers/streams `load()` (lock-free) and hold the `Arc` as long as they
   live; **the writer never waits for readers and never reclaims in place** — it builds
   generation N+1 forward (apply batch to a writer-private working copy via the existing
   overlay machinery, fold periodically) and swaps.

@@ -65,7 +65,9 @@ pub struct GraphApplier {
 
 impl Default for GraphApplier {
     fn default() -> Self {
-        GraphApplier { compact_threshold: DEFAULT_COMPACT_THRESHOLD }
+        GraphApplier {
+            compact_threshold: DEFAULT_COMPACT_THRESHOLD,
+        }
     }
 }
 
@@ -78,7 +80,9 @@ impl GraphApplier {
     /// An applier compacting once the pending delta reaches `threshold` entries
     /// (values below 1 are treated as 1 — compact after every batch).
     pub fn with_compact_threshold(threshold: usize) -> Self {
-        GraphApplier { compact_threshold: threshold.max(1) }
+        GraphApplier {
+            compact_threshold: threshold.max(1),
+        }
     }
 }
 

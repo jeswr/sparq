@@ -1,0 +1,111 @@
+# [OPUS-4.8] sq-h0tr — mdBook docs-guide BUILD + VALIDATE lane (scaffold slice).
+#
+# SCOPE (deliberately limited to a non-publishing build gate):
+#   This workflow installs a PINNED mdbook, builds book/, runs the broken-include
+#   "[ERROR]" log grep + `mdbook test`, and uploads the rendered book as a CI
+#   artifact. It is the reproducible, SHA-pinned build wiring the docs-site design
+#   (sq-w9sr) calls for — MINUS the Pages publish step.
+#
+# WHY IT DOES NOT DEPLOY TO PAGES (the deferred half, reported as a blocker):
+#   GitHub Pages exposes exactly ONE deploy slot. The live site at
+#   https://jeswr.github.io/sparq/ is ALREADY published by pages.yml — the Next.js
+#   feature-showcase at the root, with the benchmark dashboard overlaid at
+#   /sparq/dev/. A SECOND `actions/deploy-pages` workflow here would race pages.yml
+#   on every main/benchmark-data push (last-writer-wins) AND replace the live
+#   showcase root with the mdBook guide. The sq-w9sr design (mdBook at "/") predates
+#   the showcase deploy and does not account for it; reconciling "mdBook-at-root vs
+#   showcase-at-root" + the dev/bench* fold + the one-time Pages-source flip (sq-vbq9)
+#   is a CUTOVER decision that belongs to sq-fymm / sq-w9sr, not this scaffold. Adding
+#   a publish step here unilaterally would break the existing site deploy, so it is
+#   intentionally omitted. See the PR description for the dependency note.
+#
+# When the cutover bead lands, this lane gains the deploy job (configure-pages +
+# upload-pages-artifact + deploy-pages, all SHA-pinned).
+#
+# [OPUS-4.8] sq-zngy — NOTE: the live Pages producer is pages.yml, not this scaffold.
+# The `dev/bench*` dashboard fold (bench.yml's dev/bench + bench-ec2.yml's dev/bench-ec2,
+# both on the benchmark-data branch) and the assembled-artifact smoke check live in
+# pages.yml's build job ("Overlay benchmark dashboard(s) (dev/bench*)" + "Smoke-check
+# assembled Pages artifact"). If this mdBook lane ever absorbs the Pages deploy, carry
+# that glob-fold + smoke check over rather than re-deriving them.
+
+name: docs
+
+on:
+  # [OPUS-4.8] sq-5f1s4 / sq-im8u — self-guarding path filter: the build embeds source it does
+  # NOT live next to. `book/src/getting-started/install.md` does
+  # `{{#rustdoc_include ../../../crates/sparq-engine/examples/quickstart.rs:quickstart}}`, and
+  # (as of sq-im8u) the guide pages `{{#include}}` canonical prose from `README.md`
+  # (`lead`/`quickstart-cli` anchors) and `skills/{zk-query-proofs,mpc}/SKILL.md`
+  # (`scaffold-caveat` anchors). `mdbook build`/`mdbook test` resolve those anchors, so if an
+  # anchor were renamed/removed (or the included example stopped compiling) and the filter only
+  # watched `book/**`, the break would land on main undetected — no `book/`-touching commit
+  # would re-run this lane to catch it (the gui.yml/#1081 blind-spot class). So every embedded
+  # source is listed too. (mdBook EXITs 0 on a broken include — the build step greps the log
+  # for `[ERROR]` — so re-running THIS lane on a source edit is the only thing that catches it.)
+  push:
+    branches: [main]
+    paths:
+      - "book/**"
+      - "crates/sparq-engine/examples/quickstart.rs"
+      - "README.md"
+      - "skills/zk-query-proofs/SKILL.md"
+      - "skills/mpc/SKILL.md"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "book/**"
+      - "crates/sparq-engine/examples/quickstart.rs"
+      - "README.md"
+      - "skills/zk-query-proofs/SKILL.md"
+      - "skills/mpc/SKILL.md"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# Least-privilege (Scorecard TokenPermissions): read-only — this lane neither
+# pushes nor deploys.
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Pinned, prebuilt mdbook (GitHub Releases binary — reproducible + fast, no
+      # cargo compile). Explicit `tool:` is required by the sq-ur7o install-action lint.
+      - name: Install mdbook (pinned)
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        with:
+          tool: mdbook@0.4.40
+
+      - name: Build guide
+        run: |
+          set -euo pipefail
+          # mdBook EXITS 0 even on a broken {{#include}}/anchor (rust-lang/mdBook#1094),
+          # so we capture the log and FAIL on any "[ERROR]" line in addition to the
+          # process exit code.
+          mdbook build book 2>&1 | tee /tmp/mdbook-build.log
+          if grep -q '\[ERROR\]' /tmp/mdbook-build.log; then
+            echo "::error::mdbook build emitted [ERROR] (broken include/anchor) — see log above"
+            exit 1
+          fi
+          echo "OK: mdbook build clean (no [ERROR] lines)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Test guide (compile-check rust fences)
+        run: |
+          set -euo pipefail
+          mdbook test book
+          echo "OK: mdbook test passed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload rendered guide (CI artifact only — NOT a Pages deploy)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-guide
+          path: book/book
+          if-no-files-found: error

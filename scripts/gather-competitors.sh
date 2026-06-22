@@ -15,12 +15,14 @@
 #                          Heavy. Caps dataset size, watches `df`, cleans /tmp.
 #
 # Engines: oxigraph (embedded Rust dep) | qlever (Docker) | eye (N3 binary).
-# Plus four SHARED reusable adapter KINDS (sq-eifd), dispatched off competitors.json
-# `kind` and backed by scripts/bench-adapters/:
+# Plus five SHARED reusable adapter KINDS (sq-eifd / sq-1fz0), dispatched off
+# competitors.json `kind` and backed by scripts/bench-adapters/:
 #   report-cli  : file-in/SHACL-report-out CLI (pySHACL, Jena `shacl validate`)
 #   js-lib      : in-process Node/RDF-JS SHACL (rdf-validate-shacl, sparq's own WASM)
 #   http-sparql : POST query -> parse SPARQL-JSON -> count (Fuseki, Virtuoso, QLever)
 #   vector-lib  : in-process Python ANN -> recall@k vs exact-kNN (FAISS, hnswlib)
+#   python-lib  : in-process IR kernel -> Recall@100/nDCG@10 deficits on a BEIR cut
+#                 (lucene-anserini, the FTS IR-quality oracle; sq-1fz0)
 # Select with --only <id[,id...]>; default is all engines in dry-run, but --run
 # requires you to NAME the engines (no accidental "run everything heavy").
 #
@@ -508,6 +510,13 @@ run_http_sparql_engine() { # <id>
   hdr "$id (http-sparql)"
   log "  adapter: $ADAPTERS_DIR/http_sparql_adapter.py (POST query -> parse SPARQL-JSON -> count)"
   log "  PREP (gather box): start the engine's HTTP endpoint, then set SPARQL_ENDPOINT + SPARQL_QUERY_FILE"
+  # [OPUS-4.8] sq-gbq0: a Docker-backed http-sparql engine (Fuseki, Virtuoso, the
+  # jena-* SAILs) records its IMAGE DIGEST as the version identifier (the endpoint
+  # reports no build string), and tags the result per SUITE so the file lands as
+  # <engine>-<suite>-<UTC>.json per bench/CATALOG.md (e.g. fuseki-sp2b-<UTC>.json).
+  # Both are OPTIONAL env knobs, backward-compatible: default suite stays
+  # "http-sparql" and the version falls back to the registry pinned_version.
+  log "  OPTIONAL: SPARQL_SUITE=<sp2b|watdiv|lubm|bsbm|dbpsb> tags the result file; SPARQL_IMAGE=<image:tag> records the resolved Docker DIGEST as the version"
   if [ "$DO_RUN" -eq 1 ]; then
     have python3 || die "python3 needed for the http-sparql adapter"
     { [ -n "${SPARQL_ENDPOINT:-}" ] && [ -n "${SPARQL_QUERY_FILE:-}" ]; } || die "http-sparql --run needs SPARQL_ENDPOINT + SPARQL_QUERY_FILE"
@@ -515,7 +524,14 @@ run_http_sparql_engine() { # <id>
             --query-file "$SPARQL_QUERY_FILE" --engine "$id" --iters "$ITERS" --json 2>/dev/null)" \
       || die "http-sparql adapter failed for $id (endpoint up?)"
     PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,c,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"count":int(c),"query_us":int(u)}))')"
-    write_result "$id" "http-sparql" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    # Version: a resolved Docker image DIGEST (SPARQL_IMAGE) IS the version pin for a
+    # Dockerized server; fall back to the registry pinned_version when not Dockerized.
+    local hver=""
+    if [ -n "${SPARQL_IMAGE:-}" ] && have docker; then
+      hver="$(docker inspect --format '{{index .RepoDigests 0}}' "$SPARQL_IMAGE" 2>/dev/null || true)"
+    fi
+    [ -n "$hver" ] || hver="$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")"
+    write_result "$id" "${SPARQL_SUITE:-http-sparql}" "$hver" "$PAYLOAD"
     check_df
   fi
 }
@@ -524,22 +540,105 @@ run_vector_lib_engine() { # <id>
   local id="$1"
   hdr "$id (vector-lib)"
   log "  adapter: $ADAPTERS_DIR/vector_lib_adapter.py (build index -> query -> recall@k vs exact-kNN oracle)"
-  log "  PREP (gather box): pip install numpy hnswlib; set VECTOR_NPZ to an npz with {data,queries}"
+  # [OPUS-4.8] sq-aiup: TWO gather modes.
+  #   * SINGLE-POINT (default): VECTOR_NPZ (npz with {data,queries}) -> one recall@k point.
+  #   * PARETO (gather-tier, the published-dataset recall-QPS curve): set VECTOR_DATASET +
+  #     VECTOR_ROOT to sweep `ef` over SIFT1M (sift-128-euclidean) or glove-100-angular and
+  #     emit the recall-QPS Pareto at MATCHED recall (never a single latency). The corpora
+  #     are NOT redistributable in-repo (download/gather step) — design §3.3(c).
+  log "  PREP single-point: pip install numpy hnswlib; set VECTOR_NPZ to an npz with {data,queries}"
+  log "  PREP Pareto (sq-aiup): pip install numpy hnswlib [h5py for glove]; download SIFT1M/GloVe under"
+  log "    VECTOR_ROOT (SIFT: <root>/sift/sift_{base,query}.fvecs + sift_groundtruth.ivecs;"
+  log "    GloVe: <root>/glove-100-angular.hdf5), then set VECTOR_DATASET=sift-128-euclidean|glove-100-angular"
   if [ "$DO_RUN" -eq 1 ]; then
     have python3 || die "python3 needed for the vector-lib adapter"
     python3 -c 'import numpy, hnswlib' 2>/dev/null || die "vector-lib adapter needs numpy + hnswlib (pip install numpy hnswlib)"
-    [ -n "${VECTOR_NPZ:-}" ] || die "vector-lib --run needs VECTOR_NPZ (npz with {data,queries})"
-    OUT="$(python3 "$ADAPTERS_DIR/vector_lib_adapter.py" --hnswlib --npz "$VECTOR_NPZ" --k "${VECTOR_K:-10}" --engine "$id" --json 2>/dev/null)" \
-      || die "vector-lib adapter failed for $id"
-    PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,d,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"recall_deficit_milli":int(d),"query_us":int(u)}))')"
-    write_result "$id" "vectors-recall" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    if [ -n "${VECTOR_DATASET:-}" ]; then
+      # PARETO mode: published-dataset recall-QPS curve (sq-aiup).
+      [ -n "${VECTOR_ROOT:-}" ] || die "vector-lib Pareto --run needs VECTOR_ROOT (dir holding the SIFT1M/GloVe corpus)"
+      log "  Pareto: dataset=$VECTOR_DATASET root=$VECTOR_ROOT ef=${VECTOR_EF:-16,32,64,128,256} k=${VECTOR_K:-10} match_recall=${VECTOR_MATCH_RECALL:-0.9}"
+      local errf; errf="$(mktemp)"
+      # stdout = the per-ef recall-QPS TSV rows; stderr = the --json Pareto envelope.
+      python3 "$ADAPTERS_DIR/vector_lib_adapter.py" --pareto --dataset "$VECTOR_DATASET" \
+        --root "$VECTOR_ROOT" --ef "${VECTOR_EF:-16,32,64,128,256}" --k "${VECTOR_K:-10}" \
+        --match-recall "${VECTOR_MATCH_RECALL:-0.9}" --engine "$id" --json >/dev/null 2>"$errf" \
+        || { rm -f "$errf"; die "vector-lib Pareto adapter failed for $id (dataset $VECTOR_DATASET under $VECTOR_ROOT)"; }
+      PAYLOAD="$(tail -n1 "$errf" | jq -c . 2>/dev/null)"
+      rm -f "$errf"
+      [ -n "$PAYLOAD" ] || die "vector-lib Pareto produced no parseable --json envelope for $id"
+      write_result "$id" "vectors-recall-qps-${VECTOR_DATASET}" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    else
+      [ -n "${VECTOR_NPZ:-}" ] || die "vector-lib --run needs VECTOR_NPZ (npz with {data,queries}) or VECTOR_DATASET+VECTOR_ROOT (Pareto)"
+      OUT="$(python3 "$ADAPTERS_DIR/vector_lib_adapter.py" --hnswlib --npz "$VECTOR_NPZ" --k "${VECTOR_K:-10}" --engine "$id" --json 2>/dev/null)" \
+        || die "vector-lib adapter failed for $id"
+      PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,d,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"recall_deficit_milli":int(d),"query_us":int(u)}))')"
+      write_result "$id" "vectors-recall" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    fi
+    check_df
+  fi
+}
+
+# beir_deficits_json <tsv> — fold the adapter's `<engine>\t<metric>\t<deficit_milli>`
+# lines (recall_at_100, ndcg_at_10) into ONE `{engine, deficits_milli:{metric:val}}`
+# JSON object, so each engine's results envelope is a single comparable record (the
+# same deficit shape the vector-lib path emits).
+beir_deficits_json() {
+  printf '%s' "$1" | python3 -c 'import json,sys
+m={}; e=None
+for ln in sys.stdin.read().splitlines():
+    if not ln.strip(): continue
+    e,k,v=ln.split("\t"); m[k]=int(v)
+print(json.dumps({"engine":e,"deficits_milli":m}))'
+}
+
+# [OPUS-4.8] sq-1fz0: PYTHON-LIB kind — the BEIR IR-quality axis of the FTS suite
+# (design §3.4). The ONLY python-lib engine is lucene-anserini, the kernel BM25
+# ORACLE: it downloads a small BEIR cut (SciFact / TREC-COVID + qrels), BM25-retrieves
+# with Anserini/pyserini (k1=1.2/b=0.75, matching sparq-text), and scores Recall@100 /
+# nDCG@10, emitted as DEFICITS (G4) on the SAME cut + qrels sparq-text is scored on.
+# GATHER-ONLY: the BEIR corpus is not redistributable in-repo, so this is a download
+# step, never a committed per-PR gate. The scoring half is fixture-unit-tested in
+# scripts/bench-adapters/test_adapters.py WITHOUT pyserini/beir installed.
+run_python_lib_engine() { # <id>
+  local id="$1"
+  hdr "$id (python-lib — BEIR IR-quality oracle)"
+  log "  adapter: $ADAPTERS_DIR/beir_ir_adapter.py (download BEIR cut -> Anserini BM25 retrieve -> Recall@100/nDCG@10 deficits)"
+  log "  scoring half is fixture-unit-tested in $ADAPTERS_DIR/test_adapters.py (no pyserini/beir needed)"
+  log "  PREP (gather box): pip install pyserini beir; set BEIR_CUT (scifact|trec-covid); optional BEIR_DATA_DIR"
+  log "  OPTIONAL apples-to-apples: set SPARQ_TEXT_BEIR=target/release/examples/beir_text to ALSO"
+  log "    score sparq-text on the SAME cut+qrels (cargo build -p sparq-text --release --example beir_text)"
+  log "  OFF the dashboard (no RDF/SPARQL surface) — the kernel BM25 reference, 'sub-component, not an RDF benchmark'"
+  if [ "$DO_RUN" -eq 1 ]; then
+    have python3 || die "python3 needed for the python-lib (BEIR) adapter"
+    python3 -c 'import pyserini, beir' 2>/dev/null || die "python-lib adapter needs pyserini + beir (pip install pyserini beir)"
+    local cut; cut="${BEIR_CUT:-scifact}"
+    # 1. the kernel BM25 ORACLE: Anserini retrieve + score on the cut + qrels.
+    OUT="$(python3 "$ADAPTERS_DIR/beir_ir_adapter.py" --anserini --dataset "$cut" --k "${BEIR_K:-100}" --engine "$id" --json 2>/dev/null)" \
+      || die "python-lib (BEIR) adapter failed for $id (cut '$cut'; pyserini index downloadable?)"
+    PAYLOAD="$(beir_deficits_json "$OUT")"
+    write_result "$id" "beir-ir-${cut}" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    # 2. OPTIONAL: score sparq-text on the SAME cut+qrels via the shared scorer, so the
+    #    comparison is apples-to-apples (same scorer, same judgements; design §3.4).
+    if [ -n "${SPARQ_TEXT_BEIR:-}" ]; then
+      [ -x "$SPARQ_TEXT_BEIR" ] || die "SPARQ_TEXT_BEIR='$SPARQ_TEXT_BEIR' is not an executable (build the beir_text example)"
+      local prep; prep="$(mktemp -d)"
+      python3 "$ADAPTERS_DIR/beir_ir_adapter.py" --prepare-sparq --dataset "$cut" --out "$prep" \
+        || { rm -rf "$prep"; die "could not prepare sparq inputs for cut '$cut'"; }
+      "$SPARQ_TEXT_BEIR" "$prep/corpus.nt" "$prep/queries.tsv" "${BEIR_K:-100}" sparq-text > "$prep/run.txt" \
+        || { rm -rf "$prep"; die "sparq-text beir_text retrieval failed for cut '$cut'"; }
+      local SOUT
+      SOUT="$(python3 "$ADAPTERS_DIR/beir_ir_adapter.py" --score --run "$prep/run.txt" --qrels "$prep/qrels.txt" --k "${BEIR_K:-100}" --engine sparq-text 2>/dev/null)" \
+        || { rm -rf "$prep"; die "could not score the sparq-text run for cut '$cut'"; }
+      write_result "sparq-text" "beir-ir-${cut}" "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" "$(beir_deficits_json "$SOUT")"
+      rm -rf "$prep"
+    fi
     check_df
   fi
 }
 
 # Walk every registry engine of a SHARED-ADAPTER kind (skipping the three bespoke
 # kinds handled above) and dispatch. Engines stay empty in git, so this is a no-op
-# until a maintainer adds report-cli/js-lib/http-sparql/vector-lib entries.
+# until a maintainer adds report-cli/js-lib/http-sparql/vector-lib/python-lib entries.
 if have jq; then
   while IFS= read -r aid; do
     [ -n "$aid" ] || continue
@@ -549,8 +648,9 @@ if have jq; then
       js-lib)      run_js_lib_engine      "$aid" ;;
       http-sparql) run_http_sparql_engine "$aid" ;;
       vector-lib)  run_vector_lib_engine  "$aid" ;;
+      python-lib)  run_python_lib_engine  "$aid" ;;
     esac
-  done < <(jq -r '.competitors[] | select(.kind=="report-cli" or .kind=="js-lib" or .kind=="http-sparql" or .kind=="vector-lib") | .id' "$REGISTRY")
+  done < <(jq -r '.competitors[] | select(.kind=="report-cli" or .kind=="js-lib" or .kind=="http-sparql" or .kind=="vector-lib" or .kind=="python-lib") | .id' "$REGISTRY")
 fi
 
 hdr "done"

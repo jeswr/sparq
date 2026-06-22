@@ -51,7 +51,7 @@ must be resolved WITHOUT the verifier learning which list/version.
 The issuer signs over a HIDING reference commitment instead of clear
 `(list, version)`:
 
-```
+```text
 ref_commitment = Poseidon2([DOMAIN_RC, list_id, version, ref_blinding], 4)
 signed digest  = Poseidon2([DOMAIN_FC, ref_commitment, index_commitment], 3)
 ```
@@ -63,7 +63,7 @@ carries only `ref_commitment` (and `index_commitment`, as today).
 
 The relying party publishes a single **accepted-set Merkle root** over leaves
 
-```
+```text
 accepted_leaf = Poseidon2([DOMAIN_AL, list_id, version, status_list_root], 4)
 ```
 

@@ -9,6 +9,7 @@ import { Bindings } from './bindings.js';
 import { decompressToString, type CompressionCodec } from './decompress.js';
 import {
   detectQueryForm,
+  parseNTriples,
   quadsToNQuads,
   SparqlJsonRowsParser,
   termFromSparqlJson,
@@ -19,7 +20,87 @@ import {
 import { DataFactory, Quad, Variable } from './terms.js';
 import { init, WasmStore } from './wasm.js';
 
-export type RdfFormat = 'turtle' | 'ntriples' | 'nquads' | 'trig';
+// [OPUS-4.8] sq-dvyi: `'jsonld'` added — the engine parses JSON-LD (oxjsonld) when the
+// wasm bundle is built with the OPT-IN `jsonld` feature, which the published `@jeswr/sparq`
+// bundle and the site REPL both enable (js `build:wasm`). The JS surface accepts it like
+// the other syntaxes; the default lean wasm bundle leaves oxjsonld out (perf-gate floor).
+export type RdfFormat = 'turtle' | 'ntriples' | 'nquads' | 'trig' | 'jsonld';
+
+/**
+ * [OPUS-4.8] sq-u78ol (#1117 / #1129): the output syntax {@link SparqStore.serialize} /
+ * {@link SparqStore.dump} writes the store as. `'turtle'` is the default graph; `'trig'`
+ * the whole dataset (named graphs as `GRAPH <g> { … }` blocks); the JSON-LD forms emit the
+ * whole dataset (`'jsonld'` ≡ `'jsonld-expanded'`). Aliases (`'ttl'`, media types,
+ * `'json-ld'`) are accepted by the underlying engine writer too.
+ */
+export type SerializeFormat =
+  | 'turtle'
+  | 'trig'
+  | 'jsonld'
+  | 'jsonld-expanded'
+  | 'jsonld-flattened'
+  | 'jsonld-compacted';
+
+/**
+ * [OPUS-4.8] sq-u78ol (#1117 / #1129): options for {@link SparqStore.serialize} /
+ * {@link SparqStore.dump}. All optional with sensible defaults (pretty, two-space indent,
+ * abbreviated IRIs, engine default prefixes).
+ */
+export interface SerializeOptions {
+  /**
+   * Indent the output (default `true`): Turtle/TriG use the sorted, blank-line-separated
+   * pretty shape; JSON-LD is structurally re-indented. `false` selects the compact/minified
+   * writer.
+   */
+  pretty?: boolean;
+  /** The indent unit for the pretty writer (default `'  '`, two spaces). Ignored when `pretty` is `false`. */
+  indent?: string;
+  /**
+   * Turtle/TriG only (default `true`): emit a sorted `@prefix` header and compact IRIs to
+   * `prefix:local`. `false` keeps every IRI in full `<…>` form. Ignored for JSON-LD (form
+   * selects compaction).
+   */
+  abbreviate?: boolean;
+  /**
+   * An optional caller-supplied prefix map (`[[prefix, iri], …]`) driving Turtle/TriG
+   * `@prefix` compaction and the JSON-LD compacted `@context`. Omit for the engine's
+   * well-known defaults (`rdf`/`rdfs`/`xsd`/`owl`/`schema`/`foaf`/`dc`/`skos`/`sh`).
+   * `prefixes` from `#1129` — supply your own namespace policy to get byte-parity output.
+   */
+  prefixes?: ReadonlyArray<readonly [string, string]>;
+}
+
+/**
+ * [OPUS-4.8] sq-pxls (#162): one SHACL validation result — the per-violation
+ * shape PSS's ADR-0014 `ShaclValidator` seam consumes (a drop-in for
+ * `rdf-validate-shacl`'s result records). `focusNode`/`value`/`sourceShape`
+ * are N-Triples term strings (the lexical form sparq's `Term` `Display`
+ * produces); `path` is a SHACL Turtle path expression;
+ * `sourceConstraintComponent`/`severity` are full IRIs (e.g.
+ * `http://www.w3.org/ns/shacl#Violation`); `message` is the first declared
+ * `sh:message` text or a generated default. `path`/`value`/`message` are
+ * `null` when the underlying result carries none.
+ */
+export interface ValidationResult {
+  focusNode: string;
+  path: string | null;
+  value: string | null;
+  sourceShape: string;
+  sourceConstraintComponent: string;
+  severity: string;
+  message: string | null;
+}
+
+/**
+ * [OPUS-4.8] sq-pxls (#162): a SHACL validation report — the typed parse of
+ * the JSON the wasm `Store.validate` binding returns. `conforms` counts EVERY
+ * result regardless of severity (the W3C-suite notion); filter `results` by
+ * `severity` for a violations-only gate.
+ */
+export interface ValidationReport {
+  conforms: boolean;
+  results: ValidationResult[];
+}
 
 export interface SparqStoreOptions {
   /**
@@ -35,6 +116,18 @@ export interface SparqStoreOptions {
    * `compressed` (the engine has no compressed dataset loader yet).
    */
   dataset?: boolean;
+  /**
+   * [OPUS-4.8] sq-f66jz (#1115): a base IRI to resolve the document's RELATIVE
+   * IRIs against — for a document fetched from a URL (or a shapes graph / test
+   * manifest addressed by its location) that carries relative IRIs and no
+   * `@base` of its own. A document-level `@base` directive still overrides it;
+   * the line-based formats (`ntriples` / `nquads`) allow only absolute IRIs, so
+   * `baseIri` has no effect on them. An invalid base IRI throws. Not combinable
+   * with `dataset` / `compressed` (there is no dataset/compressed base loader yet);
+   * named graphs are folded into the default graph as with a plain (non-dataset)
+   * load.
+   */
+  baseIri?: string;
 }
 
 type MatchTerm = RDF.Term | null | undefined;
@@ -66,22 +159,84 @@ export class SparqStore {
   }
 
   /**
-   * Parses an RDF document into a store.
-   * `format`: `"turtle"` (default) | `"ntriples"` | `"nquads"` | `"trig"`.
-   * Named graphs are folded into the default graph unless `options.dataset`
-   * is set, in which case they are preserved as separate graphs.
+   * Selects the right wasm `Store` factory for `options` and builds the inner store.
+   * Shared by {@link fromString} (async) and {@link fromStringSync} (sync); both validate
+   * the incompatible-option combinations identically here.
    */
-  static async fromString(data: string, format: RdfFormat = 'turtle', options: SparqStoreOptions = {}): Promise<SparqStore> {
-    await init();
+  static #buildInner(data: string, format: RdfFormat, options: SparqStoreOptions): WasmStore {
     if (options.dataset && options.compressed) {
       throw new Error('options.dataset cannot be combined with options.compressed (no compressed dataset loader yet)');
     }
-    const inner = options.dataset
-      ? WasmStore.loadDataset(data, format)
-      : options.compressed
-        ? WasmStore.loadCompressed(data, format)
-        : WasmStore.load(data, format);
-    return new SparqStore(inner);
+    // [OPUS-4.8] sq-f66jz (#1115): a base IRI threads through to the wasm `loadWithBase`
+    // binding; it has no dataset/compressed variant yet, so reject those combinations.
+    if (options.baseIri !== undefined) {
+      if (options.dataset || options.compressed) {
+        throw new Error('options.baseIri cannot be combined with options.dataset or options.compressed (no base-IRI dataset/compressed loader yet)');
+      }
+      return WasmStore.loadWithBase(data, format, options.baseIri);
+    }
+    if (options.dataset) return WasmStore.loadDataset(data, format);
+    if (options.compressed) return WasmStore.loadCompressed(data, format);
+    return WasmStore.load(data, format);
+  }
+
+  /**
+   * [OPUS-4.8] sq-ty78o (#1114): an empty, mutable store — the ergonomic counterpart to a
+   * `load`, for building a graph up from nothing with {@link update} / {@link addQuads} /
+   * {@link applyDelta}. Wraps the wasm `new Store()` constructor.
+   *
+   * Named graphs work out of the box: the delta overlay creates a named graph on the first
+   * insert targeting it, so `store.update('INSERT DATA { GRAPH <g> { … } }')` followed by a
+   * `GRAPH ?g { … }` query returns the rows — no `dataset` flag is needed for an *empty*
+   * store (dataset mode only matters when *loading* a document whose named graphs would
+   * otherwise fold into the default graph; see {@link fromString}'s `options.dataset`).
+   */
+  static async empty(): Promise<SparqStore> {
+    await init();
+    return new SparqStore(new WasmStore());
+  }
+
+  /**
+   * [OPUS-4.8] sq-ty78o (#1114): {@link empty} SYNCHRONOUSLY — the wasm engine must ALREADY
+   * be initialised (a prior `await init()` / `await SparqStore.from*()` resolved), as with
+   * {@link fromStringSync}; otherwise the wasm binding throws. Prefer async {@link empty} for
+   * first construction.
+   */
+  static emptySync(): SparqStore {
+    return new SparqStore(new WasmStore());
+  }
+
+  /**
+   * Parses an RDF document into a store.
+   * `format`: `"turtle"` (default) | `"ntriples"` | `"nquads"` | `"trig"` | `"jsonld"`.
+   * Named graphs (N-Quads / TriG / a JSON-LD `@graph`) are folded into the default
+   * graph unless `options.dataset` is set, in which case they are preserved as
+   * separate graphs. Pass `options.baseIri` to resolve the document's relative IRIs
+   * against a base (e.g. a document fetched from a URL).
+   */
+  static async fromString(data: string, format: RdfFormat = 'turtle', options: SparqStoreOptions = {}): Promise<SparqStore> {
+    await init();
+    return new SparqStore(SparqStore.#buildInner(data, format, options));
+  }
+
+  /**
+   * [OPUS-4.8] sq-lii76: parses an RDF document into a store SYNCHRONOUSLY — the same as
+   * {@link fromString} but WITHOUT the `await init()`. The wasm engine must ALREADY be
+   * initialised (a prior `await init()` / `await SparqStore.fromString(...)` has resolved),
+   * otherwise the wasm binding throws. This is the building block for the synchronous RDF/JS
+   * `DatasetCore` members ({@link Dataset.match}), where the engine is guaranteed already up;
+   * prefer the async {@link fromString} for first construction.
+   */
+  static fromStringSync(data: string, format: RdfFormat = 'turtle', options: SparqStoreOptions = {}): SparqStore {
+    return new SparqStore(SparqStore.#buildInner(data, format, options));
+  }
+
+  /**
+   * [OPUS-4.8] sq-lii76: builds a store from RDF/JS quads SYNCHRONOUSLY (see
+   * {@link fromStringSync} — the wasm engine must already be initialised).
+   */
+  static fromQuadsSync(quads: Iterable<RDF.Quad>, options: SparqStoreOptions = {}): SparqStore {
+    return SparqStore.fromStringSync(quadsToNQuads(quads), 'nquads', options);
   }
 
   /** Builds a store from RDF/JS quads (serialised internally to N-Quads). */
@@ -121,7 +276,9 @@ export class SparqStore {
 
   /**
    * Runs a SPARQL query: returns `Bindings[]` for SELECT, `boolean` for ASK.
-   * CONSTRUCT/DESCRIBE are not supported by the engine yet.
+   * For the graph-valued forms (CONSTRUCT / DESCRIBE) use {@link queryQuads}
+   * (or {@link queryQuadsString} for the raw N-Triples) — routing one through
+   * `query()` throws, since this method only yields solution tables.
    */
   query(sparql: string): Bindings[] | boolean {
     const form = detectQueryForm(sparql)?.form;
@@ -134,6 +291,31 @@ export class SparqStore {
     const json = JSON.parse(this.#inner.query(sparql)) as SparqlJsonResults;
     const rows = json.results?.bindings ?? [];
     return rows.map(bindingsFromRow);
+  }
+
+  /**
+   * [OPUS-4.8] #1123 — runs a SELECT query and returns the solutions in the OXIGRAPH JS shape:
+   * an array of plain `Map<string, Term>`, each keyed on the variable NAME (no `?`) with RDF/JS
+   * `Term` values — exactly what Oxigraph's `Store.query` yields for a SELECT, so Oxigraph code
+   * (`for (const binding of store.querySolutions(q)) binding.get("s").value`) ports unchanged.
+   *
+   * It is a thin O(n) re-view of {@link queryBindings}'s RDF/JS `Bindings` (one `Map` allocation
+   * per solution, no extra wasm round-trip), so the engine's SPARQL-JSON path — not a second
+   * code path — stays the single source of truth. Prefer {@link queryBindings} for an RDF/JS
+   * pipeline (richer immutable `Bindings`); use this for drop-in Oxigraph migration.
+   */
+  querySolutions(sparql: string): Map<string, RDF.Term>[] {
+    return this.queryBindings(sparql).map((b) => b.toMap());
+  }
+
+  /**
+   * [OPUS-4.8] #1123 — the streaming counterpart of {@link querySolutions}: yields one
+   * Oxigraph-shaped `Map<string, Term>` solution at a time without materialising the whole
+   * result (see {@link queryBindingsStream} for the streaming contract). For porting Oxigraph
+   * code that iterates `store.query(...)` lazily.
+   */
+  *querySolutionsStream(sparql: string): Generator<Map<string, RDF.Term>, void, undefined> {
+    for (const b of this.queryBindingsStream(sparql)) yield b.toMap();
   }
 
   /**
@@ -204,11 +386,137 @@ export class SparqStore {
   }
 
   /**
+   * [OPUS-4.8] sq-1gkw: runs a graph-valued query (CONSTRUCT / DESCRIBE),
+   * returning the constructed/described graph as RDF/JS {@link Quad}s in the
+   * default graph. CONSTRUCT instantiates its template once per WHERE solution
+   * (template blank nodes freshened per solution; triples with unbound or
+   * RDF-illegal slots dropped per SPARQL §16.2); DESCRIBE returns each
+   * resource's concise bounded description. A SELECT / ASK query is rejected
+   * with a clear error — use {@link query} / {@link queryBindings} /
+   * {@link queryBoolean} for those. For a large graph, stream it with
+   * {@link queryQuadsStream}, or get the raw N-Triples with
+   * {@link queryQuadsString}.
+   */
+  queryQuads(sparql: string): Quad[] {
+    return parseNTriples(this.#inner.queryQuads(sparql));
+  }
+
+  /**
+   * Like {@link queryQuads} but returns the constructed/described graph as the
+   * engine's raw N-Triples string (a syntactic subset of Turtle, so also a
+   * valid `text/turtle` document) — for forwarding to a serializer sink or
+   * writing to a file without RDF/JS term materialisation.
+   */
+  queryQuadsString(sparql: string): string {
+    return this.#inner.queryQuads(sparql);
+  }
+
+  /**
+   * Streams a graph-valued query's result as RDF/JS {@link Quad}s, one at a
+   * time, with the constructed graph crossing the wasm boundary in batches of
+   * `batchSize` triples (default 1024) so a large graph is never held whole on
+   * the JS side. Works with both `for…of` and `for await…of`; abandoning the
+   * iterator early (`break`) frees the wasm-side cursor. (Caveat: the engine
+   * materialises the full graph inside wasm before the first batch; the bound
+   * is on the JS-side copy.)
+   */
+  *queryQuadsStream(sparql: string, batchSize = 1024): Generator<Quad, void, undefined> {
+    const cursor = this.#inner.queryQuadsChunks(sparql, batchSize);
+    try {
+      for (;;) {
+        const chunk = cursor.next();
+        if (chunk === undefined) break;
+        yield* parseNTriples(chunk);
+      }
+    } finally {
+      cursor.free();
+    }
+  }
+
+  /**
    * Counts the solutions of a SELECT query without materialising them
    * (read straight from the index where possible).
    */
   count(sparql: string): number {
     return this.#inner.count(sparql);
+  }
+
+  /**
+   * [OPUS-4.8] sq-u78ol (#1117 / #1129): serialises the store's contents to a **Turtle**,
+   * **TriG**, or **JSON-LD** document string.
+   *
+   * Where {@link queryQuadsString} writes a CONSTRUCT/DESCRIBE *result graph* as flat
+   * N-Triples, this writes the **store itself** in a readable syntax — `'turtle'` (the
+   * default graph), `'trig'` (the whole dataset, named graphs as `GRAPH <g> { … }` blocks),
+   * or JSON-LD (`'jsonld'` ≡ `'jsonld-expanded'`, plus `'jsonld-flattened'` /
+   * `'jsonld-compacted'`; the whole dataset). It calls straight through to `sparq-engine`'s
+   * writers, so the output is byte-identical to the native serialiser.
+   *
+   * `options` (all optional): `pretty` (default `true`) indents the output; `indent`
+   * (default `'  '`) is the indent unit; `abbreviate` (Turtle/TriG only, default `true`)
+   * emits a `@prefix` header and `prefix:local` CURIEs; `prefixes` (#1129) is an optional
+   * `[[prefix, iri], …]` map driving `@prefix`/`@context` compaction (omit for the engine
+   * defaults). An unrecognised `format` (or a malformed `prefixes`) throws.
+   *
+   * Requires a `serialize-rdf`-enabled wasm bundle (the published `@jeswr/sparq` ships one);
+   * a `serialize-rdf`-less custom build throws a clear error here rather than a cryptic
+   * "not a function". (The full W3C JSON-LD 1.1 Compaction against a caller `@context` is the
+   * sibling raw-`Store` `serializeCompact` binding — see the javascript-wasm SKILL.)
+   */
+  serialize(format: SerializeFormat | string = 'turtle', options: SerializeOptions = {}): string {
+    if (typeof this.#inner.serialize !== 'function') {
+      throw new Error(
+        'SparqStore.serialize requires a serialize-rdf-enabled wasm bundle (build sparq-wasm with --features serialize-rdf)',
+      );
+    }
+    const pretty = options.pretty ?? true;
+    const indent = options.indent ?? '  ';
+    const abbreviate = options.abbreviate ?? true;
+    // The wasm binding takes a mutable `Array<[prefix, iri]>`; copy the readonly pairs.
+    const prefixes = options.prefixes ? options.prefixes.map(([p, iri]) => [p, iri]) : undefined;
+    return this.#inner.serialize(format, pretty, indent, abbreviate, prefixes);
+  }
+
+  /**
+   * [OPUS-4.8] sq-u78ol (#1117): alias for {@link serialize} — the `dump(format)` spelling the
+   * issue asked for. Identical behaviour and requirements.
+   */
+  dump(format: SerializeFormat | string = 'turtle', options: SerializeOptions = {}): string {
+    return this.serialize(format, options);
+  }
+
+  /**
+   * [OPUS-4.8] sq-pxls (#162): validates an RDF **data graph** against a SHACL
+   * **shapes graph**, returning a typed SHACL {@link ValidationReport}.
+   *
+   * Both arguments are RDF documents in the same `format` {@link fromString}
+   * accepts (`"turtle"` (default) | `"ntriples"` | `"nquads"` | `"trig"`);
+   * they are parsed identically (named graphs folded into the default graph).
+   * This is a **stateless one-shot** — it does NOT consult the receiver's
+   * stored triples — so it is the ergonomic drop-in for `rdf-validate-shacl`'s
+   * `validate(dataDataset, { shapes })`, running through `sparq-shacl`'s SHACL
+   * Core + SHACL-SPARQL (`sh:sparql`, §5.2) engine inside wasm. The JSON the
+   * binding returns is parsed into the typed report here, so the caller never
+   * touches the raw string.
+   *
+   * `report.conforms` counts EVERY result regardless of severity (the W3C-suite
+   * notion); filter `report.results` by `severity` for a violations-only gate.
+   * Throws only if a graph fails to parse; malformed shapes are skipped by the
+   * engine, never surfaced. Validation is in-process and best for small
+   * documents (~10–100 triples); validate large graphs server-side via the
+   * `sparq-server` HTTP `validate` path instead (the other half of #162).
+   *
+   * Requires a `shacl`-enabled wasm bundle (the published `@jeswr/sparq` ships
+   * one); a `shacl`-less custom build throws a clear error here rather than a
+   * cryptic "not a function".
+   */
+  validate(data: string, shapes: string, format: RdfFormat = 'turtle'): ValidationReport {
+    if (typeof this.#inner.validate !== 'function') {
+      throw new Error(
+        'SparqStore.validate requires a SHACL-enabled wasm bundle (build sparq-wasm with --features shacl)',
+      );
+    }
+    return JSON.parse(this.#inner.validate(data, shapes, format)) as ValidationReport;
   }
 
   /**

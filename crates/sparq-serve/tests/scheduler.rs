@@ -28,7 +28,11 @@ use sparq_serve::{Lane, SchedError, Scheduler, SchedulerConfig};
 /// A scheduler config with a known worker count and a low heavy threshold, so
 /// tests are deterministic about lane assignment and reserved capacity.
 fn cfg(workers: usize, heavy_concurrency: usize, heavy_threshold: u64) -> SchedulerConfig {
-    SchedulerConfig { workers, heavy_concurrency, heavy_threshold }
+    SchedulerConfig {
+        workers,
+        heavy_concurrency,
+        heavy_threshold,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -56,7 +60,10 @@ fn scheduling_does_not_change_results_differential() {
     for (i, t) in tickets {
         let got = t.wait().expect("job completed");
         let expected = (0..=i as u64).sum::<u64>().wrapping_mul(2654435761);
-        assert_eq!(got, expected, "scheduled result must equal direct computation for job {i}");
+        assert_eq!(
+            got, expected,
+            "scheduled result must equal direct computation for job {i}"
+        );
     }
 }
 
@@ -78,7 +85,10 @@ fn heavy_cap_always_reserves_a_cheap_worker() {
     // Even if a deployment misconfigures heavy_concurrency == workers, the cap is
     // clamped so at least one worker stays free for cheap jobs.
     let sched: Arc<Scheduler<()>> = Scheduler::new(cfg(4, 4, 1_000));
-    assert!(sched.heavy_cap() < sched.workers(), "a cheap worker must always be reserved");
+    assert!(
+        sched.heavy_cap() < sched.workers(),
+        "a cheap worker must always be reserved"
+    );
     assert!(sched.heavy_cap() >= 1);
 }
 
@@ -218,7 +228,8 @@ fn head_of_line_cheap_p99_bounded_under_expensive_query() {
         load_p99 < base_p99 + Duration::from_millis(60),
         "lane-split cheap p99 went from {:?} (unloaded) to {:?} under expensive queries — \
          reserved capacity is not containing head-of-line blocking",
-        base_p99, load_p99
+        base_p99,
+        load_p99
     );
     // The contrast must be real, asserted two ways so neither a noisy denominator
     // nor a light workload can make it pass vacuously (empirical honesty):
@@ -237,7 +248,8 @@ fn head_of_line_cheap_p99_bounded_under_expensive_query() {
         fifo_p99 > load_p99 * 3,
         "FIFO single-lane p99 ({:?}) was not dramatically worse than lane-split p99 ({:?}) — \
          the scheduler's lane split is not earning its keep in this measurement",
-        fifo_p99, load_p99
+        fifo_p99,
+        load_p99
     );
     // And lane-split cheap p99 must stay well under a single scan's duration (a
     // 200ms scan must NOT appear in cheap p99).
@@ -286,7 +298,11 @@ fn heavy_query_not_starved_under_cheap_flood() {
         cheap_tickets.len(),
         t0.elapsed()
     );
-    assert_eq!(heavy_done.load(Ordering::SeqCst), 1, "heavy job must have run to completion");
+    assert_eq!(
+        heavy_done.load(Ordering::SeqCst),
+        1,
+        "heavy job must have run to completion"
+    );
     for t in cheap_tickets {
         t.wait().expect("cheap job completed");
     }
@@ -462,7 +478,11 @@ fn no_regression_all_cheap_workload() {
 
 /// A minimal "unscheduled" baseline: a fixed pool of `width` threads pulling from
 /// one mpsc queue, no lanes, no cost, no aging — the simplest correct dispatcher.
-fn run_plain_pool(width: usize, n: usize, work: impl Fn() + Send + Sync + 'static + Clone) -> Duration {
+fn run_plain_pool(
+    width: usize,
+    n: usize,
+    work: impl Fn() + Send + Sync + 'static + Clone,
+) -> Duration {
     use std::sync::mpsc;
     let (tx, rx) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
     let rx = Arc::new(std::sync::Mutex::new(rx));
@@ -555,7 +575,11 @@ fn queued_jobs_shed_on_shutdown() {
 fn panicking_job_is_isolated() {
     let sched = Scheduler::new(cfg(2, 1, 1_000));
     let bad = sched.submit(1, || -> u32 { panic!("boom") });
-    assert_eq!(bad.wait(), Err(SchedError::Panicked), "a panicking job is surfaced, not silent");
+    assert_eq!(
+        bad.wait(),
+        Err(SchedError::Panicked),
+        "a panicking job is surfaced, not silent"
+    );
     // The pool survives: a following job still runs.
     let good = sched.submit(1, || 42u32);
     assert_eq!(good.wait(), Ok(42), "pool must survive a panicking job");

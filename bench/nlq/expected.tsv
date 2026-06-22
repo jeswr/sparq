@@ -1,0 +1,22 @@
+# [OPUS-4.8] (sq-k0km) sparq-nlq OFFLINE NL->SPARQL suite DETERMINISTIC golden counts at the
+# PINNED N=2000 (bench/nlq/run.sh's NLQ_N default). These are a pure function of N + the
+# synthetic typed schema generated in crates/sparq-nlq/examples/bench.rs (no external data, no
+# network, offline fixed-completion stub LLM), so they are byte-stable across machines (NOT
+# wall-clock). Format: <metric>\t<count>. If you change NLQ_N you MUST re-derive these.
+#
+# DERIVED by RUNNING `cargo run -p sparq-nlq --example bench --release 2000` and reading its
+# stdout (not guessed); bench/nlq/run.sh re-runs it every commit and exits 1 on any drift,
+# exactly like LUBM's row-count diff / HDT's load-decode diff / Solid's auth-view diff. The us
+# timings the example also prints are NON-CANONICAL (dev/gh-runner box) and are NOT asserted.
+#
+#   nlq_synth_triples    triples in the synthetic typed graph (3 per entity: type/label/age)
+#   nlq_prompt_chars     length of the schema-grounded prompt prompt_for(question) builds
+#                        (a token-budget proxy — smaller = leaner grounded prompt)
+#   nlq_ask_result_rows  rows the full ask loop returns (GROUP BY ?type over the synthetic
+#                        graph -> one row per type)
+#   nlq_ask_repairs      repair rounds the ask loop needed (0 = the stub's first SPARQL was
+#                        spargebra-valid + executable)
+nlq_synth_triples	6000
+nlq_prompt_chars	1973
+nlq_ask_result_rows	2
+nlq_ask_repairs	0

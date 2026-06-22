@@ -219,3 +219,105 @@ correct COUNTs, out-of-core, 51.5 GB peak RAM, on an 8-vCPU ~$0.61/h box.** The 
 full-truthy target remains neither met nor refuted on real hardware (192-core box still
 quota-blocked), but the path is now quantified: shrink/parallelise the ~200 s/1 B serial
 dict bucket, then re-measure many-core scaling.
+
+## Rung-5 dict-bucket re-measurement (sq-3l43) — instrumentation + re-launch
+
+The ~200 s/1 B SERIAL dict bucket above (`merge_remap(serial)` 137.9 s + `triple-remap
+(serial)` 62.2 s) was measured at engine **`ef86e66`**, which is BEFORE the
+`dict-consolidation` branch landed on main (parallel `intern_partials`, pipelined remap,
+parallel `into_merged`, sharded-default). `research/dict-consolidation-verdict.md` PROJECTS
+that bucket down to single-digit seconds at 1 B — an EXTRAPOLATION from 40 M synthetic on a
+contended M1, never re-measured at 1 B real truthy. sq-3l43 is the cheap precursor to the
+deferred 192-core validation (sq-bj3): one ~$1.50 r7i.2xlarge 1 B build on **current main**
+to confirm or refute the bucket reduction.
+
+Two defeaters in the existing harness made that re-measurement uninterpretable, both fixed
+here (no fabricated numbers — this PR ships the instrumentation + re-launch, the on-box run
+records the result to `hwrun/results/rung5/t2-dict-bucket.txt`):
+
+1. **Stale engine pin.** `hwrun/rung5-launch.sh`/`rung5-remote.sh` defaulted `SHA=ef86e66`
+   — the PRE-consolidation commit. Re-running them would have re-measured the OLD serial
+   path. Default is now `origin/main`; the resolved commit is recorded to `engine-sha.txt`.
+2. **Mislabelled phase report.** On the sharded DEFAULT path, `SPARQ_BUILD_TIMING=1` printed
+   the now-PARALLEL intern / PIPELINED remap occupancy under the labels `merge_remap(serial)`
+   / `triple-remap(serial)` — so a reader would have compared overlapped per-stage occupancy
+   against the old ADDITIVE-serial ~200 s and drawn the wrong conclusion. The report now
+   distinguishes the path (`sparq_core` `build_timing::PathKind`): the sharded/spill paths
+   read `intern(parallel-occupancy)` / `triple-remap(pipelined-occupancy)` and surface the
+   serial consolidation step as its own `dict-consolidate(serial)` term (the `into_merged`
+   bucket — the interpretable dict-consolidation cost on the new path). The non-sharded
+   serial build keeps the honest `merge_remap(serial)` / `triple-remap(serial)` labels.
+
+**Status:** instrumentation + orchestration ready; the 1 B r7i.2xlarge run is launchable
+with `bash hwrun/rung5-launch.sh` (uses `AWS_PROFILE=pss`, self-terminating, tag
+`purpose=sparq-hw-validation`, dead-man `shutdown -h +150`). The on-box clone checks out
+`origin/main`, so the box must be run AFTER this fix merges (otherwise it rebuilds the
+mislabelled report). The dict-consolidation bucket number at 1 B real truthy on
+post-consolidation main is NOT YET recorded — when the box runs, capture `dict consolidate
+(into_merged)` + the `dict-consolidate(serial)` term from `t2-dict-bucket.txt` here and
+compare against the projected single-digit seconds.
+
+### 2026-06-17 launch attempt — BLOCKED by the account envelope (NOT yet measured) [OPUS-4.8]
+
+The post-`#570` run was attempted on 2026-06-17 against `origin/main`. It is currently
+**blocked by the AWS account quota/IAM envelope this work box runs under — no `dict-
+consolidate(serial)` figure was produced, and none is recorded here (no fabrication).**
+Both launch paths fail at `RunInstances`:
+
+1. **On-demand `VcpuLimitExceeded`.** The original 2026-06-11 run fit the 16-vCPU Standard
+   on-demand bucket (`L-1216C47A`) because only the 2-vCPU prod `t3.large` was running
+   (14-vCPU headroom). Since **2026-06-13** the 8-vCPU `r7g.2xlarge` agent dev box
+   `sparq-dev-claude` — *the box this orchestrator itself runs on*, which must never be
+   terminated — also occupies that bucket. Standard usage is now 2 + 8 = 10 vCPU, so a
+   fresh 8-vCPU `r7i.2xlarge` (→ 18) trips the limit. The 1 B build needs ≥64 GB RAM
+   (51.5 GB peak RSS measured), and the smallest 64 GB box is an `x.2xlarge` (8 vCPU), so
+   the 6-vCPU on-demand headroom cannot host it. The prod box and the dev box are both
+   off-limits, so on-demand cannot proceed without a quota increase.
+2. **Spot `AuthFailure.ServiceLinkedRoleCreationNotPermitted`.** Spot draws on a *separate*
+   quota bucket (`L-34B43A08`), and a spot `--dry-run` reports "would have succeeded", so
+   spot is this bead's natural unblock (also cheaper: ~$0.21/h vs ~$0.61/h on-demand).
+   `hwrun/rung5-launch.sh` now takes `SPARQ_SPOT=1` to launch one-time spot (interrupt =
+   terminate, so the self-cleaning + dead-man contract holds). But the real spot
+   `RunInstances` is refused: the scoped SSO deploy role (`AWSReservedSSO_PSSSingleInstance
+   Deploy`) lacks permission to create the one-time `AWSServiceRoleForEC2Spot`
+   service-linked role (and cannot even `iam:GetRole` to check whether it exists).
+
+**Unblock — one of:** (a) a privileged principal creates the `AWSServiceRoleForEC2Spot`
+SLR once (`aws iam create-service-linked-role --aws-service-name spot.amazonaws.com`),
+after which `SPARQ_SPOT=1 bash hwrun/rung5-launch.sh` runs end-to-end under the separate
+spot quota; or (b) a Standard on-demand vCPU limit bump to ≥24 (then plain `bash
+hwrun/rung5-launch.sh`); or (c) run it from a session that is NOT on the 8-vCPU dev box so
+the on-demand headroom is free again. Tracked on sq-3l43; the deferred 192-core full
+validation is sq-bj3.
+
+### 2026-06-18 re-confirmation — BOTH paths STILL blocked (no change, no fabrication) [OPUS-4.8]
+
+Re-probed live from the same work-box session before re-attempting; the account envelope
+is unchanged from the 2026-06-17 attempt above, so **the `dict-consolidate(serial)` figure
+at 1 B is still NOT produced and none is recorded here.** Evidence captured this session:
+
+- Running instances unchanged: prod `t3.large` (2 vCPU) + dev `r7g.2xlarge`
+  `sparq-dev-claude` (8 vCPU) = 10 vCPU Standard on-demand. No `purpose=sparq-hw-validation`
+  instances exist (orphan-clean before and after).
+- **On-demand still `VcpuLimitExceeded`.** The sanctioned self-terminating launch
+  (`bash hwrun/rung5-launch.sh`, `--instance-initiated-shutdown-behavior terminate` +
+  dead-man `shutdown -h +150` + cleanup trap) aborted at `RunInstances`: *"requested more
+  vCPU capacity than your current vCPU limit of 16 … for the instance bucket"* (10 used + 8
+  for a fresh `r7i.2xlarge` = 18 > 16). The pre-flight + cleanup trap left no instance,
+  keypair, or SG behind. NB: a bare `--dry-run` RunInstances misleadingly reports "would
+  have succeeded" because dry-run does NOT evaluate the per-bucket vCPU quota — only a real
+  `RunInstances` surfaces the limit, so the dry-run cannot be used as the go/no-go signal.
+- **Spot still `AuthFailure.ServiceLinkedRoleCreationNotPermitted`.** A real spot
+  `RunInstances` probe is refused: the scoped SSO deploy role
+  (`AWSReservedSSO_PSSSingleInstanceDeploy`) cannot create the one-time
+  `AWSServiceRoleForEC2Spot` service-linked role, and cannot `iam:GetRole` to check whether
+  it already exists. `servicequotas:GetServiceQuota` is likewise denied, so the limits
+  cannot be read from this principal — only inferred from the live `RunInstances` verdicts.
+
+Not run in-place on the dev box instead: it is **aarch64 (Neoverse-V1)**, not the x86-64
+(Xeon Platinum 8488C) of the rung-5 baseline, so a figure from it would not be comparable
+to the 137.9 s + 62.2 s x86 split this re-measurement compares against; it is also the
+shared agent box (a ~12-min full-core 1 B build would contend with other agents, and the
+~84 GB index would crowd the shared root volume). The bead scopes a dedicated,
+self-terminating r7i.2xlarge precisely to avoid both. Unblock paths (a)/(b)/(c) above are
+unchanged; producing the figure remains the responsibility of whoever satisfies one of them.

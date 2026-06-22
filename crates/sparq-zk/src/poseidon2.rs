@@ -6,7 +6,7 @@
 //!    `acvm-repo/bn254_blackbox_solver/src/poseidon2.rs` — the solver behind
 //!    Noir's `std::hash::poseidon2_permutation` blackbox (itself matching the
 //!    Barretenberg crypto module). t = 4, R_F = 8, R_P = 56, x^5 S-box;
-//!    constants vendored in [`crate::poseidon2_constants`].
+//!    constants vendored in `crate::poseidon2_constants`.
 //! 2. **Sponge** (`hash`): ported from noir-lang/poseidon `src/poseidon2.nr`
 //!    (`Poseidon2::hash`): rate 3, capacity initialised to
 //!    `len * 2^64`, absorb in chunks of 3, squeeze one element.

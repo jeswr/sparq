@@ -239,7 +239,7 @@ Documented in design doc §3.6 / §7 item 4 and gh-55, all currently **missing**
 | Vocabulary term | Spec | Status | Shape of the work |
 |---|---|---|---|
 | `acl:accessToClass` | WAC (extension) | missing | needs a class-membership join over pod content — crosses the §2.4 reasoner/content boundary; non-trivial |
-| `acp:CreatorAgent` / `acp:OwnerAgent` | ACP | missing | needs *per-resource creator/owner facts* from the storage layer (who created `<r>`) — a loader-synthesized fact PSS would have to supply; recognized in `loader.rs` `SPECIAL_AGENTS` but not granted |
+| `acp:CreatorAgent` / `acp:OwnerAgent` | ACP | **done ([OPUS-4.8] sq-3jtd.5)** | per-resource creator/owner WebIDs the trusted caller supplies via `AccessProvenance` + `materialize_acp_with`; loader synthesizes `<r> solidx:creator\|owner <w>` from THAT map only (never pod content, §2.4); resource-scoped grant (`urn:sparq:provcand?…&res=R`) so a creator of `R1` is never granted `R2`. Composes under `allOf` with a second, independent concrete-WebID `acp:agent` matcher ([OPUS-4.8] sq-az1b): the two agent constraints intersect — WebID==creator/owner is granted (resource-scoped), a distinct fixed WebID grants nobody (correct-by-soundness) |
 | `acp:issuer` | ACP | missing | "same shape as `acp:client`" (design doc §3.6) — extend the principal from a pair to a triple `(agent, client, issuer)`, combinatorial blow-up noted |
 | `acp:vc` | ACP | missing | Verifiable-Credential-gated matcher — needs VC verification, genuinely large; ties to the sparq ZK/VC estate |
 | custom ACP mode IRIs | ACP | partial | the design supports *any* mode IRI; the prototype maps only the 4 standard ones — the auth-view predicate space is fixed to read/write/append/control |
@@ -276,12 +276,21 @@ Prioritize by *what PSS actually needs as an oracle*, conservatively:
 2. **(feasible, larger — **sq-3jtd.6**)** `acp:issuer` — extend the principal model from pair to
    triple; sized as a follow-up because it touches all minting + the session expansion.
 3. *(research-open — **sq-3jtd.7**)* `acl:accessToClass`, `acp:vc`, nested `acl:agentGroup`
-   chains, custom ACP mode IRIs — captured here; a single tracking bead (do not start blind; each
-   needs its own design note, `acp:vc` ties to the ZK/VC estate).
+   chains, custom ACP mode IRIs — **the per-gap design notes this bead asked for now exist:
+   [`research/solid-vocab-gaps-design.md`](./solid-vocab-gaps-design.md) [OPUS-4.8]**. Net of
+   that analysis: `acl:accessToClass` and `acp:vc` stay research-open (the former breaches the
+   §2.4 content boundary unless PSS supplies trusted class facts; the latter needs the ZK/VC
+   estate's verifier and a verify-in-PSS / match-in-rules split); **custom ACP mode IRIs is
+   near-term feasible** (no soundness barrier — a bounded `Mode`-enum→IRI refactor with a
+   public-API/`SKILL.md` cost, demand-driven); **nested `acl:agentGroup` chains is feasible as
+   an N3 transitive closure** but gated on first confirming recursive expansion is the CSS/ESS
+   reference behaviour (do not over-grant) and bounding expansion to loaded group docs.
 
-**Verdict:** `CreatorAgent`/`OwnerAgent` and `issuer` are **near-term feasible**;
-`accessToClass`/`vc`/custom-modes/nested-groups are **research-open** (they breach the
-content/reasoner boundary or need verification machinery).
+**Verdict:** `CreatorAgent`/`OwnerAgent` and `issuer` are **near-term feasible** (landed);
+within sq-3jtd.7, **custom-modes and nested-groups are near-term feasible** (the latter gated on
+a conformance decision), while **`accessToClass`/`vc` remain research-open** (they breach the
+content/reasoner boundary or need verification machinery) — see the design notes for the per-gap
+prerequisites.
 
 ---
 
@@ -342,12 +351,40 @@ The honest gaps:
 
 ### Sequenced tasks
 
-1. **(near-term, feasible — **sq-3jtd.8**)** Vendor/ingest the authorization-relevant WAC
-   fixtures from the Solid spec-tests corpus and assert library-level decision parity in
-   `tests/conformance_wac.rs`.
-2. **(feasible, after WAC — **sq-3jtd.9**)** Same for ACP (`tests/conformance_acp.rs`).
-3. *(research-open / aspirational)* Differential oracle against CSS (WAC/ACP) — captured here;
-   tracked under sq-3jtd.9's notes, not started until the corpus harness exists.
+1. **(DONE — **sq-3jtd.8** [OPUS-4.8])** WAC harness landed: `sparq_solid::wac_conformance`
+   (`src/wac_conformance.rs`) is a table-driven scenario runner over the WAC engine
+   (`materialize_wac` + `AuthIndex::accessible`, with a `run_via_podstore` twin proving the
+   `PodStore` method-form path), sharing the decision/expectation/report vocabulary
+   (`conformance::{Decision, Expect, ScenarioReport}`) with the ACP harness. The scenario
+   corpus in `tests/conformance_wac.rs` isolates each WAC construct: `acl:agent` on the
+   resource's own ACL (`acl:accessTo`), `acl:agentClass foaf:Agent` (public) /
+   `acl:AuthenticatedAgent`, `acl:agentGroup` via `vcard:hasMember`, `acl:default`
+   inheritance vs `acl:accessTo`, **nearest-ACL shadowing** (the key WAC difference from
+   ACP's cumulative inheritance), resource-specific override, the `acl:origin` (user, app)
+   pair, mode independence, `acl:Control` governing the `.acl` document, fail-closed, and
+   the multi-agent union. **Decision recorded (same as ACP):** scenarios are derived from
+   the WAC spec's normative semantics and declared as data (an `AclBuilder` corpus + an
+   expected-decision table), rather than vendoring the live JS spec-tests/CTH corpus over
+   HTTP — that route has no library entry point here (it asserts on HTTP outputs, PSS's by
+   design). The table-driven corpus is the natural input for the aspirational CSS
+   differential oracle (item 3).
+2. **(DONE — **sq-3jtd.9** [OPUS-4.8])** ACP harness landed: `sparq_solid::conformance`
+   (`src/conformance.rs`) is a table-driven scenario runner over the ACP engine
+   (`materialize_acp` + `AuthIndex::accessible`), with the scenario corpus in
+   `tests/conformance_acp.rs` (matchers incl. `acp:PublicAgent`/`acp:AuthenticatedAgent`,
+   `acp:allOf`/`acp:anyOf`/`acp:noneOf`, the (user, app) pair, deny-overrides, cumulative
+   ancestor inheritance, mode independence, fail-closed). **Decision recorded:** scenarios are
+   derived from the ACP spec's normative semantics and declared as data (an `AcrBuilder` corpus
+   + an expected-decision table), rather than vendoring the live JS spec-tests/CTH corpus over
+   HTTP — that route has no library entry point here (it asserts on HTTP outputs, PSS's by
+   design). The ACP harness defined the in-crate pattern; the WAC harness (sq-3jtd.8, item 1
+   above) now mirrors it, sharing the `conformance::{Decision, Expect, ScenarioReport}`
+   vocabulary (the `ScenarioReport::build` core takes a `FnMut` "granted?" oracle, so both
+   harnesses differ only in which auth view they consult).
+3. *(research-open / aspirational — STILL NOT STARTED)* Differential oracle against CSS (WAC/ACP):
+   run the same corpus through the JS reference evaluator and diff decisions. Deferred for the
+   JS-toolchain cost; the table-driven corpus in `tests/conformance_acp.rs` is the natural input
+   for it. Tracked as a follow-up.
 
 **Verdict: library-level conformance is near-term feasible** (the storage model already matches
 the corpus shape); **CTH-over-HTTP conformance is out-of-scope** for sparq-solid (it is PSS's,

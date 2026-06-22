@@ -1,4 +1,7 @@
 #![doc = include_str!("../README.md")]
+// [OPUS-4.8] MS-G2 (sq-8wbn): make `// SAFETY:` mandatory on every first-party unsafe
+// block. Mechanically enforces the per-site argument the unsafe-register documents.
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod compress;
 pub mod dict;
@@ -7,6 +10,11 @@ pub mod dictspill;
 #[cfg(feature = "mmap")]
 pub mod extsort;
 mod nt;
+// [OPUS-4.8] sq-yj76l (gh #1121): the opt-in `SharedGraph` server-sharing handle. OFF by
+// default so the lean default / wasm build never links it (it is `std::sync` only — no new
+// dep — but the surface stays out of the default API).
+#[cfg(feature = "shared")]
+pub mod shared;
 pub mod store;
 pub mod temporal;
 
@@ -20,6 +28,10 @@ use temporal::Temporal;
 // the alias as dead code under the `-D warnings` clippy gate.
 #[cfg(feature = "parallel")]
 type ChunkPartials = Vec<(Dict, Vec<[Id; 3]>)>;
+// [OPUS-4.8] sq-dvyi: JSON-LD parser is OPT-IN behind the `jsonld` feature so the
+// default (lean) wasm bundle never links `oxjsonld`.
+#[cfg(feature = "jsonld")]
+use oxjsonld::JsonLdParser;
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};
 use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
@@ -123,6 +135,19 @@ impl std::ops::Deref for GraphSnapshot {
         &self.graph
     }
 }
+
+// [OPUS-4.8] (sq-yj76l, gh #1121) GUARANTEE — for all feature states — that a `Graph` and its
+// read-only `GraphSnapshot` stay `Send` + `Sync`, so they can be shared across the threads of a
+// multi-threaded server (axum/actix) directly or via [`shared::SharedGraph`]. This is a
+// zero-cost compile-time check: adding a future non-`Send`/non-`Sync` field (e.g. an `Rc` or a
+// bare interior-mutable cell) to `Graph` would fail the build HERE rather than silently breaking
+// downstream multi-threaded users. The `mmap`/`dict-spill`-gated fields (`File`, `Mmap`,
+// `TxnJournal`) are themselves `Send + Sync`, so this holds with every feature on too.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Graph>();
+    assert_send_sync::<GraphSnapshot>();
+};
 
 /// Backing storage for the numeric-value cache (`numerics[id-1]` = f64 value of term
 /// `id`, NaN for non-numeric): owned dense in RAM, mmap'd from disk (out-of-core), or
@@ -628,7 +653,14 @@ pub(crate) fn is_numeric_datatype_str(dt: &str) -> bool {
 impl Graph {
     /// Loads triples from an RDF document (default graph only for M1; named
     /// graphs from TriG/N-Quads are folded into the default graph). Returns the
-    /// built graph. `format`: "turtle" | "ntriples" | "nquads" | "trig".
+    /// built graph. `format`: "turtle" | "ntriples" | "nquads" | "trig" | "jsonld"
+    /// (plus the usual aliases — "ttl"/"text/turtle", "nt", "nq", "json-ld" /
+    /// "application/ld+json", …). JSON-LD is recognised only when the crate is built with
+    /// the OPT-IN `jsonld` feature (it links `oxjsonld`). [OPUS-4.8] (sq-m2pc) An
+    /// UNRECOGNISED `format` is now an `Err` — it is NOT silently parsed as Turtle (so a
+    /// "jsonld" string in a build without the feature errors rather than mis-parsing).
+    /// JSON-LD `@graph` named graphs are folded into the default graph here; use
+    /// [`load_dataset`](Self::load_dataset) to preserve them.
     pub fn load_str(text: &str, format: &str) -> Result<Graph, String> {
         let (dict, triples) = Self::parse_to_triples(text, format)?;
         Ok(Self::from_parts(dict, triples))
@@ -653,7 +685,10 @@ impl Graph {
         }
 
         match format {
-            "ntriples" | "n-triples" => {
+            // [OPUS-4.8] (sq-m2pc) `nt`/`application/n-triples` are accepted aliases (the
+            // extension + media type) — previously they only "worked" by falling through the
+            // catch-all and parsing N-Triples AS Turtle; now they take the fast N-Triples path.
+            "ntriples" | "n-triples" | "nt" | "application/n-triples" => {
                 // N-Triples is one statement per line, so the input can be split at
                 // newline boundaries and parsed + interned in parallel (each thread
                 // builds a partial dictionary, then the partials are merged).
@@ -668,7 +703,7 @@ impl Graph {
                     return Ok((d, t));
                 }
             }
-            "nquads" | "n-quads" => {
+            "nquads" | "n-quads" | "nq" | "application/n-quads" => {
                 for q in NQuadsParser::new().for_slice(bytes) {
                     let q = q.map_err(|e| e.to_string())?;
                     push_triple!(&q.subject, &q.predicate, &q.object);
@@ -680,7 +715,21 @@ impl Graph {
                     push_triple!(&q.subject, &q.predicate, &q.object);
                 }
             }
-            _ => {
+            // [OPUS-4.8] sq-dvyi: JSON-LD. A whole-document JSON parse (NOT line-oriented,
+            // so no parallel chunking applies) yielding quads; the quad's graph name is
+            // FOLDED here (default-graph load) — `load_dataset` preserves it instead.
+            // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
+            #[cfg(feature = "jsonld")]
+            _ if is_jsonld_format(format) => {
+                for q in JsonLdParser::new().for_slice(bytes) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    push_triple!(&q.subject, &q.predicate, &q.object);
+                }
+            }
+            // [OPUS-4.8] (sq-m2pc) Turtle is gated on its explicit alias set — NOT a
+            // catch-all — so a typo'd or unsupported `format` errors below instead of
+            // silently parsing as Turtle and returning `Ok`.
+            _ if is_turtle_format(format) => {
                 // Turtle is not line-oriented, but it splits at top-level statement
                 // terminators (with the @prefix preamble shared into each chunk), parsed in
                 // parallel with a serial fallback on any mis-split — see parse_turtle_parallel.
@@ -696,6 +745,7 @@ impl Graph {
                     }
                 }
             }
+            _ => return Err(unknown_format_err(format)),
         }
 
         Ok((dict, triples))
@@ -704,7 +754,7 @@ impl Graph {
     /// Like [`load_str`](Self::load_str) but resolves relative IRIs in the document
     /// against `base` — the entry point for documents that carry no `@base` of their
     /// own (e.g. SHACL shapes graphs addressed by their location, W3C test-suite
-    /// manifests). `format`: as [`load_str`]; the line-based formats ("ntriples" /
+    /// manifests). `format`: as `load_str`; the line-based formats ("ntriples" /
     /// "nquads") only allow absolute IRIs, so `base` has no effect on them.
     pub fn load_str_with_base(text: &str, format: &str, base: &str) -> Result<Graph, String> {
         let (dict, triples) = Self::parse_to_triples_with_base(text, format, base)?;
@@ -734,7 +784,8 @@ impl Graph {
             }};
         }
         match format {
-            "ntriples" | "n-triples" | "nquads" | "n-quads" => {
+            "ntriples" | "n-triples" | "nt" | "application/n-triples" | "nquads" | "n-quads"
+            | "nq" | "application/n-quads" => {
                 return Self::parse_to_triples(text, format);
             }
             "trig" | "application/trig" => {
@@ -746,7 +797,22 @@ impl Graph {
                     push_triple!(&q.subject, &q.predicate, &q.object);
                 }
             }
-            _ => {
+            // [OPUS-4.8] sq-dvyi: JSON-LD with a document base — the URL load path (a
+            // document fetched from a URL with relative IRIs). Graph name folded.
+            // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
+            #[cfg(feature = "jsonld")]
+            _ if is_jsonld_format(format) => {
+                let parser = JsonLdParser::new()
+                    .with_base_iri(base)
+                    .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
+                for q in parser.for_slice(bytes) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    push_triple!(&q.subject, &q.predicate, &q.object);
+                }
+            }
+            // [OPUS-4.8] (sq-m2pc) Turtle is gated on its explicit alias set, mirroring
+            // `parse_to_triples`; an unknown `format` errors instead of parsing as Turtle.
+            _ if is_turtle_format(format) => {
                 let parser = TurtleParser::new()
                     .with_base_iri(base)
                     .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
@@ -755,6 +821,7 @@ impl Graph {
                     push_triple!(&t.subject, &t.predicate, &t.object);
                 }
             }
+            _ => return Err(unknown_format_err(format)),
         }
 
         Ok((dict, triples))
@@ -765,23 +832,47 @@ impl Graph {
     /// main graph; each named graph becomes a [`named`](Self::named) entry. Formats without named
     /// graphs defer to [`load_str`](Self::load_str). In-memory only (the mmap path is triple-only).
     pub fn load_dataset(text: &str, format: &str) -> Result<Graph, String> {
-        if !matches!(format, "nquads" | "n-quads" | "trig" | "application/trig") {
+        // [OPUS-4.8] sq-dvyi: JSON-LD carries named graphs (`@graph` with an outer `@id`),
+        // so it must take the dataset path too — but it is a WHOLE-DOCUMENT JSON parse
+        // (not line/statement chunkable), so it always goes through the serial loader.
+        // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
+        #[cfg(feature = "jsonld")]
+        if is_jsonld_format(format) {
+            return Self::load_dataset_serial(text, format);
+        }
+        // [OPUS-4.8] (sq-01yr) The N-Quads/TriG dataset aliases — including `nq`/
+        // `application/n-quads` (mirroring sq-m2pc) — take the dataset path so their named
+        // graphs are preserved; everything else defers to `load_str` (which itself rejects
+        // unknown formats under sq-m2pc rather than folding them into Turtle).
+        if !is_dataset_format(format) {
             return Self::load_str(text, format);
         }
         // [OPUS-4.8] (sq-25r3) N-Quads is newline-delimited, so a byte-range chunk-parallel parse
         // is correct: the quad's 4th (graph) field just routes its triple to a per-graph bucket,
         // and each graph's buckets merge through the SAME dataset-scoped sharded/serial dict merge
-        // the N-Triples fast path uses (one dict PER graph, mirroring the serial loader). TriG is
-        // NOT line-oriented (it nests `GRAPH g { … }` blocks with Turtle's prefix/blank-node
-        // scope), so it stays on the serial oxttl path here — the chunk-parallel TriG path is
-        // tracked separately (bead sq-ev37); see `load_dataset_serial`.
+        // the N-Triples fast path uses (one dict PER graph, mirroring the serial loader).
+        //
+        // [OPUS-4.8] (sq-ev37) TriG is NOT line-oriented (it nests `GRAPH g { … }` / `g { … }` /
+        // `{ … }` blocks carrying Turtle's `@prefix`/`@base` scope and document-scoped blank-node
+        // labels), so byte-range newline chunking is wrong. Instead it reuses the Turtle
+        // statement-terminator chunking ([`trig_chunks`]): each chunk is a directive-snapshot + a
+        // run of same-graph statements re-wrapped as `label { … }`, parsed back into per-graph
+        // buckets and merged per graph exactly like N-Quads. The splitter is conservative and the
+        // loader redoes the document serially on any per-chunk parse error, so the result equals
+        // [`load_dataset_serial`] (up to anonymous blank-node ids, which differ run-to-run even
+        // between two serial parses).
         #[cfg(feature = "parallel")]
         {
-            if matches!(format, "nquads" | "n-quads") {
-                return Self::load_nquads_parallel(text.as_bytes());
+            if matches!(format, "nquads" | "n-quads" | "nq" | "application/n-quads") {
+                Self::load_nquads_parallel(text.as_bytes())
+            } else {
+                Self::load_trig_parallel(text.as_bytes())
             }
         }
-        Self::load_dataset_serial(text, format)
+        #[cfg(not(feature = "parallel"))]
+        {
+            Self::load_dataset_serial(text, format)
+        }
     }
 
     /// [OPUS-4.8] (sq-25r3) Serial dataset loader (the correctness reference + the non-`parallel`
@@ -817,8 +908,23 @@ impl Graph {
             };
         }
         match format {
-            "nquads" | "n-quads" => group!(NQuadsParser::new()),
-            _ => group!(TriGParser::new()),
+            // [OPUS-4.8] (sq-01yr) The N-Quads alias set (incl. `nq`/`application/n-quads`,
+            // mirroring the `parse_to_triples` set from sq-m2pc) — single authority in
+            // `is_nquads_format`.
+            _ if is_nquads_format(format) => group!(NQuadsParser::new()),
+            // [OPUS-4.8] sq-dvyi: JSON-LD yields quads with a graph name, so the same
+            // per-graph bucketing applies — `@graph`/`@id` named graphs are preserved.
+            // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
+            #[cfg(feature = "jsonld")]
+            _ if is_jsonld_format(format) => group!(JsonLdParser::new()),
+            // [OPUS-4.8] (sq-01yr) TriG is gated on its explicit alias set — NOT a catch-all —
+            // mirroring the `parse_to_triples` Turtle fix (sq-m2pc). A typo'd or unsupported
+            // dataset `format` now ERRORS here instead of silently parsing as TriG and
+            // returning `Ok`. `load_dataset` already routes non-dataset formats to `load_str`,
+            // but the direct callers (the `jsonld`/non-`parallel` paths and the TriG-parallel
+            // serial fallback) inherited this independent silent fallback.
+            _ if is_trig_format(format) => group!(TriGParser::new()),
+            _ => return Err(unknown_format_err(format)),
         }
         let build_terms = |triples: &[[Term; 3]]| -> Graph {
             let mut dict = Dict::new();
@@ -898,11 +1004,102 @@ impl Graph {
         Ok(g)
     }
 
+    /// [OPUS-4.8] (sq-ev37) Chunk-parallel TriG dataset loader. Splits the document with the
+    /// TriG-aware statement chunker ([`trig_chunks`]) — directive-snapshot + a run of same-graph
+    /// statements re-wrapped as `label { … }` per chunk — parses each chunk into per-graph buckets
+    /// in parallel ([`parse_trig_chunk`]), then merges PER GRAPH through the SAME
+    /// [`merge_partials`] the N-Quads/N-Triples fast paths use. Falls back to the serial oxttl path
+    /// ([`load_dataset_serial`]) when the document is not safely splittable OR any chunk fails to
+    /// re-parse, so the result always equals the serial parse (up to anonymous blank-node ids).
+    #[cfg(feature = "parallel")]
+    fn load_trig_parallel(bytes: &[u8]) -> Result<Graph, String> {
+        // Below ~1 statement/thread or on a single thread, chunking is pure overhead — parse
+        // serially. Otherwise aim for ~4 chunks/thread (the Turtle policy), capped by document size.
+        let threads = rayon::current_num_threads().max(1);
+        if threads == 1 {
+            return Self::load_dataset_serial(std::str::from_utf8(bytes).map_err(|e| e.to_string())?, "trig");
+        }
+        let target = (threads * 4).min(bytes.len() / 8192 + 1).max(1);
+        Self::load_trig_chunked(bytes, target)
+    }
+
+    /// [`load_trig_parallel`] with an explicit chunk-count `target` — separated so the differential
+    /// tests can force small documents to fan out across many chunks (and so the splitter's
+    /// per-graph routing + `label { … }` re-wrapping is exercised across genuine chunk boundaries).
+    #[cfg(feature = "parallel")]
+    fn load_trig_chunked(bytes: &[u8], target: usize) -> Result<Graph, String> {
+        use rayon::prelude::*;
+        use std::collections::HashMap;
+        let serial = || {
+            Self::load_dataset_serial(
+                std::str::from_utf8(bytes).map_err(|e| e.to_string())?,
+                "trig",
+            )
+        };
+        let chunks = match trig_chunks(bytes, target) {
+            Some(c) if c.len() > 1 => c,
+            // Not safely splittable (or only one chunk): the serial path is the reference anyway.
+            _ => return serial(),
+        };
+        type ChunkBuckets = Vec<(Option<nt::GraphKey>, Dict, Vec<[Id; 3]>)>;
+        let per_chunk: Result<Vec<ChunkBuckets>, String> =
+            chunks.par_iter().map(|chunk| parse_trig_chunk(chunk)).collect();
+        let per_chunk = match per_chunk {
+            Ok(p) => p,
+            // An over-eager split produced invalid TriG — redo the whole document serially. This is
+            // the safety net that makes any clean-but-wrong split observationally impossible.
+            Err(_) => return serial(),
+        };
+        // Regroup per-chunk buckets BY GRAPH in first-occurrence document order (chunks are in
+        // document order; within a chunk buckets are already first-occurrence) — the exact input
+        // shape the per-graph merge consumes. Identical to the N-Quads loader's regroup.
+        let mut index: HashMap<Option<nt::GraphKey>, usize> = HashMap::new();
+        let mut per_graph: Vec<(Option<nt::GraphKey>, ChunkPartials)> = Vec::new();
+        for chunk in per_chunk {
+            for (key, dict, triples) in chunk {
+                let slot = *index.entry(key.clone()).or_insert_with(|| {
+                    per_graph.push((key.clone(), Vec::new()));
+                    per_graph.len() - 1
+                });
+                per_graph[slot].1.push((dict, triples));
+            }
+        }
+        let mut main: Option<Graph> = None;
+        let mut named: Vec<(Term, Graph)> = Vec::new();
+        for (key, partials) in per_graph {
+            let (dict, ids) = merge_partials(partials);
+            let sub = Self::build(dict, ids);
+            match key {
+                None => main = Some(sub),
+                Some(k) => named.push((k.to_term(), sub)),
+            }
+        }
+        let mut g = main.unwrap_or_else(|| Self::build(Dict::new(), Vec::new()));
+        g.named = named;
+        Ok(g)
+    }
+
     /// Builds a graph from an already-interned dictionary + triple set (e.g. after opt-in
     /// reasoning materialized additional triples). Public counterpart of the internal
-    /// [`build`](Self::build).
+    /// `build`.
     pub fn from_parts(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
         Self::build(dict, triples)
+    }
+
+    /// [OPUS-4.8] (gh-1118) An empty, in-memory graph — the trivial, INFALLIBLE constructor.
+    ///
+    /// Equivalent to [`from_parts`](Self::from_parts)`(Dict::new(), Vec::new())` but spelled the
+    /// obvious way, so callers no longer reach for `Graph::load_str("", "turtle").unwrap()` (which
+    /// parses an empty document and forces error handling for an operation that cannot fail) or the
+    /// lower-level `from_parts` plumbing just to get an empty graph. Build it up incrementally with
+    /// [`insert_triple`](Self::insert_triple) / [`apply_delta`](Self::apply_delta), or load into it
+    /// via the `apply_delta_nquads` / `apply_delta` paths. This is an IN-MEMORY graph (no directory
+    /// association, so `apply_delta` is overlay-only — there is no write-ahead log); use
+    /// [`open`](Self::open) for a durable directory-backed graph. Also reachable as
+    /// [`Graph::default()`](Default::default).
+    #[inline]
+    pub fn new() -> Graph {
+        Self::from_parts(Dict::new(), Vec::new())
     }
 
     /// [OPUS-4.8] (sq-zz8z, gh-51) The sort key the prefix index orders graph names by: the
@@ -985,6 +1182,26 @@ impl Graph {
         }
     }
 
+    /// [OPUS-4.8] (sq-quuu) Returns the named graph whose name term is exactly `name`, or
+    /// `None` if this dataset has no such named graph. Each named graph is itself a
+    /// self-contained [`Graph`] (its own dictionary + permutation indexes), so the returned
+    /// `&Graph` can be passed anywhere a `&Graph` is accepted — in particular to the read-only
+    /// GenAI crates (`sparq-introspect`, `sparq-sim`, `sparq-vectors`), which operate over the
+    /// store of whatever `Graph` they are handed. This is the per-name way to scope those crates
+    /// to a single named graph instead of the (default-graph) `self`.
+    ///
+    /// It is the per-name companion to
+    /// [`for_named_graphs_with_prefix`](Self::for_named_graphs_with_prefix) (which is
+    /// prefix-scoped). It is a linear scan over the `named` Vec (a dataset's distinct graphs are
+    /// typically few); for a prefix sweep use the indexed prefix method instead.
+    ///
+    /// The DEFAULT graph is `self` itself — it is not part of `named` and is not returned here;
+    /// pass `&graph` directly to scope introspect/sim/vectors to the default graph.
+    #[inline]
+    pub fn named_graph(&self, name: &Term) -> Option<&Graph> {
+        self.named.iter().find(|(n, _)| n == name).map(|(_, g)| g)
+    }
+
     /// Streaming loader: parses an RDF document incrementally from a reader (so a
     /// gzip / bzip2 decompression stream can be ingested without holding the whole
     /// document in memory). Same formats as [`load_str`](Self::load_str). The
@@ -1023,6 +1240,16 @@ impl Graph {
                     push_triple!(&t.subject, &t.predicate, &t.object);
                 }
             }
+            // [OPUS-4.8] sq-dvyi: JSON-LD over a streaming reader (the CLI's file path).
+            // Graph name folded — `load_reader` is the triple-only entry point.
+            // OPT-IN behind the `jsonld` feature (keeps the lean bundle free of oxjsonld).
+            #[cfg(feature = "jsonld")]
+            _ if is_jsonld_format(format) => {
+                for q in JsonLdParser::new().for_reader(reader) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    push_triple!(&q.subject, &q.predicate, &q.object);
+                }
+            }
             _ => {
                 for t in NTriplesParser::new().for_reader(reader) {
                     let t = t.map_err(|e| e.to_string())?;
@@ -1039,7 +1266,7 @@ impl Graph {
     /// NEVER materialised in memory — only a few blocks in flight plus the growing
     /// dictionary/triples. (The store itself must fit in RAM; this removes the redundant
     /// full-text copy a read-to-string load would hold alongside it.) For N-Triples; other
-    /// formats defer to the serial streaming [`load_reader`].
+    /// formats defer to the serial streaming `load_reader`.
     ///
     /// The read/decompress runs PIPELINED on its own thread (same 3-stage design as the
     /// external build's `build_external_ntriples_parallel`): stage 1 fills full 32 MiB
@@ -1224,14 +1451,18 @@ impl Graph {
         std::fs::create_dir_all(dir)?;
         self.store.save(dir)?; // folds any delta-overlay into the persisted permutations
         self.dict.save_mmap(dir)?; // includes appended (delta-overlay) terms
-        write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())?;
-        let (tf, ti) = self.dense_temporals();
-        write_temporals(&dir.join("temporals.bin"), &tf, &ti)?;
+        // [OPUS-4.8] (sq-7ph8) STREAM the numeric/temporal caches block-by-block straight from
+        // the in-RAM cache instead of materialising a whole-dictionary dense intermediate
+        // (`dense_numerics`/`dense_temporals`) first — bounding the finalize RSS peak for a
+        // SPARSE/FORKED cache (the common non-numeric/non-temporal case).
+        let n = self.dict.len();
+        stream_write_numerics(&dir.join("numerics.bin"), n, &self.numerics)?;
+        stream_write_temporals(&dir.join("temporals.bin"), n, &self.temporals)?;
         self.save_named(dir, false)
     }
 
     /// Like [`save`](Self::save) but persists the permutation indexes BLOCK-COMPRESSED
-    /// (~3-5x smaller on disk; the dictionary/numerics files are unchanged). [`open`]
+    /// (~3-5x smaller on disk; the dictionary/numerics files are unchanged). `open`
     /// auto-detects the format per file, serving compressed perms by lazy block-wise
     /// decode off the mapped file; call [`decompress_indexes`](Self::decompress_indexes)
     /// after open to trade RAM for exactly-raw query speed instead.
@@ -1240,9 +1471,10 @@ impl Graph {
         std::fs::create_dir_all(dir)?;
         self.store.save_compressed(dir)?; // folds any delta-overlay, like `save`
         self.dict.save_mmap(dir)?;
-        write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())?;
-        let (tf, ti) = self.dense_temporals();
-        write_temporals(&dir.join("temporals.bin"), &tf, &ti)?;
+        // [OPUS-4.8] (sq-7ph8) Stream the caches block-by-block — see `save` for the rationale.
+        let n = self.dict.len();
+        stream_write_numerics(&dir.join("numerics.bin"), n, &self.numerics)?;
+        stream_write_temporals(&dir.join("temporals.bin"), n, &self.temporals)?;
         // [OPUS-4.8] (sq-3ui0) Named graphs are persisted block-compressed too.
         self.save_named(dir, true)
     }
@@ -1345,58 +1577,6 @@ impl Graph {
     /// zero-cost slice borrows, identical to a raw store). No-op on raw/mapped indexes.
     pub fn decompress_indexes(&mut self) {
         self.store.decompress_to_ram();
-    }
-
-    /// The full dense numeric cache (one f64 per dictionary term) for persisting: the
-    /// owned/mmap'd dense backing extended over any APPENDED terms, or recomputed when
-    /// no dense backing covers the dictionary (the sparse browser mode).
-    #[cfg(feature = "mmap")]
-    fn dense_numerics(&self) -> std::borrow::Cow<'_, [f64]> {
-        let n = self.dict.len();
-        match &self.numerics {
-            NumData::Owned(v) if v.len() == n => std::borrow::Cow::Borrowed(v),
-            NumData::Mapped(_, extra) => {
-                let dense = self.numerics.as_slice();
-                if dense.len() == n {
-                    return std::borrow::Cow::Borrowed(dense);
-                }
-                let mut v = dense.to_vec();
-                v.resize(n, f64::NAN);
-                for (&id, &val) in extra {
-                    v[(id - 1) as usize] = val;
-                }
-                std::borrow::Cow::Owned(v)
-            }
-            _ => std::borrow::Cow::Owned(numerics_of(&self.dict)),
-        }
-    }
-
-    /// The full dense temporal cache columns (flag byte + f64 instant per dictionary
-    /// term) for persisting — the temporal twin of [`dense_numerics`](Self::dense_numerics).
-    #[cfg(feature = "mmap")]
-    fn dense_temporals(&self) -> (Vec<u8>, Vec<f64>) {
-        let n = self.dict.len();
-        let split = |cells: &[TempCell]| -> (Vec<u8>, Vec<f64>) {
-            (cells.iter().map(|c| c.flag).collect(), cells.iter().map(|c| c.instant).collect())
-        };
-        match &self.temporals {
-            TempData::Owned(cells) if cells.len() == n => split(cells),
-            TempData::Mapped(m, extra) => {
-                let len = TempData::mapped_len(m);
-                // SAFETY: temporals.bin starts with `len` f64 (page-aligned mmap base).
-                let minst = unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<f64>(), len) };
-                let mut flags = m[len * 8..len * 9].to_vec();
-                let mut instants = minst.to_vec();
-                flags.resize(n, 0);
-                instants.resize(n, f64::NAN);
-                for (&id, &t) in extra {
-                    flags[(id - 1) as usize] = temp_flag(t);
-                    instants[(id - 1) as usize] = t.instant;
-                }
-                (flags, instants)
-            }
-            _ => split(&temporals_of(&self.dict)),
-        }
     }
 
     /// Opens a graph saved by [`save`](Self::save) with its permutation indexes AND
@@ -1641,6 +1821,11 @@ impl Graph {
             false
         };
         let mut sharded_remap: Option<(Vec<u64>, u32)> = None;
+        // [OPUS-4.8 sq-3l43] Serial dict-consolidation seconds (`into_merged`) on the sharded
+        // default path, folded into the phase report so the FULL dict-consolidation bucket
+        // (the one this rung-5 spike re-measures) appears on one honestly-labelled line.
+        #[cfg(all(feature = "mmap", feature = "parallel"))]
+        let mut cons_secs: Option<f64> = None;
 
         if sharded {
             #[cfg(all(feature = "mmap", feature = "parallel"))]
@@ -1649,8 +1834,10 @@ impl Graph {
                 build_external_ntriples_sharded(reader, &mut sd, &mut buf, &mut runs, &tmp, chunk)?;
                 let t_cons = std::time::Instant::now();
                 let (merged, base, stride) = sd.into_merged();
+                let elapsed = t_cons.elapsed().as_secs_f64();
                 if build_timing::enabled() {
-                    eprintln!("[build-timing] dict consolidate (into_merged): {:.2}s", t_cons.elapsed().as_secs_f64());
+                    eprintln!("[build-timing] dict consolidate (into_merged): {elapsed:.2}s");
+                    cons_secs = Some(elapsed);
                 }
                 dict = merged;
                 sharded_remap = Some((base, stride));
@@ -1694,7 +1881,16 @@ impl Graph {
         buf.shrink_to_fit();
         #[cfg(all(feature = "mmap", feature = "parallel"))]
         if build_timing::enabled() {
-            build_timing::report("parse+intern+spill done", _t_build.elapsed().as_secs_f64());
+            // [OPUS-4.8 sq-3l43] The sharded default path's merge/remap buckets are PIPELINED
+            // (parallel intern + overlapped remap), NOT the additive-serial `merge_remap`/
+            // `triple-remap` of the non-sharded parallel build — label them accordingly so the
+            // dict-consolidation bucket re-measurement reads correctly.
+            let (kind, cons) = if sharded {
+                (build_timing::PathKind::Pipelined, cons_secs)
+            } else {
+                (build_timing::PathKind::Serial, None)
+            };
+            build_timing::report("parse+intern+spill done", kind, cons, _t_build.elapsed().as_secs_f64());
         }
 
         // Merge the SPO runs into the SPO permutation file (deduplicating).
@@ -1722,10 +1918,19 @@ impl Graph {
         let spo: &[[Id; 3]] =
             unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[Id; 3]>(), n) };
         let siblings: Vec<Perm> = BUILT.iter().copied().filter(|&p| p != Perm::Spo).collect();
+        // [OPUS-4.8] sq-vkz7: opt-in compressed build — the sibling sorts write `SPQCPRM1`
+        // straight from their merge tail, and SPO is re-encoded below. SPO itself must stay
+        // RAW until the siblings finish, because they re-sort by mmapping it as `[[Id;3]]`.
+        let compressed = build_compressed_perms();
         let sib_sort = |perm: Perm, sub: &std::path::Path, per: usize| -> Result<(), String> {
             std::fs::create_dir_all(sub).map_err(|e| e.to_string())?;
             let out = dir.join(format!("perm{}.bin", perm as usize));
-            extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+            if compressed {
+                extsort::external_sort_compressed(spo.iter().copied(), perm.order(), &out, sub, per)
+                    .map_err(|e| e.to_string())
+            } else {
+                extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+            }
         };
         // The sibling sorts are independent — run them CONCURRENTLY (each in its own tmp
         // subdir, so run files don't collide), sharing the chunk budget so total resident
@@ -1768,6 +1973,14 @@ impl Graph {
             eprintln!("[build-timing] sibling sorts ∥ dict-save done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
         }
 
+        // [OPUS-4.8] sq-vkz7: the siblings are already `SPQCPRM1`; compress SPO LAST, now
+        // that no sibling sort needs it raw. One streaming pass over the raw SPO perm (the
+        // 1/6 we had to keep raw) — never the `open` + `decode_all` of ALL SIX perms the
+        // separate `recompress` would do.
+        if compressed {
+            compress_perm_file_in_place(&spo_path)?;
+        }
+
         // Empty files for the unbuilt permutations so `open` finds all six slots.
         for i in 0..6 {
             let p = dir.join(format!("perm{i}.bin"));
@@ -1786,7 +1999,7 @@ impl Graph {
     /// [OPUS-4.8] (sq-5atq) EXTERNAL-MEMORY build for a DATASET WITH NAMED GRAPHS — the
     /// out-of-core twin of an in-RAM dataset `load_dataset` + [`save`](Self::save). Streams an
     /// N-Quads (`"nquads"`/`"n-quads"`) or TriG (`"trig"`) document and writes the SAME
-    /// on-disk layout [`save_named`](Self::save_named) emits — the default graph in `dir`
+    /// on-disk layout `save_named` emits — the default graph in `dir`
     /// itself plus each named graph under `dir/named/<i>/`, committed by the `dir/named.bin`
     /// manifest — so [`open`](Self::open) reads the whole dataset back LOSSLESSLY (mmap).
     ///
@@ -1811,7 +2024,7 @@ impl Graph {
     /// [`build_external`](Self::build_external)), and an empty default graph still produces a
     /// valid (empty) store in `dir`.
     ///
-    /// `chunk` is the per-graph external-build run size (see [`build_external`]).
+    /// `chunk` is the per-graph external-build run size (see `build_external`).
     #[cfg(feature = "mmap")]
     pub fn build_external_quads<R: std::io::Read>(
         reader: R,
@@ -2053,7 +2266,7 @@ impl Graph {
     /// with the distinct-term count — terms spill to disk and are externally
     /// deduplicated/ranked into EXACTLY the ids the (default) sharded in-RAM
     /// consolidation assigns, so every output file is byte-identical to
-    /// [`build_external`](Self::build_external)'s. N-Triples only (the same RDF-star
+    /// [`build_external`](Self::build_external)'s. N-Triples only (the same RDF 1.2 triple-term
     /// restriction as the sharded path). Design: research/external-dictionary.md.
     #[cfg(feature = "dict-spill")]
     pub fn build_external_spill<R: std::io::Read + Send>(
@@ -2079,7 +2292,15 @@ impl Graph {
             dictspill::SpillInterner::new(default_shards(), &tmp, cfg).map_err(|e| e.to_string())?;
         build_external_ntriples_dictspill(reader, &mut interner)?;
         if build_timing::enabled() {
-            build_timing::report("parse+route+stage done", _t_build.elapsed().as_secs_f64());
+            // [OPUS-4.8 sq-3l43] The spill path's "merge" bucket is the bounded PARALLEL
+            // `intern_batch` occupancy (Pipelined), not a serial `merge_remap`. Consolidation
+            // (`consolidate`) is a LATER phase, reported separately below, so `None` here.
+            build_timing::report(
+                "parse+route+stage done",
+                build_timing::PathKind::Pipelined,
+                None,
+                _t_build.elapsed().as_secs_f64(),
+            );
         }
 
         // Phases 2-4: external dedup/rank. The dictionary files and the numeric/temporal
@@ -2115,10 +2336,18 @@ impl Graph {
         let spo: &[[Id; 3]] =
             unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[Id; 3]>(), n) };
         let siblings: Vec<Perm> = BUILT.iter().copied().filter(|&p| p != Perm::Spo).collect();
+        // [OPUS-4.8] sq-vkz7: opt-in compressed build, same as `build_external_opts` —
+        // siblings write `SPQCPRM1` directly; SPO is re-encoded after they finish.
+        let compressed = build_compressed_perms();
         let sib_sort = |perm: Perm, sub: &std::path::Path, per: usize| -> Result<(), String> {
             std::fs::create_dir_all(sub).map_err(|e| e.to_string())?;
             let out = dir.join(format!("perm{}.bin", perm as usize));
-            extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+            if compressed {
+                extsort::external_sort_compressed(spo.iter().copied(), perm.order(), &out, sub, per)
+                    .map_err(|e| e.to_string())
+            } else {
+                extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+            }
         };
         {
             use rayon::prelude::*;
@@ -2130,6 +2359,10 @@ impl Graph {
         drop(map);
         if build_timing::enabled() {
             eprintln!("[build-timing] sibling sorts done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+        }
+        // SPO compressed last, now that no sibling sort needs it raw (see `build_external_opts`).
+        if compressed {
+            compress_perm_file_in_place(&spo_path)?;
         }
 
         // Empty files for the unbuilt permutations so `open` finds all six slots.
@@ -2351,6 +2584,47 @@ impl Graph {
         Ok(())
     }
 
+    /// [OPUS-4.8] (gh-1122) Insert a SINGLE triple from `oxrdf` terms — the ergonomic
+    /// convenience over [`apply_delta`](Self::apply_delta) for the one-triple case.
+    ///
+    /// Each position accepts anything that converts into an `oxrdf::Term` (`NamedNode`,
+    /// `Literal`, `BlankNode`, an [RDF 1.2] triple term, or a `Term` itself), so callers avoid both
+    /// building a dictionary-encoded `[[Term; 3]]` batch by hand AND assembling/escaping an
+    /// `INSERT DATA { … }` SPARQL string for what is conceptually one append. The term is interned
+    /// APPEND-ONLY and applied through the same delta-overlay path as `apply_delta`, so it inherits
+    /// the identical semantics: set-valued (re-inserting an existing triple is a no-op), O(1) work,
+    /// and — for a directory-backed graph (opened via [`open`](Self::open)) — WAL-logged + fsync'd
+    /// before it is applied. To add several triples at once, prefer one
+    /// [`apply_delta`](Self::apply_delta) batch over a loop of single inserts (one WAL append).
+    ///
+    /// [RDF 1.2]: https://www.w3.org/TR/rdf12-concepts/
+    pub fn insert_triple(
+        &mut self,
+        subject: impl Into<Term>,
+        predicate: impl Into<Term>,
+        object: impl Into<Term>,
+    ) -> Result<(), String> {
+        let triple = [subject.into(), predicate.into(), object.into()];
+        self.apply_delta(&[triple], &[])
+    }
+
+    /// [OPUS-4.8] (gh-1122) Remove a SINGLE triple from `oxrdf` terms — the retraction twin of
+    /// [`insert_triple`](Self::insert_triple), delegating to [`apply_delta`](Self::apply_delta).
+    ///
+    /// Removing a triple the graph does not contain is a NO-OP (set semantics, inherited from
+    /// `apply_delta`), never an error. As with `insert_triple`, for a directory-backed graph the
+    /// deletion is WAL-logged + fsync'd before it is applied; to retract several triples at once,
+    /// prefer one [`apply_delta`](Self::apply_delta) batch.
+    pub fn remove_triple(
+        &mut self,
+        subject: impl Into<Term>,
+        predicate: impl Into<Term>,
+        object: impl Into<Term>,
+    ) -> Result<(), String> {
+        let triple = [subject.into(), predicate.into(), object.into()];
+        self.apply_delta(&[], &[triple])
+    }
+
     /// [OPUS-4.8] (sq-ycle) Commit a whole multi-operation UPDATE body's resolved per-slot
     /// quad-delta as ONE atomic, all-or-nothing durable frame — the SINGLE commit point for
     /// `sparq_engine::apply_effects`. `records` is `(is_insert, slot, triple)` quads computed
@@ -2449,8 +2723,8 @@ impl Graph {
     /// directory swap, scoped to the `named/` sub-tree: the renumbered survivors are built in a
     /// staging `named.drop-new/`, fsync'd, then swapped in (`named` → `named.drop-old`,
     /// `named.drop-new` → `named`), and only THEN is the shrunk manifest written (the manifest
-    /// rewrite is itself atomic+dir-fsync'd via [`write_named_manifest`]). An interrupted swap
-    /// is completed/rolled back deterministically by [`recover_named_drop`] on the next
+    /// rewrite is itself atomic+dir-fsync'd via `write_named_manifest`). An interrupted swap
+    /// is completed/rolled back deterministically by `recover_named_drop` on the next
     /// [`open`](Self::open). Surviving sub-graphs are re-opened from their new directories so
     /// each re-acquires a correctly-indexed per-graph WAL.
     ///
@@ -2497,7 +2771,7 @@ impl Graph {
     /// graph: each of those rebuilt the ENTIRE surviving named set (renumber + manifest rewrite),
     /// making DROP ALL O(n²) in the number of named graphs. Clearing the whole set is O(n) — one
     /// pass to release every sub-graph's handles, one manifest removal, one sub-tree removal — so
-    /// this routes straight through the no-survivors arm of [`persist_named_after_drop`].
+    /// this routes straight through the no-survivors arm of `persist_named_after_drop`.
     ///
     /// In-memory parent (or a non-`mmap` build): just clears the entries, matching the old
     /// `self.named.clear()`. Idempotent — a no-op when there are no named graphs.
@@ -2782,33 +3056,170 @@ impl Graph {
         }
         #[cfg(feature = "mmap")]
         if let Some(dir) = dir {
-            // [OPUS-4.8] (review 1593) ROLLBACK-SAFE directory swap. The two-rename swap has a
-            // window where the canonical `dir` does not exist (between the two renames); a
-            // crash there must NOT lose the dataset. We:
-            //   1. write the new base to `compact-new` and fsync the DIRECTORY (so its
-            //      existence + contents are durable before it can become canonical);
-            //   2. rename `dir` -> `compact-old`, fsync the parent (the rename is durable);
-            //   3. rename `compact-new` -> `dir`, fsync the parent.
-            // If a crash interrupts the swap, `recover_compaction` (run on every open)
-            // deterministically completes or rolls it back from the surviving sibling.
-            let new_dir = dir.with_extension("compact-new");
-            let old_dir = dir.with_extension("compact-old");
-            std::fs::remove_dir_all(&new_dir).ok();
-            std::fs::remove_dir_all(&old_dir).ok();
-            self.wal = None; // close the log before the directory swap
-            self.save(&new_dir).map_err(|e| e.to_string())?;
-            fsync_dir(&new_dir).map_err(|e| e.to_string())?;
-            let parent = dir.parent().unwrap_or_else(|| std::path::Path::new("."));
-            std::fs::rename(&dir, &old_dir).map_err(|e| e.to_string())?;
-            fsync_dir(parent).map_err(|e| e.to_string())?;
-            std::fs::rename(&new_dir, &dir).map_err(|e| e.to_string())?;
-            fsync_dir(parent).map_err(|e| e.to_string())?;
-            // Re-open memory-mapped from the new base (fresh, empty WAL); only then drop
-            // the old files (open mmaps keep unlinked files alive on unix).
-            *self = Graph::open(&dir).map_err(|e| e.to_string())?;
-            std::fs::remove_dir_all(&old_dir).ok();
+            self.persist_swap(&dir)?;
         }
         Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-x32t) ROLLBACK-SAFE on-disk swap shared by [`compact`](Self::compact) and
+    /// [`vacuum`](Self::vacuum): persist `self`'s CURRENT in-memory image as the new durable base
+    /// at `dir`, atomically, truncating the old WAL. Factored out of `compact` (review 1593) so
+    /// the erasure-grade vacuum reuses the exact same crash-safe machinery.
+    ///
+    /// The two-rename swap has a window where the canonical `dir` does not exist (between the two
+    /// renames); a crash there must NOT lose the dataset. We:
+    ///
+    ///   1. write the new base to `<dir>.compact-new` and fsync the DIRECTORY (so its existence +
+    ///      contents are durable before it can become canonical);
+    ///   2. rename `dir` -> `<dir>.compact-old`, fsync the parent (the rename is durable);
+    ///   3. rename `<dir>.compact-new` -> `dir`, fsync the parent.
+    ///
+    /// If a crash interrupts the swap, [`recover_compaction`] (run on every [`open`](Self::open))
+    /// deterministically completes or rolls it back from the surviving sibling. The graph is then
+    /// re-opened memory-mapped from the new base with a fresh, empty WAL.
+    #[cfg(feature = "mmap")]
+    fn persist_swap(&mut self, dir: &std::path::Path) -> Result<(), String> {
+        // Close THIS graph's WAL before the directory swap (its `wal.log` is about to be renamed
+        // away with `dir`), then run the shared crash-safe swap, writing `self`'s CURRENT image as
+        // the new base. Adopt the re-opened directory-backed graph in place. [OPUS-4.8] (sq-ft7u)
+        self.wal = None;
+        let reopened = swap_dir_to_new_base(dir, |new_dir| self.save(new_dir))
+            .map_err(|e| e.to_string())?;
+        *self = reopened;
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) PUBLIC crash-safe RESTORE-INTO-DURABLE seam. Atomically REPLACE the
+    /// durable contents of the directory-backed store at `dir` with `fresh`'s image, reusing the
+    /// EXACT same rollback-safe two-rename protocol as the internal compaction swap (the helper
+    /// `persist_swap` also calls — there is one crash-safe swap implementation, not two). Returns
+    /// the directory-backed [`Graph`] re-opened memory-mapped from the new base (a fresh, empty
+    /// WAL), so the caller's subsequent updates WAL-append to the restored store.
+    ///
+    /// This is the durable counterpart to the server's online in-memory restore: the caller imports
+    /// (and thus FULLY validates) the backup artifact into `fresh` BEFORE calling this, so the swap
+    /// only ever runs over a known-good image.
+    ///
+    /// CRASH-SAFETY + FAIL-CLOSED. The protocol is: write `fresh`'s image to `<dir>.compact-new`
+    /// and fsync that directory (durable before it can become canonical); rename `dir` ->
+    /// `<dir>.compact-old` (parent fsync); rename `<dir>.compact-new` -> `dir` (parent fsync);
+    /// re-open memory-mapped from the new base; drop `<dir>.compact-old`. There is a window where
+    /// the canonical `dir` does not exist (between the two renames); a crash there is HEALED
+    /// deterministically on the next `open` (which runs the compaction recovery from the surviving
+    /// `.compact-new` / `.compact-old` sibling), so `dir` ends up old-or-new — NEVER corrupt or
+    /// partially written. If anything fails BEFORE the first rename (e.g. writing the new base),
+    /// `dir` is untouched: the old durable store survives intact.
+    ///
+    /// PRECONDITION (caller's responsibility): NO other handle may be mutating `dir` (WAL-appending)
+    /// concurrently — the caller must quiesce the durable writer that owns `dir` before invoking
+    /// this, exactly as the in-process compaction swap runs only on the single writer thread.
+    #[cfg(feature = "mmap")]
+    pub fn restore_into_durable(
+        dir: &std::path::Path,
+        fresh: Graph,
+    ) -> std::io::Result<Graph> {
+        swap_dir_to_new_base(dir, |new_dir| fresh.save(new_dir))
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) The directory this graph is durably backed by (its `--persist` dir),
+    /// or `None` for an in-memory graph. The companion to [`restore_into_durable`](Self::restore_into_durable):
+    /// a caller doing an in-place durable restore reads the backing dir, then closes the WAL
+    /// (see [`close_wal`](Self::close_wal)) before swapping the directory over to the new base.
+    #[cfg(feature = "mmap")]
+    pub fn persist_dir(&self) -> Option<std::path::PathBuf> {
+        self.wal.as_ref().map(|w| w.dir.clone())
+    }
+
+    /// [OPUS-4.8] (sq-ft7u) Close (drop) this graph's write-ahead-log handle, if any. Used right
+    /// before a directory swap that renames the backing dir away (the WAL's `wal.log` lives under
+    /// it), exactly as the internal compaction swap does — the swap then re-opens a fresh handle.
+    /// A no-op for an in-memory graph. Safe to call on a graph whose dir is about to be replaced
+    /// by [`restore_into_durable`](Self::restore_into_durable); the graph keeps serving reads from
+    /// its in-memory image, it simply stops appending to the (about-to-be-renamed) log.
+    #[cfg(feature = "mmap")]
+    pub fn close_wal(&mut self) {
+        self.wal = None;
+    }
+
+    /// [OPUS-4.8] (sq-x32t, epic sq-toze.33) ERASURE-GRADE VACUUM. Like [`compact`](Self::compact)
+    /// it physically rewrites a directory-backed store to contain only the current LIVE triples —
+    /// but it additionally PURGES THE DICTIONARY: it re-interns every live term into a FRESH
+    /// dictionary, so a term string (an IRI or a literal VALUE — e.g. personal data) that is no
+    /// longer referenced by any live triple after a `DELETE` / `DROP GRAPH` is physically gone
+    /// from the on-disk dictionary blob too, not just from the triple indexes.
+    ///
+    /// Why this exists separately from `compact`: `compact` keeps the dictionary as-is (ids stay
+    /// stable, which makes the serving-path fold O(triples) with no re-interning); orphaned term
+    /// strings linger in the dict until a full reload. That is the right trade for the periodic
+    /// serving compaction, but NOT for erasure — a deleted literal's bytes would survive. `vacuum`
+    /// pays the O(terms) re-intern so erasure is complete down to the value bytes.
+    ///
+    /// The live dataset (default graph + every named graph, recursively) is dumped to `[Term; 3]`
+    /// and re-interned into a brand-new [`Graph`] with an empty [`Dict`]; that fresh image is then
+    /// swapped in via the SAME rollback-safe `persist_swap` the compaction
+    /// uses (atomic, crash-safe, WAL-truncated). The live triple set is preserved EXACTLY
+    /// (round-trip). For an in-memory graph it just replaces the dictionary/store in place.
+    ///
+    /// PHYSICAL-ERASURE SCOPE (honest): this scrubs the engine's own on-disk segments + dictionary;
+    /// it cannot reach bytes already copied off-box (filesystem snapshots, block-level COW history,
+    /// external backups), which the storage/backup tier must handle per the retention-erasure
+    /// runbook.
+    pub fn vacuum(&mut self) -> Result<(), String> {
+        #[cfg(feature = "mmap")]
+        let dir = self.wal.as_ref().map(|w| w.dir.clone());
+        // Re-intern the whole live dataset into a fresh graph with an EMPTY dictionary, so any
+        // term orphaned by a prior delete/drop is dropped (it is never re-interned).
+        let mut fresh = self.reintern_live()?;
+        #[cfg(feature = "mmap")]
+        if let Some(dir) = dir {
+            // Close THIS graph's WAL before the directory swap (its `wal.log` is about to be
+            // renamed away). `persist_swap` writes `fresh`'s image to `dir` and re-opens
+            // `fresh` memory-mapped from the new base with a fresh WAL; adopt that re-opened,
+            // directory-backed graph back into `self` so subsequent updates WAL-append to it.
+            self.wal = None;
+            fresh.persist_swap(&dir)?;
+        }
+        // Adopt the freshly re-interned (and, when persisted, re-opened) image in place.
+        std::mem::swap(self, &mut fresh);
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-x32t) Builds a fresh in-memory [`Graph`] holding exactly this graph's LIVE
+    /// triples (default + named, recursively), re-interned into a brand-new [`Dict`] — so terms
+    /// orphaned by a delete/drop are absent from the result. Carries NO directory/WAL association
+    /// (the caller's [`persist_swap`](Self::persist_swap) gives the swapped-in graph its own).
+    fn reintern_live(&self) -> Result<Graph, String> {
+        // Dump the live default-graph triples as Terms (overlay already merged by `scan`).
+        let live: Vec<[Term; 3]> = {
+            let scan = self.store.scan(&[None, None, None]);
+            scan.rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    [self.dict.term(spo[0]), self.dict.term(spo[1]), self.dict.term(spo[2])]
+                })
+                .collect()
+        };
+        let mut fresh = Graph::from_parts(Dict::new(), Vec::new());
+        if !live.is_empty() {
+            fresh.apply_delta(&live, &[])?;
+        }
+        // Named graphs: re-intern each recursively and attach it as an IN-MEMORY sub-graph (no
+        // directory/WAL — the parent's `save` writes the whole `named/` sub-tree afresh).
+        for (name, sub) in &self.named {
+            let sub_fresh = sub.reintern_live()?;
+            fresh.named.push((name.clone(), sub_fresh));
+        }
+        Ok(fresh)
+    }
+}
+
+/// [OPUS-4.8] (gh-1118) An empty, in-memory [`Graph`] — the trivial INFALLIBLE default. Delegates
+/// to [`Graph::new`], so `Graph::default()` and `Graph::new()` are interchangeable.
+impl Default for Graph {
+    #[inline]
+    fn default() -> Self {
+        Graph::new()
     }
 }
 
@@ -2828,6 +3239,49 @@ fn fsync_dir(dir: &std::path::Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// [OPUS-4.8] (sq-ft7u) The ONE crash-safe directory-base swap, factored out of
+/// [`persist_swap`](Graph::persist_swap) so the public [`restore_into_durable`](Graph::restore_into_durable)
+/// reuses the IDENTICAL rollback-safe protocol rather than copy-pasting it. `write_new_base` is
+/// handed the (cleared) `<dir>.compact-new` sibling and must write the desired new durable image
+/// there (e.g. `graph.save(new_dir)`). On success the new base is canonical at `dir` and a graph
+/// re-opened memory-mapped from it (fresh, empty WAL) is returned.
+///
+/// The protocol (matching the design recorded on `persist_swap`):
+///   1. clear any stale siblings, then write the new base to `<dir>.compact-new` and fsync that
+///      DIRECTORY (so it is durable before it can become canonical);
+///   2. rename `dir` -> `<dir>.compact-old`, fsync the parent (the rename is durable);
+///   3. rename `<dir>.compact-new` -> `dir`, fsync the parent;
+///   4. re-open from the new base, THEN drop `<dir>.compact-old` (open mmaps keep unlinked files
+///      alive on unix, so the re-open must precede the cleanup).
+///
+/// FAIL-CLOSED: if `write_new_base` (or its fsync) fails — i.e. anything BEFORE the first rename —
+/// `dir` is never touched, so the old durable store survives intact. A crash DURING the two
+/// renames is healed by [`recover_compaction`] on the next [`open`](Graph::open), which promotes
+/// `compact-new` or rolls back to `compact-old` — `dir` is never lost.
+#[cfg(feature = "mmap")]
+fn swap_dir_to_new_base<F>(dir: &std::path::Path, write_new_base: F) -> std::io::Result<Graph>
+where
+    F: FnOnce(&std::path::Path) -> std::io::Result<()>,
+{
+    let new_dir = dir.with_extension("compact-new");
+    let old_dir = dir.with_extension("compact-old");
+    std::fs::remove_dir_all(&new_dir).ok();
+    std::fs::remove_dir_all(&old_dir).ok();
+    // Build + sync the new base FIRST. A failure here leaves `dir` untouched (fail-closed) —
+    // the two renames below have not started, so the old durable store is intact.
+    write_new_base(&new_dir)?;
+    fsync_dir(&new_dir)?;
+    let parent = dir.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::rename(dir, &old_dir)?;
+    fsync_dir(parent)?;
+    std::fs::rename(&new_dir, dir)?;
+    fsync_dir(parent)?;
+    // Re-open memory-mapped from the new base (fresh, empty WAL); only then drop the old files.
+    let reopened = Graph::open(dir)?;
+    std::fs::remove_dir_all(&old_dir).ok();
+    Ok(reopened)
 }
 
 /// [OPUS-4.8] (review 1593) Recover an INTERRUPTED [`compact`](Graph::compact) directory swap
@@ -3445,11 +3899,173 @@ fn write_numerics(path: &std::path::Path, nums: &[f64]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 
+/// [OPUS-4.8] (sq-7ph8) STREAM-writes the dense `numerics.bin` (`n` little-endian f64, the
+/// same layout [`write_numerics`] emits and [`Graph::open`] mmaps) DIRECTLY from the cache,
+/// in fixed-size blocks, without first materialising a whole-dictionary dense `Vec<f64>`.
+///
+/// The in-RAM save path used to call `numerics_of`/`dense_numerics`, which for a SPARSE or
+/// FORKED cache rebuilds an O(distinct-terms) dense `Vec` (8 B/term) purely to write it — an
+/// RSS spike on top of the resident dict. Probing the cache per id (`lookup`, O(1)) and
+/// flushing a small reusable block buffer keeps peak resident memory at the block size, the
+/// same bounded-write discipline the dict-spill path (`dictspill.rs`) already uses. The bytes
+/// written are identical: NaN for non-numeric ids, the cached f64 otherwise.
+#[cfg(feature = "mmap")]
+fn stream_write_numerics(path: &std::path::Path, n: usize, num: &NumData) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+    const BLOCK: usize = 1 << 16; // ids per flush (512 KiB of f64)
+    let mut buf: Vec<f64> = Vec::with_capacity(BLOCK.min(n));
+    let flush = |w: &mut std::io::BufWriter<std::fs::File>, buf: &mut Vec<f64>| -> std::io::Result<()> {
+        // SAFETY: reinterpret the contiguous f64 block as bytes for writing. (sq-7ph8)
+        // - `buf` is a live `Vec<f64>` of `buf.len()` initialised elements; `size_of_val(&buf[..])`
+        //   = `len * 8` covers exactly that contiguous, fully-initialised region (no over-read).
+        // - target `u8` has alignment 1; the f64 source is over-aligned, so the cast never
+        //   produces a misaligned access.
+        // - the bytes are only READ (passed to `write_all`), never written through the alias.
+        // - the `&[u8]` is consumed within this closure before `buf.clear()`; it never escapes
+        //   the source borrow, so no dangling/provenance issue.
+        // - native-endian reinterpret, identical to `write_numerics` above and symmetric with the
+        //   native-endian read in `NumData::as_slice`: this cache is rebuilt locally, never shipped
+        //   cross-arch, so write-native + read-native round-trips. Byte-identical to the old dense
+        //   write (asserted by `streamed_caches_byte_identical_to_dense`).
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), std::mem::size_of_val(&buf[..])) };
+        w.write_all(bytes)?;
+        buf.clear();
+        Ok(())
+    };
+    for id in 1..=n as Id {
+        buf.push(num.lookup(id).unwrap_or(f64::NAN));
+        if buf.len() == BLOCK {
+            flush(&mut w, &mut buf)?;
+        }
+    }
+    if !buf.is_empty() {
+        flush(&mut w, &mut buf)?;
+    }
+    w.flush()
+}
+
+/// [OPUS-4.8] (sq-7ph8) STREAM-writes the dense `temporals.bin` (`n` little-endian f64
+/// instants then `n` flag bytes — the layout [`write_temporals`] emits and
+/// [`TempData::lookup`]/[`Graph::open`] read) DIRECTLY from the cache, without first
+/// materialising the two whole-dictionary dense columns `dense_temporals` builds.
+///
+/// `dense_temporals` always allocated a fresh `(Vec<u8>, Vec<f64>)` (9 B/term) even when the
+/// in-RAM cache is SPARSE (the usual non-temporal case: a tiny map), a transient
+/// O(distinct-terms) RSS spike purely to feed the writer. Here the instants are streamed in
+/// one id pass (probing `lookup`, O(1)) through a small reusable f64 block; the flags follow
+/// in a second pass through a small `u8` block. Peak resident memory is the block size, not
+/// the dictionary — matching the streamed dict-spill write. Output bytes are identical.
+#[cfg(feature = "mmap")]
+fn stream_write_temporals(path: &std::path::Path, n: usize, temp: &TempData) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+    const BLOCK: usize = 1 << 16;
+    // Pass 1: the f64 instant column (NaN for non-temporal ids — temp_flag 0 carries the
+    // "not temporal" decode, so the instant value of a flag-0 cell is irrelevant on read).
+    let mut fbuf: Vec<f64> = Vec::with_capacity(BLOCK.min(n));
+    let flush_f = |w: &mut std::io::BufWriter<std::fs::File>, buf: &mut Vec<f64>| -> std::io::Result<()> {
+        // SAFETY: reinterpret the contiguous f64 instant block as bytes for writing. (sq-7ph8)
+        // Same invariants as `stream_write_numerics::flush`: `size_of_val(&buf[..]) = len*8` views
+        // exactly the live, initialised `Vec<f64>` region; `u8` has align 1 so no misalignment;
+        // the bytes are read-only (fed to `write_all`); the `&[u8]` never escapes this closure
+        // (consumed before `buf.clear()`); native-endian, symmetric with the native-endian temporal
+        // read path and byte-identical to `write_temporals`. The trailing flag column below is a
+        // plain `Vec<u8>` write (no unsafe).
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), std::mem::size_of_val(&buf[..])) };
+        w.write_all(bytes)?;
+        buf.clear();
+        Ok(())
+    };
+    for id in 1..=n as Id {
+        fbuf.push(temp.lookup(id).map(|t| t.instant).unwrap_or(f64::NAN));
+        if fbuf.len() == BLOCK {
+            flush_f(&mut w, &mut fbuf)?;
+        }
+    }
+    if !fbuf.is_empty() {
+        flush_f(&mut w, &mut fbuf)?;
+    }
+    // Pass 2: the flag byte column.
+    let mut gbuf: Vec<u8> = Vec::with_capacity(BLOCK.min(n));
+    for id in 1..=n as Id {
+        gbuf.push(temp.lookup(id).map(temp_flag).unwrap_or(0));
+        if gbuf.len() == BLOCK {
+            w.write_all(&gbuf)?;
+            gbuf.clear();
+        }
+    }
+    if !gbuf.is_empty() {
+        w.write_all(&gbuf)?;
+    }
+    w.flush()
+}
+
 fn subject_term(s: &oxrdf::NamedOrBlankNode) -> Term {
     match s {
         oxrdf::NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
         oxrdf::NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.clone()),
     }
+}
+
+/// [OPUS-4.8] sq-dvyi: the `format` strings the loaders accept for JSON-LD — the short
+/// key the JS surface passes (`"jsonld"`), the hyphenated spelling, and the IANA media
+/// type (`application/ld+json`, what an `Accept`-negotiated URL load reports). Kept in
+/// one place so every loader arm (`parse_to_triples` / `…_with_base` / `load_reader` /
+/// `load_dataset`) recognises the same set. OPT-IN behind the `jsonld` feature; every
+/// call site is gated on the same feature, so the helper is only compiled when JSON-LD is.
+#[cfg(feature = "jsonld")]
+fn is_jsonld_format(format: &str) -> bool {
+    matches!(format, "jsonld" | "json-ld" | "application/ld+json")
+}
+
+/// [OPUS-4.8] (sq-m2pc) Whether `format` names the Turtle serialization. The single
+/// authority for the Turtle alias set, kept in lock-step with the CLI's `is_known_format`.
+/// `parse_to_triples`/`parse_to_triples_with_base` previously fell back to Turtle for ANY
+/// unrecognised string (so a typo'd or unsupported format silently parsed as Turtle and
+/// returned `Ok`); they now gate on this set and reject the unknown rest.
+fn is_turtle_format(format: &str) -> bool {
+    matches!(
+        format,
+        "turtle" | "ttl" | "text/turtle" | "application/turtle"
+    )
+}
+
+/// [OPUS-4.8] (sq-01yr) Whether `format` names the TriG serialization. The single authority
+/// for the TriG alias set, mirroring [`is_turtle_format`]. `load_dataset_serial` previously
+/// fell back to TriG for ANY string that was not N-Quads/JSON-LD (so a typo'd or unsupported
+/// dataset format silently parsed as TriG and returned `Ok`); it now gates on this set and
+/// rejects the unknown rest via [`unknown_format_err`].
+fn is_trig_format(format: &str) -> bool {
+    matches!(format, "trig" | "application/trig")
+}
+
+/// [OPUS-4.8] (sq-01yr) Whether `format` names a quad-bearing dataset serialization (N-Quads
+/// or TriG, plus their aliases) that `load_dataset` routes through the per-graph dataset path
+/// to PRESERVE named graphs. Any other format defers to `load_str` (which folds named graphs
+/// into the default graph, and rejects genuinely-unknown strings under sq-m2pc). JSON-LD is
+/// handled by its own `is_jsonld_format` gate ahead of this check, so it is not listed here.
+fn is_nquads_format(format: &str) -> bool {
+    matches!(format, "nquads" | "n-quads" | "nq" | "application/n-quads")
+}
+
+/// [OPUS-4.8] (sq-01yr) The set of dataset formats `load_dataset` takes through the per-graph
+/// path — the union of [`is_nquads_format`] and [`is_trig_format`].
+fn is_dataset_format(format: &str) -> bool {
+    is_nquads_format(format) || is_trig_format(format)
+}
+
+/// [OPUS-4.8] (sq-m2pc) The error returned by `parse_to_triples`/`…_with_base` for a
+/// format string they do not recognise — the replacement for the old silent
+/// "unknown ⇒ Turtle" catch-all. The `jsonld` entry only appears when that opt-in
+/// feature is compiled in (the only build in which a "jsonld"/"json-ld" string parses).
+fn unknown_format_err(format: &str) -> String {
+    let known = if cfg!(feature = "jsonld") {
+        "turtle | ntriples | nquads | trig | jsonld"
+    } else {
+        "turtle | ntriples | nquads | trig"
+    };
+    format!("unknown RDF format {format:?} (known: {known})")
 }
 
 /// Splits a byte buffer into ~`target` ranges, each ending on a newline so no
@@ -3624,25 +4240,21 @@ fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String>
 /// global `Dict` + remapped triples — the merge stage shared by the in-memory N-Triples loader
 /// ([`parse_ntriples_parallel`]) and the per-graph N-Quads loader ([`Graph::load_nquads_parallel`],
 /// which calls this once per graph). Sharded on ≥2 threads (the parallel dict consolidation that
-/// breaks the measured serial-`merge_remap` ceiling); serial `merge_remap` on one thread or when
-/// any partial carries an RDF 1.2 triple term (the sharded interner cannot represent those — see
-/// `ShardedDict::intern_partials`).
+/// breaks the measured serial-`merge_remap` ceiling); serial `merge_remap` on one thread.
 #[cfg(feature = "parallel")]
 fn merge_partials(partials: ChunkPartials) -> (Dict, Vec<[Id; 3]>) {
     let total: usize = partials.iter().map(|(_, t)| t.len()).sum();
-    // [OPUS-4.8] (sq-hxgb) The SHARDED merge cannot consolidate RDF 1.2 triple terms
-    // (a triple term's components are hash-routed to a shard AND referenced structurally
-    // by the triple, breaking the term↔id bijection across shards — see
-    // `ShardedDict::intern_partials`). The byte parser now accepts `<<( … )>>` object
-    // terms, so a document MAY contain them; when any partial does, take the serial
-    // `merge_remap` path, which interns triple terms structurally and correctly. Triple
-    // terms are rare (reification metadata), and detection is a single arena scan per
-    // partial (`Dict::has_triple_terms`) — no cost on the common triple-term-free input.
-    let has_triple_terms = partials.iter().any(|(d, _)| d.has_triple_terms());
-    // One rayon thread (or any triple-term partial): the sharded merge would only add
-    // routing/consolidation overhead (or cannot run at all) — keep the proven serial
-    // merge (also the byte-reference the differential tests pin).
-    if rayon::current_num_threads() <= 1 || has_triple_terms {
+    // [OPUS-4.8] (sq-87bq) RDF 1.2 triple terms are now consolidated by the SHARDED merge
+    // too: `ShardedDict::intern_partials` interns them structurally into a dedicated triple
+    // shard (a serial second pass keyed on their components' already-routed temp ids — see
+    // `intern_triple_terms`), preserving the cross-shard term↔id bijection. This is the SAME
+    // machinery the sharded external builder (sq-t3rt, #91) and the pipelined in-RAM loader
+    // (`load_ntriples_pipelined`) already use successfully with triple terms; the earlier
+    // `has_triple_terms ⇒ serial` guard here (added by sq-hxgb before that path was wired in)
+    // is therefore stale and removed, so triple-term bulk loads keep full parse parallelism.
+    // One rayon thread: the sharded merge would only add routing/consolidation overhead —
+    // keep the proven serial merge (also the byte-reference the differential tests pin).
+    if rayon::current_num_threads() <= 1 {
         let cap = partials.iter().map(|(d, _)| d.len()).max().unwrap_or(0);
         let mut global = Dict::with_capacity(cap);
         let mut all = Vec::with_capacity(total);
@@ -3658,10 +4270,12 @@ fn merge_partials(partials: ChunkPartials) -> (Dict, Vec<[Id; 3]>) {
     // ceiling — load plateaued at ~1.8× on 4 identical cores — was exactly this stage).
     let mut sd = dict::ShardedDict::new(default_shards());
     let mut all: Vec<[Id; 3]> = Vec::with_capacity(total);
-    // [OPUS-4.8] `sharded_extend` can only `Err` on a malformed triple term, but the guard
-    // above (`has_triple_terms` ⇒ serial path) means this branch is triple-term-free — so an
-    // error here is an internal invariant breach, not recoverable input. Surface it loudly.
-    sharded_extend(&mut sd, &partials, &mut all).expect("sharded merge: triple-term-free path must not error");
+    // [OPUS-4.8] (sq-87bq) `sharded_extend` (well-formed input, incl. RDF 1.2 triple terms)
+    // only `Err`s on a MALFORMED triple term — a component id out of the partial's range or
+    // referencing an unpopulated slot. `parse_block` produces well-formed partials (children
+    // precede their parent triple in arena order), so an error here is an internal invariant
+    // breach, not recoverable input. Surface it loudly.
+    sharded_extend(&mut sd, &partials, &mut all).expect("sharded merge: well-formed partials must not error");
     finish_sharded(sd, all)
 }
 
@@ -3670,6 +4284,73 @@ fn merge_partials(partials: ChunkPartials) -> (Dict, Vec<[Id; 3]>) {
 #[cfg(feature = "parallel")]
 fn default_shards() -> usize {
     (rayon::current_num_threads() * 2).clamp(4, 64)
+}
+
+#[cfg(feature = "mmap")]
+thread_local! {
+    /// [OPUS-4.8] sq-vkz7 — per-thread override of the [`build_compressed_perms`] gate, so
+    /// tests/benchmarks can request the compressed build WITHOUT mutating the process-global
+    /// environment (a `set_var`/`getenv` data race under parallel `cargo test`, exactly the
+    /// hazard the dict-spill `from_lookup` note documents). `None` ⇒ fall back to the env var.
+    /// Read once on the build's orchestrating thread before any rayon fan-out, so a value set
+    /// on the calling thread is observed by the whole build.
+    static BUILD_COMPRESSED_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// [OPUS-4.8] sq-vkz7 — TEST/BENCH hook: run `f` with the [`build_compressed_perms`] gate
+/// forced to `on`, on THIS thread only, restoring the previous override afterwards. Used by
+/// the differential build tests so they never touch the global environment.
+#[cfg(feature = "mmap")]
+#[doc(hidden)]
+pub fn with_build_compressed<R>(on: bool, f: impl FnOnce() -> R) -> R {
+    let prev = BUILD_COMPRESSED_OVERRIDE.with(|c| c.replace(Some(on)));
+    let r = f();
+    BUILD_COMPRESSED_OVERRIDE.with(|c| c.set(prev));
+    r
+}
+
+/// [OPUS-4.8] sq-vkz7 — gate for the external build to emit BLOCK-COMPRESSED (`SPQCPRM1`)
+/// permutation files DIRECTLY from the sort/merge tail, skipping the separate
+/// `open` + `decode_all` + re-encode recompress pass. Off by default (RAW stays the build
+/// default per `research/compressed-perms-verdict.md`); set
+/// `SPARQ_BUILD_COMPRESSED=1|on|true` (or [`with_build_compressed`] in tests) to opt in. The
+/// output is byte-identical to running the raw build then `recompress`.
+#[cfg(feature = "mmap")]
+fn build_compressed_perms() -> bool {
+    if let Some(forced) = BUILD_COMPRESSED_OVERRIDE.with(|c| c.get()) {
+        return forced;
+    }
+    matches!(
+        std::env::var("SPARQ_BUILD_COMPRESSED").as_deref(),
+        Ok("1") | Ok("on") | Ok("true")
+    )
+}
+
+/// [OPUS-4.8] sq-vkz7 — converts a RAW `[u32;3]` permutation file at `path` to the
+/// BLOCK-COMPRESSED `SPQCPRM1` format IN PLACE, by streaming its rows through
+/// [`compress::CompressedPermWriter`] into a temp file and renaming it over `path`. One
+/// sequential pass over the raw rows (already sorted+deduped on disk) — no `Graph::open`,
+/// no `decode_all`. Used only for the SPO perm, which the build had to keep raw while the
+/// sibling sorts re-read it. An empty raw file (unbuilt perm) is left untouched.
+#[cfg(feature = "mmap")]
+fn compress_perm_file_in_place(path: &std::path::Path) -> Result<(), String> {
+    let (map, n) = extsort::map_perm(path).map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Ok(()); // empty perm stays raw-empty, exactly like the non-compressed build
+    }
+    // SAFETY: the perm file is a whole number of [u32;3] rows written by this build.
+    let rows: &[[Id; 3]] = unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[Id; 3]>(), n) };
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".cmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    let mut w = compress::CompressedPermWriter::create(&tmp).map_err(|e| e.to_string())?;
+    for &row in rows {
+        w.push(row).map_err(|e| e.to_string())?;
+    }
+    w.finish(&tmp).map_err(|e| e.to_string())?;
+    drop(map); // release the raw mapping before replacing the file underneath it
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Interns a parsed block's partial dicts into the sharded dict and appends the block's
@@ -3727,10 +4408,10 @@ fn intern_subject_ref(dict: &mut Dict, s: &oxrdf::NamedOrBlankNode) -> Id {
 }
 
 /// [OPUS-4.8] (T1) Intern an oxttl-parsed object `Term` from its BORROWED components — the object
-/// slot is the one that can be a literal or (RDF-star) a quoted triple. IRIs/blank nodes/literals
+/// slot is the one that can be a literal or (RDF 1.2) a triple term. IRIs/blank nodes/literals
 /// dispatch straight to the component interners with `&str` views; a nested triple term recurses
 /// (its s/p/o are interned first, then the triple is stored by component ids, matching
-/// `Dict::intern(&Term::Triple(_))`). No owned `Term` is built for the common non-star case.
+/// `Dict::intern(&Term::Triple(_))`). No owned `Term` is built for the common non-triple-term case.
 #[cfg(feature = "parallel")]
 #[inline]
 fn intern_object_ref(dict: &mut Dict, o: &Term) -> Id {
@@ -3740,7 +4421,7 @@ fn intern_object_ref(dict: &mut Dict, o: &Term) -> Id {
         Term::Literal(l) => {
             dict.intern_lit(l.value(), l.datatype().as_str(), crate::dict::lang_with_dir(l).as_deref())
         }
-        // RDF-star quoted triple: rare; fall back to the owned-Term path (handles nesting +
+        // RDF 1.2 triple term: rare; fall back to the owned-Term path (handles nesting +
         // content-addressed triple ids identically to the serial parser).
         Term::Triple(_) => dict.intern(o),
     }
@@ -4119,15 +4800,287 @@ fn parse_turtle_chunked(bytes: &[u8], target: usize) -> Result<(Dict, Vec<[Id; 3
         Ok(p) => p,
         Err(_) => return serial(), // an over-eager split produced invalid Turtle — redo serially
     };
-    let total: usize = partials.iter().map(|(_, t)| t.len()).sum();
-    let cap = partials.iter().map(|(d, _)| d.len()).max().unwrap_or(0);
-    let mut global = Dict::with_capacity(cap);
-    let mut all = Vec::with_capacity(total);
-    for (pd, ptriples) in partials {
-        let remap = global.merge_remap(&pd);
-        remap_extend(&mut all, ptriples, &remap);
+    // [OPUS-4.8] (sq-eq26, T4) Consolidate the per-chunk partial dicts through the SHARED
+    // `merge_partials`: serial `merge_remap` on one thread (proven byte-reference the
+    // differential oracles pin), but on ≥2 threads the SHARDED `ShardedDict` merge the
+    // N-Triples loaders already use — the parallel dict consolidation that breaks the
+    // serial-`merge_remap` ceiling. Turtle's per-chunk parser ([`parse_turtle_chunk`])
+    // resets prefix/base/blank-node scope at each chunk boundary and emits FULLY-RESOLVED
+    // terms + per-chunk-unique blank-node labels into each partial `Dict` (turtle_chunks
+    // only splits where directive snapshots are shared and blank labels can't collide), so
+    // a partial here is structurally identical to an N-Triples block's partial: the merge
+    // sees only ground terms and labelled blank nodes and unifies them by term equality,
+    // exactly as the serial `merge_remap` loop did. RDF-1.2 triple terms are consolidated by
+    // the sharded merge too (sq-87bq), so triple-term Turtle stays eligible. The output
+    // (term + triple set) is identical to the serial merge — pinned by the
+    // `parallel_turtle_*_match_serial` differential oracles below.
+    Ok(merge_partials(partials))
+}
+
+/// [OPUS-4.8] (sq-ev37) Delimit a TriG graph LABEL token starting at `start` — the `labelOrSubject`
+/// that precedes a `{ … }` block (`label { … }` or `GRAPH label { … }`). A label is one of an
+/// `IRIREF` (`<…>`), a `BLANK_NODE_LABEL` (`_:name`), or a `PrefixedName` (`pfx:local` / `:local`).
+/// Returns the offset just past the token, or `None` (→ caller falls back to serial) when the token
+/// is anything we do not delimit cleanly (an anonymous `[]` graph label, a collection, EOF, …).
+///
+/// The returned span is REPLAYED VERBATIM as the chunk's graph header, so its exact bytes — and in
+/// particular a blank-node label `_:g` — are preserved; the per-graph dataset merge then unifies
+/// that label across chunks exactly as the serial parse / the N-Quads fast path do (sq-25r3). We
+/// only need a span here: oxttl re-validates the token when it re-parses the chunk.
+#[cfg(feature = "parallel")]
+fn scan_graph_label(bytes: &[u8], start: usize) -> Option<usize> {
+    let n = bytes.len();
+    if start >= n {
+        return None;
     }
-    Ok((global, all))
+    match bytes[start] {
+        // IRIREF: `<` … `>` (no unescaped `>` inside; oxttl re-validates the snapshot).
+        b'<' => memchr::memchr(b'>', &bytes[start + 1..]).map(|off| start + 1 + off + 1),
+        // BLANK_NODE_LABEL `_:name` or a PrefixedName `pfx:local` / `:local`: a run of name
+        // characters terminated by whitespace, a comment, or the opening `{`. PN_CHARS / `.` / `:`
+        // are all consumed; the `{` (or ws/comment) that follows ends the token. (oxttl validates
+        // the precise PN grammar on re-parse — a malformed label makes that chunk fail → serial.)
+        b'_' | b':' | b'A'..=b'Z' | b'a'..=b'z' | 0x80..=0xff => {
+            let mut i = start;
+            while i < n
+                && !matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r' | b'#' | b'{' | b'}')
+            {
+                i += 1;
+            }
+            // A label must be non-empty; the caller checks that a `{` follows (after ws/comments).
+            (i > start).then_some(i)
+        }
+        _ => None,
+    }
+}
+
+/// [OPUS-4.8] (sq-ev37) A scanned TriG top-level unit: one statement's byte span `[start, end)`,
+/// the graph it belongs to (`None` = default graph; `Some((s, e))` = the verbatim label byte-span),
+/// and how many directive spans precede it (its chunk's preamble = `dirs[..dirs_before]`).
+#[cfg(feature = "parallel")]
+struct TrigStmt {
+    start: usize,
+    end: usize,
+    graph: Option<(usize, usize)>,
+    dirs_before: usize,
+}
+
+/// [OPUS-4.8] (sq-ev37) Split a TriG dataset into independently-parseable chunks for the
+/// chunk-parallel in-memory loader, or `None` to fall back to the serial oxttl path. This is the
+/// TriG twin of [`turtle_chunks`]: it reuses the SAME statement-terminator scanning
+/// ([`next_terminator`]) and directive-snapshot machinery (Turtle `@prefix`/`@base` and SPARQL
+/// `PREFIX`/`BASE` spans, replayed verbatim into each chunk), and adds the TriG-specific structure:
+///
+/// 1. **Graph routing context per statement.** A top-level unit is a directive, a DEFAULT-graph
+///    triple (`subj … .`), or a graph BLOCK — `{ … }` (default graph), `label { … }`, or
+///    `GRAPH label { … }`. While inside a block every statement is routed to that block's graph;
+///    the closing `}` returns to the top level. Each statement records its graph as the verbatim
+///    label byte-span (or `None`).
+/// 2. **Block-open/close + headers as units.** The `label {` / `GRAPH label {` header and the
+///    closing `}` are consumed as structural tokens (not statements). A chunk that carries a run of
+///    statements from graph `G` is re-wrapped as `label { … }` (the verbatim label), so oxttl
+///    re-parses it back into `G`. This lets a single large block split across many chunks while
+///    each chunk stays a self-contained, re-parseable TriG fragment.
+///
+/// Then [`parse_trig_chunk`] parses each chunk into per-graph buckets and the loader merges them
+/// with the SAME per-graph [`merge_partials`] the N-Quads fast path uses — so blank-node + prefix
+/// scope across blocks and chunk boundaries is resolved by the dataset-scoped dict merge (by label,
+/// exactly as the serial parse), not by anything fragile in the splitter.
+///
+/// Correctness is paramount: anything the scanner cannot cleanly delimit (a `triplesOrGraph`
+/// subject that is not a simple label, an anonymous-blank-node graph label, a truncated block, a
+/// `}`-before-`{` imbalance, …) returns `None` and the loader runs the proven serial path — and
+/// even a clean split is only ACCEPTED if every chunk re-parses (the loader redoes serially on any
+/// per-chunk parse error), so an over-eager split can never silently change the result.
+///
+/// Two-level only: TriG graph blocks do not nest, so the scanner needs no stack — just a current
+/// graph context (`None` at the top level, `Some(label)` inside one block).
+#[cfg(feature = "parallel")]
+fn trig_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
+    let n = bytes.len();
+    let mut dirs: Vec<(usize, usize)> = Vec::new();
+    let mut stmts: Vec<TrigStmt> = Vec::new();
+    // `None` at depth 0 (top level); `Some(label_span)` inside a block (label_span `None` ⇒ the
+    // anonymous `{ … }` default-graph block).
+    let mut cur_graph: Option<Option<(usize, usize)>> = None;
+    let mut j = skip_ws_comments(bytes, 0);
+    while j < n {
+        match cur_graph {
+            // ── Inside a block: statements terminated by `.`, or the closing `}`. ──────────────
+            Some(label) => {
+                if bytes[j] == b'}' {
+                    cur_graph = None;
+                    j = skip_ws_comments(bytes, j + 1);
+                    continue;
+                }
+                let end = next_terminator(bytes, j)?;
+                stmts.push(TrigStmt { start: j, end, graph: label, dirs_before: dirs.len() });
+                j = skip_ws_comments(bytes, end);
+            }
+            // ── Top level: directive, graph block, or a default-graph triple. ─────────────────
+            None => {
+                if is_sparql_directive_start(bytes, j) {
+                    let end = next_sparql_directive_end(bytes, j)?;
+                    dirs.push((j, end));
+                    j = skip_ws_comments(bytes, end);
+                    continue;
+                }
+                match bytes[j] {
+                    // `@prefix` / `@base`: a `.`-terminated directive span.
+                    b'@' => {
+                        let end = next_terminator(bytes, j)?;
+                        dirs.push((j, end));
+                        j = skip_ws_comments(bytes, end);
+                    }
+                    // Anonymous default-graph block `{ … }`.
+                    b'{' => {
+                        cur_graph = Some(None);
+                        j = skip_ws_comments(bytes, j + 1);
+                    }
+                    // A stray `}` at top level is malformed → serial.
+                    b'}' => return None,
+                    // `GRAPH label { … }` (case-insensitive keyword + ws). A subject that merely
+                    // starts with `g`/`G` (e.g. `graph:x` / `<…graph> …`) does NOT match because
+                    // `matches_kw_ws` requires whitespace/comment immediately after `graph`.
+                    _ if matches_kw_ws(bytes, j, b"graph") => {
+                        let after_kw = skip_ws_comments(bytes, j + 5);
+                        let label_end = scan_graph_label(bytes, after_kw)?;
+                        let at_brace = skip_ws_comments(bytes, label_end);
+                        if bytes.get(at_brace) != Some(&b'{') {
+                            return None; // `GRAPH` not followed by `label {` — malformed.
+                        }
+                        cur_graph = Some(Some((after_kw, label_end)));
+                        j = skip_ws_comments(bytes, at_brace + 1);
+                    }
+                    // `triplesOrGraph`: a leading SIMPLE label token. If the next significant byte
+                    // is `{`, it is a `label { … }` block; otherwise it is a default-graph triple
+                    // whose subject is that token — delimited by `next_terminator` from `j` (the
+                    // label scan is only a lookahead; the statement still starts at `j`).
+                    b'<' | b'_' | b':' | b'A'..=b'Z' | b'a'..=b'z' | 0x80..=0xff => {
+                        if let Some(label_end) = scan_graph_label(bytes, j) {
+                            let at = skip_ws_comments(bytes, label_end);
+                            if bytes.get(at) == Some(&b'{') {
+                                cur_graph = Some(Some((j, label_end)));
+                                j = skip_ws_comments(bytes, at + 1);
+                                continue;
+                            }
+                        }
+                        let end = next_terminator(bytes, j)?;
+                        stmts.push(TrigStmt { start: j, end, graph: None, dirs_before: dirs.len() });
+                        j = skip_ws_comments(bytes, end);
+                    }
+                    // Any other top-level statement start (a `[` blank-property-list subject, a `(`
+                    // collection subject, a literal — i.e. NOT a graph label). It is a default-graph
+                    // triple; delimit it. (A `[ … ] { … }` graph block is not valid TriG, so a `{`
+                    // can never legally follow such a subject — if one did, the chunk would fail to
+                    // re-parse and the loader would fall back to serial.)
+                    _ => {
+                        let end = next_terminator(bytes, j)?;
+                        stmts.push(TrigStmt { start: j, end, graph: None, dirs_before: dirs.len() });
+                        j = skip_ws_comments(bytes, end);
+                    }
+                }
+            }
+        }
+    }
+    // An unclosed block (EOF while inside one) is malformed → serial.
+    if cur_graph.is_some() {
+        return None;
+    }
+    if stmts.len() < 2 {
+        return None;
+    }
+
+    // Directive snapshot: the verbatim, in-order bytes of `dirs[..dirs_before]`, joined by `\n` —
+    // the exact replay [`turtle_chunks`] uses (correct for redefinitions and relative `@base`).
+    let snapshot = |dirs_before: usize| -> Vec<u8> {
+        let mut pre = Vec::new();
+        for &(s, e) in &dirs[..dirs_before] {
+            pre.extend_from_slice(&bytes[s..e]);
+            pre.push(b'\n');
+        }
+        pre
+    };
+
+    // Partition statements into ~target contiguous groups. A group must share BOTH the directive
+    // snapshot AND the graph context (so the chunk's preamble and `label { … }` wrapper are well
+    // defined) — split a group at any change of either.
+    let per = (stmts.len() / target.max(1)).max(1);
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    let mut idx = 0;
+    while idx < stmts.len() {
+        let dirs_before = stmts[idx].dirs_before;
+        let graph = stmts[idx].graph;
+        let group_start = stmts[idx].start;
+        let mut end_i = (idx + per).min(stmts.len());
+        for (k, stmt) in stmts.iter().enumerate().take(end_i).skip(idx + 1) {
+            if stmt.dirs_before != dirs_before || stmt.graph != graph {
+                end_i = k;
+                break;
+            }
+        }
+        let body_end = stmts[end_i - 1].end;
+        let mut chunk = snapshot(dirs_before);
+        match graph {
+            // Default-graph statements: emit them bare (a valid TriG document body).
+            None => chunk.extend_from_slice(&bytes[group_start..body_end]),
+            // Block statements: re-wrap in `label { … }` so oxttl re-parses them back into the
+            // right graph. The label bytes are replayed VERBATIM (blank-node labels and prefixed
+            // names included), so graph identity is preserved across chunks.
+            Some((ls, le)) => {
+                chunk.extend_from_slice(&bytes[ls..le]);
+                chunk.extend_from_slice(b" {\n");
+                chunk.extend_from_slice(&bytes[group_start..body_end]);
+                chunk.extend_from_slice(b"\n}\n");
+            }
+        }
+        chunks.push(chunk);
+        idx = end_i;
+    }
+    Some(chunks)
+}
+
+/// [OPUS-4.8] (sq-ev37) Is the case-insensitive keyword `kw` at `k`, followed by whitespace or a
+/// comment (so `GRAPH ` matches but a `graph:` prefixed name or a `<…graph>` IRI does not)?
+#[cfg(feature = "parallel")]
+fn matches_kw_ws(bytes: &[u8], k: usize, kw: &[u8]) -> bool {
+    bytes.len() > k + kw.len()
+        && bytes[k..k + kw.len()].eq_ignore_ascii_case(kw)
+        && matches!(bytes.get(k + kw.len()), Some(b' ' | b'\t' | b'\n' | b'\r' | b'#'))
+}
+
+/// [OPUS-4.8] (sq-ev37) Parse one self-contained TriG chunk into per-graph buckets — the per-chunk
+/// worker for [`Graph::load_trig_chunked`], the oxttl analogue of [`nt::parse_quads_chunk`]. Routes
+/// each quad's triple to a bucket keyed by its graph name (`None` = default graph), interning S/P/O
+/// into that bucket's OWN partial dict (the graph NAME is the routing key, never interned), in
+/// first-occurrence order within the chunk — exactly the input shape the per-graph
+/// [`merge_partials`] consumes. Errors (an over-eager split that yields invalid TriG) propagate so
+/// the loader can redo the document serially.
+#[cfg(feature = "parallel")]
+#[allow(clippy::type_complexity)]
+fn parse_trig_chunk(bytes: &[u8]) -> Result<Vec<(Option<nt::GraphKey>, Dict, Vec<[Id; 3]>)>, String> {
+    use oxrdf::GraphName;
+    use std::collections::HashMap;
+    let mut buckets: Vec<(Option<nt::GraphKey>, Dict, Vec<[Id; 3]>)> = Vec::new();
+    let mut index: HashMap<Option<nt::GraphKey>, usize> = HashMap::new();
+    for q in TriGParser::new().for_slice(bytes) {
+        let q = q.map_err(|e| e.to_string())?;
+        let key = match q.graph_name {
+            GraphName::DefaultGraph => None,
+            GraphName::NamedNode(nn) => Some(nt::GraphKey::Iri(nn.into_string())),
+            GraphName::BlankNode(b) => Some(nt::GraphKey::Blank(b.into_string())),
+        };
+        let slot = *index.entry(key.clone()).or_insert_with(|| {
+            buckets.push((key.clone(), Dict::new(), Vec::new()));
+            buckets.len() - 1
+        });
+        let (_, dict, triples) = &mut buckets[slot];
+        let s = intern_subject_ref(dict, &q.subject);
+        let p = dict.intern_iri(q.predicate.as_str());
+        let o = intern_object_ref(dict, &q.object);
+        triples.push([s, p, o]);
+    }
+    Ok(buckets)
 }
 
 /// Streams N-Triples from `reader` in newline-aligned ~64 MiB blocks, parsing+interning
@@ -4390,6 +5343,9 @@ fn remap_perm_file(path: &std::path::Path, base: &[u64], stride: u32) -> Result<
     }
     // SAFETY: read-write mapping of a freshly-written perm file of whole [u32;3] rows.
     let mut mmap = unsafe { memmap2::MmapMut::map_mut(&f) }.map_err(|e| e.to_string())?;
+    // SAFETY: the mmap base is page-aligned (≥ 4-byte u32 align) and the file is a whole
+    // number of [u32;3] rows, so `len/4` u32 cells are in-bounds; the `MmapMut` is
+    // exclusively owned here and the rayon writes below are disjoint by index. [OPUS-4.8 sq-8wbn]
     let ids: &mut [u32] = unsafe { std::slice::from_raw_parts_mut(mmap.as_mut_ptr().cast::<u32>(), len / 4) };
     use rayon::prelude::*;
     ids.par_iter_mut().for_each(|id| *id = dict::remap_sharded(*id, base, stride));
@@ -4462,9 +5418,9 @@ fn build_external_ntriples_dictspill<R: std::io::Read + Send>(
                     continue;
                 }
                 let partials = parse_block(&block)?;
-                // [OPUS-4.8] (sq-hxgb) The sharded/spill consolidation cannot represent
-                // triple terms; fail clearly rather than panic / corrupt (see helper).
-                reject_triple_terms_in_external_build(&partials)?;
+                // [OPUS-4.8] (sq-jvbr) The dict-spill consolidation now interns RDF 1.2 triple
+                // terms structurally (`SpillInterner::intern_batch` → `finalize_triple_terms`),
+                // so no rejection here — like the sharded path (sq-t3rt).
                 if ptx.send(partials).is_err() {
                     return Ok(());
                 }
@@ -4504,28 +5460,6 @@ fn parse_block(bytes: &[u8]) -> Result<ChunkPartials, String> {
     Ok(partials)
 }
 
-/// [OPUS-4.8] (sq-jvbr) The DICT-SPILL external N-Triples builder consolidates partial
-/// dicts through a HASH-SHARDED, disk-staged interner whose on-disk term records are
-/// content-only (`serialize_termparts`) — it has no representation for an RDF 1.2 triple
-/// term `<<( … )>>`, whose content IS its components' ids (resolvable only after the whole
-/// external dedup). So it surfaces a CLEAR error rather than panicking / corrupting.
-///
-/// The SHARDED in-RAM external builder (`build_external_ntriples_sharded`) NO LONGER needs
-/// this: as of sq-t3rt `ShardedDict::intern_partials` interns triple terms structurally into
-/// a dedicated triple shard. Giving the dict-spill staging the same is tracked as sq-jvbr;
-/// until then this guard keeps that path honest.
-#[cfg(feature = "dict-spill")]
-fn reject_triple_terms_in_external_build(partials: &[(Dict, Vec<[Id; 3]>)]) -> Result<(), String> {
-    if partials.iter().any(|(d, _)| d.has_triple_terms()) {
-        return Err("N-Triples: RDF 1.2 triple terms `<<( … )>>` are not yet supported by the \
-                    dict-spill external builder; build with the default sharded path \
-                    (SPARQ_DICT_SPILL unset) or load this document in memory \
-                    (Graph::load_str/load_reader) instead (sq-jvbr)"
-            .to_string());
-    }
-    Ok(())
-}
-
 /// Env-gated (`SPARQ_BUILD_TIMING`) phase-time accumulators for the parallel ingest path,
 /// to attribute wall-time across parallel-parse vs dict-merge vs triple-remap.
 #[cfg(feature = "parallel")]
@@ -4562,22 +5496,253 @@ mod build_timing {
             counter.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    pub fn report(stage: &str, secs: f64) {
+    /// Which interning topology produced the `MERGE_NS`/`REMAP_NS` buckets — they are NOT
+    /// comparable across paths, so the report MUST label them honestly:
+    ///
+    /// * [`Serial`](PathKind::Serial) — the non-sharded parallel external build
+    ///   (`build_external_ntriples_parallel`): "merge" is the one serial `Dict::merge_remap`
+    ///   global-id re-intern and "remap" is a serial loop. These two buckets ADD into the
+    ///   serial dict-consolidation wall (the measured ~200 s/1 B at engine `ef86e66`).
+    /// * [`Pipelined`](PathKind::Pipelined) — the sharded default
+    ///   (`build_external_ntriples_sharded`) and the dict-spill path: the "merge" bucket is
+    ///   the PARALLEL `intern_partials`/`intern_batch` occupancy and the "remap" bucket runs
+    ///   on its OWN pipeline stage CONCURRENTLY with the next batch's intern. They are
+    ///   per-stage thread-occupancy (inflated by contention), NOT additive serial wall — so
+    ///   labelling them `(serial)` (as this report did before [OPUS-4.8] sq-3l43) made a
+    ///   rung-5 re-measurement of the dict-consolidation bucket UNINTERPRETABLE: a reader
+    ///   would compare pipelined occupancy against the old additive-serial ~200 s/1 B and
+    ///   draw the wrong conclusion. The interpretable dict-consolidation bucket on this path
+    ///   is the `consolidate` term (`into_merged`/spilled, serial) PLUS whatever intern
+    ///   occupancy exceeds the overlapped parse — which is what sq-3l43 confirms at 1 B.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    // [OPUS-4.8 sq-3l43] `build_timing` is a PRIVATE module, so these items are only
+    // crate-reachable regardless of the `pub` keyword. Declare that reachability accurately
+    // with `pub(crate)`: it both reflects the real (crate-internal) surface and keeps the
+    // textual public-API diff gate (G2 / scripts/pub_api_diff.py, a `pub\s+(fn|enum|…)`
+    // regex that does NOT resolve enclosing-module visibility) from tripping on a `pub`
+    // that exports nothing.
+    pub(crate) enum PathKind {
+        Serial,
+        Pipelined,
+    }
+
+    /// Format the per-phase build-timing line for `stage`. Pure (no I/O, no clock) so it is
+    /// unit-testable; `report` prints what this returns. `consolidate_secs` is the serial
+    /// dict-consolidation step (`into_merged` for sharded, `consolidate` for spilled), folded
+    /// in so the FULL dict-consolidation bucket is attributed on one line; pass `None` for the
+    /// serial path (whose consolidation is the inline `merge_remap` already in "merge").
+    pub(crate) fn format_report(
+        stage: &str,
+        kind: PathKind,
+        consolidate_secs: Option<f64>,
+        secs: f64,
+    ) -> String {
         use std::sync::atomic::Ordering::Relaxed;
         let (p, m, r) = (
             PARSE_NS.load(Relaxed) as f64 / 1e9,
             MERGE_NS.load(Relaxed) as f64 / 1e9,
             REMAP_NS.load(Relaxed) as f64 / 1e9,
         );
-        eprintln!(
-            "[build-timing] {stage}: parse(parallel) {p:.2}s | merge_remap(serial) {m:.2}s | triple-remap(serial) {r:.2}s | {secs:.2}s wall to here"
-        );
+        // Honest bucket labels: serial buckets ADD to the consolidation wall; pipelined
+        // buckets are overlapped per-stage occupancy (see `PathKind`).
+        let (merge_lbl, remap_lbl) = match kind {
+            PathKind::Serial => ("merge_remap(serial)", "triple-remap(serial)"),
+            PathKind::Pipelined => {
+                ("intern(parallel-occupancy)", "triple-remap(pipelined-occupancy)")
+            }
+        };
+        let cons = match consolidate_secs {
+            Some(c) => format!(" | dict-consolidate(serial) {c:.2}s"),
+            None => String::new(),
+        };
+        format!(
+            "[build-timing] {stage}: parse(parallel) {p:.2}s | {merge_lbl} {m:.2}s | {remap_lbl} {r:.2}s{cons} | {secs:.2}s wall to here"
+        )
+    }
+
+    pub(crate) fn report(stage: &str, kind: PathKind, consolidate_secs: Option<f64>, secs: f64) {
+        eprintln!("{}", format_report(stage, kind, consolidate_secs, secs));
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::Ordering::Relaxed;
+
+        // The phase counters are process-global statics; serialize the few tests that set
+        // them so they don't race each other's `format_report` reads.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        // [OPUS-4.8 sq-3l43] The non-sharded parallel build's buckets are the genuine
+        // additive-serial `merge_remap` + `triple-remap` (the measured ~200 s/1 B); they
+        // MUST keep the `(serial)` label and carry NO separate consolidate term.
+        #[test]
+        fn serial_path_labels_buckets_serial_and_has_no_consolidate_term() {
+            let _g = LOCK.lock().unwrap();
+            reset();
+            MERGE_NS.store(137_900_000_000, Relaxed); // 137.9 s
+            REMAP_NS.store(62_200_000_000, Relaxed); //  62.2 s
+            PARSE_NS.store(138_100_000_000, Relaxed); // 138.1 s
+            let line = format_report("parse+intern+spill done", PathKind::Serial, None, 221.2);
+            assert!(line.contains("merge_remap(serial) 137.90s"), "{line}");
+            assert!(line.contains("triple-remap(serial) 62.20s"), "{line}");
+            assert!(!line.contains("dict-consolidate"), "serial path folds consolidation into merge_remap: {line}");
+            assert!(!line.contains("parallel-occupancy"), "{line}");
+        }
+
+        // The sharded DEFAULT (what sq-3l43 re-measures) overlaps a PARALLEL intern with a
+        // pipelined remap — those buckets are per-stage occupancy, NOT additive-serial. They
+        // MUST NOT be labelled `(serial)` (which would make the bucket re-measurement read as
+        // a regression vs the old additive 200 s/1 B), and the serial `into_merged`
+        // consolidation MUST appear as its own honestly-labelled term on the same line.
+        #[test]
+        fn pipelined_path_labels_occupancy_and_surfaces_consolidate_bucket() {
+            let _g = LOCK.lock().unwrap();
+            reset();
+            MERGE_NS.store(40_000_000_000, Relaxed); // 40 s intern occupancy
+            REMAP_NS.store(60_000_000_000, Relaxed); // 60 s remap occupancy
+            PARSE_NS.store(138_000_000_000, Relaxed);
+            let line = format_report("parse+intern+spill done", PathKind::Pipelined, Some(3.5), 150.0);
+            // The whole point of the bead: the dict-consolidation bucket is the small serial
+            // `into_merged` term, distinct from the (overlapped) intern/remap occupancy.
+            assert!(line.contains("dict-consolidate(serial) 3.50s"), "{line}");
+            assert!(line.contains("intern(parallel-occupancy) 40.00s"), "{line}");
+            assert!(line.contains("triple-remap(pipelined-occupancy) 60.00s"), "{line}");
+            // Must NOT mislabel the pipelined buckets as additive-serial.
+            assert!(!line.contains("merge_remap(serial)"), "{line}");
+            assert!(!line.contains("triple-remap(serial)"), "{line}");
+        }
+
+        // Pipelined paths whose consolidation is reported on a SEPARATE later line (dict-spill)
+        // pass `None` and so carry no inline consolidate term, but still drop the serial labels.
+        #[test]
+        fn pipelined_path_without_inline_consolidate_omits_the_term() {
+            let _g = LOCK.lock().unwrap();
+            reset();
+            MERGE_NS.store(10_000_000_000, Relaxed);
+            let line = format_report("parse+route+stage done", PathKind::Pipelined, None, 99.0);
+            assert!(!line.contains("dict-consolidate"), "{line}");
+            assert!(line.contains("intern(parallel-occupancy) 10.00s"), "{line}");
+            assert!(!line.contains("(serial)"), "{line}");
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- sq-dvyi: engine-side JSON-LD ingest (the lean WASM build's `load`) ----
+    //
+    // The site REPL's upload/URL path loads through `Graph::load_str` / `load_dataset`
+    // in the wasm bundle; JSON-LD is the one widely-served RDF syntax those entries did
+    // not accept. These cover the triple-folding path, the base-IRI path (relative IRIs
+    // in a fetched document), and the named-graph-preserving dataset path (`@graph`).
+    // `dump_terms` returns full lexical term forms (`<iri>`, `"lit"`, `"lit"^^<dt>`), so
+    // the assertions match against those, not bare strings.
+
+    /// A JSON-LD object document parses through `load_str` to the expected triples:
+    /// a plain string literal, a typed (xsd:integer) literal, and an IRI object; and
+    /// every `jsonld` alias is accepted.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_load_str_object() {
+        let doc = r#"{
+            "@context": { "ex": "http://ex/", "name": "ex:name", "age": "ex:age", "knows": { "@id": "ex:knows", "@type": "@id" } },
+            "@id": "ex:alice",
+            "name": "Alice",
+            "age": { "@value": "30", "@type": "http://www.w3.org/2001/XMLSchema#integer" },
+            "knows": "ex:bob"
+        }"#;
+        for fmt in ["jsonld", "json-ld", "application/ld+json"] {
+            let g = Graph::load_str(doc, fmt).unwrap_or_else(|e| panic!("{fmt}: {e}"));
+            assert_eq!(g.len(), 3, "{fmt}: subject has three predicates");
+            let terms = dump_terms(&g);
+            let has = |s: &str, p: &str, o: &str| {
+                terms.iter().any(|(ts, tp, to)| ts == s && tp == p && to == o)
+            };
+            assert!(
+                has("<http://ex/alice>", "<http://ex/name>", "\"Alice\""),
+                "{fmt}: name triple missing: {terms:?}"
+            );
+            assert!(
+                has(
+                    "<http://ex/alice>",
+                    "<http://ex/age>",
+                    "\"30\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+                ),
+                "{fmt}: typed age triple missing: {terms:?}"
+            );
+            assert!(
+                has("<http://ex/alice>", "<http://ex/knows>", "<http://ex/bob>"),
+                "{fmt}: knows IRI triple missing: {terms:?}"
+            );
+        }
+    }
+
+    /// A JSON-LD array of node objects (the common "list of records" shape) loads every
+    /// node — JSON-LD is whole-document, not line-oriented, so this is one parse.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_load_str_array() {
+        let doc = r#"[
+            { "@id": "http://ex/a", "http://ex/p": [ { "@id": "http://ex/b" } ] },
+            { "@id": "http://ex/b", "http://ex/p": [ { "@id": "http://ex/c" } ] }
+        ]"#;
+        let g = Graph::load_str(doc, "jsonld").unwrap();
+        assert_eq!(g.len(), 2);
+    }
+
+    /// Relative IRIs in a JSON-LD document resolve against the supplied base — the URL
+    /// load path (a document fetched from `https://host/dir/data.jsonld`) relies on this.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_load_str_with_base_resolves_relative() {
+        let doc = r#"{ "@id": "alice", "http://ex/knows": { "@id": "bob" } }"#;
+        let g = Graph::load_str_with_base(doc, "jsonld", "http://base.example/dir/").unwrap();
+        let terms = dump_terms(&g);
+        assert!(
+            terms.iter().any(|(s, p, o)| s == "<http://base.example/dir/alice>"
+                && p == "<http://ex/knows>"
+                && o == "<http://base.example/dir/bob>"),
+            "relative IRIs must resolve against the base: {terms:?}"
+        );
+    }
+
+    /// `load_dataset` preserves the named graph a JSON-LD `@graph` with an outer `@id`
+    /// expresses (so a `GRAPH ?g { … }` query against an uploaded JSON-LD dataset works),
+    /// while `load_str` folds it into the default graph.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_load_dataset_preserves_named_graph() {
+        let doc = r#"{
+            "@id": "http://ex/g1",
+            "@graph": [ { "@id": "http://ex/s", "http://ex/p": { "@id": "http://ex/o" } } ]
+        }"#;
+        let ds = Graph::load_dataset(doc, "jsonld").unwrap();
+        // The triple lives in the named graph, not the default graph.
+        assert_eq!(ds.len(), 0, "default graph empty");
+        let name = Term::NamedNode(NamedNode::new("http://ex/g1").unwrap());
+        let sub = ds
+            .named
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, g)| g.len());
+        assert_eq!(sub, Some(1), "named graph ex:g1 holds the triple");
+
+        // Folding (load_str) keeps the same triple but in the default graph.
+        let folded = Graph::load_str(doc, "jsonld").unwrap();
+        assert_eq!(folded.len(), 1);
+        assert!(folded.named.is_empty());
+    }
+
+    /// Malformed JSON-LD surfaces a parse error (not a silent empty graph), so the REPL
+    /// can report the failure inline.
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn jsonld_malformed_errors() {
+        assert!(Graph::load_str("{ not json", "jsonld").is_err());
+    }
 
     /// [OPUS-4.8] (sq-zz8z, gh-51) The graph-IRI prefix RANGE SCAN returns EXACTLY the named graphs
     /// whose `STR(name)` starts with the prefix, and its lazily-built cache stays coherent across
@@ -4621,6 +5786,37 @@ mod tests {
         );
     }
 
+    /// [OPUS-4.8] (sq-quuu) `named_graph(name)` returns the per-name named-graph `&Graph` so the
+    /// read-only GenAI crates can be scoped to one graph of a quad dataset. The returned graph
+    /// holds EXACTLY that graph's triples (not the default graph, not a mixture across graphs),
+    /// and an unknown name yields `None`.
+    #[test]
+    fn named_graph_by_name_scopes_to_one_graph() {
+        let nq = "<http://ex/a> <http://ex/p> <http://ex/x> <http://ex/g1> .\n\
+                  <http://ex/b> <http://ex/p> <http://ex/y> <http://ex/g1> .\n\
+                  <http://ex/c> <http://ex/p> <http://ex/z> <http://ex/g2> .\n\
+                  <http://ex/d> <http://ex/p> <http://ex/w> .\n"; // default graph
+        let g = Graph::load_dataset(nq, "nquads").unwrap();
+        // The default graph (`g` itself) holds only the one default-graph triple.
+        assert_eq!(g.len(), 1);
+
+        let g1 = Term::NamedNode(NamedNode::new("http://ex/g1").unwrap());
+        let g2 = Term::NamedNode(NamedNode::new("http://ex/g2").unwrap());
+        let missing = Term::NamedNode(NamedNode::new("http://ex/none").unwrap());
+
+        let sub1 = g.named_graph(&g1).expect("ex:g1 exists");
+        assert_eq!(sub1.len(), 2, "ex:g1 holds exactly its two triples");
+        let sub2 = g.named_graph(&g2).expect("ex:g2 exists");
+        assert_eq!(sub2.len(), 1, "ex:g2 holds exactly its one triple");
+        assert!(g.named_graph(&missing).is_none(), "unknown name -> None");
+
+        // The scoped sub-graph really is a usable `&Graph`: its own dictionary resolves the
+        // members it contains and NOT a member of a sibling graph.
+        let iri = |s: &str| Term::NamedNode(NamedNode::new(s).unwrap());
+        assert!(sub1.id_of(&iri("http://ex/a")).is_some()); // ex:a is in ex:g1
+        assert!(sub1.id_of(&iri("http://ex/c")).is_none()); // ex:c is NOT in ex:g1
+    }
+
     #[cfg(feature = "parallel")]
     #[test]
     fn parallel_turtle_matches_serial() {
@@ -4661,15 +5857,15 @@ mod tests {
         assert!(turtle_chunks(bn.as_bytes(), 32).is_some(), "blank nodes must no longer bail to serial");
     }
 
-    /// [OPUS-4.8] sq-t267: RDF 1.2 / RDF-star quoted triples must parse IDENTICALLY through the
-    /// chunk-parallel Turtle path and the serial path — including a quoted triple that lands at a
+    /// [OPUS-4.8] sq-t267: RDF 1.2 triple terms must parse IDENTICALLY through the
+    /// chunk-parallel Turtle path and the serial path — including a triple term that lands at a
     /// CHUNK BOUNDARY. The terminator pre-scan ([`next_terminator`]) treats the `<` of `<<( … )>>`
     /// as an IRI start and scans to the first `>`, so it skips the whole triple term as one opaque
     /// span; the load-bearing risk is a DECIMAL or a `.`-bearing IRI *inside* the term being misread
     /// as a top-level statement terminator (which would split a chunk mid-triple-term and corrupt
-    /// the parse). This pins chunked == serial for: (a) plain quoted-triple objects, (b) a decimal
+    /// the parse). This pins chunked == serial for: (a) plain triple-term objects, (b) a decimal
     /// INSIDE the triple term, (c) the `{| … |}` annotation form (asserts base triple + reifies +
-    /// annotation), and (d) a single LARGE quoted-triple statement whose body straddles the split
+    /// annotation), and (d) a single LARGE triple-term statement whose body straddles the split
     /// point — the chunk boundary falls right after its terminator, not inside it.
     #[cfg(feature = "parallel")]
     #[test]
@@ -4691,7 +5887,7 @@ mod tests {
             (pt.len(), st.len())
         };
 
-        // (a) Plain quoted-triple objects, one statement each, many statements so the splitter
+        // (a) Plain triple-term objects, one statement each, many statements so the splitter
         //     puts chunk boundaries BETWEEN triple-term statements. The `>` inside `>>` and the
         //     `<` of `<<(` must not desync the terminator scan.
         let mut plain = String::from("@prefix : <http://ex/> .\n");
@@ -4724,7 +5920,7 @@ mod tests {
         assert!(annot.len() > 8192);
         differential(&annot, 32, true);
 
-        // (d) A SINGLE large quoted-triple statement (long IRIs, internal newlines/decimals)
+        // (d) A SINGLE large triple-term statement (long IRIs, internal newlines/decimals)
         //     padded with ground statements either side, so a chunk boundary falls right AFTER
         //     the big statement's terminator — exercising the boundary-adjacent case without
         //     splitting the term itself. chunked == serial is the witness it stayed intact.
@@ -4742,6 +5938,84 @@ mod tests {
         let (p, s) = differential(&boundary, 32, true);
         assert_eq!(p, s);
         assert_eq!(p, 801, "400 pre + 1 quoted + 400 post");
+    }
+
+    /// [OPUS-4.8] (sq-87bq) END-TO-END semantics of the RDF 1.2 Turtle reification surface
+    /// (the SPARQL-1.2 annotation sugar) through `Graph::load_str`: the reifying-triple
+    /// `<< s p o >>` (subject AND object position) and the annotation block `{| … |}` must
+    /// load to the standard desugaring — an `rdf:reifies <<( s p o )>>` reifier statement plus
+    /// any asserted base / annotation triples — with the triple TERM `<<( s p o )>>` a
+    /// first-class `Term::Triple` object. Pins the supported surface (oxttl-desugared), not
+    /// just chunked==serial parse equality.
+    #[test]
+    fn turtle_rdf12_reification_surface_loads_desugared() {
+        const REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+        // The triple TERM both forms desugar their reifier onto.
+        let tt = Term::Triple(Box::new(oxrdf::Triple::new(
+            oxrdf::NamedNode::new("http://ex/s").unwrap(),
+            oxrdf::NamedNode::new("http://ex/p").unwrap(),
+            Term::NamedNode(oxrdf::NamedNode::new("http://ex/o").unwrap()),
+        )));
+        let dump = |g: &Graph| {
+            let scan = g.store.scan(&[None, None, None]);
+            let mut v: Vec<(String, String, String)> = scan
+                .rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+
+        // (1) NAMED reifier `<< s p o ~ ex:r >>`: deterministic reifier id, no anon bnode.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . << ex:s ex:p ex:o ~ ex:r >> ex:certainty 0.9 .",
+            "turtle",
+        )
+        .unwrap();
+        // The reifier `ex:r` carries `rdf:reifies <<( ex:s ex:p ex:o )>>` and the annotation.
+        let r = g.dict.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r").unwrap()));
+        let reifies = g.dict.lookup(&Term::NamedNode(oxrdf::NamedNode::new(REIFIES).unwrap()));
+        let tt_id = g.dict.lookup(&tt);
+        assert!(tt_id != 0, "the triple term `<<( ex:s ex:p ex:o )>>` must be a first-class dict term");
+        let reifies_rows = g.store.scan(&[Some(r), Some(reifies), Some(tt_id)]).rows.len();
+        assert_eq!(reifies_rows, 1, "named reifier must carry exactly one `rdf:reifies <<( … )>>`");
+        // The annotation triple `ex:r ex:certainty 0.9` is present.
+        let cert = g.dict.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/certainty").unwrap()));
+        assert_eq!(g.store.scan(&[Some(r), Some(cert), None]).rows.len(), 1, "annotation triple must load");
+
+        // (2) Annotation block `{| … |}` desugars to: the ASSERTED base triple + a reifier
+        //     (anon) `rdf:reifies <<( … )>>` + the annotation triple. The base triple is
+        //     asserted (unlike the bare `<< … >>` reifier, which does NOT assert it).
+        let g2 =
+            Graph::load_str("@prefix ex: <http://ex/> . ex:s ex:p ex:o {| ex:certainty 0.9 |} .", "turtle").unwrap();
+        let rows2 = dump(&g2);
+        assert!(
+            rows2.iter().any(|(s, p, o)| s == "<http://ex/s>" && p == "<http://ex/p>" && o == "<http://ex/o>"),
+            "annotation block must ASSERT the base triple, got {rows2:?}"
+        );
+        assert!(
+            rows2.iter().any(|(_, p, _)| p == &format!("<{REIFIES}>")),
+            "annotation block must emit an `rdf:reifies` reifier, got {rows2:?}"
+        );
+        assert!(g2.dict.lookup(&tt) != 0, "the annotated base triple must appear as a triple TERM object");
+
+        // (3) reifiedTriple in SUBJECT position `<< s p o >> p2 o2` (a Turtle construct the
+        //     legacy custom NT parser cannot express, here handled by the Turtle loader): the
+        //     reifier is the SUBJECT of the annotation, the base triple is NOT asserted.
+        let g3 = Graph::load_str("@prefix ex: <http://ex/> . << ex:s ex:p ex:o >> ex:src ex:doc1 .", "turtle").unwrap();
+        let rows3 = dump(&g3);
+        assert!(
+            !rows3.iter().any(|(s, p, o)| s == "<http://ex/s>" && p == "<http://ex/p>" && o == "<http://ex/o>"),
+            "a bare `<< … >>` reifier must NOT assert the base triple, got {rows3:?}"
+        );
+        assert!(
+            rows3.iter().any(|(_, p, o)| p == &format!("<{REIFIES}>") && o.starts_with("<<(")),
+            "subject-position reifier must carry `rdf:reifies <<( … )>>`, got {rows3:?}"
+        );
     }
 
     /// Decodes a parsed triple sequence to strings with blank nodes renumbered by FIRST
@@ -4836,6 +6110,76 @@ mod tests {
             ground.push_str(&format!(":s{i} :p \"lit {i}\" ; :q {i}.5 .\n"));
         }
         differential(&ground, 16);
+    }
+
+    /// [OPUS-4.8] (sq-eq26, T4) The chunked Turtle merge now routes through the SHARDED
+    /// `ShardedDict` consolidation on ≥2 threads (the same path the N-Triples loaders use),
+    /// replacing the serial `merge_remap`-in-a-loop. This pins that the sharded merge yields
+    /// the IDENTICAL term + triple set as the single-thread serial merge on a multi-chunk
+    /// fixture that combines all the Turtle-specific state the merge must consolidate:
+    /// prefixes/base resolution, labelled + anonymous blank nodes shared across chunk
+    /// boundaries, AND RDF-1.2 triple terms (the construct sq-87bq enabled for the sharded
+    /// path). We run the parse under an EXPLICIT 4-thread rayon pool so the sharded path is
+    /// exercised regardless of the host's ambient thread count, and compare against the
+    /// serial parser under canonical blank-node renumbering.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_turtle_sharded_merge_matches_serial() {
+        // A multi-chunk document: prefixes + base, ground statements, labelled blank nodes
+        // shared across distant statements, anonymous nests/collections, and RDF-1.2 quoted
+        // triples (object position + the `{| … |}` annotation form) interleaved so chunk
+        // boundaries fall between every flavour of statement.
+        let mut ttl = String::from(
+            "@prefix : <http://ex/> .\n@prefix ex: <http://example.org/v#> .\n@base <http://base/> .\n",
+        );
+        ttl.push_str("_:shared :starts :here .\n");
+        for i in 0..500 {
+            ttl.push_str(&format!(
+                ":s{i} :p :o{i} ; :rel ex:r{i} ; :iri <doc/{i}> .\n"
+            ));
+            ttl.push_str(&format!("_:b{} :links _:b{} .\n", i / 4, i / 4 + 1));
+            ttl.push_str(&format!(
+                ":r{i} :has [ :q \"v{i}.w\" ; :list ( 1 2.5 \"three\" ) ] .\n"
+            ));
+            ttl.push_str(&format!(":m{i} :annotates <<( ex:a{i} :age {i} )>> .\n"));
+            ttl.push_str(&format!(
+                ":a{i} :age {i} {{| :certainty {i}.5 ; :by :src{i} |}} .\n"
+            ));
+        }
+        ttl.push_str("_:shared :ends :here .\n");
+        assert!(ttl.len() > 8192);
+
+        let target = 32;
+        let chunks = turtle_chunks(ttl.as_bytes(), target).expect("doc must fan out");
+        assert!(
+            chunks.len() > 1,
+            "doc must split into multiple chunks to exercise the merge"
+        );
+
+        // Force the SHARDED path: a 4-thread pool makes `merge_partials` route through the
+        // `ShardedDict` consolidation (default_shards() >= 4) inside `parse_turtle_chunked`.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let (pd, pt) = pool.install(|| {
+            assert!(
+                rayon::current_num_threads() > 1,
+                "pool must expose the sharded path"
+            );
+            parse_turtle_chunked(ttl.as_bytes(), target).unwrap()
+        });
+
+        // Serial reference: the single-chunk parser, no sharding.
+        let mut sd = Dict::new();
+        let st = parse_turtle_chunk(ttl.as_bytes(), &mut sd).unwrap();
+
+        assert_eq!(
+            canon_bnodes(&pd, &pt),
+            canon_bnodes(&sd, &st),
+            "sharded chunked merge must equal serial up to anonymous bnode ids"
+        );
+        assert!(pt.len() >= 2000, "expected the full triple set, got {}", pt.len());
     }
 
     /// [OPUS-4.8] Regression for review 1398: a PN_LOCAL_ESC `\#` in a prefixed-name local
@@ -5099,11 +6443,16 @@ mod tests {
 
         // 4. Literals with datatypes, language tags (incl. `--dir`), escapes, and a `.`-bearing
         //    IRI/literal — the byte parser's literal/IRI grammar must agree with oxttl's per graph.
+        //    [OPUS-4.8] (sq-langcase / #1119) The MIXED-CASE tags (`en-US`, `en-GB--ltr`) pin the
+        //    casing-normalisation parity: the byte parser must lowercase the tag to the SAME slot
+        //    oxttl produces, or this differential check fails on the language column.
         let mut lits = String::new();
         for i in 0..400 {
             let g = if i % 3 == 0 { String::new() } else { format!(" <http://g.x/{}.n>", i % 3) };
             lits.push_str(&format!(
                 "<http://ex/s{i}> <http://ex/p> \"val.{i} \\\"q\\\" x\"@en-us{g} .\n\
+                 <http://ex/s{i}> <http://ex/m> \"mixed.{i}\"@en-US{g} .\n\
+                 <http://ex/s{i}> <http://ex/d> \"dir.{i}\"@en-GB--ltr{g} .\n\
                  <http://ex/s{i}> <http://ex/n> \"{i}\"^^<http://www.w3.org/2001/XMLSchema#integer>{g} .\n"
             ));
         }
@@ -5151,6 +6500,247 @@ mod tests {
         differential(&dotted, 16);
     }
 
+    /// [OPUS-4.8] (sq-ev37) DIFFERENTIAL: the chunk-parallel TriG loader
+    /// ([`Graph::load_trig_chunked`]) must produce a dataset IDENTICAL (default graph, the set AND
+    /// order of named graphs, and every graph's triples + dict) to the serial oxttl reference
+    /// ([`Graph::load_dataset_serial`]) — the TriG twin of [`parallel_nquads_matches_serial`]. Each
+    /// case forces a fan-out across many chunks (small `target`) so chunk boundaries fall inside
+    /// blocks, between blocks of different graphs, and across runs of a shared blank-node label.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_trig_matches_serial() {
+        let differential = |trig: &str, target: usize| {
+            let chunks = trig_chunks(trig.as_bytes(), target)
+                .unwrap_or_else(|| panic!("doc must be splittable (len {})", trig.len()));
+            assert!(chunks.len() > 1, "doc must split into multiple chunks (len {})", trig.len());
+            let par = Graph::load_trig_chunked(trig.as_bytes(), target).unwrap();
+            let ser = Graph::load_dataset_serial(trig, "trig").unwrap();
+            assert_eq!(par.len(), ser.len(), "default-graph triple count differs");
+            let par_names: Vec<String> = par.named.iter().map(|(n, _)| n.to_string()).collect();
+            let ser_names: Vec<String> = ser.named.iter().map(|(n, _)| n.to_string()).collect();
+            assert_eq!(par_names, ser_names, "named-graph set/order differs");
+            assert_eq!(canon_dataset(&par), canon_dataset(&ser), "chunked TriG must equal serial");
+        };
+
+        // 1. Many `GRAPH g { … }` blocks interleaved with top-level default-graph triples and an
+        //    anonymous `{ … }` default block — the core per-graph routing across chunk boundaries.
+        //    A leading `@prefix` is in scope for every chunk (the directive-snapshot replay).
+        let mut multi = String::from("@prefix : <http://ex/> .\n");
+        for i in 0..400 {
+            match i % 4 {
+                0 => multi.push_str(&format!(":s{i} :p :o{i} .\n")), // default (top level)
+                1 => multi.push_str(&format!("GRAPH :g1 {{ :s{i} :p :o{i} . :s{i} :q :r{i} . }}\n")),
+                2 => multi.push_str(&format!(":g2 {{ :s{i} :p :o{i} . }}\n")), // label { … }
+                _ => multi.push_str(&format!("{{ :d{i} :p :o{i} . }}\n")),     // anon default block
+            }
+        }
+        differential(&multi, 24);
+
+        // 2. ONE large `GRAPH g { … }` block whose interior statements split across many chunks —
+        //    the case the `label { … }` re-wrap exists for (a whole block bigger than a chunk). The
+        //    same blank-node label `_:b{k}` recurs at the block's start and end and is chained
+        //    between adjacent statements, so the per-graph dict merge must unify it across chunks.
+        let mut big = String::from("@prefix : <http://ex/> .\n:top :p :level .\nGRAPH :big {\n_:shared :starts :here .\n");
+        for i in 0..500 {
+            big.push_str(&format!(":s{i} :p :o{i} .\n_:n{} :next _:n{} .\n", i / 3, i / 3 + 1));
+        }
+        big.push_str("_:shared :ends :here .\n}\n");
+        differential(&big, 24);
+
+        // 3. A BLANK-NODE-named graph `_:g { … }` (label replayed verbatim across chunks) plus
+        //    same-spelled `_:g` used as a normal subject/object in the default graph — the routing
+        //    key must NOT be conflated with the in-graph bnode (mirrors the N-Quads case 3).
+        let mut bgraph = String::from("@prefix : <http://ex/> .\n_:g :is :a-default-subject .\n_:g {\n");
+        for i in 0..400 {
+            bgraph.push_str(&format!(":s{i} :p _:x{i} .\n"));
+        }
+        bgraph.push_str("}\n:after :p :default .\n");
+        differential(&bgraph, 24);
+
+        // 4. The SAME named graph re-opened in non-adjacent blocks (first-occurrence ordering must
+        //    survive: g_a, then g_b, then g_a again must keep [g_a, g_b]), plus prefixed names,
+        //    typed/lang literals (incl. an interior `.`), and SPARQL-style `PREFIX` directives.
+        let mut reopen = String::from("PREFIX : <http://ex/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n");
+        for i in 0..300 {
+            reopen.push_str(&format!(
+                "GRAPH :g_a {{ :s{i} :p \"v.{i}\"@en . }}\n\
+                 :top{i} :p \"{i}\"^^xsd:integer .\n\
+                 GRAPH :g_b {{ :s{i} :p :o{i} . }}\n"
+            ));
+        }
+        for i in 0..50 {
+            reopen.push_str(&format!("GRAPH :g_a {{ :late{i} :p :o{i} . }}\n"));
+        }
+        differential(&reopen, 24);
+
+        // 5. Mid-document `@prefix` REDEFINITION: statements before vs after the redefinition must
+        //    each parse under the correct snapshot (the chunker splits a group at any directive
+        //    change and replays the in-scope directives verbatim).
+        let mut redef = String::from("@prefix p: <http://a/> .\n");
+        for i in 0..150 {
+            redef.push_str(&format!("p:s{i} p:p p:o{i} .\nGRAPH p:g {{ p:s{i} p:p p:o{i} . }}\n"));
+        }
+        redef.push_str("@prefix p: <http://b/> .\n");
+        for i in 0..150 {
+            redef.push_str(&format!("p:s{i} p:p p:o{i} .\nGRAPH p:g {{ p:s{i} p:p p:o{i} . }}\n"));
+        }
+        differential(&redef, 24);
+
+        // 6. Comments + blank lines interleaved (a chunk boundary may land on one); a comment text
+        //    contains a `.` and braces to confirm they are skipped, not treated as structure.
+        let mut sparse = String::from("@prefix : <http://ex/> .\n");
+        for i in 0..300 {
+            sparse.push_str("# a comment . with a dot and { fake brace }\n\n");
+            if i % 2 == 0 {
+                sparse.push_str(&format!("GRAPH :g {{ :s{i} :p :o{i} . }}\n"));
+            } else {
+                sparse.push_str(&format!(":s{i} :p :o{i} .\n"));
+            }
+        }
+        differential(&sparse, 24);
+    }
+
+    /// [OPUS-4.8] (sq-m2pc) `parse_to_triples` / `parse_to_triples_with_base` (and the
+    /// `load_str` wrappers over them) must REJECT a format string they do not recognise,
+    /// instead of the old catch-all that silently parsed everything-unknown as Turtle and
+    /// returned `Ok`. The Turtle alias set (`turtle`/`ttl`/`text/turtle`/`application/turtle`)
+    /// keeps working, as do the line-based + trig formats; only the genuinely-unknown rest
+    /// errors.
+    #[test]
+    fn parse_to_triples_rejects_unknown_format() {
+        // Valid Turtle body — would parse cleanly IF routed to the Turtle arm, so a passing
+        // assertion below proves the format string (not the document) is what got rejected.
+        let ttl = "<http://ex/s> <http://ex/p> <http://ex/o> .";
+
+        // Every accepted Turtle alias still parses to the one triple.
+        for fmt in ["turtle", "ttl", "text/turtle", "application/turtle"] {
+            let g = Graph::load_str(ttl, fmt)
+                .unwrap_or_else(|e| panic!("alias {fmt:?} must parse as Turtle, got {e}"));
+            assert_eq!(g.len(), 1, "alias {fmt:?}");
+            // and the with_base entry agrees.
+            let gb = Graph::load_str_with_base(ttl, fmt, "http://base/")
+                .unwrap_or_else(|e| panic!("alias {fmt:?} (base) must parse, got {e}"));
+            assert_eq!(gb.len(), 1, "alias {fmt:?} (base)");
+        }
+
+        // The line-based / trig formats (and their `nt`/`nq` extension aliases) are
+        // unaffected — they route to their own parser, not the catch-all.
+        assert!(Graph::load_str(ttl, "ntriples").is_ok());
+        assert!(Graph::load_str(ttl, "nt").is_ok(), "nt is an N-Triples alias");
+        assert!(Graph::parse_to_triples(ttl, "application/n-triples").is_ok());
+
+        // Unknown / typo'd / unsupported strings now ERROR instead of silently parsing as
+        // Turtle. Empty string is included — it must not be a Turtle alias either.
+        for bogus in ["bogusfmt", "turtl", "Turtle", "rdfxml", "n3", ""] {
+            // (`Result::Ok` carries `(Dict, Vec<…>)`, which is not `Debug`, so `expect_err`
+            // cannot be used — match on the error directly.)
+            let e = match Graph::parse_to_triples(ttl, bogus) {
+                Err(e) => e,
+                Ok(_) => panic!("unknown format {bogus:?} must error, not fall back to Turtle"),
+            };
+            assert!(e.contains(bogus), "error should name the bad format: {e}");
+            assert!(
+                Graph::parse_to_triples_with_base(ttl, bogus, "http://base/").is_err(),
+                "with_base path must also reject {bogus:?}"
+            );
+            // The public `load_str` wrappers propagate the same error.
+            assert!(Graph::load_str(ttl, bogus).is_err(), "load_str must reject {bogus:?}");
+        }
+    }
+
+    /// [OPUS-4.8] (sq-01yr) `load_dataset_serial` (the serial dataset reference, reached by the
+    /// `jsonld`/non-`parallel` paths and the TriG-parallel serial fallback) had its OWN
+    /// independent `_ => TriGParser` catch-all, so ANY string that was not N-Quads/JSON-LD —
+    /// including typos and unsupported formats — silently parsed as TriG and returned `Ok`.
+    /// It now gates TriG on its explicit alias set (mirroring the `parse_to_triples` Turtle fix,
+    /// sq-m2pc) and rejects the unknown rest. The public `load_dataset` entry — which routes
+    /// non-dataset formats to `load_str` first — must agree on the rejection.
+    #[test]
+    fn load_dataset_rejects_unknown_format() {
+        // A one-quad N-Quads body — valid for the dataset path, so a passing assertion proves
+        // the FORMAT string (not the document) is what gets rejected below.
+        let nq = "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .";
+        // A one-statement TriG body in the default graph.
+        let trig = "<http://ex/s> <http://ex/p> <http://ex/o> .";
+
+        // Accepted dataset aliases still load through the serial reference.
+        for fmt in ["nquads", "n-quads", "nq", "application/n-quads"] {
+            let g = Graph::load_dataset_serial(nq, fmt)
+                .unwrap_or_else(|e| panic!("alias {fmt:?} must parse as N-Quads, got {e}"));
+            assert_eq!(g.named.len() + g.len(), 1, "alias {fmt:?}");
+        }
+        for fmt in ["trig", "application/trig"] {
+            let g = Graph::load_dataset_serial(trig, fmt)
+                .unwrap_or_else(|e| panic!("alias {fmt:?} must parse as TriG, got {e}"));
+            assert_eq!(g.len(), 1, "alias {fmt:?}");
+        }
+
+        // Unknown / typo'd / unsupported strings now ERROR instead of silently parsing as TriG.
+        // `trg` is the load-bearing case: previously it hit the catch-all and parsed as TriG.
+        for bogus in ["bogusfmt", "trg", "TriG", "rdfxml", ""] {
+            let e = match Graph::load_dataset_serial(trig, bogus) {
+                Err(e) => e,
+                Ok(_) => panic!("unknown format {bogus:?} must error, not fall back to TriG"),
+            };
+            assert!(e.contains(bogus), "error should name the bad format: {e}");
+            // The public `load_dataset` entry must also reject it: it routes a non-dataset
+            // format to `load_str`, which rejects the unknown string under sq-m2pc.
+            assert!(
+                Graph::load_dataset(trig, bogus).is_err(),
+                "public load_dataset must reject {bogus:?}"
+            );
+        }
+    }
+
+    /// [OPUS-4.8] (sq-ev37) The public `Graph::load_dataset("…","trig")` entry point (which under
+    /// the `parallel` feature dispatches to `load_trig_parallel`) must agree with the serial
+    /// reference on a dataset large enough to genuinely fan out — the end-to-end witness that the
+    /// dispatch + per-graph build are wired correctly, not just the internals.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn load_dataset_trig_public_entry_matches_serial() {
+        let mut trig = String::from("@prefix : <http://ex/> .\n_:shared :a :b .\n");
+        for i in 0..3000 {
+            if i % 3 == 0 {
+                trig.push_str(&format!(":s{i} :p _:n{i} .\n"));
+            } else {
+                trig.push_str(&format!("GRAPH :g1 {{ :s{i} :p _:n{i} . }}\n"));
+            }
+        }
+        trig.push_str("GRAPH :g1 { _:shared :c :d . }\n");
+        let pub_g = Graph::load_dataset(&trig, "trig").unwrap();
+        let ser = Graph::load_dataset_serial(&trig, "trig").unwrap();
+        assert_eq!(pub_g.len(), ser.len());
+        assert_eq!(pub_g.named.len(), ser.named.len(), "named graph count");
+        assert_eq!(canon_dataset(&pub_g), canon_dataset(&ser), "public load_dataset must equal serial");
+    }
+
+    /// [OPUS-4.8] (sq-ev37) Malformed / not-cleanly-splittable TriG must NOT be silently accepted:
+    /// either `trig_chunks` bails (`None` → serial) or some chunk fails to re-parse (→ serial), and
+    /// either way the public loader returns the SAME `Err` the serial oxttl parser does. This pins
+    /// the one failure the chunked-vs-serial oracle cannot catch — an over-eager split that happens
+    /// to parse invalid input as valid.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_trig_rejects_malformed() {
+        let cases = [
+            // Unclosed graph block.
+            "@prefix : <http://ex/> .\n:a :p :b .\nGRAPH :g { :x :y :z .\n:c :d :e .\n",
+            // A `}` with no matching `{`.
+            "@prefix : <http://ex/> .\n:a :p :b .\n} :c :d :e .\n:f :g :h .\n",
+            // Missing `.` between two default-graph triples (oxttl rejects the fused statement).
+            "@prefix : <http://ex/> .\n:a :p :b\n:c :d :e .\n:f :g :h .\n",
+            // An undefined prefix used inside a block (`undef:` was never declared).
+            "@prefix : <http://ex/> .\n:a :p :b .\nGRAPH :g { :x undef:y :z . }\n:c :d :e .\n",
+        ];
+        for src in cases {
+            let serial_err = Graph::load_dataset_serial(src, "trig").is_err();
+            let public_err = Graph::load_dataset(src, "trig").is_err();
+            assert_eq!(public_err, serial_err, "rejection parity differs for {src:?}");
+            assert!(serial_err, "case was expected to be invalid TriG: {src:?}");
+        }
+    }
+
     /// [OPUS-4.8] (sq-25r3) The public `Graph::load_dataset("…","nquads")` entry point (which
     /// dispatches to the parallel path under the `parallel` feature) must agree with the serial
     /// reference on a dataset with default + named graphs and a cross-chunk blank node — the
@@ -5171,10 +6761,12 @@ mod tests {
         assert_eq!(canon_dataset(&pub_g), canon_dataset(&ser), "public load_dataset must equal serial");
     }
 
-    /// [OPUS-4.8] (sq-25r3) TriG is DEFERRED to the serial oxttl path (bead sq-ev37)
-    /// — the parallel N-Quads work must not break it. Loading a TriG dataset through the public
-    /// `load_dataset` (which routes TriG to `load_dataset_serial`) must still split the default and
-    /// named graphs correctly.
+    /// [OPUS-4.8] (sq-25r3 / sq-ev37) Loading a small TriG dataset through the public
+    /// `load_dataset` must split the default and named graphs correctly. (Under the `parallel`
+    /// feature this now routes through the chunk-parallel `load_trig_parallel`, which falls back to
+    /// serial for a document this small; the result is the same either way — the byte-identical
+    /// equivalence on larger, genuinely-fanned-out documents is pinned by
+    /// `parallel_trig_matches_serial`.)
     #[test]
     fn load_dataset_trig_still_serial_and_correct() {
         let trig = "@prefix : <http://ex/> .\n\
@@ -5323,7 +6915,7 @@ mod tests {
 
         // Positive controls: well-formed Turtle MUST parse (so the oracle is not vacuous), covering
         // the constructs the T1 interner has to keep handling — prefixed names, full IRIs, blank
-        // nodes, collections, language tags, datatyped + plain literals, RDF-star quoted triples.
+        // nodes, collections, language tags, datatyped + plain literals, RDF 1.2 triple terms.
         let good: &[&str] = &[
             "@prefix ex: <http://ex/> .\nex:s ex:p ex:o .\n",
             "<http://ex/s> <http://ex/p> \"plain\" .\n",
@@ -5686,6 +7278,39 @@ mod tests {
         };
         assert_eq!(named_of(&g2, "http://res/a"), Some(2), "named graph a lost a WAL-logged triple");
         assert_eq!(named_of(&g2, "http://res/b"), Some(1), "named graph b not recovered from WAL");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (gh-1122) `insert_triple` / `remove_triple` against a DIRECTORY-BACKED graph
+    /// flow through the SAME durable `apply_delta` path as a batch: each is WAL-logged + fsync'd,
+    /// so a crash-style reopen (no save/compact in between) recovers the insert and honours the
+    /// remove. This is the load-bearing durability invariant of the single-triple convenience API.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn single_triple_mutations_are_wal_durable() {
+        let dir = std::env::temp_dir().join(format!("sparq_single_triple_wal_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        Graph::load_str("", "ntriples").unwrap().save(&dir).unwrap();
+        let s = NamedNode::new_unchecked("http://ex/s");
+        let p = NamedNode::new_unchecked("http://ex/p");
+        let keep = Term::NamedNode(NamedNode::new_unchecked("http://ex/keep"));
+        let gone = Term::NamedNode(NamedNode::new_unchecked("http://ex/gone"));
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            g.insert_triple(s.clone(), p.clone(), keep.clone()).unwrap();
+            g.insert_triple(s.clone(), p.clone(), gone.clone()).unwrap();
+            // Retract one of them through the single-triple remove path.
+            g.remove_triple(s.clone(), p.clone(), gone.clone()).unwrap();
+            // Drop WITHOUT save()/compact(): only the WAL records are on disk.
+        }
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(g2.len(), 1, "exactly the un-retracted insert must recover from the WAL");
+        assert!(g2.id_of(&keep).is_some(), "the kept triple's object must be present");
+        assert!(
+            g2.pattern(Some(&Term::NamedNode(s)), Some(&p), Some(&gone)).is_none()
+                || g2.store.scan(&[None, None, None]).rows.len() == 1,
+            "the removed triple must not survive the reopen"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -6228,6 +7853,8 @@ mod tests {
         // SAFETY: single-threaded test; we restore/remove the var before returning.
         unsafe { std::env::set_var("SPARQ_QUADS_SPILL_MAX_OPEN", "4") };
         let build = Graph::build_external_quads(nq.as_bytes(), "nquads", &ext_dir, 64);
+        // SAFETY: single-threaded test; removes the var set above before returning so the
+        // process env is left clean. Edition-2024 made `remove_var` `unsafe`. [OPUS-4.8 sq-8wbn]
         unsafe { std::env::remove_var("SPARQ_QUADS_SPILL_MAX_OPEN") };
         build.expect("bounded-writer-pool build must succeed with a tiny FD budget");
 
@@ -6332,9 +7959,11 @@ mod tests {
 
     /// [OPUS-4.8] The spilled external build still supports its mmap'd read-back path, and
     /// it rejects non-N-Triples formats with a clear error (the documented restriction).
-    /// [OPUS-4.8] (sq-jvbr) It also still rejects RDF 1.2 triple terms with a clear error
-    /// (unlike the sharded path, which now handles them — sq-t3rt): the dict-spill staging
-    /// has no representation for a triple term, so the guard must stay live and tested.
+    /// [OPUS-4.8] (sq-jvbr) It now ACCEPTS RDF 1.2 triple terms (previously rejected): the
+    /// `SpillInterner` interns them structurally into an in-RAM triple-term arena finalised
+    /// after the leaf consolidation (`finalize_triple_terms`), so a triple-term document
+    /// builds and opens. Full differential coverage vs the sharded/serial/in-memory paths is
+    /// in `dict_spill_triple_terms_match_in_memory` below; this just checks the smoke path.
     #[cfg(feature = "dict-spill")]
     #[test]
     fn dict_spill_rejects_non_ntriples_and_opens_mmap() {
@@ -6344,14 +7973,20 @@ mod tests {
             .expect_err("spill build must reject non-ntriples");
         assert!(err.contains("N-Triples"), "error must name the restriction: {err}");
 
-        // RDF 1.2 triple terms are rejected by the dict-spill path (sq-jvbr) with an
-        // actionable error that points at the working alternatives.
+        // RDF 1.2 triple terms now build through the dict-spill path (sq-jvbr) and open.
         let tt = "<http://ex/r1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
                   <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> .\n";
-        let tt_err = Graph::build_external_spill(tt.as_bytes(), "ntriples", &dir.join("tt"), 64, &cfg)
-            .expect_err("dict-spill build must reject triple terms (sq-jvbr)");
-        assert!(tt_err.contains("triple term"), "error must name triple terms: {tt_err}");
-        assert!(tt_err.contains("sharded") || tt_err.contains("memory"), "error must point at a working path: {tt_err}");
+        let tt_dir = dir.join("tt");
+        Graph::build_external_spill(tt.as_bytes(), "ntriples", &tt_dir, 64, &cfg)
+            .expect("dict-spill build must now accept triple terms (sq-jvbr)");
+        let tg = Graph::open(&tt_dir).unwrap();
+        assert_eq!(tg.len(), 1, "the single reifier statement is materialised");
+        let ttobj = Term::Triple(Box::new(oxrdf::Triple::new(
+            oxrdf::NamedNode::new("http://ex/a").unwrap(),
+            oxrdf::NamedNode::new("http://ex/b").unwrap(),
+            Term::NamedNode(oxrdf::NamedNode::new("http://ex/c").unwrap()),
+        )));
+        assert!(tg.id_of(&ttobj).is_some(), "the triple term `<<( a b c )>>` must be a first-class dict term");
 
         let nt = "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
                   <http://ex/a> <http://ex/p> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n";
@@ -6361,6 +7996,100 @@ mod tests {
         let g = Graph::open(&ok_dir).unwrap();
         assert_eq!(g.len(), 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-jvbr) The DICT-SPILL external builder now interns RDF 1.2 triple terms
+    /// `<<( … )>>` structurally: leaf components spill/dedup as usual, while triple-term
+    /// OCCURRENCES go to an in-RAM arena (rare reification metadata, like the sharded path's
+    /// serial second pass) and are finalised — content-addressed by their components' FINAL
+    /// ids, deduped, assigned ids AFTER every leaf — in `finalize_triple_terms`. The built
+    /// store must round-trip identically (term-level, order-independent) to the in-memory
+    /// loader and the serial/sharded external builds. A tiny memory budget forces cache
+    /// eviction/epochs + many sort runs, exercising the staged-id remap windows under spill.
+    ///
+    /// Coverage (mirrors the sharded differential test):
+    /// - a triple term shared by TWO statements (must dedup to ONE id);
+    /// - components in distinct namespaces (route to different leaf shards);
+    /// - a leaf SHARED between a plain triple and a triple-term component;
+    /// - a NESTED triple term (a triple term in another's object slot);
+    /// - a blank-node component;
+    /// - bulk rows so the document spans multiple parse blocks AND triggers epoch resets.
+    #[cfg(feature = "dict-spill")]
+    #[test]
+    fn dict_spill_triple_terms_match_in_memory() {
+        use store::BUILT;
+        let mut nt = String::new();
+        for i in 0..3000u32 {
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                i % 211,
+                i % 11,
+                i % 500
+            ));
+            if i % 500 == 0 {
+                // Shared triple term across two statements; cross-namespace components.
+                nt.push_str("<http://ex/r1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <http://alpha.example/alice> <http://beta.example/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n");
+                nt.push_str("<http://ex/r1b> <http://ex/sameAs> <<( <http://alpha.example/alice> <http://beta.example/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n");
+            }
+        }
+        // A leaf shared between a plain triple and a triple-term component.
+        nt.push_str("<http://ex/knows> <http://ex/about> <http://alpha.example/alice> .\n");
+        // Blank-node component.
+        nt.push_str("<http://ex/r2> <http://ex/about> <<( _:b0 <http://ex/p> \"v\" )>> .\n");
+        // Nested triple term.
+        nt.push_str("<http://ex/r3> <http://ex/nested> <<( <http://gamma.example/x> <http://delta.example/q> <<( <http://eps.example/a> <http://zeta.example/b> <http://eta.example/c> )>> )>> .\n");
+
+        let mem = Graph::load_str(&nt, "ntriples").expect("in-memory loader must accept triple terms");
+
+        let base = std::env::temp_dir().join(format!("sparq_spill_tt_{}", std::process::id()));
+        let spill_dir = base.join("spill");
+        // Tiny budget -> epoch resets + many sort runs (exercises the remap windows).
+        let cfg = dictspill::SpillConfig { mem_budget: 64 << 10, disk_floor: 0 };
+        Graph::build_external_spill(nt.as_bytes(), "ntriples", &spill_dir, 256, &cfg)
+            .expect("dict-spill build must accept triple terms (sq-jvbr)");
+        let sp = Graph::open(&spill_dir).unwrap();
+        assert_eq!(sp.len(), mem.len(), "spill triple count differs from in-memory");
+        assert_eq!(sp.dict.len(), mem.dict.len(), "spill dict size differs from in-memory");
+
+        let dump = |g: &Graph| {
+            let scan = g.store.scan(&[None, None, None]);
+            let mut v: Vec<(String, String, String)> = scan
+                .rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(dump(&sp), dump(&mem), "spill-built store differs from in-memory (triple terms)");
+
+        // The shared triple term must be ONE dict entry referenced by both reifiers.
+        let tt = Term::Triple(Box::new(oxrdf::Triple::new(
+            oxrdf::NamedNode::new("http://alpha.example/alice").unwrap(),
+            oxrdf::NamedNode::new("http://beta.example/age").unwrap(),
+            Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER)),
+        )));
+        let tt_id = sp.id_of(&tt).expect("the shared triple term must be in the spill dict");
+        let r1 = sp.id_of(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1").unwrap())).unwrap();
+        let r1b = sp.id_of(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1b").unwrap())).unwrap();
+        let obj_of = |s: Id| {
+            let scan = sp.store.scan(&[Some(s), None, None]);
+            assert_eq!(scan.rows.len(), 1, "reifier must have exactly one statement");
+            scan.to_spo(&scan.rows[0])[2]
+        };
+        assert_eq!(obj_of(r1), tt_id, "<r1>'s object is the shared triple term");
+        assert_eq!(obj_of(r1b), tt_id, "<r1b>'s object is the SAME shared triple-term id");
+
+        // Sanity: the triple-term-free permutation/dict bytes are still produced (no perm
+        // file is empty), proving the staged-triple remap fed every triple through.
+        for &perm in BUILT {
+            let f = spill_dir.join(format!("perm{}.bin", perm as usize));
+            assert!(std::fs::metadata(&f).map(|m| m.len() > 0).unwrap_or(false), "perm {f:?} must be non-empty");
+        }
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// [OPUS-4.8] (sq-t3rt) The SHARDED external builder now handles RDF 1.2 triple terms
@@ -6382,8 +8111,8 @@ mod tests {
     /// - enough bulk rows that the input spans multiple parse blocks/chunks (cross-chunk
     ///   partial merge), with the reification metadata interleaved among them.
     ///
-    /// (The dict-spill path still rejects triple terms — that is bead sq-jvbr, deliberately
-    /// not fixed here to avoid a conflicting edit.)
+    /// (The dict-spill path now also supports triple terms — sq-jvbr; see
+    /// `dict_spill_triple_terms_match_in_memory`.)
     #[cfg(all(feature = "mmap", feature = "parallel"))]
     #[test]
     fn external_build_triple_terms_sharded_matches_serial_and_memory() {
@@ -6573,6 +8302,86 @@ mod tests {
             v
         };
         assert_eq!(dump(&par), dump(&seq));
+    }
+
+    /// [OPUS-4.8] (sq-87bq) The NON-streaming in-memory merge (`merge_partials`, behind
+    /// `parse_ntriples_parallel` / the per-graph N-Quads merge) must consolidate RDF 1.2
+    /// triple terms through the SHARDED path — its earlier `has_triple_terms ⇒ serial`
+    /// guard was stale (the sharded interner gained structural triple-term support in
+    /// sq-t3rt). This test FORCES the sharded branch (≥2 threads in a scoped rayon pool) on
+    /// triple-term partials and pins the result to the serial `merge_remap` reference, so the
+    /// fix is covered deterministically regardless of the ambient thread count.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn merge_partials_sharded_consolidates_triple_terms() {
+        // Several blocks' worth of triples with interleaved reification metadata, components
+        // in distinct namespaces (different leaf shards), a shared triple term (cross-shard
+        // dedup), a blank-node component, and a nested triple term.
+        let mut nt = String::new();
+        for i in 0..4000u32 {
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                i % 211,
+                i % 13,
+                i % 700
+            ));
+            if i % 700 == 0 {
+                // Same triple term referenced by two statements -> must dedup to one id.
+                nt.push_str("<http://ex/r1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <http://alpha.example/alice> <http://beta.example/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n");
+                nt.push_str("<http://ex/r1b> <http://ex/sameAs> <<( <http://alpha.example/alice> <http://beta.example/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n");
+            }
+        }
+        nt.push_str("<http://ex/r2> <http://ex/about> <<( _:b0 <http://ex/p> \"v\" )>> .\n");
+        nt.push_str("<http://ex/r3> <http://ex/nested> <<( <http://gamma.example/x> <http://delta.example/q> <<( <http://eps.example/a> <http://zeta.example/b> <http://eta.example/c> )>> )>> .\n");
+        let bytes = nt.as_bytes();
+
+        // Round-trip a (dict, triples) pair to its sorted term-set (recursively expanding
+        // triple terms via `Dict::term`), so the comparison is id-assignment-order
+        // independent.
+        let dump = |dict: &Dict, triples: &[[Id; 3]]| {
+            let mut v: Vec<(String, String, String)> = triples
+                .iter()
+                .map(|&[s, p, o]| (dict.term(s).to_string(), dict.term(p).to_string(), dict.term(o).to_string()))
+                .collect();
+            v.sort();
+            v
+        };
+
+        // Reference: serial `merge_remap` consolidation (single thread -> serial branch).
+        let serial = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| merge_partials(parse_block(bytes).unwrap()));
+        // Under test: the SHARDED branch (>=2 threads).
+        let sharded = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(|| merge_partials(parse_block(bytes).unwrap()));
+
+        assert_eq!(sharded.1.len(), serial.1.len(), "sharded triple count differs from serial");
+        assert_eq!(sharded.0.len(), serial.0.len(), "sharded dict size differs from serial");
+        assert_eq!(
+            dump(&sharded.0, &sharded.1),
+            dump(&serial.0, &serial.1),
+            "sharded merge_partials differs from serial reference on triple-term input"
+        );
+
+        // Cross-shard dedup is OBSERVABLE: the triple term shared by <r1>/<r1b> is ONE dict
+        // entry, so both statements' objects carry the same id.
+        let tt = Term::Triple(Box::new(oxrdf::Triple::new(
+            oxrdf::NamedNode::new("http://alpha.example/alice").unwrap(),
+            oxrdf::NamedNode::new("http://beta.example/age").unwrap(),
+            Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER)),
+        )));
+        let tt_id = sharded.0.lookup(&tt);
+        assert!(tt_id != 0, "the shared triple term must be in the sharded dict");
+        let r1 = sharded.0.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1").unwrap()));
+        let r1b = sharded.0.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1b").unwrap()));
+        let obj_of = |subj: Id| sharded.1.iter().find(|t| t[0] == subj).map(|t| t[2]);
+        assert_eq!(obj_of(r1), Some(tt_id), "<r1>'s object is the shared triple term");
+        assert_eq!(obj_of(r1b), Some(tt_id), "<r1b>'s object is the SAME shared triple-term id");
     }
 
     /// The streaming pipelined loader must be byte-exact against the serial loader for
@@ -7213,6 +9022,65 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// [OPUS-4.8] (sq-ft7u) The PUBLIC `restore_into_durable` seam: replacing a directory-backed
+    /// store's contents with a fresh image must (a) round-trip the fresh live triple set after the
+    /// swap AND after a reopen (the on-disk base IS the restored image), and (b) leave NO sibling
+    /// cruft. The restored graph must also be WAL-backed (a subsequent durable update survives a
+    /// reopen), proving the re-open carried a real WAL.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn restore_into_durable_round_trips_and_is_wal_backed() {
+        let dir = std::env::temp_dir().join(format!("sparq_restore_durable_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        // Establish an ORIGINAL durable store with one triple.
+        Graph::load_str("<http://ex/orig> <http://ex/p> <http://ex/o> .", "ntriples")
+            .unwrap()
+            .save(&dir)
+            .unwrap();
+        assert_eq!(Graph::open(&dir).unwrap().len(), 1);
+
+        // Restore a DIFFERENT, larger fresh image THROUGH to the durable dir.
+        let mut fresh = Graph::load_str(
+            "<http://ex/r1> <http://ex/p> <http://ex/o1> .\n\
+             <http://ex/r2> <http://ex/p> <http://ex/o2> .",
+            "ntriples",
+        )
+        .unwrap();
+        // A named graph too, to exercise the whole sub-tree write.
+        fresh
+            .apply_delta_nquads(
+                "<http://ex/n> <http://ex/q> <http://ex/w> <http://ex/g> .",
+                "",
+            )
+            .unwrap();
+        let restored = Graph::restore_into_durable(&dir, fresh).unwrap();
+        // The original triple is GONE; the restored set is present (round-trip of the live set).
+        let live = dump_terms(&restored);
+        assert!(!live.iter().any(|(s, _, _)| s.contains("/orig")), "original content replaced");
+        assert!(live.iter().any(|(s, _, _)| s.contains("/r1")), "restored content present");
+        assert_eq!(restored.len(), 2, "two default-graph triples after restore");
+        // No sibling leftovers from the swap.
+        assert!(!dir.with_extension("compact-new").exists());
+        assert!(!dir.with_extension("compact-old").exists());
+
+        // The restored graph is genuinely WAL-backed: a durable update + a fresh reopen sees it.
+        let mut g = restored;
+        g.apply_delta_nquads("<http://ex/post> <http://ex/p> <http://ex/v> .", "").unwrap();
+        drop(g);
+        let reopened = Graph::open(&dir).unwrap();
+        let live2 = dump_terms(&reopened);
+        assert!(live2.iter().any(|(s, _, _)| s.contains("/r1")), "restored content survives reopen");
+        assert!(live2.iter().any(|(s, _, _)| s.contains("/post")), "post-restore update is WAL-durable");
+        assert!(!live2.iter().any(|(s, _, _)| s.contains("/orig")), "original never resurrects");
+        let g_name = Term::NamedNode(NamedNode::new_unchecked("http://ex/g".to_string()));
+        let named = reopened
+            .named_graph(&g_name)
+            .expect("the restored named graph survives the reopen");
+        assert_eq!(named.len(), 1, "the named graph holds its one triple after reopen");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// [OPUS-4.8] (review 1593) A durable CLEAR of a directory-backed graph must SURVIVE a
     /// reopen. The pre-fix CLEAR replaced the graph with a fresh in-memory empty graph,
     /// dropping the WAL/dir association, so the on-disk base was untouched and a reopen
@@ -7518,6 +9386,348 @@ mod tests {
         assert_eq!(Graph::open(&dir).unwrap().len(), 3);
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    /// [OPUS-4.8] (sq-7ph8) The streamed numerics/temporals save must write BYTE-IDENTICAL
+    /// `numerics.bin`/`temporals.bin` to the old dense-materialise path — for a DENSE-owned
+    /// cache, a SPARSE cache (`into_compressed`), AND a graph carrying temporal literals — so
+    /// the bounded-RSS finalize is purely a memory optimisation, never an on-disk format change.
+    /// We prove it by comparing the streamed files against a reference dense computation done
+    /// directly off the dictionary, and by checking the exact on-disk sizes (`n*8`, `n*9`).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn streamed_caches_byte_identical_to_dense() {
+        // A mix: numeric literals, temporal literals (dateTime + date), and many plain IRIs/
+        // strings so the caches are MOSTLY empty — the case that used to spike a dense buffer.
+        let ttl = "@prefix : <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             :a :v 1.5 . :b :v 2.5 . :c :n \"42\"^^xsd:integer .\n\
+             :d :t \"2020-01-02T03:04:05Z\"^^xsd:dateTime .\n\
+             :e :t \"2021-06-07\"^^xsd:date .\n\
+             :f :label \"just a string\" . :g :p :a . :h :p :b .";
+
+        // Reference dense bytes computed straight from a dict (the pre-streaming layout):
+        // `n` LE f64 numerics; then `n` LE f64 temporal instants followed by `n` flag bytes.
+        let reference = |dict: &Dict| -> (Vec<u8>, Vec<u8>) {
+            let n = dict.len();
+            let mut num = Vec::new();
+            let mut inst = Vec::new();
+            let mut flags = Vec::new();
+            for id in 1..=n as Id {
+                num.extend_from_slice(&numeric_of(&dict.term(id)).to_le_bytes());
+                match temporal_of_id(dict, id) {
+                    Some(t) => {
+                        inst.extend_from_slice(&t.instant.to_le_bytes());
+                        flags.push(temp_flag(t));
+                    }
+                    None => {
+                        inst.extend_from_slice(&f64::NAN.to_le_bytes());
+                        flags.push(0);
+                    }
+                }
+            }
+            inst.extend_from_slice(&flags); // temporals.bin = instants || flags
+            (num, inst)
+        };
+
+        for sparse in [false, true] {
+            for compressed in [false, true] {
+                let g = {
+                    let g = Graph::load_str(ttl, "turtle").unwrap();
+                    if sparse { g.into_compressed() } else { g }
+                };
+                let (want_num, want_temp) = reference(&g.dict);
+                let dir = std::env::temp_dir()
+                    .join(format!("sparq_stream_caches_{}_{sparse}_{compressed}", std::process::id()));
+                std::fs::remove_dir_all(&dir).ok();
+                if compressed {
+                    g.save_compressed(&dir).unwrap();
+                } else {
+                    g.save(&dir).unwrap();
+                }
+
+                let got_num = std::fs::read(dir.join("numerics.bin")).unwrap();
+                let got_temp = std::fs::read(dir.join("temporals.bin")).unwrap();
+                let n = g.dict.len();
+                assert_eq!(got_num.len(), n * 8, "numerics.bin size (sparse={sparse} compressed={compressed})");
+                assert_eq!(got_temp.len(), n * 9, "temporals.bin size (sparse={sparse} compressed={compressed})");
+                assert_eq!(got_num, want_num, "streamed numerics != dense (sparse={sparse} compressed={compressed})");
+                assert_eq!(got_temp, want_temp, "streamed temporals != dense (sparse={sparse} compressed={compressed})");
+
+                // And the caches still resolve after a re-open (mmap path).
+                let g2 = Graph::open(&dir).unwrap();
+                // 42 is an xsd:integer, inline-encoded into its id (never in numerics.bin); the
+                // decimals 1.5/2.5 are the cache entries that must round-trip.
+                let nums: Vec<f64> = g2.dict.iter().filter_map(|(id, _)| g2.numeric_value(id)).collect();
+                assert!(nums.contains(&1.5) && nums.contains(&2.5), "numerics survive: {nums:?}");
+                let temporal_count = g2.dict.iter().filter(|(id, _)| g2.temporal_value(*id).is_some()).count();
+                assert_eq!(temporal_count, 2, "both temporal literals survive (sparse={sparse} compressed={compressed})");
+                std::fs::remove_dir_all(&dir).ok();
+            }
+        }
+    }
+
+    /// [OPUS-4.8] (sq-x32t) Recursively reads every regular file under `dir` and returns true iff
+    /// `needle`'s bytes appear in ANY of them — used to prove a deleted term's bytes are PHYSICALLY
+    /// gone from the on-disk store (not merely logically hidden by the overlay).
+    #[cfg(feature = "mmap")]
+    fn on_disk_contains(dir: &std::path::Path, needle: &[u8]) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if on_disk_contains(&p, needle) {
+                    return true;
+                }
+            } else if let Ok(bytes) = std::fs::read(&p) {
+                if bytes.windows(needle.len()).any(|w| w == needle) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// [OPUS-4.8] (sq-x32t, epic sq-toze.33) ERASURE-COMPLETENESS — the load-bearing test. After
+    /// INSERT + DELETE + DROP GRAPH, a `vacuum` (the admin WAL compact/vacuum) must (1) preserve the
+    /// LIVE triple set exactly (round-trip), and (2) physically REMOVE the erased data's bytes from
+    /// the on-disk store — including a deleted LITERAL VALUE that is no longer referenced (the
+    /// dictionary purge), not just hide it behind the delta-overlay. We prove (2) by asserting the
+    /// distinctive deleted bytes are present on disk BEFORE the vacuum (so the test can actually
+    /// fail) and ABSENT after, and by re-opening to confirm durability.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn vacuum_erases_deleted_data_bytes_on_disk() {
+        let dir = std::env::temp_dir().join(format!("sparq_vacuum_erase_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        // Seed: a default-graph triple to KEEP, a default-graph triple whose object literal will be
+        // DELETED, and a NAMED graph that will be DROPped. Distinctive byte markers per datum.
+        let g0 = Graph::load_dataset(
+            "<http://ex/keep> <http://ex/p> \"KEEP-ME-LIVE-MARKER\" .\n\
+             <http://ex/alice> <http://ex/ssn> \"SECRET-SSN-555-00-1234\" .\n\
+             <http://ex/n1> <http://ex/p> \"NAMED-GRAPH-DROP-MARKER\" <http://ex/secretgraph> .",
+            "nquads",
+        )
+        .unwrap();
+        g0.save(&dir).unwrap();
+
+        // The marked secrets are on disk to begin with (dictionary blob holds the literal values).
+        assert!(on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"), "deleted-literal seed must be on disk first");
+        assert!(on_disk_contains(&dir, b"NAMED-GRAPH-DROP-MARKER"), "dropped-graph seed must be on disk first");
+
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            // Logical erasure: DELETE the SSN triple and DROP the named graph (via retraction).
+            g.apply_delta(
+                &[],
+                &[[
+                    Term::NamedNode(NamedNode::new_unchecked("http://ex/alice")),
+                    Term::NamedNode(NamedNode::new_unchecked("http://ex/ssn")),
+                    Term::Literal(Literal::new_simple_literal("SECRET-SSN-555-00-1234")),
+                ]],
+            )
+            .unwrap();
+            g.drop_named_durable(&named("secretgraph")).unwrap();
+
+            // Logically hidden — but the WAL/dict bytes still hold the secrets pre-vacuum.
+            assert_eq!(dump_terms(&g).len(), 1, "only the KEEP triple remains live");
+            assert!(on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"), "pre-vacuum: still on disk (logical only)");
+
+            // VACUUM: physically rewrite the store + purge the dictionary.
+            g.vacuum().unwrap();
+
+            // Round-trip: the live set is preserved exactly.
+            let live = dump_terms(&g);
+            assert_eq!(live.len(), 1);
+            assert_eq!(live[0].0, "<http://ex/keep>");
+            assert!(g.named.is_empty(), "dropped named graph is gone");
+        }
+
+        // The KEEP marker survives; the erased data's bytes are PHYSICALLY GONE from disk.
+        assert!(on_disk_contains(&dir, b"KEEP-ME-LIVE-MARKER"), "live data must survive the vacuum");
+        assert!(!on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"), "DELETED literal value bytes must be physically erased");
+        assert!(!on_disk_contains(&dir, b"NAMED-GRAPH-DROP-MARKER"), "DROPped-graph data bytes must be physically erased");
+
+        // Durability: a fresh open sees exactly the live triple and nothing resurrects.
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(dump_terms(&g2).len(), 1, "erasure survives reopen");
+        assert!(g2.named.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-x32t) `vacuum` ROUND-TRIP equality across the whole dataset (default + named),
+    /// independent of the byte-level erasure check: the post-vacuum quad set must EQUAL the pre-vacuum
+    /// live quad set exactly, and survive a reopen.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn vacuum_preserves_live_dataset_exactly() {
+        let dir = std::env::temp_dir().join(format!("sparq_vacuum_roundtrip_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let mut nq = String::new();
+        for i in 0..40u32 {
+            nq.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
+            nq.push_str(&format!("<http://ex/s{i}> <http://ex/q> <http://ex/o{i}> <http://ex/g{}> .\n", i % 3));
+        }
+        Graph::load_dataset(&nq, "nquads").unwrap().save(&dir).unwrap();
+
+        let mut g = Graph::open(&dir).unwrap();
+        // Mutate (insert + delete + drop a graph) so the overlay is non-trivial before vacuum.
+        g.apply_delta(
+            &[[
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/new")),
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/p")),
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/v")),
+            ]],
+            &[[
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/s0")),
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/p")),
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/o0")),
+            ]],
+        )
+        .unwrap();
+        g.drop_named_durable(&named("g0")).unwrap();
+
+        let before = dump_quads(&g);
+        g.vacuum().unwrap();
+        let after = dump_quads(&g);
+        assert_eq!(before, after, "vacuum must preserve the live dataset exactly (default + named)");
+
+        let reopened = dump_quads(&Graph::open(&dir).unwrap());
+        assert_eq!(before, reopened, "the vacuumed dataset must survive a reopen unchanged");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-x32t) CRASH-SAFETY of `vacuum`: it uses the SAME rollback-safe directory swap
+    /// (`<dir>.compact-new` / `<dir>.compact-old` siblings, healed by `recover_compaction` on open)
+    /// as `compact`, so an interrupted vacuum must never lose or corrupt the store. We simulate the
+    /// two crash windows directly on the sibling dirs and assert the open recovers a VALID store.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn vacuum_swap_crash_recovery() {
+        let base = std::env::temp_dir().join(format!("sparq_vacuum_recover_{}", std::process::id()));
+        let dir = base.join("g");
+        let build = |d: &std::path::Path, tag: &str| {
+            std::fs::remove_dir_all(d).ok();
+            Graph::load_str(&format!("<http://ex/{tag}> <http://ex/p> <http://ex/o> ."), "ntriples")
+                .unwrap()
+                .save(d)
+                .unwrap();
+        };
+        // (a) Crash BETWEEN the two renames (dir missing, both siblings present): the open must
+        //     COMPLETE the swap by promoting the fully-synced new base.
+        build(&dir.with_extension("compact-old"), "old");
+        build(&dir.with_extension("compact-new"), "new");
+        assert!(!dir.exists());
+        let g = Graph::open(&dir).unwrap();
+        assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/new")), "must promote the new base");
+        assert!(!dir.with_extension("compact-new").exists() && !dir.with_extension("compact-old").exists());
+        // (b) Crash BEFORE the new base was ready (dir missing, only old present): roll back.
+        std::fs::remove_dir_all(&dir).ok();
+        build(&dir.with_extension("compact-old"), "old");
+        assert!(!dir.exists());
+        let g = Graph::open(&dir).unwrap();
+        assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/old")), "must roll back to the old base");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    // ---- [OPUS-4.8] gh-1118 / gh-1122: ergonomic constructors + single-triple mutation ----
+
+    /// gh-1118: `Graph::new()` and `Graph::default()` both yield an EMPTY in-memory graph
+    /// (no error handling, no `load_str("", …)` workaround) and are interchangeable.
+    #[test]
+    fn new_and_default_are_empty_graphs() {
+        let n = Graph::new();
+        assert!(n.is_empty(), "Graph::new() must be empty");
+        assert_eq!(n.len(), 0, "Graph::new() must have zero triples");
+        assert!(n.named.is_empty(), "Graph::new() must have no named graphs");
+        let d = Graph::default();
+        assert!(d.is_empty(), "Graph::default() must be empty");
+        assert_eq!(d.len(), 0, "Graph::default() must have zero triples");
+        // An empty graph is immediately usable for incremental build-up.
+        let mut g = Graph::new();
+        g.insert_triple(
+            NamedNode::new_unchecked("http://ex/s"),
+            NamedNode::new_unchecked("http://ex/p"),
+            NamedNode::new_unchecked("http://ex/o"),
+        )
+        .unwrap();
+        assert_eq!(g.len(), 1);
+    }
+
+    /// gh-1122: `insert_triple` takes oxrdf terms directly, makes the triple queryable
+    /// (REAL overlay path — `id_of` resolves the interned terms and a pattern scan finds the
+    /// row), and is SET-VALUED — re-inserting the same triple is a no-op, not a duplicate.
+    #[test]
+    fn insert_triple_interns_and_is_set_valued() {
+        let mut g = Graph::new();
+        let s = NamedNode::new_unchecked("http://ex/alice");
+        let p = NamedNode::new_unchecked("http://schema.org/age");
+        let o = Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER));
+        // Mixed term kinds: NamedNode (subject), NamedNode (predicate), Literal (object).
+        g.insert_triple(s.clone(), p.clone(), o.clone()).unwrap();
+        assert_eq!(g.len(), 1);
+        // Real path: the terms are interned, so the pattern scan finds exactly this row.
+        let pat = g
+            .pattern(Some(&Term::NamedNode(s.clone())), Some(&p), Some(&o))
+            .expect("all three terms interned");
+        assert_eq!(g.store.scan(&pat).rows.len(), 1, "the inserted triple must be queryable");
+        // Set semantics: re-inserting the identical triple does not grow the graph.
+        g.insert_triple(s, p, o).unwrap();
+        assert_eq!(g.len(), 1, "re-inserting an existing triple is a no-op");
+    }
+
+    /// gh-1122: `remove_triple` retracts a present triple and is a NO-OP (never an error)
+    /// for an absent one — the retraction twin of `insert_triple`.
+    #[test]
+    fn remove_triple_retracts_and_absent_is_noop() {
+        let mut g = Graph::new();
+        let s = NamedNode::new_unchecked("http://ex/s");
+        let p = NamedNode::new_unchecked("http://ex/p");
+        let o = Term::NamedNode(NamedNode::new_unchecked("http://ex/o"));
+        let other = Term::NamedNode(NamedNode::new_unchecked("http://ex/never"));
+        g.insert_triple(s.clone(), p.clone(), o.clone()).unwrap();
+        assert_eq!(g.len(), 1);
+        // Removing an absent triple is a no-op (the object term is not even in the dict).
+        g.remove_triple(s.clone(), p.clone(), other).unwrap();
+        assert_eq!(g.len(), 1, "removing an absent triple must not change the graph");
+        // Removing the present triple retracts it.
+        g.remove_triple(s, p, o).unwrap();
+        assert!(g.is_empty(), "removing the present triple must empty the graph");
+    }
+
+    /// gh-1122: the load-bearing invariant — a graph built with `Graph::new()` +
+    /// `insert_triple` is RESULT-EQUIVALENT to the same triples parsed from Turtle text
+    /// (same materialised term set), so the convenience API is not a separate semantics.
+    #[test]
+    fn insert_triple_equivalent_to_text_load() {
+        let mut built = Graph::new();
+        let s = NamedNode::new_unchecked("http://ex/alice");
+        built
+            .insert_triple(
+                s.clone(),
+                NamedNode::new_unchecked("http://ex/name"),
+                Term::Literal(Literal::new_simple_literal("Alice")),
+            )
+            .unwrap();
+        built
+            .insert_triple(
+                s,
+                NamedNode::new_unchecked("http://ex/knows"),
+                NamedNode::new_unchecked("http://ex/bob"),
+            )
+            .unwrap();
+        let loaded = Graph::load_str(
+            "<http://ex/alice> <http://ex/name> \"Alice\" .\n\
+             <http://ex/alice> <http://ex/knows> <http://ex/bob> .",
+            "ntriples",
+        )
+        .unwrap();
+        let mut a = dump_terms(&built);
+        let mut b = dump_terms(&loaded);
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "insert_triple build must match the text-loaded graph");
+    }
 }
 
 #[cfg(test)]
@@ -7567,6 +9777,30 @@ mod dir_roundtrip_test {
         let scan = g.store.scan(&[None, None, None]);
         let t = scan.to_spo(&scan.rows.as_ref()[0]);
         assert_eq!(g.dict.term(t[2]).to_string(), "\"abc\"@en--ltr");
+    }
+
+    /// [OPUS-4.8] (sq-langcase / KamiQuasi #1119) Cross-format CONSISTENCY: loading the SAME
+    /// language-tagged triple as N-Triples, N-Quads, and Turtle must yield the SAME stored term —
+    /// a lowercased tag (`en-us`), not the format-dependent `en-US` (N-Triples) / `en-us` (Turtle)
+    /// split that existed before the byte parser was taught to normalise the tag. This is the
+    /// public-API regression for the reported bug: pick the literal object back out via the store
+    /// scan and compare its serialised form across all three load paths.
+    #[test]
+    fn language_tag_casing_consistent_across_formats() {
+        let only_obj = |g: &crate::Graph| -> String {
+            let scan = g.store.scan(&[None, None, None]);
+            let t = scan.to_spo(&scan.rows.as_ref()[0]);
+            g.dict.term(t[2]).to_string()
+        };
+        let nt = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "ntriples").unwrap();
+        let ttl = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "turtle").unwrap();
+        let nq = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "nquads").unwrap();
+        assert_eq!(only_obj(&nt), "\"hi\"@en-us", "N-Triples must lowercase the language tag");
+        assert_eq!(only_obj(&ttl), "\"hi\"@en-us", "Turtle must lowercase the language tag");
+        assert_eq!(only_obj(&nq), "\"hi\"@en-us", "N-Quads must lowercase the language tag");
+        // The three load paths agree (the format-dependent split is gone).
+        assert_eq!(only_obj(&nt), only_obj(&ttl));
+        assert_eq!(only_obj(&nt), only_obj(&nq));
     }
 
     /// Fork-after-compact must stay O(delta): compaction folds the numeric/temporal

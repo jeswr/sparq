@@ -57,6 +57,14 @@ path = "src/lib.rs"
 name = "recursion_depth"
 path = "tests/recursion_depth.rs"
 
+# [OPUS-4.8] Regression test for the custom-aggregate DISTINCT parse fix
+# (SPARQ-PATCHES.md §9, bead sq-fldo). Declared explicitly for the same
+# `autotests = false` reason as the recursion-depth target above. Not an
+# upstream change.
+[[test]]
+name = "custom_aggregate_distinct"
+path = "tests/custom_aggregate_distinct.rs"
+
 [dependencies.oxilangtag]
 version = "0.1"
 

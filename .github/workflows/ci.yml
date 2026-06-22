@@ -36,6 +36,91 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # [OPUS-4.8] merge-throughput: path-filtered gate. Compute whether THIS change
+  # touches Rust at all, so a doc-only / compliance / CI-markdown / site PR can skip the
+  # ~15-minute Rust test matrix while the required `ci-summary / gate` still resolves
+  # SUCCESS for it. CORRECTNESS CONTRACT (the heavy jobs below `if:` on this):
+  #   • rust_changed == 'true'  -> every heavy job runs EXACTLY as before. A Rust PR can
+  #     never merge without the full matrix.
+  #   • rust_changed == 'false' -> the heavy jobs are `skipped`; the ci-summary aggregator
+  #     (ci-summary.yml) already treats a `skipped` conclusion as NON-failing
+  #     (`conclusion != "success" and != "skipped" and != "neutral"` is the only thing it
+  #     fails on), so the gate goes green fast. Fast doc/lint siblings (docs-quality, etc.)
+  #     still run and still gate.
+  # SAFE-BY-DEFAULT: rust_changed is forced 'true' on EVERY event except `pull_request`.
+  # On `push` to main (the canonical build), `merge_group` (the merge queue re-runs the
+  # whole set), `schedule`, and `workflow_dispatch` the full matrix ALWAYS runs — only a
+  # PR diff that is purely non-Rust is ever allowed to skip. The Rust path set is broad on
+  # purpose: any `*.rs`, any `Cargo.toml`, `Cargo.lock`, the `rust-toolchain*` pin, OR this
+  # workflow file itself (so editing a Rust job here re-runs that job). If the diff cannot
+  # be computed for any reason, the filter's absence of a match defaults to NOT skipping
+  # only because we hard-force 'true' off the PR path — i.e. we never silently skip Rust.
+  changes:
+    name: detect rust changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust_changed: ${{ steps.decide.outputs.rust_changed }}
+      # [OPUS-4.8] docker_changed is true when the SHIPPED image's inputs change but no
+      # Rust did (a Dockerfile/entrypoint/smoke-script edit). docker-smoke gates on
+      # rust_changed OR docker_changed so a Dockerfile-only PR (the sq-n6rv class of bug —
+      # the bind posture/entrypoint) still gets the image smoke even though the matrix skips.
+      docker_changed: ${{ steps.decide.outputs.docker_changed }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Only run the path filter on pull_request; on every other event we force-run the
+      # full matrix (see decide step), so the filter's result is irrelevant there and we
+      # skip it to avoid the unreliable push/merge_group base-diff.
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - '.github/workflows/ci.yml'
+              # [OPUS-4.8] sq-spfg: the checked-in coverage/mutation FLOOR files are ratchet
+              # inputs the `coverage` job's --check-monotonic gate validates. Without these,
+              # a PR that lowers ONLY a floor (no .rs/Cargo/ci.yml change) sets
+              # rust_changed=false, SKIPS the coverage job, and bypasses the monotonicity
+              # gate at the PR level (merge_group force-true still catches it in the queue,
+              # but the PR-level gate should fire too). List them so a floor-only PR runs the
+              # gate that guards exactly those files. mutants-baseline.json is included
+              # defensively for when the advisory mutation ratchet is promoted to gating.
+              - 'bench/coverage-floor.json'
+              - 'bench/coverage-presence.json'
+              - 'bench/mutants-baseline.json'
+            docker:
+              - 'Dockerfile'
+              - '**/Dockerfile'
+              # [OPUS-4.8] sq-5f1s4 — `.dockerignore` shapes the `context: .` build the
+              # docker-smoke job runs (it decides what `COPY . .` includes). A
+              # `.dockerignore`-only PR that breaks the build context would otherwise set
+              # docker_changed=false and skip the smoke at PR time (the gui.yml/#1081
+              # blind-spot class). container-scan.yml already lists it; match that here.
+              - '.dockerignore'
+              - 'scripts/docker-smoke.sh'
+              - '.github/workflows/ci.yml'
+      - name: Decide rust_changed (safe-by-default off the PR path)
+        id: decide
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            # push / merge_group / schedule / workflow_dispatch -> always run the full matrix.
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            echo "docker_changed=true" >> "$GITHUB_OUTPUT"
+            echo "event=${{ github.event_name }} -> forcing rust_changed=true + docker_changed=true (full matrix)"
+          else
+            echo "rust_changed=${{ steps.filter.outputs.rust }}" >> "$GITHUB_OUTPUT"
+            echo "docker_changed=${{ steps.filter.outputs.docker }}" >> "$GITHUB_OUTPUT"
+            echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }} docker=${{ steps.filter.outputs.docker }}"
+          fi
+
   # [OPUS-4.8] BUILD-ONCE for the sharded test suite (sq-vyxy folded in). The old
   # design had every shard run `cargo build --workspace --all-targets` itself — the
   # 131s build FLOOR that rust-cache makes cheap for *deps* but cannot remove for
@@ -49,9 +134,19 @@ jobs:
   # once, off the warm build this job already has (was a guarded shard-1 step before).
   build-archive:
     name: build + archive test binaries (+ doctests once)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # [OPUS-4.8] sq-c76x: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
+      # build + `nextest archive` write. The stock ubuntu-latest runner ships ~14 GB free
+      # on `/`; the archive (.tar.zst of every workspace test binary) plus the warm
+      # `target/` were exhausting it (`No space left on device`). In-repo shell, no
+      # third-party action to SHA-pin. Best-effort + guarded — absent paths no-op. See
+      # scripts/ci-free-disk.sh.
+      - name: Free runner disk before build + archive
+        run: ./scripts/ci-free-disk.sh
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Cache cargo + target
@@ -70,7 +165,7 @@ jobs:
       # side) lets a residual transient binary race self-heal. SHA-pinned install
       # action (a pin already vetted elsewhere in this workflow).
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: nextest
       # [OPUS-4.8] Build + ARCHIVE the whole workspace test set once. `--all-targets`
@@ -78,8 +173,23 @@ jobs:
       # bin test targets), so the archived set == what the un-sharded run built. The
       # .tar.zst is self-contained (binaries + the metadata nextest needs to run them
       # on another runner with `--archive-file`), so the shards never recompile.
+      #
+      # [OPUS-4.8] The archive runs `--features approx-ann,filtered-ann,vec-predicate`
+      # (#363, LOAD-BEARING): sparq-vectors' heavy recall/over-fetch/vec-predicate tests are
+      # MODULE-gated (`#![cfg(feature = ...)]`) and MUST run in this sharded lane — without
+      # these the gated binaries compile EMPTY and the heavy-hnsw shard's exact filter matches
+      # ZERO tests (nextest exit 4). These three are the ONLY opt-in features carried here.
+      # GUARD (sq-vya1): the archive carries NO OTHER opt-in features (we deliberately avoid
+      # `--all-features` — cross-crate conflicts + heavy/native/network deps would not even
+      # resolve; see feature-matrix.yml's SCOPE). Any test behind a DEFAULT-OFF feature OTHER
+      # than those three compiles EMPTY here and runs SILENTLY-zero in the shards — its coverage
+      # is the JOB OF feature-matrix.yml (per-leg `cargo test -p <crate> --features <set>`,
+      # gated by ci-summary). When you add/feature-gate a test: a sparq-vectors recall/vec test
+      # rides these archive features; ANYTHING ELSE must be wired into a feature-matrix.yml leg
+      # (read that file's GUARD block). Prove a suite is reached: `cargo nextest list -p <crate>
+      # --features <set>` must SHOW its test names.
       - name: Build + archive test binaries (nextest archive)
-        run: cargo nextest archive --workspace --all-targets --archive-file nextest.tar.zst
+        run: cargo nextest archive --workspace --all-targets --features approx-ann,filtered-ann,vec-predicate --archive-file nextest.tar.zst
       # [OPUS-4.8] Upload the archive immediately after the build, BEFORE doctests, so
       # the shards' input artifact is produced even if the doctest step later fails.
       - name: Upload nextest archive
@@ -101,8 +211,11 @@ jobs:
       # artifact present"). A doctest failure is rare and itself a hard, independent
       # blocking signal; archive-then-doctest above at least guarantees the artifact
       # exists. Re-open this if doctest flakiness ever makes the masked picture costly.
+      # [OPUS-4.8] (#363) SAME feature set as the archive build above so the opt-in
+      # sparq-vectors doc examples (the approx-ann/filtered-ann/vec-predicate-gated `///`
+      # blocks) are compiled/run here too, not silently dropped.
       - name: Doctests (nextest does not run these; run once, off the warm build)
-        run: cargo test --workspace --doc
+        run: cargo test --workspace --features approx-ann,filtered-ann,vec-predicate --doc
 
   test:
     # [OPUS-4.8] LOAD-AWARE sharded test matrix (merge-queue-drain speed — @jeswr).
@@ -148,7 +261,12 @@ jobs:
     # fail-fast: false so one shard's failure does not cancel the others (we want the
     # full failure picture across the suite, not just the first shard to break).
     name: test (load-aware shard ${{ matrix.name }})
-    needs: build-archive
+    # [OPUS-4.8] needs BOTH: build-archive (artifact) AND changes (the path filter). With
+    # build-archive `if:`-skipped on a doc-only PR, this job is skipped too (a needed job
+    # was skipped) — exactly the intent. Keep the explicit `changes` need + `if:` so the
+    # skip is driven by the filter, not an incidental artifact-missing failure.
+    needs: [changes, build-archive]
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     env:
       # [OPUS-4.8] THE single source of truth for the known-heavy tests. `test(=NAME)`
@@ -161,11 +279,25 @@ jobs:
       matrix:
         include:
           # Dedicated shard for the 108.7s diskann recall test (the long pole).
+          # [OPUS-4.8] sq-c76x: rayon_threads=1 makes the recall metric BIT-DETERMINISTIC.
+          # The data/query gen + HNSW level-RNG are already seeded, but the HNSW graph is
+          # built rayon-PARALLEL inside instant-distance (ann.rs build), so thread
+          # scheduling perturbs neighbour selection and HNSW recall varied run-to-run
+          # (MEASURED 0.9980<->1.0000 across runs; ~5pt above the 0.95 floor — safe, but
+          # not reproducible). Pinning ONE rayon thread removes that scheduling variance
+          # (MEASURED: HNSW becomes bit-identical) at ZERO cost here — these are accuracy
+          # gates, not throughput benches, and run alone on their shard. DiskANN is already
+          # bit-identical (MEASURED 0.9660 every run); pinning it too is harmless + uniform.
+          # Floors are UNCHANGED (HNSW >= 0.95, DiskANN >= 0.90) — this removes variance, it
+          # does not move the bar. Only the heavy shards set this; the bulk shards keep
+          # default parallelism (their ~1827 tiny tests want the threads).
           - name: heavy-diskann
             filter: "test(=diskann_recall_at_10_vs_brute_force_on_50k)"
+            rayon_threads: "1"
           # Dedicated shard for the 61.2s hnsw recall test — SPLIT from diskann.
           - name: heavy-hnsw
             filter: "test(=hnsw_recall_at_10_vs_brute_force_on_50k)"
+            rayon_threads: "1"
           # The uniform remainder (~222s), evenly count-partitioned 3 ways.
           - name: bulk 1/3
             partition: "count:1/3"
@@ -174,11 +306,19 @@ jobs:
           - name: bulk 3/3
             partition: "count:3/3"
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # [OPUS-4.8] sq-c76x: reclaim ~20-30 GB BEFORE downloading/extracting the nextest
+      # archive and running the shard. This is the PRIMARY site of the `No space left on
+      # device` bulk-shard failures: the bulk shards `--extract-to .` the archived
+      # `target/` INTO the checkout (to rebuild the baked CARGO_BIN_EXE path — see the run
+      # step below) and write per-test diagnostics, on a runner that starts with only
+      # ~14 GB free. Same in-repo, SHA-pin-free, best-effort step as build-archive.
+      - name: Free runner disk before download + test
+        run: ./scripts/ci-free-disk.sh
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: nextest
       - name: Download nextest archive
@@ -215,35 +355,87 @@ jobs:
       # locally (nextest 0.9.137): clean checkout + extract-to . -> all 4 CLI-spawn tests
       # PASS; without it they reproduce the exact NotFound panic. (Touching ONLY this
       # run-step keeps it on the build-once archive path — sq-vyxy stays closed.)
+      # [OPUS-4.8] sq-c76x: TWO retry layers, each fixing a DIFFERENT failure class —
+      #   1. `--retries 2` (kept, unchanged): nextest's PER-TEST retry. A single flaky
+      #      test process re-runs in-place; the test passes iff any attempt passes. This
+      #      is the residual-variance / transient-binary-race self-heal (sq-x4jy).
+      #   2. The `for attempt` STEP-LEVEL retry below (new): re-invokes the WHOLE
+      #      `cargo nextest run` up to MAX_ATTEMPTS times. This catches failures that a
+      #      per-test retry CANNOT — a transient archive-extraction error, residual disk
+      #      pressure on the first attempt, or a runner hiccup that fails the invocation
+      #      before/around the test run. Without it, ONE such transient sinks the whole
+      #      shard, the ci-summary gate then concludes failure, and an otherwise-mergeable
+      #      PR is blocked (the exact merge-train stall this bead fixes). With it, a single
+      #      transient self-heals on the retry. A GENUINE failure still fails every attempt
+      #      and correctly reds the shard (and the gate) — the floor is never weakened.
+      # The matrix branch (heavy vs bulk) only changes the nextest ARGS; the retry wrapper
+      # is identical for both, so we build the arg list once then loop.
       - name: Test (nextest, shard ${{ matrix.name }})
+        # [OPUS-4.8] sq-c76x: pin rayon to one thread ONLY on the heavy recall shards
+        # (matrix.rayon_threads is "1" there, empty on the bulk shards) so the HNSW
+        # parallel-build recall metric is reproducible — see the matrix comment. An empty
+        # value leaves RAYON_NUM_THREADS unset, so the bulk shards keep default parallelism.
+        env:
+          RAYON_NUM_THREADS: ${{ matrix.rayon_threads }}
         run: |
           set -euo pipefail
+          common=(--archive-file nextest.tar.zst --workspace-remap . \
+                  --extract-to . --extract-overwrite --retries 2)
           if [ -n "${{ matrix.filter }}" ]; then
             # Dedicated heavy shard: intersect HEAVY with this shard's single test so
             # the shard's set is provably a SUBSET of HEAVY (belt-and-braces: if the
             # test is ever renamed in only one place, the shard runs empty rather than
             # silently re-including it in bulk).
-            cargo nextest run --archive-file nextest.tar.zst --workspace-remap . \
-              --extract-to . --extract-overwrite \
-              --retries 2 -E '( ${{ env.HEAVY }} ) & ( ${{ matrix.filter }} )'
+            args=("${common[@]}" -E '( ${{ env.HEAVY }} ) & ( ${{ matrix.filter }} )')
           else
             # Bulk shard: everything that is NOT a known-heavy test, count-partitioned.
-            cargo nextest run --archive-file nextest.tar.zst --workspace-remap . \
-              --extract-to . --extract-overwrite \
-              --retries 2 --partition ${{ matrix.partition }} -E 'not ( ${{ env.HEAVY }} )'
+            args=("${common[@]}" --partition ${{ matrix.partition }} -E 'not ( ${{ env.HEAVY }} )')
           fi
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::nextest shard '${{ matrix.name }}' — attempt $attempt/$MAX_ATTEMPTS"
+            # Capture the exit code EXPLICITLY. `cargo … || rc=$?` is `set -e`-safe (the
+            # `||` makes the failure non-fatal) AND captures nextest's REAL exit code —
+            # unlike `if cargo …; then`, where `$?` after the `if` is the `if` statement's
+            # own status (always 0) and a genuine failure would silently exit 0, wrongly
+            # passing the gate. `rc` is reset to 0 each attempt before the run.
+            rc=0
+            cargo nextest run "${args[@]}" || rc=$?
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "shard '${{ matrix.name }}' passed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::shard '${{ matrix.name }}' failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient."
+              exit "$rc"
+            fi
+            echo "::warning::shard '${{ matrix.name }}' attempt $attempt failed (exit $rc) — reclaiming disk and retrying once (sq-c76x transient self-heal)."
+            # Reclaim disk again in case the first attempt was a `No space left` race
+            # that left partial extraction/diagnostics behind; the script is best-effort.
+            ./scripts/ci-free-disk.sh || true
+            attempt=$((attempt + 1))
+          done
 
   wasm:
-    name: wasm build (sparq-wasm)
+    name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm + sparq-text-wasm + sparq-shacl-wasm + sparq-solid)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build sparq-wasm for the browser target
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
+      # [OPUS-4.8] sq-yqi1 (#162): also build WITH the opt-in `shacl` feature so the
+      # SHACL `Store::validate(...)` binding (and its wasm32 sparq-shacl/sparq-engine
+      # graph) is gate-protected — it must keep compiling to wasm.
+      - name: Build sparq-wasm for the browser target (shacl feature)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl
       # [OPUS-4.8] sq-085p follow-up: clippy AGAINST the wasm32 target (the target is
       # already installed for this job). The native `lint` job's `clippy --all-targets`
       # compiles sparq-wasm for the HOST triple, so it never sees wasm32-cfg'd code paths
@@ -251,10 +443,73 @@ jobs:
       # warnings makes those a hard failure here, where the native clippy can't reach them.
       - name: clippy (wasm32 target, deny warnings)
         run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+      # [OPUS-4.8] sq-yqi1 (#162): clippy the shacl-feature surface on wasm32 too.
+      - name: clippy (wasm32 target, shacl feature, deny warnings)
+        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features shacl -- -D warnings
+      # [OPUS-4.8] sq-dvyi: also build + clippy WITH the opt-in `jsonld` feature (the
+      # site REPL's JSON-LD upload/URL path) so the oxjsonld-linked surface is
+      # gate-protected on wasm32. The DEFAULT bundle stays JSON-LD-free (perf floor).
+      # The site builds `shacl,jsonld` together, so the combined feature set is built too.
+      - name: Build sparq-wasm for the browser target (jsonld feature)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features jsonld
+      - name: Build sparq-wasm for the browser target (shacl + jsonld, the site bundle)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl,jsonld
+      - name: clippy (wasm32 target, jsonld feature, deny warnings)
+        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features jsonld -- -D warnings
+      # [OPUS-4.8] sq-6qw3 (W-reason): the tier-b forward-chaining inference bundle. Build +
+      # clippy it on wasm32 in BOTH feature states (default + the opt-in `why()` proof-tree
+      # `explain` feature) so the reason bundle is gate-protected exactly like sparq-wasm.
+      - name: Build sparq-reason-wasm for the browser target
+        run: cargo build -p sparq-reason-wasm --target wasm32-unknown-unknown
+      - name: Build sparq-reason-wasm for the browser target (explain feature)
+        run: cargo build -p sparq-reason-wasm --target wasm32-unknown-unknown --features explain
+      - name: clippy (wasm32 target, sparq-reason-wasm, deny warnings)
+        run: cargo clippy -p sparq-reason-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+      - name: clippy (wasm32 target, sparq-reason-wasm, explain feature, deny warnings)
+        run: cargo clippy -p sparq-reason-wasm --target wasm32-unknown-unknown --all-targets --features explain -- -D warnings
+      # [OPUS-4.8] sq-nzcb (W-rsp): the tier-b windowed RSP-QL stream bundle. Build + clippy
+      # it on wasm32 so the streaming bundle is gate-protected exactly like the others. It
+      # has no opt-in features (a single default state), so one build + one clippy suffice.
+      - name: Build sparq-rsp-wasm for the browser target
+        run: cargo build -p sparq-rsp-wasm --target wasm32-unknown-unknown
+      - name: clippy (wasm32 target, sparq-rsp-wasm, deny warnings)
+        run: cargo clippy -p sparq-rsp-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+      # [OPUS-4.8] sq-jbe6 (W-text): the tier-b BM25 full-text bundle. Build + clippy it on
+      # wasm32 so the text bundle (sparq-text `engine` feature + the `text:` magic-predicate
+      # rewrite + sparq-engine) is gate-protected exactly like the other wasm bundles. It has
+      # a single feature state (no opt-in features), so one build + one clippy invocation.
+      - name: Build sparq-text-wasm for the browser target
+        run: cargo build -p sparq-text-wasm --target wasm32-unknown-unknown
+      - name: clippy (wasm32 target, sparq-text-wasm, deny warnings)
+        run: cargo clippy -p sparq-text-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+      # [OPUS-4.8] sq-lfmf (W-shacl): the tier-b SHACL validation bundle. Build + clippy it
+      # on wasm32 in BOTH feature states (default SHACL Core + SHACL-SPARQL, and the opt-in
+      # `shacl-af` sh:rule feature) so the SHACL bundle (sparq-shacl + its no-default-features
+      # sparq-engine/sparq-core wasm32 graph, carrying the pure-Rust `sh:pattern` regex) is
+      # gate-protected exactly like the other wasm bundles.
+      - name: Build sparq-shacl-wasm for the browser target
+        run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown
+      - name: Build sparq-shacl-wasm for the browser target (shacl-af feature)
+        run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown --features shacl-af
+      - name: clippy (wasm32 target, sparq-shacl-wasm, deny warnings)
+        run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+      - name: clippy (wasm32 target, sparq-shacl-wasm, shacl-af feature, deny warnings)
+        run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets --features shacl-af -- -D warnings
       - name: Guard the wasm dependency graph (no native-only deps)
         # [OPUS-4.8] sq-9qz6: enforce the "flate2/zstd/rayon/sparq-parse must never
         # enter the wasm graph" invariant (was comment-only) — fails if a native-only
-        # dep leaks into sparq-wasm's wasm32 graph (bundle bloat / broken browser build).
+        # dep leaks into a wasm bundle's wasm32 graph (bundle bloat / broken browser build).
+        # [OPUS-4.8] sq-yqi1: guard runs against the DEFAULT graph (SHACL is opt-in, so
+        # the default bundle stays SHACL-free); the shacl-feature graph is verified clean
+        # locally and the wasm32 build above proves it links.
+        # [OPUS-4.8] sq-6qw3: the guard now also scans sparq-reason-wasm's default graph
+        # (regex is allowed there — it's pure-Rust + wasm-portable, not a native-only dep).
+        # [OPUS-4.8] sq-nzcb: and sparq-rsp-wasm's default graph (among the leanest —
+        # no regex; sparq-rsp + its engine/core are no-default-features).
+        # [OPUS-4.8] sq-jbe6: it now also scans sparq-text-wasm (unicode-segmentation is
+        # pure-Rust + wasm-portable; the guard catches any native-only dep leaking in).
+        # [OPUS-4.8] sq-lfmf: and sparq-shacl-wasm (regex is allowed there — pure-Rust +
+        # wasm-portable, the sh:pattern constraint; the guard catches native-only leaks).
         run: ./scripts/wasm-deps-guard.sh
       # [OPUS-4.8] Headless wasm tests of the REAL #[wasm_bindgen] exports
       # (crates/sparq-wasm/tests/web.rs). `cargo build --target wasm32` above never
@@ -271,6 +526,89 @@ jobs:
       - name: Headless wasm tests (wasm-pack test --node)
         working-directory: crates/sparq-wasm
         run: wasm-pack test --node
+      # [OPUS-4.8] sq-yqi1 (#162): run the headless wasm tests WITH the shacl feature
+      # so the real exported `Store::validate(...)` binding is exercised in a genuine
+      # wasm runtime (conforming + violating reports + the JsError parse-error arm).
+      - name: Headless wasm tests (wasm-pack test --node, shacl feature)
+        working-directory: crates/sparq-wasm
+        run: wasm-pack test --node --features shacl
+      # [OPUS-4.8] sq-dvyi: run the headless wasm tests WITH the jsonld feature so the
+      # real exported `Store::load`/`loadDataset` JSON-LD path (folded + `@graph` named
+      # graph queryable) is exercised in a genuine wasm runtime — the site REPL's path.
+      - name: Headless wasm tests (wasm-pack test --node, jsonld feature)
+        working-directory: crates/sparq-wasm
+        run: wasm-pack test --node --features jsonld
+      # [OPUS-4.8] sq-6qw3 (W-reason): drive the REAL #[wasm_bindgen] Reasoner exports
+      # (crates/sparq-reason-wasm/tests/web.rs) in a genuine wasm runtime, in BOTH feature
+      # states — the default suite, then with the opt-in `explain` feature so the `why()`
+      # proof-tree binding is exercised across the JS boundary too.
+      - name: Headless wasm tests (sparq-reason-wasm, wasm-pack test --node)
+        working-directory: crates/sparq-reason-wasm
+        run: wasm-pack test --node
+      - name: Headless wasm tests (sparq-reason-wasm, wasm-pack test --node, explain feature)
+        working-directory: crates/sparq-reason-wasm
+        run: wasm-pack test --node --features explain
+      # [OPUS-4.8] sq-nzcb (W-rsp): drive the REAL #[wasm_bindgen] Rsp exports
+      # (crates/sparq-rsp-wasm/tests/web.rs) in a genuine wasm runtime — windowed continuous
+      # SELECT + SPARQL-1.1-JSON serialisation across the JS boundary, which `cargo build
+      # --target wasm32` above never RUNS. Single feature state (the bundle has no features).
+      - name: Headless wasm tests (sparq-rsp-wasm, wasm-pack test --node)
+        working-directory: crates/sparq-rsp-wasm
+        run: wasm-pack test --node
+      # [OPUS-4.8] sq-jbe6 (W-text): drive the REAL #[wasm_bindgen] TextSearch exports
+      # (crates/sparq-text-wasm/tests/web.rs) in a genuine wasm runtime — the index build +
+      # `text:` rewrite + SPARQL-JSON serialisation across the JS boundary, which a
+      # `cargo build --target wasm32` never runs.
+      - name: Headless wasm tests (sparq-text-wasm, wasm-pack test --node)
+        working-directory: crates/sparq-text-wasm
+        run: wasm-pack test --node
+      # [OPUS-4.8] sq-lfmf (W-shacl): drive the REAL #[wasm_bindgen] Validator exports
+      # (crates/sparq-shacl-wasm/tests/web.rs) in a genuine wasm runtime — SHACL validation +
+      # the JSON / Turtle / text report serialisation across the JS boundary, which a
+      # `cargo build --target wasm32` above never RUNS. Both feature states: default, then
+      # with the opt-in `shacl-af` (sh:rule) feature.
+      - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node)
+        working-directory: crates/sparq-shacl-wasm
+        run: wasm-pack test --node
+      - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node, shacl-af feature)
+        working-directory: crates/sparq-shacl-wasm
+        run: wasm-pack test --node --features shacl-af
+      # [OPUS-4.8] sq-aq5: sparq-introspect wasm-safety. The crate is pure sorted scans over
+      # sparq-core's public read API (no threads, no syscalls, no wall clock) so it is a
+      # tier-b browser surface for in-tab schema cards. It is NOT a #[wasm_bindgen] BUNDLE
+      # crate (a plain library, rlib-only), so there is no `cargo build -p` browser-bundle
+      # step — instead the headless `tests/wasm.rs` build+RUN below is the smoke gate: it
+      # compiles the whole introspection pipeline (build + to_json + to_text_summary +
+      # to_void(_with_cs) + characteristic_set_ids) to wasm32 AND runs it in a genuine wasm
+      # runtime. On wasm the crate takes sparq-core without default features (drops native-only
+      # rayon `parallel`, which introspect never uses). clippy on wasm32 first, deny warnings —
+      # the native lint job compiles for the HOST triple and never sees wasm32-cfg'd paths.
+      - name: clippy (wasm32 target, sparq-introspect, deny warnings)
+        run: cargo clippy -p sparq-introspect --target wasm32-unknown-unknown --all-targets -- -D warnings
+      - name: Headless wasm tests (sparq-introspect, wasm-pack test --node)
+        working-directory: crates/sparq-introspect
+        run: wasm-pack test --node
+      # Bundle-size MEASUREMENT (informational, not a gated baseline — introspect is not a
+      # shipped bundle in any wasm graph; the bead asked to verify the size is trivial, not to
+      # ratchet it). Reports the release wasm32 byte size of the introspect test image to the
+      # job summary so a future bloat is visible in the log.
+      - name: Measure sparq-introspect wasm bundle size (informational)
+        run: ./scripts/introspect-wasm-size.sh | tee -a "$GITHUB_STEP_SUMMARY"
+      # [OPUS-4.8] sq-7agop: the opt-in Solid access-control layer compiles to wasm32 AND
+      # now RUNS there. `materialize_wac`/`materialize_acp` previously called
+      # `std::time::Instant::now()` unconditionally (for the informational `stats.millis`),
+      # which PANICS on wasm32-unknown-unknown (no monotonic clock) — the crate compiled
+      # but TRAPPED at runtime. The timing is now cfg-gated off on wasm32 (reports `0.0`).
+      # clippy on the wasm32 target first (the native lint job compiles for the HOST triple
+      # and never sees wasm32-cfg'd paths), then the headless `wasm-pack test --node` smoke
+      # (crates/sparq-solid/tests/wasm_materialize.rs) drives the REAL materialize path in a
+      # genuine wasm runtime so the trap can never silently regress — `cargo build --target
+      # wasm32` alone never RUNS materialize. The crate's transitive oxrdf→rand→getrandom
+      # uses the wasm_js backend selected by .cargo/config.toml.
+      - name: clippy (wasm32 target, sparq-solid, deny warnings)
+        run: cargo clippy -p sparq-solid --target wasm32-unknown-unknown --all-targets -- -D warnings
+      - name: Headless wasm tests (sparq-solid materialize, wasm-pack test --node)
+        run: wasm-pack test --node crates/sparq-solid
 
   # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
   # panic-surface tests) is run by the dedicated `python.yml` workflow ("Python
@@ -287,9 +625,11 @@ jobs:
     # and would have stopped the clippy gate from gating — verified by hand-tracing the
     # jq filter against every check name.)
     name: clippy (gate) + fmt (non-blocking)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: rustfmt, clippy
@@ -298,6 +638,63 @@ jobs:
       # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
       - name: clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # [OPUS-4.8] sq-4sbk: clippy -D warnings, WORKSPACE-WIDE, with `--all-features` — the
+      # clippy sibling of the two-state rustdoc gate below. The default-features clippy above
+      # NEVER compiles code inside default-OFF `#[cfg(feature = "…")]` modules (result-cache,
+      # txn, vectorized, service, fedplan, fedclient, odrl-bridge, …), so a clippy lint inside
+      # an opt-in feature module slips the central gate and only surfaces — if at all — via a
+      # feature-matrix.yml leg that happens to enable that exact feature (the legs there clippy
+      # per-crate `-p <crate> --features <set>`). This workspace-wide `--all-features` pass
+      # catches such lints centrally AND the cross-crate feature-unification interactions that a
+      # per-crate `-p` leg structurally cannot see (a default-feature edit that only mis-lints
+      # once the unified all-features build turns another crate's feature on). VERIFIED SOUND on
+      # main before being made gating (sq-4sbk crux check): the workspace has NO `compile_error!`
+      # mutual-exclusion guard and NO `not(feature=…)` *compile-time* assert that breaks under
+      # unification — `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+      # compiles every opt-in crate (sparq-hdt/-gpu/-py/-fedplan-mpc included) and is CLEAN.
+      # The network features (`live`/`embeddings`) only COMPILE reqwest here; no socket is
+      # opened (clippy does not run tests), so they are safe in this lint-only pass. Cost: the
+      # lint job already builds the workspace twice over (default clippy + two rustdoc passes);
+      # this adds only the off-by-default feature code on a warm target dir — a modest increment,
+      # not a second full build (the bulk of the dependency + first-party graph is already
+      # compiled by the default-features clippy above).
+      - name: clippy (deny warnings, workspace — all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # [OPUS-4.8] sq-8gsv: rustdoc -D warnings, WORKSPACE-WIDE. A broken/private intra-doc
+      # link (e.g. a public item linking to a crate-private const/fn, or an unresolved
+      # `[`Foo`]` that renders as literal text) is a rustdoc warning — NOT a clippy/build
+      # warning — so it slips past every other gate here and mis-renders the published docs.
+      # This was previously scoped to sparq-solid (sq-z1rm) and sparq-mpc (sq-h1w2) only,
+      # because the rest of the workspace carried ~174 pre-existing intra-doc-link warnings
+      # across ~20 crates. sq-8gsv cleared that backlog, so the gate now covers the WHOLE
+      # doc surface: any new public item that links to a private/unresolved one fails CI.
+      # Two feature states cover the feature-gated doc surface (e.g. sparq-solid's
+      # `odrl-bridge`/`count-enforcement` modules, sparq-mpc's `insecure-test-rng`,
+      # sparq-prov's `reason` bridge): default features, then `--all-features`.
+      - name: rustdoc (deny warnings, workspace — default features)
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+      - name: rustdoc (deny warnings, workspace — all features)
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+      # [OPUS-4.8] sq-hqmm: invoke the standalone bench/dict (dict-baseline) selftest from a CI
+      # lane. bench/dict carries its OWN `[workspace]` table (the same isolation pattern as
+      # bench/parse and bench/serve), so the `cargo clippy --workspace` + the workspace nextest
+      # archive above NEVER reach it — its structural invariants (every dictionary term classified
+      # exactly once, `Dict::into_blob` preserving the term count, positive footprints) live ONLY in
+      # its `selftest` subcommand and were unchecked by any lane. This step clippy-gates the crate
+      # (under -D warnings, since the workspace clippy can't) and runs `dict-baseline selftest` so a
+      # harness regression (a composition miscount, an into_blob that drops terms) fails CI. It is
+      # in-process + dataset-free + makes no wall-clock claim, so it is deterministic in CI (the
+      # README documents `selftest` as the CI-runnable check; this is the lane that runs it). It is a
+      # SEPARATE workspace (own target dir), so sparq-core compiles once more here in debug — but the
+      # registry/git deps come warm from rust-cache, and a debug build keeps the added cost small.
+      - name: bench/dict standalone selftest (clippy + invariant checks)
+        run: |
+          cargo clippy --manifest-path bench/dict/Cargo.toml --all-targets -- -D warnings
+          cargo run --manifest-path bench/dict/Cargo.toml -- selftest
       # Informational until the deferred `cargo fmt --all` reformat lands (see rustfmt.toml).
       - name: rustfmt (informational)
         run: cargo fmt --all --check
@@ -327,9 +724,11 @@ jobs:
     #     workspace-floor pin.
     # If the root MSRV is bumped, update the `@1.88` toolchain pin below to match.
     name: MSRV check (Rust 1.88, declared floor)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install Rust (pinned MSRV)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.88
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -347,18 +746,28 @@ jobs:
     # drop below the ratchet count is a conformance regression and fails CI. Never
     # lower the ratchet.
     name: W3C SPARQL conformance (ratchet >= 1229 pass+divergence)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch W3C test suites (pinned)
         run: ./scripts/fetch-conformance.sh
       - name: Run conformance suites
-        # [OPUS-4.8] --bin is REQUIRED: the crate now ships two binaries
-        # (sparq-conformance + sparq-inference-conformance, added in 058bdbf5),
-        # so a bare `cargo run -p sparq-conformance` is ambiguous and exits 101.
+        # [OPUS-4.8] --bin is REQUIRED: the crate now ships three binaries
+        # (sparq-conformance + sparq-inference-conformance + the consolidated
+        # sparq-conformance-scoreboard), so a bare `cargo run -p sparq-conformance`
+        # is ambiguous and exits 101.
         run: cargo run --release -p sparq-conformance --bin sparq-conformance
+      - name: Consolidated conformance scoreboard (all suites + floors)
+        # [OPUS-4.8] sq-ncvq.16: surface the ONE central index of every conformance
+        # ratchet across crates (SPARQL + inference + SHACL + GeoSPARQL) at the top
+        # of the primary conformance job's summary, then the detailed SPARQL report.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Summarize
         run: cat conformance-report.md >> "$GITHUB_STEP_SUMMARY"
       - name: Enforce ratchet (pass+divergence count must not regress)
@@ -393,9 +802,11 @@ jobs:
     # same `>= N` belt-and-braces check the conformance jobs use. Never lower the
     # ratchet (raise BASELINE_PASS / SHACL_SPARQL_FLOOR as coverage grows).
     name: W3C SHACL conformance (ratchet — core >= 98, sparql >= 5)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch W3C SHACL test suite (pinned)
@@ -424,6 +835,242 @@ jobs:
           name: shacl-conformance
           path: shacl-conformance.out
 
+  geo-conformance:
+    # [OPUS-4.8] sq-ncvq.16 — OGC GeoSPARQL conformance RATCHET, promoted to a
+    # DEDICATED gating job so it is surfaced in the central conformance scoreboard
+    # alongside SPARQL / inference / SHACL (it formerly ran only inside the generic
+    # `cargo test --workspace` shards, invisible as a conformance check). The
+    # ratchet itself is the in-source corpus in
+    # crates/sparq-geo/tests/ogc_compliance_ratchet.rs (NOT fixture-gated — no fetch
+    # needed): the runner asserts `fail == 0` AND a pass-count FLOOR
+    # (OGC_RATCHET_FLOOR) that may only RISE. This job runs that runner with
+    # --nocapture and re-checks the printed `pass N / fail M (floor F)` line as the
+    # same belt-and-braces `>= floor` gate the SHACL/SPARQL jobs use. Never lower
+    # the floor (raise OGC_RATCHET_FLOOR as the corpus grows).
+    name: W3C/OGC GeoSPARQL conformance (ratchet — topology pass >= 119)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Run OGC GeoSPARQL topology compliance ratchet
+        # The runner asserts its own floor (OGC_RATCHET_FLOOR) + fail==0; capture the
+        # scoreboard so the grep gate below re-checks the pass count.
+        run: |
+          cargo test -p sparq-geo --test ogc_compliance_ratchet -- --nocapture \
+            | tee geo-conformance.out
+      - name: Enforce ratchet (topology pass count must not regress)
+        run: |
+          GEO_FLOOR=119
+          # runner prints: "pass <n> / fail <m> (floor <f>)"
+          GEO_PASS=$(grep -oE 'pass [0-9]+ / fail' geo-conformance.out | grep -oE '[0-9]+' | head -1)
+          echo "OGC GeoSPARQL topology pass: ${GEO_PASS:-unknown} (floor $GEO_FLOOR)"
+          [ -n "$GEO_PASS" ] && [ "$GEO_PASS" -ge "$GEO_FLOOR" ] || { echo "::error::OGC GeoSPARQL regressed below the ratchet (${GEO_PASS:-?} < $GEO_FLOOR)"; exit 1; }
+      - name: Emit consolidated conformance scoreboard
+        # [OPUS-4.8] sq-ncvq.16: render the ONE central scoreboard index (all suites
+        # + floors across crates) into this job's step summary, so the GeoSPARQL job
+        # surfaces where it sits in the whole conformance picture.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: geo-conformance
+          path: |
+            geo-conformance.out
+            conformance-scoreboard.md
+
+  solid-conformance:
+    # [OPUS-4.8] sq-j174 — Solid WAC + ACP conformance RATCHET, promoted to a
+    # DEDICATED gating job so it is surfaced in the central conformance scoreboard
+    # alongside SPARQL / inference / SHACL / GeoSPARQL (it formerly ran only inside
+    # the generic `cargo test --workspace` shards, invisible as a conformance check).
+    # The ratchet is the in-source library-level decision-parity corpus in
+    # crates/sparq-solid/tests/conformance_wac.rs + conformance_acp.rs (NOT
+    # fixture-gated — no fetch needed): each runner asserts a scenario-count FLOOR
+    # (WAC_SCENARIO_FLOOR / ACP_SCENARIO_FLOOR) that may only RISE. This job runs
+    # both runners with --nocapture and re-checks the printed
+    # `<WAC|ACP> scenarios pass N / fail M (floor F)` line as the same
+    # belt-and-braces `>= floor` gate the SHACL/geo jobs use. Never lower the floor
+    # (raise WAC_SCENARIO_FLOOR / ACP_SCENARIO_FLOOR as the corpus grows).
+    name: Solid WAC/ACP conformance (ratchet — wac >= 12, acp >= 12)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Run Solid WAC + ACP decision-parity suites
+        # The runners assert their own pinned floors; capture the output so the grep
+        # gate below re-checks the scenario counts.
+        run: |
+          cargo test -p sparq-solid --test conformance_wac --test conformance_acp -- --nocapture \
+            | tee solid-conformance.out
+      - name: Enforce ratchet (scenario counts must not regress)
+        run: |
+          WAC_FLOOR=12
+          ACP_FLOOR=12
+          # runners print: "<WAC|ACP> scenarios pass <n> / fail <m> (floor <f>)"
+          WAC_PASS=$(grep -oE 'WAC scenarios pass [0-9]+ / fail' solid-conformance.out | grep -oE '[0-9]+' | head -1)
+          ACP_PASS=$(grep -oE 'ACP scenarios pass [0-9]+ / fail' solid-conformance.out | grep -oE '[0-9]+' | head -1)
+          echo "Solid WAC scenarios: ${WAC_PASS:-unknown} (floor $WAC_FLOOR); Solid ACP scenarios: ${ACP_PASS:-unknown} (floor $ACP_FLOOR)"
+          [ -n "$WAC_PASS" ] && [ "$WAC_PASS" -ge "$WAC_FLOOR" ] || { echo "::error::Solid WAC regressed below the ratchet (${WAC_PASS:-?} < $WAC_FLOOR)"; exit 1; }
+          [ -n "$ACP_PASS" ] && [ "$ACP_PASS" -ge "$ACP_FLOOR" ] || { echo "::error::Solid ACP regressed below the ratchet (${ACP_PASS:-?} < $ACP_FLOOR)"; exit 1; }
+      - name: Emit consolidated conformance scoreboard
+        # [OPUS-4.8] sq-j174: render the ONE central scoreboard index (all suites +
+        # floors across crates) into this job's step summary, so the Solid job
+        # surfaces where it sits in the whole conformance picture.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: solid-conformance
+          path: |
+            solid-conformance.out
+            conformance-scoreboard.md
+
+  odrl-conformance:
+    # [OPUS-4.8] sq-tmsd6 — SolidLab ODRL Test Suite conformance RATCHET, a
+    # DEDICATED gating job alongside SPARQL / inference / SHACL / GeoSPARQL / Solid /
+    # JSON-LD. The runner is crate-local in sparq-policy
+    # (crates/sparq-policy/tests/odrl_test_suite.rs): each of the 68 self-describing
+    # ODRL cases is driven through the REAL parse_policy_str + evaluate path and
+    # compared against the case's expected compliance report (the oracle:
+    # report:activationState ⇒ ALLOW/DENY). The suite data is FETCHED (gitignored,
+    # mirroring the SPARQL/SHACL/JSON-LD fetch-then-run split), so this job clones
+    # the pinned suite, runs the runner with --nocapture, and re-checks the printed
+    # `ODRL suite scenarios pass N / fail M / not-implemented K (floor F)` line as
+    # the same belt-and-braces `>= floor` gate the other ratchet jobs use. The
+    # runner's own `assert!(pass >= ODRL_SUITE_FLOOR)` is the primary gate. Honest
+    # baseline: 59/68 pass; the 9 remaining are a documented not-implemented bucket
+    # (LogicalConstraint/odrl:and, party/asset collections, the odrl:use
+    # umbrella-action divergence, duty-unknown) that never fails the gate. Never
+    # lower the ratchet (raise ODRL_SUITE_FLOOR as the fragment grows).
+    name: SolidLab ODRL conformance (ratchet — pass >= 59)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Fetch SolidLab ODRL Test Suite (pinned)
+        run: bash scripts/fetch-odrl-suite.sh
+      - name: Run SolidLab ODRL decision-parity suite
+        # The runner asserts its own pinned floor; capture the output so the grep
+        # gate below re-checks the pass count.
+        run: |
+          cargo test -p sparq-policy --test odrl_test_suite -- --nocapture \
+            | tee odrl-conformance.out
+      - name: Enforce ratchet (pass count must not regress)
+        run: |
+          ODRL_FLOOR=59
+          # runner prints: "ODRL suite scenarios pass <n> / fail <m> / not-implemented <k> (floor <f>)"
+          ODRL_PASS=$(grep -oE 'ODRL suite scenarios pass [0-9]+ / fail' odrl-conformance.out | grep -oE '[0-9]+' | head -1)
+          echo "SolidLab ODRL scenarios pass: ${ODRL_PASS:-unknown} (floor $ODRL_FLOOR)"
+          [ -n "$ODRL_PASS" ] && [ "$ODRL_PASS" -ge "$ODRL_FLOOR" ] || { echo "::error::SolidLab ODRL regressed below the ratchet (${ODRL_PASS:-?} < $ODRL_FLOOR)"; exit 1; }
+      - name: Emit consolidated conformance scoreboard
+        # Render the ONE central scoreboard index (all suites + floors across crates)
+        # into this job's step summary, so the ODRL job surfaces where it sits in the
+        # whole conformance picture.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: odrl-conformance
+          path: |
+            odrl-conformance.out
+            conformance-scoreboard.md
+
+  jsonld-conformance:
+    # [OPUS-4.8] sq-oy1f.2 / sq-3uos5 / sq-oy1f.19 — W3C JSON-LD 1.1 conformance
+    # RATCHET (toRdf + fromRdf + compact + frame), a DEDICATED gating job alongside
+    # SPARQL / inference / SHACL / GeoSPARQL / Solid. The runner is crate-local
+    # (crates/sparq-conformance/tests/jsonld_suite.rs) but behind the OPT-IN
+    # `jsonld-suite` feature (forwards to sparq-core/jsonld +
+    # sparq-engine/serialize-rdf), so it runs ONLY here — the generic
+    # `cargo test --workspace` shards build it feature-OFF (a single self-SKIP test,
+    # zero oxjsonld/writer code linked: the lean-core posture). This job fetches the
+    # pinned w3c/json-ld-api suite (toRdf/fromRdf/compact) AND the SEPARATE pinned
+    # w3c/json-ld-framing suite (frame), runs the runner with the feature ON +
+    # --nocapture, and re-checks the printed `TOTAL toRdf|fromRdf|compact|frame
+    # <pass> …` lines as the same belt-and-braces `>= floor` gate. The runner's own
+    # `assert!(pass >= FLOOR)` is the primary gate. Honest baseline: NOT 100%
+    # conformant (remote-context / option / negative divergences are documented gaps;
+    # compact is RDF→compacted-JSON-LD via the native Compaction Algorithm gated on a
+    # lossless round-trip; frame is RDF→framed-JSON-LD via the native Framing
+    # Algorithm gated on RDF-equivalence to the normative expected output, each with
+    # its own honest below-floor divergence + skip buckets); expand/flatten are
+    # reported as not-implemented buckets and never fail the gate. Never lower the
+    # ratchet (raise TORDF_FLOOR / FROMRDF_FLOOR / COMPACT_FLOOR / FRAME_FLOOR as
+    # oxjsonld + the native writer/compactor/framer improve).
+    name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 51, compact >= 186, frame >= 61)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Fetch W3C JSON-LD 1.1 API test suite (toRdf/fromRdf/compact, pinned)
+        run: ./scripts/fetch-jsonld-tests.sh
+      - name: Fetch W3C JSON-LD 1.1 Framing test suite (frame, pinned)
+        # [OPUS-4.8] sq-oy1f.19 — framing is a SEPARATE W3C repo (w3c/json-ld-framing).
+        run: ./scripts/fetch-jsonld-framing-tests.sh
+      - name: Run JSON-LD toRdf + fromRdf + compact + frame suites (jsonld-suite feature ON)
+        # The runner asserts its own pinned floors; capture the scoreboard so the
+        # grep gate below re-checks the pass counts.
+        run: |
+          cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite -- --nocapture \
+            | tee jsonld-conformance.out
+      - name: Enforce ratchet (pass counts must not regress)
+        run: |
+          TORDF_FLOOR=413
+          FROMRDF_FLOOR=51
+          # [OPUS-4.8] sq-oy1f.16 — RAISED 163 → 186 after #978's compaction
+          # faithfulness fixes (re-measured: 186 pass). Mirror the toRdf/fromRdf
+          # belt-and-braces grep gate.
+          COMPACT_FLOOR=186
+          # [OPUS-4.8] sq-oy1f.19 — the frame ratchet (RDF → framed JSON-LD over the
+          # w3c/json-ld-framing suite; normative-answer-equivalence). Same grep shape.
+          FRAME_FLOOR=61
+          # runner prints: "TOTAL toRdf <pass> <fail> <skip> (floor F)"
+          TORDF_PASS=$(grep -E '^TOTAL toRdf ' jsonld-conformance.out | awk '{print $3}' | head -1)
+          FROMRDF_PASS=$(grep -E '^TOTAL fromRdf ' jsonld-conformance.out | awk '{print $3}' | head -1)
+          COMPACT_PASS=$(grep -E '^TOTAL compact ' jsonld-conformance.out | awk '{print $3}' | head -1)
+          FRAME_PASS=$(grep -E '^TOTAL frame ' jsonld-conformance.out | awk '{print $3}' | head -1)
+          echo "JSON-LD toRdf pass: ${TORDF_PASS:-unknown} (floor $TORDF_FLOOR); fromRdf pass: ${FROMRDF_PASS:-unknown} (floor $FROMRDF_FLOOR); compact pass: ${COMPACT_PASS:-unknown} (floor $COMPACT_FLOOR); frame pass: ${FRAME_PASS:-unknown} (floor $FRAME_FLOOR)"
+          [ -n "$TORDF_PASS" ] && [ "$TORDF_PASS" -ge "$TORDF_FLOOR" ] || { echo "::error::JSON-LD toRdf regressed below the ratchet (${TORDF_PASS:-?} < $TORDF_FLOOR)"; exit 1; }
+          [ -n "$FROMRDF_PASS" ] && [ "$FROMRDF_PASS" -ge "$FROMRDF_FLOOR" ] || { echo "::error::JSON-LD fromRdf regressed below the ratchet (${FROMRDF_PASS:-?} < $FROMRDF_FLOOR)"; exit 1; }
+          [ -n "$COMPACT_PASS" ] && [ "$COMPACT_PASS" -ge "$COMPACT_FLOOR" ] || { echo "::error::JSON-LD compact regressed below the ratchet (${COMPACT_PASS:-?} < $COMPACT_FLOOR)"; exit 1; }
+          [ -n "$FRAME_PASS" ] && [ "$FRAME_PASS" -ge "$FRAME_FLOOR" ] || { echo "::error::JSON-LD frame regressed below the ratchet (${FRAME_PASS:-?} < $FRAME_FLOOR)"; exit 1; }
+      - name: Emit consolidated conformance scoreboard
+        # Render the ONE central scoreboard index (all suites + floors across crates)
+        # into this job's step summary, so the JSON-LD job surfaces where it sits in
+        # the whole conformance picture.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: jsonld-conformance
+          path: |
+            jsonld-conformance.out
+            conformance-scoreboard.md
+
   inference-conformance:
     # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL
     # (W3C OWL WG test cases), the w3c/N3 community-group suite, and
@@ -439,9 +1086,11 @@ jobs:
     # GATES exactly like the SPARQL ratchet above: a drop below the count is a
     # conformance regression and fails CI. Never lower the ratchet.
     name: Inference conformance (ratchet >= 1967 pass+divergence)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch inference test suites (pinned)
@@ -496,18 +1145,47 @@ jobs:
     # well under the ~15-20 min budget; only the heavy sparq-vectors full set is
     # nightly. Never silently drop a crate — every exclusion is in the floor file.
     name: coverage ratchet + test-presence gate (per-crate)
-    if: github.event_name != 'schedule'
+    needs: changes
+    # [OPUS-4.8] Combine the pre-existing schedule exclusion with the rust-changed gate:
+    # the per-commit coverage tier still never runs on the nightly schedule, AND now also
+    # skips on a doc-only PR. On `push`/`merge_group` rust_changed is force-'true', so the
+    # canonical/queue coverage run is unchanged.
+    if: github.event_name != 'schedule' && needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
+      # instrumented build. cargo-llvm-cov compiles the workspace per-crate with coverage
+      # instrumentation AND writes a `.profraw` per test, on a runner that starts with only
+      # ~14 GB free on `/` — the same `No space left on device` profile sq-c76x fixed in the
+      # load-aware test lane. Same in-repo, SHA-pin-free, best-effort step (absent paths
+      # no-op). See scripts/ci-free-disk.sh.
+      - name: Free runner disk before build + instrumented test
+        run: ./scripts/ci-free-disk.sh
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # cargo-llvm-cov
+        # [OPUS-4.8] sq-tool-pin: taiki-e/install-action picks the tool from its @<tool> ref;
+        # SHA-pinning (our code-scanning=0 policy) drops that ref, so an explicit `with: tool:`
+        # is MANDATORY — without it install-action installs NOTHING and `cargo llvm-cov` ENOENTs.
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov
       - name: Test-presence gate (fast, no compile)
         run: python3 scripts/coverage-presence.py --check
+      - name: Coverage-floor MONOTONICITY gate (ratchet only rises, fast, no compile)
+        # [OPUS-4.8] sq-neq8: FAIL if THIS branch LOWERS/DROPS any crate's coverage floor
+        # vs origin/main. --check-robust only compares measured-vs-floor, so a floor
+        # DECREASE in a PR is otherwise invisible — exactly how #661 (sq-cafc) silently
+        # re-seeded sparq-serve 92->83 (caught by a human, not CI). Mirrors the conformance
+        # ratchet's only-rises enforcement. A deliberate, reviewed regression must add
+        # --allow-lower to this command in the PR (and a reviewer must approve it).
+        # Cheap (no compile) so it fails fast before the instrumented build.
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          python3 scripts/coverage-gate.py --check-monotonic --base-ref origin/main
       - name: Measure + enforce per-crate coverage (per-commit tier, max-remeasure gate)
         # [OPUS-4.8] sq-x4jy: ROBUST per-crate MAX-REMEASURE gate. Measure once, then
         # --check-robust re-measures ONLY the crates below floor (up to K=3 total
@@ -575,23 +1253,44 @@ jobs:
     # [OPUS-4.8] NIGHTLY heavy-coverage tier (sq-hbg7). Runs the FULL per-crate
     # set INCLUDING the sparq-vectors 50k recall/diskann accuracy tests that the
     # per-commit `coverage` job skips (those run >10 min for that one crate under
-    # llvm-cov instrumentation — too slow for per-commit, hence this split). The
-    # gate is the SAME floor file; --check verifies the nightly numbers still meet
-    # their floors. Triggered by the `schedule:` cron (or manual dispatch), and only
-    # when the nightly-gate says HEAD changed since the last nightly.
+    # llvm-cov instrumentation — too slow for per-commit, hence this split).
+    #
+    # [OPUS-4.8] sq-bjct: this tier ALSO merges the W3C SPARQL + inference conformance
+    # BINARIES (sparq-conformance / sparq-inference-conformance — they run as `cargo
+    # run`, NOT `cargo test`) into the sparq-core / sparq-engine llvm-cov reports
+    # (scripts/coverage.sh measure_merged, auto-enabled for tier!=per-commit). Those two
+    # crates are gated here on their HIGHER `nightly_floor` (bench/coverage-floor.json),
+    # while the per-commit `coverage` job still gates the cheaper test-only `floor`. The
+    # gate driver reads the summary's `tier` and applies nightly_floor automatically.
+    # Triggered by the `schedule:` cron (or manual dispatch), and only when the
+    # nightly-gate says HEAD changed since the last nightly.
     name: coverage (nightly, full incl. heavy vectors)
     needs: nightly-gate
     if: needs.nightly-gate.outputs.fresh == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
+      # FULL-tier instrumented build. This nightly job adds the heavy sparq-vectors 50k
+      # recall/diskann tests on top of the per-crate llvm-cov instrumentation + per-test
+      # `.profraw`, so it is the most disk-hungry coverage run — and the runner still starts
+      # with only ~14 GB free on `/` (the `No space left on device` profile sq-c76x fixed in
+      # the load-aware test lane). Same in-repo, SHA-pin-free, best-effort step (absent paths
+      # no-op). See scripts/ci-free-disk.sh.
+      - name: Free runner disk before build + instrumented test
+        run: ./scripts/ci-free-disk.sh
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # cargo-llvm-cov
+        # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
+        # install-action — the @<tool> ref is dropped by the SHA pin, so without this the
+        # tool is silently NOT installed and `cargo llvm-cov` ENOENTs (see per-commit job).
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov
       - name: Test-presence gate
         run: python3 scripts/coverage-presence.py --check
       - name: Measure + enforce per-crate coverage (FULL tier, max-remeasure gate)
@@ -615,23 +1314,150 @@ jobs:
           name: coverage-summary-nightly
           path: target/coverage/coverage-summary.json
 
+  mutants-nightly-advisory:
+    # [OPUS-4.8] NIGHTLY MUTATION-TESTING RATCHET (sq-8kt3, epic sq-qcnn). The test-QUALITY
+    # companion to the coverage ratchet: line coverage proves a line RAN, mutation testing
+    # proves a test would NOTICE if that line's behaviour changed (it catches vacuous /
+    # assertion-light tests that 100% line coverage hides). cargo-mutants rebuilds + reruns
+    # the suite ONCE PER MUTANT, so it is FAR too slow for per-commit — like coverage-nightly
+    # it is schedule + workflow_dispatch only, behind the same nightly-gate freshness check,
+    # and is NEVER on the per-PR required `ci-summary` path (that would blow the PR budget).
+    #
+    # ADVISORY (non-gating) FOR NOW — the job NAME contains the whole word "advisory", so the
+    # ci-summary aggregator (.github/workflows/ci-summary.yml `\b(advisory|informational)\b`)
+    # excludes it from the gating set: even a `failure` here cannot block a merge. This is
+    # the deliberate bootstrap idiom (mirroring how `geiger` started, and how the coverage
+    # ratchet seeded its floor before gating): we seed bench/mutants-baseline.json across the
+    # workspace over the first few nightly runs, then PROMOTE to gating by renaming the job
+    # (drop "advisory") + flipping the step to fail on a regression, once broadly seeded.
+    # Until then `continue-on-error: true` keeps the run green while it seeds.
+    #
+    # SEEDED SO FAR (honest): the crates listed in bench/mutants-baseline.json carry a real
+    # committed ceiling from an actual cargo-mutants run (sparq-canon, sparq-parse from the
+    # original local run; sparq-algos added locally under sq-ep3f). Every OTHER crate in
+    # CRATES below is measured + reported here and gets its ceiling seeded on its first
+    # nightly run (download the mutants-outcomes-nightly artifact, run
+    # scripts/mutants-gate.py --seed on each outcomes.json, commit — sq-ep3f). The
+    # baseline's absence of a crate is NOT a claim that it has zero surviving mutants — it
+    # just has not been measured yet.
+    name: mutation ratchet (cargo-mutants, advisory)
+    needs: nightly-gate
+    if: needs.nightly-gate.outputs.fresh == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: true # advisory while the baseline seeds; remove when promoted to gating
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Free runner disk before mutation build
+        # cargo-mutants builds the workspace many times (one rebuild per mutant); reclaim
+        # space first like coverage-nightly. Best-effort, no-ops on absent paths.
+        run: ./scripts/ci-free-disk.sh
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # cargo-mutants
+        with:
+          tool: cargo-mutants@25.3.1
+      - name: Run cargo-mutants per crate + ratchet against the baseline
+        # Per-crate (--package), one mutants.out dir per crate, so a slow/large crate cannot
+        # starve the others and the gate can attribute survivors precisely. The static
+        # exclusions (presence-gated / non-host crates) live in .cargo/mutants.toml. sparq-core
+        # is measured with its representative features (mmap,dict-spill) exactly like the
+        # coverage lane's PER-CRATE QUIRK. The 120-min budget is generous; per-crate failures
+        # are tolerated (continue-on-error) while seeding — the gate verdict is the --check.
+        run: |
+          set -o pipefail
+          mkdir -p target/mutants
+          # Crates measured by the mutation ratchet. Mirrors the coverage PER_COMMIT set
+          # MINUS the presence-gated / non-host crates excluded in .cargo/mutants.toml.
+          CRATES="sparq-canon sparq-parse sparq-introspect sparq-prov sparq-algos \
+                  sparq-core sparq-engine sparq-reason sparq-shacl sparq-geo sparq-text \
+                  sparq-hdt sparq-rsp sparq-sim sparq-solid sparq-nlq sparq-mpc \
+                  sparq-serve sparq-server sparq-zk sparq-zk-compose sparq-vectors \
+                  sparq-fedplan sparq-fedclient sparq-policy"
+          for c in $CRATES; do
+            echo "::group::cargo-mutants $c"
+            feat=()
+            # shellcheck disable=SC2054 # mmap,dict-spill is ONE cargo arg, not two elements
+            [ "$c" = "sparq-core" ] && feat=(--features mmap,dict-spill)
+            # Tolerate a per-crate failure while seeding (advisory). The OUTCOMES file is
+            # what the gate reads; a crate that fails to produce one is simply not checked.
+            cargo mutants -p "$c" "${feat[@]}" -o "target/mutants/$c" || \
+              echo "WARN: cargo-mutants $c did not complete cleanly (advisory)"
+            echo "::endgroup::"
+          done
+          # Collect every produced outcomes.json and run the ratchet --check. While advisory
+          # (continue-on-error) a regression here is REPORTED but does not block; promotion to
+          # gating drops continue-on-error + this job's "advisory" name token.
+          OUTCOMES=$(find target/mutants -name outcomes.json)
+          echo "outcomes files: $OUTCOMES"
+          if [ -n "$OUTCOMES" ]; then
+            # shellcheck disable=SC2086 # intentional word-split: each path is a separate arg
+            python3 scripts/mutants-gate.py --check $OUTCOMES \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no outcomes produced — nothing to check" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload mutation outcomes
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants-outcomes-nightly
+          path: target/mutants/*/mutants.out/outcomes.json
+
+  unsafe-register:
+    # [OPUS-4.8] sq-toze.6 / cert gap GX-5: GATING `unsafe`-count RATCHET. This is the
+    # promotion the `geiger` job's own comment anticipated ("Promote to a gate later
+    # only with a checked-in unsafe-count ratchet"). It counts the first-party `unsafe`
+    # sites per crate (a hermetic, build-free source scan that strips comments/strings)
+    # and FAILS if any crate rose above its committed snapshot in bench/unsafe-snapshot.json
+    # without a corresponding compliance/memsafety/unsafe-register.md update + re-seed.
+    # Unlike `geiger` this name contains NO "advisory"/"informational" token, so the
+    # ci-summary aggregator treats it as a REQUIRED gating check (sq-wjth). No cargo
+    # build / cargo-geiger needed: geiger cannot run the virtual workspace manifest and
+    # is too heavy/flaky for a gating lane (hence its `|| true`); the deterministic
+    # scan is what we actually ratchet. Python-only ⇒ seconds, no toolchain.
+    name: unsafe-register (count ratchet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Ratchet first-party unsafe count against the snapshot
+        # Fails CI if a crate's live `unsafe` count exceeds bench/unsafe-snapshot.json.
+        # The fix is always: add a row to compliance/memsafety/unsafe-register.md + a
+        # `// SAFETY:` comment in source, then `scripts/unsafe-gate.py --seed`.
+        run: python3 scripts/unsafe-gate.py --check
+
   geiger:
     # [OPUS-4.8] sq-emay: INFORMATIONAL `unsafe`-usage report (cargo-geiger). Pure
     # visibility — surfaces the ~40 unsafe sites concentrated in sparq-core (mmap, the
     # zero-copy dictionary, SIMD) so a PR that ADDS unsafe is visible in the run summary
     # without blocking. Non-gating by design: every step is `continue-on-error: true`
     # (cargo-geiger fails the run on some dependency-graph shapes, and we never want this
-    # report to break CI). Promote to a gate later only with a checked-in unsafe-count
-    # ratchet (mirroring the coverage/conformance idiom) — out of scope here.
+    # report to break CI).
+    #
+    # [OPUS-4.8] sq-4plh: the "promote to a gate later only with a checked-in unsafe-count
+    # ratchet (mirroring the coverage/conformance idiom)" follow-up this comment used to
+    # anticipate IS NOW DONE — see the `unsafe-register (count ratchet)` job above
+    # (sq-toze.6 / cert gap GX-5, PR #217): it ratchets the first-party `unsafe` count per
+    # crate against the checked-in floor in `bench/unsafe-snapshot.json` (the
+    # `bench/coverage-floor.json` analogue) and FAILS a PR that adds an unsafe site without
+    # a `compliance/memsafety/unsafe-register.md` row + re-seed. That job — not this one —
+    # is the gate; this `geiger` job stays informational (cargo-geiger is too heavy/flaky
+    # for a per-PR gating lane), so the two are complementary: GATE via the source-scan
+    # ratchet, VISIBILITY via cargo-geiger.
     name: unsafe report (cargo-geiger, informational)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-geiger
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: cargo-geiger
         continue-on-error: true
@@ -662,11 +1488,18 @@ jobs:
     # script against the tag's image before push. Builds with the SAME Dockerfile + buildx the
     # release job uses, so the artifact under test matches the one that ships.
     name: docker image smoke (run + curl /health + query)
+    # [OPUS-4.8] The image bakes the compiled sparq-server binary, so a Rust change can
+    # change what ships; gate on rust_changed. (A pure Dockerfile/entrypoint change also
+    # touches no `*.rs`, but the release.yml re-runs this script against the tag image
+    # before push, so a doc-only PR skipping it here is safe — the canonical push to main
+    # force-runs it, and any Dockerfile-affecting PR should accompany a build change.)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.docker_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
       - name: Build image (load into the local daemon)
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0

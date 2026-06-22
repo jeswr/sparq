@@ -63,7 +63,10 @@ pub struct TimeTravelConfig {
 
 impl Default for TimeTravelConfig {
     fn default() -> Self {
-        TimeTravelConfig { max_generations: 16, max_age: None }
+        TimeTravelConfig {
+            max_generations: 16,
+            max_age: None,
+        }
     }
 }
 
@@ -87,7 +90,11 @@ pub struct RingConfig {
 
 impl Default for RingConfig {
     fn default() -> Self {
-        RingConfig { retain: DEFAULT_RETAIN, time_travel: None, clock: SystemTime::now }
+        RingConfig {
+            retain: DEFAULT_RETAIN,
+            time_travel: None,
+            clock: SystemTime::now,
+        }
     }
 }
 
@@ -282,7 +289,8 @@ impl<S> GenerationRing<S> {
                         // A clock that stepped backwards makes the front look
                         // future-published; keep it (conservative, never lies
                         // about retention it still holds).
-                        now.duration_since(front.published_at).map_or(true, |age| age <= max)
+                        now.duration_since(front.published_at)
+                            .map_or(true, |age| age <= max)
                     })
             });
             if keep_for_time_travel {
@@ -322,7 +330,12 @@ impl<S> GenerationRing<S> {
     /// generation (O(retained) scan — robust to non-monotonic clocks).
     pub fn as_of(&self, t: SystemTime) -> Option<Arc<Generation<S>>> {
         let inner = self.inner.lock().expect("generation ring poisoned");
-        inner.retained.iter().rev().find(|g| g.published_at <= t).cloned()
+        inner
+            .retained
+            .iter()
+            .rev()
+            .find(|g| g.published_at <= t)
+            .cloned()
     }
 
     /// How many generations are still alive anywhere — retained by the ring *or*

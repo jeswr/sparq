@@ -17,7 +17,10 @@ struct MockSnapshot {
 impl MockSnapshot {
     fn new(value: u64, live: &Arc<AtomicUsize>) -> Self {
         live.fetch_add(1, Ordering::SeqCst);
-        MockSnapshot { value, live: live.clone() }
+        MockSnapshot {
+            value,
+            live: live.clone(),
+        }
     }
 }
 
@@ -46,7 +49,13 @@ fn initial_state_is_generation_zero() {
 #[test]
 fn readers_pin_old_generations_while_writer_publishes_past() {
     let live = Arc::new(AtomicUsize::new(0));
-    let ring = GenerationRing::with_config(MockSnapshot::new(0, &live), RingConfig { retain: 2, ..RingConfig::default() });
+    let ring = GenerationRing::with_config(
+        MockSnapshot::new(0, &live),
+        RingConfig {
+            retain: 2,
+            ..RingConfig::default()
+        },
+    );
 
     // A reader pins generation 0 (e.g. a long-lived stream).
     let pinned = ring.current();
@@ -76,13 +85,23 @@ fn readers_pin_old_generations_while_writer_publishes_past() {
 #[test]
 fn retention_bound_drops_ring_references_but_not_reader_pins() {
     let live = Arc::new(AtomicUsize::new(0));
-    let ring = GenerationRing::with_config(MockSnapshot::new(0, &live), RingConfig { retain: 3, ..RingConfig::default() });
+    let ring = GenerationRing::with_config(
+        MockSnapshot::new(0, &live),
+        RingConfig {
+            retain: 3,
+            ..RingConfig::default()
+        },
+    );
 
     // No readers: beyond current + K, forgotten generations are freed promptly.
     for i in 1..=10u64 {
         ring.publish(MockSnapshot::new(i, &live), std::iter::empty());
     }
-    assert_eq!(live.load(Ordering::SeqCst), 4, "ring retains current + K = 4");
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        4,
+        "ring retains current + K = 4"
+    );
     assert_eq!(ring.live_generations(), 4);
     assert_eq!(ring.oldest_retained(), 7);
 
@@ -92,7 +111,11 @@ fn retention_bound_drops_ring_references_but_not_reader_pins() {
     for i in 11..=20u64 {
         ring.publish(MockSnapshot::new(i, &live), std::iter::empty());
     }
-    assert_eq!(ring.oldest_retained(), 17, "ring's own refs moved past the pin");
+    assert_eq!(
+        ring.oldest_retained(),
+        17,
+        "ring's own refs moved past the pin"
+    );
     // current+K from the ring, plus the externally pinned gen 10.
     assert_eq!(live.load(Ordering::SeqCst), 5);
     assert_eq!(ring.live_generations(), 5);
@@ -109,7 +132,11 @@ fn retention_bound_drops_ring_references_but_not_reader_pins() {
 fn epoch_bumps_only_for_touched_pods() {
     let live = Arc::new(AtomicUsize::new(0));
     let ring = GenerationRing::new(MockSnapshot::new(0, &live));
-    let (a, b, c) = (PodId::from("pod:a"), PodId::from("pod:b"), PodId::from("pod:c"));
+    let (a, b, c) = (
+        PodId::from("pod:a"),
+        PodId::from("pod:b"),
+        PodId::from("pod:c"),
+    );
 
     let g1 = ring.publish(MockSnapshot::new(1, &live), pods(&["pod:a", "pod:b"]));
     assert_eq!(g1.epochs().epoch(&a), 1);
@@ -118,7 +145,11 @@ fn epoch_bumps_only_for_touched_pods() {
     assert_eq!(g1.epochs().len(), 2);
 
     let g2 = ring.publish(MockSnapshot::new(2, &live), pods(&["pod:b"]));
-    assert_eq!(g2.epochs().epoch(&a), 1, "untouched pod's epoch carried unchanged");
+    assert_eq!(
+        g2.epochs().epoch(&a),
+        1,
+        "untouched pod's epoch carried unchanged"
+    );
     assert_eq!(g2.epochs().epoch(&b), 2);
     assert_eq!(g2.epochs().epoch(&c), 0);
 
@@ -126,7 +157,10 @@ fn epoch_bumps_only_for_touched_pods() {
     assert_eq!(g1.epochs().epoch(&b), 1);
 
     // Duplicate mentions within one publish bump once.
-    let g3 = ring.publish(MockSnapshot::new(3, &live), pods(&["pod:c", "pod:c", "pod:c"]));
+    let g3 = ring.publish(
+        MockSnapshot::new(3, &live),
+        pods(&["pod:c", "pod:c", "pod:c"]),
+    );
     assert_eq!(g3.epochs().epoch(&c), 1);
     assert_eq!(g3.epochs().epoch(&a), 1);
     assert_eq!(g3.epochs().epoch(&b), 2);
@@ -148,7 +182,13 @@ fn publish_with_no_touched_pods_keeps_epochs() {
 #[test]
 fn retain_zero_keeps_only_current() {
     let live = Arc::new(AtomicUsize::new(0));
-    let ring = GenerationRing::with_config(MockSnapshot::new(0, &live), RingConfig { retain: 0, ..RingConfig::default() });
+    let ring = GenerationRing::with_config(
+        MockSnapshot::new(0, &live),
+        RingConfig {
+            retain: 0,
+            ..RingConfig::default()
+        },
+    );
     for i in 1..=5u64 {
         ring.publish(MockSnapshot::new(i, &live), std::iter::empty());
     }

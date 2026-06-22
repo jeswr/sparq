@@ -526,3 +526,859 @@ pub(crate) fn select_validate(
         }));
     }
 }
+
+// =============================================================================
+// [OPUS-4.8] 🤖 SPARQ agent — sq-qcnn.1 (epic sq-qcnn test-quality program).
+//
+// Correctness coverage for the DARK branches of the SHACL-SPARQL pre-binding
+// (`sh:sparql` §5.2 and the §6 component validators): the deep-algebra arms of
+// `push_values_down` (Group / Slice / Distinct / Reduced / OrderBy / Minus) and
+// the fail-closed error paths of `ask_violates` / `select_validate` /
+// `PreparedSparql::evaluate` / `pre_bind_ask` / `PreparedValidator::build`.
+//
+// Two complementary layers:
+//   * STRUCTURAL — drive `push_values_down` directly over a hand-shaped
+//     `Modifier { Filter { Bgp } }` algebra and assert the load-bearing
+//     invariant: the pre-binding VALUES table is JOINED at the deepest leaf
+//     (BELOW the modifier and the FILTER), with the modifier wrapper preserved
+//     unchanged. This is the real production recursion (not a mock).
+//   * SEMANTIC — run a real `sh:select` / `sh:ask` validator whose WHERE wraps
+//     the FILTER in each solution-modifier shape against real data, and assert
+//     the conforms/violation count derived BY HAND from SHACL §5.2 / §6.3 (the
+//     pre-bound `$this` / `$value` / `$param` stays in scope through the
+//     modifier, so the constraint evaluates correctly).
+//
+// Test-only: no behaviour change. (The provably-equivalent `func.rs:318` mutant
+// noted on sq-qcnn.1 is in a different module and is deliberately not chased.)
+// =============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxrdf::{Literal, NamedNode};
+    use spargebra::algebra::GraphPattern;
+    use sparq_core::Graph;
+
+    /// Parse a SELECT and return its top-level WHERE pattern.
+    fn select_pattern(q: &str) -> GraphPattern {
+        match SparqlParser::new().parse_query(q).unwrap() {
+            Query::Select { pattern, .. } => pattern,
+            other => panic!("expected SELECT, got {:?}", other),
+        }
+    }
+
+    /// A `Filter { Bgp }` leaf to nest under a solution modifier — exactly the
+    /// shape an authored `{ ?this :p ?v . FILTER(?v > 0) }` produces.
+    fn filter_bgp() -> GraphPattern {
+        // `SELECT * { ?this :p ?v . FILTER(?v > 0) }` => Project { Filter { Bgp } };
+        // unwrap the Project to get the inner Filter { Bgp }.
+        match select_pattern("SELECT * WHERE { ?this <http://x/p> ?v . FILTER(?v > 0) }") {
+            GraphPattern::Project { inner, .. } => *inner,
+            other => other,
+        }
+    }
+
+    /// A single-row VALUES table binding `?this` to an IRI (the pre-binding the
+    /// production code injects).
+    fn values_this() -> GraphPattern {
+        let term = Term::NamedNode(NamedNode::new("http://example.org/n").unwrap());
+        pre_bind_values(&[("this", &term)]).unwrap()
+    }
+
+    /// Assert that `pushed` is `Wrapper -> … -> Filter { Join { Values, Bgp } }`:
+    /// the modifier wrapper(s) are preserved above, and the VALUES table is joined
+    /// at the deepest leaf (BELOW the FILTER). Walks past the modifier shells the
+    /// caller named (`wrappers`), then a Filter, then the Join.
+    fn assert_values_at_leaf(pushed: &GraphPattern, descend_filter: bool) {
+        // Descend any chain down to the Join that wraps Values + the BGP leaf.
+        fn find_values_join(p: &GraphPattern) -> bool {
+            match p {
+                GraphPattern::Join { left, right } => {
+                    matches!(**left, GraphPattern::Values { .. })
+                        && matches!(**right, GraphPattern::Bgp { .. })
+                        || find_values_join(left)
+                        || find_values_join(right)
+                }
+                GraphPattern::Filter { inner, .. }
+                | GraphPattern::Extend { inner, .. }
+                | GraphPattern::OrderBy { inner, .. }
+                | GraphPattern::Distinct { inner }
+                | GraphPattern::Reduced { inner }
+                | GraphPattern::Slice { inner, .. }
+                | GraphPattern::Group { inner, .. } => find_values_join(inner),
+                GraphPattern::Minus { left, .. } | GraphPattern::LeftJoin { left, .. } => {
+                    find_values_join(left)
+                }
+                _ => false,
+            }
+        }
+        assert!(
+            find_values_join(pushed),
+            "VALUES table not joined at the deepest leaf: {:?}",
+            pushed
+        );
+        if descend_filter {
+            // The FILTER must STILL wrap the join (the pre-bound vars are in scope
+            // inside it) — i.e. there is a Filter somewhere above the Values join.
+            fn has_filter_above_join(p: &GraphPattern) -> bool {
+                match p {
+                    GraphPattern::Filter { inner, .. } => {
+                        find_values_join_inner(inner) || has_filter_above_join(inner)
+                    }
+                    GraphPattern::Extend { inner, .. }
+                    | GraphPattern::OrderBy { inner, .. }
+                    | GraphPattern::Distinct { inner }
+                    | GraphPattern::Reduced { inner }
+                    | GraphPattern::Slice { inner, .. }
+                    | GraphPattern::Group { inner, .. } => has_filter_above_join(inner),
+                    GraphPattern::Minus { left, .. } | GraphPattern::LeftJoin { left, .. } => {
+                        has_filter_above_join(left)
+                    }
+                    _ => false,
+                }
+            }
+            fn find_values_join_inner(p: &GraphPattern) -> bool {
+                match p {
+                    GraphPattern::Join { left, .. } => {
+                        matches!(**left, GraphPattern::Values { .. })
+                    }
+                    GraphPattern::Filter { inner, .. } => find_values_join_inner(inner),
+                    _ => false,
+                }
+            }
+            assert!(
+                has_filter_above_join(pushed),
+                "FILTER no longer wraps the pre-binding join: {:?}",
+                pushed
+            );
+        }
+    }
+
+    // --- push_values_down: deep-algebra arms (structural invariant) ----------
+
+    #[test]
+    fn push_values_down_through_group() {
+        let inner = GraphPattern::Group {
+            inner: Box::new(filter_bgp()),
+            variables: vec![Variable::new_unchecked("this")],
+            aggregates: vec![],
+        };
+        let out = push_values_down(&inner, &values_this());
+        // Group preserved on top; VALUES joined below the FILTER at the BGP leaf.
+        assert!(matches!(out, GraphPattern::Group { .. }), "{:?}", out);
+        assert_values_at_leaf(&out, true);
+    }
+
+    #[test]
+    fn push_values_down_through_slice() {
+        let inner = GraphPattern::Slice {
+            inner: Box::new(filter_bgp()),
+            start: 1,
+            length: Some(5),
+        };
+        let out = push_values_down(&inner, &values_this());
+        // The Slice (LIMIT/OFFSET) MUST stay above the pre-binding join.
+        match &out {
+            GraphPattern::Slice { start, length, .. } => {
+                assert_eq!(*start, 1);
+                assert_eq!(*length, Some(5));
+            }
+            other => panic!("expected Slice, got {:?}", other),
+        }
+        assert_values_at_leaf(&out, true);
+    }
+
+    #[test]
+    fn push_values_down_through_distinct() {
+        let inner = GraphPattern::Distinct {
+            inner: Box::new(filter_bgp()),
+        };
+        let out = push_values_down(&inner, &values_this());
+        assert!(matches!(out, GraphPattern::Distinct { .. }), "{:?}", out);
+        assert_values_at_leaf(&out, true);
+    }
+
+    #[test]
+    fn push_values_down_through_reduced() {
+        let inner = GraphPattern::Reduced {
+            inner: Box::new(filter_bgp()),
+        };
+        let out = push_values_down(&inner, &values_this());
+        assert!(matches!(out, GraphPattern::Reduced { .. }), "{:?}", out);
+        assert_values_at_leaf(&out, true);
+    }
+
+    #[test]
+    fn push_values_down_through_order_by() {
+        let inner = match select_pattern(
+            "SELECT * WHERE { ?this <http://x/p> ?v . FILTER(?v > 0) } ORDER BY ?v",
+        ) {
+            // `Project { OrderBy { Filter { Bgp } } }` => take the OrderBy inner.
+            GraphPattern::Project { inner, .. } => *inner,
+            other => other,
+        };
+        assert!(matches!(inner, GraphPattern::OrderBy { .. }));
+        let out = push_values_down(&inner, &values_this());
+        assert!(matches!(out, GraphPattern::OrderBy { .. }), "{:?}", out);
+        assert_values_at_leaf(&out, true);
+    }
+
+    #[test]
+    fn push_values_down_through_minus_binds_left_only() {
+        // `Minus { left, right }` => VALUES joins into the (required) LEFT only;
+        // the RIGHT (the excluded set) is left untouched (SHACL §6.3: pre-bind the
+        // value everywhere it occurs in the REQUIRED pattern).
+        let inner = match select_pattern(
+            "SELECT * WHERE { ?this <http://x/p> ?v MINUS { ?this <http://x/q> ?w } }",
+        ) {
+            GraphPattern::Project { inner, .. } => *inner,
+            other => other,
+        };
+        assert!(matches!(inner, GraphPattern::Minus { .. }));
+        let out = push_values_down(&inner, &values_this());
+        match &out {
+            GraphPattern::Minus { left, right } => {
+                // Left now joins the VALUES table; right is unchanged (still a Bgp).
+                assert!(
+                    matches!(
+                        &**left,
+                        GraphPattern::Join { left: jl, .. } if matches!(**jl, GraphPattern::Values { .. })
+                    ),
+                    "MINUS left should join VALUES, got {:?}",
+                    left
+                );
+                assert!(
+                    matches!(&**right, GraphPattern::Bgp { .. }),
+                    "MINUS right must be untouched, got {:?}",
+                    right
+                );
+            }
+            other => panic!("expected Minus, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn push_values_down_left_join_binds_left_only() {
+        // OPTIONAL => LeftJoin; the pre-binding joins the required LEFT only.
+        let inner = match select_pattern(
+            "SELECT * WHERE { ?this <http://x/p> ?v OPTIONAL { ?this <http://x/q> ?w } }",
+        ) {
+            GraphPattern::Project { inner, .. } => *inner,
+            other => other,
+        };
+        assert!(matches!(inner, GraphPattern::LeftJoin { .. }));
+        let out = push_values_down(&inner, &values_this());
+        match &out {
+            GraphPattern::LeftJoin { left, .. } => assert!(
+                matches!(
+                    &**left,
+                    GraphPattern::Join { left: jl, .. } if matches!(**jl, GraphPattern::Values { .. })
+                ),
+                "LeftJoin left should join VALUES, got {:?}",
+                left
+            ),
+            other => panic!("expected LeftJoin, got {:?}", other),
+        }
+    }
+
+    // --- inject_values: solution-modifier descent (Reduced/Slice/OrderBy) -----
+
+    #[test]
+    fn inject_values_descends_distinct_reduced_slice_orderby() {
+        let this = Term::NamedNode(NamedNode::new("http://example.org/n").unwrap());
+        // Each top-level modifier above the Project is descended by inject_values
+        // (the LIMIT/DISTINCT/ORDER BY apply to the PRE-BOUND results), then the
+        // bound var is added to the projection.
+        for q in [
+            "SELECT DISTINCT ?this WHERE { ?this <http://x/p> ?v . FILTER(?v > 0) }",
+            "SELECT REDUCED ?this WHERE { ?this <http://x/p> ?v . FILTER(?v > 0) }",
+            "SELECT ?this WHERE { ?this <http://x/p> ?v . FILTER(?v > 0) } ORDER BY ?v LIMIT 3",
+        ] {
+            let query = SparqlParser::new().parse_query(q).unwrap();
+            let bound = pre_bind_select(&query, &[("this", &this)]).unwrap();
+            // The pre-bound `?this` must surface in the projection (so a consumer
+            // reading it back gets the focus node).
+            let Query::Select { pattern, .. } = &bound else {
+                unreachable!()
+            };
+            assert!(
+                projection_contains(pattern, "this"),
+                "?this not projected for `{}`: {:?}",
+                q,
+                pattern
+            );
+        }
+    }
+
+    /// Does some Project under `p` list a variable named `name`?
+    fn projection_contains(p: &GraphPattern, name: &str) -> bool {
+        match p {
+            GraphPattern::Project { inner, variables } => {
+                variables.iter().any(|v| v.as_str() == name) || projection_contains(inner, name)
+            }
+            GraphPattern::Distinct { inner }
+            | GraphPattern::Reduced { inner }
+            | GraphPattern::Slice { inner, .. }
+            | GraphPattern::OrderBy { inner, .. }
+            | GraphPattern::Filter { inner, .. }
+            | GraphPattern::Group { inner, .. }
+            | GraphPattern::Extend { inner, .. } => projection_contains(inner, name),
+            GraphPattern::Join { left, right } | GraphPattern::Minus { left, right } => {
+                projection_contains(left, name) || projection_contains(right, name)
+            }
+            _ => false,
+        }
+    }
+
+    // --- pre_bind_ask: descend the ASK Project, bind through a modifier --------
+
+    #[test]
+    fn pre_bind_ask_descends_into_project_and_modifier() {
+        let value = Term::Literal(Literal::new_simple_literal("abcdef"));
+        // `ASK { FILTER(STRLEN(STR($value)) <= 3) }` => Project { Filter { Bgp } }.
+        let q = SparqlParser::new()
+            .parse_query("ASK { FILTER (STRLEN(STR(?value)) <= 3) }")
+            .unwrap();
+        let bound = pre_bind_ask(&q, &[("value", &value)]).unwrap();
+        let Query::Ask { pattern, .. } = &bound else {
+            panic!("expected ASK")
+        };
+        // The outer Project shell is preserved; VALUES joined below the FILTER.
+        match pattern {
+            GraphPattern::Project { inner, .. } => assert_values_at_leaf(inner, true),
+            other => panic!("expected Project shell, got {:?}", other),
+        }
+    }
+
+    // --- semantic: a real validator whose WHERE uses each modifier ------------
+
+    fn graph(ttl: &str) -> Graph {
+        Graph::load_str(ttl, "turtle").unwrap()
+    }
+
+    const DATA: &str = r#"
+        @prefix ex: <http://example.org/> .
+        ex:alice ex:age 30 ; ex:tag "a", "b" .
+        ex:bob   ex:age -1 ; ex:tag "c" .
+    "#;
+
+    /// SELECT-component validator: run per focus, each solution is a violation.
+    /// The WHERE shape (Group/OrderBy/Slice/Minus over the FILTER) must NOT change
+    /// the answer — the pre-bound `$this` stays in scope through the modifier.
+    fn select_violations(select: &str, focus_iri: &str) -> usize {
+        let data = graph(DATA);
+        let query = SparqlParser::new().parse_query(select).unwrap();
+        let validator = match query {
+            Query::Select { .. } => query,
+            _ => panic!("expected SELECT"),
+        };
+        let focus = Term::NamedNode(NamedNode::new(focus_iri).unwrap());
+        let bindings: &[Binding] = &[("this", &focus)];
+        let mut out = Vec::new();
+        select_validate(
+            &validator,
+            &data,
+            &focus,
+            bindings,
+            None,
+            |f: ComponentResultFields| ValidationResult {
+                focus_node: f.focus,
+                path: f.path,
+                value: f.value,
+                source_shape: Term::NamedNode(NamedNode::new("http://example.org/S").unwrap()),
+                source_component: "http://www.w3.org/ns/shacl#SPARQLConstraintComponent"
+                    .to_string(),
+                severity: "http://www.w3.org/ns/shacl#Violation".to_string(),
+                messages: vec![],
+                default_message: f.default_message,
+                details: vec![],
+            },
+            &mut out,
+        );
+        out.len()
+    }
+
+    #[test]
+    fn select_validate_group_pre_binds_this() {
+        // Per focus, GROUP BY $this with HAVING(COUNT > 1): bob has 1 tag, alice 2.
+        // The validator flags a focus with MORE than one ex:tag.
+        let q = "SELECT ?this WHERE { ?this <http://example.org/tag> ?t } \
+                 GROUP BY ?this HAVING (COUNT(?t) > 1)";
+        // alice (2 tags) -> 1 solution -> 1 violation.
+        assert_eq!(select_violations(q, "http://example.org/alice"), 1);
+        // bob (1 tag) -> 0 solutions -> conforms.
+        assert_eq!(select_violations(q, "http://example.org/bob"), 0);
+    }
+
+    #[test]
+    fn select_validate_order_by_slice_pre_binds_this() {
+        // ORDER BY + LIMIT over the pre-binding: alice has age 30 (>0 -> conforms,
+        // FILTER keeps only negatives), bob has age -1 -> 1 violation.
+        let q = "SELECT ?this ?value WHERE { ?this <http://example.org/age> ?value . \
+                 FILTER(?value < 0) } ORDER BY ?value LIMIT 10";
+        assert_eq!(select_violations(q, "http://example.org/bob"), 1);
+        assert_eq!(select_violations(q, "http://example.org/alice"), 0);
+    }
+
+    #[test]
+    fn select_validate_minus_pre_binds_this() {
+        // MINUS over the pre-binding: flag a focus that has an ex:age but is NOT
+        // excluded by the MINUS (here MINUS removes nothing matching). bob age -1
+        // present -> the pattern { ?this :age ?value } MINUS {} yields a solution.
+        let q = "SELECT ?this ?value WHERE { ?this <http://example.org/age> ?value . \
+                 FILTER(?value < 0) MINUS { ?this <http://example.org/never> ?z } }";
+        assert_eq!(select_violations(q, "http://example.org/bob"), 1);
+        assert_eq!(select_violations(q, "http://example.org/alice"), 0);
+    }
+
+    /// ASK-component validator: run per value node; ASK=false (constraint not
+    /// satisfied) is a violation.
+    fn ask_is_violation(ask: &str, value: &Term) -> bool {
+        let data = graph(DATA);
+        let query = SparqlParser::new().parse_query(ask).unwrap();
+        let this = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
+        ask_violates(&query, &data, &[("this", &this), ("value", value)])
+    }
+
+    #[test]
+    fn ask_violates_filter_pre_binds_value() {
+        // ASK { FILTER(STRLEN(STR($value)) <= 3) }: a 6-char value VIOLATES
+        // (ASK=false); a 2-char value conforms (ASK=true).
+        let q = "ASK { FILTER (STRLEN(STR($value)) <= 3) }";
+        let long = Term::Literal(Literal::new_simple_literal("abcdef"));
+        let short = Term::Literal(Literal::new_simple_literal("ab"));
+        assert!(ask_is_violation(q, &long), "6-char value should violate");
+        assert!(!ask_is_violation(q, &short), "2-char value should conform");
+    }
+
+    // --- ERROR / fail-closed paths -------------------------------------------
+
+    #[test]
+    fn prepared_validator_build_rejects_form_mismatch() {
+        // is_ask=true but the query is a SELECT -> None (ill-formed -> skipped).
+        assert!(PreparedValidator::build("SELECT * WHERE { ?s ?p ?o }", true).is_none());
+        // is_ask=false but the query is an ASK -> None.
+        assert!(PreparedValidator::build("ASK { ?s ?p ?o }", false).is_none());
+        // A CONSTRUCT (neither ASK nor SELECT) -> None for both flags.
+        let construct = "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }";
+        assert!(PreparedValidator::build(construct, true).is_none());
+        assert!(PreparedValidator::build(construct, false).is_none());
+        // Unparsable -> None.
+        assert!(PreparedValidator::build("NOT A QUERY", true).is_none());
+        // Well-formed matches build OK.
+        assert!(matches!(
+            PreparedValidator::build("ASK { ?s ?p ?o }", true),
+            Some(PreparedValidator::Ask(_))
+        ));
+        assert!(matches!(
+            PreparedValidator::build("SELECT * WHERE { ?s ?p ?o }", false),
+            Some(PreparedValidator::Select(_))
+        ));
+    }
+
+    #[test]
+    fn prepared_sparql_build_rejects_non_select() {
+        // A non-SELECT sh:select is ill-formed -> None.
+        let ask = SparqlConstraint {
+            select: "ASK { ?s ?p ?o }".to_string(),
+            prefixes: String::new(),
+            message: None,
+            deactivated: false,
+            prepared: None,
+        };
+        assert!(PreparedSparql::build(&ask).is_none());
+        // Unparsable -> None.
+        let bad = SparqlConstraint {
+            select: "SELECT ??? garbage".to_string(),
+            prefixes: String::new(),
+            message: None,
+            deactivated: false,
+            prepared: None,
+        };
+        assert!(PreparedSparql::build(&bad).is_none());
+        // Valid SELECT -> Some.
+        let ok = SparqlConstraint {
+            select: "SELECT ?this WHERE { ?this ?p ?o }".to_string(),
+            prefixes: String::new(),
+            message: None,
+            deactivated: false,
+            prepared: None,
+        };
+        assert!(PreparedSparql::build(&ok).is_some());
+    }
+
+    #[test]
+    fn pre_bind_select_rejects_non_select_query() {
+        let this = Term::NamedNode(NamedNode::new("http://example.org/n").unwrap());
+        let ask = SparqlParser::new().parse_query("ASK { ?s ?p ?o }").unwrap();
+        assert!(pre_bind_select(&ask, &[("this", &this)]).is_none());
+    }
+
+    #[test]
+    fn pre_bind_ask_rejects_non_ask_query() {
+        let this = Term::NamedNode(NamedNode::new("http://example.org/n").unwrap());
+        let sel = SparqlParser::new()
+            .parse_query("SELECT * WHERE { ?s ?p ?o }")
+            .unwrap();
+        assert!(pre_bind_ask(&sel, &[("this", &this)]).is_none());
+    }
+
+    #[test]
+    fn pre_bind_rejects_inexpressible_blank_node() {
+        // A blank-node focus cannot be written as a VALUES ground term -> None
+        // (the constraint is skipped rather than mis-evaluated, SHACL-leniently).
+        let bnode = Term::BlankNode(oxrdf::BlankNode::new("b0").unwrap());
+        let sel = SparqlParser::new()
+            .parse_query("SELECT ?this WHERE { ?this ?p ?o }")
+            .unwrap();
+        assert!(pre_bind_select(&sel, &[("this", &bnode)]).is_none());
+        let ask = SparqlParser::new().parse_query("ASK { ?s ?p ?o }").unwrap();
+        assert!(pre_bind_ask(&ask, &[("this", &bnode)]).is_none());
+        // term_to_ground itself returns None for a blank node.
+        assert!(term_to_ground(&bnode).is_none());
+    }
+
+    #[test]
+    fn ask_violates_fail_closed_on_inexpressible_value() {
+        // ask_violates pre-binds a blank-node value -> pre_bind_ask None ->
+        // returns false (conforms, fail-closed; never panics validate()).
+        let data = graph(DATA);
+        let bnode = Term::BlankNode(oxrdf::BlankNode::new("b1").unwrap());
+        let q = SparqlParser::new()
+            .parse_query("ASK { FILTER (STRLEN(STR($value)) <= 3) }")
+            .unwrap();
+        assert!(!ask_violates(&q, &data, &[("value", &bnode)]));
+    }
+
+    #[test]
+    fn select_validate_fail_closed_on_inexpressible_focus() {
+        // A blank-node focus -> pre_bind_select None -> no results pushed.
+        let data = graph(DATA);
+        let bnode = Term::BlankNode(oxrdf::BlankNode::new("b2").unwrap());
+        let q = SparqlParser::new()
+            .parse_query("SELECT ?this WHERE { ?this ?p ?o }")
+            .unwrap();
+        let mut out = Vec::new();
+        select_validate(
+            &q,
+            &data,
+            &bnode,
+            &[("this", &bnode)],
+            None,
+            |_f: ComponentResultFields| unreachable!("no solutions for an inexpressible focus"),
+            &mut out,
+        );
+        assert!(out.is_empty());
+    }
+
+    // --- term_lexical / substitute helper edges -------------------------------
+
+    #[test]
+    fn term_lexical_covers_each_term_kind() {
+        assert_eq!(
+            term_lexical(Term::NamedNode(NamedNode::new("http://x/n").unwrap())),
+            "http://x/n"
+        );
+        assert_eq!(
+            term_lexical(Term::Literal(Literal::new_simple_literal("hi"))),
+            "hi"
+        );
+        assert_eq!(
+            term_lexical(Term::BlankNode(oxrdf::BlankNode::new("b").unwrap())),
+            "_:b"
+        );
+    }
+
+    #[test]
+    fn substitute_keeps_unknown_and_unclosed_braces_verbatim() {
+        let vars = vec!["this".to_string()];
+        let row = vec![Some(Term::NamedNode(NamedNode::new("http://x/n").unwrap()))];
+        // Known {?this} substitutes; unknown {?missing} and a non-var {literal}
+        // and an unclosed `{` are kept verbatim.
+        assert_eq!(
+            substitute("a {?this} b {?missing} c {plain} d {", &vars, &row),
+            "a http://x/n b {?missing} c {plain} d {"
+        );
+        // No placeholders at all -> identity.
+        assert_eq!(substitute("no braces here", &vars, &row), "no braces here");
+    }
+
+    #[test]
+    fn substitute_bindings_over_pre_bound_terms() {
+        let value = Term::Literal(Literal::new_simple_literal("xyz"));
+        let out = substitute_bindings("len of {$value} too big", &[("value", &value)]);
+        assert_eq!(out, "len of xyz too big");
+    }
+
+    // --- runtime-query-error fail-closed paths --------------------------------
+    //
+    // A `SERVICE` clause parses fine but the local-only executor refuses it at
+    // RUNTIME (`Err("unsupported graph pattern: Service …")`). The three
+    // SHACL-SPARQL entry points must treat that as conforming / no-solutions
+    // (lenient — a query error NEVER panics validate(); SHACL §5.2 / §6.3).
+
+    #[test]
+    fn ask_violates_fail_closed_on_runtime_query_error() {
+        let data = graph(DATA);
+        let this = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
+        let q = SparqlParser::new()
+            .parse_query("ASK { SERVICE <http://example.org/remote> { ?s ?p ?o } }")
+            .unwrap();
+        // ask_prepared returns Err -> ask_violates returns false (conforms).
+        assert!(!ask_violates(&q, &data, &[("this", &this)]));
+    }
+
+    #[test]
+    fn select_validate_fail_closed_on_runtime_query_error() {
+        let data = graph(DATA);
+        let focus = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
+        let q = SparqlParser::new()
+            .parse_query(
+                "SELECT ?this WHERE { SERVICE <http://example.org/remote> { ?this ?p ?o } }",
+            )
+            .unwrap();
+        let mut out = Vec::new();
+        select_validate(
+            &q,
+            &data,
+            &focus,
+            &[("this", &focus)],
+            None,
+            |_f: ComponentResultFields| unreachable!("a runtime query error yields no solutions"),
+            &mut out,
+        );
+        // query_prepared returns Err -> no results pushed.
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn prepared_sparql_evaluate_fail_closed_on_runtime_query_error() {
+        // The §5.2 `sh:sparql` path: a SERVICE in the sh:select errors at runtime,
+        // so PreparedSparql::evaluate pushes no results (conforms).
+        let data = graph(DATA);
+        let focus = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
+        let constraint = SparqlConstraint {
+            select: "SELECT ?this WHERE { SERVICE <http://example.org/remote> { ?this ?p ?o } }"
+                .to_string(),
+            prefixes: String::new(),
+            message: None,
+            deactivated: false,
+            prepared: None,
+        };
+        let prepared = PreparedSparql::build(&constraint).expect("a SELECT with SERVICE parses");
+        let mut out = Vec::new();
+        prepared.evaluate(
+            &data,
+            &focus,
+            &constraint,
+            |_f: ResultFields| unreachable!("a runtime query error yields no solutions"),
+            &mut out,
+        );
+        assert!(out.is_empty());
+    }
+
+    // --- PreparedSparql::evaluate happy path: ?value / ?path / {?var} mapping --
+    //
+    // Drives the §5.2 solution -> ValidationResult field mapping (the ?value /
+    // ?path / {?var}-message branches) directly through the public evaluate().
+
+    #[test]
+    fn prepared_sparql_evaluate_maps_value_path_and_message() {
+        // Data: alice ex:knows bob (an IRI value on a predicate path).
+        let data =
+            graph("@prefix ex: <http://example.org/> . ex:alice ex:knows ex:bob ; ex:age 30 .");
+        let focus = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
+        // Project ?value and ?path; the constraint message references {?value}.
+        let constraint = SparqlConstraint {
+            select: "SELECT ?this ?value ?path WHERE { \
+                       BIND(<http://example.org/bob> AS ?value) \
+                       BIND(<http://example.org/knows> AS ?path) \
+                       ?this <http://example.org/knows> ?value }"
+                .to_string(),
+            prefixes: String::new(),
+            message: Some("offender {?value} via {?path}".to_string()),
+            deactivated: false,
+            prepared: None,
+        };
+        let prepared = PreparedSparql::build(&constraint).unwrap();
+        let mut out = Vec::new();
+        prepared.evaluate(
+            &data,
+            &focus,
+            &constraint,
+            |f: ResultFields| ValidationResult {
+                focus_node: focus.clone(),
+                path: f.path,
+                value: f.value,
+                source_shape: focus.clone(),
+                source_component: "x".to_string(),
+                severity: "x".to_string(),
+                messages: vec![],
+                default_message: f.default_message,
+                details: vec![],
+            },
+            &mut out,
+        );
+        assert_eq!(out.len(), 1, "alice ex:knows ex:bob -> one solution");
+        let r = &out[0];
+        assert_eq!(
+            r.value,
+            Some(Term::NamedNode(
+                NamedNode::new("http://example.org/bob").unwrap()
+            )),
+            "?value maps to the bound bob"
+        );
+        assert!(
+            matches!(&r.path, Some(crate::path::Path::Predicate(p)) if p == "http://example.org/knows"),
+            "?path (an IRI) maps to a predicate path, got {:?}",
+            r.path
+        );
+        assert_eq!(
+            r.default_message, "offender http://example.org/bob via http://example.org/knows",
+            "{{?value}}/{{?path}} substituted from the solution row"
+        );
+    }
+
+    #[test]
+    fn prepared_sparql_evaluate_uses_row_message_when_no_constraint_message() {
+        // No constraint sh:message + a projected ?message binding -> the result's
+        // default_message is taken from the ?message row value (§5.2.2 precedence:
+        // constraint message > ?message binding > generated default).
+        let data = graph("@prefix ex: <http://example.org/> . ex:alice ex:age 30 .");
+        let focus = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
+        let constraint = SparqlConstraint {
+            select: "SELECT ?this ?message WHERE { ?this <http://example.org/age> ?v . \
+                       BIND(\"row-level reason\" AS ?message) }"
+                .to_string(),
+            prefixes: String::new(),
+            message: None, // no constraint message -> fall through to ?message
+            deactivated: false,
+            prepared: None,
+        };
+        let prepared = PreparedSparql::build(&constraint).unwrap();
+        let mut out = Vec::new();
+        prepared.evaluate(
+            &data,
+            &focus,
+            &constraint,
+            |f: ResultFields| ValidationResult {
+                focus_node: focus.clone(),
+                path: f.path,
+                value: f.value,
+                source_shape: focus.clone(),
+                source_component: "x".to_string(),
+                severity: "x".to_string(),
+                messages: vec![],
+                default_message: f.default_message,
+                details: vec![],
+            },
+            &mut out,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].default_message, "row-level reason");
+    }
+
+    #[test]
+    fn prepared_sparql_evaluate_fail_closed_on_blank_node_focus() {
+        // A blank-node focus is inexpressible as VALUES -> evaluate() returns
+        // early (the §5.2 unreachable-today guard): no results pushed.
+        let data = graph("@prefix ex: <http://example.org/> . ex:alice ex:age 30 .");
+        let bnode = Term::BlankNode(oxrdf::BlankNode::new("focus0").unwrap());
+        let constraint = SparqlConstraint {
+            select: "SELECT ?this WHERE { ?this ?p ?o }".to_string(),
+            prefixes: String::new(),
+            message: None,
+            deactivated: false,
+            prepared: None,
+        };
+        let prepared = PreparedSparql::build(&constraint).unwrap();
+        let mut out = Vec::new();
+        prepared.evaluate(
+            &data,
+            &bnode,
+            &constraint,
+            |_f: ResultFields| unreachable!("an inexpressible focus yields no solutions"),
+            &mut out,
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn select_validate_maps_path_when_projected() {
+        // A §6 SELECT validator that projects ?path (an IRI) -> the result's
+        // sh:resultPath is that predicate path (§5.2.2 mapping in select_validate).
+        let data = graph("@prefix ex: <http://example.org/> . ex:alice ex:knows ex:bob .");
+        let focus = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
+        let query = SparqlParser::new()
+            .parse_query(
+                "SELECT ?this ?path WHERE { BIND(<http://example.org/knows> AS ?path) \
+                 ?this <http://example.org/knows> ?o }",
+            )
+            .unwrap();
+        let mut out = Vec::new();
+        select_validate(
+            &query,
+            &data,
+            &focus,
+            &[("this", &focus)],
+            None,
+            |f: ComponentResultFields| ValidationResult {
+                focus_node: f.focus,
+                path: f.path,
+                value: f.value,
+                source_shape: focus.clone(),
+                source_component: "x".to_string(),
+                severity: "x".to_string(),
+                messages: vec![],
+                default_message: f.default_message,
+                details: vec![],
+            },
+            &mut out,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(&out[0].path, Some(crate::path::Path::Predicate(p)) if p == "http://example.org/knows"),
+            "?path (an IRI) -> a predicate path, got {:?}",
+            out[0].path
+        );
+    }
+
+    #[test]
+    fn select_validate_non_iri_path_maps_to_none() {
+        // A ?path bound to a NON-IRI (a literal) is not a predicate path -> the
+        // result carries no sh:resultPath (the `_ => None` arm of the §5.2.2 path
+        // mapping). Spec-correct: only an IRI ?path is a predicate path.
+        let data = graph("@prefix ex: <http://example.org/> . ex:alice ex:age 30 .");
+        let focus = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
+        let query = SparqlParser::new()
+            .parse_query(
+                "SELECT ?this ?path WHERE { BIND(\"not-an-iri\" AS ?path) \
+                 ?this <http://example.org/age> ?o }",
+            )
+            .unwrap();
+        let mut out = Vec::new();
+        select_validate(
+            &query,
+            &data,
+            &focus,
+            &[("this", &focus)],
+            None,
+            |f: ComponentResultFields| ValidationResult {
+                focus_node: f.focus,
+                path: f.path,
+                value: f.value,
+                source_shape: focus.clone(),
+                source_component: "x".to_string(),
+                severity: "x".to_string(),
+                messages: vec![],
+                default_message: f.default_message,
+                details: vec![],
+            },
+            &mut out,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].path.is_none(),
+            "a literal ?path is not a predicate path"
+        );
+    }
+}

@@ -1,0 +1,22 @@
+{
+  ".beads/issues.jsonl": {
+    "bytes": 1592739,
+    "sha256": "5a924f81c803f7c90a8de5e4115631c36efa01e8c86475e8481cbb7d024380cb"
+  },
+  "AGENTS.md": {
+    "bytes": 105185,
+    "sha256": "99035273d6974567d16ef6404d399a92cca6c5b13592eade7a900a3352dbf197"
+  },
+  "crates/sparq-kb/ingest/agents-findings.ttl": {
+    "bytes": 15045,
+    "sha256": "a47d7d7effbbe19db1c64cb1f5cf59c8a2c516007c8ec2b00ce5ee97f34d49db"
+  },
+  "crates/sparq-kb/ingest/pkg-instances.ttl": {
+    "bytes": 426321,
+    "sha256": "dd1ccb577baa4376879b6172d44221eaf2b6f80bd67f37f3c8d9fdc7f9048b64"
+  },
+  "crates/sparq-kb/ontology/pkg/pkg.ttl": {
+    "bytes": 16230,
+    "sha256": "17d3d6aabbef6e48b6f4f79116eaa91059a63f5cdf023dcc019c44f38221bfb4"
+  }
+}

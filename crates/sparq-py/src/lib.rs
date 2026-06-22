@@ -2,7 +2,9 @@
 //!
 //! A thin, allocation-conscious wrapper over the workspace's public APIs:
 //!
-//! * [`Graph`] wraps `sparq_core::Graph` (load / save / open / len).
+//! * `Graph` wraps `sparq_core::Graph` (load / save / open / len). `Graph.copy`
+//!   returns a cheap, logically-independent copy over the core's structural
+//!   snapshot (Arc-shared immutable base) — O(pending delta), not O(triples).
 //! * `Graph.query` / `Graph.query_json` / `Graph.ask` / `Graph.construct` /
 //!   `Graph.describe` call `sparq_engine` (all four query forms are native:
 //!   ASK early-exits, CONSTRUCT/DESCRIBE return term triples).
@@ -108,7 +110,7 @@ impl Term {
                 // round-trips through `query` at parity with `query_json`.
                 direction: l.direction().map(|d| d.to_string()),
             },
-            // RDF-star quoted triple: keep the N-Triples rendering as the value.
+            // RDF 1.2 triple term: keep the N-Triples rendering as the value.
             oxrdf::Term::Triple(t) => Term {
                 kind: "triple".into(),
                 value: t.to_string(),
@@ -201,7 +203,13 @@ impl QueryResult {
 /// Resolve `(text, format)` for `Graph.load`: `os.PathLike` is always a file;
 /// a `str` is a file iff it names an existing file (no newline in it), else it
 /// is parsed as RDF content. The format defaults from the file extension
-/// (`.ttl` / `.nt` / `.nq` / `.trig`), falling back to `"turtle"`.
+/// (`.ttl` / `.nt` / `.nq` / `.trig` / `.jsonld`), falling back to `"turtle"`.
+///
+/// [OPUS-4.8] sq-oy1f.20: the `.jsonld` extension maps to `"jsonld"` unconditionally
+/// (it is not behind a `#[cfg]`), so the mapping is feature-agnostic. With the default
+/// `jsonld` feature ON, `sparq-core` parses it; under `--no-default-features` the same
+/// `"jsonld"` string reaches `sparq-core`, which rejects the unknown format — a clean
+/// fail-closed error rather than feeding JSON to the Turtle parser.
 fn resolve_source(source: &Bound<'_, PyAny>, format: Option<&str>) -> PyResult<(String, String)> {
     let from_file = |path: &std::path::Path, format: Option<&str>| -> PyResult<(String, String)> {
         let text = std::fs::read_to_string(path)
@@ -212,6 +220,7 @@ fn resolve_source(source: &Bound<'_, PyAny>, format: Option<&str>) -> PyResult<(
                 Some("nt") => "ntriples".into(),
                 Some("nq") => "nquads".into(),
                 Some("trig") => "trig".into(),
+                Some("jsonld") => "jsonld".into(),
                 _ => "turtle".into(),
             },
         };
@@ -300,8 +309,10 @@ impl Graph {
     ///
     /// `source`: RDF content (e.g. a Turtle document), a path to an RDF file
     /// (`str` or `os.PathLike`), and `format` one of `"turtle"`, `"ntriples"`,
-    /// `"nquads"`, `"trig"` (default: from the file extension, else `"turtle"`).
-    /// N-Quads / TriG named graphs are preserved and queryable via `GRAPH`.
+    /// `"nquads"`, `"trig"`, `"jsonld"` (default: from the file extension, else
+    /// `"turtle"`). N-Quads / TriG / JSON-LD named graphs are preserved and
+    /// queryable via `GRAPH`. JSON-LD support is on by default; a wheel built with
+    /// `--no-default-features` drops it and `format="jsonld"` then errors.
     #[staticmethod]
     #[pyo3(signature = (source, format=None))]
     fn load(py: Python<'_>, source: &Bound<'_, PyAny>, format: Option<&str>) -> PyResult<Graph> {
@@ -466,7 +477,7 @@ impl Graph {
     /// The graph's triples join the document as ground facts. This graph's blank
     /// nodes are renamed under a reserved `sparqg` prefix before composition, so
     /// a blank-node label in `rules` can NOT alias an existing data node (rule-
-    /// local blanks stay rule-local; review 1961). RDF-star triple terms have no
+    /// local blanks stay rule-local; review 1961). RDF 1.2 triple terms have no
     /// N3 form and are rejected.
     fn reason_n3_with(&mut self, py: Python<'_>, rules: &str) -> PyResult<usize> {
         use std::fmt::Write as _;
@@ -486,7 +497,7 @@ impl Graph {
                         let term = inner.dict.term(id);
                         match term {
                             oxrdf::Term::Triple(_) => {
-                                return Err("RDF-star triple terms cannot participate in N3 reasoning".into());
+                                return Err("RDF 1.2 triple terms cannot participate in N3 reasoning".into());
                             }
                             // [OPUS-4.8] roborev 1961: rename this graph's blank
                             // nodes under the reserved `sparqg` prefix before
@@ -612,6 +623,31 @@ impl Graph {
         Ok(py.detach(|| sparq_reason::inconsistencies(&inner.dict, &all_triples(inner))))
     }
 
+    /// A cheap, logically-INDEPENDENT copy of this graph that can then be
+    /// mutated separately — `update` / `reason` / `reason_n3_with` on either the
+    /// original or the copy leave the other untouched.
+    ///
+    /// Built on the core's structural snapshot (`sparq_core::Graph::snapshot`):
+    /// the immutable base storage (the six permutation indexes, the frozen
+    /// dictionary base, the numeric caches) is `Arc`-shared, so this is
+    /// O(pending delta), NEVER O(triples) — it duplicates neither the indexes nor
+    /// the dictionary arena. (The first copy of a freshly-loaded graph pays a
+    /// one-time O(n) freeze to mint the shareable base; subsequent copies of the
+    /// frozen lineage are cheap.) Named graphs are copied too.
+    ///
+    /// The cached full-text index is NOT carried over: the copy starts without
+    /// one and lazily rebuilds on its first `text_search` / `query_text`, exactly
+    /// as a freshly loaded graph would (the same lazy-rebuild policy a mutating
+    /// swap uses). [OPUS-4.8] sq-6h8
+    fn copy(&self, py: Python<'_>) -> Graph {
+        let inner = &self.inner;
+        // `snapshot()` yields an immutable point-in-time view; `into_graph()`
+        // drops the read-only wrapper, leaving an independently-mutable `Graph`
+        // that already owns its own Arc-shared base + per-generation delta.
+        let copied = py.detach(|| inner.snapshot().into_graph());
+        Graph { inner: copied, text: None }
+    }
+
     /// Number of triples in the default graph.
     fn __len__(&self) -> usize {
         self.inner.len()
@@ -628,7 +664,7 @@ impl Graph {
     // `pyo3_runtime.PanicException` instead of `panic = "abort"` killing the
     // interpreter. The engine itself proved robust — no normal-input
     // query/update/load reaches a panic (verified empirically while writing
-    // test_parity.py: division-by-zero, bad regex, RDF-star, unsupported
+    // test_parity.py: division-by-zero, bad regex, RDF 1.2 triple terms, unsupported
     // patterns all return a clean ValueError), so there is no organic input that
     // drives a panic. This private hook is the only reliable way to assert the
     // unwind path is wired correctly. The leading underscore marks it private;

@@ -34,10 +34,26 @@
 //!
 //! NOTHING in the sparq workspace depends on this crate; default builds and
 //! the wasm artifact are byte-identical with or without it.
+//!
+//! ## FIPS posture (CR-G4) [OPUS-4.8]
+//!
+//! The primitives here — BN254, Poseidon2, and Schnorr over Baby-JubJub
+//! ([`sig`]) — are **not** FIPS-approved and are **not** inside any FIPS 140-3 /
+//! CMVP-validated module. sparq makes **no FIPS claim and no CMVP claim**; these
+//! are ZK-friendly primitives chosen for in-circuit efficiency, not regulatory
+//! approval. This crate is `publish = false` and not in the default dependency
+//! graph, so a FIPS-constrained operator keeps it out of FIPS scope by not
+//! opting in. See `compliance/cryptoreview/fips-posture.md`.
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod canon;
 pub mod commit;
+// [OPUS-4.8] sq-xojl: DUAL-LEAF value-lane host encoding (VALUE_HOOK + lexical
+// leaf). OPT-IN behind the `dual-leaf` cargo feature (OFF by default): the
+// default string-canonical pipeline is byte-unchanged. Carries the documented
+// INV-VL downgrade (#769 accepted, CR-G8 / sq-qhy4); NOT externally audited.
+#[cfg(feature = "dual-leaf")]
+pub mod dual_leaf;
 pub mod encode;
 pub mod field;
 pub mod ingest;

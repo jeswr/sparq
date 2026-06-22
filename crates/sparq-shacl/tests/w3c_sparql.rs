@@ -9,13 +9,13 @@
 //!
 //! Scope: the `node/` and `property/` sub-suites (plain `sh:sparql`). The
 //! `component/` sub-suite (custom SPARQL-based constraint components, i.e. the
-//! `sh:parameter` / `sh:validator` declaration machinery) and most of
-//! `pre-binding/` (which probes the FULL pre-binding algebra-rewrite semantics,
-//! including rejection of queries that re-bind a pre-bound variable) are out of
-//! scope for this milestone and are not walked (see this crate's open beads —
-//! `bd list -l area:sparq-shacl`).
-//! The `component/` tests additionally need an `owl:imports` of the external
-//! `http://datashapes.org/dash` vocabulary the offline harness cannot resolve.
+//! `sh:parameter` / `sh:validator` declaration machinery) is walked by the
+//! sibling `w3c_sparql_component.rs` runner (sq-wys: it resolves the
+//! `owl:imports <http://datashapes.org/dash>` via a vendored excerpt and
+//! pre-binds `$PATH`). Most of `pre-binding/` (which probes the FULL pre-binding
+//! algebra-rewrite semantics, including rejection of queries that re-bind a
+//! pre-bound variable) is still out of scope for this milestone and is not
+//! walked (see this crate's open beads — `bd list -l area:sparq-shacl`).
 
 use oxrdf::Term;
 use sparq_core::Graph;

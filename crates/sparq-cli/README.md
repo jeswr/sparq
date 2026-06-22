@@ -34,7 +34,25 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
   json (`--format`), CONSTRUCT/DESCRIBE as N-Triples.
 - **`build` / `query-mmap`** — build an on-disk index once, then query it memory-mapped
   without loading the dataset into RAM.
-- **`bench`** — run a directory of `*.rq` queries N times each, one TSV timing line per query.
+- **`bench` / `bench-mmap`** — run a directory of `*.rq` queries N times each, one TSV timing
+  line per query. Pass `--json <path>` to ALSO write the per-query results (`name` / `rows` /
+  `min_micros`, min-of-iters) to `<path>` as a machine-readable JSON document (the
+  structured-benchmark-catalog shape); the STDOUT TSV is unchanged. Measured numbers are
+  whatever the running host reports and are non-canonical — never commit them.
+- **`dump <file> <in-fmt> <out-fmt>`** — re-serialize a loaded
+  document to stdout in the writer matrix: `turtle[-pretty]` / `trig[-pretty]` / `nquads` /
+  `ntriples` / `jsonld[-expanded|-flattened|-compacted]` / `jsonld-pretty…`. `jsonld-compact[-pretty]`
+  runs the **full W3C JSON-LD 1.1 Compaction** against a caller `@context` passed with
+  `--context <ctx.jsonld>` (richer than the prefix-only `jsonld-compacted`). The writer matrix is
+  the `serialize-rdf` feature, pulled into the **default build by the default-on `jsonld` feature**.
+- **JSON-LD I/O is default-on** ([OPUS-4.8] sq-oy1f.4, user-prioritised epic sq-oy1f) — the
+  default CLI **reads** a JSON-LD document (`<in-fmt>` ∈ `jsonld` / `json-ld` / `application/ld+json`;
+  `@graph` named graphs are preserved as a dataset) AND **writes** one (the `jsonld*` out-formats
+  above), out of the box. This is a deliberate maintainer-directed exception to sparq's
+  opt-in-by-default principle. It stays toggleable: `--no-default-features --features mmap,mimalloc,dict-spill`
+  drops the `oxjsonld` parser (and a `jsonld` input then errors, exit 2). What is default-on now:
+  JSON-LD **parse + serialise + full 1.1 Compaction/Framing**; full conneg-conformance ratcheting
+  is on the [sq-oy1f](https://github.com/jeswr/sparq/issues/757) roadmap.
 - **`--reason <rdfs|owl-rl|n3>`** — opt-in forward-chaining materialization before query.
 - **Transparent decompression** — `.gz` / `.bz2` / `.zst` inputs detected by content.
   The gzip path defaults to the pure-Rust `miniz_oxide` backend; the opt-in, native-only

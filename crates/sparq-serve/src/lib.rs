@@ -1,77 +1,65 @@
-//! sparq-serve: the concurrent-serving core (research/concurrent-serving.md §6).
-//!
-//! Wave A deliverable 1 (§8): the **generation ring** — an arc-swapped chain of
-//! immutable store snapshots with a bounded retention ring and per-pod epoch
-//! vectors. This replaces the double-buffered `AppState` snapshot scheme whose two
-//! measured pathologies (§4.3/§4.4: the 5.4 s/32 s pinned-snapshot writer stall and
-//! reclaim-poll degradation under reader churn) motivated the redesign.
-//!
-//! Invariants (load-bearing, tested):
-//! - **Readers never block the writer; the writer never waits for readers** and
-//!   never reclaims in place. Old generations are freed by ordinary `Arc` drop
-//!   when their last holder lets go — there is no reclaim poll, no grace timer.
-//! - **The ring only forgets its own references** beyond the retention bound K;
-//!   it can never invalidate a generation a reader still pins.
-//! - `current()` is lock-free (`ArcSwap::load`, ~10–20 ns); only `publish()` and
-//!   the introspection accessors take the (writer-side) mutex.
-//!
-//! Wave A deliverable 2 (§6.5): the **single sequenced writer** with a
-//! group-commit window — [`Writer`] owns the sole right to publish generations;
-//! updates arriving within a window (default 3 ms / 256 updates) are applied to
-//! one working copy and published as ONE generation, epochs bumped for the union
-//! of touched pods. Sync ([`Writer::submit`], returns the generation number) and
-//! fire-and-forget ([`Writer::submit_detached`]) submission; failed updates are
-//! reported to their submitter and skipped, never poisoning the batch (policy
-//! documented in the `writer` module). [`GraphApplier`] is the production
-//! [`ApplyUpdates`] strategy — the STRUCTURAL FORK (`Graph::fork`, Arc-shared
-//! immutable storage + per-generation delta) makes its fork O(pending delta),
-//! with a threshold compaction policy in `seal` bounding the delta (its module
-//! docs record the design and the measured before/after numbers).
-//!
-//! Opt-in time travel: a retained generation IS a queryable snapshot, so
-//! [`RingConfig::time_travel`] ([`TimeTravelConfig`]) extends retention beyond the
-//! concurrency bound K (count and/or age bounded; K stays the floor) and
-//! [`GenerationRing::at`] / [`GenerationRing::as_of`] resolve a generation number /
-//! "as of T" timestamp to a pinned historical generation ([`Generation::published_at`]
-//! is stamped by the ring's injectable clock). Memory cost is honest and documented on
-//! [`TimeTravelConfig`]: each retained generation is a FULL `Graph` until the
-//! structural-fork follow-up lands; the API is shaped so delta-chain retention can
-//! replace full graphs later without an API change.
-//!
-//! Wave B deliverable (§6.2): the read-side **query [`Scheduler`]** — goal #4
-//! requirements 3 + 4 (cheap-query prioritisation + no head-of-line blocking). A
-//! cost-aware bounded thread pool with two lanes: cheap jobs are prioritised and
-//! always keep a reserved worker (so an expensive-query flood can never block a
-//! cheap query — the structural no-HoL guarantee), while heavy jobs run under a
-//! bounded concurrency cap with SRPT-approx + unbounded-aging ordering
-//! (shortest-estimated-first, starvation-free). Readers still pin a generation on
-//! entry (A1) inside the submitted closure, so snapshot consistency is preserved
-//! and scheduling never changes results. See the `scheduler` module docs for the
-//! Umbra-derived design (litreview-C Topic A) and the empirical-honesty test plan.
-//!
-//! Library-first rule (§6.1): sync, runtime-agnostic, no HTTP and no async-runtime
-//! types anywhere in the API (the writer and scheduler use `std::thread` +
-//! channels/condvars internally). The result cache and stream admission
-//! (`Shed(SnapshotPressure)` at the bound) are LATER waves; this crate ships the
-//! foundation they compose over and exposes the introspection (live-generation
-//! count, oldest retained number, scheduler queue depths) they will need.
-//!
-//! Snapshot integration decision: §6.4 sketches `Generation { id, graph: Arc<Graph>,
-//! epochs }`. The production snapshot mechanism is exactly an `Arc<sparq_core::Graph>`
-//! clone (`AppState::snapshot()`, measured 27 ns in §4.3), which fits behind a plain
-//! type parameter at zero cost — so [`Generation<S>`] is generic over the snapshot
-//! handle instead of introducing a `StoreSnapshot` trait that would carry no methods.
-//! The integration test `tests/real_store.rs` instantiates the ring with the real
-//! `Graph`; unit tests use an instrumented mock to observe drops.
+// [OPUS-4.8] sq-ieqz: the crate's rustdoc front page IS its crate-local README
+// (`crates/sparq-serve/README.md`, the same file crates.io/docs.rs surface), so the
+// two never drift. The Wave A/B design narrative (ring / sequenced writer / scheduler
+// invariants, the time-travel opt-in, the library-first + no-wasm-dep guards) lives in
+// that README; the per-item rustdoc on the re-exports below carries the API detail.
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod applier;
+/// [OPUS-4.8] (sq-o5bi) ONLINE consistent-snapshot backup + restore for the serving store
+/// — export an already-immutable pinned [`Generation`] to a single self-describing artifact
+/// WHILE SERVING (no stop-the-world), and re-hydrate a [`sparq_core::Graph`] from one
+/// (fail-closed on a corrupt/mismatched artifact). Compiled only behind the opt-in `backup`
+/// feature (default OFF); the serving core is fully buildable without it. See the module docs
+/// for the Option-A artifact format and the at-rest-encryption out-of-scope boundary.
+#[cfg(feature = "backup")]
+pub mod backup;
+/// [OPUS-4.8] (sq-bu1a) The INCREMENTAL DELTA-STREAM / point-in-time-recovery companion to the
+/// Option-A base backup ([`backup`]): export the change between two same-lineage generations as a
+/// self-describing delta artifact keyed off generation/writer-seq, and replay an ordered chain of
+/// deltas forward onto a restored base to reach a chosen recovery point (fail-closed on a corrupt
+/// or discontinuous stream). Compiled only behind the opt-in `backup` feature (default OFF). See
+/// the module docs for the delta artifact format and the same-lineage boundary.
+#[cfg(feature = "backup")]
+pub mod backup_delta;
 mod epoch;
 mod footprint;
 mod ring;
 mod scheduler;
 mod writer;
 
+// [OPUS-4.8] sq-jluc: the response-bytes result cache (research/concurrent-serving.md
+// §5 row 2 + §6.3) is OPT-IN and OFF by default — the `result-cache` cargo feature.
+// The default `sparq-serve` build (and every consumer that does not turn the feature
+// on) carries ZERO cache code: no module, no canonicalization, no extra dependency
+// (the cache reuses the in-tree `rustc-hash` and `std`). Gating the modules — not just
+// the re-exports — is what keeps the default build lean.
+//
+// LAYER DISTINCTION (do not conflate): `sparq-engine` ALSO has a feature named
+// `result-cache`, but it is a DIFFERENT crate and a DIFFERENT layer — the engine's is
+// the embedded whole-query algebra-keyed LRU inside one engine instance (caller bumps a
+// version on mutation). THIS cache is the SERVING-layer response-bytes cache: keyed on
+// the visibility scope and invalidated by the per-pod epoch bumps of the generation
+// ring, neither of which the engine layer knows about. Cargo features are per-package,
+// so the shared name is not a conflict; the module docs in `cache.rs` spell out the
+// boundary.
+#[cfg(feature = "result-cache")]
+mod cache;
+#[cfg(feature = "result-cache")]
+mod canon;
+
+#[cfg(feature = "backup")]
+pub use backup::{export as backup_export, import as backup_import, BackupError, BackupMeta};
+// [OPUS-4.8] (sq-bu1a) The change-stream / PITR delta companion (feature `backup`):
+// `export_delta` between two same-lineage generations, `import_delta` to decode one (fail-closed),
+// and `replay` to apply an ordered chain forward onto a restored base. `DELTA_MAGIC` is the
+// artifact's distinguishing magic line; `Delta`/`DeltaMeta` are the decoded forms.
+#[cfg(feature = "backup")]
+pub use backup_delta::{
+    export_delta as backup_export_delta, import_delta as backup_import_delta,
+    replay as backup_replay, Delta, DeltaMeta, DELTA_MAGIC,
+};
 pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 pub use epoch::{Epoch, PodEpochs, PodId};
 pub use footprint::{Footprint, TargetGraph};
@@ -83,3 +71,15 @@ pub use writer::{
     ApplyUpdates, CommitGranularity, WriteError, Writer, WriterConfig, DEFAULT_MAX_BATCH,
     DEFAULT_WINDOW,
 };
+
+// [OPUS-4.8] sq-jluc: result-cache public surface (feature `result-cache`). The cache's
+// invalidation `Footprint` (the per-pod / unbounded READ footprint) is a DISTINCT type
+// from this crate's write-side `footprint::Footprint` (the commutativity conflict tag),
+// so it is re-exported under the disambiguating name `ReadFootprint`.
+#[cfg(feature = "result-cache")]
+pub use cache::{
+    Bytes, CacheConfig, CacheStats, Footprint as ReadFootprint, LeadGuard, LeaseOutcome,
+    ResultCache, ScopeKey, WaitGuard, WaitOutcome, DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRY_BYTES,
+};
+#[cfg(feature = "result-cache")]
+pub use canon::{canonicalize, canonicalize_renamed};

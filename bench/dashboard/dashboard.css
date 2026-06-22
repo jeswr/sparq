@@ -4,6 +4,10 @@
   --bg: #f6f8fa; --card: #ffffff; --fg: #1f2328; --muted: #586069; --line: #d8dee4;
   --accent: #2563eb; --zebra: #fafbfc; --head: #f0f3f6;
   --best-bg: #dcfce7; --best-fg: #166534; --worse-bg: #fee2e2; --worse-fg: #991b1b; --na: #e5e7eb;
+  /* [OPUS-4.8] sq-19z8: per-metric semantic badges (regime + result-mode), muted by design. */
+  --badge-entailed-bg: #ede9fe; --badge-entailed-fg: #5b21b6;
+  --badge-extensional-bg: #e0f2fe; --badge-extensional-fg: #075985;
+  --badge-mode-bg: #eef0f3; --badge-mode-fg: #586069;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
@@ -12,6 +16,10 @@
     --bg: #0d1117; --card: #161b22; --fg: #e6edf3; --muted: #9aa4b2; --line: #30363d;
     --accent: #58a6ff; --zebra: #11161d; --head: #1b222c;
     --best-bg: #0f3d24; --best-fg: #4ade80; --worse-bg: #4a1d1d; --worse-fg: #f87171; --na: #30363d;
+    /* [OPUS-4.8] sq-19z8 dark-mode semantic-badge palette. */
+    --badge-entailed-bg: #2e1065; --badge-entailed-fg: #c4b5fd;
+    --badge-extensional-bg: #0c2a3e; --badge-extensional-fg: #7dd3fc;
+    --badge-mode-bg: #21262d; --badge-mode-fg: #9aa4b2;
   }
 }
 
@@ -74,6 +82,28 @@ table.summary-table { width: 100%; border-collapse: collapse; font-size: 0.92rem
 .pill-best { background: var(--best-bg); color: var(--best-fg); }
 .pill-worse { background: var(--worse-bg); color: var(--worse-fg); }
 .pill-na { background: var(--na); color: var(--muted); }
+
+/* [OPUS-4.8] sq-19z8: per-metric SEMANTIC badges (LUBM regime + result mode), shown next to the
+   metric label. Smaller + lighter-weight than the Δ pill so they READ as metadata, not a verdict;
+   the regime/mode value previously lived only in the cell's title-attr tooltip. */
+.metric-badges { margin-left: 7px; white-space: nowrap; }
+.metric-badge {
+  min-width: 0; padding: 1px 7px; margin-left: 4px; font-size: 0.68rem; font-weight: 600;
+  letter-spacing: 0.01em; vertical-align: middle; cursor: help;
+}
+.metric-badge:first-child { margin-left: 0; }
+.badge-entailed { background: var(--badge-entailed-bg); color: var(--badge-entailed-fg); }
+.badge-extensional { background: var(--badge-extensional-bg); color: var(--badge-extensional-fg); }
+.badge-mode { background: var(--badge-mode-bg); color: var(--badge-mode-fg); }
+
+/* [OPUS-4.8] sq-aas7: FEATURED-tier provenance badge. Shows whether the featured numbers came from
+   the EC2/nightly series (preferred when present) or the per-commit gh-runner band. Reuses the
+   .pill base; nightly is the "best/promoted" colour, per-commit a muted neutral. */
+.featured-tier { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 14px; }
+.tier-badge { min-width: 0; cursor: help; }
+.tier-nightly { background: var(--best-bg); color: var(--best-fg); }
+.tier-per-commit { background: var(--na); color: var(--muted); }
+.featured-tier-note { font-size: 0.82rem; color: var(--muted); }
 
 .chart-group { margin-bottom: 26px; }
 .chart-group h3 {
@@ -146,6 +176,11 @@ table.summary-table { width: 100%; border-collapse: collapse; font-size: 0.92rem
 .featured-title {
   margin: 0 0 10px; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em;
   color: var(--accent); font-weight: 700;
+}
+/* [OPUS-4.8] sq-5o5.3: per-suite honest framing caption (e.g. the ZK estate's circuit-COST,
+   not-speed, research-grade / not-audited note). Muted + italic, like the scaling/refs captions. */
+.featured-suite-note {
+  font-size: 0.74rem; color: var(--muted); font-style: italic; margin: -4px 0 10px; line-height: 1.5;
 }
 .featured-table th.competitor-col, .featured-table td.competitor-col { color: var(--muted); }
 /* sparq's own column reads slightly stronger than competitor columns so the engine-under-test is

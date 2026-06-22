@@ -20,7 +20,7 @@ CI-ratcheted); wasm cargo-artifact baseline 1,573,887 B (tracked); 19 crates.
 | u64 inline ValueIds | **Measured-and-rejected** | `96db20a` → `research/u64-valueids-verdict.md` (2× memory / 1.6× scan loss; u32 already inlines ints); spawned the temporal-cache win `72b35e3` (dateTime FILTER 7.2×, ORDER BY 7.4×) |
 | Compressed on-disk perms | **Adopted** | `8e1525c` → `research/compressed-perms-verdict.md` (2.47–2.75×, lazy block-mmap default for compressed dirs, old files compatible) |
 | GenAI supports | **Landed** | sparq-introspect `56ee687`; sparq-sim `d8e4db6` (precision@10 0.999); sparq-nlq `d1c6c2f` (replay-tested NL→SPARQL); sparq-vectors `8313931` + verbalization/hybrid-fusion `41db5de`; digest determinism fix `ac905b0` |
-| RDF-star structural storage | **Landed** | `27743f9` — `Stored::Triple` structural ids, round-trip tested |
+| RDF 1.2 triple-term structural storage | **Landed** | `27743f9` — `Stored::Triple` structural ids, round-trip tested |
 | Inference / N3 toward EYE parity | **Landed** | sparq-reason: parallel materialization, backward `<=` rules, EYE-vendored cases, `string:encodeForUri` `f96898b`; incremental RDFS `c36eedc` (~4100×/~870×); open follow-up noted in design docs: `reason_n3_stratified`, NAF-aware counting |
 | RDF/SPARQL 1.2 | **Landed** | full-board conformance `9917404` incl. 1.2 syntax/eval suites (triple terms, var-in-triple-term, 1.2 builtins, `lang--dir`) |
 | SPARQL feature gaps | **Landed** | conformance rounds 1–3 (`b78d726` et al.), FROM/FROM NAMED `5c591d4`, numeric tower, casts `4bd8db1` → 1229/1229 `9917404` |

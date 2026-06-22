@@ -17,9 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sparq_serve::{
-    ApplyUpdates, GenerationRing, PodId, Writer, WriterConfig,
-};
+use sparq_serve::{ApplyUpdates, GenerationRing, PodId, Writer, WriterConfig};
 
 /// Snapshot = applied-update log (mirrors tests/writer.rs).
 type Log = Vec<String>;
@@ -56,7 +54,11 @@ fn token_is_satisfied_immediately_on_the_acking_ring() {
     let writer = Writer::spawn(
         ring.clone(),
         LogApplier,
-        WriterConfig { window: Duration::from_millis(1), max_batch: 256, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 256,
+            ..WriterConfig::default()
+        },
     );
 
     for expect in 1..=5u64 {
@@ -79,7 +81,11 @@ fn read_your_writes_boundary() {
     let writer = Writer::spawn(
         ring.clone(),
         LogApplier,
-        WriterConfig { window: Duration::from_millis(1), max_batch: 256, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 256,
+            ..WriterConfig::default()
+        },
     );
     let token = writer.submit("only".into(), pod("p")).unwrap();
     assert_eq!(token, 1);
@@ -109,7 +115,11 @@ fn lagging_replica_refuses_then_accepts_token() {
     let lw = Writer::spawn(
         leader.clone(),
         LogApplier,
-        WriterConfig { window: Duration::from_millis(1), max_batch: 256, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 256,
+            ..WriterConfig::default()
+        },
     );
 
     // Leader applies three updates; replica is still at generation 0.
@@ -134,7 +144,11 @@ fn lagging_replica_refuses_then_accepts_token() {
     let rw = Writer::spawn(
         replica.clone(),
         LogApplier,
-        WriterConfig { window: Duration::from_millis(1), max_batch: 256, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 256,
+            ..WriterConfig::default()
+        },
     );
     for i in 0..3 {
         rw.submit(format!("u{i}"), pod("p")).unwrap();
@@ -157,7 +171,11 @@ fn satisfied_token_pin_never_regresses_under_concurrent_writes() {
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
         LogApplier,
-        WriterConfig { window: Duration::from_millis(1), max_batch: 16, ..WriterConfig::default() },
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 16,
+            ..WriterConfig::default()
+        },
     ));
 
     // Establish a token at generation 1.
@@ -182,7 +200,10 @@ fn satisfied_token_pin_never_regresses_under_concurrent_writes() {
     // Reader: every satisfied pin reflects at least the token.
     for _ in 0..50_000 {
         if let Some(g) = ring.read_your_writes(token) {
-            assert!(g.number() >= token, "a satisfied RYW pin never regresses below its token");
+            assert!(
+                g.number() >= token,
+                "a satisfied RYW pin never regresses below its token"
+            );
         }
     }
     // The feeder ran concurrently throughout the reader spin, but on a contended CPU
@@ -197,5 +218,8 @@ fn satisfied_token_pin_never_regresses_under_concurrent_writes() {
     }
     stop.store(true, Ordering::Relaxed);
     feeder.join().unwrap();
-    assert!(ring.current().number() > 1, "writer advanced past the anchor");
+    assert!(
+        ring.current().number() > 1,
+        "writer advanced past the anchor"
+    );
 }

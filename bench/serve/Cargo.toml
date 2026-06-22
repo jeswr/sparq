@@ -26,6 +26,14 @@ sparq-serve = { path = "../../crates/sparq-serve" }
 spargebra = { version = "0.4", features = ["sparql-12", "sep-0006"] }
 mimalloc = "0.1"
 
+# [OPUS-4.8] (sq-k5qq / sq-5vm.1) TEST-only: every spike (writer_spike, plus snapshot_spike,
+# cache_spike, stream_spike, point_spike, update_stream_spike, pss_update_throughput) emits an
+# optional, strictly-additive `--json <path>` results document (dependency-free `format!`-built
+# JSON — no serde in the harness itself); this dev-dep parses that emit back so the per-binary
+# round-trip test catches a malformed document.
+[dev-dependencies]
+serde_json = "1"
+
 [[bin]]
 name = "loadgen"
 path = "src/bin/loadgen.rs"
@@ -57,3 +65,9 @@ path = "src/bin/update_stream_spike.rs"
 [[bin]]
 name = "writer_spike"
 path = "src/bin/writer_spike.rs"
+
+# [OPUS-4.8] sq-b4lo / gh-52 — single-writer write-throughput on the PSS update set,
+# with an optional QLever-parity gate (the gh-52 Phase-2 acceptance criterion).
+[[bin]]
+name = "pss_update_throughput"
+path = "src/bin/pss_update_throughput.rs"

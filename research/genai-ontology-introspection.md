@@ -82,10 +82,10 @@ Given the 6 sorted permutations, here is the **stat → index → cost** table t
 
 | Statistic | Index | How | Cost |
 |---|---|---|---|
-| **Predicate histogram** `count(p)=|{(s,o):(s,p,o)}|` | PSO or POS | each P-block length | one scan (or precomputed block index) |
-| **Distinct subjects per predicate** `|{s:(s,p,·)}|` | PSO | count S-runs within each P-block | one scan |
-| **Distinct objects per predicate** `|{o:(·,p,o)}|` | POS | count O-runs within each P-block | one scan |
-| **Class extent** `|{s: (s,rdf:type,C)}|` | POS (p=type) | O-run lengths within the `rdf:type` P-block | sub-scan |
+| **Predicate histogram** `count(p)=\|{(s,o):(s,p,o)}\|` | PSO or POS | each P-block length | one scan (or precomputed block index) |
+| **Distinct subjects per predicate** `\|{s:(s,p,·)}\|` | PSO | count S-runs within each P-block | one scan |
+| **Distinct objects per predicate** `\|{o:(·,p,o)}\|` | POS | count O-runs within each P-block | one scan |
+| **Class extent** `\|{s: (s,rdf:type,C)}\|` | POS (p=type) | O-run lengths within the `rdf:type` P-block | sub-scan |
 | **Subject out-degree dist.** | SPO | S-run lengths | one scan |
 | **Object in-degree dist.** | OSP | O-run lengths | one scan |
 | **Characteristic set of `s`** | SPO | predicates in the S-run (already sorted, dedup adjacent) | part of the SPO scan |

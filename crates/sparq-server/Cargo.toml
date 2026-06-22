@@ -35,20 +35,54 @@ required-features = ["server"]
 # sparq-engine directly — see crates/sparq-wasm/Cargo.toml), so the heavy async deps
 # are never part of the bundle. Kept behind a feature so a consumer can depend on the
 # pure serializer library (XML/CSV/TSV) without dragging in the runtime.
-default = ["server"]
+# [OPUS-4.8] (sq-oy1f.4, MAINTAINER-DIRECTED DEFAULT-ON EXCEPTION) `jsonld` is in the default
+# set: the server speaks `application/ld+json` in BOTH directions (CONSTRUCT/DESCRIBE + GSP-read
+# EMIT, GSP-write ACCEPT) out of the box (the user-prioritised sq-oy1f epic). Deliberate exception
+# to opt-in-by-default — JSON-LD is the dominant linked-data interchange format and the server
+# binary has no bundle-size floor. Still TOGGLEABLE: `--no-default-features --features server`
+# (or just `server`) drops JSON-LD and `application/ld+json` becomes unrecognised (406/415) as
+# before. The `--no-default-features` (pure serialiser library) build is unaffected.
+default = ["server", "jsonld"]
 # [OPUS-4.8] (sq-vpx4) Compiles internal TEST SEAMS — currently the durable-write
 # failure-injection hook on the `--persist` seal path, exposed via
 # `AppState::with_config_inject_durable_failure` for the graceful-degradation
 # integration test. Production builds never enable it (the seam field + constructor
 # vanish), so production behaviour is byte-identical to a build without this feature.
 test-seams = []
+# [OPUS-4.8] (sq-0bxp) `audit-log` (default OFF): compiles the OPT-IN per-query access
+# audit log (CDMC CD-2 / ISO 27001 A.8.15 / EU CRA logging). With the feature on, the
+# server can emit a structured `tracing` record under target `sparq_server::audit` for
+# every query / update / Graph-Store request — requester identity (a token fingerprint or
+# `anonymous`, never the secret), operation class, a NON-reversible query fingerprint (NOT
+# the full query text — the #241 info-leak posture), the access decision, the HTTP status /
+# row count and the duration. STILL OFF AT RUNTIME by default even when compiled in: the
+# operator must additionally set `--audit-log` / `SPARQ_AUDIT_LOG=1`
+# (`ServerConfig::audit_log`). Without the feature the audit module + every call site is
+# `#[cfg]`-stripped, so a request pays exactly ZERO — byte-identical to before. Needs the
+# `server` feature (it works on the async HTTP `Response` + `tracing`).
+audit-log = ["server"]
+# [OPUS-4.8] (sq-gos8, epic sq-toze) `access-audit` (default OFF): compiles the OPT-IN RICHER
+# STRUCTURED access-audit sink (ASVS V7 / ISO 27001 A.8.15 / CDMC CD-2 logging). Where
+# `audit-log` emits a flat `tracing` event, this emits a TYPED, self-describing access RECORD
+# (actor / action / resource / decision + policy-basis / timestamp / request fingerprint) as
+# JSON-Lines through a PLUGGABLE sink (`access_audit::AuditSink`); the default sink writes to a
+# configured file or stderr (heavy/external sinks — SIEM, OTel — stay out of core, an embedder
+# implements the trait). STILL OFF AT RUNTIME by default even when compiled in: the operator
+# must additionally configure a sink target (`--access-audit <file|stderr>` /
+# `SPARQ_ACCESS_AUDIT`), so `AppState`'s sink is `None` unless deliberately turned on. PRIVACY
+# BOUNDARY: it records identities (WebID / token fingerprint) + resource IRIs BY DESIGN (that is
+# the audit trail) but the query CONTENT only as a NON-reversible fingerprint, never the raw
+# text (the #241 / sq-toze.34 redaction posture). Without the feature the module + every call
+# site is `#[cfg]`-stripped, so a request pays exactly ZERO. Needs `server` (it hooks the async
+# enforcement seam) and reuses the already-present `serde_json` for the JSON-Lines records.
+access-audit = ["server"]
 # [OPUS-4.8] (sq-7cxr, gh-44) `server` turns on `sparq-core/mmap` so the binary can use the
 # engine's durable directory-backed `Graph` (`Graph::open`/`save` + the per-graph write-ahead
 # log + named-graph persistence) behind the `--persist <DIR>` flag — the QLever `--persist-updates`
 # equivalent. Feature unification means the `sparq-core` `sparq-engine` resolves also gains `mmap`,
 # so the WAL-durable `apply_delta` path is live on the shared graph. Without `--persist` the server
 # is in-memory exactly as before (the flag, not the feature, selects durability).
-server = ["dep:sparq-serve", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
+server = ["dep:sparq-serve", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library) for the server's `Content-Encoding: gzip` request
 # inflate (MultiGzDecoder) — a measured 1.5–3× at ~zero code change. The weak
@@ -81,11 +115,124 @@ service = ["server", "sparq-engine/service"]
 # server compiles without sparq-geo or the georust stack and every engine call is
 # the registry-free one (zero cost, byte-identical behaviour).
 geo = ["dep:sparq-geo"]
+# [OPUS-4.8] (sq-d3d8, epic sq-3183) `federation-descriptors` (default OFF) makes the
+# server a *discoverable* federation node: it serves a W3C VoID dataset description at
+# `GET /.well-known/void` and a SPARQL 1.1 Service Description for a `GET /sparql` with no
+# `query` parameter. The descriptor generation lives in `sparq-introspect`
+# (`Introspection::to_void`); this feature pulls that crate (light: it depends only on
+# sparq-core + serde, no async/heavy deps) and mounts the routes. STILL OFF AT RUNTIME by
+# default even when compiled in — the operator must additionally set
+# `--federation-descriptors` / `SPARQ_FEDERATION_DESCRIPTORS=1` (config flag
+# `ServerConfig::federation_descriptors`), so discovery is never exposed unless deliberately
+# turned on. Without the feature, zero cost: no sparq-introspect dependency, no routes,
+# byte-identical to before; sparq-core/sparq-engine untouched either way.
+federation-descriptors = ["server", "dep:sparq-introspect"]
+# [OPUS-4.8] (sq-bzh1, epic sq-3183) `tpf` (default OFF) exposes a Triple Pattern Fragments /
+# Linked Data Fragments (Hartig LDF) READ-ONLY source endpoint at `GET /tpf?subject=&predicate=&
+# object=`: a paged RDF fragment of the triples matching one triple pattern, with Hydra controls
+# (`hydra:totalItems` from the cheap cardinality ESTIMATE, `hydra:next`/`hydra:previous` paging,
+# and the `hydra:search` URI-template control). It makes the server a low-cost federation SOURCE a
+# TPF client (Comunica / the LDF client) can drive a join against. The handler reuses the existing
+# axum stack + the graph serialisers (Turtle / N-Triples) and the public `Graph::pattern` /
+# `store.estimate` / `store.scan` / `dict.term` API — no new dependency, and sparq-core/sparq-engine
+# untouched. STILL OFF AT RUNTIME by default even when compiled in — the operator must additionally
+# set `--tpf` / `SPARQ_TPF=1` (`ServerConfig::tpf`), mirroring `federation-descriptors`. Without the
+# feature, zero cost: no route, byte-identical to before.
+tpf = ["server"]
+# [OPUS-4.8] (sq-dxhb, epic sq-3183) `brtpf` (default OFF, implies `tpf`) extends the TPF
+# endpoint to bindings-restricted Triple Pattern Fragments (brTPF — Hartig & Buil-Aranda,
+# ODBASE 2016): a client may attach a SET of solution mappings (a `values` parameter on the
+# GET, or a POST body) so the server returns ONLY the page of pattern matches that are
+# COMPATIBLE with at least one supplied binding — pushing a bind-join's semi-join down to the
+# source so far less data crosses the wire than re-fetching the whole pattern per binding. The
+# fragment advertises the restriction through an extra `hydra:mapping` for the `values`
+# variable, and the `hydra:totalItems` count plus the paging window reflect the
+# bindings-restricted result, NOT the unrestricted pattern. Pure (no new dependency) — the
+# binding compatibility test runs over the same `Graph::pattern` / `store.scan` / `dict.term`
+# API. Without the feature the brTPF parsing + the `values` parameter handling are
+# `#[cfg]`-stripped, so a `tpf`-only build is byte-identical to before (a stray `values`
+# parameter is just an ignored unknown parameter — plain TPF). STILL governed by the same
+# `--tpf` runtime flag (brTPF is the same endpoint, extended).
+brtpf = ["tpf"]
+# [OPUS-4.8] (sq-r868, from-pss gh-162 follow-up (c)) `shacl` (default OFF) mounts the
+# OPT-IN HTTP SHACL validation endpoint `POST /shacl/validate`: the client POSTs a SHACL
+# shapes graph (RDF, by `Content-Type`) and the server validates its CURRENTLY-LOADED data
+# graph against it, returning a validation report — a JSON projection of
+# `sparq_shacl::ValidationReport` (the same `{ conforms, results: [{ focusNode, path, value,
+# sourceShape, sourceConstraintComponent, severity, message }] }` shape the wasm `shacl`
+# binding (gh-162 part (a)) and the PSS Pod-Manager consume) by default, or the W3C SHACL
+# report-vocabulary Turtle on `Accept: text/turtle`. This is the server-side / large-graph
+# path from gh-162: the store is already in memory (no per-request data parse), and the
+# 100k-node case where the JS `rdf-validate-shacl` OOMs is handled natively. The feature
+# pulls `sparq-shacl` (which transitively pulls sparq-engine for `sh:sparql`); sparq-shacl
+# follows the opt-in isolation pattern, so a build WITHOUT this feature carries ZERO SHACL
+# code — byte-identical to before, and sparq-core/the wasm bundle are untouched either way
+# (sparq-wasm depends on sparq-core/-engine directly, never on sparq-server). STILL OFF AT
+# RUNTIME by default even when compiled in — the operator must additionally set `--shacl` /
+# `SPARQ_SHACL=1` (`ServerConfig::shacl`), mirroring `tpf` / `federation-descriptors`;
+# validation is a READ over the store, so it is gated by the read auth like any GET.
+shacl = ["server", "dep:sparq-shacl"]
+# [OPUS-4.8] (sq-hj4n, gh-916) `n3-patch` (default OFF) adds the OPTIONAL Solid-style N3-Patch
+# (`solid:InsertDeletePatch`, media type `text/n3`) dialect to the Graph-Store-Protocol `PATCH`
+# method. With it on, a `PATCH` carrying a `text/n3` body is parsed into its `solid:deletes` /
+# `solid:inserts` / `solid:where` formulas and translated into ONE atomic graph-scoped SPARQL
+# Update submitted through the SAME sequenced group-commit writer the `application/sparql-update`
+# PATCH path uses (so it inherits atomicity + the auth gate). The N3 parsing rides the `oxttl`
+# `N3Parser` — `oxttl` is ALREADY a server dependency (the GSP read-side Turtle serialiser), so
+# this pulls NO new dependency. The OTHER PATCH dialect (`application/sparql-update` body) is
+# ALWAYS-ON and is NOT behind this feature. Without the `n3-patch` feature the N3-Patch parser +
+# its dispatch arm are `#[cfg]`-stripped: a `text/n3` PATCH body is then a plain `415` and the
+# crate is byte-identical to before — sparq-core / sparq-engine / the wasm bundle untouched
+# either way (sparq-wasm depends on sparq-core/-engine directly, never on sparq-server). STILL OFF
+# AT RUNTIME by default even when compiled in — the operator must additionally set `--n3-patch` /
+# `SPARQ_N3_PATCH=1` (`ServerConfig::n3_patch`), mirroring `tpf` / `shacl` / `federation-descriptors`.
+n3-patch = ["server"]
+# [OPUS-4.8] (sq-o5bi) `backup` (default OFF) mounts the OPT-IN ONLINE consistent-snapshot
+# backup/restore admin routes: `POST /admin/backup` streams a single self-describing artifact
+# of the CURRENTLY-PINNED generation (triples + per-pod epoch vectors + writer seq) WHILE
+# SERVING (no stop-the-world — the export reads an already-immutable `Arc<Generation>`, so
+# readers never block the writer and the writer never blocks readers), and `POST /admin/restore`
+# atomically installs a freshly-built ring+writer rehydrated from such an artifact (fail-closed on
+# a corrupt/mismatched artifact). A `--restore <FILE>` / `SPARQ_RESTORE` startup setting runs the
+# same restore on start (the bootstrap primitive for horizontal-scaling stage-2 + the base of
+# PITR). The feature turns on sparq-serve's own `backup` feature (the artifact format +
+# export/import live there); it adds no new dependency beyond that. DISTINCT from the offline
+# `sparq-cli save` (stop-the-world, index rebuild) and from the `--persist` per-graph WAL.
+# At-rest ENCRYPTION of the artifact is a SEPARATE concern, out of scope. Both routes are
+# WRITE/admin-gated (the existing `--auth-token` admin gate). Without the feature the routes +
+# the restore setting are `#[cfg]`-stripped, so a build without it is byte-identical to before.
+# Needs `server`.
+# [OPUS-4.8] (sq-0g6g) `dep:arc-swap` is brought in ONLY here — the swappable serving core
+# (`ArcSwap<ServingCore>`) that enables the atomic online restore exists solely under `backup`.
+# The default `server` build holds the ring/writer directly (byte-identical to pre-#941) and
+# never depends on arc-swap, so the default serving read path stays lean.
+backup = ["server", "dep:arc-swap", "sparq-serve/backup"]
+# [OPUS-4.8] (sq-oy1f.1, epic sq-oy1f) `jsonld` (default OFF) wires JSON-LD 1.1
+# (`application/ld+json`) into the server's RDF content negotiation, both directions:
+#   * EMIT — a SPARQL CONSTRUCT/DESCRIBE or a Graph-Store-Protocol GET with
+#     `Accept: application/ld+json` is served as JSON-LD (the engine's *flattened* form),
+#     participating in the existing q-value-aware Accept negotiation; and
+#   * ACCEPT — a GSP PUT/POST (or the SHACL shapes-body reader, which shares the same media-type
+#     matrix) with `Content-Type: application/ld+json` is parsed into the store via the engine's
+#     JSON-LD parser.
+# It turns on `sparq-core/jsonld` (the `oxjsonld` parser that `Graph::load_str` dispatches the
+# "jsonld" token to) and `sparq-engine/serialize-rdf` (the `write_jsonld` serialiser). Both are
+# native-pure (no wasm impact — sparq-wasm depends on sparq-core/-engine directly, never on
+# sparq-server). Without the feature the `GraphFormat::JsonLd` variant, its negotiation arm and
+# its write-body arm are `#[cfg]`-stripped, so an `application/ld+json` request gets the same
+# 406/415 it did before and the default build is byte-identical. Needs `server`.
+jsonld = ["server", "sparq-core/jsonld", "sparq-engine/serialize-rdf"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
+# [OPUS-4.8] (sq-o5bi, sq-0g6g) The swappable serving core (ring + writer) lives behind an
+# `ArcSwap` so an online restore can atomically install a rehydrated core while readers load
+# lock-free — the same arc-swap the ring uses internally. `backup`-feature ONLY: the default
+# serving path holds ring/writer directly (byte-identical to pre-#941), so without `backup` the
+# server never depends on arc-swap. The serialiser-only build and the wasm graph never see it.
+arc-swap = { version = "1", optional = true }
 sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 # The concurrent-serving core (Wave A, research/concurrent-serving.md §6): the
 # lock-free generation ring pins read snapshots; the single sequenced writer
@@ -93,9 +240,20 @@ sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 # and the wasm graph never see it (`cargo tree -p sparq-wasm -e normal | grep -c
 # serve` must stay 0).
 sparq-serve = { path = "../sparq-serve", version = "0.1.0", optional = true }
+# [OPUS-4.8] (sq-d3d8) Behind the opt-in `federation-descriptors` feature only: the VoID /
+# Service-Description generator (`Introspection::to_void`). Light — it depends only on
+# sparq-core + serde (no async, no heavy deps), and is already in the workspace tree
+# (sparq-engine / sparq-nlq use it). OFF by default, so it adds nothing to the standard build.
+sparq-introspect = { path = "../sparq-introspect", version = "0.1.0", optional = true }
 # Behind the opt-in `geo` feature only (geof_registry; its own default `engine`
 # feature is this same sparq-engine, so the graph gains just the georust stack).
 sparq-geo = { path = "../sparq-geo", version = "0.1.0", optional = true }
+# [OPUS-4.8] (sq-r868) Behind the opt-in `shacl` feature only: SHACL Core + SHACL-SPARQL
+# validation (`sparq_shacl::validate` → `ValidationReport`) for the `POST /shacl/validate`
+# endpoint. It transitively pulls sparq-engine (already a dependency here) for `sh:sparql`;
+# its OWN `oxrdf` is the same workspace 0.3 the server resolves, so terms flow through. OFF
+# by default — a build without the `shacl` feature carries zero SHACL code.
+sparq-shacl = { path = "../sparq-shacl", version = "0.1.0", optional = true }
 oxrdf.workspace = true
 # [OPUS-4.8] sq-rt6v: prefix-compacting Turtle + RDF/XML graph serialisation, and RDF/XML
 # request-body parsing, for the GSP read/write + CONSTRUCT/DESCRIBE surface. Both crates are
@@ -117,14 +275,33 @@ spargebra.workspace = true
 # --- async HTTP stack (feature-gated; native only) ---
 # `ws` powers the /subscriptions endpoint (T23, SEPA-style SPARQL subscriptions).
 axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "tokio", "query", "json", "ws"] }
+# [OPUS-4.8] (sq-2gqr) Slow-loris guard: `axum::serve` builds hyper's connection `Builder`
+# internally and never installs a timer, so hyper's HTTP/1 `header_read_timeout` is inert and a
+# slow client holds a connection (and concurrency slot) open forever. `sparq_server::serve` owns
+# the accept loop on hyper's `http1::Builder` directly (with a `TokioTimer` + `header_read_timeout`).
+# Both are already in axum 0.8's own dependency graph, so this adds NO new transitive code — it
+# only names them as direct deps so we can call `Builder`. http1-only (matches axum's config).
+hyper = { version = "1", optional = true, default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1", optional = true, default-features = false, features = ["server", "tokio", "service"] }
 # `sync` adds the watch channel that carries the commit generation to subscription tasks (T23).
-tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+# [OPUS-4.8] sq-toze.36: `io-util` adds AsyncReadExt/AsyncWriteExt for the in-binary --health-probe
+# (health_probe::run_probe): the distroless image has no curl/wget, so the server probes its own
+# loopback /health over a raw TcpStream for the Dockerfile HEALTHCHECK (cert gap GX-13).
+tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "io-util"] }
 # `limit` + `load-shed` power the max-concurrency guard (T15); `util` for ServiceBuilder combinators.
 tower = { version = "0.5", optional = true, features = ["limit", "load-shed", "util"] }
 # `catch-panic` turns a handler panic into a 500 instead of a dead connection (T15).
-tower-http = { version = "0.6", optional = true, features = ["trace", "catch-panic"] }
+# [OPUS-4.8] (sq-lodb) `timeout` adds `RequestBodyTimeoutLayer` / `TimeoutBody` — the slow-BODY
+# guard (an idle deadline between consecutive request-body frame polls) that complements
+# sq-2gqr's connection header-read deadline. Pure-Rust; already in tower-http's graph behind the
+# feature, so no new transitive code.
+tower-http = { version = "0.7", optional = true, features = ["trace", "catch-panic", "timeout"] }
 # Emits the TraceLayer request log when the binary runs with --verbose.
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["fmt", "env-filter"] }
+# [OPUS-4.8] (sq-cz89/sq-j9zs) Detailed error diagnostics (the offending query/RDF/path) are
+# emitted to the SERVER-SIDE `tracing` log instead of the HTTP response body, so they surface
+# only via the operator's opt-in `--verbose` / RUST_LOG subscriber — never leaking to callers.
+tracing = { version = "0.1", optional = true, default-features = false, features = ["std"] }
 # `stream::iter` feeds the streamed SELECT body (T16) — already in axum's dependency
 # graph, so this adds no new transitive code.
 futures-util = { version = "0.3", optional = true, default-features = false }
@@ -152,9 +329,13 @@ sparesults = { version = "0.3", features = ["sparql-12"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "time"] }
 # In-process HTTP client for integration tests (spin the server, assert protocol shape).
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-# WebSocket client for the /subscriptions integration tests (T23) — same version axum's
-# `ws` feature resolves to, so the dependency tree gains nothing new.
-tokio-tungstenite = "0.24"
+# WebSocket client for the /subscriptions integration tests (T23) — pinned to the SAME
+# version axum 0.8's `ws` feature resolves to (0.29) so the dependency tree gains nothing
+# new (no duplicate tungstenite/tungstenite-http). [OPUS-4.8] (sq-1qkm) Bumped 0.24 -> 0.29
+# to re-deduplicate after axum 0.8 moved to tungstenite 0.29; the 0.26 break moved
+# `Message::Text` to `Utf8Bytes` and `Ping/Pong/Binary` to `Bytes` — handled in
+# tests/subscriptions.rs.
+tokio-tungstenite = "0.29"
 # `StreamExt::next` / `SinkExt::send` on the test client's WebSocket stream.
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 # [OPUS-4.8] (sq-ebii) The decompression-ratio-cap test gzips a request body (a high-ratio

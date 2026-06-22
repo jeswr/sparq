@@ -141,7 +141,7 @@ Three layers:
 
 Relevant supported features (verified in `mod.rs`/`parser.rs`):
 
-- `@prefix`, `{ … } => { … }` forward rules, `<= ` backward rules, lists `( … )`.
+- `@prefix`, `{ … } => { … }` forward rules, `<=` backward rules, lists `( … )`.
 - **`log:notIncludes` / `log:includes`** with an *empty-formula subject* (`{}`) = scoped
   negation-as-failure **against the current store**. Critical semantics: rules containing
   negation are re-evaluated every fixpoint round, but **derived facts are never retracted**
@@ -255,6 +255,27 @@ structural facts. Pod *content* graphs are **excluded** — otherwise any agent 
 a document could embed `acl:` triples and grant themselves access. Writing `.acl`/`.acr`
 graphs is what `acl:Control` (WAC) / ACR write (ACP) gates.
 
+That excludes pod *content*, but the `.acl`/`.acr`/group graphs are themselves emitted to
+the reasoner **verbatim**, so there is a SECOND smuggling surface: the reasoner's own
+**derivation-internal vocabulary** is the `solidx:` namespace (`solidx:creator`,
+`solidx:owner`, `solidx:appliesToResource`, `solidx:isResource`, `solidx:isWebId`,
+`solidx:provForResource`, …). Those facts are meant to be produced ONLY by the loader (from
+trusted structural metadata + the caller-supplied `AccessProvenance`) or derived by the
+rules. A writer who controls an `.acr` could otherwise place a forged
+`<r> solidx:creator <self>` (cross-resource privilege escalation) or
+`<pol> solidx:appliesToResource <secret>` (policy redirection onto a resource they do not
+control) directly into the control document — and the rules cannot distinguish it from a
+loader-synthesized trusted fact. **[OPUS-4.8] sq-3jtd.5:** the loader therefore HARD-REJECTS
+(`is_reserved_derivation_predicate`) any control-graph or group-document triple whose
+predicate is in `solidx:` space before it reaches the reasoner — the direct analogue of the
+`urn:sparq:` reserved-principal guard (`validate_principal_iri`). The trusted channel for
+creator/owner facts is `AccessProvenance` and **nothing else**. *Until that filter was in
+place this boundary was NOT airtight: the original forgery test only covered a forged fact
+in a **resource** graph (never fed to the reasoner anyway); a forged fact placed inside the
+`.acr` itself escalated. The filter, the `acp:CreatorAgent`/`acp:OwnerAgent` resource-scoping
+AND the `solidx:appliesToResource` redirection class are now closed — see tests
+`acp_forged_{creator,owner,applies_to_resource}_in_acr_document_does_not_grant`.*
+
 ## 3. L2 — the rule sets (`crates/sparq-solid/rules/*.n3`)
 
 Vocabulary: `auth:` = `https://sparq.dev/ns/auth#` (public view), `solidx:` =
@@ -265,7 +286,7 @@ the session layer needs it, §3.4).
 
 For graphs and IRI structure (things the single-graph reasoner cannot see):
 
-```
+```text
 <R>  solidx:isResource true .          # every pod graph + every structural container prefix
 <R>  solidx:ownAcl <R.acl> .           # iff graph <R.acl> exists      (WAC)
 <R>  solidx:ownAcr <R.acr> .           # iff graph <R.acr> exists      (ACP)
@@ -438,11 +459,40 @@ The materializer (§4.2) hardcodes this order; each stratum is still pure N3 in 
 Covered: WAC accessTo, default with nearest-ancestor discovery (incl. multi-level), agent,
 agentClass foaf:Agent + acl:AuthenticatedAgent, agentGroup (+ group docs as graphs), origin
 (as pair principal), 4 modes with Control→ACL-resource semantics; ACP accessControl +
-transitive memberAccessControl, allOf/anyOf/noneOf, agent/client attrs incl.
+transitive memberAccessControl, allOf/anyOf/noneOf, agent/client/**issuer** attrs incl.
 Public/Authenticated/PublicClient specials, allow/deny with deny-overrides.
-Not covered (documented gaps, §7): `acp:issuer` (same shape as client — extend the principal
-to a triple, combinatorially noted), `acp:vc`, `acp:CreatorAgent`/`OwnerAgent` (need
-per-resource creator facts from the storage layer), `acl:accessToClass`, custom ACP modes
+`acp:issuer` ([OPUS-4.8] sq-3jtd.6): the third principal dimension — the OIDC issuer that
+vouched for the WebID — is the exact twin of the client dimension. A constrained issuer mints
+a three-component `urn:sparq:triple?agent=A&client=C&issuer=I` principal (an unconstrained
+issuer keeps the agent / `urn:sparq:pair?…` term byte-identical), the candidate enumeration
+gains an `issuer × {matcher values, auth:AnyIssuer top}` factor (still bounded as the client
+dimension is), and the session expands to ≤12 lookups (the pre-issuer ≤6 doubled).
+`acp:CreatorAgent`/`acp:OwnerAgent` ([OPUS-4.8] sq-3jtd.5): the context agent must be the
+resource's creator / owner. "Who created/owns `<r>`" is structural storage metadata the
+trusted caller (PSS) supplies through the `AccessProvenance` channel and
+`materialize_acp_with` — the loader synthesizes `<r> solidx:creator|owner <w>` facts from
+THAT map ONLY. Neither pod content NOR the `.acr` document itself can supply them: the
+loader hard-rejects any control-graph triple whose predicate is in `solidx:` space (§2.4),
+so a writer cannot self-grant via a forged `solidx:creator` triple smuggled into the `.acr`
+(tests `acp_forged_{creator,owner,applies_to_resource}_in_acr_document_does_not_grant`).
+The grant is RESOURCE-SCOPED — a resource-tagged
+`urn:sparq:provcand?…&res=R` candidate mints per (policy, creator/owner, resource), so the
+creator of `R1` is never granted `R2`; the creator/owner agent composes with the matcher's
+own `acp:client`/`acp:issuer` constraints (minting the same pair/triple principal). With no
+provenance supplied, no `CreatorAgent`/`OwnerAgent` matcher grants (fail-closed). A provenance
+matcher composes with client/issuer constraints on itself and with `anyOf`/`noneOf`/the
+policy's other allOf matchers' client/issuer dimensions. It ALSO composes with a SECOND,
+independent concrete-WebID `acp:agent` matcher under the same `allOf` ([OPUS-4.8] sq-az1b)
+with no special-casing — the provenance candidate's agent dimension is the creator/owner
+WebID, so the sibling concrete matcher's accept-set (that one WebID) and the allOf rejection
+check (acp-b.n3) intersect the two agent constraints: the degenerate case where the concrete
+WebID EQUALS the resource's creator/owner is supported (the agent satisfies both matchers,
+the grant stays resource-scoped — the creator of `R1` is still never granted `R2`), and the
+case where the concrete WebID is a DIFFERENT fixed agent grants nobody — correct-by-soundness
+(the two matchers demand the agent be both the creator and a distinct fixed WebID, an
+unsatisfiable conjunction), not a missing feature. Documented bound: only `acp:vc` /
+`acl:accessToClass` / custom modes remain out of scope (below).
+Not covered (documented gaps, §7): `acp:vc`, `acl:accessToClass`, custom ACP modes
 (design supports any mode IRI; prototype maps the 4 standard ones).
 
 ## 4. L3 — the `sparq-solid` crate
@@ -455,7 +505,8 @@ pub fn materialize_acp(graph: &mut Graph) -> Result<MaterializeStats, String>;
 //   both: strip reserved graphs → assemble facts (§4.2) → reason_n3 strata →
 //   REPLACE <urn:sparq:auth> in graph.named
 
-pub struct Session<'a> { pub agent: Option<&'a str>, pub client: Option<&'a str> }
+pub struct Session<'a> { pub agent: Option<&'a str>, pub client: Option<&'a str>, pub issuer: Option<&'a str> }
+//   [OPUS-4.8] sq-3jtd.6: `issuer` (ACP acp:issuer, the OIDC IdP); None = any issuer.
 pub enum Mode { Read, Write, Append, Control }
 pub struct AuthIndex { /* principal → mode → graph names; conditional grants; matcher accept-sets */ }
 impl AuthIndex {
@@ -761,4 +812,18 @@ Reading the numbers honestly:
    today): a *precise* per-solution check for variable `GRAPH ?var` template slots (today:
    require write on every store graph), and the `auth:append`-only insert-into-absent-graph
    edge. <!-- [OPUS-4.8] sq-xor3 -->
-
+7. **Containment / `ldp:contains` view ownership** — **DECIDED: PSS-written, not
+   sparq-derived** (sq-3jtd.4). A container's `ldp:contains` listing is explicit content the
+   storage layer (PSS) writes in its UPDATE bodies; sparq-solid stores it as ordinary triples
+   in the container's named graph (`fixture.rs`) and treats it as opaque content — it never
+   derives `ldp:contains` from IRI structure, mutates/re-derives it on a write, or reads it
+   into the reasoner. Containment *ancestry* is derived structurally (`solidx:parent`/
+   `solidx:ancestor`, §3.2) only to drive ACL inheritance and is never surfaced as
+   `ldp:contains`. Rationale: (i) avoids re-deriving a view on every write; (ii) keeps the
+   §2.4 content/reasoner boundary clean — a derived listing would have to read pod content;
+   (iii) the engine's atomic multi-op UPDATE (sq-ycle) is exactly the mechanism that keeps the
+   PSS-written listing consistent. The invariant is pinned by
+   `tests/containment_view_ownership.rs`. **Revisit only if** PSS asks sparq to own
+   containment; that would be a separate, explicitly-scoped *structural-only* (IRI
+   slash-semantics) derivation spike, never a content-reading one (`research/sparq-solid-scope.md`
+   area 2). <!-- [OPUS-4.8] sq-3jtd.4 -->

@@ -223,7 +223,7 @@ impl FilterCmp {
 /// constant operand parsed from the literal. Only the integer-FILTER fragment
 /// the `filter_int` circuit supports is extracted; any other FILTER shape
 /// (float, string, arithmetic, `?a op ?b`, `IN`, …) makes the query fall
-/// outside the bindable fragment and is rejected by [`collect_filters`].
+/// outside the bindable fragment and is rejected by `collect_filters`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryFilter {
     /// The variable the FILTER constrains (its operand column).

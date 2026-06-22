@@ -191,7 +191,7 @@ fn instantiate(template: &[TriplePattern], solutions: &QueryResult) -> Vec<Tripl
 }
 
 /// Template subject: an IRI or blank node. A variable bound to a literal (or an
-/// RDF-star triple term) is an illegal subject — the triple is skipped.
+/// RDF 1.2 triple term) is an illegal subject — the triple is skipped.
 fn subject_term<'a>(
     tp: &'a TermPattern,
     get: &dyn Fn(&Variable) -> Option<Term>,
@@ -205,7 +205,7 @@ fn subject_term<'a>(
             Term::BlankNode(b) => Some(NamedOrBlankNode::BlankNode(b)),
             _ => None, // literal / triple term in subject position — illegal, skip
         },
-        _ => None, // RDF-star triple template — not supported, skip
+        _ => None, // RDF 1.2 triple-term template — not supported, skip
     }
 }
 

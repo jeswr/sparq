@@ -44,6 +44,25 @@
 //!   second valid codeword within distance `e` — needs `> e` coordinated errors
 //!   and is the standard RS limitation, not a regression over plain Lagrange,
 //!   which silently miscorrects on a SINGLE error.)
+//!
+//!   **Residual miscorrection window (the adversarial caveat, sq-6u6b (3)).** The
+//!   one case where robust reconstruction returns a WRONG secret WITHOUT aborting
+//!   is when `> e` tampered shares happen to land the corrupted vector within
+//!   Hamming distance `e` of a *different* valid degree-`degree` codeword `Q'`.
+//!   BW then "corrects" to `Q' ≠ Q` and the all-points re-check passes (the
+//!   tampered points now look like the `≤ e` errors of `Q'`), so we return
+//!   `Q'(0)` and name the honest minority as the corrected shares. This requires
+//!   the adversary to (a) control more than `e` shares AND (b) choose their
+//!   deltas so the result is near a second codeword — which over a random-looking
+//!   field `F_p = 2^61 − 1` means hitting a `(degree+1)`-coordinate algebraic
+//!   coincidence with the remaining honest shares. For independent/random deltas
+//!   the probability is `≈ |codewords within distance e| / p^{redundancy}`, i.e.
+//!   astronomically small (`~2^{-61}` per honest constraint). It is nonetheless a
+//!   REAL malicious caveat, not a numerical artefact: it is the generic RS
+//!   bounded-distance-decoding limit, and the information-theoretic MAC layer
+//!   (WI-4, bead sq-6d6g) — whose soundness comes from the secret `α`, not from
+//!   codeword distance — is what closes it. Detection of `≤ e` errors is, by
+//!   contrast, unconditional.
 //! - **The degree-`2t` equality/mult open at `n = 2t+1`** (`join::secure_equal`).
 //!   WI-2 (bead sq-7q9i) routes that open through THIS primitive at degree `2t`
 //!   ([`crate::shamir::reconstruct_degree`]): it detects/corrects when
@@ -98,7 +117,52 @@ use crate::shamir::Share;
 /// The returned secret is `Q(0)` of the recovered/agreed degree-`degree`
 /// polynomial. On any inconsistency that cannot be corrected, returns
 /// [`MpcError::Tampered`] with the identified cheater points where possible.
+///
+/// Callers that need the identity of the cheaters on the SUCCESS path (the shares
+/// Berlekamp–Welch corrected — exact attribution, not a heuristic) should use
+/// [`reconstruct_robust_attributed`] instead, which returns the same secret plus
+/// that list.
 pub fn reconstruct_robust(shares: &[Share], degree: usize) -> Result<Fp, MpcError> {
+    reconstruct_robust_attributed(shares, degree).map(|r| r.secret)
+}
+
+/// Outcome of a successful robust reconstruction with cheater attribution.
+///
+/// `secret` is `Q(0)` of the recovered degree-`degree` polynomial. `cheaters`
+/// holds the evaluation points (`Share::x`) of the shares that were CORRECTED —
+/// i.e. whose supplied `y` disagrees with the recovered codeword. On the success
+/// path (Berlekamp–Welch correction, or the pure `e = 0` consistency check) this
+/// list is **exact**: the agreeing degree-`degree` majority uniquely pins the
+/// codeword, so every named point really did carry a tampered value. It is empty
+/// when all shares were already consistent (clean input, or the no-redundancy
+/// `n == degree + 1` path where attribution is impossible).
+///
+/// Contrast with the abort path: when correction is impossible the honest set is
+/// unknown, so [`MpcError::Tampered`]'s `cheaters` is a best-effort *vote*, not an
+/// exact set. Here, because correction SUCCEEDED, attribution is sound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RobustReconstruction {
+    /// The recovered secret `Q(0)`.
+    pub secret: Fp,
+    /// Evaluation points (`Share::x`) of the corrected (tampered) shares, sorted
+    /// ascending. Exact on the success path; see the struct docs.
+    pub cheaters: Vec<u64>,
+}
+
+/// Robust reconstruction that ALSO returns the exactly-identified cheaters on the
+/// success path (bead sq-6u6b follow-up (1)).
+///
+/// Behaves exactly like [`reconstruct_robust`] for the secret value and for the
+/// abort/precondition errors, but on success additionally surfaces which shares
+/// Berlekamp–Welch had to correct. When correction succeeds the recovered `Q` is
+/// the unique degree-`degree` codeword agreeing with the honest majority, so the
+/// off-curve points are precisely the tampered shares — sound attribution, not a
+/// heuristic. Callers that need to *act* on a cheater (e.g. exclude a party from
+/// a re-run) should prefer this entry point over the value-only one.
+pub fn reconstruct_robust_attributed(
+    shares: &[Share],
+    degree: usize,
+) -> Result<RobustReconstruction, MpcError> {
     let n = shares.len();
     if n < degree + 1 {
         return Err(MpcError::Protocol(format!(
@@ -113,9 +177,13 @@ pub fn reconstruct_robust(shares: &[Share], degree: usize) -> Result<Fp, MpcErro
 
     // No redundancy: t+1 points always define SOME degree-t polynomial. There is
     // nothing to cross-check, so we preserve plain-Lagrange behaviour and make NO
-    // detection claim (returning Tampered here would be a false positive).
+    // detection claim (returning Tampered here would be a false positive). With no
+    // redundancy we also cannot attribute anything, so cheaters is empty.
     if n == degree + 1 {
-        return lagrange_at_zero(shares);
+        return Ok(RobustReconstruction {
+            secret: lagrange_at_zero(shares)?,
+            cheaters: Vec::new(),
+        });
     }
 
     // Redundant: maximal Berlekamp–Welch error budget for this (n, degree).
@@ -129,42 +197,125 @@ pub fn reconstruct_robust(shares: &[Share], degree: usize) -> Result<Fp, MpcErro
     for e in 0..=e_max {
         if let Some(q) = berlekamp_welch(shares, degree, e) {
             // Re-verify against ALL points: the recovered Q must disagree with at
-            // most e of them; the agreeing majority pins the true codeword.
+            // most e of them; the agreeing majority pins the true codeword. Those
+            // off-curve points ARE exactly the corrected shares — sound attribution.
             let bad = disagreeing_points(shares, &q);
             if bad.len() <= e {
-                return Ok(eval_poly(&q, Fp::zero()));
+                let mut cheaters: Vec<u64> = bad.into_iter().map(|i| shares[i].x).collect();
+                cheaters.sort_unstable();
+                return Ok(RobustReconstruction {
+                    secret: eval_poly(&q, Fp::zero()),
+                    cheaters,
+                });
             }
         }
     }
 
     // No degree-`degree` polynomial fits within the correctable budget: the
     // shares are mutually inconsistent beyond what redundancy can repair. Abort
-    // (detect-and-abort), naming the cheaters we can pin against the best fit.
+    // (detect-and-abort), naming the cheaters we can pin by a voting scheme.
     Err(tampered_error(shares, degree, e_max))
 }
 
-/// Identify, against the best-effort interpolation of the first `degree+1`
-/// points, which point indices are off-curve — a best-effort cheater list for
-/// the abort message. (When correction is impossible this is heuristic: the
-/// honest set is unknown, so we report the minority relative to one reference
-/// subset. Detection itself is sound; the *attribution* is best-effort.)
+/// Best-effort cheater attribution for the ABORT path (bead sq-6u6b follow-up
+/// (2)): name the off-curve points of the MOST self-consistent reference subset.
+///
+/// When `> e` shares are tampered the honest set is unknowable, so no attribution
+/// can be sound (the bead acknowledges this — detection is sound, blame is not).
+/// The OLD code fixed the reference to the FIRST `degree+1` points; if a cheater
+/// happened to sit in that arbitrary window the recovered polynomial was wrong and
+/// it blamed the honest majority. We instead try **every** `degree+1`-point
+/// reference subset, interpolate each, and keep the fit with the FEWEST off-curve
+/// points across all `n` shares. The intuition: a fully-honest reference subset
+/// recovers the true polynomial and disagrees only with the `≈ #cheaters` tampered
+/// shares, whereas a cheater-containing subset recovers a spurious polynomial that
+/// generically misses almost everything — so "fewest disagreements" is a strong
+/// signal for "this reference subset was (probably) all honest", and its off-curve
+/// set is then the best single-subset cheater estimate. Ties (and the pathological
+/// all-miss case) fall back to the first such minimum, which is no worse than the
+/// old fixed-subset behaviour.
+///
+/// **Measured guarantee and its limit.** In the FIRST abort band — exactly
+/// `e_max + 1` tampered shares (one over the correctable budget) — a fully-honest
+/// reference subset is the *unique* minimum and this names ONLY genuinely-tampered
+/// points (no honest party framed; pinned by `abort_first_band_names_only_real_
+/// cheaters` across `n = 5..9`). That is precisely the case the old fixed-first-
+/// subset code could get wrong. As the error count grows further past the budget
+/// the honest set becomes genuinely unidentifiable and the minimum-disagreement
+/// subset can itself contain a cheater, so attribution degrades to a true best-
+/// effort guess that MAY name an honest party. This is therefore NOT a blanket
+/// soundness claim: [`MpcError::Tampered::cheaters`] stays documented as best-
+/// effort and callers MUST NOT treat an abort-path name as proof of guilt.
+/// Detection itself is always sound; only blame is heuristic. The success path
+/// ([`reconstruct_robust_attributed`]) is where attribution is exact.
 fn tampered_error(shares: &[Share], degree: usize, e_max: usize) -> MpcError {
     let n = shares.len();
-    // Reference polynomial from the first degree+1 points (an arbitrary subset).
-    let suspects = match lagrange_at_zero_poly(&shares[..degree + 1]) {
-        Ok(q) => disagreeing_points(shares, &q)
-            .into_iter()
-            .map(|i| shares[i].x)
-            .collect::<Vec<_>>(),
-        Err(_) => Vec::new(),
-    };
+    let suspects = best_effort_suspects(shares, degree);
     MpcError::Tampered {
         detail: format!(
             "RS consistency check failed: {n} shares of a degree-{degree} secret are not all on \
              one polynomial and the inconsistency exceeds the correctable budget e={e_max} \
-             (need n >= degree + 2e + 1 to correct e errors)"
+             (need n >= degree + 2e + 1 to correct e errors); cheater attribution is best-effort \
+             on this abort path"
         ),
         cheaters: suspects,
+    }
+}
+
+/// Off-curve evaluation points of the most self-consistent `degree+1`-point
+/// reference fit (sorted ascending). See [`tampered_error`] for the rationale.
+fn best_effort_suspects(shares: &[Share], degree: usize) -> Vec<u64> {
+    let mut best: Option<Vec<usize>> = None;
+    // Enumerate all C(n, degree+1) reference subsets. At the intended party counts
+    // (n = 3..9, degree+1 ≤ 5) this is ≤ C(9,5)=126 fits, each O(n^2) — negligible.
+    for_each_combination(shares.len(), degree + 1, &mut |idxs| {
+        let subset: Vec<Share> = idxs.iter().map(|&i| shares[i]).collect();
+        let Ok(q) = lagrange_at_zero_poly(&subset) else {
+            return;
+        };
+        let bad = disagreeing_points(shares, &q);
+        // Keep the fit with the fewest disagreements (most likely all-honest).
+        if best.as_ref().is_none_or(|b| bad.len() < b.len()) {
+            best = Some(bad);
+        }
+    });
+    match best {
+        Some(bad) => {
+            let mut xs: Vec<u64> = bad.into_iter().map(|i| shares[i].x).collect();
+            xs.sort_unstable();
+            xs
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Invoke `f` on each strictly-increasing combination of `k` indices drawn from
+/// `0..n` (the lexicographic `C(n, k)` subsets). A reused index buffer means no
+/// per-subset allocation. `k == 0` yields the single empty combination; `k > n`
+/// yields none.
+fn for_each_combination(n: usize, k: usize, f: &mut impl FnMut(&[usize])) {
+    if k > n {
+        return;
+    }
+    let mut idx: Vec<usize> = (0..k).collect();
+    loop {
+        f(&idx);
+        if k == 0 {
+            return; // the single empty combination
+        }
+        // Find the rightmost index that can be incremented. idx[i] may rise to at
+        // most (n - k + i); past that the slot is "maxed out".
+        let mut i = k - 1;
+        while idx[i] == n - k + i {
+            if i == 0 {
+                return; // all slots maxed → last combination consumed
+            }
+            i -= 1;
+        }
+        idx[i] += 1;
+        for j in (i + 1)..k {
+            idx[j] = idx[j - 1] + 1;
+        }
     }
 }
 
@@ -235,7 +386,10 @@ fn berlekamp_welch(shares: &[Share], degree: usize, e: usize) -> Option<Vec<Fp>>
         }
         // RHS: the fixed monic top E_e = 1 contributes y·x^e to N(x_i)=y·E(x_i),
         // i.e. moves to the RHS as + y·x^e.
-        row[cols] = y.mul(x.pow(e as u64));
+        // [OPUS-4.8] sq-7ltf: `e` is the PUBLIC error-correction parameter and `x`
+        // a PUBLIC evaluation point, so the variable-time exponentiation is sound
+        // here (no secret in the exponent or base).
+        row[cols] = y.mul(x.pow_vartime(e as u64));
         aug.push(row);
     }
 
@@ -514,5 +668,132 @@ mod tests {
         corrupt(&mut min_set, 0, 9_999);
         let got = reconstruct_robust(&min_set, t).expect("t+1 points always interpolate");
         assert_ne!(got, secret, "t+1: tamper changes the secret (no detection)");
+    }
+
+    // ---------------------------------------------------------------------
+    // [OPUS-4.8] sq-6u6b: cheater attribution.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn attributed_success_pins_exact_cheaters() {
+        // (1) On the SUCCESS path the corrected shares are EXACTLY the tampered
+        // ones — `cheaters` lists their evaluation points (Share::x), sorted.
+        let b = ShamirBackend::new_seeded(9, 0x9999).unwrap();
+        let t = b.threshold();
+        assert_eq!(t, 4); // e_max = 2
+        let secret = fp(555_555);
+        let mut shares = b.dealer().share(secret);
+        corrupt(&mut shares, 0, 11);
+        corrupt(&mut shares, 5, 22);
+        let r = reconstruct_robust_attributed(&shares, t).unwrap();
+        assert_eq!(r.secret, secret, "still corrects to the true secret");
+        let mut expected = vec![shares[0].x, shares[5].x];
+        expected.sort_unstable();
+        assert_eq!(
+            r.cheaters, expected,
+            "corrected shares must be exactly the tampered evaluation points"
+        );
+    }
+
+    #[test]
+    fn attributed_clean_input_names_no_cheaters() {
+        // No tamper ⇒ empty cheater list on the success path.
+        let b = ShamirBackend::new_seeded(7, 0xC0FFEE).unwrap();
+        let t = b.threshold();
+        let shares = b.dealer().share(fp(42));
+        let r = reconstruct_robust_attributed(&shares, t).unwrap();
+        assert_eq!(r.secret, fp(42));
+        assert!(r.cheaters.is_empty(), "clean input has no cheaters");
+    }
+
+    #[test]
+    fn attributed_no_redundancy_empty_cheaters() {
+        // At exactly t+1 shares attribution is impossible; cheaters is empty and
+        // we never claim Tampered (matches reconstruct_robust behaviour).
+        let b = ShamirBackend::new_seeded(5, 0xABCD).unwrap();
+        let t = b.threshold();
+        let shares = b.dealer().share(fp(123_456));
+        let mut min_set = shares[..t + 1].to_vec();
+        corrupt(&mut min_set, 0, 9_999);
+        let r = reconstruct_robust_attributed(&min_set, t).unwrap();
+        assert!(r.cheaters.is_empty());
+    }
+
+    #[test]
+    fn abort_first_band_names_only_real_cheaters() {
+        // (2) The improvement that is genuinely demonstrable: in the FIRST abort
+        // band — exactly `e_max + 1` tampered shares (one over the correctable
+        // budget) — a fully-honest `degree+1`-reference subset is the UNIQUE
+        // minimum-disagreement fit (it disagrees with only the `e_max+1` cheaters;
+        // any cheater-containing subset recovers a spurious poly that misses many
+        // more points). So the min-disagreement heuristic names ONLY genuinely-
+        // tampered points: no honest party is framed. This is the regime the old
+        // fixed-first-subset attribution could get wrong (its arbitrary window may
+        // contain a cheater). Beyond this band attribution is provably impossible
+        // (documented best-effort), so we do NOT assert soundness there.
+        let mut rng = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        for &(n, degree) in &[(5usize, 1usize), (6, 1), (7, 1), (7, 2), (9, 1), (9, 2)] {
+            let e_max = (n - degree - 1) / 2;
+            let num_err = e_max + 1; // first abort band
+            for _ in 0..300 {
+                let secret = fp(next() % crate::field::P);
+                let pts: Vec<u64> = (1..=n as u64).collect();
+                let mut shares = deal_at(&mut next, secret, degree, &pts);
+                // Tamper `num_err` distinct shares.
+                let mut idxs: Vec<usize> = (0..n).collect();
+                for i in (1..n).rev() {
+                    let j = next() as usize % (i + 1);
+                    idxs.swap(i, j);
+                }
+                let mut tampered_xs = Vec::new();
+                for &i in &idxs[..num_err] {
+                    let mut d = next() % crate::field::P;
+                    if d == 0 {
+                        d = 1;
+                    }
+                    shares[i].y = shares[i].y.add(fp(d));
+                    tampered_xs.push(shares[i].x);
+                }
+                tampered_xs.sort_unstable();
+                let err = reconstruct_robust(&shares, degree).unwrap_err();
+                let MpcError::Tampered { cheaters, .. } = err else {
+                    panic!("n={n} degree={degree}: expected Tampered, got {err:?}");
+                };
+                assert!(!cheaters.is_empty(), "must name at least one suspect");
+                for x in &cheaters {
+                    assert!(
+                        tampered_xs.contains(x),
+                        "n={n} degree={degree} num_err={num_err}: framed honest x={x} \
+                         (tampered {tampered_xs:?}, named {cheaters:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Deal a degree-`degree` Shamir sharing of `secret` at the given evaluation
+    /// points, with random non-constant coefficients drawn from `next`.
+    fn deal_at(
+        next: &mut impl FnMut() -> u64,
+        secret: Fp,
+        degree: usize,
+        pts: &[u64],
+    ) -> Vec<Share> {
+        let mut coeffs = vec![secret];
+        for _ in 0..degree {
+            coeffs.push(fp(next() % crate::field::P));
+        }
+        pts.iter()
+            .map(|&x| Share {
+                x,
+                y: eval_poly(&coeffs, Fp::new(x)),
+            })
+            .collect()
     }
 }

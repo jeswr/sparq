@@ -38,6 +38,7 @@
 //! BGP-join obliviousness-cost analysis (RQ2b). No fake crypto here.
 
 use crate::batched::{BatchedShares, RowBinding};
+use crate::compare::secure_equal_to_bit;
 use crate::field::Fp;
 use crate::oblivious_join::{self, Candidate, MatchBit, ObliviousOutputCost};
 use crate::partial::{HolderId, MpcError, PartialResult};
@@ -321,9 +322,14 @@ fn canonicalize_rows(rows: &mut [Vec<Option<Term>>]) {
 /// on a match.
 ///
 /// The key is `Fp` because the secret-shared equality primitive operates over
-/// the field; the holder is responsible for encoding its private key term into
-/// `Fp` (in production via a collision-resistant hash whose pre-image stays
-/// secret-shared and is proven in-circuit — out of scope here; see doc).
+/// the field; the holder encodes its private key term into `Fp` via the
+/// documented, collision-resistant [`crate::term_encode::encode_term`] (a
+/// domain-separated SHA-512 folded into the field, with a stated birthday bound),
+/// or — to GUARANTEE injectivity for a concrete key set rather than rely on the
+/// bound — through [`crate::term_encode::KeyEncoder`], which fails closed on a
+/// false-match collision before any key is shared. The in-circuit proof that the
+/// opened key equals `encode_term(term)` for the holder's real term stays the M4
+/// collaborative-proof job (the encoder is its on-ramp).
 #[derive(Debug, Clone)]
 pub struct HiddenKeyedRows {
     /// The holder that owns these rows.
@@ -363,11 +369,16 @@ pub struct HiddenKeyedRows {
 ///   circuit-PSI uses oblivious hashing / cuckoo bins to cut this to ~linear;
 ///   that optimisation (Q3, RQ2b — BGP-join obliviousness cost) is NOT done. The
 ///   all-pairs version is correct but not the SOTA cost profile.
-/// - The field encoding of the key is the holder's responsibility; a production
-///   build needs a collision-resistant hash whose correctness is proven inside
-///   the collaborative proof (M4). Here equality in `Fp` stands in for term
-///   equality and is exact only if the encoding is injective on the inputs (the
-///   differential test guarantees this by construction).
+/// - The field encoding of the key now has a documented, collision-resistant
+///   construction — [`crate::term_encode::encode_term`] (domain-separated SHA-512
+///   folded into the field) with a stated birthday bound, plus
+///   [`crate::term_encode::KeyEncoder`] for a fail-closed exact-injectivity check
+///   over a concrete key set (sq-dl81). Equality in `Fp` is then a SOUND stand-in
+///   for term equality except on a birthday collision (`≈ q²/2^62`, negligible in
+///   the ≤10⁴-row regime), which `KeyEncoder` detects. What is STILL deferred to
+///   the collaborative proof (M4) is the in-circuit guarantee that the opened key
+///   actually equals `encode_term` of the holder's real term — the encoding-
+///   *correctness* proof, for which this encoder is the on-ramp.
 /// - Malicious security (a party feeding inconsistent shares) is NOT provided —
 ///   semi-honest only, exactly as [`ShamirBackend`] states.
 ///
@@ -399,6 +410,25 @@ impl HiddenValueJoin {
     /// cleartext after sharing except to deal the shares — exactly what a dealer
     /// does. It returns the boolean match WITHOUT reconstructing `a` or `b`.
     ///
+    /// ## Leakage — the L2 match-graph leak (characterised, sq-4vgx)
+    ///
+    /// The match bit IS opened (the `m == 0?` test reconstructs `m`). For ONE pair
+    /// that single bit is the minimum a join must compute, but the all-pairs driver
+    /// [`Self::join`] calls this on EVERY `(i, j)`, so the party driving the opens
+    /// learns the **entire bipartite match graph** — exactly which left row matched
+    /// which right row — even though the keys themselves stay hidden (`m` is a
+    /// uniform nonzero for unequal keys, so neither key nor their difference leaks).
+    /// That match graph reveals the join-key fan-out / multiplicity distribution (a
+    /// strong fingerprint of the hidden key distribution): leak **L2** in the
+    /// leakage taxonomy (`research/mpc-sparql-capability-matrix.md` §5, "L2 per-pair
+    /// match graph / fan-out"). This is the CHEAP-but-LEAKY tier — it leaks strictly
+    /// more than the output multiset alone. [`Self::batched_join`]'s oblivious
+    /// output bounds the result-set leaks (L1/L2 of the *output*), and
+    /// [`Self::fully_oblivious_batched_join`] closes L2 at the DECISION by keeping
+    /// the per-pair bit secret-shared via [`secure_equal_to_bit`] — never opened.
+    /// The leak is PINNED by `secure_equal_leaks_full_bipartite_match_graph` so this
+    /// boundary is a regression-guarded property, not just prose.
+    ///
     /// **Consistency-checked open (sq-7q9i, WI-2).** The product `m = d·r` is a
     /// degree-`2t` Reed–Solomon codeword over the `n` party points; the open
     /// routes through [`shamir::reconstruct_degree`] → the WI-1 RS checker at
@@ -429,6 +459,29 @@ impl HiddenValueJoin {
     /// `m = (a - b)·r` is opened at degree `2t`; `m == 0 ⇔ a == b`, and for unequal
     /// keys `m` is uniform nonzero — so ONLY the match bit is revealed, never either
     /// key or their difference.
+    ///
+    /// **Integrity envelope — DETECT-only, never CORRECT (bead sq-ji5f; decision
+    /// = the honest envelope).** The degree-`2t` open routes through
+    /// [`shamir::reconstruct_degree`] → the WI-1 Reed–Solomon checker, but the
+    /// honest-majority constructor fixes `t = ⌊(n−1)/2⌋`, so the equality open's
+    /// correction budget at degree `2t` is `e_max = ⌊(n − (2t+1))/2⌋ = 0` for
+    /// EVERY party count the constructor builds:
+    ///
+    /// - **odd `n`** (`n = 2t+1`): zero RS redundancy at degree `2t` ⇒ tampering
+    ///   is information-theoretically undetectable (a MAC is the deferred WI-4
+    ///   fix, bead sq-6d6g) — NOT claimed otherwise;
+    /// - **even `n`** (`n = 2t+2`): exactly one redundant share ⇒ a tampered
+    ///   product share is DETECTED and the open aborts with [`MpcError::Tampered`].
+    ///
+    /// So this primitive can at best **detect-and-abort** under an honest majority
+    /// and NEVER auto-corrects a cheater. Robust correction (`e_max ≥ 1`) at
+    /// degree `2t` would need `n ≥ 2t+3`, which is deliberately NOT provisioned
+    /// here: the bead weighed (a) over-provisioning the party set, (b) a
+    /// BGW/DN degree-reduction round before the open, and (c) leaving
+    /// detect-and-abort as the honest envelope, and chose (c) — robustness is out
+    /// of scope for the honest-majority equality test and would change the trust
+    /// model. The arithmetic and behaviour are pinned by the `sq-ji5f` properties
+    /// in `adversarial_tests` (`honest_majority_equality_open_*`).
     fn secure_equal_shared(
         &self,
         dealer: &mut ShamirDealer,
@@ -463,6 +516,20 @@ impl HiddenValueJoin {
     /// `left.payload_vars ++ right.payload_vars` (the key is NOT projected — it
     /// stays hidden). Result is attributed to the synthetic federation holder and
     /// canonicalised so the disclosed multiset is order-independent.
+    ///
+    /// ## Leakage — this is the CHEAP-but-LEAKY tier (L2 not closed; sq-4vgx)
+    ///
+    /// This all-pairs loop opens `secure_equal` for EVERY `(i, j)` pair, so
+    /// the party driving the opens learns the full **bipartite match graph** — which
+    /// left row matched which right row (leak **L2**; see `secure_equal` and
+    /// `research/mpc-sparql-capability-matrix.md` §5). The keys/values stay hidden,
+    /// but the match-graph fan-out fingerprints the hidden key distribution. The
+    /// output is also exactly the true match count (leak **L1**). Use this only when
+    /// the per-pair match structure is acceptable to reveal; for the oblivious
+    /// output use [`Self::batched_join`] (bounds L1/L2 of the result set) and for the
+    /// decision-time fix use [`Self::fully_oblivious_batched_join`] (the per-pair bit
+    /// is secret-shared, never opened). The L2 leak here is PINNED by
+    /// `secure_equal_leaks_full_bipartite_match_graph`.
     pub fn join(
         &self,
         left: &HiddenKeyedRows,
@@ -525,7 +592,7 @@ impl HiddenValueJoin {
 /// parties' shares of the whole key column are jointly independent of every key
 /// (the batched-Shamir hiding property). This is the structural reason the keys
 /// never leak: the cleartext keys are used ONLY as the local inputs to Shamir
-/// sharing and to the secure-equality test ([`HiddenValueJoin::secure_equal_shared`]),
+/// sharing and to the secure-equality test (`HiddenValueJoin::secure_equal_shared`),
 /// and are NEVER reconstructed from shares — exactly as the four-flatmates aggregate
 /// uses its salary column. The DISCLOSED payload columns ride alongside in the clear
 /// (disclosure-minimisation, convention #4 — only the *key* is hidden).
@@ -618,7 +685,7 @@ impl HiddenValueJoin {
     ///      are disclosed (convention #4); the VALUE stays hidden. Correlation is by
     ///      key, not index, so the orders need not match.
     /// 3. For each candidate pair the match is decided by the existing
-    ///    [`Self::secure_equal`] over the secret-shared keys — the join key/value is
+    ///    `Self::secure_equal` over the secret-shared keys — the join key/value is
     ///    NEVER opened; only the match bit is (see the honesty note).
     /// 4. The candidates feed [`crate::oblivious_join::oblivious_join_output`] with
     ///    [`MatchBit::Public`] bits and the public bound `B`: non-matches become
@@ -720,6 +787,129 @@ impl HiddenValueJoin {
 
         // (4) Route through the oblivious output transform: hide which candidates
         // matched (shuffle) and bound the revealed cardinality to the public `B`.
+        oblivious_join::oblivious_join_output(&self.backend, &candidates, out_vars, bound)
+    }
+
+    /// **The fully-oblivious batched hidden-value join (sq-xhaw).** The upgrade
+    /// [`Self::batched_join`] explicitly deferred: decide each candidate pair's
+    /// match as a **secret-shared bit that is NEVER opened per pair**, so the join
+    /// leaks nothing per pair — only the final oblivious output (bounded to the
+    /// public `B`, shuffled) is revealed.
+    ///
+    /// ## What changes vs [`Self::batched_join`] (and why it matters)
+    ///
+    /// [`Self::batched_join`] decides each match with `secure_equal`, which OPENS
+    /// the masked product `m = (a−b)·r` per candidate. That open IS the match bit at
+    /// `(i, j)` — and the set of true `(i, j)` is the **bipartite match graph / key
+    /// fan-out** (leak L2 at the DECISION; `research/mpc-sparql-capability-matrix.md`
+    /// §4.2). `batched_join` therefore closes the OUTPUT leaks (L1/L2 of the result
+    /// set, via the oblivious shuffle + padded reveal) but NOT the decision-time
+    /// match-graph leak — it states this honestly in its own doc.
+    ///
+    /// This entry point closes that last leak: it computes each match bit with
+    /// [`crate::compare::secure_equal_to_bit`] — a bit-decomposition equality whose
+    /// 0/1 verdict stays a fresh degree-`t` **secret-shared** sharing — and feeds it
+    /// as a [`MatchBit::SecretShared`] selector into the SAME landed oblivious output
+    /// transform ([`crate::oblivious_join::oblivious_join_output`], sq-jnkm). The
+    /// per-candidate match bit is therefore never reconstructed anywhere in the
+    /// protocol; the only thing ever opened is the `B` shuffled output tags (which
+    /// classify a slot as a real row or a dummy AFTER the permutation destroyed
+    /// position→candidate linkage). No per-pair open ⇒ no per-pair leak.
+    ///
+    /// ## Cost (honest — this is the expensive path)
+    ///
+    /// `secure_equal_to_bit` is a bit-decomposition + AND-tree of secure
+    /// multiplications ([`crate::compare::COMPARE_BITS`] equalities + `COMPARE_BITS
+    /// − 1` ANDs, each one [`shamir::mul_shares_raw`] + one
+    /// [`crate::shamir::ShamirDealer::degree_reduce`] round), per candidate pair —
+    /// **vastly** more multiplication rounds than `batched_join`'s single masked-open
+    /// per pair. The reward is the per-pair confidentiality. This is the LAN,
+    /// `O(L)`-round profile the comparison module documents; the constant-round
+    /// (Rabbit/edaBits) speedup is the same future seam `compare` defers. We do not
+    /// extrapolate beyond the `secure_equal`/comparison feasibility envelope.
+    ///
+    /// ## Privacy property enforced (state it precisely — empirical-honesty rule)
+    ///
+    /// - **Per pair: nothing is opened.** The match bit is a secret-shared 0/1; the
+    ///   keys/values are never reconstructed (bit-decomposition deals only the bit
+    ///   shares, exactly like [`crate::compare::secure_greater_than`]). The L2
+    ///   match-graph leak `batched_join` has is **eliminated at the decision**.
+    /// - **Output: oblivious.** Cardinality bounded to the public `B`, shuffled so
+    ///   position→candidate linkage is destroyed (sq-jnkm transform, unchanged).
+    /// - **Operand range.** Both holders' private keys must be `< 2^COMPARE_BITS`
+    ///   (`secure_equal_to_bit` fails closed otherwise so the bit-decomposition is
+    ///   injective and field-equality ⇔ recovered-bit-equality).
+    ///
+    /// HONESTY (NOT an overclaim; privacy-claims gate is live, cite sq-qhy4).
+    /// Semi-honest, honest-majority ONLY — unchanged from the [`ShamirBackend`] /
+    /// `compare` layer: every multiplication routes through `degree_reduce`, which
+    /// has no in-protocol check that a deviating party re-shared honestly, so this is
+    /// NOT maliciously secure. This closes a *confidentiality* axis (the per-pair
+    /// match bit), which is orthogonal to malicious security; the external soundness
+    /// sign-off is still pending (sq-qhy4). No soundness/security guarantee beyond
+    /// the documented semi-honest model is claimed.
+    ///
+    /// ## Fail-closed contracts (same as [`Self::batched_join`])
+    ///
+    /// - `Positional`: both batches must be equal length; `Keyed`: both `Keyed`;
+    ///   mixed bindings → [`MpcError::Protocol`].
+    /// - `bound` must cover the candidate count (`oblivious_join_output` fails closed
+    ///   otherwise — never truncating a candidate, which could drop a true match).
+    /// - Output schema is `left.payload_vars ++ right.payload_vars` (the key is NOT
+    ///   projected — it stays hidden).
+    pub fn fully_oblivious_batched_join(
+        &self,
+        left: &BatchedHiddenInput,
+        right: &BatchedHiddenInput,
+        bound: usize,
+    ) -> Result<BatchedJoinOutput, MpcError> {
+        // Output schema: left payload vars then right payload vars (key NOT projected).
+        let mut out_vars = left.payload_vars.clone();
+        out_vars.extend(right.payload_vars.iter().cloned());
+        let payload_arity = out_vars.len();
+
+        // One fresh dealer for this protocol run (production: fresh OS-seeded CSPRNG,
+        // sq-1vt) — independent masks, never a reused keystream across joins.
+        let mut dealer = self.backend.dealer();
+
+        // (1) Enumerate the candidate row pairs the RowBinding permits — the SAME
+        // public candidate structure as `batched_join` (the candidate COUNT is a
+        // public MPC assumption; only the per-pair match VERDICT is hidden here).
+        let pairs = candidate_pairs(&left.binding, &right.binding, left.len(), right.len())?;
+
+        // (2) Decide each candidate's match as a SECRET-SHARED bit — NEVER opened.
+        // `secure_equal_to_bit` bit-decomposes both private keys and returns a fresh
+        // degree-`t` sharing of `1{lkey == rkey}`; the keys are never reconstructed
+        // and the verdict is never opened (the L2-at-decision leak `batched_join`
+        // has is closed here). The bit becomes a `MatchBit::SecretShared` selector.
+        let mut candidates: Vec<Candidate> = Vec::with_capacity(pairs.len());
+        for (li, rj) in pairs {
+            let (lkey, lpay) = &left.rows[li];
+            let (rkey, rpay) = &right.rows[rj];
+            let match_bit = secure_equal_to_bit(&mut dealer, *lkey, *rkey)?;
+            let mut payload = lpay.clone();
+            payload.extend(rpay.iter().cloned());
+            // Uniform output arity for the recipient (a short row is a malformed
+            // input, never a silent truncation).
+            if payload.len() != payload_arity {
+                return Err(MpcError::Protocol(format!(
+                    "fully_oblivious_batched_join: candidate payload arity {} != schema arity \
+                     {payload_arity} (left {} + right {} payload vars)",
+                    payload.len(),
+                    left.payload_vars.len(),
+                    right.payload_vars.len()
+                )));
+            }
+            candidates.push(Candidate {
+                payload,
+                matched: MatchBit::SecretShared(match_bit),
+            });
+        }
+
+        // (3) Route through the oblivious output transform with the SECRET-SHARED
+        // selectors: the oblivious select consumes the shared bit directly (one
+        // `mul_shares_raw` per slot, no open), the slots are shuffled, and exactly
+        // `B` tags are revealed. Nothing per-pair is opened anywhere.
         oblivious_join::oblivious_join_output(&self.backend, &candidates, out_vars, bound)
     }
 }
@@ -1338,6 +1528,127 @@ mod hidden_value_tests {
             }
         }
     }
+
+    // ===================== sq-4vgx: PIN the L2 match-graph leak =====================
+    //
+    // The spike's deliverable: pin, with a test, exactly what the CHEAP-but-LEAKY
+    // scalar all-pairs path (`HiddenValueJoin::join` / `secure_equal`) reveals,
+    // BEFORE any fix — so the privacy boundary between the leaky tier and the
+    // oblivious tier (`fully_oblivious_batched_join`, sq-xhaw) is a regression-
+    // guarded property, not just prose. These tests assert the leak EXISTS in the
+    // scalar path (it is the documented cheap tier) and is ABSENT (per-pair) in the
+    // fully-oblivious path. If a future refactor silently routed the leaky path as
+    // though it were oblivious, the first test would still pass (the leak is real)
+    // but `fully_oblivious_*` already pins the no-open property — together they
+    // fence the boundary.
+
+    /// PIN (sq-4vgx): the scalar all-pairs `secure_equal` driver learns the EXACT
+    /// bipartite match graph. We play the role of the party driving the opens:
+    /// call `secure_equal` on every `(i, j)` and collect each opened verdict. The
+    /// recovered incidence matrix must equal the TRUE bipartite match graph — i.e.
+    /// the open path leaks not just the match COUNT but precisely which left row
+    /// matched which right row (leak L2). The hidden KEY values are still never
+    /// recovered (only the per-pair equality bit), which we also assert.
+    #[test]
+    fn secure_equal_leaks_full_bipartite_match_graph() {
+        // Two left rows and three right rows over a small private-key domain. The
+        // keys themselves are secret; the match GRAPH is what leaks.
+        let lkeys = [7u64, 9];
+        let rkeys = [7u64, 9, 7]; // r0,r2 share L's 7; r1 shares L's 9
+        let true_graph: Vec<Vec<bool>> = lkeys
+            .iter()
+            .map(|&lk| rkeys.iter().map(|&rk| lk == rk).collect())
+            .collect();
+
+        let join = HiddenValueJoin::new(ShamirBackend::new_seeded(5, 0x4F60).unwrap());
+        let mut dealer = join.backend.dealer();
+
+        // Drive the opens exactly as `HiddenValueJoin::join` does — and record the
+        // per-pair verdict the driver observes.
+        let observed: Vec<Vec<bool>> = lkeys
+            .iter()
+            .map(|&lk| {
+                rkeys
+                    .iter()
+                    .map(|&rk| {
+                        join.secure_equal(&mut dealer, Fp::new(lk), Fp::new(rk))
+                            .unwrap()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // THE LEAK: the driver reconstructs the full bipartite match graph, not
+        // merely the match count. (This is L2 — the cheap-tier leak the oblivious
+        // path closes.)
+        assert_eq!(
+            observed, true_graph,
+            "scalar secure_equal driver must reveal the exact per-pair match graph (L2 leak pinned)"
+        );
+
+        // The match graph fingerprints the key fan-out: L's key 7 has fan-out 2 on
+        // the right, key 9 fan-out 1 — directly readable from the observed rows.
+        let fanout: Vec<usize> = observed
+            .iter()
+            .map(|row| row.iter().filter(|&&b| b).count())
+            .collect();
+        assert_eq!(
+            fanout,
+            vec![2, 1],
+            "per-key fan-out is readable from the leak"
+        );
+    }
+
+    /// PIN (sq-4vgx, companion): two key configurations that yield the SAME output
+    /// multiset SIZE (and the same total match count) but DIFFERENT bipartite match
+    /// graphs are DISTINGUISHABLE through the scalar open path — which is precisely
+    /// the privacy loss the oblivious tier removes. Config A: a 2×2 block on one key
+    /// (fan-out [2,2] across two left rows → 4 matches won't help; use disjoint).
+    /// We pick two graphs with the SAME number of true cells but different shapes.
+    #[test]
+    fn scalar_match_graph_distinguishes_equal_size_different_shape() {
+        // Both configs: 2 left rows × 2 right rows, with exactly 2 matching pairs —
+        // identical match COUNT, so the count alone cannot tell them apart.
+        // Config A — diagonal: (l0,r0) and (l1,r1) match.
+        let a_l = [1u64, 2];
+        let a_r = [1u64, 2];
+        // Config B — one left row matches BOTH right rows (key fan-out 2), the other
+        // matches neither: (l0,r0) and (l0,r1) match. Same 2 matches, different graph.
+        let b_l = [5u64, 8];
+        let b_r = [5u64, 5];
+
+        let graph_of = |lk: &[u64], rk: &[u64]| -> Vec<Vec<bool>> {
+            let join = HiddenValueJoin::new(ShamirBackend::new_seeded(5, 0x4F61).unwrap());
+            let mut dealer = join.backend.dealer();
+            lk.iter()
+                .map(|&l| {
+                    rk.iter()
+                        .map(|&r| {
+                            join.secure_equal(&mut dealer, Fp::new(l), Fp::new(r))
+                                .unwrap()
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+
+        let ga = graph_of(&a_l, &a_r);
+        let gb = graph_of(&b_l, &b_r);
+
+        let count = |g: &Vec<Vec<bool>>| g.iter().flatten().filter(|&&b| b).count();
+        assert_eq!(
+            count(&ga),
+            count(&gb),
+            "both configs have the same match count"
+        );
+        // Yet the observed match GRAPHS differ — the scalar path leaks the SHAPE,
+        // not just the size. This is exactly the L2 information the oblivious
+        // output + secret-shared-bit decision (sq-jnkm / sq-xhaw) hide.
+        assert_ne!(
+            ga, gb,
+            "equal-count configs must be distinguishable via the scalar match-graph leak (L2)"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1827,5 +2138,234 @@ mod batched_hidden_value_tests {
         let shared = input.shared_keys(&mut dealer).unwrap();
         assert_eq!(shared.len(), 3, "one batched sharing per row");
         assert_eq!(*shared.binding(), RowBinding::Positional);
+    }
+
+    // =========== [OPUS-4.8] sq-xhaw: FULLY-OBLIVIOUS batched hidden join ==========
+    //
+    // The match bit per candidate is SECRET-SHARED and NEVER opened per pair (vs
+    // `batched_join`, which opens `secure_equal`'s masked product per pair — the L2
+    // match-graph leak). The load-bearing test is the RESULT differential: the
+    // revealed output equals the plaintext reference join, while the only per-pair
+    // primitive used is `secure_equal_to_bit` (no open). The L1/L2 tests pin the
+    // obliviousness the secret-shared bit makes possible.
+
+    /// Plaintext index-aligned (Positional) reference join.
+    fn plaintext_positional(
+        l: &[(u64, Vec<Option<Term>>)],
+        r: &[(u64, Vec<Option<Term>>)],
+    ) -> Vec<Vec<Option<Term>>> {
+        (0..l.len().min(r.len()))
+            .filter(|&i| l[i].0 == r[i].0)
+            .map(|i| {
+                let mut row = l[i].1.clone();
+                row.extend(r[i].1.iter().cloned());
+                row
+            })
+            .collect()
+    }
+
+    /// THE sq-xhaw differential (Positional, n ∈ {3,5,7}): the fully-oblivious
+    /// join's RESULT equals the plaintext index-aligned join — and the per-pair
+    /// match bit is SECRET-SHARED, never opened (the join path uses only
+    /// `secure_equal_to_bit`, whose verdict stays shared; nothing per-pair is
+    /// reconstructed). The revealed slot count is the public bound `B`, NOT the true
+    /// match count.
+    #[test]
+    fn fully_oblivious_positional_differential_equals_plaintext() {
+        let l = [
+            (10u64, vec![lit("L0")]),
+            (20, vec![lit("L1")]),
+            (30, vec![lit("L2")]),
+        ];
+        let r = [
+            (10u64, vec![lit("R0")]),
+            (99, vec![lit("R1")]),
+            (30, vec![lit("R2")]),
+        ];
+        let expected = plaintext_positional(&l, &r);
+        for n in [3usize, 5, 7] {
+            let backend = ShamirBackend::new_seeded(n, 0x0BBE + n as u64).unwrap();
+            let join = HiddenValueJoin::new(backend);
+            let li = positional("L", &["lname"], &l);
+            let ri = positional("R", &["rname"], &r);
+            let (result, cost) = join.fully_oblivious_batched_join(&li, &ri, 3).unwrap();
+            assert_eq!(result.holder, HolderId::new("federation"));
+            assert_eq!(result.vars, vec![var("lname"), var("rname")]);
+            assert_eq!(cost.bound, 3, "n={n}: revealed slot bound is B");
+            assert_eq!(
+                real_multiset(&result),
+                expect_multiset(&expected),
+                "n={n}: fully-oblivious positional join != plaintext"
+            );
+            assert_eq!(result.rows.len(), 2, "n={n}: exactly the 2 matching rows");
+        }
+    }
+
+    /// The fully-oblivious join agrees with the leaky-per-pair `batched_join` on the
+    /// RESULT multiset (same correctness), differing only in WHAT leaks: the
+    /// fully-oblivious path never opens a per-pair match bit. Cross-check across
+    /// several seeds so the (independent) shuffles cannot mask a discrepancy.
+    #[test]
+    fn fully_oblivious_matches_leaky_batched_result() {
+        let l = [
+            (1u64, vec![lit("a")]),
+            (2, vec![lit("b")]),
+            (3, vec![lit("c")]),
+            (4, vec![lit("d")]),
+        ];
+        let r = [
+            (1u64, vec![lit("p")]),
+            (9, vec![lit("q")]),
+            (3, vec![lit("r")]),
+            (8, vec![lit("s")]),
+        ];
+        for seed in 0..8u64 {
+            let join = HiddenValueJoin::new(ShamirBackend::new_seeded(5, 200 + seed).unwrap());
+            let li = positional("L", &["x"], &l);
+            let ri = positional("R", &["y"], &r);
+            let (oblivious, _) = join.fully_oblivious_batched_join(&li, &ri, 4).unwrap();
+            let (leaky, _) = join.batched_join(&li, &ri, 4).unwrap();
+            assert_eq!(
+                real_multiset(&oblivious),
+                real_multiset(&leaky),
+                "seed {seed}: fully-oblivious result differs from leaky batched_join"
+            );
+        }
+    }
+
+    /// THE Keyed differential (n ∈ {3,5,7}): rows correlate by the DISCLOSED public
+    /// key; within a shared disclosed key the HIDDEN value gates the match via the
+    /// secret-shared equality bit. Result equals the plaintext join.
+    #[test]
+    fn fully_oblivious_keyed_differential_equals_plaintext() {
+        // ("r1", hidden 100) on both → match. ("r2", 200 vs 999) → no match.
+        // ("r3", 300) on both → match. Orders deliberately differ across sides.
+        let l = [
+            ("r1", 100u64, vec![lit("La")]),
+            ("r2", 200, vec![lit("Lb")]),
+            ("r3", 300, vec![lit("Lc")]),
+        ];
+        let r = [
+            ("r3", 300u64, vec![lit("Rc")]),
+            ("r1", 100, vec![lit("Ra")]),
+            ("r2", 999, vec![lit("Rb")]),
+        ];
+        // Plaintext: candidate pairs are equal-disclosed-key rows; match iff hidden
+        // values also equal. r1: 100==100 ✓ (La,Ra). r3: 300==300 ✓ (Lc,Rc). r2:
+        // 200!=999 ✗.
+        let expected: Vec<Vec<Option<Term>>> =
+            vec![vec![lit("La"), lit("Ra")], vec![lit("Lc"), lit("Rc")]];
+        for n in [3usize, 5, 7] {
+            let backend = ShamirBackend::new_seeded(n, 0xC0DE + n as u64).unwrap();
+            let join = HiddenValueJoin::new(backend);
+            let li = keyed("L", &["ln"], &l);
+            let ri = keyed("R", &["rn"], &r);
+            // 3 disclosed-key candidate pairs (r1, r2, r3 each correlate one-to-one);
+            // r2's hidden values differ so it is a candidate that does NOT match. B=3.
+            let (result, cost) = join.fully_oblivious_batched_join(&li, &ri, 3).unwrap();
+            assert_eq!(cost.bound, 3, "n={n}");
+            assert_eq!(
+                real_multiset(&result),
+                expect_multiset(&expected),
+                "n={n}: fully-oblivious keyed join != plaintext"
+            );
+        }
+    }
+
+    /// L1 obliviousness: two candidate sets with DIFFERENT true match counts produce
+    /// the IDENTICAL revealed slot count (= B). This is only possible BECAUSE the
+    /// per-pair match bit is never opened — if it were, the parties would learn the
+    /// true count from the per-pair verdicts. (The recipient who filters dummies
+    /// learns the true result size; the protocol transcript sees only B.)
+    #[test]
+    fn fully_oblivious_revealed_count_is_bound_not_true_cardinality() {
+        let join = HiddenValueJoin::new(ShamirBackend::new_seeded(3, 0xA11).unwrap());
+        // one match (only row 0).
+        let l1 = positional(
+            "L",
+            &["x"],
+            &[
+                (1u64, vec![lit("a")]),
+                (2, vec![lit("b")]),
+                (3, vec![lit("c")]),
+            ],
+        );
+        let r1 = positional(
+            "R",
+            &["y"],
+            &[
+                (1u64, vec![lit("p")]),
+                (8, vec![lit("q")]),
+                (9, vec![lit("r")]),
+            ],
+        );
+        // three matches (all rows).
+        let l3 = positional(
+            "L",
+            &["x"],
+            &[
+                (1u64, vec![lit("a")]),
+                (2, vec![lit("b")]),
+                (3, vec![lit("c")]),
+            ],
+        );
+        let r3 = positional(
+            "R",
+            &["y"],
+            &[
+                (1u64, vec![lit("p")]),
+                (2, vec![lit("q")]),
+                (3, vec![lit("r")]),
+            ],
+        );
+        let (out1, _) = join.fully_oblivious_batched_join(&l1, &r1, 5).unwrap();
+        let (out3, _) = join.fully_oblivious_batched_join(&l3, &r3, 5).unwrap();
+        // Different true counts (1 vs 3), identical disclosed-multiset SIZE only
+        // after dummy-filter; the transcript-visible slot count is B=5 in both runs.
+        assert_eq!(out1.rows.len(), 1, "true match count 1");
+        assert_eq!(out3.rows.len(), 3, "true match count 3");
+        // The protocol revealed exactly B=5 slots either way (cost.bound), proving
+        // the count is bounded to B not the true cardinality — checked via cost.
+        let (_, c1) = join.fully_oblivious_batched_join(&l1, &r1, 5).unwrap();
+        let (_, c3) = join.fully_oblivious_batched_join(&l3, &r3, 5).unwrap();
+        assert_eq!(
+            c1.bound, c3.bound,
+            "revealed slot bound identical regardless of true count"
+        );
+        assert_eq!(c1.bound, 5);
+    }
+
+    /// Fail-closed: a `bound` below the candidate count is rejected (never truncates
+    /// a candidate, which could drop a true match) — same contract as `batched_join`.
+    #[test]
+    fn fully_oblivious_bound_below_candidate_count_fails_closed() {
+        let join = HiddenValueJoin::new(ShamirBackend::new_seeded(3, 1).unwrap());
+        let l = positional("L", &["x"], &[(1u64, vec![lit("a")]), (2, vec![lit("b")])]);
+        let r = positional("R", &["y"], &[(1u64, vec![lit("p")]), (2, vec![lit("q")])]);
+        let err = join.fully_oblivious_batched_join(&l, &r, 1).unwrap_err();
+        assert!(matches!(err, MpcError::Protocol(m) if m.contains("truncate")));
+    }
+
+    /// No-overlap → empty result, matching plaintext; the output is all dummies up
+    /// to B (no match bit opened to reveal the emptiness per pair).
+    #[test]
+    fn fully_oblivious_no_overlap_is_empty() {
+        let join = HiddenValueJoin::new(ShamirBackend::new_seeded(5, 77).unwrap());
+        let l = positional("L", &["x"], &[(1u64, vec![lit("a")]), (2, vec![lit("b")])]);
+        let r = positional("R", &["y"], &[(7u64, vec![lit("p")]), (8, vec![lit("q")])]);
+        let (result, cost) = join.fully_oblivious_batched_join(&l, &r, 4).unwrap();
+        assert!(result.rows.is_empty(), "disjoint keys → empty join");
+        assert_eq!(cost.bound, 4, "still reveals B slots (all dummies)");
+    }
+
+    /// Mixed bindings (one Positional, one Keyed) fail closed — same ambiguity guard
+    /// as `batched_join`.
+    #[test]
+    fn fully_oblivious_mixed_bindings_fail_closed() {
+        let join = HiddenValueJoin::new(ShamirBackend::new_seeded(3, 1).unwrap());
+        let l = positional("L", &["x"], &[(1u64, vec![lit("a")])]);
+        let r = keyed("R", &["y"], &[("k", 1u64, vec![lit("p")])]);
+        let err = join.fully_oblivious_batched_join(&l, &r, 4).unwrap_err();
+        assert!(matches!(err, MpcError::Protocol(m) if m.contains("row-binding")));
     }
 }

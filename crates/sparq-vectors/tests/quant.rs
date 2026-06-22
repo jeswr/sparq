@@ -10,7 +10,8 @@
 //!    EncodedStore slot→id mapping used as the DiskANN candidate cache.
 
 use sparq_vectors::{
-    cosine, nearest_exact, DistanceTable, PqConfig, ProductQuantizer, ScalarQuantizer, VectorStore,
+    cosine, nearest_exact, DistanceTable, EncodedStore, PqConfig, ProductQuantizer,
+    ScalarQuantizer, VectorStore,
 };
 
 fn splitmix64(state: &mut u64) -> u64 {
@@ -329,5 +330,76 @@ fn pq_ties_break_on_ascending_id() {
     let ranked: Vec<u32> = enc.rank_pq(&table, 3).into_iter().map(|(id, _)| id).collect();
     // The three [1,0,0,0] vectors share a code → ascending id order 5,7,10.
     assert_eq!(ranked, vec![5, 7, 10]);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+// [OPUS-4.8] (sq-qamd) The PQ codebook round-trips through to_bytes/from_bytes byte-for-byte (so it
+// can be persisted alongside a .spqg graph), and a decoded quantizer produces identical codes and
+// ADC distances.
+fn pq_codebook_serialization_round_trips() {
+    let path = tmp("pq-serde.spqv");
+    let mut cstate = 0x5151_u64;
+    let store = clustered_store(&path, 16, 3, 40, 0.1, &mut cstate);
+    let pq = ProductQuantizer::fit(16, store.iter().map(|(_, v)| v), PqConfig::default()).unwrap();
+
+    let bytes = pq.to_bytes();
+    let decoded = ProductQuantizer::from_bytes(&bytes).unwrap();
+    assert_eq!(decoded.dim(), pq.dim());
+    assert_eq!(decoded.m(), pq.m());
+    assert_eq!(decoded.k(), pq.k());
+    // Re-serializing the decoded quantizer yields the identical bytes.
+    assert_eq!(decoded.to_bytes(), bytes);
+
+    // Codes and ADC distances match the original for every stored vector.
+    let mut state = 0x9999_u64;
+    let q = rand_vec(&mut state, 16);
+    let t0 = DistanceTable::new(&pq, &q);
+    let t1 = DistanceTable::new(&decoded, &q);
+    for (_, v) in store.iter() {
+        assert_eq!(pq.encode(v), decoded.encode(v), "decoded codebook encodes differently");
+        let c = pq.encode(v);
+        assert!((t0.distance(&c) - t1.distance(&c)).abs() < 1e-6, "ADC distance differs");
+    }
+
+    // A truncated / over-long / invalid block is rejected.
+    assert!(ProductQuantizer::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    let mut extra = bytes.clone();
+    extra.push(0);
+    assert!(ProductQuantizer::from_bytes(&extra).is_err());
+    assert!(ProductQuantizer::from_bytes(b"").is_err());
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+// [OPUS-4.8] (sq-qamd) EncodedStore::from_parts reconstructs the candidate cache from its flat
+// ids/codes/stride and validates the code-array length.
+fn encoded_store_from_parts_round_trips_and_validates() {
+    let path = tmp("pq-fromparts.spqv");
+    let mut cstate = 0x2222_u64;
+    let store = clustered_store(&path, 8, 2, 30, 0.1, &mut cstate);
+    let pq = ProductQuantizer::fit(
+        8,
+        store.iter().map(|(_, v)| v),
+        PqConfig { m: 4, k: 16, iters: 10, seed: 3 },
+    )
+    .unwrap();
+    let enc = pq.encode_store(&store).unwrap();
+
+    let ids: Vec<u32> = enc.iter().map(|(_, id, _)| id).collect();
+    let rebuilt = EncodedStore::from_parts(ids, enc.codes().to_vec(), enc.stride()).unwrap();
+    assert_eq!(rebuilt.len(), enc.len());
+    for slot in 0..enc.len() {
+        assert_eq!(rebuilt.code(slot), enc.code(slot));
+        assert_eq!(rebuilt.id(slot), enc.id(slot));
+    }
+
+    // Wrong length is rejected.
+    assert!(EncodedStore::from_parts(vec![1, 2, 3], vec![0u8; 5], 2).is_err());
+    // stride 0 with codes present is rejected; empty is fine.
+    assert!(EncodedStore::from_parts(vec![1], vec![0u8], 0).is_err());
+    assert!(EncodedStore::from_parts(vec![], vec![], 0).is_ok());
+
     let _ = std::fs::remove_file(&path);
 }

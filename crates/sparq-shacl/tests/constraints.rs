@@ -564,3 +564,541 @@ fn deactivated_shape_is_skipped() {
         r.to_text()
     );
 }
+
+// ---- [OPUS-4.8] (sq-vg3y) SHACL-1.2 core/node forms ----
+
+// ---- sh:datatype disjunctive (list) form ----
+
+#[test]
+fn datatype_list_form_accepts_any_listed() {
+    // sh:datatype ( xsd:string rdf:langString ): a plain string and a lang-tagged
+    // literal both conform; an integer (neither) violates. Mirrors W3C datatype-003.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode "plain" ;
+          sh:targetNode "tagged"@en ;
+          sh:targetNode 42 ;
+          sh:datatype ( xsd:string rdf:langString ) .
+    "#;
+    let r = run("", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "DatatypeConstraintComponent"), 1);
+    // The integer is the sole violator.
+    assert!(flagged_values(&r).iter().any(|v| v.contains("42")));
+}
+
+#[test]
+fn datatype_single_iri_still_works() {
+    // Regression: the single-IRI form is the singleton-set case.
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode "x" , 1 ;
+          sh:datatype xsd:string .
+    "#;
+    let r = run("", shapes);
+    assert_eq!(count_component(&r, "DatatypeConstraintComponent"), 1);
+}
+
+// ---- sh:nodeKind disjunctive (list) form ----
+
+#[test]
+fn nodekind_list_form_accepts_iri_or_blanknode() {
+    // sh:nodeKind ( sh:BlankNode sh:IRI ): an IRI and a blank node conform; a
+    // literal violates. Mirrors W3C nodeKind-002.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:iri ;
+          sh:targetNode "true"^^xsd:boolean ;
+          sh:nodeKind ( sh:BlankNode sh:IRI ) .
+    "#;
+    let r = run("ex:iri ex:p 0 .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "NodeKindConstraintComponent"), 1);
+}
+
+// ---- sh:closed sh:ByTypes ----
+
+#[test]
+fn closed_by_types_uses_properties_of_value_node_types() {
+    // closed-003 in miniature: ex:RootClass is closed-by-types and declares
+    // ex:rootClassProperty1; ex:SubClass (subclass) declares ex:subClassProperty1.
+    // An instance of ROOT (not Sub) that uses ex:subClassProperty1 is closed out;
+    // an instance of Sub that uses it is allowed (its type pulls the property in).
+    let shapes = r#"
+        ex:RootClass a rdfs:Class, sh:NodeShape ;
+          sh:property [ sh:path ex:rootClassProperty1 ] ;
+          sh:closed sh:ByTypes .
+        ex:SubClass a rdfs:Class, sh:NodeShape ;
+          rdfs:subClassOf ex:RootClass ;
+          sh:property [ sh:path ex:subClassProperty1 ] ;
+          sh:closed sh:ByTypes .
+    "#;
+    let data = r#"
+        ex:RootInstance a ex:RootClass ; ex:subClassProperty1 1 .
+        ex:SubInstance a ex:SubClass ; ex:rootClassProperty1 1 ; ex:subClassProperty1 3 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // Exactly one closed violation: ex:RootInstance's ex:subClassProperty1.
+    assert_eq!(count_component(&r, "ClosedConstraintComponent"), 1);
+    let closed: Vec<_> = r
+        .results
+        .iter()
+        .filter(|x| x.source_component.ends_with("ClosedConstraintComponent"))
+        .collect();
+    assert!(closed[0].focus_node.to_string().contains("RootInstance"));
+}
+
+// ---- sh:memberShape ----
+
+#[test]
+fn member_shape_checks_each_list_member() {
+    // sh:memberShape [ sh:nodeKind sh:IRI ]: a list of IRIs conforms; a list with
+    // a literal member, AND a value that is not a SHACL list at all, both violate.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:goodList, ex:badList, ex:notAList ;
+          sh:memberShape [ sh:nodeKind sh:IRI ] .
+    "#;
+    let data = r#"
+        ex:goodList rdf:first ex:a ; rdf:rest ( ex:b ) .
+        ex:badList  rdf:first ex:a ; rdf:rest ( "lit" ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // One top-level result per violating value node (badList + notAList).
+    assert_eq!(count_component(&r, "MemberShapeConstraintComponent"), 2);
+}
+
+// [OPUS-4.8] (sq-f8gu) sh:memberShape emits one sh:detail sub-result per
+// NON-CONFORMING member: the actual validation results of validating that member
+// against the member shape. A non-list value node carries NO details (there are
+// no members to validate against the shape).
+#[test]
+fn member_shape_emits_detail_per_failing_member() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:list, ex:notAList ;
+          sh:memberShape [ sh:nodeKind sh:IRI ] .
+    "#;
+    // ex:list = ( ex:ok "bad1" "bad2" ): one IRI member (ok) and two literal
+    // members (each violates sh:nodeKind sh:IRI).
+    let data = r#"
+        ex:list rdf:first ex:ok ; rdf:rest ( "bad1" "bad2" ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+
+    let top: Vec<_> = r
+        .results
+        .iter()
+        .filter(|x| {
+            x.source_component
+                .ends_with("MemberShapeConstraintComponent")
+        })
+        .collect();
+    assert_eq!(top.len(), 2, "{}", r.to_text());
+
+    // The list result carries two details (one per failing member); each detail
+    // is a NodeKind violation whose sh:value is the offending literal.
+    let list_result = top
+        .iter()
+        .find(|x| {
+            x.value
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .as_deref()
+                == Some("<http://example.org/list>")
+        })
+        .expect("a result on ex:list");
+    assert_eq!(list_result.details.len(), 2, "{}", r.to_text());
+    assert!(list_result
+        .details
+        .iter()
+        .all(|d| d.source_component.ends_with("NodeKindConstraintComponent")));
+    let mut detail_vals: Vec<String> = list_result
+        .details
+        .iter()
+        .filter_map(|d| d.value.as_ref().map(std::string::ToString::to_string))
+        .collect();
+    detail_vals.sort();
+    assert_eq!(
+        detail_vals,
+        vec![r#""bad1""#.to_string(), r#""bad2""#.to_string()]
+    );
+
+    // The non-list value node carries no details.
+    let notalist = top
+        .iter()
+        .find(|x| {
+            x.value
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .as_deref()
+                == Some("<http://example.org/notAList>")
+        })
+        .expect("a result on ex:notAList");
+    assert!(notalist.details.is_empty(), "{}", r.to_text());
+
+    // sh:detail must surface in the Turtle report and round-trip as valid Turtle.
+    let ttl = r.to_turtle();
+    assert!(ttl.contains("sh:detail"), "no sh:detail in report: {ttl}");
+    oxttl::TurtleParser::new()
+        .for_slice(ttl.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|e| panic!("report Turtle does not parse: {e}\n{ttl}"));
+}
+
+// ---- sh:uniqueMembers ----
+
+#[test]
+fn unique_members_flags_duplicate_and_nonlist() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:uniq, ex:dup, ex:notAList ;
+          sh:uniqueMembers true .
+    "#;
+    let data = r#"
+        ex:uniq rdf:first 1 ; rdf:rest ( 2 3 ) .
+        ex:dup  rdf:first 1 ; rdf:rest ( 2 1 ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // ex:dup (duplicate 1) + ex:notAList (not a list) -> two results; ex:uniq ok.
+    assert_eq!(count_component(&r, "UniqueMembersConstraintComponent"), 2);
+}
+
+// [OPUS-4.8] (sq-f8gu) sh:uniqueMembers emits one sh:detail sub-result per
+// DUPLICATED member (each duplicated value reported once via sh:value), and a
+// non-list value node carries no details.
+#[test]
+fn unique_members_emits_detail_per_duplicate() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:dup, ex:notAList ;
+          sh:uniqueMembers true .
+    "#;
+    // ex:dup = ( 1 2 1 3 2 ): members 1 and 2 each appear twice -> two duplicates.
+    let data = r#"
+        ex:dup rdf:first 1 ; rdf:rest ( 2 1 3 2 ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+
+    let dup_result = r
+        .results
+        .iter()
+        .find(|x| {
+            x.source_component
+                .ends_with("UniqueMembersConstraintComponent")
+                && x.value
+                    .as_ref()
+                    .map(std::string::ToString::to_string)
+                    .as_deref()
+                    == Some("<http://example.org/dup>")
+        })
+        .expect("a result on ex:dup");
+    // One detail per duplicated value (1 and 2), each carrying that value.
+    assert_eq!(dup_result.details.len(), 2, "{}", r.to_text());
+    let mut detail_vals: Vec<String> = dup_result
+        .details
+        .iter()
+        .filter_map(|d| d.value.as_ref().map(std::string::ToString::to_string))
+        .collect();
+    detail_vals.sort();
+    assert_eq!(
+        detail_vals,
+        vec![
+            r#""1"^^<http://www.w3.org/2001/XMLSchema#integer>"#.to_string(),
+            r#""2"^^<http://www.w3.org/2001/XMLSchema#integer>"#.to_string(),
+        ]
+    );
+
+    let notalist = r
+        .results
+        .iter()
+        .find(|x| {
+            x.source_component
+                .ends_with("UniqueMembersConstraintComponent")
+                && x.value
+                    .as_ref()
+                    .map(std::string::ToString::to_string)
+                    .as_deref()
+                    == Some("<http://example.org/notAList>")
+        })
+        .expect("a result on ex:notAList");
+    assert!(notalist.details.is_empty(), "{}", r.to_text());
+}
+
+// ---- sh:maxListLength / sh:minListLength ----
+
+#[test]
+fn max_list_length_flags_too_long_and_nonlist() {
+    // Value nodes: ex:ok (2 members, ok), rdf:nil (0, ok), ex:long (3, violates),
+    // ex:notAList (not a list, violates). Mirrors W3C maxListLength-001.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:ok, rdf:nil, ex:long, ex:notAList ;
+          sh:maxListLength 2 .
+    "#;
+    let data = r#"
+        ex:ok   rdf:first 1 ; rdf:rest ( 2 ) .
+        ex:long rdf:first 1 ; rdf:rest ( 2 3 ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "MaxListLengthConstraintComponent"), 2);
+}
+
+#[test]
+fn min_list_length_flags_too_short_and_nil() {
+    // rdf:nil is a valid SHACL list of length 0 < 1 -> violates; ex:notAList is
+    // not a list -> violates; ex:ok (length 2) passes. Mirrors W3C minListLength-001.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:ok, rdf:nil, ex:notAList ;
+          sh:minListLength 1 .
+    "#;
+    let data = r#"
+        ex:ok rdf:first 1 ; rdf:rest ( 2 ) .
+        ex:notAList ex:p 0 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "MinListLengthConstraintComponent"), 2);
+}
+
+// ---- sh:uniqueValuesFor ----
+
+#[test]
+fn unique_values_for_single_property() {
+    // Two target nodes sharing the same ex:id -> a symmetric pair of results.
+    // A node with no ex:id contributes nothing. Mirrors W3C uniqueValuesFor-001.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetClass ex:Thing ;
+          sh:uniqueValuesFor ex:id .
+    "#;
+    let data = r#"
+        ex:a a ex:Thing ; ex:id "001" .
+        ex:b a ex:Thing ; ex:id "002" .
+        ex:dup1 a ex:Thing ; ex:id "DUP" .
+        ex:dup2 a ex:Thing ; ex:id "DUP" .
+        ex:noid a ex:Thing .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // dup1 -> dup2 and dup2 -> dup1: exactly two results.
+    assert_eq!(count_component(&r, "UniqueValuesForConstraintComponent"), 2);
+}
+
+#[test]
+fn unique_values_for_composite_key_and_missing_values() {
+    // Composite key ( ex:notation ex:scheme ): only nodes that agree on BOTH
+    // collide. Mirrors W3C uniqueValuesFor-002.
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetClass ex:Concept ;
+          sh:uniqueValuesFor ( ex:notation ex:scheme ) .
+    "#;
+    let data = r#"
+        ex:v1 a ex:Concept ; ex:notation "A1" ; ex:scheme ex:S1 .
+        ex:v2 a ex:Concept ; ex:notation "A2" ; ex:scheme ex:S1 .
+        ex:bad1 a ex:Concept ; ex:notation "A1" ; ex:scheme ex:S2 .
+        ex:bad2 a ex:Concept ; ex:notation "A1" ; ex:scheme ex:S2 .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // Only bad1/bad2 agree on both -> two results; v1 (notation A1, scheme S1)
+    // does NOT collide with bad1 (scheme differs).
+    assert_eq!(count_component(&r, "UniqueValuesForConstraintComponent"), 2);
+}
+
+#[test]
+fn unique_values_for_no_values_conforms() {
+    // No instance has the property -> conforms (W3C uniqueValuesFor-004).
+    let shapes = r#"
+        ex:S a sh:NodeShape ;
+          sh:targetClass ex:Thing ;
+          sh:uniqueValuesFor ex:id .
+    "#;
+    let r = run("ex:a a ex:Thing . ex:b a ex:Thing .", shapes);
+    assert!(r.conforms, "{}", r.to_text());
+}
+
+// ---- [OPUS-4.8] (sq-bif.10) genuinely-dark eval.rs dispatch branches ----
+//
+// The sq-qap0 datatype/pattern tests exercised only WELL-FORMED literals and a
+// VALID regex. These pin the still-dark conjuncts: the `&& well_formed(l)` FALSE
+// branch in `Component::Datatype` (right datatype IRI, ill-formed lexical value)
+// and the `regex_for(..) == None` branch in `Component::Pattern` (an uncompilable
+// pattern yields no regex — the constraint is SKIPPED with a diagnostic, sq-lz99x,
+// NOT fail-closed flagging every value).
+
+/// `sh:datatype` is NOT satisfied by a literal that carries the right datatype IRI
+/// but whose lexical value is ill-formed for it — the `well_formed(l)` conjunct.
+/// `"abc"^^xsd:integer` and `"5.5"^^xsd:integer` both have datatype xsd:integer yet
+/// are lexically invalid; `"42"^^xsd:integer` is well-formed and conforms.
+#[test]
+fn datatype_rejects_ill_formed_lexical_value() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:v ; sh:datatype xsd:integer ] .
+    "#;
+    // Three values all TYPED xsd:integer: "abc" (non-numeric) and "5.5" (decimal,
+    // not an integer) are ill-formed; "42" is well-formed.
+    let data = r#"
+        ex:n ex:v "abc"^^xsd:integer , "5.5"^^xsd:integer , "42"^^xsd:integer .
+    "#;
+    let r = run(data, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    // Exactly the two ill-formed values are flagged; "42" passes.
+    assert_eq!(
+        count_component(&r, "DatatypeConstraintComponent"),
+        2,
+        "{}",
+        r.to_text()
+    );
+    assert_eq!(
+        flagged_values(&r),
+        vec![
+            "\"5.5\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string(),
+            "\"abc\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string(),
+        ],
+        "{}",
+        r.to_text()
+    );
+}
+
+/// A bounded integer datatype (`xsd:byte`) rejects an out-of-range lexical value
+/// even though it is a syntactically valid integer — the range arm of
+/// `well_formed`. `"300"` exceeds the signed-byte range (-128..=127).
+#[test]
+fn datatype_rejects_out_of_range_bounded_integer() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:v ; sh:datatype xsd:byte ] .
+    "#;
+    let r = run(
+        r#"ex:n ex:v "300"^^xsd:byte , "100"^^xsd:byte ."#,
+        shapes,
+    );
+    assert!(!r.conforms, "{}", r.to_text());
+    // "300" is out of the byte range; "100" is in range.
+    assert_eq!(count_component(&r, "DatatypeConstraintComponent"), 1);
+    assert_eq!(
+        flagged_values(&r),
+        vec!["\"300\"^^<http://www.w3.org/2001/XMLSchema#byte>".to_string()]
+    );
+}
+
+/// [OPUS-4.8] (sq-lz99x) An uncompilable `sh:pattern` (a regex that fails to
+/// compile) yields NO regex, so the `Component::Pattern` `regex_for(..) == None`
+/// branch SKIPS the constraint (the crate's lenient ill-formed-shape policy) and
+/// records a diagnostic — it does NOT fail-closed by flagging every value. The
+/// unbalanced `[` is a lexical regex error. Before sq-lz99x both values here were
+/// (wrongly) reported as violations.
+#[test]
+fn pattern_with_invalid_regex_is_skipped_with_diagnostic() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:code ; sh:pattern "[" ] .
+    "#;
+    // Two values; the (only) constraint is uncompilable, so NEITHER is flagged.
+    let r = run(r#"ex:n ex:code "ab" , "cd" ."#, shapes);
+    assert!(
+        r.conforms,
+        "a skipped uncompilable pattern reports no violations: {}",
+        r.to_text()
+    );
+    assert_eq!(
+        count_component(&r, "PatternConstraintComponent"),
+        0,
+        "{}",
+        r.to_text()
+    );
+    // The skip is surfaced, once, as a diagnostic naming the component.
+    assert_eq!(r.diagnostics.len(), 1, "{}", r.to_text());
+    let d = &r.diagnostics[0];
+    assert!(
+        d.source_component.ends_with("PatternConstraintComponent"),
+        "{}",
+        d.source_component
+    );
+    assert!(d.message.contains("SKIPPED"), "{}", d.message);
+    // to_text surfaces the diagnostic even though the report conforms.
+    assert!(r.to_text().contains("diagnostic"), "{}", r.to_text());
+}
+
+/// [OPUS-4.8] (sq-lz99x) The bead's exact repro: a negative-lookahead pattern
+/// `^(?!(TODO|TBD)).*` with `sh:flags "i"`. The Rust `regex` crate (like the XML
+/// Schema regex flavour the SHACL spec ties `sh:pattern` to) has NO lookahead, so
+/// the pattern does not compile. Pre-fix this flagged EVERY conformant string as a
+/// violation; now the constraint is SKIPPED with a diagnostic and a conformant
+/// value passes. (Express such a check as a POSITIVE-match `sh:sparql` REGEX
+/// constraint instead — see the bead.)
+#[test]
+fn pattern_lookahead_is_skipped_not_fail_closed() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:title ; sh:pattern "^(?!(TODO|TBD)).*" ; sh:flags "i" ] .
+    "#;
+    let r = run(r#"ex:n ex:title "A real title" ."#, shapes);
+    assert!(
+        r.conforms,
+        "an unsupported-lookahead pattern must not fail-close a conformant value: {}",
+        r.to_text()
+    );
+    assert_eq!(count_component(&r, "PatternConstraintComponent"), 0);
+    assert_eq!(r.diagnostics.len(), 1, "{}", r.to_text());
+    // The diagnostic carries the regex crate's own error (names look-around) and
+    // notes the flags it was compiled with.
+    let m = &r.diagnostics[0].message;
+    assert!(m.contains("flags \"i\""), "{m}");
+    assert!(m.to_lowercase().contains("look"), "{m}");
+}
+
+/// [OPUS-4.8] (sq-lz99x) A WELL-FORMED `sh:pattern` is unaffected by the
+/// skip-on-uncompilable change: real violations are still reported and no spurious
+/// diagnostic is recorded.
+#[test]
+fn pattern_valid_still_reports_violations_and_no_diagnostic() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:code ; sh:pattern "^ab" ] .
+    "#;
+    let r = run(r#"ex:n ex:code "abc" , "xyz" ."#, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "PatternConstraintComponent"), 1);
+    assert_eq!(flagged_values(&r), vec!["\"xyz\"".to_string()]);
+    assert!(r.diagnostics.is_empty(), "{}", r.to_text());
+}
+
+/// [OPUS-4.8] (sq-lz99x) A diagnostic is recorded ONCE per (shape, pattern), not
+/// once per focus node or value — so a shape with many targets does not flood the
+/// report.
+#[test]
+fn pattern_skip_diagnostic_is_deduplicated() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+          sh:property [ sh:path ex:code ; sh:pattern "[" ] .
+    "#;
+    // Three focus nodes, each with two values: 6 (focus, value) pairs total.
+    let data = r#"
+        ex:a a ex:T ; ex:code "x" , "y" .
+        ex:b a ex:T ; ex:code "p" , "q" .
+        ex:c a ex:T ; ex:code "m" , "n" .
+    "#;
+    let r = run(data, shapes);
+    assert!(r.conforms, "{}", r.to_text());
+    assert_eq!(
+        r.diagnostics.len(),
+        1,
+        "the skip is reported once, not per focus/value: {}",
+        r.to_text()
+    );
+}

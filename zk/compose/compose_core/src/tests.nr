@@ -10,12 +10,13 @@
 //! pipeline ports -- the bit-compatibility requirement for commitment
 //! recomputation in-circuit.
 
-use crate::filter_int::{filter_int_check, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_NE};
 use crate::filter_float::filter_f64_check;
+use crate::filter_int::{filter_int_check, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_NE};
+use crate::filter_signed::{filter_decimal_check, filter_signed_int_check};
 use crate::hashes::{commit_fold, h2, h3, TYPE_CODE_LITERAL};
-use crate::join::{join_eq_check, join_value_commitment, JOIN_DOMAIN};
+use crate::join::{JOIN_DOMAIN, join_eq_check, join_value_commitment};
 use crate::revoke::{revoke_unset_check, revoke_unset_check_committed, SIG_DOMAIN_STATUS_IDX_COMMIT};
-use crate::scan::{scan_check, PatternSpec};
+use crate::scan::{PatternSpec, scan_check};
 
 // ---------------------------------------------------------------------------
 // Cross-vectors (sparq-zk fixture outputs, nargo 1.0.0-beta.21).
@@ -29,14 +30,8 @@ fn commit_fold_matches_sparq_zk_cross_vectors() {
         commit_fold([1], 1),
         0x168758332d5b3e2d13be8048c8011b454590e06c44bce7f702f09103eef5a373,
     );
-    assert_eq(
-        h2(1, 2),
-        0x038682aa1cb5ae4e0a3f13da432a95c77c5c111f6f030faf9cad641ce1ed7383,
-    );
-    assert_eq(
-        h3(1, 2, 3),
-        0x23864adb160dddf590f1d3303683ebcb914f828e2635f6e85a32f0a1aecd3dd8,
-    );
+    assert_eq(h2(1, 2), 0x038682aa1cb5ae4e0a3f13da432a95c77c5c111f6f030faf9cad641ce1ed7383);
+    assert_eq(h3(1, 2, 3), 0x23864adb160dddf590f1d3303683ebcb914f828e2635f6e85a32f0a1aecd3dd8);
     assert_eq(
         commit_fold([1, 2, 3, 4], 4),
         0x130bf204a32cac1f0ace56c78b731aa3809f06df2731ebcf6b3464a15788b1b9,
@@ -119,7 +114,10 @@ fn test_graphs() -> ([[[Field; 3]; 4]; 2], [u32; 2], [Field; 2]) {
     // step-1b contract). If a future encoding change flips the natural order, this
     // asserts HERE -- a clear fixture bug -- rather than tripping the circuit's
     // "per-graph commitments not strictly increasing" guard inside an unrelated test.
-    assert(commitments[0].lt(commitments[1]), "test_graphs fixture not in canonical ascending-commitment order");
+    assert(
+        commitments[0].lt(commitments[1]),
+        "test_graphs fixture not in canonical ascending-commitment order",
+    );
     (enc, counts, commitments)
 }
 
@@ -164,7 +162,15 @@ fn scan_rejects_attribution_understated() {
     // is [true, true]; [true, false] understates the genuinely-matching graph 1.
     let (enc, counts, commitments) = test_graphs();
     let rows: [[Field; 3]; 2] = [[S1, P, O1], [S2, P, O2]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, [true, false], counts, enc);
+    scan_check::<2, 4, 2>(
+        commitments,
+        p_pattern(),
+        rows,
+        2,
+        [true, false],
+        counts,
+        enc,
+    );
 }
 
 #[test(should_fail_with = "attribution does not match the proved source graphs")]
@@ -196,7 +202,15 @@ fn scan_rejects_tampered_graph_content() {
     // graph 1's commitment then mismatches BEFORE any row/attribution check.
     enc[1][0] = [S1, P_OTHER, O1];
     let rows: [[Field; 3]; 2] = [[S2, P, O2], [0, 0, 0]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 1, [true, false], counts, enc);
+    scan_check::<2, 4, 2>(
+        commitments,
+        p_pattern(),
+        rows,
+        1,
+        [true, false],
+        counts,
+        enc,
+    );
 }
 
 #[test(should_fail_with = "matching triple missing from disclosed rows")]
@@ -373,6 +387,235 @@ fn filter_f64_rejects_lying_verdict() {
 }
 
 // ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-1q9h: filter_signed_int + filter_decimal -- accept + adversarial.
+// ---------------------------------------------------------------------------
+
+/// Test-side replica of the SIGNED-integer operand binding (sign + digits ->
+/// Enc). The lexical form is '[-]?<digits>'; the token folds in the xsd:integer
+/// datatype. The NON-circular anchor is the Rust e2e (the crate computes
+/// `operand_enc` via `sparq_zk::encode` and proves against this circuit).
+fn enc_signed_int_literal<let MD: u32>(neg: bool, mag_digits: [u8; MD]) -> Field {
+    let suffix: [u8; 44] = "^^<http://www.w3.org/2001/XMLSchema#integer>".as_bytes();
+    // Two-branch token layout, mirroring the circuit's `assert_literal_binding`
+    // (the negative token carries a leading '-', so its length differs by one).
+    if neg {
+        let mut t: [u8; MD + 47] = [0; MD + 47]; // 1('"') + 1('-') + MD + 1('"') + 44
+        t[0] = 34;
+        t[1] = 45;
+        for i in 0..MD {
+            t[i + 2] = mag_digits[i];
+        }
+        t[MD + 2] = 34;
+        for i in 0..44 {
+            t[MD + 3 + i] = suffix[i];
+        }
+        let digest: [u8; 32] = std::hash::blake3(t);
+        let mut hs: Field = 0;
+        for i in 1..32 {
+            hs = hs * 256 + (digest[i] as Field);
+        }
+        h2(TYPE_CODE_LITERAL, hs)
+    } else {
+        let mut t: [u8; MD + 46] = [0; MD + 46]; // 1 + MD + 1 + 44
+        t[0] = 34;
+        for i in 0..MD {
+            t[i + 1] = mag_digits[i];
+        }
+        t[MD + 1] = 34;
+        for i in 0..44 {
+            t[MD + 2 + i] = suffix[i];
+        }
+        let digest: [u8; 32] = std::hash::blake3(t);
+        let mut hs: Field = 0;
+        for i in 1..32 {
+            hs = hs * 256 + (digest[i] as Field);
+        }
+        h2(TYPE_CODE_LITERAL, hs)
+    }
+}
+
+#[test]
+fn filter_signed_int_negative_vs_positive_bound() {
+    // value = -42, bound = +1: -42 < 1 so lt true, gt false, eq false, ne true.
+    let digits: [u8; 2] = [52, 50]; // "42"
+    let enc = enc_signed_int_literal(true, digits);
+    filter_signed_int_check::<2>(enc, OP_LT, false, 1, true, true, digits);
+    filter_signed_int_check::<2>(enc, OP_GT, false, 1, false, true, digits);
+    filter_signed_int_check::<2>(enc, OP_EQ, false, 1, false, true, digits);
+    filter_signed_int_check::<2>(enc, OP_NE, false, 1, true, true, digits);
+    filter_signed_int_check::<2>(enc, OP_LE, false, 1, true, true, digits);
+    filter_signed_int_check::<2>(enc, OP_GE, false, 1, false, true, digits);
+}
+
+#[test]
+fn filter_signed_int_both_negative_order() {
+    // value = -42, bound = -100: among negatives larger magnitude is smaller,
+    // so -42 > -100. gt true, lt false, ge true.
+    let digits: [u8; 2] = [52, 50]; // "42"
+    let enc = enc_signed_int_literal(true, digits);
+    filter_signed_int_check::<2>(enc, OP_GT, true, 100, true, true, digits);
+    filter_signed_int_check::<2>(enc, OP_LT, true, 100, false, true, digits);
+    filter_signed_int_check::<2>(enc, OP_GE, true, 100, true, true, digits);
+    // boundary: -42 vs -42 eq.
+    filter_signed_int_check::<2>(enc, OP_EQ, true, 42, true, true, digits);
+    filter_signed_int_check::<2>(enc, OP_GE, true, 42, true, true, digits);
+    filter_signed_int_check::<2>(enc, OP_GT, true, 42, false, true, digits);
+}
+
+#[test]
+fn filter_signed_int_non_negative_matches_filter_int() {
+    // value = +25, bound = +18, gt true -- same semantics as filter_int's path.
+    let digits: [u8; 2] = [50, 53]; // "25"
+    let enc = enc_signed_int_literal(false, digits);
+    filter_signed_int_check::<2>(enc, OP_GT, false, 18, true, false, digits);
+    filter_signed_int_check::<2>(enc, OP_LT, false, 18, false, false, digits);
+}
+
+#[test(should_fail_with = "filter verdict mismatch")]
+fn filter_signed_int_rejects_lying_verdict() {
+    // -17 < -18 is FALSE (among negatives -17 > -18); claiming true is the lie.
+    let digits: [u8; 2] = [49, 55]; // "17"
+    let enc = enc_signed_int_literal(true, digits);
+    filter_signed_int_check::<2>(enc, OP_LT, true, 18, true, true, digits);
+}
+
+#[test(should_fail_with = "operand encoding mismatch")]
+fn filter_signed_int_rejects_sign_swap() {
+    // Anchor encoding is for -42; prover tries to pass it off as +42.
+    let digits: [u8; 2] = [52, 50]; // "42"
+    let enc_neg = enc_signed_int_literal(true, digits);
+    filter_signed_int_check::<2>(enc_neg, OP_GT, false, 0, true, false, digits);
+}
+
+#[test(should_fail_with = "negative zero is not canonical")]
+fn filter_signed_int_rejects_negative_zero() {
+    let digits: [u8; 1] = [48]; // "0"
+    let enc = enc_signed_int_literal(true, digits);
+    filter_signed_int_check::<1>(enc, OP_EQ, false, 0, true, true, digits);
+}
+
+#[test(should_fail_with = "non-canonical leading zero")]
+fn filter_signed_int_rejects_leading_zero() {
+    let digits: [u8; 2] = [48, 53]; // "05"
+    let enc = enc_signed_int_literal(true, digits);
+    filter_signed_int_check::<2>(enc, OP_LT, false, 0, true, true, digits);
+}
+
+/// Test-side replica of the DECIMAL operand binding (sign + int + '.' + frac).
+fn enc_decimal_literal<let ID: u32, let FD: u32>(
+    neg: bool,
+    int_digits: [u8; ID],
+    frac_digits: [u8; FD],
+) -> Field {
+    let suffix: [u8; 44] = "^^<http://www.w3.org/2001/XMLSchema#decimal>".as_bytes();
+    if neg {
+        // token = '"' + '-' + int + '.' + frac + '"' + suffix
+        let mut t: [u8; ID + FD + 48] = [0; ID + FD + 48]; // 1+1+ID+1+FD+1+44
+        t[0] = 34;
+        t[1] = 45;
+        for i in 0..ID {
+            t[i + 2] = int_digits[i];
+        }
+        t[ID + 2] = 46; // '.'
+        for i in 0..FD {
+            t[ID + 3 + i] = frac_digits[i];
+        }
+        t[ID + FD + 3] = 34;
+        for i in 0..44 {
+            t[ID + FD + 4 + i] = suffix[i];
+        }
+        let digest: [u8; 32] = std::hash::blake3(t);
+        let mut hs: Field = 0;
+        for i in 1..32 {
+            hs = hs * 256 + (digest[i] as Field);
+        }
+        h2(TYPE_CODE_LITERAL, hs)
+    } else {
+        // token = '"' + int + '.' + frac + '"' + suffix
+        let mut t: [u8; ID + FD + 47] = [0; ID + FD + 47]; // 1+ID+1+FD+1+44
+        t[0] = 34;
+        for i in 0..ID {
+            t[i + 1] = int_digits[i];
+        }
+        t[ID + 1] = 46; // '.'
+        for i in 0..FD {
+            t[ID + 2 + i] = frac_digits[i];
+        }
+        t[ID + FD + 2] = 34;
+        for i in 0..44 {
+            t[ID + FD + 3 + i] = suffix[i];
+        }
+        let digest: [u8; 32] = std::hash::blake3(t);
+        let mut hs: Field = 0;
+        for i in 1..32 {
+            hs = hs * 256 + (digest[i] as Field);
+        }
+        h2(TYPE_CODE_LITERAL, hs)
+    }
+}
+
+#[test]
+fn filter_decimal_positive_fraction_compare() {
+    // value = 123.45 (scaled 12345 at FD=2). bound = 123.40 (scaled 12340).
+    // 123.45 > 123.40: gt true, lt false, eq false.
+    let int_d: [u8; 3] = [49, 50, 51]; // "123"
+    let frac_d: [u8; 2] = [52, 53]; // "45"
+    let enc = enc_decimal_literal(false, int_d, frac_d);
+    filter_decimal_check::<3, 2>(enc, OP_GT, false, 12340, true, false, int_d, frac_d);
+    filter_decimal_check::<3, 2>(enc, OP_LT, false, 12340, false, false, int_d, frac_d);
+    filter_decimal_check::<3, 2>(enc, OP_EQ, false, 12345, true, false, int_d, frac_d);
+    filter_decimal_check::<3, 2>(enc, OP_GE, false, 12345, true, false, int_d, frac_d);
+}
+
+#[test]
+fn filter_decimal_negative_fraction_order() {
+    // value = -0.50 (scaled 50, neg). bound = -0.10 (scaled 10, neg).
+    // among negatives larger magnitude is smaller, so -0.50 < -0.10: lt true.
+    let int_d: [u8; 1] = [48]; // "0"
+    let frac_d: [u8; 2] = [53, 48]; // "50"
+    let enc = enc_decimal_literal(true, int_d, frac_d);
+    filter_decimal_check::<1, 2>(enc, OP_LT, true, 10, true, true, int_d, frac_d);
+    filter_decimal_check::<1, 2>(enc, OP_GT, true, 10, false, true, int_d, frac_d);
+    // -0.50 vs +0.10: negative < non-negative.
+    filter_decimal_check::<1, 2>(enc, OP_LT, false, 10, true, true, int_d, frac_d);
+}
+
+#[test]
+fn filter_decimal_trailing_zero_is_canonical() {
+    // "3.0" is a canonical xsd:decimal (trailing fraction zero allowed).
+    let int_d: [u8; 1] = [51]; // "3"
+    let frac_d: [u8; 1] = [48]; // "0"
+    let enc = enc_decimal_literal(false, int_d, frac_d);
+    // 3.0 == 3.0 (scaled 30 at FD=1).
+    filter_decimal_check::<1, 1>(enc, OP_EQ, false, 30, true, false, int_d, frac_d);
+}
+
+#[test(should_fail_with = "filter verdict mismatch")]
+fn filter_decimal_rejects_lying_verdict() {
+    // 1.50 < 1.40 is FALSE; claiming true is the per-row pruning lie.
+    let int_d: [u8; 1] = [49]; // "1"
+    let frac_d: [u8; 2] = [53, 48]; // "50"
+    let enc = enc_decimal_literal(false, int_d, frac_d);
+    filter_decimal_check::<1, 2>(enc, OP_LT, false, 140, true, false, int_d, frac_d);
+}
+
+#[test(should_fail_with = "operand encoding mismatch")]
+fn filter_decimal_rejects_swapped_fraction() {
+    // Anchor encoding is for 1.50; prover witnesses 1.59 digits.
+    let enc_150 = enc_decimal_literal(false, [49], [53, 48]); // "1.50"
+    filter_decimal_check::<1, 2>(enc_150, OP_GT, false, 0, true, false, [49], [53, 57]);
+}
+
+#[test(should_fail_with = "negative zero is not canonical")]
+fn filter_decimal_rejects_negative_zero() {
+    // "-0.00" has zero magnitude -- not canonical.
+    let int_d: [u8; 1] = [48]; // "0"
+    let frac_d: [u8; 2] = [48, 48]; // "00"
+    let enc = enc_decimal_literal(true, int_d, frac_d);
+    filter_decimal_check::<1, 2>(enc, OP_EQ, false, 0, true, true, int_d, frac_d);
+}
+
+// ---------------------------------------------------------------------------
 // revoke -- hidden-index status-list inclusion + bit-unset (sq-3e5 / sq-h2v).
 // ---------------------------------------------------------------------------
 //
@@ -500,7 +743,9 @@ fn revoke_committed_wrong_index_commitment_rejected() {
 // signature by seed200 (a key NOT in K).
 // ---------------------------------------------------------------------------
 
-use crate::issuer::{hidden_issuer_attestation, key_set_membership, schnorr_verify, Point};
+use crate::issuer::{
+    hidden_issuer_attestation, key_set_membership, Point, reduction_range_bind, schnorr_verify,
+};
 
 // In-set signer (seed102, index 2 in K).
 global IV_M: Field = 0x18bca25b3980838a520d97b3d360b9d88fa497367d04d73db872ad86f05b9bab;
@@ -525,8 +770,12 @@ global OV_S: Field = 0x060040d301f61065d8bfcce98a1847a28ee8a57978be00f63b3c65af3
 global OV_E: Field = 0x00216946ce445d7b02ac66fcd1c5f8a0f93d3950929ba2abb2e0bd4e8cacba00;
 global OV_E_K: Field = 0x0000000000000000000000000000000000000000000000000000000000000003;
 
-fn in_set_pk() -> Point { Point { x: IV_PK_X, y: IV_PK_Y } }
-fn in_set_r() -> Point { Point { x: IV_R_X, y: IV_R_Y } }
+fn in_set_pk() -> Point {
+    Point { x: IV_PK_X, y: IV_PK_Y }
+}
+fn in_set_r() -> Point {
+    Point { x: IV_R_X, y: IV_R_Y }
+}
 
 // (1) ACCEPT: a valid signature by an IN-SET issuer verifies end-to-end, and the
 // issuer key is NOT among the public inputs (m, key_set_root only). The full
@@ -534,9 +783,15 @@ fn in_set_r() -> Point { Point { x: IV_R_X, y: IV_R_Y } }
 #[test]
 fn hidden_issuer_in_set_signature_verifies() {
     hidden_issuer_attestation::<2>(
-        IV_M, IV_ROOT,
-        in_set_pk(), in_set_r(), IV_S, IV_E, IV_E_K,
-        IV_IDX, [IV_SIB0, IV_SIB1],
+        IV_M,
+        IV_ROOT,
+        in_set_pk(),
+        in_set_r(),
+        IV_S,
+        IV_E,
+        IV_E_K,
+        IV_IDX,
+        [IV_SIB0, IV_SIB1],
     );
 }
 
@@ -561,11 +816,15 @@ fn hidden_issuer_out_of_set_key_rejected() {
     // The out-of-set key's own valid signature, but folded against K's root with
     // the in-set member's path (the only path the prover could try to present).
     hidden_issuer_attestation::<2>(
-        IV_M, IV_ROOT,
+        IV_M,
+        IV_ROOT,
         Point { x: OV_PK_X, y: OV_PK_Y },
         Point { x: OV_R_X, y: OV_R_Y },
-        OV_S, OV_E, OV_E_K,
-        IV_IDX, [IV_SIB0, IV_SIB1],
+        OV_S,
+        OV_E,
+        OV_E_K,
+        IV_IDX,
+        [IV_SIB0, IV_SIB1],
     );
 }
 
@@ -577,7 +836,10 @@ fn hidden_issuer_out_of_set_signature_is_itself_valid() {
     schnorr_verify(
         Point { x: OV_PK_X, y: OV_PK_Y },
         Point { x: OV_R_X, y: OV_R_Y },
-        OV_S, OV_E, OV_E_K, IV_M,
+        OV_S,
+        OV_E,
+        OV_E_K,
+        IV_M,
     );
 }
 
@@ -620,6 +882,56 @@ fn hidden_issuer_off_curve_key_rejected() {
     schnorr_verify(Point { x: 1, y: 1 }, in_set_r(), IV_S, IV_E, IV_E_K, IV_M);
 }
 
+// [OPUS-4.8] sq-ru0yx (internal re-audit finding M-1): the challenge-reduction
+// NO-WRAP regression suite. The bare reduction identity `e + e_k*L == e_base` plus
+// `e < L` and `e_k < 8` does NOT uniquely pin `e = e_base mod L`: for `e_k == 7`
+// the FIELD identity also accepts the wrap alternative `e' in [q_base-7L, L)`. The
+// fix (`reduction_range_bind` step 4) forbids that window. These exercise the
+// range-bind in isolation with explicit `(e, e_k)` (a genuine Poseidon2 preimage
+// with tiny `e_base`, the only `e_base` for which the wrap window is reachable, is
+// infeasible to grind; so the regression pins the constraint directly).
+
+// The reduction constants this test wires (mirrors `issuer.nr`):
+//   L     = BJJ_L                  (scalar-field order, ~2^251)
+//   TOP   = q_base - 7*L           (REDUCTION_TOP_BOUND, the e_k==7 no-wrap bound)
+global RW_L_MINUS_1: Field =
+    0x060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f0; // L - 1
+global RW_TOP: Field =
+    0x060c89ce5c263405370a08b6d0302b0b797b683ee9d2ee486fbfce8e6017ef6a; // q_base - 7*L
+global RW_TOP_MINUS_1: Field =
+    0x060c89ce5c263405370a08b6d0302b0b797b683ee9d2ee486fbfce8e6017ef69; // (q_base - 7*L) - 1
+
+// (M-1a) ACCEPT: for `e_k < 7` the full `[0, L)` range is honest (bound == L), so
+// the largest canonical scalar `e = L - 1` passes the range bind.
+#[test]
+fn reduction_no_wrap_accepts_max_e_for_low_quotient() {
+    reduction_range_bind(RW_L_MINUS_1, 6);
+}
+
+// (M-1b) ACCEPT: for `e_k == 7` the honest window is `[0, q_base - 7L)`, so
+// `e = (q_base - 7L) - 1` (the largest honest value) passes -- the fix does NOT
+// reject any honest witness.
+#[test]
+fn reduction_no_wrap_accepts_top_boundary_honest_e() {
+    reduction_range_bind(RW_TOP_MINUS_1, 7);
+}
+
+// (M-1c) REJECT (the forge this fix closes): for `e_k == 7`, the FIRST value of the
+// previously-admitted wrap window `e = q_base - 7L` is now rejected by the no-wrap
+// upper bound. Without the fix this `e` satisfied `e < L` and (for the matching
+// small `e_base`) the bare identity, forging a second valid challenge scalar.
+#[test(should_fail_with = "call to assert_max_bit_size")]
+fn reduction_no_wrap_rejects_wrap_window_e_at_top_quotient() {
+    reduction_range_bind(RW_TOP, 7);
+}
+
+// (M-1d) REJECT: the very top of the old wrap window, `e = L - 1`, with `e_k == 7`
+// is also excluded by the no-wrap bound (it is `>= q_base - 7L`).
+#[test(should_fail_with = "call to assert_max_bit_size")]
+fn reduction_no_wrap_rejects_max_e_at_top_quotient() {
+    reduction_range_bind(RW_L_MINUS_1, 7);
+}
+
 // [OPUS-4.8] sq-ayv: pin the index-commitment cross-vector so the Rust
 // `status_index_commitment` and this in-circuit `h3(DOMAIN, index, blinding)`
 // stay bit-identical (the cross-binding rests on them computing the same value).
@@ -659,7 +971,9 @@ global HPK2_X: Field = 0x200dfe61440979d4e8b0827802a9ea8940fe2189c385b838f830568
 global HPK2_Y: Field = 0x032de7d8b3f3f23488bd0819b6949e13456dc9a9d315cd7bfa7b87b7666ea421;
 global HDIG2: Field = 0x1fcb2bb6901f29951dcdc1d75f7d3bee6eca922a34fcd58c88bdc194dba5a559;
 
-fn holder_hpk() -> Point { Point { x: HPK_X, y: HPK_Y } }
+fn holder_hpk() -> Point {
+    Point { x: HPK_X, y: HPK_Y }
+}
 
 // (H0) CROSS-VECTOR: the in-circuit holder_key_digest is bit-identical to the host
 // `sparq_zk::sig::holder_key_digest` (the SECURITY-critical T6 cross-check anchor).
@@ -721,6 +1035,113 @@ fn holder_pok_rejects_off_curve_key() {
 }
 
 // ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier): in-circuit hidden-holder
+// SET membership. Vectors generated by `sparq_zk_compose::holder` from the REAL
+// holder set K = {seed100, seed101, seed102, seed103} committed as a depth-2
+// Poseidon2 Merkle tree whose leaf is `holder_key_digest(hpk)` (the canonical
+// attested holder identity, NOT the issuer `h2(x,y)` shape). The in-set holder is
+// seed102 at index 2 (its digest is HDIG, the SAME seed-102 holder key the
+// holder_pok vectors above use); the membership path is
+// [leaf(seed103), h2(leaf100, leaf101)]. The out-of-set holder is seed200 (the
+// HPK2_* / HDIG2 key, NOT in K). NOT-yet-sound (sq-qhy4); no soundness property is
+// asserted as achieved.
+// ---------------------------------------------------------------------------
+
+use crate::holder::{hidden_holder_set, holder_set_leaf, holder_set_membership};
+
+// holder set K = {seed100, seed101, seed102, seed103} as a depth-2 tree. The
+// seed-102 holder (HDIG) is at index 2; its path is [leaf(seed103), node(0,1)].
+global HS_ROOT: Field = 0x2764f6597829fa6d121c559b5aee2d9bbf3212490f75198b74025d52e7d97bc9;
+global HS_SIB0: Field = 0x1326436cfe5c0e122b2113d1a76160914a63572996e452ff2b4f455574d5e999;
+global HS_SIB1: Field = 0x3023a9d3b938915778d33941416030795369f7f6fc2e03b2467546d0d4f5c03c;
+global HS_IDX: Field = 2;
+
+// (HS0) The holder-set leaf is the holder-key DIGEST (== HDIG), bit-identical to
+// the host `holder_set_root`'s leaf -- distinct from the issuer key-set leaf
+// `key_leaf = h2(x, y)` over the same key (the ZKSIG_HK domain tag separates them).
+#[test]
+fn holder_set_leaf_is_holder_digest() {
+    assert_eq(holder_set_leaf(holder_hpk()), HDIG);
+}
+
+// (HS1) ACCEPT: the in-set holder's digest folds to the public root along the
+// claimed path (the membership gadget alone, isolating it from the key-pair check).
+#[test]
+fn holder_set_membership_in_set_holds() {
+    holder_set_membership::<2>(holder_hpk(), HS_ROOT, HS_IDX, [HS_SIB0, HS_SIB1]);
+}
+
+// (HS2) ACCEPT: the FULL hidden-holder-set relation -- possession of hsk
+// (hpk = hsk*G) AND membership of holder_key_digest(hpk) in the committed set --
+// verifies end-to-end. The holder key, secret, index, and path are ALL private;
+// only `holder_set_root` is public (the hidden-holder upgrade over holder_pok,
+// which makes the digest public).
+#[test]
+fn hidden_holder_set_in_set_verifies() {
+    hidden_holder_set::<2>(HS_ROOT, HSK, holder_hpk(), HS_IDX, [HS_SIB0, HS_SIB1]);
+}
+
+// (HS3) REJECT out-of-set holder: a DIFFERENT (self-consistent) holder key pair
+// (seed200, HDIG2) -- the prover knows hsk2 with hpk2 = hsk2*G -- is rejected
+// because holder_key_digest(hpk2) is NOT a member of K, so the membership fold
+// cannot recompute the public root. This is the holder analogue of the
+// hidden_issuer out-of-set-key forge: a real, possessed key that is simply not in
+// the set.
+#[test(should_fail_with = "holder is not a member of the committed holder set")]
+fn hidden_holder_set_out_of_set_holder_rejected() {
+    // The out-of-set holder's own valid (hsk2, hpk2), folded against K's root with
+    // the in-set member's path (the only path the prover could try to present).
+    hidden_holder_set::<2>(
+        HS_ROOT,
+        HSK2,
+        Point { x: HPK2_X, y: HPK2_Y },
+        HS_IDX,
+        [HS_SIB0, HS_SIB1],
+    );
+}
+
+// (HS4) REJECT wrong secret: a key not derived from the proven hpk breaks
+// `hpk == hsk*G` (HSK2*G is HPK2, not HPK) -- a "holder" who does NOT possess the
+// in-set secret cannot satisfy the relation even with the correct path.
+#[test(should_fail_with = "holder key mismatch")]
+fn hidden_holder_set_wrong_secret_rejected() {
+    hidden_holder_set::<2>(HS_ROOT, HSK2, holder_hpk(), HS_IDX, [HS_SIB0, HS_SIB1]);
+}
+
+// (HS5) REJECT wrong path: the correct in-set holder with a TAMPERED sibling cannot
+// recompute the public root (the prover cannot forge an authentication path).
+#[test(should_fail_with = "holder is not a member of the committed holder set")]
+fn hidden_holder_set_wrong_path_rejected() {
+    hidden_holder_set::<2>(HS_ROOT, HSK, holder_hpk(), HS_IDX, [HS_SIB0 + 1, HS_SIB1]);
+}
+
+// (HS6) REJECT index/path mismatch: presenting the in-set holder's path under a
+// DIFFERENT claimed index folds the leaf along the wrong directions, so it cannot
+// reach the root (a prover cannot reuse another slot's path -- the index bits are
+// the fold directions, bound in-circuit).
+#[test(should_fail_with = "holder is not a member of the committed holder set")]
+fn hidden_holder_set_index_path_mismatch_rejected() {
+    // index 0 (dirs [0,0]) with seed-102's path (which is for index 2, dirs [0,1]).
+    hidden_holder_set::<2>(HS_ROOT, HSK, holder_hpk(), 0, [HS_SIB0, HS_SIB1]);
+}
+
+// (HS7) REJECT identity holder key (universal-degenerate guard, mirrors holder_pok
+// / schnorr_verify). The neutral (0,1) is hsk*G only for hsk == 0 mod L and carries
+// no possession secret -- rejected before the membership fold can be gamed.
+#[test(should_fail_with = "identity holder key rejected")]
+fn hidden_holder_set_identity_key_rejected() {
+    let id = Point { x: 0, y: 1 };
+    hidden_holder_set::<2>(HS_ROOT, 0, id, HS_IDX, [HS_SIB0, HS_SIB1]);
+}
+
+// (HS8) REJECT off-curve holder key (twist / small-subgroup forgery guard).
+#[test(should_fail_with = "point is not on Baby-JubJub")]
+fn hidden_holder_set_off_curve_key_rejected() {
+    let off = Point { x: 1, y: 1 };
+    hidden_holder_set::<2>(HS_ROOT, HSK, off, HS_IDX, [HS_SIB0, HS_SIB1]);
+}
+
+// ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-bwwl / sq-8mwz: join_eq -- hidden cross-credential JOIN.
 // accept + each adversarial reject + the public-input-hiding pin. Tiny (N_A=4,
 // N_B=4) monomorphisations; the equality structure is what matters.
@@ -763,7 +1184,20 @@ fn join_eq_genuine_join_accepts() {
     let commit_a = commit_one(row_a);
     let commit_b = commit_one(row_b);
     let jc = join_value_commitment(JK, JB);
-    join_eq_check::<4, 4>(commit_a, commit_b, jc, 2, 0, enc_a, 1, enc_b, 1, row_a, row_b, JB);
+    join_eq_check::<4, 4>(
+        commit_a,
+        commit_b,
+        jc,
+        2,
+        0,
+        enc_a,
+        1,
+        enc_b,
+        1,
+        row_a,
+        row_b,
+        JB,
+    );
 }
 
 // (J2 / A1) REJECT forged equality: the two slots hold DIFFERENT terms. A prover
@@ -780,7 +1214,20 @@ fn join_eq_unequal_slots_rejected() {
     let commit_b = commit_one(row_b);
     // Prover claims equality (and commits to JK), but row_b[0] = jk2 != JK.
     let jc = join_value_commitment(JK, JB);
-    join_eq_check::<4, 4>(commit_a, commit_b, jc, 2, 0, enc_a, 1, enc_b, 1, row_a, row_b, JB);
+    join_eq_check::<4, 4>(
+        commit_a,
+        commit_b,
+        jc,
+        2,
+        0,
+        enc_a,
+        1,
+        enc_b,
+        1,
+        row_a,
+        row_b,
+        JB,
+    );
 }
 
 // (J3 / A2) REJECT row-swap / forged graph: the prover supplies graph-A contents
@@ -798,7 +1245,20 @@ fn join_eq_forged_graph_a_rejected() {
     // commit_a is for a DIFFERENT graph (a row the prover does not actually
     // hold) -- it cannot match the re-commit of enc_a.
     let bogus_commit_a = commit_one([999, 999, 999]);
-    join_eq_check::<4, 4>(bogus_commit_a, commit_b, jc, 2, 0, enc_a, 1, enc_b, 1, row_a, row_b, JB);
+    join_eq_check::<4, 4>(
+        bogus_commit_a,
+        commit_b,
+        jc,
+        2,
+        0,
+        enc_a,
+        1,
+        enc_b,
+        1,
+        row_a,
+        row_b,
+        JB,
+    );
 }
 
 // (J4 / A2) REJECT join over a row NOT present in the (correctly committed)
@@ -816,7 +1276,20 @@ fn join_eq_row_not_in_graph_rejected() {
     let jc = join_value_commitment(JK, JB);
     // A fabricated row_a that shares JK in slot 2 but is NOT a row of graph A.
     let phantom_a = [555, 555, JK];
-    join_eq_check::<4, 4>(commit_a, commit_b, jc, 2, 0, enc_a, 1, enc_b, 1, phantom_a, row_b, JB);
+    join_eq_check::<4, 4>(
+        commit_a,
+        commit_b,
+        jc,
+        2,
+        0,
+        enc_a,
+        1,
+        enc_b,
+        1,
+        phantom_a,
+        row_b,
+        JB,
+    );
 }
 
 // (J5) REJECT a join commitment that does NOT bind the proven join value (the
@@ -832,7 +1305,20 @@ fn join_eq_wrong_commitment_rejected() {
     let commit_b = commit_one(row_b);
     // Commitment to a DIFFERENT value than the join value JK that was proven.
     let wrong_jc = join_value_commitment(0xfeed, JB);
-    join_eq_check::<4, 4>(commit_a, commit_b, wrong_jc, 2, 0, enc_a, 1, enc_b, 1, row_a, row_b, JB);
+    join_eq_check::<4, 4>(
+        commit_a,
+        commit_b,
+        wrong_jc,
+        2,
+        0,
+        enc_a,
+        1,
+        enc_b,
+        1,
+        row_a,
+        row_b,
+        JB,
+    );
 }
 
 // (J6) REJECT an out-of-range join slot (must be subject/predicate/object).
@@ -845,7 +1331,20 @@ fn join_eq_out_of_range_slot_rejected() {
     let commit_a = commit_one(row_a);
     let commit_b = commit_one(row_b);
     let jc = join_value_commitment(JK, JB);
-    join_eq_check::<4, 4>(commit_a, commit_b, jc, 3, 0, enc_a, 1, enc_b, 1, row_a, row_b, JB);
+    join_eq_check::<4, 4>(
+        commit_a,
+        commit_b,
+        jc,
+        3,
+        0,
+        enc_a,
+        1,
+        enc_b,
+        1,
+        row_a,
+        row_b,
+        JB,
+    );
 }
 
 // (J7) PUBLIC-INPUT HIDING PIN (the headline privacy property). The relation's
@@ -903,5 +1402,18 @@ fn join_eq_mixed_slots_multi_row_accepts() {
     let commit_b = commit_one(row_b);
     let jc = join_value_commitment(JK, JB);
     // slot_a = 1 (predicate of a1), slot_b = 2 (object of row_b); join on a1.
-    join_eq_check::<4, 4>(commit_a, commit_b, jc, 1, 2, enc_a, 2, enc_b, 1, a1, row_b, JB);
+    join_eq_check::<4, 4>(
+        commit_a,
+        commit_b,
+        jc,
+        1,
+        2,
+        enc_a,
+        2,
+        enc_b,
+        1,
+        a1,
+        row_b,
+        JB,
+    );
 }

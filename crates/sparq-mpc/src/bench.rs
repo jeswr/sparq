@@ -84,6 +84,14 @@ pub enum QueryClass {
     /// **Oblivious sort** (Batcher odd-even mergesort): the obliviousness
     /// substrate; `O(n log² n)` compare-exchanges in `O(log² n)` depth.
     ObliviousSort,
+    /// **Hidden bounded property path** (`sq-py8h`): the secret-graph `(p){m,k}`
+    /// operator. Its cost is the `k×`-join secure equalities + the `O(k)` AND/OR
+    /// degree-reduction rounds that chain the per-tuple hop bits + the `B`-slot
+    /// oblivious output — modelled by
+    /// [`crate::hidden_path::planner::BoundedPathPlan::comm_counter`] (sq-py8h.5).
+    /// Operator class [`OperatorClass::EqualityJoin`] (the secret-shared hop equality
+    /// opens at degree `2t`). `[OPUS-4.8]`
+    HiddenBoundedPath,
 }
 
 impl QueryClass {
@@ -94,6 +102,7 @@ impl QueryClass {
             QueryClass::HiddenValueEquiJoin => "hidden_value_equi_join",
             QueryClass::ObliviousShuffle => "oblivious_shuffle",
             QueryClass::ObliviousSort => "oblivious_sort",
+            QueryClass::HiddenBoundedPath => "hidden_bounded_path",
         }
     }
 
@@ -109,7 +118,8 @@ impl QueryClass {
             QueryClass::CumulativeSumAggregate => OperatorClass::LinearAggregate,
             QueryClass::HiddenValueEquiJoin
             | QueryClass::ObliviousShuffle
-            | QueryClass::ObliviousSort => OperatorClass::EqualityJoin,
+            | QueryClass::ObliviousSort
+            | QueryClass::HiddenBoundedPath => OperatorClass::EqualityJoin,
         }
     }
 }
@@ -411,6 +421,24 @@ fn model_sort(n: usize, scale: usize) -> CommCounter {
     c
 }
 
+/// Model the hidden bounded property path `(p){1,k}` over `scale` secret edges with
+/// a public padded output bound `B = scale`. Routes through the operator's OWN
+/// statically-projected cost descriptor
+/// ([`crate::hidden_path::planner::BoundedPathPlan::comm_counter`], sq-py8h.5) so the
+/// matrix cell reports the SAME modelled communication the operator pays — the
+/// `k×`-join secure equalities + the `O(k)` reduction rounds + the `B`-slot oblivious
+/// output — never a fabricated wall-clock. `k` is the fixed public bound
+/// [`BOUNDED_PATH_K`]; `B = scale` covers up to `scale` distinct endpoint pairs.
+/// `[OPUS-4.8]`
+fn model_bounded_path(n: usize, scale: usize) -> Result<CommCounter, MpcError> {
+    use crate::hidden_path::planner::{plan_hidden_bounded_path, HiddenPathRequest};
+    // `(p){1,k}` over a single predicate, projected against |E| = scale public edges.
+    let req = HiddenPathRequest::range("p", 1, BOUNDED_PATH_K);
+    let plan = plan_hidden_bounded_path(&req, scale)?;
+    // B = scale (cover up to `scale` distinct endpoint pairs); at least 1 slot.
+    Ok(plan.comm_counter(n, scale.max(1)))
+}
+
 // =============================================================================
 // The CORRECTNESS check per query class (runs the REAL primitive so a fast-but-
 // wrong cost cell is caught). Needs a seeded backend (caller supplies it).
@@ -497,6 +525,70 @@ pub fn check_sort(dealer: &mut ShamirDealer, t: usize, scale: usize) -> Result<b
     Ok(ascending && multiset_eq(&values, &opened))
 }
 
+/// The fixed PUBLIC bound `k` the hidden-bounded-path cost cell models: `(p){1,k}`.
+/// A small finite bound keeps the `Σ_ℓ |E|^ℓ` enumeration within the in-process
+/// counting tier while still exercising the multi-length union + reduction chain.
+/// `[OPUS-4.8]`
+pub const BOUNDED_PATH_K: usize = 3;
+
+/// Run the REAL hidden bounded property path `(p){1,k}` over a `scale`-edge linear
+/// chain `n_0 →p n_1 →p … →p n_scale` and assert the disclosed endpoint pairs match
+/// the plaintext bounded-path oracle over that chain — the correctness gate for the
+/// hidden-bounded-path cost cell (design record §5.4: differential correctness
+/// alongside every cost cell). Returns the number of disclosed endpoint pairs.
+///
+/// On a length-`scale` chain, `(p){1,k}` connects every `(n_i, n_j)` with
+/// `1 <= j − i <= k`, so the oracle count is closed-form — no separate engine
+/// needed. `[OPUS-4.8]`
+pub fn check_bounded_path(backend: &ShamirBackend, scale: usize) -> Result<usize, MpcError> {
+    use crate::hidden_path::{
+        eval_bounded_path_hidden, HiddenBoundedPath, HiddenNode, PredicatedEdge, PredicatedEdges,
+    };
+    use oxrdf::{NamedNode, Term};
+    if scale == 0 {
+        return Ok(0);
+    }
+    // Build the chain n_0 →p n_1 →p … →p n_scale (scale edges, scale+1 nodes).
+    let node = |i: usize| -> HiddenNode {
+        HiddenNode {
+            key: Fp::new((i + 1) as u64),
+            term: Term::NamedNode(NamedNode::new_unchecked(format!("urn:n:{i}"))),
+        }
+    };
+    let edges: Vec<PredicatedEdge> = (0..scale)
+        .map(|i| PredicatedEdge {
+            predicate: "p".to_string(),
+            subject: node(i),
+            object: node(i + 1),
+        })
+        .collect();
+    let edges = PredicatedEdges::new(edges);
+    let form = HiddenBoundedPath::range("p", 1, BOUNDED_PATH_K);
+    // Plaintext oracle: pairs (i, j) on the chain with 1 <= j−i <= k.
+    let k = BOUNDED_PATH_K;
+    let expected: usize = (0..=scale)
+        .map(|i| {
+            let hi = (i + k).min(scale);
+            hi.saturating_sub(i)
+        })
+        .sum();
+    // B must cover the (pre-dedup) candidate enumeration, never just the deduped
+    // result — `oblivious_set_output` fails closed on `B < candidates`. The safe
+    // public upper bound is the projected tuple enumeration Σ_ℓ |E|^ℓ.
+    let bound: usize = (1..=k)
+        .map(|len| scale.saturating_pow(len as u32))
+        .sum::<usize>()
+        .max(1);
+    let result = eval_bounded_path_hidden(backend, &edges, &form, bound)?;
+    if result.rows.len() != expected {
+        return Err(MpcError::Protocol(format!(
+            "hidden bounded path correctness gate: got {} endpoint pairs, oracle expected {expected}",
+            result.rows.len()
+        )));
+    }
+    Ok(result.rows.len())
+}
+
 /// Build a secret-shared column from cleartext field values (the dealer shares
 /// each; the harness plays all parties, exactly as the oblivious tests do). A
 /// [`SecretColumn`] is a `Vec` of full Shamir sharings (one per row).
@@ -543,6 +635,7 @@ pub fn cell(query_class: QueryClass, n: usize, scale: usize) -> Result<MatrixCel
         QueryClass::HiddenValueEquiJoin => model_hidden_join(n, scale),
         QueryClass::ObliviousShuffle => model_shuffle(n, scale),
         QueryClass::ObliviousSort => model_sort(n, scale),
+        QueryClass::HiddenBoundedPath => model_bounded_path(n, scale)?,
     };
     Ok(MatrixCell {
         query_class,
@@ -577,6 +670,9 @@ pub fn run_matrix(
         cells.push(cell(QueryClass::HiddenValueEquiJoin, n, join_scale)?);
         cells.push(cell(QueryClass::ObliviousShuffle, n, shuffle_scale)?);
         cells.push(cell(QueryClass::ObliviousSort, n, shuffle_scale)?);
+        // The hidden bounded property path (sq-py8h.5): models |E| = shuffle_scale
+        // secret edges at the fixed public bound k = BOUNDED_PATH_K, B = scale.
+        cells.push(cell(QueryClass::HiddenBoundedPath, n, shuffle_scale)?);
     }
     Ok(MatrixResults {
         party_counts: party_counts.to_vec(),
@@ -592,8 +688,9 @@ mod tests {
     #[test]
     fn matrix_builds_over_all_party_counts() {
         let r = run_matrix(DEFAULT_PARTIES, 4, 8).unwrap();
-        // 4 query classes × 4 party counts = 16 cells.
-        assert_eq!(r.cells.len(), DEFAULT_PARTIES.len() * 4);
+        // 5 query classes (aggregate, hidden join, shuffle, sort, bounded path)
+        // × 4 party counts = 20 cells.
+        assert_eq!(r.cells.len(), DEFAULT_PARTIES.len() * 5);
         // Every party count present.
         for &n in DEFAULT_PARTIES {
             assert!(r.cells.iter().any(|c| c.parties == n));

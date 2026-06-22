@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "[OPUS-4.8] MUTATION-TESTING RATCHET (sq-8kt3, epic sq-qcnn) \u2014 committed per-crate SURVIVING-mutant CEILING, reviewed in diffs exactly like the line-coverage ratchet (bench/coverage-floor.json). scripts/mutants-gate.py --check FAILS CI when a crate has MORE surviving (test-undetected) mutants than its ceiling. This measures test QUALITY: a mutant that survives is code a test ran over but never asserted on \u2014 a vacuous-test gap that line coverage cannot see.",
+    "ceiling = measured_surviving + 2 (a small margin so a toolchain bump that reshuffles the viable mutant set never trips the gate). The ceiling only ever FALLS (--seed will not raise it without --allow-higher). caught_pct is recorded for humans but the GATE is the surviving COUNT (stable: caught% has a moving denominator).",
+    "Tiering: cargo-mutants rebuilds + reruns the suite ONCE PER MUTANT, so it is far too slow for per-commit. It runs in the NIGHTLY tier only \u2014 .github/workflows/ci.yml `mutants-nightly` (schedule + workflow_dispatch), and is ADVISORY (non-gating: the lane name contains \"advisory\" so the ci-summary aggregator excludes it) until this baseline is fully seeded across the workspace, then it ratchets to gating. It is NOT on the per-PR required ci-summary path \u2014 adding it there would blow the PR budget.",
+    "Excluded crates (sparq-cli/-conformance/-gpu/-bench/-py and *-wasm): same rationale as the coverage ratchet's floor:0 crates \u2014 see scripts/mutants-gate.py EXCLUDED and .cargo/mutants.toml exclude_globs.",
+    "HONESTY: a crate appears here ONLY once it has actually been measured by a real cargo-mutants run. Crates not yet listed are seeded on their first nightly run \u2014 the absence of a crate is NOT a claim that it has zero surviving mutants.",
+    "Regenerate after tests improve: cargo mutants -p <crate> -o target/mutants/<crate> && scripts/mutants-gate.py --seed target/mutants/<crate>/outcomes.json"
+  ],
+  "crates": {
+    "sparq-algos": {
+      "caught": 125,
+      "caught_pct": 95.45,
+      "ceiling": 8,
+      "measured_surviving": 6,
+      "timeout": 1,
+      "unviable": 3
+    },
+    "sparq-canon": {
+      "caught": 28,
+      "caught_pct": 80.0,
+      "ceiling": 9,
+      "measured_surviving": 7,
+      "timeout": 0,
+      "unviable": 8
+    },
+    "sparq-parse": {
+      "caught": 25,
+      "caught_pct": 72.09,
+      "ceiling": 14,
+      "measured_surviving": 12,
+      "timeout": 6,
+      "unviable": 0
+    }
+  },
+  "margin": 2
+}

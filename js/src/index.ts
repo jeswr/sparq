@@ -1,12 +1,23 @@
-export { SparqStore, type RdfFormat, type SparqStoreOptions } from './store.js';
+export {
+  SparqStore,
+  type RdfFormat,
+  type SparqStoreOptions,
+  type SerializeFormat,
+  type SerializeOptions,
+  type ValidationReport,
+  type ValidationResult,
+} from './store.js';
+// [OPUS-4.8] sq-lii76 (#981) — the RDF/JS `DatasetCore` entry the ESM `<script type=module>`
+// snippet imports by name (`import { Dataset } from "..."`), lazily instantiating the wasm.
+export { Dataset } from './dataset.js';
 export { Bindings } from './bindings.js';
 export { DataFactory, NamedNode, BlankNode, Literal, Variable, DefaultGraph, Quad } from './terms.js';
 export {
   termFromSparqlJson,
   termToNT,
   quadsToNQuads,
+  parseNTriples,
   detectQueryForm,
-  askToSelect,
   SparqlJsonRowsParser,
   type SparqlJsonTerm,
   type SparqlJsonResults,

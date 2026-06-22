@@ -14,6 +14,13 @@
 //! sends AFTER `ServerApplier::seal` has WAL-fsync'd the batch to the durable graph (see
 //! `src/http.rs`). So by the time a 204 returns, the update is already on disk — the restart
 //! merely re-opens it.
+//!
+//! [OPUS-4.8] (sq-1b390) Gate the whole suite on the `server` feature. It spins the real axum
+//! server and uses the `server`-gated `sparq_server::router` / `AppState` API, so under
+//! `--no-default-features --all-targets` (the pure-serialiser-library build) this file must
+//! compile OUT — otherwise `clippy --no-default-features --all-targets` breaks on the
+//! unresolved axum / serde_json / router imports. 🤖 SPARQ agent.
+#![cfg(feature = "server")]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -590,5 +597,262 @@ async fn persistent_durable_write_error_repeated_503_reads_survive() {
             "reads must keep being served from the (empty) last published snapshot during the outage",
         );
     }
+    s.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-bif.14) MULTI-STEP / SEQUENCED durable-write failure injection.
+//
+// The two tests above fail a CONTIGUOUS PREFIX of seals (a transient burst that clears, or a
+// permanent jam). They do not exercise the INTERLEAVED path: a writer that recovers, takes more
+// durable writes, then fails AGAIN, then recovers again — the realistic flapping-disk / quota-
+// bouncing failure mode. This test drives that sequence over HTTP through the SAME `test-seams`
+// seal seam and asserts the graceful-degradation contract holds at EVERY step:
+//   * each seal that the injected hook fails → the in-flight write is refused 503 and is NEVER
+//     published (fail-closed), so the live row count does NOT advance on a failed step;
+//   * each seal the hook lets through → 204 and the row count advances by exactly that write;
+//   * the writer SURVIVES every failure (the server keeps serving across the whole sequence);
+//   * the cumulative live set after the sequence is EXACTLY the successful writes (no failed
+//     write leaked in, no successful write lost), and that set is durable across a restart.
+// The seam's hook is a stateful `FnMut`, so the per-seal failure decision is driven by a seal
+// counter — failures land at chosen, NON-prefix positions.
+// ---------------------------------------------------------------------------
+
+/// Boots a `--persist` server whose Nth durable seal fails iff `fail_on` contains N (0-based over
+/// the seals that actually reach the durable commit). `test-seams` only. Unlike
+/// `start_with_transient_failures` (which fails the first `n_fail` seals), this fails an ARBITRARY
+/// SET of seal indices, so a recover→fail→recover sequence can be modelled exactly.
+#[cfg(feature = "test-seams")]
+async fn start_with_failures_at(config: ServerConfig, fail_on: &'static [usize]) -> Server {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    let graph = Graph::load_str("", "turtle").unwrap();
+    let seal_idx = Arc::new(AtomicUsize::new(0));
+    let hook: Box<dyn FnMut() -> Option<String> + Send> = Box::new(move || {
+        let n = seal_idx.fetch_add(1, Ordering::SeqCst);
+        if fail_on.contains(&n) {
+            Some(format!("injected durable-write error at seal #{}", n))
+        } else {
+            None
+        }
+    });
+    let state = AppState::with_config_inject_durable_failure(graph, config, hook)
+        .expect("durable open with injected failure seam");
+    let app = router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    Server { base: format!("http://{}", addr), shutdown: Some(tx), task: Some(task) }
+}
+
+/// A SEQUENCED outage: durable writes succeed, then a seal fails, then writes recover, then a seal
+/// fails AGAIN, then recovers — interleaved with reads. At every step fail-closed holds (a refused
+/// write never lands, a recovered write does), the writer survives the whole sequence, and the
+/// final live set is EXACTLY the successful writes, durable across a restart. `test-seams` only.
+#[cfg(feature = "test-seams")]
+#[tokio::test]
+async fn sequenced_durable_failures_recover_and_refail_fail_closed() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+
+    // Fail the 2nd and 4th durable seals (0-based seal indices 1 and 3). So the planned outcome
+    // for writes w0..w4 is: w0 ok, w1 REFUSED, w2 ok, w3 REFUSED, w4 ok → 3 live rows.
+    let s = start_with_failures_at(persist_config(scratch.path()), &[1, 3]).await;
+
+    // `(should_fail, subject)` for five writes; we track the live count as we go so each step's
+    // assertion depends on the PREVIOUS steps having behaved (a regression that mis-publishes a
+    // refused write, or drops a good one, shifts the running count and trips a later assert).
+    let plan = [false, true, false, true, false];
+    let mut expected_live: usize = 0;
+
+    for (i, should_fail) in plan.iter().enumerate() {
+        let status = post_update(
+            &cl,
+            &s.base,
+            &format!("INSERT DATA {{ <http://ex/w{}> <http://ex/p> <http://ex/v> }}", i),
+        )
+        .await;
+
+        if *should_fail {
+            assert_eq!(
+                status, 503,
+                "write w{} hits an injected durable failure → must be refused 503",
+                i
+            );
+            // Fail-closed: the refused write is NOT in the live view.
+            assert!(
+                !ask(&cl, &s.base, &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)).await,
+                "a refused (non-durable) write w{} must NOT be published",
+                i
+            );
+        } else {
+            assert_eq!(
+                status, 204,
+                "write w{} seals durably → must succeed 204 (writer survived prior failures)",
+                i
+            );
+            expected_live += 1;
+            // The successful write IS in the live view.
+            assert!(
+                ask(&cl, &s.base, &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)).await,
+                "a successful write w{} must be published",
+                i
+            );
+        }
+
+        // The running cumulative count matches exactly the successful writes so far — reads keep
+        // being served from the last published snapshot the whole way through the outage.
+        assert_eq!(
+            count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await,
+            expected_live,
+            "after step w{} the live set must be exactly the successful writes so far",
+            i
+        );
+    }
+
+    assert_eq!(expected_live, 3, "plan sanity: w0, w2, w4 should have committed");
+
+    // The surviving live set is durable across a clean restart: exactly the successful writes,
+    // and NONE of the refused ones ever resurrect.
+    s.stop().await;
+    let s2 = Server::start(persist_config(scratch.path())).await;
+    assert_eq!(
+        count_rows(&cl, &s2.base, "SELECT * WHERE { ?s ?p ?o }").await,
+        3,
+        "the successful writes must survive a restart (they really were made durable)",
+    );
+    for i in [0usize, 2, 4] {
+        assert!(
+            ask(&cl, &s2.base, &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)).await,
+            "committed write w{} must survive the restart",
+            i
+        );
+    }
+    for i in [1usize, 3] {
+        assert!(
+            !ask(&cl, &s2.base, &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)).await,
+            "refused write w{} must NEVER resurrect after a restart",
+            i
+        );
+    }
+    s2.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-x32t, epic sq-toze.33) ADMIN WAL COMPACTION / VACUUM — erasure-completeness.
+// ---------------------------------------------------------------------------
+
+/// POSTs to `/admin/compact` (optionally with a Bearer token) and returns the status.
+async fn post_compact(cl: &reqwest::Client, base: &str, token: Option<&str>) -> reqwest::StatusCode {
+    let mut req = cl.post(format!("{base}/admin/compact"));
+    if let Some(t) = token {
+        req = req.header("authorization", format!("Bearer {}", t));
+    }
+    req.send().await.unwrap().status()
+}
+
+/// Recursively true iff `needle`'s bytes appear in any regular file under `dir` — proves a
+/// deleted datum's bytes are PHYSICALLY present/absent on disk.
+fn dir_contains_bytes(dir: &Path, needle: &[u8]) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if dir_contains_bytes(&p, needle) {
+                return true;
+            }
+        } else if let Ok(bytes) = std::fs::read(&p) {
+            if bytes.windows(needle.len()).any(|w| w == needle) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The end-to-end ADMIN COMPACTION flow over HTTP: INSERT some data (one to keep, one secret),
+/// DELETE the secret, then `POST /admin/compact`. After compaction the LIVE data is intact AND the
+/// deleted secret's bytes are PHYSICALLY GONE from the `--persist` directory — and a restart
+/// confirms the erasure is durable. This is the operator-invokable erasure of the runbook §7a.
+#[tokio::test]
+async fn admin_compact_physically_erases_deleted_data() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+
+    {
+        let s = Server::start(persist_config(scratch.path())).await;
+        assert_eq!(
+            post_update(&cl, &s.base, "INSERT DATA { <http://ex/keep> <http://ex/p> \"KEEP-LIVE-9f3a\" }").await,
+            204,
+        );
+        assert_eq!(
+            post_update(&cl, &s.base, "INSERT DATA { <http://ex/alice> <http://ex/ssn> \"SECRET-SSN-7b21\" }").await,
+            204,
+        );
+        // Logical erasure: the secret is gone from the live view…
+        assert_eq!(
+            post_update(&cl, &s.base, "DELETE DATA { <http://ex/alice> <http://ex/ssn> \"SECRET-SSN-7b21\" }").await,
+            204,
+        );
+        assert_eq!(count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await, 1, "only KEEP remains live");
+        // …but its bytes still linger in the on-disk WAL/dict history until compaction.
+        assert!(dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"), "pre-compaction: secret still on disk");
+
+        // Operator-invoked compaction (no auth token configured here → ungated).
+        assert_eq!(post_compact(&cl, &s.base, None).await, 200, "compaction must succeed");
+
+        // Live data preserved; deleted secret physically erased; server still serving.
+        assert_eq!(count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await, 1, "live data survives compaction");
+        assert!(dir_contains_bytes(scratch.path(), b"KEEP-LIVE-9f3a"), "live data must remain on disk");
+        assert!(!dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"), "deleted secret bytes must be physically erased");
+
+        // Writes still work after compaction (fresh WAL).
+        assert_eq!(
+            post_update(&cl, &s.base, "INSERT DATA { <http://ex/after> <http://ex/p> <http://ex/v> }").await,
+            204,
+        );
+        s.stop().await;
+    }
+    // Durability: restart sees the post-compaction state; the secret never resurrects.
+    let s2 = Server::start(persist_config(scratch.path())).await;
+    assert_eq!(count_rows(&cl, &s2.base, "SELECT * WHERE { ?s ?p ?o }").await, 2, "KEEP + after survive restart");
+    assert!(!dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"), "erasure must survive the restart");
+    s2.stop().await;
+}
+
+/// The admin compaction endpoint is GATED by the WRITE auth token: no/wrong token → 401, correct
+/// token → 200. (Same gate as SPARQL Update — it mutates the durable store.)
+#[tokio::test]
+async fn admin_compact_requires_write_auth() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+    let config = ServerConfig { auth_token: Some("s3cr3t".to_string()), ..persist_config(scratch.path()) };
+    let s = Server::start(config).await;
+
+    assert_eq!(post_compact(&cl, &s.base, None).await, 401, "no token must be refused");
+    assert_eq!(post_compact(&cl, &s.base, Some("wrong")).await, 401, "wrong token must be refused");
+    assert_eq!(post_compact(&cl, &s.base, Some("s3cr3t")).await, 200, "correct write token compacts");
+    s.stop().await;
+}
+
+/// An IN-MEMORY server (no `--persist`) returns 409 on `/admin/compact`: there is no on-disk WAL
+/// history to purge (in-memory erasure is already immediate), so a misleading no-op success is
+/// avoided.
+#[tokio::test]
+async fn admin_compact_on_in_memory_server_is_409() {
+    let cl = reqwest::Client::new();
+    // Default config = no persist dir = in-memory.
+    let s = Server::start(ServerConfig::default()).await;
+    assert_eq!(post_compact(&cl, &s.base, None).await, 409, "in-memory server has nothing to compact");
     s.stop().await;
 }

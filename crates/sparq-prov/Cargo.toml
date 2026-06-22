@@ -1,0 +1,45 @@
+# [OPUS-4.8] sq-ntcg (CDMC CD-1): W3C PROV-O data-lineage capture for DERIVED data.
+[package]
+name = "sparq-prov"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "W3C PROV-O data-lineage records for data DERIVED by a sparq operation (CONSTRUCT, reasoner materialization) — a small, opt-in public API over sparq's term model"
+publish = false
+
+# OPT-IN, lean core. NOTHING in the workspace's default build depends on this
+# crate: it is a standalone member (like `sparq-canon`), so `sparq-core`'s
+# default build and the wasm artifact are byte-identical with or without it.
+# Consumers who don't need provenance never pull it. The capability is therefore
+# OFF BY DEFAULT at the dependency level — the leanest possible gating, with zero
+# core overhead when absent. [OPUS-4.8] sq-ntcg, branch feat-prov-lineage.
+
+# [OPUS-4.8] sq-m3i0: the reasoner-materialization lineage bridge is itself a
+# *non-default* feature, so even consumers who pull sparq-prov for CONSTRUCT
+# lineage pay nothing (no sparq-reason dep) unless they ask for `reason`.
+[features]
+default = []
+# Map a sparq-reason `why()` proof tree → PROV-O RDF (the `reason` module). Pulls
+# sparq-reason with its `explain` feature (the `ProofTree`/`ProofNode` surface).
+reason = ["dep:sparq-reason"]
+
+[dependencies]
+# sparq term model (oxrdf 0.3 re-export) + store Graph.
+sparq-core = { path = "../sparq-core" }
+# The CONSTRUCT derivation we wrap (and, by extension, DESCRIBE).
+sparq-engine = { path = "../sparq-engine" }
+oxrdf = { workspace = true }
+# Reasoner proof trees (`why()`), only under the `reason` feature. `explain` is the
+# sparq-reason feature that exposes ProofTree/ProofNode; default-features stay on
+# (parallel materialization) — sparq-prov never enters the wasm graph.
+sparq-reason = { path = "../sparq-reason", features = ["explain"], optional = true }
+
+[dev-dependencies]
+# Round-trip the emitted PROV-O graph back through the loader to prove it is
+# well-formed RDF (Turtle ⊇ N-Triples).
+oxttl = { workspace = true }

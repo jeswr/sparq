@@ -15,13 +15,26 @@
 # SEMANTICS: success / skipped / neutral are non-failing; failure / cancelled /
 # timed_out / action_required / stale fail the gate. The gate EXCLUDES ITSELF (no
 # self-deadlock). It waits until EVERY discovered sibling check-run is terminal
-# (pending == 0) AND the set of sibling check NAMES has held unchanged for a short
-# settle window, bounded below by a startup-race floor and above by the job timeout.
-# This converges FAST once the last sibling finishes — including a `build + test`
-# MATRIX whose shards register/complete at staggered times — instead of repeatedly
-# re-waiting a long unchanged-name window per late arrival (the thrash @jeswr saw
-# after the test job was split into shards). A stable-empty set passes (e.g. a
-# docs-only change that triggers no other workflow). [OPUS-4.8]
+# (pending == 0) AND that all-terminal state has HELD for a short settle window,
+# bounded below by a startup-race floor and above by the job timeout. This converges
+# FAST once the last sibling finishes — including a `build + test` MATRIX whose shards
+# register/complete at staggered times — instead of repeatedly re-waiting a long
+# unchanged-name window per late arrival (the thrash @jeswr saw after the test job was
+# split into shards). A stable-empty set passes (e.g. a docs-only change that triggers
+# no other workflow). [OPUS-4.8]
+#
+# STILL-SETTLING SET ROBUSTNESS (bead sq-ipkku). [OPUS-4.8] The settle is re-armed
+# ONLY by genuinely-new PENDING work (`pending > 0`), NOT by a check-run that arrives
+# already TERMINAL. Earlier the settle reset on ANY change to the sibling NAME set, so
+# a flurry of late-but-already-green check-runs trickling in (observed on #997: the set
+# grew 81 -> 86 mid-poll while every check was terminal+green) reset the settle on each
+# injection, never let it reach the window, and the loop hit its cap and emitted a
+# FALSE RED — even though nothing failed. Now an already-terminal injection cannot
+# starve convergence: only unfinished work (pending) holds or re-arms the gate. And the
+# loop-budget exhaustion is no longer an unconditional RED — see the GRACEFUL TIMEOUT
+# note at the bottom of the poll loop: if at the budget everything is terminal (just
+# never quiet for a full settle), we render the real verdict on the full terminal set
+# rather than blind-failing; a genuine hang (work still pending) is the only timeout RED.
 #
 # ADVISORY/INFORMATIONAL checks are NON-GATING (bead sq-wjth). [OPUS-4.8] A check
 # whose NAME contains the WHOLE WORD "advisory" or "informational" (case-insensitive,
@@ -35,7 +48,9 @@
 #   • "markdownlint-advisory (whole repo)"            (docs-quality.yml)
 #   • "external-links (lychee online, advisory)"      (docs-quality.yml)
 #   • "vale (prose, advisory)"                        (docs-quality.yml)
-#   • "custom-checks (… advisory)"                    (docs-quality.yml)
+# ([OPUS-4.8] sq-8ic6: "readme-template (template, advisory)" was PROMOTED to the HARD
+#  gate "readme-template (template)" — no advisory token, so it now GATES — once the
+#  sq-9jw5 README-overhaul backlog cleared and sq-ixsf tightened the stub classifier.)
 # REQUIRED checks (gate / build+test / clippy / coverage / the conformance + perf
 # ratchets / wasm / MSRV / supply-chain / …) do NOT contain those words, so they
 # still gate normally. Rationale: an advisory job that concludes `failure` (e.g.
@@ -98,125 +113,155 @@ jobs:
         run: |
           set -euo pipefail
           # CONVERGENCE (handles the startup race + late-registering workflows WITHOUT
-          # thrashing on a matrix). [OPUS-4.8] sq — @jeswr reported the gate wasn't
-          # converging promptly once `build + test` was split into a 4-shard matrix.
+          # thrashing on a matrix, AND without false-RED'ing on a still-injecting set —
+          # bead sq-ipkku). [OPUS-4.8] sq — @jeswr reported the gate wasn't converging
+          # promptly once `build + test` was split into a 4-shard matrix, and later that
+          # a flurry of late-but-already-green check-runs (set grew 81 -> 86 mid-poll on
+          # #997) could time the gate out into a FALSE RED.
           #
           # The convergence condition is: every DISCOVERED sibling check-run is TERMINAL
-          # (`pending == 0`) AND the discovered NAME set has been unchanged for a SHORT
-          # settle of SETTLE_POLLS consecutive polls — bounded below by a MIN_POLLS
-          # startup floor and above by the loop/job timeout.
+          # (`pending == 0`) AND that all-terminal state has HELD for a SHORT settle of
+          # SETTLE_POLLS consecutive polls — bounded below by a MIN_POLLS startup floor
+          # and above by the loop/job timeout.
           #
-          # WHY NOT a long unchanged-name window: the previous design required the name
-          # set to hold unchanged for 4 polls (80s) and reset that counter on ANY name
-          # change. With a matrix, the N shard check-runs register at DIFFERENT times, so
-          # every late arrival reset the 4-poll window — convergence crawled (≈7 min on
-          # the first 4-shard PR, worst case toward the cap), and the identical logic
-          # WILL also run on `merge_group` once a merge queue is enabled (this workflow
-          # currently triggers only on `pull_request` + `push`), so the MERGE QUEUE's
-          # gate would be slow/fragile too.
-          #
-          # WHY pending==0 is the right primary signal: a check-run that is still
-          # registering/running is NOT `completed`, so it counts in `pending`. We only
-          # render a verdict once EVERY discovered sibling is terminal — so all N matrix
-          # shards (which complete at different times) are waited-for and folded in. The
-          # busy registration phase is naturally covered: while shards keep arriving and
-          # running, pending>0 holds the gate; the SETTLE window then runs AFTER the last
-          # sibling finishes (when the name set is already stable), so it converges in
+          # WHY pending==0 (not name-set-stability) is the settle signal: a check-run
+          # that is still registering/running is NOT `completed`, so it counts in
+          # `pending`. We render a verdict only once EVERY discovered sibling is terminal,
+          # so all N matrix shards (which complete at staggered times) are waited-for and
+          # folded in. While shards keep arriving and running, pending>0 holds the gate;
+          # the settle window then runs AFTER the last sibling finishes, converging in
           # ~SETTLE_POLLS polls instead of re-waiting a full window per late arrival.
           #
-          # LATE-REGISTERING workflows are still folded in: a genuinely-late workflow's
-          # check-run appears as queued/in_progress (pending>0) AND grows the name set,
-          # which resets the short settle — so we wait for it and re-judge. The MIN_POLLS
-          # floor additionally guards the startup race where the FIRST sibling finishes
-          # so fast that a slightly-later-registering workflow hasn't appeared yet: no
-          # verdict is rendered before MIN_POLLS polls have elapsed, giving slow workflows
-          # time to register before an all-terminal partial set could pass prematurely.
-          # A stable-empty set still passes (docs-only change with no siblings).
-          SETTLE_POLLS=2          # name set must hold unchanged for 2 × 20s = 40s once terminal
+          # WHY the settle is re-armed ONLY by pending work, NOT by name-set growth
+          # (sq-ipkku): the previous design reset the settle on ANY change to the sibling
+          # NAME set. That conflated two very different events — (a) genuinely-new
+          # UNFINISHED work appearing (which MUST hold the gate) and (b) a new check-run
+          # arriving already TERMINAL (e.g. a fast docs/advisory job, or a re-run, or a
+          # late workflow whose single job completes instantly). Case (b) represents NO
+          # unfinished work, yet under the old rule each such arrival reset the settle to
+          # 0. When such arrivals trickled in over many minutes (the #997 81->86 growth),
+          # the settle never reached its window before the loop cap, and the gate emitted
+          # a FALSE RED while every check was green. Now `pending > 0` is the ONLY thing
+          # that re-arms the settle: an already-terminal injection cannot starve
+          # convergence, but a genuinely-late workflow (which appears as queued/in_progress
+          # => pending>0) still holds and re-arms the gate exactly as before. We keep the
+          # discovered name set ONLY for human-readable logging of what changed; it no
+          # longer gates convergence.
+          #
+          # WHY MIN_POLLS still matters: it guards the startup race where the FIRST
+          # sibling finishes so fast that a slightly-later-registering workflow hasn't
+          # appeared yet — no verdict is rendered before MIN_POLLS polls have elapsed,
+          # giving slow workflows time to register (and arm pending>0) before an
+          # all-terminal PARTIAL set could pass prematurely. A stable-empty set still
+          # passes (docs-only change with no siblings).
+          #
+          # render_verdict <runs-json-lines>: shared by the normal converge path AND the
+          # graceful-timeout path. Partitions the terminal sibling set into GATING vs
+          # advisory/informational EXCLUDED, then exits 0 (all green/skipped/neutral) or 1
+          # (>=1 non-passing gating check). Defined once so both paths apply IDENTICAL
+          # gating semantics — a timeout that finds everything terminal must judge the set
+          # the same way a clean convergence would, never blind-pass or blind-fail.
+          render_verdict() {
+            local runs="$1" total
+            total=$(printf '%s\n' "$runs" | jq -rs 'length')
+            if [ "$total" -eq 0 ]; then
+              echo "ci-summary: no sibling checks to aggregate (stable empty set) — passing." \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            # [OPUS-4.8] sq-wjth: a non-passing conclusion gates ONLY for a check that is
+            # NOT advisory/informational. The (.name|ascii_downcase) test drops any check
+            # whose name contains the WHOLE WORD "advisory" or "informational" (case-
+            # insensitive) from the gating set — its failure can never block the merge.
+            # The \b…\b word boundaries make the rule precise: it matches the standalone
+            # words (incl. hyphen-/paren-/comma-delimited, e.g. "markdownlint-advisory",
+            # "(…, advisory)", "(…, informational)") but NOT a word that merely CONTAINS
+            # them as a substring — so "cargo-deny (advisories, …)" (plural) and any
+            # hypothetical required check like "advisories audit" are NOT excluded. See
+            # the ADVISORY/INFORMATIONAL note in the header for the exact names this
+            # covers and why required checks are unaffected.
+            local ADVISORY_RE='\b(advisory|informational)\b' gating excluded failed n
+            # `total` counts ALL siblings; the gate only judges the GATING subset, so the
+            # summary reports gating counts and states how many advisory checks were
+            # excluded — it does not claim the advisory ones were counted toward the
+            # verdict.
+            gating=$(printf '%s\n' "$runs" | jq -rs --arg re "$ADVISORY_RE" \
+              '[.[] | select((.name | ascii_downcase | test($re)) | not)] | length')
+            excluded=$((total - gating))
+            failed=$(printf '%s\n' "$runs" | jq -rs --arg re "$ADVISORY_RE" '[.[]
+              | select((.name | ascii_downcase | test($re)) | not)
+              | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")]')
+            n=$(printf '%s' "$failed" | jq 'length')
+            if [ "$n" -gt 0 ]; then
+              {
+                echo "### ci-summary: FAILED — $n non-passing gating check(s) of $gating gating ($excluded advisory check(s) excluded)"
+                printf '%s' "$failed" | jq -r '.[] | "- ✗ \(.name): \(.conclusion // "incomplete")"'
+              } | tee -a "$GITHUB_STEP_SUMMARY"
+              echo "::error::ci-summary failed — see the non-passing gating checks above."
+              exit 1
+            fi
+            echo "### ci-summary: PASSED — all $gating gating check(s) green (or skipped/neutral); $excluded advisory check(s) excluded; set stable." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          SETTLE_POLLS=2          # all-terminal state must hold for 2 × 20s = 40s
           MIN_POLLS=3             # never render a verdict before 3 × 20s = 60s (startup-race floor)
           INTERVAL=20
           prev_names=""
           stable=0
+          runs=""                 # last-fetched sibling set; reused by the graceful timeout
+          pending=0
           for attempt in $(seq 1 110); do   # 110 × 20s ≈ 37 min, under the job timeout
             # Exclude THIS gate's own check-run from the aggregate so it can't count
-            # itself into `pending` and self-deadlock. We exclude by THIS workflow
-            # run's id (SELF_RUN_ID), which the check-run's details_url embeds as
-            # …/actions/runs/<RUN_ID>/…, NOT by job name: a name match would also
-            # drop a future sibling job literally named `gate`. The match is anchored
-            # to "/runs/<id>" so it can't accidentally hit a substring of some other
-            # numeric id elsewhere in the URL.
+            # itself into `pending` and self-deadlock. We exclude by THIS workflow run's
+            # id (SELF_RUN_ID), which the check-run's details_url embeds as
+            # …/actions/runs/<RUN_ID>/…, NOT by job name: a name match would also drop a
+            # future sibling job literally named `gate`. The match is anchored to
+            # "/runs/<id>" so it can't accidentally hit a substring of some other numeric
+            # id elsewhere in the URL.
             runs=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
               --jq "[.check_runs[]
                      | select((.details_url // .html_url // \"\") | contains(\"/runs/$SELF_RUN_ID\") | not)
                      | {name, status, conclusion}] | .[]")
-            # Stability key: join the SORTED, de-duplicated check NAMES with newlines.
-            # A newline cannot appear inside a check name, whereas a comma can (e.g.
-            # "MSRV check (Rust 1.88, declared floor)"), so a comma-joined key was
-            # collision/ambiguity-prone — two distinct sets could fold to the same
-            # string. The newline-joined sorted-unique set is an unambiguous key.
+            # Names are kept for LOGGING only (what changed since last poll); they no
+            # longer gate convergence — see the sq-ipkku rationale above. Sorted+unique,
+            # newline-joined (a newline cannot appear in a check name; a comma can).
             names=$(printf '%s\n' "$runs" | jq -rs '[.[].name] | unique | join("\n")')
             pending=$(printf '%s\n' "$runs" | jq -rs '[.[] | select(.status != "completed")] | length')
             total=$(printf '%s\n' "$runs" | jq -rs 'length')
-            # The settle window must be a POST-TERMINAL window: only advance `stable`
-            # while pending==0 AND the name set is unchanged. If anything is still
-            # pending — OR the name set just changed — reset to 0 so the SETTLE_POLLS
-            # window genuinely runs AFTER the last sibling finishes (otherwise `stable`
-            # would already be >= SETTLE_POLLS from the busy phase and the gate could
-            # render a verdict on the very first pending==0 poll, with no settle).
-            if [ "$names" != "$prev_names" ]; then prev_names="$names"; stable=0;
-            elif [ "$pending" -eq 0 ]; then stable=$((stable + 1));
-            else stable=0; fi
-            echo "attempt $attempt: $total check-run(s), $pending running, name-set stable for $stable/$SETTLE_POLLS poll(s)"
-            # Converge once every discovered sibling is terminal (pending == 0) AND the
-            # name set has held unchanged for the short settle — but never before the
-            # MIN_POLLS startup floor, so a slightly-late-registering workflow has time
-            # to appear (and re-arm the settle via pending>0) before an all-terminal
-            # PARTIAL set could pass prematurely.
+            # Settle is a POST-TERMINAL window re-armed ONLY by pending work. While
+            # anything is still running/registering (pending>0) we reset to 0 so the
+            # window genuinely runs AFTER the last sibling finishes. Once pending==0 we
+            # advance every poll, regardless of already-terminal check-runs that may keep
+            # being injected (the #997 false-RED cause) — a terminal arrival is finished
+            # work and must not starve convergence.
+            if [ "$pending" -ne 0 ]; then stable=0; else stable=$((stable + 1)); fi
+            changed=""; [ "$names" != "$prev_names" ] && changed=" (name set changed)"; prev_names="$names"
+            echo "attempt $attempt: $total check-run(s), $pending running, all-terminal stable for $stable/$SETTLE_POLLS poll(s)$changed"
+            # Converge once every discovered sibling is terminal (pending == 0) AND that
+            # state has held for the short settle — but never before the MIN_POLLS startup
+            # floor, so a slightly-late-registering workflow has time to appear (and
+            # re-arm the settle via pending>0) before an all-terminal PARTIAL set passes.
             if [ "$attempt" -ge "$MIN_POLLS" ] && [ "$pending" -eq 0 ] && [ "$stable" -ge "$SETTLE_POLLS" ]; then
-              # Set has settled and everything is terminal — render the verdict.
-              if [ "$total" -eq 0 ]; then
-                echo "ci-summary: no sibling checks to aggregate (stable empty set) — passing." \
-                  | tee -a "$GITHUB_STEP_SUMMARY"
-                exit 0
-              fi
-              # [OPUS-4.8] sq-wjth: a non-passing conclusion gates ONLY for a check
-              # that is NOT advisory/informational. The (.name|ascii_downcase) test
-              # drops any check whose name contains the WHOLE WORD "advisory" or
-              # "informational" (case-insensitive) from the gating set — its failure
-              # can never block the merge. The \b…\b word boundaries make the rule
-              # precise: it matches the standalone words (incl. hyphen-/paren-/comma-
-              # delimited, e.g. "markdownlint-advisory", "(…, advisory)", "(…,
-              # informational)") but NOT a word that merely CONTAINS them as a
-              # substring — so "cargo-deny (advisories, …)" (plural) and any
-              # hypothetical required check like "advisories audit" are NOT excluded.
-              # See the ADVISORY/INFORMATIONAL note in the header for the exact names
-              # this covers and why required checks are unaffected.
-              ADVISORY_RE='\b(advisory|informational)\b'
-              # Partition the settled, terminal sibling set into GATING vs EXCLUDED
-              # (advisory/informational). `total` counts ALL siblings; the gate only
-              # judges the GATING subset, so the summary reports gating counts and
-              # states how many advisory checks were excluded — it does not claim the
-              # advisory ones were counted toward the verdict.
-              gating=$(printf '%s\n' "$runs" | jq -rs --arg re "$ADVISORY_RE" \
-                '[.[] | select((.name | ascii_downcase | test($re)) | not)] | length')
-              excluded=$((total - gating))
-              failed=$(printf '%s\n' "$runs" | jq -rs --arg re "$ADVISORY_RE" '[.[]
-                | select((.name | ascii_downcase | test($re)) | not)
-                | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")]')
-              n=$(printf '%s' "$failed" | jq 'length')
-              if [ "$n" -gt 0 ]; then
-                {
-                  echo "### ci-summary: FAILED — $n non-passing gating check(s) of $gating gating ($excluded advisory check(s) excluded)"
-                  printf '%s' "$failed" | jq -r '.[] | "- ✗ \(.name): \(.conclusion // "incomplete")"'
-                } | tee -a "$GITHUB_STEP_SUMMARY"
-                echo "::error::ci-summary failed — see the non-passing gating checks above."
-                exit 1
-              fi
-              echo "### ci-summary: PASSED — all $gating gating check(s) green (or skipped/neutral); $excluded advisory check(s) excluded; set stable." \
-                | tee -a "$GITHUB_STEP_SUMMARY"
-              exit 0
+              render_verdict "$runs"   # exits 0 or 1
             fi
             sleep "$INTERVAL"
           done
-          echo "::error::ci-summary timed out — sibling check-runs never reached a settled, all-terminal state (some check stayed pending or the set kept changing) within the loop budget."
+          # GRACEFUL TIMEOUT (sq-ipkku). [OPUS-4.8] Exhausting the loop budget is NOT an
+          # unconditional RED — a timeout means "didn't reach a quiet settle", which is
+          # only a genuine failure if real WORK is still pending. Two cases:
+          #   • pending == 0 at the budget: every discovered sibling IS terminal; we just
+          #     never got SETTLE_POLLS consecutive quiet polls (e.g. an already-green set
+          #     that kept being injected into). Render the REAL verdict on that full
+          #     terminal set via the same gating semantics as a clean convergence — so a
+          #     still-settling-but-all-green set passes and a genuinely-failed check still
+          #     fails. This is the fix for the #997 false RED.
+          #   • pending > 0 at the budget: something truly hung (a check never finished
+          #     within ~37 min). That is a legitimate RED — we cannot certify a set with
+          #     unfinished work green.
+          if [ "$pending" -eq 0 ]; then
+            echo "::notice::ci-summary loop budget reached with every sibling check terminal (the set kept being injected into without a full quiet settle) — rendering the verdict on the final all-terminal set."
+            render_verdict "$runs"   # exits 0 or 1
+          fi
+          echo "::error::ci-summary timed out — $pending sibling check-run(s) never finished within the loop budget (genuine hang, not a still-settling set). See the per-poll log above."
           exit 1

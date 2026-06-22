@@ -26,6 +26,37 @@ test('fromString compressed returns identical results', async () => {
   );
 });
 
+// [OPUS-4.8] sq-dvyi: JSON-LD is parsed engine-side (oxjsonld) when the wasm bundle is
+// built with the OPT-IN `jsonld` feature (the js `build:wasm` script enables it, so this
+// published bundle and the site REPL both have it). With the feature on, `fromString(_,
+// 'jsonld')` works like the other syntaxes — the site REPL's JSON-LD upload/URL path. The
+// DEFAULT (lean) wasm bundle does NOT link oxjsonld (it stays under the perf-gate floor).
+// (`dataset: true` preserves a JSON-LD `@graph` as a named graph.)
+test('fromString parses JSON-LD (folded), queryable like Turtle', async () => {
+  const jsonld = JSON.stringify({
+    '@context': { ex: 'http://ex/' },
+    '@id': 'ex:alice',
+    'ex:name': 'Alice',
+    'ex:knows': { '@id': 'ex:bob' },
+  });
+  const store = await SparqStore.fromString(jsonld, 'jsonld');
+  assert.equal(store.size, 2);
+  const rows = store.queryBindings('PREFIX ex: <http://ex/> SELECT ?n WHERE { ex:alice ex:name ?n }');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].get('n').value, 'Alice');
+});
+
+test('fromString JSON-LD with dataset:true preserves @graph as a named graph', async () => {
+  const jsonld = JSON.stringify({
+    '@id': 'http://ex/g1',
+    '@graph': [{ '@id': 'http://ex/s', 'http://ex/p': { '@id': 'http://ex/o' } }],
+  });
+  const store = await SparqStore.fromString(jsonld, 'jsonld', { dataset: true });
+  const rows = store.queryBindings('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].get('g').value, 'http://ex/g1');
+});
+
 test('SELECT returns RDF/JS bindings with spec-compliant terms', async () => {
   const store = await load();
   const rows = store.queryBindings(
@@ -400,4 +431,197 @@ test('engine errors surface as JS exceptions', async () => {
   const store = await load();
   assert.throws(() => store.queryBindings('SELECT ?s WHERE { broken'), /error|expected/i);
   assert.throws(() => store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'), /SELECT/);
+});
+
+// [OPUS-4.8] sq-1gkw: CONSTRUCT/DESCRIBE through queryQuads() / queryQuadsString() /
+// queryQuadsStream(), parsed back to RDF/JS quads.
+test('queryQuads() returns CONSTRUCT result as RDF/JS quads', async () => {
+  const store = await load();
+  const quads = store.queryQuads(
+    'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }',
+  );
+  // Three name triples (alice, bob, _:org) -> three constructed triples.
+  assert.equal(quads.length, 3);
+  const label = quads.find((q) => q.subject.value === 'http://ex/alice');
+  assert.ok(label, 'alice was constructed');
+  assert.equal(label.predicate.value, 'http://ex/label');
+  assert.equal(label.object.termType, 'Literal');
+  assert.equal(label.object.value, 'Alice');
+  assert.equal(label.graph.termType, 'DefaultGraph');
+  // The language tag survives the N-Triples round-trip.
+  const bob = quads.find((q) => q.subject.value === 'http://ex/bob');
+  assert.equal(bob.object.language, 'en');
+  // A blank-node subject is preserved (label is engine-assigned but present).
+  const org = quads.find((q) => q.object.value === 'ACME');
+  assert.equal(org.subject.termType, 'BlankNode');
+});
+
+test('queryQuads() returns DESCRIBE concise bounded description', async () => {
+  const store = await load();
+  const quads = store.queryQuads('DESCRIBE <http://ex/bob>');
+  // CBD of ex:bob = its outgoing triples (name + age); nothing inbound.
+  assert.ok(quads.every((q) => q.subject.value === 'http://ex/bob'));
+  assert.ok(quads.some((q) => q.predicate.value === 'http://ex/name' && q.object.value === 'Bob'));
+  const age = quads.find((q) => q.predicate.value === 'http://ex/age');
+  assert.equal(age.object.termType, 'Literal');
+  assert.equal(age.object.datatype.value, `${XSD}integer`);
+  assert.equal(age.object.value, '25');
+});
+
+test('queryQuadsString() returns the raw N-Triples document', async () => {
+  const store = await load();
+  const nt = store.queryQuadsString(
+    'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }',
+  );
+  assert.match(nt, /<http:\/\/ex\/alice> <http:\/\/ex\/label> "Alice" \./);
+  // Parsing the string and the quads path agree.
+  const fromString = store.queryQuads(
+    'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }',
+  );
+  assert.equal(nt.trim().split('\n').filter((l) => l.trim()).length, fromString.length);
+});
+
+test('queryQuadsStream() yields the same quads as queryQuads()', async () => {
+  const store = await load();
+  const q = 'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }';
+  const whole = store.queryQuads(q);
+  const streamed = [...store.queryQuadsStream(q, 1)];
+  assert.equal(streamed.length, whole.length);
+  // Multiset-equal regardless of batch boundaries.
+  for (const w of whole) {
+    assert.ok(streamed.some((s) => s.equals(w)), `streamed result contains ${w.subject.value}`);
+  }
+});
+
+test('queryQuadsStream() frees the cursor when abandoned early', async () => {
+  const store = await load();
+  const q = 'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }';
+  const it = store.queryQuadsStream(q, 1);
+  const first = it.next();
+  assert.equal(first.done, false);
+  it.return(); // triggers the finally{} cursor.free()
+  // Store is still usable afterwards.
+  assert.equal(store.queryQuads(q).length, 3);
+});
+
+test('queryQuads() rejects a SELECT / ASK query', async () => {
+  const store = await load();
+  assert.throws(() => store.queryQuads('SELECT ?s WHERE { ?s ?p ?o }'), /CONSTRUCT.*DESCRIBE/i);
+});
+
+test('queryQuads() round-trips datatyped, escaped and IRI-object terms', async () => {
+  const store = await SparqStore.fromString(
+    `@prefix ex: <http://ex/> .
+     ex:s ex:quote "a \\"q\\" \\n b" ; ex:link ex:target ; ex:n "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .`,
+    'turtle',
+  );
+  const quads = store.queryQuads('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+  const quote = quads.find((q) => q.predicate.value === 'http://ex/quote');
+  assert.equal(quote.object.value, 'a "q" \n b'); // escapes decoded
+  const link = quads.find((q) => q.predicate.value === 'http://ex/link');
+  assert.equal(link.object.termType, 'NamedNode');
+  assert.equal(link.object.value, 'http://ex/target');
+  const num = quads.find((q) => q.predicate.value === 'http://ex/n');
+  assert.equal(num.object.datatype.value, `${XSD}decimal`);
+});
+
+// [OPUS-4.8] sq-ty78o (#1114): the empty `SparqStore.empty()` constructor — build a store
+// from nothing and grow it with update(), including a named-graph block (the round-trip the
+// issue reported, gated only by the previously-missing wasm constructor).
+test('empty() builds a mutable store; named-graph updates round-trip', async () => {
+  const store = await SparqStore.empty();
+  assert.equal(store.size, 0);
+  // Default-graph insert grows the store.
+  store.update('INSERT DATA { <http://ex/a> <http://ex/p> "v" }');
+  assert.equal(store.size, 1);
+  // Named-graph INSERT then GRAPH ?g query returns the inserted row (no dataset flag needed).
+  store.update('INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }');
+  const rows = store.queryBindings('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].get('g').value, 'http://ex/g');
+});
+
+test('emptySync() builds an empty store (engine already initialised)', async () => {
+  // Ensure the wasm engine is up (emptySync() does not await init()).
+  await SparqStore.empty();
+  const store = SparqStore.emptySync();
+  assert.equal(store.size, 0);
+  store.addQuads([
+    DF.quad(DF.namedNode('http://ex/a'), DF.namedNode('http://ex/p'), DF.literal('v')),
+  ]);
+  assert.equal(store.size, 1);
+});
+
+// [OPUS-4.8] sq-f66jz (#1115): the baseIri option resolves a document's relative IRIs.
+test('fromString with baseIri resolves relative IRIs', async () => {
+  const store = await SparqStore.fromString('<a> <p> <../up/o> .', 'turtle', {
+    baseIri: 'http://ex/dir/',
+  });
+  assert.equal(store.size, 1);
+  const rows = store.queryBindings('SELECT ?s ?o WHERE { ?s ?p ?o }');
+  assert.equal(rows[0].get('s').value, 'http://ex/dir/a');
+  assert.equal(rows[0].get('o').value, 'http://ex/up/o');
+});
+
+test('fromStringSync with baseIri resolves relative IRIs', async () => {
+  await SparqStore.empty(); // ensure wasm init
+  const store = SparqStore.fromStringSync('<a> <p> <o> .', 'turtle', { baseIri: 'http://ex/' });
+  const rows = store.queryBindings('SELECT ?s WHERE { ?s ?p ?o }');
+  assert.equal(rows[0].get('s').value, 'http://ex/a');
+});
+
+test('baseIri rejects an invalid base, and is not combinable with dataset/compressed', async () => {
+  await assert.rejects(
+    SparqStore.fromString('<a> <p> <o> .', 'turtle', { baseIri: 'not a iri' }),
+    /base|iri/i,
+  );
+  await assert.rejects(
+    SparqStore.fromString('<a> <p> <o> .', 'turtle', { baseIri: 'http://ex/', dataset: true }),
+    /baseIri/,
+  );
+  await assert.rejects(
+    SparqStore.fromString('<a> <p> <o> .', 'turtle', { baseIri: 'http://ex/', compressed: true }),
+    /baseIri/,
+  );
+});
+
+// [OPUS-4.8] sq-u78ol (#1117 / #1129): serialize() / dump() expose the store's contents as a
+// Turtle / TriG / JSON-LD document (the wasm serialize-rdf writer, surfaced on the wrapper).
+test('serialize() writes Turtle; round-trips to the same triple count', async () => {
+  const store = await load();
+  const ttl = store.serialize('turtle');
+  assert.ok(ttl.length > 0);
+  assert.ok(ttl.includes('@prefix'), 'abbreviated by default'); // well-known prefixes present
+  // dump() is an alias for serialize().
+  assert.equal(store.dump('turtle'), ttl);
+  // Round-trip: re-parse the serialised Turtle -> same number of triples.
+  const reparsed = await SparqStore.fromString(ttl, 'turtle');
+  assert.equal(reparsed.size, store.size);
+});
+
+test('serialize() honours abbreviate=false and a custom prefix map (#1129)', async () => {
+  const store = await SparqStore.fromString('<http://ex/s> <http://ex/p> <http://ex/o> .', 'turtle');
+  // No abbreviation: full <...> IRIs, no @prefix header.
+  const full = store.serialize('turtle', { abbreviate: false });
+  assert.ok(!full.includes('@prefix'), 'no prefix header when abbreviate=false');
+  assert.ok(full.includes('<http://ex/s>'), 'full IRIs preserved');
+  // Caller-supplied prefix map drives @prefix compaction (#1129).
+  const compact = store.serialize('turtle', { prefixes: [['ex', 'http://ex/']] });
+  assert.ok(compact.includes('@prefix ex:'), 'caller prefix declared');
+  assert.ok(compact.includes('ex:s'), 'IRI compacted to the caller prefix');
+});
+
+test('serialize("trig") emits named graphs as GRAPH blocks', async () => {
+  const store = await SparqStore.fromString(
+    '<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .\n',
+    'nquads',
+    { dataset: true },
+  );
+  const trig = store.serialize('trig');
+  assert.ok(trig.includes('GRAPH'), 'TriG carries the named graph as a GRAPH block');
+});
+
+test('serialize() rejects an unknown format', async () => {
+  const store = await load();
+  assert.throws(() => store.serialize('rdfxml'), /serialize|format/i);
 });

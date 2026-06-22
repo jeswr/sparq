@@ -16,6 +16,17 @@
 use crate::dict::{Dict, Id};
 use std::borrow::Cow;
 
+/// [OPUS-4.8] (sq-53s1, ASVS V5.5.2) Maximum nesting depth of RDF 1.2 triple terms
+/// `<<( s p o )>>` accepted by the byte-level N-Triples/N-Quads parser before it returns a
+/// clean parse error instead of recursing until the native stack overflows and aborts the
+/// process. `object_term`/`triple_term` (and the no-intern `span_object`/`span_triple_term`
+/// graph-scan mirror) recurse once per `<<(` nesting level on the OBJECT axis; an adversarial
+/// input such as `<<( <<( … )>> )>>` repeated 10k deep would otherwise blow the stack. The cap
+/// is far deeper than any real RDF 1.2 data nests (triple-term nesting beyond a handful of
+/// levels is unheard of in practice) yet shallow enough to keep recursion within the stack.
+/// Kept in step with spargebra's `MAX_RECURSION_DEPTH` (the SPARQL side of the same control).
+const MAX_TRIPLE_TERM_DEPTH: usize = 128;
+
 /// [OPUS-4.8] (sq-25r3) The identity of an N-Quads quad's GRAPH field (4th term): an absolute
 /// IRI or a blank-node label, decoded (escapes resolved) so two byte-different-but-equal graph
 /// references route to the SAME graph. `None` (the default graph) is represented by the absence
@@ -24,7 +35,7 @@ use std::borrow::Cow;
 /// `oxrdf::Term` stored in the parent graph's `named` vec. `Ord`/`Hash` give a deterministic
 /// per-graph grouping independent of parse order.
 #[cfg(feature = "parallel")]
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum GraphKey {
     Iri(String),
     Blank(String),
@@ -162,6 +173,13 @@ fn graph_key(b: &[u8], i: usize) -> Result<GraphKey, String> {
 #[cfg(feature = "parallel")]
 fn span_term(b: &[u8], i: usize) -> Result<usize, String> {
     match b.get(i) {
+        // [OPUS-4.8] (sq-87bq) Triple terms are OBJECT-ONLY (RDF 1.2); a `<<(` reaching the
+        // subject/predicate (or graph) span walk is a non-object triple term — reject with a
+        // precise message, mirroring `term`. See the grammar note there (prods. [7]/[8]/[9]).
+        Some(b'<') if b.get(i + 1) == Some(&b'<') && b.get(i + 2) == Some(&b'(') => Err(format!(
+            "N-Quads: RDF 1.2 triple term `<<( … )>>` is only valid in OBJECT position \
+             (subject/predicate/graph must be an IRI or blank node), at byte {i}"
+        )),
         Some(b'<') => {
             let (_s, _e, _esc, next) = scan_delim(b, i, b'>')?;
             Ok(next)
@@ -181,8 +199,15 @@ fn span_term(b: &[u8], i: usize) -> Result<usize, String> {
 /// term `<<( … )>>`). Mirrors [`object_term`]'s grammar.
 #[cfg(feature = "parallel")]
 fn span_object(b: &[u8], i: usize) -> Result<usize, String> {
+    span_object_depth(b, i, 0)
+}
+
+/// [OPUS-4.8] (sq-53s1) `span_object` carrying the triple-term nesting `depth` so the no-intern
+/// graph-scan walk is bounded identically to the interning path (`object_term_depth`).
+#[cfg(feature = "parallel")]
+fn span_object_depth(b: &[u8], i: usize, depth: usize) -> Result<usize, String> {
     if b.get(i) == Some(&b'<') && b.get(i + 1) == Some(&b'<') && b.get(i + 2) == Some(&b'(') {
-        span_triple_term(b, i)
+        span_triple_term(b, i, depth)
     } else {
         span_term(b, i)
     }
@@ -191,13 +216,19 @@ fn span_object(b: &[u8], i: usize) -> Result<usize, String> {
 /// [OPUS-4.8] (sq-25r3) Index just past an RDF 1.2 triple term `<<( s p o )>>`, recursing through
 /// its nested object. Mirrors [`triple_term`].
 #[cfg(feature = "parallel")]
-fn span_triple_term(b: &[u8], i: usize) -> Result<usize, String> {
+fn span_triple_term(b: &[u8], i: usize, depth: usize) -> Result<usize, String> {
+    // [OPUS-4.8] (sq-53s1, ASVS V5.5.2) Mirror the interning path's depth bound (`triple_term`).
+    if depth >= MAX_TRIPLE_TERM_DEPTH {
+        return Err(format!(
+            "N-Quads: RDF 1.2 triple term nested more than {MAX_TRIPLE_TERM_DEPTH} levels deep at byte {i}"
+        ));
+    }
     let mut j = skip_ws(b, i + 3);
     let k = span_term(b, j)?;
     j = skip_ws(b, k);
     let k = span_term(b, j)?;
     j = skip_ws(b, k);
-    let k = span_object(b, j)?;
+    let k = span_object_depth(b, j, depth + 1)?;
     j = skip_ws(b, k);
     if b.get(j) == Some(&b')') && b.get(j + 1) == Some(&b'>') && b.get(j + 2) == Some(&b'>') {
         Ok(j + 3)
@@ -287,6 +318,18 @@ fn str_of(raw: &[u8]) -> Result<&str, String> {
 
 fn term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
     match b.get(i) {
+        // [OPUS-4.8] (sq-87bq) A `<<(` here is an RDF 1.2 triple term in a NON-object
+        // position (subject, predicate, or a triple term's own subject/predicate). The RDF
+        // 1.2 N-Triples grammar makes triple terms OBJECT-ONLY — `subject ::= IRIREF |
+        // BLANK_NODE_LABEL` (prod. [7]) and `predicate ::= IRIREF` (prod. [8]); only
+        // `object ::= IRIREF | BLANK_NODE_LABEL | literal | tripleTerm` (prod. [9]) admits a
+        // `tripleTerm` (prod. [11]). (This differs from the legacy RDF-star CG `<< s p o >>`
+        // QUOTED-triple syntax, which DID allow subject quoting; RDF 1.2 deliberately dropped
+        // that.) Reject with a precise message instead of the generic "unexpected term start".
+        Some(b'<') if b.get(i + 1) == Some(&b'<') && b.get(i + 2) == Some(&b'(') => Err(format!(
+            "N-Triples: RDF 1.2 triple term `<<( … )>>` is only valid in OBJECT position \
+             (subject/predicate must be an IRI or blank node), at byte {i}"
+        )),
         Some(b'<') => iri(b, i, dict),
         Some(b'_') => blank(b, i, dict),
         Some(b'"') => literal(b, i, dict),
@@ -298,8 +341,16 @@ fn term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
 /// N-Triples permits a triple term `<<( s p o )>>`. The `<<(` opener disambiguates a triple
 /// term from a plain IRIREF (`<…>`); anything else falls through to the shared [`term`] path.
 fn object_term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
+    object_term_depth(b, i, dict, 0)
+}
+
+/// [OPUS-4.8] (sq-53s1) `object_term` carrying the current triple-term nesting `depth` so a
+/// pathologically nested `<<( … )>>` chain returns a clean parse error at `MAX_TRIPLE_TERM_DEPTH`
+/// instead of overflowing the stack. `depth` is the number of `<<(` openers already entered above
+/// this call (0 at the top-level object position).
+fn object_term_depth(b: &[u8], i: usize, dict: &mut Dict, depth: usize) -> Result<(Id, usize), String> {
     if b.get(i) == Some(&b'<') && b.get(i + 1) == Some(&b'<') && b.get(i + 2) == Some(&b'(') {
-        triple_term(b, i, dict)
+        triple_term(b, i, dict, depth)
     } else {
         term(b, i, dict)
     }
@@ -311,14 +362,21 @@ fn object_term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), Strin
 /// so the two loaders content-address triple terms identically). The subject is an IRI or
 /// blank node, the predicate an IRI, and the object any term — including a NESTED triple term
 /// (recursion through `object_term`). Returns the interned id and the index past the `>>`.
-fn triple_term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
+fn triple_term(b: &[u8], i: usize, dict: &mut Dict, depth: usize) -> Result<(Id, usize), String> {
+    // [OPUS-4.8] (sq-53s1, ASVS V5.5.2) Bound the triple-term nesting before recursing into the
+    // object, so deeply-nested input yields a clean parse error rather than a stack overflow.
+    if depth >= MAX_TRIPLE_TERM_DEPTH {
+        return Err(format!(
+            "N-Triples: RDF 1.2 triple term nested more than {MAX_TRIPLE_TERM_DEPTH} levels deep at byte {i}"
+        ));
+    }
     // Skip the `<<(` opener.
     let mut j = skip_ws(b, i + 3);
     let (s, k) = term(b, j, dict)?;
     j = skip_ws(b, k);
     let (p, k) = term(b, j, dict)?;
     j = skip_ws(b, k);
-    let (o, k) = object_term(b, j, dict)?;
+    let (o, k) = object_term_depth(b, j, dict, depth + 1)?;
     j = skip_ws(b, k);
     // Closer `)>>`.
     if b.get(j) == Some(&b')') && b.get(j + 1) == Some(&b'>') && b.get(j + 2) == Some(&b'>') {
@@ -393,6 +451,20 @@ const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
 const RDF_DIR_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString";
 
+/// [OPUS-4.8] (sq-langcase / #1119) ASCII-lowercases a parsed language tag, BORROWING the input
+/// when it is already all-lowercase (the common case) so the no-uppercase fast path stays
+/// allocation-free. RDF language tags are ASCII (`(PN_CHARS_BASE)('-' alnum*)*` plus the RDF 1.2
+/// `--ltr`/`--rtl` direction), so `make_ascii_lowercase` is the correct, locale-independent fold —
+/// the SAME normalisation `oxrdf`/`oxttl` apply, keeping the byte parser's stored language slot
+/// byte-identical to the oxttl paths' for the same tag.
+fn lowercase_lang(raw: &str) -> Cow<'_, str> {
+    if raw.bytes().any(|c| c.is_ascii_uppercase()) {
+        Cow::Owned(raw.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(raw)
+    }
+}
+
 fn literal(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
     let (vstart, vend, vesc, after) = scan_delim(b, i, b'"')?;
     let value = decode(&b[vstart..vend], vesc)?;
@@ -416,9 +488,23 @@ fn literal(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
             }
             // RDF 1.2 `@lang--dir` keeps the combined slot (the dict's stored encoding)
             // but is typed rdf:dirLangString.
-            let lang = str_of(&b[lstart..j])?;
-            let dt = if lang.contains("--") { RDF_DIR_LANG_STRING } else { RDF_LANG_STRING };
-            Ok((dict.intern_lit(&value, dt, Some(lang)), j))
+            let raw = str_of(&b[lstart..j])?;
+            let dt = if raw.contains("--") { RDF_DIR_LANG_STRING } else { RDF_LANG_STRING };
+            // [OPUS-4.8] (sq-langcase / KamiQuasi #1119) NORMALISE the language tag to ASCII
+            // lowercase, matching the oxttl/oxrdf paths (`Literal::new_language_tagged_literal`
+            // lowercases via `make_ascii_lowercase`; oxttl's Turtle/N-Quads/TriG recognisers call
+            // `language.to_ascii_lowercase()` before interning). RDF 1.1/1.2 language tags are
+            // case-INSENSITIVE, so `"x"@en-US` and `"x"@en-us` are the SAME RDF term and must
+            // intern to the SAME dict id (term identity is byte-equality of the stored slot).
+            // Without this the byte-level N-Triples/N-Quads fast path preserved the written case
+            // while every oxttl path lowercased it — a format-dependent inconsistency (a Turtle
+            // doc lowercased, the same triple in N-Triples did not) AND a latent term-identity
+            // bug (case-variant tags interned as two distinct terms). The `--dir` suffix is only
+            // ever `ltr`/`rtl` (already lowercase) so lowercasing the whole slot is equivalent to
+            // lowercasing just the BCP47 language part. The all-lowercase case (the overwhelming
+            // majority) borrows with no allocation; only a tag carrying uppercase pays one alloc.
+            let lang = lowercase_lang(raw);
+            Ok((dict.intern_lit(&value, dt, Some(&lang)), j))
         }
         // simple literal -> xsd:string
         _ => Ok((dict.intern_lit(&value, XSD_STRING, None), after)),
@@ -523,6 +609,81 @@ mod tests {
         assert_eq!(d.term(t[1][2]), Term::Literal(Literal::new_simple_literal("v")));
     }
 
+    // [OPUS-4.8] (sq-langcase / KamiQuasi #1119) The byte-level N-Triples/N-Quads parser
+    // NORMALISES language tags to ASCII lowercase, matching every oxttl path (the Turtle /
+    // N-Quads / TriG recognisers + `oxrdf::Literal::new_language_tagged_literal`). Previously the
+    // byte path PRESERVED the written case (`en-US`) while oxttl lowercased it (`en-us`), giving a
+    // format-dependent result for the SAME triple. RDF 1.1/1.2 language tags are case-insensitive,
+    // so the lowercased slot is the canonical RDF term — and the regression target is twofold:
+    // (a) cross-format consistency, (b) `"x"@en-US` and `"x"@en-us` interning to the SAME id.
+    #[test]
+    fn language_tag_lowercased_to_match_oxttl() {
+        let nt = b"<http://ex/s> <http://ex/p> \"hi\"@en-US .\n";
+        let mut d = Dict::new();
+        let t = parse_chunk(nt, &mut d).unwrap();
+        assert_eq!(t.len(), 1);
+        // The stored term carries the lowercased tag — byte-identical to what oxttl produces.
+        let want = Term::Literal(Literal::new_language_tagged_literal_unchecked("hi", "en-us"));
+        assert_eq!(d.term(t[0][2]), want);
+        // And it equals what the checked oxrdf constructor (which lowercases) yields from the
+        // mixed-case tag, i.e. the byte parser and the oxttl/oxrdf paths agree.
+        let oxttl_like =
+            Term::Literal(Literal::new_language_tagged_literal("hi", "en-US").unwrap());
+        assert_eq!(d.term(t[0][2]), oxttl_like);
+    }
+
+    #[test]
+    fn case_variant_language_tags_intern_to_same_id() {
+        // Two lines whose ONLY difference is the language-tag case must content-address to one id
+        // (term identity is case-insensitive on the tag) — they did NOT before this fix.
+        let nt = b"<http://ex/s> <http://ex/p> \"hi\"@en-US .\n<http://ex/s2> <http://ex/p> \"hi\"@en-us .\n";
+        let mut d = Dict::new();
+        let t = parse_chunk(nt, &mut d).unwrap();
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0][2], t[1][2], "case-variant language tags must share one dict id");
+    }
+
+    #[test]
+    fn directional_language_tag_lowercases_lang_part_only() {
+        // RDF 1.2 `@lang--dir`: the BCP47 language part lowercases; the direction (`ltr`/`rtl`,
+        // already lowercase) is unchanged. The stored slot must match the oxttl encoding exactly.
+        let nt = b"<http://ex/s> <http://ex/p> \"hi\"@en-US--ltr .\n";
+        let mut d = Dict::new();
+        let t = parse_chunk(nt, &mut d).unwrap();
+        assert_eq!(t.len(), 1);
+        let want = Term::Literal(
+            Literal::new_directional_language_tagged_literal_unchecked(
+                "hi",
+                "en-us",
+                oxrdf::BaseDirection::Ltr,
+            ),
+        );
+        assert_eq!(d.term(t[0][2]), want);
+    }
+
+    // The N-Quads byte fast path interns S/P/O through the SAME `literal` path, so it lowercases
+    // too — guarding against a future divergence between the two byte loaders.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn nquads_language_tag_lowercased() {
+        let nq = b"<http://ex/s> <http://ex/p> \"hi\"@en-US <http://ex/g> .\n";
+        let buckets = parse_quads_chunk(nq).unwrap();
+        assert_eq!(buckets.len(), 1);
+        let (_g, dict, triples) = &buckets[0];
+        let want = Term::Literal(Literal::new_language_tagged_literal_unchecked("hi", "en-us"));
+        assert_eq!(dict.term(triples[0][2]), want);
+    }
+
+    #[test]
+    fn already_lowercase_language_tag_unchanged() {
+        // The common all-lowercase tag is untouched (and the fast borrow path is exercised).
+        let nt = b"<http://ex/s> <http://ex/p> \"hi\"@fr .\n";
+        let mut d = Dict::new();
+        let t = parse_chunk(nt, &mut d).unwrap();
+        let want = Term::Literal(Literal::new_language_tagged_literal_unchecked("hi", "fr"));
+        assert_eq!(d.term(t[0][2]), want);
+    }
+
     #[test]
     fn unterminated_triple_term_errors() {
         let nt = b"<http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/b> <http://ex/c> .\n";
@@ -532,10 +693,193 @@ mod tests {
 
     #[test]
     fn triple_term_only_in_object_position() {
-        // A `<<(` in SUBJECT position is not a valid term start for `term` (subjects are
-        // never triple terms in RDF 1.2) — the parser must reject it rather than misparse.
-        let nt = b"<<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/p> <http://ex/o> .\n";
+        // [OPUS-4.8] (sq-87bq) RDF 1.2 makes triple terms OBJECT-ONLY (N-Triples grammar:
+        // `subject ::= IRIREF | BLANK_NODE_LABEL` [7], `predicate ::= IRIREF` [8], only
+        // `object` [9] admits a `tripleTerm` [11]). The parser must REJECT a `<<( … )>>` in
+        // subject OR predicate position with a precise, position-aware message — not misparse
+        // it, and not silently accept the legacy RDF-star CG `<< … >>` subject-quoting that
+        // RDF 1.2 dropped.
+
+        // Subject position.
+        let subj = b"<<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/p> <http://ex/o> .\n";
         let mut d = Dict::new();
-        assert!(parse_chunk(nt, &mut d).is_err(), "triple term in subject position must be rejected");
+        let e = parse_chunk(subj, &mut d).expect_err("triple term in subject position must be rejected");
+        assert!(e.contains("only valid in OBJECT position"), "message must explain the object-only rule, got: {e}");
+
+        // Predicate position.
+        let pred = b"<http://ex/s> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/o> .\n";
+        let mut d = Dict::new();
+        let e = parse_chunk(pred, &mut d).expect_err("triple term in predicate position must be rejected");
+        assert!(e.contains("only valid in OBJECT position"), "message must explain the object-only rule, got: {e}");
+
+        // A triple term's OWN subject must also be a plain term (recursion goes through
+        // `term`, not `object_term`): a nested `<<( … )>>` in the inner subject is rejected.
+        let inner_subj = b"<http://ex/s> <http://ex/p> <<( <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/q> <http://ex/r> )>> .\n";
+        let mut d = Dict::new();
+        assert!(
+            parse_chunk(inner_subj, &mut d).is_err(),
+            "a triple term in a triple term's SUBJECT slot must be rejected (object-only nesting)"
+        );
+
+        // Sanity: the same triple term in OBJECT position parses fine (the rejection is
+        // strictly position-driven, not a blanket ban).
+        let obj = b"<http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> .\n";
+        let mut d = Dict::new();
+        assert!(parse_chunk(obj, &mut d).is_ok(), "the same triple term in object position must parse");
+    }
+
+    // [OPUS-4.8] (sq-53s1, ASVS V5.5.2) Builds one N-Triples line whose OBJECT is `depth` levels
+    // of nested RDF 1.2 triple terms `<<( s p <<( … )>> )>>`. Each level wraps the previous object
+    // in a fresh triple term; the innermost object is a plain IRI.
+    fn nested_triple_term_line(depth: usize) -> Vec<u8> {
+        let mut line = b"<http://ex/s> <http://ex/p> ".to_vec();
+        for _ in 0..depth {
+            line.extend_from_slice(b"<<( <http://ex/a> <http://ex/b> ");
+        }
+        line.extend_from_slice(b"<http://ex/leaf>");
+        for _ in 0..depth {
+            line.extend_from_slice(b" )>>");
+        }
+        line.extend_from_slice(b" .\n");
+        line
+    }
+
+    #[test]
+    fn deeply_nested_triple_term_returns_clean_error_not_stack_overflow() {
+        // 10k levels of `<<( … )>>` nesting must NOT recurse until the native stack overflows
+        // (which would abort the whole process); it must return a normal parse `Err`.
+        let line = nested_triple_term_line(10_000);
+        let mut d = Dict::new();
+        let e = parse_chunk(&line, &mut d).expect_err("deeply-nested triple terms must be rejected, not overflow the stack");
+        assert!(
+            e.contains("nested more than") && e.contains("levels deep"),
+            "must be the depth-limit error, got: {e}"
+        );
+        // Sanitized per the #241 posture: the error reports the limit and a byte offset, never
+        // echoes the (attacker-controlled) offending input.
+        assert!(!e.contains("http://ex/leaf"), "error must not echo the offending input");
+    }
+
+    #[test]
+    fn nested_triple_term_at_limit_parses() {
+        // One level below the cap must still parse cleanly — the bound is high enough that no
+        // real RDF 1.2 data is rejected. `MAX_TRIPLE_TERM_DEPTH` is the number of `<<(` levels,
+        // so a line nested exactly `MAX_TRIPLE_TERM_DEPTH` deep is accepted.
+        let line = nested_triple_term_line(MAX_TRIPLE_TERM_DEPTH);
+        let mut d = Dict::new();
+        assert!(
+            parse_chunk(&line, &mut d).is_ok(),
+            "nesting up to the cap ({MAX_TRIPLE_TERM_DEPTH}) must parse"
+        );
+
+        // One level beyond the cap is the first rejected depth.
+        let over = nested_triple_term_line(MAX_TRIPLE_TERM_DEPTH + 1);
+        let mut d = Dict::new();
+        assert!(
+            parse_chunk(&over, &mut d).is_err(),
+            "nesting one beyond the cap must be rejected"
+        );
+    }
+
+    // [OPUS-4.8] (sq-53s1) The N-Quads fast path uses a separate no-intern span walk
+    // (`span_object`/`span_triple_term`) to locate the graph field; it must be bounded too.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn deeply_nested_triple_term_in_nquads_span_returns_clean_error() {
+        let mut line = b"<http://ex/s> <http://ex/p> ".to_vec();
+        for _ in 0..10_000 {
+            line.extend_from_slice(b"<<( <http://ex/a> <http://ex/b> ");
+        }
+        line.extend_from_slice(b"<http://ex/leaf>");
+        for _ in 0..10_000 {
+            line.extend_from_slice(b" )>>");
+        }
+        // N-Quads: explicit graph field after the object.
+        line.extend_from_slice(b" <http://ex/g> .\n");
+        let e = match parse_quads_chunk(&line) {
+            Err(e) => e,
+            Ok(_) => panic!("deeply-nested triple terms in N-Quads must be rejected, not overflow"),
+        };
+        assert!(
+            e.contains("nested more than") && e.contains("levels deep"),
+            "must be the depth-limit error, got: {e}"
+        );
+    }
+
+    // [OPUS-4.8] (sq-cpm) The N-Quads 4th field is an OPTIONAL `graphLabel`, and the RDF 1.2
+    // N-Quads grammar restricts it to `IRIREF | BLANK_NODE_LABEL` (prod. `graphLabel`) — a
+    // literal or a triple term in graph position is a syntax error, not a fourth quad component.
+    // `parse_quads_chunk` resolves the graph bucket via `graph_key` (IRI/blank only) and
+    // `span_term` (object-only triple-term rule), so these cases must be rejected; an absent 4th
+    // field routes to the default (`None`) graph.
+    // `parse_quads_chunk` returns `Dict` (no `Debug`/`PartialEq`), so these helpers pull just the
+    // graph-key column and the per-graph triple counts out of the bucket vec for assertions.
+    #[cfg(feature = "parallel")]
+    fn quad_graph_keys(line: &[u8]) -> Result<Vec<(Option<GraphKey>, usize)>, String> {
+        parse_quads_chunk(line).map(|buckets| {
+            buckets.into_iter().map(|(g, _dict, triples)| (g, triples.len())).collect()
+        })
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn nquads_graph_label_accepts_iri_and_blank_only() {
+        // IRI graph label: routes the triple into a named-graph bucket keyed by that IRI.
+        let iri_g = b"<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .\n";
+        assert_eq!(
+            quad_graph_keys(iri_g).expect("IRI graph label must parse"),
+            vec![(Some(GraphKey::Iri("http://ex/g".to_owned())), 1)],
+            "the triple lands in the IRI-keyed graph"
+        );
+
+        // Blank-node graph label.
+        let blank_g = b"<http://ex/s> <http://ex/p> <http://ex/o> _:g0 .\n";
+        assert_eq!(
+            quad_graph_keys(blank_g).expect("blank-node graph label must parse"),
+            vec![(Some(GraphKey::Blank("g0".to_owned())), 1)],
+            "blank-node graph label key"
+        );
+
+        // No 4th field: the triple is in the default graph (`None`).
+        let default_g = b"<http://ex/s> <http://ex/p> <http://ex/o> .\n";
+        assert_eq!(
+            quad_graph_keys(default_g).expect("triple with no graph label must parse"),
+            vec![(None, 1)],
+            "absent graph label is the default graph"
+        );
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn nquads_graph_label_rejects_literal() {
+        // A literal in the 4th position is not a valid `graphLabel`.
+        let lit_g = b"<http://ex/s> <http://ex/p> <http://ex/o> \"g\" .\n";
+        let e = quad_graph_keys(lit_g).expect_err("a literal graph label must be rejected");
+        assert!(
+            e.contains("graph name must be an IRI or blank node"),
+            "message must explain the IRI/blank-only rule, got: {e}"
+        );
+
+        // A typed literal likewise.
+        let typed_g = b"<http://ex/s> <http://ex/p> <http://ex/o> \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n";
+        assert!(
+            quad_graph_keys(typed_g).is_err(),
+            "a typed-literal graph label must be rejected"
+        );
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn nquads_graph_label_rejects_triple_term() {
+        // A triple term `<<( … )>>` is OBJECT-ONLY; it is not a valid `graphLabel`. The span walk
+        // (`span_term`) reaches the `<<(` opener in graph position and rejects it with the
+        // position-aware message.
+        let tt_g = b"<http://ex/s> <http://ex/p> <http://ex/o> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> .\n";
+        let e = quad_graph_keys(tt_g).expect_err("a triple-term graph label must be rejected");
+        assert!(
+            e.contains("only valid in OBJECT position"),
+            "message must explain the object-only rule, got: {e}"
+        );
     }
 }
+

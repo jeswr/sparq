@@ -1,0 +1,31 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "name": "sparq",
+      "bom-ref": "pkg:cargo/sparq",
+      "description": "sparq — SOTA Rust RDF + SPARQL engine. This is the checked-in VEX (Vulnerability Exploitability eXchange) source of truth; the release workflow stamps the released version into a per-release copy attached to the GitHub Release alongside the CycloneDX SBOM."
+    },
+    "supplier": {
+      "name": "Jesse Wright",
+      "url": [
+        "https://github.com/jeswr/sparq"
+      ]
+    }
+  },
+  "_comment": [
+    "[OPUS-4.8] sq-toze.3 (GX-2): VEX justifying the advisories that cargo-deny is configured",
+    "to ignore in deny.toml. KEEP THIS IN SYNC WITH deny.toml [advisories].ignore — each entry",
+    "here corresponds 1:1 to an ignore there, with the same justification.",
+    "[OPUS-4.8] sq-g2xs: the sole prior entry, RUSTSEC-2025-0134 (`rustls-pemfile`), was REMOVED:",
+    "the federation HTTP client was migrated ureq 2 -> ureq 3, whose rustls-native-certs 0.8 no",
+    "longer depends on the archived `rustls-pemfile` (its code moved into rustls-pki-types'",
+    "PemObject). The crate left the tree, the deny.toml ignore was dropped, and this VEX entry was",
+    "removed to keep the 1:1 invariant. The list is now empty — when a future advisory needs a",
+    "justified ignore, add the deny.toml ignore AND the matching `not_affected` entry here together."
+  ],
+  "vulnerabilities": []
+}

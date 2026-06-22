@@ -17,6 +17,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] sq-jxl0: wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page and every feature-gated item (`write`, `zlib-ng`) render on docs.rs.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # [OPUS-4.8] sq-2te: HDT WRITE support (`save`: sparq `Graph` -> `.hdt`).
 # Opt-in because the only tractable path on hdt 0.4 is the crate's `Hdt::read_nt`
 # (N-Triples -> FourSectDict PFC + BitmapTriples) + `Hdt::write`, BOTH gated behind
@@ -62,7 +68,7 @@ flate2 = "1"
 #   zstd  — `.hdt.zst` (magic 28 B5 2F FD). `zstd::stream::read::Decoder`.
 #   bzip2 — `.hdt.bz2` (magic "BZh").       `bzip2::read::MultiBzDecoder`.
 zstd = "0.13"
-bzip2 = "0.5"
+bzip2 = "0.6"
 # [OPUS-4.8] CRC8/CRC32-C verification in the direct decoder (decode.rs). Same
 # crate (and the same CRC params) the wrapped `hdt` reader uses for the bitmap /
 # sequence sections, so the direct path validates byte-for-byte identically.
@@ -88,3 +94,8 @@ hdt = { version = "0.4", features = ["sophia"] }
 # under `cargo test` parallelism. `tempfile::tempdir()` hands each invocation a
 # unique directory (auto-removed on drop), so no two tests can ever collide.
 tempfile = "3"
+# [OPUS-4.8] (sq-cxji) Test-only: PARSE the `examples/bench_load.rs` `--json` emit back
+# to assert it is valid, well-shaped JSON. The emit itself stays serde-free (hand-built
+# `format!`, mirroring `mpc_net_bench::cell_json`); serde_json is a dev-dependency so it
+# never enters the crate's published graph.
+serde_json = "1"

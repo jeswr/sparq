@@ -42,6 +42,36 @@
 //! [`SignatureScheme`] tags the scheme so BBS+ / SD-JWT-VC / a post-quantum
 //! candidate can ship as parallel options for the paper's per-signature
 //! performance + security table. v1 ships `poseidon2-schnorr-v1` only.
+//!
+//! ## Constant-time posture (CR-G5 / sq-8jv7) [OPUS-4.8]
+//! Honest statement, do NOT over-read: **this signing path is NOT asserted
+//! constant-time.** The Baby-JubJub scalar multiplication `R = G·k` and the
+//! scalar arithmetic `s = k + e·sk` are done with `arkworks`
+//! (`ark-ed-on-bn254` / `ark-ff`), which makes **no default constant-time
+//! guarantee** and which sparq does not (and cannot, without replacing the
+//! curve implementation) assert is constant-time. A co-located attacker
+//! observing signing could in principle obtain a timing/cache signal
+//! correlated with the secret key `sk` or the nonce `k`. This is the
+//! **irreducible arkworks residual** recorded in
+//! `compliance/cryptoreview/side-channel-analysis.md` §2.2 / §6 and gap
+//! **CR-G5**; closing it needs a constant-time scalar-mul (a curve/dep swap),
+//! tracked as a follow-up bead.
+//!
+//! What sq-8jv7 *did* change is the secret-dependent control flow **in code we
+//! own**: `derive_nonce`'s degenerate-`k` guard is now branchless (always
+//! computes the re-fold candidate and `subtle`-selects it), so our own emitted
+//! control flow is data-independent of the secret nonce. We do **not** claim
+//! this makes signing constant-time — the arkworks residual dominates.
+//!
+//! **Why the residual is rated LOW (placement, not primitives):** the secret
+//! key is used **only at ISSUANCE** (signing), which v1 places in a trusted
+//! issuance environment; the relying party only ever calls [`verify`], which
+//! is over **public** data (commitment + public key) and carries no secret.
+//! This becomes load-bearing only if signing ever moves to an exposed /
+//! online surface (e.g. the deferred in-circuit hidden-key upgrade), at which
+//! point a constant-time scalar-mul is required. The crate remains
+//! **research-grade and externally unaudited** (CR-G1, `sq-qhy4`); a clean
+//! source-level reading is not a timing-channel proof.
 
 use crate::field::Fr;
 use crate::poseidon2;
@@ -84,6 +114,183 @@ impl SignatureScheme {
     }
 }
 
+// --- pluggable issuer-signature seam (sq-1hsl) ----------------------------
+// [OPUS-4.8] sq-1hsl: the OFF-circuit signature seam as an OPEN trait, per the
+// maintainer-greenlit (#769) configurable-commitment build-out
+// (`research/zk-configurable-commitment-design.md` §4, §10 Q4 default = open
+// trait). This is the SIGNATURE-VERIFICATION axis, distinct from the
+// commitment-method axis ([`crate::commit::CommitmentMethod`], a CLOSED
+// fail-closed enum because the method is IN-CIRCUIT-affecting). Signature
+// verification here is OFF-circuit (verifier-side, public data only), so an open
+// trait is the right extensibility point: a second verifier-side scheme (an
+// EdDSA/ECDSA-over-a-VC bridge, §5) can be added without touching the
+// registry/verifier call sites or any circuit.
+//
+// SCOPE + HONESTY (load-bearing): this is the trait BOUNDARY plus the existing
+// Schnorr-over-Baby-JubJub scheme moved BEHIND it, byte-for-byte unchanged. It
+// adds NO new production scheme, NO circuit, and NO dependency. The closed
+// [`SignatureScheme`] enum tag is RETAINED unchanged (the registry, the manifest
+// verifier in `sparq-zk-compose`, and already-issued credentials reference it),
+// so this is purely additive and back-compatible. The whole ZK estate is
+// remediated + internally re-audited but NOT externally audited (sq-qhy4, P0);
+// nothing here asserts a soundness or privacy property.
+
+/// Whether (and how) an issuer-signature scheme can be verified IN-CIRCUIT — the
+/// honest discriminator the configurability design (§4.2) surfaces, because it is
+/// the property that actually matters for this estate: a scheme over BN254's
+/// embedded curve has a native in-circuit verifier; a generic VC signature over a
+/// non-embedded curve does not (it is verifiable verifier-side only, which
+/// sacrifices the hidden-issuer privacy upgrade).
+///
+/// This is a LOCAL descriptor, NOT a `sparq-zk-compose::CircuitId` — `sparq-zk`
+/// is the lower crate and does not depend on the circuit crate (the in-circuit
+/// gadget for the v1 scheme lives in `sparq-zk-compose`'s `hidden_issuer_d{depth}`
+/// member; this only NAMES that such a member exists). Fail-closed by default:
+/// a scheme with no in-circuit verifier returns [`Self::None`].
+// [OPUS-4.8] sq-1hsl.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InCircuitVerifier {
+    /// The scheme has NO in-circuit verifier — it is checkable verifier-side only
+    /// (e.g. an EdDSA/ECDSA-over-a-VC bridge over a non-embedded curve, §4.3). The
+    /// hidden-issuer ("signed by SOME key in `K`") privacy upgrade is NOT reachable.
+    None,
+    /// The scheme has a native in-circuit verifier (over BN254's embedded curve),
+    /// reachable as a `sparq-zk-compose` hidden-issuer circuit member. The hidden-key
+    /// set-membership privacy upgrade is reachable. `member_hint` names the member
+    /// family for documentation/dispatch (`hidden_issuer`), NOT a circuit handle.
+    Native {
+        /// The in-circuit member-family name (e.g. `"hidden_issuer"`). A stable
+        /// string, NOT a typed `CircuitId` (that lives in the higher crate).
+        member_hint: &'static str,
+    },
+}
+
+/// An OFF-circuit issuer-signature scheme — the pluggable, verifier-side
+/// signature seam (sq-1hsl, design §4.2). Object-safe (`&dyn
+/// IssuerSignatureScheme`) so a resolver can hold a registry of schemes and
+/// dispatch by cryptosuite IRI.
+///
+/// All methods operate on the SERIALIZED hex forms the registry / manifest carry
+/// (`zk:issuerPublicKey`, `zk:commitmentSignature`), so the trait abstracts over
+/// schemes whose key/signature byte layouts differ. The signed MESSAGE is a
+/// scheme-independent domain-separated field element (built by the
+/// `commitment_message*` free functions — that is message construction, not the
+/// signature scheme), passed in as `&Fr`.
+///
+/// Fail-closed: every method must return `false` / reject on any malformed input
+/// (a relying party feeds prover-controlled bytes), never panic.
+///
+/// # Not a guarantee
+/// Implementing this trait asserts NO cryptographic property. The estate is NOT
+/// externally audited (sq-qhy4). The trait only standardizes the verifier-side
+/// dispatch boundary so a second scheme can be wired in without touching call
+/// sites.
+// [OPUS-4.8] sq-1hsl: open OFF-circuit signature-scheme trait.
+pub trait IssuerSignatureScheme {
+    /// The `zk:cryptosuite` IRI this scheme records on a registry entry /
+    /// attestation. The resolver ([`resolve_signature_scheme`]) matches on this.
+    fn cryptosuite_iri(&self) -> &str;
+
+    /// Verify a signature (hex) over the domain-separated message field element
+    /// `m`, under the issuer public key (hex). Verifier-side, PUBLIC data only —
+    /// the relying-party path. Fail-closed on malformed key/signature hex.
+    fn verify_message(&self, pk_hex: &str, m: &Fr, sig_hex: &str) -> bool;
+
+    /// Whether this scheme has an in-circuit verifier (and which member family) —
+    /// the honest discriminator of §4.2. Defaults to [`InCircuitVerifier::None`]
+    /// (fail-closed: a scheme is assumed verifier-side-only unless it states a
+    /// native in-circuit member).
+    fn in_circuit(&self) -> InCircuitVerifier {
+        InCircuitVerifier::None
+    }
+}
+
+/// The default issuer-signature scheme: Schnorr over Baby-JubJub with a Poseidon2
+/// challenge (`zk:poseidon2-schnorr-v1`) — the v1 scheme, now expressed BEHIND the
+/// [`IssuerSignatureScheme`] trait. Its [`Self::verify_message`] is byte-for-byte
+/// the existing verifier-side path (parse via [`public_key_from_hex`] and
+/// [`signature_from_hex`], then [`verify`]), so wrapping it in the trait changes no
+/// behaviour — the same key, message, and signature produce the same accept/reject
+/// as a direct [`verify`] call (pinned by the seam tests).
+///
+/// It is the one scheme with a NATIVE in-circuit verifier (Baby-JubJub's base
+/// field IS BN254's scalar field), so [`Self::in_circuit`] reports the
+/// `hidden_issuer` member family — the embedded-curve property that made this the
+/// v1 choice over Ed25519 (see the module-level scheme note).
+// [OPUS-4.8] sq-1hsl: the Schnorr-over-Baby-JubJub scheme as the first trait impl.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SchnorrBjjScheme;
+
+impl IssuerSignatureScheme for SchnorrBjjScheme {
+    fn cryptosuite_iri(&self) -> &str {
+        SignatureScheme::POSEIDON2_SCHNORR_V1_IRI
+    }
+
+    fn verify_message(&self, pk_hex: &str, m: &Fr, sig_hex: &str) -> bool {
+        // Byte-identical to the existing verifier-side path. Fail-closed on hex
+        // that does not parse to a usable key / signature.
+        let (Some(pk), Some(sig)) = (public_key_from_hex(pk_hex), signature_from_hex(sig_hex))
+        else {
+            return false;
+        };
+        verify(&pk, m, &sig)
+    }
+
+    fn in_circuit(&self) -> InCircuitVerifier {
+        // Embedded-curve scheme => a native hidden-issuer in-circuit member exists
+        // (`sparq-zk-compose`'s `hidden_issuer_d{depth}`).
+        InCircuitVerifier::Native { member_hint: "hidden_issuer" }
+    }
+}
+
+/// Resolve the OFF-circuit issuer-signature scheme for a `zk:cryptosuite` IRI, or
+/// `None` if no in-tree scheme verifies it (fail-closed — a verifier requiring a
+/// known scheme MUST reject an unresolved cryptosuite, never assume a default).
+///
+/// Today only [`SchnorrBjjScheme`] is implemented, so this resolves exactly the
+/// IRIs [`SignatureScheme::from_cryptosuite_iri`] accepts — the two stay in lock
+/// step (a seam test pins the equivalence). The resolver is the additive
+/// extension point: a future verifier-side scheme (an EdDSA/ECDSA-over-a-VC
+/// bridge, §5) is wired in by adding its IRI arm here, with no change to the
+/// registry or `sparq-zk-compose` call sites.
+///
+/// Returns a boxed `dyn` so the caller can dispatch uniformly across schemes
+/// whose key/signature layouts differ.
+// [OPUS-4.8] sq-1hsl: cryptosuite-IRI -> scheme resolver (the open seam's registry).
+pub fn resolve_signature_scheme(cryptosuite_iri: &str) -> Option<Box<dyn IssuerSignatureScheme>> {
+    if cryptosuite_iri == SignatureScheme::POSEIDON2_SCHNORR_V1_IRI {
+        return Some(Box::new(SchnorrBjjScheme));
+    }
+    None
+}
+
+/// Verify a commitment signature using the scheme selected by `cryptosuite_iri`,
+/// composing the OFF-circuit signature seam with the rest of the verify path. The
+/// signed `m` is the domain-separated message the caller built (e.g.
+/// [`commitment_message_with_status`]). Fail-closed: an unresolved cryptosuite
+/// (no in-tree scheme) returns `false`, exactly like the existing
+/// `RegistryEntry::verify_commitment_signature_with_status` guard — it does not
+/// fall back to a default scheme.
+///
+/// This is the seam's convenience entry point; it composes naturally with the
+/// commitment-method registry (a [`crate::registry::RegistryEntry`] carries BOTH
+/// its `zk:scheme` commitment method and its `zk:cryptosuite` signature scheme, so
+/// a caller resolves the method via [`crate::commit::CommitmentMethod::from_scheme_iri`]
+/// and the signature scheme via this function — the two independent axes the
+/// design separates).
+// [OPUS-4.8] sq-1hsl.
+pub fn verify_commitment_with_scheme(
+    cryptosuite_iri: &str,
+    pk_hex: &str,
+    m: &Fr,
+    sig_hex: &str,
+) -> bool {
+    match resolve_signature_scheme(cryptosuite_iri) {
+        Some(scheme) => scheme.verify_message(pk_hex, m, sig_hex),
+        None => false,
+    }
+}
+
 /// An issuer's public verification key: a Baby-JubJub point `pk = sk·G`. Its
 /// affine coordinates `(x, y)` are field elements (= Noir `Field`), so the key
 /// itself is in the same arena as the commitment it signs.
@@ -92,8 +299,74 @@ pub struct PublicKey(pub Affine<EdwardsConfig>);
 
 /// An issuer secret key (a Baby-JubJub scalar). Test/issuance-side only — a
 /// relying party never sees it.
-#[derive(Debug, Clone, Copy)]
+///
+/// # Secret-memory hygiene (sq-u8a8, from the side-channel analysis CR-G5)
+/// [OPUS-4.8] The scalar is **zeroized on drop** so the key bytes do not linger
+/// in freed stack/heap memory after the `SecretKey` goes out of scope. arkworks'
+/// `JjScalar` (`ark-ed-on-bn254::Fr`) does not implement [`zeroize::Zeroize`], so
+/// we cannot derive it; instead a manual [`Drop`] overwrites the scalar's
+/// canonical little-endian bytes (the only secret-bearing representation we can
+/// reach) and resets the field element to zero. This is **memory HYGIENE ONLY**:
+/// it changes neither the signing algorithm nor any value the key produces while
+/// alive (every signing/verify test is byte-identical). Because a type that
+/// implements [`Drop`] cannot also be `Copy`, [`SecretKey`] is no longer `Copy`
+/// (it is still [`Clone`]); all callers pass it by `&` reference, so this is not a
+/// behavioural change.
+#[derive(Clone)]
 pub struct SecretKey(pub JjScalar);
+
+// [OPUS-4.8] sq-u8a8: zeroize the secret scalar on drop. `JjScalar` is not
+// `Zeroize`, so we best-effort scrub its canonical byte image and overwrite the
+// field element with zero. This is hygiene, not a protocol change — the key
+// behaves identically for its whole lifetime; only its drop is scrubbed.
+impl zeroize::Zeroize for SecretKey {
+    fn zeroize(&mut self) {
+        // Scrub the canonical little-endian byte image of the scalar, then reset
+        // the live field element to the additive identity so nothing recoverable
+        // remains in the `SecretKey`'s own storage.
+        let mut bytes = self.0.into_bigint().to_bytes_le();
+        bytes.zeroize();
+        self.0 = JjScalar::zero();
+    }
+}
+
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.zeroize();
+    }
+}
+
+// [OPUS-4.8] sq-u8a8: manual `Debug` that REDACTS the secret scalar. A derived
+// `Debug` would print the raw key; a stray `{:?}` (log line, panic, failed
+// `assert_eq!`) would then leak it. (The old derive was `Debug` only because the
+// type was a simple newtype; redacting it is pure hygiene — no caller relies on
+// the scalar appearing in the debug output.)
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SecretKey").field(&"<redacted>").finish()
+    }
+}
+
+impl SecretKey {
+    /// [OPUS-4.8] sq-u8a8: constant-time equality of two secret keys, comparing
+    /// their canonical little-endian scalar bytes via [`subtle::ConstantTimeEq`]
+    /// so the comparison time does not depend on WHERE two keys first differ.
+    ///
+    /// This is a **defensive PRIMITIVE**, not a replacement for any existing
+    /// comparison: the side-channel analysis (CR-G5) found sparq performs no
+    /// secret-vs-secret key equality on any live path (the relying party only ever
+    /// calls [`verify`] over PUBLIC data), so nothing in the protocol calls this
+    /// today. It exists so any FUTURE secret-key comparison is constant-time by
+    /// construction rather than by a plain `==` on `JjScalar` (whose `PartialEq`
+    /// is not asserted constant-time). Behaviour is identical to a value `==`.
+    pub fn ct_eq(&self, other: &SecretKey) -> subtle::Choice {
+        use subtle::ConstantTimeEq;
+        let a = self.0.into_bigint().to_bytes_le();
+        let b = other.0.into_bigint().to_bytes_le();
+        a.ct_eq(&b)
+    }
+}
 
 /// A Schnorr signature `(R, s)` over a message field element: `R = k·G`,
 /// `s = k + e·sk` with `e = Poseidon2(DOMAIN, R.x, R.y, pk.x, pk.y, m)`.
@@ -215,6 +488,7 @@ impl SecretKey {
 /// challenge live in the same base field, keeping the scheme circuit-friendly.
 // [OPUS-4.8] audit #3 codex #4.
 fn derive_nonce(sk: &SecretKey, m: &Fr) -> JjScalar {
+    use subtle::{ConditionallySelectable, ConstantTimeEq};
     // A distinct domain tag from the challenge so the nonce-PRF output can never
     // collide with / be mistaken for a challenge value.
     const SIG_DOMAIN_NONCE: u64 = 0x5a4b_5349_475f_4e31; // "ZKSIG_N1"
@@ -224,20 +498,46 @@ fn derive_nonce(sk: &SecretKey, m: &Fr) -> JjScalar {
     let sk_base = Fr::from_be_bytes_mod_order(&sk.0.into_bigint().to_bytes_be());
     let k_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), sk_base, *m]);
     let k = JjScalar::from_be_bytes_mod_order(&k_base.into_bigint().to_bytes_be());
-    // Guard the degenerate k == 0 (would make R the identity); fold once more.
-    if k.is_zero() {
-        let k2_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), k_base, *m]);
-        JjScalar::from_be_bytes_mod_order(&k2_base.into_bigint().to_bytes_be())
-    } else {
-        k
+
+    // [OPUS-4.8] sq-8jv7: guard the degenerate `k == 0` (would make `R` the
+    // identity) WITHOUT a secret-dependent branch in our own code. The old
+    // `if k.is_zero() { .. } else { .. }` selected on the secret nonce; here we
+    // ALWAYS compute the re-fold candidate `k2` and then `subtle`-select it only
+    // when `k == 0`, so the control flow our code emits is data-independent of
+    // the secret nonce. (The `k == 0` event is itself negligibly rare — ~2^-251
+    // for a 251-bit scalar field — so this is defence-in-depth, not a measured
+    // leak; the irreducible residual is the arkworks scalar mul `G·k` /
+    // `e·sk.0`, which sparq does NOT assert constant-time — see the module
+    // CONSTANT-TIME POSTURE note and `compliance/cryptoreview/side-channel-analysis.md` §2.2.)
+    let k2_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), k_base, *m]);
+    let k2 = JjScalar::from_be_bytes_mod_order(&k2_base.into_bigint().to_bytes_be());
+    // Constant-time "is k zero?" over the canonical little-endian scalar bytes,
+    // then a branchless byte-wise select of `k` vs `k2` keyed on that Choice.
+    let k_le = k.into_bigint().to_bytes_le();
+    let zero_le = JjScalar::zero().into_bigint().to_bytes_le();
+    let k_is_zero = k_le.ct_eq(&zero_le);
+    let mut sel = k_le;
+    let k2_le = k2.into_bigint().to_bytes_le();
+    debug_assert_eq!(sel.len(), k2_le.len());
+    for (dst, src) in sel.iter_mut().zip(k2_le.iter()) {
+        *dst = u8::conditional_select(dst, src, k_is_zero);
     }
+    JjScalar::from_le_bytes_mod_order(&sel)
 }
 
 /// Sign `m` with `sk` using a DETERMINISTIC nonce derived from `(sk, m)` (no
-/// entropy source, no caller seed — see [`derive_nonce`]). This is the
+/// entropy source, no caller seed — see `derive_nonce`). This is the
 /// issuance-side path used by [`SecretKey::sign_commitment`]; a relying party
-/// only ever calls [`verify`]. Equivalent in shape to [`sign`] but with the
+/// only ever calls [`verify`]. Equivalent in shape to `sign` but with the
 /// nonce pinned, so it is replay-stable and seed-reuse-proof.
+//
+// # Constant-time posture (CR-G5 / sq-8jv7) [OPUS-4.8]
+// NOT asserted constant-time. The scalar mul `G·k` and the scalar arithmetic
+// `k + e·sk.0` use arkworks ops sparq does not assert are constant-time (the
+// irreducible residual — see the module CONSTANT-TIME POSTURE note). Our own
+// secret-dependent control flow ([`derive_nonce`]'s `k == 0` guard) is
+// branchless; the residual is the dependency's, and is LOW today by
+// issuance-side placement.
 // [OPUS-4.8] audit #3 codex #4.
 pub fn sign_deterministic(sk: &SecretKey, m: &Fr) -> Signature {
     let g = EdwardsProjective::generator();
@@ -839,6 +1139,13 @@ fn jj_scalar_to_base(s: &JjScalar) -> Fr {
 /// `s`, and the challenge reduction `(e, e_k)` such that
 /// `e_base = e + e_k * L` with `e < L` and `e_k < 8` (the soundness binding the
 /// circuit re-checks). All as base-field [`Fr`] elements (= Noir `Field`).
+///
+/// [OPUS-4.8] sq-ru0yx (internal re-audit M-1): the circuit's reduction binding
+/// ALSO enforces a no-wrap bound (`issuer.nr::challenge_scalar` step 4) — when
+/// `e_k == 7` it requires `e < q_base - 7*L`, closing the field-wrap alternative
+/// `(e_base + q_base - 7*L, 7)` that the bare `e + e_k*L == e_base` identity would
+/// otherwise admit. This honest witness (`e = e_base mod L`, `e_k = floor(e_base /
+/// L)`) always satisfies it, so the host helper is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InCircuitSchnorrWitness {
     /// Issuer public-key affine coordinates.
@@ -1056,6 +1363,45 @@ mod tests {
         assert!(verify(&pk, &m, &sig), "honest signature must verify");
     }
 
+    // [OPUS-4.8] sq-u8a8: the constant-time secret-key equality returns the SAME
+    // boolean as a value equality on the underlying scalars — for an equal pair
+    // (same seed) and an unequal pair. This is the "CT-eq agrees with the prior
+    // `==`" gate; nothing in the protocol calls `ct_eq` today (the verifier path
+    // is over public data), so this is the only exercise of the defensive
+    // primitive.
+    #[test]
+    fn secret_key_ct_eq_agrees_with_scalar_eq() {
+        let (sk_a, _) = keypair(7);
+        let (sk_a2, _) = keypair(7); // same seed → same scalar
+        let (sk_b, _) = keypair(8); // different seed → different scalar
+        let eq_same: bool = sk_a.ct_eq(&sk_a2).into();
+        let eq_diff: bool = sk_a.ct_eq(&sk_b).into();
+        assert!(
+            eq_same,
+            "ct_eq must be true for two keys with the same scalar"
+        );
+        assert!(
+            !eq_diff,
+            "ct_eq must be false for keys with different scalars"
+        );
+        // Cross-check against the scalar value equality (the prior-`==` semantics).
+        assert_eq!(eq_same, sk_a.0 == sk_a2.0);
+        assert_eq!(eq_diff, sk_a.0 == sk_b.0);
+    }
+
+    // [OPUS-4.8] sq-u8a8: compile + behaviour check that `SecretKey` implements
+    // `Zeroize` and that scrubbing resets the scalar to zero. (A `SecretKey` also
+    // zeroizes on `Drop`; this asserts the scrub itself, which `Drop` calls.)
+    #[test]
+    fn secret_key_zeroizes() {
+        use ark_ff::Zero;
+        use zeroize::Zeroize;
+        let (mut sk, _) = keypair(9);
+        assert!(!sk.0.is_zero(), "fresh key is non-zero");
+        sk.zeroize();
+        assert!(sk.0.is_zero(), "zeroized SecretKey scalar must be zero");
+    }
+
     #[test]
     fn wrong_message_rejected() {
         // The truncated-leaf-suppression shape: a signature over C(G) must NOT
@@ -1172,6 +1518,37 @@ mod tests {
             verify(&pk, &commitment_message(&c), &sig),
             "deterministic signature must verify"
         );
+    }
+
+    /// [OPUS-4.8] sq-8jv7: the branchless degenerate-`k` guard in `derive_nonce`
+    /// is BEHAVIOURALLY IDENTICAL to the old `if k.is_zero()` select. In the
+    /// non-degenerate case (overwhelmingly the only reachable case — `k == 0`
+    /// has probability ~2^-251) the nonce equals the first PRF fold, so the
+    /// signature is byte-stable and verifies. This pins that the constant-time
+    /// rewrite changed no value the signer produces (the protocol is identical;
+    /// only our emitted control flow is now data-independent of the secret).
+    #[test]
+    fn branchless_nonce_matches_first_fold_and_signs_stably() {
+        const SIG_DOMAIN_NONCE: u64 = 0x5a4b_5349_475f_4e31; // mirror derive_nonce
+        let sk = SecretKey::from_seed(77);
+        let m = commitment_message(&Fr::from(0xabcdu64));
+        // Recompute the first PRF fold exactly as derive_nonce does.
+        let sk_base = Fr::from_be_bytes_mod_order(&sk.0.into_bigint().to_bytes_be());
+        let k_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), sk_base, m]);
+        let k_first = JjScalar::from_be_bytes_mod_order(&k_base.into_bigint().to_bytes_be());
+        assert!(!k_first.is_zero(), "first fold is non-degenerate for this seed");
+        assert_eq!(
+            super::derive_nonce(&sk, &m),
+            k_first,
+            "branchless guard must return the first fold when k != 0"
+        );
+        // And the produced signature is replay-stable + verifies (no value drift).
+        let pk = sk.public_key();
+        let h1 = sk.sign_commitment(&Fr::from(0xabcdu64));
+        let h2 = sk.sign_commitment(&Fr::from(0xabcdu64));
+        assert_eq!(h1, h2, "deterministic signing remains replay-stable");
+        let sig = signature_from_hex(&h1).expect("round-trips");
+        assert!(verify(&pk, &m, &sig), "signature still verifies after CT rewrite");
     }
 
     /// [OPUS-4.8] codex #4: distinct messages get DISTINCT nonces `R` — the
@@ -1632,5 +2009,198 @@ mod tests {
         // distinct tag prevents cross-substitution.
         let idx_c = status_index_commitment(0x1234u64, &blinding);
         assert_ne!(c, idx_c, "join commitment must be domain-separated from the index commitment");
+    }
+
+    // --- sq-1hsl: the pluggable OFF-circuit signature seam ------------------
+    // [OPUS-4.8]
+
+    /// A second, MOCK `IssuerSignatureScheme` that exercises the open seam
+    /// WITHOUT any real cryptography: it "accepts" iff the signature hex equals a
+    /// fixed sentinel, and reports no in-circuit verifier. It exists only to prove
+    /// the trait dispatches a non-default scheme distinctly from the Schnorr
+    /// default (the trait boundary is real, not a single-impl façade); it is NOT a
+    /// signature scheme and is test-only.
+    struct MockAcceptScheme;
+    const MOCK_CRYPTOSUITE_IRI: &str = "urn:test:mock-accept-v1";
+    const MOCK_ACCEPT_SIG: &str = "deadbeef";
+    impl IssuerSignatureScheme for MockAcceptScheme {
+        fn cryptosuite_iri(&self) -> &str {
+            MOCK_CRYPTOSUITE_IRI
+        }
+        fn verify_message(&self, _pk_hex: &str, _m: &Fr, sig_hex: &str) -> bool {
+            sig_hex == MOCK_ACCEPT_SIG
+        }
+        // in_circuit() defaults to None (verifier-side-only) — exercises the
+        // default-method path of the trait too.
+    }
+
+    /// The default scheme behind the trait reproduces the EXACT prior Schnorr
+    /// verifier path: for the same (key, message, signature) the trait's
+    /// `verify_message` accepts iff a direct `verify` accepts — byte-for-byte the
+    /// same decision, both for an honest signature and for tampered inputs. This
+    /// is the back-compat invariant (the v1 scheme moved behind the trait changed
+    /// nothing).
+    #[test]
+    fn schnorr_scheme_matches_direct_verify_byte_for_byte() {
+        let sk = SecretKey::from_seed(101);
+        let pk = sk.public_key();
+        let c = Fr::from(0xc0ffeeu64);
+        let salt = Fr::from(0x5a17u64);
+        // The issued-entry path signs the SALT-BOUND message; build that here.
+        let sig_hex = sk.sign_commitment_with_salt(&c, &salt);
+        let m = commitment_message_with_salt(&c, &salt);
+        let pk_hex = public_key_to_hex(&pk);
+
+        let scheme = SchnorrBjjScheme;
+        // The trait reports the v1 cryptosuite IRI (single source of truth with
+        // the closed enum tag).
+        assert_eq!(scheme.cryptosuite_iri(), SignatureScheme::POSEIDON2_SCHNORR_V1_IRI);
+
+        // Honest signature: trait accept == direct verify accept (both true).
+        let direct = {
+            let sig = signature_from_hex(&sig_hex).unwrap();
+            verify(&pk, &m, &sig)
+        };
+        let via_trait = scheme.verify_message(&pk_hex, &m, &sig_hex);
+        assert!(direct && via_trait, "honest signature must verify both ways");
+        assert_eq!(direct, via_trait, "trait must mirror direct verify exactly");
+
+        // Tampered message: both reject.
+        let m_bad = commitment_message_with_salt(&(c + Fr::from(1u64)), &salt);
+        let direct_bad = {
+            let sig = signature_from_hex(&sig_hex).unwrap();
+            verify(&pk, &m_bad, &sig)
+        };
+        assert_eq!(scheme.verify_message(&pk_hex, &m_bad, &sig_hex), direct_bad);
+        assert!(!scheme.verify_message(&pk_hex, &m_bad, &sig_hex), "tampered msg fails");
+
+        // Malformed key / signature hex: fail-closed, never panic.
+        assert!(!scheme.verify_message("zz", &m, &sig_hex), "bad key hex => false");
+        assert!(!scheme.verify_message(&pk_hex, &m, "zz"), "bad sig hex => false");
+
+        // And the scheme reports its NATIVE in-circuit member (embedded curve).
+        assert_eq!(
+            scheme.in_circuit(),
+            InCircuitVerifier::Native { member_hint: "hidden_issuer" }
+        );
+    }
+
+    /// The resolver maps the v1 cryptosuite IRI to the Schnorr scheme and fails
+    /// closed (None) on any other IRI — in lock step with the closed
+    /// `SignatureScheme::from_cryptosuite_iri` enum tag (the two must agree on
+    /// exactly which IRIs are verifiable, so a verifier cannot be tricked).
+    #[test]
+    fn resolver_is_fail_closed_and_agrees_with_enum_tag() {
+        // v1 IRI resolves AND parses to the enum tag.
+        let iri = SignatureScheme::POSEIDON2_SCHNORR_V1_IRI;
+        assert!(resolve_signature_scheme(iri).is_some());
+        assert!(SignatureScheme::from_cryptosuite_iri(iri).is_some());
+        assert_eq!(resolve_signature_scheme(iri).unwrap().cryptosuite_iri(), iri);
+
+        // Unknown IRIs: resolver None AND enum None (lock step).
+        for bogus in ["", "urn:other", "https://sparq.dev/ns/zk#poseidon2-schnorr-v2"] {
+            assert!(resolve_signature_scheme(bogus).is_none(), "resolver fail-closed");
+            assert_eq!(
+                resolve_signature_scheme(bogus).is_none(),
+                SignatureScheme::from_cryptosuite_iri(bogus).is_none(),
+                "resolver and enum tag must agree on {}",
+                bogus
+            );
+        }
+    }
+
+    /// `verify_commitment_with_scheme` (the seam's convenience entry point)
+    /// composes resolve + verify: it accepts an honest v1 signature, rejects a
+    /// tampered one, and fails closed on an unknown cryptosuite (no default
+    /// fallback) — the property the registry verify path relies on.
+    #[test]
+    fn verify_commitment_with_scheme_composes_and_fails_closed() {
+        let sk = SecretKey::from_seed(202);
+        let pk_hex = public_key_to_hex(&sk.public_key());
+        let c = Fr::from(0xabcdu64);
+        let salt = Fr::from(0x99u64);
+        let sig_hex = sk.sign_commitment_with_salt(&c, &salt);
+        let m = commitment_message_with_salt(&c, &salt);
+        let iri = SignatureScheme::POSEIDON2_SCHNORR_V1_IRI;
+
+        assert!(
+            verify_commitment_with_scheme(iri, &pk_hex, &m, &sig_hex),
+            "honest v1 signature verifies through the scheme seam"
+        );
+        // Unknown cryptosuite => fail closed (no default scheme).
+        assert!(
+            !verify_commitment_with_scheme("urn:unknown", &pk_hex, &m, &sig_hex),
+            "unknown cryptosuite must NOT fall back to a default scheme"
+        );
+        // Tampered signature => reject.
+        let mut sig = signature_from_hex(&sig_hex).unwrap();
+        sig.s += JjScalar::from(1u64);
+        let tampered_hex = signature_to_hex(&sig);
+        assert!(
+            !verify_commitment_with_scheme(iri, &pk_hex, &m, &tampered_hex),
+            "tampered signature must not verify"
+        );
+    }
+
+    /// The trait dispatches a SECOND, non-default scheme distinctly from the
+    /// Schnorr default — through a `&dyn IssuerSignatureScheme`, proving the
+    /// boundary is a real open seam (object-safe dynamic dispatch), not a
+    /// single-impl façade. The mock and the default disagree on the SAME inputs,
+    /// which a single hard-wired scheme could not do.
+    #[test]
+    fn trait_dispatches_a_second_scheme_dynamically() {
+        let schemes: [&dyn IssuerSignatureScheme; 2] = [&SchnorrBjjScheme, &MockAcceptScheme];
+        // Distinct cryptosuite IRIs (distinct schemes).
+        assert_ne!(schemes[0].cryptosuite_iri(), schemes[1].cryptosuite_iri());
+
+        // The mock "accepts" its sentinel signature and rejects anything else,
+        // over ANY key/message — behaviour the real Schnorr scheme would reject.
+        let m = Fr::from(7u64);
+        assert!(
+            schemes[1].verify_message("ignored", &m, MOCK_ACCEPT_SIG),
+            "mock accepts its sentinel"
+        );
+        assert!(
+            !schemes[1].verify_message("ignored", &m, "00"),
+            "mock rejects a non-sentinel signature"
+        );
+        // The Schnorr scheme would reject the mock's sentinel (it is not a valid
+        // Baby-JubJub signature), so the two impls give DIFFERENT answers on the
+        // same input — the dispatch is real.
+        assert!(!schemes[0].verify_message("ignored", &m, MOCK_ACCEPT_SIG));
+
+        // The in-circuit discriminator differs per scheme (Native vs None).
+        assert_eq!(
+            schemes[0].in_circuit(),
+            InCircuitVerifier::Native { member_hint: "hidden_issuer" }
+        );
+        assert_eq!(schemes[1].in_circuit(), InCircuitVerifier::None);
+    }
+
+    /// The signature-scheme axis composes with — and is INDEPENDENT of — the
+    /// commitment-method axis: a registry entry carries BOTH a `zk:scheme`
+    /// (commitment method) and a `zk:cryptosuite` (signature scheme), resolved by
+    /// two separate functions. This pins that the two seams are orthogonal (the
+    /// design's separation of an open signature trait from the closed commitment
+    /// enum).
+    #[test]
+    fn signature_scheme_and_commitment_method_axes_are_independent() {
+        use crate::commit::CommitmentMethod;
+        // The signature cryptosuite IRI is NOT a commitment-method scheme IRI, and
+        // vice versa — the two axes never cross-resolve.
+        let sig_iri = SignatureScheme::POSEIDON2_SCHNORR_V1_IRI;
+        let method_iri = crate::registry::ZK_SCHEME_POSEIDON2_RDFC10_V1;
+        assert!(resolve_signature_scheme(sig_iri).is_some());
+        assert_eq!(
+            CommitmentMethod::from_scheme_iri(sig_iri),
+            None,
+            "a signature cryptosuite IRI is NOT a commitment method"
+        );
+        assert!(resolve_signature_scheme(method_iri).is_none());
+        assert_eq!(
+            CommitmentMethod::from_scheme_iri(method_iri),
+            Some(CommitmentMethod::StringCanonicalV1),
+            "a commitment-method IRI is NOT a signature cryptosuite"
+        );
     }
 }

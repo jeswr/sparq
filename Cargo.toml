@@ -1,11 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm", "crates/sparq-reason", "crates/sparq-server", "crates/sparq-serve", "crates/sparq-conformance", "crates/sparq-py", "crates/sparq-shacl", "crates/sparq-hdt", "crates/sparq-sim", "crates/sparq-geo", "crates/sparq-introspect", "crates/sparq-nlq", "crates/sparq-vectors", "crates/sparq-rsp", "crates/sparq-gpu", "crates/sparq-solid", "crates/sparq-parse", "crates/sparq-text", "crates/sparq-zk", "crates/sparq-zk-compose", "crates/sparq-mpc"]
+members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm", "crates/sparq-reason", "crates/sparq-reason-wasm", "crates/sparq-text-wasm", "crates/sparq-server", "crates/sparq-serve", "crates/sparq-conformance", "crates/sparq-py", "crates/sparq-shacl", "crates/sparq-shacl-wasm", "crates/sparq-hdt", "crates/sparq-sim", "crates/sparq-geo", "crates/sparq-introspect", "crates/sparq-nlq", "crates/sparq-vectors", "crates/sparq-rsp", "crates/sparq-rsp-wasm", "crates/sparq-gpu", "crates/sparq-solid", "crates/sparq-policy", "crates/sparq-parse", "crates/sparq-text", "crates/sparq-canon", "crates/sparq-zk", "crates/sparq-zk-compose", "crates/sparq-mpc", "crates/sparq-prov", "crates/sparq-fedplan", "crates/sparq-fedplan-mpc", "crates/sparq-fedclient", "crates/sparq-algos", "crates/sparq-trust", "crates/sparq-kb", "crates/sparq-terse", "crates/sparq-reason-el"]
 # `fuzz` is the cargo-fuzz harness (bead sq-ovnf): it requires a NIGHTLY toolchain
 # (libFuzzer codegen), so it is excluded from the workspace to keep the STABLE
 # `cargo build`/`cargo test`/`clippy --workspace` gate from ever trying to compile it.
 # Build/run it only via `cargo +nightly fuzz run <target>` from `fuzz/`. [OPUS-4.8]
-exclude = ["vendor/spargebra", "fuzz"]
+exclude = ["vendor/spargebra", "fuzz", "gui/src-tauri"]
+# `gui/src-tauri` (bead sq-2e93) is the Tauri 2 desktop GUI scaffold. It has its OWN
+# `[workspace]` table (a standalone crate root) AND is excluded here so Tauri's heavy,
+# webview-system-lib-dependent dependency tree (webkit2gtk / WebView2 / WKWebView) never
+# enters the required `cargo build --workspace` / `clippy --workspace` gate, which runs on
+# CI runners without those libs. The GUI is built/linted/typechecked in its own path-scoped
+# `.github/workflows/gui.yml` lane (which installs the system deps). [OPUS-4.8]
 
 # Vendored spargebra 0.4.6 with surgical W3C-conformance parser fixes (see
 # vendor/spargebra/SPARQ-PATCHES.md and docs/upstream-proposals.md — each fix is
@@ -37,6 +43,10 @@ categories = ["database-implementations", "parsing", "science"]
 # Term model + parsers (best-in-class; we build the store + engine ourselves).
 oxrdf = { version = "0.3", features = ["rdf-12"] }
 oxttl = { version = "0.2", features = ["rdf-12"] }
+# JSON-LD parser (same oxigraph family as oxrdf/oxttl, pure-Rust + wasm-portable — no
+# native-only deps, so it is safe in the lean wasm bundle). [OPUS-4.8] sq-dvyi: the
+# engine-side JSON-LD ingest the browser REPL's upload/URL path needs.
+oxjsonld = { version = "0.2", features = ["rdf-12"] }
 # SPARQL syntax -> algebra (we build the planner + physical execution ourselves).
 spargebra = { version = "0.4", features = ["sparql-12", "sep-0006"] }
 # Fast hashing / maps.

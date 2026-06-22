@@ -15,6 +15,28 @@ publish = false
 # artifact, and every other crate's dependency graph are untouched by it.
 # (Verified by the byte-identical wasm gate in the zk-core branch report.)
 
+[features]
+default = []
+# [OPUS-4.8] sq-zzxt: the `value-only` commitment method — a single value-first
+# leaf with the lexical-identity hash DROPPED (term identity lost entirely). It is
+# a BENCHMARK / RESEARCH comparison dial only and NEVER a production default
+# (`research/zk-configurable-commitment-design.md` §2.2, §10 default (2)). OFF by
+# default: a normal build CANNOT construct or parse the value-only method, and the
+# `commit::CommitmentMethod::ValueOnlyV1` variant is compiled out — the feature
+# name is the warning. LEAN: adds NO dependency. (`string-canonical` and
+# `dual-leaf` are always available; only the research dial is gated.)
+commitment-value-only = []
+# [OPUS-4.8] sq-xojl: the DUAL-LEAF value-lane HOST ENCODING (`dual_leaf` module)
+# — VALUE_HOOK + lexical-identity hash in one leaf, the host mirror of the
+# `filter_value_dl_int` Noir circuit member. OFF by default: the default
+# string-canonical pipeline (`encode.rs`/`commit.rs`) is byte-unchanged and the
+# `dual_leaf` module is compiled out. The `DualLeafV1` commitment METHOD (the
+# config seam, sq-zzxt) is always present; this feature gates the value-lane
+# ENCODER + components used by the verifier/circuit cross-check. Carries the
+# documented INV-VL downgrade (#769 accepted, CR-G8 / sq-qhy4); NOT externally
+# audited. LEAN: adds NO dependency (reuses the existing blake3 / poseidon2).
+dual-leaf = []
+
 [dependencies]
 # sparq term model / store / engine. The engine dep turns on its non-default
 # `zk` feature (the zk-trace executor seam); that feature only exists inside
@@ -22,15 +44,13 @@ publish = false
 sparq-core = { path = "../sparq-core" }
 sparq-engine = { path = "../sparq-engine", features = ["zk"] }
 oxrdf = { workspace = true }
-oxttl = { workspace = true }
 spargebra = { workspace = true }
 
-# RDFC10 (W3C RDF Dataset Canonicalization). Maintained zkp-ld implementation;
-# it speaks oxrdf 0.2, so we bridge from sparq's oxrdf 0.3 via canonical
-# N-Quads text (see src/canon.rs for why this is the clean seam).
-rdf-canon = "0.15.3"
-oxrdf02 = { package = "oxrdf", version = "0.2.4" }
-oxttl01 = { package = "oxttl", version = "0.1.8" }
+# RDFC-1.0 (W3C RDF Dataset Canonicalization) — single-sourced in the opt-in
+# `sparq-canon` crate (the public canonicalization surface; sq-0qip). It owns
+# the oxrdf 0.3 <-> 0.2 bridge and the rdf-canon dependency, so `sparq-zk`'s
+# `canon` module is now just a re-export. [OPUS-4.8]
+sparq-canon = { path = "../sparq-canon" }
 
 # BN254 scalar field (the Noir `Field`) for Poseidon2.
 # [OPUS-4.8] The whole arkworks stack (ark-bn254/ark-ff/ark-ec/ark-serialize/ark-ed-on-bn254/
@@ -44,21 +64,28 @@ ark-ff = { version = "0.6", default-features = false }
 # Off-circuit string hash h_s (plan §2.2: Enc_t(term) = h_2(type_code, h_s(value))).
 blake3 = "1"
 
+# [OPUS-4.8] sq-u8a8 (epic sq-toze / from side-channel analysis sq-egx6, gap
+# CR-G5): secret-memory hygiene + constant-time-equality PRIMITIVES for the
+# secret-bearing types in this crate. This is timing/memory HYGIENE only — it
+# changes NO crypto algorithm, protocol behaviour, wire format, or verifier
+# soundness (the analysis found the architecture already avoids secret-vs-secret
+# equality, so `subtle` is adopted for the SecretKey scalar bytes' future-safe
+# CT compare, not to replace any public-data `==`). `zeroize` zeroes the issuer/
+# holder `SecretKey` scalar on drop so it does not linger in freed memory.
+# Mark for Fable crypto re-review.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+subtle = "2"
+
 # OS CSPRNG for the trusted-ingest per-graph salt mint (audit #9 / sq-610): each
 # named graph draws fresh OS-random entropy so its bnode salt is globally unique
-# by construction. Already in the workspace lockfile (via ark-std's rand).
-# [OPUS-4.8] sq-610.
-getrandom = "0.2"
+# by construction.
+# [OPUS-4.8] sq-610 / sq-8xug: bumped to the 0.4 line as part of the rand-ecosystem
+# upgrade. getrandom 0.3+ replaced the top-level `getrandom()` fn with `fill()`.
+getrandom = "0.4"
 ark-ed-on-bn254 = { version = "0.6", default-features = false }
 ark-ec = { version = "0.6", default-features = false }
 ark-serialize = { version = "0.6", default-features = false }
 ark-std = { version = "0.6", default-features = false, features = ["std"] }
 
-[dev-dependencies]
-serde_json = "1"
-# SHA-384 parameterized-hash cases of the W3C rdf-canon suite (test075).
-# [OPUS-4.8] Pinned to 0.10 (NOT 0.11): rdf-canon 0.15.3 exposes a `Digest` bound from
-# digest 0.10, and the test feeds `sha2::Sha384` straight into canonicalize_quads_with::<D>.
-# Bumping this crate's sha2 to 0.11 (digest 0.11) makes the type fail rdf-canon's 0.10 bound.
-# Lift only once rdf-canon publishes a digest-0.11 release. See Dependabot PR #17 / bead.
-sha2 = "0.10"
+# [dev-dependencies] removed: the W3C rdf-canon suite (and its serde_json/sha2
+# deps) moved to `sparq-canon` with the canonicalization surface (sq-0qip).

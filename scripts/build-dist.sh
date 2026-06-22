@@ -24,11 +24,33 @@
 # Cross-compiling the non-host tiers needs a cross toolchain (this repo's CI does it on
 # native runners — see .github/workflows/dist.yml). Locally, this script builds only the
 # tiers whose rustc target is installed; it prints the recipe for the rest.
+#
+# SUPPLY CHAIN: each dist binary embeds its resolved dependency manifest via cargo-auditable
+# (sq-ytnq), matching dist.yml/release.yml — `cargo audit bin dist/sparq-cli-<tier>` works
+# post-build. Install once: `cargo install cargo-auditable` (the script warns + falls back
+# to a plain build if it is missing).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 OUT=dist
 mkdir -p "$OUT"
+
+# [OPUS-4.8] sq-ytnq (area:release): embed the resolved dependency manifest INTO the
+# shipped dist binary via cargo-auditable, so a `dist/sparq-cli-<tier>` built with this
+# script is self-describing for post-incident audit (`cargo audit bin dist/sparq-cli-<tier>`)
+# — exactly as the CI dist/release matrices already do (dist.yml + release.yml#package,
+# sq-toze.8/.23). `cargo auditable build` is a drop-in for `cargo build` with identical
+# flags + output path; it only embeds a compressed dep graph (near-zero size, no runtime
+# cost). This is a LOCAL helper, not a CI runner that pre-installs the tool, so if
+# cargo-auditable is absent we warn once and fall back to plain `cargo build` rather than
+# hard-failing a developer's build — but the self-describing path is the default.
+CARGO_BUILD="cargo build"
+if cargo auditable --version >/dev/null 2>&1; then
+  CARGO_BUILD="cargo auditable build"
+else
+  echo "WARN: cargo-auditable not found — dist binaries will NOT embed their dependency" >&2
+  echo "      manifest (sq-ytnq). Install for self-describing artifacts: cargo install cargo-auditable" >&2
+fi
 
 # tier → "rustc-target target-cpu"
 tier_spec() {
@@ -54,7 +76,7 @@ build_one() {
 
   if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
     echo "SKIP $tier — rustc target '$target' not installed."
-    echo "     recipe:  RUSTFLAGS=\"$flags\" cargo build --release -p sparq-cli --target $target"
+    echo "     recipe:  RUSTFLAGS=\"$flags\" $CARGO_BUILD --release -p sparq-cli --target $target"
     return 0
   fi
 
@@ -62,7 +84,7 @@ build_one() {
   if [ "${PGO:-0}" = "1" ]; then
     build_pgo "$tier" "$target" "$flags"
   else
-    RUSTFLAGS="$flags" cargo build --release -p sparq-cli --target "$target"
+    RUSTFLAGS="$flags" $CARGO_BUILD --release -p sparq-cli --target "$target"
   fi
   cp "target/$target/release/sparq-cli" "$OUT/sparq-cli-$tier"
   echo "    -> $OUT/sparq-cli-$tier"
@@ -78,7 +100,7 @@ build_pgo() {
   [ -z "$profdata" ] && { echo "need llvm-tools: rustup component add llvm-tools-preview" >&2; exit 1; }
   rm -rf "$prof"; mkdir -p "$prof"
 
-  RUSTFLAGS="$flags -Cprofile-generate=$prof" cargo build --release -p sparq-cli --target "$target"
+  RUSTFLAGS="$flags -Cprofile-generate=$prof" $CARGO_BUILD --release -p sparq-cli --target "$target"
   local TRAIN="${TRAIN_NT:-bench/qlever-synthetic/synthetic.nt}"
   local Q="${TRAIN_Q:-bench/qlever-synthetic/queries}"
   if [ -f "$TRAIN" ]; then
@@ -88,7 +110,8 @@ build_pgo() {
     echo "WARN: no training data at $TRAIN — PGO profile will be thin." >&2
   fi
   "$profdata" merge -o "$prof/merged.profdata" "$prof"/*.profraw
-  RUSTFLAGS="$flags -Cprofile-use=$prof/merged.profdata" cargo build --release -p sparq-cli --target "$target"
+  # The profile-USE rebuild is the SHIPPED binary, so it carries the embedded dep manifest.
+  RUSTFLAGS="$flags -Cprofile-use=$prof/merged.profdata" $CARGO_BUILD --release -p sparq-cli --target "$target"
 }
 
 if [ $# -ge 1 ]; then

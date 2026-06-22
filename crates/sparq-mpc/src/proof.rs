@@ -235,21 +235,34 @@ mod tests {
     fn collaborative_proof_is_honestly_deferred() {
         struct StubProof;
         impl CollaborativeProof<StubBackend> for StubProof {
-            fn prove(&self, _b: &StubBackend, _s: &ProofStatement, _j: &[JoinPlan]) -> Result<Proof, MpcError> {
+            fn prove(
+                &self,
+                _b: &StubBackend,
+                _s: &ProofStatement,
+                _j: &[JoinPlan],
+            ) -> Result<Proof, MpcError> {
                 Err(MpcError::not_yet(
                     "collaborative proof of correct + attested-source result",
                     "ZK foundation #3/#4/#5/#6/#8/#9/#12 + Q1 distributed-attestation spike (M4)",
                 ))
             }
             fn verify(&self, _s: &ProofStatement, _p: &Proof) -> Result<bool, MpcError> {
-                Err(MpcError::not_yet("verify collaborative proof", "ZK foundation + M4"))
+                Err(MpcError::not_yet(
+                    "verify collaborative proof",
+                    "ZK foundation + M4",
+                ))
             }
         }
 
-        let err = StubProof.prove(&StubBackend, &empty_statement(), &[]).unwrap_err();
+        let err = StubProof
+            .prove(&StubBackend, &empty_statement(), &[])
+            .unwrap_err();
         match err {
             MpcError::NotYetImplemented { gated_on, .. } => {
-                assert!(gated_on.contains("#3"), "must cite issuer-signature gate #3");
+                assert!(
+                    gated_on.contains("#3"),
+                    "must cite issuer-signature gate #3"
+                );
                 assert!(gated_on.contains("Q1"), "must cite the Q1 spike");
             }
             other => panic!("expected NotYetImplemented, got {other:?}"),
@@ -262,14 +275,20 @@ mod tests {
     fn attestation_is_honestly_deferred() {
         struct StubAttest;
         impl Attestation for StubAttest {
-            fn attest_source(&self, _h: &HolderId, _k: &[String]) -> Result<AttestationShare, MpcError> {
+            fn attest_source(
+                &self,
+                _h: &HolderId,
+                _k: &[String],
+            ) -> Result<AttestationShare, MpcError> {
                 Err(MpcError::not_yet(
                     "distributed issuer-signature attestation over secret-shared witness",
                     "ZK foundation #3/#8/#9 + Q1",
                 ))
             }
         }
-        let err = StubAttest.attest_source(&HolderId::new("alice"), &[]).unwrap_err();
+        let err = StubAttest
+            .attest_source(&HolderId::new("alice"), &[])
+            .unwrap_err();
         assert!(matches!(err, MpcError::NotYetImplemented { .. }));
     }
 }

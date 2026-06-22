@@ -29,6 +29,16 @@
 #                             per-crate MAX(lines_pct), writing the result (used by an
 #                             external shell loop, and unit-tested directly).
 #
+#   --check-monotonic         [OPUS-4.8] sq-neq8: RATCHET-DIRECTION gate. Diff THIS branch's
+#                             bench/coverage-floor.json floors against the BASE (default
+#                             `origin/main:bench/coverage-floor.json`, overridable via
+#                             --base-ref / --base-file) and FAIL (exit 1) if a PR LOWERS any
+#                             crate's floor. --check only compares measured-vs-floor, so a
+#                             floor DECREASE in a PR is otherwise INVISIBLE — exactly how
+#                             #661 silently dropped sparq-serve 92->83 (caught by a human,
+#                             not CI). A deliberate, reviewed regression must pass --allow-
+#                             lower. New crates and RAISED floors always pass.
+#
 # THE MAX-REMEASURE PRINCIPLE (sq-x4jy) [OPUS-4.8]
 # ------------------------------------------------
 # llvm-cov instrumentation only ever UNDERCOUNTS: when a test process aborts/OOMs or a
@@ -83,26 +93,67 @@ NIGHTLY_NOTE = {
                      "tier measures the full set.",
 }
 
+# [OPUS-4.8] sq-bjct: crates whose NIGHTLY measurement MERGES the W3C conformance
+# binaries (sparq-conformance / sparq-inference-conformance) into the per-crate
+# report (scripts/coverage.sh measure_merged). Those crates carry a separate, HIGHER
+# `nightly_floor` gated only by the nightly tier; their base `floor` stays the cheaper
+# test-only number gated per-commit. Seeding from a nightly summary RAISES nightly_floor;
+# seeding from a per-commit summary RAISES the base floor — neither touches the other.
+CONFORMANCE_MERGE_CRATES = {"sparq-core", "sparq-engine"}
+CONFORMANCE_MERGE_NOTE = (
+    "[OPUS-4.8] sq-bjct: nightly_floor gates the NIGHTLY tier, whose measurement MERGES "
+    "the W3C SPARQL + inference conformance BINARIES (they run as `cargo run`, not "
+    "`cargo test`) into this crate's llvm-cov report — a higher number than the test-only "
+    "per-commit `floor`. See scripts/coverage.sh measure_merged + the coverage-nightly job."
+)
+
 def load(p):
     with open(p) as f:
         return json.load(f)
 
 def seed(summary_path, floor_path, allow_lower):
     s = load(summary_path)
+    tier = s.get("tier")                       # [OPUS-4.8] sq-bjct
     existing = load(floor_path)["crates"] if os.path.exists(floor_path) else {}
     out = {}
     raised, kept, new, lowered = [], [], [], []
+    # A crate's MERGED nightly measurement seeds `nightly_floor`, NOT the base floor:
+    # only when seeding FROM a nightly summary AND the row actually merged the binaries.
+    def is_merged_row(crate, row):
+        return (crate in CONFORMANCE_MERGE_CRATES and tier and tier != "per-commit"
+                and "conformance-merge" in (row.get("features") or []))
     for crate, row in sorted(s["crates"].items()):
+        prev_entry = dict(existing.get(crate, {}))   # carry forward the WHOLE entry
         if not row.get("measured", False):
             # carry an existing floor forward; never invent one for an unmeasured crate
             if crate in existing:
-                out[crate] = existing[crate]; kept.append(crate)
+                out[crate] = prev_entry; kept.append(crate)
             continue
         if crate in ARTIFACT_ZERO:
-            out[crate] = {"floor": 0, "note": ARTIFACT_ZERO[crate]}
+            entry = {"floor": 0, "note": ARTIFACT_ZERO[crate]}
+            # preserve a previously-seeded nightly_floor (the artifact note is base-only)
+            if prev_entry.get("nightly_floor") is not None:
+                entry["nightly_floor"] = prev_entry["nightly_floor"]
+            out[crate] = entry
             continue
         measured = row["lines_pct"]
         proposed = max(0, math.floor(measured) - MARGIN)
+        if is_merged_row(crate, row):
+            # Ratchet the NIGHTLY floor up; leave the base `floor` (per-commit) untouched.
+            entry = prev_entry if prev_entry else {"floor": 0}
+            prev = entry.get("nightly_floor")
+            label = f"{crate}.nightly_floor"
+            if prev is None:
+                entry["nightly_floor"] = proposed; new.append(f"{label}={proposed}")
+            elif proposed > prev:
+                entry["nightly_floor"] = proposed; raised.append(f"{label} {prev}->{proposed}")
+            elif proposed < prev and allow_lower:
+                entry["nightly_floor"] = proposed; lowered.append(f"{label} {prev}->{proposed}")
+            else:
+                entry["nightly_floor"] = prev; kept.append(label)  # ratchet
+            entry.setdefault("nightly_note", CONFORMANCE_MERGE_NOTE)
+            out[crate] = entry
+            continue
         prev = existing.get(crate, {}).get("floor")
         note = NIGHTLY_NOTE.get(crate)
         if prev is None:
@@ -115,6 +166,11 @@ def seed(summary_path, floor_path, allow_lower):
             chosen = prev; kept.append(crate)  # ratchet: never auto-lower
         entry = {"floor": chosen}
         if note: entry["note"] = note
+        # preserve a previously-seeded nightly_floor when seeding from a per-commit summary
+        if prev_entry.get("nightly_floor") is not None:
+            entry["nightly_floor"] = prev_entry["nightly_floor"]
+            if prev_entry.get("nightly_note"):
+                entry["nightly_note"] = prev_entry["nightly_note"]
         out[crate] = entry
     doc = {
         "_comment": [
@@ -134,8 +190,16 @@ def seed(summary_path, floor_path, allow_lower):
             "Floors with floor:0 are crates whose llvm-cov line% is a known measurement "
             "artifact (see each note) — they are guarded by the test-PRESENCE gate "
             "(bench/coverage-presence.json) instead of the % gate.",
+            "[OPUS-4.8] sq-bjct: a crate with a `nightly_floor` (sparq-core / sparq-engine) "
+            "is gated TWICE: per-commit on the test-only `floor`, and nightly on the higher "
+            "`nightly_floor` — the nightly tier MERGES the W3C SPARQL + inference conformance "
+            "BINARIES (which run as `cargo run`, not `cargo test`) into that crate's llvm-cov "
+            "report. Seeding from a nightly summary raises `nightly_floor`; seeding from a "
+            "per-commit summary raises the base `floor`. Neither seed touches the other.",
             "Regenerate after a deliberate coverage rise: scripts/coverage.sh && "
-            "scripts/coverage-gate.py --seed target/coverage/coverage-summary.json",
+            "scripts/coverage-gate.py --seed target/coverage/coverage-summary.json "
+            "(per-commit -> base floor); COVERAGE_TIER=nightly scripts/coverage.sh && "
+            "scripts/coverage-gate.py --seed ... (nightly -> nightly_floor).",
         ],
         "margin_points": MARGIN,
         "crates": out,
@@ -150,33 +214,64 @@ def seed(summary_path, floor_path, allow_lower):
     return 0
 
 def check(summary_path, floor_path, require_all):
+    # [OPUS-4.8] sq-039g: distinguish MISSING (a crate entirely ABSENT from this tier's
+    # summary — legitimately not run in this tier, e.g. a nightly-only crate in a
+    # per-commit summary; fatal only with --require-all) from UNMEASURED (a crate that
+    # WAS attempted in this tier but whose coverage step ERRORED — coverage.sh records a
+    # row with "measured": false, e.g. sparq-conformance exit 2 when fixtures are absent,
+    # or — the dangerous case — sparq-core/sparq-engine failing to measure because a
+    # fixture-dependent test aborted). An unmeasured crate WITH A NON-ZERO (effective)
+    # FLOOR is ALWAYS fatal: it is supposed to be gated on its floor, and a failed
+    # measurement would otherwise SILENTLY un-gate it. That was the bug — a measure-
+    # failure was lumped into `missing`, so it was caught ONLY under --require-all, which
+    # the nightly/per-commit --check-robust invocations do NOT pass. An unmeasured crate
+    # with an effective floor of 0 (the ARTIFACT_ZERO crates) is not %-gated anyway, so
+    # its measure-failure is reported but not fatal (the test-presence gate guards it).
     s = load(summary_path); floors = load(floor_path)["crates"]
     measured = s["crates"]
-    fails, missing, oks = [], [], []
+    tier = s.get("tier")            # [OPUS-4.8] sq-bjct: tier-aware nightly_floor
+    fails, missing, unmeasured, oks = [], [], [], []
     for crate, fentry in sorted(floors.items()):
-        floor = fentry["floor"] if isinstance(fentry, dict) else fentry
+        floor = effective_floor(fentry, tier)
         row = measured.get(crate)
-        if row is None or not row.get("measured", False):
-            missing.append(crate); continue
+        if row is None:
+            missing.append((crate, floor)); continue
+        if not row.get("measured", False):
+            unmeasured.append((crate, floor)); continue
         val = row["lines_pct"]
         if val + 1e-9 < floor:
             fails.append((crate, val, floor))
         else:
             oks.append((crate, val, floor))
+    # A crate that failed to MEASURE but carries a real (>0) effective floor is a hard
+    # failure regardless of --require-all; a floor-0 (artifact) crate is not %-gated.
+    unmeasured_gated = [(c, f) for c, f in unmeasured if f > 0]
     for crate, val, floor in oks:
         print(f"  ok   {crate:<20} {val:6.2f}% >= floor {floor}")
-    for crate in missing:
-        flag = "MISSING (not in this tier's summary)"
-        print(f"  --   {crate:<20} {flag}")
+    for crate, floor in missing:
+        print(f"  --   {crate:<20} MISSING (not in this tier's summary)")
+    for crate, floor in unmeasured:
+        if floor > 0:
+            print(f"  FAIL {crate:<20} UNMEASURED (measure step errored) "
+                  f"— floor {floor} NOT enforced")
+        else:
+            print(f"  --   {crate:<20} UNMEASURED (measure step errored) "
+                  f"— floor 0, not %-gated")
     for crate, val, floor in fails:
         print(f"  FAIL {crate:<20} {val:6.2f}% < floor {floor}")
-    bad = bool(fails) or (require_all and bool(missing))
+    bad = bool(fails) or bool(unmeasured_gated) or (require_all and bool(missing))
     if fails:
         print(f"::error::coverage regressed below the floor for {len(fails)} crate(s)")
+    if unmeasured_gated:
+        print(f"::error::{len(unmeasured_gated)} crate(s) FAILED TO MEASURE but have a "
+              f"non-zero floor (would otherwise be SILENTLY un-gated): "
+              f"{', '.join(c for c, _ in unmeasured_gated)}")
     if require_all and missing:
         print(f"::error::{len(missing)} floor crate(s) absent from the summary "
-              f"(--require-all): {', '.join(missing)}")
-    print(f"\ncoverage gate: {len(oks)} ok / {len(fails)} fail / {len(missing)} missing")
+              f"(--require-all): {', '.join(c for c, _ in missing)}")
+    print(f"\ncoverage gate: {len(oks)} ok / {len(fails)} fail / "
+          f"{len(unmeasured)} unmeasured ({len(unmeasured_gated)} gated) / "
+          f"{len(missing)} missing")
     return 1 if bad else 0
 
 # --- pure aggregation primitives (unit-tested by --self-test) -----------------
@@ -188,6 +283,23 @@ def floor_of(fentry):
     """Floor value from a floor-file entry (a dict {"floor": N} or a bare number)."""
     return fentry["floor"] if isinstance(fentry, dict) else fentry
 
+def effective_floor(fentry, tier):
+    """[OPUS-4.8] sq-bjct: the floor that APPLIES for a given measurement tier.
+
+    A crate whose nightly measurement MERGES the conformance binaries (sparq-core /
+    sparq-engine) carries a HIGHER `nightly_floor` alongside the per-commit `floor`:
+    the per-commit `coverage` job measures test-only (lower) coverage and gates on
+    `floor`; the nightly `coverage-nightly` job measures the suite-MERGED (higher)
+    coverage and gates on `nightly_floor`. Without this split, ratcheting the merge
+    crates to their (higher) nightly number — which sq-bjct asks for — would make the
+    cheaper, test-only per-commit job fail. Any tier other than "per-commit" uses the
+    nightly floor when present; per-commit always uses the base floor."""
+    base = floor_of(fentry)
+    if tier and tier != "per-commit" and isinstance(fentry, dict) \
+       and fentry.get("nightly_floor") is not None:
+        return fentry["nightly_floor"]
+    return base
+
 def sub_floor_crates(summary, floors):
     """Pure: the set of crates that are MEASURED in `summary` AND below their floor.
 
@@ -196,13 +308,54 @@ def sub_floor_crates(summary, floors):
     semantics). This is exactly the set the robust gate re-measures."""
     out = []
     measured = summary.get("crates", {})
+    tier = summary.get("tier")      # [OPUS-4.8] sq-bjct: tier-aware nightly_floor
     for crate, fentry in floors.items():
         row = measured.get(crate)
         if row is None or not row.get("measured", False):
             continue
-        if row["lines_pct"] + 1e-9 < floor_of(fentry):
+        if row["lines_pct"] + 1e-9 < effective_floor(fentry, tier):
             out.append(crate)
     return sorted(out)
+
+def floor_regressions(base_floors, new_floors):
+    """[OPUS-4.8] sq-neq8: PURE — return the list of (crate, base_floor, new_floor) tuples
+    where the new floor file LOWERED a crate's floor relative to `base_floors`.
+
+    Both args are the `crates` mapping of a floor file (crate -> {"floor": N} | N). A crate
+    only in `new_floors` (a newly-added crate) is NOT a regression; a crate only in
+    `base_floors` (dropped from the floor file) is reported separately by the caller — it is
+    NOT a *floor* lowering but it IS a way to erode the ratchet, so the caller treats a drop
+    as a regression too. Here we report only the floor DECREASES; equal/raised floors pass.
+
+    [OPUS-4.8] sq-bjct: a crate's `nightly_floor` (the merged-suite gate for
+    sparq-core / sparq-engine) is part of the same ratchet, so LOWERING it — or
+    DROPPING it once present — is reported too (as a "<crate>.nightly_floor" row).
+    A newly-ADDED nightly_floor is not a regression."""
+    out = []
+    for crate, bentry in sorted(base_floors.items()):
+        if crate not in new_floors:
+            continue  # dropped-crate handling is the caller's (it is reported, not silent)
+        nentry = new_floors[crate]
+        bf, nf = floor_of(bentry), floor_of(nentry)
+        if nf < bf:
+            out.append((crate, bf, nf))
+        # nightly_floor ratchet (only when the base had one — a new one cannot regress).
+        bnf = bentry.get("nightly_floor") if isinstance(bentry, dict) else None
+        if bnf is not None:
+            nnf = nentry.get("nightly_floor") if isinstance(nentry, dict) else None
+            if nnf is None or nnf < bnf:
+                out.append((f"{crate}.nightly_floor", bnf,
+                            nnf if nnf is not None else "DROPPED"))
+    return out
+
+
+def dropped_crates(base_floors, new_floors):
+    """[OPUS-4.8] sq-neq8: PURE — crates present in the BASE floor file but ABSENT from the
+    new one. Removing a crate's floor row erodes the ratchet just as a floor decrease does
+    (its coverage is no longer gated at all), so --check-monotonic treats it as a regression
+    unless --allow-lower is given."""
+    return sorted(c for c in base_floors if c not in new_floors)
+
 
 def merge_max(prev, new):
     """Pure: return a NEW summary that is `prev` with each crate's coverage replaced by
@@ -305,6 +458,74 @@ def check_robust(summary_path, floor_path, k, require_all,
     print("==> final verdict (canonical --check over the per-crate-MAX summary):")
     return check(out_path, floor_path, require_all)
 
+def _load_floors_obj(doc):
+    """A floor file's `crates` map, accepting either the full doc or a bare crates map."""
+    return doc["crates"] if isinstance(doc, dict) and "crates" in doc else doc
+
+
+def _base_floors_from_git(base_ref, floor_path, log=print):
+    """[OPUS-4.8] sq-neq8: load the BASE floor file from git (`<base_ref>:<repo-rel path>`).
+    Returns the `crates` map, or None if the base ref / path is unavailable (e.g. the file
+    did not exist on base — a brand-new floor file cannot regress anything, so the caller
+    fail-OPENs). Resolves the floor's path relative to the repo root so the git pathspec is
+    correct regardless of CWD."""
+    try:
+        root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        rel = os.path.relpath(os.path.abspath(floor_path), root)
+        # git uses forward slashes in pathspecs on every platform.
+        rel = rel.replace(os.sep, "/")
+        r = subprocess.run(["git", "show", f"{base_ref}:{rel}"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            log(f"  note: base '{base_ref}:{rel}' unavailable "
+                f"({r.stderr.strip() or 'not found'}) — monotonic gate fail-OPEN (PASS)")
+            return None
+        return _load_floors_obj(json.loads(r.stdout))
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as e:
+        log(f"  note: could not read base floors via git ({e}) — fail-OPEN (PASS)")
+        return None
+
+
+def check_monotonic(floor_path, base_ref, base_file, allow_lower, log=print):
+    """[OPUS-4.8] sq-neq8: FAIL if THIS branch's floor file LOWERS or DROPS any crate's floor
+    vs the base (origin/main by default). Mirrors the conformance ratchet's only-rises rule.
+    `--allow-lower` permits a deliberate, reviewed regression. Returns an exit code."""
+    new_floors = _load_floors_obj(load(floor_path))
+    if base_file is not None:
+        base_floors = _load_floors_obj(load(base_file))
+        src = base_file
+    else:
+        base_floors = _base_floors_from_git(base_ref, floor_path, log=log)
+        src = f"{base_ref}:{os.path.basename(floor_path)}"
+    if base_floors is None:
+        log("coverage monotonic gate: no base to compare — PASS")
+        return 0
+
+    regressions = floor_regressions(base_floors, new_floors)
+    dropped = dropped_crates(base_floors, new_floors)
+    log(f"==> coverage monotonic gate: comparing floors vs {src}")
+    for crate, bf, nf in regressions:
+        log(f"  LOWERED  {crate:<20} floor {bf} -> {nf}")
+    for crate in dropped:
+        log(f"  DROPPED  {crate:<20} (floor {floor_of(base_floors[crate])} -> absent)")
+    bad = bool(regressions) or bool(dropped)
+    if not bad:
+        log("  ok: every base crate's floor is preserved or RAISED")
+        log("coverage monotonic gate: PASS")
+        return 0
+    if allow_lower:
+        log("  --allow-lower: the floor regression(s) above are an EXPLICIT, reviewed "
+            "decrease — PASS")
+        log("coverage monotonic gate: PASS (--allow-lower)")
+        return 0
+    log(f"::error::coverage floor regressed for {len(regressions)} crate(s) and "
+        f"{len(dropped)} dropped crate(s) vs {src}. The coverage ratchet only RISES "
+        f"(sq-neq8). If this lowering is intentional, re-run with --allow-lower.")
+    log("coverage monotonic gate: FAIL")
+    return 1
+
+
 def main():
     # --self-test is a standalone mode (mirrors scripts/perf-gate.py --self-test):
     # unit-test the PURE aggregation logic on synthetic measurement sequences, no files.
@@ -316,17 +537,25 @@ def main():
         sys.exit(_cli_merge_max(sys.argv[1:]))
 
     ap = argparse.ArgumentParser(description="per-crate coverage ratchet gate")
-    ap.add_argument("summary", help="coverage-summary.json from scripts/coverage.sh")
+    # `summary` is required for --seed/--check/--check-robust but NOT for --check-monotonic
+    # (which diffs floor FILES, not a measured summary); validated below after parsing.
+    ap.add_argument("summary", nargs="?", default=None,
+                    help="coverage-summary.json from scripts/coverage.sh "
+                         "(not used by --check-monotonic)")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--seed", action="store_true", help="(re)generate the floor file")
     g.add_argument("--check", action="store_true", help="enforce the floor file")
     g.add_argument("--check-robust", action="store_true",
                    help="[OPUS-4.8] robust gate: re-measure ONLY sub-floor crates up to "
                         "K times, keep the per-crate MAX, fail only if still below floor")
+    g.add_argument("--check-monotonic", action="store_true",
+                   help="[OPUS-4.8] sq-neq8: FAIL if the floor file LOWERS/DROPS any crate's "
+                        "floor vs the base (origin/main); the ratchet only RISES")
     ap.add_argument("--floor", default=os.path.join(os.path.dirname(__file__), "..",
                     "bench", "coverage-floor.json"))
     ap.add_argument("--allow-lower", action="store_true",
-                    help="permit --seed to LOWER a floor (deliberate regression)")
+                    help="permit --seed/--check-monotonic to LOWER a floor "
+                         "(deliberate, reviewed regression)")
     ap.add_argument("--require-all", action="store_true",
                     help="--check fails if a floor crate is absent from the summary")
     ap.add_argument("-k", "--max-measurements", type=int, default=DEFAULT_K,
@@ -334,8 +563,19 @@ def main():
     ap.add_argument("--out", default=None,
                     help="--check-robust: write the final per-crate-MAX summary here "
                          "(default: overwrite the input summary)")
+    ap.add_argument("--base-ref", default="origin/main",
+                    help="--check-monotonic: git ref of the base floor file "
+                         "(default origin/main)")
+    ap.add_argument("--base-file", default=None,
+                    help="--check-monotonic: compare against a base floor FILE on disk "
+                         "instead of a git ref (overrides --base-ref)")
     a = ap.parse_args()
     floor = os.path.abspath(a.floor)
+    if a.check_monotonic:
+        sys.exit(check_monotonic(floor, a.base_ref, a.base_file, a.allow_lower))
+    if a.summary is None:
+        ap.error("the 'summary' argument is required for "
+                 "--seed/--check/--check-robust")
     if a.seed:
         sys.exit(seed(a.summary, floor, a.allow_lower))
     if a.check_robust:
@@ -379,12 +619,30 @@ def self_test():
             r.update(lines_pct=pct, lines_covered=int(pct), lines_total=100, seconds=1)
         return r
 
-    def summ(d):
-        return {"crates": {k: crate(*v) if isinstance(v, tuple) else crate(v)
-                           for k, v in d.items()}}
+    def summ(d, tier=None):
+        s = {"crates": {k: crate(*v) if isinstance(v, tuple) else crate(v)
+                        for k, v in d.items()}}
+        if tier is not None:
+            s["tier"] = tier
+        return s
 
     FLOORS = {"a": {"floor": 80}, "b": {"floor": 83}, "c": {"floor": 90}}
     quiet = lambda *a, **k: None
+
+    # --- effective_floor / tier-aware nightly_floor (sq-bjct) [OPUS-4.8] --------
+    fe = {"floor": 90, "nightly_floor": 94}
+    assert effective_floor(fe, "per-commit") == 90, "per-commit uses base floor"
+    assert effective_floor(fe, "nightly") == 94, "nightly uses nightly_floor"
+    assert effective_floor(fe, "full") == 94, "any non-per-commit tier uses nightly_floor"
+    assert effective_floor(fe, None) == 90, "absent tier defaults to base floor"
+    assert effective_floor({"floor": 90}, "nightly") == 90, "no nightly_floor -> base"
+    assert effective_floor(88, "nightly") == 88, "bare-number entry -> itself"
+    # A merge crate at 92% PASSES per-commit (floor 90) but FAILS nightly (floor 94).
+    FL_M = {"core": {"floor": 90, "nightly_floor": 94}}
+    assert sub_floor_crates(summ({"core": 92.0}, tier="per-commit"), FL_M) == []
+    assert sub_floor_crates(summ({"core": 92.0}, tier="nightly"), FL_M) == ["core"]
+    # ...and a merge crate at 95% passes BOTH tiers.
+    assert sub_floor_crates(summ({"core": 95.0}, tier="nightly"), FL_M) == []
 
     # --- merge_max: per-crate MAX, measured-only, internal consistency ---------
     m = merge_max(summ({"a": 70.0, "b": 90.0}), summ({"a": 95.0, "b": 88.0}))
@@ -463,6 +721,91 @@ def self_test():
     code5, _ = robust_aggregate(lambda cs: (_ for _ in ()).throw(AssertionError(
         "should not re-measure when all pass")), init5, FLOORS, k=3, log=quiet)
     assert code5 == 0
+
+    # === MONOTONIC gate (sq-neq8): floor-vs-base ratchet direction =============
+    # floor_regressions: only DECREASES are returned; raises / equal / new pass.
+    base = {"a": {"floor": 80}, "b": 83, "c": {"floor": 90}}
+    # b lowered 83->70 (bare-int form), c raised, a equal, d is new -> only b regresses.
+    nw = {"a": {"floor": 80}, "b": {"floor": 70}, "c": {"floor": 95}, "d": {"floor": 50}}
+    assert floor_regressions(base, nw) == [("b", 83, 70)], floor_regressions(base, nw)
+    # the exact #661 shape: sparq-serve 92 -> 83 silently lowered by a re-seed.
+    b661 = {"sparq-serve": {"floor": 92}}
+    n661 = {"sparq-serve": {"floor": 83}}
+    assert floor_regressions(b661, n661) == [("sparq-serve", 92, 83)], "must catch #661"
+    # no regression when every floor is preserved or raised.
+    assert floor_regressions(base, {"a": {"floor": 80}, "b": 83, "c": {"floor": 91}}) == []
+    # a DROPPED crate is not a "floor lowering" but IS reported by dropped_crates.
+    assert dropped_crates(base, {"a": {"floor": 80}, "c": {"floor": 90}}) == ["b"], \
+        dropped_crates(base, {"a": {"floor": 80}, "c": {"floor": 90}})
+    assert dropped_crates(base, nw) == []  # nothing dropped (a,b,c all present)
+    # a brand-new crate present only in `new` is never a regression.
+    assert floor_regressions(base, {**base, "z": {"floor": 99}}) == []
+    assert dropped_crates(base, {**base, "z": {"floor": 99}}) == []
+
+    # [OPUS-4.8] sq-bjct: nightly_floor is part of the ratchet — lowering or DROPPING
+    # one (once present in base) is a regression; ADDING one is not.
+    bnf = {"core": {"floor": 90, "nightly_floor": 94}}
+    assert floor_regressions(bnf, {"core": {"floor": 90, "nightly_floor": 92}}) \
+        == [("core.nightly_floor", 94, 92)]
+    assert floor_regressions(bnf, {"core": {"floor": 90}}) \
+        == [("core.nightly_floor", 94, "DROPPED")]
+    assert floor_regressions(bnf, {"core": {"floor": 90, "nightly_floor": 95}}) == []  # raised
+    # adding a nightly_floor where base had none is fine; base floor unchanged.
+    assert floor_regressions({"core": {"floor": 90}},
+                             {"core": {"floor": 90, "nightly_floor": 92}}) == []
+
+    # === UNMEASURED vs MISSING in check() (sq-039g) [OPUS-4.8] ==================
+    # The bug: a crate present in the summary with "measured": false (its coverage step
+    # ERRORED — e.g. conformance fixtures absent -> sparq-conformance exit 2, or a
+    # fixture-dependent sparq-core test aborting) was lumped into `missing`, so it was
+    # fatal ONLY under --require-all. The per-commit / nightly --check-robust gate does
+    # NOT pass --require-all, so such a crate was SILENTLY un-gated instead of gated on
+    # its floor. Fix: an UNMEASURED crate with a non-zero (effective) floor ALWAYS fails;
+    # a genuinely-MISSING crate keeps the --require-all semantics; a floor-0 unmeasured
+    # crate (artifact) is reported but not fatal.
+    import tempfile, contextlib, io
+    def run_check(summary_crates, floor_crates, require_all, tier=None):
+        """Drive the real check() over tempfile summary + floor; return its exit code."""
+        sdoc = {"crates": {k: (crate(*v) if isinstance(v, tuple) else crate(v))
+                           for k, v in summary_crates.items()}}
+        if tier is not None:
+            sdoc["tier"] = tier
+        fdoc = {"crates": floor_crates}
+        with tempfile.NamedTemporaryFile("w", suffix=".sum.json", delete=False) as sf, \
+             tempfile.NamedTemporaryFile("w", suffix=".floor.json", delete=False) as ff:
+            json.dump(sdoc, sf); sp = sf.name
+            json.dump(fdoc, ff); fp = ff.name
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return check(sp, fp, require_all)
+        finally:
+            os.unlink(sp); os.unlink(fp)
+
+    FL = {"a": {"floor": 80}, "z": {"floor": 0, "note": "artifact"}}
+    # a crate that MEASURED at/above floor + an artifact-zero crate -> PASS.
+    assert run_check({"a": 90.0, "z": (0.0,)}, FL, require_all=False) == 0
+    # UNMEASURED gated crate (a present, measured:false, floor 80) -> FAIL even WITHOUT
+    # --require-all (the core of sq-039g: a measure-failure must not silently un-gate).
+    assert run_check({"a": (0, False), "z": (0.0,)}, FL, require_all=False) == 1, \
+        "unmeasured crate with a non-zero floor MUST fail without --require-all"
+    # ...and it still fails WITH --require-all (regression guard).
+    assert run_check({"a": (0, False), "z": (0.0,)}, FL, require_all=True) == 1
+    # UNMEASURED ARTIFACT crate (z, floor 0) is NOT fatal — not %-gated, presence-gated.
+    assert run_check({"a": 90.0, "z": (0, False)}, FL, require_all=False) == 0, \
+        "an unmeasured floor-0 (artifact) crate must not fail the gate"
+    # genuinely-MISSING crate (absent from summary) keeps the --require-all semantics:
+    #   not fatal without --require-all ...
+    assert run_check({"a": 90.0}, FL, require_all=False) == 0, \
+        "a crate absent from the summary is not fatal without --require-all"
+    #   ... fatal WITH --require-all.
+    assert run_check({"a": 90.0}, FL, require_all=True) == 1, \
+        "an absent crate must fail under --require-all"
+    # The exact sq-039g danger: a conformance-fixture-dependent crate (sparq-core, real
+    # floor) failing to MEASURE under the nightly tier -> FAIL even without --require-all.
+    FLC = {"sparq-core": {"floor": 90, "nightly_floor": 94}}
+    assert run_check({"sparq-core": (0, False)}, FLC, require_all=False,
+                     tier="nightly") == 1, \
+        "sparq-core failing to measure (fixtures absent) must FAIL the nightly gate"
 
     print("coverage-gate self-test: ALL ASSERTIONS PASSED")
     return 0

@@ -22,9 +22,14 @@ use sparq_zk_compose::manifest::{
     AttestedStatusRef, BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp,
     ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
 };
+use sparq_zk_compose::build::{
+    build_filter_decimal, build_filter_signed_int, derive_filter_decimal_id,
+    derive_filter_signed_int_id,
+};
 use sparq_zk_compose::toml::{
-    canonical_digits, filter_f64_prover_toml, filter_int_prover_toml, pad_hex, pad_rows,
-    prover_toml_for, scan_prover_toml, ProverTomlError,
+    canonical_digits, filter_decimal_prover_toml, filter_f64_prover_toml, filter_int_prover_toml,
+    filter_signed_int_prover_toml, pad_hex, pad_rows, prover_toml_for, scan_prover_toml,
+    ProverTomlError,
 };
 
 // --------------------------------------------------------------------------
@@ -93,6 +98,62 @@ fn filter_f64_prover_toml_renders_b_bits_not_bound() {
     assert!(!toml.contains("bound ="), "f64 member uses b_bits, never bound");
     assert!(toml.contains("op = \"3\"\n"));
     assert!(toml.contains("digits = [\"52\", \"50\"]\n"));
+}
+
+// [OPUS-4.8] sq-7lrq: the composable SIGNED xsd:integer renderer must emit the
+// member `main`'s declaration order: challenge, operand_enc, op, bound_neg, bound,
+// expected, neg, mag_digits.
+#[test]
+fn filter_signed_int_prover_toml_renders_sign_split_bound_and_neg_witness() {
+    let toml = filter_signed_int_prover_toml(
+        &fh("0xchal"),
+        &fh("0xop"),
+        FilterOp::Lt.code(),
+        false, // bound_neg: +1
+        1,     // |bound|
+        true,  // expected
+        true,  // operand neg (value = -42)
+        b"42", // magnitude digits
+    );
+    let expected = "challenge = \"0xchal\"\n\
+                    operand_enc = \"0xop\"\n\
+                    op = \"0\"\n\
+                    bound_neg = false\n\
+                    bound = \"1\"\n\
+                    expected = true\n\
+                    neg = true\n\
+                    mag_digits = [\"52\", \"50\"]\n";
+    // The exact-bytes equality below pins BOTH the field set and the declaration
+    // order (a substring scan would mis-match `neg` inside `bound_neg`).
+    assert_eq!(toml, expected);
+}
+
+// [OPUS-4.8] sq-7lrq: the composable xsd:decimal renderer must emit the member
+// `main`'s declaration order: challenge, operand_enc, op, bound_neg, bound_scaled,
+// expected, neg, int_digits, frac_digits.
+#[test]
+fn filter_decimal_prover_toml_renders_scaled_bound_and_two_digit_arrays() {
+    let toml = filter_decimal_prover_toml(
+        &fh("0xchal"),
+        &fh("0xop"),
+        FilterOp::Gt.code(),
+        false, // bound_neg
+        12340, // bound_scaled = round(123.40 * 100)
+        true,  // expected
+        false, // operand neg (value = 123.45)
+        b"123",
+        b"45",
+    );
+    let expected = "challenge = \"0xchal\"\n\
+                    operand_enc = \"0xop\"\n\
+                    op = \"2\"\n\
+                    bound_neg = false\n\
+                    bound_scaled = \"12340\"\n\
+                    expected = true\n\
+                    neg = false\n\
+                    int_digits = [\"49\", \"50\", \"51\"]\n\
+                    frac_digits = [\"52\", \"53\"]\n";
+    assert_eq!(toml, expected);
 }
 
 #[test]
@@ -174,7 +235,7 @@ fn prover_toml_for_join_eq_without_witness_returns_err_not_panic() {
         slot_a: 0,
         slot_b: 2,
     };
-    let res = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], &[], None);
+    let res = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], &[], None, None);
     assert_eq!(
         res,
         Err(ProverTomlError::JoinEqMissingWitness),
@@ -191,7 +252,7 @@ fn prover_toml_for_filter_int_uses_op_code_and_digits() {
         bound: 7,
         expected: false,
     };
-    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], b"7", None).unwrap();
+    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], b"7", None, None).unwrap();
     assert_eq!(id, CircuitId::FilterInt { d: 1 });
     assert!(toml.contains("op = \"5\"\n"), "FilterOp::Ne code is 5");
     assert!(toml.contains("bound = \"7\"\n"));
@@ -209,10 +270,130 @@ fn prover_toml_for_filter_f64_uses_b_bits() {
         b_bits: bits,
         expected: true,
     };
-    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], b"18", None).unwrap();
+    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], b"18", None, None).unwrap();
     assert_eq!(id, CircuitId::FilterF64 { d: 2 });
     assert!(toml.contains(&format!("b_bits = \"{bits}\"\n")));
     assert!(toml.contains("op = \"1\"\n"), "FilterOp::Le code is 1");
+}
+
+// [OPUS-4.8] sq-7lrq: `prover_toml_for`'s signed-int / decimal arms require the
+// private `FilterSignedWitness`; the END-TO-END host path (build_* -> prover_toml_for)
+// must render the right member + sign-split bound + private witness.
+#[test]
+fn prover_toml_for_filter_signed_int_renders_via_witness() {
+    // value = -42 (md=2), op LT against +1.
+    let (inputs, witness) =
+        build_filter_signed_int(fh("0xop"), -42, FilterOp::Lt, 1, true).expect("d2 builds");
+    assert_eq!(*inputs.circuit_id(), CircuitId::FilterSignedInt { md: 2 });
+    let (id, toml) =
+        prover_toml_for(&inputs, &fh("0xchal"), &[], &[], &[], None, Some(&witness)).unwrap();
+    assert_eq!(id, CircuitId::FilterSignedInt { md: 2 });
+    assert!(toml.contains("bound_neg = false\n"), "bound +1 => not negative");
+    assert!(toml.contains("bound = \"1\"\n"));
+    assert!(toml.contains("neg = true\n"), "operand -42 => neg true");
+    assert!(toml.contains("mag_digits = [\"52\", \"50\"]\n"));
+}
+
+#[test]
+fn prover_toml_for_filter_decimal_renders_via_witness() {
+    // value = 123.45 (i3 f2), op GT against bound_scaled 12340.
+    let (inputs, witness) =
+        build_filter_decimal(fh("0xop"), false, "123", "45", FilterOp::Gt, false, 12340, true)
+            .expect("i3_f2 builds");
+    assert_eq!(*inputs.circuit_id(), CircuitId::FilterDecimal { id: 3, fd: 2 });
+    let (id, toml) =
+        prover_toml_for(&inputs, &fh("0xchal"), &[], &[], &[], None, Some(&witness)).unwrap();
+    assert_eq!(id, CircuitId::FilterDecimal { id: 3, fd: 2 });
+    assert!(toml.contains("bound_scaled = \"12340\"\n"));
+    assert!(toml.contains("int_digits = [\"49\", \"50\", \"51\"]\n"));
+    assert!(toml.contains("frac_digits = [\"52\", \"53\"]\n"));
+}
+
+// A signed/decimal input with NO `filter_signed_witness` must fail gracefully
+// (recoverable Err, no panic) — the sign + digits live in the witness, not the
+// manifest. Mirrors the JoinEqMissingWitness contract.
+#[test]
+fn prover_toml_for_filter_signed_without_witness_returns_err_not_panic() {
+    let inputs = ProofInputs::FilterSignedInt {
+        id: CircuitId::FilterSignedInt { md: 2 },
+        operand_enc: fh("0xop"),
+        op: FilterOp::Lt,
+        bound_neg: false,
+        bound: 1,
+        expected: true,
+    };
+    let res = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], &[], None, None);
+    assert_eq!(res, Err(ProverTomlError::FilterSignedMissingWitness));
+
+    let dec = ProofInputs::FilterDecimal {
+        id: CircuitId::FilterDecimal { id: 3, fd: 2 },
+        operand_enc: fh("0xop"),
+        op: FilterOp::Gt,
+        bound_neg: false,
+        bound_scaled: 12340,
+        expected: true,
+    };
+    let res = prover_toml_for(&dec, &fh("0xchal"), &[], &[], &[], None, None);
+    assert_eq!(res, Err(ProverTomlError::FilterSignedMissingWitness));
+}
+
+// [OPUS-4.8] sq-7lrq: derive_* must EXACT-match the compiled member family and
+// return None (clean error) for out-of-family shapes — the sq-wto discipline.
+#[test]
+fn derive_filter_signed_int_id_exact_match_only() {
+    assert_eq!(
+        derive_filter_signed_int_id(2),
+        Some(CircuitId::FilterSignedInt { md: 2 })
+    );
+    assert_eq!(
+        derive_filter_signed_int_id(4),
+        Some(CircuitId::FilterSignedInt { md: 4 })
+    );
+    // 0 magnitude digits clamps to the 1-digit canonical form... but md=1 is not a
+    // compiled member, so it is out-of-family (None) — never a wrong-MD member.
+    assert_eq!(derive_filter_signed_int_id(0), None);
+    assert_eq!(derive_filter_signed_int_id(1), None);
+    assert_eq!(derive_filter_signed_int_id(3), None);
+    assert_eq!(derive_filter_signed_int_id(5), None);
+}
+
+#[test]
+fn derive_filter_decimal_id_exact_shape_match_only() {
+    assert_eq!(
+        derive_filter_decimal_id(3, 2),
+        Some(CircuitId::FilterDecimal { id: 3, fd: 2 })
+    );
+    // a leading-zero integer part (e.g. "0.45") clamps to id>=1, but (1, 2) has no
+    // compiled member => None (clean error, never a wrong shape).
+    assert_eq!(derive_filter_decimal_id(0, 2), None);
+    assert_eq!(derive_filter_decimal_id(3, 1), None);
+    assert_eq!(derive_filter_decimal_id(2, 2), None);
+    assert_eq!(derive_filter_decimal_id(3, 3), None);
+}
+
+// build_filter_decimal must reject non-digit lexical bytes (fail-closed; never
+// emit a token that cannot match the committed literal).
+#[test]
+fn build_filter_decimal_rejects_non_digit_lexical_bytes() {
+    assert!(build_filter_decimal(fh("0xop"), false, "12x", "45", FilterOp::Gt, false, 1, true).is_none());
+    assert!(build_filter_decimal(fh("0xop"), false, "123", "4z", FilterOp::Gt, false, 1, true).is_none());
+}
+
+// build_filter_signed_int derives the operand sign from the value and renders the
+// magnitude digits (no sign) — a +value witnesses neg=false.
+#[test]
+fn build_filter_signed_int_positive_value_has_neg_false() {
+    let (inputs, witness) =
+        build_filter_signed_int(fh("0xop"), 42, FilterOp::Gt, -7, true).expect("d2 builds");
+    assert!(!witness.neg, "+42 => neg false");
+    assert!(witness.frac_digits.is_empty(), "signed-int has no fraction digits");
+    assert_eq!(witness.int_digits, b"42".to_vec());
+    if let ProofInputs::FilterSignedInt { bound_neg, bound, .. } = inputs {
+        assert!(bound_neg, "bound -7 => negative");
+        assert_eq!(bound, 7, "|bound| = 7");
+    } else {
+        panic!("expected FilterSignedInt");
+    }
 }
 
 #[test]
@@ -233,7 +414,7 @@ fn prover_toml_for_scan_pads_rows_and_enc_to_circuit_dimensions() {
         [fh("0xe00"), fh("0xe01"), fh("0xe02")],
         [fh("0xe10"), fh("0xe11"), fh("0xe12")],
     ]];
-    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[2], &scan_enc, &[], None).unwrap();
+    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[2], &scan_enc, &[], None, None).unwrap();
     assert_eq!(id, CircuitId::Scan { k: 1, n: 3, r: 2 });
     // rows padded from 1 -> 2 (the second row is the zero row).
     assert!(
@@ -268,6 +449,15 @@ fn circuit_id_package_names_every_member_family() {
     assert_eq!(CircuitId::Scan { k: 2, n: 4, r: 1 }.package(), "scan_k2_n4_r1");
     assert_eq!(CircuitId::FilterInt { d: 1 }.package(), "filter_int_d1");
     assert_eq!(CircuitId::FilterF64 { d: 3 }.package(), "filter_f64_d3");
+    // [OPUS-4.8] sq-7lrq: signed-int / decimal package names.
+    assert_eq!(
+        CircuitId::FilterSignedInt { md: 2 }.package(),
+        "filter_signed_int_d2"
+    );
+    assert_eq!(
+        CircuitId::FilterDecimal { id: 3, fd: 2 }.package(),
+        "filter_decimal_i3_f2"
+    );
     assert_eq!(CircuitId::RevokeUnset { depth: 10 }.package(), "revoke_unset_d10");
     assert_eq!(CircuitId::HiddenIssuer { depth: 4 }.package(), "hidden_issuer_d4");
 }
@@ -398,6 +588,8 @@ fn proof_manifest_json_round_trips_and_defaults_type() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     let json = manifest.to_json();
     let back = ProofManifest::from_json(&json).expect("round-trips");

@@ -52,7 +52,7 @@ fn main() {
     println!("    auth view: {} triples, closure per stratum {:?}\n", astats.auth_triples, astats.strata_facts);
 
     // 2. per-query: v1 rewrite+copy vs full-dataset direct query
-    let alice = Session { agent: Some(ALICE), client: None };
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
     let allowed = store.accessible(&alice, Mode::Read);
     println!("alice readable graphs: {}", allowed.len());
     let direct = timed("engine::query, FULL dataset (GRAPH ?g over all graphs)", || {
@@ -118,7 +118,7 @@ fn main() {
     assert_eq!(fat_vnothing.rows.len(), 0);
 
     // 3. session graph-set: cold vs cached
-    let bob = Session { agent: Some(sparq_solid::fixture::BOB), client: None };
+    let bob = Session { agent: Some(sparq_solid::fixture::BOB), client: None, issuer: None, now: None };
     let t = Instant::now();
     let cold = store.accessible(&bob, Mode::Read);
     println!("{:64} {:10.3} ms", "session graph-set, cold (AuthIndex walk)", t.elapsed().as_secs_f64() * 1e3);

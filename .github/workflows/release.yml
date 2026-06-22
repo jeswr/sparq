@@ -1,117 +1,465 @@
 # GitHub Release pipeline (T20): tag `vX.Y.Z` -> build, package, checksum, release, docker.
 #
-# DESIGN: this workflow is SELF-CONTAINED — it duplicates dist.yml's build matrix instead of
-# `workflow_call`-ing it, for two reasons:
-#   1. dist.yml has no `workflow_call` trigger and adding one means editing a file another
-#      work-thread owns; a reusable-workflow refactor is a deliberate follow-up, not a hidden
-#      edit. Until then the matrices MUST be kept in sync by hand (both carry this note's
-#      tier table; see dist.yml for the per-tier rationale).
-#   2. Release artifacts have a different shape from dist artifacts: versioned archives
-#      (tar.gz / zip) containing the binary + README + LICENSE + CHANGELOG, plus a SHA256SUMS
-#      manifest — not dist's bare per-tier binaries.
-# Both workflows currently fire on tags; that double-builds the binaries. Harmless but
-# wasteful — once this lands, the maintainer can drop the `tags` trigger from dist.yml
-# (keeping its workflow_dispatch for ad-hoc builds). See docs/release.md.
+# [OPUS-4.8] sq-v286.2: the per-hardware-tier build matrix is no longer inlined here. It is
+# defined ONCE in the reusable workflow `build-matrix.yml` and invoked below with
+# `mode: archive` (the `package` job is a `workflow_call`). release.yml remains THE entry point
+# for cutting a release (it fires on a `v*` tag and is the path the release-plz tag flow will
+# drive — research/release-ci-design.md §6 item 4); dist.yml is now dispatch-only and calls the
+# same reusable matrix with `mode: binary`. This ends the hand-synced double-matrix +
+# double-build the design record flags (§5 "Reuse, do not duplicate"; §6 item 2 "Unify the
+# duplicated build matrix via workflow_call; drop dist.yml's tags trigger").
 #
-# Triggers: version tags only. NO schedule, NO pull_request — releasing is a deliberate act.
+# Release artifacts keep their distinct shape vs dist's bare binaries: versioned archives
+# (tar.gz / zip) containing the binary + README + LICENSE + CHANGELOG, plus a SHA256SUMS
+# manifest — produced by the reusable workflow's `archive` mode + the `release` job below.
+#
+# Triggers: version tags AND manual workflow_dispatch — both are deliberate releasing acts. NO
+# schedule, NO pull_request, so this workflow NEVER runs as a PR check and never gates a PR (the
+# required branch-protection check is `ci-summary / gate`, which only ever evaluates PR/main
+# events — release.yml has no `pull_request` trigger, so it is invisible to that aggregator).
+#
+# [OPUS-4.8] sq-gl3cf: a `v*` tag push is the canonical release; `workflow_dispatch` is the
+# developer/test path that builds + attaches the SAME assets (GUI bundles, archives, SBOM/VEX,
+# docker image) WITHOUT pushing a real `v*` tag. On dispatch, `github.ref_name` is the BRANCH the
+# dispatch ran on (NOT a version), so every place asset identity / the release tag was derived
+# from `github.ref_name` is now threaded from the `setup` job's single `version` output
+# (`inputs.tag` on dispatch, `github.ref_name` on tag push). Dispatch builds are pre-release by
+# default. There is NO double-build on tag: a single event fires exactly one trigger, and `setup`
+# resolves the version for whichever fired.
 name: release
 
 on:
   push:
     tags: ["v*"]
+  # [OPUS-4.8] sq-gl3cf: manual path to build + attach the release assets (incl. the UNSIGNED
+  # Tauri desktop GUI bundles) without cutting a real `v*` tag — for developer/test releases.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Release tag the built assets attach to (e.g. v0.1.0-dev). A developer/test dispatch
+          SHOULD use a -dev / pre-release suffix so it is never mistaken for a canonical release.
+          This is the single source of asset naming + the GitHub Release tag on the dispatch path.
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the created GitHub Release as a pre-release (default true for dispatch builds)."
+        required: false
+        type: boolean
+        default: true
 
 # Default: read-only. Jobs that need more (release: contents, docker: packages) opt in below.
 permissions:
   contents: read
 
 jobs:
-  # ---- 1. build + package per hardware tier (mirror of dist.yml's matrix) ----
+  # ---- 0. resolve the single version string used for asset identity + the release tag ----
+  # [OPUS-4.8] sq-gl3cf: ONE source of truth for the version, consumed by EVERY job that names an
+  # asset or attaches to a tag. On a `v*` tag push, `inputs.tag` is empty and `github.ref_name` is
+  # the tag (e.g. `v0.1.0`). On `workflow_dispatch`, `inputs.tag` is the developer-supplied release
+  # tag and `github.ref_name` is the BRANCH (wrong for asset identity) — so `${{ inputs.tag ||
+  # github.ref_name }}` picks the dispatch input when present and the tag otherwise. This output is
+  # threaded into `gui-bundle`, `sbom`, `package` (via build-matrix.yml's `version` input), and
+  # `release` (tag_name + body links) so BOTH triggers name assets + tag the Release identically.
+  setup:
+    name: resolve release version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: v
+        run: echo "version=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+  # ---- 1. build + package per hardware tier ----
+  # [OPUS-4.8] sq-v286.2: invoke the shared reusable matrix in `archive` mode. The 10-tier
+  # runner-label matrix + build steps + the sq-zqq6 SLSA archive attestation all live in
+  # build-matrix.yml now (single source of truth); this caller only selects the artifact shape.
+  # The reusable workflow's matrix job attests + uploads `pkg-<tier>`; the `release` job below
+  # consumes those artifacts. `permissions:` here is the ceiling passed down to the called
+  # workflow — it must grant the OIDC + attestation writes the attestation step needs.
   package:
-    name: package ${{ matrix.tier }}
-    runs-on: ${{ matrix.os }}
-    # [OPUS-4.8] sq-zqq6: build-provenance attestation over the packaged archives
-    # needs the OIDC token + attestation write. Read-only otherwise.
+    # [OPUS-4.8] sq-gl3cf: thread the resolved version into the reusable matrix so the per-tier
+    # archives are named `sparq-cli-<version>-<tier>` on BOTH triggers (on dispatch, the matrix's
+    # own `github.ref_name` is the branch and would mis-name every archive).
+    needs: setup
     permissions:
       contents: read
       id-token: write
       attestations: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # ---- Apple ----
-          # Apple silicon (M1–M4): ONE binary, no target-cpu (Darwin baseline already enables
-          # every Apple-silicon feature — measured; see research/hardware/optimization-findings.md).
-          - { tier: arm64-darwin,     os: macos-14,         target: aarch64-apple-darwin,      cpu: "",          ext: "" }
-          # Intel Macs: x86-64-v3 (every Intel Mac since ~2015 / Haswell has AVX2).
-          # Deliberate divergence from dist.yml: its macos-13 label has been retired by
-          # GitHub; macos-*-intel is the supported Intel runner line (dist.yml needs the
-          # same fix — flagged in docs/release.md, not edited here).
-          - { tier: x64-darwin,       os: macos-15-intel,   target: x86_64-apple-darwin,       cpu: x86-64-v3,   ext: "" }
-          # ---- x86-64 Linux ----
-          # baseline (SSE2) + v2 (SSE4.2) + v3 (AVX2/BMI2/FMA) + v4 (AVX-512).
-          - { tier: x64-baseline,     os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64,      ext: "" }
-          - { tier: x64-v2,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v2,   ext: "" }
-          - { tier: x64-v3,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v3,   ext: "" }
-          - { tier: x64-v4,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v4,   ext: "" }
-          # Generic aarch64 Linux (Graviton/Ampere, Raspberry Pi 4+): neoverse-n1 + LSE.
-          - { tier: arm64-linux,      os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, cpu: neoverse-n1, ext: "" }
-          # ---- Windows ----
-          - { tier: win-x64-baseline, os: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64,      ext: ".exe" }
-          - { tier: win-x64-v3,       os: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64-v3,   ext: ".exe" }
-          # Windows on ARM — cross-compiled from the x64 runner.
-          - { tier: win-arm64,        os: windows-latest,   target: aarch64-pc-windows-msvc,   cpu: "",          ext: ".exe" }
+    uses: ./.github/workflows/build-matrix.yml
+    with:
+      mode: archive
+      version: ${{ needs.setup.outputs.version }}
+
+  # ---- 1b. per-release CycloneDX SBOM + VEX ----
+  # [OPUS-4.8] sq-toze.3 (GX-2): emit a CycloneDX SBOM for each released binary plus a VEX
+  # (the checked-in supply-chain/vex.cdx.json, version-stamped) justifying the advisories
+  # cargo-deny is configured to ignore. Both are uploaded as an artifact for the `release`
+  # job to attach to the GitHub Release, and SLSA-attested here (binding their digests to
+  # this workflow run; verifiable with `gh attestation verify`).
+  sbom:
+    name: CycloneDX SBOM + VEX
+    # [OPUS-4.8] sq-gl3cf: needs the resolved version so the per-release SBOM/VEX filenames carry
+    # the dispatch tag (on dispatch the scripts' GITHUB_REF_NAME fallback is the branch).
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - name: Install Rust + target
-        shell: bash
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add ${{ matrix.target }}
-      - name: Build (${{ matrix.cpu || 'default-cpu' }})
-        shell: bash
-        run: |
-          FLAGS=""
-          [ -n "${{ matrix.cpu }}" ] && FLAGS="-Ctarget-cpu=${{ matrix.cpu }}"
-          [ "${{ matrix.tier }}" = "arm64-linux" ] && FLAGS="$FLAGS -Ctarget-feature=+lse"
-          RUSTFLAGS="$FLAGS" cargo build --release --locked -p sparq-cli --target ${{ matrix.target }}
-      - name: Package (binary + README + LICENSE + CHANGELOG)
-        shell: bash
-        run: |
-          PKG="sparq-cli-${GITHUB_REF_NAME}-${{ matrix.tier }}"
-          mkdir -p "pkg/$PKG"
-          cp "target/${{ matrix.target }}/release/sparq-cli${{ matrix.ext }}" "pkg/$PKG/"
-          cp README.md "pkg/$PKG/"
-          # LICENSE is copied when present (license = MIT is declared in Cargo.toml; adding
-          # the LICENSE file itself is on the pre-release checklist in docs/release.md).
-          if [ -f LICENSE ]; then cp LICENSE "pkg/$PKG/"; fi
-          if [ -f CHANGELOG.md ]; then cp CHANGELOG.md "pkg/$PKG/"; fi
-          cd pkg
-          case "${{ matrix.tier }}" in
-            win-*) 7z a "$PKG.zip" "$PKG" ;;
-            *)     tar czf "$PKG.tar.gz" "$PKG" ;;
-          esac
-      # [OPUS-4.8] sq-zqq6: SLSA build provenance over the packaged archives.
-      # Generates a signed attestation (Sigstore) binding each archive's digest
-      # to this workflow run; verifiable with `gh attestation verify <file>`.
-      - name: Attest build provenance (archives)
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        with:
+          tool: cargo-cyclonedx
+      # [OPUS-4.8] sq-toze.27 (GS-3): Node for the JS/npm SBOM of the published WASM client.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+      # [OPUS-4.8] sq-gl3cf: pass VERSION explicitly. gen-sbom-vex.sh honors $VERSION (falling
+      # back to GITHUB_REF_NAME), but on a workflow_dispatch GITHUB_REF_NAME is the BRANCH, so the
+      # SBOM/VEX filenames would be mis-stamped — thread the resolved version instead.
+      - name: Generate per-release SBOM + VEX
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: scripts/gen-sbom-vex.sh
+      # [OPUS-4.8] sq-toze.27 (GS-3): per-release CycloneDX SBOM for the published npm
+      # client (`js/` = @jeswr/sparq). Writes sbom/sparq-js-<ver>.sbom.cdx.json (runtime
+      # tree) + sbom/sparq-js-dev-<ver>.sbom.cdx.json (full build tree) into the same
+      # sbom/ dir, so they are attested + attached + checksummed alongside the Rust SBOMs.
+      # [OPUS-4.8] sq-gl3cf: gen-js-sbom.sh ALSO reads GITHUB_REF_NAME for the version-stamped
+      # filenames, so it needs the same VERSION thread for the dispatch path to name JS SBOMs right.
+      - name: Generate per-release JS/npm SBOM (published WASM client)
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: scripts/gen-js-sbom.sh
+      - name: Attest build provenance (SBOM + VEX)
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: |
-            pkg/*.tar.gz
-            pkg/*.zip
+            sbom/*.sbom.cdx.json
+            sbom/*.vex.cdx.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: pkg-${{ matrix.tier }}
-          path: |
-            pkg/*.tar.gz
-            pkg/*.zip
+          name: sbom-vex
+          path: sbom/*.json
+          if-no-files-found: error
+
+  # ---- 1c. Tauri desktop GUI bundles (UNSIGNED) ----
+  # [OPUS-4.8] sq-8n1c: build the cross-platform Tauri 2 desktop INSTALLERS — .dmg (+ .app)
+  # on macOS, .msi + NSIS .exe on Windows, .deb + .AppImage on Linux — as ADDITIONAL release
+  # artifacts on the same desktop platforms the `package` matrix already covers, per the GUI
+  # design record (research/gui-design.md §3 "Releases"). They are SLSA build-provenance
+  # attested here (subject-path below), uploaded as `pkg-gui-<label>`, and the `release` job's
+  # `pattern: pkg-*` download then folds them into SHA256SUMS + the GitHub Release for free —
+  # so the existing SBOM/VEX/provenance/checksum estate covers them with no bespoke wiring.
+  #
+  # UNSIGNED — and that is a deliberate, honest limitation, NOT an oversight:
+  #   * macOS bundles are NOT codesigned/notarized (Apple Developer ID cert + notarytool key
+  #     are maintainer-held) -> Gatekeeper will quarantine them on download.
+  #   * Windows .msi/.exe are NOT Authenticode-signed (EV/OV cert is maintainer-held)
+  #     -> SmartScreen will warn on download.
+  # Real OS-level signing is the SEPARATE needs:user bead sq-v286.8 (Apple Developer ID +
+  # Windows Authenticode); this job MUST NOT fabricate signing. The SLSA attestation below
+  # proves WHO BUILT the bundle (build provenance), which is orthogonal to and NOT a substitute
+  # for OS code-signing. Until sq-v286.8 lands, these are test-/developer-install bundles.
+  #
+  # SCOPE — desktop installers only. The matrix covers exactly the desktop (platform, arch)
+  # pairs that produce a native installer, one row per pair (NOT per microarch tier — a .deb is
+  # arch-keyed, not -Ctarget-cpu-keyed, so the x64-linux baseline/v2/v3/v4 split the `package`
+  # matrix carries collapses to ONE Linux-x64 bundle row here). Runner labels are the EXACT set
+  # proven in build-matrix.yml + gui.yml so the GUI and CLI/server matrices cannot drift.
+  #
+  # win-arm64 is DELIBERATELY ABSENT: build-matrix.yml produces the aarch64-pc-windows-msvc
+  # CLI/server binaries by CROSS-LINKING from the x64 Windows runner, but the Tauri bundler runs
+  # the host-arch installer toolchain (NSIS/WiX) and cannot reliably cross-bundle an arm64
+  # Windows installer from an x64 host — so there is no win-arm64 GUI installer this pass (an
+  # honest gap, not a silent drop). Mobile (Android .aab / iOS .ipa) is the separate net-new
+  # bead sq-v286.9 — no rows here.
+  #
+  # ====================================================================================
+  # [OPUS-4.8] sq-gl3cf: STABLE, PREDICTABLE per-OS asset names — the /download page can
+  # hardcode these. The `Stage GUI bundles` step below maps each matrix `label` to ONE canonical
+  # `{arch}` token and emits `sparq-gui_<version>_<arch>.<ext>` per produced bundle EXT (NOT the
+  # old nested `sparq-gui-<ver>-<label>-<tauri's own sparq_<ver>_<arch>.<ext>>` double-version).
+  # `<version>` is the resolved release tag (needs.setup.outputs.version: the `v*` tag on a tag
+  # push, the dispatch `inputs.tag` on dispatch). EXACT emitted names per row:
+  #
+  #   label=arm64-darwin (macOS arm64):  sparq-gui_<version>_aarch64.dmg
+  #   label=x64-darwin   (macOS x64):    sparq-gui_<version>_x86_64.dmg
+  #   label=win-x64      (Windows x64):  sparq-gui_<version>_x64.msi
+  #                                      sparq-gui_<version>_x64-setup.exe   (NSIS)
+  #   label=x64-linux    (Linux x64):    sparq-gui_<version>_amd64.AppImage
+  #                                      sparq-gui_<version>_amd64.deb
+  #   label=arm64-linux  (Linux arm64):  sparq-gui_<version>_arm64.AppImage
+  #                                      sparq-gui_<version>_arm64.deb
+  #
+  # A label maps to ONE arch token, but Windows/Linux emit TWO files (different ext) per label;
+  # both carry the same `<arch>` token, differing only by ext (and `-setup.exe` disambiguates the
+  # NSIS installer from any future plain `.exe`). The per-EXT glob + `found==0 -> fail` guard are
+  # preserved. The SLSA attest `subject-path: gui-bundles/*` and the `pkg-gui-<label>` upload name
+  # are UNCHANGED.
+  # ====================================================================================
+  gui-bundle:
+    name: "GUI desktop bundle ${{ matrix.label }} (unsigned)"
+    # [OPUS-4.8] sq-gl3cf: the resolved version is the asset-name token for every bundle.
+    needs: setup
+    runs-on: ${{ matrix.os }}
+    # [OPUS-4.8] sq-gl3cf — a documented-untested platform's bundler MUST NOT fail the whole
+    # release. `continue-on-error` is per-row (matrix.soft): Linux rows are BLOCKING (the full
+    # frontend chain is reproduced locally + the GUI crate is proven green in gui.yml), while
+    # macOS/Windows rows are SOFT this pass (their native .dmg/.msi/NSIS bundler steps are
+    # documented-untested — see the job header). A soft row that fails reports `success` to the
+    # `release` job's `needs`, and its `pkg-gui-<label>` upload is simply skipped — so the release
+    # still ships every working bundle + its SLSA attestation, and `release`'s `pattern: pkg-*`
+    # download tolerates the missing artifact. Any deferred platform is tracked HONESTLY in
+    # sq-gl3cf (documented-WIP, NOT hidden). Flip a row's `soft` to `false` once it is proven green.
+    continue-on-error: ${{ matrix.soft }}
+    # SLSA build-provenance attestation over the produced bundles needs the OIDC token +
+    # attestation write; read-only on the repo otherwise (uploads a workflow artifact, the
+    # `release` job creates the Release).
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    timeout-minutes: 60
+    strategy:
+      # One platform's bundler failure must not cancel the others — each desktop installer is
+      # independent. A BLOCKING row (soft:false) that fails fails the `release` job via `needs`
+      # (correct: a release should not silently ship missing a proven platform's installer); a
+      # SOFT row (soft:true) is non-fatal (continue-on-error above).
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: fully reproduced locally + proven green in gui.yml -> BLOCKING (soft:false).
+          - { os: ubuntu-latest, label: x64-linux, soft: false }
+          - { os: ubuntu-24.04-arm, label: arm64-linux, soft: false }
+          # macOS/Windows: native bundlers documented-untested this pass -> SOFT (non-fatal).
+          - { os: macos-14, label: arm64-darwin, soft: true }
+          - { os: macos-15-intel, label: x64-darwin, soft: true }
+          - { os: windows-latest, label: win-x64, soft: true }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The Tauri webview + bundler system libraries are LINUX-ONLY (macOS ships WKWebView,
+      # Windows ships WebView2). This is the SAME apt set gui.yml installs to build the GUI
+      # crate; the bundler additionally needs the deb/appimage tooling, which these packages
+      # (+ patchelf, used by the AppImage bundler) provide.
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      # [OPUS-4.8] sq-gl3cf — the GUI frontend (gui/app) is a DISTINCT operational Next.js app
+      # (repointed off the marketing site by PR #1003 / sq-ixc3.8). Its `prebuild` hook
+      # (gui/app/scripts/sync-wasm.mjs) needs the lean shacl,jsonld wasm bundle present in js/wasm/.
+      # Mirror gui.yml's proven-green `gui-app`/`tauri-e2e` jobs: build the wasm bundle FIRST.
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build wasm bundle (shacl,jsonld)
+        working-directory: js
+        run: npm run build:wasm
+
+      # [OPUS-4.8] sq-gl3cf — the GUI frontend (gui/app) is a repo-ROOT npm-workspace member
+      # (root package.json `workspaces` lists `gui/app`, alongside `packages/*`, `site`, `js`).
+      # A workspace-aware repo-root `npm install` installs gui/app's deps (next, cross-env, …)
+      # into the hoisted root node_modules — so the explicit `Build GUI frontend` step below
+      # resolves `next`/`cross-env` from root .bin. This is EXACTLY the install the proven-green
+      # gui.yml `gui-app` ("Install workspace dependencies") + `tauri-e2e` jobs use.
+      # (`npm install`, not `npm ci`, matches gui.yml — tolerant of a not-yet-regenerated lock.)
+      # The Windows `npm install` ENOENT/EPERM (run 27890097353) was the @jeswr/sparq workspace
+      # member's `prepare` hook (js/guardrails/prepare-build.mjs) calling `execFileSync('npm',…)`
+      # WITHOUT `shell:true`, so `npm.cmd` did not resolve on Windows (`spawnSync npm ENOENT`),
+      # whose crash then triggered npm's rollback `EPERM rmdir node_modules/next` cleanup warnings.
+      # That root cause is fixed in prepare-build.mjs (shell:true) in the same change as this.
+      - name: Install workspace dependencies (incl. gui/app)
+        run: npm install
+
+      # [OPUS-4.8] sq-gl3cf — BUILD THE FRONTEND EXPLICITLY here, instead of relying on Tauri's
+      # `beforeBuildCommand` (`cd ../app && npm run build:tauri` in gui/src-tauri/tauri.conf.json).
+      # Run 27890097353 failed EVERY Linux + macOS row at `sh: cd: can't cd to ../app`: Tauri runs
+      # `beforeBuildCommand` from its inferred FRONTEND dir, NOT from gui/src-tauri (tauri-cli
+      # helpers::run_hook -> cwd = frontend_dir()), so the config's `cd ../app` (which assumes
+      # CWD=gui/src-tauri) resolves against the wrong base and ENOENTs. This is the EXACT pattern
+      # gui.yml's `tauri-e2e` job uses (`(cd gui/app && npm run build:tauri)`) — proven green.
+      # `cross-env` (a gui/app devDependency) keeps `build:tauri`'s `NEXT_PUBLIC_BASE_PATH=`
+      # shell-portable across runners. Produces gui/app/out — the `frontendDist: "../app/out"`
+      # the Tauri shell embeds. REPRODUCED locally on this work box (x64-linux): wasm build →
+      # workspace install → `gui/app` `build:tauri` produces gui/app/out/index.html.
+      - name: Build GUI frontend (static export -> gui/app/out)
+        working-directory: gui/app
+        run: npm run build:tauri
+
+      # tauri-cli (the `cargo tauri build` driver). Installed via `cargo install … --locked`,
+      # the SAME pattern gui.yml uses for wasm-pack / tauri-driver (a cargo install is not a
+      # pinned GitHub Action, so no SHA pin applies); `^2` tracks the Tauri 2 line the crate
+      # depends on (gui/src-tauri/Cargo.toml `tauri = { version = "2" }`).
+      - name: Install tauri-cli (v2)
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+
+      # [OPUS-4.8] sq-gl3cf — write a CI-ONLY config overlay that EMPTIES `beforeBuildCommand`.
+      # tauri-cli's run_hook treats an empty `beforeBuildCommand` as "skip" (HookCommand::Script(s)
+      # if s.is_empty() => no-op; the official config docs list `"beforeBuildCommand": ""` as a
+      # valid value). The frontend is already built by the explicit step above, so `cargo tauri
+      # build` just bundles the existing `frontendDist` (gui/app/out) — it never runs the CWD-fragile
+      # `cd ../app` hook that failed run 27890097353. We do NOT edit tauri.conf.json (the dev path
+      # still uses its `beforeDevCommand`); this overlay is release-CI scoped. Written from a
+      # `shell: bash` step so it is byte-identical on Windows runners (Git Bash) too.
+      - name: Write CI tauri config overlay (skip beforeBuildCommand; frontend prebuilt)
+        shell: bash
+        working-directory: gui/src-tauri
+        run: |
+          set -euo pipefail
+          printf '%s\n' '{ "build": { "beforeBuildCommand": "" } }' > tauri.ci.conf.json
+          echo "overlay written:"; cat tauri.ci.conf.json
+
+      # Build the UNSIGNED desktop bundle. `cargo tauri build` runs from gui/src-tauri, merges the
+      # CI overlay (`-c tauri.ci.conf.json`) so the `beforeBuildCommand` hook is skipped (frontend
+      # already exported to gui/app/out above), compiles the native Rust shell embedding gui/app/out
+      # (`frontendDist`), and bundles installers for the host platform into
+      # gui/src-tauri/target/release/bundle/<format>/. `--ci` disables interactive prompts;
+      # no signing env vars are set, so the bundles are produced UNSIGNED (see the job header
+      # — signing is needs:user sq-v286.8). `--verbose` aids first-CI-run diagnosis.
+      #
+      # PROVEN vs DOCUMENTED-UNTESTED (honest status — this workflow is tag-triggered, so it
+      # does NOT run on this PR; validate on the first real `v*` tag):
+      #   * The frontend chain (wasm bundle → root `npm install` → gui/app `build:tauri` →
+      #     gui/app/out) is REPRODUCED locally on this work box (x64-linux): it produces
+      #     gui/app/out/index.html with ROOT-RELATIVE assets, the path `frontendDist` reads.
+      #   * The empty-`beforeBuildCommand` skip is confirmed from tauri-cli source (run_hook).
+      #   * Linux rows (ubuntu-latest, ubuntu-24.04-arm): the GUI crate build + webkit deps are
+      #     already proven green in gui.yml; the .deb/.AppImage bundle step is the new surface.
+      #   * macOS rows: WKWebView ships with the OS; the .dmg/.app bundle is documented-untested.
+      #   * Windows row: WebView2 ships with the OS; the prepare-hook ENOENT root cause is fixed,
+      #     and the .msi/NSIS .exe bundle step itself is still documented-untested. If a platform
+      #     still fails the bundler on first cut, its row is marked non-fatal (see `continue-on-error`
+      #     on the matrix) so the release ships the working bundles + attestation; sq-gl3cf tracks it.
+      - name: Build Tauri desktop bundle (unsigned)
+        working-directory: gui/src-tauri
+        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json
+
+      # Collect every produced installer into a flat staging dir under a STABLE, PREDICTABLE
+      # per-OS name (the scheme the /download page hardcodes — see the documented names in the
+      # job header). Tauri names bundles `<productName>_<version>_<tauri-arch>.<ext>` (e.g.
+      # `sparq_0.1.0_amd64.deb`), which nests Tauri's OWN version + arch token; we DISCARD that
+      # raw basename and re-emit `sparq-gui_<version>_<arch>.<ext>` where <version> is the
+      # resolved release tag and <arch> is the matrix label mapped to a single canonical token.
+      # The EXT selects the suffix; the label selects the arch token. Windows/Linux emit two
+      # files (different ext) per label, both with the same arch token (NSIS gets `-setup.exe`).
+      # `if-no-files-found: error` on the upload + this `set -e` glob guard mean a bundler that
+      # silently produced nothing FAILS the job rather than shipping an empty release row.
+      # [OPUS-4.8] sq-gl3cf: VERSION is the resolved release tag (threaded via env so the SAME
+      # bash works on both the tag-push and workflow_dispatch paths).
+      - name: Stage GUI bundles
+        shell: bash
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="gui/src-tauri/target/release/bundle"
+          OUT="gui-bundles"
+          mkdir -p "$OUT"
+          shopt -s nullglob globstar
+
+          # matrix label -> ONE canonical arch token for the emitted asset name.
+          case "${{ matrix.label }}" in
+            arm64-darwin) ARCH="aarch64" ;;
+            x64-darwin)   ARCH="x86_64" ;;
+            win-x64)      ARCH="x64" ;;
+            x64-linux)    ARCH="amd64" ;;
+            arm64-linux)  ARCH="arm64" ;;
+            *)
+              echo "ERROR: no arch mapping for label '${{ matrix.label }}'" >&2
+              exit 1
+              ;;
+          esac
+
+          found=0
+          # Glob each bundle EXT directory; the directory (dmg/deb/appimage/rpm/msi/nsis) tells us
+          # the ext + suffix. We re-name to sparq-gui_<version>_<arch>.<suffix> regardless of
+          # Tauri's own basename. NSIS .exe gets a `-setup.exe` suffix to disambiguate it from any
+          # future plain .exe; everything else uses its native extension.
+          #   dir       suffix
+          #   dmg       <arch>.dmg
+          #   deb       <arch>.deb
+          #   appimage  <arch>.AppImage
+          #   rpm       <arch>.rpm            (not produced by default; kept for resilience)
+          #   msi       <arch>.msi
+          #   nsis      <arch>-setup.exe
+          for f in "$BUNDLE_DIR"/dmg/*.dmg \
+                   "$BUNDLE_DIR"/deb/*.deb \
+                   "$BUNDLE_DIR"/appimage/*.AppImage \
+                   "$BUNDLE_DIR"/rpm/*.rpm \
+                   "$BUNDLE_DIR"/msi/*.msi \
+                   "$BUNDLE_DIR"/nsis/*.exe; do
+            case "$f" in
+              *.dmg)      suffix="${ARCH}.dmg" ;;
+              *.deb)      suffix="${ARCH}.deb" ;;
+              *.AppImage) suffix="${ARCH}.AppImage" ;;
+              *.rpm)      suffix="${ARCH}.rpm" ;;
+              *.msi)      suffix="${ARCH}.msi" ;;
+              *.exe)      suffix="${ARCH}-setup.exe" ;;  # NSIS installer
+              *)
+                echo "ERROR: unexpected bundle ext for '$f'" >&2
+                exit 1
+                ;;
+            esac
+            cp "$f" "$OUT/sparq-gui_${VERSION}_${suffix}"
+            found=$((found + 1))
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "ERROR: tauri build produced no installer bundles under $BUNDLE_DIR" >&2
+            find "$BUNDLE_DIR" -maxdepth 2 -type f 2>/dev/null || true
+            exit 1
+          fi
+          echo "staged $found GUI bundle(s) for ${{ matrix.label }} (arch=$ARCH, version=$VERSION):"
+          ls -1 "$OUT"
+
+      # SLSA build-provenance over EVERY produced bundle (the subject-path) — this is the
+      # "rides for free" claim made literal: the bundle digests are bound to this workflow run
+      # and verifiable with `gh attestation verify <bundle> --repo <repo>`. (Provenance != OS
+      # code-signing; see the job header.)
+      - name: Attest build provenance (GUI bundles)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: gui-bundles/*
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pkg-gui-${{ matrix.label }}
+          path: gui-bundles/*
           if-no-files-found: error
 
   # ---- 2. checksums + GitHub Release ----
   release:
     name: create GitHub Release
-    needs: package
+    # [OPUS-4.8] sq-gl3cf: `setup` added so the Release attaches to the resolved tag (tag_name
+    # below) on BOTH triggers — on dispatch, action-gh-release's default tag_name is `github.ref`,
+    # which is the BRANCH, so we must override it explicitly.
+    needs: [setup, package, sbom, gui-bundle]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release + upload assets — the only write this pipeline needs
@@ -121,18 +469,38 @@ jobs:
           pattern: pkg-*
           path: assets
           merge-multiple: true
+      # [OPUS-4.8] sq-toze.3 (GX-2): pull the SBOM + VEX in alongside the archives so they
+      # are covered by SHA256SUMS and attached to the release.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom-vex
+          path: assets
       - name: Generate SHA256SUMS
         run: cd assets && sha256sum -- * > SHA256SUMS
       - name: Create release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
+          # [OPUS-4.8] sq-gl3cf: attach to the RESOLVED tag. The action defaults tag_name to
+          # `github.ref`, which on a workflow_dispatch is the branch (wrong) — pin it to the
+          # version the rest of the pipeline named assets with so dispatch + tag agree.
+          tag_name: ${{ needs.setup.outputs.version }}
+          # [OPUS-4.8] sq-gl3cf: dispatch builds are developer/test releases — mark them
+          # pre-release by default (the dispatch `prerelease` input; true unless overridden). A
+          # tag push has no such input, so `inputs.prerelease` is empty -> not a pre-release.
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
           files: assets/*
           generate_release_notes: true
-          # CHANGELOG.md is the curated source of truth; point readers at it.
+          # CHANGELOG.md is the curated source of truth; point readers at it. Body links use the
+          # resolved version (needs.setup.outputs.version), not github.ref_name, so dispatch
+          # builds (where github.ref_name is the branch) link to the right tag.
           body: |
-            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md) for the curated changelog.
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ needs.setup.outputs.version }}/CHANGELOG.md) for the curated changelog.
 
-            `SHA256SUMS` covers every attached archive: `shasum -a 256 -c SHA256SUMS`.
+            `SHA256SUMS` covers every attached archive plus the CycloneDX SBOM + VEX: `shasum -a 256 -c SHA256SUMS`.
+
+            **Desktop GUI bundles (UNSIGNED).** This release also includes cross-platform [sparq GUI](https://github.com/${{ github.repository }}/tree/${{ needs.setup.outputs.version }}/gui) desktop installers (`sparq-gui_${{ needs.setup.outputs.version }}_*`): macOS `.dmg`, Windows `.msi` + NSIS `.exe`, and Linux `.deb` + `.AppImage`. **These bundles are NOT code-signed or notarized.** On macOS, Gatekeeper will quarantine them; on Windows, SmartScreen will warn — see [/download](https://github.com/${{ github.repository }}/tree/${{ needs.setup.outputs.version }}/gui) for the install bypass instructions (Gatekeeper/SmartScreen). OS-level code-signing (Apple Developer ID notarization + Windows Authenticode) requires maintainer-held credentials and is tracked separately — until then, treat the GUI bundles as developer/test installs. The SLSA attestation below proves *who built* each bundle (build provenance); it is not a substitute for OS code-signing. (No `win-arm64` GUI installer yet — the Tauri bundler cannot cross-bundle it from the x64 Windows runner; no mobile app bundles yet.)
+
+            **Supply chain:** each release carries a CycloneDX SBOM per binary (`*-${{ needs.setup.outputs.version }}.sbom.cdx.json`, including the GUI shell `sparq-gui-${{ needs.setup.outputs.version }}.sbom.cdx.json`), a CycloneDX SBOM for the published npm/WASM client (`sparq-js-${{ needs.setup.outputs.version }}.sbom.cdx.json` runtime tree + `sparq-js-dev-${{ needs.setup.outputs.version }}.sbom.cdx.json` full build tree), and a VEX (`sparq-${{ needs.setup.outputs.version }}.vex.cdx.json`) stating the exploitability of every advisory the dependency policy ignores. All artifacts (archives, GUI bundles, SBOMs, VEX) are SLSA build-provenance attested — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.
           fail_on_unmatched_files: true
 
   # ---- 3. server container -> ghcr.io ----
@@ -150,8 +518,12 @@ jobs:
       # pushed image; the OIDC token is what signs the provenance attestation.
       id-token: write
       attestations: write
+      # [OPUS-4.8] sq-p9xq: upload the released image's Trivy SARIF to the
+      # code-scanning dashboard (Security tab) so a vuln in the published artifact
+      # is visible there, not just in the run log.
+      security-events: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
       - name: Log in to ghcr.io
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -183,6 +555,49 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Smoke test the image (docker run + /health + ASK query)
         run: scripts/docker-smoke.sh sparq-server:smoke 3030
+      # [OPUS-4.8] sq-p9xq: SCAN BEFORE PUSH. cargo-deny gates the Rust dependency tree, but
+      # the distroless base layer (glibc / libgcc / CA certs) is outside that scope — a CVE
+      # disclosed there would ship in the released image unscanned. Trivy scans the exact
+      # `sparq-server:smoke` artifact built above (same bytes that get pushed) for OS-package
+      # AND library vulns, and FAILS the release on a FIXABLE HIGH/CRITICAL so a vulnerable
+      # image never reaches ghcr.io. `container-scan.yml` runs the same scan on PRs/main/weekly
+      # against the Dockerfile; this is the release-gate copy that scans the published bytes.
+      #   exit-code: 1   => fail the step (and the release) on a non-ignored match.
+      #   ignore-unfixed => only FIXABLE vulns gate; a CVE with no upstream fix yet cannot
+      #                     block a release (it is still surfaced in the SARIF pass below).
+      #   trivyignores   => the shared .trivyignore allowlist for triaged/accepted CVEs.
+      - name: Trivy scan released image (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: sparq-server:smoke
+          scan-type: image
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          trivyignores: .trivyignore
+      # Second pass: SARIF for the code-scanning dashboard. exit-code 0 (the gating decision
+      # is the table pass above) and includes unfixed findings so the Security tab shows the
+      # full picture of the released image for triage.
+      - name: Trivy scan released image (SARIF for code-scanning)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: sparq-server:smoke
+          scan-type: image
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          trivyignores: .trivyignore
+      - name: Upload Trivy SARIF to code-scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-release-image
       - name: Build and push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:

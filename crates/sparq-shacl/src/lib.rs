@@ -1,52 +1,41 @@
-//! sparq-shacl: opt-in SHACL Core + SHACL-SPARQL validation over
-//! [`sparq_core::Graph`]s.
-//!
-//! Parse a shapes graph into a shapes model, evaluate every SHACL Core
-//! constraint component against a data graph by direct index-backed scans,
-//! evaluate `sh:sparql` constraints (SHACL §5.2) and SPARQL-based constraint
-//! COMPONENTS (`sh:ConstraintComponent`, SHACL §6) by routing their
-//! `sh:select`/`sh:ask` through `sparq-engine` (with `$this`/`$value`/`$PATH`
-//! and `$paramName` pre-binding), and produce a [`ValidationReport`] (with
-//! Turtle and plain-text renderings of the SHACL report vocabulary).
-//!
-//! This crate follows the `sparq-reason` isolation pattern: it is NOT a
-//! dependency of any other sparq crate — the core engine and the wasm bundle
-//! carry zero SHACL code unless a consumer opts in by depending on it.
-//! (`sparq-engine`, pulled in for `sh:sparql`, is likewise native-only and does
-//! not depend on this crate, so there is no cycle and the wasm bundle is untouched.)
-//!
-//! ```
-//! use sparq_core::Graph;
-//!
-//! let data = Graph::load_str(r#"
-//!     @prefix ex: <http://example.org/> .
-//!     ex:alice a ex:Person ; ex:age "thirty" .
-//! "#, "turtle").unwrap();
-//! let shapes = Graph::load_str(r#"
-//!     @prefix sh: <http://www.w3.org/ns/shacl#> .
-//!     @prefix ex: <http://example.org/> .
-//!     @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-//!     ex:PersonShape a sh:NodeShape ;
-//!       sh:targetClass ex:Person ;
-//!       sh:property [ sh:path ex:age ; sh:datatype xsd:integer ] .
-//! "#, "turtle").unwrap();
-//!
-//! let report = sparq_shacl::validate(&data, &shapes);
-//! assert!(!report.conforms);
-//! assert_eq!(report.results.len(), 1);
-//! ```
+// [OPUS-4.8] sq-jxl0: single-source the crate overview from README.md so crates.io
+// (package.readme) and the docs.rs front page render identical content. The README's
+// `## Usage` rust fences are compiled as doctests (hidden `#`-scaffolding inside them).
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod eval;
 pub mod model;
 pub mod path;
 mod report;
+// [OPUS-4.8] (sq-d1dw) SHACL-AF rules (`sh:rule`) — OPT-IN behind the `shacl-af`
+// cargo feature so the base validation path carries zero rule code when off.
+#[cfg(feature = "shacl-af")]
+pub mod rules;
+// [OPUS-4.8] (sq-v0b8, #796) SHACL Compact Syntax (SCS) PARSER (text → shapes
+// triples) — OPT-IN behind the `scs` cargo feature so the base validation path
+// (and the default + wasm bundles) carry zero parser code when off.
+#[cfg(feature = "scs")]
+pub mod scs;
 mod sparql;
 pub mod view;
 
 pub use model::{Component, Shape, ShapesModel, Target};
 pub use path::Path;
-pub use report::{ValidationReport, ValidationResult};
+// [OPUS-4.8] (sq-lz99x) `ShapeDiagnostic` surfaces a constraint the validator
+// SKIPPED because it could not be evaluated (e.g. an uncompilable `sh:pattern`).
+pub use report::{ShapeDiagnostic, ValidationReport, ValidationResult};
+
+// [OPUS-4.8] (sq-v0b8) SHACL Compact Syntax parser public surface (feature `scs`).
+#[cfg(feature = "scs")]
+pub use scs::{parse as parse_scs, parse_to_graph as parse_scs_to_graph, ScsError, DEFAULT_BASE};
+
+// [OPUS-4.8] SHACL-AF rules + node-expression public surface (feature `shacl-af`).
+#[cfg(feature = "shacl-af")]
+pub use rules::{
+    apply_rules, apply_rules_with_model, conforms, eval_node_expression, expand, ConformanceCheck,
+    Inference,
+};
 
 use oxrdf::Triple;
 use sparq_core::Graph;
@@ -62,7 +51,8 @@ pub fn validate(data: &Graph, shapes: &Graph) -> ValidationReport {
 /// [`validate`] against an already-parsed shapes model (amortises shape
 /// parsing across many data graphs).
 pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationReport {
-    ValidationReport::new(eval::validate_graph(data, model))
+    let (results, diagnostics) = eval::validate_graph(data, model);
+    ValidationReport::with_diagnostics(results, diagnostics)
 }
 
 /// Builds a queryable [`Graph`] from already-parsed triples. The seam for
@@ -452,5 +442,155 @@ mod tests {
         .unwrap();
         let r = validate(&data, &shapes);
         assert!(r.conforms, "{}", r.to_text());
+    }
+}
+
+// [OPUS-4.8] (sq-mk9n / sq-3w6n, `shacl-af`) The two SHACL-AF node-expression
+// constraints: `sh:expression` (`sh:ExpressionConstraintComponent`) — a value
+// node violates when the node expression does not evaluate to `{ true }` — and
+// `sh:nodeByExpression` (`sh:NodeByExpressionConstraintComponent`) — a value node
+// violates when it does not conform to a node shape the expression computes.
+#[cfg(feature = "shacl-af")]
+#[cfg(test)]
+mod expression_tests {
+    use super::*;
+
+    fn g(ttl: &str) -> Graph {
+        let prelude = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+            @prefix shnex: <http://www.w3.org/ns/shacl-node-expr#> .\n\
+            @prefix ex: <http://example.org/> .\n\
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n";
+        Graph::load_str(&format!("{prelude}{ttl}"), "turtle").unwrap()
+    }
+
+    #[test]
+    fn expression_constant_false_violates() {
+        // The W3C `expression-001` shape: `sh:expression false` at a node shape ⇒
+        // every targeted node is a violation (false != true).
+        let data = g("ex:i a ex:C .");
+        let shapes = g("ex:C a rdfs:Class, sh:NodeShape ; sh:expression false .");
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "{}", r.to_text());
+        assert!(r.results.iter().any(|res| res
+            .source_component
+            .ends_with("ExpressionConstraintComponent")
+            && res.value.as_ref().map(|v| v.to_string()).as_deref()
+                == Some("<http://example.org/i>")));
+    }
+
+    #[test]
+    fn expression_true_conforms() {
+        // A node expression that DOES evaluate to { true } conforms — here a
+        // `shnex:exists` over an existing path value.
+        let data = g("ex:i a ex:C ; ex:p ex:v .");
+        let shapes = g(
+            "ex:C a rdfs:Class, sh:NodeShape ; \
+             sh:expression [ shnex:exists [ sh:path ex:p ] ] .",
+        );
+        let r = validate(&data, &shapes);
+        assert!(r.conforms, "exists ex:p => true => conforms: {}", r.to_text());
+    }
+
+    #[test]
+    fn expression_on_property_shape_per_value() {
+        // `sh:expression` on a property shape applies per path value node; here the
+        // value (5) satisfies a matchAll-over-minInclusive-3 ⇒ exists ⇒ true.
+        let data = g("ex:i a ex:C ; ex:age 5 .");
+        let shapes = g(
+            "ex:C a rdfs:Class, sh:NodeShape ; \
+             sh:property [ sh:path ex:age ; \
+               sh:expression [ shnex:exists [ shnex:nodes [ shnex:var \"focusNode\" ] ; \
+                 shnex:matchAll [ sh:minInclusive 3 ] ] ] ] .",
+        );
+        let r = validate(&data, &shapes);
+        assert!(
+            r.conforms,
+            "age 5 >= 3 => matchAll true => exists true: {}",
+            r.to_text()
+        );
+    }
+
+    // ---- [OPUS-4.8] (sq-3w6n) sh:nodeByExpression ----
+
+    #[test]
+    fn node_by_expression_constant_iri_violates_nonconforming_value() {
+        // The W3C `nodeByExpression-001` shape: a property shape whose value nodes
+        // must conform to the node shape an expression computes. Here the expression
+        // is the constant IRI `ex:AssignedToShape` (per SHACL-AF, an IRI expression
+        // evaluating to { ex:AssignedToShape } — the `sh:node` special case). The
+        // assignee lacks the required `ex:email`, so it does NOT conform => one
+        // violation with the value node and component IRI.
+        let data = g("ex:issue a ex:Issue ; ex:assignedTo ex:anon . ex:anon a ex:Person .");
+        let shapes = g(
+            "ex:AssignedToShape a sh:NodeShape ; \
+               sh:property [ sh:path ex:email ; sh:minCount 1 ] . \
+             ex:Issue a rdfs:Class, sh:NodeShape ; \
+               sh:property [ sh:path ex:assignedTo ; sh:nodeByExpression ex:AssignedToShape ] .",
+        );
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "{}", r.to_text());
+        assert!(
+            r.results.iter().any(|res| res
+                .source_component
+                .ends_with("NodeByExpressionConstraintComponent")
+                && res.value.as_ref().map(|v| v.to_string()).as_deref()
+                    == Some("<http://example.org/anon>")),
+            "expected a NodeByExpression violation for ex:anon: {}",
+            r.to_text()
+        );
+    }
+
+    #[test]
+    fn node_by_expression_conforming_value_passes() {
+        // The same constraint, but the assignee carries the required email, so it
+        // conforms to the computed node shape and there is no violation.
+        let data = g(
+            "ex:issue a ex:Issue ; ex:assignedTo ex:jane . \
+             ex:jane a ex:Person ; ex:email \"jane@ex.org\" .",
+        );
+        let shapes = g(
+            "ex:AssignedToShape a sh:NodeShape ; \
+               sh:property [ sh:path ex:email ; sh:minCount 1 ] . \
+             ex:Issue a rdfs:Class, sh:NodeShape ; \
+               sh:property [ sh:path ex:assignedTo ; sh:nodeByExpression ex:AssignedToShape ] .",
+        );
+        let r = validate(&data, &shapes);
+        assert!(
+            r.conforms,
+            "ex:jane has an email => conforms: {}",
+            r.to_text()
+        );
+    }
+
+    #[test]
+    fn node_by_expression_path_computed_shape() {
+        // A dynamically-computed shape: the node expression is a path-values
+        // expression that locates the shape at `ex:hasShape` from the value node.
+        // ex:obs/ex:hasShape => ex:RangeShape (minInclusive 0); ex:obs's measure is
+        // -1, so it must NOT conform => one violation on the value node.
+        let data = g(
+            "ex:obs a ex:Observation ; ex:value -1 ; ex:hasShape ex:RangeShape . \
+             ex:s a ex:DataShape ; ex:item ex:obs .",
+        );
+        let shapes = g(
+            "ex:RangeShape a sh:NodeShape ; \
+               sh:property [ sh:path ex:value ; sh:minInclusive 0 ] . \
+             ex:DataShape a rdfs:Class, sh:NodeShape ; \
+               sh:property [ sh:path ex:item ; \
+                 sh:nodeByExpression [ sh:path ex:hasShape ] ] .",
+        );
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "value -1 < 0 must violate: {}", r.to_text());
+        assert!(
+            r.results.iter().any(|res| res
+                .source_component
+                .ends_with("NodeByExpressionConstraintComponent")
+                && res.value.as_ref().map(|v| v.to_string()).as_deref()
+                    == Some("<http://example.org/obs>")),
+            "expected a NodeByExpression violation for ex:obs: {}",
+            r.to_text()
+        );
     }
 }

@@ -23,7 +23,7 @@
 //!      groups of equal terms yield the distinct term with its MIN seq
 //!      (= first occurrence) plus a (min_seq, seq) pair per occurrence.
 //!   3. assign    — per shard in order: external sort of the distinct terms by
-//!      min_seq; final id = base[shard] + rank (the sharded path's
+//!      min_seq; final id = baseshard + rank (the sharded path's
 //!      assignment). The dictionary files (`dict-terms/offs/hash/hid/
 //!      meta.bin`) plus `numerics.bin`/`temporals.bin` are STREAM-written
 //!      in final-id order — never resident.
@@ -206,7 +206,11 @@ fn serialize_termparts(tp: &TermParts, out: &mut Vec<u8>) {
             out.extend_from_slice(b.as_bytes());
         }
         TermParts::Triple(_) => {
-            panic!("RDF-star triple terms are not supported by the spilled-dict bulk interner; use the serial loader")
+            // [OPUS-4.8] (sq-jvbr) Triple terms are NOT routed/spilled as leaf records — their
+            // content is their components' ids (resolvable only after the leaf dedup), so they
+            // take the dedicated in-RAM triple-term arena (`SpillInterner::triples`) and are
+            // finalised in `finalize_triple_terms`. This leaf serializer must never see one.
+            panic!("RDF 1.2 triple terms take the triple-term arena, not the leaf serializer (sq-jvbr)")
         }
     }
 }
@@ -650,11 +654,25 @@ pub(crate) struct SpillInterner {
     staged_path: PathBuf,
     staged_count: u64,
     cache_budget_per_shard: usize,
+    /// [OPUS-4.8] (sq-jvbr) RDF 1.2 triple-term occurrences, in first-occurrence (batch,
+    /// partial, arena) order. Each entry is the triple's three components encoded in the
+    /// SAME staged-id namespace as a triple (inline / leaf `(shard+1)<<32|seq` / nested
+    /// triple-term `TRIPLE_TT_BASE|tt_index`). Triple terms are rare reification metadata,
+    /// so this arena stays in RAM (the sharded path's dedicated triple shard is in-RAM too)
+    /// rather than spilling — bounded by the triple-term count, not the leaf-term count.
+    /// Empty on the common triple-term-free hot path (no allocation, no behaviour change).
+    triples: Vec<[u64; 3]>,
 }
 
-/// Staged-triple encoding: values < 2^32 are pass-through inline ids; otherwise
-/// `(shard+1) << 32 | seq`.
+/// Staged-id encoding: values `< STAGED_DICT_BASE` are pass-through inline ids; a leaf is
+/// `(shard+1) * STAGED_DICT_BASE | seq`; a triple-term reference is `TRIPLE_TT_BASE | tt_index`
+/// (sq-jvbr). `STAGED_DICT_BASE` is `2^32` so a leaf `seq` (a `u32`) occupies the low 32 bits.
 const STAGED_DICT_BASE: u64 = 1 << 32;
+
+/// [OPUS-4.8] (sq-jvbr) Triple-term staged-reference tag, well above any leaf shard band
+/// (`(shard+1) * 2^32`): `default_shards()` is tiny, so this `2^48` base never collides with
+/// a leaf reference. The low bits hold the `tt_index` into `SpillInterner::triples`.
+const TRIPLE_TT_BASE: u64 = 1 << 48;
 
 impl SpillInterner {
     pub(crate) fn new(n: usize, tmp: &Path, cfg: &SpillConfig) -> io::Result<SpillInterner> {
@@ -680,6 +698,7 @@ impl SpillInterner {
             // Ingest phase: the dedup caches get half the budget (the other half is
             // reserved so the consolidation's sort buffers never exceed the same bound).
             cache_budget_per_shard: (cfg.mem_budget / 2 / n).max(1 << 12),
+            triples: Vec::new(),
         })
     }
 
@@ -702,6 +721,12 @@ impl SpillInterner {
                 let mut scratch: Vec<u8> = Vec::new();
                 for i in 1..=pd.len() as Id {
                     let tp = pd.term_parts(i);
+                    // [OPUS-4.8] (sq-jvbr) Triple terms are NOT hash-routed — they take the
+                    // serial triple-term arena pass below (same split as the sharded path's
+                    // `intern_partials`: leaf pass parallel, triple-term pass serial).
+                    if matches!(tp, TermParts::Triple(_)) {
+                        continue;
+                    }
                     let s = (dict::hash_termparts(&tp) % n as u64) as usize;
                     serialize_termparts(&tp, &mut scratch);
                     b[s].push((i, scratch.as_slice().into()));
@@ -717,7 +742,12 @@ impl SpillInterner {
         let mut remaps: Vec<Vec<u64>> = partials.iter().map(|(pd, _)| vec![0u64; pd.len() + 1]).collect();
         #[derive(Clone, Copy)]
         struct SlotPtr(*mut u64, usize);
+        // SAFETY: `SlotPtr` (a `*mut u64`) only ever touches its own hash-routed slot —
+        // disjoint writes, no reads until the parallel scope ends (same argument as
+        // `ShardedDict::intern_partials`). [OPUS-4.8 sq-8wbn]
         unsafe impl Send for SlotPtr {}
+        // SAFETY: shared read of a `Copy` raw-pointer handle; the writes it performs are
+        // disjoint by hash routing (see the `Send` argument). [OPUS-4.8 sq-8wbn]
         unsafe impl Sync for SlotPtr {}
         let scatter: Vec<SlotPtr> = remaps.iter_mut().map(|v| SlotPtr(v.as_mut_ptr(), v.len())).collect();
 
@@ -739,6 +769,45 @@ impl SpillInterner {
                 Ok(())
             })
             .map_err(|e| e.to_string())?;
+
+        // [OPUS-4.8] (sq-jvbr) Serial second pass — fill every partial's triple-term remap
+        // slots from the in-RAM arena. Runs AFTER the leaf scatter, so each component's staged
+        // id is already in `remaps` (children precede their triple in a partial's arena —
+        // `nt::parse_chunk` interns s/p/o before the triple). One arena entry per OCCURRENCE,
+        // in (partial, arena) order — final dedup-by-component happens in `finalize_triple_terms`,
+        // exactly as leaves dedup at consolidation, so a per-occurrence arena entry is correct.
+        // Skipped entirely (no per-term walk) unless a partial actually carries a triple term.
+        if partials.iter().any(|(pd, _)| pd.has_triple_terms()) {
+            for (pidx, (pd, _)) in partials.iter().enumerate() {
+                for i in 1..=pd.len() as Id {
+                    if let TermParts::Triple(local_ids) = pd.term_parts(i) {
+                        let rm = &remaps[pidx];
+                        let resolve = |id: Id| -> Result<u64, String> {
+                            if id >= dict::INLINE_BASE {
+                                return Ok(id as u64); // global inline-integer id
+                            }
+                            let v = *rm.get(id as usize).ok_or_else(|| {
+                                format!(
+                                    "dict-spill: malformed triple term in partial {pidx}: component local id {id} out of range (remap len {})",
+                                    rm.len()
+                                )
+                            })?;
+                            if v == 0 {
+                                return Err(format!(
+                                    "dict-spill: malformed triple term in partial {pidx}: component local id {id} references an \
+                                     unpopulated slot (not routed/interned, or violates children-first arena ordering)"
+                                ));
+                            }
+                            Ok(v)
+                        };
+                        let comps = [resolve(local_ids[0])?, resolve(local_ids[1])?, resolve(local_ids[2])?];
+                        let tt_index = self.triples.len() as u64;
+                        self.triples.push(comps);
+                        remaps[pidx][i as usize] = TRIPLE_TT_BASE | tt_index;
+                    }
+                }
+            }
+        }
 
         // Stage the batch's triples (sequential append; 24 B/triple).
         for (pidx, (_, ptriples)) in partials.iter().enumerate() {
@@ -776,6 +845,10 @@ pub(crate) struct RemapPlan {
     staged_path: PathBuf,
     staged_count: u64,
     shards: Vec<ShardRemap>,
+    /// [OPUS-4.8] (sq-jvbr) Final dict id per RDF 1.2 triple-term OCCURRENCE (`tt_finals[tt_index]`),
+    /// used by [`remap_staged`] to resolve a `TRIPLE_TT_BASE | tt_index` staged reference.
+    /// Empty on the common triple-term-free path.
+    tt_finals: Vec<u32>,
 }
 
 struct ShardRemap {
@@ -826,6 +899,9 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
         s.cache = FxHashMap::default();
         shard_files.push((s.rec_path, s.seq, s.epochs));
     }
+    // [OPUS-4.8] (sq-jvbr) Move the in-RAM triple-term arena out before dropping the interner;
+    // it is finalised AFTER the leaf consolidation (their final ids follow every leaf's).
+    let staged_triples = std::mem::take(&mut st.triples);
     drop(st);
     ensure_disk(tmp, cfg.disk_floor)?;
 
@@ -963,55 +1039,13 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
         debug_assert_eq!(local, counts[s]);
         m2f_w.flush().map_err(io_err)?;
     }
-    terms_w.flush().map_err(io_err)?;
-    offs_w.flush().map_err(io_err)?;
-    numer_w.flush().map_err(io_err)?;
-
-    // temporals.bin layout = all instants then all flags: append the spilled flags.
-    flags_w.flush().map_err(io_err)?;
-    drop(flags_w);
-    {
-        let mut fr = BufReader::new(std::fs::File::open(&flags_path).map_err(io_err)?);
-        std::io::copy(&mut fr, &mut tempi_w).map_err(io_err)?;
-        tempi_w.flush().map_err(io_err)?;
-        std::fs::remove_file(&flags_path).ok();
-    }
-
-    // dict-meta.bin (version header + prefixes + datatypes + term count) — identical bytes to
-    // `save_mmap`. [OPUS-4.8] (review 1409) The version header records the id-space partition.
-    {
-        let mut meta = BufWriter::new(std::fs::File::create(dir.join("dict-meta.bin")).map_err(io_err)?);
-        meta.write_all(&dict::DICT_META_MAGIC.to_le_bytes()).map_err(io_err)?;
-        meta.write_all(&dict::DICT_META_VERSION.to_le_bytes()).map_err(io_err)?;
-        meta.write_all(&dict::INLINE_BASE.to_le_bytes()).map_err(io_err)?;
-        meta.write_all(&(prefixes.names.len() as u32).to_le_bytes()).map_err(io_err)?;
-        for p in &prefixes.names {
-            dict::write_str(&mut meta, p).map_err(io_err)?;
-        }
-        meta.write_all(&(datatypes.names.len() as u32).to_le_bytes()).map_err(io_err)?;
-        for d in &datatypes.names {
-            dict::write_str(&mut meta, d).map_err(io_err)?;
-        }
-        meta.write_all(&total.to_le_bytes()).map_err(io_err)?;
-        meta.flush().map_err(io_err)?;
-    }
-
-    // dict-hash.bin + dict-hid.bin: externally sorted by (hash, id) — the canonical
-    // order `save_mmap` also produces.
-    {
-        let mut hw = BufWriter::new(std::fs::File::create(dir.join("dict-hash.bin")).map_err(io_err)?);
-        let mut iw = BufWriter::new(std::fs::File::create(dir.join("dict-hid.bin")).map_err(io_err)?);
-        let mut merge = hash_sorter.into_merge().map_err(io_err)?;
-        while let Some(p) = merge.next().map_err(io_err)? {
-            hw.write_all(&p.hash.to_le_bytes()).map_err(io_err)?;
-            iw.write_all(&p.id.to_le_bytes()).map_err(io_err)?;
-        }
-        hw.flush().map_err(io_err)?;
-        iw.flush().map_err(io_err)?;
-    }
 
     // Phase 4 — per shard: (seq -> min_seq) ⋈ (min_seq -> final id) -> dense
     // `seq -> final id` remap file (sorted by seq; every seq present exactly once).
+    // [OPUS-4.8] (sq-jvbr) MOVED ahead of the meta/hash finalisation (it used to run last)
+    // so the per-shard `seq -> final id` remaps exist BEFORE triple terms are finalised — a
+    // triple term's leaf components are staged `(shard, seq)` ids that resolve to final ids
+    // through these same remap files.
     let mut shards_out: Vec<ShardRemap> = Vec::with_capacity(n);
     for (s, (_, seq_count, mut epochs)) in shard_files.into_iter().enumerate() {
         ensure_disk(tmp, cfg.disk_floor)?;
@@ -1080,7 +1114,181 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
         shards_out.push(ShardRemap { remap_path, epochs });
     }
 
-    Ok(RemapPlan { staged_path, staged_count, shards: shards_out })
+    // [OPUS-4.8] (sq-jvbr) Phase 4b — FINALISE RDF 1.2 triple terms. They are content-
+    // addressed by their components' FINAL dense ids and assigned ids AFTER every leaf
+    // (`total + rank`), exactly as the sharded path's dedicated triple shard sorts LAST. The
+    // arena holds one entry per occurrence in first-occurrence order, so deduping by resolved
+    // components in arena order yields first-occurrence-of-distinct order — the same ranking.
+    // Triple terms are rare reification metadata, so this in-RAM pass mirrors the sharded
+    // path's serial second pass (`intern_triple_terms`) rather than spilling.
+    let tt_finals = finalize_triple_terms(
+        &staged_triples,
+        &shards_out,
+        total,
+        &mut terms_w,
+        &mut offs_w,
+        &mut numer_w,
+        &mut tempi_w,
+        &mut flags_w,
+        &mut hash_sorter,
+        &mut pos,
+        tmp,
+    )?;
+    let total = total + tt_finals.distinct as u64;
+    if total >= dict::INLINE_BASE as u64 {
+        return Err("dict-spill: dictionary exceeded the id capacity (2^31 distinct non-integer terms incl. triple terms); widen Id to u64".into());
+    }
+
+    // Flush the dictionary blobs (leaf records + appended triple-term records).
+    terms_w.flush().map_err(io_err)?;
+    offs_w.flush().map_err(io_err)?;
+    numer_w.flush().map_err(io_err)?;
+
+    // temporals.bin layout = all instants then all flags: append the spilled flags.
+    flags_w.flush().map_err(io_err)?;
+    drop(flags_w);
+    {
+        let mut fr = BufReader::new(std::fs::File::open(&flags_path).map_err(io_err)?);
+        std::io::copy(&mut fr, &mut tempi_w).map_err(io_err)?;
+        tempi_w.flush().map_err(io_err)?;
+        std::fs::remove_file(&flags_path).ok();
+    }
+
+    // dict-meta.bin (version header + prefixes + datatypes + term count) — identical bytes to
+    // `save_mmap`. [OPUS-4.8] (review 1409) The version header records the id-space partition.
+    {
+        let mut meta = BufWriter::new(std::fs::File::create(dir.join("dict-meta.bin")).map_err(io_err)?);
+        meta.write_all(&dict::DICT_META_MAGIC.to_le_bytes()).map_err(io_err)?;
+        meta.write_all(&dict::DICT_META_VERSION.to_le_bytes()).map_err(io_err)?;
+        meta.write_all(&dict::INLINE_BASE.to_le_bytes()).map_err(io_err)?;
+        meta.write_all(&(prefixes.names.len() as u32).to_le_bytes()).map_err(io_err)?;
+        for p in &prefixes.names {
+            dict::write_str(&mut meta, p).map_err(io_err)?;
+        }
+        meta.write_all(&(datatypes.names.len() as u32).to_le_bytes()).map_err(io_err)?;
+        for d in &datatypes.names {
+            dict::write_str(&mut meta, d).map_err(io_err)?;
+        }
+        meta.write_all(&total.to_le_bytes()).map_err(io_err)?;
+        meta.flush().map_err(io_err)?;
+    }
+
+    // dict-hash.bin + dict-hid.bin: externally sorted by (hash, id) — the canonical order
+    // `save_mmap` also produces. Triple-term `(hash, final id)` pairs were pushed into the
+    // SAME sorter during finalisation, so the merged stream stays globally sorted.
+    {
+        let mut hw = BufWriter::new(std::fs::File::create(dir.join("dict-hash.bin")).map_err(io_err)?);
+        let mut iw = BufWriter::new(std::fs::File::create(dir.join("dict-hid.bin")).map_err(io_err)?);
+        let mut merge = hash_sorter.into_merge().map_err(io_err)?;
+        while let Some(p) = merge.next().map_err(io_err)? {
+            hw.write_all(&p.hash.to_le_bytes()).map_err(io_err)?;
+            iw.write_all(&p.id.to_le_bytes()).map_err(io_err)?;
+        }
+        hw.flush().map_err(io_err)?;
+        iw.flush().map_err(io_err)?;
+    }
+
+    Ok(RemapPlan { staged_path, staged_count, shards: shards_out, tt_finals: tt_finals.per_occurrence })
+}
+
+/// [OPUS-4.8] (sq-jvbr) Result of [`finalize_triple_terms`]: the per-OCCURRENCE final dict id
+/// (`per_occurrence[tt_index]`, used by [`remap_staged`] to resolve a `TRIPLE_TT_BASE` staged
+/// reference) and the count of DISTINCT triple terms appended to the dictionary.
+struct TripleTermFinals {
+    per_occurrence: Vec<u32>,
+    distinct: usize,
+}
+
+/// [OPUS-4.8] (sq-jvbr) Resolve, dedup, and stream every RDF 1.2 triple-term occurrence into
+/// the dictionary, appending its records AFTER every leaf (final id = `leaf_total + rank`,
+/// matching the sharded triple shard's LAST-shard position). `staged_triples` holds the
+/// staged-id components in first-occurrence order; a leaf component `(shard, seq)` resolves to
+/// its final id through the per-shard `dsp-remap{s}.bin`, a nested triple-term component (a
+/// `TRIPLE_TT_BASE` ref) through an earlier occurrence's already-assigned final id (children
+/// precede parents in arena order), and an inline-integer component passes through. The
+/// streamed `StoredRef::Triple`/offset/numeric(NaN)/temporal(none)/`(hash, id)` records are
+/// the exact bytes `save_mmap` writes for a triple term, so the read-back path is identical.
+#[allow(clippy::too_many_arguments)]
+fn finalize_triple_terms(
+    staged_triples: &[[u64; 3]],
+    shards_out: &[ShardRemap],
+    leaf_total: u64,
+    terms_w: &mut BufWriter<std::fs::File>,
+    offs_w: &mut BufWriter<std::fs::File>,
+    numer_w: &mut BufWriter<std::fs::File>,
+    tempi_w: &mut BufWriter<std::fs::File>,
+    flags_w: &mut BufWriter<std::fs::File>,
+    hash_sorter: &mut PodSorter<HashPair>,
+    pos: &mut u64,
+    tmp: &Path,
+) -> Result<TripleTermFinals, String> {
+    let io_err = |e: io::Error| e.to_string();
+    if staged_triples.is_empty() {
+        return Ok(TripleTermFinals { per_occurrence: Vec::new(), distinct: 0 });
+    }
+    let _ = tmp; // disk floor already enforced before this phase; no further spill here
+
+    // Random-access reader over a shard's dense `seq -> final id` remap file (4 B/entry).
+    // Triple terms are rare, so per-component seeks are cheap; opened lazily per shard.
+    use std::io::{Seek, SeekFrom};
+    let mut remap_files: Vec<Option<std::fs::File>> = (0..shards_out.len()).map(|_| None).collect();
+    let mut leaf_final = |shard: usize, seq: u32| -> Result<u32, String> {
+        let f = match &mut remap_files[shard] {
+            Some(f) => f,
+            slot @ None => {
+                *slot = Some(std::fs::File::open(&shards_out[shard].remap_path).map_err(io_err)?);
+                slot.as_mut().unwrap()
+            }
+        };
+        f.seek(SeekFrom::Start(seq as u64 * 4)).map_err(io_err)?;
+        let mut b = [0u8; 4];
+        f.read_exact(&mut b).map_err(|_| {
+            format!("dict-spill: triple-term component references leaf seq {seq} outside shard {shard}'s remap")
+        })?;
+        Ok(u32::from_le_bytes(b))
+    };
+
+    // dedup distinct triple terms by their FINAL component ids → final dict id; per-occurrence
+    // final id for the staged-triple remap.
+    let mut dedup: FxHashMap<[u32; 3], u32> = FxHashMap::default();
+    let mut per_occurrence: Vec<u32> = Vec::with_capacity(staged_triples.len());
+    let mut next_rank: u64 = 0;
+    for occ in staged_triples {
+        // Resolve each component to its FINAL dense id.
+        let mut comps = [0u32; 3];
+        for (k, &v) in occ.iter().enumerate() {
+            comps[k] = if v < STAGED_DICT_BASE {
+                v as u32 // inline-integer id (global)
+            } else if v >= TRIPLE_TT_BASE {
+                let nested = (v - TRIPLE_TT_BASE) as usize;
+                *per_occurrence.get(nested).ok_or_else(|| {
+                    "dict-spill: triple-term nested reference precedes its definition (arena order violated)".to_string()
+                })?
+            } else {
+                let shard = (v / STAGED_DICT_BASE) as usize - 1;
+                let seq = (v % STAGED_DICT_BASE) as u32;
+                leaf_final(shard, seq)?
+            };
+        }
+        let id = match dedup.get(&comps) {
+            Some(&id) => id,
+            None => {
+                let id = (leaf_total + 1 + next_rank) as u32; // 1-based dense final id, after all leaves
+                next_rank += 1;
+                dedup.insert(comps, id);
+                // Stream the triple-term dict record + sidecar cells (NaN numeric, no temporal).
+                offs_w.write_all(&pos.to_le_bytes()).map_err(io_err)?;
+                *pos += dict::write_record(terms_w, &dict::StoredRef::Triple(comps)).map_err(io_err)?;
+                hash_sorter.push(HashPair { hash: dict::hash_triple_ids(comps), id }).map_err(io_err)?;
+                numer_w.write_all(&f64::NAN.to_le_bytes()).map_err(io_err)?;
+                tempi_w.write_all(&f64::NAN.to_le_bytes()).map_err(io_err)?;
+                flags_w.write_all(&[0u8]).map_err(io_err)?;
+                id
+            }
+        };
+        per_occurrence.push(id);
+    }
+    Ok(TripleTermFinals { per_occurrence, distinct: next_rank as usize })
 }
 
 /// Per-shard sliding window over a dense remap file, advanced at epoch boundaries —
@@ -1150,6 +1358,13 @@ pub(crate) fn remap_staged(
                 let v = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
                 out[k] = if v < STAGED_DICT_BASE {
                     v as Id // inline-integer id, passed through at ingest
+                } else if v >= TRIPLE_TT_BASE {
+                    // [OPUS-4.8] (sq-jvbr) RDF 1.2 triple-term reference — its final dict id was
+                    // assigned (after every leaf) in `finalize_triple_terms`.
+                    let tt = (v - TRIPLE_TT_BASE) as usize;
+                    *plan.tt_finals.get(tt).ok_or_else(|| {
+                        "dict-spill: staged triple-term reference has no finalised id".to_string()
+                    })?
                 } else {
                     let s = (v / STAGED_DICT_BASE) as usize - 1;
                     windows[s].map(t, (v % STAGED_DICT_BASE) as u32).map_err(io_err)?

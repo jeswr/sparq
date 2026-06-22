@@ -1,0 +1,4 @@
+# [OPUS-4.8] sq-vz2v — the Node reference adapter's installed deps are not tracked;
+# the differential is nightly-only and the CI lane runs `npm ci` from the committed
+# package.json + lockfile. Keeps the repo lean (these are heavy RDF-JS trees).
+node_modules/

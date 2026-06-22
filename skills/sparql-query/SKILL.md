@@ -1,6 +1,6 @@
 ---
 name: sparql-query
-description: Run SPARQL 1.1/1.2 queries (SELECT/ASK/CONSTRUCT/DESCRIBE) and UPDATE against the sparq RDF engine in Rust — load RDF into a sparq_core::Graph, then use sparq_engine::{query, ask, query_json, count, construct, describe, update}; covers property paths, RDF-star quoted triples, aggregates/subqueries, custom extension functions (query_with_functions / FunctionRegistry), prepared queries, query budgets/timeouts, named-graph dataset views, and EXPLAIN. Use when an agent or developer needs to embed/execute SPARQL over sparq.
+description: Run SPARQL 1.1/1.2 queries (SELECT/ASK/CONSTRUCT/DESCRIBE) and UPDATE against the sparq RDF engine in Rust — load RDF into a sparq_core::Graph, then use sparq_engine::{query, ask, query_json, count, construct, describe, update}; covers property paths, RDF 1.2 triple terms, aggregates/subqueries, custom extension functions (query_with_functions / FunctionRegistry), prepared queries, query budgets/timeouts, named-graph dataset views, and EXPLAIN. Use when an agent or developer needs to embed/execute SPARQL over sparq.
 ---
 
 # sparq SPARQL query surface
@@ -57,9 +57,25 @@ All entry points take `&Graph` + `&str` and return `Result<_, String>` (parse + 
 `String`). The result types:
 
 - `pub struct QueryResult { pub vars: Vec<oxrdf::Variable>, pub rows: Vec<Vec<Option<oxrdf::Term>>> }`
-  — `len()` / `is_empty()` count solution rows.
-- `pub struct QueryBudget { pub deadline: Option<Instant> /*native only*/, pub max_rows: Option<usize> }`
-  — `QueryBudget::unlimited()` is the no-op default.
+  — `len()` / `is_empty()` count solution rows. The layout is **columnar** (the `vars` header is
+  stored once, not per cell); index a cell as `result.rows[row][col]` where `col` is the position of
+  the variable in `result.vars`, `None` = unbound.
+- *(opt-in `query-solution` feature, OFF by default)* `result.solutions()` gives an
+  **Oxigraph-shaped** per-solution view — an iterator of borrowed, zero-copy `QuerySolution` values
+  (one per row, sharing the `vars` header; no second materialisation, no cloned terms). Each matches
+  Oxigraph's `QuerySolution`: `sol.get(var) -> Option<&Term>` (by `&str` name with or without a
+  leading `?`, by `oxrdf::VariableRef`/`&Variable`, or by positional `usize`; `None` = absent or
+  unbound), `sol.iter()` over the bound `(VariableRef, &Term)` pairs (unbound cells skipped),
+  `&sol[var]` (panicking `Index`), plus `variables()` / `values()` / `len()` / `is_empty()`. Use it
+  for ergonomic Rust Oxigraph interop / migration; the underlying `{vars, rows}` layout is unchanged.
+- `pub struct QueryBudget { pub deadline: Option<Instant> /*native only*/, pub max_rows: Option<usize>, pub max_bytes: Option<usize> }`
+  — `QueryBudget::unlimited()` is the no-op default. `max_rows` caps the working-set ROW count;
+  `max_bytes` (`sq-s5is`) is the byte-accounted companion — it prices row WIDTH
+  (`rows × vars × size_of::<Id>()`) plus the bytes of query-computed (BIND/aggregate/CONSTRUCT)
+  literals, so a few very wide rows or a huge computed literal is bounded where the row cap is
+  blind. Both are coarse cooperative ceilings (checked at operator entry / per outer loop), a
+  conservative LOWER bound on heap — not an exact RSS quota; whichever trips first aborts with
+  `query budget exceeded (max-rows|max-bytes)`.
 
 SELECT/ASK entry points (each has `_prepared`, `_with_budget`, and `_view` variants):
 
@@ -80,7 +96,12 @@ Update (data lives in the default + named graphs):
 
 - `update(&Graph, &str) -> Result<Graph, String>` — returns a NEW graph (O(n) rebuild).
 - `update_in_place(&mut Graph, &str) -> Result<(), String>` — incremental delta-overlay, O(batch);
-  WAL-durable for directory-backed graphs.
+  WAL-durable for directory-backed graphs. NON-atomic on error: a failing op leaves the earlier
+  ops' partial prefix applied (request-level atomicity is the caller's responsibility).
+- `update_in_place_atomic(&mut Graph, &str) -> Result<(), String>` (+ `_with_budget`) — request-ATOMIC
+  delta-overlay: forks, applies, and commits back ONLY if every op succeeds (else `graph` is left at
+  its pre-request state). Use this for SPARQL-1.1 all-or-nothing semantics from a direct library
+  consumer without writing your own fork/seal recovery.
 - `update_in_place_capturing(&mut Graph, &str, &QueryBudget) -> Result<Vec<UpdateEffect>, String>`
   + `apply_effects(&mut Graph, &[UpdateEffect])` — apply once, capturing the RESOLVED delta, then
   replay it onto a second (e.g. durable mirror) graph WITHOUT re-executing the text. Use this when
@@ -101,6 +122,15 @@ Extension functions (SPARQL 17.6) and dataset views:
 - `DatasetView { base: &Graph, named: Arc<FxHashSet<Term>>, default: DefaultGraphMode }`;
   `query_view` / `ask_view` / `count_view` / `query_json_view` (+ `_with_budget`), or
   `with_view(&v, || …)`.
+- *(opt-in `window-functions`)* `CustomAggregateRegistry::new()` + `.register(iri, |members:
+  &[Option<Term>]| -> Result<Option<Term>, String>)`; `query_with_aggregates(&Graph, &str, &reg)`
+  (+ `_and_budget`) parses+installs, `with_aggregates(&reg, || …)` scopes it. Window functions:
+  `window::{WindowSpec, WindowFunction, WindowAggregate, WindowFrame, FrameUnit, FrameBound, SortKey,
+  apply_window}` (programmatic pass), or `query_over(&Graph, &str)` (+ `_with_budget`) for the inline
+  `OVER(…)` query syntax (a source rewrite over the engine; covers `ROW_NUMBER`/`RANK`/`DENSE_RANK`,
+  the windowed aggregates `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` (sq-imj8), the offset/positional
+  `LAG`/`LEAD(?x[, n[, default]])` and `NTILE(n)` (sq-hqhc), `PARTITION BY`/`ORDER BY`,
+  `ROWS`/`RANGE` frames, and a reusable named `WINDOW w AS (…)` clause (sq-hqhc)).
 
 Introspection: `explain(&Graph, &str)` (plan-only) and `explain_analyze(&Graph, &str)` (plan + per-
 operator execution trace).
@@ -136,15 +166,23 @@ sparq_engine::query(&g,
     "PREFIX ex: <http://ex/> SELECT ?x WHERE { ex:alice ex:knows+ ?x }").unwrap();   // transitive
 ```
 
-**RDF-star / RDF 1.2 quoted triples** (`<< s p o >>`) — stored structurally; patterns with variables
-inside the quoted triple match. Load with the `rdf-12` feature enabled on oxrdf/oxttl (default in
-this workspace):
+**RDF 1.2 triple terms** (`<<( s p o )>>`) — stored structurally; patterns with variables
+inside the triple term match. Load with the `rdf-12` feature enabled on oxrdf/oxttl (default in
+this workspace). In Turtle/TriG you can write the reified triple `<< s p o >>` (the
+`reifiedTriple` sugar; subject or object position, optionally `<< s p o ~ reifier >>`) or the
+annotation block `s p o {| … |}` (which also **asserts** the base triple); both desugar to the
+standard `rdf:reifies <<( s p o )>>` form. The triple term `<<( s p o )>>` itself (the `tripleTerm`
+production) is **object-position only** (RDF 1.2). See the SPARQL 1.2 triple-term
+functions `TRIPLE`/`isTRIPLE`/`SUBJECT`/`PREDICATE`/`OBJECT` for constructing/decomposing them.
 
 ```rust
 let g = Graph::load_str(
     r#"@prefix ex: <http://ex/> . << ex:alice ex:age 30 >> ex:certainty 0.9 ."#, "turtle").unwrap();
 sparq_engine::query(&g,
     "PREFIX ex: <http://ex/> SELECT ?s ?o ?c WHERE { << ?s ex:age ?o >> ex:certainty ?c }").unwrap();
+// Annotation-block form (asserts ex:alice ex:age 30 AND records the certainty reifier):
+let g2 = Graph::load_str(
+    r#"@prefix ex: <http://ex/> . ex:alice ex:age 30 {| ex:certainty 0.9 |} ."#, "turtle").unwrap();
 ```
 
 **Custom extension functions** — register Rust closures under function IRIs, then `query_with_functions`:
@@ -165,13 +203,110 @@ let r = query_with_functions(&g,
 // To use the registry with ANOTHER entry point: with_functions(&reg, || sparq_engine::ask(&g, q))
 ```
 
+**Custom aggregate registry** (opt-in `window-functions` feature) — register a Rust closure as a
+named aggregate IRI, then call it from a real SPARQL `GROUP BY`. Unlike a scalar extension function,
+the closure FOLDS the group's per-member values (`None` ≡ unbound for that member) into one term:
+
+```rust
+// Cargo.toml: sparq-engine = { version = "0.1", features = ["window-functions"] }
+use oxrdf::{Literal, Term};
+use sparq_engine::{query_with_aggregates, CustomAggregateRegistry};
+
+let mut reg = CustomAggregateRegistry::new();
+reg.register("http://ex/agg#product", |members: &[Option<Term>]| {
+    let mut acc: i64 = 1;
+    for m in members { if let Some(Term::Literal(l)) = m { acc *= l.value().parse::<i64>().map_err(|e| e.to_string())?; } }
+    Ok(Some(Term::Literal(Literal::from(acc))))
+});
+let r = query_with_aggregates(&g,
+    "PREFIX ex: <http://ex/> PREFIX agg: <http://ex/agg#> \
+     SELECT ?d (agg:product(?s) AS ?p) WHERE { ?x ex:dept ?d ; ex:sales ?s } GROUP BY ?d",
+    &reg).unwrap();
+// query_with_aggregates DECLARES every registry IRI to the parser (so `agg:product(?s)` parses as an
+// aggregate, not a scalar call) AND installs the registry for evaluation. `with_aggregates(&reg, ||..)`
+// is the scoped form (composes with with_functions / with_view).
+// CAVEAT: a `DISTINCT` custom aggregate (`agg:product(DISTINCT ?s)`) does not currently PARSE in the
+// vendored spargebra (a parser limitation, tracked as a follow-up bead); non-DISTINCT works.
+```
+
+**Window functions** (opt-in `window-functions` feature) — **NON-STANDARD extension**: SPARQL has no
+W3C-REC `OVER (PARTITION BY … ORDER BY …)` syntax, so sparq exposes windowing two ways, both following
+the SQL:2003 window model (the surface Stardog / AnzoGraph expose) and neither touching the engine's
+W3C-conformance SPARQL surface.
+
+*(a) Programmatic pass over a `QueryResult`* — the full surface. Run an ordinary SELECT, then apply a
+`WindowSpec` (`ROW_NUMBER` / `RANK` / `DENSE_RANK`; the offset/positional `Lag` / `Lead` / `Ntile`
+(sq-hqhc); or a windowed aggregate over the whole partition, or — sq-imj8 — over an explicit
+`ROWS`/`RANGE` frame). One column is appended; row order is preserved:
+
+```rust
+use sparq_engine::window::{apply_window, SortKey, WindowFunction, WindowSpec};
+use oxrdf::Variable;
+
+let result = sparq_engine::query(&g, "SELECT ?emp ?dept ?sales WHERE { … }").unwrap();
+let spec = WindowSpec {
+    partition_by: vec![Variable::new("dept").unwrap()],
+    order_by: vec![SortKey::desc(Variable::new("sales").unwrap())],
+    function: WindowFunction::Rank,            // RANK() over (PARTITION BY ?dept ORDER BY ?sales DESC)
+    frame: None,                               // a frame applies only to an Aggregate (None = whole partition)
+    new_var: Variable::new("rank").unwrap(),
+};
+let ranked = apply_window(&result, &spec).unwrap(); // ?rank appended; RANK has gaps after ties
+// Windowed aggregate over a FRAME (sq-imj8): a running total is
+//   WindowFunction::Aggregate { agg: WindowAggregate::Sum, of }
+//   + frame: Some(WindowFrame::rows_running())  // ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+// `WindowFrame { unit: FrameUnit::Rows|Range, start, end }` with `FrameBound::{UnboundedPreceding,
+// Preceding(n), CurrentRow, Following(n), UnboundedFollowing}`; RANGE bounds are peer-group based
+// (no numeric RANGE offset). `frame: None` keeps the whole-partition default.
+```
+
+*(b) Inline `OVER(…)` query syntax* (sq-h564) — write the window directly in the SELECT projection and
+run it with `query_over` / `query_over_with_budget`. This is a **source rewrite in front of the engine**
+(it does NOT change the vendored `spargebra` parser): `query_over` lifts each `(FN() OVER (…) AS ?out)`
+item out of the projection, runs the window-stripped SELECT through the ordinary engine, applies the
+programmatic pass above, then reprojects. **Covered subset:** the ranking functions `ROW_NUMBER()`,
+`RANK()`, `DENSE_RANK()`, the windowed aggregates `COUNT(?x)` / `SUM(?x)` / `AVG(?x)` / `MIN(?x)` /
+`MAX(?x)` (sq-imj8 — single `?var` argument; case-insensitive), and the offset/positional functions
+`LAG(?x[, n[, default]])` / `LEAD(…)` / `NTILE(n)` (sq-hqhc). A spec can be reused via a named
+`WINDOW w AS (…)` clause and `OVER w` (sq-hqhc). `PARTITION BY ?v …`, `ORDER BY` over
+projected variables **or computed expressions** (sq-c1jv) — e.g. `ORDER BY (?a + ?b)`, `DESC(?sales + 0)`,
+`STRLEN(?s)`; each expression is bound to a fresh helper var in the rewritten inner SELECT and dropped
+from the output — in both `DESC(…)` and `… DESC` spellings, an explicit `ROWS`/`RANGE` frame on an
+aggregate (sq-imj8 — `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, `ROWS n PRECEDING`,
+`RANGE BETWEEN … AND CURRENT ROW`, etc.), multiple window columns, and `SELECT *`. A query with no
+`OVER` clause is run unchanged (so `query_over` is a strict superset of `query` for non-window queries):
+
+```rust
+// Cargo.toml: sparq-engine = { version = "0.1", features = ["window-functions"] }
+let r = sparq_engine::query_over(&g,
+    "PREFIX ex: <http://ex/> \
+     SELECT ?emp (ROW_NUMBER() OVER (PARTITION BY ?dept ORDER BY DESC(?sales)) AS ?rn) \
+     WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }").unwrap(); // ?rn = per-?dept rank, descending by ?sales
+```
+
+**Inline-OVER caveats (HONEST):** the `OVER` surface (and the `WINDOW` clause) is a sparq extension, not
+W3C SPARQL, recognised ONLY on the `query_over` entry point (a `(… OVER …)` clause / `WINDOW` clause is
+still a parse error on `query`/the standard surface). A ranking function call must be empty
+(`ROW_NUMBER()`); a windowed aggregate takes a single `?var` argument (`SUM(?x)`); `LAG`/`LEAD` take a
+bare `?var` plus an optional integer offset and a constant default, `NTILE` a positive integer; the
+`AS ?out` alias is required. The `OVER` operand is either an inline `(…)` spec or a name bound by a
+trailing `WINDOW name AS (…)` clause. `ORDER BY` keys may be projected variables OR computed expressions
+(sq-c1jv) but `PARTITION BY` keys must be projected variables. A `ROWS`/`RANGE` frame is valid only on an
+aggregate (a frame on a ranking or offset function errors), and `RANGE` supports only the peer-group
+bounds (`UNBOUNDED …` / `CURRENT ROW`), not a numeric `RANGE n PRECEDING` offset. **Deferred
+(programmatic API only, beaded):** a `DISTINCT` windowed aggregate (`COUNT(DISTINCT ?x) OVER …`), an
+aggregate / `LAG`/`LEAD` argument over a computed-expression, numeric `RANGE` offsets, and `PARTITION BY`
+over a computed expression.
+
 **Budgets / timeouts / ASK-style early exit** — a `QueryBudget` is checked cooperatively at coarse
-sites; tripping it fails with `"query budget exceeded (timeout)"` / `"... (max-rows)"`:
+sites; tripping it fails with `"query budget exceeded (timeout)"` / `"... (max-rows)"` /
+`"... (max-bytes)"`:
 
 ```rust
 use sparq_engine::QueryBudget;
 let budget = QueryBudget {
     max_rows: Some(10_000),
+    max_bytes: Some(64 << 20), // byte-accounted companion (sq-s5is); None = off
     #[cfg(not(target_arch = "wasm32"))]
     deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(2)),
 };
@@ -201,16 +336,144 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
 - **Only SELECT/ASK** go through `query`/`query_json`/`count`; CONSTRUCT/DESCRIBE have their own
   functions, and a form mismatch is a clean `Err` (e.g. `ask()` on a SELECT).
 - **`SELECT *`** never exposes blank-node "variables" (`_:x` in a pattern is an existential var).
-- **`update` vs `update_in_place`** — `update` returns a fresh `Graph` (input borrowed, untouched);
-  `update_in_place(&mut g, …)` mutates via the delta overlay (call `Graph::compact` periodically).
-  `LOAD` only resolves `file://`; set the base dir with `with_load_base(path, || update(...))`.
+- **`update` vs `update_in_place` vs `update_in_place_atomic`** — `update` returns a fresh `Graph`
+  (input borrowed, untouched, atomic by construction); `update_in_place(&mut g, …)` mutates via the
+  delta overlay (call `Graph::compact` periodically) but is NON-atomic on error; `update_in_place_atomic`
+  forks-and-seals so an in-place mutation is all-or-nothing. `LOAD` only resolves `file://`; set the
+  base dir with `with_load_base(path, || update(...))`.
 - **SPARQL `SERVICE` federation** is the non-default `service` cargo feature (pulls `ureq`; off on
   wasm). When enabled, outbound `SERVICE` fetches go through a **default-deny SSRF egress filter**:
   an endpoint that resolves to a loopback / RFC1918 / link-local (incl. the `169.254.169.254`
   cloud-metadata IP) / unique-local / unspecified address is refused (checked on the *resolved* IP,
   so DNS rebinding can't bypass it). To federate to a trusted internal endpoint, allowlist its host
   for the scope: `with_service_egress_allow([host.to_string()], || query(&g, q))`. Public endpoints
-  need no opt-in.
+  need no opt-in. Every egress-refusal error string carries the stable
+  `sparq_engine::SERVICE_EGRESS_REFUSED_MARKER` substring (`sq-iu0c`), so a network-exposed host can
+  `contains()`-classify a blocked `SERVICE` as an authorization-policy refusal (e.g. HTTP `403`)
+  rather than a server fault — `sparq-server` does exactly this.
+- **`SERVICE` bind-join (`VALUES` pushdown)** — when a `SERVICE` sub-query is the right side of a
+  join (or `OPTIONAL`) whose join variables are already bound by the left side, sparq pushes a
+  *block* of those bindings into the remote query as a `VALUES` clause (the brTPF/FedX "bound join")
+  instead of fetching the whole remote relation and joining locally. For a selective join this slashes
+  the rows the endpoint returns and the data transferred. It is **on by default** — a
+  correctness-preserving optimisation of the existing `SERVICE` path (the answer is identical to the
+  unbound-then-local-join path; `SILENT`, `OPTIONAL`/left-join, multi-var and empty-binding edge cases
+  are all preserved) — and **falls back to the verbatim forward** when it can't apply (no bound join
+  var, a join key bound to a blank node). The only tuning knob is the block
+  size (distinct binding tuples per remote request): **opt-in** via
+  `with_service_bound_join_block_size(n, || query(&g, q))` or the `SPARQ_SERVICE_BIND_BLOCK` env var
+  (default ~50). The knob never changes results — only the remote-request count vs per-request size.
+- **`SERVICE ?ep` variable endpoint** (`sq-d4p`) — a `SERVICE ?ep { P }` whose endpoint variable is
+  bound by the surrounding query is evaluated per SPARQL 1.1: the bind-join path partitions the
+  already-bound left rows by their `?ep` value and dispatches one bind-join **per distinct endpoint
+  IRI**, tagging each remote row with `?ep = <that endpoint>` so the surrounding join re-attaches it
+  to exactly the left rows that named that endpoint. A left row whose `?ep` is unbound or not an IRI
+  names no valid endpoint and contributes no federated answer. A **top-level** `SERVICE ?ep` with
+  nothing to bind it still errors (or, under `SILENT`, yields the join identity). (No new public API —
+  this is a behavioural addition on the `service` feature.)
+- **Per-query `SERVICE` timeout** (`sq-d4p`) — the SERVICE HTTP transport's socket timeout is now
+  bounded by the active `QueryBudget` deadline (it caps at `min(remaining-until-deadline, default)`
+  with a small non-zero floor), so a `SERVICE` fetch under a tight `deadline` no longer blocks for the
+  full default on an unresponsive endpoint.
+- **Window functions + custom aggregate registry** are the non-default `window-functions` cargo
+  feature. **Window functions are a NON-STANDARD extension** — there is no W3C-REC SPARQL `OVER`
+  syntax. sparq exposes them as a programmatic pass over a `QueryResult` (the SQL:2003 model
+  Stardog/AnzoGraph expose), `ROW_NUMBER`/`RANK`/`DENSE_RANK`, the offset/positional
+  `LAG`/`LEAD`/`NTILE` (sq-hqhc), + a windowed aggregate over the whole partition or an explicit
+  `ROWS`/`RANGE` frame (sq-imj8),
+  AND as an inline `OVER(…)` query syntax via the dedicated `query_over` entry point (a *source rewrite*
+  in front of the engine — it does NOT change the vendored parser, so the standard `query`/`ask`/… surface
+  stays exactly SPARQL 1.1 and conformance is unaffected; `OVER` is a parse error everywhere except
+  `query_over`). The inline syntax covers the three ranking functions, the windowed aggregates
+  `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` with `PARTITION BY`/`ORDER BY` and `ROWS`/`RANGE` frames (sq-imj8), the
+  offset/positional `LAG`/`LEAD`/`NTILE` and a reusable named `WINDOW w AS (…)` clause (sq-hqhc);
+  `DISTINCT`/computed-expression function arguments, numeric `RANGE` offsets and a computed-expression
+  `PARTITION BY` are inline-deferred (use the programmatic API). The custom-aggregate side DOES ride real SPARQL `GROUP BY` (a declared aggregate
+  IRI is part of the SPARQL 1.1 extension grammar). When the feature is off, zero window/aggregate-registry
+  code compiles and the default build is byte-identical (no new dependencies). See the recipes above.
+- **Vectorized columnar primitives** are the non-default `vectorized` cargo feature (M4 plan, bead
+  `sq-hvfe`): the `chunk` module's `DataChunk` (a column-major, vector-at-a-time id-level batch),
+  a numeric FILTER comparison kernel (`DataChunk::select_numeric` → a `SelVec`), and a
+  selection/gather kernel (`DataChunk::apply_selection`). This is a **building block**, NOT yet
+  wired into the query evaluator — `query`/`query_json`/etc. are unchanged whether the feature is on
+  or off. When off, zero columnar code compiles and the default native + wasm builds are
+  byte-identical (no new dependencies; no `unsafe`).
+- **Materialised-view / query-result cache** is the non-default `result-cache` cargo feature (bead
+  `sq-a9cn`): `ResultCache::new(capacity)` is a bounded, version-aware LRU that stores a SELECT/ASK
+  `QueryResult` keyed by `(parsed query algebra, caller graph-version)`; serve a query through
+  `cache.get_or_eval(&graph, &query, version, &budget)` (returns an `Arc<QueryResult>`). It re-serves
+  the same read query against a slowly-changing graph without re-executing. **Soundness contract**:
+  the engine evaluates against a borrowed `&Graph` and can't see mutations, so the **caller bumps the
+  `u64` version on every mutation** (`apply_delta`/`update`/reload) — a hit is only returned for the
+  current version. **Non-deterministic queries are never stored** — `NOW`/`RAND`/`UUID`/`STRUUID`/
+  `BNODE`, a remote `SERVICE`, or any custom function / aggregate; `is_cacheable(&query)` reports this
+  conservatively, and `get_or_eval` evaluates those fresh every time. Keying on the parsed algebra
+  makes the cache insensitive to whitespace / comments / prefix spelling. `cache.stats()` exposes
+  hit/miss/entry counts; `cache.clear()` drops all entries. When off, zero cache code compiles, the
+  default build is byte-identical, and no new dependencies are added.
+
+  ```rust
+  // Cargo.toml: sparq-engine = { version = "0.1", features = ["result-cache"] }
+  use sparq_engine::{PreparedQuery, QueryBudget, ResultCache};
+  let cache = ResultCache::new(256);          // up to 256 distinct results, LRU
+  let q = PreparedQuery::parse("SELECT ?s WHERE { ?s ?p ?o }")?.into_query();
+  let mut version = 0u64;
+  let r1 = cache.get_or_eval(&graph, &q, version, &QueryBudget::unlimited())?; // miss
+  let r2 = cache.get_or_eval(&graph, &q, version, &QueryBudget::unlimited())?; // hit (same Arc)
+  // ... mutate the graph, then bump the epoch so the next read re-evaluates:
+  version += 1;
+  let r3 = cache.get_or_eval(&graph, &q, version, &QueryBudget::unlimited())?; // miss (fresh)
+  # Ok::<(), String>(())
+  ```
+- **Sharing one `Graph` across server threads** — a `sparq_core::Graph` (and its read-only
+  `GraphSnapshot`) is **`Send + Sync`** (guaranteed by a compile-time assertion in `sparq-core`), so
+  it can be shared across the async handlers of an axum/actix/tower server directly with
+  `Arc<RwLock<Graph>>`. To skip that boilerplate, enable the non-default **`shared` cargo feature**
+  on `sparq-core` (bead `sq-yj76l`, gh #1121) for `shared::SharedGraph` — a cheaply-cloneable handle
+  (`SharedGraph::new(graph)` / `.clone()` is an `Arc` bump) with three access paths: `.snapshot()`
+  hands out a cheap immutable point-in-time `GraphSnapshot` you query **lock-free** for the request
+  (the recommended read-heavy path — the write lock is held only for the O(overlay) snapshot clone),
+  while `.read()` / `.write()` give RAII `RwLock` guards for ad-hoc locked access. It is `std::sync`
+  only (no new dependency) and off by default, so the lean default / wasm build pays nothing.
+
+  ```rust
+  // Cargo.toml: sparq-core = { version = "0.1", features = ["shared"] }
+  use sparq_core::shared::SharedGraph;
+  let shared = SharedGraph::new(graph);          // drop into axum `State`, clone per handler
+  let snap = shared.snapshot();                  // cheap immutable view; query it lock-free
+  let _n = snap.len();
+  shared.write().apply_delta(&[], &[])?;          // exclusive write lock only for the mutation
+  # Ok::<(), String>(())
+  ```
+- **MVCC / ACID transaction isolation** is the non-default `txn` cargo feature (bead `sq-it1x`):
+  `txn::TransactionManager::new(graph)` owns one logical graph and hands out **snapshot-isolation**
+  read transactions (`begin_read()` → a cheap point-in-time view that derefs to `&Graph`, immune to
+  later commits) and serialized **write** transactions (`begin_write()` → a copy-on-write fork).
+  `WriteTxn::update(sparql)` applies SPARQL `UPDATE`s to the private fork (read-your-own-writes via
+  `w.graph()`); `commit()` returns the new `u64` version, or `CommitError::Conflict` under
+  **first-committer-wins** if a concurrent writer published an overlapping write set since the txn
+  began (the whole body is then discarded — atomic rollback). A stale but *non*-conflicting writer's
+  resolved delta is replayed onto the current generation, so no commit is lost. For a single writer
+  the conflict check never fires (SI = serializability); durability is inherited from a directory-
+  backed graph's WAL. Built on the COW delta-overlay substrate; when off, zero txn code compiles and
+  the default build is byte-identical (no new deps).
+
+  ```rust
+  // Cargo.toml: sparq-engine = { version = "0.1", features = ["txn"] }
+  use sparq_engine::txn::{CommitError, TransactionManager};
+  let m = TransactionManager::new(graph);
+  // Snapshot-isolation read: this view never changes underneath us.
+  let snap = m.begin_read();
+  let _n = sparq_engine::count(&snap, "SELECT * WHERE { ?s ?p ?o }")?;
+  // Write txn: fork, mutate the private copy, commit (first-committer-wins).
+  let mut w = m.begin_write();
+  w.update("INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }")?;
+  match w.commit() {
+      Ok(version) => println!("committed as v{version}"),
+      Err(CommitError::Conflict { .. }) => { /* retry against the new state */ }
+  }
+  # Ok::<(), String>(())
+  ```
 - **Default cargo features** (`parallel`, `regex`, `digest`): `regex` powers REGEX/REPLACE; `digest`
   powers MD5/SHA*; `parallel` enables rayon scan/join/sort/aggregate. The **wasm** crate
   (`sparq-wasm`) disables defaults, so on `wasm32-unknown-unknown` REGEX/hash builtins and

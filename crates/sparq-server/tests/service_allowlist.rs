@@ -103,13 +103,29 @@ async fn empty_allowlist_refuses_service_before_any_network_call() {
         .send()
         .await
         .unwrap();
-    // A non-SILENT SERVICE that is refused fails the query — the server maps an engine
-    // execution error to a non-2xx. (500 here; the body names the egress refusal.)
-    assert!(!resp.status().is_success(), "blocked SERVICE must not 200; got {}", resp.status());
+    // [OPUS-4.8] (sq-iu0c) A non-SILENT SERVICE blocked by the egress allowlist is a POLICY
+    // refusal, not a server fault — the server maps the engine's egress-refusal marker to an
+    // honest 403 (Forbidden), distinct from the 500 a genuine execution error gives. The
+    // egress/allowlist detail names the refused host, so the server SANITIZES it (see
+    // `forbidden_egress`/`sanitized_error` in http.rs): the body carries only the stable
+    // generic policy-refusal class, and the host detail goes to the server log. The 403 plus
+    // the "no socket dialled" assertion below are the load-bearing proof of the strict
+    // pre-DNS refusal.
+    assert_eq!(
+        resp.status(),
+        403,
+        "blocked SERVICE must be a 403 policy refusal, got {}",
+        resp.status(),
+    );
     let body = resp.text().await.unwrap().to_lowercase();
     assert!(
-        body.contains("egress") || body.contains("allowlist") || body.contains("service"),
-        "expected an egress/allowlist refusal in the body, got: {body}"
+        body.contains("service") && body.contains("refus") && body.contains("egress allowlist"),
+        "expected the sanitized egress-refusal class in the body, got: {body}"
+    );
+    // The refused host must NOT leak into the client body (info-leak / SSRF-probe oracle).
+    assert!(
+        !body.contains(&host.to_lowercase()),
+        "the refused host must not reach the client body, got: {body}"
     );
     // The query has already returned; give any in-flight dial a brief window, then assert
     // the live listener accepted NOTHING — i.e. the refusal happened before any socket

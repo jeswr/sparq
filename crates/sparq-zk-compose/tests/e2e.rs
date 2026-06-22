@@ -20,7 +20,8 @@ use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use sparq_zk::commit::commit_triples;
 use sparq_zk::encode::salt_from_bytes;
 use sparq_zk_compose::build::{
-    build_filter_f64, build_filter_int, build_scan, encode_double_literal, encode_int_literal,
+    build_filter_decimal, build_filter_f64, build_filter_int, build_filter_signed_int, build_scan,
+    encode_decimal_literal, encode_double_literal, encode_int_literal, encode_signed_int_literal,
     Pattern, Slot,
 };
 use sparq_zk_compose::driver::CircuitProver;
@@ -406,6 +407,8 @@ fn sample_manifest() -> ProofManifest {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the scan commitment (salt- AND
     // status-bound) so the sample manifest passes the issuer-signature +
@@ -504,7 +507,7 @@ fn witness_gen_filter_int_satisfiable() {
         &FieldHex("0x2a".into()),
         &[],
         &[],
-        &digits, None
+        &digits, None, None
     ).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("compiles");
@@ -526,7 +529,7 @@ fn witness_gen_filter_int_rejects_false_verdict() {
     let (filter, digits) =
         build_filter_int(operand_enc, 17, FilterOp::Ge, 18, true).unwrap();
     let (id, toml) =
-        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits, None).unwrap();
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits, None, None).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).unwrap();
     assert!(
@@ -550,7 +553,7 @@ fn witness_gen_filter_int_ne_satisfiable() {
     let (filter, digits) =
         build_filter_int(operand_enc, 30, FilterOp::Ne, 18, true).unwrap();
     let (id, toml) =
-        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits, None).unwrap();
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits, None, None).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("compiles");
     prover
@@ -572,7 +575,7 @@ fn witness_gen_filter_int_ne_rejects_false_verdict() {
     let (filter, digits) =
         build_filter_int(operand_enc, 18, FilterOp::Ne, 18, true).unwrap();
     let (id, toml) =
-        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits, None).unwrap();
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits, None, None).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).unwrap();
     assert!(
@@ -600,7 +603,7 @@ fn witness_gen_scan_satisfiable() {
         &FieldHex("0x2a".into()),
         &scan.witness.counts,
         &scan.witness.enc,
-        &[], None
+        &[], None, None
     ).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("compiles");
@@ -623,7 +626,7 @@ fn full_prove_verify_filter_int_d1() {
     let (filter, digits) =
         build_filter_int(operand_enc, 5, FilterOp::Lt, 10, true).unwrap();
     let (id, toml) =
-        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits, None).unwrap();
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits, None, None).unwrap();
     assert_eq!(id, CircuitId::FilterInt { d: 1 });
 
     let prover = CircuitProver::from_crate_root();
@@ -660,7 +663,7 @@ fn full_prove_verify_filter_int_ne_d1() {
     let (filter, digits) =
         build_filter_int(operand_enc, 5, FilterOp::Ne, 9, true).unwrap();
     let (id, toml) =
-        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits, None).unwrap();
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits, None, None).unwrap();
     assert_eq!(id, CircuitId::FilterInt { d: 1 });
 
     let prover = CircuitProver::from_crate_root();
@@ -702,7 +705,7 @@ fn full_manifest_prove_verify_scan() {
         &challenge,
         &scan.witness.counts,
         &scan.witness.enc,
-        &[], None
+        &[], None, None
     ).unwrap();
     let prover = CircuitProver::from_crate_root();
     let out = scratch("manifest_scan");
@@ -731,6 +734,8 @@ fn full_manifest_prove_verify_scan() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     attest_all(&mut manifest, &test_issuer_sk(1), salt); // [OPUS-4.8] audit #3/#9/#12 (salt+status-bound)
     // [OPUS-4.8] audit #4: the verifier issues the nonce that the proof committed
@@ -776,7 +781,7 @@ fn honest_filter_d1(
     let operand_enc = encode_int_literal(value);
     let (filter, digits) =
         build_filter_int(operand_enc, value, op, bound, expected).unwrap();
-    let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits, None).unwrap();
+    let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits, None, None).unwrap();
     assert_eq!(id, CircuitId::FilterInt { d: 1 });
     let out = scratch(tag);
     // [OPUS-4.8] tag-isolated prove: every forge test targets filter_int_d1, so
@@ -812,7 +817,7 @@ fn honest_age_scan(
         challenge,
         &scan.witness.counts,
         &scan.witness.enc,
-        &[], None
+        &[], None, None
     ).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).expect("scan prove succeeds");
@@ -853,6 +858,8 @@ fn filter_manifest(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the honest scan (salt- AND status-bound)
     // so the #1/#2 forge tests reach the crypto gate (the FILTER forge they
@@ -1208,6 +1215,8 @@ fn nonce_binding_mismatch_rejected() {
             join_edges: vec![],
             hidden_revocation: None,
             hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
         };
         attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
         m
@@ -1306,6 +1315,8 @@ fn holder_pop_manifest(holder_hex: &str, pop_hex: &str, cryptosuite: &str) -> Pr
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     attest_all(&mut m, &test_issuer_sk(1), salt);
     m
@@ -1576,6 +1587,8 @@ fn holder_bound_manifest(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     attest_all_holder(
         &mut m,
@@ -1919,7 +1932,7 @@ fn holder_pop_valid_verifies_end_to_end() {
         &challenge,
         &scan.witness.counts,
         &scan.witness.enc,
-        &[], None
+        &[], None, None
     ).unwrap();
     let prover = CircuitProver::from_crate_root();
     let out = scratch("holder_pop_scan");
@@ -1952,6 +1965,8 @@ fn holder_pop_valid_verifies_end_to_end() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     attest_all(&mut manifest, &test_issuer_sk(1), salt);
     verify_manifest(
@@ -2007,6 +2022,8 @@ fn malformed_proof_hex_rejected_not_panicked() {
             join_edges: vec![],
             hidden_revocation: None,
             hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
         };
         attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
         m
@@ -2274,6 +2291,8 @@ fn filter_reject_comparison_substitution_17_vs_18() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -2305,6 +2324,8 @@ fn filter_reject_filter_add_on_scan_only() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -2336,6 +2357,8 @@ fn filter_reject_constant_swap_age_as_salary() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundPattern { pattern: 0 }) => {}
@@ -2387,6 +2410,8 @@ fn filter_reject_operand_slot_substitution() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "age" => {}
@@ -2432,6 +2457,8 @@ fn filter_reject_false_verdict_row() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -2463,6 +2490,8 @@ fn filter_reject_unbindable_filter_fragment() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::Sparqzk(_)) => {}
@@ -2507,6 +2536,8 @@ fn filter_binding_happy_path_structure() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the scan (salt- AND status-bound).
     // `scan_inputs_for` commits under salt byte 9, so the attestation salt must
@@ -2573,6 +2604,8 @@ fn filter_reject_unproven_failing_row() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -2628,6 +2661,8 @@ fn filter_two_rows_both_gated_verifies() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     // [OPUS-4.8] audit #3/#9: attest the scan (salt-bound). `scan_inputs_for`
     // commits under salt byte 9.
@@ -2687,6 +2722,8 @@ fn scan_only_manifest(graph: &[Triple], salt_byte: u8) -> (ProofManifest, Fr, Fr
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     (m, commitment_fr, salt)
 }
@@ -2830,6 +2867,8 @@ fn issuer_reject_drop_triple_recommit_suppression() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::UnattestedCommitment { proof: 0, .. }) => {}
@@ -3150,6 +3189,8 @@ fn cross_graph_manifest(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     // Salt- AND status-bound attestations for BOTH commitments (audit #3+#9+#12),
     // distinct salts, shared fixture status reference.
@@ -3483,7 +3524,7 @@ fn probe_scan_public_inputs_hex() {
     let scan = build_scan(&[commit], &pattern).unwrap();
     let challenge = FieldHex("0x2a".into());
     let (id, toml) =
-        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[], None).unwrap();
+        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[], None, None).unwrap();
     let prover = CircuitProver::from_crate_root();
     let out = scratch("probe_scan_pi");
     let art = prover.prove_in(&id, &toml, &out, "probe_scan_pi").unwrap();
@@ -3515,7 +3556,7 @@ fn probe_filter_f64_public_inputs_hex() {
         build_filter_f64(operand_enc, value, FilterOp::Ge, 18.0_f64, true).expect("d2 builds");
     assert_eq!(*inputs.circuit_id(), CircuitId::FilterF64 { d: 2 });
     let challenge = FieldHex("0x2a".into());
-    let (id, toml) = prover_toml_for(&inputs, &challenge, &[], &[], &digits, None).unwrap();
+    let (id, toml) = prover_toml_for(&inputs, &challenge, &[], &[], &digits, None, None).unwrap();
     let prover = CircuitProver::from_crate_root();
     let out = scratch("probe_filter_f64_pi");
     let art = prover.prove_in(&id, &toml, &out, "probe_filter_f64_pi").unwrap();
@@ -3523,6 +3564,66 @@ fn probe_filter_f64_public_inputs_hex() {
     eprintln!("FILTER_F64_PUBLIC_INPUTS_LEN={}", art.public_inputs.len());
     eprintln!("FILTER_F64_PUBLIC_INPUTS_HEX={hex}");
     eprintln!("FILTER_F64_INPUTS_JSON={}", serde_json::to_string(&inputs).unwrap());
+}
+
+/// [OPUS-4.8] sq-7lrq: PROBE (ignored) that dumps the real bb `public_inputs` for a
+/// `filter_signed_int_d{md}` member, so the
+/// `reconstruct_filter_signed_int_matches_real_bb_public_inputs` unit-test constant
+/// in `verifier.rs` is an EMPIRICAL anchor (not self-referential layout reasoning),
+/// exactly like the f64 probe (sq-f9tl NEW-1). Run with `--ignored` when the
+/// toolchain is present; paste the printed hex into the unit test.
+#[test]
+#[ignore = "probe: prints real bb public_inputs hex for the filter_signed_int reconstruct unit test"]
+fn probe_filter_signed_int_public_inputs_hex() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping probe");
+        return;
+    }
+    // operand = -42 (xsd:integer, md=2), FILTER(?o < 1) -> true.
+    let operand_enc = encode_signed_int_literal(-42);
+    let (inputs, witness) =
+        build_filter_signed_int(operand_enc, -42, FilterOp::Lt, 1, true).expect("d2 builds");
+    assert_eq!(*inputs.circuit_id(), CircuitId::FilterSignedInt { md: 2 });
+    let challenge = FieldHex("0x2a".into());
+    let (id, toml) =
+        prover_toml_for(&inputs, &challenge, &[], &[], &[], None, Some(&witness)).unwrap();
+    let prover = CircuitProver::from_crate_root();
+    let out = scratch("probe_filter_signed_int_pi");
+    let art = prover.prove_in(&id, &toml, &out, "probe_filter_signed_int_pi").unwrap();
+    let hex: String = art.public_inputs.iter().map(|b| format!("{b:02x}")).collect();
+    eprintln!("FILTER_SIGNED_INT_PUBLIC_INPUTS_LEN={}", art.public_inputs.len());
+    eprintln!("FILTER_SIGNED_INT_PUBLIC_INPUTS_HEX={hex}");
+    eprintln!("FILTER_SIGNED_INT_INPUTS_JSON={}", serde_json::to_string(&inputs).unwrap());
+}
+
+/// [OPUS-4.8] sq-7lrq: PROBE (ignored) that dumps the real bb `public_inputs` for a
+/// `filter_decimal_i{id}_f{fd}` member, the empirical anchor for the
+/// `reconstruct_filter_decimal_matches_real_bb_public_inputs` unit test. Run with
+/// `--ignored` when the toolchain is present; paste the printed hex into the test.
+#[test]
+#[ignore = "probe: prints real bb public_inputs hex for the filter_decimal reconstruct unit test"]
+fn probe_filter_decimal_public_inputs_hex() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping probe");
+        return;
+    }
+    // operand = 123.45 (xsd:decimal, i3 f2), FILTER(?o > 123.40) -> true.
+    // bound_scaled = round(123.40 * 100) = 12340.
+    let operand_enc = encode_decimal_literal(false, 123, "45");
+    let (inputs, witness) =
+        build_filter_decimal(operand_enc, false, "123", "45", FilterOp::Gt, false, 12340, true)
+            .expect("i3_f2 builds");
+    assert_eq!(*inputs.circuit_id(), CircuitId::FilterDecimal { id: 3, fd: 2 });
+    let challenge = FieldHex("0x2a".into());
+    let (id, toml) =
+        prover_toml_for(&inputs, &challenge, &[], &[], &[], None, Some(&witness)).unwrap();
+    let prover = CircuitProver::from_crate_root();
+    let out = scratch("probe_filter_decimal_pi");
+    let art = prover.prove_in(&id, &toml, &out, "probe_filter_decimal_pi").unwrap();
+    let hex: String = art.public_inputs.iter().map(|b| format!("{b:02x}")).collect();
+    eprintln!("FILTER_DECIMAL_PUBLIC_INPUTS_LEN={}", art.public_inputs.len());
+    eprintln!("FILTER_DECIMAL_PUBLIC_INPUTS_HEX={hex}");
+    eprintln!("FILTER_DECIMAL_INPUTS_JSON={}", serde_json::to_string(&inputs).unwrap());
 }
 
 /// [OPUS-4.8] sq-f9tl (NEW-1): PROBE (ignored) that dumps the real bb
@@ -3567,7 +3668,7 @@ fn probe_scan_k2_public_inputs_hex() {
     );
     let challenge = FieldHex("0x2a".into());
     let (id, toml) =
-        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[], None).unwrap();
+        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[], None, None).unwrap();
     let prover = CircuitProver::from_crate_root();
     let out = scratch("probe_scan_k2_pi");
     let art = prover.prove_in(&id, &toml, &out, "probe_scan_k2_pi").unwrap();
@@ -3764,6 +3865,8 @@ fn revocation_stale_status_list_rejected() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     // The relying party only trusts version 5 (window 0): the old-version
     // snapshot is STALE.
@@ -3958,6 +4061,8 @@ fn revocation_within_window_verifies() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     // now=5, window=3 => accepts [2, 5]; version 3 is fresh. The AUTHORITATIVE
     // snapshot for (list, version=3) is non-revoked (re-audit Option B: the bit is
@@ -4110,7 +4215,7 @@ fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr
         &challenge,
         &scan.witness.counts,
         &scan.witness.enc,
-        &[], None
+        &[], None, None
     ).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
@@ -4138,6 +4243,8 @@ fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     attest_all_committed(&mut manifest, &test_issuer_sk(1), salt, &fixture_index_commitment());
     (manifest, salt)
@@ -4220,6 +4327,8 @@ fn committed_index_without_hidden_revocation_rejected() {
         join_edges: vec![],
         hidden_revocation: None, // <- MISSING; committed-index requires it
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
         derivation_steps: vec![],
     };
     attest_all_committed(&mut m, &sk, salt, &ic);
@@ -4267,6 +4376,8 @@ fn committed_index_disclosed_commitment_mismatch_rejected() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
         derivation_steps: vec![],
     };
     // The issuer signs over `signed_ic`, but the disclosed reference carries
@@ -4479,7 +4590,7 @@ fn hi_scan_manifest(prover: &CircuitProver, signer_sk: &SecretKey, tag: &str) ->
     };
     let scan = build_scan(&[commit], &pattern).unwrap();
     let challenge = FieldHex("0x2a".into());
-    let (id, toml) = prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[], None).unwrap();
+    let (id, toml) = prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[], None, None).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
     let mut manifest = ProofManifest {
@@ -4500,6 +4611,8 @@ fn hi_scan_manifest(prover: &CircuitProver, signer_sk: &SecretKey, tag: &str) ->
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     attest_all(&mut manifest, signer_sk, salt);
     (manifest, c, salt)
@@ -4654,7 +4767,7 @@ fn hi_scan_manifest_no_clear_attestation(
     let scan = build_scan(&[commit], &pattern).unwrap();
     let challenge = FieldHex("0x2a".into());
     let (id, toml) =
-        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[], None).unwrap();
+        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[], None, None).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
     let manifest = ProofManifest {
@@ -4674,6 +4787,8 @@ fn hi_scan_manifest_no_clear_attestation(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
         derivation_steps: vec![],
     };
     (manifest, c, salt)
@@ -4951,7 +5066,7 @@ fn filter_f64_witness_honest_proves_lie_rejected() {
         build_filter_f64(operand_enc.clone(), value, FilterOp::Ge, bound, true)
             .expect("25.0 >= 18.0 builds (d=2 member)");
     assert_eq!(*inputs.circuit_id(), CircuitId::FilterF64 { d: 2 });
-    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &digits, None).unwrap();
+    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &digits, None, None).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("filter_f64_d2 compiles");
     prover
@@ -4961,7 +5076,7 @@ fn filter_f64_witness_honest_proves_lie_rejected() {
     // The FLIPPED verdict (false) must be UNprovable — soundness.
     let (lie_inputs, lie_digits) =
         build_filter_f64(operand_enc, value, FilterOp::Ge, bound, false).expect("builds");
-    let (lid, ltoml) = prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &lie_digits, None).unwrap();
+    let (lid, ltoml) = prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &lie_digits, None, None).unwrap();
     let lie = prover.gen_witness_tagged(&lid, &ltoml, "f64_lie");
     assert!(
         lie.is_err(),
@@ -4989,7 +5104,7 @@ fn filter_f64_operand_binding_rejects_substituted_value() {
     // Force the operand_enc to the committed 25's encoding while the digits witness
     // says 99 (build_filter_f64 already set operand_enc to the passed value; here we
     // pass operand_enc_25 but value=99 so the digit witness is "99").
-    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], b"99", None).unwrap();
+    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], b"99", None, None).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("compiles");
     let res = prover.gen_witness_tagged(&id, &toml, "f64_subst");
@@ -4997,6 +5112,82 @@ fn filter_f64_operand_binding_rejects_substituted_value() {
         res.is_err(),
         "SOUNDNESS: witnessing a value (99) different from the operand_enc the scan \
          committed (25) must fail the canonical-token binding (operand encoding mismatch)"
+    );
+}
+
+/// [OPUS-4.8] sq-7lrq (soundness, composable path): the COMPOSABLE signed-int host
+/// emitter (`build_filter_signed_int` -> `prover_toml_for`'s FilterSignedInt arm)
+/// produces a witness that PROVES for an honest verdict and is UNprovable for the
+/// flipped verdict. This anchors the NEW manifest-composable wiring against the same
+/// real `sparq_zk::encode` binding the standalone `filter_signed_binding.rs` test
+/// pins — but exercising the host build/render path the manifest actually uses.
+#[test]
+fn filter_signed_int_composable_witness_honest_proves_lie_rejected() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping composable signed-int witness soundness test");
+        return;
+    }
+    // operand = -42 (xsd:integer, md=2), FILTER(?o < 1) — true (a negative is < +1).
+    let operand_enc = encode_signed_int_literal(-42);
+    let (inputs, witness) =
+        build_filter_signed_int(operand_enc.clone(), -42, FilterOp::Lt, 1, true)
+            .expect("-42 < 1 builds (md=2 member)");
+    assert_eq!(*inputs.circuit_id(), CircuitId::FilterSignedInt { md: 2 });
+    let (id, toml) =
+        prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &[], None, Some(&witness)).unwrap();
+    let prover = CircuitProver::from_crate_root();
+    prover.compile(&id).expect("filter_signed_int_d2 compiles");
+    prover
+        .gen_witness_tagged(&id, &toml, "signed_honest")
+        .expect("the honest signed-int FILTER verdict must PROVE");
+
+    // The FLIPPED verdict (false) must be UNprovable — soundness.
+    let (lie_inputs, lie_witness) =
+        build_filter_signed_int(operand_enc, -42, FilterOp::Lt, 1, false).expect("builds");
+    let (lid, ltoml) =
+        prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &[], None, Some(&lie_witness)).unwrap();
+    let lie = prover.gen_witness_tagged(&lid, &ltoml, "signed_lie");
+    assert!(
+        lie.is_err(),
+        "SOUNDNESS: a FALSE signed-int FILTER verdict (-42 < 1 = false) must be UNprovable"
+    );
+}
+
+/// [OPUS-4.8] sq-7lrq (soundness, composable path): the COMPOSABLE decimal host
+/// emitter (`build_filter_decimal` -> `prover_toml_for`'s FilterDecimal arm) proves
+/// an honest verdict and rejects the flipped verdict, anchoring the new
+/// manifest-composable wiring against the real decimal token binding.
+#[test]
+fn filter_decimal_composable_witness_honest_proves_lie_rejected() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping composable decimal witness soundness test");
+        return;
+    }
+    // operand = 123.45 (xsd:decimal, i3 f2), FILTER(?o > 123.40) — true.
+    // bound_scaled = round(123.40 * 100) = 12340.
+    let operand_enc = encode_decimal_literal(false, 123, "45");
+    let (inputs, witness) =
+        build_filter_decimal(operand_enc.clone(), false, "123", "45", FilterOp::Gt, false, 12340, true)
+            .expect("123.45 > 123.40 builds (i3_f2 member)");
+    assert_eq!(*inputs.circuit_id(), CircuitId::FilterDecimal { id: 3, fd: 2 });
+    let (id, toml) =
+        prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &[], None, Some(&witness)).unwrap();
+    let prover = CircuitProver::from_crate_root();
+    prover.compile(&id).expect("filter_decimal_i3_f2 compiles");
+    prover
+        .gen_witness_tagged(&id, &toml, "decimal_honest")
+        .expect("the honest decimal FILTER verdict must PROVE");
+
+    // The FLIPPED verdict (false) must be UNprovable — soundness.
+    let (lie_inputs, lie_witness) =
+        build_filter_decimal(operand_enc, false, "123", "45", FilterOp::Gt, false, 12340, false)
+            .expect("builds");
+    let (lid, ltoml) =
+        prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &[], None, Some(&lie_witness)).unwrap();
+    let lie = prover.gen_witness_tagged(&lid, &ltoml, "decimal_lie");
+    assert!(
+        lie.is_err(),
+        "SOUNDNESS: a FALSE decimal FILTER verdict (123.45 > 123.40 = false) must be UNprovable"
     );
 }
 
@@ -5031,7 +5222,7 @@ fn filter_f64_composes_end_to_end() {
         &challenge,
         &scan.witness.counts,
         &scan.witness.enc,
-        &[], None
+        &[], None, None
     ).unwrap();
     let scan_out = scratch("f64_compose_scan");
     let scan_art = prover.prove_in(&scan_id, &scan_toml, &scan_out, "f64_compose_scan").unwrap();
@@ -5046,7 +5237,7 @@ fn filter_f64_composes_end_to_end() {
     // Prove the composable float-FILTER sub-proof: ?score >= 18.0 (true).
     let (filter_inputs, fdigits) =
         build_filter_f64(operand_enc, score, FilterOp::Ge, 18.0, true).expect("filter builds");
-    let (fid, ftoml) = prover_toml_for(&filter_inputs, &challenge, &[], &[], &fdigits, None).unwrap();
+    let (fid, ftoml) = prover_toml_for(&filter_inputs, &challenge, &[], &[], &fdigits, None, None).unwrap();
     let f_out = scratch("f64_compose_filter");
     let filter_art = prover.prove_in(&fid, &ftoml, &f_out, "f64_compose_filter").unwrap();
 
@@ -5072,6 +5263,8 @@ fn filter_f64_composes_end_to_end() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     attest_all(&mut manifest, &test_issuer_sk(1), salt);
     verify_manifest(
@@ -5173,6 +5366,8 @@ fn entailment_manifest(regime: EntailmentRegime, steps: Vec<DerivationStep>) -> 
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     attest_all(&mut m, &test_issuer_sk(1), salt);
     m

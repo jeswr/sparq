@@ -1,0 +1,55 @@
+<!-- [OPUS-4.8] SLSA gap register (epic sq-toze / bead sq-toze.14, branch cert-slsa). -->
+# SLSA gap register (sparq)
+
+Open gaps between sparq's **honest current level (Build L2 for release archives + container)**
+and a higher/complete SLSA posture. Every gap carries a severity, a remediation plan, a target,
+and the `bd` bead that tracks the fix (epic `sq-toze`). No gap is papered over: the
+self-published claim in `controls.md` is bounded to exactly what the evidence backs.
+
+Severity: **P0** blocks the honest L2 claim · **P1** needed for "all release artifacts attested" ·
+**P2** raises assurance · **P3** aspirational (L3).
+
+| ID | Gap | Sev | SLSA control | Remediation | Target | Bead |
+|---|---|---|---|---|---|---|
+| ~~**GX-9**~~ | ~~`dist.yml` builds `sparq-cli` tiered binaries on `v*` tags + dispatch with **no provenance**.~~ **ADDRESSED (sq-toze.23).** Took remediation (a): `dist.yml#build` now carries `permissions: id-token: write` + `attestations: write`, installs `cargo-auditable`, builds with `cargo auditable build --release --locked`, and runs `actions/attest-build-provenance@a2bbfa2… # v4.1.0` over the per-tier binary (`subject-path: dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}`) — same mechanism/SHA-pin as `release.yml#package`. Each dist binary now gets a signed in-toto SLSA provenance predicate (Sigstore Fulcio OIDC cert + Rekor). Verify: `gh attestation verify dist/sparq-cli-<tier> --repo jeswr/sparq`. **Level: SLSA Build L2** (in-band provenance on a hosted runner — same as the release archives; L3 remains GX-11). | P1 | SL-B2-d | DONE — `.github/workflows/dist.yml#build` (attest step + OIDC perms + cargo-auditable). | landed | **sq-toze.23** |
+| **GX-10** | Published packages (crates.io / npm / PyPI) carry **no provenance** — only the GitHub-release archives + ghcr image do. There was **no publish workflow at all** in `.github/workflows/`; the crates/bindings were published manually / out-of-CI, so the artifact a consumer `cargo add`/`npm i`/`pip install`s was unattested. **PARTIALLY ADDRESSED (sq-toze.24).** Added [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) (`release: published` + maintainer `workflow_dispatch`). **npm — CLOSED/IV:** `#npm` runs `npm publish --provenance --access public` in the GitHub-Actions OIDC context (`id-token: write`, `setup-node` `registry-url`); npm records a Sigstore-signed in-toto SLSA provenance statement and a post-publish step (`npm view @jeswr/sparq@<ver> dist.attestations`) fails the job if no attestation was recorded. Consumer verify: `npm audit signatures`. **crates.io — PARTIAL (external sub-gap OPEN):** `#crates` `cargo package`s each publishable crate and attests the `.crate` bytes with the same `attest-build-provenance@a2bbfa2… # v4.1.0` mechanism, uploaded as `crate-packages` + a Sigstore attestation (`gh attestation verify <file>.crate --repo jeswr/sparq`). crates.io has **no native provenance-link mechanism upstream** — that part is NOT closable from our side. **PyPI — CI-WIRED, maintainer config pending (sq-toze.37):** `#pypi-build` (maturin matrix: manylinux x86_64/aarch64, macOS arm64/x64, Windows x64) + `#pypi-sdist` build the `sparq-rdf` wheels+sdist; `#pypi-publish` uploads them via PyPI **Trusted Publishing** with native **PEP-740 attestations** (`pypa/gh-action-pypi-publish@cef2210… # v1.14.0`, `attestations: true`, `id-token: write`, GitHub `environment: pypi`). PyPI records an in-toto/Sigstore-signed provenance statement per file and shows a "Provenance" panel (verify: `pypi-attestations verify` / `gh attestation verify`) — the PyPI-native equivalent of npm `--provenance`, the strongest of the three lanes. The lane needs ONE non-repo step: a maintainer registers the Trusted Publisher on the `sparq-rdf` PyPI project (owner `jeswr`, repo `sparq`, workflow `publish.yml`, env `pypi`); until then the OIDC token mint fails by design (no static token stored). | P1 | SL-B2-e | npm DONE (`publish.yml#npm`, `--provenance` + provenance-attestation verify). crates.io: out-of-band attestation DONE (`publish.yml#crates`); native crates.io link awaits upstream (external). PyPI: PEP-740 lane DONE in CI (`publish.yml#pypi-*`); awaits one-time PyPI Trusted-Publisher registration (maintainer). | npm landed; crates.io partial (external); PyPI CI-wired (maintainer PyPI config pending) | **sq-toze.24** (npm/crates) + **sq-toze.37** (PyPI) |
+| **GX-8** | **Reproducible-build CHARACTERISED (sq-toze.9), not yet enforced.** A documented double-build diff now exists — [`reproducible-build.md`](./reproducible-build.md): two independent `--release --locked` builds of `sparq-cli` are **identical size + byte-identical apart from 22 bytes**, all traced to **one** non-determinism source (the C-compiled `mimalloc` `__DATE__`/`__TIME__` `.rodata` banner, plus the build-id it perturbs). So the honest claim moved from "no evidence" to "near-reproducible, single named cause". Residual to a *byte-for-byte* claim: pin `SOURCE_DATE_EPOCH` (or drop the opt-in `mimalloc` default) + a CI rebuild-and-diff ratchet. (SLSA L2/L3 do not *require* reproducibility, but CRA integrity + consumer trust want it.) | P2 | (cross-cutting; SL-B3 adjacent) | DONE (doc): [`reproducible-build.md`](./reproducible-build.md) records the measured diff + the single root cause + the scoped remediation. REMAINING (keeps the bead open): the `SOURCE_DATE_EPOCH`/feature-drop fix + a `reproducible-build` CI lane that fails on any non-build-id delta. Shared with the CRA/SBOM/SSDF/OpenSSF frameworks. | doc DONE; CI ratchet remaining | **sq-toze.9** |
+| **GX-11** | **Build L3 not met.** Provenance is generated by `attest-build-provenance` **in the same job** as the `cargo auditable build` step — not by an isolated trusted builder. A compromised build step shares the signing context. | P3 | SL-B3-b | Migrate the release binary/container build to `slsa-framework/slsa-github-generator` (or an equivalent reusable trusted builder) so provenance is produced in an isolated job the user build steps cannot influence → genuine L3. Aspirational; large workflow change. | aspirational | **sq-toze.25** |
+
+## Gaps that are NOT sparq's to close (recorded for honesty, not as failures)
+
+| Item | Why it's external | Where it lives |
+|---|---|---|
+| **Machine-enforced admission policy** ("only deploy artifacts attested by `jeswr/sparq`'s release workflow") | This is a *consumer/operator* deployment control (Kyverno/cosign/`gh attestation verify` in their pipeline). sparq ships verifiable provenance + the documented verify command; enforcing it at deploy time is the operator's. | `controls.md` SL-V-b (operator-owned) |
+| **crates.io published-package provenance** | crates.io has no provenance-attestation mechanism as of this writing. Cannot be wired from our side until upstream support exists. | folded into GX-10 / sq-toze.24 (external sub-gap) |
+| **PyPI Trusted-Publisher registration for `sparq-rdf`** | The publish workflow + PEP-740 attestation wiring is in-repo (`publish.yml#pypi-*`), but the Trusted Publisher (owner/repo/workflow/env binding) is configured on the **PyPI project account**, which cannot be a tracked repo file. A maintainer must register it once on PyPI; the CI is otherwise complete. | folded into GX-10 / sq-toze.37 (maintainer-account act) |
+| **L3 *certificate* / third-party provenance audit** | A SLSA-level *attestation by an accredited assessor* is an external-body activity (out of agent scope). We make the controls + evidence audit-ready; the certificate is theirs. | this register (external by definition) |
+
+## Dependency note (resolved inputs to the SLSA assessment, bead sq-toze.14)
+
+The SLSA assessment bead `sq-toze.14` depended on three gap-fix beads. Their current state on
+this branch (`cert-slsa`, based on `main` at the time of writing):
+
+- **sq-toze.3 (GX-2, per-release SBOM+VEX)** — **DONE** (✓ in `bd`; evidence §3). Inputs the L2
+  `release.yml#sbom` attestation.
+- **sq-toze.8 (GX-7, cargo-auditable + cargo-vet)** — **DONE / landed on `main`** via PR #210
+  (`ci(supply-chain): … cargo-auditable/vet (sq-toze.2/.3/.8)`, merged 2026-06-15): cargo-auditable
+  in `release.yml#package`, cargo-vet GATING in `supply-chain.yml#vet`. The bead is being closed
+  out as part of that merge. The SLSA claim cites the implemented controls.
+- **sq-toze.9 (GX-8, reproducible-build evidence)** — **doc DONE / bead still OPEN** (GX-8 above):
+  the reproducibility *evidence* now exists ([`reproducible-build.md`](./reproducible-build.md) — a
+  measured 22-byte, single-root-cause diff), so the "honest non-repro reason" the gap demanded is
+  delivered; what keeps the bead open is the optional CI rebuild-and-diff ratchet that would flip
+  it from *characterised* to *enforced*. Does not block the L2 claim; strengthens the
+  higher-assurance/CRA-integrity story.
+
+## What changing these gaps would buy
+
+- Close **GX-9 + GX-10** → "**every** released sparq artifact (archives, container, *and* the
+  packages consumers install) carries SLSA provenance" — the honest claim moves from
+  "release archives + container are L2" to "all release artifacts are L2".
+- Close **GX-11** → **Build L3** (isolated, non-falsifiable provenance) — the headline level rises.
+- Close **GX-8** → reproducibility evidence strengthens CRA integrity + lets consumers
+  independently rebuild and compare. The measured diff is already documented
+  ([`reproducible-build.md`](./reproducible-build.md)); the remaining CI ratchet would make
+  bit-for-bit reproducibility an enforced, not just demonstrated, property.

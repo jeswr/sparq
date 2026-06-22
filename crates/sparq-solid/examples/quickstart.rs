@@ -26,9 +26,12 @@ fn main() -> Result<(), String> {
     //    visibility is an O(1) hash check, nothing is copied per query.
     let query = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }";
     for (label, session) in [
-        ("alice (pod owner)", Session { agent: Some(ALICE), client: None }),
-        ("carol (team member)", Session { agent: Some(CAROL), client: None }),
-        ("bob via app.ex (acl:origin pair)", Session { agent: Some(BOB), client: Some(APP) }),
+        ("alice (pod owner)", Session { agent: Some(ALICE), client: None, issuer: None, now: None }),
+        ("carol (team member)", Session { agent: Some(CAROL), client: None, issuer: None, now: None }),
+        (
+            "bob via app.ex (acl:origin pair)",
+            Session { agent: Some(BOB), client: Some(APP), issuer: None, now: None },
+        ),
         ("anonymous", Session::default()),
     ] {
         let readable = store.accessible(&session, Mode::Read).len();
@@ -45,7 +48,8 @@ fn main() -> Result<(), String> {
     println!("auth view: {:?} read grants", who.rows[0][0].as_ref().map(|t| t.to_string()));
 
     // sanity: the fixture's hand-derived counts (same as tests/e2e.rs)
-    let alice = store.query_as(&Session { agent: Some(ALICE), client: None }, Mode::Read, query)?;
+    let alice =
+        store.query_as(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, Mode::Read, query)?;
     let anon = store.query_as(&Session::default(), Mode::Read, query)?;
     assert_eq!(alice.rows.len(), 599);
     assert_eq!(anon.rows.len(), 144);

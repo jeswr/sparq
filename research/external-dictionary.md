@@ -115,8 +115,12 @@ in-flight blocks (~3 × 64 MiB + partials), and transient batch overshoot of the
   unset ⇒ exactly the old path.
 - Runtime: `SPARQ_DICT_SPILL=1` routes `Graph::build_external` (N-Triples) through the
   spilled dict; `Graph::build_external_spill(...)` is the explicit API.
-  N-Triples only (same restriction and reason as the sharded path: the byte parser
-  rejects RDF-star; triple terms cannot be sharded/spilled by content hash).
+  N-Triples only (same restriction as the sharded path). RDF 1.2 triple terms (sq-jvbr)
+  ARE supported: leaf components spill/dedup as usual, while triple-term occurrences take an
+  in-RAM arena (rare reification metadata) finalised after the leaf consolidation —
+  content-addressed by their components' FINAL ids and assigned ids after every leaf (the
+  sharded path's dedicated-triple-shard position). They are not hash-routed/spilled because a
+  triple term's content is its components' ids, only resolvable after the leaf dedup.
 - wasm32: the feature is never enabled there (sparq-wasm uses
   `default-features = false`); no detection APIs or libc reach the wasm build. Byte
   count must stay at the 1,643,095 baseline (verified below).

@@ -1,0 +1,63 @@
+# [OPUS-4.8] sq-lfmf (W-shacl): the tier-b WASM bundle for sparq-shacl.
+#
+# A SEPARATE, lazy-loaded bundle (not folded into the lean `sparq-wasm` bundle): it
+# carries the SHACL Core + SHACL-SPARQL (`sh:sparql`, W3C SHACL §5.2) validation engine
+# (`sparq-shacl`) plus the SPARQL engine it routes constraint queries through
+# (`sparq-engine`), which the lean default browser bundle deliberately does not. The
+# showcase site loads it ONLY on /surface/shacl (next/dynamic, client-only) so the
+# landing page stays light. Mirrors the per-bundle-crate pattern of `sparq-reason-wasm`.
+#
+# NOTE: the lean `sparq-wasm` bundle ALSO exposes a minimal `Store::validate(...)` behind
+# its non-default `shacl` feature (sq-yqi1, #162) for the PSS ADR-0014 seam. This crate is
+# the standalone showcase artifact: a stateless `Validator` with the FULL report surface
+# (W3C-vocabulary Turtle + plain-text renderings + severity-filtered conformance), so the
+# /surface/shacl page can render the per-violation W3C report without rebuilding the lean
+# bundle or shipping SHACL on the landing page.
+[package]
+name = "sparq-shacl-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+# cdylib for the wasm artifact; rlib so the pure helpers can be unit-tested natively.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# No-default-features everywhere => no rayon: the wasm build has no threads and we keep
+# the bundle minimal. `sparq-shacl` with default-features off forwards `default-features =
+# false` to its wasm32 `sparq-engine` dep (so rayon never enters — wasm-deps-guard); its
+# own pure-Rust `regex` dep (sh:pattern) compiles to wasm32. `sparq-engine`/`sparq-core`
+# with defaults off drop rayon + the SPARQL regex/digest cores. The portability spike
+# (this bead, sq-lfmf) confirmed sparq-shacl + sparq-engine build for
+# `wasm32-unknown-unknown` with no std::fs/threads — the SHACL-SPARQL `sh:pattern` REGEX
+# path is carried (sparq-shacl's regex dep); the only build blocker is getrandom's wasm
+# backend (handled below, exactly as `sparq-wasm`/`sparq-reason-wasm` do).
+sparq-core = { path = "../sparq-core", default-features = false }
+sparq-shacl = { path = "../sparq-shacl", default-features = false }
+oxrdf.workspace = true
+wasm-bindgen = "0.2"
+
+# oxrdf pulls `rand`/getrandom (blank-node ids). On wasm there is no OS RNG, so select
+# getrandom's browser backend (crypto.getRandomValues). The matching
+# `--cfg getrandom_backend="wasm_js"` is set in the workspace .cargo/config.toml.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[features]
+default = []
+# [OPUS-4.8] sq-lfmf: expose SHACL Advanced Features (SHACL-AF) `sh:rule` validation by
+# turning on `sparq-shacl`'s non-default `shacl-af` feature. OFF by default so the standard
+# SHACL bundle carries zero rule code; CI builds the bundle BOTH with and without it.
+shacl-af = ["sparq-shacl/shacl-af"]
+
+[dev-dependencies]
+# [OPUS-4.8] sq-lfmf — headless wasm test harness, mirroring sparq-reason-wasm: exercises
+# the #[wasm_bindgen] JS-facing API in a REAL wasm runtime via `wasm-pack test --node`.
+# Dev-only: it must NOT enter the non-dev wasm graph.
+wasm-bindgen-test = "0.3"
+
+[package.metadata.wasm-pack.profile.release]
+# Optimise the wasm for size (the regex automata are the bundle-size risk).
+wasm-opt = ["-Oz"]

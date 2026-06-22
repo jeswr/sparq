@@ -19,7 +19,7 @@ This document details the implementation status of SPARQL 1.1 functions in noir_
 | COALESCE | 🚫 | SPARQL-specific, not an XPath function |
 | NOT EXISTS | 🚫 | SPARQL query operator, not a function |
 | EXISTS | ✅ | Implemented as `exists` for sequences |
-| logical-or (`||`) | ✅ | Implemented as `logical_or` |
+| logical-or (`\|\|`) | ✅ | Implemented as `logical_or` |
 | logical-and (`&&`) | ✅ | Implemented as `logical_and` |
 | RDFterm-equal (`=`) | 🚫 | RDF-specific comparison |
 | sameTerm | 🚫 | RDF-specific function |

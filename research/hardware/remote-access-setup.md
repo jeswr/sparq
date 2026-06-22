@@ -368,7 +368,7 @@ MAC$ rsync -avz xps:~/bench.log ./                            # pull the log
 
 ## Quick checklist
 
-```
+```text
 [ ] §1.1  ssh key exists on Mac
 [ ] §1.2  openssh-server running on XPS
 [ ] §1.3  Mac public key in XPS ~/.ssh/authorized_keys

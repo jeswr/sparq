@@ -1,12 +1,12 @@
 //! Label-only embedding — the back-compat special case of the verbalization layer in
-//! [`crate::verbalize`].
+//! [`crate::verbalize()`].
 //!
 //! [`embed_labels`] embeds **one human-readable label per entity** (by predicate
 //! priority) and nothing else. That is enough for lexical lookup, but production KG
 //! systems embed a richer *passage* per entity (label + type + description + selected
 //! literals — see `research/genai-text-embedding-practices.md`); use
-//! [`embed_entities`](crate::embed_entities) with an
-//! [`EntityTextConfig`](crate::EntityTextConfig) for that. Both helpers share the same
+//! [`embed_entities`] with an
+//! [`EntityTextConfig`] for that. Both helpers share the same
 //! engine: predicate index-block scans for candidates (no full-graph scan), batched
 //! embedding, vectors keyed by dictionary id.
 

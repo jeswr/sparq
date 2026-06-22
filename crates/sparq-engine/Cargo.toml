@@ -55,7 +55,77 @@ zk = []
 # additionally `cfg(not(wasm32))`-gated and never enter the wasm bundle even if the
 # feature were turned on for a wasm target. When off, zero federation/HTTP code
 # compiles. [OPUS-4.8]
-service = ["dep:serde_json", "dep:ureq"]
+service = ["dep:serde_json", "dep:ureq", "dep:quick-xml"]
+# [OPUS-4.8] (sq-678h) RDF serializer matrix: Turtle / TriG / N-Quads writers
+# (`serialize` module). The base build can already *parse* every format but only
+# *write* N-Triples (`triples_to_ntriples`, always on). This feature adds the missing
+# writers. OPT-IN and OFF by default so a consumer that only needs N-Triples pays
+# nothing — the writers reuse the existing oxrdf term/IRI/literal infrastructure and
+# pull in ZERO new dependencies (oxrdf is already a direct dep), so the default build's
+# dependency graph is byte-for-byte unchanged when this is off.
+serialize-rdf = []
+# [OPUS-4.8] (sq-5qz9) SPARQL window functions + custom aggregate registry.
+# Two extension surfaces, OFF by default:
+#   * a `CustomAggregateRegistry` whose named (IRI) user aggregates are callable in
+#     real SPARQL `GROUP BY` (the vendored spargebra already parses a declared custom
+#     aggregate IRI — `SparqlParser::with_custom_aggregate_function`); the engine
+#     evaluates `AggregateFunction::Custom` against the installed registry.
+#   * a programmatic window-function pass (`window` module) — ROW_NUMBER / RANK /
+#     DENSE_RANK, the offset/positional LAG / LEAD / NTILE (sq-hqhc), + a windowed
+#     aggregate over a result table, with PARTITION BY + ORDER BY window specs (and a
+#     reusable named WINDOW clause on the inline OVER syntax). These are a
+#     NON-STANDARD extension (no W3C-REC SPARQL
+#     window syntax exists); the surface follows the SQL:2003 OVER (PARTITION BY …
+#     ORDER BY …) window-spec model that Stardog/AnzoGraph expose.
+# When off, ZERO window/custom-aggregate code compiles and the default build is
+# byte-identical (no new dependencies — oxrdf is already a direct dep).
+window-functions = []
+# [OPUS-4.8] (sq-hvfe) Vectorized (columnar / vector-at-a-time) execution primitives —
+# the first building block of the M4 plan (research/optimization-techniques.md). The
+# `chunk` module's `DataChunk` columnar intermediate + a numeric FILTER comparison
+# kernel + a selection/gather kernel, the vector-at-a-time analogue of the
+# row-materialising evaluator's per-row FILTER. OPT-IN and OFF by default: when off,
+# zero columnar code compiles and the default native + wasm builds are byte-identical.
+# Pulls in ZERO new dependencies (sparq-core is already a direct dep) and contains no
+# `unsafe` — the kernels are plain index loops the compiler auto-vectorises.
+vectorized = []
+# [OPUS-4.8] (sq-a9cn) Materialised-view / query-result cache: a bounded, version-aware
+# LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed by `(parsed
+# query algebra, caller graph-version)`. Vendor-parity operational-perf feature for
+# endpoints that re-serve the same read query against a slowly-changing graph. OPT-IN and
+# OFF by default: when off, zero cache code compiles and the default native + wasm builds
+# are byte-identical. Pulls in ZERO new dependencies (std `HashMap`/`Mutex`/`Arc` only)
+# and contains no `unsafe`. Caching is SOUND only under the documented contract — the
+# caller bumps the version on every mutation, and non-deterministic queries (NOW/RAND/
+# UUID/SERVICE/custom fns, detected by `cache::is_cacheable`) are never stored.
+result-cache = []
+# [OPUS-4.8] (sq-it1x) MVCC / ACID multi-statement transaction isolation. A
+# `txn::TransactionManager` providing SNAPSHOT-ISOLATION read transactions (a cheap
+# `GraphSnapshot` of the current committed generation) and serialized write transactions
+# with FIRST-COMMITTER-WINS write-write conflict detection (optimistic concurrency
+# control), all built on the existing copy-on-write delta-overlay substrate
+# (`Graph::fork`/`snapshot`/`apply_delta`). Per the design record
+# (research/concurrent-serving-litreview-A-mvcc-benchmarks.md §A.1), a single-writer
+# store with snapshot reads is trivially serializable (SI = serializability); the OCC
+# conflict check additionally serializes concurrent writers safely. OPT-IN and OFF by
+# default — when off, zero txn code compiles and the default native + wasm builds are
+# byte-identical. Pulls in ZERO new dependencies (std `Mutex`/`Arc` + the crate's own
+# `update_in_place_capturing` write-set capture; oxrdf/rustc-hash are already direct deps)
+# and contains no `unsafe`.
+txn = []
+# [OPUS-4.8] (sq-xj29q) Oxigraph-shaped per-solution result accessor: a borrowed,
+# zero-copy `QuerySolution` view over each `QueryResult` row, reachable through
+# `QueryResult::solutions()`. It mirrors Oxigraph's `QuerySolution` API
+# (`get` by name / `VariableRef` / position, `iter` over bound `(Variable, Term)`
+# pairs, panicking `Index`) so a Rust consumer migrating from / interoperating with
+# Oxigraph (#1124 oxrdf alignment, #1128 migration guide) can index a result
+# per-solution instead of walking the columnar `{vars, rows}` table by hand. It is a
+# pure VIEW: no second materialisation of the table, no per-row map, no cloned terms —
+# the columnar layout the engine uses for perf is unchanged. OPT-IN and OFF by default:
+# when off, zero of this code compiles and the default native + wasm builds are
+# byte-identical. Pulls in ZERO new dependencies (oxrdf — `Term`/`Variable`/
+# `VariableRef` — is already a direct dep) and contains no `unsafe`.
+query-solution = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -77,6 +147,13 @@ sha2 = { version = "0.11", optional = true }
 # already in the workspace tree (sparq-conformance, sparq-server) and is
 # platform-independent, but it is only ever pulled in when `service` is on.
 serde_json = { version = "1", optional = true }
+# [OPUS-4.8] (sq-ycu) SPARQL-Results-XML (SRX) parsing for the `service` feature. Some
+# endpoints ignore the `Accept: …+json` header and return XML; without an SRX parser the
+# whole SERVICE call fails. quick-xml is platform-independent (it carries no HTTP/TLS, so
+# it is safe in the main dep block, like serde_json) and is already in the workspace tree
+# (sparq-conformance, sparq-geo). Pulled in only when `service` is on. `default-features =
+# false` drops its (unused) serde derive support.
+quick-xml = { version = "0.40", default-features = false, optional = true }
 
 # UUID()/STRUUID() need an OS RNG; depending on uuid from the wasm build would drag
 # getrandom into the browser dependency graph, so the functions are native-only.
@@ -86,7 +163,13 @@ serde_json = { version = "1", optional = true }
 # endpoints without bundling webpki-roots. [OPUS-4.8]
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 uuid = { version = "1", features = ["v4"] }
-ureq = { version = "2", default-features = false, features = ["tls", "native-certs"], optional = true }
+# [OPUS-4.8] sq-g2xs: ureq 3 (was 2) to migrate off the archived/unmaintained `rustls-pemfile`
+# (RUSTSEC-2025-0134). ureq 2 pulled it transitively via `rustls-native-certs 0.7`; ureq 3 uses
+# `rustls-native-certs 0.8` (which dropped `rustls-pemfile` in favour of `rustls-pki-types`'
+# `PemObject`). `rustls,platform-verifier` is the faithful successor of ureq 2's
+# `tls,native-certs`: TLS via rustls, server-cert validation against the OS trust store (via
+# `rustls-platform-verifier`) rather than a bundled CA set — same runtime trust behaviour as before.
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
 
 [dev-dependencies]
 # The dict-consolidation differential test compares the serial, sharded-parallel and
@@ -98,3 +181,9 @@ rayon.workspace = true
 # The cs-planner q-error gate builds its characteristic-set tables through the
 # dict-id accessor (dev-only; the library never depends on introspection).
 sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
+# [OPUS-4.8] (sq-e3pj) The JSON-LD writer's round-trip tests parse the emitted document
+# back to RDF to assert isomorphism. serde_json reads the JSON DOM in the test only — it
+# is a DEV dependency, so the opt-in `serialize-rdf` feature itself stays dependency-free
+# (the native writer emits JSON by hand and pulls in nothing). serde_json is already in
+# the workspace tree (sparq-server / the `service` feature).
+serde_json = "1"

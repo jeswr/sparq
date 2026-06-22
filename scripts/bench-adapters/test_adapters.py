@@ -6,17 +6,20 @@
 #   - shacl_report_count : parse a SHACL ValidationReport graph -> (conforms, viol)
 #   - http_sparql_adapter.parse_sparql_json : SELECT / ASK / COUNT(*) reductions
 #   - vector_lib_adapter.recall_at_k + parse_neighbour_tsv : recall scoring + deficit
+#   - beir_ir_adapter : TREC qrels/run parsers + Recall@k / nDCG@k + deficit (sq-1fz0)
 # shacl_report_count's test needs rdflib (the SHACL report parser's only dep); if
 # rdflib is absent that one test SKIPS (the http + vector tests are stdlib-only and
 # always run). Run with the venv that has rdflib for full coverage:
 #   /tmp/sq-eifd-venv/bin/python scripts/bench-adapters/test_adapters.py
 import os
+import struct
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 FIX = os.path.join(HERE, "fixtures")
 
+import beir_ir_adapter as beir  # noqa: E402
 import http_sparql_adapter as http  # noqa: E402
 import vector_lib_adapter as vec  # noqa: E402
 
@@ -94,6 +97,126 @@ def test_vector():
         check("vec.disjoint-raises", True, True)
 
 
+# --- gather-tier Pareto maths (sq-aiup; stdlib-only, no numpy/hnswlib) --------
+def _fvecs_bytes(rows, fmt):
+    """Encode rows as TEXMEX .fvecs/.ivecs bytes: per row <int32 d><d values>."""
+    out = b""
+    for r in rows:
+        out += struct.pack("<i", len(r))
+        out += struct.pack("<%d%s" % (len(r), fmt), *r)
+    return out
+
+
+def test_pareto():
+    # .fvecs / .ivecs round-trip (the SIFT1M on-disk format) via read_vecs.
+    fvecs = _fvecs_bytes([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], "f")
+    check("vec.read_fvecs", vec.read_vecs(fvecs, "f"), [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    ivecs = _fvecs_bytes([[10, 20], [30, 40]], "i")
+    check("vec.read_ivecs", vec.read_vecs(ivecs, "i"), [[10, 20], [30, 40]])
+    # ragged dims must raise (truncated/mismatched corpus fails loudly).
+    try:
+        vec.read_vecs(_fvecs_bytes([[1.0, 2.0], [3.0]], "f"), "f")
+        check("vec.read_vecs.ragged-raises", False, True)
+    except ValueError:
+        check("vec.read_vecs.ragged-raises", True, True)
+    # truncated trailing row must raise.
+    try:
+        vec.read_vecs(struct.pack("<i", 3) + struct.pack("<2f", 1.0, 2.0), "f")
+        check("vec.read_vecs.truncated-raises", False, True)
+    except ValueError:
+        check("vec.read_vecs.truncated-raises", True, True)
+
+    # qps_from_query_us: inverse of latency; 0 for non-positive.
+    approx("vec.qps.1000us", vec.qps_from_query_us(1000.0), 1000.0)
+    check("vec.qps.zero", vec.qps_from_query_us(0), 0.0)
+
+    # Pareto frontier: a dominated point (lower recall AND lower qps than another) drops.
+    # (0.99, 500) dominates (0.95, 300); (0.999, 100) is on the frontier (best recall).
+    pts = [(0.95, 300.0), (0.99, 500.0), (0.999, 100.0), (0.95, 200.0)]
+    front = vec.pareto_frontier(pts)
+    check("vec.pareto.frontier", front, [(0.99, 500.0), (0.999, 100.0)])
+    # ties collapse to one point.
+    check("vec.pareto.ties", vec.pareto_frontier([(0.9, 100.0), (0.9, 100.0)]), [(0.9, 100.0)])
+
+    # matched_recall_qps: best QPS at recall >= target (the only honest cross-engine #).
+    # At recall>=0.9: both frontier points qualify -> max qps = 500.
+    check("vec.matched.0_9", vec.matched_recall_qps(pts, 0.9), 500.0)
+    # At recall>=0.999: only (0.999,100) qualifies -> 100.
+    check("vec.matched.0_999", vec.matched_recall_qps(pts, 0.999), 100.0)
+    # Unreachable recall -> None (engine cannot hit that recall on this dataset).
+    check("vec.matched.unreachable", vec.matched_recall_qps(pts, 1.0), None)
+
+
+# --- BEIR IR scoring (sq-1fz0; stdlib-only, no pyserini/beir) ----------------
+def test_beir():
+    with open(os.path.join(FIX, "beir_qrels.txt")) as f:
+        qrels = beir.parse_qrels(f.read())
+    with open(os.path.join(FIX, "beir_run.txt")) as f:
+        run = beir.parse_run(f.read())
+    # parse: 3 queries; q1 keeps the rel-0 dZ as an explicit non-relevant judgement.
+    check("beir.parse.nqueries", len(qrels), 3)
+    check("beir.parse.q1_judged", sorted(qrels["q1"]), ["dA", "dB", "dZ"])
+    check("beir.parse.q1_relevant", sorted(beir._relevant_docs(qrels["q1"])), ["dA", "dB"])
+    # parse_run sorts by score regardless of file row order: q1 rows are dB,dA,dX in
+    # the file but dA(9)>dX(8)>dB(7) by score.
+    check("beir.parse.q1_ranked", run["q1"], ["dA", "dX", "dB"])
+    # Recall@3 = mean(1.0, 0.5, 0.0) = 0.5  -> deficit 500 (see fixture header).
+    recall, n = beir.recall_at_k(run, qrels, 3)
+    check("beir.recall.nqueries", n, 3)
+    approx("beir.recall@3", recall, 0.5)
+    check("beir.recall_deficit_milli", beir.deficit_milli(recall), 500)
+    # nDCG@3 = 0.4332715... -> deficit 567 (graded q2: dC grade-2 missed).
+    ndcg, nn = beir.ndcg_at_k(run, qrels, 3)
+    check("beir.ndcg.nqueries", nn, 3)
+    approx("beir.ndcg@3", ndcg, 0.4332715186)
+    check("beir.ndcg_deficit_milli", beir.deficit_milli(ndcg), 567)
+    # A run that returns every relevant doc first -> perfect recall + nDCG -> deficit 0.
+    perfect = {q: list(beir._relevant_docs(qrels[q])) for q in qrels}
+    pr, _ = beir.recall_at_k(perfect, qrels, 100)
+    check("beir.recall.perfect_deficit", beir.deficit_milli(pr), 0)
+    # qrels with NO positive judgement must raise (catch a mis-aligned pair loudly).
+    try:
+        beir.recall_at_k({"q1": ["dA"]}, {"q1": {"dA": 0}}, 3)
+        check("beir.no-positive-raises", False, True)
+    except ValueError:
+        check("beir.no-positive-raises", True, True)
+    # malformed qrels (wrong field count) must raise.
+    try:
+        beir.parse_qrels("q1 0 dA")
+        check("beir.bad-qrels-raises", False, True)
+    except ValueError:
+        check("beir.bad-qrels-raises", True, True)
+    # malformed run (wrong field count) must raise.
+    try:
+        beir.parse_run("q1 Q0 dA 1 9.0")
+        check("beir.bad-run-raises", False, True)
+    except ValueError:
+        check("beir.bad-run-raises", True, True)
+    # --- sparq-side input conversion (the apples-to-apples bridge) -----------
+    # corpus -> N-Triples: one `<beir:doc:DOCID> <beir:text> "..." .` per doc, sorted,
+    # with ECHAR escaping of the literal body.
+    nt = beir.corpus_to_ntriples({"d2": 'has "quotes"\nand newline', "d1": "plain text"})
+    check(
+        "beir.corpus_to_ntriples",
+        nt,
+        '<beir:doc:d1> <beir:text> "plain text" .\n'
+        '<beir:doc:d2> <beir:text> "has \\"quotes\\"\\nand newline" .\n',
+    )
+    check("beir.escape_nt_literal", beir.escape_nt_literal('a\\b"c'), 'a\\\\b\\"c')
+    # queries -> TSV: `<qid>\t<text>`, sorted, whitespace collapsed to single spaces.
+    check(
+        "beir.queries_to_tsv",
+        beir.queries_to_tsv({"q2": "two", "q1": "a\tb\n c"}),
+        "q1\ta b c\nq2\ttwo\n",
+    )
+    # qrels round-trips through parse_qrels (write TREC -> parse back -> identical map).
+    qr = {"q1": {"dB": 1, "dA": 2}}
+    check("beir.qrels_to_trec.roundtrip", beir.parse_qrels(beir.qrels_to_trec(qr)), qr)
+    # empty inputs produce empty (not malformed) files.
+    check("beir.corpus_to_ntriples.empty", beir.corpus_to_ntriples({}), "")
+    check("beir.queries_to_tsv.empty", beir.queries_to_tsv({}), "")
+
+
 # --- shacl report-count parser (needs rdflib) --------------------------------
 def test_shacl():
     try:
@@ -129,6 +252,8 @@ def test_shacl():
 def main():
     test_http()
     test_vector()
+    test_pareto()
+    test_beir()
     test_shacl()
     print("\n%d passed, %d failed" % (PASS, FAIL))
     return 1 if FAIL else 0

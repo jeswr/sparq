@@ -1,0 +1,75 @@
+{
+  "_README": "[OPUS-4.8] Frozen-corpus sha256 manifest for the ast-grep+outline A/B (sq-lhwo.4). Files are pinned by sha256; directory entries are glob targets scanned live (not content-hashed). measure_ab.py drift-checks this BEFORE measuring so a run over a changed corpus is FLAGGED, not silently trusted. Regenerable data (a .json, not markdown) -> not a perf claim; check-no-perf-numbers.py never touches it.",
+  "crates/": {
+    "dir": true,
+    "note": "directory glob target \u2014 drift not hashed (grep/ast-grep scan the live tree)"
+  },
+  "crates/sparq-core/": {
+    "dir": true,
+    "note": "directory glob target \u2014 drift not hashed (grep/ast-grep scan the live tree)"
+  },
+  "crates/sparq-core/src/dict.rs": {
+    "bytes": 168895,
+    "sha256": "5619e51672f96c63affaab22c2ab966be37e25376c5f0d676ffd06ac4fd73e8c"
+  },
+  "crates/sparq-core/src/dictspill.rs": {
+    "bytes": 75168,
+    "sha256": "dc157700f91667439f275d88f989b6276f6bbbede5db98e6eaa94d2266dee406"
+  },
+  "crates/sparq-core/src/lib.rs": {
+    "bytes": 507364,
+    "sha256": "c4919d860b8935c86d566adebd5169b35ddc359c3127c16ec2e20b81725e0dba"
+  },
+  "crates/sparq-core/src/nt.rs": {
+    "bytes": 36172,
+    "sha256": "3f0bd7b1c4ab6a5a0bf978f841628215c41b2fcb16d9d7d4aa3e039e7d437a7f"
+  },
+  "crates/sparq-engine/": {
+    "dir": true,
+    "note": "directory glob target \u2014 drift not hashed (grep/ast-grep scan the live tree)"
+  },
+  "crates/sparq-engine/src/exec.rs": {
+    "bytes": 481361,
+    "sha256": "680ab6042c9b7a8a9fc3551561e0cb4d93a512f03e8529724cbc463f3fe7321b"
+  },
+  "crates/sparq-engine/src/lib.rs": {
+    "bytes": 110873,
+    "sha256": "541cd62067d0c53023843713882e2ba7eb6b17768ca7bc2411b82d4230c88e23"
+  },
+  "crates/sparq-engine/src/serialize.rs": {
+    "bytes": 195814,
+    "sha256": "d0cc4b8d122897dcacb120a805383fe590d788a21bb90b76f0227af9420c83ee"
+  },
+  "crates/sparq-fedclient/src/source.rs": {
+    "bytes": 116570,
+    "sha256": "92321b513201a03c739fc1a2dc459651d2f051171c3df1352795939693e517ed"
+  },
+  "crates/sparq-fedplan/src/adaptive.rs": {
+    "bytes": 111310,
+    "sha256": "e2b19298e063c7c7117a84b0d968ea460e062e3d889a3bc136b949e6cd700505"
+  },
+  "crates/sparq-introspect/": {
+    "dir": true,
+    "note": "directory glob target \u2014 drift not hashed (grep/ast-grep scan the live tree)"
+  },
+  "crates/sparq-introspect/src/lib.rs": {
+    "bytes": 127788,
+    "sha256": "f6a16684df0bb2ec7ad70633dc01c1df37b455df699f8445e6df8c18d1e35ec5"
+  },
+  "crates/sparq-mpc/src/shamir.rs": {
+    "bytes": 106244,
+    "sha256": "2c4780d5a3ddf3d5e70fe9c32dbaed1dddd2a7b321f99cb6e7673ff6bf077291"
+  },
+  "crates/sparq-server/src/http.rs": {
+    "bytes": 377564,
+    "sha256": "44e80ea60bb454df63894b6f080588bdb726b78201b11a7f8bca4217ad53eca9"
+  },
+  "crates/sparq-zk-compose/src/verifier.rs": {
+    "bytes": 312415,
+    "sha256": "4eadd52edeb680a27954981a0a44c92711efb00a2c69e04b542282482f3da040"
+  },
+  "crates/sparq-zk/src/sig.rs": {
+    "bytes": 114262,
+    "sha256": "0dda52b3dfb3a082bbc6f6743c8005e107a08dd7559ac0c9600b990748fb1358"
+  }
+}

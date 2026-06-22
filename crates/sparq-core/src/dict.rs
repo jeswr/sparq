@@ -222,8 +222,12 @@ fn hash_blank(label: &str) -> u64 {
 /// its components, NOT strings. Unlike the other term kinds this hash is dict-relative
 /// (the ids are), so a `Term::Triple` is hashed only AFTER its children are resolved in
 /// the target dict (`intern`/`lookup` handle this; `hash_term` cannot).
+/// [OPUS-4.8] (sq-jvbr) `pub(crate)` so the dict-spill external builder can content-address
+/// an RDF 1.2 triple term by its components' FINAL dense ids when it assembles the
+/// triple-term dictionary records (the same `(hash, id)` pair `save_mmap`/`into_merged`
+/// produce), keeping `dict-hash.bin`/`dict-hid.bin` consistent for triple terms too.
 #[inline]
-fn hash_triple_ids(ids: [Id; 3]) -> u64 {
+pub(crate) fn hash_triple_ids(ids: [Id; 3]) -> u64 {
     let mut h = rustc_hash::FxHasher::default();
     h.write_u8(3);
     h.write_u32(ids[0]);
@@ -251,7 +255,7 @@ pub(crate) fn lang_with_dir(l: &Literal) -> Option<std::borrow::Cow<'_, str>> {
     }
 }
 
-/// Inverse of [`lang_with_dir`]: split a STORED language slot back into its BCP47 tag and
+/// Inverse of `lang_with_dir`: split a STORED language slot back into its BCP47 tag and
 /// (optional) RDF 1.2 base direction. A stored slot of `en--ltr` is `("en", Some("ltr"))`;
 /// a plain `en` is `("en", None)`. The returned tag/direction are the spec-distinct
 /// components the SPARQL 1.2 results formats keep apart (`xml:lang` vs `its:dir`) — see the
@@ -290,7 +294,7 @@ pub fn split_lang_dir(slot: &str) -> (&str, Option<&str>) {
 /// and never drift apart:
 /// - stored-slot fast path — [`split_lang_dir`] (splits off the `--dir` suffix, then validates
 ///   it here);
-/// - materialised path — [`reconstruct_ref`] (same split-then-validate of a stored slot);
+/// - materialised path — `reconstruct_ref` (same split-then-validate of a stored slot);
 /// - outbound SPARQL 1.2 results — `sparq-engine`'s `json.rs` (emits the validated direction
 ///   as a separate `its:dir` field);
 /// - inbound SERVICE results parser — `sparq-engine`'s `service.rs` (sq-s955), where `its:dir`
@@ -394,7 +398,7 @@ fn stored_eq_term(s: &Stored, q: &Term, prefixes: &[Box<str>], datatypes: &[Name
 }
 
 /// [OPUS-4.8] sq-cvug — the safe placeholders `reconstruct_triple` substitutes when a
-/// quoted-triple component id is IN RANGE but resolves to the WRONG term KIND (e.g. a
+/// triple-term component id is IN RANGE but resolves to the WRONG term KIND (e.g. a
 /// literal id in the subject/predicate position). This can only arise from a tampered,
 /// checksum-less mmap'd index (threat-model B5 / T-MMAP-DoS); the trusted in-process
 /// interner only ever stores a valid `(IRI|blank, IRI, any-term)` shape. Decoding such a
@@ -600,7 +604,7 @@ fn reconstruct_ref(d: &Dict, s: &StoredRef) -> Term {
     }
 }
 
-/// [OPUS-4.8] sq-cvug — depth-bounded term resolution for the quoted-triple reconstruction
+/// [OPUS-4.8] sq-cvug — depth-bounded term resolution for the triple-term reconstruction
 /// recursion. A validly-built store nests triple terms only shallowly (each is interned
 /// after its components, so the structure is a finite DAG), but a TAMPERED mmap'd index
 /// could encode a self/cyclic component reference that would recurse without bound →
@@ -730,7 +734,9 @@ struct MappedDict {
 impl MappedDict {
     #[inline]
     fn slice_u64(m: &memmap2::Mmap) -> &[u64] {
-        // SAFETY: written as little-endian u64; mmap base is page-aligned (>= 8).
+        // SAFETY: `write_pod_slice` wrote these as raw NATIVE-endian u64 (little-endian on
+        // every supported target — pinned by `DICT_ON_DISK_LE_GUARD`, sq-lvw8); mmap base is
+        // page-aligned (>= 8). This pointer cast reads them back in the same native order.
         unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<u64>(), m.len() / 8) }
     }
     #[inline]
@@ -743,7 +749,9 @@ impl MappedDict {
     }
     #[inline]
     fn hashids(&self) -> &[u32] {
-        // SAFETY: written as little-endian u32; mmap base is page-aligned (>= 4).
+        // SAFETY: `write_pod_slice` wrote these as raw NATIVE-endian u32 (little-endian on
+        // every supported target — pinned by `DICT_ON_DISK_LE_GUARD`, sq-lvw8); mmap base is
+        // page-aligned (>= 4). This pointer cast reads them back in the same native order.
         unsafe { std::slice::from_raw_parts(self.hashids.as_ptr().cast::<u32>(), self.hashids.len() / 4) }
     }
     /// The parsed term record for a 1-based id.
@@ -781,94 +789,246 @@ impl MappedDict {
     /// Any violation is a clean `InvalidData` error — never a panic, never UB.
     #[cfg(feature = "mmap")]
     fn validate(&self, len: usize, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> std::io::Result<()> {
-        let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("mmap dict: {m}"));
-        if self.offsets.len() != len.checked_mul(8).ok_or_else(|| bad("term count overflows offset-array size"))? {
-            return Err(bad("dict-offs.bin length is not term_count * 8 (corrupt or truncated)"));
-        }
-        if self.hashes.len() != len * 8 {
-            return Err(bad("dict-hash.bin length is not term_count * 8 (corrupt or truncated)"));
-        }
-        if self.hashids.len() != len.checked_mul(4).ok_or_else(|| bad("term count overflows hashid-array size"))? {
-            return Err(bad("dict-hid.bin length is not term_count * 4 (corrupt or truncated)"));
-        }
-        let len_id = u32::try_from(len).map_err(|_| bad("term count exceeds u32 id space"))?;
-        let blob: &[u8] = &self.blob;
-        // [OPUS-4.8] sq-cvug — quoted-triple `(own_id, subject, predicate)` ids collected
-        // during the parse pass, verified for KIND once every record offset is known in range.
-        let mut triple_sp: Vec<(Id, Id, Id)> = Vec::new();
-        for (idx, &off) in self.offsets().iter().enumerate() {
-            let own_id = (idx as Id) + 1; // records are stored in 1-based id order
-            let off = off as usize;
-            let rec = blob.get(off..).ok_or_else(|| bad("term offset is past the end of dict-terms.bin"))?;
-            let parsed = parse_stored_ref_checked(rec)
-                .ok_or_else(|| bad("a term record is malformed (bad tag/length or non-UTF-8 bytes)"))?;
-            // Range-check the table indices / component ids the record carries: these are
-            // attacker-controlled u32s in the blob, used unchecked as `prefixes[..]` /
-            // `datatypes[..]` indices and as ids when the term is reconstructed.
-            match parsed {
-                StoredRef::Iri { prefix, .. } => {
-                    if prefix as usize >= prefixes.len() {
-                        return Err(bad("an IRI record references an out-of-range prefix id"));
-                    }
+        // [OPUS-4.8] sq-ueuk — delegate to the mmap-free `&[u8]` seam below. The four
+        // mmap'd files are passed as plain byte slices (a `memmap2::Mmap` derefs to `&[u8]`),
+        // so ALL of the header/length/bounds/record/index logic lives in a pure function
+        // that has no `mmap`/file-I/O/FFI dependency and can be Kani-proof-harnessed (the
+        // MS-G4 follow-up the .spqv validator already enjoys — see .github/workflows/kani.yml).
+        //
+        // [OPUS-4.8] sq-lvw8 (sq-ueuk/#418 verify note) — the seam reads the offset/hashid
+        // arrays with EXPLICIT `from_le_bytes`, while the runtime mmap readers (`slice_u64` /
+        // `hashids`) reinterpret the same bytes with a NATIVE-endian pointer cast. PR #418's
+        // claim that this delegation is "byte-for-byte unchanged" from the old inline validator
+        // therefore holds only on a LITTLE-ENDIAN target, where native == LE. That precondition
+        // is enforced for the whole persistence format by `DICT_ON_DISK_LE_GUARD` (a build error
+        // on a big-endian target), so on every platform this validator actually runs on, the
+        // explicit-LE seam and the native-endian readers observe identical integers.
+        validate_dict_bytes(&self.blob, &self.offsets, &self.hashes, &self.hashids, len, prefixes, datatypes)
+    }
+}
+
+/// [OPUS-4.8] sq-ueuk — the mmap-FREE core of [`MappedDict::validate`].
+///
+/// Takes the four on-disk regions as plain `&[u8]` (a `memmap2::Mmap` derefs to one) so the
+/// whole validator is a pure function of its byte inputs: no `mmap`, no file I/O, no FFI, no
+/// `unsafe`. That makes it BOTH unit-testable from in-memory buffers AND amenable to a Kani
+/// bounded proof (`#[cfg(kani)]` harness below), exactly like `VectorStore::open_from_bytes`
+/// is the mmap-free twin of the `.spqv` validator (the MS-G4 gap; sq-hkud, epic sq-toze).
+///
+/// The byte regions:
+///   * `blob`    — the concatenated term records (`dict-terms.bin`),
+///   * `offsets` — `len` little-endian `u64` byte offsets into `blob` (`dict-offs.bin`),
+///   * `hashes`  — `len` little-endian `u64` content hashes (`dict-hash.bin`); only its
+///     length is load-bearing here (it is binary-searched, not indexed, at query time),
+///   * `hashids` — `len` little-endian `u32` term ids parallel to `hashes` (`dict-hid.bin`).
+///
+/// `len` is the term count read from the (already magic/version-validated) meta file.
+/// We require:
+///   * `dict-offs.bin` is exactly `len * 8` bytes (one `u64` offset per term),
+///   * `dict-hash.bin` is exactly `len * 8` bytes and `dict-hid.bin` exactly `len * 4`
+///     (the parallel sorted lookup arrays — a mismatch would make `mapped_find`'s binary
+///     search read past the hashids array),
+///   * every offset is `<= blob.len()` AND the record at that offset parses fully with valid
+///     UTF-8 (via [`parse_stored_ref_checked`]),
+///   * every record's `prefix` / `datatype` index is within the prefix / datatype tables,
+///     and every `Triple` component id is a valid 1-based term id — otherwise a later
+///     `reconstruct_ref` / `hash_stored_ref` would index those tables out of bounds.
+///
+/// Any violation is a clean `InvalidData` error — never a panic, never UB.
+#[cfg(feature = "mmap")]
+fn validate_dict_bytes(
+    blob: &[u8],
+    offsets: &[u8],
+    hashes: &[u8],
+    hashids: &[u8],
+    len: usize,
+    prefixes: &[Box<str>],
+    datatypes: &[NamedNode],
+) -> std::io::Result<()> {
+    let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("mmap dict: {m}"));
+    if offsets.len() != len.checked_mul(8).ok_or_else(|| bad("term count overflows offset-array size"))? {
+        return Err(bad("dict-offs.bin length is not term_count * 8 (corrupt or truncated)"));
+    }
+    if hashes.len() != len * 8 {
+        return Err(bad("dict-hash.bin length is not term_count * 8 (corrupt or truncated)"));
+    }
+    if hashids.len() != len.checked_mul(4).ok_or_else(|| bad("term count overflows hashid-array size"))? {
+        return Err(bad("dict-hid.bin length is not term_count * 4 (corrupt or truncated)"));
+    }
+    let len_id = u32::try_from(len).map_err(|_| bad("term count exceeds u32 id space"))?;
+    // Read the `idx`-th little-endian `u64` offset directly from the byte region. The length
+    // check above guarantees `offsets` is exactly `len * 8` bytes, so `0..len` is in range;
+    // we still index via `get` so this stays panic-free for ANY input (the Kani obligation).
+    let offset_at = |idx: usize| -> Option<usize> {
+        let start = idx.checked_mul(8)?;
+        let end = start.checked_add(8)?;
+        let bytes: [u8; 8] = offsets.get(start..end)?.try_into().ok()?;
+        Some(u64::from_le_bytes(bytes) as usize)
+    };
+    // [OPUS-4.8] sq-cvug — triple-term `(own_id, subject, predicate)` ids collected
+    // during the parse pass, verified for KIND once every record offset is known in range.
+    let mut triple_sp: Vec<(Id, Id, Id)> = Vec::new();
+    for idx in 0..len {
+        let own_id = (idx as Id) + 1; // records are stored in 1-based id order
+        let off = offset_at(idx).ok_or_else(|| bad("offset-array index out of range (corrupt or truncated)"))?;
+        let rec = blob.get(off..).ok_or_else(|| bad("term offset is past the end of dict-terms.bin"))?;
+        let parsed = parse_stored_ref_checked(rec)
+            .ok_or_else(|| bad("a term record is malformed (bad tag/length or non-UTF-8 bytes)"))?;
+        // Range-check the table indices / component ids the record carries: these are
+        // attacker-controlled u32s in the blob, used unchecked as `prefixes[..]` /
+        // `datatypes[..]` indices and as ids when the term is reconstructed.
+        match parsed {
+            StoredRef::Iri { prefix, .. } => {
+                if prefix as usize >= prefixes.len() {
+                    return Err(bad("an IRI record references an out-of-range prefix id"));
                 }
-                StoredRef::Lit { datatype, .. } => {
-                    if datatype as usize >= datatypes.len() {
-                        return Err(bad("a literal record references an out-of-range datatype id"));
-                    }
+            }
+            StoredRef::Lit { datatype, .. } => {
+                if datatype as usize >= datatypes.len() {
+                    return Err(bad("a literal record references an out-of-range datatype id"));
                 }
-                StoredRef::Triple(ids) => {
-                    // A quoted-triple term's components are themselves dictionary ids; an
-                    // inline-integer id (>= INLINE_BASE) or a real term id (1..=len) is in
-                    // range, but 0 or a dangling id would later index OOB. Beyond range, a
-                    // validly-built store interns each component BEFORE the triple (see
-                    // `intern_triple_ids`), so a non-inline component id is always STRICTLY
-                    // LESS than the triple's own id. Enforcing that here rejects a tampered
-                    // self/forward/cyclic reference (e.g. a triple whose object id is the
-                    // triple itself), which would otherwise drive `reconstruct_triple` into
-                    // UNBOUNDED RECURSION → stack overflow → process abort (a DoS). [OPUS-4.8]
-                    if ids
-                        .iter()
-                        .any(|&c| c == 0 || (c < INLINE_BASE && (c > len_id || c >= own_id)))
-                    {
-                        return Err(bad("a quoted-triple record references an out-of-range, forward, or self component id"));
-                    }
-                    triple_sp.push((own_id, ids[0], ids[1]));
+            }
+            StoredRef::Triple(ids) => {
+                // A triple term's components are themselves dictionary ids; an
+                // inline-integer id (>= INLINE_BASE) or a real term id (1..=len) is in
+                // range, but 0 or a dangling id would later index OOB. Beyond range, a
+                // validly-built store interns each component BEFORE the triple (see
+                // `intern_triple_ids`), so a non-inline component id is always STRICTLY
+                // LESS than the triple's own id. Enforcing that here rejects a tampered
+                // self/forward/cyclic reference (e.g. a triple whose object id is the
+                // triple itself), which would otherwise drive `reconstruct_triple` into
+                // UNBOUNDED RECURSION → stack overflow → process abort (a DoS). [OPUS-4.8]
+                if ids
+                    .iter()
+                    .any(|&c| c == 0 || (c < INLINE_BASE && (c > len_id || c >= own_id)))
+                {
+                    return Err(bad("a quoted-triple record references an out-of-range, forward, or self component id"));
                 }
-                StoredRef::Blank(_) => {}
+                triple_sp.push((own_id, ids[0], ids[1]));
             }
+            StoredRef::Blank(_) => {}
         }
-        // [OPUS-4.8] sq-cvug — KIND check: a component id can be in range yet of the wrong
-        // kind (e.g. a literal where the subject must be IRI/blank or the predicate an IRI).
-        // `reconstruct_triple` now fails closed to a placeholder rather than panicking, but
-        // reject such an index here too so a corrupt store never opens. Resolving each id is
-        // safe now: every offset above was confirmed in range and every record parseable, so
-        // `record_kind` cannot OOB. (Inline-integer ids resolve to a literal — invalid in a
-        // subject/predicate slot.)
-        let record_kind = |c: Id| -> Option<u8> {
-            if is_inline(c) {
-                return Some(1); // inline integer => literal
-            }
-            let off = *self.offsets().get((c - 1) as usize)? as usize;
-            // tag byte: 0=IRI, 1=literal, 2=blank, 3=triple
-            blob.get(off).copied()
-        };
-        for (_own, s, p) in triple_sp {
-            match record_kind(s) {
-                Some(0 | 2) => {} // IRI or blank — valid subject
-                _ => return Err(bad("a quoted-triple subject component is not an IRI or blank node")),
-            }
-            match record_kind(p) {
-                Some(0) => {} // IRI — valid predicate
-                _ => return Err(bad("a quoted-triple predicate component is not an IRI")),
-            }
+    }
+    // [OPUS-4.8] sq-cvug — KIND check: a component id can be in range yet of the wrong
+    // kind (e.g. a literal where the subject must be IRI/blank or the predicate an IRI).
+    // `reconstruct_triple` now fails closed to a placeholder rather than panicking, but
+    // reject such an index here too so a corrupt store never opens. Resolving each id is
+    // safe now: every offset above was confirmed in range and every record parseable, so
+    // `record_kind` cannot OOB. (Inline-integer ids resolve to a literal — invalid in a
+    // subject/predicate slot.)
+    let record_kind = |c: Id| -> Option<u8> {
+        if is_inline(c) {
+            return Some(1); // inline integer => literal
         }
-        // Every id in the sorted lookup array must be a valid 1-based term id: `mapped_find`
-        // feeds it straight to `stored` (→ `offsets()[id-1]`), so `id == 0` (underflow) or
-        // `id > len` (OOB) would be an out-of-bounds read on a hostile dict-hid.bin.
-        if self.hashids().iter().any(|&id| id == 0 || id > len_id) {
+        let off = offset_at((c - 1) as usize)?;
+        // tag byte: 0=IRI, 1=literal, 2=blank, 3=triple
+        blob.get(off).copied()
+    };
+    for (_own, s, p) in triple_sp {
+        match record_kind(s) {
+            Some(0 | 2) => {} // IRI or blank — valid subject
+            _ => return Err(bad("a quoted-triple subject component is not an IRI or blank node")),
+        }
+        match record_kind(p) {
+            Some(0) => {} // IRI — valid predicate
+            _ => return Err(bad("a quoted-triple predicate component is not an IRI")),
+        }
+    }
+    // Every id in the sorted lookup array must be a valid 1-based term id: `mapped_find`
+    // feeds it straight to `stored` (→ `offsets()[id-1]`), so `id == 0` (underflow) or
+    // `id > len` (OOB) would be an out-of-bounds read on a hostile dict-hid.bin. Read each
+    // little-endian `u32` from the byte region; the length check above guarantees the slice
+    // is exactly `len * 4` bytes, and `chunks_exact(4)` never panics on a short tail.
+    for chunk in hashids.chunks_exact(4) {
+        let id = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        if id == 0 || id > len_id {
             return Err(bad("dict-hid.bin contains an out-of-range term id (corrupt lookup index)"));
         }
-        Ok(())
+    }
+    Ok(())
+}
+
+// [OPUS-4.8] sq-ueuk (epic sq-toze, gap MS-G4) — Kani bounded proof of the mmap dict
+// validator, now that the `&[u8]` seam above lets Kani reach the header/length/bounds/record
+// logic WITHOUT a real `mmap` (which Kani — like Miri — cannot model; see the WHY scope note
+// in .github/workflows/kani.yml). This is the dict-side twin of `sparq-vectors`'
+// `open_from_bytes_*` harnesses: it model-checks that `validate_dict_bytes` is TOTAL over a
+// bounded symbolic byte domain — it always returns `Ok`/`Err`, never panics, never reads out
+// of bounds, never hits UB — for EVERY hostile input in that domain.
+//
+// UNTESTED-HERE: Kani is not installed in the authoring environment, so this harness has NOT
+// been run; it is written against Kani's documented API (`kani::any()`, `kani::assume()`,
+// `#[kani::proof]`, `#[kani::unwind]`) and is VALIDATED ON THE FIRST CI RUN of the `kani`
+// lane. It is `#[cfg(kani)]`, so the normal `cargo build`/`clippy`/`test` never compile it.
+// The `kani` cfg is registered in crates/sparq-core/Cargo.toml [lints.rust] so `-D warnings`
+// (unexpected_cfgs) is happy on the normal build.
+#[cfg(all(kani, feature = "mmap"))]
+mod kani_proofs {
+    use super::*;
+
+    /// Symbolic buffer ceiling. The four byte regions are independently symbolic but length-
+    /// coupled to `len` by the early size checks, so a small `len` plus a small blob exercises
+    /// every branch — the size-arithmetic rejections, the record parse + table-index range
+    /// checks, the triple-term component/kind checks, and the hashid range loop — while
+    /// keeping the bounded exploration tractable.
+    const MAX_LEN: usize = 2; // up to 2 terms
+    const MAX_BLOB: usize = 24; // a couple of small records / one triple term (1+12) + slack
+
+    /// Fills a `Vec<u8>` of a symbolic length `<= cap` with symbolic bytes.
+    fn symbolic_bytes(cap: usize) -> Vec<u8> {
+        let n: usize = kani::any();
+        kani::assume(n <= cap);
+        let mut v = vec![0u8; n];
+        for b in v.iter_mut() {
+            *b = kani::any();
+        }
+        v
+    }
+
+    /// PROPERTY: `validate_dict_bytes` never panics / OOB / UB for ANY four byte regions and
+    /// term count up to the bounds, with empty prefix/datatype tables. Empty tables make every
+    /// non-zero IRI-prefix / literal-datatype index out of range (so that rejection branch is
+    /// exercised) and keep the symbolic surface minimal.
+    #[kani::proof]
+    #[kani::unwind(28)] // > MAX_BLOB so every bounded record/slice loop fully unrolls.
+    fn validate_dict_bytes_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= MAX_LEN);
+        let blob = symbolic_bytes(MAX_BLOB);
+        let offsets = symbolic_bytes(MAX_LEN * 8);
+        let hashes = symbolic_bytes(MAX_LEN * 8);
+        let hashids = symbolic_bytes(MAX_LEN * 4);
+        // The property is simply: this call returns (must not panic / OOB / UB). Both `Ok`
+        // and `Err` are correct outcomes; the harness proves the validator is TOTAL over the
+        // bounded input domain.
+        let _ = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, len, &[], &[]);
+    }
+
+    /// PROPERTY (focused): with the array LENGTHS already correct for `len`, the record-parse,
+    /// component-id, kind, and hashid-range tail still never panics. Pinning the lengths past
+    /// the size checks spends Kani's budget on the loop/arithmetic logic the corpus is least
+    /// likely to have exhausted, with one prefix + one datatype so the in-range index branch
+    /// is also taken.
+    #[kani::proof]
+    #[kani::unwind(28)]
+    fn validate_dict_bytes_sized_tail_never_panics() {
+        const LEN: usize = 1;
+        let blob = symbolic_bytes(MAX_BLOB);
+        let mut offsets = vec![0u8; LEN * 8];
+        for b in offsets.iter_mut() {
+            *b = kani::any();
+        }
+        let mut hashes = vec![0u8; LEN * 8];
+        for b in hashes.iter_mut() {
+            *b = kani::any();
+        }
+        let mut hashids = vec![0u8; LEN * 4];
+        for b in hashids.iter_mut() {
+            *b = kani::any();
+        }
+        let prefixes: [Box<str>; 1] = [Box::from("p")];
+        let datatypes = [NamedNode::new_unchecked("http://example.org/dt")];
+        let _ = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, LEN, &prefixes, &datatypes);
     }
 }
 
@@ -1209,7 +1369,7 @@ impl Dict {
             TermParts::Lit { value, datatype, lang } => self.intern_lit(value, datatype, *lang),
             TermParts::Blank(b) => self.intern_blank(b),
             TermParts::Triple(_) => {
-                panic!("RDF-star triple terms must be interned structurally (intern_triple_ids), not via the parts-based leaf path")
+                panic!("RDF 1.2 triple terms must be interned structurally (intern_triple_ids), not via the parts-based leaf path")
             }
         }
     }
@@ -1243,7 +1403,7 @@ impl Dict {
         self.find_term(hash, term).unwrap_or(NO_ID)
     }
 
-    /// Returns the id for a literal given its components, else `NO_ID` — [`lookup`]
+    /// Returns the id for a literal given its components, else `NO_ID` — `lookup`
     /// without constructing an `oxrdf::Term` (the fast path for resolving computed
     /// BIND/aggregate values against the dictionary). Canonical small `xsd:integer`s
     /// resolve to their inline id, exactly like `lookup`/`intern_lit`.
@@ -1807,20 +1967,15 @@ impl Dict {
     }
 
     /// [OPUS-4.8] (sq-hxgb) Whether this dict stores any RDF 1.2 triple term
-    /// (`Stored::Triple`). The parallel N-Triples loader checks each parsed PARTIAL with
-    /// this to pick the merge path: the SHARDED merge cannot consolidate triple terms
-    /// (a triple's components are both hash-routed to a shard AND referenced by the
-    /// triple, breaking the term↔id bijection on merge — see `intern_partials`), so a
-    /// document that contains any triple term falls back to the serial `merge_remap`,
-    /// which interns triple terms structurally and correctly. Arena-mode (partial) dicts
-    /// only — that is all the loader ever inspects here.
+    /// (`Stored::Triple`).
     //
-    // [OPUS-4.8] (sq-qmth) Gated on `parallel`: the only callers are the parallel
-    // N-Triples loader (`parse_ntriples_parallel`) and the external-build triple-term
-    // guard, both `#[cfg(feature = "parallel")]`. Without this gate the method is dead
-    // code on the wasm build (no `parallel` feature), which the wasm32 `clippy -D warnings`
-    // job promotes to a hard error (`-D dead-code`).
-    #[cfg(feature = "parallel")]
+    // [OPUS-4.8] (sq-jvbr) The SOLE caller is the DICT-SPILL external builder's
+    // `SpillInterner::intern_batch` (`#[cfg(feature = "dict-spill")]`), which uses it to SKIP
+    // the serial triple-term arena pass on the common triple-term-free hot path. Gated to
+    // `dict-spill` so the method is not dead code on the default / wasm builds, which
+    // `clippy -D warnings` (`-D dead-code`) would otherwise reject. (`any_triple_terms`, the
+    // implementation, stays ungated — `intern_partials` uses it on every build.)
+    #[cfg(feature = "dict-spill")]
     pub(crate) fn has_triple_terms(&self) -> bool {
         self.any_triple_terms()
     }
@@ -1938,10 +2093,52 @@ pub(crate) fn write_record(w: &mut impl std::io::Write, t: &StoredRef) -> std::i
     })
 }
 
-/// Writes a slice of plain-old-data (u32/u64) as raw little-endian bytes (for the mmap
-/// offset / hash / id arrays). Little-endian is assumed on read (all target platforms).
+/// [OPUS-4.8] sq-lvw8 (sq-ueuk/#418 follow-up): the mmap on-disk dictionary format is
+/// little-endian. [`write_pod_slice`] / [`MappedDict::slice_u64`] / [`MappedDict::hashids`]
+/// move the offset/hash/id arrays through a raw native-endian byte cast, while
+/// [`validate_dict_bytes`] and the `dict-spill` external builder use explicit
+/// `from_le_bytes` / `to_le_bytes`; the two only agree (and the in-RAM vs spilled build only
+/// stay byte-identical) on a little-endian host. Make that a BUILD error, not silent on-disk
+/// corruption, on the day someone targets a big-endian platform — at which point both the raw
+/// writer and the unsafe readers must be reworked onto explicit `*_le_bytes`. (`compile_error!`
+/// here would be evaluated even when the `mmap` cfg is inactive, so this uses a const guard,
+/// which is monomorphised only when the feature is on.)
+#[cfg(feature = "mmap")]
+const DICT_ON_DISK_LE_GUARD: () = assert!(
+    cfg!(target_endian = "little"),
+    "the mmap/dict-spill on-disk dictionary format is little-endian only (sq-lvw8): \
+     write_pod_slice + the MappedDict pointer-cast readers are native-endian, but \
+     validate_dict_bytes and the dict-spill builder are explicit-LE, so they diverge on a \
+     big-endian target. Port both to explicit *_le_bytes before enabling these features on BE."
+);
+
+/// Writes a slice of plain-old-data (u32/u64) as raw bytes (for the mmap offset / hash /
+/// id arrays — `dict-offs.bin` / `dict-hash.bin` / `dict-hid.bin`).
+///
+/// [OPUS-4.8] sq-lvw8 (sq-ueuk/#418 follow-up): this is a raw `transmute`-style byte copy,
+/// so the on-disk byte order is the HOST's native endianness — little-endian on every target
+/// sparq currently builds for. The whole mmap dictionary format relies on that:
+///   * the mmap readers ([`MappedDict::slice_u64`] / [`MappedDict::hashids`]) reinterpret
+///     these bytes as `&[u64]` / `&[u32]` via a pointer cast — also native-endian — so the
+///     in-RAM write/read round-trip is self-consistent on ANY single target, BUT
+///   * [`validate_dict_bytes`] and the `dict-spill` external builder (`dictspill.rs`) read
+///     and WRITE the very same files with EXPLICIT `from_le_bytes` / `to_le_bytes`.
+///
+/// On a little-endian host all three agree, so `save_mmap`'s output is byte-for-byte identical
+/// to the spilled-build output and `validate_dict_bytes` accepts it — exactly the equivalence
+/// PR #418 relied on when it called its validator refactor "byte-for-byte unchanged". On a
+/// BIG-endian host the native-endian writer/reader here would diverge from the explicit-LE
+/// `validate_dict_bytes` / `dictspill` paths, so a freshly-written store would FAIL its own
+/// `open_mmap` validation and the two build paths would no longer be byte-identical. Rather
+/// than carry that silent-corruption hazard, the persistence features are STATICALLY pinned to
+/// little-endian targets by [`DICT_ON_DISK_LE_GUARD`]; the only correct way to support BE would
+/// be to route BOTH this writer and the unsafe readers through explicit `*_le_bytes` too.
 #[cfg(feature = "mmap")]
 fn write_pod_slice<T: Copy>(path: &std::path::Path, data: &[T]) -> std::io::Result<()> {
+    // Force-evaluate the little-endian on-disk-format guard (sq-lvw8): referencing the const
+    // both keeps it from being dead-code-eliminated and makes a big-endian build fail HERE,
+    // at the native-endian raw byte write, rather than silently emit a BE file.
+    let () = DICT_ON_DISK_LE_GUARD;
     // SAFETY: T is u32/u64 (POD); we only read its bytes.
     let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) };
     std::fs::write(path, bytes)
@@ -2071,10 +2268,10 @@ impl ShardedDict {
     /// inline integers are handled by the caller), returning `(tag, idx, temp-id)`. The
     /// per-shard interning runs in parallel (each shard is single-writer → no contention).
     ///
-    /// RDF-star triple terms are NOT supported by the sharded interner (a triple's
+    /// RDF 1.2 triple terms are NOT supported by the sharded interner (a triple's
     /// component terms would be interned both in their hash-routed shard and alongside
     /// the triple, breaking the term↔id bijection on merge); the N-Triples bulk loaders
-    /// that feed it reject RDF-star syntax before it could reach here.
+    /// that feed it reject triple-term syntax before it could reach here.
     pub fn intern_terms(&mut self, items: Vec<(u32, Id, Term)>) -> Vec<(u32, Id, Id)> {
         // Leaves route across the `n_leaf` LEAF shards only; the trailing triple shard is
         // reserved for `intern_partials`'s structural second pass (see the type doc).
@@ -2084,7 +2281,7 @@ impl ShardedDict {
         for (tag, idx, t) in items {
             assert!(
                 !matches!(t, Term::Triple(_)),
-                "RDF-star triple terms are not supported by the sharded bulk interner; use the serial loader"
+                "RDF 1.2 triple terms are not supported by the sharded bulk interner; use the serial loader"
             );
             let s = (hash_term(&t) % n as u64) as usize;
             buckets[s].push((tag, idx, t));
@@ -2189,7 +2386,13 @@ impl ShardedDict {
         // written afterwards by the serial pass, never concurrently.)
         #[derive(Clone, Copy)]
         struct SlotPtr(*mut Id, usize);
+        // SAFETY: `SlotPtr` (a `*mut Id`) only ever touches its own disjoint slot — the
+        // hash routing above assigns each (pidx, i) leaf slot to exactly one shard, so the
+        // raw-pointer handle can be sent/shared across the parallel scatter without
+        // aliasing; no reads happen until the parallel scope ends. [OPUS-4.8 sq-8wbn]
         unsafe impl Send for SlotPtr {}
+        // SAFETY: shared read of a `Copy` raw-pointer handle; the writes it performs are
+        // disjoint by the hash routing above (see the `Send` argument). [OPUS-4.8 sq-8wbn]
         unsafe impl Sync for SlotPtr {}
         let scatter: Vec<SlotPtr> = remaps.iter_mut().map(|v| SlotPtr(v.as_mut_ptr(), v.len())).collect();
 
@@ -2456,7 +2659,7 @@ mod tests {
         assert_eq!(d.len(), 0, "no inline integer is stored in the dictionary");
     }
 
-    /// [OPUS-4.8] sq-cvug — a quoted-triple component id that is IN RANGE but resolves to the
+    /// [OPUS-4.8] sq-cvug — a triple-term component id that is IN RANGE but resolves to the
     /// WRONG KIND (a literal where the subject must be IRI/blank, or where the predicate must
     /// be an IRI) used to hit `reconstruct_triple`'s `unreachable!()` → a clean panic (DoS) on
     /// a hostile/corrupt mmap'd index. It must now FAIL CLOSED to a safe placeholder, never
@@ -2862,6 +3065,59 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// [OPUS-4.8] sq-lvw8 (sq-ueuk/#418 follow-up) — endianness invariant of the mmap on-disk
+    /// dictionary format. The format mixes two byte-order conventions for the SAME files: the
+    /// runtime writer/readers (`write_pod_slice`, `MappedDict::slice_u64`/`hashids`) move the
+    /// `u64`/`u32` arrays through a raw NATIVE-endian byte cast, while `validate_dict_bytes` and
+    /// the `dict-spill` external builder use explicit `to_le_bytes` / `from_le_bytes`. They
+    /// agree, and the in-RAM `save_mmap` output is byte-for-byte identical to the spilled build
+    /// (the claim PR #418 relied on), ONLY on a little-endian host — which is exactly what
+    /// `DICT_ON_DISK_LE_GUARD` pins at compile time. This test makes the assumption a CHECKED
+    /// invariant: it evaluates the compile-time guard, confirms the writer's raw bytes equal the
+    /// explicit-LE encoding the validator expects, and that re-opening round-trips. On a
+    /// (currently unbuildable) big-endian target `DICT_ON_DISK_LE_GUARD` fails the build before
+    /// this test — or any silent on-disk corruption — can be reached.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn mmap_dict_on_disk_arrays_are_little_endian() {
+        // Force-evaluate the compile-time little-endian guard: on a big-endian target this
+        // const initializer (and thus the whole crate) fails to build, so the persistence
+        // format is never silently emitted in the wrong byte order. `cfg!(target_endian)` is a
+        // compile-time constant here, hence the const guard rather than a runtime `assert!`.
+        let () = DICT_ON_DISK_LE_GUARD;
+
+        let mut d = Dict::new();
+        d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a")));
+        d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/b")));
+        let dir = std::env::temp_dir().join(format!("sparq-dict-endian-mmap-{}", std::process::id()));
+        d.save_mmap(&dir).unwrap();
+
+        // (a) `write_pod_slice` is a raw native-endian byte copy; on this LE host the on-disk
+        //     `dict-offs.bin` must therefore be the EXPLICIT little-endian encoding of the same
+        //     u64 offsets that `validate_dict_bytes` (which uses `from_le_bytes`) reads back.
+        let offs_bytes = std::fs::read(dir.join("dict-offs.bin")).unwrap();
+        assert_eq!(offs_bytes.len() % 8, 0, "offset array is whole u64s");
+        for chunk in offs_bytes.chunks_exact(8) {
+            // Re-encoding the LE-decoded value must reproduce the on-disk bytes exactly.
+            let v = u64::from_le_bytes(chunk.try_into().unwrap());
+            assert_eq!(&v.to_le_bytes(), chunk, "dict-offs.bin is little-endian on this host");
+        }
+        // (b) Same for `dict-hid.bin` (the u32 lookup ids the seam reads via `from_le_bytes`).
+        let hid_bytes = std::fs::read(dir.join("dict-hid.bin")).unwrap();
+        assert_eq!(hid_bytes.len() % 4, 0, "hashid array is whole u32s");
+        for chunk in hid_bytes.chunks_exact(4) {
+            let v = u32::from_le_bytes(chunk.try_into().unwrap());
+            assert_eq!(&v.to_le_bytes(), chunk, "dict-hid.bin is little-endian on this host");
+        }
+
+        // (c) End-to-end: the store re-opens and resolves — i.e. the native-endian mmap readers
+        //     and the explicit-LE `validate_dict_bytes` (run inside `open_mmap`) agree.
+        let d2 = Dict::open_mmap(&dir).unwrap();
+        assert_eq!(d2.lookup(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a"))), 1);
+        assert_eq!(d2.lookup(&Term::NamedNode(NamedNode::new_unchecked("http://ex/b"))), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// [OPUS-4.8] Regression for review 1409: the mmap dictionary must carry an on-disk
     /// id-space partition marker so a store written under a DIFFERENT `INLINE_BASE` (or a
     /// legacy header-less file) is REJECTED rather than silently misinterpreting its ids.
@@ -2897,6 +3153,90 @@ mod tests {
         assert!(err.to_string().contains("legacy"), "clear rebuild error: {err}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] sq-ueuk — exercise the mmap-FREE `&[u8]` validator seam directly from
+    /// in-memory buffers (no real `mmap`, no file I/O), the same seam the Kani harness proves
+    /// over a bounded symbolic domain. Builds a well-formed two-term store in RAM (one IRI +
+    /// one literal) and then mutates each region to hit every rejection branch.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn validate_dict_bytes_seam_accepts_valid_and_rejects_corruption() {
+        // A well-formed store: ids 1 = IRI(prefix 0, suffix "a"), 2 = literal "v" of datatype 0.
+        let prefixes: Vec<Box<str>> = vec![Box::from("http://ex/")];
+        let datatypes = vec![NamedNode::new_unchecked("http://ex/dt")];
+        let recs = [
+            StoredRef::Iri { prefix: 0, suffix: "a" },
+            StoredRef::Lit { value: "v", datatype: 0, lang: None },
+        ];
+        let mut blob: Vec<u8> = Vec::new();
+        let mut offsets: Vec<u8> = Vec::new();
+        for r in &recs {
+            offsets.extend_from_slice(&(blob.len() as u64).to_le_bytes());
+            write_record(&mut blob, r).unwrap();
+        }
+        let len = recs.len();
+        // Sorted lookup arrays: hashes are not indexed here (length-only), ids must be 1..=len.
+        let hashes: Vec<u8> = vec![0u8; len * 8];
+        let mut hashids: Vec<u8> = Vec::new();
+        hashids.extend_from_slice(&1u32.to_le_bytes());
+        hashids.extend_from_slice(&2u32.to_le_bytes());
+
+        // (a) The well-formed buffers validate.
+        validate_dict_bytes(&blob, &offsets, &hashes, &hashids, len, &prefixes, &datatypes)
+            .expect("a well-formed in-memory store validates");
+
+        // (b) Wrong offset-array length (truncated dict-offs.bin) is rejected.
+        let err = validate_dict_bytes(&blob, &offsets[..8], &hashes, &hashids, len, &prefixes, &datatypes)
+            .expect_err("a truncated offset array must be rejected");
+        assert!(err.to_string().contains("dict-offs.bin"), "{err}");
+
+        // (c) An offset past the end of the blob is rejected (no panic / OOB).
+        let mut bad_offsets = offsets.clone();
+        bad_offsets[0..8].copy_from_slice(&((blob.len() + 1) as u64).to_le_bytes());
+        let err = validate_dict_bytes(&blob, &bad_offsets, &hashes, &hashids, len, &prefixes, &datatypes)
+            .expect_err("an out-of-range offset must be rejected");
+        assert!(err.to_string().contains("past the end"), "{err}");
+
+        // (d) An out-of-range prefix id is rejected (empty prefix table makes prefix 0 invalid).
+        let err = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, len, &[], &datatypes)
+            .expect_err("an out-of-range prefix id must be rejected");
+        assert!(err.to_string().contains("prefix id"), "{err}");
+
+        // (e) A hashid of 0 (would underflow `offsets[id-1]`) is rejected.
+        let mut bad_hashids = hashids.clone();
+        bad_hashids[0..4].copy_from_slice(&0u32.to_le_bytes());
+        let err = validate_dict_bytes(&blob, &offsets, &hashes, &bad_hashids, len, &prefixes, &datatypes)
+            .expect_err("a zero hashid must be rejected");
+        assert!(err.to_string().contains("dict-hid.bin"), "{err}");
+
+        // (f) A hashid > len (would index past the offset array) is rejected.
+        let mut over_hashids = hashids.clone();
+        over_hashids[4..8].copy_from_slice(&(len as u32 + 1).to_le_bytes());
+        let err = validate_dict_bytes(&blob, &offsets, &hashes, &over_hashids, len, &prefixes, &datatypes)
+            .expect_err("an out-of-range hashid must be rejected");
+        assert!(err.to_string().contains("dict-hid.bin"), "{err}");
+
+        // (g) Totally-empty inputs with len 0 validate (vacuously well-formed).
+        validate_dict_bytes(&[], &[], &[], &[], 0, &[], &[]).expect("an empty store validates");
+    }
+
+    /// [OPUS-4.8] sq-ueuk — the seam must reject a tampered triple term whose component id
+    /// forward-references (or self-references) its own id, which would otherwise drive the
+    /// reconstruct recursion unbounded. Build a single triple term whose subject id equals its
+    /// own id and confirm it is refused at the `&[u8]` boundary (no panic / no stack blowup).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn validate_dict_bytes_seam_rejects_self_referential_triple() {
+        // id 1 = Triple([1, 1, 1]) — every component is the triple's own id (forward/self).
+        let mut blob: Vec<u8> = Vec::new();
+        write_record(&mut blob, &StoredRef::Triple([1, 1, 1])).unwrap();
+        let offsets = 0u64.to_le_bytes().to_vec();
+        let hashes = vec![0u8; 8];
+        let hashids = 1u32.to_le_bytes().to_vec();
+        let err = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, 1, &[], &[])
+            .expect_err("a self/forward-referential quoted-triple must be rejected");
+        assert!(err.to_string().contains("quoted-triple"), "{err}");
     }
 
     #[test]

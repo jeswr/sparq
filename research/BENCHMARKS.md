@@ -25,7 +25,7 @@ and through **Oxigraph** (a mature, widely-used Rust SPARQL engine), and:
 2. reports **load time**, **per-query time** (min of *K* iterations, warm), and
    **peak process RSS** (measured in a clean subprocess, right after load).
 
-```
+```text
 cargo run -p sparq-bench --release -- --scale 50000 --iters 4
 ```
 

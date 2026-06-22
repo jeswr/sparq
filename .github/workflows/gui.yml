@@ -1,0 +1,425 @@
+# [OPUS-4.8] sq-2e93 / sq-bu69 — GUI CI lane: build / lint / typecheck / clippy the Tauri 2
+# GUI, now extended to the per-platform build+clippy MATRIX the design record specifies.
+#
+# WHY: the GUI design record (research/gui-design.md §3) calls for a PATH-SCOPED,
+# NON-merge-queue lane modelled on site-e2e.yml / js.yml. It validates the things a dev box
+# without the webview system libraries (webkit2gtk / WebView2 / WKWebView) cannot:
+#   1. the shared framework-agnostic TS client (packages/sparq-client) typechecks,
+#   2. the site still builds AND typechecks (next lint + tsc) consuming that shared package,
+#   3. the Tauri crate (gui/src-tauri) compiles + clippies CLEAN against the real engine, on
+#      EVERY desktop platform the release matrix ships (macOS / Linux x64 + arm64 / Windows).
+#
+# SCOPE: PRs that touch gui/**, packages/sparq-client/**, or this workflow. A Rust-/docs-only
+# PR skips it (no run, so the required `ci-summary / gate` simply never waits on it —
+# cross-workflow `needs:` is impossible, exactly as documented in site-e2e.yml). It is NOT a
+# `merge_group` lane (ci-summary.yml never cross-workflow needs gui.yml). Re-runs on push to
+# main for post-merge cover.
+#
+# GATING vs ADVISORY (the `ci-summary / gate` aggregator polls EVERY check-run on the head
+# commit cross-workflow; it EXCLUDES only names matching the whole word `advisory`/
+# `informational` — `\b(advisory|informational)\b` — so a job's NAME decides whether it
+# gates). [OPUS-4.8] This bit gui.yml once (PR #748): a per-platform job WITHOUT the token is
+# treated as GATING, and a macOS/Windows runner-image/webview flake would then break the
+# `ci-summary / gate` for EVERY PR. So:
+#   * "shared TS client typecheck" and "site build + typecheck (consuming @sparq/client)"
+#     are the load-bearing deliverable and are PROVEN green (Linux, TS-only) — they GATE (no
+#     excluded keyword in their names).
+#   * the per-platform Tauri "GUI build + clippy (…, advisory)" matrix and the
+#     "GUI tauri-driver e2e (Linux, advisory)" job carry the `advisory` keyword so the
+#     aggregator excludes them, AND set `continue-on-error: true`, so a webview/runner-image
+#     flake on a platform we have not yet proven reliably green can never turn `ci-summary`
+#     red. The Linux rows (ubuntu-latest x64 + ubuntu-24.04-arm) build green today; the
+#     macOS/Windows rows stay advisory until proven across the full matrix. [OPUS-4.8] sq-pnnl
+#     — the tauri-driver e2e is now a REAL launch+run-a-query assertion (gui/e2e, not the old
+#     no-op scaffold), but the headless WebKitWebDriver + tauri-driver + xvfb webview session
+#     is a NEW surface whose CI reliability is unproven, so it KEEPS the `advisory` token +
+#     `continue-on-error` and is strictly non-gating. Bead sq-var9 drops the keyword +
+#     `continue-on-error` (and the maintainer adds gui to the branch-protection
+#     required-contexts, a `needs:user` repo-settings action) to PROMOTE them to a hard gate
+#     once reliably green.
+#
+# Every action below is SHA-pinned (Scorecard Pinned-Dependencies); the lane is
+# least-privilege (contents: read).
+name: gui
+
+on:
+  pull_request:
+    # [OPUS-4.8] The `site build + typecheck` job here consumes `site/` (its static export +
+    # the bundle-wasm-esm script) and `js/` (the @jeswr/sparq source it bundles), and resolves
+    # workspace deps from the root lockfile — so changes to ANY of those can break it. They were
+    # previously omitted, so a `site/`+lockfile regression (an unresolved `fzstd` in the ESM
+    # bundle) slipped onto `main` undetected and only surfaced on a PR whose `gate` re-scans the
+    # merge ref. List every input the jobs read.
+    paths:
+      - "gui/**"
+      - "packages/sparq-client/**"
+      - "site/**"
+      - "js/**"
+      - "package-lock.json"
+      - ".github/workflows/gui.yml"
+  push:
+    branches: [main]
+    paths:
+      - "gui/**"
+      - "packages/sparq-client/**"
+      - "site/**"
+      - "js/**"
+      - "package-lock.json"
+      - ".github/workflows/gui.yml"
+
+# Least-privilege default (Scorecard TokenPermissions): read-only; this lane never writes.
+permissions:
+  contents: read
+
+# One in-flight run per PR/branch; cancel a superseded run (the per-platform Tauri build is
+# expensive — the design calls out cancel-in-progress for exactly this reason).
+concurrency:
+  group: gui-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shared-client:
+    name: shared TS client typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/sparq-client
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      # [OPUS-4.8] sq-jpki.1 — repo-root npm workspaces: packages/sparq-client is a workspace
+      # member and the per-member lock was dropped. `npm install` (run in packages/sparq-client)
+      # resolves the member's deps via the repo-root workspace, installing into the hoisted root
+      # node_modules; the typecheck then runs against that tree. (This lane uses `npm install`,
+      # not `npm ci`, so it is tolerant of a not-yet-regenerated lock — unchanged behaviour.)
+      - name: Install dependencies
+        run: npm install
+
+      - name: Typecheck (@sparq/client)
+        run: npm run typecheck
+
+  site-with-shared-client:
+    name: site build + typecheck (consuming @sparq/client)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The site's static export hard-fails without the wasm bundle; build it first
+      # (wasm-pack target, then the lean shacl,jsonld bundle the site syncs into public/).
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Cache cargo
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: gui-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build wasm bundle (shacl,jsonld)
+        working-directory: js
+        run: npm run build:wasm
+
+      # [OPUS-4.8] sq-jpki — the @sparq/client hand-written WasmStore mirror is now DELETED:
+      # the package re-exports the wasm-pack GENERATED `Store` surface from the TRACKED copy
+      # `packages/sparq-client/src/generated/sparq_wasm.d.ts`. With the freshly built
+      # js/wasm/sparq_wasm.d.ts now present, assert that tracked copy is BYTE-IDENTICAL to it,
+      # so a binding change that was not re-synced (`npm run sync:wasm-types`) fails CI here
+      # rather than letting the tracked d.ts drift from the engine. (The `shared-client` job
+      # above runs the bare typecheck WITHOUT the artifact, resolving the Store surface from the
+      # tracked copy; this is the only lane that can verify the tracked copy still matches a
+      # fresh build — the design's §4 single-source-of-truth check.) This replaces the obsolete
+      # sq-06gq subset-conformance guard, which checked a mirror that no longer exists.
+      - name: Install @sparq/client dependencies
+        working-directory: packages/sparq-client
+        run: npm install
+
+      - name: "@sparq/client tracked wasm d.ts byte-identical to fresh build"
+        working-directory: packages/sparq-client
+        run: npm run check:wasm-types
+
+      - name: Install site dependencies
+        working-directory: site
+        run: npm install
+
+      - name: Site lint
+        working-directory: site
+        run: npm run lint
+
+      - name: Site typecheck
+        working-directory: site
+        run: npx tsc --noEmit
+
+      - name: Site static export build (consumes @sparq/client)
+        working-directory: site
+        run: npm run build
+
+  # [OPUS-4.8] sq-ixc3.8 / sq-ixc3.9 — the DISTINCT operational GUI frontend (gui/app).
+  #
+  # This is the load-bearing deliverable of the GUI-foundation work: the workbench frontend is a
+  # SEPARATE Next.js app (NOT the marketing site), static-exported for BOTH the Tauri desktop
+  # webview (root-relative) AND a hosted "Try the GUI live" web target (sub-path). It runs the
+  # in-tab WASM engine, so the build embeds the lean shacl,jsonld bundle (built first). GATING
+  # (no `advisory` keyword): it is TS + a static export, fully reproducible on a Linux runner
+  # without any webview system libraries, so a break here is a real regression.
+  gui-app:
+    name: "operational GUI frontend (build + lint + typecheck, both targets)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The GUI frontend embeds the in-tab engine, so the wasm bundle must be built first
+      # (the same shacl,jsonld bundle the site syncs).
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Cache cargo
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: gui-app-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build wasm bundle (shacl,jsonld)
+        working-directory: js
+        run: npm run build:wasm
+
+      - name: Install workspace dependencies
+        run: npm install
+
+      - name: GUI frontend lint
+        working-directory: gui/app
+        run: npm run lint
+
+      - name: GUI frontend typecheck
+        working-directory: gui/app
+        run: npm run typecheck
+
+      # The hosted "Try the GUI live" web target (sub-path basePath).
+      - name: GUI frontend static export (web target)
+        working-directory: gui/app
+        run: npm run build:web
+
+      # The Tauri desktop webview target (root-relative). Proves the SAME frontend exports for
+      # both hosts off the single NEXT_PUBLIC_BASE_PATH switch.
+      - name: GUI frontend static export (Tauri target)
+        working-directory: gui/app
+        run: npm run build:tauri
+
+  # [OPUS-4.8] sq-bu69 — per-platform Tauri build + clippy matrix.
+  #
+  # ADVISORY (see the header): every matrix row's NAME carries the `advisory` keyword, so the
+  # `ci-summary / gate` aggregator excludes the whole leg, and `continue-on-error: true` keeps
+  # a macOS/Windows webview or runner-image flake from ever turning `ci-summary` red. The
+  # Linux rows build green today (reproduced locally on arm64 with the same clippy/build/test
+  # commands); the macOS/Windows rows are documented-untested in CI this pass — they stay
+  # advisory until proven across the full matrix (bead sq-var9 promotes the leg to a hard
+  # gate then). The TS + site-build jobs above remain GATING.
+  #
+  # Runner labels are the EXACT set proven in release.yml's desktop build matrix
+  # (macos-14 = Apple silicon, macos-15-intel = Intel Mac, ubuntu-latest = x86_64 Linux,
+  # ubuntu-24.04-arm = aarch64 Linux, windows-latest = Windows) so the GUI CI matrix and the
+  # release matrix cannot drift. macOS/Windows ship their webview (WKWebView / WebView2) with
+  # the OS, so only the Linux rows install the webkit2gtk system libraries.
+  tauri-build:
+    name: "GUI build + clippy (${{ matrix.label }}, advisory)"
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 45
+    strategy:
+      # Do not let one platform's failure cancel the others — each row is independent
+      # diagnostic signal while the leg is advisory.
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, label: arm64-darwin }
+          - { os: macos-15-intel, label: x64-darwin }
+          - { os: ubuntu-latest, label: x64-linux }
+          - { os: ubuntu-24.04-arm, label: arm64-linux }
+          - { os: windows-latest, label: win-x64 }
+    defaults:
+      run:
+        working-directory: gui/src-tauri
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The Tauri webview system libraries (webkit2gtk + GTK/soup/appindicator) are LINUX-ONLY:
+      # macOS (WKWebView) and Windows (WebView2) ship their webview with the OS, so the cargo
+      # build there needs no extra system packages. These are exactly what a typical Linux dev
+      # box lacks, so the full `cargo build` of the GUI crate is validated HERE.
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+
+      - name: Cache cargo (gui crate)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gui/src-tauri/target
+          key: gui-tauri-${{ matrix.label }}-${{ hashFiles('gui/src-tauri/Cargo.lock') }}
+
+      # clippy with -D warnings, inheriting the repo's lint bar. Builds against the real
+      # engine path deps (sparq-engine / sparq-core).
+      - name: Clippy (-D warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build (debug)
+        run: cargo build
+
+      # The native engine command-layer tests (engine.rs) — they exercise the direct
+      # sparq-engine link and need no display server.
+      - name: Test (engine command layer)
+        run: cargo test
+
+  # [OPUS-4.8] sq-pnnl — tauri-driver (WebDriver) e2e: REAL launch + run-a-query assertion.
+  #
+  # This REPLACES the earlier no-op scaffold smoke (sq-bu69), which only confirmed
+  # tauri-driver / WebKitWebDriver / xvfb were on PATH. The job now builds the frontend the
+  # webview embeds, builds the desktop shell binary, and drives it through tauri-driver: it
+  # launches the shell headless (xvfb), waits for the in-tab WASM REPL to mount + the engine
+  # to warm, ENTERS a SPARQL SELECT into the editor, clicks Run, and ASSERTS the result table
+  # renders with the expected binding. The harness lives in gui/e2e (run-e2e.mjs, webdriverio).
+  #
+  # The design (research/gui-design.md §3 E2E) is explicit that Tauri's webview e2e uses
+  # tauri-driver (WebDriver), NOT Playwright's Chromium — so this is a NEW harness, not a reuse
+  # of site-e2e.yml. tauri-driver supports Linux (via WebKitWebDriver, headless under xvfb) and
+  # Windows (via Edge WebDriver); macOS has no WKWebView WebDriver, so the e2e is Linux-only.
+  #
+  # ADVISORY — DELIBERATELY KEPT (the #748-class risk). The frontend-build + shell-build
+  # prerequisites are reproduced locally, but the headless WebKitWebDriver + tauri-driver +
+  # xvfb webview session itself is a NEW surface whose CI reliability is not yet proven across
+  # multiple runs, and it cannot be reproduced on a box without the webkit2gtk system libs. So
+  # the job NAME keeps the whole-word `advisory` token (the `ci-summary / gate` aggregator
+  # excludes `\b(advisory|informational)\b`) AND `continue-on-error: true`, so a flaky webview
+  # session can NEVER turn `ci-summary` red for every PR. The assertion RUNS (it is no longer a
+  # no-op) — it is just non-gating until proven reliably green. Promotion to a hard gate (drop
+  # the token + continue-on-error, add gui to branch-protection required contexts, a
+  # `needs:user` repo-settings action) is the separate follow-up tracked by bead sq-var9.
+  tauri-e2e:
+    name: "GUI tauri-driver e2e (Linux, advisory)"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Tauri system dependencies (+ WebKitWebDriver, xvfb)
+        run: |
+          sudo apt-get update
+          # webkit2gtk-driver provides WebKitWebDriver, the WebDriver server tauri-driver
+          # proxies on Linux; xvfb gives the headless runner a virtual display for the webview.
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            webkit2gtk-driver \
+            xvfb
+
+      # wasm32 target is needed to build the lean WASM bundle the in-tab REPL runs.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Cache cargo (gui e2e)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gui/src-tauri/target
+          key: gui-e2e-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      # Build the frontend the Tauri webview embeds. The shell's `cargo build` embeds whatever
+      # is in `gui/app/out` at COMPILE TIME (sq-ixc3.8 repointed `frontendDist` to the DISTINCT
+      # operational frontend, NOT the marketing site), so the frontend MUST be built first. The
+      # export is root-relative (build:tauri sets NEXT_PUBLIC_BASE_PATH='') because a Tauri
+      # webview serves from the custom-protocol root, not a /sparq basePath (gui/README.md).
+      #
+      # The GUI frontend embeds the in-tab engine, so it needs the shacl,jsonld bundle (its
+      # SHACL tool + JSON-LD ingest) — build the full bundle, not the lean one.
+      - name: Build the WASM bundle (shacl,jsonld; the in-tab engine)
+        working-directory: js
+        run: |
+          npm install
+          npm run build:wasm
+
+      - name: Build the GUI frontend static export (root-relative; embedded by the shell)
+        run: |
+          npm install
+          (cd gui/app && npm run build:tauri)
+
+      # Build the desktop shell binary (debug). With site/out present, tauri_build embeds the
+      # frontend into the `sparq-gui` binary tauri-driver will launch.
+      - name: Build the GUI shell (debug, embeds the frontend)
+        working-directory: gui/src-tauri
+        run: cargo build
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+
+      - name: Install the e2e harness dependencies
+        working-directory: gui/e2e
+        run: npm ci
+
+      # The REAL assertion: launch the shell through tauri-driver under a virtual display, run
+      # a SPARQL SELECT in the in-tab WASM REPL, and assert the result table renders. APP_BINARY
+      # is the absolute path to the just-built debug binary. `continue-on-error` above keeps a
+      # webview/driver flake strictly non-gating while this NEW harness is proven on CI.
+      - name: Run the tauri-driver WebDriver e2e (headless under xvfb)
+        working-directory: gui/e2e
+        env:
+          APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
+        run: xvfb-run --auto-servernum npm run test:e2e

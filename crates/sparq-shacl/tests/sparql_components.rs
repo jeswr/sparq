@@ -7,11 +7,11 @@
 //! values are pre-bound as `$paramName`, along with `$this` / `$value`, and the
 //! validator runs.
 //!
-//! These use LOCAL fixtures (the component is declared in the shapes graph)
-//! rather than the W3C `sparql/component/*` suite, which `owl:imports` the
-//! external `http://datashapes.org/dash` vocabulary an offline harness cannot
-//! resolve. The component machinery itself is the same shape the dash suite
-//! exercises (modelled on `tests/shacl/.../sparql/component/validator-001.ttl`).
+//! These use LOCAL fixtures (the component is declared in the shapes graph) and
+//! complement the W3C `sparql/component/*` suite runner (`w3c_sparql_component.rs`,
+//! sq-wys), which resolves that suite's `owl:imports <http://datashapes.org/dash>`
+//! against a vendored excerpt. The component machinery is the same shape the dash
+//! suite exercises (modelled on `tests/shacl/.../sparql/component/validator-001.ttl`).
 
 use sparq_core::Graph;
 use sparq_shacl::validate;
@@ -224,6 +224,108 @@ fn node_validator_preferred_for_node_shape() {
     assert_eq!(r.results.len(), 1, "{}", r.to_text());
     let msg = r.results[0].effective_messages()[0].to_string();
     assert!(msg.contains("node-validator fired"), "message: {msg}");
+}
+
+/// [OPUS-4.8] (sq-wys) A `sh:propertyValidator` with `$PATH` pre-bound to the
+/// property shape's path. Mirrors the W3C `propertyValidator-select-001` shape:
+/// a SELECT validator over `$this $PATH ?value` flags values that are not
+/// literals tagged with the parameter language `$lang`. `$PATH` is a property
+/// PATH, not a term, so it cannot ride the VALUES pre-binding table — the
+/// validator is re-parsed per property shape with the path substituted.
+#[test]
+fn property_validator_path_prebinding() {
+    let shapes = format!(
+        r#"{PREFIXES}
+        ex:LangComponent a sh:ConstraintComponent ;
+          sh:parameter [ sh:path ex:lang ; sh:name "language" ] ;
+          sh:propertyValidator [
+            a sh:SPARQLSelectValidator ;
+            sh:select """
+              SELECT DISTINCT $this ?value WHERE {{
+                $this $PATH ?value .
+                FILTER (!isLiteral(?value) || !langMatches(lang(?value), $lang))
+              }}
+            """ ;
+          ] .
+        # A property shape (has sh:path) activates the property validator; the
+        # shape's path ex:englishLabel is substituted for $PATH.
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:country ;
+          sh:property [ sh:path ex:englishLabel ; ex:lang "en" ] .
+    "#
+    );
+    let data = r#"
+        @prefix ex: <http://example.org/> .
+        ex:country ex:englishLabel "Munich" ;        # no language tag -> violation
+                   ex:englishLabel "Beijing"@en .     # @en -> conforms
+    "#;
+    let r = run(data, &shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(r.results.len(), 1, "{}", r.to_text());
+    let res = &r.results[0];
+    assert_eq!(res.value.as_ref().unwrap().to_string(), "\"Munich\"");
+    // The result path is the property shape's path (inherited), not a $PATH leak.
+    assert_eq!(
+        res.path.as_ref().map(|p| p.to_turtle()),
+        Some("<http://example.org/englishLabel>".to_string())
+    );
+    assert_eq!(res.source_component, "http://example.org/LangComponent");
+
+    // The same component on a DIFFERENT-path shape re-binds $PATH to that path —
+    // proving the substitution is per-shape, not shared.
+    let shapes2 = format!(
+        r#"{PREFIXES}
+        ex:LangComponent a sh:ConstraintComponent ;
+          sh:parameter [ sh:path ex:lang ; sh:name "language" ] ;
+          sh:propertyValidator [
+            a sh:SPARQLSelectValidator ;
+            sh:select """
+              SELECT DISTINCT $this ?value WHERE {{
+                $this $PATH ?value .
+                FILTER (!isLiteral(?value) || !langMatches(lang(?value), $lang))
+              }}
+            """ ;
+          ] .
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:country ;
+          sh:property [ sh:path ex:germanLabel ; ex:lang "de" ] .
+    "#
+    );
+    let data2 = r#"
+        @prefix ex: <http://example.org/> .
+        ex:country ex:englishLabel "Munich" ;     # different predicate: ignored
+                   ex:germanLabel "Muenchen" .    # no @de -> violation
+    "#;
+    let r2 = run(data2, &shapes2);
+    assert_eq!(r2.results.len(), 1, "{}", r2.to_text());
+    assert_eq!(r2.results[0].value.as_ref().unwrap().to_string(), "\"Muenchen\"");
+}
+
+/// [OPUS-4.8] (sq-wys) The pre-bound parameter variable is the LOCAL NAME of the
+/// parameter's `sh:path` IRI, NOT its `sh:name` display label (SHACL §6.2.1).
+/// Here the parameter is `sh:path ex:lang ; sh:name "language"` and the validator
+/// references `$lang`; binding `$language` would leave `$lang` unbound and the
+/// constraint would never fire.
+#[test]
+fn parameter_variable_is_path_local_name_not_sh_name() {
+    let shapes = format!(
+        r#"{PREFIXES}
+        ex:LangComponent a sh:ConstraintComponent ;
+          sh:parameter [ sh:path ex:lang ; sh:name "language" ] ;
+          sh:validator [
+            a sh:SPARQLAskValidator ;
+            sh:ask "ASK {{ FILTER (isLiteral($value) && langMatches(lang($value), $lang)) }}" ;
+          ] .
+        ex:S a sh:NodeShape ;
+          sh:targetNode "Munich", "Beijing"@en ;
+          ex:lang "en" .
+    "#
+    );
+    let r = run("@prefix ex: <http://example.org/> . ex:x ex:y ex:z .", &shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(r.results.len(), 1, "{}", r.to_text());
+    // "Munich" (no @en) violates; "Beijing"@en conforms.
+    assert_eq!(r.results[0].value.as_ref().unwrap().to_string(), "\"Munich\"");
 }
 
 /// The report Turtle for a custom-component result is valid Turtle and carries

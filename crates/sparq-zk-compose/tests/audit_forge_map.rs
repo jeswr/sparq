@@ -202,6 +202,8 @@ fn honest_scan_only_manifest() -> (ProofManifest, Fr, Fr) {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     (m, commitment, salt)
 }
@@ -409,6 +411,8 @@ fn scan_plus_filter_manifest(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     }
 }
 
@@ -586,6 +590,8 @@ fn finding_08_attribution_collapse_rejected() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     match verify_full(&m, "f08_attr_collapse") {
         Err(CheckError::AttributionUnderDeclared { pattern: 0, .. }) => {}
@@ -649,6 +655,8 @@ fn finding_09_salt_reused_rejected() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     match verify_full(&m, "f09_salt_reuse") {
         Err(CheckError::SaltReused { .. }) => {}
@@ -822,7 +830,7 @@ fn honest_filter_d1(
 ) -> (ProofInputs, ProofArtifacts) {
     let operand_enc = encode_int_literal(value);
     let (filter, digits) = build_filter_int(operand_enc, value, op, bound, expected).unwrap();
-    let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits, None).unwrap();
+    let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits, None, None).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).expect("filter proves");
     (filter, art)
@@ -840,7 +848,7 @@ fn honest_age_scan(challenge: &FieldHex, prover: &CircuitProver, tag: &str) -> (
     };
     let scan = build_scan(std::slice::from_ref(&commit), &pattern).expect("scan builds");
     let (id, toml) =
-        prover_toml_for(&scan.inputs, challenge, &scan.witness.counts, &scan.witness.enc, &[], None).unwrap();
+        prover_toml_for(&scan.inputs, challenge, &scan.witness.counts, &scan.witness.enc, &[], None, None).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).expect("scan proves");
     (scan.inputs, encode_artifacts(&art))
@@ -879,6 +887,8 @@ fn composed_manifest(
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     }
 }
 
@@ -1031,7 +1041,7 @@ fn finding_11_n_relabel_bb_rejected() {
         "#11 bb: the >16-slot graph must derive the scan_k2_n64_r8 member"
     );
     let (id, toml) =
-        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[], None).unwrap();
+        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[], None, None).unwrap();
     let out = scratch("f11bb");
     let art = prover.prove_in(&id, &toml, &out, "f11bb").expect("scan_k2_n64_r8 proves");
 
@@ -1061,6 +1071,8 @@ fn finding_11_n_relabel_bb_rejected() {
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     };
     // The n-relabel is closed by the canonical-vk recompute (bb verify rejects
     // the n=64 proof against the n=16 vk) and/or the public-input length mismatch.

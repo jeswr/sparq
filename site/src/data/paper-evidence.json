@@ -1,0 +1,262 @@
+{
+  "_comment": "[OPUS-4.8] sq-gum8 — paper-bound EVIDENCE for the academic paper factory. Distinct from benchmarks.generated.json (which is per-commit TIMING, all environment=indicative on the dev work-box). Every record here is a DETERMINISTIC, machine-INDEPENDENT metric (recall floor / answer-safety invariant / cost-model crossover / conformance ratchet floor) lifted from a real test or the central conformance scoreboard, so environment=canonical. The honesty gate in scripts/build-papers.mjs FAILS the build if a paper-bound headline table references an environment=indicative record. To add a number a paper may cite as a headline, it MUST appear here as environment=canonical and trace to a named test or const (the `source` field).",
+  "schemaVersion": 1,
+  "records": {
+    "filtered_ann.recall_at_10_floor": {
+      "value": 0.90,
+      "unit": "recall@10",
+      "environment": "canonical",
+      "kind": "deterministic-floor",
+      "n_vectors": 20000,
+      "dim": 32,
+      "k": 10,
+      "n_queries": 100,
+      "mask_selectivity": "~0.50",
+      "source": "crates/sparq-vectors/tests/filtered.rs::filtered_traversal_recall_vs_exact_on_broad_mask",
+      "note": "Asserted floor: filtered-traversal recall@10 vs the EXACT-filtered ground truth (nearest_exact_filtered) is gated >= 0.90 on a 20k synthetic set under a ~50% mask. Machine-independent (a deterministic seed + an assertion threshold), not a timing."
+    },
+    "ann.recall_at_10_floor": {
+      "value": 0.95,
+      "unit": "recall@10",
+      "environment": "canonical",
+      "kind": "deterministic-floor",
+      "n_vectors": 50000,
+      "dim": 32,
+      "k": 10,
+      "n_queries": 100,
+      "source": "crates/sparq-vectors/tests/recall.rs::hnsw_recall_at_10_vs_brute_force_on_50k",
+      "note": "Asserted floor: unfiltered HNSW recall@10 vs exact brute force is gated >= 0.95 on a 50k random set. The underlying ANN machinery is unmodified prior art; this floor bounds the approximation the filter operates over."
+    },
+    "filtered_ann.prefilter_equals_postfilter": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "source": "crates/sparq-vectors/tests/filtered_bgp.rs::filtered_equals_postfilter_and_is_subset",
+      "note": "Proven by assert_eq: the filtered top-k is byte-identical (same ids, same order) to post-filtering the unfiltered top-k by the same BGP constraint, and is a subset of the unfiltered top-k. This is the answer-safety claim: pre-filtering narrows, never widens, and never changes the answer."
+    },
+    "filtered_ann.transitive_equals_postfilter": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "source": "crates/sparq-vectors/tests/filtered_bgp_transitive.rs",
+      "note": "A multi-hop constraint (?node :owns ?x . ?x a :Vehicle) restricts ?node to the projection of the join-connected sub-BGP and matches post-filtering the unfiltered top-k by that same transitive constraint; a disconnected pattern does not affect the mask."
+    },
+    "filtered_ann.cyclic_equals_postfilter": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "source": "crates/sparq-vectors/tests/filtered_bgp_cyclic.rs",
+      "note": "Connected-component mask derivation terminates (fixpoint worklist) and stays answer-equal to post-filter even when the constraining sub-BGP contains a cycle (?node :owns ?x . ?x :ownedBy ?node)."
+    },
+    "filtered_ann.prefilter_crossover": {
+      "value": 0.5,
+      "unit": "mask-selectivity-fraction",
+      "environment": "canonical",
+      "kind": "cost-model-crossover",
+      "scatter_penalty": 2.0,
+      "source": "crates/sparq-vectors/src/cost.rs::CostModel::decision_crossover_default_penalty (tests/cost_model.rs)",
+      "note": "Deterministic decision rule (not a measured latency): pre-filter is chosen iff m*scatter_penalty <= n, i.e. with the default scatter_penalty 2.0, iff the mask admits <= half the store. Whichever branch is picked the returned top-k is identical, so a mis-estimate costs throughput, never correctness."
+    },
+    "conformance.geosparql_topology_floor": {
+      "value": 119,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "OGC GeoSPARQL",
+      "source": "crates/sparq-geo/tests/ogc_compliance_ratchet.rs::OGC_RATCHET_FLOOR (mirrored in crates/sparq-conformance/src/scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "note": "OGC GeoSPARQL topology compliance ratchet floor: a monotone lower bound on passing sf/eh/rcc8 topology + WKT/GML equivalence assertions that CI enforces and that may only RISE. Deterministic and machine-independent (a const a test asserts), not a timing."
+    },
+    "conformance.sparql_floor": {
+      "value": 1229,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "W3C SPARQL",
+      "source": "crates/sparq-conformance/src/scoreboard.rs::SUITES (W3C SPARQL row); enforced by ci.yml job conformance (RATCHET=1229)",
+      "note": "W3C SPARQL 1.0/1.1/1.2 query+update+syntax ratchet floor (pass + documented divergence). Deterministic; CI-enforced; may only rise."
+    },
+    "conformance.inference_floor": {
+      "value": 1967,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "W3C RDF Semantics + OWL + N3",
+      "source": "crates/sparq-conformance/src/scoreboard.rs::SUITES (inference row); enforced by ci.yml job inference-conformance (RATCHET=1967)",
+      "note": "Inference (rdf-mt / OWL 2 RL / N3 / entailment / rdf-turtle) ratchet floor (pass + documented divergence). Deterministic; CI-enforced; may only rise."
+    },
+    "conformance.shacl_core_floor": {
+      "value": 98,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "W3C SHACL",
+      "source": "crates/sparq-shacl/tests/w3c_core.rs::BASELINE_PASS (mirrored in scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "note": "W3C SHACL core (data-shapes sht:Validate) ratchet floor. Deterministic; CI-enforced; may only rise."
+    },
+    "conformance.shacl_sparql_floor": {
+      "value": 5,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "W3C SHACL",
+      "source": "crates/sparq-shacl/tests/w3c_sparql.rs::SHACL_SPARQL_FLOOR (mirrored in scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "note": "W3C SHACL-SPARQL (sh:sparql node + property constraint sub-suites) ratchet floor. Deterministic; CI-enforced; may only rise."
+    },
+    "conformance.solid_wac_floor": {
+      "value": 12,
+      "unit": "passing-scenarios",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "Solid WAC",
+      "source": "crates/sparq-solid/tests/conformance_wac.rs::WAC_SCENARIO_FLOOR (mirrored in crates/sparq-conformance/src/scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "note": "Solid Web Access Control (WAC) library-level decision-parity ratchet floor: a monotone lower bound on the number of minimal per-construct .acl scenarios whose (agent, client, mode, resource) allow/deny decisions all match the WAC spec semantics, run through materialize_wac + AuthIndex::accessible. Deterministic and machine-independent (a const a test asserts over a fixed scenario table), not a timing; CI-enforced; may only rise."
+    },
+    "conformance.solid_acp_floor": {
+      "value": 12,
+      "unit": "passing-scenarios",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "Solid ACP",
+      "source": "crates/sparq-solid/tests/conformance_acp.rs::ACP_SCENARIO_FLOOR (mirrored in crates/sparq-conformance/src/scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "note": "Solid Access Control Policy (ACP) library-level decision-parity ratchet floor: a monotone lower bound on the number of minimal per-construct ACR scenarios whose (agent, client, mode, resource) allow/deny decisions all match the ACP spec semantics, run through materialize_acp + AuthIndex::accessible. Deterministic and machine-independent (a const a test asserts over a fixed scenario table), not a timing; CI-enforced; may only rise."
+    },
+    "conformance.cross_family_total": {
+      "value": 3442,
+      "unit": "passing-assertions",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "cross-family (7 suites)",
+      "source": "crates/sparq-conformance/src/scoreboard.rs::SUITES (sum of all ratchet_floor; rendered by render_scoreboard as the total row)",
+      "note": "Sum of the seven cross-family conformance ratchet floors (SPARQL 1229 + inference 1967 + SHACL core 98 + SHACL-SPARQL 5 + GeoSPARQL 119 + Solid WAC 12 + Solid ACP 12). A single deterministic, CI-enforced, monotone index across crates. If any individual floor rises this total must be updated in lock-step (the same scoreboard const is the source). Updated from the prior 3418 / 5-suite value after the Solid WAC + ACP decision-parity ratchets (sq-j174) joined the central scoreboard."
+    },
+    "conformance.suite_count": {
+      "value": 7,
+      "unit": "suites",
+      "environment": "canonical",
+      "kind": "conformance-ratchet-floor",
+      "family": "cross-family",
+      "source": "crates/sparq-conformance/src/scoreboard.rs::SUITES.len()",
+      "note": "Number of distinct conformance suites the central scoreboard registers and ratchets across crates (W3C SPARQL, inference, SHACL core, SHACL-SPARQL, OGC GeoSPARQL, Solid WAC decision parity, Solid ACP decision parity)."
+    },
+    "memsafety.unsafe_sites_total": {
+      "value": 59,
+      "unit": "unsafe-sites",
+      "environment": "canonical",
+      "kind": "unsafe-count-ratchet-ceiling",
+      "family": "memory-safety attestation",
+      "source": "bench/unsafe-snapshot.json::total (enforced by scripts/unsafe-gate.py --check; CI job 'unsafe-register (count ratchet)' in .github/workflows/ci.yml; per-site rows in compliance/memsafety/unsafe-register.md)",
+      "note": "Total first-party unsafe sites across the whole crates/ workspace, as counted by a deterministic comment-/string-stripped keyword scan (scripts/unsafe-gate.py). This is a CI-ENFORCED RATCHET CEILING: the gate fails a PR whose live count RISES above this snapshot without a matching register row + a // SAFETY: comment + a re-seed; smaller is always allowed. Deterministic and machine-independent (a source scan over committed code, not a timing). It is a COUNT/COVERAGE discipline, NOT a proof of memory safety — it bounds and documents the unsafe surface, it does not prove the absence of undefined behaviour."
+    },
+    "memsafety.unsafe_crates": {
+      "value": 5,
+      "unit": "crates",
+      "environment": "canonical",
+      "kind": "unsafe-surface-partition",
+      "family": "memory-safety attestation",
+      "source": "bench/unsafe-snapshot.json::crates (keys: sparq-core, sparq-vectors, sparq-cli, sparq-zk-compose, sparq-bench); accounting in compliance/memsafety/evidence.md MS-1",
+      "note": "Number of first-party crates that contain ANY unsafe code. Deterministic: the unsafe surface is confined to exactly these five crates; the snapshot carries a per-crate count for each, and a new unsafe block anywhere else fails to compile (forbid(unsafe_code)). Machine-independent partition of the workspace, not a measurement."
+    },
+    "memsafety.forbid_crates": {
+      "value": 30,
+      "unit": "crates",
+      "environment": "canonical",
+      "kind": "unsafe-surface-partition",
+      "family": "memory-safety attestation",
+      "source": "compliance/memsafety/evidence.md MS-1 (grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | de-duplicated by crate); 30 of 35 workspace crates",
+      "note": "Number of first-party crates carrying a crate-root #![forbid(unsafe_code)], which makes any unsafe block in that crate a COMPILE ERROR. Deterministic and machine-independent (a de-duplicated source grep over committed code). 30 forbid + 5 unsafe-bearing = 35 total workspace crates; no crate is unaccounted-for."
+    },
+    "memsafety.total_crates": {
+      "value": 35,
+      "unit": "crates",
+      "environment": "canonical",
+      "kind": "unsafe-surface-partition",
+      "family": "memory-safety attestation",
+      "source": "compliance/memsafety/evidence.md MS-1 (ls -d crates/*/ | wc -l); accounting 30 forbid + 5 unsafe = 35",
+      "note": "Total first-party crates in the workspace. Deterministic structural count; the basis for the confinement accounting (30 forbid + 5 unsafe-bearing = 35, nothing unaccounted-for)."
+    },
+    "memsafety.unsafe_sites_core": {
+      "value": 45,
+      "unit": "unsafe-sites",
+      "environment": "canonical",
+      "kind": "unsafe-count-ratchet-ceiling",
+      "family": "memory-safety attestation",
+      "source": "bench/unsafe-snapshot.json::crates['sparq-core']; 45 register rows in compliance/memsafety/unsafe-register.md §sparq-core; enforced by scripts/unsafe-gate.py --check",
+      "note": "Unsafe sites in sparq-core, the single crate concentrating the storage/dictionary/mmap/parallel-scatter/SIMD unsafe (threat-model boundary B5). The largest share of the 59; ratchet-enforced per-crate. Deterministic source scan, not a measurement."
+    },
+    "cozk.reaudit_lenses": {
+      "value": 4,
+      "unit": "audit-lenses",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "coZK witness-validation re-audit (negative result)",
+      "source": "research/mpc-cozk-reaudit.md §2 per-lens table + the four '### Lens N' sections (bead sq-9hrn); each maps a documented eprint 2025/1026 collaborative-zk-SNARK failure mode onto the intended multi-prover stack",
+      "note": "Number of eprint 2025/1026 (Garg-Goel-Jain-Roberts-Sekar, CRYPTO'25) collaborative-zk-SNARK failure-mode lenses the adversarial re-audit assigns a verdict to: (1) witness-extension leakage, (2) malicious-compiler insecurity, (3) the honest-majority 'free malicious security' iff-validate-before-proving conditional, (4) the unaudited TACEO co-snarks dependency. A deterministic structural count over the committed re-audit document, not a measurement. This is NOT a soundness result: every lens is assigned RE-OPEN (not CLOSED) precisely because the collaborative path is unbuilt and cannot be certified."
+    },
+    "cozk.test_obligation_clauses": {
+      "value": 5,
+      "unit": "test-obligation-clauses",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "coZK witness-validation re-audit (negative result)",
+      "source": "research/mpc-cozk-reaudit.md §3 (the R-WV requirement) — T1, T2, T3, T4 + clause C; encoded in crates/sparq-mpc/src/witness_validation_tests.rs (bead sq-7leq)",
+      "note": "Number of clauses in the R-WV (witness-validation-before-proving) test obligation that converts the eprint 2025/1026 precondition into an enforceable build-time gate: T1 inconsistent-share abort-before-open, T2 witness-extension leakage probe, T3 validate-before-prove is load-bearing not advisory, T4 commitment-binding of the validated witness, and clause C the construction-provenance documentary/CI assertion. A deterministic structural count over the committed re-audit + the encoded test module. The obligation is necessary, explicitly NOT claimed sufficient, and its disposition is OPEN, not met — no collaborative prover exists to validate a witness against."
+    },
+    "cozk.deferred_proof_methods": {
+      "value": 6,
+      "unit": "trait-methods",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "coZK witness-validation re-audit (negative result)",
+      "source": "crates/sparq-mpc/src/proof.rs — the CollaborativeProof::{prove, verify}, Attestation::attest_source trait methods plus their stub-test counterparts, each returning MpcError::NotYetImplemented with a named gate; the deferred-prover meta-test gate_state::deferred_prover_never_proves_over_any_witness in witness_validation_tests.rs pins the fail-closed posture",
+      "note": "Number of grep-counted collaborative-proof / attestation entry points in proof.rs that return MpcError::NotYetImplemented (a gate-naming fail-closed error) rather than executing — the committed evidence that the collaborative path is unbuilt. A deterministic source-scan count over committed code, not a measurement. This is the load-bearing honesty of the negative result: there is no shippable collaborative prover to forge against, so the re-audit cannot certify soundness; it can only encode the precondition as a gate that fires if a future prove() starts returning Ok(..) while R-WV is unmet."
+    },
+    "cozk.single_prover_audit_issues": {
+      "value": 12,
+      "unit": "confirmed-issues",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "coZK witness-validation re-audit (negative result)",
+      "source": "research/zk-soundness-audit.md 'Confirmed Issues' — the 12 numbered confirmed findings of the prior single-prover verifier soundness audit (the estate the collaborative path would plug into); the external single-prover audit gate is bead sq-qhy4",
+      "note": "Number of confirmed soundness findings in the prior adversarial audit of the single-prover ZK verifier — the estate the collaborative multi-prover path would build on top of. Cited only to establish that the foundation is itself under an open external-audit gate (sq-qhy4): the single-prover audit was internally re-audited 'sound-as-landed for its threat model' after a v1 documented NOT sound, but no accredited external cryptographer has reviewed it, and sq-qhy4 audits the single-prover verifier only — it does NOT discharge the multi-prover construction this re-audit (sq-9hrn) governs. A deterministic structural count over the committed audit document, not a measurement, and not a security claim."
+    },
+    "policy_bridge.deny_overrides_correct": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "family": "ODRL access-control bridge",
+      "source": "crates/sparq-solid/tests/odrl_bridge.rs::deny_overrides_allow_through_enforcement (and permit_plus_prohibition_same_subject_is_denied)",
+      "note": "Proven by assertion: when a matched ODRL Permission and a matched ODRL Prohibition both apply to the same principal, action, and target, the materialised deny carved into the auth view wins through the unchanged enforcement layer (which computes union-of-allow minus union-of-deny), so the principal's accessible set for that mode is empty. Deny-overrides is the ODRL Formal-Semantics conflict default and the bridge re-uses the existing access-control engine rather than adding one. A deterministic boolean invariant, not a timing, and not a security claim about the wider system."
+    },
+    "policy_bridge.fail_closed_deny_retraction": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "family": "ODRL access-control bridge",
+      "source": "crates/sparq-solid/tests/odrl_bridge.rs::ambiguous_prohibition_reeval_keeps_deny_fail_closed (and definitely_lapsed_prohibition_retracts_deny)",
+      "note": "Proven by assertion on the refresh path: a materialised deny is retracted only when re-evaluation proves the underlying prohibition is definitely withdrawn; an ambiguous (unprovable) re-evaluation KEEPS the deny so access is never silently widened on uncertainty. This asymmetric, fail-closed retraction rule (three-valued: Applies / Ambiguous / Withdrawn) is a deterministic boolean invariant, not a timing."
+    },
+    "policy_bridge.conditional_grant_rechecked": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "family": "ODRL access-control bridge",
+      "source": "crates/sparq-solid/tests/odrl_bridge.rs::recipient_constraint_persists_as_rechecked_condition",
+      "note": "Proven by assertion: a faithfully-mappable ODRL recipient constraint is persisted as an ACP conditional grant that is re-checked per session, so only the named recipient is granted (and the materialising party is not auto-granted). An unmappable constraint (for example a purpose constraint) falls back to a one-shot evaluation rather than being mis-encoded as a re-checked condition. A deterministic boolean invariant, not a timing."
+    },
+    "policy_bridge.count_enforcement_atomic": {
+      "value": true,
+      "unit": "boolean-invariant",
+      "environment": "canonical",
+      "kind": "answer-safety-invariant",
+      "family": "ODRL access-control bridge",
+      "source": "crates/sparq-policy/tests/odrl_count.rs::lteq_grants_n_then_denies (and base_deny_consumes_nothing, budget_isolated_per_party_and_target)",
+      "note": "Proven by assertion behind the opt-in count-enforcement feature: a stateful odrl:count constraint grants exactly up to its limit and then denies, consuming exactly one unit of budget per grant and zero on a denial, with budgets isolated per (rule, party, target). A deterministic boolean invariant over an integer counter, not a timing."
+    }
+  }
+}

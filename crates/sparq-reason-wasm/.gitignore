@@ -1,0 +1,4 @@
+# [OPUS-4.8] sq-6qw3: wasm-pack build artifacts — generated, never committed (mirrors
+# crates/sparq-wasm/.gitignore). The bundle is rebuilt from source by CI / the site deploy.
+/pkg
+/pkg-node

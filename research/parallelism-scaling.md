@@ -425,7 +425,7 @@ What it confirmed, corrected, and re-prioritized:
 
 **Updated Tier-0/1 priority (post-landings):**
 remaining highest-value, in order — (a) radix-partitioned group build + hash-join build (Tier-1
-#4/#5: with B1 largely gone, the serial group-hash build at `exec.rs` group_aggregate and the
+# 4/#5: with B1 largely gone, the serial group-hash build at `exec.rs` group_aggregate and the
 serial hash_join build are now the dominant *algorithmic* serial fractions); (b) parallel
 `distinct`/`minus` via the same partitioning; (c) NUMA placement (gated on hardware, unchanged);
 (d) morsels/columnar (Tier-3, unchanged — only after the above prove insufficient on target).

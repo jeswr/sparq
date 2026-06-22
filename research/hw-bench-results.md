@@ -20,6 +20,7 @@ End-to-end ingest / query / serialise / infer, built at each tier (4M-triple dat
 are within run-to-run noise (±2%) on both architectures, including on a CPU with full AVX-512:
 
 x86 (c7i):
+
 | tier | load M/s | json µs | join µs | infer s |
 |------|---------|---------|---------|---------|
 | baseline | 2.15 | 147606 | 333261 | 0.389 |
@@ -28,6 +29,7 @@ x86 (c7i):
 | v4 (AVX-512) | 2.17 | 151639 | 333527 | 0.406 |
 
 ARM (c7g):
+
 | tier | load M/s | json µs | join µs | infer s |
 |------|---------|---------|---------|---------|
 | baseline | 1.90 | 126367 | 308772 | 0.283 |
@@ -75,7 +77,7 @@ better.
 
 ## Reproduce
 
-```
+```text
 scripts/hw-bench.sh [scale] [out.csv]          # per-tier sweep on the host
 sparq-cli bench-remap [n] [dict] [iters]       # isolated remap gather; set SPARQ_NO_PREFETCH=1 to A/B
 ```

@@ -1,43 +1,8 @@
-//! sparq-parse: compressed serialization of query results (D4).
-//!
-//! The crate's first real module: chunk-at-a-time compression of serialized
-//! query results, designed around one format property — **multi-member gzip and
-//! multi-frame zstd are valid single streams**. Each serialized chunk (e.g. one
-//! element of `sparq_engine::query_json_chunks_with_budget`'s output) is
-//! compressed as an *independent* gzip member / zstd frame, and the members are
-//! concatenated in order. The concatenation decodes as ONE stream with stock
-//! decoders (`Content-Encoding: gzip` in browsers, `MultiGzDecoder`, `gzip -d`,
-//! Python `gzip`, the `zstd` CLI), so chunks can be compressed in parallel as
-//! they are produced and emitted in order: compression overlaps serialization
-//! instead of following it, and the first bytes hit the wire sooner.
-//!
-//! Measured results + design notes: `research/custom-parsers-D4-compressed-serialization.md`
-//! (benchmarks under `bench/parse/`, `compress-bench` binary). Numbers gate on
-//! the house baseline in `research/custom-parsers-baseline.md`.
-//!
-//! Hard constraint (unchanged from the scaffold): this crate must NOT enter the
-//! wasm dependency graph (`sparq-wasm` must never depend on it, directly or
-//! transitively) — flate2/zstd/rayon stay out of the bundle.
-//!
-//! # API sketch
-//!
-//! ```
-//! use sparq_parse::{Codec, CompressedSink, Mode, decode_gzip_concat};
-//!
-//! let chunks: Vec<String> = vec!["{\"head\":...".into(), "...rest".into()];
-//! let mut sink = CompressedSink::new(Codec::Gzip { level: 6 }, Mode::Parallel);
-//! let mut wire = Vec::new();
-//! for c in &chunks {
-//!     sink.push(c.as_bytes());
-//!     for member in sink.try_drain().unwrap() {
-//!         wire.extend_from_slice(&member); // stream to the client immediately
-//!     }
-//! }
-//! for member in sink.finish().unwrap() {
-//!     wire.extend_from_slice(&member);
-//! }
-//! assert_eq!(decode_gzip_concat(&wire).unwrap(), chunks.concat().into_bytes());
-//! ```
+// [OPUS-4.8] sq-ieqz: rustdoc front page IS the crate-local README
+// (`crates/sparq-parse/README.md`), so the doc surface and the README never drift.
+// The README carries the format rationale (multi-member gzip / multi-frame zstd),
+// the no-wasm-dep guard, and the runnable API-sketch doctest below.
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use std::collections::BTreeMap;
@@ -183,7 +148,10 @@ impl CompressedSink {
         CompressedSink {
             codec,
             mode,
-            shared: Arc::new(Shared { ready: Mutex::new(BTreeMap::new()), cv: Condvar::new() }),
+            shared: Arc::new(Shared {
+                ready: Mutex::new(BTreeMap::new()),
+                cv: Condvar::new(),
+            }),
             next_in: 0,
             next_out: 0,
         }
@@ -268,12 +236,22 @@ impl CompressedSink {
 
 /// One-shot convenience: compress a batch of chunks into ordered members/frames.
 /// [`Mode::Parallel`] uses the rayon pool; order is preserved by construction.
-pub fn compress_chunks<S: AsRef<[u8]> + Sync>(chunks: &[S], codec: &Codec, mode: Mode) -> io::Result<Vec<Vec<u8>>> {
+pub fn compress_chunks<S: AsRef<[u8]> + Sync>(
+    chunks: &[S],
+    codec: &Codec,
+    mode: Mode,
+) -> io::Result<Vec<Vec<u8>>> {
     match mode {
-        Mode::Serial => chunks.iter().map(|c| compress_member(codec, c.as_ref())).collect(),
+        Mode::Serial => chunks
+            .iter()
+            .map(|c| compress_member(codec, c.as_ref()))
+            .collect(),
         Mode::Parallel => {
             use rayon::prelude::*;
-            chunks.par_iter().map(|c| compress_member(codec, c.as_ref())).collect()
+            chunks
+                .par_iter()
+                .map(|c| compress_member(codec, c.as_ref()))
+                .collect()
         }
     }
 }
@@ -295,11 +273,19 @@ fn deflate_segment(level: u32, chunk: &[u8], finish: bool) -> io::Result<Vec<u8>
         if out.capacity() == out.len() {
             out.reserve(16 * 1024);
         }
-        c.compress_vec(&chunk[c.total_in() as usize..], &mut out, FlushCompress::None)?;
+        c.compress_vec(
+            &chunk[c.total_in() as usize..],
+            &mut out,
+            FlushCompress::None,
+        )?;
     }
     // Phase 2: flush. Per the zlib contract a flush is complete once deflate
     // returns with output space still available; until then keep growing.
-    let flush = if finish { FlushCompress::Finish } else { FlushCompress::Full };
+    let flush = if finish {
+        FlushCompress::Finish
+    } else {
+        FlushCompress::Full
+    };
     loop {
         if out.capacity() == out.len() {
             out.reserve(16 * 1024);
@@ -360,7 +346,10 @@ impl SingleMemberGzipSink {
         SingleMemberGzipSink {
             level,
             mode,
-            shared: Arc::new(GzShared { ready: Mutex::new(BTreeMap::new()), cv: Condvar::new() }),
+            shared: Arc::new(GzShared {
+                ready: Mutex::new(BTreeMap::new()),
+                cv: Condvar::new(),
+            }),
             next_in: 0,
             next_out: 0,
             crc: flate2::Crc::new(),
@@ -400,7 +389,11 @@ impl SingleMemberGzipSink {
         }
     }
 
-    fn take(&mut self, piece: io::Result<(Vec<u8>, flate2::Crc)>, out: &mut Vec<Vec<u8>>) -> io::Result<()> {
+    fn take(
+        &mut self,
+        piece: io::Result<(Vec<u8>, flate2::Crc)>,
+        out: &mut Vec<Vec<u8>>,
+    ) -> io::Result<()> {
         // [OPUS-4.8] Advance the emission cursor BEFORE propagating a compression
         // error. The caller (`try_drain`/`finish`) has already removed this index
         // from the ready map; if we returned `Err` without advancing `next_out`,
@@ -481,7 +474,11 @@ impl SingleMemberGzipSink {
 
 /// One-shot convenience over [`SingleMemberGzipSink`]: ordered wire pieces
 /// whose concatenation is ONE browser-decodable gzip member.
-pub fn gzip_single_member<S: AsRef<[u8]>>(chunks: &[S], level: u32, mode: Mode) -> io::Result<Vec<Vec<u8>>> {
+pub fn gzip_single_member<S: AsRef<[u8]>>(
+    chunks: &[S],
+    level: u32,
+    mode: Mode,
+) -> io::Result<Vec<Vec<u8>>> {
     let mut sink = SingleMemberGzipSink::new(level, mode);
     for c in chunks {
         sink.push(c.as_ref());
@@ -523,7 +520,8 @@ mod tests {
     /// fragments with repeated structure but distinct values (so members differ
     /// and ordering bugs cannot cancel out).
     fn json_chunks(n: usize) -> Vec<Vec<u8>> {
-        let mut chunks = vec![br#"{"head":{"vars":["s","p","o"]},"results":{"bindings":["#.to_vec()];
+        let mut chunks =
+            vec![br#"{"head":{"vars":["s","p","o"]},"results":{"bindings":["#.to_vec()];
         for i in 0..n {
             let mut c = Vec::new();
             for j in 0..200 {
@@ -560,8 +558,16 @@ mod tests {
         let chunks = json_chunks(20);
         for mode in [Mode::Serial, Mode::Parallel] {
             let members = run_sink(&chunks, Codec::Gzip { level: 6 }, mode);
-            assert_eq!(members.len(), chunks.len(), "one member per chunk ({mode:?})");
-            assert_eq!(decode_gzip_concat(&concat(&members)).unwrap(), concat(&chunks), "{mode:?}");
+            assert_eq!(
+                members.len(),
+                chunks.len(),
+                "one member per chunk ({mode:?})"
+            );
+            assert_eq!(
+                decode_gzip_concat(&concat(&members)).unwrap(),
+                concat(&chunks),
+                "{mode:?}"
+            );
         }
     }
 
@@ -570,8 +576,16 @@ mod tests {
         let chunks = json_chunks(20);
         for mode in [Mode::Serial, Mode::Parallel] {
             let members = run_sink(&chunks, Codec::Zstd { level: 3 }, mode);
-            assert_eq!(members.len(), chunks.len(), "one frame per chunk ({mode:?})");
-            assert_eq!(decode_zstd_concat(&concat(&members)).unwrap(), concat(&chunks), "{mode:?}");
+            assert_eq!(
+                members.len(),
+                chunks.len(),
+                "one frame per chunk ({mode:?})"
+            );
+            assert_eq!(
+                decode_zstd_concat(&concat(&members)).unwrap(),
+                concat(&chunks),
+                "{mode:?}"
+            );
         }
     }
 
@@ -602,7 +616,9 @@ mod tests {
         let chunks = vec![b"".to_vec(), b"x".to_vec(), b"".to_vec()];
         let members = run_sink(&chunks, Codec::Gzip { level: 6 }, Mode::Parallel);
         assert_eq!(decode_gzip_concat(&concat(&members)).unwrap(), b"x");
-        let none = CompressedSink::new(Codec::Zstd { level: 3 }, Mode::Parallel).finish().unwrap();
+        let none = CompressedSink::new(Codec::Zstd { level: 3 }, Mode::Parallel)
+            .finish()
+            .unwrap();
         assert!(none.is_empty());
     }
 
@@ -631,20 +647,31 @@ mod tests {
         let stream = concat(&frames);
 
         // Decodes with the dictionary — as one multi-frame stream and per frame.
-        assert_eq!(decode_zstd_concat_with_dict(&stream, &dict).unwrap(), concat(&responses));
+        assert_eq!(
+            decode_zstd_concat_with_dict(&stream, &dict).unwrap(),
+            concat(&responses)
+        );
         let mut d = zstd::bulk::Decompressor::with_prepared_dictionary(prepared.decoder()).unwrap();
         for (frame, want) in frames.iter().zip(&responses) {
             assert_eq!(&d.decompress(frame, want.len() + 1).unwrap(), want);
         }
 
         // And does NOT decode without it (proves the dictionary is load-bearing).
-        assert!(decode_zstd_concat(&stream).is_err(), "dict frames must not decode dict-less");
+        assert!(
+            decode_zstd_concat(&stream).is_err(),
+            "dict frames must not decode dict-less"
+        );
 
         // Dictionary actually helps on these sizes: strictly smaller than plain zstd.
         let plain = compress_chunks(&responses, &Codec::Zstd { level: 3 }, Mode::Serial).unwrap();
-        let (with, without): (usize, usize) =
-            (frames.iter().map(Vec::len).sum(), plain.iter().map(Vec::len).sum());
-        assert!(with < without, "dict {with} B should beat plain {without} B on small responses");
+        let (with, without): (usize, usize) = (
+            frames.iter().map(Vec::len).sum(),
+            plain.iter().map(Vec::len).sum(),
+        );
+        assert!(
+            with < without,
+            "dict {with} B should beat plain {without} B on small responses"
+        );
     }
 
     /// Decodes with flate2's SINGLE-member `GzDecoder` — the strict stand-in for
@@ -657,7 +684,10 @@ mod tests {
         // The whole input must be consumed by the ONE member (no ignored tail).
         let mut rest = Vec::new();
         d.into_inner().read_to_end(&mut rest).unwrap();
-        assert!(rest.is_empty(), "single-member stream must leave no trailing bytes");
+        assert!(
+            rest.is_empty(),
+            "single-member stream must leave no trailing bytes"
+        );
         out
     }
 
@@ -673,9 +703,17 @@ mod tests {
                     pieces.extend(sink.try_drain().unwrap());
                 }
                 pieces.extend(sink.finish().unwrap());
-                assert_eq!(pieces.len(), chunks.len() + 1, "chunks + trailer piece ({mode:?})");
+                assert_eq!(
+                    pieces.len(),
+                    chunks.len() + 1,
+                    "chunks + trailer piece ({mode:?})"
+                );
                 let wire = concat(&pieces);
-                assert_eq!(decode_single_member(&wire), concat(&chunks), "level {level} {mode:?}");
+                assert_eq!(
+                    decode_single_member(&wire),
+                    concat(&chunks),
+                    "level {level} {mode:?}"
+                );
                 // MultiGzDecoder agrees (it sees one member).
                 assert_eq!(decode_gzip_concat(&wire).unwrap(), concat(&chunks));
             }
@@ -693,7 +731,9 @@ mod tests {
     #[test]
     fn single_member_gzip_empty_and_empty_chunks() {
         // No pushes: a valid empty gzip member.
-        let pieces = SingleMemberGzipSink::new(6, Mode::Parallel).finish().unwrap();
+        let pieces = SingleMemberGzipSink::new(6, Mode::Parallel)
+            .finish()
+            .unwrap();
         assert_eq!(decode_single_member(&concat(&pieces)), b"");
         // Empty chunks interleaved.
         let chunks = vec![b"".to_vec(), b"abc".to_vec(), b"".to_vec(), b"def".to_vec()];
@@ -717,7 +757,10 @@ mod tests {
         }
         members.extend(sink.finish().unwrap());
         assert_eq!(members.len(), chunks.len());
-        assert_eq!(decode_zstd_concat(&concat(&members)).unwrap(), concat(&chunks));
+        assert_eq!(
+            decode_zstd_concat(&concat(&members)).unwrap(),
+            concat(&chunks)
+        );
         // Not asserted as a hard invariant (scheduling), but record the intent:
         // on any real machine some members are ready before the last push.
         if !drained_early {
@@ -735,7 +778,10 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let chunks = json_chunks(16);
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
         let done = Arc::new(AtomicBool::new(false));
 
         // Watchdog: if `pool.install` has not finished in 30 s it has deadlocked.
@@ -755,10 +801,16 @@ mod tests {
             // CompressedSink (gzip + zstd) round-trips inside the constrained pool.
             let members = run_sink(&chunks, Codec::Gzip { level: 6 }, Mode::Parallel);
             assert_eq!(members.len(), chunks.len());
-            assert_eq!(decode_gzip_concat(&concat(&members)).unwrap(), concat(&chunks));
+            assert_eq!(
+                decode_gzip_concat(&concat(&members)).unwrap(),
+                concat(&chunks)
+            );
 
             let members = run_sink(&chunks, Codec::Zstd { level: 1 }, Mode::Parallel);
-            assert_eq!(decode_zstd_concat(&concat(&members)).unwrap(), concat(&chunks));
+            assert_eq!(
+                decode_zstd_concat(&concat(&members)).unwrap(),
+                concat(&chunks)
+            );
 
             // SingleMemberGzipSink round-trips inside the constrained pool.
             let pieces = gzip_single_member(&chunks, 6, Mode::Parallel).unwrap();
@@ -796,7 +848,10 @@ mod tests {
         rayon::scope(|s| {
             s.spawn(|_| {
                 let members = run_sink(&chunks, Codec::Zstd { level: 1 }, Mode::Parallel);
-                assert_eq!(decode_zstd_concat(&concat(&members)).unwrap(), concat(&chunks));
+                assert_eq!(
+                    decode_zstd_concat(&concat(&members)).unwrap(),
+                    concat(&chunks)
+                );
                 let pieces = gzip_single_member(&chunks, 6, Mode::Parallel).unwrap();
                 assert_eq!(decode_single_member(&concat(&pieces)), concat(&chunks));
             });
@@ -827,6 +882,10 @@ mod tests {
         assert_eq!(err.to_string(), "boom");
         // Cursor advanced past the failed (and already-removed) index; the entry
         // is gone, so a re-check must not block on it.
-        assert_eq!(sink.next_out, next_out_before + 1, "cursor must advance past the error");
+        assert_eq!(
+            sink.next_out,
+            next_out_before + 1,
+            "cursor must advance past the error"
+        );
     }
 }

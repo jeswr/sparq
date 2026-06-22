@@ -32,7 +32,15 @@ use std::cmp::Ordering;
 // their own work and the next on-thread check converts that into the error.
 pub(crate) mod budget {
     use crate::QueryBudget;
+    use sparq_core::dict::Id;
     use std::cell::Cell;
+
+    /// Bytes one id-level binding cell occupies in a materialised `Row`. The
+    /// byte-accounted cap ([OPUS-4.8] sq-s5is) costs the id-level working set as
+    /// `rows × width × BYTES_PER_ID` — a portable LOWER bound on real heap (it
+    /// ignores allocator overhead / `SmallVec` inline-vs-spill), conservative in the
+    /// same direction the row cap is.
+    pub(crate) const BYTES_PER_ID: usize = std::mem::size_of::<Id>();
 
     /// The installed limits, flattened for a cheap per-check read.
     #[derive(Clone, Copy)]
@@ -41,6 +49,20 @@ pub(crate) mod budget {
         #[cfg(not(target_arch = "wasm32"))]
         deadline: Option<std::time::Instant>,
         max_rows: usize,
+        /// [OPUS-4.8] (sq-s5is) Byte ceiling on the estimated working set; `usize::MAX`
+        /// when no byte cap is set. Compared against `rows × byte_width + extra_bytes`.
+        max_bytes: usize,
+        /// [OPUS-4.8] (sq-s5is) Bytes per row of the working set CURRENTLY being checked
+        /// — `width(in ids) × BYTES_PER_ID`. Set per operator by [`set_width`] so the
+        /// row-count check sites also price WIDTH (the dimension the row cap misses). A
+        /// scalar/streaming path that never sets a width leaves this at `BYTES_PER_ID`
+        /// (one id per "row"), so the byte cap degrades to the row cap there, never wider.
+        byte_width: usize,
+        /// [OPUS-4.8] (sq-s5is) Bytes of query-computed terms interned into the per-query
+        /// local vocabulary (BIND / aggregate / CONSTRUCT scratch) — the NON-row dimension
+        /// the row cap also misses. A running high-water sum, added to the working-set
+        /// estimate on every check.
+        extra_bytes: usize,
     }
 
     const OFF: Limits = Limits {
@@ -48,15 +70,25 @@ pub(crate) mod budget {
         #[cfg(not(target_arch = "wasm32"))]
         deadline: None,
         max_rows: usize::MAX,
+        max_bytes: usize::MAX,
+        byte_width: BYTES_PER_ID,
+        extra_bytes: 0,
     };
 
     impl Limits {
+        /// `rows × byte_width + extra_bytes`, saturating — the estimated working-set
+        /// byte size compared against `max_bytes`. [OPUS-4.8] (sq-s5is)
+        #[inline]
+        fn bytes(&self, rows: usize) -> usize {
+            rows.saturating_mul(self.byte_width).saturating_add(self.extra_bytes)
+        }
+
         /// Pure (no thread-local) exhaustion test for rayon closures, where the
         /// installing thread's sticky flag is out of reach: a worker that sees
         /// `hit` stops producing, and the caller's next on-thread check fires
-        /// (the deadline is global time; a hit row cap leaves `rows > max_rows`).
-        /// Only the rayon-parallel branches call this (and `snapshot`); the
-        /// non-parallel (wasm) build compiles them out.
+        /// (the deadline is global time; a hit row/byte cap leaves the snapshot's
+        /// estimate over the limit). Only the rayon-parallel branches call this
+        /// (and `snapshot`); the non-parallel (wasm) build compiles them out.
         #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
         #[inline]
         pub(crate) fn hit(&self, rows: usize) -> bool {
@@ -64,6 +96,9 @@ pub(crate) mod budget {
                 return false;
             }
             if rows > self.max_rows {
+                return true;
+            }
+            if self.bytes(rows) > self.max_bytes {
                 return true;
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -91,19 +126,77 @@ pub(crate) mod budget {
 
     pub(crate) fn install(b: &QueryBudget) -> Guard {
         #[cfg(not(target_arch = "wasm32"))]
-        let on = b.deadline.is_some() || b.max_rows.is_some();
+        let on = b.deadline.is_some() || b.max_rows.is_some() || b.max_bytes.is_some();
         #[cfg(target_arch = "wasm32")]
-        let on = b.max_rows.is_some();
+        let on = b.max_rows.is_some() || b.max_bytes.is_some();
         ACTIVE.with(|a| {
             a.set(Limits {
                 on,
                 #[cfg(not(target_arch = "wasm32"))]
                 deadline: b.deadline,
                 max_rows: b.max_rows.unwrap_or(usize::MAX),
+                max_bytes: b.max_bytes.unwrap_or(usize::MAX),
+                byte_width: BYTES_PER_ID,
+                extra_bytes: 0,
             })
         });
         EXCEEDED.with(|e| e.set(None));
         Guard
+    }
+
+    /// [OPUS-4.8] (sq-s5is) Sets the per-row byte width (= `width_in_ids ×
+    /// BYTES_PER_ID`) of the working set the next row-count checks price. Called once
+    /// per operator with that operator's output arity, so a check on `rows` correctly
+    /// estimates `rows × width` bytes — the WIDE-row dimension the row cap misses.
+    /// No-op (and no thread-local write on the unbudgeted hot path) when no budget is
+    /// installed. Returns the previous width so callers can restore it.
+    #[inline]
+    pub(crate) fn set_width(width_in_ids: usize) -> usize {
+        ACTIVE.with(|c| {
+            let mut a = c.get();
+            let prev = a.byte_width;
+            if a.on {
+                a.byte_width = width_in_ids.max(1).saturating_mul(BYTES_PER_ID);
+                c.set(a);
+            }
+            prev
+        })
+    }
+
+    /// [OPUS-4.8] (sq-s5is) Restores a byte width previously returned by [`set_width`]
+    /// (cheap: one thread-local write, only while budgeted).
+    #[inline]
+    pub(crate) fn restore_width(prev: usize) {
+        ACTIVE.with(|c| {
+            let mut a = c.get();
+            if a.on {
+                a.byte_width = prev;
+                c.set(a);
+            }
+        });
+    }
+
+    /// [OPUS-4.8] (sq-s5is) Adds `n` bytes of query-computed terms to the local-vocab
+    /// high-water accumulator (the NON-row dimension). Trips the sticky flag immediately
+    /// if it pushes the estimate over `max_bytes`, so an oversized CONSTRUCT template /
+    /// aggregate scratch is caught even between row-count checks. No-op when unbudgeted.
+    #[inline]
+    pub(crate) fn add_bytes(n: usize) {
+        ACTIVE.with(|c| {
+            let mut a = c.get();
+            if !a.on {
+                return;
+            }
+            a.extra_bytes = a.extra_bytes.saturating_add(n);
+            c.set(a);
+            if a.extra_bytes > a.max_bytes {
+                EXCEEDED.with(|e| {
+                    if e.get().is_none() {
+                        e.set(Some("max-bytes"));
+                    }
+                });
+            }
+        });
     }
 
     /// Snapshot of the installed limits, for the rayon-parallel branches.
@@ -113,15 +206,38 @@ pub(crate) mod budget {
         ACTIVE.with(|a| a.get())
     }
 
-    /// `true` while a deadline / row-cap budget is installed. [OPUS-4.8] roborev 1538:
-    /// the streaming-JSON fast path uses this to take the cooperative SERIAL loop (which
-    /// breaks every 1024 rows) instead of the parallel fan-out that materialises every
-    /// matching fragment before any budget check — so `--max-results` / timeouts bound
-    /// CPU and memory, not just the final response.
+    /// `true` while a deadline / row-cap / byte-cap budget is installed. [OPUS-4.8]
+    /// roborev 1538: the streaming-JSON fast path uses this to take the cooperative
+    /// SERIAL loop (which breaks every 1024 rows) instead of the parallel fan-out that
+    /// materialises every matching fragment before any budget check — so `--max-results`
+    /// / timeouts / the byte cap bound CPU and memory, not just the final response.
     #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
     #[inline]
     pub(crate) fn active() -> bool {
         ACTIVE.with(|a| a.get().on)
+    }
+
+    /// Time remaining until the installed wall-clock deadline, if any. [OPUS-4.8] (sq-d4p)
+    ///
+    /// The SERVICE HTTP transport uses this to bound a remote round-trip by the SAME
+    /// budget that bounds local evaluation: a query under a 5s deadline must not block
+    /// for the transport's fixed default on an unresponsive endpoint. Returns:
+    /// * `None` — no deadline installed (no budget, or a row/byte-only budget); the
+    ///   transport keeps its own finite default.
+    /// * `Some(Duration::ZERO)` — the deadline has already passed; the caller should
+    ///   refuse the remote call immediately rather than dial.
+    /// * `Some(d)` — the remaining time, which the transport caps its own default to.
+    ///
+    /// Always compiled only off-wasm (no `Instant` there, and the `service` feature
+    /// never reaches a wasm build).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg_attr(not(feature = "service"), allow(dead_code))]
+    #[inline]
+    pub(crate) fn remaining_timeout() -> Option<std::time::Duration> {
+        ACTIVE.with(|a| {
+            let lim = a.get();
+            lim.deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()))
+        })
     }
 
     /// `true` once the budget is exhausted (sticky) — row-producing loops break
@@ -137,6 +253,10 @@ pub(crate) mod budget {
         }
         if rows > a.max_rows {
             EXCEEDED.with(|e| e.set(Some("max-rows")));
+            return true;
+        }
+        if a.bytes(rows) > a.max_bytes {
+            EXCEEDED.with(|e| e.set(Some("max-bytes")));
             return true;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -159,14 +279,22 @@ pub(crate) mod budget {
 
     /// Caps a speculative `Vec` pre-allocation while a budget is active, so a
     /// budgeted cross-product cannot allocate its full (possibly astronomical)
-    /// output up front before the first cooperative check fires.
+    /// output up front before the first cooperative check fires. Honours BOTH the
+    /// row cap and (via `byte_width`) the byte cap — whichever admits fewer rows.
     #[inline]
     pub(crate) fn cap_alloc(cap: usize) -> usize {
         let a = ACTIVE.with(|c| c.get());
         if !a.on {
             return cap;
         }
-        cap.min(a.max_rows.saturating_add(1)).min(1 << 20)
+        // Rows the byte cap still admits, given the current width and accrued extra.
+        let by_bytes = a
+            .max_bytes
+            .saturating_sub(a.extra_bytes)
+            .checked_div(a.byte_width.max(1))
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
+        cap.min(a.max_rows.saturating_add(1)).min(by_bytes).min(1 << 20)
     }
 
 }
@@ -316,6 +444,65 @@ pub(crate) mod functions {
     /// and contains it.
     pub(crate) fn lookup(iri: &str) -> Option<crate::ExtFn> {
         ACTIVE.with(|a| a.borrow().as_ref().and_then(|fns| fns.get(iri).cloned()))
+    }
+}
+
+// ---- Custom aggregate registry (sq-5qz9) ----------------------------------------
+//
+// Mirrors `functions` exactly (install guard + rayon-worker snapshot/re-install)
+// so a custom `AggregateFunction::Custom` IRI in a `GROUP BY` is visible to the
+// off-thread group-evaluation path. The overwhelmingly common case is NO registry
+// installed, which makes the snapshot path free. NON-DEFAULT `window-functions`
+// feature: when off, this module does not compile and the default build is
+// byte-identical. [OPUS-4.8]
+#[cfg(feature = "window-functions")]
+pub(crate) mod aggregates {
+    use crate::CustomAggregateRegistry;
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Arc<CustomAggregateRegistry>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE.with(|a| a.borrow_mut().take());
+        }
+    }
+
+    pub(crate) fn install(reg: &CustomAggregateRegistry) -> Guard {
+        ACTIVE.with(|a| *a.borrow_mut() = Some(Arc::new(reg.clone())));
+        Guard
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn snapshot() -> Option<Arc<CustomAggregateRegistry>> {
+        ACTIVE.with(|a| a.borrow().clone())
+    }
+
+    pub(crate) struct WorkerGuard(Option<Option<Arc<CustomAggregateRegistry>>>);
+    impl Drop for WorkerGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.0.take() {
+                ACTIVE.with(|a| *a.borrow_mut() = prev);
+            }
+        }
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn worker_install(snap: &Option<Arc<CustomAggregateRegistry>>) -> WorkerGuard {
+        match snap {
+            None => WorkerGuard(None),
+            Some(reg) => WorkerGuard(Some(ACTIVE.with(|a| a.borrow_mut().replace(reg.clone())))),
+        }
+    }
+
+    /// The aggregate registered for `iri`, if a registry is installed and
+    /// contains it.
+    pub(crate) fn lookup(iri: &str) -> Option<crate::AggFn> {
+        ACTIVE.with(|a| a.borrow().as_ref().and_then(|reg| reg.get(iri).cloned()))
     }
 }
 
@@ -532,6 +719,26 @@ fn is_local(id: Id) -> bool {
     id >= LOCAL_BASE
 }
 
+/// [OPUS-4.8] (sq-s5is) Estimated heap bytes of a query-computed term, for the
+/// byte-accounted budget's local-vocab accounting. The struct itself plus the lexical
+/// bytes of the value/IRI (+ datatype IRI / language tag for a literal). A LOWER bound
+/// (ignores allocator overhead), conservative in the same direction the rest of the cap
+/// is. Only ever called while a budget is installed (from `LocalVocab::intern`).
+fn local_term_bytes(t: &Term) -> usize {
+    let base = std::mem::size_of::<Term>();
+    match t {
+        Term::NamedNode(n) => base + n.as_str().len(),
+        Term::BlankNode(b) => base + b.as_str().len(),
+        Term::Literal(l) => {
+            base + l.value().len()
+                + l.datatype().as_str().len()
+                + l.language().map_or(0, str::len)
+        }
+        // RDF 1.2 triple terms: charge the struct + each component recursively.
+        other => base + format!("{other}").len(),
+    }
+}
+
 /// Per-query vocabulary for terms produced during evaluation (BIND, aggregates)
 /// that are not in the graph dictionary.
 #[derive(Default)]
@@ -557,6 +764,11 @@ impl LocalVocab {
             Term::Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
             _ => f64::NAN,
         });
+        // [OPUS-4.8] (sq-s5is) Charge the byte cap for this newly-computed term (BIND /
+        // aggregate / CONSTRUCT scratch) — the NON-row dimension the row cap misses. A
+        // query that materialises few rows but huge string literals is now bounded. The
+        // term is stored TWICE (the `terms` vec + the `ids` key), so count both.
+        budget::add_bytes(2usize.saturating_mul(local_term_bytes(&t)));
         self.terms.push(t.clone());
         self.ids.insert(t, id);
         id
@@ -1753,10 +1965,21 @@ fn eval_graph_named_pref(
 /// the evaluator — the only cost on the normal path is one thread-local flag read
 /// per *operator* (the same class of check `budget::check` already does here).
 fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
-    if trace::enabled() {
-        return eval_graph_pattern_traced(graph, local, p);
-    }
-    eval_graph_pattern_inner(graph, local, p)
+    let b = if trace::enabled() {
+        eval_graph_pattern_traced(graph, local, p)?
+    } else {
+        eval_graph_pattern_inner(graph, local, p)?
+    };
+    // [OPUS-4.8] (sq-s5is) Byte-accounted cap: price THIS operator's output at its true
+    // WIDTH (`vars × BYTES_PER_ID`), the dimension the row cap misses. The operator
+    // dispatcher is the single cooperative chokepoint every materialised intermediate
+    // flows back through, so one width-aware check here bounds the widest intermediate.
+    // No-op (one thread-local read) when no budget is installed.
+    let prev = budget::set_width(b.vars.len());
+    let r = budget::check(b.rows.len());
+    budget::restore_width(prev);
+    r?;
+    Ok(b)
 }
 
 /// EXPLAIN ANALYZE wrapper: records one trace node per operator with its output
@@ -1863,6 +2086,26 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
         }
         GraphPattern::Join { left, right } => {
             let l = eval_graph_pattern(graph, local, left)?;
+            // Bind-join pushdown: if the RIGHT side is a SERVICE and the left has
+            // already bound its join variables, push those bindings to the remote as a
+            // VALUES block instead of materialising the whole remote relation. Join is
+            // symmetric, so try either side as the SERVICE. [OPUS-4.8] (sq-sjkj)
+            #[cfg(feature = "service")]
+            {
+                if let Some(r) = try_bound_join_service(graph, local, &l, right)? {
+                    return Ok(join_bindings(l, r));
+                }
+                // Symmetric: SERVICE on the left, bindings produced by the right.
+                if matches!(left.as_ref(), GraphPattern::Service { .. }) {
+                    let r = eval_graph_pattern(graph, local, right)?;
+                    if let Some(sl) = try_bound_join_service(graph, local, &r, left)? {
+                        return Ok(join_bindings(r, sl));
+                    }
+                    // Fall through with the already-evaluated right; recompute left verbatim.
+                    let l2 = eval_graph_pattern(graph, local, left)?;
+                    return Ok(join_bindings(l2, r));
+                }
+            }
             let r = eval_graph_pattern(graph, local, right)?;
             Ok(join_bindings(l, r))
         }
@@ -1874,6 +2117,15 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             #[cfg(feature = "zk")]
             let _zk = crate::zk::op_scope(crate::zk::Op::Optional);
             let l = eval_graph_pattern(graph, local, left)?;
+            // Bind-join pushdown for `… OPTIONAL { SERVICE { … } }`: the SERVICE may
+            // only be the RIGHT (preserved) side of a left join — pushing the left's
+            // bound join vars restricts the remote relation, then the SAME
+            // `left_outer_join` reattaches it, so OPTIONAL semantics are unchanged
+            // (a left row with no remote match still survives, unbound). [OPUS-4.8] (sq-sjkj)
+            #[cfg(feature = "service")]
+            if let Some(r) = try_bound_join_service(graph, local, &l, right)? {
+                return left_outer_join(graph, local, l, r, expression.as_ref());
+            }
             let r = eval_graph_pattern(graph, local, right)?;
             left_outer_join(graph, local, l, r, expression.as_ref())
         }
@@ -1923,7 +2175,7 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
     }
 }
 
-/// SPARQL 1.1 federated query (`SERVICE`). [OPUS-4.8]
+/// SPARQL 1.1 federated query (`SERVICE`) — the VERBATIM path. [OPUS-4.8]
 ///
 /// Forwards `SELECT * WHERE { <inner> }` to the remote `endpoint`, parses the
 /// SPARQL-Results-JSON response (see [`crate::service`]) and turns it into a
@@ -1931,9 +2183,19 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
 /// `VALUES` does — so the caller joins it with the surrounding group via the normal
 /// `join_bindings` path.
 ///
+/// This is the fallback path: when the SERVICE is the right side of a join whose join
+/// vars are already bound, [`try_bound_join_service`] instead pushes those bindings as
+/// a `VALUES` block (the bind-join, bead sq-sjkj) and this verbatim forward is skipped.
+/// A VARIABLE endpoint that the surrounding query binds is likewise handled there
+/// (per-endpoint dispatch, bead sq-d4p). `eval_service` still runs for a top-level /
+/// unbound SERVICE and for every case the bind-join declines (no bound join var,
+/// blank-node join key, or a variable endpoint with nothing to bind it).
+///
 /// * `name` is a `NamedNodePattern`: a concrete IRI endpoint is evaluated; a
-///   `?var` (variable) endpoint is OUT OF SCOPE (it requires a per-solution remote
-///   call) — it errors, or, under SILENT, yields the join identity.
+///   `?var` (variable) endpoint reaching THIS path has no surrounding binding to supply
+///   the endpoint IRI (a top-level `SERVICE ?ep`), so there is nothing to call — it
+///   errors, or, under SILENT, yields the join identity. (A bindable variable endpoint
+///   never reaches here; it is dispatched by [`try_bound_join_service`].)
 /// * `silent`: on ANY failure (variable endpoint, DNS/connect error, non-2xx,
 ///   malformed body), produce a single empty solution (the identity for join) so the
 ///   surrounding query keeps its bindings and does not fail.
@@ -1983,6 +2245,19 @@ fn eval_service(
         Err(e) => return Err(e),
     };
 
+    Ok(service_relation_to_bindings(graph, local, rel))
+}
+
+/// Intern a remote [`ServiceRelation`](crate::service::ServiceRelation) into id-level
+/// [`Bindings`] against this query's dictionaries — exactly as `VALUES` does — so it
+/// joins with local BGP results. Shared by the verbatim and bound-join paths.
+/// [OPUS-4.8] (sq-sjkj)
+#[cfg(feature = "service")]
+fn service_relation_to_bindings(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    rel: crate::service::ServiceRelation,
+) -> Bindings {
     // Intern each remote term against the graph dictionary (so it joins with local
     // BGP results) or the local vocab (terms absent from the data can still match
     // other remote/VALUES rows) — identical to `values_bindings`.
@@ -1998,7 +2273,317 @@ fn eval_service(
                 .collect()
         })
         .collect();
-    Ok(Bindings::unsorted(rel.vars, rows))
+    Bindings::unsorted(rel.vars, rows)
+}
+
+/// Attempt a bind-join (`VALUES` pushdown) of a SERVICE sub-query against the
+/// already-evaluated `left` bindings. [OPUS-4.8] (sq-sjkj — research candidate C1)
+///
+/// Returns:
+/// * `Ok(Some(service_bindings))` — the bound-join applied: a remote relation
+///   restricted to `left`'s bound join-key tuples, ready for the caller to join (or
+///   left-outer-join) with `left` exactly as it would the verbatim relation. The
+///   answer is identical to the unbound-then-local-join path.
+/// * `Ok(None)` — the pushdown does NOT apply (the right side is not a concrete-IRI
+///   SERVICE, there is no shared bound join var, a join key is bound to a blank node,
+///   or the left side is empty). The caller falls back to the verbatim SERVICE path.
+/// * `Err(_)` — a non-SILENT remote failure (propagated, same as the verbatim path).
+///
+/// ## Why it preserves semantics
+///
+/// Injecting `VALUES (?j…) { (v…)… }` for the join variables restricts the remote
+/// pattern to exactly the tuples `left` already binds (SPARQL 1.1 §10.2.1 inner-joins
+/// the VALUES relation with the pattern). The remote therefore returns a SUBSET of
+/// the unbound relation — precisely the rows that can survive the local join — and we
+/// reattach them with the SAME `join_bindings` / `left_outer_join`. For a left-outer
+/// join, a left row whose key has no remote match simply finds no compatible remote
+/// row and survives unbound, identical to the verbatim path. SILENT is honoured: a
+/// failed block degrades to the join identity (empty remote relation) so the
+/// surrounding bindings are kept, exactly as the verbatim SILENT path does.
+#[cfg(feature = "service")]
+fn try_bound_join_service(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    left: &Bindings,
+    right: &GraphPattern,
+) -> Result<Option<Bindings>, String> {
+    let GraphPattern::Service { name, inner, silent } = right else {
+        return Ok(None);
+    };
+    let silent = *silent;
+
+    // The endpoint is either a concrete IRI (the original bind-join) or a VARIABLE
+    // (`SERVICE ?ep { … }`, bead sq-d4p). A variable endpoint is dispatched per
+    // distinct endpoint IRI bound by `left`: see `bound_join_variable_endpoint`.
+    let endpoint = match name {
+        NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
+        NamedNodePattern::Variable(ep_var) => {
+            return bound_join_variable_endpoint(graph, local, left, ep_var, inner, silent);
+        }
+    };
+
+    bound_join_to_endpoint(graph, local, left, &endpoint, inner, silent)
+}
+
+/// Bind-join the SERVICE sub-`inner` against one CONCRETE `endpoint` over the `left`
+/// bindings, returning the interned remote relation (see [`try_bound_join_service`] for
+/// the contract). Factored out so the variable-endpoint path
+/// ([`bound_join_variable_endpoint`]) can call it once per distinct endpoint IRI.
+/// [OPUS-4.8] (sq-sjkj / sq-d4p)
+#[cfg(feature = "service")]
+fn bound_join_to_endpoint(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    left: &Bindings,
+    endpoint: &str,
+    inner: &GraphPattern,
+    silent: bool,
+) -> Result<Option<Bindings>, String> {
+    // The remote pattern's in-scope variables; the join keys are the ones ALSO bound
+    // by `left`. We must intersect with `left.vars` (textual) so the VALUES we push
+    // names variables the remote pattern actually mentions.
+    let mut inner_vars: Vec<Variable> = Vec::new();
+    inner.on_in_scope_variable(|v| {
+        if !inner_vars.contains(v) {
+            inner_vars.push(v.clone());
+        }
+    });
+    // Join keys: variables shared between the left relation and the remote pattern,
+    // in `left`-column order (so we can read each left row's tuple positionally).
+    let join_vars: Vec<Variable> = left
+        .vars
+        .iter()
+        .filter(|v| inner_vars.contains(v))
+        .cloned()
+        .collect();
+    if join_vars.is_empty() {
+        // No bound join variable to push — the verbatim path is the correct (and only)
+        // evaluation.
+        return Ok(None);
+    }
+    if left.rows.is_empty() {
+        // Nothing to push. An empty left makes the whole join empty anyway, but the
+        // verbatim path also handles SILENT/error uniformly, so defer to it.
+        return Ok(None);
+    }
+
+    // Column indices of the join vars in the left relation.
+    let key_cols: Vec<usize> = join_vars.iter().map(|v| left.col(v).expect("join var is a left var")).collect();
+
+    // Collect the DISTINCT, fully-bound, pushable join-key tuples from the left side.
+    // A row with any unbound (`NO_ID`) join key, or a key bound to a non-pushable
+    // term (blank node / triple term), means we cannot faithfully constrain the
+    // remote — abandon the pushdown for the verbatim path to keep exact semantics.
+    let mut seen: FxHashSet<Row> = FxHashSet::default();
+    let mut tuples: Vec<Vec<Term>> = Vec::new();
+    for row in &left.rows {
+        let mut key: Row = SmallVec::new();
+        for &c in &key_cols {
+            key.push(row[c]);
+        }
+        if key.contains(&NO_ID) {
+            return Ok(None); // an unbound join key — wildcard; cannot push.
+        }
+        if !seen.insert(key.clone()) {
+            continue; // already pushed this tuple
+        }
+        let mut terms: Vec<Term> = Vec::with_capacity(key.len());
+        for &id in &key {
+            match term_of(graph, local, id) {
+                Some(t) if crate::service::pushable_term(&t) => terms.push(t),
+                _ => return Ok(None), // blank node / triple term / missing — fall back.
+            }
+        }
+        tuples.push(terms);
+    }
+    if tuples.is_empty() {
+        return Ok(None);
+    }
+
+    // Render the inner pattern once; each block re-uses it with a fresh VALUES head.
+    let inner_sparql = format!("{inner}");
+    let block = crate::service::bind_block_size();
+
+    // Accumulate the union of the per-block remote relations. All blocks share the
+    // remote `head.vars`, so we keep the first block's var list and concatenate rows.
+    let mut acc_vars: Option<Vec<Variable>> = None;
+    let mut acc_rows: Vec<Vec<Option<oxrdf::Term>>> = Vec::new();
+
+    for chunk in tuples.chunks(block) {
+        let values = crate::service::render_values_block(&join_vars, chunk);
+        // Inject the VALUES inside the SELECT * group, alongside the inner pattern, so
+        // the remote inner-joins the pushed bindings with its pattern.
+        let query = format!("SELECT * WHERE {{ {values} {inner_sparql} }}");
+        match service_transport::with(|t| crate::service::eval_remote(t, endpoint, &query)) {
+            Ok(rel) => {
+                acc_rows.extend(rel.rows);
+                if acc_vars.is_none() {
+                    acc_vars = Some(rel.vars);
+                }
+            }
+            // SILENT: a failed block means the SERVICE as a whole must behave EXACTLY
+            // as the verbatim single-request SILENT path — which yields the JOIN
+            // IDENTITY (a single empty solution) so the surrounding bindings are KEPT
+            // unchanged. We therefore discard any partial block results and hand the
+            // caller the identity relation (one zero-column row); joining / left-outer
+            // joining `left` with it leaves `left` exactly as it was. This matches the
+            // unbound-then-local-join path's SILENT semantics precisely. [OPUS-4.8]
+            Err(_) if silent => {
+                return Ok(Some(Bindings::unsorted(Vec::new(), vec![Row::new()])));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Vars: a non-empty `tuples` always produced at least one successful block above
+    // (failures returned early), so `acc_vars` is set unless every block returned an
+    // EMPTY result with no head — in which case the join vars are a safe head (the
+    // relation has zero rows, so the var list only names columns that, being the join
+    // keys, always exist on both sides). [OPUS-4.8]
+    let vars = acc_vars.unwrap_or_else(|| join_vars.clone());
+    let rel = crate::service::ServiceRelation { vars, rows: acc_rows };
+    Ok(Some(service_relation_to_bindings(graph, local, rel)))
+}
+
+/// Evaluate `SERVICE ?ep { inner }` — a VARIABLE endpoint — against the `left`
+/// bindings, by dispatching one bind-join PER DISTINCT endpoint IRI that `left` binds
+/// to `ep_var`. [OPUS-4.8] (sq-d4p)
+///
+/// SPARQL 1.1 federated query evaluates `SERVICE ?ep { P }` per in-scope solution μ:
+/// substitute μ(?ep) for ?ep and evaluate `SERVICE μ(?ep) { P }`. The `left` relation
+/// IS those in-scope solutions, so we partition `left` by its `?ep` binding and run the
+/// existing bind-join ([`bound_join_to_endpoint`]) once per endpoint, then TAG every
+/// remote row with `?ep = <that endpoint IRI>` so the surrounding join re-attaches the
+/// remote rows to exactly the left rows that named that endpoint. The union of the
+/// per-endpoint relations is the SERVICE result.
+///
+/// Returns:
+/// * `Ok(Some(rel))` — the per-endpoint dispatch applied; `rel` carries `?ep` plus the
+///   remote variables, ready for the caller's `join_bindings` / `left_outer_join`.
+/// * `Ok(None)` — cannot dispatch (the endpoint variable is not bound by `left`, or the
+///   bind-join declined for every endpoint — e.g. no shared join variable); the caller
+///   falls back to the verbatim `eval_service`, which reports the documented
+///   variable-endpoint error (or, under SILENT, the join identity).
+/// * `Err(_)` — a non-SILENT remote failure (propagated).
+///
+/// A left row whose `?ep` is UNBOUND or not an IRI names no valid endpoint, so it
+/// contributes no remote solution (it simply finds no `?ep`-tagged remote row to join
+/// with) — matching per-solution `evalService`, where substituting a non-IRI yields no
+/// federated answer for that solution.
+#[cfg(feature = "service")]
+fn bound_join_variable_endpoint(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    left: &Bindings,
+    ep_var: &Variable,
+    inner: &GraphPattern,
+    silent: bool,
+) -> Result<Option<Bindings>, String> {
+    // The endpoint variable must be a left column (bound by the surrounding query);
+    // otherwise there is nothing to dispatch on — defer to the verbatim path.
+    let Some(ep_col) = left.col(ep_var) else {
+        return Ok(None);
+    };
+    if left.rows.is_empty() {
+        return Ok(None);
+    }
+
+    // Partition the left rows by their endpoint id, preserving first-seen order so the
+    // dispatch (and the resulting row order) is deterministic. A row whose `?ep` is
+    // unbound or a non-IRI term is dropped from dispatch (it names no endpoint).
+    let mut order: Vec<Id> = Vec::new();
+    let mut groups: FxHashMap<Id, Vec<Row>> = FxHashMap::default();
+    for row in &left.rows {
+        let id = row[ep_col];
+        if id == NO_ID {
+            continue; // unbound endpoint — no remote call for this solution.
+        }
+        match term_of(graph, local, id) {
+            Some(Term::NamedNode(_)) => {}
+            _ => continue, // a non-IRI ?ep is not a valid endpoint — skip.
+        }
+        // The sub-left for an endpoint reuses the FULL left layout (same `vars`), so the
+        // recursive bind-join reads join-key columns positionally exactly as before.
+        groups
+            .entry(id)
+            .or_insert_with(|| {
+                order.push(id);
+                Vec::new()
+            })
+            .push(row.clone());
+    }
+    if order.is_empty() {
+        // No left row binds `?ep` to a concrete endpoint IRI: nothing to dispatch, and
+        // (for an inner join) the result is empty. Defer to the verbatim path so SILENT
+        // vs error is decided uniformly.
+        return Ok(None);
+    }
+
+    // Resolve the endpoint IRI strings once (id -> "http://…").
+    let mut acc_vars: Vec<Variable> = vec![ep_var.clone()];
+    let mut acc_rows: Vec<Row> = Vec::new();
+    // Whether at least one endpoint's bind-join actually applied. If EVERY endpoint
+    // declined (e.g. no shared join var), there is no faithful pushdown — defer wholly
+    // to the verbatim path rather than returning a partial/empty result.
+    let mut any_applied = false;
+
+    for id in order {
+        let sub_rows = groups.remove(&id).expect("group for ordered id");
+        let endpoint = match term_of(graph, local, id) {
+            Some(Term::NamedNode(n)) => n.into_string(),
+            _ => continue, // unreachable: filtered above.
+        };
+        let sub_left = Bindings::unsorted(left.vars.clone(), sub_rows);
+        let Some(rel) = bound_join_to_endpoint(graph, local, &sub_left, &endpoint, inner, silent)?
+        else {
+            // This endpoint's sub-join declined the pushdown (no shared join var, an
+            // unbound/blank join key, …). For correctness we cannot mix a pushed
+            // endpoint with a verbatim one, so abandon the whole variable-endpoint
+            // pushdown and let the verbatim path handle it.
+            return Ok(None);
+        };
+        any_applied = true;
+        // Tag every remote row with `?ep = <endpoint>` (its first column) and align the
+        // remaining columns to the accumulated header, extending `acc_vars` with any new
+        // remote variable as it first appears.
+        for v in &rel.vars {
+            if !acc_vars.contains(v) {
+                acc_vars.push(v.clone());
+            }
+        }
+        // Column index of each accumulated var within THIS endpoint's relation (skip
+        // `?ep`, which the remote relation does not carry).
+        let src_col: Vec<Option<usize>> = acc_vars
+            .iter()
+            .map(|v| if v == ep_var { None } else { rel.col(v) })
+            .collect();
+        for r in &rel.rows {
+            let mut out: Row = SmallVec::with_capacity(acc_vars.len());
+            for (i, c) in src_col.iter().enumerate() {
+                if i == 0 {
+                    out.push(id); // the `?ep` column.
+                } else {
+                    out.push(c.map(|j| r[j]).unwrap_or(NO_ID));
+                }
+            }
+            acc_rows.push(out);
+        }
+    }
+
+    if !any_applied {
+        return Ok(None);
+    }
+
+    // Normalise every row to the final header width (a later endpoint may have added a
+    // variable absent from an earlier one; those earlier rows get `NO_ID` in the new
+    // column).
+    let width = acc_vars.len();
+    for r in &mut acc_rows {
+        while r.len() < width {
+            r.push(NO_ID);
+        }
+    }
+    Ok(Some(Bindings::unsorted(acc_vars, acc_rows)))
 }
 
 /// Test/embedder seam for the SERVICE HTTP transport. By default `with` runs the
@@ -2041,7 +2626,14 @@ pub(crate) mod service_transport {
                 None => {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
-                        f(&crate::service::HttpTransport::new())
+                        // [OPUS-4.8] (sq-d4p) Bound the remote round-trip by the active
+                        // QueryBudget deadline: a query under a 5s budget must not block
+                        // for the transport's fixed 30s default on an unresponsive
+                        // endpoint. `remaining_timeout()` is `None` when no deadline is
+                        // installed, in which case the transport keeps its own default.
+                        f(&crate::service::HttpTransport::with_budget(
+                            super::budget::remaining_timeout(),
+                        ))
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
@@ -3135,7 +3727,7 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
     if view::default_is_empty() {
         return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
     }
-    // RDF 1.2 quoted-triple patterns with variables decompose into synthetic-variable
+    // RDF 1.2 triple-term patterns with variables decompose into synthetic-variable
     // slots + structural-unification relations, joined by the ordinary machinery (F14).
     let (rewritten, constraints) = extract_quoted_constraints(patterns);
     if !constraints.is_empty() {
@@ -3156,21 +3748,21 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
     eval_bgp_binary(graph, patterns, &[])
 }
 
-// ---- RDF 1.2 quoted-triple patterns with variables (F14) ----------------------
+// ---- RDF 1.2 triple-term patterns with variables (F14) ----------------------
 
-/// Prefix for the synthetic variables standing in for a quoted-triple pattern slot
+/// Prefix for the synthetic variables standing in for a triple-term pattern slot
 /// (like [`BNODE_VAR_PREFIX`], `#` cannot appear in a SPARQL VARNAME).
 const QT_VAR_PREFIX: &str = "#qt#";
 
-/// One BGP slot that held a quoted-triple pattern CONTAINING VARIABLES, replaced by a
+/// One BGP slot that held a triple-term pattern CONTAINING VARIABLES, replaced by a
 /// synthetic variable. Its relation enumerates every stored triple term and unifies it
-/// structurally against the quoted pattern, binding the inner variables.
+/// structurally against the triple-term pattern, binding the inner variables.
 struct QuotedConstraint {
     var: Variable,
     pattern: TriplePattern,
 }
 
-/// `true` when a quoted-triple pattern has a variable / blank node anywhere inside
+/// `true` when a triple-term pattern has a variable / blank node anywhere inside
 /// (such a pattern cannot resolve to a single dictionary id).
 fn quoted_has_var(t: &TriplePattern) -> bool {
     fn slot(tp: &TermPattern) -> bool {
@@ -3183,9 +3775,9 @@ fn quoted_has_var(t: &TriplePattern) -> bool {
     slot(&t.subject) || matches!(t.predicate, NamedNodePattern::Variable(_)) || slot(&t.object)
 }
 
-/// Rewrites the BGP: every subject/object slot holding a variable-carrying quoted-triple
-/// pattern becomes a fresh synthetic variable, with the quoted pattern recorded as a
-/// [`QuotedConstraint`]. Ground quoted triples are untouched (they resolve to one id).
+/// Rewrites the BGP: every subject/object slot holding a variable-carrying triple-term
+/// pattern becomes a fresh synthetic variable, with the triple-term pattern recorded as a
+/// [`QuotedConstraint`]. Ground triple terms are untouched (they resolve to one id).
 fn extract_quoted_constraints(patterns: &[TriplePattern]) -> (Vec<TriplePattern>, Vec<QuotedConstraint>) {
     let mut out = Vec::with_capacity(patterns.len());
     let mut constraints: Vec<QuotedConstraint> = Vec::new();
@@ -3205,7 +3797,7 @@ fn extract_quoted_constraints(patterns: &[TriplePattern]) -> (Vec<TriplePattern>
     (out, constraints)
 }
 
-/// The variables of a quoted-triple pattern in first-occurrence order (blank nodes as
+/// The variables of a triple-term pattern in first-occurrence order (blank nodes as
 /// their synthetic existential variables), appended to `out` without duplicates.
 fn collect_quoted_vars(t: &TriplePattern, out: &mut Vec<Variable>) {
     fn push(out: &mut Vec<Variable>, v: Variable) {
@@ -3265,8 +3857,8 @@ fn bind_quoted_var(v: &Variable, id: Id, vars: &[Variable], binds: &mut [Id]) ->
     }
 }
 
-/// Structurally unifies a quoted-triple pattern against a stored triple term's
-/// component ids, recursing through nested quoted patterns.
+/// Structurally unifies a triple-term pattern against a stored triple term's
+/// component ids, recursing through nested triple-term patterns.
 fn unify_quoted(graph: &Graph, pat: &TriplePattern, comps: [Id; 3], vars: &[Variable], binds: &mut [Id]) -> bool {
     fn slot(graph: &Graph, tp: &TermPattern, id: Id, vars: &[Variable], binds: &mut [Id]) -> bool {
         match tp {
@@ -3325,7 +3917,7 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     if view::default_is_empty() {
         return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
     }
-    // Quoted-triple patterns with variables (F14): the conjunctive-flattening path calls
+    // Triple-term patterns with variables (F14): the conjunctive-flattening path calls
     // this directly (bypassing eval_bgp), so the decomposition must happen here too.
     // The rewrite preserves pattern count/order, so `pat_filters` indexes stay aligned.
     let (rewritten, constraints) = extract_quoted_constraints(patterns);
@@ -4892,7 +5484,9 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
 /// (within a partition rows are scanned in ascending index, so a group's first row IS its min),
 /// and the global first-seen order is re-imposed by sorting groups on min row index — exactly the
 /// serial first-seen order, so output stays byte-identical.
-fn build_groups(b: &Bindings, key_cols: &[usize]) -> (Vec<Key>, Vec<Vec<usize>>) {
+/// `key_cols[i]` is the bindings column for the i-th GROUP BY variable, or `None` when that
+/// variable is never bound (no column) — its key id is then `NO_ID` (unbound) for every row.
+fn build_groups(b: &Bindings, key_cols: &[Option<usize>]) -> (Vec<Key>, Vec<Vec<usize>>) {
     #[cfg(feature = "parallel")]
     if b.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
@@ -4905,7 +5499,7 @@ fn build_groups(b: &Bindings, key_cols: &[usize]) -> (Vec<Key>, Vec<Vec<usize>>)
             .map(|row| {
                 let mut h = rustc_hash::FxHasher::default();
                 for &c in key_cols {
-                    row[c].hash(&mut h);
+                    c.map(|i| row[i]).unwrap_or(NO_ID).hash(&mut h);
                 }
                 (h.finish() % P as u64) as u8
             })
@@ -4921,7 +5515,7 @@ fn build_groups(b: &Bindings, key_cols: &[usize]) -> (Vec<Key>, Vec<Vec<usize>>)
                     if parts[ri] as usize != p {
                         continue;
                     }
-                    let key: Key = key_cols.iter().map(|&c| row[c]).collect();
+                    let key: Key = key_cols.iter().map(|&c| c.map(|i| row[i]).unwrap_or(NO_ID)).collect();
                     match idx.get(&key) {
                         Some(&i) => out[i].2.push(ri),
                         None => {
@@ -4942,7 +5536,7 @@ fn build_groups(b: &Bindings, key_cols: &[usize]) -> (Vec<Key>, Vec<Vec<usize>>)
     let mut order: Vec<Key> = Vec::new();
     let mut members: Vec<Vec<usize>> = Vec::new();
     for (ri, row) in b.rows.iter().enumerate() {
-        let key: Key = key_cols.iter().map(|&c| row[c]).collect();
+        let key: Key = key_cols.iter().map(|&c| c.map(|i| row[i]).unwrap_or(NO_ID)).collect();
         match idx.get(&key) {
             Some(&i) => members[i].push(ri),
             None => {
@@ -4962,7 +5556,12 @@ fn group_aggregate(
     group_vars: &[Variable],
     aggregates: &[(Variable, AggregateExpression)],
 ) -> Result<Bindings, String> {
-    let key_cols: Vec<usize> = group_vars.iter().map(|v| b.col(v).expect("group var present")).collect();
+    // A GROUP BY variable that is never bound anywhere in the WHERE clause has no column in
+    // `b`. Per SPARQL 1.1 §11.1 the group key for such a variable evaluates to unbound for every
+    // solution, so all rows share the same (unbound) key on that position — they collapse into one
+    // group and the variable is unbound in the output. We model the missing column as `None` and
+    // feed `NO_ID` (unbound) for it, rather than panicking. (Regression: bead sq-vymy4.) [OPUS-4.8]
+    let key_cols: Vec<Option<usize>> = group_vars.iter().map(|v| b.col(v)).collect();
 
     // Group rows by the group-key id tuple, preserving first-seen order (parallel ≥ threshold).
     let (mut order, mut members) = build_groups(&b, &key_cols);
@@ -5002,6 +5601,10 @@ fn group_aggregate(
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
+        // [OPUS-4.8] (sq-5qz9) keep a custom-aggregate registry visible off-thread, like `fns`.
+        // (`self::` because the `aggregates` *parameter* below shadows the module name.)
+        #[cfg(feature = "window-functions")]
+        let aggs = self::aggregates::snapshot();
         // Process `members`/`order` in PAR_THRESHOLD-sized batches: evaluate + read-only
         // resolve each batch in parallel, then serially intern only that batch's genuinely
         // new terms and emit its rows. Peak `Value` footprint is one batch, not all groups.
@@ -5014,6 +5617,8 @@ fn group_aggregate(
                     let _fns = functions::worker_install(&fns);
                     let _vw = view::worker_install(&vw);
                     let _spx = spatial::worker_install(&spx);
+                    #[cfg(feature = "window-functions")]
+                    let _aggs = self::aggregates::worker_install(&aggs);
                     aggregates
                         .iter()
                         .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg).map(|v| value_to_id_readonly(graph, lv, &v)))
@@ -5071,6 +5676,17 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                     return Ok(v);
                 }
             }
+            // [OPUS-4.8] (sq-5qz9) A declared custom aggregate IRI: fold the group's
+            // per-member values through the installed registry. Unlike the builtins,
+            // the user aggregate sees the FULL member sequence (an unbound member is
+            // passed as `None`, not skipped) so it can implement count-style or
+            // unbound-sensitive aggregates; DISTINCT de-duplicates the materialised
+            // member terms first (treating two unbound members as equal). The closure
+            // works in `oxrdf::Term`, so the per-member value is materialised to a term.
+            #[cfg(feature = "window-functions")]
+            if let AggregateFunction::Custom(iri) = name {
+                return eval_custom_aggregate(graph, local, b, members, expr, *distinct, iri.as_str());
+            }
             // Collect the per-member values of `expr`. [OPUS-4.8] An UNBOUND member (a variable
             // with no binding in that row, e.g. an OPTIONAL one) is SKIPPED for every aggregate,
             // matching SPARQL "aggregate over the bound values": SUM/AVG over an OPTIONAL column
@@ -5120,6 +5736,48 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                 _ => Err("M2: unsupported aggregate".into()),
             }
         }
+    }
+}
+
+/// [OPUS-4.8] (sq-5qz9) Evaluate a declared custom aggregate IRI against the
+/// installed [`crate::CustomAggregateRegistry`]. Materialises each group member's
+/// value of `expr` to an `Option<Term>` (`None` ≡ unbound for that member —
+/// passed THROUGH, not skipped, so a user count-style aggregate can see it),
+/// applies DISTINCT over the materialised members, then folds via the closure.
+/// A missing registry / unregistered IRI is the same hard error the registry-free
+/// path raises; a closure `Err` is a SPARQL expression error (→ unbound result).
+#[cfg(feature = "window-functions")]
+fn eval_custom_aggregate(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    members: &[usize],
+    expr: &Expression,
+    distinct: bool,
+    iri: &str,
+) -> Result<Value, String> {
+    let Some(f) = aggregates::lookup(iri) else {
+        return Err(format!("unsupported SPARQL function: no custom aggregate registered for <{iri}>"));
+    };
+    let mut args: Vec<Option<Term>> = Vec::with_capacity(members.len());
+    for &ri in members {
+        let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
+        // A genuine expression error inside the argument makes the aggregate a
+        // SPARQL error (→ unbound), mirroring SUM/AVG; an unbound member is a
+        // first-class `None` argument the user aggregate decides how to treat.
+        if matches!(v, Value::Error) {
+            return Ok(Value::Error);
+        }
+        args.push(value_as_term(&v));
+    }
+    if distinct {
+        let mut seen: FxHashSet<Option<Term>> = FxHashSet::default();
+        args.retain(|t| seen.insert(t.clone()));
+    }
+    match f(&args) {
+        Ok(Some(t)) => Ok(Value::Term(t)),
+        Ok(None) => Ok(Value::Unbound),
+        Err(_) => Ok(Value::Error), // expression error → unbound aggregate (builtin discipline)
     }
 }
 
@@ -5395,6 +6053,17 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
         }
         Ordering::Equal
     };
+    // ORDER BY tie handling [OPUS-4.8]: `cmp` returns `Ordering::Equal` only for rows that
+    // tie on *every* ORDER BY key (no secondary tie-breaker), and SPARQL leaves the relative
+    // order of ORDER BY-tied solutions unspecified, so any tie order is conformant. We still
+    // keep it *deterministic at a fixed thread count*: both branches use a STABLE sort
+    // (`rayon::par_sort_by` is a stable parallel merge sort, same guarantee as `slice::sort_by`),
+    // so ties retain their `b.rows` (scan) input order rather than being shuffled by the
+    // parallel partitioning. The only residual cross-thread-count variation is that `b.rows`
+    // itself is in dict-id (scan) order, which is thread-count-dependent — that is the
+    // umbrella dict-id-order property (research/dict-id-order-determinism-audit.md), not a
+    // tie-break defect in this sort. So no total-order tie-breaker is added: it would cost a
+    // term materialisation per tied row for an order the spec does not constrain.
     #[cfg(feature = "parallel")]
     if keyed.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
@@ -7778,9 +8447,9 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
         TermPattern::BlankNode(b) => Ok(Term::BlankNode(b.clone())),
         TermPattern::Literal(l) => Ok(Term::Literal(l.clone())),
         TermPattern::Variable(_) => Err("variable where a term was expected".into()),
-        // RDF-star GROUND triple term `<<( s p o )>>` (RDF 1.2): build the structural
+        // GROUND triple term `<<( s p o )>>` (RDF 1.2): build the structural
         // `Term::Triple`, which the dictionary interns/looks up by its component ids.
-        // A variable INSIDE a quoted-triple pattern (sq-kbs / T6) is handled UPSTREAM by
+        // A variable INSIDE a triple-term pattern (sq-kbs / T6) is handled UPSTREAM by
         // BGP decomposition (`extract_quoted_constraints` -> `quoted_relation`), which
         // rewrites any variable-carrying quoted slot into a synthetic variable before this
         // resolver runs. So in a parsed query this function only ever sees a GROUND triple
@@ -7789,7 +8458,7 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
             let subject: oxrdf::NamedOrBlankNode = match term_pattern_to_term(&t.subject)? {
                 Term::NamedNode(n) => n.into(),
                 Term::BlankNode(b) => b.into(),
-                _ => return Err("RDF-star triple-term subject must be an IRI or blank node".into()),
+                _ => return Err("RDF 1.2 triple-term subject must be an IRI or blank node".into()),
             };
             let predicate = match &t.predicate {
                 NamedNodePattern::NamedNode(n) => n.clone(),
@@ -8917,7 +9586,7 @@ mod path_tests {
 
     #[test]
     fn rdf_star_structural_roundtrip_output() {
-        // Loading RDF-star Turtle and selecting the triple term materialises a structural
+        // Loading RDF 1.2 triple-term Turtle and selecting the triple term materialises a structural
         // `Term::Triple` (oxrdf formats it as `<<( … )>>`), NOT the old canonical-string
         // literal stopgap.
         let g = Graph::load_str("PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .", "turtle").unwrap();
@@ -8985,7 +9654,7 @@ mod path_tests {
 
     #[test]
     fn rdf_star_variables_inside_quoted_patterns() {
-        // F14: variables inside quoted-triple patterns MATCH structurally against the
+        // F14: variables inside triple-term patterns MATCH structurally against the
         // stored triple terms, binding the inner variables.
         let g = Graph::load_str(
             "PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .\n<< :bob :age 25 >> :certainty 0.4 .\n:alice :name \"Alice\" .",
@@ -9012,7 +9681,7 @@ mod path_tests {
 
     #[test]
     fn rdf_star_quoted_pattern_var_positions_bind() {
-        // sq-kbs (T6): a variable in EACH position of a quoted-triple pattern binds to
+        // sq-kbs (T6): a variable in EACH position of a triple-term pattern binds to
         // the matching component of the stored triple term, and the bound VALUES are
         // exactly the subject/predicate/object of the reified statement.
         let g = Graph::load_str(
@@ -9070,7 +9739,7 @@ mod path_tests {
 
     #[test]
     fn rdf_star_quoted_pattern_all_vars_enumerate() {
-        // sq-kbs (T6): `<< ?s ?p ?o >>` enumerates EVERY stored quoted triple, binding all
+        // sq-kbs (T6): `<< ?s ?p ?o >>` enumerates EVERY stored triple term, binding all
         // three slots, and the count equals the number of distinct reified statements.
         let g = Graph::load_str(
             "PREFIX : <http://ex/>\n\
@@ -9092,7 +9761,7 @@ mod path_tests {
 
     #[test]
     fn rdf_star_quoted_pattern_nested_one_level() {
-        // sq-kbs (T6): a quoted triple NESTED (one level) inside a quoted-triple pattern
+        // sq-kbs (T6): a triple term NESTED (one level) inside a triple-term pattern
         // unifies recursively — the inner variables bind to the inner statement's parts.
         let g = Graph::load_str(
             "PREFIX : <http://ex/>\n<< << :alice :age 30 >> :statedBy :bob >> :certainty 0.8 .",
@@ -9406,6 +10075,41 @@ mod path_pushdown_tests {
         }
     }
 
+    /// [OPUS-4.8] (sq-5kr) Pin the bound-endpoint shortcuts that AVOID the
+    /// full-store scans: `p*`/`p?` over a bound endpoint must emit ITS reflexive
+    /// pair (not the whole `graph_nodes()` domain), and a bound-endpoint `!(...)`
+    /// must return only that node's non-excluded edges from the narrowed scan.
+    /// The load-bearing case is a CONSTANT endpoint absent from the data
+    /// (`:z`, which occurs in no triple): the zero-length rules still bind
+    /// `<z> p* <z>` / `<z> p? <z>`, whereas a reflexive pass over `graph_nodes()`
+    /// would never see `:z` and would WRONGLY drop the solution — so this guards
+    /// against a regression to the old domain-scan reflexive logic.
+    #[test]
+    fn bound_endpoint_zero_length_and_negated_avoid_full_store_scan() {
+        // :a -e-> :b ; :a -f-> :c .  :z occurs in NO triple.
+        let g = Graph::load_str("@prefix : <http://ex/> .\n:a :e :b . :a :f :c .\n", "turtle").unwrap();
+        let rows = |sparql: &str| rowset(&crate::query(&g, &format!("{PFX}{sparql}")).unwrap());
+        let ask = |sparql: &str| !crate::query(&g, &format!("{PFX}{sparql}")).unwrap().rows.is_empty();
+        let want = |items: &[&str]| {
+            let mut v: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+
+        // Bound-subject `p*`: reflexive self + the one `:e` hop (NOT the node domain).
+        assert_eq!(rows("SELECT ?y WHERE { :a :e* ?y }"), want(&["<http://ex/a>", "<http://ex/b>"]));
+        // Bound-subject `p?`: reflexive self + the one `:e` hop.
+        assert_eq!(rows("SELECT ?y WHERE { :a :e? ?y }"), want(&["<http://ex/a>", "<http://ex/b>"]));
+        // Constant endpoint ABSENT from the data still has its zero-length self-pair.
+        assert_eq!(rows("SELECT ?y WHERE { :z :e* ?y }"), want(&["<http://ex/z>"]));
+        assert!(ask("ASK WHERE { :z :e? :z }"), "absent-term :z must satisfy its own :e? self-pair");
+        // Bound-subject negated set: only :a's non-:e edges (the :f hop), narrowed scan.
+        assert_eq!(rows("SELECT ?y WHERE { :a !:e ?y }"), want(&["<http://ex/c>"]));
+        // Bound-OBJECT negated set: subjects reaching :c via a non-:e predicate (:a -f-> :c).
+        assert_eq!(rows("SELECT ?x WHERE { ?x !:e :c }"), want(&["<http://ex/a>"]));
+    }
+
     /// The row budget must fire INSIDE a single-source traversal (not only
     /// between traversal roots): one long chain, one start node, tiny budget.
     #[test]
@@ -9415,7 +10119,7 @@ mod path_pushdown_tests {
             ttl.push_str(&format!(":m{k} :e :m{} .\n", k + 1));
         }
         let g = Graph::load_str(&ttl, "turtle").unwrap();
-        let budget = crate::QueryBudget { deadline: None, max_rows: Some(64) };
+        let budget = crate::QueryBudget { max_rows: Some(64), ..crate::QueryBudget::unlimited() };
         let err = crate::query_with_budget(&g, "PREFIX : <http://ex/> SELECT ?y WHERE { :m0 :e+ ?y }", &budget)
             .unwrap_err();
         assert!(err.contains("budget"), "expected a budget error, got: {err}");
@@ -9580,10 +10284,166 @@ mod service_exec_tests {
         assert!(eval_select(&g, &p).is_err());
     }
 
+    // ---------------------------------------------------------------------
+    // Bind-join (VALUES pushdown) differential: bound == verbatim. [OPUS-4.8]
+    // (bead sq-sjkj). A mock transport that evaluates the RECEIVED query (VALUES
+    // and all) against a real remote `Graph`, so the injected pushdown is
+    // genuinely executed and we can assert the bound path's results are IDENTICAL
+    // to the verbatim path's — plus count remote requests.
+    // ---------------------------------------------------------------------
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A transport backed by a remote `Graph`: it runs each received query through
+    /// the engine (`query_json`) and records the query strings it served.
+    struct RemoteGraph {
+        remote: Graph,
+        seen: Rc<RefCell<Vec<String>>>,
+    }
+    impl Transport for RemoteGraph {
+        fn fetch(&self, _e: &str, q: &str) -> Result<String, String> {
+            self.seen.borrow_mut().push(q.to_string());
+            crate::query_json(&self.remote, q)
+        }
+    }
+
+    /// Sort a result's rows into a canonical multiset for order-independent equality.
+    fn canon(res: &QueryResult) -> Vec<Vec<Option<String>>> {
+        let mut rows: Vec<Vec<Option<String>>> = res
+            .rows
+            .iter()
+            .map(|r| r.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect())
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    fn three_persons() -> Graph {
+        Graph::load_str(
+            "@prefix ex: <http://ex/> . \
+             ex:alice a ex:Person . ex:bob a ex:Person . ex:carol a ex:Person .",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    fn remote_names() -> Graph {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        ttl.push_str("ex:alice ex:name \"Alice\" . ex:bob ex:name \"Bob\" .\n");
+        for i in 0..60 {
+            ttl.push_str(&format!("ex:noise{i} ex:name \"N{i}\" .\n"));
+        }
+        Graph::load_str(&ttl, "turtle").unwrap()
+    }
+
+    /// Run a federated query with a remote-graph mock, returning (result, n_requests).
+    fn run_fed(local: &Graph, q: &str, remote: Graph) -> (QueryResult, usize) {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteGraph { remote, seen: Rc::clone(&seen) }));
+        let p = pattern(q);
+        let res = eval_select(local, &p).unwrap();
+        let n = seen.borrow().len();
+        (res, n)
+    }
+
     #[test]
-    fn variable_endpoint_is_scoped_out() {
+    fn bound_join_equals_verbatim_basic() {
+        // Same query, same mock: the bound-join path (default, ON) must match the
+        // verbatim path (forced by a single-tuple block can't disable it, so we
+        // compare against an explicit local-join reconstruction via VALUES-free mock).
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s a ex:Person . SERVICE <http://r/> { ?s ex:name ?name } }";
+        let (bound, n) = run_fed(&three_persons(), q, remote_names());
+        // alice + bob match; carol + 60 noise do not contribute to the join.
+        assert_eq!(bound.rows.len(), 2, "only alice/bob have remote names");
+        assert_eq!(n, 1, "3 distinct subjects < block 50 => one request");
+        let got = canon(&bound);
+        // The verbatim equivalent: no SERVICE, just the remote relation joined.
+        // Reconstruct it locally to pin the expected multiset.
+        let expect: Vec<Vec<Option<String>>> = {
+            let mut v = vec![
+                vec![Some("<http://ex/alice>".to_string()), Some("\"Alice\"".to_string())],
+                vec![Some("<http://ex/bob>".to_string()), Some("\"Bob\"".to_string())],
+            ];
+            v.sort();
+            v
+        };
+        assert_eq!(got, expect, "bound-join result multiset");
+    }
+
+    #[test]
+    fn bound_join_block_boundary_unions_all_blocks() {
+        // Block size 1 => one request per distinct subject; the union must still be
+        // the SAME result as a single block. Proves block-boundary correctness.
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteGraph {
+            remote: remote_names(),
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s a ex:Person . SERVICE <http://r/> { ?s ex:name ?name } }";
+        let res = crate::service::with_service_bound_join_block_size(1, || {
+            eval_select(&three_persons(), &pattern(q)).unwrap()
+        });
+        assert_eq!(res.rows.len(), 2);
+        assert_eq!(seen.borrow().len(), 3, "block size 1 over 3 subjects => 3 requests");
+    }
+
+    #[test]
+    fn bound_join_optional_keeps_unmatched() {
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s a ex:Person . OPTIONAL { SERVICE <http://r/> { ?s ex:name ?name } } }";
+        let (res, _n) = run_fed(&three_persons(), q, remote_names());
+        assert_eq!(res.rows.len(), 3, "left-join: carol survives with an unbound name");
+        let name_i = res.vars.iter().position(|v| v.as_str() == "name").unwrap();
+        let bound_names = res.rows.iter().filter(|r| r[name_i].is_some()).count();
+        assert_eq!(bound_names, 2, "only alice/bob got a name");
+    }
+
+    #[test]
+    fn bound_join_silent_block_failure_keeps_left() {
+        // A transport that fails => under SILENT, the bound-join degrades to the join
+        // identity (empty remote relation), so the local rows survive unchanged —
+        // identical to the verbatim SILENT path.
+        let _g = service_transport::install(Box::new(Boom));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE \
+                 { ?s a ex:Person . SERVICE SILENT <http://r/> { ?s ex:name ?name } }";
+        let res = eval_select(&three_persons(), &pattern(q)).unwrap();
+        assert_eq!(res.rows.len(), 3, "SILENT remote failure keeps all local persons");
+    }
+
+    #[test]
+    fn bound_join_unbound_join_var_falls_back_to_verbatim() {
+        // Here ?s is NOT bound on the left of the SERVICE (the left binds only ?p),
+        // so there is no bound join var to push — the verbatim path runs. The remote
+        // returns its whole relation, joined locally. Still correct.
+        let local = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:alice ex:knows ex:bob .",
+            "turtle",
+        )
+        .unwrap();
+        let remote = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:bob ex:name \"Bob\" . ex:zzz ex:name \"Z\" .",
+            "turtle",
+        )
+        .unwrap();
+        // The SERVICE binds ?o/?name; the left binds ?s/?o (via ex:knows). ?o is shared
+        // and bound => this actually DOES bind-join on ?o. Use a genuinely unshared var.
+        let q = "PREFIX ex: <http://ex/> SELECT ?name WHERE \
+                 { ex:alice ex:knows ?x . SERVICE <http://r/> { ?y ex:name ?name } }";
+        let (res, _n) = run_fed(&local, q, remote);
+        // No shared var => cross product of {?x=bob} with remote {bob,zzz} => 2 rows.
+        assert_eq!(res.rows.len(), 2, "no bound join var => verbatim cross-join");
+    }
+
+    #[test]
+    fn variable_endpoint_unbound_top_level_errors() {
+        // A variable endpoint with NOTHING to bind it (the surrounding pattern produces
+        // no row binding `?e`) has no endpoint to call: the verbatim path errors
+        // (non-SILENT) / yields the identity (SILENT). [OPUS-4.8] (sq-d4p)
         let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a a ex:T .", "turtle").unwrap();
-        // No transport installed: a variable endpoint must error BEFORE any fetch.
+        // No `ex:ep` data => `?s ex:ep ?e` yields 0 rows => empty left => verbatim path.
         let p = pattern(
             "PREFIX ex: <http://ex/> SELECT ?s WHERE \
              { ?s a ex:T . ?s ex:ep ?e . SERVICE ?e { ?s ex:p ?o } }",
@@ -9596,8 +10456,203 @@ mod service_exec_tests {
             "PREFIX ex: <http://ex/> SELECT ?s WHERE \
              { ?s a ex:T . ?s ex:ep ?e . SERVICE SILENT ?e { ?s ex:p ?o } }",
         );
-        // The ?e join with no ex:ep data yields 0 rows; the point is it does not error.
         assert!(eval_select(&g, &p2).is_ok());
+    }
+
+    // ---------------------------------------------------------------------
+    // SERVICE ?var — variable endpoint, per-endpoint dispatch. [OPUS-4.8] (sq-d4p)
+    // ---------------------------------------------------------------------
+
+    /// A transport that routes each query to a distinct remote `Graph` keyed by the
+    /// endpoint IRI, recording the (endpoint, query) pairs it served. Lets a test prove
+    /// that `SERVICE ?ep` dials the RIGHT endpoint per left binding of `?ep`.
+    struct RemoteByEndpoint {
+        graphs: std::collections::HashMap<String, Graph>,
+        seen: Rc<RefCell<Vec<(String, String)>>>,
+    }
+    impl Transport for RemoteByEndpoint {
+        fn fetch(&self, e: &str, q: &str) -> Result<String, String> {
+            self.seen.borrow_mut().push((e.to_string(), q.to_string()));
+            match self.graphs.get(e) {
+                Some(g) => crate::query_json(g, q),
+                None => Err(format!("no such endpoint {e}")),
+            }
+        }
+    }
+
+    /// `local` data binds each person to the endpoint that knows their name.
+    fn persons_with_endpoints() -> Graph {
+        Graph::load_str(
+            "@prefix ex: <http://ex/> . \
+             ex:alice ex:ep <http://r1/> . \
+             ex:bob   ex:ep <http://r2/> . \
+             ex:carol ex:ep <http://r1/> .",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn variable_endpoint_dispatches_per_endpoint() {
+        // alice & carol -> r1 ; bob -> r2. Each remote knows only its own names.
+        let r1 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:alice ex:name \"Alice\" . ex:carol ex:name \"Carol\" .",
+            "turtle",
+        )
+        .unwrap();
+        let r2 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:bob ex:name \"Bob\" .",
+            "turtle",
+        )
+        .unwrap();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut graphs = std::collections::HashMap::new();
+        graphs.insert("http://r1/".to_string(), r1);
+        graphs.insert("http://r2/".to_string(), r2);
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs,
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
+        let res = eval_select(&persons_with_endpoints(), &pattern(q)).unwrap();
+        let mut got = canon(&res);
+        got.sort();
+        let mut expect = vec![
+            vec![Some("<http://ex/alice>".to_string()), Some("\"Alice\"".to_string())],
+            vec![Some("<http://ex/bob>".to_string()), Some("\"Bob\"".to_string())],
+            vec![Some("<http://ex/carol>".to_string()), Some("\"Carol\"".to_string())],
+        ];
+        expect.sort();
+        assert_eq!(got, expect, "each person resolved against its own endpoint");
+        // Two distinct endpoints => exactly two remote requests (one bind-join each).
+        let endpoints: std::collections::HashSet<String> =
+            seen.borrow().iter().map(|(e, _)| e.clone()).collect();
+        assert_eq!(endpoints.len(), 2, "dialled both r1 and r2, and only those");
+    }
+
+    #[test]
+    fn variable_endpoint_optional_keeps_unmatched() {
+        // carol's endpoint r1 does NOT know her name -> under OPTIONAL she survives
+        // unbound; alice (r1) and bob (r2) get names.
+        let r1 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:alice ex:name \"Alice\" .",
+            "turtle",
+        )
+        .unwrap();
+        let r2 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:bob ex:name \"Bob\" .",
+            "turtle",
+        )
+        .unwrap();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut graphs = std::collections::HashMap::new();
+        graphs.insert("http://r1/".to_string(), r1);
+        graphs.insert("http://r2/".to_string(), r2);
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs,
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . OPTIONAL { SERVICE ?e { ?s ex:name ?name } } }";
+        let res = eval_select(&persons_with_endpoints(), &pattern(q)).unwrap();
+        assert_eq!(res.rows.len(), 3, "all three persons survive the left join");
+        let name_i = res.vars.iter().position(|v| v.as_str() == "name").unwrap();
+        let named = res.rows.iter().filter(|r| r[name_i].is_some()).count();
+        assert_eq!(named, 2, "only alice/bob got a name; carol's endpoint lacked it");
+    }
+
+    #[test]
+    fn variable_endpoint_silent_failure_keeps_left() {
+        // A failing transport under SILENT must keep the left rows unchanged (identity),
+        // exactly like the concrete-endpoint SILENT path.
+        let _g = service_transport::install(Box::new(Boom));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE \
+                 { ?s ex:ep ?e . SERVICE SILENT ?e { ?s ex:name ?name } }";
+        let res = eval_select(&persons_with_endpoints(), &pattern(q)).unwrap();
+        assert_eq!(res.rows.len(), 3, "SILENT remote failure keeps all three persons");
+    }
+
+    #[test]
+    fn variable_endpoint_non_iri_binding_yields_no_remote_row() {
+        // A literal-valued `?e` is not a valid endpoint -> that solution contributes no
+        // remote row (inner join drops it). alice (valid r1) survives; dave (literal) does not.
+        let local = Graph::load_str(
+            "@prefix ex: <http://ex/> . \
+             ex:alice ex:ep <http://r1/> . \
+             ex:dave  ex:ep \"not-an-iri\" .",
+            "turtle",
+        )
+        .unwrap();
+        let r1 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:alice ex:name \"Alice\" .",
+            "turtle",
+        )
+        .unwrap();
+        let mut graphs = std::collections::HashMap::new();
+        graphs.insert("http://r1/".to_string(), r1);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs,
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
+        let res = eval_select(&local, &pattern(q)).unwrap();
+        assert_eq!(res.rows.len(), 1, "only the valid-IRI endpoint produced a row");
+        // The literal endpoint was never dialled.
+        assert!(
+            seen.borrow().iter().all(|(e, _)| e == "http://r1/"),
+            "only the valid IRI endpoint was contacted"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Per-query timeout wired to the QueryBudget deadline. [OPUS-4.8] (sq-d4p)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn http_transport_timeout_tracks_budget() {
+        use crate::service::{HttpTransport, DEFAULT_SERVICE_TIMEOUT, MIN_SERVICE_TIMEOUT};
+        use std::time::Duration;
+        // No deadline -> the built-in default in full.
+        assert_eq!(HttpTransport::with_budget(None).timeout_for_test(), DEFAULT_SERVICE_TIMEOUT);
+        // A deadline tighter than the default caps the round-trip to the remaining time.
+        let tight = Duration::from_secs(5);
+        assert_eq!(HttpTransport::with_budget(Some(tight)).timeout_for_test(), tight);
+        // A deadline looser than the default never RAISES the timeout above the default.
+        let loose = Duration::from_secs(120);
+        assert_eq!(
+            HttpTransport::with_budget(Some(loose)).timeout_for_test(),
+            DEFAULT_SERVICE_TIMEOUT
+        );
+        // An already-expired (zero) deadline still gets the small non-zero floor.
+        assert_eq!(
+            HttpTransport::with_budget(Some(Duration::ZERO)).timeout_for_test(),
+            MIN_SERVICE_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn budget_remaining_timeout_reflects_deadline() {
+        use std::time::{Duration, Instant};
+        // No budget installed -> None.
+        assert!(budget::remaining_timeout().is_none());
+        // A future deadline -> Some(positive), bounded by the deadline.
+        let b = crate::QueryBudget {
+            deadline: Some(Instant::now() + Duration::from_secs(10)),
+            ..crate::QueryBudget::unlimited()
+        };
+        let _g = budget::install(&b);
+        let r = budget::remaining_timeout().expect("deadline installed");
+        assert!(r <= Duration::from_secs(10) && r > Duration::from_secs(8), "got {r:?}");
+        // An expired deadline saturates to ZERO (never panics / underflows).
+        let b2 = crate::QueryBudget {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            ..crate::QueryBudget::unlimited()
+        };
+        let _g2 = budget::install(&b2);
+        assert_eq!(budget::remaining_timeout(), Some(Duration::ZERO));
     }
 }
 
@@ -9766,5 +10821,78 @@ mod aggregate_empty_semantics {
     fn group_by_constant_over_empty_is_zero_rows() {
         let r = run("SELECT ?k (COUNT(*) AS ?v) WHERE { ?s ex:nomatch ?o } GROUP BY (1 AS ?k)");
         assert!(r.rows.is_empty());
+    }
+}
+
+/// `GROUP BY ?v` where `?v` is **never bound** anywhere in the WHERE clause must NOT panic.
+/// Per SPARQL 1.1 §11.1 the key for an unbound grouping variable is unbound for every solution,
+/// so all matching rows collapse into ONE group with `?v` unbound in the output. Regression for
+/// bead sq-vymy4 — the engine previously panicked with `group var present` at the `key_cols`
+/// build. [OPUS-4.8]
+#[cfg(test)]
+mod group_by_unbound_var {
+    use super::*;
+
+    /// A non-empty graph: three `ex:a`-typed subjects. The WHERE clause below matches all three,
+    /// so the input multiset is non-empty — but `?kind` is never bound.
+    fn g() -> Graph {
+        Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:x1 a ex:Thing . ex:x2 a ex:Thing . ex:x3 a ex:Thing .",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    fn run(q: &str) -> QueryResult {
+        crate::query(&g(), &format!("PREFIX ex: <http://ex/> {q}")).unwrap()
+    }
+
+    fn int_lit(n: i64) -> Term {
+        Term::Literal(oxrdf::Literal::new_typed_literal(n.to_string(), oxrdf::vocab::xsd::INTEGER))
+    }
+
+    /// The bead's exact shape: GROUP BY an unbound var with a COUNT(DISTINCT). One group, the
+    /// grouping var unbound, the count over the whole matched set. Must not panic.
+    #[test]
+    fn group_by_never_bound_var_is_one_unbound_group() {
+        let r = run("SELECT ?kind (COUNT(DISTINCT ?x) AS ?n) WHERE { ?x a ex:Thing } GROUP BY ?kind");
+        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["kind", "n"]);
+        assert_eq!(r.rows.len(), 1, "all rows share the unbound key ⇒ exactly one group");
+        // `?kind` unbound, `?n` = number of distinct ?x (3).
+        assert_eq!(r.rows[0], vec![None, Some(int_lit(3))]);
+    }
+
+    /// COUNT(*) variant — the count is the size of the (single) group, i.e. all matched rows.
+    #[test]
+    fn group_by_never_bound_var_count_star() {
+        let r = run("SELECT ?kind (COUNT(*) AS ?n) WHERE { ?x a ex:Thing } GROUP BY ?kind");
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0], vec![None, Some(int_lit(3))]);
+    }
+
+    /// A BOUND grouping var mixed with a NEVER-bound one: grouping still partitions by the bound
+    /// var (here all rows share `?x`'s type-less subject so… group by the bound `?x`), and the
+    /// unbound `?kind` is unbound in every output row. Three distinct subjects ⇒ three groups.
+    #[test]
+    fn mixed_bound_and_unbound_group_vars() {
+        let r = run("SELECT ?x ?kind (COUNT(*) AS ?n) WHERE { ?x a ex:Thing } GROUP BY ?x ?kind");
+        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["x", "kind", "n"]);
+        assert_eq!(r.rows.len(), 3, "three distinct ?x ⇒ three groups");
+        // Every row has `?kind` (the 2nd cell) unbound and a per-subject count of 1.
+        for row in &r.rows {
+            assert_eq!(row[1], None, "the never-bound ?kind must be unbound");
+            assert_eq!(row[2], Some(int_lit(1)));
+        }
+    }
+
+    /// SUM over a never-bound grouping var: one group, the unbound key, SUM is unbound (no
+    /// numeric members) — and crucially, no panic.
+    #[test]
+    fn group_by_never_bound_var_with_sum() {
+        let r = run("SELECT ?kind (SUM(?missing) AS ?total) WHERE { ?x a ex:Thing } GROUP BY ?kind");
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], None, "?kind unbound");
+        // SUM over an all-unbound column is "0"^^xsd:integer (Sum({}) = 0).
+        assert_eq!(r.rows[0][1], Some(int_lit(0)));
     }
 }

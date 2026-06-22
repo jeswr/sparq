@@ -21,11 +21,11 @@ the **only tractable family of property paths under MPC over a secret graph**.
 - [`mpc-sparql-capability-matrix.md`](./mpc-sparql-capability-matrix.md) — adopts its
   capability-tier vocabulary (BUILT / KNOWN / OPEN / IMPOSSIBLE), its primitive-class ladder
   (P0–P7), and its two-regime split (DISCLOSED / HIDDEN). This record **resolves its single
-  property-path cell** (matrix §2 row "Property paths", §4.3) into a full operator design. One
-  correction to that record: it still says `degree_reduce` is *"in-flight in PR #119, not yet
-  merged"* (matrix §1.2); **PR #119 has since merged**, so the P4 keystone this operator depends
-  on is now BUILT on `main` ([`shamir.rs:406`](../crates/sparq-mpc/src/shamir.rs)). That is what
-  makes this bead actionable now rather than blocked.
+  property-path cell** (matrix §2 row "Property paths", §4.3) into a full operator design. The P4
+  keystone this operator depends on — `degree_reduce` (BGW reshare-and-recombine, PR #119,
+  `sq-dvuc`) — is **BUILT on `main`** ([`degree_reduce`](../crates/sparq-mpc/src/shamir.rs)); the
+  matrix §1.2 reflects that (its earlier "in-flight in PR #119, not yet merged" draft note was
+  reconciled in `sq-k4of`). That is what makes this bead actionable now rather than blocked.
 - [`mpc-security-models-and-benchmarks.md`](./mpc-security-models-and-benchmarks.md) — the
   3-axis security taxonomy, the seven-channel leakage taxonomy, the honest-envelope framing. §4
   here uses its vocabulary verbatim.
@@ -90,7 +90,7 @@ realizable on the now-merged degree-reduction backend):
 | **`a (p){1,k} b`** (bounded `+`) | between 1 and `k` hops of `p` | UNION of `k` fixed chains, lengths `1..k` | **YES** — `k` BGP chains, deduped (§2.2) |
 | **`a (p){0,k} b`** (bounded `*`, reflexive) | between 0 and `k` hops | the `{1,k}` union PLUS the reflexive `a = b` pair (length-0) | **YES** — add the diagonal (§2.3) |
 | **`a (p?) b`** (`ZeroOrOnePath`, the special case `{0,1}`) | 0 or 1 hop | reflexive pair ∪ one 1-hop pattern | **YES** |
-| **`a (p₁ | p₂) b`** (alternation) | one hop via `p₁` OR `p₂` | UNION of fixed chains, one per branch | **YES** — union of fixed BGPs (§2.4) |
+| **`a (p₁ \| p₂) b`** (alternation) | one hop via `p₁` OR `p₂` | UNION of fixed chains, one per branch | **YES** — union of fixed BGPs (§2.4) |
 | **bounded nesting / composition** of the above | e.g. `a (p/q){1,k} b` | distribute the bound; each fixed-length expansion is a fixed BGP | **YES** if every repetition operator carries an explicit finite bound |
 
 **Honest boundary conditions (stated, not hidden):**
@@ -139,7 +139,7 @@ on top.
 A fixed exactly-`k` path `?a (p){k} ?b` introduces `k−1` **fresh intermediate variables**
 `?z₁ … ?z_{k−1}` and rewrites to the `k`-pattern conjunctive BGP
 
-```
+```text
 ?a p ?z₁ .  ?z₁ p ?z₂ .  …  ?z_{k−2} p ?z_{k−1} .  ?z_{k−1} p ?b .
 ```
 

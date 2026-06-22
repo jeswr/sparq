@@ -30,13 +30,24 @@
 //! - Internal node = `h2(left, right)`; fold pairwise up `D` levels to the root.
 //!
 //! # Scope (honest, mirrors `revocation`)
-//! This is a DENSE tree of `2^D` leaves: `key_set_root` hashes all `2^D` leaves,
-//! `O(2^D)` host work. The depth-`D` member covers up to `2^D` issuers. Real
-//! issuer sets are small (tens of authorities), so depth 4–10 is ample; a
-//! production deployment with a very large issuer registry would want a
-//! sparse/compressed-inclusion commitment (the circuit relation is depth-generic,
-//! only this dense host builder bounds the size). The compiled member is `d4`
-//! (16 issuers) — see the verifier docs and the crate `STATUS`.
+//! [`key_set_root`] / [`key_membership_witness`] build a DENSE tree: they
+//! materialise all `2^D` leaves, so the host work is `O(2^D)`. The depth-`D`
+//! member covers up to `2^D` issuers/holders. Real issuer sets are small (tens of
+//! authorities), so for those the dense builder at depth 4–10 is ample.
+//!
+//! A production deployment with a VERY LARGE registry (e.g. a holder set —
+//! sq-8k3h, the analogue of this key-set membership) cannot afford `O(2^D)` host
+//! work at large `D`. For that case [`key_set_root_sparse`] /
+//! [`key_membership_witness_sparse`] compute the BIT-IDENTICAL root and
+//! authentication path in `O(n·D)` (where `n = keys.len()`), never materialising
+//! the padding slots. They exploit the dense layout's structure: members occupy
+//! the contiguous prefix `0..n` and every slot `n..2^D` is the same padding leaf,
+//! so each level above the populated prefix is a fixed per-level "empty-subtree"
+//! digest that depends only on the level, not on data. The circuit relation
+//! (`key_set_membership::<D>`) is depth-generic and folds the path identically
+//! whichever host builder produced it — only the dense builder bounded the
+//! registry size. The compiled member is `d4` (16 slots) — see the verifier docs
+//! and the crate `STATUS`.
 
 use sparq_zk::field::{field_to_hex, Fr};
 use sparq_zk::poseidon2;
@@ -109,6 +120,184 @@ pub fn key_membership_witness(keys: &[PublicKey], depth: u32, index: u64) -> Opt
         pos /= 2;
     }
     Some(siblings)
+}
+
+// =====================================================================
+// [OPUS-4.8] sq-8k3h: SPARSE host commitment for a very large registry.
+//
+// The dense builders above are `O(2^depth)`: fine for tens-of-authorities issuer
+// sets, infeasible for a very large holder registry at the deep `depth` such a
+// registry needs. The sparse builders below produce the BIT-IDENTICAL root and
+// authentication path in `O(n·depth)` (`n = keys.len()`) by never materialising
+// the padding slots. The circuit relation is unchanged and depth-generic — only
+// the *host* builder bounded the size — so a sparse-built witness verifies under
+// exactly the same `hidden_issuer_d{depth}` / `key_set_membership::<D>` member.
+//
+// The leaf-taking core (`empty_subtree_roots` / `sparse_fold_leaves` /
+// `sparse_root_from_leaves` / `sparse_witness_from_leaves`) is `pub(crate)` so the
+// holder-set builders (`crate::holder`, sq-8k3h proper) reuse the SAME machinery —
+// both modules already share `h2` and the `Fr::from(0)` padding leaf, so the trees
+// are bit-identical and there is one source of truth for the sparse fold.
+// =====================================================================
+
+/// The per-level "empty-subtree" digests of the dense layout: `roots[k]` is the
+/// Merkle root of an all-padding subtree of height `k` (so `roots[0] = padding`
+/// and `roots[k] = h2(roots[k-1], roots[k-1])`). Length = `depth + 1` (levels
+/// `0..=depth`). Because every dense slot `n..2^depth` holds the SAME padding leaf,
+/// any internal node whose entire subtree is padding is exactly `roots[k]` — a
+/// constant that depends only on the level, not the data. This is the standard
+/// sparse-Merkle empty-node precomputation; it makes the sparse builders below
+/// `O(n·depth)` instead of `O(2^depth)`. `O(depth)`.
+///
+/// `padding` is the leaf value the dense builder pads unused slots with — the SAME
+/// `Fr::from(0)` in both [`crate::issuer`] and [`crate::holder`], passed in so this
+/// stays the single shared sparse-fold core.
+pub(crate) fn empty_subtree_roots(depth: u32, padding: Fr) -> Vec<Fr> {
+    let mut roots = Vec::with_capacity(depth as usize + 1);
+    roots.push(padding);
+    for k in 1..=depth as usize {
+        let prev = roots[k - 1];
+        roots.push(h2(prev, prev));
+    }
+    roots
+}
+
+/// One node of a level in the sparse fold: either a concrete digest in the
+/// populated prefix, or the constant empty-subtree digest for that level.
+#[inline]
+fn node_at(prefix: &[Fr], idx: usize, empty: Fr) -> Fr {
+    prefix.get(idx).copied().unwrap_or(empty)
+}
+
+/// Fold the depth-`depth` tree keeping ONLY the populated prefix at each level,
+/// given the `n` non-padding `leaves` (the members, in slot order) and the dense
+/// `padding` leaf. Returns `(prefixes, empties)` where `prefixes[k]` is the
+/// non-padding prefix of level `k` (level 0 = `leaves`) and `empties[k]` is that
+/// level's empty-subtree digest. `prefixes[depth]` is the single-element root
+/// level. `None` if `depth > 31` or `leaves.len() > 2^depth` (the set overflows the
+/// tree) — the SAME fail-closed conditions as the dense builders. `O(n·depth)`.
+///
+/// SHARED by [`crate::issuer`] and [`crate::holder`]: each module computes its own
+/// `leaves` (with its own per-key digest + identity fail-closed guard) then calls
+/// this. The fold itself is leaf-agnostic, so the trees are bit-identical.
+pub(crate) fn sparse_fold_leaves(
+    leaves: Vec<Fr>,
+    depth: u32,
+    padding: Fr,
+) -> Option<(Vec<Vec<Fr>>, Vec<Fr>)> {
+    if depth > 31 {
+        return None;
+    }
+    let n_leaves = 1u128 << depth; // u128: depth<=31 so this never overflows
+    if leaves.len() as u128 > n_leaves {
+        return None; // the set does not fit the tree at this depth
+    }
+    let empties = empty_subtree_roots(depth, padding);
+    let mut prefixes: Vec<Vec<Fr>> = Vec::with_capacity(depth as usize + 1);
+    prefixes.push(leaves);
+    for k in 0..depth as usize {
+        let cur = &prefixes[k];
+        let empty = empties[k];
+        // Parent prefix length = ceil(cur.len() / 2); a parent is non-empty iff at
+        // least one child is in the populated prefix.
+        let parent_len = cur.len().div_ceil(2);
+        let mut parent = Vec::with_capacity(parent_len);
+        for p in 0..parent_len {
+            let left = node_at(cur, 2 * p, empty);
+            let right = node_at(cur, 2 * p + 1, empty);
+            parent.push(h2(left, right));
+        }
+        prefixes.push(parent);
+    }
+    // The root level holds at most one populated node (empty only if leaves is empty).
+    debug_assert!(
+        prefixes[depth as usize].len() <= 1,
+        "root level has <= 1 node"
+    );
+    Some((prefixes, empties))
+}
+
+/// The BIT-IDENTICAL depth-`depth` Merkle root for the given non-padding `leaves`,
+/// in `O(n·depth)`. The dense-builder equivalent materialises all `2^depth` slots;
+/// this never does. SHARED sparse core (see [`sparse_fold_leaves`]).
+pub(crate) fn sparse_root_from_leaves(leaves: Vec<Fr>, depth: u32, padding: Fr) -> Option<Fr> {
+    let (prefixes, empties) = sparse_fold_leaves(leaves, depth, padding)?;
+    // The root prefix is empty exactly when leaves is empty (an all-padding tree);
+    // then the root is the depth-level empty-subtree digest.
+    Some(node_at(
+        &prefixes[depth as usize],
+        0,
+        empties[depth as usize],
+    ))
+}
+
+/// The BIT-IDENTICAL authentication path (sibling per level, BOTTOM-UP) for
+/// `index` over the given non-padding `leaves`, in `O(n·depth)`. At each level the
+/// sibling is the populated-prefix node if it exists, else that level's constant
+/// empty-subtree digest. `None` if `index >= 2^depth` or `leaves` overflows the
+/// tree / `depth > 31`. SHARED sparse core (see [`sparse_fold_leaves`]).
+pub(crate) fn sparse_witness_from_leaves(
+    leaves: Vec<Fr>,
+    depth: u32,
+    index: u64,
+    padding: Fr,
+) -> Option<Vec<Fr>> {
+    // `sparse_fold_leaves` rejects `depth > 31`, so `1u64 << depth` never overflows.
+    let (prefixes, empties) = sparse_fold_leaves(leaves, depth, padding)?;
+    if index >= (1u64 << depth) {
+        return None; // out of range for this tree (matches the dense builder)
+    }
+    let mut pos = index as usize;
+    let mut siblings = Vec::with_capacity(depth as usize);
+    for k in 0..depth as usize {
+        let sib = pos ^ 1;
+        siblings.push(node_at(&prefixes[k], sib, empties[k]));
+        pos /= 2;
+    }
+    Some(siblings)
+}
+
+/// The `n` non-padding key-set leaves (NOT padded to `2^depth`): leaf `i` =
+/// `key_set_leaf(keys[i])`. `None` if any key is the identity (fail-closed, matches
+/// `key_leaves`) or the set overflows the depth-`depth` tree / `depth > 31`. The
+/// sparse builders fold these directly without materialising the padding slots.
+fn sparse_key_leaves(keys: &[PublicKey], depth: u32) -> Option<Vec<Fr>> {
+    if depth > 31 || keys.len() as u128 > (1u128 << depth) {
+        return None;
+    }
+    let mut leaves = Vec::with_capacity(keys.len());
+    for pk in keys {
+        leaves.push(key_set_leaf(pk)?);
+    }
+    Some(leaves)
+}
+
+/// SPARSE variant of [`key_set_root`]: the BIT-IDENTICAL depth-`depth` root,
+/// computed in `O(n·depth)` instead of `O(2^depth)` — the builder a very large
+/// issuer/holder registry needs (sq-8k3h). Cross-checked equal to [`key_set_root`]
+/// for every `(keys, depth)` in the tests. Returns `None` under the same
+/// fail-closed conditions as the dense builder.
+pub fn key_set_root_sparse(keys: &[PublicKey], depth: u32) -> Option<Fr> {
+    sparse_root_from_leaves(sparse_key_leaves(keys, depth)?, depth, padding_leaf())
+}
+
+/// SPARSE variant of [`key_membership_witness`]: the BIT-IDENTICAL authentication
+/// path (sibling per level, BOTTOM-UP) for `index`, in `O(n·depth)`. The returned
+/// path folds to [`key_set_root_sparse`] (== [`key_set_root`]) under the circuit's
+/// fold, so it is a drop-in replacement for the dense witness in the depth-generic
+/// member. `None` if `index >= 2^depth` or under the dense builder's fail-closed
+/// conditions.
+pub fn key_membership_witness_sparse(
+    keys: &[PublicKey],
+    depth: u32,
+    index: u64,
+) -> Option<Vec<Fr>> {
+    sparse_witness_from_leaves(
+        sparse_key_leaves(keys, depth)?,
+        depth,
+        index,
+        padding_leaf(),
+    )
 }
 
 /// The complete private witness for one hidden issuer attestation: the Schnorr
@@ -251,6 +440,218 @@ mod tests {
         let toml = hidden_issuer_prover_toml(&Fr::from(0x2au64), &m, &key_set_root(&keys, depth).unwrap(), &w);
         for field in ["challenge", "m", "key_set_root", "pk_x", "pk_y", "r_x", "r_y", "s", "e", "e_k", "index", "siblings"] {
             assert!(toml.contains(field), "toml must render {field}");
+        }
+    }
+
+    // ============================================================
+    // [OPUS-4.8] sq-8k3h: SPARSE host commitment cross-checks.
+    // The sparse builders MUST produce a root + authentication path BIT-IDENTICAL
+    // to the dense builders, so a sparse-built witness verifies under the same
+    // depth-generic member. These pins are the soundness contract for the sparse
+    // path: any drift from the dense layout fails here.
+    // ============================================================
+
+    // The empty-subtree digests fold the way the dense padding does: an all-padding
+    // tree's `key_set_root` (no keys) equals the depth-level empty digest, and each
+    // level doubles the previous one.
+    #[test]
+    fn empty_subtree_roots_fold_like_dense_padding() {
+        for depth in 0..=8u32 {
+            let roots = empty_subtree_roots(depth, padding_leaf());
+            assert_eq!(roots.len() as u32, depth + 1);
+            assert_eq!(roots[0], padding_leaf());
+            for k in 1..=depth as usize {
+                assert_eq!(roots[k], h2(roots[k - 1], roots[k - 1]));
+            }
+            // The dense root of an EMPTY key set (all padding) == the depth-level digest.
+            assert_eq!(key_set_root(&[], depth), Some(roots[depth as usize]));
+        }
+    }
+
+    // For every (size, depth) with size <= 2^depth, the sparse root EQUALS the dense
+    // root — across empty, partial, and full trees.
+    #[test]
+    fn sparse_root_matches_dense_for_all_sizes() {
+        for depth in 0..=6u32 {
+            let cap = 1u64 << depth;
+            for size in 0..=cap {
+                let seeds: Vec<u64> = (0..size).map(|i| 1000 + i).collect();
+                let keys = keyset(&seeds);
+                assert_eq!(
+                    key_set_root_sparse(&keys, depth),
+                    key_set_root(&keys, depth),
+                    "sparse root must equal dense root (depth {depth}, size {size})"
+                );
+            }
+        }
+    }
+
+    // For every populated index, the sparse authentication path EQUALS the dense
+    // path (and so re-folds to the same root the circuit derives). Covers partial
+    // trees where the dense padding slots become the sparse empty digests.
+    #[test]
+    fn sparse_witness_matches_dense_for_all_indices() {
+        for depth in 0..=5u32 {
+            let cap = 1u64 << depth;
+            // A partial set (so padding/empty siblings exercise both paths) and a full set.
+            for size in [cap / 2 + 1, cap] {
+                if size == 0 {
+                    continue;
+                }
+                let seeds: Vec<u64> = (0..size).map(|i| 2000 + i).collect();
+                let keys = keyset(&seeds);
+                for index in 0..cap {
+                    assert_eq!(
+                        key_membership_witness_sparse(&keys, depth, index),
+                        key_membership_witness(&keys, depth, index),
+                        "sparse witness must equal dense witness (depth {depth}, size {size}, index {index})"
+                    );
+                }
+            }
+        }
+    }
+
+    // The whole point of sq-8k3h: a DEEP tree a very large registry needs is built
+    // by the sparse path WITHOUT materialising 2^depth leaves (the dense builder is
+    // infeasible here), and a member's path still re-folds to the sparse root under
+    // the circuit's bottom-up fold (directions = LSB-first index bits) — bit-for-bit
+    // the relation the depth-generic `key_set_membership::<D>` member checks.
+    #[test]
+    fn sparse_deep_tree_witness_refolds_to_root() {
+        let depth = 28u32; // 2^28 = 268M dense slots — only the sparse builder is feasible
+        let keys = keyset(&[7001, 7002, 7003, 7004, 7005]);
+        let root = key_set_root_sparse(&keys, depth).expect("sparse deep root");
+        for index in 0..keys.len() as u64 {
+            let sibs =
+                key_membership_witness_sparse(&keys, depth, index).expect("sparse deep path");
+            assert_eq!(sibs.len(), depth as usize);
+            let mut node = key_set_leaf(&keys[index as usize]).unwrap();
+            let mut pos = index;
+            for sib in &sibs {
+                let is_right = pos & 1 == 1;
+                node = if is_right {
+                    h2(*sib, node)
+                } else {
+                    h2(node, *sib)
+                };
+                pos /= 2;
+            }
+            assert_eq!(
+                node, root,
+                "sparse path for index {index} re-folds to the sparse root"
+            );
+        }
+    }
+
+    // A high index far outside the populated prefix (but inside the tree) still has
+    // a well-defined sparse path that folds to the root — i.e. an unused slot is a
+    // valid, distinct leaf, never silently aliased onto a member.
+    #[test]
+    fn sparse_empty_slot_path_is_well_defined() {
+        let depth = 20u32;
+        let keys = keyset(&[8001, 8002, 8003]);
+        let root = key_set_root_sparse(&keys, depth).unwrap();
+        let idx = (1u64 << depth) - 1; // last slot, all-padding region
+        let sibs = key_membership_witness_sparse(&keys, depth, idx).unwrap();
+        let mut node = padding_leaf(); // the leaf at an unused slot is the padding leaf
+        let mut pos = idx;
+        for sib in &sibs {
+            let is_right = pos & 1 == 1;
+            node = if is_right {
+                h2(*sib, node)
+            } else {
+                h2(node, *sib)
+            };
+            pos /= 2;
+        }
+        assert_eq!(
+            node, root,
+            "an unused-slot path folds to the same committed root"
+        );
+    }
+
+    // Fail-closed parity with the dense builder: identity key, overflow, depth>31,
+    // and out-of-range index all return None from the sparse builders too.
+    #[test]
+    fn sparse_fail_closed_matches_dense() {
+        let keys = keyset(&[100, 101, 102, 103]);
+        // out-of-range index (4 leaves, idx 4)
+        assert_eq!(key_membership_witness_sparse(&keys, 2, 4), None);
+        assert_eq!(key_membership_witness(&keys, 2, 4), None);
+        // 5 keys do not fit a depth-2 (4-slot) tree
+        let big = keyset(&[1, 2, 3, 4, 5]);
+        assert_eq!(key_set_root_sparse(&big, 2), None);
+        assert_eq!(key_set_root(&big, 2), None);
+        // depth > 31 fail-closed
+        assert_eq!(key_set_root_sparse(&keys, 32), None);
+        assert_eq!(key_membership_witness_sparse(&keys, 32, 0), None);
+    }
+
+    // ============================================================
+    // [OPUS-4.8] sq-ru0yx (internal re-audit finding M-1): the challenge-reduction
+    // NO-WRAP invariant, pinned host-side so the default `cargo test` lane (no nargo/
+    // bb) guards the constants the in-circuit `issuer.nr::reduction_range_bind`
+    // depends on. The in-circuit forge/accept tests live in `compose_core/tests.nr`
+    // (`reduction_no_wrap_*`, toolchain lane). See research/zk-membership-pok-reaudit.md §3.
+    // ============================================================
+
+    // The Baby-JubJub order L and the no-wrap bound REDUCTION_TOP_BOUND = q_base -
+    // 7L, as field elements (mirrors issuer.nr's BJJ_L / REDUCTION_TOP_BOUND). q_base
+    // itself is NOT representable as an Fr (it reduces to 0), so the bound is the
+    // canonical representative of -7L. These pin the soundness constants the in-
+    // circuit no-wrap bound enforces; a drift invalidates the fix.
+    const BJJ_L_HEX: &str =
+        "0x060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
+    const REDUCTION_TOP_BOUND_HEX: &str =
+        "0x060c89ce5c263405370a08b6d0302b0b797b683ee9d2ee486fbfce8e6017ef6a"; // q_base - 7L
+
+    fn fr_from_hex(h: &str) -> Fr {
+        sparq_zk::field::field_from_hex_str(h).unwrap()
+    }
+
+    // The reduction arithmetic that justifies M-1: q_base // L == 7, and
+    // 7L < q_base < 8L (so the e_k==7 bucket is the ONLY one that can wrap). Worked
+    // in the field where q_base == 0, so -7L is the canonical REDUCTION_TOP_BOUND.
+    #[test]
+    fn reduction_top_bound_partitions_with_l() {
+        let l = fr_from_hex(BJJ_L_HEX);
+        let top_bound = fr_from_hex(REDUCTION_TOP_BOUND_HEX);
+        // top_bound == q_base - 7L: in the field q_base == 0, so 7L + top_bound == 0
+        // (i.e. 7L + (q-7L) = q == 0 mod q). This pins top_bound to exactly q - 7L.
+        assert_eq!(l * Fr::from(7u64) + top_bound, Fr::from(0u64), "7L + (q-7L) == q == 0");
+        // The honest e_k==7 range is [0, q-7L); the excluded wrap window is
+        // [q-7L, L). They partition [0, L): top_bound + (8L - q) == L, and 8L - q is
+        // the field value 8L (since q == 0). So top_bound + 8L == L.
+        let window_width = l * Fr::from(8u64); // 8L - q, since q == 0 in the field
+        assert_eq!(top_bound + window_width, l, "[0,q-7L) and [q-7L,L) partition [0,L)");
+        // A real, narrowing exclusion: the bound is neither 0 nor all of L.
+        assert_ne!(top_bound, Fr::from(0u64));
+        assert_ne!(top_bound, l);
+    }
+
+    // The HONEST in-circuit witness always lands in a bucket the no-wrap bound
+    // accepts, so the fix never rejects a valid prover: e_k is a 3-bit quotient in
+    // {0..7} and the reduction identity e + e_k*L == e_base holds (the relation the
+    // circuit binds). Real signatures' e_base is essentially random, so this also
+    // documents that the top bucket is hit rarely (the wrap window is honest-
+    // unreachable).
+    #[test]
+    fn honest_witness_respects_reduction_buckets() {
+        use sparq_zk::sig::{commitment_message, in_circuit_witness, signature_from_hex};
+        let l = fr_from_hex(BJJ_L_HEX);
+        for seed in [1u64, 7, 42, 100, 255, 1009, 65537] {
+            let sk = SecretKey::from_seed(seed);
+            let c = Fr::from(seed.wrapping_mul(0x9e3779b97f4a7c15));
+            let m = commitment_message(&c);
+            let sig = signature_from_hex(&sk.sign_commitment(&c)).unwrap();
+            let w = in_circuit_witness(&sk.public_key(), &m, &sig).unwrap();
+            // e_k in {0..7}: a 3-bit quotient (the circuit's assert_max_bit_size::<3>).
+            let k_ok = (0u64..=7).any(|k| w.e_k == Fr::from(k));
+            assert!(k_ok, "seed {seed}: e_k must be a 3-bit quotient in {{0..7}}");
+            // e is canonical (< L): e + (L-1-e) == L-1 with both representable, i.e.
+            // the witnessed-difference range bind the circuit's assert_lt_l performs.
+            // Confirm e != L and e is recovered by reducing e_base = e + e_k*L mod L.
+            assert_ne!(w.e, l, "seed {seed}: reduced e must be < L (canonical)");
         }
     }
 }

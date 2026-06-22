@@ -1,0 +1,28 @@
+# Hadolint config for the sparq-server Dockerfile (GX-12 / sq-toze.31, CIS Docker §4).
+# [OPUS-4.8] Authored while Fable unavailable — re-review when Fable returns.
+#
+# The CI lane (.github/workflows/container-scan.yml) lints the Dockerfile with hadolint
+# and GATES on real issues. `failure-threshold: warning` means INFO/STYLE findings are
+# reported but do NOT fail the build; WARNING and ERROR do. The few intentional choices
+# below are waived by RULE CODE (not by lowering the threshold), each with a reason — so
+# a NEW real problem still gates.
+#
+# failure-threshold semantics (hadolint): error > warning > info > style. The threshold
+# is the LOWEST severity that fails; `warning` => warning+error fail, info/style pass.
+failure-threshold: warning
+
+ignored:
+  # DL3059 — "Multiple consecutive RUN instructions. Consider consolidation."
+  # INTENTIONAL: the builder stage runs `cargo install cargo-auditable` (GX-7, a
+  # reproducible tool install) as a SEPARATE layer from `cargo auditable build`, so the
+  # slow fat-LTO release build does not bust the tool-install cache layer on a source-only
+  # change. Consolidating them would defeat that layering. This is INFO-level anyway and
+  # would already pass under failure-threshold: warning; pinned here so it is silent in the
+  # report and the intent is documented. (Dockerfile builder stage.)
+  - DL3059
+
+# NOTE on the digest-pinned bases: both `FROM` lines are pinned by `@sha256:…` (Scorecard
+# PinnedDependencies / CIS Docker §4.7). hadolint's DL3006 ("always tag the image") and
+# DL3007 ("do not use latest") are SATISFIED by a digest pin and do NOT fire here, so no
+# waiver is needed for them — the digest pin is the strongest form. Left documented so a
+# future reader does not "helpfully" add a tag and weaken the pin.

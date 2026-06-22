@@ -32,19 +32,46 @@ parallel = ["dep:rayon", "dep:memchr"]
 compact-index = []
 # Out-of-core querying: persist the indexes and memory-map them (native only).
 mmap = ["dep:memmap2"]
+# [OPUS-4.8] sq-dvyi: JSON-LD ingest for the in-memory loaders (`load_str` /
+# `load_dataset` / `load_reader`). OPT-IN and OFF by default so the DEFAULT lean wasm
+# bundle (which the perf-gate tracks via `cargo build -p sparq-wasm`, no features) does
+# NOT link `oxjsonld` and stays under the wasm_bundle_bytes floor. JSON-LD is a
+# whole-document JSON parse (not chunkable), so it has no parallel/streaming variant to
+# gate further. Consumers that want JSON-LD (the site REPL upload/URL path) enable this.
+jsonld = ["dep:oxjsonld"]
 # Spillable BUILD-time term dictionary (native only, off by default): bound the peak
 # build RSS by a configurable memory budget — term occurrences spill to disk and are
 # externally sorted/deduplicated into the SAME ids (byte-identical output) as the
 # sharded in-RAM consolidation. See research/external-dictionary.md. Rides the
 # parallel parse pipeline and the mmap on-disk store, hence the feature deps.
 dict-spill = ["mmap", "parallel", "dep:libc"]
+# [OPUS-4.8] sq-yj76l (gh #1121): the ergonomic `shared::SharedGraph` handle — an
+# `Arc<RwLock<Graph>>` packaging the recommended read-heavy serving pattern for sharing one
+# store across the async handlers of an axum/actix/tower server. `Graph` is ALREADY Send+Sync
+# (a compile-time assertion in the crate root guarantees it stays so), so this adds NO new
+# dependency — it is `std::sync` only — and is OFF by default so the lean default / wasm build
+# pays nothing. See the `shared` module docs.
+shared = []
 
 [dependencies]
 oxrdf.workspace = true
 oxttl.workspace = true
+# [OPUS-4.8] sq-dvyi: JSON-LD ingest for the in-memory loaders (`load_str` /
+# `load_dataset` / `load_reader`). Pure-Rust + wasm-portable, but OPT-IN behind the
+# `jsonld` feature (OFF by default) so the tracked lean wasm bundle never links it and
+# stays under the wasm_bundle_bytes perf floor — the site REPL enables the feature.
+oxjsonld = { workspace = true, optional = true }
 rustc-hash.workspace = true
 hashbrown.workspace = true
 rayon = { workspace = true, optional = true }
 memchr = { workspace = true, optional = true }
 memmap2 = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
+
+# [OPUS-4.8] sq-ueuk (epic sq-toze, gap MS-G4) — register the `kani` cfg so the
+# `#[cfg(kani)]` bounded-proof harness in `dict.rs` (the mmap-free `validate_dict_bytes`
+# seam) does not trip `-D warnings` (unexpected_cfgs) on the NORMAL build. `cargo kani` sets
+# this cfg itself when it model-checks; under a normal build the harness is stripped. Mirrors
+# crates/sparq-vectors/Cargo.toml, which registers the same cfg for its `.spqv` validator proof.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

@@ -97,11 +97,16 @@ pub enum MpcError {
     /// ([`MpcError::Protocol`]) nor a deferred stub ([`MpcError::NotYetImplemented`]):
     /// it means a party fed an inconsistent share value, so the result is
     /// REFUSED rather than silently corrupted. `cheaters` lists the evaluation
-    /// points (`Share::x`) identified as off-curve where attribution is possible
-    /// (best-effort when correction itself is impossible — detection is sound,
-    /// attribution is heuristic). NOTE: at exactly `t+1` shares (no redundancy)
-    /// tampering is information-theoretically undetectable and this is NEVER
-    /// returned there — see [`crate::robust::reconstruct_robust`].
+    /// points (`Share::x`) identified as off-curve. On this abort path it is the
+    /// off-curve set of the MOST self-consistent (minimum-disagreement) reference
+    /// fit — sound (names only true cheaters) in the first abort band of `e+1`
+    /// errors, best-effort beyond it where the honest set is genuinely
+    /// unidentifiable: detection is sound, blame is heuristic. Sound, exact
+    /// attribution is available on the SUCCESS path via
+    /// [`crate::robust::reconstruct_robust_attributed`]. NOTE: at exactly `t+1`
+    /// shares (no redundancy) tampering is information-theoretically undetectable
+    /// and this is NEVER returned there — see
+    /// [`crate::robust::reconstruct_robust`].
     Tampered { detail: String, cheaters: Vec<u64> },
     /// **No registered backend satisfies the stated security requirement** — the
     /// fail-closed result of [`crate::backend::BackendRegistry::select`] (sq-a6p1).
@@ -118,6 +123,23 @@ pub enum MpcError {
         requirement: String,
         considered: usize,
     },
+    /// **The batched IT-MAC check FAILED** (`σ ≠ 0`) just before a value was about
+    /// to be opened — the catch-everything step of honest-majority
+    /// malicious-with-abort security (design `research/mpc-malicious-security-design.md`
+    /// §2.5, sq-km34.4 / sq-ka8m). Every authenticated value carries an IT-MAC
+    /// `m_x = α·x` under a session-global, secret-shared `[α]` no party knows; the
+    /// batched check opens a leakage-free `σ = Σ χ_j·[m_{y_j}] − (Σ χ_j·y_j)·[α]`,
+    /// which is identically `0` for honest executions. A non-zero `σ` means some
+    /// opened value `y_j` was tampered (a forged share, a wrong `degree_reduce`
+    /// re-sharing, an inconsistent input) WITHOUT a consistent matching change to
+    /// its MAC — impossible without knowing `α` — so the result is REFUSED
+    /// fail-closed (`≈ 1 − 2^{−61}` soundness over `F_p`) rather than opened wrong
+    /// or leaked. Distinct from [`MpcError::Tampered`] (the Reed–Solomon
+    /// over-determination check, which needs `n > 2t+1` redundancy): this check
+    /// works at the MINIMAL `n = 2t+1` because soundness comes from the *secret*
+    /// `α`, not from codeword redundancy. `detail` describes the batch that failed.
+    /// `[OPUS-4.8]`
+    MacCheckFailed { detail: String },
 }
 
 impl MpcError {
@@ -125,7 +147,10 @@ impl MpcError {
     /// Used by every crypto-deferred trait method so the gate is uniform and
     /// greppable.
     pub fn not_yet(what: &str, gated_on: &str) -> Self {
-        MpcError::NotYetImplemented { what: what.to_string(), gated_on: gated_on.to_string() }
+        MpcError::NotYetImplemented {
+            what: what.to_string(),
+            gated_on: gated_on.to_string(),
+        }
     }
 }
 
@@ -153,6 +178,13 @@ impl std::fmt::Display for MpcError {
                     f,
                     "no registered MPC backend satisfies the security requirement \
                      [{requirement}] (refused fail-closed after considering {considered} backend(s))"
+                )
+            }
+            MpcError::MacCheckFailed { detail } => {
+                write!(
+                    f,
+                    "IT-MAC check FAILED (σ != 0) before open — a tampered value/share/re-sharing \
+                     was caught by the batched MAC-check; refusing fail-closed: {detail}"
                 )
             }
         }

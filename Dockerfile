@@ -56,10 +56,18 @@ WORKDIR /build
 # .dockerignore keeps the context to the workspace sources (no target/, bench data, .git).
 COPY . .
 
+# [OPUS-4.8] sq-toze.8 (GX-7): cargo-auditable embeds the dependency manifest into the
+# server binary so the shipped image is self-describing for post-build audit
+# (`cargo audit bin /usr/local/bin/sparq-server`). `--locked` here uses cargo-auditable's
+# OWN crates.io lockfile (a reproducible tool install) — it does NOT pin to this workspace's
+# Cargo.lock; the server binary itself is pinned by the `--locked` on the build step below.
+RUN cargo install --locked cargo-auditable
+
 # --locked: build exactly the committed Cargo.lock. The workspace release profile is
 # fat-LTO + codegen-units=1 (the shipped-binary configuration), so this step is slow
-# but produces the same binary the benchmarks measured.
-RUN cargo build --release --locked -p sparq-server ${CARGO_FLAGS}
+# but produces the same binary the benchmarks measured. `cargo auditable build` is a
+# drop-in for `cargo build` that embeds the dependency manifest (GX-7).
+RUN cargo auditable build --release --locked -p sparq-server ${CARGO_FLAGS}
 
 # -------- runtime --------
 # [OPUS-4.8] SHA-pinned (Scorecard PinnedDependencies). Tag kept on its own comment line
@@ -89,6 +97,25 @@ EXPOSE 3030
 # surface in production with `-e SPARQ_AUTH_TOKEN=...` (and `-e SPARQ_AUTH_TOKEN_READ=1` for
 # a fully-gated surface) — the server reads those from the environment.
 ENV SPARQ_ALLOW_REMOTE=1
+
+# [OPUS-4.8] sq-toze.36 (cert gap GX-13, CIS Docker Benchmark §4.6): self-declared HEALTHCHECK
+# so a container runtime can tell an unhealthy-but-still-running server apart from a healthy one
+# (`docker ps` STATUS shows healthy/unhealthy; `--health-cmd` orchestrators can act on it).
+#
+# DISTROLESS CONSTRAINT: this runtime stage has NO shell and NO curl/wget, so the classic
+# `HEALTHCHECK CMD curl -f .../health` cannot run here. Instead the server binary probes ITSELF:
+# `--health-probe` opens a TCP connection to the loopback /health endpoint and exits 0 (healthy)
+# / non-zero (unhealthy) — no external tool, no extra layer. EXEC form (a JSON array) is required
+# precisely because there is no shell to interpret a string CMD. The probe defaults to
+# 127.0.0.1:3030 (the loopback inside this container's netns), matching the ENTRYPOINT's
+# 0.0.0.0:3030 bind; a remapped internal port can be passed via SPARQ_HEALTH_PROBE_ADDR.
+#
+# Note: k8s/Nomad typically run their OWN liveness/readiness probe against /health and ignore the
+# image HEALTHCHECK — this primarily benefits bare `docker run` / docker-compose / Swarm. It is
+# baked once here and costs nothing when an orchestrator overrides it. --start-period covers the
+# initial dataset load before the first failing check counts against the container.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["/usr/local/bin/sparq-server", "--health-probe"]
 
 # Bind 0.0.0.0 inside the container (the binary's default 127.0.0.1 is unreachable through
 # Docker's port mapping). Flags repeat-override in sparq-server's arg parser, so callers can

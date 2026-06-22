@@ -11,6 +11,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] sq-jxl0: wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page renders on docs.rs (the front page now comes from README.md via include_str!).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # Opt-in stream processing (the sparq-reason / sparq-shacl isolation pattern): a
 # SEPARATE crate so the core engine carries zero streaming code, deps, or runtime
 # cost by default — RSP is engaged only by depending on this crate. Nothing in
@@ -31,3 +37,10 @@ oxrdf.workspace = true
 spargebra.workspace = true
 # ISTREAM/DSTREAM row-hash diffs (already in the tree via sparq-core).
 rustc-hash.workspace = true
+
+# [OPUS-4.8] (sq-cxji) Test-only: PARSE the `examples/throughput.rs` `--json` emit back
+# to assert it is valid, well-shaped JSON. The emit itself stays serde-free (hand-built
+# `format!`, mirroring `mpc_net_bench::cell_json`); serde_json is a dev-dependency so it
+# never enters the crate's published graph.
+[dev-dependencies]
+serde_json = "1"

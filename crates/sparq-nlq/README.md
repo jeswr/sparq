@@ -1,141 +1,117 @@
+<!-- [OPUS-4.8] sq-inzv: README brought to template. -->
 # sparq-nlq
 
-**Natural-language questions → SPARQL** over a sparq graph — an opt-in crate (GenAI
-phase 3, see [`research/genai-design.md`](../../research/genai-design.md)) built as a
-deliberately **lean loop** (the SPARQL-LLM research finding the design adopts:
-retrieve + repair beats sprawling agents). Nothing in the workspace depends on this
-crate; the default build does not compile it, and the engine carries zero GenAI code.
+<p>
+  <a href="https://crates.io/crates/sparq-nlq"><img src="https://img.shields.io/crates/v/sparq-nlq.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/sparq-nlq"><img src="https://docs.rs/sparq-nlq/badge.svg" alt="docs.rs"></a>
+  <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+</p>
 
-## The loop
+**Natural-language questions → SPARQL** over a sparq graph — an **opt-in** crate (GenAI
+phase 3) built as a deliberately **lean loop** (retrieve + repair beats sprawling
+agents). Nothing in the workspace depends on it; the default build does not compile it,
+and the engine carries zero GenAI code.
 
-```text
-         ┌──────────────────────────────────────────────────────┐
-         │ GROUND   sparq_introspect::to_text_summary(budget)   │
-         │          + few-shot examples + the question          │
-         └───────────────────────────┬──────────────────────────┘
-                                     ▼
-         ┌──────────────────────────────────────────────────────┐
-   ┌────▶│ GENERATE Llm::complete(prompt) -> completion         │
-   │     └───────────────────────────┬──────────────────────────┘
-   │                                 ▼
-   │     ┌──────────────────────────────────────────────────────┐
-   │     │ VALIDATE extract ```sparql block, spargebra parse    │
-   │     └───────────┬──────────────────────────┬───────────────┘
-   │           parse error                  parses
-   │                 │                          ▼
-   │     ┌───────────┴───────────┐  ┌──────────────────────────┐
-   └─────┤ REPAIR (≤ N rounds:   │  │ EXECUTE sparq_engine::   │
-   ▲     │ error + failed query  │  │ query_with_budget        │
-   │     │ back to the LLM)      │  └────────────┬─────────────┘
-   │     └───────────────────────┘     exec error│        ok
-   └──────────────────────────────────◀──────────┘         ▼
-                                           Answer { sparql, result,
-                                                    repairs, transcript }
-```
+The loop: **GROUND** (`sparq_introspect` schema summary + few-shot examples + question)
+→ **GENERATE** (`Llm::complete`) → **VALIDATE** (extract the ` ```sparql ` block,
+`spargebra` parse) → on error **REPAIR** (≤ N rounds) → **EXECUTE**
+(`sparq_engine::query_with_budget`) → return `Answer { sparql, result, repairs,
+transcript }`.
 
-- **Grounding** is the introspect crate's token-budgeted schema summary — exact
-  counts mined from the store's permutation indexes, not guesses — plus two
-  schema-agnostic few-shot examples.
-- **Validation** parses with `spargebra` *before* the engine sees the query, so the
-  repair round gets a real parser error message. Execution failures (unsupported
-  forms, `QueryBudget` trips) are repair signals too.
-- **Execution** always runs under a [`QueryBudget`] — LLM-generated queries are
-  untrusted input. The default is **bounded** (10 s wall clock, 1M materialised
-  rows); opting out requires setting `exec_timeout` / `max_rows` to `None`
-  explicitly.
-- The returned `Answer` carries the final query, the materialised result, the repair
-  count and the **full transcript** (every prompt/completion with its outcome) — the
-  transcript is the provenance of the answer.
+## 🚀 Quickstart
 
-## The `Llm` trait — record/replay, offline CI
-
-```rust
-pub trait Llm {
-    fn complete(&self, prompt: &str) -> Result<String, String>;
-}
-```
-
-| Impl | Role |
-|---|---|
-| `ReplayLlm` | Serves recorded prompt→completion pairs from a JSON fixture — **the CI path**. Exact-prompt match (prompts are deterministic); misses produce a diagnosable error. |
-| `RecordingLlm<L>` | Wraps any backend, records every exchange, `save()`s the fixture. |
-| `AnthropicLlm` | Thin blocking client for the Anthropic Messages API (`POST /v1/messages`), behind the **non-default `live` feature**. Model id is configurable, default `claude-sonnet-4-6`; key from `ANTHROPIC_API_KEY`. |
-
-## Usage — replay (offline, what the tests do)
-
-```rust
+```rust,no_run
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# use sparq_core::Graph;
 use sparq_nlq::{Nlq, ReplayLlm};
 
+# let graph = Graph::load_str("", "turtle")?;
+// Offline / CI path: serve recorded prompt→completion pairs from a fixture.
 let replay = ReplayLlm::from_file("tests/fixtures/olympics_replay.json")?;
 let nlq = Nlq::new(&graph, Box::new(replay));
 let answer = nlq.ask("How many athletes are on each team?")?;
 println!("{}\n{} rows, {} repair(s)", answer.sparql, answer.result.len(), answer.repairs);
+# Ok(()) }
 ```
 
-## Usage — live (opt-in, network)
+The live path is opt-in (network): `cargo add sparq-nlq --features live`, set
+`ANTHROPIC_API_KEY`, and wrap `live::AnthropicLlm::from_env()?` in a `RecordingLlm` to
+record a replayable fixture as you go.
 
-```sh
-cargo add sparq-nlq --features live   # or: features = ["live"] in Cargo.toml
-export ANTHROPIC_API_KEY=sk-ant-...
-```
+## ✨ Features
 
-```rust
-use std::rc::Rc;
-use sparq_nlq::{live::AnthropicLlm, Nlq, NlqConfig, RecordingLlm};
+- **Grounded generation** — the introspect crate's token-budgeted schema summary (exact
+  counts from the store's permutation indexes, not guesses) plus two schema-agnostic
+  few-shot examples.
+- **Index-grounded entity/relation linking** ([`link`](src/link.rs), opt-in via
+  `NlqConfig::link_entities`, default **off**) — resolves proper nouns to the IRIs
+  present in *this* store (label index over `rdfs:label`/`skos:prefLabel`/… plus
+  predicate local-names) and expands each with structurally-similar siblings via
+  [`sparq-sim`](../sparq-sim) — no model, no network. Off by default because it changes
+  the prompt string (re-record fixtures first). <!-- [OPUS-4.8] sq-uw40 -->
+- **Validate before execute** — parses with `spargebra` *before* the engine sees the
+  query; execution failures (unsupported forms, budget trips) are repair signals too.
+- **Dictionary-grounded repair** ([`constrain`](src/constrain.rs), opt-in via
+  `NlqConfig::check_dictionary`) — once a query parses, every predicate / `rdf:type`
+  class IRI is checked against the **live dictionary** (`Graph::id_of`); an ungrounded
+  IRI becomes a *targeted* did-you-mean repair signal. This is the design doc's
+  API-backend fallback: strict logit-level grammar-constrained **decoding** needs
+  logit/grammar access the Anthropic Messages API does not expose, so it is only
+  feasible on a local backend — **not implemented here, and not claimed**
+  (`research/genai-nl-to-sparql.md` §11). <!-- [OPUS-4.8] sq-9yjp -->
+- **Budgeted execution** — LLM output is untrusted, so every query runs under a
+  [`QueryBudget`] (default **bounded**: 10 s, 1M rows; opting out is explicit).
+- **Full provenance** — `Answer` carries the final query, result, repair count, and the
+  **full transcript**; `prompt_for` / `repair_prompt_for` are public + deterministic.
+- **Citations from provenance** ([`cite`](src/cite.rs) / [`provenance`](src/provenance.rs),
+  opt-in via `--features citations`, default **off**) — `Answer::citations(&graph)`
+  resolves each answer-row binding to its in-graph `prov:wasDerivedFrom` source +
+  `dcterms:source` anchor + `pkg:confidence` / `pkg:assurance`, rendering numbered
+  footnotes. Citations are **emitted from provenance, never generated**, so each resolves
+  to a real in-graph source (resolution rate 1.0, zero fabricated refs); a binding with no
+  provenance is reported as **"no source recorded"**, never guessed.
+  <!-- [OPUS-4.8] sq-2489d.1 -->
+- **Answer-qualification — hedge + abstention** ([`qualify`](src/qualify.rs), opt-in via
+  `--features citations` + `NlqConfig::qualify`, default **off**) — `Nlq::ask_qualified`
+  folds the answer's supporting `pkg:assurance`/`pkg:confidence` (the same Phase-1 join)
+  **weakest-link** into a verb hedge + verbal band, and below a `min_confidence` floor
+  **abstains** ("insufficient confidence to answer"). The band *reflects asserted
+  assurance* — **not** a calibrated confidence (no reliability measurement exists yet).
+  <!-- [OPUS-4.8] sq-2489d.2 -->
+- **`Llm` trait — record/replay, offline CI** — `ReplayLlm` serves recorded pairs (the
+  CI path); `RecordingLlm<L>` wraps any backend and `save()`s a fixture; `AnthropicLlm`
+  is a thin blocking Messages-API client behind the non-default `live` feature.
+- **Exec-accuracy harness** ([`eval`](src/eval.rs)) — grades executed SPARQL the QALD
+  way (**answer-set F1**, not query-string equality) against a live-recomputed gold
+  query, reporting linking (oracle vs end-to-end) and grounding (grounded vs ungrounded)
+  separately.
 
-let llm = Rc::new(RecordingLlm::new(AnthropicLlm::from_env()?)); // record while you go
-let nlq = Nlq::with_config(&graph, Box::new(Rc::clone(&llm)), NlqConfig {
-    max_repair_rounds: 3,                       // design-doc cap for live runs
-    ..NlqConfig::default()
-});
-let answer = nlq.ask("Which team has the most athletes?")?;
-llm.save("my_session.json")?;                   // replayable fixture for later
-```
+## Honest status — what is and is not measured
 
-`Nlq::prompt_for` / `repair_prompt_for` are public and deterministic, so fixtures can
-be constructed and inspected outside the loop.
+- **Validated offline (the CI gate)**: the engine-side loop and the exec-accuracy
+  harness itself, end-to-end on real data with scripted/recorded backends. The
+  record→`save`→`from_file`→identical-scores round-trip is CI-gated, so a committed live
+  session is guaranteed replayable.
+- **NOT yet measured against a real model**: live-model exec-accuracy *numbers*, and
+  whether linking lifts them. The offline scores demonstrate the *harness* and the
+  *mechanism*, **not** a real model's accuracy; the live path (`#[cfg(feature = "live")]`
+  **and** `#[ignore]`'d) needs a key, the olympics dump, and a **canonical** measurement
+  host — open work in bead `sq-g0lw`. `AnthropicLlm` is compile-checked in CI but never
+  called; no test touches the network. <!-- [OPUS-4.8] sq-05rv sq-g0lw -->
+- **Partial scope**: grammar-constrained decoding stays unimplemented and unclaimed
+  (see the dictionary-grounded-repair feature above, bead `sq-9yjp`).
 
-## Eval harness — measured results
+## 📚 Learn more
 
-`tests/olympics_eval.rs` is the design doc's accuracy-gate scaffold: it drives the
-full loop against the real olympics dataset (1.78M triples,
-`bench/qlever-olympics/olympics.nt`, skip-if-absent) with `ReplayLlm` serving the
-committed fixture — 9 hand-written NL→SPARQL pairs over the olympics schema,
-realistic completions (only vocabulary visible in the grounding prompt), including
-**one deliberate parse failure that exercises the repair round**.
+- **How-to** — [`skills/genai-retrieval/SKILL.md`](../../skills/genai-retrieval/SKILL.md).
+- **API reference** — [docs.rs/sparq-nlq](https://docs.rs/sparq-nlq).
+- **Design** — [`research/genai-nl-to-sparql.md`](../../research/genai-nl-to-sparql.md)
+  (§4.3) and [`research/genai-design.md`](../../research/genai-design.md) (§4).
+- **Schema grounding** — [`sparq-introspect`](../sparq-introspect).
+- **Performance** — the eval harnesses run network-free in CI; tracked figures live on
+  the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench), not in docs.
+- **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 
-What the harness measures and gates (run it, or see the perf dashboard at
-<https://jeswr.github.io/sparq/dev/bench>, for the absolute figures):
+## License
 
-| Metric | What it checks |
-|---|---|
-| Parse success (after ≤1 repair) | every fixture pair parses |
-| Execution success | every fixture pair executes |
-| Result sanity | non-empty + exact row counts + spot-checked values |
-| Repair rounds used | the one scripted malformed query exercises a repair |
-| LLM-excluded `ask()` latency | gated low (the recorded p50/max print from the example below) |
-
-Re-record the fixture whenever the prompt template, default `NlqConfig`, or dataset
-changes:
-
-```sh
-cargo run -p sparq-nlq --example record_olympics --release
-```
-
-## Honest status
-
-- **What is validated**: the engine-side loop — grounding, extraction, spargebra
-  validation, budgeted execution, repair plumbing, record/replay — end-to-end against
-  real data, with the design doc's LLM-excluded latency gate enforced in release.
-- **What is NOT yet validated**: live-model exec-accuracy. The recorded completions
-  are hand-written (as a competent LLM would answer given the grounding prompt); the
-  design doc's full accuracy gate — QALD-10-style harness, exec-accuracy ≥ the same
-  LLM without grounding ("the grounding must pay for itself") — is a documented
-  follow-up that runs through this same harness with `--features live` +
-  `RecordingLlm`, after which the recorded fixtures become the regression set.
-- **Not yet wired**: entity/relation linking from `sparq-sim` (design §2 phase 3
-  lists it as input to grounding; the schema summary alone is enough for the
-  olympics-scale schema) — bead `sq-uw40`; and N2 grammar-constrained decoding
-  against the live dictionary — bead `sq-9yjp`. <!-- [OPUS-4.8] -->
-- `AnthropicLlm` is compile-checked in CI (`--features live`) but never called there;
-  no test touches the network.
+[MIT](../../LICENSE). <!-- [OPUS-4.8] sq-lsxd -->

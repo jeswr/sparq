@@ -1,3 +1,4 @@
+<!-- [OPUS-4.8] sq-inzv: README brought to template. -->
 # sparq-server
 
 <p>
@@ -6,100 +7,11 @@
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-A **W3C-conformant HTTP server** exposing the [sparq](../../README.md) query engine.
-
-Implements the **SPARQL 1.1 Protocol** (`query` + `update` at `/sparql`) and the **Graph
-Store HTTP Protocol** (read + write) over a `Graph` — **in-memory by default** (updates lost
-on restart) or, with **`--persist <DIR>`**, **durable** (write-ahead-logged + fsync'd to an
-on-disk index that survives a restart with no rebuild — see "Durable persistence"). Adds
-`Accept`-driven content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph
-Store N-Triples/Turtle/RDF-XML), EXPLAIN, Prometheus `/metrics`, WebSocket subscriptions, and
-an opt-in time-travel feature. Reads and writes never share a lock, so queries never wait on
-the writer (the concurrency model is in the design doc linked below).
-
-## Security posture (read before exposing)
-
-### Authentication — optional Bearer-token write gate (mirrors QLever's `-a`)
-
-By default `sparq-server` has **no authentication** — anyone who can reach the port can read
-AND write the whole dataset. You can turn on a **required Bearer-token gate on the write
-surface** (PSS gh-46), with an **optional read gate**:
-
-- **`--auth-token <TOKEN>`** (env `SPARQ_AUTH_TOKEN`) — gates **writes**. Every request that
-  MUTATES the dataset must present `Authorization: Bearer <TOKEN>` or it is refused `401`
-  (with `WWW-Authenticate: Bearer`). The write surface is: a SPARQL **UPDATE** on `/sparql`
-  (`Content-Type: application/sparql-update`, OR a `query`/`update` body that *parses as an
-  update* — classification keys on "does this mutate", not the route), and the **Graph-Store
-  Protocol write methods** (`PUT`/`POST`/`DELETE`) on `/sparql/graph` and `/graphs/{*path}`.
-  The token is compared in **constant time**. Scheme casing is tolerated (`Bearer`/`bearer`).
-  When unset, there is **no write auth** (today's behaviour preserved exactly).
-- **`--auth-token-read`** (env `SPARQ_AUTH_TOKEN_READ=1`) — ALSO gate **reads** (SPARQL query,
-  GSP `GET`/`HEAD`, AND the subscription read surfaces — see below) with the same token. Off by
-  default (QLever-style: writes gated, reads open). Has no effect unless a token is also configured.
-- The 401 is **identical for a missing vs a wrong token**, so an attacker cannot learn whether
-  a token was presented.
-- The subscription transports — the **`/subscriptions` WebSocket** and the
-  **`/subscriptions/sse`** Server-Sent-Events stream (both stream live SELECT diffs, a *read*
-  surface) — are gated by `--auth-token-read` exactly like the other reads (bead `sq-cxk5`,
-  closing the prior read-auth bypass). The **SSE** GET takes the `Authorization: Bearer <TOKEN>`
-  header like any GET. The **WebSocket** upgrade accepts the token from either channel — see
-  the next paragraph. With no read gate configured, both are open (back-compatible).
-
-#### Authenticating a WebSocket subscription from a browser
-
-A browser's `WebSocket` API **cannot set arbitrary headers** on the handshake, so it cannot send
-`Authorization: Bearer`. The `/subscriptions` upgrade therefore accepts the read token from
-**either** channel and validates it against `--auth-token` (constant-time) when `--auth-token-read`
-is on:
-
-- **`Authorization: Bearer <TOKEN>`** header — for non-browser clients (a CLI WS client, a proxy).
-- **`Sec-WebSocket-Protocol: bearer.<TOKEN>`** subprotocol — the browser channel:
-  `new WebSocket("ws://host/subscriptions", ["bearer." + token])`. The server picks the
-  *first* offered subprotocol whose value starts with `bearer.`, takes the substring after the
-  `bearer.` prefix as the token, and (per RFC 6455) echoes that exact subprotocol back as the
-  selected one so the handshake completes. The token is **validated, not merely echoed** — a
-  wrong/absent token is refused with the same `401` the HTTP surface uses, *before* the upgrade.
-
-This is a complement to, not a replacement for, a real authorization layer (a reverse proxy /
-gateway, or [`sparq-solid`](../sparq-solid)) — the gate is a single shared secret with no
-per-user identity, scopes, or TLS of its own. **Deliver the token over TLS** (terminate it at a
-proxy); a bare `Bearer` token on plaintext HTTP is sniffable.
-
-### Bind posture — loopback by default; the auth × bind matrix
-
-The server **binds loopback by default** (`127.0.0.1:3030`, reachable only from this host). A
-**non-loopback** bind (e.g. `0.0.0.0`) exposes the surface to the network, so the binary
-refuses it unless the posture makes it safe. The full matrix:
-
-| `--auth-token`? | `--auth-token-read`? | `--allow-remote`? | non-loopback bind |
-| --- | --- | --- | --- |
-| no  | —   | no  | **refused** — read+write fully open |
-| no  | —   | yes | allowed, **warns** read+write exposed |
-| yes | no  | no  | **refused** — writes gated but **reads still open** |
-| yes | no  | yes | allowed, **warns** reads remain open |
-| yes | yes | no  | **allowed** — whole surface authenticated (still warns) |
-| yes | yes | yes | **allowed** (still warns) |
-
-The rule: a configured write-token counts as "auth present" for the bind decision **only when
-reads are also gated** (`--auth-token-read`) — because a write-token alone still leaves an open
-read endpoint on a remote bind. When only writes are gated, `--allow-remote` is still required
-and the server warns that reads remain open. Loopback binds are always allowed.
-
-### SERVICE federation + DoS guards
-
-- SPARQL `SERVICE` federation is **OFF in the default build** (the `service` cargo feature).
-  Built with `--features service` it is **default-DENY-all**: a `SERVICE <iri>` reaches
-  nothing unless its host is on the egress allowlist (`--service-allow` / `--service-allow-file`
-  / `SPARQ_SERVICE_ALLOW`). This is an SSRF guard — a `SERVICE` clause turns attacker-supplied
-  query text into an outbound request from the server host (worst case cloud-metadata). The
-  allowlist is enforced before any socket opens, on the resolved IP (DNS-rebinding-safe).
-- DoS guards that ARE on by default: query timeout (`503` — now on the UPDATE path too),
-  body cap (`413`), concurrency load-shedding (`429`), a 20× gzip-body decompression-ratio
-  cap (`413` zip-bomb guard, `sq-ebii`), panic→`500`. OFF by default (opt in if you expose
-  the port): the coarse **memory cap** `--max-query-rows` (working-set row ceiling on every
-  form → `413`, `sq-ebii`) and `--max-results`. There is **no rate limit** — add one in the
-  gateway. See the four-limit "Server hardening" section in the SKILL for the precise
-  (honest) semantics of each cap.
+A **W3C-conformant HTTP server** exposing the [sparq](../../README.md) query engine: the
+**SPARQL 1.1 Protocol** (`query` + `update` at `/sparql`) and the **Graph Store HTTP Protocol**
+over a `Graph`. **In-memory by default** (updates lost on restart) or **durable** with
+`--persist <DIR>`. Adds content negotiation, EXPLAIN, `/metrics`, WebSocket/SSE subscriptions, and
+opt-in time-travel. Reads and writes never share a lock, so queries never wait on the writer.
 
 ## 🚀 Quickstart
 
@@ -111,133 +23,95 @@ cargo run -p sparq-server -- --format turtle data.ttl
 curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s ?p ?o } LIMIT 5'
 ```
 
-## Durable persistence (`--persist DIR` — QLever's `--persist-updates`)
-
-By default the server is **in-memory**: updates apply to a `Graph` held only in RAM, so they
-are **lost on restart**. Pass **`--persist <DIR>`** (env `SPARQ_PERSIST_DIR`) to treat the
-on-disk index at `DIR` as the **durable, rebuildable source of truth** — the equivalent of
-running QLever on an on-disk index with `--persist-updates`:
-
-```sh
-# first run: seed the durable store at ./store from data.ttl, then serve
-cargo run -p sparq-server -- --persist ./store --format turtle data.ttl
-
-# apply an update (the 204 returns only after it is fsync'd to ./store)
-curl -X POST http://127.0.0.1:3030/sparql -H 'content-type: application/sparql-update' \
-  --data 'INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }'
-
-# restart on the SAME dir — every prior update is present, with NO rebuild
-cargo run -p sparq-server -- --persist ./store
-curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }'
-```
-
-Semantics:
-
-- **Durability point.** Every committed SPARQL Update (the default graph **and** named graphs)
-  is appended to a per-graph write-ahead log and **fsync'd before the group-commit ack** (the
-  `204`). So once a write returns success it is on disk; a crash or restart re-opens the store
-  and **replays the WAL** — no rebuild, no re-load.
-- **Startup.** If `DIR` already holds a store it is **opened** (its WAL replayed) and any
-  `DATA_FILE` seed is **ignored** — the persisted store wins, exactly like QLever's persisted
-  index. If `DIR` is empty/absent, the `DATA_FILE` seed (or an empty graph) is written there
-  and opened.
-- **Back-compat.** Without `--persist` the behaviour is unchanged: in-memory, lost on restart.
-- **Atomicity.** A rejected update is never persisted (it is never published either), and the
-  durable store stays in lockstep with the published in-memory state. The durable graph is written from the
-  **resolved delta** captured during the in-memory commit (not by re-executing the update text),
-  so a non-deterministic or side-effecting update (`NOW()`/`RAND()`/`UUID()`/`BNODE()`,
-  `LOAD <remote>`) persists the EXACT value that was acked — never a re-rolled one — so a restart
-  surfaces precisely what the client saw.
-- **Graceful degradation on a durable-write error (sq-vpx4).** A durable-write failure (e.g. a
-  transient `ENOSPC` / I/O error on the `--persist` mirror) no longer kills the server: the
-  in-flight write is **refused with `503` (retryable)** — never acked `2xx`, never published —
-  and the writer thread stays alive. Reads keep being served from the last published snapshot
-  (degraded read-only), and a subsequent write succeeds once durability recovers; a persistent
-  error simply yields repeated `503`s. The fail-closed invariant is unchanged: a write that did
-  not durably commit is never observed by any reader.
-- **Deferred hardening (beaded, not yet wired):** byte-accounted durability metrics, online
-  compaction tuning under sustained write load, and WAL-durable `CLEAR`/`DROP GRAPH <g>` of an
-  *existing* named graph (today those operations are applied in memory and persisted only at the
-  next compaction).
-
-## 🐳 Running the container image (ghcr.io)
-
-A container image is published to `ghcr.io/jeswr/sparq-server` on every release tag (built
-from the repo `Dockerfile`; a CI smoke test runs the built image and curls `/health` + a
-query before it ships). The runtime stage is distroless (no shell, no package manager).
-
-```sh
-# boots out of the box, empty default graph, no auth (see the warning it prints):
-docker run --rm -p 3030:3030 ghcr.io/jeswr/sparq-server
-
-# serve a dataset (mount it read-only):
-docker run --rm -p 3030:3030 -v "$PWD/data:/data:ro" \
-  ghcr.io/jeswr/sparq-server --format turtle /data/dataset.ttl
-
-curl http://127.0.0.1:3030/health   # -> ok
-curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=ASK {}'
-```
-
-**Why it binds `0.0.0.0`.** Inside a container the only useful bind is the non-loopback
-`0.0.0.0` (loopback is unreachable through Docker's port mapping). The fail-closed bind
-posture above refuses a non-loopback bind unless opted in, so the image sets
-`SPARQ_ALLOW_REMOTE=1` to boot — running the container is itself the operator's explicit
-choice to publish a network surface. **This default posture has no auth**: anyone who can
-reach the published port can READ AND WRITE the dataset (the server logs a loud no-auth
-WARNING on startup — heed it).
-
-**Securing it (recommended for anything beyond local use).** Every `SPARQ_*` var is read
-from the *environment*, so turn on the Bearer gate with `-e` — no flag wiring needed:
-
-```sh
-# fully gated — writes AND reads require the token (drop the second -e for QLever-style
-# writes-gated/reads-open). Deliver $TOK over TLS — terminate at a reverse proxy:
-docker run --rm -p 3030:3030 \
-  -e SPARQ_AUTH_TOKEN="$TOK" -e SPARQ_AUTH_TOKEN_READ=1 ghcr.io/jeswr/sparq-server
-```
-
-For per-user authz, front it with a gateway or `sparq-solid`. The other `SPARQ_*` hardening
-vars (timeout, body cap, concurrency, …) work the same way through `-e`. See the auth × bind
-matrix under "Security posture".
+**Read "Security posture" before exposing the port** — by default there is **no auth**, loopback only.
 
 ## ✨ Features
 
-- **SPARQL 1.1 Protocol** — `query` (GET / POST direct / POST url-encoded / HEAD) and
-  `update` (`application/sparql-update` → `204`, atomic).
-- **Durable persistence** — `--persist <DIR>` (env `SPARQ_PERSIST_DIR`) makes the on-disk index
-  the source of truth: updates are WAL-fsync'd before ack and survive a restart with **no
-  rebuild** (QLever's `--persist-updates`). Off by default (in-memory). See "Durable persistence".
-- **Graph Store HTTP Protocol** — `GET`/`HEAD` read and `PUT`/`POST`/`DELETE` write, indirect
-  (`?graph=`/`?default`) and direct (request-URI) graph identification.
-- **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE
-  and GSP read in N-Triples / prefix-Turtle / RDF/XML; streamed SELECT bodies.
-- **Authentication** — optional `--auth-token <TOKEN>` Bearer gate on the write surface
-  (constant-time compared; mirrors QLever's `-a`), with an optional `--auth-token-read` gate
-  for reads. Off by default (back-compat). See "Security posture".
-- **Hardening flags** — `--query-timeout` / `--max-body-bytes` / `--max-concurrent` /
-  `--max-results` / `--max-query-rows` (coarse memory cap) / `--max-decompress-ratio`
-  (zip-bomb guard) / `--service-allow*` (SERVICE SSRF egress) / `--max-subscriptions*`, each
-  with a `SPARQ_*` env override. The four DoS/SSRF limits are documented together (with their
-  honest semantics) in the SKILL's "Server hardening" section.
-- **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style **WebSocket
-  subscriptions** (live SELECT diffs).
-- **Opt-in features** — `time-travel` (`?generation=N` snapshot pinning), `geo` (sparq-geo
-  `geof:` functions), `service` (SERVICE federation, default-deny), `zlib-ng` (native-only
-  faster zlib-ng C backend for `Content-Encoding: gzip` request inflate; off by default,
-  pure-Rust `miniz_oxide` otherwise; never in the wasm build).
+- **SPARQL 1.1 Protocol** — `query` (GET / POST direct / POST url-encoded / HEAD) and `update`
+  (`application/sparql-update` → `204`, atomic), including the protocol dataset-override params.
+- **Named graphs + Graph Store Protocol** — a full RDF dataset (`GRAPH` patterns, cross-graph
+  joins, `FROM`/`FROM NAMED`, graph-scoped updates through the same writer) plus GSP `GET`/`HEAD`
+  read and `PUT`/`POST`/`DELETE`/`PATCH` write (indirect `?graph=`/`?default` or direct request-URI).
+  A `PATCH` applies an **atomic, graph-scoped in-place modify**: an always-on
+  `application/sparql-update` body (executed atomically through the same writer, with its WHERE
+  dataset scoped to the addressed graph), and — behind the OPT-IN `n3-patch` feature + `--n3-patch`
+  flag — a Solid-style `text/n3` **N3-Patch** (`solid:InsertDeletePatch`).
+- **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE and
+  GSP read in N-Triples / prefix-Turtle / RDF-XML / **JSON-LD** (`application/ld+json` — the
+  `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); streamed
+  SELECT bodies. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style
+  **WebSocket + SSE** live SELECT diffs.
+- **Durable persistence** — `--persist <DIR>` makes the on-disk index the source of truth (off by
+  default, in-memory). See "Durable persistence".
+- **Authentication** — optional `--auth-token <TOKEN>` Bearer write gate (constant-time; mirrors
+  QLever's `-a`), plus an optional `--auth-token-read` gate for reads (also gates `/metrics` and the
+  subscription streams). Off by default. See "Security posture".
+- **Hardening flags** — query/UPDATE-WHERE timeouts, body cap, concurrency load-shed, slow-loris
+  read timeouts, row/byte memory caps, gzip zip-bomb ratio cap, and the SERVICE egress allowlist,
+  each with a `SPARQ_*` env override (honest per-cap semantics in the SKILL's "Server hardening").
+- **Opt-in features** (a build without a feature carries zero code for it) — `time-travel`
+  (`?generation=N` snapshot pinning), `geo` (`geof:` functions), `service` (SERVICE federation,
+  **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
+  `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
+  (`POST /shacl/validate`), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
+  `backup` (no-stop-the-world `/admin/backup` snapshot + PITR delta `/admin/backup/delta` +
+  `/admin/restore`; on `--persist`, `?persist=true`/`--restore-persist` writes the restore through to
+  disk crash-safely so it survives a restart), `audit-log`/`access-audit`, `zlib-ng`.
+- **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4, epic sq-oy1f) — the `jsonld` feature is in the
+  server's **default** set: `application/ld+json` joins q-value-aware RDF conneg out of the box, **both
+  directions** (flattened JSON-LD on CONSTRUCT/DESCRIBE/GSP-read; `oxjsonld` GSP write body). Off via
+  `--no-default-features --features server` (→ 406 read, 415 write). Full conneg ratcheting is roadmap.
+
+## Security posture (essentials — full detail in the SKILL)
+
+By default: **no auth, loopback-only.** Hardening is opt-in but honest where it matters.
+
+- **Auth × bind matrix.** A non-loopback bind is refused unless `--allow-remote` is set, and a write-token counts as "auth present" for that decision **only when reads are also gated** (`--auth-token-read`) — a write-token alone still leaves reads open on a remote bind. The 401 is byte-identical for a missing vs a wrong token. The Bearer gate is one shared secret with no per-user identity — for real authz front it with a gateway or [`sparq-solid`](../sparq-solid), over TLS.
+- **Error responses do not leak internals** — every error is a generic `{"error":"…"}` class (never the caller's input, an RDF fragment, a path, or a token); detail to the log, class to the body (regression-guarded by `tests/hardening.rs`). An unmatched route is a categorised `404 {"error":"not found"}` (the message never echoes the requested path).
+- **Stable retry contract** — **transient** (`429`/`503`): retry; **permanent** (`4xx`): fix the request — a `413` row/byte cap is a permanent honest refusal, **not** a silent truncation; **defect** (`500`): surface, don't hot-retry. Versioned table in the `status_contract` crate doc.
+- **SERVICE federation** is OFF in the default build; with `--features service` it is **default-DENY-all** (egress allowlist enforced before any socket, on the resolved IP — DNS-rebinding-safe). DoS guards on by default (query timeout, body cap, concurrency shed, 20× gzip-ratio cap, panic→`500`); **no rate limit** — add one in the gateway.
+- **Request-log redaction (ON by default with `--verbose`)** — a `GET /sparql?query=…` URL can
+  carry PII, so the query string becomes a length + non-reversible fingerprint
+  (`--log-full-requests` opts out). **Honest boundary:** this is log-CONTENT redaction, **not**
+  anonymity (method/path/status/size/timing are still recorded), and **not** the ZK/MPC privacy
+  story (what a *remote party* learns from a *computation*) — purely operator-log hygiene. <!-- privacy-claims-allow: negated/historical mention — explicitly states this is NOT the ZK/MPC privacy story -->
+- Hardening headers (`nosniff`, CSP, `DENY`, `no-referrer`) are always on; **CORS is OFF by
+  default** (opt-in exact first-party allowlist, never `*`); opt-in **access-audit** trails record
+  identities + resources by design but keep query content fingerprinted.
+
+## Concurrency contract — N readers, 1 sequenced writer
+
+> **N concurrent lock-free readers against 1 sequenced writer.** Reads never block; all writes are
+> *serialised* through one group-committing writer. There is **no distributed lock, replication, or
+> consensus**, and the engine is **not sharded per logical dataset** — horizontal scale is an
+> *external* deployment concern.
+
+Readers pin the current immutable generation; writers commit batches as new generations
+([`sparq-serve`](../sparq-serve/README.md)). **This single writer IS the write ceiling, by design**
+— a feature for the interactive single-resource-write workload, not a gap. An in-engine
+distributed/sharded writer is an **explicit Phase-2 non-goal** ([`research/`](../../research/adr-horizontal-scaling.md), gh-52 / PSS ADR-0012; no engine code).
+
+## Durable persistence (`--persist DIR`)
+
+`--persist <DIR>` makes the on-disk index the durable source of truth (QLever's `--persist-updates`):
+every update is WAL-fsync'd **before the `204` ack** (restart replays the WAL, no rebuild); a rejected update is never persisted, a durable-write failure refuses with a **retryable `503`** (fail-closed), and WAL compaction (`POST /admin/compact` / `sparq-cli compact`) purges deleted bytes for erasure-completeness but **cannot** reach off-box copies (snapshots/backups) — see the SKILL.
+
+**Restore into a live durable store** (`backup` feature): a `POST /admin/restore?persist=true` (or `--restore FILE --restore-persist` on start) REPLACES the durable store's contents with a backup artifact, written through to `DIR` so it survives a restart. The swap runs on the single writer thread, crash-safely (a two-rename directory swap healed deterministically on the next open), and is **fail-closed**: a corrupt artifact is rejected with the live store untouched. Without `?persist=true`, a `--persist` server refuses the restore (`409`) — an in-memory-only restore would be silently lost on restart.
 
 ## 📚 Learn more
 
-- **How-to** — [`skills/http-server/SKILL.md`](../../skills/http-server/SKILL.md) (all
-  endpoints, request/response forms, status codes, hardening flags, metrics, embedding the
-  axum router) and [`SUBSCRIPTIONS.md`](SUBSCRIPTIONS.md) (the subscription protocol).
-- **API reference** — [docs.rs/sparq-server](https://docs.rs/sparq-server).
-- **Design** — the lock-free generation-ring + sequenced-writer concurrency model is in
-  [`research/concurrent-serving.md`](../../research/concurrent-serving.md).
+- **How-to** — [`skills/http-server/SKILL.md`](../../skills/http-server/SKILL.md) (every endpoint,
+  status code, the full auth × bind matrix, each hardening cap's honest semantics, CORS, audit
+  sinks, TPF/brTPF, SHACL, federation discovery, the container image) and
+  [`SUBSCRIPTIONS.md`](SUBSCRIPTIONS.md) (the subscription protocol).
+- **API reference** — [docs.rs/sparq-server](https://docs.rs/sparq-server) (incl. the versioned
+  `status_contract` retry doc).
+- **Design** — [`research/concurrent-serving.md`](../../research/concurrent-serving.md)
+  (generation-ring + sequenced-writer) and
+  [`research/adr-horizontal-scaling.md`](../../research/adr-horizontal-scaling.md) (the non-goal).
 - **Performance** — not baked into docs; see the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench) and the `#[ignore]`d
-  update-cost benchmark in `tests/updates.rs`.
-- **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
+  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+- **Contribute** — [`AGENTS.md`](../../AGENTS.md), [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License
 

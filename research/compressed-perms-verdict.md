@@ -9,7 +9,15 @@ measured perm compression ratio is 2.5–2.75x, clearing the >2x bar set for it.
 
 Written by `Graph::save_compressed` / `TripleStore::save_compressed` (CLI:
 `save <data> <format> <dir> compressed`, or `recompress <src> <dst>` to compact an
-existing raw dir without re-parsing). Per `perm{i}.bin`, all little-endian:
+existing raw dir without re-parsing). The external-memory `build` can also emit this
+format DIRECTLY from its sort/merge tail — `SPARQ_BUILD_COMPRESSED=1 sparq-cli build …`
+(sq-vkz7) — skipping the separate `open` + `decode_all` + re-encode recompress pass over
+the whole index (a full pass over an 84+ GB index at 1B scale). The sibling perms are
+written compressed straight from `extsort::external_sort_compressed`'s merge; SPO is kept
+raw until the siblings re-sort from it, then re-encoded last. Raw stays the build DEFAULT;
+the one-pass output is byte-identical to a raw build followed by `recompress` (guarded by
+`sparq-engine/tests/compressed_build_differential.rs`). Per `perm{i}.bin`, all
+little-endian:
 
 ```text
 magic[8] = "SPQCPRM1" | len u64 | n_blocks u64 | blocks_len u64

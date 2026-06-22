@@ -1,0 +1,22 @@
+/node_modules
+/.next
+/out
+*.tsbuildinfo
+next-env.d.ts
+
+# Generated wasm bundle — built from crates/sparq-wasm via `js/`'s wasm-pack step
+# (see scripts/sync-wasm.mjs and the pages deploy workflow). Not a source artifact.
+/public/wasm/
+
+# [OPUS-4.8] sq-gum8 — paper-factory build outputs (scripts/build-papers.mjs compiles the
+# site/papers/*.typ sources into these via the Typst CLI on prebuild). Regenerable, like the
+# wasm bundle; the .typ sources under site/papers/ are the tracked source of truth.
+/public/papers/
+/src/generated/
+
+# [OPUS-4.8] sq-5q63 — Playwright (e2e/) outputs: traces, reports, downloaded browsers.
+# Regenerable test artifacts, never source. The spec + playwright.config.ts are tracked.
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/

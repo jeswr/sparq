@@ -33,19 +33,148 @@ tied directly to the post-batch re-evaluation table in `AGENTS.md`.
 
 ### The conformance-ratchet "never lower" rule
 
-The committed conformance floors (`conformance-report.md`,
-`inference-conformance-report.md`, the SHACL floors, `bench/perf-baseline.json`, the
-coverage floors) are **ratchets: they only ever go UP.** Never lower a ratchet to make a
-change pass — fix the regression instead. If a test newly diverges for a *documented,
+The conformance floors are **ratchets: they only ever go UP.** They are reported by
+[`sparq-conformance`](crates/sparq-conformance) — the SPARQL report (`conformance-report.md`)
+is git-ignored and regenerated locally by `cargo run -p sparq-conformance` (CI re-runs it and
+publishes it as an artifact), while the inference report is committed at
+[`inference-conformance-report.md`](inference-conformance-report.md). The SHACL floors,
+`bench/perf-baseline.json`, and the coverage floors ratchet the same way. Never lower a ratchet
+to make a change pass — fix the regression instead. If a test newly diverges for a *documented,
 spec-justified* reason, record the rationale in the report alongside the divergence
 (don't just drop the count). Raising a floor when coverage genuinely improves is
 encouraged.
+
+<!-- [OPUS-4.8] sq-8qzz: contributor note guarding new golden/snapshot tests against the
+     thread-count-dependent dict-id order. No current test is at risk (the audit verified
+     this) — this is a forward-looking convention, not a fix for a present bug. -->
+### A golden over serialised RDF or an unordered/tied result must canonicalise or pin threads
+
+`sparq-core` assigns dictionary ids in a **thread-count-dependent** order (the parallel
+sharded dict merge, `default_shards = (rayon::current_num_threads()*2).clamp(4,64)`), and
+that id order surfaces — spec-permittedly — in several **observable but unspecified** places:
+RDF serialisation row order (Turtle / TriG / N-Quads / N-Triples / JSON-LD), `SELECT` row
+order without `ORDER BY`, `CONSTRUCT` / `DESCRIBE` triple order, and `ORDER BY`-tie order.
+None is a correctness bug (the SPARQL / RDF specs leave all of them unspecified), and no
+golden/snapshot file in the repo pins any of them today — the conformance harness compares
+unordered results as a **bag (multiset)** and existing snapshot/differential tests sort the
+rendered rows by term before asserting.
+
+So if you add a test that pins one of those outputs **as an exact string / file**, make it
+robust to thread count one of two ways, or it will be host-flaky exactly like the #691
+`label_propagation` test was:
+
+- **Canonicalise** — sort the rendered rows (or compare as a set/multiset of term strings)
+  before asserting. This is the default; it matches every existing test.
+- **Pin threads** — set `RAYON_NUM_THREADS=1` for that test if you genuinely must assert an
+  exact byte sequence (rare; prefer canonicalising). CI does not pin threads on the
+  conformance / bulk shards, and nextest runs shards on differently-sized runners.
+
+Background and the full per-surface analysis: `research/dict-id-order-determinism-audit.md`.
+
+### Every `unsafe` block needs a `// SAFETY:` comment and a register row
+
+`sparq`'s `unsafe` is confined to five crates (mmap loaders, the zero-copy dictionary,
+SIMD/FFI); the other twenty-six are `#![forbid(unsafe_code)]`. If you add an `unsafe` block,
+`fn`, `impl`, `trait`, or `extern`, you **must** in the same change:
+
+1. Put a **`// SAFETY:`** comment immediately above it stating the invariant it relies on
+   and why that invariant holds (clippy's `undocumented_unsafe_blocks` is the local check).
+2. Add a row to [`compliance/memsafety/unsafe-register.md`](./compliance/memsafety/unsafe-register.md)
+   (the GX-5 justification register) — file:line, the invariant, why it is sound, how it is
+   tested/bounded. If you cannot give a sound argument, mark the row `NEEDS-REVIEW` and open
+   a bead rather than fabricating one.
+3. Re-seed the count snapshot: `scripts/unsafe-gate.py --seed`.
+
+The **`unsafe-register (count ratchet)`** CI lane (a required gating check) fails the PR
+until all three are done — it counts first-party `unsafe` per crate and rejects any rise
+above `bench/unsafe-snapshot.json`. Run `scripts/unsafe-gate.py --check` locally first.
 
 ### Changing a public API → update the matching skill
 
 If you change any **public API** (a `pub` item, a CLI flag, an HTTP route, or a Python/JS
 binding), update the corresponding `skills/<surface>/SKILL.md` **in the same change**.
 This is a required, enforced convention — see the MAINTENANCE RULE in `AGENTS.md`.
+
+## Secure coding
+
+<!-- [OPUS-4.8] Secure-coding standard (bead sq-toze.7 / gap GX-6). Maps the cert
+     expectations (SSDF PW, ASVS V1/V5) onto sparq's ACTUAL gates. Points to AGENTS.md
+     and the workflows rather than duplicating them. -->
+
+`sparq` processes untrusted input (RDF text, SPARQL queries, HTTP requests). This section
+is the contributor-facing secure-coding standard; it maps to the secure-SDLC (NIST SSDF)
+and ASVS expectations and is grounded in the gates CI already enforces. The detail of each
+gate lives in [`AGENTS.md`](./AGENTS.md) and the workflows under
+[`.github/workflows/`](./.github/workflows/) — this is the index, not a duplicate.
+
+### `unsafe` policy
+
+- **Prefer safe Rust.** Do not add `unsafe` to a crate that has none. The `unsafe` we keep
+  is concentrated in `sparq-core` (mmap, the zero-copy dictionary, SIMD).
+- **Justify every `unsafe` site.** A new `unsafe` block needs an inline `// SAFETY:` comment
+  stating the invariant you rely on and why it holds. Adding `unsafe` is visible in CI: the
+  `unsafe report (cargo-geiger, informational)` step in [`ci.yml`](./.github/workflows/ci.yml)
+  surfaces the count in the run summary. (A consolidated per-site justification register is a
+  tracked gap, GX-5, not yet a file in the repo — until it lands, the inline `// SAFETY:`
+  comment at the site is the register of record.)
+- **Run it under the UB lanes.** Pure-Rust `unsafe` in `sparq-core` is exercised by the
+  `miri` lane ([`miri.yml`](./.github/workflows/miri.yml)) and the parser/loader fuzzers
+  ([`fuzz.yml`](./.github/workflows/fuzz.yml)). The mmap sites that Miri cannot reach are
+  covered by an oracle + fuzz matrix — extend that coverage when you touch them.
+
+### Input validation and the hardened surfaces
+
+- The parser, query engine, and HTTP server (`sparq-core`, `sparq-engine`, `sparq-server`)
+  are the surfaces most likely to see untrusted input. Validate at the boundary, prefer
+  total functions, and **never let untrusted input drive an `unwrap`/`expect`/`panic!` or an
+  unbounded allocation** — a reachable panic or OOM is an in-scope DoS bug (see
+  [`SECURITY.md`](./SECURITY.md)).
+- Keep error and log output clean: do not leak RDF/SPARQL content, internal paths, or stack
+  detail into HTTP error responses or logs (ASVS V7).
+- The `sparq-zk*` and `sparq-mpc` crates are research scaffolds with **no security
+  guarantee** — do not present their output as a cryptographic assurance. See `SECURITY.md`.
+
+### Supply chain
+
+- If your change touches `Cargo.toml`/`Cargo.lock`, the supply-chain gate applies:
+  `cargo deny check bans sources licenses` gates on every PR
+  ([`supply-chain.yml`](./.github/workflows/supply-chain.yml)), the daily advisory watchdog
+  ([`dependency-monitoring.yml`](./.github/workflows/dependency-monitoring.yml)) flags new
+  RustSec advisories, and a CycloneDX SBOM is generated per build. The policy lives in
+  [`deny.toml`](./deny.toml).
+- Add the **smallest** dependency that does the job, from a maintained source, and record any
+  tolerated advisory with a justification in `deny.toml` (each `ignore` entry carries a
+  reason and a tracking bead).
+
+### The gates a change must pass
+
+A contribution lands only when the gate in **"The gate"** above is green: `cargo build` /
+`cargo test`, `cargo clippy --workspace --all-targets -- -D warnings` (a hard gate),
+and the W3C conformance + performance/coverage ratchets (never lowered). `cargo fmt --all
+--check` also runs in CI but is currently **informational** (`continue-on-error: true`),
+to be flipped to a hard gate once the one-time `cargo fmt --all` reformat lands; format your
+code anyway.
+Security-specific lanes also run: **CodeQL** SAST
+([`codeql.yml`](./.github/workflows/codeql.yml), `security-and-quality` queries), **miri**,
+**fuzz**, **supply-chain**, and the **OpenSSF Scorecard** analysis
+([`scorecard.yml`](./.github/workflows/scorecard.yml)). The aggregate `ci-summary` check
+gates the merge.
+
+### Reporting a vulnerability you find while contributing
+
+If you discover a security issue, **do not open a public issue or PR** — use the private
+channels in [`SECURITY.md`](./SECURITY.md) (GitHub Security Advisories or
+jesse@jeswr.org). The machine-readable pointer is
+[`.well-known/security.txt`](./.well-known/security.txt).
+
+### Secure-SDLC (SSDF) touchpoints
+
+The above maps onto the NIST SSDF practices: a documented secure-coding standard and threat
+model (PW.1 — this section plus [`SECURITY.md`](./SECURITY.md) and the threat model),
+review and analysis before merge (PW.7/PW.8 — code review, CodeQL, clippy, miri, fuzz),
+supply-chain provenance (PW.4/PS.3 — cargo-deny, SBOM), and coordinated vulnerability
+handling (RV — the disclosure policy and `security.txt`). Follow the PR conventions in
+`AGENTS.md` (small, reviewed, all review comments resolved before merge).
 
 ## Tasks and TODOs live in beads, not markdown
 

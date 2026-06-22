@@ -40,8 +40,8 @@ pub const BUILT: &[Perm] = &[Perm::Spo, Perm::Pos, Perm::Osp];
 impl Perm {
     pub const ALL: [Perm; 6] = [Perm::Spo, Perm::Sop, Perm::Pso, Perm::Pos, Perm::Osp, Perm::Ops];
 
-    /// The column indices (into a canonical [s,p,o] triple) in this permutation's
-    /// sort order. e.g. POS -> [1,2,0].
+    /// The column indices (into a canonical s,p,o triple) in this permutation's
+    /// sort order. e.g. POS -> 1,2,0.
     #[inline]
     pub fn order(self) -> [usize; 3] {
         match self {
@@ -264,7 +264,7 @@ pub struct TripleStore {
 }
 
 impl TripleStore {
-    /// Builds the [`BUILT`] permutation indexes from canonical [s,p,o] triples (all
+    /// Builds the [`BUILT`] permutation indexes from canonical s,p,o triples (all
     /// six by default; just SPO/POS/OSP under `compact-index`). SPO is sorted (in
     /// parallel) and deduplicated first; the rest are independent and built concurrently.
     pub fn from_triples(triples: Vec<[Id; 3]>) -> Self {
@@ -755,7 +755,7 @@ pub struct Scan<'a> {
 }
 
 impl<'a> Scan<'a> {
-    /// Maps a stored row back to a canonical [s,p,o] triple.
+    /// Maps a stored row back to a canonical s,p,o triple.
     #[inline]
     pub fn to_spo(&self, row: &[Id; 3]) -> [Id; 3] {
         let order = self.perm.order();

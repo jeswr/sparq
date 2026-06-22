@@ -5,6 +5,13 @@
 //! JSON protocol end to end: subscribe → initial notification, committed SPARQL Update
 //! via POST /sparql → added/removed diff, non-matching update → silence, unsubscribe,
 //! the per-connection / global limits, and slot cleanup after a socket drop.
+//!
+//! [OPUS-4.8] (sq-1b390) Gate the whole suite on the `server` feature. It spins the real axum
+//! server and uses the `server`-gated `sparq_server::router` / `AppState` API, so under
+//! `--no-default-features --all-targets` (the pure-serialiser-library build) this file must
+//! compile OUT — otherwise `clippy --no-default-features --all-targets` breaks on the
+//! unresolved axum / serde_json / router imports. 🤖 SPARQ agent.
+#![cfg(feature = "server")]
 
 use std::time::Duration;
 
@@ -48,7 +55,9 @@ async fn connect(addr: &str) -> Ws {
 }
 
 async fn send_json(ws: &mut Ws, msg: Value) {
-    ws.send(Message::Text(msg.to_string())).await.unwrap();
+    // [OPUS-4.8] (sq-1qkm) tungstenite 0.26+ — `Message::Text` holds a `Utf8Bytes`, not a
+    // `String`; `Utf8Bytes: From<String>` so `.into()` bridges it.
+    ws.send(Message::Text(msg.to_string().into())).await.unwrap();
 }
 
 /// Receives the next text frame as JSON (5 s guard so a missing message fails fast).
@@ -60,7 +69,8 @@ async fn recv_json(ws: &mut Ws) -> Value {
             .expect("socket closed")
             .expect("socket error");
         match frame {
-            Message::Text(t) => return serde_json::from_str(&t).unwrap(),
+            // [OPUS-4.8] (sq-1qkm) `t` is `Utf8Bytes` (tungstenite 0.26+); `.as_str()` yields &str.
+            Message::Text(t) => return serde_json::from_str(t.as_str()).unwrap(),
             Message::Ping(_) | Message::Pong(_) => continue,
             other => panic!("unexpected frame: {other:?}"),
         }

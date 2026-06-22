@@ -1,0 +1,51 @@
+# [OPUS-4.8] sq-2q1x (Phase 1 of the untrusted-planner → MPC-routing seam designed in
+# research/mpc-untrusted-planner-routing-design.md, epics sq-pwr / sq-0jsc): the GLUE
+# crate that turns sparq-fedplan source selection + a per-source privacy descriptor into
+# the typed plan the sparq-mpc pipeline already consumes — WITHOUT coupling either crate.
+# THIS BEAD IS THE SKELETON ONLY: the SourcePrivacyDescriptor (default-deny) + typed,
+# panic-free stubs for the deferred phases (source-selection / routing / leakage-envelope).
+# NO MPC protocol, NO secret-sharing, NO privacy-bearing logic lands here — see README.md
+# for the honest boundary (the privacy-bearing phases are audit-gated; sq-9hrn / sq-qhy4).
+[package]
+name = "sparq-fedplan-mpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Opt-in glue between cost-based federated source selection (sparq-fedplan) and MPC-over-federated-SPARQL routing (sparq-mpc): the SourcePrivacyDescriptor (default-deny) + typed seam for the later disclosed/hidden routing + leakage-envelope phases. Research scaffold, not externally audited."
+publish = false
+
+# OPT-IN, lean core. NOTHING in the workspace's default build depends on this crate: it is
+# a standalone member (like `sparq-fedplan` / `sparq-mpc` themselves), so `sparq-core`'s
+# default build and the WASM artifact are byte-identical with or without it. The whole
+# surface is additionally behind the `fedplan-mpc` cargo feature (OFF by default), so even
+# a crate that DID depend on `sparq-fedplan-mpc` pays nothing for it unless the feature is
+# enabled. Neither `sparq-fedplan` nor `sparq-mpc` gains a cross-dependency on the other:
+# both are pulled in HERE, only under this feature. [OPUS-4.8] sq-2q1x.
+
+[features]
+# OFF by default — a build that does not enable `fedplan-mpc` compiles an empty crate and
+# does NOT pull in `sparq-fedplan` or `sparq-mpc`. Enabling it turns on the `fedplan`
+# feature of `sparq-fedplan` (the planner surface this seam consumes) too.
+default = []
+fedplan-mpc = ["dep:sparq-fedplan", "dep:sparq-mpc", "sparq-fedplan/fedplan"]
+
+[dependencies]
+# Both upstreams are OPTIONAL and only pulled in under the `fedplan-mpc` feature — keeping
+# the default build empty and the two upstream crates decoupled from each other. Referenced
+# by `path` like every other sibling sparq crate.
+#   - sparq-fedplan : SourceDescriptor / SourceId / select_sources / plan_bgp (the classic
+#                     cost-based source selection + join planning this seam wraps). Its own
+#                     `fedplan` feature is enabled transitively (see [features] above).
+#   - sparq-mpc     : Routing / OperatorClass / OperatorRouting (the per-operator
+#                     disclosed-vs-hidden enum the later routing phase emits into). NO crypto
+#                     is invoked from here in Phase 1.
+sparq-fedplan = { path = "../sparq-fedplan", optional = true }
+sparq-mpc = { path = "../sparq-mpc", optional = true }
+
+[dev-dependencies]
+# (none — the Phase-1 tests use only the crate's own surface.)

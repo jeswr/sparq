@@ -12,22 +12,82 @@ returns). Numbers below were measured by Opus 4.8.
    noir-optimisation skill) for every compiled circuit-family member, in the
    `zk/ieee754` JSON convention (`circuit_size`).
 2. **Wall-clock prove/verify** for the small credential-scale e2e cases.
+3. **SPARQL feature → ZK gate-cost catalog** (`sparql_feature_catalog.json`) — a
+   coverage map AND an optimisation-target list spanning SPARQL 1.1, joining each
+   query's `circuit_size` from the gate-count snapshot. See "SPARQL feature
+   catalog" below.
 
 ## Files
 
-| file                          | contents |
-|-------------------------------|----------|
-| `gate_counts_latest.json`     | per-member ultra_honk gate counts |
-| `prove_verify_timing.json`    | bb prove/verify wall-clock + proof sizes (early, 2-member, darwin) |
-| `family_cost_curve.json`      | sq-pn2 full-family (k,n,r,d) prove/verify/size curve |
-| `family_curve/`               | sq-pn2 standalone timing harness (own cargo project) |
-| `scripts/gate_counts.sh`      | regenerate the gate-count JSON |
-| `scripts/prove_verify.sh`     | time prove+verify for one member |
+| file                              | contents |
+|-----------------------------------|----------|
+| `gate_counts_latest.json`         | per-member ultra_honk gate counts |
+| `prove_verify_timing.json`        | bb prove/verify wall-clock + proof sizes (early, 2-member, darwin) |
+| `family_cost_curve.json`          | sq-pn2 full-family (k,n,r,d) prove/verify/size curve |
+| `family_curve/`                   | sq-pn2 standalone timing harness (own cargo project) |
+| `sparql_feature_catalog.json`     | sq-1s2.1.2 SPARQL 1.1 feature → ZK coverage + gate-cost catalog |
+| `scripts/gate_counts.sh`          | regenerate the gate-count JSON |
+| `scripts/prove_verify.sh`         | time prove+verify for one member |
+| `scripts/sparql_catalog.py`       | regenerate the SPARQL feature catalog (joins the snapshot) |
 
 > The gate-count JSON is also the source the in-crate **regression gate**
 > (`crates/sparq-zk-compose/tests/gate_count.rs`, sq-c5f) baselines against —
 > re-run `scripts/gate_counts.sh` after an intentional circuit change and update
 > both that JSON and `crates/sparq-zk-compose/tests/gate_count_snapshot.json`.
+
+## sq-1s2.1.2: SPARQL feature → ZK gate-cost catalog
+
+`sparql_feature_catalog.json` is a **comprehensive SPARQL 1.1 benchmark catalog**
+that doubles as (i) a **ZK-coverage map** — for each SPARQL feature, which circuit
+member(s) (if any) it compiles to today — and (ii) an **optimisation-target list**
+— per-member `circuit_size` with the high-gate members flagged as reduction
+targets. It implements the §6 catalog design of
+`research/zk-field-native-encoding.md`.
+
+The catalog spans the full feature surface: BGP (single / multi-pattern), every
+numeric-FILTER datatype + operator (the complex filters: integer, signed integer,
+decimal, double), boolean / string / dateTime FILTER, OPTIONAL, UNION, **property
+paths including `+` / `*` / `?` / `/` / `|` / `^`**, aggregates / GROUP BY,
+subqueries, BIND, VALUES, MINUS / negation, and the hidden-credential primitives
+(revocation, issuer attestation, holder possession).
+
+**Honesty is load-bearing.** Each query records its coverage status:
+
+- `covered` — compiles to a real circuit member; its `circuit_size` is **joined
+  from** `crates/sparq-zk-compose/tests/gate_count_snapshot.json` (the
+  regression-gated source of truth), never hand-typed, so it can never drift.
+- `partial (…)` — composed verifier-side or desugared to a covered primitive
+  (e.g. UNION, OPTIONAL, alternative paths); `circuit_size: null`.
+- `NO ZK CIRCUIT YET (gap)` — the feature has **no circuit today** (general
+  property-path traversal `+`/`*`/`?`, aggregates, BIND expression eval, string
+  predicates, dateTime compare, negation, boolean FILTER). These carry
+  `circuit_size: null`. **A gate number is NEVER fabricated for a gap.**
+
+High-gate covered members are auto-flagged: `HIGH_GATE_blake3_binding` marks the
+numeric-FILTER family (the value-hook reduction target of §2.6 — the blake3
+token-binding the encoding overhaul removes), and `HIGH_GATE_lattice` marks a
+scan/join member that is large because of the (k,n,r)/(na,nb) lattice corner.
+
+### Regenerate
+
+```sh
+bench/zk-compose/scripts/sparql_catalog.py > bench/zk-compose/sparql_feature_catalog.json
+```
+
+The generator needs **no** `nargo`/`bb` (it reads the committed snapshot), so it
+is deterministic. The committed JSON is gated by
+`crates/sparq-zk-compose/tests/sparql_catalog.rs`, which fails if a covered query
+names a member absent from the snapshot, if a covered `circuit_size` disagrees
+with the snapshot, or if a gap carries a non-null gate number. After an
+**intentional** circuit change, re-run `scripts/gate_counts.sh` (re-baseline the
+snapshot) and then re-run the catalog generator to re-join the new numbers.
+
+> This file is the **DATA layer**. The website surface that renders it (the
+> SPARQL → ZK coverage + gate-cost table on `/benchmarks/zk`) landed in sq-1s2.1.3
+> (#777): `site/scripts/sync-zk-catalog.mjs` copies this JSON into
+> `site/src/data/zk-sparql-catalog.generated.json`, which the
+> `ZkSparqlCatalog` component (`site/src/components/benchmarks/zk-sparql-catalog.tsx`)
+> renders — so the rendered numbers always trace back to this snapshot-joined data.
 
 ## sq-pn2: full-family prove/verify cost curve
 

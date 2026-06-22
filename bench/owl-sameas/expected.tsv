@@ -1,0 +1,13 @@
+# [OPUS-4.8] OWL sameAs equality micro-suite DETERMINISTIC expected sizes per tier (sq-msl6, A3).
+# run.sh asserts BOTH columns; any mismatch is a sparq-reason owl:sameAs regression and fails the
+# run loudly. These are STRUCTURAL facts of the OWL-RL closure (with K=4 classes, M=3 data triples
+# per class, fixed in gen.sh), NOT perf measurements:
+#   closure_triples = K*N*(N+M) = 4*N*(N+3)   (N^2 full sameAs relation incl. reflexive + N*M eq-rep)
+#   query_rows      = K*N       = 4*N         (every class member inherits the anchor's :p0 :v0)
+# Each value was VERIFIED against `sparq-cli reason … owl` on the pinned generator, not assumed
+# (the engine does union-find sameAs rewriting then expands each class back — owl.rs). The query
+# returns only K=4 on the RAW corpus; the entailment delta to K*N is the point of the suite.
+# Columns: tier(N)<TAB>closure_triples<TAB>query_rows
+8	352	32
+32	4480	128
+256	265216	1024

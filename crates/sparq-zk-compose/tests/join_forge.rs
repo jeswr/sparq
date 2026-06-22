@@ -224,6 +224,8 @@ fn join_manifest() -> ProofManifest {
         join_edges: vec![JoinEdge { scan_a: 0, graph_a: 0, scan_b: 1, graph_b: 0, join_proof: 2 }],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
     }
 }
 
@@ -384,7 +386,7 @@ fn honest_built_join() -> BuiltJoin {
 /// Render the honest join's `Prover.toml` via the HOST emitter (`prover_toml_for`'s
 /// JoinEq arm + `build_join`'s witness) — NOT a private renderer.
 fn honest_join_toml(built: &BuiltJoin) -> (CircuitId, String) {
-    prover_toml_for(&built.inputs, &challenge(), &[], &[], &[], Some(&built.witness))
+    prover_toml_for(&built.inputs, &challenge(), &[], &[], &[], Some(&built.witness), None)
         .expect("join toml emits with the host witness")
 }
 
@@ -478,6 +480,7 @@ fn bb_forge_unequal_values_witness_unsatisfiable() {
         &[],
         &[],
         Some(&forged_witness),
+        None,
     )
     .expect("forged join toml emits");
 
@@ -526,6 +529,7 @@ fn bb_forge_join_commitment_not_binding_value_unsatisfiable() {
         &[],
         &[],
         Some(&honest.witness),
+        None,
     )
     .expect("forged-commitment join toml emits");
 

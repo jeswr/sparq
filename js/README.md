@@ -14,6 +14,9 @@ browser. (The wasm bundle bytes are tracked per-commit on the perf dashboard,
   UNION, MINUS, BIND, VALUES, aggregates, ORDER BY, DISTINCT/LIMIT/OFFSET,
   sub-SELECT) and ASK — both evaluated natively (ASK early-exits at the first
   solution).
+- SPARQL 1.1 CONSTRUCT / DESCRIBE: `queryQuads()` returns the constructed
+  graph as RDF/JS `Quad`s, `queryQuadsString()` as raw N-Triples, and
+  `queryQuadsStream()` streams a large graph one quad at a time.
 - Named graphs (`options.dataset`): `GRAPH <iri>` / `GRAPH ?g` patterns,
   `FROM` / `FROM NAMED`, graph-aware `match()`.
 - SPARQL 1.1 Update over the full dataset (`INSERT/DELETE DATA` with `GRAPH`
@@ -31,16 +34,57 @@ browser. (The wasm bundle bytes are tracked per-commit on the perf dashboard,
   vocabulary-dictionary negotiation with a sparq server — content-addressed
   dictionary caching, background warm-up, pluggable dict-capable decoder.
 - Results as RDF/JS Query-spec `Bindings` (Map-like, `.get(variable)`), terms as
-  spec-compliant RDF/JS `Term`s (typed against `@rdfjs/types`).
+  spec-compliant RDF/JS `Term`s (typed against `@rdfjs/types`); an
+  **Oxigraph-compatible** accessor (`querySolutions()` → `Map<string, Term>[]`,
+  `Bindings.toMap()`) ports Oxigraph result-processing code unchanged.
+- The named **`Dataset`** export implements the **full RDF/JS `Dataset`
+  interface** (the set algebra `union`/`intersection`/`difference`/… on top of
+  `DatasetCore`), with the binary set ops **interoperating with foreign RDF/JS
+  datasets** (N3.js, `@rdfjs/dataset`), not just our own.
 
 ## Install / build
 
 The package ships the wasm artifact; from a source checkout build it first:
 
 ```sh
-npm run build   # wasm-pack build ../crates/sparq-wasm + tsc
+npm run build   # wasm-pack build ../crates/sparq-wasm (--features shacl) + tsc
 npm test        # node --test against the built dist/
 ```
+
+### Pinning a git build (before the npm release)
+
+Until `@jeswr/sparq` is published to npm under its settled name, depend on it by
+**pinning a git build**. The package's `prepare` script compiles the wasm engine
++ TypeScript on install, so a git pin yields a working binding (the registry
+tarball ships those prebuilt). Add to the consumer's `package.json`:
+
+```jsonc
+"dependencies": {
+  // pin an immutable commit; `directory: "js"` is read from this package.json
+  "@jeswr/sparq": "github:jeswr/sparq#<commit-sha>"
+}
+```
+
+A git-pinned install needs the Rust → wasm toolchain on the build machine
+(`rustup target add wasm32-unknown-unknown` + `cargo install wasm-pack`); without
+it `prepare` fails loudly with the install command rather than silently shipping
+an engine-less binding. After install, verify the engine actually landed:
+
+```sh
+node -e "import('@jeswr/sparq').then(m=>m.SparqStore.fromString('<a> <b> <c> .','ntriples')).then(s=>{s.free?.();console.log('ok')})"
+```
+
+Maintainers run the publish guardrail this repo gates on — `npm run
+check:package` — which proves `prepare` is wired, the `files` allowlist is
+intact, and the packed tarball actually ships `dist/` + `wasm/*_bg.wasm`.
+
+The default build (and the published bundle) ships with `--features shacl` so
+`SparqStore.validate` works out of the box. SHACL is not free in the wasm
+binary — it pulls in the SHACL engine + `regex` + the SPARQL query path for
+`sh:sparql`, which roughly **doubles** the `.wasm` (measured ~1.21 MiB → ~2.19
+MiB, +~1.0 MiB / +85%, before gzip). If you do not need validation and bundle
+size matters, build the lean variant — `npm run build:wasm:lean` — which omits
+SHACL entirely (`SparqStore.validate` then throws a clear error if called).
 
 ## Usage
 
@@ -63,6 +107,14 @@ for (const row of store.queryBindings(
 // ASK → boolean
 store.queryBoolean('PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }'); // true
 
+// CONSTRUCT / DESCRIBE → RDF/JS quads (default graph)
+for (const quad of store.queryQuads(
+  'PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }',
+)) {
+  console.log(quad.subject.value, quad.predicate.value, quad.object.value);
+}
+store.queryQuadsString('DESCRIBE <http://ex/bob>'); // raw N-Triples string
+
 // RDF/JS-style triple lookup (generated SELECT under the hood)
 store.match(null, DF.namedNode('http://ex/name'), null); // → Quad[]
 store.countQuads(null, DF.namedNode('http://ex/name'));  // → 2 (no materialisation)
@@ -74,6 +126,12 @@ const fromQuads = await SparqStore.fromQuads([
 
 // SPARQL Update (the engine rebuilds its immutable index; the handle swaps in place)
 store.update('PREFIX ex: <http://ex/> INSERT DATA { ex:carol ex:name "Carol" }');
+
+// Oxigraph-compatible SELECT results: an array of plain Map<string, Term>
+// (drop-in for Oxigraph's `Store.query` — `binding.get("s").value`)
+for (const binding of store.querySolutions('SELECT ?s WHERE { ?s ?p ?o } LIMIT 10')) {
+  console.log(binding.get('s').value);
+}
 
 // Raw SPARQL 1.1 JSON results, skipping JS-side term materialisation
 const json = JSON.parse(store.queryJson('SELECT * WHERE { ?s ?p ?o } LIMIT 10'));
@@ -101,8 +159,99 @@ const fromZst = await SparqStore.fromCompressed(zstBytes, 'ntriples');
 const compact = await SparqStore.fromString(bigTurtle, 'turtle', { compressed: true });
 compact.heapBytes(); // rough wasm-side footprint
 
+// SHACL validation (data graph vs shapes graph) → a typed ValidationReport.
+// Stateless one-shot: does NOT consult the store's own triples (a drop-in for
+// rdf-validate-shacl). conforms counts every result; filter by severity for a gate.
+const report = store.validate(dataTurtle, shapesTurtle, 'turtle'); // format defaults to 'turtle'
+report.conforms;                                                    // boolean
+for (const r of report.results) {
+  console.log(r.focusNode, r.path, r.severity, r.message);          // per-violation fields
+}
+
 store.free(); // release wasm memory (also `using store = …` via Symbol.dispose)
 ```
+
+### `Dataset` — the full RDF/JS `Dataset` algebra, importable from a `<script type="module">`
+
+For an RDF/JS-`Dataset`-shaped surface (rather than the SPARQL-first
+`SparqStore`), import the named **`Dataset`** export. It implements the **full
+RDF/JS [`Dataset`](https://rdf.js.org/dataset-spec/) interface** — the
+`DatasetCore` members (`add` / `delete` / `has` / `match` / `size` /
+`[Symbol.iterator]`) **plus** the set algebra and iteration helpers
+(`union` / `intersection` / `difference` / `addAll` / `deleteMatches` /
+`contains` / `equals` / `filter` / `map` / `forEach` / `some` / `every` /
+`reduce` / `import` / `toStream` / `toArray` / `toString` / `toCanonical`) — with
+the **full SPARQL surface one accessor away** (`dataset.store`).
+
+The binary set ops are **library-agnostic**: `union(other)`,
+`intersection(other)`, `difference(other)`, `addAll`, `contains` and `equals`
+accept either another sparq `Dataset` **or any foreign RDF/JS dataset/store**
+(e.g. an [`N3.Store`](https://github.com/rdfjs/N3.js) or
+[`@rdfjs/dataset`](https://github.com/rdfjs/dataset)) — detected through the
+`[Symbol.iterator]` every RDF/JS dataset exposes, with a fast native path when
+the operand is our own:
+
+```js
+import { Dataset } from '@jeswr/sparq';
+import { Store as N3Store } from 'n3';
+
+const a = await Dataset.fromString('<http://ex/a> <http://ex/p> <http://ex/b> .', 'ntriples');
+const n3 = new N3Store(/* … RDF/JS quads from N3 … */);
+a.union(n3);         // works across libraries (foreign operand)
+a.intersection(n3);  // ditto
+a.difference(n3);
+a.contains(n3);
+a.equals(n3);
+```
+
+> `toCanonical` returns the **RDFC-1.0** (RDF Dataset Canonicalization) canonical
+> N-Quads — blank nodes relabelled to `_:c14nN`, lines canonically sorted — so two
+> datasets that are RDF-isomorphic (differ only in blank-node labels and/or quad
+> order) canonicalise byte-identically. `equals` is isomorphism-aware (it compares
+> canonical forms) and `contains` recognises a relabelled subgraph (a blank-node
+> homomorphism), so "differences in blank node labels are ignored" per the RDF/JS
+> spec. Backed by the engine's RDFC-1.0 implementation surfaced over wasm. (RDF-1.2
+> triple terms are outside the W3C RDFC-1.0 data model and `toCanonical` throws on
+> them.)
+
+Because the instance methods are
+synchronous, you obtain an instance through an **async factory** —
+`Dataset.create()` / `Dataset.fromString()` / `Dataset.fromQuads()` — each of
+which `await`s the wasm engine first. That is the lazy-load point: the
+~MB `.wasm` is fetched on the first `await Dataset.…`, never on import, and the
+cold start is paid at most once per page.
+
+This is what makes the GitHub-issue ESM snippet (#981) work — you can import the
+name directly in a browser `<script type="module">` from any ESM CDN, and the
+engine streams in only when you first build a dataset:
+
+```html
+<script type="module">
+  // From an ESM CDN (or a bundler import) — the ~MB wasm is lazily fetched by
+  // the first `Dataset.fromString(...)`, not by the import below.
+  import { Dataset, DataFactory as DF } from "https://esm.sh/@jeswr/sparq";
+
+  const ds = await Dataset.fromString(
+    "<http://ex/a> <http://ex/name> \"Alice\" .",
+    "ntriples",
+  );
+  console.log(ds.size); // 1
+
+  ds.add(DF.quad(DF.namedNode("http://ex/b"), DF.namedNode("http://ex/name"), DF.literal("Bob")));
+  for (const q of ds.match(null, DF.namedNode("http://ex/name"), null)) {
+    console.log(q.subject.value, q.object.value);
+  }
+
+  // Drop to the SPARQL engine when DatasetCore is not enough:
+  console.log(ds.store.queryBoolean("ASK { ?s ?p ?o }")); // true
+  ds.free();
+</script>
+```
+
+If you only need the low-level engine handle, the wasm-pack `--target web` glue
+is itself a real ESM module — `import init, { Store } from ".../wasm/sparq_wasm.js";
+await init();` — but `Dataset` (and `SparqStore`) is the ergonomic, memoised-init
+entry to prefer in an app.
 
 ### Talking to a sparq server: dictionary-fetch protocol
 
@@ -133,7 +282,11 @@ verified warm-up from `GET /dictionary/{dict-id}` for the *next* request.
   loaded with `options.dataset`; `size`/`heapBytes` always report the default
   graph (use `countQuads()` for dataset totals). `dataset` is not combinable
   with `compressed` yet.
-- CONSTRUCT / DESCRIBE / federated queries are not supported (tracked in beads — `bd list -l area:js`).
+- Federated (`SERVICE`) queries are not exposed at the JS wrapper layer (tracked in beads — `bd list -l area:js`).
+- `validate()` (SHACL) runs in-process and is best for small documents
+  (~10–100 triples); for large data graphs validate server-side via the
+  `sparq-server` HTTP `validate` path. It needs a `--features shacl` bundle
+  (shipped by default; `build:wasm:lean` omits it — see *Install / build*).
 - `REGEX`/`REPLACE` are compiled out of the wasm build (the engine's
   non-default `regex` cargo feature) to keep the bundle small — use
   `CONTAINS`/`STRSTARTS`/… or a custom build.
@@ -147,6 +300,15 @@ verified warm-up from `GET /dictionary/{dict-id}` for the *next* request.
   `fromCompressed` uses `node:zlib` in Node (which loops members) and
   `DecompressionStream` in the browser (single-member only); multi-frame
   **zstd** decodes fully everywhere via the bundled fzstd.
+- **SPARQL-injection guard.** `match()`/`countQuads()` build a query string and
+  `addQuads`/`applyDelta`/`fromQuads` build N-Quads, both embedding RDF/JS terms
+  via `termToNT`. Hostile term values cannot break out of their token: IRIs are
+  percent-encoded over the full `IRIREF`-illegal set (`< > " { } | ^` `` ` ``
+  `\` and `#x00–#x20`, so a `>` in an ACL-pointer IRI becomes `%3E`) and literal
+  values escape `"`, `\` and all control chars — the same rules QLever's lexer
+  enforces. This is proved end-to-end against the engine's real parser in
+  `test/injection.test.mjs`. Note percent-encoding is canonicalising: an IRI
+  value that *contains* illegal chars stores under its encoded form.
 
 ## Benchmarks
 

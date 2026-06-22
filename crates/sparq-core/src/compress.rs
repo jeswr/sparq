@@ -107,6 +107,37 @@ pub struct CompressedPerm {
     len: usize,
 }
 
+/// Encodes one block (`chunk`, 1..=`BLOCK` sorted rows) into `out`, appending its
+/// `count` varint, first row absolute, then per-row lexicographic deltas. Shared by the
+/// in-RAM [`CompressedPerm::encode`] and the streaming [`CompressedPermWriter`] so both
+/// emit a BYTE-IDENTICAL block stream. [OPUS-4.8] sq-vkz7
+#[inline]
+fn encode_block(chunk: &[[Id; 3]], out: &mut Vec<u8>) {
+    put_varint(out, chunk.len() as u64);
+    // First row absolute.
+    put_varint(out, chunk[0][0] as u64);
+    put_varint(out, chunk[0][1] as u64);
+    put_varint(out, chunk[0][2] as u64);
+    // Remaining rows: lexicographic delta vs the previous row.
+    for w in chunk.windows(2) {
+        let (p, r) = (w[0], w[1]);
+        let d0 = r[0] - p[0];
+        put_varint(out, d0 as u64);
+        if d0 == 0 {
+            let d1 = r[1] - p[1];
+            put_varint(out, d1 as u64);
+            if d1 == 0 {
+                put_varint(out, (r[2] - p[2]) as u64); // strictly increasing
+            } else {
+                put_varint(out, r[2] as u64); // col2 resets → absolute
+            }
+        } else {
+            put_varint(out, r[1] as u64); // cols 1,2 reset → absolute
+            put_varint(out, r[2] as u64);
+        }
+    }
+}
+
 impl CompressedPerm {
     /// Encodes a sorted permutation (rows already in this permutation's column order).
     pub fn encode(rows: &[[Id; 3]]) -> Self {
@@ -114,29 +145,7 @@ impl CompressedPerm {
         let mut blocks = Vec::with_capacity(rows.len() * 6);
         for chunk in rows.chunks(BLOCK) {
             dir.push((chunk[0], blocks.len() as u32));
-            put_varint(&mut blocks, chunk.len() as u64);
-            // First row absolute.
-            put_varint(&mut blocks, chunk[0][0] as u64);
-            put_varint(&mut blocks, chunk[0][1] as u64);
-            put_varint(&mut blocks, chunk[0][2] as u64);
-            // Remaining rows: lexicographic delta vs the previous row.
-            for w in chunk.windows(2) {
-                let (p, r) = (w[0], w[1]);
-                let d0 = r[0] - p[0];
-                put_varint(&mut blocks, d0 as u64);
-                if d0 == 0 {
-                    let d1 = r[1] - p[1];
-                    put_varint(&mut blocks, d1 as u64);
-                    if d1 == 0 {
-                        put_varint(&mut blocks, (r[2] - p[2]) as u64); // strictly increasing
-                    } else {
-                        put_varint(&mut blocks, r[2] as u64); // col2 resets → absolute
-                    }
-                } else {
-                    put_varint(&mut blocks, r[1] as u64); // cols 1,2 reset → absolute
-                    put_varint(&mut blocks, r[2] as u64);
-                }
-            }
+            encode_block(chunk, &mut blocks);
         }
         CompressedPerm { dir, blocks: Blocks::Owned(blocks), len: rows.len() }
     }
@@ -386,6 +395,153 @@ impl CompressedPerm {
     }
 }
 
+/// [OPUS-4.8] sq-vkz7 — STREAMING writer of the [`CompressedPerm`] on-disk format
+/// ([`FILE_MAGIC`] `SPQCPRM1`). Encodes the FoR+varint block stream as sorted rows arrive,
+/// so the external-memory build can emit compressed perms STRAIGHT FROM the merge tail —
+/// no raw-write-then-reopen-then-`decode_all`-then-`encode` recompress second pass over an
+/// 84+ GB index. The byte stream it produces is BYTE-IDENTICAL to
+/// `CompressedPerm::encode(rows).write_to(w)` for the same `rows` (proven in tests).
+///
+/// The format is `header[32] | directory | blocks`, so the directory (which we only finish
+/// once the last block is sealed) must physically precede the block stream. We therefore
+/// buffer the SPARSE directory in RAM (one 16-byte entry per [`BLOCK`] rows ≈ 0.13 B/triple
+/// — the same directory the open path already holds resident) and stream the block bytes to
+/// a side file; [`finish`](Self::finish) writes `header | directory` then appends the block
+/// side file. The block COPY is over the already-compressed stream (~2.5× smaller than raw),
+/// and there is no decode / re-sort — the saving the bead targets.
+#[cfg(feature = "mmap")]
+pub struct CompressedPermWriter {
+    /// One (first-triple, byte-offset-into-blocks) entry per sealed block.
+    dir: Vec<([Id; 3], u32)>,
+    /// The current (not-yet-sealed) block's rows, up to [`BLOCK`].
+    cur: Vec<[Id; 3]>,
+    /// Reusable scratch for one encoded block.
+    scratch: Vec<u8>,
+    /// The block stream, written to a side file as blocks are sealed. `None` only after
+    /// [`finish`](Self::finish) has taken it to close the write handle before the read.
+    body: Option<std::io::BufWriter<std::fs::File>>,
+    /// Path of the block side file (removed by [`finish`](Self::finish)).
+    body_path: std::path::PathBuf,
+    /// Running length of the block stream in bytes (the next block's byte offset).
+    blocks_len: u64,
+    /// Total rows pushed so far.
+    len: u64,
+}
+
+#[cfg(feature = "mmap")]
+impl CompressedPermWriter {
+    /// Creates a writer that will produce the compressed perm at `out`, staging the block
+    /// stream in a sibling temp file `<out>.blocks` (same directory ⇒ same filesystem, so
+    /// the final assembly copy never crosses devices).
+    pub fn create(out: &std::path::Path) -> std::io::Result<Self> {
+        let mut body_path = out.as_os_str().to_owned();
+        body_path.push(".blocks");
+        let body_path = std::path::PathBuf::from(body_path);
+        let body = std::io::BufWriter::new(std::fs::File::create(&body_path)?);
+        Ok(CompressedPermWriter {
+            dir: Vec::new(),
+            cur: Vec::with_capacity(BLOCK),
+            scratch: Vec::with_capacity(BLOCK * 6),
+            body: Some(body),
+            body_path,
+            blocks_len: 0,
+            len: 0,
+        })
+    }
+
+    /// Appends one row. Rows MUST arrive in this permutation's sorted column order and be
+    /// already deduplicated (the merge tail guarantees both); the delta encoder relies on
+    /// `row >= prev` and strictly-increasing within an equal-prefix run.
+    pub fn push(&mut self, row: [Id; 3]) -> std::io::Result<()> {
+        self.cur.push(row);
+        self.len += 1;
+        if self.cur.len() == BLOCK {
+            self.seal_block()?;
+        }
+        Ok(())
+    }
+
+    /// Seals the current full/partial block: records its directory entry then encodes it to
+    /// the block side file. A no-op if the current block is empty.
+    fn seal_block(&mut self) -> std::io::Result<()> {
+        if self.cur.is_empty() {
+            return Ok(());
+        }
+        // The directory byte-offset must fit u32, exactly as `CompressedPerm::encode`'s does
+        // (the directory stores `u32` offsets). A single perm's block stream is bounded by
+        // u32 by construction of the format; surface an error rather than silently truncate.
+        let off = u32::try_from(self.blocks_len).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "compressed perm: block stream exceeds 4 GiB (u32 directory offset overflow)",
+            )
+        })?;
+        self.dir.push((self.cur[0], off));
+        self.scratch.clear();
+        encode_block(&self.cur, &mut self.scratch);
+        let body = self.body.as_mut().expect("body present until finish() consumes the writer");
+        std::io::Write::write_all(body, &self.scratch)?;
+        self.blocks_len += self.scratch.len() as u64;
+        self.cur.clear();
+        Ok(())
+    }
+
+    /// Finishes the stream: seals any partial block, then writes the final `SPQCPRM1` file to
+    /// `out` (`header | directory | blocks`) and removes the block side file. For a non-empty
+    /// perm the bytes are identical to `CompressedPerm::encode(all_rows).write_to(out)`.
+    ///
+    /// EMPTY-PERM POLICY: when no rows were pushed, `out` is written as a ZERO-byte file
+    /// (NOT a bare 32-byte header), matching `TripleStore::save_compressed` which leaves an
+    /// unbuilt permutation raw-empty so `open` skips it by size. This keeps the streaming
+    /// build byte-identical to a raw build followed by `recompress`.
+    pub fn finish(mut self, out: &std::path::Path) -> std::io::Result<()> {
+        self.seal_block()?;
+        // Flush and CLOSE the block write handle before re-opening it for reading (portable;
+        // avoids a concurrent write+read handle to the same file). `take()` drops the inner
+        // `File` here rather than at end of scope.
+        let mut body = self.body.take().expect("body present until finish() consumes the writer");
+        std::io::Write::flush(&mut body)?;
+        drop(body);
+        if self.len == 0 {
+            // Unbuilt/empty perm: raw-empty file, like `save_compressed`'s `!rows.is_empty()`.
+            std::fs::File::create(out)?;
+            std::fs::remove_file(&self.body_path).ok();
+            return Ok(());
+        }
+        // Re-open the staged block stream for the assembly copy.
+        let mut body_rd = std::io::BufReader::new(std::fs::File::open(&self.body_path)?);
+        let mut w = std::io::BufWriter::new(std::fs::File::create(out)?);
+        {
+            use std::io::Write;
+            w.write_all(&FILE_MAGIC)?;
+            w.write_all(&self.len.to_le_bytes())?;
+            w.write_all(&(self.dir.len() as u64).to_le_bytes())?;
+            w.write_all(&self.blocks_len.to_le_bytes())?;
+            for &(key, off) in &self.dir {
+                for c in key {
+                    w.write_all(&c.to_le_bytes())?;
+                }
+                w.write_all(&off.to_le_bytes())?;
+            }
+        }
+        std::io::copy(&mut body_rd, &mut w)?;
+        std::io::Write::flush(&mut w)?;
+        drop(body_rd);
+        std::fs::remove_file(&self.body_path).ok();
+        Ok(())
+    }
+}
+
+#[cfg(feature = "mmap")]
+impl Drop for CompressedPermWriter {
+    fn drop(&mut self) {
+        // If `finish` was not called (e.g. a build error unwound past us), don't leak the
+        // staged block side file. `finish` consumes `self`, so reaching `drop` with a path
+        // still present means the writer was abandoned.
+        std::fs::remove_file(&self.body_path).ok();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +602,52 @@ mod tests {
         for &(lo, hi) in cases {
             assert_eq!(c.range(lo, hi), raw_range(lo, hi), "range mismatch for {lo:?}..={hi:?}");
         }
+    }
+
+    /// [OPUS-4.8] sq-vkz7 — for a NON-EMPTY perm the STREAMING [`CompressedPermWriter`] must
+    /// produce a file BYTE-IDENTICAL to the in-RAM `encode(rows).write_to(..)`. Covers block
+    /// boundaries (127/128/129), a partial last block, and a large run. The EMPTY case must
+    /// instead produce a zero-byte file (the `save_compressed`/`recompress` empty-perm rule).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn stream_writer_byte_identical_to_encode_write_to() {
+        let tmp = std::env::temp_dir().join(format!("sq_vkz7_stream_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        for &n in &[0usize, 1, 5, 127, 128, 129, 256, 1000, 5000] {
+            let rows = sample(n);
+
+            // Streaming writer to a file.
+            let out = tmp.join(format!("perm_{n}.bin"));
+            let mut w = CompressedPermWriter::create(&out).unwrap();
+            for &r in &rows {
+                w.push(r).unwrap();
+            }
+            w.finish(&out).unwrap();
+            let got = std::fs::read(&out).unwrap();
+
+            // The block side file must be cleaned up by finish() in every case.
+            let mut side = out.as_os_str().to_owned();
+            side.push(".blocks");
+            assert!(!std::path::Path::new(&side).exists(), "block side file leaked at n={n}");
+
+            if rows.is_empty() {
+                assert!(got.is_empty(), "empty perm must be a zero-byte file, got {} bytes", got.len());
+                continue;
+            }
+
+            // Reference: in-RAM encode then write_to a byte buffer — must match exactly.
+            let mut want = Vec::new();
+            CompressedPerm::encode(&rows).write_to(&mut want).unwrap();
+            assert_eq!(got, want, "stream vs encode+write_to byte mismatch at n={n}");
+
+            // And it must round-trip back through from_mmap to the same rows.
+            let f = std::fs::File::open(&out).unwrap();
+            // SAFETY: we own and just wrote this file; nothing else mutates it during the test.
+            let map = unsafe { memmap2::Mmap::map(&f) }.unwrap();
+            let perm = CompressedPerm::from_mmap(map).unwrap();
+            assert_eq!(perm.len(), rows.len(), "len mismatch at n={n}");
+            assert_eq!(perm.decode_all(), rows, "decoded rows mismatch at n={n}");
+        }
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

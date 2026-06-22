@@ -1,52 +1,71 @@
-//! sparq-introspect: **ontology/schema introspection** over a [`sparq_core::Graph`] —
-//! the effective schema a knowledge graph *actually uses*, mined from the store's
-//! sorted permutation indexes (GenAI phase 2, see `research/genai-design.md` §2 and
-//! `research/genai-ontology-introspection.md`).
-//!
-//! Everything is a **sorted scan, never a join-engine call**:
-//!
-//! - **Characteristic sets** (Neumann & Moerkotte, ICDE 2011): one SPO scan groups
-//!   subjects by their exact predicate set — subjects are contiguous, predicates within
-//!   a subject run are sorted, so the per-subject predicate list falls out of run
-//!   boundaries. Each distinct set carries its subject count and per-predicate triple
-//!   counts (the paper's structure: `count(C)` + per-predicate multiplicity).
-//! - **Schema summary**: class extents from the `rdf:type` block (one POS range),
-//!   per-class predicate usage with coverage ratios, per-predicate global stats
-//!   (triples, distinct subjects/objects, literal-vs-IRI object split, datatype
-//!   distribution, sample values), and **observed** domain/range histograms — the
-//!   most-common subject/object classes per predicate — alongside any **declared**
-//!   `rdfs:domain`/`rdfs:range` triples present.
-//! - **Vocabulary detection**: namespaces in use (IRIs split at the last `#`/`/`, the
-//!   same split the dictionary itself stores) with distinct-term counts, recognised
-//!   against a bundled table of well-known vocabularies.
-//!
-//! - **Cross-class join hints**: the `(subject_class) --predicate--> (object_class)`
-//!   edge table with per-edge triple counts ([`JoinHints`]), mined in the same SPO
-//!   scan — the join-cardinality signal beyond the per-predicate observed range.
-//!
-//! Outputs: the [`Introspection`] struct tree, [`Introspection::to_json`] (the machine
-//! surface for LLM grounding), [`Introspection::to_text_summary`] (a compact,
-//! most-important-first digest under a character budget — the prompt-ready "schema
-//! card" deck the design doc prescribes), [`Introspection::to_void`] (a W3C VoID
-//! dataset description, as N-Triples), and [`Introspection::schema_summary_for`] (a
-//! retrieval-mode digest scoped to a set of seed IRIs, for large-schema KGs).
-//!
-//! The crate is opt-in and read-only over the public `sparq-core` API; the default
-//! engine build does not include it and carries no introspection code.
+// [OPUS-4.8] sq-jxl0: single-source the crate overview from README.md so crates.io
+// (package.readme) and the docs.rs front page render identical content. The README's
+// rust fences are API-map sketches marked `ignore` (they reference an external graph).
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};
 use rustc_hash::FxHashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sparq_core::dict::{self, Id, TermParts, INLINE_BASE};
 use sparq_core::Graph;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
 const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
+// [OPUS-4.8] sq-lc3: the class-subsumption predicate driving ABSTAT-style type
+// minimalization. A `(C rdfs:subClassOf D)` triple makes `D` a superclass of `C`
+// (proper when `C ≠ D`); minimalization drops a subject's superclass types in favour
+// of its most-specific (minimal) types — see `BuildOptions::minimalize_types`.
+const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const VOID_NS: &str = "http://rdfs.org/ns/void#";
+/// [OPUS-4.8] sq-bde: the W3C SHACL namespace. [`Introspection::to_shacl`] exports each
+/// mined characteristic set as an `sh:NodeShape` under this namespace — a CS ≈ a node
+/// shape (Neumann & Moerkotte's per-entity-type predicate co-occurrence is exactly the
+/// "what properties does an entity of this kind carry, and how often" question SHACL's
+/// property shapes describe).
+const SHACL_NS: &str = "http://www.w3.org/ns/shacl#";
+/// [OPUS-4.8] sq-mr32 (federation A3/Z2): the **sparq characteristic-set** extension
+/// vocabulary. VoID has no native term for per-entity-type predicate co-occurrence
+/// statistics (the Neumann & Moerkotte characteristic sets sparq mines), so the served
+/// descriptor expresses them under this documented sparq namespace, alongside (not
+/// replacing) the standard VoID terms. A remote federation source-selector that does
+/// not understand it simply ignores these triples; one that does gets star/multi-join
+/// cardinality estimates far sharper than bare `void:propertyPartition` counts.
+///
+/// Terms (all under `<http://sparq.dev/ns/cs#>`):
+/// - `scs:CharacteristicSet` — the rdf:type of each characteristic-set node.
+/// - `scs:characteristicSet` — links the `void:Dataset` to one characteristic-set node.
+/// - `scs:distinctCharacteristicSets` — total distinct sets in the dataset (on the dataset).
+/// - `scs:subjects` — `count(C)`: subjects whose *exact* predicate set this is.
+/// - `scs:predicateStat` — links a set to one per-predicate statistic node.
+/// - `scs:avgMultiplicity` — `predicate_triples / subjects` for that predicate in the set.
+///
+/// Each per-predicate statistic node reuses `void:property` (the predicate IRI) and
+/// `void:triples` (Σ triples that predicate emits across the set's subjects), so a
+/// VoID-aware-but-cs-unaware client still reads a meaningful property partition.
+const CS_NS: &str = "http://sparq.dev/ns/cs#";
+
+/// [OPUS-4.8] sq-3n4: the conventional file extension for a persisted introspection
+/// sidecar — the mined effective schema as JSON, written next to the source dataset so
+/// later processes can produce summaries / VoID without re-mining the graph. See
+/// [`Introspection::save`]/[`Introspection::load`] and [`sidecar_path_for`].
+pub const SIDECAR_EXTENSION: &str = "introspect";
+
+/// [OPUS-4.8] sq-3n4: the conventional sidecar path for a dataset — the dataset path
+/// with [`SIDECAR_EXTENSION`] **appended** (not replacing the dataset's own extension),
+/// so `data/olympics.nt` ⇒ `data/olympics.nt.introspect`. Appending (rather than
+/// swapping the extension) keeps the sidecar unambiguous when two datasets differ only
+/// by extension (`g.nt` vs `g.ttl`) and mirrors how companion files like `*.nt.gz` read.
+pub fn sidecar_path_for(dataset: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    let p = dataset.as_ref();
+    let mut name = p.file_name().unwrap_or(p.as_os_str()).to_os_string();
+    name.push(".");
+    name.push(SIDECAR_EXTENSION);
+    p.with_file_name(name)
+}
 
 /// Well-known vocabularies, recognised by namespace: `(prefix, namespace, title)`.
 /// Bundled (offline, WASM-safe) — no network lookup.
@@ -138,6 +157,25 @@ pub struct BuildOptions {
     pub max_join_hints: usize,
     /// Sample values are truncated to this many characters.
     pub max_sample_chars: usize,
+    /// [OPUS-4.8] sq-lc3: **ABSTAT-style type minimalization** over the graph's
+    /// `rdfs:subClassOf` hierarchy. When `true`, before any pattern is mined each
+    /// subject's asserted type set is folded to its **minimal** (most-specific) types:
+    /// a type `D` is dropped from a subject iff the subject also carries some type `C`
+    /// for which `(C rdfs:subClassOf+ D)` holds and `C ≠ D` — i.e. `D` is a proper
+    /// superclass of an asserted (more specific) class of the same subject. The
+    /// subsumption relation is the transitive closure of the `rdfs:subClassOf` triples
+    /// **present in the graph** (no external ontology fetch, no OWL reasoning); cycles
+    /// are tolerated (mutually-`subClassOf` classes are treated as equivalent and none
+    /// is dropped). Minimalization is applied uniformly: it changes `class_instances`,
+    /// per-class predicate usage, characteristic-set `rdf:type` histograms, observed
+    /// domain/range, and the cross-class join hints — every pattern reads the same
+    /// minimalized type map. Untyped subjects, literal/blank type objects, and classes
+    /// with no `subClassOf` edge are unaffected.
+    ///
+    /// Default `false`: the mined schema reports **every** asserted type (the ABSTAT
+    /// "full" profile). This is opt-in and additive — it neither pulls a new dependency
+    /// nor changes the default output.
+    pub minimalize_types: bool,
 }
 
 impl Default for BuildOptions {
@@ -149,12 +187,15 @@ impl Default for BuildOptions {
             max_namespaces: 200,
             max_join_hints: 1000,
             max_sample_chars: 60,
+            // [OPUS-4.8] sq-lc3: report every asserted type by default; minimalization
+            // is opt-in.
+            minimalize_types: false,
         }
     }
 }
 
 /// An IRI with a count — the unit of every histogram in this crate.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Counted {
     pub iri: String,
     pub count: u64,
@@ -162,7 +203,7 @@ pub struct Counted {
 
 /// One distinct **characteristic set** (Neumann & Moerkotte): the exact set of
 /// predicates emitted by some group of subjects.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CharacteristicSet {
     /// The predicate IRIs, sorted lexicographically (deterministic across store
     /// builds — dictionary-id order varies with the build path).
@@ -179,7 +220,7 @@ pub struct CharacteristicSet {
 }
 
 /// The characteristic-set table: the retained top sets plus exact tail aggregates.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CharacteristicSets {
     /// Total number of *distinct* characteristic sets in the graph.
     pub distinct: u64,
@@ -191,7 +232,7 @@ pub struct CharacteristicSets {
 }
 
 /// Usage of one predicate on instances of one class.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClassPredicate {
     pub predicate: String,
     /// Instances of the class with at least one triple via this predicate.
@@ -200,10 +241,20 @@ pub struct ClassPredicate {
     pub triples: u64,
     /// `subjects / instances` of the class, in `[0, 1]`.
     pub coverage: f64,
+    /// [OPUS-4.8] sq-3n4: sample object values **scoped to this class** (literals
+    /// quoted, IRIs bare), bounded by [`BuildOptions::samples_per_predicate`]. Unlike
+    /// [`PredicateProfile::samples`] — which are global across every subject of the
+    /// predicate and so can show values that belong only to a *different*, larger class
+    /// (the "looks odd on minority classes" problem) — these are drawn only from triples
+    /// whose subject is an instance of *this* class. Selection is the lexicographically
+    /// smallest rendered distinct values among that class's objects, so it is
+    /// deterministic across store builds (dictionary-id order varies with the build
+    /// path).
+    pub samples: Vec<String>,
 }
 
 /// A class (an `rdf:type` object) and how its instances are described.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClassProfile {
     pub class: String,
     pub instances: u64,
@@ -212,7 +263,7 @@ pub struct ClassProfile {
 }
 
 /// Triple counts by object kind for one predicate (the literal-vs-IRI split).
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct ObjectKinds {
     pub iri: u64,
     pub literal: u64,
@@ -221,7 +272,7 @@ pub struct ObjectKinds {
 }
 
 /// Global statistics for one predicate.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PredicateProfile {
     pub predicate: String,
     pub triples: u64,
@@ -253,7 +304,7 @@ pub struct PredicateProfile {
 
 /// A namespace in use, with its distinct-term count and (when recognised) the
 /// well-known prefix and title from the bundled vocabulary table.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VocabularyUse {
     pub namespace: String,
     pub prefix: Option<String>,
@@ -263,7 +314,7 @@ pub struct VocabularyUse {
 }
 
 /// The detected vocabularies: top namespaces plus exact tail aggregates.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Vocabularies {
     /// Total number of distinct namespaces in the dictionary.
     pub distinct: u64,
@@ -281,7 +332,7 @@ pub struct Vocabularies {
 /// `(C, p, D)` cell is incremented. It quantifies which classes actually join through
 /// which predicate, the join-cardinality signal a planner or NL→SPARQL prompt wants
 /// beyond the per-predicate global observed range.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JoinHint {
     pub subject_class: String,
     pub predicate: String,
@@ -294,7 +345,7 @@ pub struct JoinHint {
 }
 
 /// The cross-class join-hint table: the retained top edges plus exact tail aggregates.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JoinHints {
     /// Total number of *distinct* `(C, p, D)` edges observed.
     pub distinct: u64,
@@ -307,7 +358,7 @@ pub struct JoinHints {
 
 /// The full introspection result. Build with [`Introspection::build`]; export with
 /// [`to_json`](Introspection::to_json) / [`to_text_summary`](Introspection::to_text_summary).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Introspection {
     pub triples: u64,
     /// Distinct subjects.
@@ -337,6 +388,20 @@ struct PredAcc {
     domains: FxHashMap<Id, u64>,
 }
 
+/// [OPUS-4.8] sq-3n4: per (class, predicate) accumulator — usage counts plus the
+/// class-scoped sample labels. `samples` holds the lex-smallest distinct rendered
+/// object values seen on triples of this predicate whose subject is an instance of the
+/// class (bounded by [`BuildOptions::samples_per_predicate`]).
+#[derive(Default)]
+struct ClassPredAcc {
+    /// Instances of the class with at least one triple via this predicate.
+    subjects: u64,
+    /// Total triples via this predicate whose subject is an instance of the class.
+    triples: u64,
+    /// Class-scoped sample object values, lex-smallest distinct first.
+    samples: Vec<String>,
+}
+
 /// Per-characteristic-set accumulator.
 /// Keep the `cap` lexicographically smallest sample strings, ascending — the
 /// selection (not just the order) is then independent of dictionary-id assignment.
@@ -350,6 +415,20 @@ fn keep_min_sample(samples: &mut Vec<String>, cap: usize, s: String) {
             samples.sort_unstable();
         }
     }
+}
+
+/// [OPUS-4.8] sq-3n4: as [`keep_min_sample`], but skips a value already retained — the
+/// per-class sample path feeds *every* triple's object (not the POS-collapsed distinct
+/// objects the per-predicate path sees), so the same value can arrive repeatedly; this
+/// keeps the retained set a set of **distinct** rendered values, matching the
+/// per-predicate samples' distinct-object semantics.
+fn keep_min_sample_distinct(samples: &mut Vec<String>, cap: usize, s: String) {
+    // A repeated value that is already retained, or one not smaller than the current
+    // max once the cap is full, contributes nothing — cheap guards before the insert.
+    if samples.contains(&s) {
+        return;
+    }
+    keep_min_sample(samples, cap, s);
 }
 
 struct CsAcc {
@@ -456,18 +535,44 @@ impl Introspection {
         let id_of = |iri: &str| graph.id_of(&Term::NamedNode(NamedNode::new_unchecked(iri)));
         let type_id = id_of(RDF_TYPE);
 
-        // ---- 1. Type map: subject -> class ids, class -> instance count. One range
-        // scan of the rdf:type block. Only IRI objects count as classes.
+        // ---- 1. Type map: subject -> class ids. One range scan of the rdf:type block.
+        // Only IRI objects count as classes.
         let mut subj_types: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
-        let mut class_instances: FxHashMap<Id, u64> = FxHashMap::default();
         if let Some(tid) = type_id {
             let scan = graph.store.scan(&[None, Some(tid), None]);
             for row in scan.rows.iter() {
                 let [s, _, c] = scan.to_spo(row);
                 if is_iri(graph, c) {
                     subj_types.entry(s).or_default().push(c);
-                    *class_instances.entry(c).or_default() += 1;
                 }
+            }
+        }
+
+        // [OPUS-4.8] sq-lc3: ABSTAT-style type minimalization over the graph's
+        // `rdfs:subClassOf` hierarchy. Opt-in (`BuildOptions::minimalize_types`) and
+        // applied here, once, so EVERY downstream pattern (class extents, per-class
+        // predicate usage, characteristic-set type histograms, observed domain/range,
+        // cross-class join hints) reads the same minimal type map. We fold each
+        // subject's asserted type set to its most-specific members: a type `D` is
+        // dropped iff the subject also carries some `C ≠ D` with `(C subClassOf+ D)` —
+        // i.e. `D` is a proper superclass of a more specific asserted class. The
+        // subsumption relation is the transitive closure of the `subClassOf` edges
+        // present in the graph; cycles are tolerated (treated as class equivalence, so
+        // neither member is dropped on account of the other).
+        if opts.minimalize_types && !subj_types.is_empty() {
+            if let Some(supers) = build_superclass_closure(graph) {
+                for types in subj_types.values_mut() {
+                    minimalize_type_set(types, &supers);
+                }
+            }
+        }
+
+        // class -> instance count, derived from the (possibly minimalized) type map so
+        // it stays consistent with every other pattern.
+        let mut class_instances: FxHashMap<Id, u64> = FxHashMap::default();
+        for classes in subj_types.values() {
+            for &c in classes {
+                *class_instances.entry(c).or_default() += 1;
             }
         }
 
@@ -478,7 +583,12 @@ impl Introspection {
         // one pass.
         let mut cs: FxHashMap<Box<[Id]>, CsAcc> = FxHashMap::default();
         let mut preds: FxHashMap<Id, PredAcc> = FxHashMap::default();
-        let mut class_preds: FxHashMap<Id, FxHashMap<Id, (u64, u64)>> = FxHashMap::default();
+        // [OPUS-4.8] sq-3n4: per (class, predicate): (subjects, triples, class-scoped
+        // sample labels). The samples are the lex-smallest distinct rendered objects
+        // among triples whose subject is an instance of the class — so a minority class
+        // shows ITS OWN representative values, not the predicate's global minimum (which
+        // can belong entirely to a different, larger class).
+        let mut class_preds: FxHashMap<Id, FxHashMap<Id, ClassPredAcc>> = FxHashMap::default();
         // Cross-class join hints: (subject_class, predicate, object_class) -> triples.
         // Filled in the same scan — when the subject is typed AND the object is a typed
         // IRI, the cell for every (C, p, D) the subject's/object's types span is bumped.
@@ -520,6 +630,22 @@ impl Introspection {
                                 }
                             }
                         }
+                        // [OPUS-4.8] sq-3n4: class-scoped sample labels. Render this
+                        // typed subject's object once and offer it to each of the
+                        // subject's classes' (class, predicate) sample sets — so a
+                        // minority class keeps its OWN representative values instead of
+                        // the predicate's global minimum. Rendered identically to the
+                        // global per-predicate samples; the distinct-keeping helper
+                        // matches their distinct-object semantics.
+                        let rendered = render_object_sample(graph, o3, opts.max_sample_chars);
+                        for &c in ts {
+                            let cp = class_preds.entry(c).or_default().entry(p).or_default();
+                            keep_min_sample_distinct(
+                                &mut cp.samples,
+                                opts.samples_per_predicate,
+                                rendered.clone(),
+                            );
+                        }
                     }
                     k += 1;
                 }
@@ -539,8 +665,8 @@ impl Introspection {
                     for &c in ts {
                         *pa.domains.entry(c).or_default() += 1;
                         let cp = class_preds.entry(c).or_default().entry(p).or_default();
-                        cp.0 += 1;
-                        cp.1 += ms[idx];
+                        cp.subjects += 1;
+                        cp.triples += ms[idx];
                     }
                 }
             }
@@ -600,70 +726,36 @@ impl Introspection {
                 }
                 let n = (k - i) as u64;
                 acc.distinct += 1;
+                // Kind / datatype / observed-range accounting (needs `n` + the parts).
                 if dict::is_inline(o) {
                     acc.kinds.literal += n;
                     *acc.datatypes.entry(XSD_INTEGER.to_string()).or_default() += n;
-                    keep_min_sample(
-                        &mut acc.samples,
-                        opts.samples_per_predicate,
-                        format!("\"{}\"", o - INLINE_BASE),
-                    );
                 } else {
                     match graph.dict.term_parts(o) {
-                        TermParts::Iri { prefix, suffix } => {
+                        TermParts::Iri { .. } => {
                             acc.kinds.iri += n;
                             if let Some(ts) = subj_types.get(&o) {
                                 for &c in ts {
                                     *acc.ranges.entry(c).or_default() += 1;
                                 }
                             }
-                            keep_min_sample(
-                                &mut acc.samples,
-                                opts.samples_per_predicate,
-                                truncate_chars(
-                                    &format!("{prefix}{suffix}"),
-                                    opts.max_sample_chars,
-                                ),
-                            );
                         }
-                        TermParts::Lit {
-                            value,
-                            datatype,
-                            lang,
-                        } => {
+                        TermParts::Lit { datatype, .. } => {
                             acc.kinds.literal += n;
                             *acc.datatypes.entry(datatype.to_string()).or_default() += n;
-                            let rendered = match lang {
-                                Some(l) => format!("\"{value}\"@{l}"),
-                                None => format!("\"{value}\""),
-                            };
-                            keep_min_sample(
-                                &mut acc.samples,
-                                opts.samples_per_predicate,
-                                truncate_chars(&rendered, opts.max_sample_chars),
-                            );
                         }
-                        TermParts::Blank(b) => {
-                            acc.kinds.blank += n;
-                            keep_min_sample(
-                                &mut acc.samples,
-                                opts.samples_per_predicate,
-                                truncate_chars(&format!("_:{b}"), opts.max_sample_chars),
-                            );
-                        }
-                        TermParts::Triple(_) => {
-                            acc.kinds.triple_term += n;
-                            keep_min_sample(
-                                &mut acc.samples,
-                                opts.samples_per_predicate,
-                                truncate_chars(
-                                    &graph.dict.term(o).to_string(),
-                                    opts.max_sample_chars,
-                                ),
-                            );
-                        }
+                        TermParts::Blank(_) => acc.kinds.blank += n,
+                        TermParts::Triple(_) => acc.kinds.triple_term += n,
                     }
                 }
+                // Sample label — rendered by the shared helper so the global samples and
+                // the per-class samples ([OPUS-4.8] sq-3n4) are byte-identical. Distinct
+                // objects are already run-collapsed here, so `keep_min_sample` suffices.
+                keep_min_sample(
+                    &mut acc.samples,
+                    opts.samples_per_predicate,
+                    render_object_sample(graph, o, opts.max_sample_chars),
+                );
                 i = k;
             }
             objs.insert(p, acc);
@@ -752,11 +844,12 @@ impl Introspection {
                     .get(&c)
                     .map(|m| {
                         m.iter()
-                            .map(|(&p, &(subj, tri))| ClassPredicate {
+                            .map(|(&p, cp)| ClassPredicate {
                                 predicate: iri_str(p),
-                                subjects: subj,
-                                triples: tri,
-                                coverage: subj as f64 / instances.max(1) as f64,
+                                subjects: cp.subjects,
+                                triples: cp.triples,
+                                coverage: cp.subjects as f64 / instances.max(1) as f64,
+                                samples: cp.samples.clone(),
                             })
                             .collect()
                     })
@@ -915,6 +1008,39 @@ impl Introspection {
         serde_json::to_string_pretty(self).expect("introspection serialises to JSON")
     }
 
+    /// [OPUS-4.8] sq-3n4: parses a persisted introspection back from the JSON
+    /// [`to_json`](Introspection::to_json) produced — the in-memory inverse of
+    /// [`save`](Introspection::save)/[`load`](Introspection::load) for callers that hold
+    /// the bytes themselves (e.g. a WASM tab that cached the sidecar in IndexedDB). Once
+    /// rehydrated, every O(output) export — [`to_text_summary`](Introspection::to_text_summary),
+    /// [`schema_summary_for`](Introspection::schema_summary_for),
+    /// [`to_void`](Introspection::to_void), … — runs off the struct with **no graph
+    /// rescan**, the whole point of the sidecar.
+    pub fn from_json(json: &str) -> serde_json::Result<Introspection> {
+        serde_json::from_str(json)
+    }
+
+    /// [OPUS-4.8] sq-3n4: writes the introspection to a persisted **`*.introspect`
+    /// sidecar** — the mined effective schema as JSON, alongside the source graph — so a
+    /// later process can produce summaries / VoID / retrieval-mode cards **without
+    /// rescanning the graph** ([`build`](Introspection::build) is `O(|G| + |dict|)`;
+    /// reloading the sidecar is `O(output)`). The conventional extension is
+    /// [`SIDECAR_EXTENSION`] (`.introspect`); see [`sidecar_path_for`] to derive it from
+    /// a dataset path. The format is exactly [`to_json`](Introspection::to_json)'s, so a
+    /// sidecar is also a plain JSON document any other tool can read.
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_json())
+    }
+
+    /// [OPUS-4.8] sq-3n4: loads a persisted [`save`](Introspection::save) sidecar. A
+    /// malformed sidecar surfaces as [`std::io::ErrorKind::InvalidData`] (so the one
+    /// `io::Result` covers both the read and the parse). Round-trips
+    /// [`save`](Introspection::save) exactly.
+    pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Introspection> {
+        let json = std::fs::read_to_string(path)?;
+        Self::from_json(&json).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
     /// Emits a [W3C VoID](https://www.w3.org/TR/void/) description of the dataset as
     /// **N-Triples** (a syntactic subset of Turtle, so the output parses as either —
     /// no serializer dependency, oxrdf renders every term RFC-correctly).
@@ -1000,6 +1126,181 @@ impl Introspection {
         out
     }
 
+    /// [OPUS-4.8] sq-mr32 (federation A3/Z2): the VoID description (`to_void`) **plus**
+    /// the characteristic-set source statistics, as one N-Triples document.
+    ///
+    /// This is the served federation-descriptor surface: it is a strict superset of
+    /// `to_void` — every standard VoID triple is emitted unchanged — followed by the
+    /// characteristic-set extension (see `CS_NS`). sparq already mines these sets
+    /// (Neumann & Moerkotte's per-entity-type predicate co-occurrence + per-predicate
+    /// multiplicity); exposing them lets a remote, CostFed/Odyssey-class source-selector
+    /// estimate star- and multi-join cardinalities against this node far more accurately
+    /// than the bare `void:propertyPartition` counts allow.
+    ///
+    /// Shape, per retained characteristic set (`self.characteristic_sets.sets`, already
+    /// bounded by [`BuildOptions::max_char_sets`] and ordered by descending subject
+    /// count — so the served document is bounded and deterministic):
+    ///
+    /// ```text
+    /// <dataset> scs:characteristicSet _:csN .
+    /// <dataset> scs:distinctCharacteristicSets "<distinct>"^^xsd:integer .
+    /// _:csN a scs:CharacteristicSet ;
+    ///        scs:subjects "<count(C)>"^^xsd:integer ;
+    ///        scs:predicateStat _:csN_M .
+    /// _:csN_M void:property <predicate> ;
+    ///          void:triples "<Σ triples>"^^xsd:integer ;
+    ///          scs:avgMultiplicity "<triples/subjects>"^^xsd:decimal .
+    /// ```
+    ///
+    /// The elided long tail is summarised on the dataset (`scs:distinctCharacteristicSets`
+    /// is the EXACT distinct-set count, not just the retained count, so a consumer knows
+    /// whether the served sets are complete). Reuses `void:property`/`void:triples` on the
+    /// per-predicate nodes so a VoID-aware client still reads them as property partitions.
+    pub fn to_void_with_cs(&self, dataset_iri: &str) -> String {
+        use std::fmt::Write as _;
+        let mut out = self.to_void(dataset_iri);
+        let ds = NamedNode::new_unchecked(dataset_iri);
+        let cs = |local: &str| format!("{CS_NS}{local}");
+        let v = |local: &str| format!("{VOID_NS}{local}");
+        let iri = |s: &str| NamedNode::new_unchecked(s).to_string();
+        let int = |n: u64| Literal::new_typed_literal(n.to_string(), xsd::INTEGER).to_string();
+        let dec = |val: &str| Literal::new_typed_literal(val.to_string(), xsd::DECIMAL).to_string();
+
+        // Dataset-level: the EXACT distinct-set count (independent of how many were
+        // retained for the served partitions), so a consumer knows the tail exists.
+        let _ = writeln!(
+            out,
+            "{ds} <{}> {} .",
+            cs("distinctCharacteristicSets"),
+            int(self.characteristic_sets.distinct)
+        );
+
+        // One node per retained characteristic set. Blank-node labels are local to this
+        // document and distinct from the VoID partitions' `_:cN`/`_:pN` (here `_:csN`,
+        // `_:csN_M`), so the two blank-node spaces never collide.
+        for (si, set) in self.characteristic_sets.sets.iter().enumerate() {
+            let cnode = format!("_:cs{si}");
+            let _ = writeln!(out, "{ds} <{}> {cnode} .", cs("characteristicSet"));
+            let _ = writeln!(out, "{cnode} <{RDF_TYPE}> <{}> .", cs("CharacteristicSet"));
+            let _ = writeln!(out, "{cnode} <{}> {} .", cs("subjects"), int(set.subjects));
+            for (pi, (pred, &triples)) in set
+                .predicates
+                .iter()
+                .zip(&set.predicate_triples)
+                .enumerate()
+            {
+                let pnode = format!("_:cs{si}_{pi}");
+                let _ = writeln!(out, "{cnode} <{}> {pnode} .", cs("predicateStat"));
+                let _ = writeln!(out, "{pnode} <{}> {} .", v("property"), iri(pred));
+                let _ = writeln!(out, "{pnode} <{}> {} .", v("triples"), int(triples));
+                // avg multiplicity = triples / subjects, rendered as a fixed-precision
+                // xsd:decimal (subjects >= 1 for any retained set).
+                let mult = triples as f64 / set.subjects.max(1) as f64;
+                let _ = writeln!(
+                    out,
+                    "{pnode} <{}> {} .",
+                    cs("avgMultiplicity"),
+                    dec(&format!("{mult:.4}"))
+                );
+            }
+        }
+        out
+    }
+
+    /// [OPUS-4.8] sq-bde: export each mined characteristic set as a W3C **SHACL node
+    /// shape**, returned as one N-Triples document (valid Turtle).
+    ///
+    /// A characteristic set (Neumann & Moerkotte: the exact set of predicates a group of
+    /// subjects emits, with per-predicate multiplicity) maps almost one-to-one onto an
+    /// `sh:NodeShape`: "an entity of this kind carries exactly these properties, this
+    /// many times". The mined statistics are derived **only from what the data actually
+    /// asserts**, so every constraint emitted is one the current graph already satisfies
+    /// — the shapes describe the effective schema, they are not an aspirational contract.
+    /// (A consumer who wants a stricter contract edits the generated shapes; a CS is the
+    /// data-grounded floor.)
+    ///
+    /// Per retained set (`self.characteristic_sets.sets`, already bounded by
+    /// [`BuildOptions::max_char_sets`] and ordered by descending subject count, so the
+    /// document is bounded and deterministic):
+    ///
+    /// ```text
+    /// _:shapeN a sh:NodeShape ;
+    ///     sh:targetClass <C> ;              # one per class universal to the set (see below)
+    ///     scs:subjects "<count(C)>"^^xsd:integer ;   # provenance: how many subjects
+    ///     sh:property _:shapeN_M .
+    /// _:shapeN_M a sh:PropertyShape ;
+    ///     sh:path <predicate> ;
+    ///     sh:minCount 1 ;                   # always: every subject in the set emits it
+    ///     sh:maxCount 1 .                   # ONLY when the set's avg multiplicity is 1
+    /// ```
+    ///
+    /// Soundness of the cardinality constraints (each holds for *every* subject in the
+    /// set, by the definition of a characteristic set):
+    /// - `sh:minCount 1` — a subject is in this set iff it emits **exactly** this
+    ///   predicate set, so each listed predicate occurs at least once on every subject.
+    /// - `sh:maxCount 1` — emitted only when `predicate_triples[i] == subjects`, i.e. the
+    ///   summed occurrence count equals the subject count. Since each subject emits the
+    ///   predicate at least once, an equal sum forces exactly one per subject. Any larger
+    ///   sum (avg multiplicity > 1) means some subject is multi-valued, so no `sh:maxCount`
+    ///   is emitted — never an unsound upper bound.
+    ///
+    /// `sh:targetClass <C>` is emitted only for a class **universal** to the set — one
+    /// whose subject count within the set equals the set's total subject count, so every
+    /// instance the shape would target genuinely has this exact predicate set. (The
+    /// per-set `classes` histogram is bounded by [`BuildOptions::max_classes_per_histogram`];
+    /// a universal class with count == subjects is necessarily retained, as it is the most
+    /// common.) `rdf:type` itself is expressed through targeting, so it is **not** repeated
+    /// as an `sh:property`. A set whose subjects share no universal class (untyped or
+    /// heterogeneous entities) yields a **target-less** node shape — still a valid,
+    /// reusable schema template, just not auto-applied to any class.
+    ///
+    /// The `scs:subjects` provenance triple (see `CS_NS`) records the support behind each
+    /// shape; a SHACL processor that does not know the term simply ignores it.
+    pub fn to_shacl(&self) -> String {
+        use std::fmt::Write as _;
+        let sh = |local: &str| format!("{SHACL_NS}{local}");
+        let cs = |local: &str| format!("{CS_NS}{local}");
+        let iri = |s: &str| NamedNode::new_unchecked(s).to_string();
+        let int = |n: u64| Literal::new_typed_literal(n.to_string(), xsd::INTEGER).to_string();
+
+        let mut out = String::new();
+        for (si, set) in self.characteristic_sets.sets.iter().enumerate() {
+            let snode = format!("_:shape{si}");
+            let _ = writeln!(out, "{snode} <{RDF_TYPE}> <{}> .", sh("NodeShape"));
+            // Provenance: subjects backing this shape (the set's support count).
+            let _ = writeln!(out, "{snode} <{}> {} .", cs("subjects"), int(set.subjects));
+
+            // sh:targetClass for every class UNIVERSAL to the set (count == subjects), so
+            // each targeted instance genuinely carries this exact predicate set.
+            for c in &set.classes {
+                if c.count == set.subjects {
+                    let _ = writeln!(out, "{snode} <{}> {} .", sh("targetClass"), iri(&c.iri));
+                }
+            }
+
+            // One sh:property per predicate (rdf:type is carried by sh:targetClass, not
+            // repeated as a property shape).
+            let mut pi = 0u64;
+            for (pred, &triples) in set.predicates.iter().zip(&set.predicate_triples) {
+                if pred == RDF_TYPE {
+                    continue;
+                }
+                let pnode = format!("_:shape{si}_{pi}");
+                pi += 1;
+                let _ = writeln!(out, "{snode} <{}> {pnode} .", sh("property"));
+                let _ = writeln!(out, "{pnode} <{RDF_TYPE}> <{}> .", sh("PropertyShape"));
+                let _ = writeln!(out, "{pnode} <{}> {} .", sh("path"), iri(pred));
+                // Always: every subject in the set emits this predicate at least once.
+                let _ = writeln!(out, "{pnode} <{}> {} .", sh("minCount"), int(1));
+                // Exactly-one only when the summed occurrences equal the subject count.
+                if triples == set.subjects {
+                    let _ = writeln!(out, "{pnode} <{}> {} .", sh("maxCount"), int(1));
+                }
+            }
+        }
+        out
+    }
+
     /// Renders a compact, prompt-ready text digest under `budget_chars` characters,
     /// most important information first: dataset totals, then a prefix glossary of
     /// exactly the namespaces the summary uses, then classes (with per-class predicate
@@ -1040,7 +1341,11 @@ impl Introspection {
                     } else {
                         String::new()
                     };
-                    let hint = self.predicate_hint(&cp.predicate, &mut prefixes);
+                    let hint = self.predicate_hint(
+                        &cp.predicate,
+                        cp.samples.first().map(|s| s.as_str()),
+                        &mut prefixes,
+                    );
                     body.push(format!(
                         "- {} — {}/{} subjects ({pct}%{mult}){hint}",
                         prefixes.compact(&cp.predicate),
@@ -1150,9 +1455,18 @@ impl Introspection {
     }
 
     /// A short range hint for a predicate line in the class section: the dominant
-    /// observed range class, else the dominant literal datatype, plus one sample —
-    /// from the predicate's GLOBAL profile (per-class counts, global hints).
-    fn predicate_hint(&self, predicate: &str, prefixes: &mut PrefixAssigner) -> String {
+    /// observed range class, else the dominant literal datatype (from the predicate's
+    /// GLOBAL profile), plus one sample. [OPUS-4.8] sq-3n4: when `class_sample` is
+    /// supplied (the class-scoped sample for this predicate) it is preferred for the
+    /// `e.g.` example — so a minority class shows ITS OWN representative value rather
+    /// than the predicate's global minimum, which may belong only to a larger class; the
+    /// global sample is the fallback when the class has none.
+    fn predicate_hint(
+        &self,
+        predicate: &str,
+        class_sample: Option<&str>,
+        prefixes: &mut PrefixAssigner,
+    ) -> String {
         let Some(p) = self.predicates.iter().find(|p| p.predicate == predicate) else {
             return String::new();
         };
@@ -1162,7 +1476,7 @@ impl Introspection {
         } else if let Some(dt) = p.datatypes.first() {
             hint.push_str(&format!(" → {}", prefixes.compact(&dt.iri)));
         }
-        if let Some(s) = p.samples.first() {
+        if let Some(s) = class_sample.or_else(|| p.samples.first().map(|s| s.as_str())) {
             hint.push_str(&format!(", e.g. {}", prefixes.compact(s)));
         }
         hint
@@ -1175,7 +1489,7 @@ impl Introspection {
     /// it participates in (as subject or object); a seed naming a **predicate** pulls
     /// that predicate's global profile. Only the matched slice is rendered, under
     /// `budget_chars`, most-relevant-first, with the same prefix glossary discipline as
-    /// [`to_text_summary`].
+    /// `to_text_summary`.
     ///
     /// This is struct-level scoping (it filters the already-mined profiles by IRI);
     /// it does not re-scan the graph, so it cannot expand to neighbours the build did
@@ -1203,7 +1517,11 @@ impl Introspection {
                     .take(12)
                 {
                     let pct = (cp.coverage * 100.0).round() as u64;
-                    let hint = self.predicate_hint(&cp.predicate, &mut prefixes);
+                    let hint = self.predicate_hint(
+                        &cp.predicate,
+                        cp.samples.first().map(|s| s.as_str()),
+                        &mut prefixes,
+                    );
                     body.push(format!(
                         "- {} — {}/{} subjects ({pct}%){hint}",
                         prefixes.compact(&cp.predicate),
@@ -1310,6 +1628,134 @@ impl Introspection {
 /// Whether a dictionary id names an IRI (inline ids are integers, never IRIs).
 fn is_iri(graph: &Graph, id: Id) -> bool {
     !dict::is_inline(id) && matches!(graph.dict.term_parts(id), TermParts::Iri { .. })
+}
+
+/// [OPUS-4.8] sq-lc3: build the **transitive** superclass relation from the graph's
+/// `rdfs:subClassOf` triples — `supers[c]` is the set of classes strictly above `c`
+/// (every `d` with `c subClassOf+ d`, excluding `c` itself). Returns `None` when the
+/// graph carries no `rdfs:subClassOf` predicate at all (the common case — minimalization
+/// is then a no-op and the caller skips it).
+///
+/// Only IRI–IRI `subClassOf` edges are considered (literal/blank class terms are
+/// ignored). The closure is computed by repeated relaxation over the direct edges until
+/// a fixpoint, so multi-step chains (`A ⊑ B ⊑ C` ⇒ `C ∈ supers[A]`) and cycles both
+/// settle: in a cycle every member ends up in every other member's superclass set, so
+/// [`minimalize_type_set`] — which never drops a class that is *also* a superclass of
+/// the class it would be dropped for — keeps both, treating them as equivalent.
+fn build_superclass_closure(graph: &Graph) -> Option<FxHashMap<Id, FxHashMap<Id, ()>>> {
+    let sub_id = graph.id_of(&Term::NamedNode(NamedNode::new_unchecked(RDFS_SUBCLASS_OF)))?;
+    // Direct edges: c -> { d : (c subClassOf d) }.
+    let mut direct: FxHashMap<Id, FxHashMap<Id, ()>> = FxHashMap::default();
+    let scan = graph.store.scan(&[None, Some(sub_id), None]);
+    for row in scan.rows.iter() {
+        let [c, _, d] = scan.to_spo(row);
+        if c != d && is_iri(graph, c) && is_iri(graph, d) {
+            direct.entry(c).or_default().insert(d, ());
+        }
+    }
+    drop(scan);
+    if direct.is_empty() {
+        // The predicate exists in the dictionary but no usable edge was asserted.
+        return Some(FxHashMap::default());
+    }
+
+    // Transitive closure by fixpoint relaxation over the direct edges. Graphs carry
+    // few `subClassOf` edges relative to data triples, so a naive O(edges × iterations)
+    // pass is ample (and avoids any heavy graph-algorithm dependency — core stays lean).
+    let mut supers = direct.clone();
+    let keys: Vec<Id> = supers.keys().copied().collect();
+    loop {
+        let mut changed = false;
+        for &c in &keys {
+            // Pull every superclass-of-a-superclass into c's set. Snapshot the current
+            // closure parents to avoid borrowing `supers` mutably and immutably at once.
+            let parents: Vec<Id> = supers[&c].keys().copied().collect();
+            let mut additions: Vec<Id> = Vec::new();
+            for p in parents {
+                if let Some(grand) = supers.get(&p) {
+                    for &g in grand.keys() {
+                        if g != c && !supers[&c].contains_key(&g) {
+                            additions.push(g);
+                        }
+                    }
+                }
+            }
+            if !additions.is_empty() {
+                let set = supers.get_mut(&c).expect("c is a known key");
+                for g in additions {
+                    set.insert(g, ());
+                }
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Some(supers)
+}
+
+/// [OPUS-4.8] sq-lc3: fold one subject's asserted type list to its **minimal**
+/// (most-specific) members. A type `d` is removed iff some *other* type `c` in the same
+/// asserted list has `d` among its strict superclasses (`c subClassOf+ d`) AND `c` is
+/// not itself subsumed by `d` (the cycle / mutual-equivalence guard — when `c` and `d`
+/// subsume each other neither is dropped). Order is preserved for the survivors;
+/// duplicates already present in the list are also collapsed.
+fn minimalize_type_set(types: &mut Vec<Id>, supers: &FxHashMap<Id, FxHashMap<Id, ()>>) {
+    if types.len() <= 1 {
+        return;
+    }
+    // Snapshot the original set so the "dropped because a more specific sibling exists"
+    // test is against the full asserted set, not a partially-pruned one.
+    let original: Vec<Id> = types.clone();
+    let mut seen: FxHashMap<Id, ()> = FxHashMap::default();
+    types.retain(|&d| {
+        // Collapse duplicates deterministically (keep first occurrence).
+        if seen.insert(d, ()).is_some() {
+            return false;
+        }
+        // Keep `d` unless some sibling `c` is strictly more specific than `d`.
+        let dropped = original.iter().any(|&c| {
+            if c == d {
+                return false;
+            }
+            let c_subclass_of_d = supers.get(&c).is_some_and(|s| s.contains_key(&d));
+            let d_subclass_of_c = supers.get(&d).is_some_and(|s| s.contains_key(&c));
+            // `c` is a proper subclass of `d` (and not mutually equivalent) ⇒ `d` is a
+            // superclass type that ABSTAT drops in favour of the minimal `c`.
+            c_subclass_of_d && !d_subclass_of_c
+        });
+        !dropped
+    });
+}
+
+/// [OPUS-4.8] sq-3n4: renders an object id to the sample-string form used by every
+/// histogram in this crate — literals quoted (`"v"`, `"v"@en`), IRIs bare, blanks
+/// `_:b`, triple terms via the dict's Display — truncated to `max_chars`. Factored out
+/// of the per-predicate POS scan so the per-class sample labels render objects
+/// byte-for-byte identically (same selection key, same truncation).
+fn render_object_sample(graph: &Graph, o: Id, max_chars: usize) -> String {
+    if dict::is_inline(o) {
+        return format!("\"{}\"", o - INLINE_BASE);
+    }
+    match graph.dict.term_parts(o) {
+        TermParts::Iri { prefix, suffix } => {
+            truncate_chars(&format!("{prefix}{suffix}"), max_chars)
+        }
+        TermParts::Lit {
+            value,
+            lang,
+            datatype: _,
+        } => {
+            let rendered = match lang {
+                Some(l) => format!("\"{value}\"@{l}"),
+                None => format!("\"{value}\""),
+            };
+            truncate_chars(&rendered, max_chars)
+        }
+        TermParts::Blank(b) => truncate_chars(&format!("_:{b}"), max_chars),
+        TermParts::Triple(_) => truncate_chars(&graph.dict.term(o).to_string(), max_chars),
+    }
 }
 
 /// Truncates to `max` characters on a char boundary, appending `…` when cut.
@@ -1499,6 +1945,100 @@ mod tests {
         let company = &ix.classes[1];
         assert_eq!(company.class, ex("Company"));
         assert_eq!(company.instances, 1);
+    }
+
+    // [OPUS-4.8] sq-lc3: ABSTAT-style type minimalization over rdfs:subClassOf.
+    #[test]
+    fn minimalize_types_keeps_only_the_minimal_class() {
+        // The bead's olympics shape: a subject typed both as a subclass and its
+        // declared superclass (dbo:SportsEvent rdfs:subClassOf dbo:Sport). Here
+        // :swimming100m is typed both :SportsEvent and :Sport, with
+        // :SportsEvent rdfs:subClassOf :Sport.
+        let g = graph(
+            ":swimming100m rdf:type :SportsEvent , :Sport ; :name \"100m\" .
+             :SportsEvent rdfs:subClassOf :Sport .",
+        );
+
+        // Default (minimalize_types = false): BOTH types are reported.
+        let full = Introspection::build(&g);
+        let full_classes: Vec<&str> = full.classes.iter().map(|c| c.class.as_str()).collect();
+        assert!(
+            full_classes.contains(&ex("SportsEvent").as_str())
+                && full_classes.contains(&ex("Sport").as_str()),
+            "without minimalization both the subclass and superclass type appear: {:?}",
+            full_classes
+        );
+
+        // Opt-in minimalization: only the minimal (most-specific) type survives.
+        let opts = BuildOptions {
+            minimalize_types: true,
+            ..BuildOptions::default()
+        };
+        let min = Introspection::build_with(&g, &opts);
+        let min_classes: Vec<&str> = min.classes.iter().map(|c| c.class.as_str()).collect();
+        assert_eq!(
+            min_classes,
+            vec![ex("SportsEvent").as_str()],
+            "minimalization drops the superclass :Sport, keeping only :SportsEvent"
+        );
+        // The surviving class still carries the subject's predicate usage.
+        let se = &min.classes[0];
+        assert_eq!(se.instances, 1);
+        assert!(se.predicates.iter().any(|p| p.predicate == ex("name")));
+
+        // The characteristic set's rdf:type histogram is likewise minimal.
+        let cs = &min.characteristic_sets.sets[0];
+        let cs_classes: Vec<&str> = cs.classes.iter().map(|c| c.iri.as_str()).collect();
+        assert_eq!(cs_classes, vec![ex("SportsEvent").as_str()]);
+    }
+
+    // [OPUS-4.8] sq-lc3: minimalization follows multi-step subClassOf chains and does
+    // not cross-contaminate independent subjects.
+    #[test]
+    fn minimalize_types_chain_and_independence() {
+        // Chain :C ⊑ :B ⊑ :A. A subject typed all three folds to :C only.
+        // A second, independent subject typed only :A keeps :A (it has no more
+        // specific sibling).
+        let g = graph(
+            ":x rdf:type :A , :B , :C .
+             :y rdf:type :A .
+             :C rdfs:subClassOf :B . :B rdfs:subClassOf :A .",
+        );
+        let opts = BuildOptions {
+            minimalize_types: true,
+            ..BuildOptions::default()
+        };
+        let ix = Introspection::build_with(&g, &opts);
+        // :C: 1 instance (x). :A: 1 instance (y). :B: dropped entirely.
+        let c = ix.classes.iter().find(|p| p.class == ex("C")).unwrap();
+        assert_eq!(c.instances, 1);
+        let a = ix.classes.iter().find(|p| p.class == ex("A")).unwrap();
+        assert_eq!(a.instances, 1);
+        assert!(
+            ix.classes.iter().all(|p| p.class != ex("B")),
+            "transitive superclass :B is dropped for x and was never the minimal type"
+        );
+    }
+
+    // [OPUS-4.8] sq-lc3: a subClassOf cycle (mutually-equivalent classes) is tolerated —
+    // neither member is dropped.
+    #[test]
+    fn minimalize_types_tolerates_cycles() {
+        let g = graph(
+            ":x rdf:type :P , :Q .
+             :P rdfs:subClassOf :Q . :Q rdfs:subClassOf :P .",
+        );
+        let opts = BuildOptions {
+            minimalize_types: true,
+            ..BuildOptions::default()
+        };
+        let ix = Introspection::build_with(&g, &opts);
+        let names: Vec<&str> = ix.classes.iter().map(|c| c.class.as_str()).collect();
+        assert!(
+            names.contains(&ex("P").as_str()) && names.contains(&ex("Q").as_str()),
+            "mutually-subClassOf classes are equivalent; neither is dropped: {:?}",
+            names
+        );
     }
 
     #[test]
@@ -1856,6 +2396,223 @@ mod tests {
         assert!(nt2.contains("http://xmlns.com/foaf/0.1/Person"));
     }
 
+    /// [OPUS-4.8] sq-mr32 (federation A3/Z2): the VoID+CS export is a strict superset of
+    /// `to_void` (every standard VoID triple unchanged) plus the characteristic-set
+    /// statistics under the `scs:` extension, and the whole document re-parses as valid
+    /// RDF.
+    #[test]
+    fn void_with_cs_superset_and_carries_char_sets() {
+        // alice/bob share the set {type, name}; carol has {type, name, worksAt}.
+        let g = graph(
+            ":alice rdf:type foaf:Person ; foaf:name \"Alice\" .
+             :bob   rdf:type foaf:Person ; foaf:name \"Bob\" .
+             :carol rdf:type foaf:Person ; foaf:name \"Carol\" ; :worksAt :acme .",
+        );
+        let ix = Introspection::build(&g);
+        let void = ix.to_void("http://ex.org/dataset");
+        let withcs = ix.to_void_with_cs("http://ex.org/dataset");
+
+        // Strict superset: every base VoID line is present verbatim in the CS variant.
+        for line in void.lines() {
+            assert!(
+                withcs.contains(line),
+                "VoID+CS must contain every base VoID line; missing: {line}"
+            );
+        }
+        assert!(
+            withcs.len() > void.len(),
+            "VoID+CS must add the characteristic-set triples"
+        );
+
+        // Re-parse the whole document — valid N-Triples (hence valid Turtle).
+        let triples: Vec<oxrdf::Triple> = oxttl::NTriplesParser::new()
+            .for_slice(withcs.as_bytes())
+            .map(|t| t.expect("VoID+CS is valid N-Triples"))
+            .collect();
+        let cs = |l: &str| format!("{CS_NS}{l}");
+
+        // Dataset carries the EXACT distinct-set count (here 2: {type,name}, {type,name,worksAt}).
+        assert_eq!(ix.characteristic_sets.distinct, 2);
+        let distinct_lit = oxrdf::Literal::new_typed_literal(
+            ix.characteristic_sets.distinct.to_string(),
+            oxrdf::vocab::xsd::INTEGER,
+        )
+        .to_string();
+        assert!(
+            withcs.contains(&format!(
+                "<http://ex.org/dataset> <{}> {distinct_lit} .",
+                cs("distinctCharacteristicSets")
+            )),
+            "must carry exact distinct-set count: {withcs}"
+        );
+
+        // One typed CharacteristicSet node per retained set, each with scs:subjects.
+        let typed_cs = triples
+            .iter()
+            .filter(|t| {
+                t.predicate.as_str() == RDF_TYPE
+                    && t.object.to_string() == format!("<{}>", cs("CharacteristicSet"))
+            })
+            .count();
+        assert_eq!(typed_cs, ix.characteristic_sets.sets.len());
+        assert!(typed_cs >= 2);
+
+        // Per-predicate stat nodes reuse void:property + void:triples and add
+        // scs:avgMultiplicity, and name a real predicate from the graph.
+        assert!(triples
+            .iter()
+            .any(|t| t.predicate.as_str() == cs("avgMultiplicity")));
+        assert!(withcs.contains("http://xmlns.com/foaf/0.1/name"));
+        // avg multiplicity for a single-valued predicate ({type,name} ×2 subjects, name
+        // once each) renders as the fixed-precision decimal 1.0000.
+        assert!(
+            withcs.contains("1.0000"),
+            "avg multiplicity should render as a fixed-precision decimal: {withcs}"
+        );
+    }
+
+    /// [OPUS-4.8] sq-bde: each characteristic set exports as a SHACL `sh:NodeShape` — a
+    /// universal class becomes `sh:targetClass`, every (non-type) predicate a
+    /// `sh:PropertyShape` with `sh:minCount 1`, and `sh:maxCount 1` exactly when the set's
+    /// avg multiplicity for that predicate is 1. The whole document is valid RDF.
+    #[test]
+    fn shacl_exports_char_sets_as_node_shapes() {
+        // Three characteristic sets:
+        //  - {type, name}          ×2  (alice, bob)   — Person universal, name single
+        //  - {type, name, worksAt} ×1  (carol)        — Person universal, worksAt ×2 multi
+        //  - {label}               ×1  (untyped doc)  — no universal class, single
+        let g = graph(
+            ":alice rdf:type foaf:Person ; foaf:name \"Alice\" .
+             :bob   rdf:type foaf:Person ; foaf:name \"Bob\" .
+             :carol rdf:type foaf:Person ; foaf:name \"Carol\" ; :worksAt :acme , :globex .
+             :doc   rdfs:label \"A note\" .",
+        );
+        let ix = Introspection::build(&g);
+        let shacl = ix.to_shacl();
+
+        // Whole document re-parses as valid N-Triples (hence valid Turtle).
+        let triples: Vec<oxrdf::Triple> = oxttl::NTriplesParser::new()
+            .for_slice(shacl.as_bytes())
+            .map(|t| t.expect("SHACL export is valid N-Triples"))
+            .collect();
+
+        let sh = |l: &str| format!("{SHACL_NS}{l}");
+        let cs = |l: &str| format!("{CS_NS}{l}");
+        let person = "http://xmlns.com/foaf/0.1/Person";
+        let name = "http://xmlns.com/foaf/0.1/name";
+        let works = ex("worksAt");
+        let label = "http://www.w3.org/2000/01/rdf-schema#label";
+        let int1 = oxrdf::Literal::new_typed_literal("1", oxrdf::vocab::xsd::INTEGER).to_string();
+
+        // One sh:NodeShape per retained set (here all three are retained).
+        let node_shapes = triples
+            .iter()
+            .filter(|t| {
+                t.predicate.as_str() == RDF_TYPE
+                    && t.object.to_string() == format!("<{}>", sh("NodeShape"))
+            })
+            .count();
+        assert_eq!(node_shapes, ix.characteristic_sets.sets.len());
+        assert_eq!(node_shapes, 3, "three distinct characteristic sets");
+
+        // sh:targetClass Person is emitted (universal to the two Person sets); a
+        // target-less shape exists for the untyped {label} set (no universal class).
+        let target_person = triples
+            .iter()
+            .filter(|t| {
+                t.predicate.as_str() == sh("targetClass")
+                    && t.object.to_string() == format!("<{person}>")
+            })
+            .count();
+        assert_eq!(target_person, 2, "Person targets the two typed sets");
+        // No targetClass ever points at a class that is only a minority of a set, and the
+        // untyped set yields zero targets total beyond the two Person ones.
+        let total_targets = triples
+            .iter()
+            .filter(|t| t.predicate.as_str() == sh("targetClass"))
+            .count();
+        assert_eq!(total_targets, 2, "only universal classes are targeted");
+
+        // rdf:type is expressed via targeting — never repeated as a property shape path.
+        assert!(
+            !triples.iter().any(|t| t.predicate.as_str() == sh("path")
+                && t.object.to_string() == format!("<{RDF_TYPE}>")),
+            "rdf:type must not appear as an sh:path"
+        );
+
+        // Helper: collect the (path -> set of predicate-IRIs that carry a given sh: term).
+        let paths_with = |term: &str| -> Vec<String> {
+            // pnode -> path
+            let path_of: std::collections::HashMap<String, String> = triples
+                .iter()
+                .filter(|t| t.predicate.as_str() == sh("path"))
+                .map(|t| (t.subject.to_string(), t.object.to_string()))
+                .collect();
+            triples
+                .iter()
+                .filter(|t| {
+                    t.predicate.as_str() == sh(term) && t.object.to_string() == int1
+                })
+                .filter_map(|t| path_of.get(&t.subject.to_string()).cloned())
+                .collect()
+        };
+
+        // Every (non-type) predicate of every set gets sh:minCount 1.
+        let min_paths = paths_with("minCount");
+        for p in [name, &works, label] {
+            assert!(
+                min_paths.contains(&format!("<{p}>")),
+                "sh:minCount 1 for {p}: {shacl}"
+            );
+        }
+
+        // sh:maxCount 1 ONLY for single-valued predicates: name (1 each) and label (1),
+        // never worksAt (carol has 2 → avg multiplicity 2, unsound to bound).
+        let max_paths = paths_with("maxCount");
+        assert!(max_paths.contains(&format!("<{name}>")), "name is single-valued");
+        assert!(max_paths.contains(&format!("<{label}>")), "label is single-valued");
+        assert!(
+            !max_paths.contains(&format!("<{works}>")),
+            "worksAt is multi-valued — no sh:maxCount: {shacl}"
+        );
+
+        // Provenance: each shape carries scs:subjects with its support count, and the
+        // support counts match the mined sets exactly (2 + 1 + 1).
+        let mut supports: Vec<u64> = triples
+            .iter()
+            .filter(|t| t.predicate.as_str() == cs("subjects"))
+            .map(|t| {
+                if let oxrdf::Term::Literal(l) = &t.object {
+                    l.value().parse::<u64>().unwrap()
+                } else {
+                    panic!("scs:subjects must be a literal")
+                }
+            })
+            .collect();
+        supports.sort_unstable();
+        assert_eq!(supports, vec![1, 1, 2]);
+
+        // Property shapes are typed sh:PropertyShape.
+        assert!(triples.iter().any(|t| t.predicate.as_str() == RDF_TYPE
+            && t.object.to_string() == format!("<{}>", sh("PropertyShape"))));
+    }
+
+    /// [OPUS-4.8] sq-bde: the empty graph yields an empty (but valid) SHACL document.
+    #[test]
+    fn shacl_empty_graph_is_empty_and_valid() {
+        let g = graph("");
+        let ix = Introspection::build(&g);
+        let shacl = ix.to_shacl();
+        assert!(shacl.is_empty(), "no sets → no shapes");
+        // Trivially parses.
+        assert_eq!(
+            oxttl::NTriplesParser::new()
+                .for_slice(shacl.as_bytes())
+                .count(),
+            0
+        );
+    }
+
     /// Retrieval-mode (seed-scoped) summary: only the seeds' slice is rendered, under
     /// budget, and unmatched seeds are noted.
     #[test]
@@ -1887,5 +2644,208 @@ mod tests {
             let t = ix.schema_summary_for(&[person], budget);
             assert!(t.chars().count() <= budget, "budget {budget} overflow");
         }
+    }
+
+    /// [OPUS-4.8] sq-3n4: per-class sample labels isolate a minority class. The shared
+    /// predicate `:p` is used by a large `:Big` class (with the lexicographically
+    /// smallest object values) and a one-instance `:Minor` class (a large value). The
+    /// global per-predicate samples are the small `:Big` values — so the minority class
+    /// must NOT borrow them; its own `samples` field carries its own value, and the text
+    /// summary renders it on the minority class's line.
+    #[test]
+    fn per_class_samples_isolate_minority_class() {
+        let g = graph(
+            ":b1 a :Big ; :p \"aaa\" .
+             :b2 a :Big ; :p \"aab\" .
+             :b3 a :Big ; :p \"aac\" .
+             :m1 a :Minor ; :p \"zzz\" .",
+        );
+        let ix = Introspection::build(&g);
+
+        // The GLOBAL predicate samples are the lex-smallest across every subject — the
+        // :Big values; "zzz" is NOT among them.
+        let gp = ix
+            .predicates
+            .iter()
+            .find(|p| p.predicate == ex("p"))
+            .unwrap();
+        assert_eq!(gp.samples, vec!["\"aaa\"", "\"aab\"", "\"aac\""]);
+        assert!(!gp.samples.iter().any(|s| s == "\"zzz\""));
+
+        let class = |name: &str| ix.classes.iter().find(|c| c.class == ex(name)).unwrap();
+        let class_pred = |name: &str| {
+            class(name)
+                .predicates
+                .iter()
+                .find(|cp| cp.predicate == ex("p"))
+                .unwrap()
+        };
+
+        // The minority class's sample is ITS OWN value, not the global :Big minimum.
+        let minor = class_pred("Minor");
+        assert_eq!(minor.samples, vec!["\"zzz\""]);
+        // The big class's per-class samples are its own values (capped at 3).
+        let big = class_pred("Big");
+        assert_eq!(big.samples, vec!["\"aaa\"", "\"aab\"", "\"aac\""]);
+
+        // The text summary renders the minority class's own example on its line — the
+        // exact "looks odd on minority classes" defect the bead names.
+        let s = ix.to_text_summary(4000);
+        let minor_line = s
+            .lines()
+            .find(|l| l.contains(":p ") && l.contains("1/1"))
+            .unwrap_or_else(|| panic!("minority :p line missing:\n{s}"));
+        assert!(
+            minor_line.contains("zzz"),
+            "minority class line must show its own sample, not the global min:\n{minor_line}"
+        );
+        assert!(
+            !minor_line.contains("aaa"),
+            "minority class line must not borrow the dominant class's sample:\n{minor_line}"
+        );
+
+        // The per-class samples survive a JSON round-trip on the public surface.
+        let v: serde_json::Value = serde_json::from_str(&ix.to_json()).unwrap();
+        let classes = v["classes"].as_array().unwrap();
+        let minor_json = classes.iter().find(|c| c["class"] == ex("Minor")).unwrap();
+        let p_json = minor_json["predicates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|cp| cp["predicate"] == ex("p"))
+            .unwrap();
+        assert_eq!(p_json["samples"][0], "\"zzz\"");
+    }
+
+    /// [OPUS-4.8] sq-3n4: per-class samples are bounded by `samples_per_predicate` and
+    /// hold DISTINCT values (the per-class path feeds every triple, not POS-collapsed
+    /// distinct objects, so repeats must be de-duplicated).
+    #[test]
+    fn per_class_samples_distinct_and_bounded() {
+        // :Thing instances repeat the value "dup" and add three distinct others.
+        let g = graph(
+            ":a a :Thing ; :p \"dup\" , \"dup\" , \"m\" .
+             :b a :Thing ; :p \"dup\" , \"n\" .
+             :c a :Thing ; :p \"o\" .",
+        );
+        let opts = BuildOptions {
+            samples_per_predicate: 2,
+            ..BuildOptions::default()
+        };
+        let ix = Introspection::build_with(&g, &opts);
+        let thing = ix.classes.iter().find(|c| c.class == ex("Thing")).unwrap();
+        let cp = thing
+            .predicates
+            .iter()
+            .find(|cp| cp.predicate == ex("p"))
+            .unwrap();
+        // Cap honoured, lex-smallest distinct: "dup", "m" (NOT a duplicated "dup").
+        assert_eq!(cp.samples.len(), 2);
+        assert_eq!(cp.samples, vec!["\"dup\"", "\"m\""]);
+        let mut sorted = cp.samples.clone();
+        sorted.dedup();
+        assert_eq!(sorted.len(), cp.samples.len(), "samples must be distinct");
+    }
+
+    /// [OPUS-4.8] sq-3n4: the persisted `*.introspect` sidecar round-trips byte-exactly
+    /// through `save`/`load`, and a loaded sidecar produces the same O(output) summaries
+    /// as the freshly-built one WITHOUT re-touching the graph.
+    #[test]
+    fn sidecar_save_load_roundtrip() {
+        let g = graph(
+            ":alice rdf:type foaf:Person ; foaf:name \"Alice\" ; foaf:age 30 ; :worksAt :acme .
+             :bob   rdf:type foaf:Person ; foaf:name \"Bob\" .
+             :acme  rdf:type :Company ; :name \"Acme\" .",
+        );
+        let ix = Introspection::build(&g);
+
+        // Unique temp path (no extra dev-deps): pid + a nanosecond stamp.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "sparq-introspect-sidecar-{}-{stamp}.introspect",
+            std::process::id()
+        ));
+
+        ix.save(&path).expect("save sidecar");
+        let loaded = Introspection::load(&path).expect("load sidecar");
+        let _ = std::fs::remove_file(&path);
+
+        // Byte-exact JSON round-trip (struct equality via its canonical serialisation).
+        assert_eq!(ix.to_json(), loaded.to_json());
+        // Headline numbers and a deep field survive.
+        assert_eq!(loaded.triples, ix.triples);
+        assert_eq!(loaded.entities, ix.entities);
+        assert_eq!(loaded.classes.len(), ix.classes.len());
+        assert_eq!(
+            loaded.characteristic_sets.distinct,
+            ix.characteristic_sets.distinct
+        );
+        // Per-class samples (sq-3n4's other half) survive into the sidecar too.
+        let loaded_person = loaded
+            .classes
+            .iter()
+            .find(|c| c.class == "http://xmlns.com/foaf/0.1/Person")
+            .unwrap();
+        assert!(loaded_person
+            .predicates
+            .iter()
+            .any(|cp| !cp.samples.is_empty()));
+
+        // The whole point: every O(output) export runs off the loaded struct, no rescan.
+        assert_eq!(
+            loaded.to_text_summary(4000),
+            ix.to_text_summary(4000),
+            "loaded sidecar must reproduce the summary exactly"
+        );
+        assert_eq!(
+            loaded.to_void("http://ex.org/dataset"),
+            ix.to_void("http://ex.org/dataset")
+        );
+    }
+
+    /// [OPUS-4.8] sq-3n4: `from_json` is the in-memory inverse of `to_json`, and a
+    /// missing / malformed sidecar surfaces as a clean `io::Error`.
+    #[test]
+    fn sidecar_from_json_and_error_paths() {
+        let g = graph(":a rdf:type :T ; :p \"v\" .");
+        let ix = Introspection::build(&g);
+        let back = Introspection::from_json(&ix.to_json()).expect("parse own JSON");
+        assert_eq!(back.to_json(), ix.to_json());
+
+        // A nonexistent path is a NotFound io::Error (read failure).
+        let err = Introspection::load("/no/such/sparq-introspect-sidecar.introspect").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+
+        // Malformed JSON surfaces as InvalidData (parse failure mapped into io).
+        let bad = std::env::temp_dir().join(format!(
+            "sparq-introspect-bad-{}.introspect",
+            std::process::id()
+        ));
+        std::fs::write(&bad, b"{ not valid introspect json ]").unwrap();
+        let err = Introspection::load(&bad).unwrap_err();
+        let _ = std::fs::remove_file(&bad);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// [OPUS-4.8] sq-3n4: the conventional sidecar path appends `.introspect` to the
+    /// dataset name (keeping the dataset's own extension), so two datasets differing only
+    /// by extension get distinct sidecars.
+    #[test]
+    fn sidecar_path_convention() {
+        use std::path::Path;
+        assert_eq!(
+            sidecar_path_for("data/olympics.nt"),
+            Path::new("data/olympics.nt.introspect")
+        );
+        assert_eq!(
+            sidecar_path_for("data/olympics.ttl"),
+            Path::new("data/olympics.ttl.introspect")
+        );
+        // Distinct datasets that share a stem but differ by extension never collide.
+        assert_ne!(sidecar_path_for("g.nt"), sidecar_path_for("g.ttl"));
+        assert_eq!(SIDECAR_EXTENSION, "introspect");
     }
 }

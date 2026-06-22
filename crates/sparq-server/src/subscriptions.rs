@@ -141,7 +141,7 @@ impl Drop for ConnSlots {
 /// `Authorization` header on a WS handshake, the token is accepted from EITHER the
 /// `Authorization: Bearer <token>` header (non-browser clients) OR a
 /// `Sec-WebSocket-Protocol: bearer.<token>` subprotocol (browsers) — see
-/// [`crate::http::ws_auth_gate`]. When a `bearer.<token>` subprotocol is present and accepted, it
+/// `crate::http::ws_auth_gate`. When a `bearer.<token>` subprotocol is present and accepted, it
 /// is echoed back as the selected subprotocol (RFC 6455 requires the server to confirm one of the
 /// client's offered subprotocols, or a browser rejects the handshake). When no read token is
 /// configured the upgrade is unchanged (open access) — back-compatible.
@@ -356,6 +356,9 @@ pub(crate) async fn subscribe_init(
         Ok(p) if p.form == QueryForm::Select => {}
         Ok(_) => return Err(refuse("only SELECT queries can be subscribed".into(), StatusCode::BAD_REQUEST)),
         Err(PrepareError::Malformed(e)) => return Err(refuse(format!("malformed query: {e}"), StatusCode::BAD_REQUEST)),
+        // [OPUS-4.8] sq-z33x: subscriptions carry no SPARQL-Protocol dataset override, so this
+        // arm is unreachable in practice — but a bad graph IRI is a client error regardless.
+        Err(PrepareError::BadGraphUri(e)) => return Err(refuse(e, StatusCode::BAD_REQUEST)),
     }
 
     // Limits: per-connection first (cheap), then the global slot. Both are genuine
@@ -682,10 +685,10 @@ async fn send(socket: &mut WebSocket, msg: &Value) -> Result<(), axum::Error> {
 
 /// SSE (`text/event-stream`) transport for SPARQL update subscriptions, ALONGSIDE the
 /// WebSocket `/subscriptions` endpoint. Both transports share ONE notification source —
-/// [`subscribe_init`] (register + initial result) and [`Subscription::reevaluate_step`]
+/// `subscribe_init` (register + initial result) and `Subscription::reevaluate_step`
 /// (re-evaluate + diff), driven by the same commit-generation `watch` channel
-/// ([`AppState::subscribe_commits`]) and the same global/per-connection slot accounting
-/// ([`ConnSlots`]). Only the wire framing differs: SSE emits `event:`/`data:`/`id:` frames
+/// (`AppState::subscribe_commits`) and the same global/per-connection slot accounting
+/// (`ConnSlots`). Only the wire framing differs: SSE emits `event:`/`data:`/`id:` frames
 /// instead of WebSocket JSON text frames.
 ///
 /// Because SSE is a one-way GET stream (no client→server channel after the request),
@@ -693,7 +696,7 @@ async fn send(socket: &mut WebSocket, msg: &Value) -> Result<(), axum::Error> {
 /// optional `alias`) query-string parameters — the natural REST shape, versus the WS
 /// path's multiplexed many-subscriptions-per-socket protocol. There is no `unsubscribe`
 /// frame: a client unsubscribes by closing the stream, which drops the per-stream state
-/// (releasing its global slot via [`ConnSlots`]'s `Drop`) with no leak.
+/// (releasing its global slot via `ConnSlots`'s `Drop`) with no leak.
 pub mod sse {
     use std::collections::HashMap;
 
@@ -735,18 +738,18 @@ pub mod sse {
     /// Auth ([OPUS-4.8] sq-cxk5): this is a READ surface (live SELECT diffs), so it mirrors the
     /// WebSocket `/subscriptions` path AND the other `/sparql` GET routes — when
     /// `--auth-token-read` is configured the GET is gated behind the read token via
-    /// [`crate::http::auth_gate`] ([`crate::http::Operation::Read`]) and refused with the SAME
+    /// `crate::http::auth_gate` (`crate::http::Operation::Read`) and refused with the SAME
     /// 401 BEFORE the event-stream opens. As a plain GET, the `Authorization: Bearer <token>`
     /// header is the only auth channel here (no WS subprotocol). When no read token is configured
     /// the GET is unchanged (open access) — back-compatible.
     ///
     /// A registration refusal is returned as a normal JSON HTTP error BEFORE the event-stream
     /// opens — SSE cannot set a status once the stream is flowing — classified to match the
-    /// `/sparql` endpoint ([`crate::http::engine_error_response`]): missing/non-SELECT/malformed
+    /// `/sparql` endpoint (`crate::http::engine_error_response`): missing/non-SELECT/malformed
     /// query → **400**; the initial evaluation over the row cap (`--max-results` /
     /// `--max-query-rows`) → **413**; the initial evaluation timing out, or subscription-slot
     /// exhaustion → **503**; any other engine error → **500**. The status is carried on the
-    /// [`super::Refusal`]. On success the response is `text/event-stream` and the first two
+    /// `super::Refusal`. On success the response is `text/event-stream` and the first two
     /// frames are the `subscribed` ack and the full initial result.
     pub async fn sse_endpoint(State(state): State<AppState>, headers: axum::http::HeaderMap, Query(params): Query<HashMap<String, String>>) -> Response {
         // [OPUS-4.8] sq-cxk5: gate the read surface behind the read token (fail-closed when
@@ -922,7 +925,7 @@ mod tests {
     #[test]
     fn max_rows_budget_refuses_oversized_results() {
         let g = graph("@prefix ex: <http://ex/> . ex:a ex:p ex:b . ex:c ex:p ex:d . ex:e ex:p ex:f .");
-        let budget = QueryBudget { deadline: None, max_rows: Some(2) };
+        let budget = QueryBudget { max_rows: Some(2), ..QueryBudget::unlimited() };
         let err = eval_rows(&g, "SELECT ?s WHERE { ?s ?p ?o }", &budget, &ServerConfig::default()).unwrap_err();
         assert!(err.contains("max-rows"), "unexpected error: {err}");
     }
@@ -938,5 +941,186 @@ mod tests {
         assert_eq!(msg["notification"]["addedResults"]["head"]["vars"], json!(["s"]));
         assert_eq!(msg["notification"]["addedResults"]["results"]["bindings"][0], b);
         assert_eq!(msg["notification"]["removedResults"]["results"]["bindings"], json!([]));
+    }
+
+    // [OPUS-4.8] sq-4vao: behavioural tests for the lowest-covered subscription pieces — the
+    // budget→status classification, the RDF-1.2 triple-term encoding, the error-frame builder
+    // edges, and the transport-agnostic reevaluate_step / subscribe_init state machine (the
+    // added/removed diff, mid-stream termination, and the refusal classes).
+
+    #[test]
+    fn term_json_encodes_an_rdf12_triple_term() {
+        // The `oxrdf::Term::Triple` arm (the SPARQL 1.2 triple-term encoding) is the only
+        // term shape the existing tests miss. A solution row whose object is a triple term must
+        // serialise to `{"type":"triple","value":{subject,predicate,object}}`.
+        use oxrdf::{Literal, NamedNode, Term, Triple};
+        let inner = Triple::new(
+            NamedNode::new("http://ex/s").unwrap(),
+            NamedNode::new("http://ex/p").unwrap(),
+            Literal::new_simple_literal("o"),
+        );
+        let v = term_json(&Term::Triple(Box::new(inner)));
+        assert_eq!(v["type"], "triple");
+        assert_eq!(v["value"]["subject"], json!({"type": "uri", "value": "http://ex/s"}));
+        assert_eq!(v["value"]["predicate"], json!({"type": "uri", "value": "http://ex/p"}));
+        assert_eq!(v["value"]["object"], json!({"type": "literal", "value": "o"}));
+    }
+
+    #[test]
+    fn budget_error_classifies_engine_strings_into_sse_statuses() {
+        let cfg = ServerConfig {
+            query_timeout: Some(std::time::Duration::from_secs(7)),
+            max_results: Some(99),
+            ..ServerConfig::default()
+        };
+        // Timeout → 503, and the message names the configured limit in seconds.
+        let timeout = budget_error("query budget exceeded (timeout)", &cfg);
+        assert_eq!(timeout.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(timeout.message.contains("7s"), "msg: {}", timeout.message);
+        // Row cap → 413, and the message names the configured max-results.
+        let rowcap = budget_error("query budget exceeded (max-rows)", &cfg);
+        assert_eq!(rowcap.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(rowcap.message.contains("99"), "msg: {}", rowcap.message);
+        // Anything else → 500, message passed through verbatim.
+        let other = budget_error("denied SERVICE host", &cfg);
+        assert_eq!(other.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(other.message, "denied SERVICE host");
+    }
+
+    #[test]
+    fn error_msg_carries_id_and_alias_when_present() {
+        // The id+alias arms (the `Some` branches) are exercised only by a terminating /
+        // unsubscribe-failure frame; assert both members land under the `error` envelope.
+        let with = error_msg("re-evaluation failed", Some(42), Some("watch"));
+        assert_eq!(with["error"]["message"], "re-evaluation failed");
+        assert_eq!(with["error"]["id"], 42);
+        assert_eq!(with["error"]["alias"], "watch");
+        // And that neither is emitted when absent (the `None` arms).
+        let bare = error_msg("bad json", None, None);
+        assert_eq!(bare["error"]["message"], "bad json");
+        assert!(bare["error"].get("id").is_none());
+        assert!(bare["error"].get("alias").is_none());
+    }
+
+    /// A `Subscription` whose diff baseline is the result of `query` over `state` right now,
+    /// leaking its global slot (the test owns the state lifetime and asserts nothing about leaks).
+    async fn seeded_sub(state: &AppState, alias: Option<&str>, query: &str) -> Subscription {
+        let mut slots = ConnSlots::new(state.subs.clone());
+        let new = match subscribe_init(state, &mut slots, 0, query, alias.map(str::to_string)).await {
+            Ok(n) => n,
+            Err(r) => panic!("initial subscribe should succeed, refused with {}", r.status),
+        };
+        std::mem::forget(slots); // hold the acquired slot for the test's lifetime
+        new.subscription
+    }
+
+    #[tokio::test]
+    async fn reevaluate_step_is_unchanged_then_notifies_on_a_real_diff() {
+        let state = AppState::new(graph("@prefix ex: <http://ex/> . ex:a ex:p ex:b ."));
+        let q = "SELECT ?s WHERE { ?s <http://ex/p> ?o }";
+        let mut sub = seeded_sub(&state, Some("w"), q).await;
+
+        // No change to the graph → the diff is empty → Unchanged (emit nothing).
+        assert!(matches!(sub.reevaluate_step(1, &state).await, ReevalStep::Unchanged));
+
+        // Insert a matching triple → re-evaluation yields one added row, no removed rows.
+        state
+            .apply_update("INSERT DATA { <http://ex/c> <http://ex/p> <http://ex/d> }")
+            .unwrap();
+        match sub.reevaluate_step(1, &state).await {
+            ReevalStep::Notify(msg) => {
+                assert_eq!(msg["notification"]["id"], 1);
+                assert_eq!(msg["notification"]["alias"], "w");
+                // sequence advanced from the seeded 0 to 1.
+                assert_eq!(msg["notification"]["sequence"], 1);
+                let added = &msg["notification"]["addedResults"]["results"]["bindings"];
+                assert_eq!(added.as_array().unwrap().len(), 1);
+                assert_eq!(added[0]["s"]["value"], "http://ex/c");
+                assert_eq!(msg["notification"]["removedResults"]["results"]["bindings"], json!([]));
+            }
+            ReevalStep::Unchanged => panic!("expected Notify after an insert, got Unchanged"),
+            ReevalStep::Terminate(msg) => panic!("expected Notify, got Terminate: {msg}"),
+        }
+        // The baseline advanced, so an immediate re-evaluation with no further change is Unchanged.
+        assert!(matches!(sub.reevaluate_step(1, &state).await, ReevalStep::Unchanged));
+    }
+
+    #[tokio::test]
+    async fn reevaluate_step_terminates_when_a_later_result_overflows_the_row_cap() {
+        // Seed under a row cap of 1 with exactly one matching row (initial eval fits), then grow
+        // the graph past the cap so the NEXT re-evaluation overflows → Terminate, carrying the
+        // row-cap message and the subscription id.
+        let cfg = ServerConfig { max_results: Some(1), ..ServerConfig::default() };
+        let state = AppState::with_config(graph("@prefix ex: <http://ex/> . ex:a ex:p ex:b ."), cfg);
+        let q = "SELECT ?s WHERE { ?s <http://ex/p> ?o }";
+        let mut sub = seeded_sub(&state, None, q).await;
+
+        state
+            .apply_update("INSERT DATA { <http://ex/c> <http://ex/p> <http://ex/d> }")
+            .unwrap();
+        match sub.reevaluate_step(5, &state).await {
+            ReevalStep::Terminate(msg) => {
+                assert_eq!(msg["error"]["id"], 5);
+                let m = msg["error"]["message"].as_str().unwrap();
+                assert!(m.contains("re-evaluation failed"), "msg: {m}");
+                assert!(m.contains("max-results"), "msg: {m}");
+            }
+            ReevalStep::Unchanged => panic!("expected Terminate on row-cap overflow, got Unchanged"),
+            ReevalStep::Notify(msg) => panic!("expected Terminate on row-cap overflow, got Notify: {msg}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_init_refuses_non_select_and_malformed_queries() {
+        let state = AppState::new(graph("@prefix ex: <http://ex/> . ex:a ex:p ex:b ."));
+        let mut slots = ConnSlots::new(state.subs.clone());
+
+        // A well-formed but non-SELECT query (ASK) is a client error → 400.
+        let ask = subscribe_init(&state, &mut slots, 0, "ASK { ?s ?p ?o }", None)
+            .await
+            .err()
+            .expect("ASK is not subscribable");
+        assert_eq!(ask.status, StatusCode::BAD_REQUEST);
+        assert!(ask.error["error"]["message"].as_str().unwrap().contains("only SELECT"));
+
+        // A malformed query is also a 400, with the parse error surfaced.
+        let bad = subscribe_init(&state, &mut slots, 0, "SELECT ?s WHERE {", None)
+            .await
+            .err()
+            .expect("a malformed query is refused");
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+        assert!(bad.error["error"]["message"].as_str().unwrap().contains("malformed query"));
+
+        // A refusal holds NO global slot.
+        assert_eq!(state.subs.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn subscribe_init_enforces_per_connection_and_global_slot_caps() {
+        let cfg = ServerConfig { max_subscriptions_per_conn: 2, max_subscriptions: 1, ..ServerConfig::default() };
+        let state = AppState::with_config(graph("@prefix ex: <http://ex/> . ex:a ex:p ex:b ."), cfg);
+        let q = "SELECT ?s WHERE { ?s <http://ex/p> ?o }";
+
+        let mut slots = ConnSlots::new(state.subs.clone());
+        // current_conn_subs already at the per-conn cap → refuse with 503, no slot taken.
+        let per_conn = subscribe_init(&state, &mut slots, 2, q, None)
+            .await
+            .err()
+            .expect("per-connection cap refuses");
+        assert_eq!(per_conn.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(per_conn.error["error"]["message"].as_str().unwrap().contains("this connection"));
+        assert_eq!(state.subs.active_count(), 0);
+
+        // Take the single global slot, then a second attempt hits the global cap → 503.
+        assert!(subscribe_init(&state, &mut slots, 0, q, None).await.is_ok(), "first global slot should be granted");
+        assert_eq!(state.subs.active_count(), 1);
+        let global = subscribe_init(&state, &mut slots, 0, q, None)
+            .await
+            .err()
+            .expect("global cap refuses");
+        assert_eq!(global.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(global.error["error"]["message"].as_str().unwrap().contains("server-wide"));
+        // The failed global acquire released its provisional slot — still exactly one held.
+        assert_eq!(state.subs.active_count(), 1);
     }
 }

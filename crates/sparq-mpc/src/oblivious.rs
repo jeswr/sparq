@@ -138,7 +138,7 @@
 
 use crate::field::Fp;
 use crate::partial::MpcError;
-use crate::shamir::{Share, ShamirDealer};
+use crate::shamir::{ShamirDealer, Share};
 
 /// A vector of secret-shared field elements — the unit the shuffle/sort operate
 /// over. Each entry is a full Shamir sharing (`Vec<Share>` = one value's `n`
@@ -176,13 +176,20 @@ pub struct Switch {
 /// cannot reach all permutations (or reaches some far more often) leaks order
 /// information. The switch count is `O(n log n)`.
 ///
-/// We build the **plain** recursive form (`⌊m/2⌋` input + `⌊m/2⌋` output switches
-/// per level) rather than the AS-Waksman redundancy-removal optimization (which
-/// shaves one switch per level by fixing the first output pair). The plain form is
-/// marginally larger but routes every permutation without the odd-`m` corner-case
-/// over-constraint the fixed pair introduces — see `solve_waksman_level`.
-/// Tightening to the AS-Waksman `−1`/level count is a perf-only follow-up (bead
-/// sq-hny9).
+/// We build the **AS-Waksman** (Beauquier–Darrot, "On arbitrary-size Waksman
+/// networks") redundancy-removal form: `⌊m/2⌋` input switches and `⌊(m−1)/2⌋`
+/// output switches per level (one fewer output switch than the plain Beneš form on
+/// **even** `m`), giving the optimal arbitrary-size count `W(n) = W(⌈n/2⌉) +
+/// W(⌊n/2⌋) + (n−1)`. The saving comes from **fixing one output pair** on even
+/// levels: the last output pair `(m−2, m−1)` is routed straight (output `m−2` from
+/// the TOP sub-network, output `m−1` from the BOTTOM), so it needs no switch — the
+/// alternating-path solver seeds that pin and derives the rest, so the fixed pair
+/// is a *consequence* of the routing rather than an over-constraint. On **odd** `m`
+/// no extra output pair is pinned (the odd-trailing output already carries no
+/// switch), which is exactly how the corner-case clash the bead flagged — output 1
+/// pinned BOTTOM vs. the odd-trailing input pinned TOP — is avoided. Full support
+/// (every `n!` permutation reachable) and exhaustive routing are tested for small
+/// `n`; see `solve_waksman_level`.
 ///
 /// The topology depends ONLY on `n`. The same network is reused for every shuffle
 /// of the same width; only the control bits (the secret permutation) change.
@@ -261,7 +268,10 @@ impl WaksmanNetwork {
         let (switches, bits) = route_recording(perm);
         // The switch list must match the canonical topology (it does, by the
         // build==route recursion); guard it so a future refactor can't desync.
-        debug_assert_eq!(switches, self.switches, "route topology desynced from build");
+        debug_assert_eq!(
+            switches, self.switches,
+            "route topology desynced from build"
+        );
         Ok(bits)
     }
 
@@ -327,15 +337,17 @@ fn route_recording(perm: &[usize]) -> (Vec<Switch>, Vec<bool>) {
 /// the trailing input/output passes straight into the top sub-network (no input
 /// switch, no output switch).
 ///
-/// We use the **Beneš/Waksman recursive network** in its plain form — `⌊m/2⌋`
-/// input + `⌊m/2⌋` output switches per level — rather than the AS-Waksman
-/// redundancy-removal optimization (which fixes the first output pair to shave one
-/// switch per level). The plain form is one switch/level larger (still `O(n log
-/// n)`) but routes EVERY permutation without the corner-case over-constraint the
-/// fixed pair introduces for odd `m` (verified exhaustively for all permutations
-/// up to `n = 9`). Crucially for a *shuffle* it is **NOT Benes-biased**: it reaches
-/// all `n!` permutations with full support (tested for `n = 3, 4`). Tightening to
-/// the −1/level AS-Waksman count is a perf-only follow-up (bead sq-hny9).
+/// We use the **AS-Waksman recursive network** (Beauquier–Darrot): `⌊m/2⌋` input
+/// switches and `⌊(m−1)/2⌋` output switches per level. On **even** `m` that is one
+/// FEWER output switch than the plain Beneš form — the last output pair `(m−2,
+/// m−1)` is routed straight (no switch) by fixing output `m−2` to the TOP
+/// sub-network and `m−1` to the BOTTOM. On **odd** `m` all `⌊m/2⌋` output switches
+/// are kept (no extra pair is pinned), so the odd-trailing-input / fixed-pair
+/// clash the bead flagged cannot occur. This yields the optimal arbitrary-size
+/// count `W(n) = W(⌈n/2⌉) + W(⌊n/2⌋) + (n−1)` (still `O(n log n)`) and routes EVERY
+/// permutation (verified exhaustively up to `n = 9`). Crucially for a *shuffle* it
+/// is **NOT Benes-biased**: it reaches all `n!` permutations with full support
+/// (tested for `n = 3, 4`).
 ///
 /// Routing (data-dependent — the control BITS, not the topology): solved by the
 /// standard alternating-path / 2-coloring argument over the input/output pair
@@ -347,7 +359,10 @@ fn waksman_rec(wires: &[usize], perm: &[usize], switches: &mut Vec<Switch>, bits
         return;
     }
     if m == 2 {
-        switches.push(Switch { a: wires[0], b: wires[1] });
+        switches.push(Switch {
+            a: wires[0],
+            b: wires[1],
+        });
         bits.push(perm[0] == 1); // swap iff input 0 must reach output 1
         return;
     }
@@ -357,13 +372,21 @@ fn waksman_rec(wires: &[usize], perm: &[usize], switches: &mut Vec<Switch>, bits
     let top_len = m - half; // = ⌈m/2⌉
     let bot_len = half; // = ⌊m/2⌋
 
-    let solved = solve_waksman_level(m, half, odd, perm);
+    // AS-Waksman: ⌊(m−1)/2⌋ output switches. On even m the LAST output pair
+    // (m−2, m−1) is fixed (no switch), shaving one switch this level; on odd m all
+    // `half` output switches are kept.
+    let out_switches = (m - 1) / 2;
+
+    let solved = solve_waksman_level(m, half, odd, out_switches, perm);
 
     // --- emit in BUILD/application order: input column, top sub, bottom sub, output column.
 
     // Input column: switch k acts on local (2k, 2k+1) → global (wires[2k], wires[2k+1]).
     for k in 0..half {
-        switches.push(Switch { a: wires[2 * k], b: wires[2 * k + 1] });
+        switches.push(Switch {
+            a: wires[2 * k],
+            b: wires[2 * k + 1],
+        });
         bits.push(solved.in_swap[k]);
     }
 
@@ -383,17 +406,23 @@ fn waksman_rec(wires: &[usize], perm: &[usize], switches: &mut Vec<Switch>, bits
     waksman_rec(&top_wires, &solved.top_perm, switches, bits);
     waksman_rec(&bot_wires, &solved.bot_perm, switches, bits);
 
-    // Output column: switch k (k in 0..half) acts on global (wires[2k], wires[2k+1]).
-    for k in 0..half {
-        switches.push(Switch { a: wires[2 * k], b: wires[2 * k + 1] });
+    // Output column: AS-Waksman emits only the first `out_switches = ⌊(m−1)/2⌋`
+    // output switches. On even m the last output pair (m−2, m−1) is fixed (output
+    // m−2 from TOP, m−1 from BOTTOM) and carries NO switch — that is the −1/level
+    // saving; on odd m `out_switches == half` so all are emitted.
+    for k in 0..out_switches {
+        switches.push(Switch {
+            a: wires[2 * k],
+            b: wires[2 * k + 1],
+        });
         bits.push(solved.out_swap[k]);
     }
 }
 
 /// The solved routing of one AS-Waksman level.
 struct WaksmanLevel {
-    in_swap: Vec<bool>,  // len half (per input switch)
-    out_swap: Vec<bool>, // len half (index 0 fixed false)
+    in_swap: Vec<bool>,   // len half (per input switch)
+    out_swap: Vec<bool>,  // len ⌊(m−1)/2⌋ (the last even-m output pair is fixed)
     top_perm: Vec<usize>, // permutation routed by the top sub-network (len ⌈m/2⌉)
     bot_perm: Vec<usize>, // permutation routed by the bottom sub-network (len ⌊m/2⌋)
 }
@@ -419,7 +448,23 @@ struct WaksmanLevel {
 /// DIFFERENT sub-networks, then 2-color by walking alternating cycles. Seeding
 /// each cycle at an undecided input switch (with the fixed output pair already
 /// pinned) yields a consistent assignment; this is the classic Waksman routing.
-fn solve_waksman_level(m: usize, half: usize, odd: bool, perm: &[usize]) -> WaksmanLevel {
+///
+/// AS-Waksman optimization: on **even** `m` the last output pair `(m−2, m−1)` is
+/// pinned BEFORE the alternating-path propagation (output `m−2` from TOP, `m−1`
+/// from BOTTOM), so it needs no output switch — the pin is just one more seed the
+/// constraint propagation honours, making the fixed pair a *consequence* of a
+/// consistent routing rather than an axiom that over-constrains it. `out_switches`
+/// = `⌊(m−1)/2⌋` switch bits are returned (the pinned even-`m` pair excluded). On
+/// **odd** `m` nothing extra is pinned (the odd-trailing output already carries no
+/// switch), avoiding the corner-case clash between a pinned output pair and the
+/// odd-trailing input that is forced TOP.
+fn solve_waksman_level(
+    m: usize,
+    half: usize,
+    odd: bool,
+    out_switches: usize,
+    perm: &[usize],
+) -> WaksmanLevel {
     let top_len = m - half;
     // inv[o] = the input that must reach output o.
     let mut inv = vec![0usize; m];
@@ -436,6 +481,14 @@ fn solve_waksman_level(m: usize, half: usize, odd: bool, perm: &[usize]) -> Waks
     if odd {
         in_top[m - 1] = Some(true);
         out_from_top[m - 1] = Some(true);
+    } else {
+        // AS-Waksman (even m): fix the LAST output pair (m−2, m−1) so it needs no
+        // switch — output m−2 fed from TOP, m−1 from BOTTOM. This is the −1/level
+        // saving. We pin it as a seed; the alternating-path propagation below makes
+        // the rest consistent, so the fixed pair is a consequence of the routing.
+        // (m ≥ 4 here: m == 2 returns early above, m == 3 is odd.)
+        out_from_top[m - 2] = Some(true);
+        out_from_top[m - 1] = Some(false);
     }
 
     // Helper: given an input i is decided, the OTHER input of its switch must go to
@@ -505,7 +558,11 @@ fn solve_waksman_level(m: usize, half: usize, odd: bool, perm: &[usize]) -> Waks
                             out_from_top[p] = Some(!t);
                             changed = true;
                         } else {
-                            debug_assert_eq!(out_from_top[p], Some(!t), "output pair conflict at {o}");
+                            debug_assert_eq!(
+                                out_from_top[p],
+                                Some(!t),
+                                "output pair conflict at {o}"
+                            );
                         }
                     }
                 }
@@ -526,9 +583,11 @@ fn solve_waksman_level(m: usize, half: usize, odd: bool, perm: &[usize]) -> Waks
         in_swap[k] = !low_top; // pass when low_top; swap otherwise
     }
     // Output switch k passes iff output 2k is fed from TOP (top→low is the pass
-    // wiring).
-    let mut out_swap = vec![false; half];
-    for k in 0..half {
+    // wiring). Only the first `out_switches` output pairs carry a switch; on even
+    // m the last pair (k = half−1, outputs m−2/m−1) was pinned (TOP/BOTTOM) and has
+    // no switch — that is the AS-Waksman −1/level saving.
+    let mut out_swap = vec![false; out_switches];
+    for k in 0..out_switches {
         let low_from_top = out_from_top[2 * k].unwrap();
         out_swap[k] = !low_from_top;
     }
@@ -567,7 +626,12 @@ fn solve_waksman_level(m: usize, half: usize, odd: bool, perm: &[usize]) -> Waks
         }
     }
 
-    WaksmanLevel { in_swap, out_swap, top_perm, bot_perm }
+    WaksmanLevel {
+        in_swap,
+        out_swap,
+        top_perm,
+        bot_perm,
+    }
 }
 
 // =====================================================================
@@ -599,7 +663,11 @@ impl ShuffleCost {
         } else {
             0
         };
-        ShuffleCost { items: n, switches, depth_rounds }
+        ShuffleCost {
+            items: n,
+            switches,
+            depth_rounds,
+        }
     }
 }
 
@@ -641,15 +709,29 @@ pub fn shuffle(
     Ok((col, ShuffleCost::model(n, net.switch_count())))
 }
 
+/// Public wrapper over the private `random_permutation` sampler so the
+/// **network tier** ([`crate::transport`]) can draw the SAME uniformly-random
+/// secret permutation the in-process [`shuffle`] uses, then route it through the
+/// [`WaksmanNetwork`] to obtain the per-switch control bits it drives over the
+/// wire. Same unbiased Fisher–Yates over the dealer's masking RNG, same
+/// fail-closed `n > P` guard — the network tier must not re-implement a second
+/// sampler. `[OPUS-4.8]` sq-bdbv.
+pub fn sample_random_permutation(
+    dealer: &mut ShamirDealer,
+    n: usize,
+) -> Result<Vec<usize>, MpcError> {
+    random_permutation(dealer, n)
+}
+
 /// Draw a uniformly-random permutation of `0..n` via Fisher–Yates over the
 /// dealer's masking RNG (CSPRNG in production). Unbiased: each index is chosen
 /// uniformly from the remaining range with rejection sampling to kill modulo bias.
 ///
 /// **Fails closed for oversized `n`.** The unbiased sampler can only draw a
 /// uniform integer below the field modulus `P = 2^61 − 1` (it rejection-samples
-/// field elements), so a column whose length exceeds `P` is rejected with a typed
-/// [`MpcError`] rather than producing a biased permutation or hanging
-/// ([`uniform_below`]). `n` is a row count, so `n > P` is unreachable in any real
+/// field elements via `uniform_below`), so a column whose length exceeds `P` is
+/// rejected with a typed [`MpcError`] rather than producing a biased permutation
+/// or hanging. `n` is a row count, so `n > P` is unreachable in any real
 /// deployment; this guards the boundary explicitly anyway. `[OPUS-4.8]`
 fn random_permutation(dealer: &mut ShamirDealer, n: usize) -> Result<Vec<usize>, MpcError> {
     // Reject up front so the `as u64` cast below cannot lose information and the
@@ -1046,7 +1128,11 @@ mod tests {
             let mut perm: Vec<usize> = (0..n).collect();
             permute_each(&mut perm, 0, &mut |p| {
                 let (switches, bits) = route_recording(p);
-                assert_eq!(switches, *net.switches(), "n={n} perm={p:?}: topology depends on data");
+                assert_eq!(
+                    switches,
+                    *net.switches(),
+                    "n={n} perm={p:?}: topology depends on data"
+                );
                 assert_eq!(bits.len(), switches.len());
             });
         }
@@ -1054,23 +1140,86 @@ mod tests {
 
     #[test]
     fn waksman_switch_count_is_log_linear() {
-        // The plain Beneš/Waksman form is O(n log n); assert it stays within a
-        // loose 2·n·⌈log₂ n⌉ bound (the AS-Waksman optimization would shave it, a
-        // perf-only follow-up — bead sq-hny9) and is non-trivial for n>1.
+        // The AS-Waksman form is O(n log n); assert it stays within a loose
+        // 2·n·⌈log₂ n⌉ bound and is non-trivial for n>1.
         for n in [2usize, 3, 4, 5, 7, 8, 16, 17, 31, 32] {
             let net = WaksmanNetwork::new(n);
             let l = ceil_log2(n);
             let upper = 2 * n * l; // loose O(n log n) upper bound
-            assert!(net.switch_count() <= upper, "n={n}: {} > {upper}", net.switch_count());
+            assert!(
+                net.switch_count() <= upper,
+                "n={n}: {} > {upper}",
+                net.switch_count()
+            );
             assert!(net.switch_count() >= 1, "n={n}");
         }
     }
 
+    /// AS-Waksman optimal switch count (bead sq-hny9): the network realizes the
+    /// canonical arbitrary-size recurrence `W(n) = W(⌈n/2⌉) + W(⌊n/2⌋) + (n−1)`
+    /// (Beauquier–Darrot), shaving one switch per even-`m` recursion level vs. the
+    /// plain Beneš form. This is the `~n·⌈log₂ n⌉ − n + 1` optimal count.
+    #[test]
+    fn waksman_switch_count_is_as_waksman_optimal() {
+        fn canonical(n: usize) -> usize {
+            match n {
+                0 | 1 => 0,
+                2 => 1,
+                _ => canonical(n.div_ceil(2)) + canonical(n / 2) + (n - 1),
+            }
+        }
+        for n in 0..=64usize {
+            assert_eq!(
+                WaksmanNetwork::new(n).switch_count(),
+                canonical(n),
+                "n={n}: switch count is not the AS-Waksman optimum"
+            );
+        }
+        // Spot-check known optimal values from the literature.
+        assert_eq!(WaksmanNetwork::new(4).switch_count(), 5);
+        assert_eq!(WaksmanNetwork::new(8).switch_count(), 17);
+        assert_eq!(WaksmanNetwork::new(16).switch_count(), 49);
+    }
+
     /// THE shuffle correctness + routing test: for every permutation of small n,
     /// routing it and applying the network must realize EXACTLY that permutation.
+    /// Full support (the anti-Benes-bias property the bead requires verified): for
+    /// small `n`, EVERY one of the `n!` permutations is realized by routing it
+    /// through the network — none is unreachable. Combined with
+    /// `waksman_routes_every_permutation_correctly` (which checks each routes to
+    /// EXACTLY itself) this proves the realized-permutation map is a bijection onto
+    /// `S_n`, so a uniform random `perm` gives an unbiased shuffle even after the
+    /// AS-Waksman switch-count reduction.
+    #[test]
+    fn waksman_has_full_support_after_optimization() {
+        use std::collections::HashSet;
+        for n in 1..=7usize {
+            let net = WaksmanNetwork::new(n);
+            let mut realized: HashSet<Vec<usize>> = HashSet::new();
+            let mut perm: Vec<usize> = (0..n).collect();
+            permute_each(&mut perm, 0, &mut |p| {
+                let bits = net.route(p).expect("route ok");
+                let mut labels: Vec<usize> = (0..n).collect();
+                for (sw, &bit) in net.switches().iter().zip(&bits) {
+                    if bit {
+                        labels.swap(sw.a, sw.b);
+                    }
+                }
+                // labels[o] = input landing at output o; record the realized perm.
+                realized.insert(labels);
+            });
+            let factorial: usize = (1..=n).product();
+            assert_eq!(
+                realized.len(),
+                factorial,
+                "n={n}: AS-Waksman net does not reach all {factorial} permutations (biased)"
+            );
+        }
+    }
+
     #[test]
     fn waksman_routes_every_permutation_correctly() {
-        for n in 1..=7usize {
+        for n in 1..=8usize {
             let net = WaksmanNetwork::new(n);
             let mut perm: Vec<usize> = (0..n).collect();
             permute_each(&mut perm, 0, &mut |p| {
@@ -1084,7 +1233,10 @@ mod tests {
                     }
                 }
                 for (i, &pi) in p.iter().enumerate() {
-                    assert_eq!(labels[pi], i, "n={n} perm={p:?}: input {i} should land at {pi}");
+                    assert_eq!(
+                        labels[pi], i,
+                        "n={n} perm={p:?}: input {i} should land at {pi}"
+                    );
                 }
             });
         }
@@ -1122,7 +1274,10 @@ mod tests {
                 break;
             }
         }
-        assert!(any_reordered, "shuffle never reordered across 8 trials — suspicious");
+        assert!(
+            any_reordered,
+            "shuffle never reordered across 8 trials — suspicious"
+        );
     }
 
     #[test]
@@ -1158,7 +1313,11 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(seen.len(), 6, "AS-Waksman shuffle did not reach all 3! perms: {seen:?}");
+        assert_eq!(
+            seen.len(),
+            6,
+            "AS-Waksman shuffle did not reach all 3! perms: {seen:?}"
+        );
     }
 
     /// A 4-item shuffle must also reach all 24 permutations (exercises the odd/even
@@ -1179,7 +1338,12 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(seen.len(), 24, "shuffle did not reach all 4! perms (saw {})", seen.len());
+        assert_eq!(
+            seen.len(),
+            24,
+            "shuffle did not reach all 4! perms (saw {})",
+            seen.len()
+        );
     }
 
     // ---- Sorting network: data-independent access pattern -----------------
@@ -1197,7 +1361,10 @@ mod tests {
         let cmp = SimulatedSecretComparator::new(t);
         let (_sa, ap_a, _) = sort_by(col_a, &cmp).unwrap();
         let (_sb, ap_b, _) = sort_by(col_b, &cmp).unwrap();
-        assert_eq!(ap_a, ap_b, "sort access pattern leaked data (differed across payloads)");
+        assert_eq!(
+            ap_a, ap_b,
+            "sort access pattern leaked data (differed across payloads)"
+        );
         assert_eq!(ap_a, SortingNetwork::new(8).compare_exchanges());
     }
 
@@ -1214,7 +1381,10 @@ mod tests {
                         v.swap(i, j);
                     }
                 }
-                assert!(v.windows(2).all(|w| w[0] <= w[1]), "n={n} mask={mask:b} not sorted: {v:?}");
+                assert!(
+                    v.windows(2).all(|w| w[0] <= w[1]),
+                    "n={n} mask={mask:b} not sorted: {v:?}"
+                );
             }
         }
     }
@@ -1234,7 +1404,11 @@ mod tests {
             let col = share_col(&mut dealer, &vals);
             let cmp = SimulatedSecretComparator::new(t);
             let (sorted, _ap, cost) = sort_by(col, &cmp).unwrap();
-            assert_eq!(open_col(t, &sorted), sorted_asc(vals.clone()), "sort wrong for {vals:?}");
+            assert_eq!(
+                open_col(t, &sorted),
+                sorted_asc(vals.clone()),
+                "sort wrong for {vals:?}"
+            );
             assert_eq!(cost.items, vals.len());
         }
     }
@@ -1263,7 +1437,11 @@ mod tests {
         let keys = vec![Fp::new(7); 4]; // all equal
         let col = share_col(&mut dealer, &payload);
         let (sorted_col, _k, _ap, _c) = sort_with_keys(col, keys).unwrap();
-        assert_eq!(open_col(t, &sorted_col), vec![1, 2, 3, 4], "equal keys must keep input order");
+        assert_eq!(
+            open_col(t, &sorted_col),
+            vec![1, 2, 3, 4],
+            "equal keys must keep input order"
+        );
     }
 
     // ---- Cost model ------------------------------------------------------
@@ -1361,7 +1539,11 @@ mod tests {
             let perm = random_permutation(&mut dealer, n).expect("valid n");
             let mut sorted = perm.clone();
             sorted.sort_unstable();
-            assert_eq!(sorted, (0..n).collect::<Vec<_>>(), "n={n}: not a permutation");
+            assert_eq!(
+                sorted,
+                (0..n).collect::<Vec<_>>(),
+                "n={n}: not a permutation"
+            );
         }
     }
 }

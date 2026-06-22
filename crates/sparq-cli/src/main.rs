@@ -1,4 +1,6 @@
 #![doc = include_str!("../README.md")]
+// [OPUS-4.8] MS-G2 (sq-8wbn): make `// SAFETY:` mandatory on every first-party unsafe block.
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 use std::io::Read;
 use std::time::Instant;
@@ -20,14 +22,21 @@ fn main() {
         Some("ingest") => cmd_ingest(&args),
         Some("save") => cmd_save(&args),
         Some("recompress") => cmd_recompress(&args),
+        Some("compact") => cmd_compact(&args),
         Some("build") => cmd_build(&args),
         Some("query-mmap") => cmd_query_mmap(&args),
         Some("probe-compress") => cmd_probe_compress(&args),
         Some("compare-compress") => cmd_compare_compress(&args),
         Some("bench-remap") => cmd_bench_remap(&args),
         Some("scaling") => cmd_scaling(&args),
+        // [OPUS-4.8] (sq-678h) `dump` re-serializes a loaded RDF document into the writer
+        // matrix (turtle / trig / nquads). Gated behind the opt-in `serialize-rdf` feature:
+        // the default CLI build carries no serializer code, so the subcommand is only present
+        // when built with `--features serialize-rdf`.
+        #[cfg(feature = "serialize-rdf")]
+        Some("dump") => cmd_dump(&args),
         _ => {
-            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)");
+            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli compact <persist-dir>                   # WAL compact/vacuum: physically purge erased data (offline)\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
         }
     }
@@ -35,7 +44,7 @@ fn main() {
 
 /// Isolated micro-benchmark of the latency-bound dict-remap gather, to measure the per-ISA
 /// software prefetch in isolation (undiluted by parsing) on each hardware target.
-///   sparq-cli bench-remap [n_triples] [dict_size] [iters]
+///   sparq-cli bench-remap n_triples dict_size iters
 /// Run twice — once normally, once with SPARQ_NO_PREFETCH=1 — to get the prefetch delta.
 fn cmd_bench_remap(args: &[String]) {
     let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20_000_000);
@@ -53,7 +62,7 @@ fn cmd_bench_remap(args: &[String]) {
 /// sweeping the thread count in ONE process. Reports best time, speedup vs the smallest pool, and
 /// parallel EFFICIENCY (speedup ÷ thread-ratio; 1.0 = perfectly linear) per subsystem, so you can
 /// see precisely where each part plateaus. On a many-core box pass e.g. `1,2,4,8,16,32,64,128,192`.
-///   sparq-cli scaling <data-file> <format> <queries-dir> [threads=auto] [iters=3]
+///   sparq-cli scaling `<data-file>` `<format>` `<queries-dir>` [threads=auto] [iters=3]
 fn cmd_scaling(args: &[String]) {
     let (path, format, qdir) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(f), Some(d)) => (p.clone(), f.clone(), d.clone()),
@@ -335,6 +344,59 @@ fn cmd_recompress(args: &[String]) {
     eprintln!("recompressed {} triples {src} -> {dst} in {:.3}s", g.len(), t.elapsed().as_secs_f64());
 }
 
+/// [OPUS-4.8] (sq-x32t) `compact <persist-dir>` — WAL COMPACTION / VACUUM for ERASURE-
+/// COMPLETENESS (epic sq-toze.33). An OFFLINE operator command: stop the server, run this on its
+/// `--persist <dir>`, restart. A logical SPARQL `DELETE` / `DROP GRAPH` retracts data from the
+/// live view but leaves the superseded bytes in earlier WAL segments until a compaction folds the
+/// live state into a fresh base; this command does exactly that — physically rewriting the store
+/// to contain ONLY the current live triples, so erased data is gone from the on-disk history.
+///
+/// `Graph::open` replays the WAL into the live overlay, `Graph::vacuum` re-interns the live
+/// triples into a fresh dictionary (so orphaned term VALUES are purged too) and ATOMICALLY
+/// (rollback-safe two-rename swap, parent dir fsync'd between renames, WAL truncated) replaces the
+/// on-disk store; an interrupted swap is healed deterministically on the next open. The live
+/// triple set is preserved exactly (round-trip).
+///
+/// Online equivalent: `POST /admin/compact` on a running `--persist` server (gated by the write
+/// auth token). The complement on the server side runs on the writer thread between batches.
+///
+/// PHYSICAL-ERASURE CAVEAT (honest scope): this scrubs the engine's own on-disk segments; it
+/// cannot reach bytes already copied off-box — filesystem snapshots, block-level COW history, or
+/// external backups — which the storage/backup tier must handle per the retention-erasure runbook.
+fn cmd_compact(args: &[String]) {
+    let dir = match args.get(2) {
+        Some(d) => d.as_str(),
+        None => {
+            eprintln!("usage: sparq-cli compact <persist-dir>   # offline WAL compact/vacuum for erasure-completeness");
+            std::process::exit(2);
+        }
+    };
+    let path = std::path::Path::new(dir);
+    // `open` replays the WAL into the live overlay (and heals any interrupted prior compaction).
+    let mut g = sparq_core::Graph::open(path).unwrap_or_else(|e| {
+        eprintln!("open error ({dir}): {e}");
+        std::process::exit(1);
+    });
+    let before = g.len();
+    let t = Instant::now();
+    // [OPUS-4.8] (sq-x32t) ERASURE-GRADE vacuum: atomic, crash-safe rewrite of the on-disk store
+    // to only the live triples + a fresh dictionary (so orphaned term VALUES are purged too) +
+    // WAL truncate. `vacuum` re-interns; the lighter `Graph::compact` keeps the dict and would
+    // leave a deleted literal's bytes on disk, which is not erasure-complete.
+    g.vacuum().unwrap_or_else(|e| {
+        eprintln!("compact error ({dir}): {e}");
+        std::process::exit(1);
+    });
+    let after = g.len();
+    // `len` is invariant across compaction (the live set is preserved exactly); print it as a
+    // round-trip sanity signal, not as a deletion count (the purged data was already retracted).
+    eprintln!(
+        "compacted {dir}: {} live triples (was {before}) in {:.3}s — superseded/erased data physically removed from the on-disk WAL history",
+        after,
+        t.elapsed().as_secs_f64()
+    );
+}
+
 /// `build <file[.gz|.bz2]> <format> <dir> [chunk_millions]` — EXTERNAL-MEMORY build:
 /// stream the (optionally compressed) document straight to on-disk, memory-mapped indexes
 /// via disk-backed sort/merge, so a dataset whose indexes exceed RAM can be constructed on
@@ -349,7 +411,12 @@ fn cmd_build(args: &[String]) {
     let (path, format, dir) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(f), Some(d)) => (p.as_str(), f.as_str(), d.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli build <file[.gz|.bz2]> <format> <dir> [chunk_millions]");
+            // [OPUS-4.8] sq-vkz7: `SPARQ_BUILD_COMPRESSED=1` makes the external build emit
+            // block-compressed (SPQCPRM1) perms in ONE pass — skipping a later `recompress`.
+            eprintln!(
+                "usage: sparq-cli build <file[.gz|.bz2]> <format> <dir> [chunk_millions]\n  \
+                 (set SPARQ_BUILD_COMPRESSED=1 to write block-compressed perms directly, no recompress pass)"
+            );
             std::process::exit(2);
         }
     };
@@ -739,13 +806,25 @@ fn cmd_query_mmap(args: &[String]) {
 /// `parse_to_triples` falls back to Turtle for ANY unrecognised string, so the CLI must
 /// gate on this set itself to honour the "unsupported format → non-zero exit" contract.
 fn is_known_format(format: &str) -> bool {
+    // [OPUS-4.8] (sq-oy1f.4) JSON-LD input is recognised in the DEFAULT build (the `jsonld`
+    // feature is in the CLI default set — a maintainer-directed exception). Without the feature
+    // (`--no-default-features`) the `oxjsonld` parser is not linked, so the JSON-LD tokens are
+    // NOT "known" and a `jsonld` input format errors (exit 2) rather than mis-parsing as Turtle.
+    #[cfg(feature = "jsonld")]
+    if matches!(format, "jsonld" | "json-ld" | "application/ld+json") {
+        return true;
+    }
     matches!(
         format,
         "hdt"
             | "ntriples"
             | "n-triples"
+            | "nt"
+            | "application/n-triples"
             | "nquads"
             | "n-quads"
+            | "nq"
+            | "application/n-quads"
             | "trig"
             | "application/trig"
             | "turtle"
@@ -757,8 +836,12 @@ fn is_known_format(format: &str) -> bool {
 
 /// [OPUS-4.8] Report an unknown `--format` value and exit 2 (usage error).
 fn die_unknown_format(format: &str) -> ! {
+    // [OPUS-4.8] (sq-oy1f.4) `jsonld` is named in the default build (the `jsonld` feature is in
+    // the CLI default set); a `--no-default-features` build omits it from the list.
     eprintln!(
-        "unknown format '{format}' (known: turtle | ntriples | nquads | trig{})",
+        "unknown format '{}' (known: turtle | ntriples | nquads | trig{}{})",
+        format,
+        if cfg!(feature = "jsonld") { " | jsonld" } else { "" },
         if cfg!(feature = "hdt") { " | hdt" } else { "" }
     );
     std::process::exit(2);
@@ -814,8 +897,18 @@ fn load_quiet(path: &str, format: &str) -> sparq_core::Graph {
         use std::io::Read;
         let mut text = String::new();
         open_reader(path).and_then(|mut r| r.read_to_string(&mut text)).unwrap_or_else(|e| die(e.to_string()));
-        // N-Quads / TriG carry named graphs — load them as a dataset so GRAPH queries work.
-        if matches!(format, "nquads" | "n-quads" | "trig" | "application/trig") {
+        // N-Quads / TriG (and — [OPUS-4.8] sq-oy1f.4 — JSON-LD, whose `@graph` carries named
+        // graphs) load as a DATASET so GRAPH queries and full-dataset re-serialisation (`dump …
+        // jsonld`) see the named graphs instead of folding them into the default graph.
+        #[cfg(feature = "jsonld")]
+        let dataset = matches!(
+            format,
+            "nquads" | "n-quads" | "trig" | "application/trig"
+                | "jsonld" | "json-ld" | "application/ld+json"
+        );
+        #[cfg(not(feature = "jsonld"))]
+        let dataset = matches!(format, "nquads" | "n-quads" | "trig" | "application/trig");
+        if dataset {
             sparq_core::Graph::load_dataset(&text, format).unwrap_or_else(|e| die(e))
         } else {
             sparq_core::Graph::load_str(&text, format).unwrap_or_else(|e| die(e))
@@ -841,6 +934,116 @@ fn load(path: &str, format: &str) -> sparq_core::Graph {
         dict as f64 / g.dict.len().max(1) as f64,
     );
     g
+}
+
+/// [OPUS-4.8] (sq-678h, sq-e3pj) `dump <file[.gz|.bz2|.zst]> <in-format> <out-format>` — load an
+/// RDF document and re-serialize the whole graph (default + named graphs) into one of the writer
+/// matrix formats and print it to stdout. `out-format` ∈ {turtle, trig, nquads, ntriples,
+/// jsonld[-expanded|-flattened|-compacted]}. Turtle emits only the default graph (named graphs
+/// need a dataset format); trig/nquads/jsonld emit the full dataset. JSON-LD defaults to the
+/// expanded form; `jsonld-flattened` / `jsonld-compacted` select the other 1.1 document forms.
+/// [OPUS-4.8] (sq-ixc3.3) `jsonld-pretty[-expanded|-flattened|-compacted]` emit the same
+/// JSON-LD documents in an indented, multi-line shape (whitespace-only over the minified writer).
+/// [OPUS-4.8] (sq-oy1f.5) `jsonld-compact` (+ `jsonld-compact-pretty`) emit the FULL W3C
+/// JSON-LD 1.1 Compaction Algorithm against a caller `@context` supplied via `--context <file>`
+/// (term definitions / `@vocab` / type-language-`@container` coercion / `@reverse` / aliasing),
+/// not the prefix-only `jsonld-compacted` form. Behind the opt-in `serialize-rdf` cargo feature.
+#[cfg(feature = "serialize-rdf")]
+fn cmd_dump(args: &[String]) {
+    let (path, in_fmt, out_fmt) = match (args.get(2), args.get(3), args.get(4)) {
+        (Some(p), Some(i), Some(o)) => (p.as_str(), i.as_str(), o.as_str()),
+        _ => {
+            eprintln!("usage: sparq-cli dump <file[.gz|.bz2|.zst]> <in-format> <out-format> [--context <ctx.jsonld>]\n  out-format: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples | jsonld[-expanded|-flattened|-compacted] | jsonld-pretty[-expanded|-flattened|-compacted] | jsonld-compact[-pretty] (needs --context)");
+            std::process::exit(2);
+        }
+    };
+    // [OPUS-4.8] (sq-oy1f.5) `--context <file>`: the JSON-LD `@context` for full 1.1 Compaction.
+    // Scanned from the args (the CLI is positional, not clap); only the `jsonld-compact` out-
+    // formats consult it. A present `--context` with no value is a usage error.
+    let context_path: Option<&str> = match args.iter().position(|a| a == "--context") {
+        None => None,
+        Some(i) => Some(args.get(i + 1).map(String::as_str).unwrap_or_else(|| {
+            eprintln!("--context needs a value (a JSON-LD @context file)");
+            std::process::exit(2);
+        })),
+    };
+    let g = load_quiet(path, in_fmt);
+    use sparq_engine::serialize::JsonLdForm;
+    let serialized = match out_fmt {
+        // [OPUS-4.8] (sq-oy1f.5) FULL W3C JSON-LD 1.1 Compaction against the `--context` file.
+        "jsonld-compact" | "json-ld-compact" | "jsonld-compact-pretty" | "json-ld-compact-pretty" => {
+            let ctx_path = context_path.unwrap_or_else(|| {
+                eprintln!("out-format '{out_fmt}' needs a `@context`: pass --context <file.jsonld>");
+                std::process::exit(2);
+            });
+            let ctx_text = std::fs::read_to_string(ctx_path).unwrap_or_else(|e| {
+                eprintln!("error reading context file {ctx_path}: {e}");
+                std::process::exit(1);
+            });
+            let ctx = sparq_engine::serialize::parse_context_json(&ctx_text).unwrap_or_else(|| {
+                eprintln!("context file {ctx_path} is not a JSON object (a JSON-LD @context)");
+                std::process::exit(1);
+            });
+            if out_fmt.ends_with("-pretty") {
+                let opts = sparq_engine::serialize::JsonLdPrettyOptions::default();
+                sparq_engine::serialize::graph_to_jsonld_compact_pretty(&g, &ctx, &opts)
+            } else {
+                sparq_engine::serialize::graph_to_jsonld_compact(&g, &ctx)
+            }
+        }
+        "turtle" | "ttl" => sparq_engine::serialize::graph_to_turtle(&g),
+        // [OPUS-4.8] (sq-ixc3.2) idiomatic, deterministic pretty Turtle / TriG.
+        "turtle-pretty" | "ttl-pretty" => sparq_engine::serialize::graph_to_turtle_pretty(&g),
+        "trig-pretty" => sparq_engine::serialize::graph_to_trig_pretty(&g),
+        "trig" => sparq_engine::serialize::graph_to_trig(&g),
+        "nquads" | "n-quads" => sparq_engine::serialize::graph_to_nquads(&g),
+        "jsonld" | "json-ld" | "jsonld-expanded" => {
+            sparq_engine::serialize::graph_to_jsonld(&g, JsonLdForm::Expanded)
+        }
+        "jsonld-flattened" => sparq_engine::serialize::graph_to_jsonld(&g, JsonLdForm::Flattened),
+        "jsonld-compacted" => sparq_engine::serialize::graph_to_jsonld(&g, JsonLdForm::Compacted),
+        // [OPUS-4.8] (sq-ixc3.3) pretty (indented) JSON-LD — whitespace-only over the minified
+        // forms above. `jsonld-pretty` defaults to expanded, matching `jsonld`.
+        "jsonld-pretty" | "json-ld-pretty" | "jsonld-pretty-expanded" => {
+            sparq_engine::serialize::graph_to_jsonld_pretty(&g, JsonLdForm::Expanded)
+        }
+        "jsonld-pretty-flattened" => {
+            sparq_engine::serialize::graph_to_jsonld_pretty(&g, JsonLdForm::Flattened)
+        }
+        "jsonld-pretty-compacted" => {
+            sparq_engine::serialize::graph_to_jsonld_pretty(&g, JsonLdForm::Compacted)
+        }
+        // N-Triples stays on the always-on writer (the default graph as `s p o .` lines).
+        "ntriples" | "n-triples" => {
+            let triples: Vec<oxrdf::Triple> = g
+                .iter_ids()
+                .map(|[s, p, o]| {
+                    let subject = match g.dict.term(s) {
+                        oxrdf::Term::NamedNode(n) => oxrdf::NamedOrBlankNode::NamedNode(n),
+                        oxrdf::Term::BlankNode(b) => oxrdf::NamedOrBlankNode::BlankNode(b),
+                        other => {
+                            eprintln!("corrupt store: non-IRI/blank subject {other}");
+                            std::process::exit(1);
+                        }
+                    };
+                    let predicate = match g.dict.term(p) {
+                        oxrdf::Term::NamedNode(n) => n,
+                        other => {
+                            eprintln!("corrupt store: non-IRI predicate {other}");
+                            std::process::exit(1);
+                        }
+                    };
+                    oxrdf::Triple { subject, predicate, object: g.dict.term(o) }
+                })
+                .collect();
+            sparq_engine::triples_to_ntriples(&triples)
+        }
+        other => {
+            eprintln!("unknown out-format '{other}' (known: turtle | turtle-pretty | trig | trig-pretty | nquads | ntriples | jsonld[-expanded|-flattened|-compacted] | jsonld-pretty[-expanded|-flattened|-compacted] | jsonld-compact[-pretty] (needs --context))");
+            std::process::exit(2);
+        }
+    };
+    print!("{serialized}");
 }
 
 /// [OPUS-4.8] (sq-l4ki) Output serialisation chosen by `query --format`. `Table` (the
@@ -890,7 +1093,7 @@ fn out_format_flag(args: &[String]) -> OutFormat {
     }
 }
 
-/// [OPUS-4.8] (sq-l4ki) Renders a SELECT [`QueryResult`] as a fixed-width ASCII table —
+/// [OPUS-4.8] (sq-l4ki) Renders a SELECT `QueryResult` as a fixed-width ASCII table —
 /// the default human-readable `query` output. Unbound cells render empty; each term uses
 /// its SPARQL/Turtle term syntax (oxrdf's `Display`). Column widths are sized to the
 /// widest cell so columns line up; for a zero-variable result (which only ASK produces,
@@ -1059,11 +1262,42 @@ fn die_query(e: String) -> ! {
     std::process::exit(1);
 }
 
+/// [OPUS-4.8] (sq-d7d) Extract a `--json <path>` results-emit flag (and its value) from the
+/// positional argument vector, returning `(positional_args_without_the_flag, Option<path>)`.
+/// `bench` / `bench-mmap` index their other arguments positionally (`args.get(N)`), so the
+/// flag+value pair is removed BEFORE positional parsing rather than handled inline — this keeps
+/// the historical positional contract intact whether the flag is present or absent. A bare
+/// `--json` with no following value is a usage error (exit 2), mirroring the rest of the CLI.
+fn take_json_flag(args: &[String]) -> (Vec<String>, Option<String>) {
+    let mut out = Vec::with_capacity(args.len());
+    let mut json_path = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--json" {
+            match args.get(i + 1) {
+                Some(p) => {
+                    json_path = Some(p.clone());
+                    i += 2;
+                    continue;
+                }
+                None => {
+                    eprintln!("`--json` requires a path argument: --json <path>");
+                    std::process::exit(2);
+                }
+            }
+        }
+        out.push(args[i].clone());
+        i += 1;
+    }
+    (out, json_path)
+}
+
 fn cmd_bench(args: &[String]) {
+    let (args, json_path) = take_json_flag(args);
     let (path, format, dir) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(f), Some(d)) => (p, f, d),
         _ => {
-            eprintln!("usage: sparq-cli bench <data-file> <format> <queries-dir> [iters]");
+            eprintln!("usage: sparq-cli bench <data-file> <format> <queries-dir> [iters] [count|materialize|json] [--json <results.json>]");
             std::process::exit(2);
         }
     };
@@ -1074,7 +1308,7 @@ fn cmd_bench(args: &[String]) {
         std::process::exit(2);
     }
     let g = load(path, format);
-    run_query_suite(&g, dir, iters, mode);
+    run_query_suite(&g, dir, iters, mode, json_path.as_deref());
 }
 
 /// `bench-mmap <dir> <queries-dir> [iters] [count|materialize|json]` — same as `bench`
@@ -1082,10 +1316,11 @@ fn cmd_bench(args: &[String]) {
 /// be measured without loading it into RAM. Used to compare sparq's compute against the
 /// stored QLever baselines at 100M+ on a 16 GB machine.
 fn cmd_bench_mmap(args: &[String]) {
+    let (args, json_path) = take_json_flag(args);
     let (dir, qdir) = match (args.get(2), args.get(3)) {
         (Some(d), Some(q)) => (d.as_str(), q.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli bench-mmap <index-dir> <queries-dir> [iters] [count|materialize|json] [decompress]");
+            eprintln!("usage: sparq-cli bench-mmap <index-dir> <queries-dir> [iters] [count|materialize|json] [decompress] [--json <results.json>]");
             std::process::exit(2);
         }
     };
@@ -1103,12 +1338,26 @@ fn cmd_bench_mmap(args: &[String]) {
         g.decompress_indexes();
         eprintln!("decompressed indexes to RAM in {:.3}s | committed heap ~{:.3} GB", t.elapsed().as_secs_f64(), g.heap_bytes() as f64 / 1e9);
     }
-    run_query_suite(&g, qdir, iters, mode);
+    run_query_suite(&g, qdir, iters, mode, json_path.as_deref());
+}
+
+/// One measured row of the query suite — the same fields the TSV reports
+/// (`name`, `rows`, `min_micros`), captured so they can be serialised to JSON.
+/// [OPUS-4.8] (sq-d7d)
+struct SuiteRow {
+    name: String,
+    /// `Ok(min_micros)` for a successful query (with `rows`), or `Err(message)` if it failed.
+    outcome: Result<(usize, f64), String>,
 }
 
 /// Runs every `*.rq` in `dir` (sorted) `iters` times in `mode`, printing one TSV line
 /// per query: `<name>\t<rows>\t<min_micros>`.
-fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str) {
+///
+/// [OPUS-4.8] (sq-d7d) When `json_path` is `Some`, the SAME measured fields are ALSO written
+/// to that path as a machine-readable JSON document (the structured-benchmark-catalog pattern,
+/// mirroring `bench/memtier` / `mpc_net_bench`'s dependency-free emit). STDOUT is byte-for-byte
+/// unchanged whether or not the flag is present — JSON is strictly additive.
+fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str, json_path: Option<&str>) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| {
             eprintln!("error reading {dir}: {e}");
@@ -1120,6 +1369,7 @@ fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str) {
         .collect();
     entries.sort();
 
+    let mut results: Vec<SuiteRow> = Vec::with_capacity(entries.len());
     for path in entries {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
         let sparql = std::fs::read_to_string(&path).unwrap();
@@ -1157,9 +1407,85 @@ fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str) {
                 }
             }
         }
-        match err {
+        match &err {
             None => println!("{name}\t{rows}\t{best:.1}"),
             Some(e) => println!("{name}\tERROR\t{e}"),
         }
+        let outcome = match err {
+            None => Ok((rows, best)),
+            Some(e) => Err(e),
+        };
+        results.push(SuiteRow { name, outcome });
     }
+
+    if let Some(p) = json_path {
+        let doc = suite_results_json(mode, iters, &results);
+        if let Err(e) = std::fs::write(p, doc) {
+            eprintln!("error writing --json results to {p}: {e}");
+            std::process::exit(1);
+        }
+        eprintln!("wrote {} query results to {p}", results.len());
+    }
+}
+
+/// [OPUS-4.8] (sq-d7d) Serialise a query-suite run to stable, dependency-free JSON — the same
+/// hand-built `format!` convention as `mpc_net_bench::cell_json` (no serde_json dep added to the
+/// CLI). The shape mirrors the catalog pattern: a top-level object carrying the run parameters +
+/// an honest `note` (these are the numbers THIS machine measured — non-canonical), and a
+/// `queries` array of one object per `*.rq`, each with the SAME fields the TSV prints
+/// (`name`, `rows`, `min_micros`) or an `error` string when the query failed.
+fn suite_results_json(mode: &str, iters: usize, rows: &[SuiteRow]) -> String {
+    let mut s = String::new();
+    s.push_str("{\n");
+    s.push_str("  \"harness\": \"sparq-cli bench\",\n");
+    s.push_str(&format!("  \"mode\": {},\n", json_str(mode)));
+    s.push_str(&format!("  \"iters\": {iters},\n"));
+    s.push_str(
+        "  \"note\": \"min-of-iters wall-clock MEASURED on the running host; \
+         NON-CANONICAL (whatever this machine measured) — do not bake into committed files\",\n",
+    );
+    s.push_str("  \"queries\": [\n");
+    for (i, r) in rows.iter().enumerate() {
+        s.push_str("    {\n");
+        s.push_str(&format!("      \"name\": {}", json_str(&r.name)));
+        match &r.outcome {
+            Ok((rows, micros)) => {
+                s.push_str(&format!(",\n      \"rows\": {rows}"));
+                s.push_str(&format!(",\n      \"min_micros\": {micros:.1}\n"));
+            }
+            Err(e) => {
+                s.push_str(&format!(",\n      \"error\": {}\n", json_str(e)));
+            }
+        }
+        s.push_str("    }");
+        if i + 1 < rows.len() {
+            s.push(',');
+        }
+        s.push('\n');
+    }
+    s.push_str("  ]\n");
+    s.push_str("}\n");
+    s
+}
+
+/// [OPUS-4.8] (sq-d7d) Minimal JSON string escaper for the dependency-free emit — escapes the
+/// characters JSON requires (`"`, `\`, and the C0 control set incl. the named whitespace
+/// escapes). Query names are file stems and error strings are engine messages, so this covers
+/// the realistic input; anything else still produces valid `\uXXXX` escapes.
+fn json_str(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for c in raw.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }

@@ -40,7 +40,7 @@
 //!   public-input field vector from the DECLARED [`ProofInputs`] (in `main`
 //!   declaration order) using the verifier's own challenge, serialize to
 //!   bb's byte layout (32-byte BE field elements, no header — see
-//!   [`reconstruct_public_inputs`]), and assert byte-equality with the
+//!   `reconstruct_public_inputs`), and assert byte-equality with the
 //!   prover's `public_inputs` blob. This binds the JSON statement to the
 //!   proof; without it stages 1-2 (JSON) and the proof (a detached crypto
 //!   object) describe potentially different statements.
@@ -78,7 +78,7 @@
 //!    commitment to the index), the clear index is WITHHELD, and liveness is
 //!    checked by the hidden-index proof cross-bound to that commitment (so neither
 //!    the index nor the bit is disclosed). The clear-index path above is unchanged
-//!    for clear references. See [`bind_revocation`] / [`bind_hidden_revocation`].
+//!    for clear references. See `bind_revocation` / `bind_hidden_revocation`.
 //!
 //! 4. **Freshness / single-use (audit #4).** [`verify_manifest`] takes a
 //!    VERIFIER-ISSUED fresh [`VerifierNonce`] (minted out of band, handed to the
@@ -104,7 +104,8 @@
 //! bits) and the verifier's nonce to the proofs.
 
 use crate::build::{
-    derive_filter_f64_id, derive_filter_int_id, derive_join_eq_id, derive_scan_id,
+    derive_filter_decimal_id, derive_filter_f64_id, derive_filter_int_id,
+    derive_filter_signed_int_id, derive_join_eq_id, derive_scan_id,
 };
 use crate::driver::{CircuitProver, DriverError};
 use crate::manifest::{
@@ -153,7 +154,7 @@ use std::path::Path;
 /// (the structural pre-filter). The accept decision then
 /// depends only on this external set; `manifest.key_set`, if present at all, is
 /// only accepted when it is a SUBSET of this external set (checked, never
-/// trusted as the anchor) — see [`bind_issuer_attestations`].
+/// trusted as the anchor) — see `bind_issuer_attestations`.
 ///
 /// Keys are stored in normalized hex form (no `0x`, lowercase) and validated as
 /// parseable, non-identity Baby-JubJub points at construction (an unparseable or
@@ -290,13 +291,19 @@ impl KeySet {
 /// Membership here means "this holder key is authorised to present" — it does NOT
 /// bind the key to a SPECIFIC credential. Issuer-attested credential↔holder
 /// binding (the issuer signing the holder key into the credential) is deferred;
-/// see [`bind_holder_pop`]. Keys are stored normalized (no `0x`, lowercase) and
+/// see `bind_holder_pop`. Keys are stored normalized (no `0x`, lowercase) and
 /// validated as parseable, non-identity Baby-JubJub points at construction
 /// (unparseable/identity entries dropped fail-closed).
 // [OPUS-4.8] sq-cwq: external holder trust anchor (mirrors KeySet).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HolderRegistry {
     holders: BTreeSet<String>,
+    /// [OPUS-4.8] sq-3c00: when `Some(depth)`, the relying party has OPTED IN to the
+    /// hidden-holder-SET tier — a `manifest.holder_set_proofs` entry is accepted and
+    /// bound to the depth-`depth` holder-set Merkle root this registry derives. MUST
+    /// equal the `holder_set_d{depth}` member the prover used. `None` => disabled (a
+    /// `holder_set_proofs` entry is rejected `HolderSetNotEnabled`, fail-closed).
+    hidden_holder_set_depth: Option<u32>,
 }
 
 impl HolderRegistry {
@@ -304,7 +311,7 @@ impl HolderRegistry {
     /// (`HolderRegistryEmpty`) — the explicit "holder binding not in use" anchor
     /// and the test default. (A `Challenge` binding is unaffected.)
     pub fn empty() -> Self {
-        HolderRegistry { holders: BTreeSet::new() }
+        HolderRegistry { holders: BTreeSet::new(), hidden_holder_set_depth: None }
     }
 
     /// Build a registry from the relying party's authorised holder public keys
@@ -320,7 +327,62 @@ impl HolderRegistry {
             .into_iter()
             .filter_map(|h| public_key_from_hex(h.as_ref()).map(|_| normalize_hex(h.as_ref())))
             .collect();
-        HolderRegistry { holders }
+        HolderRegistry { holders, hidden_holder_set_depth: None }
+    }
+
+    /// [OPUS-4.8] sq-3c00: OPT IN to the hidden-holder-SET anonymity tier at Merkle
+    /// `depth` — a `manifest.holder_set_proofs` proof whose PUBLIC root matches the
+    /// depth-`depth` root this registry derives is then accepted (the holder proves
+    /// membership in this set WITHOUT disclosing which holder). MUST equal the
+    /// `holder_set_d{depth}` member the prover used. The clear-key / clear-digest
+    /// holder paths are unaffected (additive). Builder-style.
+    ///
+    /// NOT-yet-sound (sq-qhy4); opt-in. Enabling this only changes a decision when a
+    /// `holder_set_proofs` entry is presented.
+    pub fn with_hidden_holder_set_depth(mut self, depth: u32) -> Self {
+        self.hidden_holder_set_depth = Some(depth);
+        self
+    }
+
+    /// The opt-in hidden-holder-set depth, if enabled (sq-3c00). `None` => disabled
+    /// (a `manifest.holder_set_proofs` entry is not accepted).
+    fn hidden_holder_set_depth(&self) -> Option<u32> {
+        self.hidden_holder_set_depth
+    }
+
+    /// The trusted holders in the canonical leaf order for the hidden-holder-set
+    /// Merkle tree (sq-3c00): the normalized-hex set's sorted order (`BTreeSet`
+    /// iteration), exactly mirroring [`KeySet::ordered_keys`]. Both the relying
+    /// party (deriving the authoritative `holder_set_root`) and the prover (building
+    /// its membership path) commit the set in THIS order, so the roots agree.
+    // [OPUS-4.8] sq-3c00: canonical leaf order for the holder-set commitment.
+    fn ordered_holders(&self) -> Vec<sparq_zk::sig::PublicKey> {
+        self.holders
+            .iter()
+            .filter_map(|h| public_key_from_hex(h))
+            .collect()
+    }
+
+    /// The authoritative hidden-holder-set Merkle root (sq-3c00) over the trusted
+    /// holders in canonical order, at depth `depth`. This is the TRUST ANCHOR the
+    /// relying party derives from its OWN registry (exactly as
+    /// [`KeySet::hidden_issuer_root`] derives the key-set root), and which a
+    /// `manifest.holder_set_proofs` proof's PUBLIC `holder_set_root` must byte-equal.
+    /// `None` if the set overflows the tree, `depth` is implausible, or any holder
+    /// key is the identity (fail-closed). Leaf = `holder_key_digest(hpk)`.
+    // [OPUS-4.8] sq-3c00.
+    pub fn hidden_holder_set_root(&self, depth: u32) -> Option<Fr> {
+        crate::holder::holder_set_root(&self.ordered_holders(), depth)
+    }
+
+    /// The 0-based index of `holder_hex` in the canonical leaf order, if it is a
+    /// member — the slot the prover proves membership at. (Prover-side convenience;
+    /// the verifier never needs the index, which stays private.) Mirrors
+    /// [`KeySet::member_index`].
+    // [OPUS-4.8] sq-3c00.
+    pub fn member_index(&self, holder_hex: &str) -> Option<usize> {
+        let target = normalize_hex(holder_hex);
+        self.holders.iter().position(|h| *h == target)
     }
 
     /// The registry trusts no holder.
@@ -365,17 +427,27 @@ impl HolderRegistry {
 /// rejectable" requirement (`research/zk-holder-pop-design.md` §1 honest scope /
 /// §4.3 obligation 3).
 ///
-/// # Honest scope (clear-key tier only)
-/// This is the B1 clear-key tier: the presented holder key is DISCLOSED and the
-/// verifier recomputes its digest host-side. The hidden-key in-circuit PoK (B2,
-/// sq-i1dt) — where only the digest is public — is a separate deliverable and is
-/// NOT enforced here.
+/// # Tiers
+/// - **B1 (clear-key, T3/sq-z8s7):** the presented holder key is DISCLOSED
+///   ([`BindingMode::HolderPop`]) and the verifier recomputes its digest host-side
+///   (`bind_holder_binding`), governed by [`Self::require_binding`].
+/// - **B2 (hidden-key in-circuit PoK, T6/sq-c2ql):** only the issuer-attested
+///   `holder_pk_digest` is public; the holder proves possession of the matching
+///   secret IN ZERO KNOWLEDGE ([`crate::manifest::HolderPokProof`], verified by
+///   `bind_holder_pok`). Opt in with [`Self::require_in_circuit_pok`]. This is the
+///   NOT-yet-sound (sq-qhy4) hidden-holder tier — see `bind_holder_pok`.
 // [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): holder-binding policy (external,
 // fail-closed bearer rejection; default back-compatible). Mirrors RevocationPolicy
 // / EntailmentPolicy as a relying-party-supplied external policy object.
+// [OPUS-4.8] sq-c2ql (HolderPoP T6 / B2): + opt-in in-circuit holder-PoK requirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HolderBindingPolicy {
     require_binding: bool,
+    /// [OPUS-4.8] sq-c2ql (B2): when set, a `HolderPop` presentation over a
+    /// holder-bound credential MUST additionally carry a verifying in-circuit holder
+    /// PoK ([`crate::manifest::HolderPokProof`]) for that credential's commitment.
+    /// Opt-in (default off), so the clear-key (B1) path is unaffected.
+    require_in_circuit_pok: bool,
 }
 
 impl HolderBindingPolicy {
@@ -386,6 +458,7 @@ impl HolderBindingPolicy {
     pub fn allow_bearer() -> Self {
         HolderBindingPolicy {
             require_binding: false,
+            require_in_circuit_pok: false,
         }
     }
 
@@ -397,6 +470,23 @@ impl HolderBindingPolicy {
     pub fn require_binding() -> Self {
         HolderBindingPolicy {
             require_binding: true,
+            require_in_circuit_pok: false,
+        }
+    }
+
+    /// [OPUS-4.8] sq-c2ql (B2): additionally REQUIRE an in-circuit holder PoK
+    /// ([`crate::manifest::HolderPokProof`]) for every holder-bound credential a
+    /// `HolderPop` presentation uses — the HIDDEN-key tier. A holder-bound covering
+    /// attestation with NO matching `HolderPokProof` is then rejected fail-closed
+    /// ([`CheckError::HolderPokMissing`]). Builder-style on top of the current
+    /// policy (so it composes with [`Self::require_binding`]).
+    ///
+    /// NOT-yet-sound (sq-qhy4); opt-in. Enabling this only changes a decision when a
+    /// `HolderPokProof` is presented or required; the B1 clear-key gate is unchanged.
+    pub fn require_in_circuit_pok(self) -> Self {
+        HolderBindingPolicy {
+            require_binding: self.require_binding,
+            require_in_circuit_pok: true,
         }
     }
 
@@ -404,11 +494,17 @@ impl HolderBindingPolicy {
     fn requires_binding(&self) -> bool {
         self.require_binding
     }
+
+    /// [OPUS-4.8] sq-c2ql (B2): whether the relying party requires an in-circuit
+    /// holder PoK for each holder-bound credential.
+    fn requires_in_circuit_pok(&self) -> bool {
+        self.require_in_circuit_pok
+    }
 }
 
 /// The relying party's ENTAILMENT-REGIME policy (sq-314): which entailment regimes
 /// it will accept a manifest under. The verifier enforces this fail-closed
-/// ([`bind_entailment`]) so `manifest.entailment_regime` is no longer free
+/// (`bind_entailment`) so `manifest.entailment_regime` is no longer free
 /// metadata.
 ///
 /// # Default = `Simple`-only (fail-closed)
@@ -418,7 +514,7 @@ impl HolderBindingPolicy {
 /// in explicitly with [`EntailmentPolicy::with_rdfs`] / [`EntailmentPolicy::with_owl`];
 /// when it does, the verifier additionally requires the manifest's
 /// `derivation_steps` to STRUCTURALLY ground every derived triple (see
-/// [`bind_entailment`] + the `derivation` module). A regime the policy does not
+/// `bind_entailment` + the `derivation` module). A regime the policy does not
 /// accept REJECTS.
 ///
 /// # Honest scope
@@ -789,7 +885,7 @@ impl SeenNonces for InMemorySeenNonces {
 ///
 /// `flock(LOCK_EX)` serialises step 1–3 across ALL processes that opened the SAME
 /// path on the SAME machine, so two concurrent verifiers cannot both observe one
-/// nonce as fresh (the check-and-append is atomic). An in-process [`Mutex`] also
+/// nonce as fresh (the check-and-append is atomic). An in-process `Mutex` also
 /// guards the fd so threads in one process can't interleave the seek/read/append.
 ///
 /// # Honest scope — reference impl, not a clustered DB
@@ -1233,6 +1329,77 @@ pub enum CheckError {
     /// truncated length prefix) (sq-z9l) — rejected before any bb call.
     // [OPUS-4.8] sq-z9l.
     HiddenIssuerMalformedProof,
+    /// [OPUS-4.8] sq-c2ql (HolderPoP T6 / B2): a [`crate::manifest::HolderPokProof`]
+    /// covers a commitment that no verified scan sub-proof references — a dangling
+    /// in-circuit holder PoK. Rejected fail-closed (every PoK must cover a
+    /// scan-referenced credential, mirroring the hidden-issuer
+    /// [`Self::HiddenIssuerUnreferencedCommitment`] discipline).
+    HolderPokUnreferencedCommitment { commitment: String },
+    /// [OPUS-4.8] sq-c2ql (B2): a [`crate::manifest::HolderPokProof`] covers a
+    /// scan-referenced commitment whose COVERING issuer attestation carries NO
+    /// holder binding ([`crate::manifest::AttestedHolderBinding`]). The in-circuit
+    /// PoK has no issuer-attested `holder_pk_digest` to bind to — there is nothing
+    /// for the binding edge to anchor on, so it is rejected fail-closed.
+    HolderPokBindingMissing { commitment: String },
+    /// [OPUS-4.8] sq-c2ql (B2): the relying party requires an in-circuit holder PoK
+    /// ([`HolderBindingPolicy::require_in_circuit_pok`]) for a holder-bound
+    /// credential, but the manifest carries NO matching
+    /// [`crate::manifest::HolderPokProof`] for that credential's commitment.
+    /// Rejected fail-closed — the hidden-key possession proof is mandated, never
+    /// silently waived.
+    HolderPokMissing { commitment: String },
+    /// [OPUS-4.8] sq-c2ql (B2): a [`crate::manifest::HolderPokProof`]'s PUBLIC
+    /// `holder_pk_digest` does NOT equal the ISSUER-ATTESTED digest the verifier
+    /// recovered from the credential's [`crate::manifest::AttestedHolderBinding`]
+    /// (signature-anchored under the external `K`). This is the binding edge: the
+    /// proven holder key is not the one the issuer signed into THIS credential.
+    /// Rejected fail-closed.
+    HolderPokDigestMismatch { commitment: String },
+    /// [OPUS-4.8] sq-c2ql (B2): `bb verify` REJECTED the in-circuit holder PoK
+    /// against the canonical `holder_pok` vk + the reconstructed public inputs
+    /// (verifier nonce + issuer-attested digest) — the prover does not know a
+    /// holder secret whose public key hashes to the issuer-attested digest, or the
+    /// public inputs were tampered. Rejected.
+    HolderPokProofRejected { commitment: String },
+    /// [OPUS-4.8] sq-c2ql (B2): a [`crate::manifest::HolderPokProof`] blob is
+    /// malformed (non-hex / truncated length prefix), or its declared commitment /
+    /// the recovered digest is not a field element — rejected before any bb call.
+    HolderPokMalformedProof,
+    /// [OPUS-4.8] sq-3c00 (hidden-holder-SET tier): a
+    /// [`crate::manifest::HolderSetProof`] was presented but the relying party has
+    /// NOT enabled the hidden-holder-set path (no
+    /// [`HolderRegistry::with_hidden_holder_set_depth`]): the verifier cannot derive
+    /// an authoritative holder-set root to bind the proof to. Rejected fail-closed.
+    HolderSetNotEnabled,
+    /// [OPUS-4.8] sq-3c00: a [`crate::manifest::HolderSetProof`] declared a Merkle
+    /// depth that does NOT match the registry policy depth: the trees (and roots)
+    /// would be over different leaf layouts. Rejected fail-closed.
+    HolderSetDepthMismatch { declared: u32, policy: u32 },
+    /// [OPUS-4.8] sq-3c00: the relying party enabled the hidden-holder-set path but
+    /// the authoritative holder-set root could not be derived (the registry
+    /// overflows the tree at the policy depth, the depth is implausible, or a
+    /// holder key is the identity). Rejected fail-closed.
+    HolderSetRootUnavailable,
+    /// [OPUS-4.8] sq-3c00: a [`crate::manifest::HolderSetProof`]'s PUBLIC
+    /// `holder_set_root` does NOT byte-equal the root the verifier derives from its
+    /// OWN authoritative [`HolderRegistry`]: the proof was produced against a
+    /// different (e.g. prover-forged) holder set. Rejected fail-closed (the trust
+    /// anchor, mirroring [`Self::HiddenIssuerRootMismatch`]).
+    HolderSetRootMismatch,
+    /// [OPUS-4.8] sq-3c00: a [`crate::manifest::HolderSetProof`] covers a commitment
+    /// that no verified scan sub-proof references — a dangling set-membership proof.
+    /// Rejected fail-closed (mirrors [`Self::HolderPokUnreferencedCommitment`]).
+    HolderSetUnreferencedCommitment { commitment: String },
+    /// [OPUS-4.8] sq-3c00: `bb verify` REJECTED the hidden-holder set-membership
+    /// proof against the canonical `holder_set_d{depth}` vk + the reconstructed
+    /// public inputs (verifier nonce + authoritative root) — the prover does not
+    /// know a holder secret whose key digest is a member of the committed set, or
+    /// the public inputs were tampered. Rejected.
+    HolderSetProofRejected { commitment: String },
+    /// [OPUS-4.8] sq-3c00: a [`crate::manifest::HolderSetProof`] blob is malformed
+    /// (non-hex / truncated length prefix), or its declared commitment / root is not
+    /// a field element — rejected before any bb call.
+    HolderSetMalformedProof,
     /// The manifest's binding is `HolderPop` but the relying party supplied NO
     /// holder registry (an empty [`HolderRegistry`]) (sq-cwq): the verifier has no
     /// trust anchor to check the holder key against, so it cannot accept a holder
@@ -1547,6 +1714,58 @@ impl std::fmt::Display for CheckError {
                 f,
                 "hidden-issuer attestation proof blob is malformed (sq-z9l)"
             ),
+            CheckError::HolderPokUnreferencedCommitment { commitment } => write!(
+                f,
+                "in-circuit holder PoK covers commitment {commitment} which no verified scan sub-proof references (sq-c2ql: dangling holder PoK)"
+            ),
+            CheckError::HolderPokBindingMissing { commitment } => write!(
+                f,
+                "in-circuit holder PoK over commitment {commitment} whose covering issuer attestation carries no holder binding (sq-c2ql: no issuer-attested holder_pk_digest for the binding edge to anchor on)"
+            ),
+            CheckError::HolderPokMissing { commitment } => write!(
+                f,
+                "relying party requires an in-circuit holder PoK for holder-bound commitment {commitment} but the manifest carries none (sq-c2ql: the hidden-key possession proof is mandated, fail-closed)"
+            ),
+            CheckError::HolderPokDigestMismatch { commitment } => write!(
+                f,
+                "in-circuit holder PoK's public holder_pk_digest does not equal the issuer-attested digest for commitment {commitment} (sq-c2ql binding edge: the proven holder key is not the one the issuer signed into this credential)"
+            ),
+            CheckError::HolderPokProofRejected { commitment } => write!(
+                f,
+                "bb rejected the in-circuit holder PoK for commitment {commitment} (sq-c2ql: the zero-knowledge holder-possession statement did not verify against the issuer-attested digest)"
+            ),
+            CheckError::HolderPokMalformedProof => write!(
+                f,
+                "in-circuit holder PoK proof blob is malformed (sq-c2ql)"
+            ),
+            CheckError::HolderSetNotEnabled => write!(
+                f,
+                "hidden-holder set-membership proof present but the relying party has not enabled the hidden-holder-set path (no HolderRegistry::with_hidden_holder_set_depth) (sq-3c00)"
+            ),
+            CheckError::HolderSetDepthMismatch { declared, policy } => write!(
+                f,
+                "hidden-holder set-membership proof depth {declared} does not match the registry policy depth {policy} (sq-3c00)"
+            ),
+            CheckError::HolderSetRootUnavailable => write!(
+                f,
+                "the relying party's authoritative holder-set root could not be derived (overflow / implausible depth / identity holder key) (sq-3c00)"
+            ),
+            CheckError::HolderSetRootMismatch => write!(
+                f,
+                "hidden-holder set-membership proof's public holder_set_root does not equal the relying party's authoritative root (sq-3c00: proved against a different holder set, fail-closed)"
+            ),
+            CheckError::HolderSetUnreferencedCommitment { commitment } => write!(
+                f,
+                "hidden-holder set-membership proof covers commitment {commitment} which no verified scan sub-proof references (sq-3c00: dangling set-membership proof)"
+            ),
+            CheckError::HolderSetProofRejected { commitment } => write!(
+                f,
+                "bb rejected the hidden-holder set-membership proof for commitment {commitment} (sq-3c00: the zero-knowledge holder-possession + set-membership statement did not verify)"
+            ),
+            CheckError::HolderSetMalformedProof => write!(
+                f,
+                "hidden-holder set-membership proof blob is malformed (sq-3c00)"
+            ),
             CheckError::HolderRegistryEmpty => write!(
                 f,
                 "manifest binding is HolderPop but the relying party supplied no holder registry (sq-cwq: no trust anchor to check the holder key against — a holder PoP cannot be accepted, fail-closed)"
@@ -1674,6 +1893,62 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
             };
             derive_filter_f64_id(d)
         }
+        // [OPUS-4.8] sq-7lrq: composable SIGNED xsd:integer FILTER. As with
+        // filter_int, the operand's MAGNITUDE-digit count is PRIVATE; the declared
+        // `md` is re-checked against the compiled signed-int family only (it must be
+        // a compiled MD). The full CircuitId is what the public-input reconstruction
+        // + canonical-vk recompute pin, so a wrong `md` cannot byte-match a real
+        // member's proof.
+        ProofInputs::FilterSignedInt { .. } => {
+            let md = match inputs.circuit_id() {
+                CircuitId::FilterSignedInt { md } => *md,
+                _ => return None,
+            };
+            derive_filter_signed_int_id(md)
+        }
+        // [OPUS-4.8] sq-7lrq: composable xsd:decimal FILTER. The operand's
+        // integer-/fraction-digit counts are PRIVATE; the declared `(id, fd)` is
+        // re-checked against the compiled decimal family only (it must be a compiled
+        // shape). The full CircuitId is what the reconstruction + canonical-vk pin.
+        ProofInputs::FilterDecimal { .. } => {
+            let (id, fd) = match inputs.circuit_id() {
+                CircuitId::FilterDecimal { id, fd } => (*id, *fd),
+                _ => return None,
+            };
+            derive_filter_decimal_id(id, fd)
+        }
+        // [OPUS-4.8] sq-xojl: DUAL-LEAF value-lane FILTER. DIGIT-COUNT-FREE — the
+        // member id carries no `d`/`md`/`(id,fd)` parameter (the per-digit family
+        // collapses), so the derive only confirms the declared id is the single
+        // `FilterValueDl` member. The full CircuitId is what the public-input
+        // reconstruction + canonical-vk recompute pin. The fail-closed legality of
+        // this member against the recorded COMMITMENT METHOD (it is LEGAL only for
+        // `DualLeafV1` / the `ValueOnlyV1` research dial, never `string-canonical`)
+        // is the dispatch matrix `crate::dispatch::resolve_circuit` (sq-cfmv) — the
+        // host-encoding wiring that gives the verifier the method is sq-j506, gated
+        // behind sq-qhy4. Here the derive only confirms the member identity.
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDl { .. } => match inputs.circuit_id() {
+            CircuitId::FilterValueDl => Some(CircuitId::FilterValueDl),
+            _ => None,
+        },
+        // [OPUS-4.8] sq-2ezsx: the DUAL-LEAF double + decimal value-lane FILTERs.
+        // Like the integer member they are DIGIT-COUNT-FREE (the per-digit family
+        // collapses; the decimal class is even scale-agnostic — the scale lives in
+        // the public `datatype_const`, not the member id), so the derive only
+        // confirms the declared id is the single member of its datatype class. The
+        // full CircuitId is what the reconstruction + canonical-vk pin. The
+        // fail-closed `(method × circuit)` legality is `crate::dispatch` (sq-cfmv).
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlF64 { .. } => match inputs.circuit_id() {
+            CircuitId::FilterValueDlF64 => Some(CircuitId::FilterValueDlF64),
+            _ => None,
+        },
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlDecimal { .. } => match inputs.circuit_id() {
+            CircuitId::FilterValueDlDecimal => Some(CircuitId::FilterValueDlDecimal),
+            _ => None,
+        },
         // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN. The
         // two graph sizes are PRIVATE (the witnessed graph contents are not public
         // inputs — only the commitments are), so — exactly as scan trusts the
@@ -1828,9 +2103,15 @@ pub fn prefilter_manifest_structure(
         // column into EITHER an xsd:integer FILTER (filter_int) or a composable
         // xsd:double FILTER (filter_f64) — both carry `operand_enc` as the
         // scan-proof anchor, bound to the committed literal in-circuit.
+        // [OPUS-4.8] sq-7lrq: a binding edge may also consume the scanned column
+        // into a SIGNED xsd:integer FILTER (filter_signed_int) or an xsd:decimal
+        // FILTER (filter_decimal); both carry `operand_enc` as the scan-proof anchor,
+        // bound to the committed literal in-circuit (same mechanism as filter_int).
         let operand = match &to.inputs {
             ProofInputs::FilterInt { operand_enc, .. } => operand_enc,
             ProofInputs::FilterF64 { operand_enc, .. } => operand_enc,
+            ProofInputs::FilterSignedInt { operand_enc, .. } => operand_enc,
+            ProofInputs::FilterDecimal { operand_enc, .. } => operand_enc,
             _ => return Err(CheckError::EdgeKindMismatch { edge: e }),
         };
         if scanned != operand {
@@ -2845,6 +3126,352 @@ fn bind_hidden_issuer_attestations(
             .map_err(CheckError::Driver)?;
         if !ok {
             return Err(CheckError::HiddenIssuerProofRejected);
+        }
+    }
+    Ok(())
+}
+
+/// [OPUS-4.8] sq-c2ql (HolderPoP T6 / B2): the in-circuit holder Proof-of-Possession
+/// cryptographic gate — the HIDDEN-key analogue of the clear-key
+/// [`bind_holder_binding`] (T3/sq-z8s7 B1) and the structural twin of
+/// [`bind_hidden_issuer_attestations`] (sq-z9l).
+///
+/// # What it proves (the binding edge — sq-c2ql)
+/// The clear-key B1 gate ([`bind_holder_binding`]) binds a DISCLOSED holder key to
+/// the issuer-attested digest host-side. B2 does the same WITHOUT disclosing the
+/// holder key: the prover supplies a [`crate::manifest::HolderPokProof`] — a bb
+/// proof of the `holder_pok` relation (knowledge of `hsk` with `hpk = hsk·G` and
+/// `Poseidon2([ZKSIG_HK, hpk.x, hpk.y]) == holder_pk_digest`, `hsk`/`hpk` private).
+/// The PUBLIC `holder_pk_digest` is NOT trusted as a prover field: this gate reads
+/// it from the ISSUER-ATTESTED [`crate::manifest::AttestedHolderBinding`] on the
+/// attestation covering the PoK's scan-referenced commitment, anchored in the
+/// issuer's Schnorr signature ([`verify_holder_attestation_signature`], the same
+/// `commitment_message_with_holder` / external-`K` anchor B1 uses). It then
+/// reconstructs the proof's public inputs from the verifier's fresh nonce + THAT
+/// issuer-signed digest and requires the proof's public inputs to byte-equal them
+/// (audit-#1 discipline), recomputes the canonical `holder_pok` vk verifier-side
+/// (audit-#2 discipline, never the prover's vk), and `bb verify`s.
+///
+/// So the proven (hidden) holder key is cryptographically bound to the
+/// issuer-attested credential — the binding edge: a holder A who does NOT hold
+/// `hsk_B` cannot produce a satisfying witness for B's issuer-signed digest
+/// (DL-hardness + proof soundness), and cannot swap in its own digest without
+/// breaking the issuer's EUF-CMA signature.
+///
+/// # Fail-closed contract
+/// - No `holder_pok_proofs` AND the policy does not require one => nothing to do
+///   (the clear-key path is the holder gate); returns `Ok`.
+/// - A PoK over a commitment no verified scan references =>
+///   [`CheckError::HolderPokUnreferencedCommitment`].
+/// - A PoK over a commitment whose covering attestation carries no holder binding
+///   (no issuer-attested digest to anchor on) =>
+///   [`CheckError::HolderPokBindingMissing`].
+/// - A digest / nonce / public-input mismatch => [`CheckError::HolderPokDigestMismatch`];
+///   a malformed blob => [`CheckError::HolderPokMalformedProof`]; a bb rejection =>
+///   [`CheckError::HolderPokProofRejected`].
+/// - Under [`HolderBindingPolicy::require_in_circuit_pok`], a holder-bound
+///   scan-referenced credential with NO matching verified PoK =>
+///   [`CheckError::HolderPokMissing`] (the hidden-key proof is mandated).
+///
+/// PRECONDITION: `bind_issuer_attestations` + `bind_revocation` have already run in
+/// the prefilter, so the per-commitment salt + revocation reference are the
+/// ISSUER-bound ones — the message [`verify_holder_attestation_signature`]
+/// recomputes is therefore the genuine issuer-signed message.
+///
+/// # SOUNDNESS (load-bearing, NOT a security claim)
+/// This wires the binding edge; it does NOT make the composition verifier sound.
+/// The verifier is NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic sq-1s2) and
+/// `holder_pok` inherits that — a passing PoK is NOT, under an adversarial prover, a
+/// guarantee the holder relation holds, and there is NO external
+/// accredited-cryptographer sign-off (sq-qhy4 pending). Research-grade, opt-in. No
+/// soundness / ZK-privacy claim is made or implied.
+// [OPUS-4.8] sq-c2ql (HolderPoP T6 / B2): in-circuit holder PoK + issuer-attested
+// credential binding edge. Opt-in, NOT-yet-sound (sq-qhy4).
+fn bind_holder_pok(
+    manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
+    holder_binding_policy: &HolderBindingPolicy,
+    prover: &CircuitProver,
+    work_dir: &Path,
+    challenge: &FieldHex,
+) -> Result<(), CheckError> {
+    // Nothing presented AND nothing required => the clear-key path is the gate.
+    if manifest.holder_pok_proofs.is_empty() && !holder_binding_policy.requires_in_circuit_pok() {
+        return Ok(());
+    }
+
+    // The scan-referenced commitments and their COVERING issuer attestation — the
+    // EXACT lookup `bind_holder_binding` / `bind_issuer_attestations` use (compare as
+    // field elements so 0x-padding cannot slip a mismatch). A PoK / requirement is
+    // only meaningful for a credential the presentation actually uses.
+    let mut covering: std::collections::BTreeMap<
+        String,
+        Option<&crate::manifest::CommitmentAttestation>,
+    > = std::collections::BTreeMap::new();
+    for sp in &manifest.sub_proofs {
+        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
+            continue;
+        };
+        for c in commitments {
+            let Some(c_fr) = c.to_field() else { continue };
+            let att = manifest.commitment_attestations.iter().find(|a| {
+                a.commitment.to_field().is_some() && a.commitment.to_field() == Some(c_fr)
+            });
+            covering.insert(field_to_hex(&c_fr), att);
+        }
+    }
+
+    // The verifier nonce (audit #4) — public-input field 0, fed by us, never the
+    // prover's declared bytes.
+    let challenge_fr = challenge
+        .to_field()
+        .ok_or(CheckError::HolderPokMalformedProof)?;
+
+    // Track which holder-bound commitments a VERIFIED PoK covered, so the
+    // require_in_circuit_pok sweep below can flag any holder-bound credential left
+    // without a possession proof.
+    let mut verified_for: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for (i, pok) in manifest.holder_pok_proofs.iter().enumerate() {
+        let Some(c_fr) = pok.commitment.to_field() else {
+            return Err(CheckError::HolderPokMalformedProof);
+        };
+        let c_key = field_to_hex(&c_fr);
+
+        // (1) The PoK must cover a commitment a verified scan references (no dangling
+        // PoK — mirrors HiddenIssuerUnreferencedCommitment).
+        let Some(covering_att) = covering.get(&c_key) else {
+            return Err(CheckError::HolderPokUnreferencedCommitment {
+                commitment: pok.commitment.0.clone(),
+            });
+        };
+        // (2) Its covering attestation must carry a holder binding — that is the
+        // issuer-attested digest the binding edge anchors on. A PoK over a bearer
+        // credential has nothing to bind to (fail-closed).
+        let Some(att) = covering_att.filter(|a| a.holder.is_some()) else {
+            return Err(CheckError::HolderPokBindingMissing {
+                commitment: pok.commitment.0.clone(),
+            });
+        };
+
+        // (3) Anchor the issuer-attested digest in the ISSUER signature: the digest
+        // must be the one the issuer folded into commitment_message_with_holder,
+        // verified under the EXTERNAL trusted K (never a free prover JSON field —
+        // the design §4.3 obligation-1 anchor, shared with B1). A holder-bound
+        // attestation whose signature does not so verify is rejected here
+        // (InvalidIssuerSignature / IssuerKeyNotInKeySet).
+        verify_holder_attestation_signature(manifest, trusted_key_set, att)?;
+        let binding = att
+            .holder
+            .as_ref()
+            .expect("filtered for Some(holder) above");
+        let Some(attested_digest) = binding.digest() else {
+            return Err(CheckError::HolderPokMalformedProof);
+        };
+
+        // (4) Reconstruct the public-input vector for holder_pok main: challenge,
+        // holder_pk_digest (two 32-byte BE field words, declaration order). We feed
+        // OUR nonce + the ISSUER-ATTESTED digest — never the prover's declared bytes
+        // — so a proof committed under a different challenge OR over a digest the
+        // issuer did not sign cannot byte-match (the binding edge).
+        let blob = hex_decode(&pok.proof_hex).ok_or(CheckError::HolderPokMalformedProof)?;
+        let art = decode_artifacts(&blob).ok_or(CheckError::HolderPokMalformedProof)?;
+        let mut reconstructed: Vec<u8> = Vec::with_capacity(64);
+        reconstructed.extend_from_slice(&field_to_be_bytes_32(&challenge_fr));
+        reconstructed.extend_from_slice(&field_to_be_bytes_32(&attested_digest));
+        if reconstructed != art.public_inputs {
+            // Diagnose the digest word distinctly (the binding edge): if the proof's
+            // second public-input word is not the issuer-attested digest, it is a
+            // digest mismatch; otherwise the challenge word (or the blob length)
+            // diverged.
+            let pi = &art.public_inputs;
+            if pi.len() == 64 && pi[32..64] != field_to_be_bytes_32(&attested_digest) {
+                return Err(CheckError::HolderPokDigestMismatch {
+                    commitment: pok.commitment.0.clone(),
+                });
+            }
+            return Err(CheckError::HolderPokProofRejected {
+                commitment: pok.commitment.0.clone(),
+            });
+        }
+
+        // (5) Recompute the canonical holder_pok vk verifier-side (audit #2) and bb
+        // verify over OUR reconstructed public inputs.
+        let id = CircuitId::HolderPok;
+        let sub_work = work_dir.join(format!("holder_pok_{i}"));
+        let canonical_vk = prover
+            .canonical_vk(&id, &sub_work.join("vk"))
+            .map_err(CheckError::Driver)?;
+        let ok = prover
+            .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+            .map_err(CheckError::Driver)?;
+        if !ok {
+            return Err(CheckError::HolderPokProofRejected {
+                commitment: pok.commitment.0.clone(),
+            });
+        }
+        verified_for.insert(c_key);
+    }
+
+    // (6) [OPUS-4.8] sq-c2ql: under require_in_circuit_pok, EVERY holder-bound
+    // scan-referenced credential a HolderPop presentation uses must carry a verified
+    // PoK — a holder-bound covering attestation with no matching PoK is rejected
+    // fail-closed (the hidden-key possession proof is mandated, never silently
+    // waived). Scoped to a `HolderPop` binding: a plain `Challenge` binding presents
+    // no holder, so there is no possession to prove (mirrors the B1 `bind_holder_pop`
+    // scoping, which returns early for `Challenge`).
+    if holder_binding_policy.requires_in_circuit_pok()
+        && matches!(manifest.binding, BindingMode::HolderPop { .. })
+    {
+        for (c_key, att) in &covering {
+            if att.is_some_and(|a| a.holder.is_some()) && !verified_for.contains(c_key) {
+                return Err(CheckError::HolderPokMissing {
+                    commitment: c_key.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier): the hidden-holder
+/// set-membership cryptographic gate — the structural twin of
+/// [`bind_hidden_issuer_attestations`] (sq-z9l) on the HOLDER axis, and the
+/// hidden-holder upgrade over the clear-digest [`bind_holder_pok`] (sq-c2ql).
+///
+/// # What it proves (and what it hides)
+/// `bind_holder_pok` makes the issuer-attested `holder_pk_digest` PUBLIC, so a
+/// verifier learns the holder is the SPECIFIC (hidden-key) party bound to one
+/// credential. This gate instead hides WHICH holder: the prover supplies a
+/// [`crate::manifest::HolderSetProof`] — a bb proof of the `hidden_holder_set`
+/// relation (knowledge of `hsk` with `hpk = hsk·G`, on-curve / non-identity /
+/// `< L`, AND `holder_key_digest(hpk)` a Merkle MEMBER of the committed holder
+/// set, with `hsk`/`hpk`/index/path all PRIVATE). Only `holder_set_root` is public,
+/// exactly as `hidden_issuer` publishes `key_set_root` instead of the issuer key.
+///
+/// # Trust anchor (mirrors the audit #3 external-K anchor — load-bearing)
+/// `holder_set_root` is a prover-committed public input, NOT trusted as a claim:
+/// the verifier derives the AUTHORITATIVE root from its OWN [`HolderRegistry`]
+/// (canonical order) at the policy's `hidden_holder_set_depth`, and REQUIRES the
+/// proof's public root to byte-equal it. A prover that proves membership in its OWN
+/// (forged) holder set fails this equality. The proof is also tied to a
+/// scan-referenced commitment (no dangling proof), so it is bound to a credential
+/// the relying party can name.
+///
+/// # Fail-closed contract
+/// - No `holder_set_proofs` => nothing to check (the clear holder paths remain the
+///   holder gate); returns `Ok`.
+/// - An entry present but the registry has NOT enabled the hidden-holder-set path
+///   (`hidden_holder_set_depth == None`) => REJECT [`CheckError::HolderSetNotEnabled`].
+/// - A depth mismatch, an unresolvable root, a root mismatch, an unreferenced
+///   commitment, a malformed blob, or a bb rejection all REJECT.
+///
+/// # SOUNDNESS (load-bearing, NOT a security claim)
+/// This wires the membership gate; it does NOT make the composition verifier sound.
+/// The verifier is NOT-yet-sound (sq-qhy4 / sq-9hrn; remediation epic sq-1s2) and
+/// `holder_set_d{depth}` inherits that — a passing proof is NOT, under an
+/// adversarial prover, a guarantee the holder relation holds, and there is NO
+/// external accredited-cryptographer sign-off (sq-qhy4 pending). Research-grade,
+/// opt-in. No soundness / ZK-privacy property is asserted as achieved.
+// [OPUS-4.8] sq-3c00 (HolderPoP hidden-holder-SET tier). Opt-in, NOT-yet-sound (sq-qhy4).
+fn bind_holder_set(
+    manifest: &ProofManifest,
+    holder_registry: &HolderRegistry,
+    prover: &CircuitProver,
+    work_dir: &Path,
+    challenge: &FieldHex,
+) -> Result<(), CheckError> {
+    if manifest.holder_set_proofs.is_empty() {
+        // No set-membership proofs; the clear holder paths are the holder gate.
+        return Ok(());
+    }
+    // The relying party must have OPTED IN; otherwise it has no authoritative
+    // holder-set root to bind the proof to and rejects fail-closed.
+    let Some(depth) = holder_registry.hidden_holder_set_depth() else {
+        return Err(CheckError::HolderSetNotEnabled);
+    };
+    // Derive the AUTHORITATIVE holder-set root from the relying party's OWN registry
+    // (canonical order) — the trust anchor every entry's public root must equal.
+    let auth_root = holder_registry
+        .hidden_holder_set_root(depth)
+        .ok_or(CheckError::HolderSetRootUnavailable)?;
+
+    let challenge_fr = challenge
+        .to_field()
+        .ok_or(CheckError::HolderSetMalformedProof)?;
+
+    // The set of commitments a VERIFIED scan sub-proof references (as field
+    // elements, so 0x-padding cannot slip a mismatch) — a set-membership proof is
+    // only meaningful for a credential the presentation actually uses.
+    let mut referenced: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for sp in &manifest.sub_proofs {
+        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
+            continue;
+        };
+        for c in commitments {
+            if let Some(c_fr) = c.to_field() {
+                referenced.insert(field_to_hex(&c_fr));
+            }
+        }
+    }
+
+    for (i, hs) in manifest.holder_set_proofs.iter().enumerate() {
+        if hs.depth != depth {
+            return Err(CheckError::HolderSetDepthMismatch {
+                declared: hs.depth,
+                policy: depth,
+            });
+        }
+        // The covered commitment must be referenced by a verified scan.
+        let Some(c_fr) = hs.commitment.to_field() else {
+            return Err(CheckError::HolderSetUnreferencedCommitment {
+                commitment: hs.commitment.0.clone(),
+            });
+        };
+        if !referenced.contains(&field_to_hex(&c_fr)) {
+            return Err(CheckError::HolderSetUnreferencedCommitment {
+                commitment: hs.commitment.0.clone(),
+            });
+        }
+
+        let blob = hex_decode(&hs.proof_hex).ok_or(CheckError::HolderSetMalformedProof)?;
+        let art = decode_artifacts(&blob).ok_or(CheckError::HolderSetMalformedProof)?;
+
+        // Public-input layout for holder_set_d{depth} main: challenge, holder_set_root
+        // (two 32-byte BE field words, declaration order). We feed OUR nonce + the
+        // AUTHORITATIVE root — never the prover's declared bytes — so a proof
+        // committed under a different challenge OR over a non-authoritative holder
+        // set cannot byte-match (the trust anchor).
+        let mut reconstructed: Vec<u8> = Vec::with_capacity(64);
+        reconstructed.extend_from_slice(&field_to_be_bytes_32(&challenge_fr));
+        reconstructed.extend_from_slice(&field_to_be_bytes_32(&auth_root));
+        if reconstructed != art.public_inputs {
+            // Diagnose the root word distinctly (the trust anchor): if the proof's
+            // second public-input word is not the authoritative root, it is a root
+            // mismatch; otherwise the challenge word (or the blob length) diverged.
+            let pi = &art.public_inputs;
+            if pi.len() == 64 && pi[32..64] != field_to_be_bytes_32(&auth_root) {
+                return Err(CheckError::HolderSetRootMismatch);
+            }
+            return Err(CheckError::HolderSetProofRejected {
+                commitment: hs.commitment.0.clone(),
+            });
+        }
+
+        // Recompute the canonical holder_set_d{depth} vk verifier-side (audit #2)
+        // and bb verify over OUR reconstructed public inputs.
+        let id = CircuitId::HolderSet { depth };
+        let sub_work = work_dir.join(format!("holder_set_{i}"));
+        let canonical_vk = prover
+            .canonical_vk(&id, &sub_work.join("vk"))
+            .map_err(CheckError::Driver)?;
+        let ok = prover
+            .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+            .map_err(CheckError::Driver)?;
+        if !ok {
+            return Err(CheckError::HolderSetProofRejected {
+                commitment: hs.commitment.0.clone(),
+            });
         }
     }
     Ok(())
@@ -4103,6 +4730,35 @@ pub fn verify_manifest(
     // verifier's nonce (audit #4), identical to the sub-proof loop's binding.
     bind_hidden_issuer_attestations(manifest, trusted_key_set, prover, work_dir, &challenge)?;
 
+    // --- sq-c2ql: in-circuit holder Proof-of-Possession cryptographic gate (B2). ---
+    // If the manifest carries in-circuit holder PoK proofs (or the policy mandates
+    // them), verify each against the ISSUER-ATTESTED holder digest of the covering
+    // credential (the binding edge: the proven hidden holder key is the one the
+    // issuer signed into THIS credential) and the verifier's nonce, then bb verify.
+    // The clear-key holder gate (bind_holder_pop, above) is UNCHANGED and still runs;
+    // this is the additive HIDDEN-key tier. NOT-yet-sound (sq-qhy4); opt-in. The
+    // challenge fed here is the verifier's nonce (audit #4), identical to the
+    // sub-proof loop's binding.
+    bind_holder_pok(
+        manifest,
+        trusted_key_set,
+        holder_binding_policy,
+        prover,
+        work_dir,
+        &challenge,
+    )?;
+
+    // --- sq-3c00: hidden-holder SET-membership cryptographic gate. ---
+    // If the manifest carries hidden-holder set-membership proofs, verify each
+    // against the relying party's OWN authoritative holder-set Merkle root (derived
+    // from its HolderRegistry) and the verifier's nonce, then bb verify. The
+    // clear-key / clear-digest holder gates (bind_holder_pop, bind_holder_pok,
+    // above) are UNCHANGED and still run; this is the additive hidden-holder
+    // anonymity tier (hides WHICH holder). NOT-yet-sound (sq-qhy4); opt-in. The
+    // challenge fed here is the verifier's nonce (audit #4), identical to the
+    // sub-proof loop's binding.
+    bind_holder_set(manifest, holder_registry, prover, work_dir, &challenge)?;
+
     Ok(())
 }
 
@@ -4235,6 +4891,84 @@ fn reconstruct_public_inputs(
             push_field(&mut out, operand_enc, proof, "operand_enc")?;
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, *b_bits);
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-7lrq: filter_signed_int_d{md} public inputs, in `main`
+        // declaration order: challenge (pushed above), operand_enc, op, bound_neg
+        // (bool -> {0,1}), bound (the constant's u64 magnitude), expected.
+        // Cross-reference `zk/compose/filter_signed_int_d{md}/src/main.nr`.
+        ProofInputs::FilterSignedInt { operand_enc, op, bound_neg, bound, expected, .. } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, u64::from(*bound_neg));
+            push_uint(&mut out, *bound);
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-7lrq: filter_decimal_i{id}_f{fd} public inputs, in `main`
+        // declaration order: challenge (pushed above), operand_enc, op, bound_neg
+        // (bool -> {0,1}), bound_scaled (the host-prescaled constant magnitude),
+        // expected. Cross-reference `zk/compose/filter_decimal_i{id}_f{fd}/src/main.nr`.
+        ProofInputs::FilterDecimal { operand_enc, op, bound_neg, bound_scaled, expected, .. } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, u64::from(*bound_neg));
+            push_uint(&mut out, *bound_scaled);
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-xojl: filter_value_dl_int (DUAL-LEAF value lane) public
+        // inputs, in `main` declaration order: challenge (pushed above),
+        // operand_enc, op, bound, datatype_const, expected. Cross-reference
+        // `zk/compose/filter_value_dl_int/src/main.nr`. `operand_enc` is the
+        // DUAL-LEAF leaf `h3(h3(VALUE_HOOK, datatype_const, LANG_NONE),
+        // lexical_component, TYPE_CODE_LITERAL)`; the verifier reconstructs the
+        // SAME public-input vector the prover serialized, so a `filter_value_dl_int`
+        // sub-proof's bb verification runs. (Like the other FILTER members, this is
+        // the public-input SERIALIZATION; the `(method, circuit)` legality + the
+        // scan-binding gate are the dispatch matrix `crate::dispatch` (sq-cfmv) and
+        // the host-encoding wiring (sq-j506), gated behind sq-qhy4.)
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDl { operand_enc, op, bound, datatype_const, expected, .. } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, *bound);
+            push_field(&mut out, datatype_const, proof, "datatype_const")?;
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-2ezsx: filter_value_dl_f64 (DUAL-LEAF double value lane)
+        // public inputs, in `main` declaration order: challenge (pushed above),
+        // operand_enc, op, b_bits (the FILTER constant as IEEE-754 bits),
+        // datatype_const, expected. Cross-reference
+        // `zk/compose/filter_value_dl_f64/src/main.nr`. `operand_enc` is the
+        // DUAL-LEAF leaf over the CANONICAL IEEE bits.
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlF64 { operand_enc, op, b_bits, datatype_const, expected, .. } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, *b_bits);
+            push_field(&mut out, datatype_const, proof, "datatype_const")?;
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-2ezsx: filter_value_dl_decimal (DUAL-LEAF decimal value
+        // lane) public inputs, in `main` declaration order: challenge (pushed
+        // above), operand_enc, op, bound_neg (bool -> {0,1}), bound_scaled (the
+        // host-prescaled constant magnitude at the canonical scale), datatype_const
+        // (folds the datatype AND the scale), expected. Cross-reference
+        // `zk/compose/filter_value_dl_decimal/src/main.nr`.
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlDecimal {
+            operand_enc,
+            op,
+            bound_neg,
+            bound_scaled,
+            datatype_const,
+            expected,
+            ..
+        } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, u64::from(*bound_neg));
+            push_uint(&mut out, *bound_scaled);
+            push_field(&mut out, datatype_const, proof, "datatype_const")?;
             push_uint(&mut out, u64::from(*expected));
         }
         // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN
@@ -4486,6 +5220,82 @@ mod tests {
         let got = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
         assert_eq!(got.len(), 160);
         assert_eq!(got, bb, "filter_f64 reconstruction must byte-match bb");
+    }
+
+    /// [OPUS-4.8] sq-7lrq: EMPIRICAL anchor for the composable `filter_signed_int_d{md}`
+    /// family. `filter_signed_int_d2` over: challenge=0x2a, operand_enc=0x25f9…a120
+    /// ("-42"^^xsd:integer), op=Lt(0), bound_neg=false, bound=1, expected=true. 6
+    /// fields * 32 = 192 bytes. Captured verbatim by
+    /// `probe_filter_signed_int_public_inputs_hex` (e2e.rs, ignored) from a real
+    /// `bb prove`; a toolchain bump that changes the serialization breaks this
+    /// loudly. The two extra words over `filter_int` are the sign-split bound
+    /// (`bound_neg`, `bound` magnitude).
+    #[test]
+    fn reconstruct_filter_signed_int_matches_real_bb_public_inputs() {
+        let bb = hex_decode(concat!(
+            // challenge
+            "000000000000000000000000000000000000000000000000000000000000002a",
+            // operand_enc ("-42"^^xsd:integer)
+            "25f95edbf033080613232d81e9851bafcb0addf47bcffcb02e388298dec5a120",
+            // op = Lt (0)
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            // bound_neg = false
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            // bound = 1 (the +1 magnitude)
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            // expected = true
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        ))
+        .unwrap();
+        let inputs = ProofInputs::FilterSignedInt {
+            id: CircuitId::FilterSignedInt { md: 2 },
+            operand_enc: fh("0x25f95edbf033080613232d81e9851bafcb0addf47bcffcb02e388298dec5a120"),
+            op: FilterOp::Lt,
+            bound_neg: false,
+            bound: 1,
+            expected: true,
+        };
+        let got = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
+        assert_eq!(got.len(), 192);
+        assert_eq!(got, bb, "filter_signed_int reconstruction must byte-match bb");
+    }
+
+    /// [OPUS-4.8] sq-7lrq: EMPIRICAL anchor for the composable
+    /// `filter_decimal_i{id}_f{fd}` family. `filter_decimal_i3_f2` over:
+    /// challenge=0x2a, operand_enc=0x2711…8ddd ("123.45"^^xsd:decimal), op=Gt(2),
+    /// bound_neg=false, bound_scaled=12340 (0x3034 = round(123.40*100)),
+    /// expected=true. 6 fields * 32 = 192 bytes. Captured verbatim by
+    /// `probe_filter_decimal_public_inputs_hex` (e2e.rs, ignored) from a real
+    /// `bb prove`. The host-prescaled `bound_scaled` is the only layout difference
+    /// from the signed-int member.
+    #[test]
+    fn reconstruct_filter_decimal_matches_real_bb_public_inputs() {
+        let bb = hex_decode(concat!(
+            // challenge
+            "000000000000000000000000000000000000000000000000000000000000002a",
+            // operand_enc ("123.45"^^xsd:decimal)
+            "271130972d0065afdc11c7ac94fd97f113e2cc1d8a6f8771d8d4116446138ddd",
+            // op = Gt (2)
+            "0000000000000000000000000000000000000000000000000000000000000002",
+            // bound_neg = false
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            // bound_scaled = 12340 (0x3034)
+            "0000000000000000000000000000000000000000000000000000000000003034",
+            // expected = true
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        ))
+        .unwrap();
+        let inputs = ProofInputs::FilterDecimal {
+            id: CircuitId::FilterDecimal { id: 3, fd: 2 },
+            operand_enc: fh("0x271130972d0065afdc11c7ac94fd97f113e2cc1d8a6f8771d8d4116446138ddd"),
+            op: FilterOp::Gt,
+            bound_neg: false,
+            bound_scaled: 12340,
+            expected: true,
+        };
+        let got = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
+        assert_eq!(got.len(), 192);
+        assert_eq!(got, bb, "filter_decimal reconstruction must byte-match bb");
     }
 
     /// [OPUS-4.8] sq-f9tl (re-audit NEW-1): EMPIRICAL anchor for the k=2 scan

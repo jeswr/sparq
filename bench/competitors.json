@@ -69,10 +69,10 @@
       "name": "QLever",
       "kind": "docker-image",
       "role": "External on-disk engine reference (scales to billions; compressed on-disk index). Compared COLD, cache cleared each run; COUNT VALUES + result SIZES cross-checked, not just row==row.",
-      "pinned_version": "docker.io/adfreiburg/qlever@<DIGEST>",
-      "version_source": "bench/qlever-*/Qleverfile (IMAGE = docker.io/adfreiburg/qlever:latest). NOTE: `:latest` is NOT a pin — the gather script resolves and records the image DIGEST at run time (the digest IS the version identifier; compare.py reports no server build string); record that digest here when you fix a reference.",
-      "version_pin_followup": "replace `:latest` with a sha256 digest pin in the Qleverfiles once a reference image is chosen — tracked as bead sq-l9yt.",
-      "install_recipe": "docker pull docker.io/adfreiburg/qlever:latest  (or the qlever-control CLI: pipx install qlever; `qlever` reads a Qleverfile). Docker is NOT installed on the dev box — this competitor is gather-only on a box that has Docker.",
+      "pinned_version": "docker.io/adfreiburg/qlever@sha256:6fb9ce89e6461607e0826872369ad09c48e96b4c6faffc3f0c8133001858c29b",
+      "version_source": "bench/qlever-*/Qleverfile (IMAGE = docker.io/adfreiburg/qlever@sha256:...). PINNED by sq-l9yt to the multi-arch manifest-list (OCI image index) digest of `:latest` resolved 2026-06-17 — this is what `docker pull` resolves and what the gather script records at run time via `docker inspect --format '{{index .RepoDigests 0}}'` (the digest IS the version identifier; compare.py reports no server build string). Re-pin only deliberately: update the three Qleverfiles AND this field together.",
+      "version_pin_followup": "DONE (sq-l9yt): `:latest` replaced with the sha256 digest pin above in all three bench/qlever-*/Qleverfile IMAGE lines.",
+      "install_recipe": "docker pull docker.io/adfreiburg/qlever@sha256:6fb9ce89e6461607e0826872369ad09c48e96b4c6faffc3f0c8133001858c29b  (or the qlever-control CLI: pipx install qlever; `qlever` reads a Qleverfile, which carries the same digest pin). Docker is NOT installed on the dev box — this competitor is gather-only on a box that has Docker.",
       "run_recipe": "in a bench/qlever-* dir: `qlever get-data && qlever index && qlever start`, then `python3 compare.py <iters> <endtoend|compute>` (drives sparq-cli AND the QLever HTTP endpoint; min-of-N cold).",
       "comparable_suites": [
         { "sparq_suite": "qlever-olympics",        "note": "real skewed DBpedia/Wallscope olympics (~1.78M); compare.py compute|endtoend" },
@@ -88,6 +88,31 @@
       "dashboard_engine_id": "qlever"
     },
     {
+      "id": "fuseki",
+      "name": "Apache Jena Fuseki + TDB2",
+      "kind": "http-sparql",
+      "role": "[OPUS-4.8 sq-gbq0] Tier-1 SPARQL-1.1 reference SERVER (per research/competitor-benchmark-landscape.md §1): the canonical Jena/TDB2 store reviewers expect as the mainstream baseline + a CORRECTNESS ORACLE (cross-check COUNT/result-size before any timing). NOT the speed target — Fuseki is Java/JVM, single-machine, and lands mid/back-of-pack vs QLever (the speed rival stays QLever). Apache-2.0 -> numbers are publishable (no DeWitt/benchmark-publication clause). Adapter kind `http-sparql` (POST a SELECT/COUNT query -> parse SPARQL-results-JSON -> count) reusing scripts/bench-adapters/http_sparql_adapter.py, the SAME shared unit the QLever path uses and the one the Virtuoso bead (sq-gji9) inherits. tdb2.tdbloader bulk-loads NT/TTL and Fuseki serves SPARQL 1.1, so it runs every existing sparq suite unmodified.",
+      "pinned_version": "apache-jena-fuseki + TDB2 (pin the Fuseki distribution version or the Docker image DIGEST at gather time)",
+      "version_source": "the resolved Docker image DIGEST (`docker inspect --format '{{index .RepoDigests 0}}'`) — this digest IS the recorded version identifier — or, for a from-tarball install, the `fuseki --version` / distribution version. The SPARQL endpoint reports no build string, so the digest/distribution version IS the recorded identifier; recorded in the gather results file at run time.",
+      "install_recipe": "use the first-party jena-fuseki-docker image (Apache-2.0; Dockerfile + compose + helper scripts), OR a community image (stain/jena-fuseki, secoresearch/fuseki), OR download apache-jena-fuseki-<ver>.tar.gz + apache-jena-<ver>.tar.gz (for tdb2.tdbloader) and put bin/ on PATH. Docker-based -> gather-only on a Docker EC2 box (no Docker on the dev box; zero recurring CI cost). gather-only — NOT a committed dependency (engines stay out of git per AGENTS.md).",
+      "run_recipe": "PREP (gather box): bulk-load the suite corpus with `tdb2.tdbloader --loc <DB> <data.nt|.ttl>`, start Fuseki over <DB> (`fuseki-server --loc <DB> /ds` or the Docker image), then for each suite .rq drive the endpoint: `scripts/gather-competitors.sh --run --only fuseki` with SPARQL_ENDPOINT=<http://host:3030/ds/query> SPARQL_QUERY_FILE=<suite>/queries/<q>.rq set; the dispatch calls scripts/bench-adapters/http_sparql_adapter.py (POST query -> parse SPARQL-JSON -> count). COLD + min-of-N; COUNT(*) compute-mode headline. Cross-check the COUNT/result-size against sparq BEFORE trusting any timing.",
+      "adapter": {
+        "endpoint_env": "SPARQL_ENDPOINT",
+        "query_file_env": "SPARQL_QUERY_FILE",
+        "note": "POST each suite query (or its `SELECT (COUNT(*) AS ?n)` compute-mode wrap) to the Fuseki /query endpoint; parse SPARQL-results-JSON, count solutions (or read ?n). Methodology extends bench/CATALOG.md QUIET-BOX: gather ONCE on an otherwise-idle box, same machine+suite+scale back-to-back vs sparq, COLD + min-of-N. Cross-check COUNT/result-size first."
+      },
+      "comparable_suites": [
+        { "sparq_suite": "sp2b",   "note": "SP2Bench corpus; load .nt via tdb2.tdbloader, run queries/*.rq against the endpoint. COUNT(*) compute-mode headline; cross-check result-size vs sparq first." },
+        { "sparq_suite": "watdiv", "note": "WatDiv SF=1 corpus; comparable in count mode (same .rq workload as the QLever/Oxigraph WatDiv comparison)." },
+        { "sparq_suite": "lubm",   "note": "LUBM EXTENSIONAL tier ONLY — Fuseki/TDB2 does not materialize OWL 2 RL by default, so the entailed tier (Q6/Q9/Q11/Q12/Q13) is NOT comparable as-loaded; scope to the extensional queries (like Oxigraph/QLever)." },
+        { "sparq_suite": "bsbm",   "note": "BSBM Explore corpus via the endpoint; CONSTRUCT/DESCRIBE forms compare produced-triple counts." },
+        { "sparq_suite": "dbpsb",  "note": "DBPSB/FEASIBLE DBpedia cut; the suite Jena/Fuseki is most-reported on in the literature." }
+      ],
+      "version_env_metadata": "gather records the Fuseki Docker image DIGEST (or the distribution version / `fuseki --version`) + java -version + the host env block. Results land git-ignored in bench/competitor-results/fuseki-<suite>-<UTC>.json; promote into engines/values only deliberately, reviewed in-diff.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "fuseki"
+    },
+    {
       "id": "eye",
       "name": "EYE (Euler Yet another proof Engine)",
       "kind": "binary",
@@ -97,8 +122,10 @@
       "install_recipe": "no Homebrew formula; install from eyereasoner/eye install.sh at the pinned commit (saved-state .pvm via SWI-Prolog). EYE is NOT installed on the dev box — gather-only where `eye` is on PATH. Set EYE=/path/to/eye.",
       "run_recipe": "EYE=$HOME/.local/bin/eye SPARQ_CLI=target/release/sparq-cli bench/inference/eye-comparison.sh  (min-of-N wall seconds; emits the sparq-vs-EYE table). EYE on dt100k is ~hours — gated behind EYE_DT100K=1.",
       "comparable_suites": [
-        { "sparq_suite": "inference-eye-comparison", "note": "socrates / DeepTaxonomy (dt1k,dt10k,dt100k) / anc500 / grid30 N3 closures" },
-        { "sparq_suite": "lubm",                     "note": "OWL-RL reasoning tier conceptually comparable, but EYE consumes N3 rules not OWL-RL builtins directly — not wired; tracked as bead sq-bzr7" }
+        { "sparq_suite": "inference-eye-comparison", "note": "socrates / DeepTaxonomy (dt1k,dt10k,dt100k) / anc500 / grid30 N3 closures" }
+      ],
+      "excluded_suites": [
+        { "sparq_suite": "lubm", "reason": "[OPUS-4.8 sq-bzr7] NOT wired and NOT comparable as previously listed. RESOLUTION = bead option (b): the OWL-RL->N3 translation needed to make EYE's closure comparable to `sparq-cli reason ... owl` on the LUBM entailed tier (Q4-Q13) is out of scope for one bench-wiring PR, so the suite is removed from comparable_suites. WHY it is not a drop-in: (1) EYE is a forward-chaining N3 reasoner, not a SPARQL query engine — it does NOT run the LUBM `.rq` queries on either tier; the only axis on which EYE could be compared here is *closure materialization*. (2) sparq's `reason owl` applies the full W3C OWL 2 RL/RDF rule table (crates/sparq-reason/src/owl.rs implements cls-*/cax-*/scm-*/prp-*/eq-* — incl. cls-svf someValuesFrom, cls-int intersectionOf, prp-trp TransitiveProperty, prp-inv inverseOf — the exact features LUBM Q6/Q9/Q11/Q12/Q13 depend on; see bench/lubm/README.md). To compare like-for-like, EYE would need a faithful, separately-VALIDATED OWL 2 RL ruleset *as N3* whose closure reproduces bench/lubm/expected-rows.tsv exactly. The repo's only OWL-in-N3 file (tests/w3c/n3/files/'state transitions'/owl2rl.n3) is a ~12-rule demo that omits transitivity (commented out), someValuesFrom, intersectionOf and inverseOf, so its closure would UNDER-count those queries — wiring it would be a misleading, not a fair, comparison. Authoring + validating the full OWL 2 RL N3 rule table is its own task; capture as a follow-up bead if the entailed-tier EYE comparison is ever wanted. EYE remains wired + comparable on the N3-closure suite above (inference-eye-comparison), which is its native pipeline." }
       ],
       "version_env_metadata": "gather records `eye --version`, the SWI-Prolog version, and the host env block; the cited third-party EYE measurements + machine spec live in bench/inference/eye-comparison.md.",
       "quiet_box_sensitive": true,
@@ -225,9 +252,10 @@
       "pinned_version": "anserini (pin the exact release/Maven coordinate + Lucene version at gather time)",
       "version_source": "the Anserini release version + bundled Lucene version, recorded in the gather results file.",
       "install_recipe": "Anserini (Apache-2.0) via its fatjar / pyserini, plus a BEIR cut (SciFact or TREC-COVID + qrels) downloaded at gather time. gather-only — NOT committed; the BEIR corpus is NOT redistributable in-repo (see the text-index-bench BEIR follow-up bead).",
-      "run_recipe": "Anserini's OWN IR harness: index the BEIR corpus, run BM25 retrieval against the qrels, report Recall@100 / nDCG@10 + latency. This is the IR-quality oracle for sparq-text's BEIR axis once that axis is wired (currently gather-only).",
+      "run_recipe": "[OPUS-4.8 sq-1fz0] WIRED: scripts/gather-competitors.sh dispatches kind `python-lib` to scripts/bench-adapters/beir_ir_adapter.py — it downloads a BEIR cut + qrels, BM25-retrieves with Anserini/pyserini (k1=1.2/b=0.75), and scores Recall@100 / nDCG@10 as DEFICITS (G4). Run: `BEIR_CUT=scifact scripts/gather-competitors.sh --run --only lucene-anserini` (set SPARQ_TEXT_BEIR=target/release/examples/beir_text to ALSO score sparq-text on the SAME cut+qrels via the same scorer). The IR-quality oracle for sparq-text's BEIR axis; gather-only (corpus not redistributable in-repo).",
       "adapter": {
-        "kind_note": "Lucene/Anserini is a kernel IR sub-component with its own harness (not the shared http-sparql/report-cli path); its results are the BM25 quality oracle, comparable ONLY on the IR-quality axis (Recall@100/nDCG@10), never as a SPARQL benchmark."
+        "kind_note": "Lucene/Anserini is a kernel IR sub-component with its own harness (scripts/bench-adapters/beir_ir_adapter.py, NOT the shared http-sparql/report-cli/vector-lib path); its results are the BM25 quality oracle, comparable ONLY on the IR-quality axis (Recall@100/nDCG@10), never as a SPARQL benchmark.",
+        "dataset_env": "BEIR_CUT (scifact|trec-covid; default scifact), BEIR_K (top-k, default 100), BEIR_DATA_DIR (download cache, default /tmp/beir-data)"
       },
       "comparable_suites": [
         { "sparq_suite": "text-index-bench", "note": "KERNEL-ONLY, IR-quality axis: compare Recall@100/nDCG@10 on the same BEIR cut + qrels. NOT a SPARQL benchmark (no RDF surface) and NOT on the dashboard. Scope to AND/OR/prefix/phrase/slop + BM25 k1=1.2/b=0.75 to stay fair." }
@@ -273,6 +301,29 @@
       "version_env_metadata": "gather records each DB image digest + the host env block.",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": null
+    },
+    {
+      "id": "hdt-cpp",
+      "name": "hdt-cpp (rdfhdt reference C++ tools)",
+      "kind": "report-cli",
+      "role": "[OPUS-4.8 sq-lrp9] The HDT reference implementation: the rdfhdt C++ tools (core LGPL, tools Apache-2.0). The ONLY like-for-like axis vs sparq-hdt is LOAD-AND-DECODE — sparq-hdt decodes HDT into sparq's OWN Dict/Graph (HDT as an ingest format) then queries its own permutation indexes, whereas hdt-cpp/java query the compressed BitmapTriples IN PLACE (HDT as a queryable store). So we compare DECODE only: `hdt2rdf <in.hdt> <out.nt>` (decode the same archive to N-Triples) is the structural analogue of sparq-hdt's load+decode-to-native. A query-over-HDT head-to-head (hdtSearch / triple-pattern over the compressed bitmap) is NOT like-for-like and is OUT OF SCOPE (different data structure, different work). hdt-java is the JVM sibling, same caveat. Adapter kind `report-cli` (file-in / N-Triples-out), Docker-based -> gather-only on a Docker EC2 box (no Docker on the dev box; zero recurring CI cost), behind the `hdt` cargo feature.",
+      "pinned_version": "rdfhdt/hdt-cpp (pin the rdfhdt/hdt-cpp Docker image DIGEST at gather time)",
+      "version_source": "the rdfhdt/hdt-cpp Docker image DIGEST (or the built tag of a from-source build), recorded in the gather results file.",
+      "install_recipe": "use the `rdfhdt/hdt-cpp` Docker image (core LGPL / tools Apache-2.0), OR build from source (autotools: `./autogen.sh && ./configure && make`). Docker-based -> gather-only on a Docker EC2 box, like QLever; zero recurring CI cost. gather-only — NOT a committed dependency (engines stay out of git per AGENTS.md).",
+      "run_recipe": "scripts/gather-competitors.sh --run --only hdt-cpp with HDT_ARCHIVE=<in.hdt> set; the dispatch calls scripts/bench-adapters/report_cli_adapter.py with the `adapter` recipe below (hdt2rdf decodes the SAME archive sparq-hdt loads, to N-Triples on stdout — the load+decode-to-native analogue). Cross-check the decoded TRIPLE COUNT against sparq-hdt's store.len() before trusting any timing. Match the regime: hdt-cpp `mapHDT` (mmap) vs `loadHDT` (in-RAM) — compare in-RAM vs in-RAM.",
+      "adapter": {
+        "cmd": ["hdt2rdf", "{archive}"],
+        "report_format": "ntriples",
+        "report_to": "stdout",
+        "version_cmd": ["hdt2rdf", "--version"],
+        "kind_note": "DECODE-ONLY. The report is the decoded N-Triples; the comparable signal is decode wall-clock + the decoded triple count (cross-check vs sparq-hdt store.len()). A query-over-HDT (hdtSearch) head-to-head is deliberately NOT wired — it is not like-for-like (sparq-hdt re-indexes; hdt-cpp queries the compressed bitmap in place)."
+      },
+      "comparable_suites": [
+        { "sparq_suite": "hdt-suite", "note": "DECODE-ONLY: hdt2rdf decodes the SAME .hdt sparq-hdt loads; cross-check the decoded triple count (== sparq-hdt store.len(), 328 for snikmeta) before trusting any decode timing. Query-over-HDT is OUT OF SCOPE — not like-for-like (sparq-hdt re-indexes into its own Dict/Graph; hdt-cpp queries the compressed BitmapTriples in place)." }
+      ],
+      "version_env_metadata": "gather records the hdt-cpp Docker image digest (or source tag) + the host env block.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "hdt-cpp"
     }
   ],
 

@@ -5,25 +5,53 @@
 #
 #   HARD gates (FAIL the build; picked up by the ci-summary aggregator):
 #     • markdownlint  — structural markdown defects over the user-facing + governance
-#                       doc surface (root docs, skills/, docs/, crates/). Tuned to the
-#                       repo's house style via .markdownlint-cli2.jsonc.
+#                       doc surface (root docs, skills/, docs/, crates/, and — as of
+#                       sq-rqyo — research/ + zk/). Tuned to the repo's house style via
+#                       .markdownlint-cli2.jsonc.
 #     • typos         — high-confidence spelling errors in those same docs (markdown
 #                       only), with a domain allowlist in _typos.toml.
 #     • internal-links — lychee --offline over those docs: every relative link AND
 #                       heading-anchor (#fragment) must resolve. Deterministic (no net).
+#     • privacy-claims — greps the OUTWARD claim surface for unqualified ZK/MPC
+#                       privacy/soundness claims (the empirical-honesty mandate; the v1
+#                       ZK verifier is pending external audit + sparq-mpc is semi-honest
+#                       only). A hit fails unless the line carries an inline
+#                       `privacy-claims-allow: <why>` marker. (scripts/check-privacy-claims.sh;
+#                       beads sq-toze.35 / sq-qhy4.)
+#     • terminology    — greps the doc surface for deprecated RDF/SPARQL wording: the
+#                       community-era "RDF-star"/"RDF*"/"SPARQL-star"/"quoted triple"/
+#                       "embedded triple" are now RDF 1.2 / SPARQL 1.2 / "triple term" /
+#                       "reified triple". A hit fails unless the line is a proper noun
+#                       (the W3C RDF-star WG/CG), a paper title, a third-party doc name, a
+#                       URL, or carries `terminology-allow: <why>`. research/ is exempt
+#                       (prior-art discussion). Source of truth: skills/terminology/SKILL.md.
+#                       (scripts/check-terminology.py; bead sq-2p8z / issue #812.)
+#     • no-perf-numbers — greps user-facing docs for baked-in benchmark figures (AGENTS.md
+#                       house rule; scripts/check-no-perf-numbers.py --enforce). PROMOTED
+#                       from advisory to HARD by sq-8ic6 once the backlog cleared (the last
+#                       stray, skills/cli/SKILL.md's inline ratio, was reworded to cite the
+#                       canonical measured source). Deterministic, grep-only, no network.
+#     • readme-template — crate-README length cap + 🚀/✨/📚 sections + License
+#                       (scripts/check-readme-template.py --enforce). PROMOTED from advisory
+#                       to HARD by sq-8ic6's deferred half once the sq-9jw5 README-overhaul
+#                       epic cleared the backlog (sq-inzv brought 20 publish=true crate
+#                       READMEs to the template; sq-4lvq finished the 3 deferred crates) and
+#                       sq-ixsf tightened the stub classifier (an explicit `internal-stub`
+#                       HTML-comment directive is now required). 0 deviations across all 35
+#                       READMEs. Deterministic (line-count/grep), no network; carries a
+#                       hermetic --self-test step.
 #
-#   ADVISORY (continue-on-error → reported in the job summary, never block a merge):
-#     • markdownlint-advisory — same rules over the WHOLE repo (research/, zk/, bench/)
-#                       so the staged-rollout backlog stays visible (tracked: sq-<TBD>).
+#   ADVISORY (continue-on-error / --advisory exit-0 → reported, never block a merge):
+#     • markdownlint-advisory — same rules over the WHOLE repo MINUS the HARD-gated dirs
+#                       (research/ + zk/ are now HARD, per sq-rqyo); covers the remaining
+#                       not-yet-clean dirs (bench/, .claude/) so any backlog stays visible.
 #     • vale          — prose hygiene: weasel words, wordy phrases, adjective puffery.
 #     • external-links — lychee online: dead http(s) links (network-flaky → advisory).
-#     • no-perf-numbers — greps docs for baked-in benchmark figures (AGENTS.md rule).
-#     • readme-template — crate-README length cap + required sections (pairs w/ sq-9jw5).
 #
-# WHY this split: markdownlint/typos/internal-links are deterministic and already pass
-# on the scoped doc surface, so they gate. Vale/external-links/the custom checks either
-# carry a large pre-existing backlog or depend on network/another in-flight bead
-# (sq-9jw5), so they advise until their scope is clean, then flip to HARD.
+# WHY this split: markdownlint/typos/internal-links/no-perf-numbers/readme-template are
+# deterministic and now pass on the scoped doc surface, so they gate. Vale/external-links
+# carry a network dependency or a pre-existing prose-style backlog, so they advise until
+# their scope is clean, then flip to HARD.
 #
 # ci-summary aggregation: it polls every check-run on the head commit and fails iff one
 # concluded failure. So every ADVISORY job must CONCLUDE SUCCESS or it would block the
@@ -65,7 +93,7 @@ jobs:
     name: markdownlint (docs)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -80,11 +108,11 @@ jobs:
     name: typos (docs)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: Install typos
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: typos@1.47.2
       - name: typos (markdown doc surface only)
@@ -102,12 +130,20 @@ jobs:
             ':!:vendor/**' ':!:**/vendor/**' | sort -u > /tmp/doc-md.txt
           echo "Scanning $(wc -l < /tmp/doc-md.txt) markdown file(s) for typos:"
           typos --file-list /tmp/doc-md.txt
+      # [OPUS-4.8] sq-hyzq: both-direction self-test for the _typos.toml allow-list — the
+      # recurring "ALL-CAPS SPARQL keyword + lowercase suffix" false-positives (DELETEd,
+      # INSERTed, "3 OPTIONALs", invokable, …) must stay SUPPRESSED, AND a genuine ALL-CAPS
+      # misspelling + ordinary lowercase typos must STILL fire (so the regex keeps its
+      # teeth). Hermetic (temp fixtures, no repo scan, no network); runs in this same HARD
+      # job so an allow-list over- or under-reach also fails the ci-summary gate.
+      - name: Self-test the typos allow-list (both directions)
+        run: bash scripts/tests/test_typos_allowlist.sh
 
   internal-links:
     name: internal-links (lychee --offline)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: "lychee (offline: relative links + anchors)"
@@ -128,17 +164,18 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
   skill-frontmatter:
-    # [OPUS-4.8] HARD gate (bead sq-56im): every skills/**/SKILL.md must have YAML
-    # frontmatter that actually parses (yaml.safe_load) and carries non-empty string
-    # `name` + `description`. Catches the GitHub "mapping values are not allowed in
-    # this context" render error caused by an UNQUOTED colon in a description value
-    # (reported on full-text-search/SKILL.md). The validation itself is deterministic
-    # (no network); the one network touch is the version-pinned `pip install` of PyYAML
-    # below. Still a HARD gate. [OPUS-4.8]
+    # [OPUS-4.8] HARD gate (beads sq-56im + sq-tstv): every skills/**/SKILL.md AND
+    # every .claude/agents/*.md must have YAML frontmatter that actually parses
+    # (yaml.safe_load) and carries non-empty string `name` + `description`. Catches the
+    # GitHub "mapping values are not allowed in this context" render error caused by an
+    # UNQUOTED colon in a description value (reported on full-text-search/SKILL.md, and
+    # later on the sparq-site.md agent's "GitHub Pages app: …" — hence the agent-file
+    # coverage). The validation itself is deterministic (no network); the one network
+    # touch is the version-pinned `pip install` of PyYAML below. Still a HARD gate. [OPUS-4.8]
     name: skill-frontmatter (Agent-Skills YAML)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -150,8 +187,289 @@ jobs:
         # sha256 against .github/requirements/docs-quality.txt before use. PyYAML has no
         # runtime deps, so that file is the full closure. See its header to bump/regenerate.
         run: pip install --require-hashes -r .github/requirements/docs-quality.txt
-      - name: Validate SKILL.md frontmatter
+      - name: Validate SKILL.md + .claude/agents frontmatter
         run: python3 scripts/check-skill-frontmatter.py
+      # [OPUS-4.8] sq-tstv: hermetic self-test of the gate's classification — an
+      # unquoted-colon agent description must FAIL, a quoted one must PASS, and the
+      # default glob must cover both the skills/ and .claude/agents/ families. Runs in
+      # this same HARD job so a coverage regression also fails the ci-summary gate.
+      - name: Self-test the skill-frontmatter gate
+        run: python3 scripts/tests/test_skill_frontmatter.py
+
+  privacy-claims:
+    # [OPUS-4.8] HARD gate (bead sq-toze.35 + sq-qhy4): the empirical-honesty mandate
+    # in CI form. The v1 ZK verifier is pending external cryptographer sign-off and
+    # `sparq-mpc` is honest-majority semi-honest only (SECURITY.md; research/zk-*-audit.md),
+    # so NO outward doc / README / SKILL / site-copy / compliance-index string may assert a
+    # ZK/MPC privacy-or-soundness property as a SETTLED, achieved fact without the
+    # not-yet-sound caveat. The script greps the outward claim surface for forbidden
+    # unqualified-claim phrases; a hit fails the build unless the line carries an inline
+    # `privacy-claims-allow: <why>` justification marker (the allow-list). Deterministic,
+    # no network, grep-only. HARD (no "advisory"/"informational" in the name) so the
+    # ci-summary aggregator gates on it. [OPUS-4.8]
+    name: privacy-claims (ZK/MPC honesty gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: No unqualified ZK/MPC privacy/soundness claims
+        run: bash scripts/check-privacy-claims.sh
+      # [OPUS-4.8] sq-qhy4: both-direction self-tests for the predicate-form soundness
+      # coverage — should-FAIL overclaims ("the verifier is sound", "…are COMPLETE and
+      # SOUND", "provably sound") must be caught; should-PASS negated/hedged/non-crypto
+      # lines (incl. the canonical "SOUND as landed for the … threat model" verdict) must
+      # not regress. Hermetic (no git/network) — pins the gate classification. Runs in
+      # this same HARD job so a coverage regression also fails the ci-summary gate.
+      - name: Self-test the privacy-claims gate (both directions)
+        run: bash scripts/tests/test_privacy_claims.sh
+
+  # [OPUS-4.8] sq-2p8z (issue #812): the terminology HARD gate. The feature historically
+  # nicknamed "RDF-star"/"RDF*" is STANDARDISED in RDF 1.2 (the construct is a "triple
+  # term", with "reifiers"/"reified triples" + rdf:reifies); "SPARQL-star" → "SPARQL 1.2".
+  # The community spellings are imprecise (a non-spec version name AND the wrong, old
+  # subject+object model), so no user-facing / governance markdown may carry them. The
+  # script greps the same doc surface the other HARD gates use (root *.md + skills/ +
+  # docs/ + crates/), exempts research/ (the sanctioned home for prior-art + competitor
+  # discussion), and recognises the legitimate proper-noun / paper-title / third-party-
+  # doc-name / URL exceptions (+ an inline `terminology-allow: <why>` marker). The single
+  # source of truth for preferred wording is skills/terminology/SKILL.md. Deterministic,
+  # grep-only, no network. HARD (no advisory token) → the ci-summary aggregator gates on it.
+  terminology:
+    name: terminology (RDF 1.2 / SPARQL 1.2 wording)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      # Pins the gate's own classification before it is trusted to guard the docs:
+      # should-FAIL banned spellings must fire AND should-PASS proper-noun / paper-title /
+      # third-party-doc / URL / allow-marker lines (+ the GeoSPARQL / italic-closer / bold
+      # false-positive families) must not regress. Hermetic (no git/network).
+      - name: Self-test the terminology gate (both directions)
+        run: python3 scripts/check-terminology.py --self-test
+      - name: No deprecated RDF-star/SPARQL-star/quoted-triple wording — GATING
+        run: python3 scripts/check-terminology.py
+
+  # [OPUS-4.8] sq-6uc7: HARD self-tests for the shared CI disk-reclaim script
+  # (scripts/ci-free-disk.sh). #462 folded `/usr/local/share/boost` + the env-named
+  # `$AGENT_TOOLSDIRECTORY` toolcache into that one script (instead of a 2nd inline
+  # step). The toolcache is UNSET on a non-GitHub host and the script runs `set -u`,
+  # so the load-bearing invariants are: (1) an unset/empty `$AGENT_TOOLSDIRECTORY`
+  # must NOT trip `set -u`; (2) an absent path must never red the step; (3) the
+  # reclaim still FIRES when the path is present. The harness is hermetic (PATH-shadows
+  # sudo/df/docker — touches no real system path) and runs unconditionally on every PR
+  # (the script gates `build-archive` + every heavy lane, which are themselves
+  # Rust-gated, so it is validated HERE rather than only when Rust changes). HARD (no
+  # "advisory"/"informational" in the name) so ci-summary gates on it.
+  ci-scripts:
+    name: ci-scripts (CI-helper self-tests + workflow lints)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: shellcheck ci-free-disk.sh + its self-test
+        run: shellcheck scripts/ci-free-disk.sh scripts/tests/test_ci_free_disk.sh
+      - name: Self-test ci-free-disk.sh (set -u safety + existence guards + #462 fold)
+        run: bash scripts/tests/test_ci_free_disk.sh
+      # [OPUS-4.8] sq-4vo9m: the per-tick disk guard (df-check + merged-worktree prune +
+      # gated main-target reclaim) that stops the autonomous loop from filling the work box
+      # to ENOSPC. Validated HERE (hermetic: the harness PATH-shadows df/pgrep and sandboxes
+      # the main checkout / worktree-gc, so it touches no real disk/worktree) — it has no
+      # runtime in CI itself, but a regression in its gated-escalation / busy-build-guard /
+      # state→exit / non-fatal-delegation logic must be caught before it is trusted to broom
+      # the work box. Both the script's own pure-predicate self-test AND the end-to-end
+      # harness run; HARD (no "advisory"/"informational") so ci-summary gates on it.
+      - name: shellcheck disk-guard.sh + its self-test
+        run: shellcheck scripts/disk-guard.sh scripts/tests/test_disk_guard.sh
+      - name: Self-test disk-guard.sh (threshold math + state→exit-code, hermetic)
+        run: bash scripts/disk-guard.sh --dry-run-self-test
+      - name: Self-test disk-guard.sh (gated escalation + busy-build guard, end-to-end)
+        run: bash scripts/tests/test_disk_guard.sh
+      # [OPUS-4.8] sq-h34dc: worktree-gc.sh's COMPLETED-but-unmerged reclaim (--reclaim-completed)
+      # removes clean+pushed wf_/agent- worktrees with no live owning task — strictly more
+      # aggressive than the default MERGED-or-GONE broom, so its safety (opt-in, workflow-named
+      # only, KEEP-if-dirty/unpushed/in-use) is pinned by a hermetic harness that builds real git
+      # repos + worktrees and spawns a live in-use process. The script's own pure self-test (the
+      # is_workflow_branch predicate + in-use probe callability) runs too. HARD (no
+      # "advisory"/"informational") so ci-summary gates on it. (shellcheck of worktree-gc.sh is
+      # new here — it now carries the load-bearing in-use guard.)
+      - name: shellcheck worktree-gc.sh + its completed-reclaim self-test
+        run: shellcheck scripts/worktree-gc.sh scripts/tests/test_worktree_gc_completed.sh
+      - name: Self-test worktree-gc.sh (pure predicates incl. is_workflow_branch, hermetic)
+        run: bash scripts/worktree-gc.sh --dry-run-self-test
+      - name: Self-test worktree-gc.sh (completed-reclaim opt-in + workflow-only + in-use guard, end-to-end)
+        run: bash scripts/tests/test_worktree_gc_completed.sh
+      # [OPUS-4.8] sq-13uyp: the per-tick merged-bead reconcile sweep — closes bd-OPEN beads
+      # whose fix already MERGED so they stop wasting frontier dispatches (it COMPLEMENTS
+      # push-frontier's open-PR exclusion, sq-7mwun). Its correctness rests on a conservative
+      # EXACT-token match (the `sq-ixc3.1` must-NOT-match-`sq-ixc3.11` guard) and a
+      # never-auto-close gate for epics / umbrella-parents / needs:user beads — a regression in
+      # either would mass-close or mis-close real backlog, so both the pure self-test AND the
+      # end-to-end harness run HARD here, before the sweep is trusted.
+      - name: shellcheck reconcile-merged-beads.sh + its self-test
+        run: shellcheck scripts/reconcile-merged-beads.sh scripts/tests/test_reconcile_merged_beads.sh
+      - name: Self-test reconcile-merged-beads.sh (boundary match + gating, hermetic)
+        run: bash scripts/reconcile-merged-beads.sh --dry-run-self-test
+      - name: Self-test reconcile-merged-beads.sh (exact-match + gating + apply/idempotency, end-to-end)
+        run: bash scripts/tests/test_reconcile_merged_beads.sh
+      # [OPUS-4.8] sq-neq8: hermetic self-test of the coverage-ratchet gate's PURE logic
+      # (max-remeasure aggregation sq-x4jy + floor-monotonicity sq-neq8) so a regression in
+      # the gate ITSELF is caught here, before the gate is trusted to guard real coverage.
+      # No compile / no files / no subprocess (mirrors perf-gate.py --self-test in bench.yml).
+      - name: Self-test coverage-gate.py (ratchet + monotonicity aggregation logic)
+        run: python3 scripts/coverage-gate.py --self-test
+      # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
+      # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
+      # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the
+      # action installs NOTHING and the downstream `cargo <tool>` ENOENTs — silently making
+      # the gate VACUOUS (exactly the coverage-gate regression root-caused 2026-06-18). The
+      # self-test guards the lint's own logic; the second step ENFORCES it over the live
+      # workflows. No compile / no deps (stdlib-only, mirrors coverage-gate.py --self-test).
+      - name: Self-test install-action tool-selector gate (pure logic)
+        run: python3 scripts/check-install-action-tool.py --self-test
+      - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
+        run: python3 scripts/check-install-action-tool.py
+      # [OPUS-4.8] sq-u59rq: the stacked-PR arm guard. A deterministic PreToolUse command-hook
+      # (.claude/settings.json, sibling to the perf-reviewer) that DENIES `gh pr merge … --auto`
+      # when the PR's baseRefName ≠ main — so we never squash-merge a stacked PR into its base
+      # branch (content misses main, head branch auto-deletes; observed #1023 → re-landed as
+      # #1028). The guard's logic lives only in the harness hook (it is not a file lint), so it
+      # is validated HERE by its hermetic self-test — command-parsing + base-comparison +
+      # fail-OPEN-on-error — with NO network/gh dependency (the base lookup is injected). Mirrors
+      # coverage-gate.py / check-install-action-tool.py --self-test (stdlib-only, no deps).
+      - name: Self-test stacked-PR arm guard (command parse + base check + fail-open)
+        run: python3 scripts/check-pr-arm-base.py --self-test
+      # [OPUS-4.8] sq-53cq: anti-drift guard for the two-hop dashboard publish. The in-repo
+      # source-of-truth bench/dashboard/* reaches the live site via bench.yml's "Seed Pages
+      # dashboard" step (a HAND-CODED `for f in …` copy list onto benchmark-data) then
+      # pages.yml's dev/ fold. The footgun: add a NEW asset to bench/dashboard/ (as happened
+      # with competitors.json) and forget the seed list, and it lands in-repo but NEVER reaches
+      # the served dashboard — silently. This gate asserts every served-class bench/dashboard
+      # asset is WIRED into the publisher (in the seed loop, or the root-redirect copy), so a
+      # new asset can't be un-published. It does NOT diff against the live benchmark-data copy
+      # (that copy LAGS by design — re-seeded only on main pushes — so a strict diff would red
+      # every honest dashboard PR); it guards the durable WIRING invariant. *.md provenance docs
+      # + the on-branch-generated data.js are excluded (documented in the script header). The
+      # self-test pins the gate's own logic; the second step ENFORCES it. GATING (no
+      # advisory/informational token): deterministic, in-repo, no network — trivially safe to
+      # gate, and it catches a real silent-drop class. Stdlib-only (mirrors the lints above).
+      - name: Self-test dashboard publish-wiring gate (pure logic)
+        run: python3 scripts/check-dashboard-publish-wiring.py --self-test
+      - name: "Enforce every served bench/dashboard asset is wired into the Pages publisher — GATING"
+        run: python3 scripts/check-dashboard-publish-wiring.py
+      # [OPUS-4.8] sq-d8or: the built-docs-site link gate (scripts/check-site-links.sh) is
+      # invoked on the publish path in pages.yml (after `next build`), where the static export
+      # exists. Its remap of the /sparq GitHub-Pages base path + its TEETH (a broken internal
+      # link / dangling #anchor must fail) are easy to break silently when the export's link
+      # shape changes, so the hermetic self-test is run HERE on every PR — it builds a tiny
+      # synthetic export and asserts both a clean pass and that a dead link fails. lychee is
+      # provisioned for this self-test the same SHA-pinned way pages.yml installs it.
+      - name: shellcheck check-site-links.sh + its self-test
+        run: shellcheck scripts/check-site-links.sh scripts/tests/test_check_site_links.sh
+      - name: Install lychee (for the site-links self-test)
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        with:
+          tool: lychee@0.23.0
+      - name: Self-test check-site-links.sh (basePath remap + broken-link teeth)
+        run: bash scripts/tests/test_check_site_links.sh
+      # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
+      # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
+      # OUTWARD surface. Before sq-mkza a hard-coded "12× faster" or an unqualified
+      # "maliciously secure" typed straight into a paper tripped NEITHER gate. The
+      # harness drives the REAL gate scripts (the perf gate by explicit `.typ` path;
+      # the privacy gate via a throwaway git repo, since it enumerates with
+      # `git ls-files`) and asserts a planted violation FAILS while the accessor /
+      # comment / negator / allow-marker paths PASS. HARD job (no "advisory" token),
+      # so a coverage regression also reds the ci-summary gate.
+      - name: shellcheck the .typ honesty-gate self-test
+        run: shellcheck scripts/tests/test_typ_honesty_gates.sh
+      - name: Self-test the .typ honesty-gate coverage (perf + privacy, both directions)
+        run: bash scripts/tests/test_typ_honesty_gates.sh
+      # [OPUS-4.8] sq-ed5: the pre-publish PyPI distribution-name availability check
+      # (scripts/check-pypi-name.py) is the runnable half of docs/release.md §0a — its
+      # LIVE `--check` mode hits the PyPI JSON API (network) and is maintainer-run at
+      # release time, but its PURE decision table (200/404/other -> verdict) + the
+      # pyproject `[project] name` reader are hermetic. The self-test ALSO pins the
+      # declared distribution name to `sparq-rdf` (the bare `sparq` is taken — sq-8slf),
+      # so a silent rename back to the taken name fails CI here. Stdlib-only, no network.
+      - name: Self-test check-pypi-name.py (decision table + dist-name reader)
+        run: python3 scripts/check-pypi-name.py --self-test
+      # [OPUS-4.8] sq-mraf: the build-BOUNDARY honesty assertion in
+      # site/scripts/build-papers.mjs re-runs BOTH shared gates over the exact paper
+      # sources + paper-evidence.json before any artifact is written, so the factory can
+      # never serve an un-scanned / violating paper. This self-test drives the REAL
+      # build-papers.mjs against a throwaway site mirror and asserts a planted .typ perf
+      # number / evidence-note ZK-claim ABORTS the build fail-closed (no artifact written),
+      # while clean sources pass. HARD job — a boundary regression also reds ci-summary.
+      - name: shellcheck the build-boundary honesty self-test
+        run: shellcheck scripts/tests/test_build_papers_honesty_boundary.sh
+      - name: Self-test the build-papers.mjs build-boundary honesty assertion (sq-mraf)
+        run: bash scripts/tests/test_build_papers_honesty_boundary.sh
+      # [OPUS-4.8] sq-dhss (epic sq-lhwo): the agent-efficiency Phase-1 telemetry
+      # harness (scripts/agent-telemetry/) is the BLOCKING measurement baseline —
+      # it parses Claude Code transcript JSONL and aggregates token/cache/$ usage
+      # per agent + per wave so every later efficiency %-claim is measured on OUR
+      # repo. Its parser is regression-covered by a hermetic stdlib-unittest suite
+      # over a CHECKED-IN SYNTHETIC fixture (no real session data). Stdlib-only, no
+      # network — run here so a parser regression reds CI before the baseline is
+      # trusted. (Measured numbers are runtime-only / NON-CANONICAL by design.)
+      - name: Self-test agent-telemetry harness (parser + cache-ratio + cost math)
+        run: python3 scripts/agent-telemetry/tests/test_agent_telemetry.py
+      # [OPUS-4.8] sq-mztg8.2 (epic sq-mztg8, FO-bridge Phase 4): the PKG write-path
+      # YAML-LD authoring compiler (crates/sparq-kb/ingest/yamlld_compile.py) lets the
+      # AGENTS.md Findings tier be authored in a compact, IRI-free *.yaml.ld and
+      # deterministically compiled to schema.org-typed PKG Turtle. Its stdlib-only
+      # subset reader + the guarded V() concept-token resolver (AMBIGUOUS / unresolvable
+      # token -> HARD compile error, never a silent wrong IRI) are regression-covered by
+      # a hermetic stdlib-unittest suite (NO PyYAML, NO subprocess, NO network). Run here
+      # so a resolver/parser regression reds CI. (The compiled tier's SHACL conformance +
+      # round-trip equivalence to the hand-authored tier is the Rust gate
+      # `sparq-kb --features validate --test yamlld_write_path`.)
+      - name: Self-test PKG write-path YAML-LD compiler (sq-mztg8.2)
+        run: python3 scripts/tests/test_yamlld_compile.py
+      # [OPUS-4.8] sq-lhwo.4 (epic sq-lhwo): the firm ast-grep+outline token A/B harness
+      # (scripts/agent-telemetry/ast-grep-outline/) under the shared §5 protocol. Its
+      # statistics + §5.6 verdict-object emitter (Wilcoxon signed-rank + bootstrap CI +
+      # break-even N* + the kill criteria) and the read-payload measurer are
+      # regression-covered by hermetic stdlib-unittest suites (NO scipy/numpy, NO network,
+      # NO ast-grep needed — the live ast-grep smoke test self-skips if absent). Run here
+      # so a regression in the VERDICT GATING (e.g. a proxy/partial-quality run wrongly
+      # reaching recommend_adopt, or the Wilcoxon/break-even math) reds CI before the
+      # harness is trusted. (Measured numbers are runtime-only / NON-CANONICAL by design.)
+      - name: Self-test ast-grep+outline A/B stats + verdict emitter (sq-lhwo.4)
+        run: python3 scripts/agent-telemetry/ast-grep-outline/tests/test_ab_stats.py
+      - name: Self-test ast-grep+outline A/B read-payload measurer (sq-lhwo.4)
+        run: python3 scripts/agent-telemetry/ast-grep-outline/tests/test_measure_ab.py
+      # [OPUS-4.8] sq-f04e: gen-js-sbom.sh DERIVES a standalone per-member lock via
+      # scripts/derive-workspace-member-lock.mjs, then cyclonedx-npm shells out to `npm ls
+      # --omit=dev`. A workspace-to-workspace dep edge (a `link: true` node — a published member
+      # depending on a sibling @sparq/* in packages/*) USED TO derive a dangling link stub that
+      # crashed npm ls with "Cannot read properties of undefined (reading 'extraneous')" -> exit
+      # 254 (the cryptic SBOM-lane failure discovered in #876/sq-jpki.2). The fix materializes the
+      # link target + its nested closure. This hermetic self-test (synthetic root lock, no network,
+      # node+npm only) pins the TEETH: a member with a workspace-link dev dep derives a lock on
+      # which BOTH `npm ls --omit=dev` and the full `npm ls` exit 0, while the runtime (--omit=dev)
+      # closure stays exactly the real runtime dep set (no dev-link leak into the published SBOM
+      # surface). HARD job (no "advisory" token) — a regression reds the ci-summary gate.
+      - name: shellcheck gen-js-sbom.sh + the derive-lock self-tests
+        run: shellcheck scripts/gen-js-sbom.sh scripts/tests/test_derive_workspace_member_lock.sh scripts/tests/test_js_sbom_external_devdep.sh
+      - name: "Self-test derive-workspace-member-lock.mjs (workspace-link materialization — sq-f04e)"
+        run: bash scripts/tests/test_derive_workspace_member_lock.sh
+      # [OPUS-4.8] sq-pl1p (sq-f04e/#887 + #922 class): sq-f04e hardened only the workspace-LINK
+      # dep case. An EXTERNAL (registry) devDependency added to a PUBLISHED member (js/) projects its
+      # full transitive closure into the derived lock; a real dev-dep tree's unsatisfied peerDeps make
+      # cyclonedx-npm's FULL `npm ls` exit 254 (the #922 break). The fix keeps the runtime SBOM strict
+      # (--omit=dev prunes the dev tree) and passes --ignore-npm-errors on the DEV SBOM only (still
+      # enumerating the full set; superset honesty guard in gen-js-sbom.sh). This hermetic self-test
+      # (synthetic root lock, no network, node+npm only) pins the runtime-strict + dev-break-is-real +
+      # runtime-honesty teeth. HARD job (no "advisory" token) — a regression reds the ci-summary gate.
+      - name: "Self-test js-sbom lane vs external dev-deps on a published member (sq-pl1p)"
+        run: bash scripts/tests/test_js_sbom_external_devdep.sh
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
@@ -159,7 +477,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -179,7 +497,7 @@ jobs:
           {
             echo "### markdownlint-advisory (whole repo): ${n} finding(s)"
             echo ""
-            echo "Out-of-HARD-scope dirs (research/, zk/, bench/, .claude/) — staged rollout."
+            echo "Out-of-HARD-scope dirs (bench/, .claude/) — staged rollout. (research/ + zk/ are HARD as of sq-rqyo.)"
             echo ""
             echo '```'
             grep -oE ' (MD[0-9]+/[a-z0-9-]+)' md-advisory.txt | sort | uniq -c | sort -rn || true
@@ -191,7 +509,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: Vale prose lint (vendored styles, no network)
@@ -216,7 +534,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: lychee (online; dead http(s) links — network-flaky → advisory)
@@ -234,18 +552,54 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-  custom-checks:
-    name: custom-checks (perf-numbers + readme-template, advisory)
+  # [OPUS-4.8] sq-8ic6: PROMOTED to a HARD gate. The no-perf-numbers backlog cleared —
+  # `scripts/check-no-perf-numbers.py --enforce` is GREEN on main (the last residual stray,
+  # `skills/cli/SKILL.md:111`'s "~12× faster" ratio, was reworded to point at the canonical
+  # measured source instead of baking the figure inline; same pattern as
+  # skills/data-formats/SKILL.md). So the no-perf-numbers house rule (AGENTS.md) now FAILS
+  # the build instead of advising. The check is deterministic (grep-only, no network). The
+  # job NAME carries no "advisory"/"informational" token, so the ci-summary aggregator gates
+  # on it. The README-template check stays ADVISORY (below) — its 67-deviation backlog is
+  # owned by the sq-9jw5 README-overhaul epic and is not yet clean. [OPUS-4.8]
+  no-perf-numbers:
+    name: no-perf-numbers (docs)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
-      - name: No hard-coded performance numbers in user-facing docs
-        run: python3 scripts/check-no-perf-numbers.py --advisory
-      - name: Crate-README length cap + required sections (template, sq-9jw5)
-        run: python3 scripts/check-readme-template.py --advisory
+      - name: No hard-coded performance numbers in user-facing docs — GATING
+        run: python3 scripts/check-no-perf-numbers.py --enforce
+
+  # [OPUS-4.8] sq-8ic6 (deferred half): PROMOTED to a HARD gate. The README-overhaul epic
+  # (sq-9jw5) cleared the backlog — sq-inzv (#751) brought 20 publish=true crate READMEs to
+  # the template and sq-4lvq finished the 3 deferred crates (sparq-hdt/introspect/sim), so
+  # `scripts/check-readme-template.py --enforce` is now GREEN across ALL 35 READMEs (0
+  # deviations). sq-ixsf tightened the stub classifier first (an EXPLICIT `internal-stub`
+  # HTML-comment directive is now required, instead of a body-prose substring match that
+  # could silently exempt a real deviation). So the crate-README template (length cap +
+  # 🚀/✨/📚 + License) now FAILS the build instead of advising — same promotion pattern as
+  # no-perf-numbers (sq-8ic6, above). Deterministic (grep/line-count only, no network). The
+  # job NAME carries no "advisory"/"informational" token, so the ci-summary aggregator gates
+  # on it. The self-test step pins the checker's own stub-classification logic. [OPUS-4.8]
+  readme-template:
+    name: readme-template (template)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      # [OPUS-4.8] sq-ixsf: hermetic self-test of the stub-classification + section/cap
+      # logic — a re-broadening back to a prose substring match (which would let real
+      # deviations through) fails the gate HERE. Mirrors the coverage-gate.py / perf-gate.py
+      # --self-test pattern; runs in this same HARD job so a regression also reds ci-summary.
+      - name: Self-test the readme-template stub classifier (pure logic)
+        run: python3 scripts/check-readme-template.py --self-test
+      - name: Crate-README length cap + required sections (template, sq-9jw5) — GATING
+        run: python3 scripts/check-readme-template.py --enforce

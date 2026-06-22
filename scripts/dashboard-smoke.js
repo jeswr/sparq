@@ -51,8 +51,11 @@ for (const k of Object.keys(labels)) {
 
 // ---- labelFor / suiteFor: the cryptic stems from the bead brief must become readable ----------
 // These assert the label map is wired through (not the fallback) for the exact examples cited.
-eq(D.labelFor('watdiv_S1_count_us'), 'WatDiv S1 — star query, count', 'watdiv_S1_count_us label');
-eq(D.suiteFor('watdiv_S1_count_us'), 'WatDiv', 'watdiv suite');
+// [OPUS-4.8] (sq-1wrw) WatDiv metrics now carry the scale-factor token `_sf<SF>` (per-commit SF=1)
+// so the per-commit + nightly SF tiers form distinct series for the scaling chart. The label map +
+// emitter both use the SF-suffixed stem (watdiv_sf1_S1_count_us), so assert against that name.
+eq(D.labelFor('watdiv_sf1_S1_count_us'), 'WatDiv S1 (SF=1) — star query, count', 'watdiv_sf1_S1_count_us label');
+eq(D.suiteFor('watdiv_sf1_S1_count_us'), 'WatDiv', 'watdiv suite');
 ok(/Students/.test(D.labelFor('lubm_q06_count_us')), 'lubm_q06 mentions Students');
 eq(D.suiteFor('lubm_q06_count_us'), 'LUBM (reasoning)', 'lubm suite');
 ok(/star join/.test(D.labelFor('op_q02_star3_count_us')), 'op_q02_star3 mentions star join');
@@ -62,8 +65,8 @@ eq(D.suiteFor('load_s'), 'Pipeline', 'load_s -> Pipeline');
 eq(D.suiteFor('wasm_bundle_bytes'), 'Memory / Size', 'wasm_bundle_bytes -> Memory / Size');
 
 // ---- titleFor: raw stem first (transparency) + dataset/query lines ----------------------------
-const t = D.titleFor('watdiv_S1_count_us');
-ok(t.split('\n')[0] === 'watdiv_S1_count_us', 'titleFor leads with the raw stem');
+const t = D.titleFor('watdiv_sf1_S1_count_us');
+ok(t.split('\n')[0] === 'watdiv_sf1_S1_count_us', 'titleFor leads with the raw stem');
 ok(/dataset:/.test(t) && /query:/.test(t), 'titleFor includes dataset + query');
 
 // ---- graceful fallback: an UNLABELLED metric must still get a label + a suite -----------------
@@ -79,7 +82,7 @@ const entries = [{
   date: Date.now(),
   benches: [
     { name: 'load_s', value: 1.2, unit: 's' },
-    { name: 'watdiv_S1_count_us', value: 30, unit: 'us' },
+    { name: 'watdiv_sf1_S1_count_us', value: 30, unit: 'us' },
     { name: 'lubm_q06_count_us', value: 99, unit: 'us' },
     { name: 'op_q01_bgp_count_us', value: 5, unit: 'us' }
   ]
@@ -94,14 +97,47 @@ ok(groupNames.indexOf('WatDiv') !== -1 && groupNames.indexOf('LUBM (reasoning)')
 let sawWatdivRow = false;
 summary.groups.forEach(function (g) {
   g.rows.forEach(function (r) {
-    if (r.name === 'watdiv_S1_count_us') {
+    if (r.name === 'watdiv_sf1_S1_count_us') {
       sawWatdivRow = true;
-      ok(r.label === 'WatDiv S1 — star query, count', 'summary row uses readable label');
-      ok(r.title.indexOf('watdiv_S1_count_us') === 0, 'summary row title carries the raw stem');
+      ok(r.label === 'WatDiv S1 (SF=1) — star query, count', 'summary row uses readable label');
+      ok(r.title.indexOf('watdiv_sf1_S1_count_us') === 0, 'summary row title carries the raw stem');
     }
   });
 });
 ok(sawWatdivRow, 'watdiv row present in summary');
+
+// ============================================================================================
+// [OPUS-4.8] sq-19z8 — per-metric SEMANTIC badges (LUBM regime + result mode).
+// semanticBadges() surfaces the label record's `regime` (extensional vs entailed OWL-RL closure)
+// and `mode` (count/materialize/json/…) fields — which previously lived ONLY in the title tooltip —
+// as small badge descriptors the DOM renders as muted .pill spans next to the metric label.
+// ============================================================================================
+ok(typeof D.semanticBadges === 'function', 'dashboard.js exports semanticBadges');
+
+// LUBM entailed query (regime=entailed, mode=count): two badges, regime FIRST then mode.
+const entBadges = D.semanticBadges('lubm_q04_count_us');
+eq(entBadges.length, 2, 'entailed LUBM query -> two badges (regime + mode)');
+eq(entBadges[0].kind, 'badge-entailed', 'first badge is the entailed-regime kind');
+eq(entBadges[0].text, 'entailed', 'entailed-regime badge text');
+ok(/OWL-RL closure|reasoning/i.test(entBadges[0].title), 'entailed badge title explains the reasoning regime');
+eq(entBadges[1].kind, 'badge-mode', 'second badge is the result-mode kind');
+eq(entBadges[1].text, 'count', 'mode badge text is the result mode');
+
+// LUBM extensional query (regime=extensional): muted extensional kind, distinct from entailed.
+const extBadges = D.semanticBadges('lubm_q01_count_us');
+eq(extBadges[0].kind, 'badge-extensional', 'extensional LUBM query -> extensional-regime badge');
+eq(extBadges[0].text, 'extensional', 'extensional-regime badge text');
+ok(/asserted|no entailment|closure/i.test(extBadges[0].title), 'extensional badge title explains no-closure');
+
+// A metric with a mode but NO regime (e.g. BSBM) -> exactly one mode badge, no regime badge.
+const modeOnly = D.semanticBadges('bsbm_query01_count_us');
+eq(modeOnly.length, 1, 'mode-only metric -> a single (mode) badge');
+eq(modeOnly[0].kind, 'badge-mode', 'mode-only metric badge is the mode kind');
+
+// A metric with NEITHER field (load/store/dict) -> no badges (rows stay clean).
+eq(D.semanticBadges('load_s').length, 0, 'load_s has no semantic badges');
+// An UNLABELLED metric -> no badges (never sprout a misleading pill on the fallback path).
+eq(D.semanticBadges('totally_new_metric_count_us').length, 0, 'unlabelled metric has no semantic badges');
 
 // ============================================================================================
 // [OPUS-4.8] sq-xvow — featured well-known suites at the TOP (+ competitor seam for sq-t0c3).
@@ -111,7 +147,7 @@ ok(typeof D.buildFeatured === 'function', 'dashboard.js exports buildFeatured');
 ok(typeof D.competitorsFor === 'function', 'dashboard.js exports competitorsFor');
 
 // featuredSuiteOf: recognised public suites are featured; engine micro-suites are NOT.
-eq(D.featuredSuiteOf('watdiv_S1_count_us') && D.featuredSuiteOf('watdiv_S1_count_us').key, 'WatDiv',
+eq(D.featuredSuiteOf('watdiv_sf1_S1_count_us') && D.featuredSuiteOf('watdiv_sf1_S1_count_us').key, 'WatDiv',
    'watdiv metric is featured under WatDiv');
 eq(D.featuredSuiteOf('lubm_q06_count_us') && D.featuredSuiteOf('lubm_q06_count_us').key, 'LUBM',
    'lubm metric is featured under LUBM');
@@ -135,7 +171,7 @@ const featEntries = [{
   benches: [
     { name: 'load_s', value: 1.2, unit: 's' },                  // NOT featured
     { name: 'op_q01_bgp_count_us', value: 5, unit: 'us' },      // NOT featured
-    { name: 'watdiv_S1_count_us', value: 30, unit: 'µs' },
+    { name: 'watdiv_sf1_S1_count_us', value: 30, unit: 'µs' },
     { name: 'lubm_q06_count_us', value: 99, unit: 'µs' },
     { name: 'sp2b_q1_count_us', value: 50, unit: 'µs' }
   ]
@@ -151,10 +187,10 @@ ok(Array.isArray(feat.competitorEngines) && feat.competitorEngines.length === 0,
    'no competitor file -> competitorEngines is []');
 let sawFeatRow = false;
 feat.groups.forEach(function (g) { g.rows.forEach(function (r) {
-  if (r.name === 'watdiv_S1_count_us') {
+  if (r.name === 'watdiv_sf1_S1_count_us') {
     sawFeatRow = true;
     eq(r.value, 30, 'featured row carries the latest value');
-    ok(r.label === 'WatDiv S1 — star query, count', 'featured row uses the sq-ocuf readable label');
+    ok(r.label === 'WatDiv S1 (SF=1) — star query, count', 'featured row uses the sq-ocuf readable label');
     ok(r.competitors && typeof r.competitors === 'object', 'featured row exposes a competitors seam');
   }
 }); });
@@ -164,18 +200,75 @@ ok(sawFeatRow, 'watdiv row present in featured view');
 // AND by canonical stem (name minus _us). Absent numbers stay absent (-> "—" in the DOM).
 const compFile = {
   engines: [{ id: 'qlever', label: 'QLever', version: '1.2.3', env: 'CI' }, { id: 'oxigraph' }],
-  values: { 'watdiv_S1_count_us': { qlever: 12 }, 'lubm_q06_count': { oxigraph: 200 } }
+  values: { 'watdiv_sf1_S1_count_us': { qlever: 12 }, 'lubm_q06_count': { oxigraph: 200 } }
 };
 const featC = D.buildFeatured(featEntries, compFile);
 eq(featC.competitorEngines.length, 2, 'competitor file -> two engine columns');
 let watdivComp = null, lubmComp = null;
 featC.groups.forEach(function (g) { g.rows.forEach(function (r) {
-  if (r.name === 'watdiv_S1_count_us') watdivComp = r.competitors;
+  if (r.name === 'watdiv_sf1_S1_count_us') watdivComp = r.competitors;
   if (r.name === 'lubm_q06_count_us') lubmComp = r.competitors;
 }); });
 eq(watdivComp && watdivComp.qlever, 12, 'competitor matched by raw metric name');
 eq(lubmComp && lubmComp.oxigraph, 200, 'competitor matched by canonical stem (name minus _us)');
 ok(watdivComp && watdivComp.oxigraph === undefined, 'unmatched competitor cell stays absent (renders —)');
+
+// ============================================================================================
+// [OPUS-4.8] sq-aas7 — nightly-priority featured tier: pickFeaturedSeries / tierDescriptor and the
+// buildFeatured `tier` carry. The featured block PREFERS the EC2/nightly series when present, falls
+// back to the per-commit gh-runner series otherwise (graceful when EC2 absent).
+// ============================================================================================
+ok(typeof D.pickFeaturedSeries === 'function', 'dashboard.js exports pickFeaturedSeries');
+ok(typeof D.tierDescriptor === 'function', 'dashboard.js exports tierDescriptor');
+eq(D.SERIES, 'sparq engine', 'SERIES constant is the per-commit series name');
+eq(D.EC2_SERIES, 'sparq engine (EC2)', 'EC2_SERIES constant matches bench-ec2.yml');
+
+// EC2 present + non-empty -> nightly tier chosen, with the EC2 entries.
+const ec2Entry = [{ commit: { id: 'ec2', message: 'n', url: '#' }, date: 1,
+  benches: [{ name: 'lubm_q06_count_us', value: 80, unit: 'µs' }] }];
+const commitEntry = [{ commit: { id: 'cc', message: 'c', url: '#' }, date: 2,
+  benches: [{ name: 'lubm_q06_count_us', value: 99, unit: 'µs' }] }];
+const pickedNightly = D.pickFeaturedSeries({ entries: { 'sparq engine': commitEntry, 'sparq engine (EC2)': ec2Entry } });
+eq(pickedNightly.tier, 'nightly', 'pickFeaturedSeries prefers EC2/nightly when present');
+eq(pickedNightly.seriesName, 'sparq engine (EC2)', 'nightly pick reports the EC2 series name');
+ok(pickedNightly.hasEc2 === true, 'nightly pick flags hasEc2');
+eq(pickedNightly.entries, ec2Entry, 'nightly pick returns the EC2 entries');
+
+// EC2 absent -> graceful fall-back to per-commit.
+const pickedCommit = D.pickFeaturedSeries({ entries: { 'sparq engine': commitEntry } });
+eq(pickedCommit.tier, 'per-commit', 'pickFeaturedSeries falls back to per-commit when EC2 absent');
+ok(pickedCommit.hasEc2 === false, 'per-commit pick flags hasEc2 false (EC2 absent -> graceful)');
+eq(pickedCommit.entries, commitEntry, 'per-commit pick returns the per-commit entries');
+// EC2 present but EMPTY -> still per-commit (an empty nightly series must not win).
+const pickedEmptyEc2 = D.pickFeaturedSeries({ entries: { 'sparq engine': commitEntry, 'sparq engine (EC2)': [] } });
+eq(pickedEmptyEc2.tier, 'per-commit', 'an EMPTY EC2 series does not override per-commit');
+// missing data object -> per-commit + empty (no throw).
+let pickThrew = false; let pickedNone = null;
+try { pickedNone = D.pickFeaturedSeries(undefined); } catch (e) { pickThrew = true; }
+ok(!pickThrew, 'pickFeaturedSeries(undefined) does not throw');
+ok(pickedNone && pickedNone.tier === 'per-commit' && pickedNone.entries.length === 0,
+   'pickFeaturedSeries(undefined) -> per-commit, empty entries');
+
+// tierDescriptor: distinct kinds + non-empty text/title.
+const tdN = D.tierDescriptor('nightly'); const tdC = D.tierDescriptor('per-commit');
+eq(tdN.kind, 'tier-nightly', 'tierDescriptor(nightly) kind');
+eq(tdC.kind, 'tier-per-commit', 'tierDescriptor(per-commit) kind');
+ok(tdN.text && tdN.title && tdC.text && tdC.title, 'tier descriptors carry text + title');
+// [OPUS-4.8] sq-c0kd: the nightly tier must NOT claim "same box" vs the competitor gathers (nightly
+// runs c7g.4xlarge, the gathers ran c7g.xlarge — same c7g family, different size). The title must
+// say "instance family" and flag the gap so EC2-nightly-vs-competitor is never read as a direct,
+// same-box comparison once the tier goes live.
+ok(!/same[ -]box/i.test(tdN.title), 'tierDescriptor(nightly) title does not claim "same box"');
+ok(/instance family/i.test(tdN.title), 'tierDescriptor(nightly) title says "instance family"');
+ok(/not directly comparable/i.test(tdN.title),
+   'tierDescriptor(nightly) title flags it is not directly comparable to the competitor cells');
+
+// buildFeatured carries the chosen tier through to the view (and defaults to per-commit).
+const featNightly = D.buildFeatured(ec2Entry, null, pickedNightly);
+eq(featNightly.tier, 'nightly', 'buildFeatured carries the nightly tier from opts');
+ok(featNightly.hasEc2 === true, 'buildFeatured carries hasEc2');
+const featDefault = D.buildFeatured(commitEntry, null);
+eq(featDefault.tier, 'per-commit', 'buildFeatured defaults to per-commit when no opts (legacy callers)');
 
 // ============================================================================================
 // [OPUS-4.8] sq-viby — scaling comparison: size/depth axis derived from the metric NAME.
@@ -219,6 +312,26 @@ const sfFam = fams.filter(function (f) { return f.axisLabel === 'scale factor'; 
 ok(sfFam && sfFam.points.length === 1, 'single-size family is kept (renders a single marker + note)');
 ok(fams.every(function (f) { return !/lubm_q06/.test(f.base); }), 'non-size-parametrised metric excluded');
 
+// [OPUS-4.8] (sq-1wrw) The exact names the ci-bench emitter now produces: the per-commit SF=1 tier
+// (watdiv_sf1_C1_count_us) and the EC2/nightly SF=1000 tier (watdiv_sf1000_C1_count_us) must
+// collapse to ONE scaling family (same base) with two ascending scale-factor points — this is the
+// engine-vs-scale-factor axis the bead unblocks. Before this bead both tiers emitted the SF-less
+// stem (watdiv_C1_count_us) and COLLIDED into a single series, so no axis could form.
+const wdFams = D.buildScalingFamilies([{
+  commit: { id: 'sf', message: 's', url: '#' }, date: Date.now(),
+  benches: [
+    { name: 'watdiv_sf1000_C1_count_us', value: 9000, unit: 'µs' }, // nightly (out of order on purpose)
+    { name: 'watdiv_sf1_C1_count_us', value: 30, unit: 'µs' }       // per-commit
+  ]
+}]);
+ok(wdFams.length === 1, 'watdiv SF tiers collapse to exactly ONE scaling family');
+ok(wdFams[0].axisLabel === 'scale factor', 'watdiv scaling axis is scale factor');
+ok(wdFams[0].points.length === 2, 'watdiv family has the two SF points (per-commit + nightly)');
+ok(wdFams[0].points[0].axis === 1 && wdFams[0].points[1].axis === 1000,
+   'watdiv SF points sorted ascending (SF=1 -> SF=1000)');
+eq(D.sizeAxisOf('watdiv_sf1_C1_count_us').base, D.sizeAxisOf('watdiv_sf1000_C1_count_us').base,
+   'watdiv per-commit + nightly share one family base (sf-token stripped)');
+
 // ============================================================================================
 // [OPUS-4.8] Copilot review fixes on PR #59 — unit-less labels (#2/#4), clean scaling base (#3),
 // and the featured "Metric" column header (#1).
@@ -233,7 +346,7 @@ ok(!/\(µs\)$/.test(D.labelForBare('deeptax_d10_count_us')),
    'labelForBare strips the trailing (µs) from an unlabelled metric');
 ok(!/\(s\)$/.test(D.labelForBare('totally_new_metric_s')),
    'labelForBare strips a trailing (s) too');
-eq(D.labelForBare('watdiv_S1_count_us'), D.labelFor('watdiv_S1_count_us'),
+eq(D.labelForBare('watdiv_sf1_S1_count_us'), D.labelFor('watdiv_sf1_S1_count_us'),
    'labelForBare leaves a labelled (no-trailing-unit) label unchanged');
 // mid-label parentheses must survive: only a TRAILING parenthesised token is a unit. lubm_q06's
 // readable label mentions "Students" and carries no trailing unit, so it is returned untouched.
@@ -285,8 +398,47 @@ ok(typeof D.buildFamilies === 'function', 'dashboard.js exports buildFamilies');
   ok(D.FAMILIES.some(function (f) { return f.key === k; }), 'FAMILIES includes the ' + k + ' family');
 });
 
+// [OPUS-4.8] sq-ncvq.15 / drift-scan §5.D: the newly-promoted families that close the dashboard
+// coverage gap — the ZK estate (headline) plus Solid/HDT/RSP/GenAI/GPU. They have NO flowing data
+// yet (stdout/criterion benches), so they render as "not yet reported"; assert they EXIST in the
+// taxonomy AND that a representative (still unlabelled) metric routes to each via the prefix
+// fallback, so when a ci-bench hook starts emitting, the metric lands in the right family.
+['zk', 'solid', 'hdt', 'rsp', 'genai', 'gpu'].forEach(function (k) {
+  ok(D.FAMILIES.some(function (f) { return f.key === k; }), 'FAMILIES includes the new ' + k + ' family (coverage gap closed)');
+});
+eq(D.familyOf('zk_commit_us').key, 'zk', 'unlabelled zk-commit metric -> ZK family (headline gap)');
+eq(D.familyOf('zktrace_bgp_us').key, 'zk', 'unlabelled zk-trace metric -> ZK family');
+eq(D.familyOf('zkcompose_gates').key, 'zk', 'unlabelled zk-compose gate-count metric -> ZK family');
+eq(D.familyOf('solid_wac_materialize_us').key, 'solid', 'unlabelled solid/WAC metric -> Solid family');
+eq(D.familyOf('hdt_load_s').key, 'hdt', 'unlabelled HDT-load metric -> HDT family');
+eq(D.familyOf('rsp_throughput').key, 'rsp', 'unlabelled RSP-throughput metric -> RSP family');
+eq(D.familyOf('sim_most_similar_us').key, 'genai', 'unlabelled similarity metric -> GenAI family');
+eq(D.familyOf('introspect_build_s').key, 'genai', 'unlabelled introspection metric -> GenAI family');
+eq(D.familyOf('gpu_filter_us').key, 'gpu', 'unlabelled GPU-kernel metric -> GPU family');
+// [OPUS-4.8] sq-5o5.5-.9: the featured=false trend-only dispositions. NL→SPARQL (nlq) is part of the
+// GenAI estate; MPC gets its OWN caveated trend family (modelled counting tier, semi-honest). The
+// sim/introspect/nlq/mpc benches are flagged `featured = false` in bench/benchmarks.toml (trend-only,
+// NO competitor card), and route to a real dashboard family so coverage is HONEST, not silent.
+ok(D.FAMILIES.some(function (f) { return f.key === 'mpc'; }), 'FAMILIES includes the new mpc family (trend-only, featured=false)');
+eq(D.familyOf('nlq_ground_us').key, 'genai', 'unlabelled NL→SPARQL (nlq) metric -> GenAI family');
+eq(D.familyOf('nlq_ask_us').key, 'genai', 'unlabelled nlq ask-loop metric -> GenAI family');
+eq(D.familyOf('mpc_rounds').key, 'mpc', 'unlabelled modelled-MPC rounds metric -> MPC family');
+// the load-bearing one: an MPC `_bytes` counting-tier metric must NOT be sunk into Core by the
+// generic "Memory / Size" STRUCTURAL fallback — its `mpc` capability prefix wins (sq-5o5.8).
+eq(D.familyOf('mpc_join_bytes').key, 'mpc', 'modelled-MPC byte-count metric -> MPC family (capability prefix beats the structural Memory/Size fallback)');
+eq(D.familyOf('mpcmatrix_total_bytes').key, 'mpc', 'mpc-matrix byte-count metric -> MPC family');
+// wasm-bundle is a deterministic SIZE GATE, not its own capability card: wasm_bundle_bytes stays in
+// Core (the `wasm` token is a Core prefix + its Memory/Size suite) — featured=false only means "no
+// competitor card", it does not move the size gate out of Core (sq-5o5.9).
+eq(D.familyOf('wasm_bundle_bytes').key, 'core', 'wasm bundle-size byte gate -> Core family (size gate, NOT a separate capability card)');
+// selective + u64 are SPARQL micro-suites (cli `bench` q01_* stems) — recognise them under SPARQL.
+eq(D.familyOf('selective_q01_count_us').key, 'sparql', 'unlabelled selective-join metric -> SPARQL family');
+eq(D.familyOf('u64_q03_materialize_us').key, 'sparql', 'unlabelled u64 value-id metric -> SPARQL family');
+// the existing capability routings must be UNCHANGED by the new families (no mis-bucketing).
+eq(D.familyOf('rdfs_infer_s').key, 'core', 'rdfs_infer_s still routes to Core (Pipeline suite wins)');
+
 // familyOf: each query type lands in its OWN family (SPARQL volume must not swallow capabilities).
-eq(D.familyOf('watdiv_S1_count_us').key, 'sparql', 'watdiv -> SPARQL family');
+eq(D.familyOf('watdiv_sf1_S1_count_us').key, 'sparql', 'watdiv -> SPARQL family');
 eq(D.familyOf('sp2b_q1_count_us').key, 'sparql', 'sp2b -> SPARQL family');
 eq(D.familyOf('lubm_q06_count_us').key, 'sparql', 'lubm -> SPARQL family');
 eq(D.familyOf('op_q01_bgp_count_us').key, 'sparql', 'operators -> SPARQL family');
@@ -308,7 +460,7 @@ const famEntries = [{
   commit: { id: 'fam', message: 'fam', url: '#' }, date: Date.now(),
   benches: [
     { name: 'load_s', value: 1.2, unit: 's' },
-    { name: 'watdiv_S1_count_us', value: 30, unit: 'µs' },
+    { name: 'watdiv_sf1_S1_count_us', value: 30, unit: 'µs' },
     { name: 'shacl_cardinality_validate_us', value: 40, unit: 'µs' },
     { name: 'geo_within10km_us', value: 55, unit: 'µs' },
     { name: 'text_phrase_us', value: 22, unit: 'µs' }
@@ -329,10 +481,10 @@ ok(famByKey.reasoning.count === 0, 'Reasoning family has count 0 in this fixture
 // each row carries the readable label + latest value (the summary first-paint payload).
 let sawFamWatdiv = false;
 famByKey.sparql.rows.forEach(function (r) {
-  if (r.name === 'watdiv_S1_count_us') {
+  if (r.name === 'watdiv_sf1_S1_count_us') {
     sawFamWatdiv = true;
     eq(r.value, 30, 'family row carries the latest value');
-    ok(r.label === 'WatDiv S1 — star query, count', 'family row uses the readable label');
+    ok(r.label === 'WatDiv S1 (SF=1) — star query, count', 'family row uses the readable label');
   }
 });
 ok(sawFamWatdiv, 'watdiv row present in the SPARQL family view');
@@ -427,7 +579,7 @@ ok(!undefThrew, 'buildFamilies(undefined) does not throw either');
     };
   }
   const hosts = {};
-  ['updated', 'repo', 'summary', 'charts', 'featured', 'scaling', 'families'].forEach(function (id) {
+  ['updated', 'repo', 'summary', 'charts', 'featured', 'same-box', 'scaling', 'families'].forEach(function (id) {
     hosts[id] = makeNode('div');
   });
   global.document = {
@@ -454,7 +606,7 @@ ok(!undefThrew, 'buildFamilies(undefined) does not throw either');
         commit: { id: 'deadbeefcafe', message: 'dom sim', url: '#' }, date: Date.now(),
         benches: [
           { name: 'load_s', value: 1.2, unit: 's' },                        // Core family
-          { name: 'watdiv_S1_count_us', value: 30, unit: 'µs' },            // SPARQL family
+          { name: 'watdiv_sf1_S1_count_us', value: 30, unit: 'µs' },        // SPARQL family
           { name: 'lubm_q06_count_us', value: 99, unit: 'µs' },             // SPARQL family
           { name: 'shacl_cardinality_validate_us', value: 40, unit: 'µs' }, // SHACL family
           { name: 'geo_within10km_us', value: 55, unit: 'µs' },             // GeoSPARQL family
@@ -484,6 +636,10 @@ ok(!undefThrew, 'buildFamilies(undefined) does not throw either');
 
   ok(hosts.featured.children.length > 0, 'DOM: #featured populated (sq-xvow rendered)');
   ok(hosts.scaling.children.length > 0, 'DOM: #scaling populated (sq-viby rendered)');
+  // [OPUS-4.8] sq-ays7: the same-box SPARQL comparison card renders from the embedded
+  // COMPETITORS_DATA.same_box_comparisons (the shim has no fetch, so boot() uses the mirror).
+  // It renders a section when the mirror carries a comparison, else a graceful hint.
+  ok(hosts['same-box'].children.length > 0, 'DOM: #same-box populated (sq-ays7 rendered)');
 
   // ---- sq-rltn: summary-first FAMILIES render — first paint covers ALL query types -------------
   ok(hosts.families.children.length > 0, 'DOM: #families populated (sq-rltn summary-first render)');
@@ -505,6 +661,17 @@ ok(!undefThrew, 'buildFamilies(undefined) does not throw either');
   const sparqlSec = famSections.filter(function (s) { return s.attributes.id === 'fam-sparql'; })[0];
   const sparqlTable = sparqlSec && sparqlSec.children.filter(function (c) { return c.tagName === 'table'; })[0];
   ok(sparqlTable, 'DOM: SPARQL family renders a summary table synchronously (first paint)');
+  // [OPUS-4.8] sq-19z8: the LUBM row (lubm_q06_count_us — entailed OWL-RL closure, mode=count)
+  // carries its semantic badges as .metric-badge pills next to the label, not just in the tooltip.
+  const sparqlBadges = sparqlSec ? sparqlSec.querySelectorAll('span.metric-badge') : [];
+  ok(sparqlBadges.length > 0, 'DOM: SPARQL family rows render .metric-badge pills (sq-19z8)');
+  ok(sparqlBadges.some(function (b) { return classList(b).indexOf('badge-entailed') !== -1; }),
+     'DOM: the entailed LUBM row shows a .badge-entailed regime pill');
+  ok(sparqlBadges.some(function (b) { return classList(b).indexOf('badge-mode') !== -1 && b.textContent === 'count'; }),
+     'DOM: the LUBM row shows a .badge-mode "count" result-mode pill');
+  // every semantic badge reuses the .pill base class (sq-19z8 reuses the Δ-pill styling).
+  ok(sparqlBadges.every(function (b) { return classList(b).indexOf('pill') !== -1; }),
+     'DOM: semantic badges reuse the .pill base class');
   // first paint must NOT have built any chart: the trend grid lives inside a <details> and is empty
   // until expanded. Confirm the details/summary disclosure exists with an EMPTY chart-grid.
   const sparqlDetails = sparqlSec && sparqlSec.children.filter(function (c) { return c.tagName === 'details'; })[0];
@@ -519,8 +686,18 @@ ok(!undefThrew, 'buildFamilies(undefined) does not throw either');
   ok(vecSec && vecSec.children.some(function (c) {
     return (c.attributes['class'] || '').indexOf('family-empty') !== -1;
   }), 'DOM: an empty family (Vector/ANN) renders a "not yet reported" placeholder (honest coverage)');
-  // featured host should contain at least one suite section with a table.
-  const featuredSection = hosts.featured.children[0];
+  // [OPUS-4.8] sq-aas7: the featured host opens with a TIER badge row (the shim has no fetch, so the
+  // EC2 series is absent -> the per-commit tier badge), then the suite sections.
+  const tierRow = hosts.featured.children.filter(function (c) {
+    return (c.attributes['class'] || '').indexOf('featured-tier') === 0;
+  })[0];
+  ok(tierRow, 'DOM: featured host renders a tier badge row (sq-aas7)');
+  const tierPill = tierRow && tierRow.querySelectorAll('span.tier-badge')[0];
+  ok(tierPill && classList(tierPill).indexOf('tier-per-commit') !== -1,
+     'DOM: tier badge is per-commit (EC2 series absent in the shim -> graceful fall-back)');
+  ok(tierPill && classList(tierPill).indexOf('pill') !== -1, 'DOM: tier badge reuses the .pill base class');
+  // featured host should contain at least one suite section with a table (after the tier row).
+  const featuredSection = hosts.featured.children.filter(function (c) { return c.tagName === 'section'; })[0];
   ok(featuredSection && featuredSection.tagName === 'section', 'DOM: featured host holds suite sections');
   // #1 — the featured table's first column header is "Metric" (not "Query"): the cell may hold
   // non-query metrics. Walk section -> table -> thead -> tr -> first th.
