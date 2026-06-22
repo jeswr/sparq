@@ -16,9 +16,24 @@
 // non-EL ontology gets an honest "n axioms outside the EL fragment were ignored" count.
 
 use crate::normal::{Expr, Names, Normal, Normalizer, BOTTOM, TOP};
+#[cfg(feature = "rbox")]
+use crate::normal::{Role, RoleAxiom};
 use crate::Report;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
+
+/// Everything the extractor reads out of the RDF substrate: the normalized concept axioms, the
+/// name table, the [`Report`], and — only under the `rbox` feature — the normalized RBox role
+/// axioms (E2). Keeping the role axioms in a feature-gated field means the default build's
+/// extraction is byte-for-byte the E1 path.
+pub struct Extracted {
+    pub axioms: Vec<Normal>,
+    pub names: Names,
+    pub report: Report,
+    /// Normalized RBox axioms (role inclusions + compositions). Empty/absent without `rbox`.
+    #[cfg(feature = "rbox")]
+    pub role_axioms: Vec<RoleAxiom>,
+}
 
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
@@ -60,6 +75,13 @@ struct Vocab {
     nothing: Id,
     /// Predicate ids whose presence on a class node makes it non-EL (see [`NON_EL_MARKERS`]).
     non_el: FxHashSet<Id>,
+    /// RBox vocabulary — only consulted under the `rbox` feature (E2).
+    #[cfg(feature = "rbox")]
+    sub_property_of: Id,
+    #[cfg(feature = "rbox")]
+    property_chain_axiom: Id,
+    #[cfg(feature = "rbox")]
+    transitive_property: Id,
 }
 
 impl Vocab {
@@ -84,6 +106,12 @@ impl Vocab {
                 .iter()
                 .map(|m| look(format!("{}{}", OWL, m)))
                 .collect(),
+            #[cfg(feature = "rbox")]
+            sub_property_of: look(format!("{}subPropertyOf", RDFS)),
+            #[cfg(feature = "rbox")]
+            property_chain_axiom: look(format!("{}propertyChainAxiom", OWL)),
+            #[cfg(feature = "rbox")]
+            transitive_property: look(format!("{}TransitiveProperty", OWL)),
         }
     }
 }
@@ -102,11 +130,18 @@ struct Idx {
     rest: FxHashMap<Id, Id>,       // rdf:rest edges
     is_restriction: FxHashSet<Id>, // nodes typed owl:Restriction
     non_el_node: FxHashSet<Id>,    // nodes carrying a non-EL marker predicate
+    #[cfg(feature = "rbox")]
+    sub_property: Vec<(Id, Id)>, // (r, s) from rdfs:subPropertyOf — a role inclusion r ⊑ s
+    #[cfg(feature = "rbox")]
+    chain_head: FxHashMap<Id, Id>, // super-property -> owl:propertyChainAxiom list head
+    #[cfg(feature = "rbox")]
+    transitive: Vec<Id>, // properties typed owl:TransitiveProperty
 }
 
-/// Extracts and normalizes the EL+⊥ TBox from `triples`, returning the normal-form axioms,
-/// the name table, and a fresh [`Report`] tallying skipped (non-EL) axioms. Single-threaded.
-pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> (Vec<Normal>, Names, Report) {
+/// Extracts and normalizes the EL+⊥ TBox from `triples`, returning the [`Extracted`] bundle
+/// (normal-form concept axioms, the name table, the [`Report`], and — under `rbox` — the
+/// normalized RBox role axioms). Single-threaded.
+pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
     let v = Vocab::intern(dict);
     let mut idx = Idx::default();
     for &[s, p, o] in triples {
@@ -130,6 +165,9 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> (Vec<Normal>, Names, Report)
             idx.is_restriction.insert(s);
         } else if v.non_el.contains(&p) {
             idx.non_el_node.insert(s);
+        } else {
+            #[cfg(feature = "rbox")]
+            extract_rbox_triple(&mut idx, &v, s, p, o);
         }
     }
 
@@ -174,8 +212,87 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> (Vec<Normal>, Names, Report)
     }
 
     let axioms = norm.finish();
+
+    // RBox normalization (E2): role inclusions + property chains + transitive roles into
+    // [`RoleAxiom`] forms. Done here while `names` is still borrowable so role ids agree with
+    // the existential links minted during concept decoding. No-op without the `rbox` feature.
+    #[cfg(feature = "rbox")]
+    let role_axioms = normalize_rbox(&idx, &v, &mut names);
+
     report.named_classes = names.concept_count();
-    (axioms, names, report)
+    Extracted {
+        axioms,
+        names,
+        report,
+        #[cfg(feature = "rbox")]
+        role_axioms,
+    }
+}
+
+/// Routes one RBox triple into the structural index: `rdfs:subPropertyOf` (role inclusion),
+/// `owl:propertyChainAxiom` (the super-property is the SUBJECT, the chain list is the object),
+/// or an `owl:TransitiveProperty` type assertion. Bare datatype-property `subPropertyOf`s are
+/// captured too but never fire — they cannot appear in an `∃r.C` link, so a spurious inclusion
+/// among data properties is inert (kept simple rather than requiring property-type declarations).
+#[cfg(feature = "rbox")]
+fn extract_rbox_triple(idx: &mut Idx, v: &Vocab, s: Id, p: Id, o: Id) {
+    if p == v.sub_property_of {
+        idx.sub_property.push((s, o));
+    } else if p == v.property_chain_axiom {
+        idx.chain_head.insert(s, o);
+    } else if p == v.ty && o == v.transitive_property {
+        idx.transitive.push(s);
+    }
+}
+
+/// Builds the normalized [`RoleAxiom`] list from the RBox structural index, minting role ids
+/// through the shared [`Names`] table. A property chain of length `n` is left-folded into `n-1`
+/// binary compositions over fresh intermediate roles; a transitive property `r` becomes the
+/// composition `r ∘ r ⊑ r`. A degenerate chain (length 0/1) is treated as a plain inclusion.
+#[cfg(feature = "rbox")]
+fn normalize_rbox(idx: &Idx, v: &Vocab, names: &mut Names) -> Vec<RoleAxiom> {
+    let mut out: Vec<RoleAxiom> = Vec::new();
+    // r ⊑ s.
+    for &(r, s) in &idx.sub_property {
+        let (ri, si) = (names.role(r), names.role(s));
+        out.push(RoleAxiom::Sub(ri, si));
+    }
+    // owl:propertyChainAxiom: r1 ∘ … ∘ rn ⊑ super.
+    for (&super_prop, &head) in &idx.chain_head {
+        let members = decode_list(head, idx, v);
+        let chain: Vec<Role> = members.iter().map(|&m| names.role(m)).collect();
+        let sup = names.role(super_prop);
+        fold_chain(&chain, sup, names, &mut out);
+    }
+    // owl:TransitiveProperty(r) ≡ r ∘ r ⊑ r.
+    for &r in &idx.transitive {
+        let ri = names.role(r);
+        out.push(RoleAxiom::Chain(ri, ri, ri));
+    }
+    out
+}
+
+/// Left-folds a property chain `r1 ∘ … ∘ rn ⊑ sup` into binary [`RoleAxiom::Chain`]s:
+/// `r1 ∘ r2 ⊑ f1`, `f1 ∘ r3 ⊑ f2`, …, `f_{n-2} ∘ rn ⊑ sup`. Length-1 chains degenerate to an
+/// inclusion `r1 ⊑ sup`; a length-0 chain (malformed) is dropped.
+#[cfg(feature = "rbox")]
+fn fold_chain(chain: &[Role], sup: Role, names: &mut Names, out: &mut Vec<RoleAxiom>) {
+    match chain {
+        [] => {}
+        [r1] => out.push(RoleAxiom::Sub(*r1, sup)),
+        [r1, r2] => out.push(RoleAxiom::Chain(*r1, *r2, sup)),
+        [first, rest @ ..] => {
+            let mut acc = *first;
+            // rest has len ≥ 2 here; compose all but the last over fresh roles, last lands on sup.
+            for &next in &rest[..rest.len() - 1] {
+                let f = names.fresh_role();
+                out.push(RoleAxiom::Chain(acc, next, f));
+                acc = f;
+            }
+            let last = rest[rest.len() - 1];
+            out.push(RoleAxiom::Chain(acc, last, sup));
+        }
+    }
 }
 
 /// Resolves a class node (named class, ⊤, ⊥, an `owl:Restriction` node, or an

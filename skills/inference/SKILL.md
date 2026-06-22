@@ -126,8 +126,9 @@ let _ = h.super_classes(some_class_id);
 let _ = h.unsatisfiable_classes();      // classes forced ⊑ owl:Nothing (e.g. via disjointWith)
 ```
 
-- **Scope (MVP, Phase E1):** `EL+⊥` minus RBox — `rdfs:subClassOf`/`owl:equivalentClass`, `owl:intersectionOf`, `owl:someValuesFrom` restrictions, `owl:disjointWith`, `owl:Thing`/`owl:Nothing`. Axioms outside that fragment (unionOf / complementOf / allValuesFrom / cardinality / nominals / RBox) are **not applied** and counted in `Report::skipped_axioms` (honest, never silently misapplied). Single-threaded.
-- **Deferred:** RBox / property chains / transitive roles (CR10/CR11) → Phase E2 (bead `sq-xetf7`); transitive reduction + scale → E3 (`sq-s2nob`); concurrency → E4; nominals + concrete domains later. The emitted lattice is the *full* (not transitively-reduced) set of derived subsumptions.
+- **Scope (default, Phase E1):** `EL+⊥` minus RBox — `rdfs:subClassOf`/`owl:equivalentClass`, `owl:intersectionOf`, `owl:someValuesFrom` restrictions, `owl:disjointWith`, `owl:Thing`/`owl:Nothing`. Class axioms outside that fragment (unionOf / complementOf / allValuesFrom / cardinality / nominals) are **not applied** and counted in `Report::skipped_axioms` (honest, never silently misapplied). Single-threaded.
+- **RBox role reasoning (opt-in `rbox` feature, Phase E2, bead `sq-xetf7`):** add `features = ["rbox"]`. Applies `rdfs:subPropertyOf` role inclusions (**CR10**) and `owl:propertyChainAxiom` + `owl:TransitiveProperty` compositions (**CR11**, incl. the SNOMED-critical right-identity `r ∘ s ⊑ s`) via a saturated role automaton, so links propagate up the role hierarchy and along chains before CR4/CR5 fire. **OFF by default** — zero role-automaton code in the default/wasm build; without it RBox axioms are left unapplied (roles compared for equality only). Same `Classifier`/`classify_graph` API; no signature change.
+- **Deferred:** transitive reduction + scale → E3 (`sq-s2nob`); concurrency → E4; nominals + concrete domains later. The emitted lattice is the *full* (not transitively-reduced) set of derived subsumptions.
 - **Use EL, not `--reason owl`, when you need a complete class hierarchy over an EL ontology.** RL is not an approximation you can tune up with more rules — EL needs a different algorithm.
 
 ## Common recipes

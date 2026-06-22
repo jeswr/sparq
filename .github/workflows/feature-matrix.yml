@@ -58,9 +58,10 @@
 #     opt-in (the spike's preferred shape, keeping sparq-reason lean). Its whole surface
 #     (lib unit tests + the tests/differential.rs ELK-calculus oracle + clippy + rustdoc)
 #     is therefore built/tested by ci.yml's `cargo {build,nextest,clippy,doc} --workspace`
-#     lanes already — there is no default-OFF feature to toggle, so a feature-matrix leg
-#     (whose template is `--features <X>`) does not apply. WHEN Phase E2 (bead sq-xetf7)
-#     adds an RBox/property-chain feature, add a leg here for it.
+#     lanes already — for the E1 default surface there is no default-OFF feature to toggle.
+#     [OPUS-4.8] sq-xetf7: Phase E2 ADDED the default-OFF `rbox` feature (RBox / property
+#     chain + transitive-role saturation, CR10/CR11), so the leg this NOTE anticipated now
+#     exists below as the `sparq-reason-el (rbox …)` matrix entry.
 
 name: feature-matrix
 
@@ -341,6 +342,22 @@ jobs:
           - name: sparq-reason (explain)
             crate: sparq-reason
             features: explain
+            test: true
+          # [OPUS-4.8] sq-xetf7 (Phase E2): sparq-reason-el's `rbox` feature — RBox / property
+          # chain + transitive-role saturation (CR10 role inclusion + CR11 role composition).
+          # The NOTE at the head of this file (sq-evb1) anticipated this leg: E1 ships the
+          # crate with NO intra-crate feature, but E2 adds the default-OFF `rbox` feature, so
+          # without a leg here the whole RBox surface goes UNGATED in CI. tests/rbox_differential.rs
+          # is `#![cfg(feature = "rbox")]` (8 CR10/CR11 closure-oracle tests) and the rbox.rs +
+          # extract.rs/classify.rs role-automaton arms are all `#[cfg(feature = "rbox")]`, so the
+          # default build (and ci.yml's `--workspace --all-targets` archive, which passes NO
+          # `--features`) compiled them EMPTY and ran ZERO of them — the silent gap this leg
+          # closes. No new dep (`rbox = []`, reuses oxrdf + rustc-hash). Verified locally: `cargo
+          # nextest list -p sparq-reason-el --features rbox` shows the 8 rbox_differential tests +
+          # the 4 in-src rbox::tests, and `clippy --all-targets -D warnings` is clean with it on.
+          - name: sparq-reason-el (rbox — CR10/CR11 RBox saturation)
+            crate: sparq-reason-el
+            features: rbox
             test: true
           # sparq-mpc: the deterministic/seedable masking RNG seam (insecure-by-name).
           - name: sparq-mpc (insecure-test-rng)

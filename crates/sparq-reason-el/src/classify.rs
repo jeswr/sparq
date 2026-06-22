@@ -17,6 +17,8 @@
 // derived membership is processed once. Single-threaded (Phase E1; concurrency is E4).
 
 use crate::normal::{Concept, Names, Normal, Role, BOTTOM, TOP};
+#[cfg(feature = "rbox")]
+use crate::rbox::RoleBox;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Indexes the normal-form axioms by the premise shape each completion rule matches on, so a
@@ -64,9 +66,29 @@ pub struct Saturation {
     pub r_succ: FxHashMap<Role, FxHashMap<Concept, FxHashSet<Concept>>>,
 }
 
-/// Runs CR1–CR5 to a fixpoint over `axioms` for `n` concepts (the dense count from [`Names`]).
-/// Returns the saturated [`Saturation`]; `S[c]` then holds every concept subsuming `c`.
+/// Runs CR1–CR5 (and, under the `rbox` feature, CR10/CR11 role saturation) to a fixpoint over
+/// `axioms` for `n` concepts (the dense count from [`Names`]). Returns the saturated
+/// [`Saturation`]; `S[c]` then holds every concept subsuming `c`.
+#[cfg(feature = "rbox")]
+pub fn saturate(axioms: &[Normal], n: usize, role_box: &RoleBox) -> Saturation {
+    saturate_inner(axioms, n, role_box)
+}
+
+/// Runs CR1–CR5 to a fixpoint (no role hierarchy — roles are compared for equality only). The
+/// E1 entry point; the `rbox` build uses the [`RoleBox`]-aware overload above.
+#[cfg(not(feature = "rbox"))]
 pub fn saturate(axioms: &[Normal], n: usize) -> Saturation {
+    saturate_inner(axioms, n)
+}
+
+/// The shared CR1–CR5 (+CR10/CR11 under `rbox`) fixpoint. The `role_box` argument exists only
+/// in the `rbox` build; CR3 link insertion routes through it so every asserted existential link
+/// is closed under role inclusion + composition before CR4/CR5 fire.
+fn saturate_inner(
+    axioms: &[Normal],
+    n: usize,
+    #[cfg(feature = "rbox")] role_box: &RoleBox,
+) -> Saturation {
     let ix = AxiomIndex::build(axioms);
     let mut sat = Saturation {
         s: vec![FxHashSet::default(); n],
@@ -101,9 +123,13 @@ pub fn saturate(axioms: &[Normal], n: usize) -> Saturation {
                 }
             }
         }
-        // CR3: every `D ⊑ ∃r.F` axiom adds the link (X, F) to R(r).
+        // CR3: every `D ⊑ ∃r.F` axiom adds the link (X, F) to R(r). Under `rbox` the link is
+        // closed under CR10 (role inclusion) + CR11 (composition) before CR4/CR5 fire.
         if let Some(links) = ix.exists.get(&d) {
             for &(r, f) in links {
+                #[cfg(feature = "rbox")]
+                add_link_rbox(&mut sat, r, x, f, &ix, role_box, &mut queue);
+                #[cfg(not(feature = "rbox"))]
                 add_link(&mut sat, r, x, f, &ix, &mut queue);
             }
         }
@@ -148,7 +174,8 @@ fn add(set: &mut FxHashSet<Concept>, x: Concept, e: Concept, queue: &mut Vec<(Co
 
 /// Adds the existential link `(x, f) ∈ R(r)` and fires the link-triggered half of CR4/CR5:
 /// for the NEW link, every `D ∈ S(f)` with an axiom `∃r.D ⊑ E` yields `E ∈ S(x)`, and a
-/// pre-existing `⊥ ∈ S(f)` yields `⊥ ∈ S(x)` (CR5).
+/// pre-existing `⊥ ∈ S(f)` yields `⊥ ∈ S(x)` (CR5). Returns `true` iff the link was new (so the
+/// `rbox` caller can decide whether to close it under CR10/CR11).
 fn add_link(
     sat: &mut Saturation,
     r: Role,
@@ -156,10 +183,10 @@ fn add_link(
     f: Concept,
     ix: &AxiomIndex,
     queue: &mut Vec<(Concept, Concept)>,
-) {
+) -> bool {
     let succ = sat.r_succ.entry(r).or_default().entry(x).or_default();
     if !succ.insert(f) {
-        return; // link already present.
+        return false; // link already present.
     }
     sat.r_pred
         .entry(r)
@@ -179,6 +206,65 @@ fn add_link(
         // CR5 for the new link.
         if d == BOTTOM {
             add(&mut sat.s[x as usize], x, BOTTOM, queue);
+        }
+    }
+    true
+}
+
+/// Adds the asserted existential link `(x, f) ∈ R(r)` (CR3) and closes it under the RBox role
+/// rules to a fixpoint via a link worklist, calling [`add_link`] (which fires CR4/CR5) for every
+/// derived link:
+///
+///   CR10  r ⊑* s          ⇒  (x, f) ∈ R(s)                      for each super-role s of r
+///   CR11  r ∘ r2 ⊑ s, (f, z) ∈ R(r2)  ⇒  (x, z) ∈ R(s)         (new link is the FIRST component)
+///         r1 ∘ r ⊑ s, (w, x) ∈ R(r1)  ⇒  (w, f) ∈ R(s)         (new link is the SECOND component)
+///
+/// Newly-derived links are pushed back onto the worklist, so composed links compose again and
+/// super-roles of derived roles also propagate — the standard RBox link-saturation. The worklist
+/// is bounded by the number of distinct `(role, x, f)` triples (each is stored at most once in
+/// `r_succ`), so the fixpoint terminates.
+#[cfg(feature = "rbox")]
+fn add_link_rbox(
+    sat: &mut Saturation,
+    r: Role,
+    x: Concept,
+    f: Concept,
+    ix: &AxiomIndex,
+    role_box: &RoleBox,
+    queue: &mut Vec<(Concept, Concept)>,
+) {
+    // Each work item is a link to STORE (already at its exact role). Seed with the CR3 link.
+    let mut links: Vec<(Role, Concept, Concept)> = vec![(r, x, f)];
+    while let Some((lr, lx, lf)) = links.pop() {
+        if !add_link(sat, lr, lx, lf, ix, queue) {
+            continue; // link already present — its consequences were already enqueued.
+        }
+        // CR10: propagate to every strict super-role of `lr` (super_roles includes lr itself).
+        for &sup in role_box.super_roles(lr) {
+            if sup != lr {
+                links.push((sup, lx, lf));
+            }
+        }
+        // CR11 (only when the TBox has any composition axiom — a pure role hierarchy skips
+        // every probe). New link as the FIRST component: lr ∘ r2 ⊑ s with (lf, z) ∈ R(r2)
+        // ⇒ (lx, z) ∈ R(s); and as the SECOND: r1 ∘ lr ⊑ s with (w, lx) ∈ R(r1) ⇒ (w, lf) ∈ R(s).
+        if role_box.has_compositions() {
+            for &(r2, s) in role_box.compositions_first(lr) {
+                if let Some(z_set) = sat.r_succ.get(&r2).and_then(|m| m.get(&lf)) {
+                    let zs: Vec<Concept> = z_set.iter().copied().collect();
+                    for z in zs {
+                        links.push((s, lx, z));
+                    }
+                }
+            }
+            for &(r1, s) in role_box.compositions_second(lr) {
+                if let Some(w_set) = sat.r_pred.get(&r1).and_then(|m| m.get(&lx)) {
+                    let ws: Vec<Concept> = w_set.iter().copied().collect();
+                    for w in ws {
+                        links.push((s, w, lf));
+                    }
+                }
+            }
         }
     }
 }
