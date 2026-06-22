@@ -45,9 +45,25 @@ default = []
 # rustc-hash. Spike: research/owl2-el-ql-reasoning-spike.md §5 (EL-track E2).
 rbox = []
 
+# [OPUS-4.8] sq-s2nob (Phase E3): transitive reduction to the DIRECT-subsumer Hasse diagram
+# (`DirectHierarchy` + `classify_hasse_graph`) — the COMPACT class-taxonomy emission (direct
+# `rdfs:subClassOf` edges + `owl:equivalentClass` cliques) instead of the O(N²) full closure,
+# plus equivalence-class collapse and a membership-indexed reduction (the "indexing / join
+# caching" the spike's E3 names). OFF by default so the E1/E2 build (and the lean wasm port)
+# carry zero reduction code; the full-closure `Classifier`/`classify_graph` API is unchanged.
+# No new dependency — reuses rustc-hash. Spike: research/owl2-el-ql-reasoning-spike.md §5 (E3).
+hasse = []
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
 oxrdf.workspace = true
 rustc-hash.workspace = true
+
+# [OPUS-4.8] sq-s2nob: the Hasse scale benchmark uses the `hasse`-gated DirectHierarchy API, so it
+# only builds with the feature on. `required-features` keeps a default `cargo build --all-targets`
+# (which passes no features) from trying to compile it and failing on the missing import.
+[[example]]
+name = "hasse_bench"
+required-features = ["hasse"]

@@ -50,12 +50,16 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   (**CR11**), incl. the SNOMED-critical right-identity `r ∘ s ⊑ s`. OFF by default: zero
   role-automaton code without it, and RBox axioms are then left unapplied (roles compared for
   equality only).
+- **Transitive reduction → Hasse diagram** *(opt-in `hasse` feature, Phase E3)* — `DirectHierarchy`
+  reduces the full closure to the **direct (immediate) subsumers**, collapses **equivalence
+  cliques**, and `classify_hasse_graph` emits the COMPACT taxonomy (direct `rdfs:subClassOf` +
+  `owl:equivalentClass`) — O(N) Hasse edges on a deep chain instead of the O(N²) full closure.
 - **Honest fragment reporting** — class axioms outside the active fragment (unionOf /
   cardinality / …) are counted in `Report::skipped_axioms`, never silently misapplied.
 
-**Scope:** EL+⊥ (E1, default) and — with `rbox` — EL+ role reasoning (E2). Transitive reduction
-+ scale are **E3**; concurrency **E4**; nominals + concrete domains are deferred. The classifier
-is **single-threaded**. Enable RBox with `sparq-reason-el = { version = "0.1", features = ["rbox"] }`.
+**Scope:** EL+⊥ (E1, default), EL+ role reasoning (E2, `rbox`), transitive reduction (E3, `hasse`).
+Concurrency is **E4**; nominals + concrete domains are deferred. The classifier is
+**single-threaded**. Enable with `sparq-reason-el = { version = "0.1", features = ["rbox", "hasse"] }`.
 
 ## 📚 Learn more
 
