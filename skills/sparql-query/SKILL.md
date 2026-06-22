@@ -57,7 +57,17 @@ All entry points take `&Graph` + `&str` and return `Result<_, String>` (parse + 
 `String`). The result types:
 
 - `pub struct QueryResult { pub vars: Vec<oxrdf::Variable>, pub rows: Vec<Vec<Option<oxrdf::Term>>> }`
-  — `len()` / `is_empty()` count solution rows.
+  — `len()` / `is_empty()` count solution rows. The layout is **columnar** (the `vars` header is
+  stored once, not per cell); index a cell as `result.rows[row][col]` where `col` is the position of
+  the variable in `result.vars`, `None` = unbound.
+- *(opt-in `query-solution` feature, OFF by default)* `result.solutions()` gives an
+  **Oxigraph-shaped** per-solution view — an iterator of borrowed, zero-copy `QuerySolution` values
+  (one per row, sharing the `vars` header; no second materialisation, no cloned terms). Each matches
+  Oxigraph's `QuerySolution`: `sol.get(var) -> Option<&Term>` (by `&str` name with or without a
+  leading `?`, by `oxrdf::VariableRef`/`&Variable`, or by positional `usize`; `None` = absent or
+  unbound), `sol.iter()` over the bound `(VariableRef, &Term)` pairs (unbound cells skipped),
+  `&sol[var]` (panicking `Index`), plus `variables()` / `values()` / `len()` / `is_empty()`. Use it
+  for ergonomic Rust Oxigraph interop / migration; the underlying `{vars, rows}` layout is unchanged.
 - `pub struct QueryBudget { pub deadline: Option<Instant> /*native only*/, pub max_rows: Option<usize>, pub max_bytes: Option<usize> }`
   — `QueryBudget::unlimited()` is the no-op default. `max_rows` caps the working-set ROW count;
   `max_bytes` (`sq-s5is`) is the byte-accounted companion — it prices row WIDTH
@@ -413,6 +423,26 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   // ... mutate the graph, then bump the epoch so the next read re-evaluates:
   version += 1;
   let r3 = cache.get_or_eval(&graph, &q, version, &QueryBudget::unlimited())?; // miss (fresh)
+  # Ok::<(), String>(())
+  ```
+- **Sharing one `Graph` across server threads** — a `sparq_core::Graph` (and its read-only
+  `GraphSnapshot`) is **`Send + Sync`** (guaranteed by a compile-time assertion in `sparq-core`), so
+  it can be shared across the async handlers of an axum/actix/tower server directly with
+  `Arc<RwLock<Graph>>`. To skip that boilerplate, enable the non-default **`shared` cargo feature**
+  on `sparq-core` (bead `sq-yj76l`, gh #1121) for `shared::SharedGraph` — a cheaply-cloneable handle
+  (`SharedGraph::new(graph)` / `.clone()` is an `Arc` bump) with three access paths: `.snapshot()`
+  hands out a cheap immutable point-in-time `GraphSnapshot` you query **lock-free** for the request
+  (the recommended read-heavy path — the write lock is held only for the O(overlay) snapshot clone),
+  while `.read()` / `.write()` give RAII `RwLock` guards for ad-hoc locked access. It is `std::sync`
+  only (no new dependency) and off by default, so the lean default / wasm build pays nothing.
+
+  ```rust
+  // Cargo.toml: sparq-core = { version = "0.1", features = ["shared"] }
+  use sparq_core::shared::SharedGraph;
+  let shared = SharedGraph::new(graph);          // drop into axum `State`, clone per handler
+  let snap = shared.snapshot();                  // cheap immutable view; query it lock-free
+  let _n = snap.len();
+  shared.write().apply_delta(&[], &[])?;          // exclusive write lock only for the mutation
   # Ok::<(), String>(())
   ```
 - **MVCC / ACID transaction isolation** is the non-default `txn` cargo feature (bead `sq-it1x`):

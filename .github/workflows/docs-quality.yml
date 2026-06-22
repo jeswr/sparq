@@ -290,6 +290,20 @@ jobs:
         run: bash scripts/disk-guard.sh --dry-run-self-test
       - name: Self-test disk-guard.sh (gated escalation + busy-build guard, end-to-end)
         run: bash scripts/tests/test_disk_guard.sh
+      # [OPUS-4.8] sq-h34dc: worktree-gc.sh's COMPLETED-but-unmerged reclaim (--reclaim-completed)
+      # removes clean+pushed wf_/agent- worktrees with no live owning task — strictly more
+      # aggressive than the default MERGED-or-GONE broom, so its safety (opt-in, workflow-named
+      # only, KEEP-if-dirty/unpushed/in-use) is pinned by a hermetic harness that builds real git
+      # repos + worktrees and spawns a live in-use process. The script's own pure self-test (the
+      # is_workflow_branch predicate + in-use probe callability) runs too. HARD (no
+      # "advisory"/"informational") so ci-summary gates on it. (shellcheck of worktree-gc.sh is
+      # new here — it now carries the load-bearing in-use guard.)
+      - name: shellcheck worktree-gc.sh + its completed-reclaim self-test
+        run: shellcheck scripts/worktree-gc.sh scripts/tests/test_worktree_gc_completed.sh
+      - name: Self-test worktree-gc.sh (pure predicates incl. is_workflow_branch, hermetic)
+        run: bash scripts/worktree-gc.sh --dry-run-self-test
+      - name: Self-test worktree-gc.sh (completed-reclaim opt-in + workflow-only + in-use guard, end-to-end)
+        run: bash scripts/tests/test_worktree_gc_completed.sh
       # [OPUS-4.8] sq-13uyp: the per-tick merged-bead reconcile sweep — closes bd-OPEN beads
       # whose fix already MERGED so they stop wasting frontier dispatches (it COMPLEMENTS
       # push-frontier's open-PR exclusion, sq-7mwun). Its correctness rests on a conservative
@@ -406,6 +420,18 @@ jobs:
       # trusted. (Measured numbers are runtime-only / NON-CANONICAL by design.)
       - name: Self-test agent-telemetry harness (parser + cache-ratio + cost math)
         run: python3 scripts/agent-telemetry/tests/test_agent_telemetry.py
+      # [OPUS-4.8] sq-mztg8.2 (epic sq-mztg8, FO-bridge Phase 4): the PKG write-path
+      # YAML-LD authoring compiler (crates/sparq-kb/ingest/yamlld_compile.py) lets the
+      # AGENTS.md Findings tier be authored in a compact, IRI-free *.yaml.ld and
+      # deterministically compiled to schema.org-typed PKG Turtle. Its stdlib-only
+      # subset reader + the guarded V() concept-token resolver (AMBIGUOUS / unresolvable
+      # token -> HARD compile error, never a silent wrong IRI) are regression-covered by
+      # a hermetic stdlib-unittest suite (NO PyYAML, NO subprocess, NO network). Run here
+      # so a resolver/parser regression reds CI. (The compiled tier's SHACL conformance +
+      # round-trip equivalence to the hand-authored tier is the Rust gate
+      # `sparq-kb --features validate --test yamlld_write_path`.)
+      - name: Self-test PKG write-path YAML-LD compiler (sq-mztg8.2)
+        run: python3 scripts/tests/test_yamlld_compile.py
       # [OPUS-4.8] sq-lhwo.4 (epic sq-lhwo): the firm ast-grep+outline token A/B harness
       # (scripts/agent-telemetry/ast-grep-outline/) under the shared §5 protocol. Its
       # statistics + §5.6 verdict-object emitter (Wilcoxon signed-rank + bootstrap CI +

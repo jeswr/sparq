@@ -27,6 +27,16 @@ rustdoc-args = ["--cfg", "docsrs"]
 # property G6 of research/solid-trust-graph-authz-design.md §2.2). It depends only on
 # what the admission gate needs — RDFC-1.0 canon, the issuer-sig primitive, the SHACL
 # validator, the N3 reasoner, and the shipped sparq-solid materialiser.
+# DEFAULT-OFF features. The crate stays lean by default; `did` pulls the only extra
+# dependency (`serde_json`, used solely to parse a fetched `did:web` DID document) and
+# is OFF unless a caller explicitly opts in (sq-pfae.3). The `did:key`/`did:web` self-
+# certifying decode (multibase/multicodec/base58/varint) is dependency-free hand-rolled,
+# so the feature's whole cost is the JSON parser for the optional `did:web` path.
+[features]
+default = []
+# DID resolution + issuer-key binding (`did:key` offline self-cert + pluggable `did:web`).
+did = ["dep:serde_json"]
+
 [dependencies]
 sparq-core = { path = "../sparq-core", default-features = false }
 sparq-reason = { path = "../sparq-reason", default-features = false }
@@ -38,6 +48,9 @@ sparq-zk = { path = "../sparq-zk" }
 # The `forShape` statement-type primitive (forPredicate desugars to it; step 3).
 sparq-shacl = { path = "../sparq-shacl", default-features = false }
 oxrdf.workspace = true
+# OPTIONAL — `did` feature only. Parses a fetched `did:web` DID document (JSON). The
+# `did:key` path needs no JSON; the default build pulls neither.
+serde_json = { version = "1", optional = true }
 
 # Test-only: parse-validate the published machine-readable vocabulary
 # `ontologies/trust/trust.ttl` so the Turtle a working group reads stays valid

@@ -25,6 +25,7 @@ links to its detailed record; the numbers live in the linked `bench/.../RESULTS*
 | **FO-KM Metric 1** | Does any foundational ontology beat gUFO / no-FO for the agent's KM tasks? | 16 | **schema.org-as-top wins (0.84)** ≫ DOLCE-DUL (0.64) > no-FO (0.58) > **gUFO (0.54, *below* no-FO)**. Driver = **LLM fluency**, not formal richness. | `bench/fo-km/RESULTS.md` (PRs #1107/#1108, landing) |
 | **bd → sparq bridge eval** | Can sparq replace the bead tracker? | — | **Bridge, don't replace** (0/4 replacement criteria met). The real value is the research↔beads JOIN (links designs to their covering beads; surfaces dormant designs). | `crates/sparq-kb` README + PR #1076 |
 | **gUFO closure-prior (KGE)** | Does gUFO closure firm up the link-prediction MRR lift? | multi-seed | **Not robust** — the lift is sign-unstable across synthetic slices (within per-seed spread). A real schema-bearing KG run is needed. | PR #1094 / `crates/sparq-vectors` eval |
+| **sparq-terse query-authoring A/B** | Does the terse dialect (`K:` keywords / `V()`) save query-authoring tokens vs plain SPARQL, at equal correctness? | 30 | **Split, per lever.** Lever 1 (`K:` keyword) clears the token bar **and ties** plain SPARQL on quality → **conditional adopt** (proxy fidelity; pending the transcript fan-out). Lever 3 (`V()`) **does-not-adopt on quality** — it loud-fails (correctly) on a punctuation-heavy prefLabel, so `resolution_correctness < 1.0`. A `V()` is a clean-label convenience, not a drop-in for an explicit IRI. | [`terse/RESULTS.md`](terse/RESULTS.md) |
 
 ## Designs (context for the above)
 
@@ -50,9 +51,10 @@ links to its detailed record; the numbers live in the linked `bench/.../RESULTS*
 ## Reproducing
 
 The harnesses live beside their records: [`pkg-dogfood/`](pkg-dogfood/) (token A/B +
-real-transcript miner + analyzer) and `bench/fo-km/` (FO overlays + discriminating
-tasks + `analyze.py`; PRs #1107/#1108, landing). Each `RESULTS*.md` documents its
-method and the exact arms.
+real-transcript miner + analyzer), [`terse/`](terse/) (the `sparq-terse` per-lever
+adoption gate — frozen tasks + reference queries + real-transpiler grader + verdict
+object; `run.sh`), and `bench/fo-km/` (FO overlays + discriminating tasks + `analyze.py`;
+PRs #1107/#1108, landing). Each `RESULTS*.md` documents its method and the exact arms.
 
 ## License
 

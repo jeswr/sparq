@@ -94,6 +94,53 @@ fn passthrough_with_no_v_is_byte_identical() {
     let exp = terse_to_sparql_with(q, &ctx, |_p| None).unwrap();
     assert_eq!(exp.canonical_sparql, q);
     assert!(exp.resolutions.is_empty());
+    assert!(exp.keywords.is_empty());
+}
+
+#[test]
+fn keyword_layer_and_v_resolution_compose() {
+    // [OPUS-4.8] sq-vfeme — lever 1 (K:<name>) and lever 3 (V("phrase")) compose through the
+    // vectors entry point: the keyword expands to its frozen IRI AND the phrase resolves to a
+    // concept IRI, both spliced into one canonical query, both echoed for the agent.
+    let g = graph();
+    let ctx = ResolveCtx::lexical(&g);
+    let exp = terse_to_sparql_with(
+        "SELECT ?f WHERE { ?f K:about V(\"cardinality estimation\") }",
+        &ctx,
+        |_p| None,
+    )
+    .expect("keyword + V() compose");
+
+    // Lever 1: K:about became the canonical PKG IRI and is echoed.
+    assert!(
+        exp.canonical_sparql.contains("<https://sparq.dev/ns/pkg#about>"),
+        "got: {}",
+        exp.canonical_sparql
+    );
+    assert_eq!(exp.keywords.len(), 1);
+    assert_eq!(exp.keywords[0].keyword, "about");
+    assert_eq!(exp.keywords[0].iri, "https://sparq.dev/ns/pkg#about");
+
+    // Lever 3: the phrase resolved and was spliced; no terse token remains.
+    assert!(exp.canonical_sparql.contains("<http://example.org/cardEst>"));
+    assert!(!exp.canonical_sparql.contains("K:"), "no keyword token must remain");
+    assert!(!exp.canonical_sparql.contains("V("), "no V() must remain");
+    assert_eq!(exp.resolutions.len(), 1);
+
+    // The whole emission is conformant SPARQL (the canary ran; verify independently).
+    spargebra::SparqlParser::new()
+        .parse_query(&exp.canonical_sparql)
+        .expect("the composed output is conformant SPARQL");
+}
+
+#[test]
+fn unknown_keyword_is_loud_even_on_the_vectors_path() {
+    // The lever-1 guardrails apply identically through terse_to_sparql_with.
+    let g = graph();
+    let ctx = ResolveCtx::lexical(&g);
+    let err = terse_to_sparql_with("ASK { ?s K:nope ?o }", &ctx, |_p| None)
+        .expect_err("an unknown keyword must fail loudly on the vectors path too");
+    assert!(matches!(err, TerseError::UnknownKeyword { .. }), "got {err:?}");
 }
 
 #[test]

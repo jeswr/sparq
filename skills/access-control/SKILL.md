@@ -119,6 +119,11 @@ Materialize the authorization view from the access-control documents, then enfor
   `store.accessible_set(...)` / `store.view_for(...) -> DatasetView` /
   `store.auth() -> &AuthIndex` — inspect the authorized graph set or the materialized
   index directly.
+- `store.wac_allow(&Session, &NamedNode) -> String` — build the public
+  [`WAC-Allow`](https://solidproject.org/TR/wac#wac-allow) response-header value
+  (`user="…",public="…"`) advertising the modes the session (and the public) hold on a
+  resource ([OPUS-4.8] sq-i7k08); fail-closed, only the modes actually held. See the
+  request-pipeline section below.
 - `store.materialize_odrl_permission(&Policy, &Request) -> BridgeOutcome` — **opt-in**
   (`odrl-bridge` feature, OFF by default; [OPUS-4.8] sq-h3uk): run the `sparq-policy` ODRL
   evaluator and, on a *definite Permit*, materialize the equivalent `principal auth:<mode>
@@ -190,10 +195,12 @@ loop. A Solid **request handler** wraps that with three steps: (1) build a `Sess
 from the authenticated request, (2) gate the request with `accessible(...)` /
 `query_as(...)`, (3) emit a [`WAC-Allow`](https://solidproject.org/TR/wac#wac-allow)
 response header advertising the modes the agent (and the public) hold on the target
-resource. There is **no public `WAC-Allow` helper in the crate yet** (tracked as a
-follow-up); it is a few lines over the existing `accessible` API, shown here so a
-server can drop it in. The header lists the modes available to `user` (the
-authenticated agent) and to `public` (an anonymous `Session::default()`):
+resource. Step (3) is the public helper
+[`PodStore::wac_allow(&Session, &NamedNode) -> String`](https://docs.rs/sparq-solid)
+([OPUS-4.8] sq-i7k08) — it builds the RFC-style `user="…",public="…"` value over the
+existing `accessible` API (the `user` list is the authenticated session's modes; the
+`public` list is an anonymous `Session::default()`'s), fail-closed and with only the
+modes actually held:
 
 ```rust
 use sparq_solid::{Mode, PodStore, Session};
@@ -209,29 +216,22 @@ fn may(store: &mut PodStore, s: &Session, mode: Mode, resource: &NamedNode) -> b
     store.accessible(s, mode).iter().any(|g| g == resource)
 }
 
-// RFC-style WAC-Allow: `user="read write",public="read"` — only the modes actually held.
-fn wac_allow(store: &mut PodStore, s: &Session, resource: &NamedNode) -> String {
-    let modes = [(Mode::Read, "read"), (Mode::Write, "write"),
-                 (Mode::Append, "append"), (Mode::Control, "control")];
-    let held = |sess: &Session| -> String {
-        modes.iter()
-            .filter(|(m, _)| may(store, sess, *m, resource))
-            .map(|(_, name)| *name).collect::<Vec<_>>().join(" ")
-    };
-    let anon = Session::default();
-    format!(r#"user="{}",public="{}""#, held(s), held(&anon))
+// Build the WAC-Allow header value for the request, e.g. `user="read write",public="read"`.
+fn wac_allow_header(store: &mut PodStore, s: &Session, resource: &NamedNode) -> String {
+    store.wac_allow(s, resource)
 }
 ```
 
 Per request: `session_from_request(...)` → `may(&mut store, &s, Mode::Read, &resource)`
 to allow/deny (a deny is `403`/`404` per your fail-closed policy) → set the response's
-`WAC-Allow` header to `wac_allow(&mut store, &s, &resource)`. `accessible` is an O(1)
-hash check over the materialized index (it caches per session), so the four-mode sweep
-is cheap. **Scope caveat:** sparq-solid is a *library-level* authoriser — there is no
-HTTP surface here (no `Link`/`acl:` resource discovery, no `.well-known`), so mapping a
-**request path to its named graph** (`resource`) and authenticating the WebID are the
-server's job (see `research/sparq-solid-scope.md` §4). The header builder above is
-illustrative, not a conformance-tested helper.
+`WAC-Allow` header to `store.wac_allow(&s, &resource)`. `wac_allow` runs four
+`accessible` sweeps that share the per-session cache (each an O(1) hash check over the
+materialized index), so it is cheap. **Scope caveat:** sparq-solid is a *library-level*
+authoriser — there is no HTTP surface here (no `Link`/`acl:` resource discovery, no
+`.well-known`), so mapping a **request path to its named graph** (`resource`) and
+authenticating the WebID are the server's job (see `research/sparq-solid-scope.md` §4).
+`wac_allow` builds the header *value* from the authorization verdict; it is not itself a
+conformance-tested HTTP layer.
 
 ## Capability notes (WAC + ACP)
 
@@ -413,6 +413,22 @@ RDFC-1.0 canonicalise (`sparq-canon`) → a **checked** issuer signature over th
 (`sparq-zk`, never a self-asserted triple) → statement-type scoping via a real SHACL shape
 (`sparq-shacl`) → freshness (a per-request check) → the clear-WebID holder binding.
 
+**Two equivalent policy-authoring forms (`parse_policy` / `resolve_rule_keys` accept both;
+`sq-pfae.4`).** A Control-gated trust policy may name a rule either way, and both desugar to the
+SAME `Vec<TrustRule>` the gate consumes:
+- **Reified** — a `trust:TrustRule` node grouping `trust:source` + `trust:forShape`/`forPredicate`
+  + `trust:scope` + `trust:freshWithin` (+ key). Keeps scope/freshness **per-rule**.
+- **Claim-level relational** (`trust:trustsSourceFor`, the foundational primitive, design §2.3.1)
+  — a `trust:Source` node carries `trust:trustsSourceFor <shape-or-predicate>` directly, alongside
+  its shared key + `trust:scope` + `trust:freshWithin`; EACH `trustsSourceFor` statement is one
+  rule. This is the compact *per-(source, statement-type)* form that **replaces ACP's type-only,
+  unimplemented `acp:vc` matcher** with claim-level trust. The object is a `sh:NodeShape` node
+  (carried like `forShape`) or a predicate IRI (desugared like `forPredicate`); a blank-node source
+  is rejected fail-closed. It composes with the opt-in `did` key binding (`trust:issuerDid` on the
+  source node). Every soundness side-condition (checked signature, type-scope, holder binding,
+  reserved-predicate guard) is identical to the reified form — the claim-level form is NOT a weaker
+  admission path.
+
 - **`admit_trust_credential_static(credential, rules, target, abac_rule_n3)`** — the
   **materialise-time** path (the `sq-xc4y` static/dynamic split). It runs only the
   session-INDEPENDENT class (signature, type-scope, scope) and installs each derived grant as an
@@ -437,8 +453,12 @@ does **not** provide privacy, unlinkability, or anonymity: the credential is adm
 clear and the holder binding authenticates the WebID in the clear (the non-anonymous degraded
 path, `sq-wvne`). The ZK estate it composes with is externally **unaudited**
 (`sq-qhy4`, pending external accredited-cryptographer sign-off). Issuer keys are
-operator-asserted (no DID resolver yet — `sq-pfae.3`, the live forgery vector D′). Open problems
-are respected as documented limitations, never solved: `sq-tu4e` (no in-reasoner NAF over
+operator-asserted by default (`trust:issuerKey` hex, the live forgery vector D′); the **opt-in
+`did` feature** (`sq-pfae.3`) lets a rule bind its key from a `trust:issuerDid` instead —
+`sparq_trust::{DidKeyResolver, DidWebResolver, resolve_rule_keys}`, `did:key` offline self-cert +
+a pluggable `did:web` fetcher (no HTTP client forced on the default build). This **narrows** D′ but
+is no absolute anchor: `did:key` is self-certifying, `did:web` only as strong as host/TLS. Open
+problems are respected as documented limitations, never solved: `sq-tu4e` (no in-reasoner NAF over
 derived facts; `revoked` is input-only; no deny-on-disagreement) and `sq-wvne` (ZK privacy) are
 out of PoC scope. `sq-xc4y` (per-request holder/freshness admission vs the materialise-once view)
 is **RESOLVED** by the static/dynamic split: see `admit_trust_credential_static` above and design

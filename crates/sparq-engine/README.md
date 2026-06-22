@@ -42,21 +42,17 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   see [`docs/extension-functions.md`](../../docs/extension-functions.md).
 - **Custom aggregates + window functions** *(opt-in `window-functions` feature, OFF by default)* —
   register a named user aggregate (`CustomAggregateRegistry`) callable from a real SPARQL `GROUP BY`,
-  and a window-function surface (`ROW_NUMBER` / `RANK` / `DENSE_RANK`, the offset/positional
-  `LAG`/`LEAD`/`NTILE` (sq-hqhc), + the windowed aggregates `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, with
-  `PARTITION BY` + `ORDER BY` and an optional `ROWS`/`RANGE` frame)
-  available two ways: a programmatic pass (`window::apply_window` over a `QueryResult`) and an inline
-  `OVER(…)` query syntax (`query_over` — e.g. `(SUM(?x) OVER (ORDER BY ?y ROWS BETWEEN UNBOUNDED
-  PRECEDING AND CURRENT ROW) AS ?run)` in the SELECT, and a reusable `WINDOW w AS (…)` clause with
-  `OVER w`). **Window functions are a NON-STANDARD extension**
-  — SPARQL has no W3C-REC `OVER` syntax. The inline form is a *source rewrite* in front of the engine
-  recognised ONLY on `query_over` (it does NOT change the vendored parser), so the standard
-  `query`/`ask`/… surface stays exactly SPARQL 1.1 and conformance is unaffected. Inline covers the three
-  ranking functions, the five windowed aggregates, `ROWS`/`RANGE` frames (sq-imj8), the offset/positional
-  `LAG`/`LEAD`/`NTILE` and a named `WINDOW` clause (sq-hqhc); `DISTINCT`/computed-expression function
+  and a window-function surface (`ROW_NUMBER`/`RANK`/`DENSE_RANK`, the offset/positional
+  `LAG`/`LEAD`/`NTILE`, + windowed `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, with `PARTITION BY` + `ORDER BY`
+  and an optional `ROWS`/`RANGE` frame) available two ways: a programmatic pass
+  (`window::apply_window` over a `QueryResult`) and an inline `OVER(…)` query syntax (`query_over`,
+  plus a reusable `WINDOW w AS (…)` clause). **Window functions are a NON-STANDARD extension** —
+  SPARQL has no W3C-REC `OVER` syntax. The inline form is a *source rewrite* recognised ONLY on
+  `query_over` (it does NOT touch the vendored parser), so the standard `query`/`ask`/… surface
+  stays exactly SPARQL 1.1 and conformance is unaffected; `DISTINCT`/computed-expression function
   arguments, numeric `RANGE` offsets, and a computed-expression `PARTITION BY` are inline-deferred
-  (use the programmatic API). When the feature is off, zero window/aggregate-registry code compiles and
-  the default build is byte-identical (no new deps).
+  (use the programmatic API). When the feature is off, zero window/aggregate-registry code compiles
+  and the default build is byte-identical (no new deps).
 - **Materialised-view / query-result cache** *(opt-in `result-cache` feature, OFF by default)* —
   a bounded, version-aware LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed
   by `(parsed query algebra, caller graph-version)`, so an endpoint that re-serves the same read
@@ -94,15 +90,19 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   `PrettyOptions { indent, abbreviate }`): subject grouping, p-o/object lists, `a` for `rdf:type`,
   used-only `@prefix`, *emission-order-independent* (sorted) — round-trip-correct. For true **W3C
   JSON-LD 1.1 Compaction** against a caller `@context`, `graph_to_jsonld_compact(&g, &ctx)` /
-  `write_jsonld_compact` (+ the `_pretty` variants) apply the full algorithm — term definitions,
-  `@vocab`, type/language/`@container` (`@set`/`@list`/`@language`/`@index`) coercion, `@reverse`,
-  `@id`/`@type` aliasing, value/node/IRI compaction — plus **JSON-LD 1.1 Framing**
-  (`graph_to_jsonld_framed(&g, &frame)`: node-pattern matching +
-  `@embed`/`@explicit`/`@default`/`@omitDefault`/`@requireAll`) — hand-rolled, dependency-free
-  (`parse_context_json` builds the context/frame). Compaction is **pyld-faithful** (differentially
-  verified; fixes sq-oy1f.12/.13/.14, see the `serialize::compact` rustdoc). `JsonLdForm::Compacted`
-  remains the lighter prefix-only `@context`. The N-Triples writer (`triples_to_ntriples`) is always
-  on; off, zero serializer code compiles, **no new dependencies**. See [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
+  `write_jsonld_compact` (+ `_pretty` variants) apply the full algorithm (term definitions, `@vocab`,
+  `@container` coercion, `@reverse`, value/node/IRI compaction), plus **JSON-LD 1.1 Framing**
+  (`graph_to_jsonld_framed`) — hand-rolled, dependency-free, **pyld-faithful** (differentially
+  verified; see the `serialize::compact` rustdoc). The N-Triples writer (`triples_to_ntriples`) is
+  always on; off, zero serializer code compiles, **no new dependencies**. See
+  [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
+- **Oxigraph-shaped per-solution accessor** *(opt-in `query-solution` feature, OFF by default)* —
+  `QueryResult::solutions()` yields borrowed, zero-copy `QuerySolution` views (one per row) matching
+  Oxigraph's `QuerySolution` API — `get` by name / `VariableRef` / position, `iter` over the bound
+  `(Variable, Term)` pairs, panicking `Index` — over the engine's columnar `{vars, rows}` table with
+  no second materialisation (eases Rust Oxigraph interop / migration). Off, zero code compiles, the
+  default build is byte-identical, no new deps. See
+  [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more
