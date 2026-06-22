@@ -126,6 +126,9 @@ pub mod delegation;
 #[cfg_attr(docsrs, doc(cfg(feature = "did")))]
 pub mod did;
 pub mod policy;
+#[cfg(feature = "secprop-vocab")]
+#[cfg_attr(docsrs, doc(cfg(feature = "secprop-vocab")))]
+pub mod secprop;
 /// The trust-document storage / authoring model — server-wide vs per-`.acr` documents,
 /// versioning, revocation, and the admission cache key that composes with the
 /// sparq-solid epoch cache (the P4 model, `sq-pfae.5`). Behind the default-OFF `store`

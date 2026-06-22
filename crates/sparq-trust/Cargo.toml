@@ -43,6 +43,12 @@ did = ["dep:serde_json"]
 # present (sparq-zk commitment for the evidence hash, std hashing) — NO new dependency,
 # so the lean default build is byte-identical with it OFF.
 store = []
+# The sparq sec-prop: EXTENSION vocabulary (`secprop` module + `secprop-ext.ttl`):
+# the orthogonal proof-system dimensions + the assurance/audit-status axis the
+# vendored `sec-prop:` ontology lacks (sq-5oru9; design §4.2). Dependency-free — it
+# is `const &str` data + a TTL drift test, strictly additive (no new dep, no new edge
+# onto the lean default build).
+secprop-vocab = []
 
 [dependencies]
 sparq-core = { path = "../sparq-core", default-features = false }
