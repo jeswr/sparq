@@ -205,6 +205,31 @@ export class SparqStore {
   }
 
   /**
+   * [OPUS-4.8] #1123 — runs a SELECT query and returns the solutions in the OXIGRAPH JS shape:
+   * an array of plain `Map<string, Term>`, each keyed on the variable NAME (no `?`) with RDF/JS
+   * `Term` values — exactly what Oxigraph's `Store.query` yields for a SELECT, so Oxigraph code
+   * (`for (const binding of store.querySolutions(q)) binding.get("s").value`) ports unchanged.
+   *
+   * It is a thin O(n) re-view of {@link queryBindings}'s RDF/JS `Bindings` (one `Map` allocation
+   * per solution, no extra wasm round-trip), so the engine's SPARQL-JSON path — not a second
+   * code path — stays the single source of truth. Prefer {@link queryBindings} for an RDF/JS
+   * pipeline (richer immutable `Bindings`); use this for drop-in Oxigraph migration.
+   */
+  querySolutions(sparql: string): Map<string, RDF.Term>[] {
+    return this.queryBindings(sparql).map((b) => b.toMap());
+  }
+
+  /**
+   * [OPUS-4.8] #1123 — the streaming counterpart of {@link querySolutions}: yields one
+   * Oxigraph-shaped `Map<string, Term>` solution at a time without materialising the whole
+   * result (see {@link queryBindingsStream} for the streaming contract). For porting Oxigraph
+   * code that iterates `store.query(...)` lazily.
+   */
+  *querySolutionsStream(sparql: string): Generator<Map<string, RDF.Term>, void, undefined> {
+    for (const b of this.queryBindingsStream(sparql)) yield b.toMap();
+  }
+
+  /**
    * Streams a SELECT query's solutions as RDF/JS `Bindings`, one at a time,
    * without ever materialising the whole result on the JS side — neither as
    * one JSON string nor as one `Bindings[]`. The engine serialises in ~64 KiB

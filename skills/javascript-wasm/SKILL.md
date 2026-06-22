@@ -64,6 +64,8 @@ get size(): number                                  // deduped triples in the DE
 heapBytes(): number                                 // rough wasm-side footprint
 query(sparql): Bindings[] | boolean                 // dispatches: SELECT->Bindings[], ASK->boolean
 queryBindings(sparql): Bindings[]                    // SELECT -> one Bindings per solution
+querySolutions(sparql): Map<string, Term>[]          // SELECT -> OXIGRAPH-shaped: array of plain Map (drop-in for oxigraph Store.query)
+querySolutionsStream(sparql): Generator<Map<string,Term>> // streaming querySolutions
 queryBoolean(sparql): boolean                        // ASK (native path; rejects non-ASK)
 queryJson(sparql): string                            // raw SPARQL 1.1 JSON string (SELECT or ASK)
 queryQuads(sparql): Quad[]                            // CONSTRUCT/DESCRIBE -> RDF/JS quads (default graph); rejects SELECT/ASK
@@ -88,7 +90,9 @@ removeQuads(quads): void                             // applyDelta([], quads) �
 free(): void                                         // also Symbol.dispose
 ```
 
-`Bindings` (RDF/JS Query-spec, Map-like): `.get('var') -> RDF.Term | undefined`, `.has`, `.keys()`, `.values()`, `.entries()`, `.size`, `.equals`, immutable `.set/.delete/.filter/.map/.merge`, iterable. Terms: `.termType` (`'NamedNode' | 'Literal' | 'BlankNode' | ...`), `.value`, plus `.language` / `.datatype` on literals.
+`Bindings` (RDF/JS Query-spec, Map-like): `.get('var') -> RDF.Term | undefined`, `.has`, `.keys()`, `.values()`, `.entries()`, `.size`, `.equals`, immutable `.set/.delete/.filter/.map/.merge`, iterable, plus `.toMap() -> Map<string, Term>` (the Oxigraph-shaped bare-string-keyed view — #1123). Terms: `.termType` (`'NamedNode' | 'Literal' | 'BlankNode' | ...`), `.value`, plus `.language` / `.datatype` on literals.
+
+`Dataset` (named export — the full RDF/JS [`Dataset`](https://rdf.js.org/dataset-spec/) over the engine; async factories `Dataset.create/fromString/fromQuads`): `DatasetCore` (`add/delete/has/match/size/[Symbol.iterator]`) PLUS the algebra `union/intersection/difference/addAll/deleteMatches/contains/equals/filter/map/forEach/some/every/reduce/import/toStream/toArray/toString/toCanonical`. The binary set ops (`union/intersection/difference/addAll/contains/equals`) are INTEROP-aware — the operand may be another sparq `Dataset` OR any foreign RDF/JS dataset/store (N3.Store, @rdfjs/dataset), detected via `[Symbol.iterator]`. Full SPARQL surface one accessor away via `dataset.store`. (`contains/equals/toCanonical` compare blank nodes by LABEL, not full RDFC-1.0.)
 
 Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNode`, `blankNode`, `literal`, `variable`, `quad`, ...) and term classes `NamedNode/BlankNode/Literal/Variable/DefaultGraph/Quad`; `init` (idempotent wasm bootstrap); compression helpers `decompress / decompressToString / sniffCodec`; SPARQL helpers `termFromSparqlJson / termToNT / quadsToNQuads / detectQueryForm / SparqlJsonRowsParser`; and the `SparqDictionaryClient` (server dictionary-fetch protocol).
 

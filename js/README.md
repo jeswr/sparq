@@ -34,7 +34,13 @@ browser. (The wasm bundle bytes are tracked per-commit on the perf dashboard,
   vocabulary-dictionary negotiation with a sparq server — content-addressed
   dictionary caching, background warm-up, pluggable dict-capable decoder.
 - Results as RDF/JS Query-spec `Bindings` (Map-like, `.get(variable)`), terms as
-  spec-compliant RDF/JS `Term`s (typed against `@rdfjs/types`).
+  spec-compliant RDF/JS `Term`s (typed against `@rdfjs/types`); an
+  **Oxigraph-compatible** accessor (`querySolutions()` → `Map<string, Term>[]`,
+  `Bindings.toMap()`) ports Oxigraph result-processing code unchanged.
+- The named **`Dataset`** export implements the **full RDF/JS `Dataset`
+  interface** (the set algebra `union`/`intersection`/`difference`/… on top of
+  `DatasetCore`), with the binary set ops **interoperating with foreign RDF/JS
+  datasets** (N3.js, `@rdfjs/dataset`), not just our own.
 
 ## Install / build
 
@@ -121,6 +127,12 @@ const fromQuads = await SparqStore.fromQuads([
 // SPARQL Update (the engine rebuilds its immutable index; the handle swaps in place)
 store.update('PREFIX ex: <http://ex/> INSERT DATA { ex:carol ex:name "Carol" }');
 
+// Oxigraph-compatible SELECT results: an array of plain Map<string, Term>
+// (drop-in for Oxigraph's `Store.query` — `binding.get("s").value`)
+for (const binding of store.querySolutions('SELECT ?s WHERE { ?s ?p ?o } LIMIT 10')) {
+  console.log(binding.get('s').value);
+}
+
 // Raw SPARQL 1.1 JSON results, skipping JS-side term materialisation
 const json = JSON.parse(store.queryJson('SELECT * WHERE { ?s ?p ?o } LIMIT 10'));
 
@@ -159,13 +171,44 @@ for (const r of report.results) {
 store.free(); // release wasm memory (also `using store = …` via Symbol.dispose)
 ```
 
-### `Dataset` — the RDF/JS `DatasetCore` entry, importable from a `<script type="module">`
+### `Dataset` — the full RDF/JS `Dataset` algebra, importable from a `<script type="module">`
 
-For an RDF/JS-`DatasetCore`-shaped surface (rather than the SPARQL-first
-`SparqStore`), import the named **`Dataset`** export. It is a thin wrapper over
-`SparqStore` exposing the four `DatasetCore` members (`add` / `delete` / `has` /
-`match`) plus `size` and `[Symbol.iterator]`, with the **full SPARQL surface one
-accessor away** (`dataset.store`). Because `DatasetCore`'s instance methods are
+For an RDF/JS-`Dataset`-shaped surface (rather than the SPARQL-first
+`SparqStore`), import the named **`Dataset`** export. It implements the **full
+RDF/JS [`Dataset`](https://rdf.js.org/dataset-spec/) interface** — the
+`DatasetCore` members (`add` / `delete` / `has` / `match` / `size` /
+`[Symbol.iterator]`) **plus** the set algebra and iteration helpers
+(`union` / `intersection` / `difference` / `addAll` / `deleteMatches` /
+`contains` / `equals` / `filter` / `map` / `forEach` / `some` / `every` /
+`reduce` / `import` / `toStream` / `toArray` / `toString` / `toCanonical`) — with
+the **full SPARQL surface one accessor away** (`dataset.store`).
+
+The binary set ops are **library-agnostic**: `union(other)`,
+`intersection(other)`, `difference(other)`, `addAll`, `contains` and `equals`
+accept either another sparq `Dataset` **or any foreign RDF/JS dataset/store**
+(e.g. an [`N3.Store`](https://github.com/rdfjs/N3.js) or
+[`@rdfjs/dataset`](https://github.com/rdfjs/dataset)) — detected through the
+`[Symbol.iterator]` every RDF/JS dataset exposes, with a fast native path when
+the operand is our own:
+
+```js
+import { Dataset } from '@jeswr/sparq';
+import { Store as N3Store } from 'n3';
+
+const a = await Dataset.fromString('<http://ex/a> <http://ex/p> <http://ex/b> .', 'ntriples');
+const n3 = new N3Store(/* … RDF/JS quads from N3 … */);
+a.union(n3);         // works across libraries (foreign operand)
+a.intersection(n3);  // ditto
+a.difference(n3);
+a.contains(n3);
+a.equals(n3);
+```
+
+> `contains`/`equals`/`toCanonical` compare quads by their concrete terms
+> (blank nodes by **label**); full RDFC-1.0 blank-node canonicalisation is not
+> yet applied. For blank-node-free datasets the comparison is exact.
+
+Because the instance methods are
 synchronous, you obtain an instance through an **async factory** —
 `Dataset.create()` / `Dataset.fromString()` / `Dataset.fromQuads()` — each of
 which `await`s the wasm engine first. That is the lazy-load point: the
