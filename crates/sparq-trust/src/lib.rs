@@ -126,6 +126,13 @@ pub mod delegation;
 #[cfg_attr(docsrs, doc(cfg(feature = "did")))]
 pub mod did;
 pub mod policy;
+/// The trust-document storage / authoring model — server-wide vs per-`.acr` documents,
+/// versioning, revocation, and the admission cache key that composes with the
+/// sparq-solid epoch cache (the P4 model, `sq-pfae.5`). Behind the default-OFF `store`
+/// feature: nothing in the lean default build depends on it.
+#[cfg(feature = "store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "store")))]
+pub mod store;
 pub mod vocab;
 pub mod wire;
 
@@ -143,4 +150,8 @@ pub use did::{
 pub use policy::{parse_policy, ControlGate, PolicyError, ShapeRef, TrustRule};
 #[cfg(feature = "did")]
 pub use policy::{resolve_rule_keys, IssuerBinding};
+#[cfg(feature = "store")]
+pub use store::{
+    AdmissionCacheKey, PolicyVersion, StoreError, TrustDocument, TrustLayer, TrustStore,
+};
 pub use wire::{derive_conditional_grants, derive_grants, ConditionalGrant};
