@@ -49,6 +49,13 @@ store = []
 # is `const &str` data + a TTL drift test, strictly additive (no new dep, no new edge
 # onto the lean default build).
 secprop-vocab = []
+# [OPUS-4.8] sq-ufsi9 — the N3 proof-admissibility ruleset over `sparq-reason` (the
+# §4.3 ODRL → admissible-proof-set reduction: strongerThan-closure / atLeast /
+# overDimension / satisfies, plus the Rust default-deny universal). Pure N3-text data
+# + a thin driver over the `sparq-reason` edge this crate already carries — NO new
+# dependency. Enables `secprop-vocab` (it reuses the secprop namespace constant). The
+# lean default build is byte-identical with it OFF.
+secprop-admissibility = ["secprop-vocab"]
 # [OPUS-4.8] sq-pfae.6 — the delegation stratum's AUDIT half: render an invocation-bound
 # delegation chain + effective capability as a minimal W3C PROV-O audit graph
 # (`prov:actedOnBehalfOf` lineage + the effective grant as `auth:*` RDF), with the

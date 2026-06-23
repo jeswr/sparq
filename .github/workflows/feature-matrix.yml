@@ -552,6 +552,24 @@ jobs:
             crate: sparq-trust
             features: secprop-vocab
             test: true
+          # [OPUS-4.8] sq-ufsi9 (epic sq-0dksu, Phase 2): the N3 proof-admissibility
+          # ruleset over `sparq-reason` (the §4.3 ODRL → admissible-proof-set
+          # reduction). The `admissibility` module + its `admissibility::tests` unit
+          # suite + the `secprop_admissibility.rs` golden integration suite
+          # (`#![cfg(feature = "secprop-admissibility")]`) are ALL behind the default-OFF
+          # `secprop-admissibility` feature, so ci.yml's default-feature `nextest archive`
+          # compiles them EMPTY and runs ZERO of them — the silent-skip gap (#1171) this
+          # leg closes. The feature is dependency-free (N3-text data + a thin driver over
+          # the `sparq-reason` edge the crate already carries), so this leg is cheap and
+          # reaches every admissibility test. Verified locally: `cargo test -p sparq-trust
+          # --features secprop-admissibility` runs the 6 `admissibility::tests` unit tests
+          # + the 3 `secprop_admissibility.rs` golden tests (empty under the strict
+          # preference, non-empty under the relaxed one); `clippy --all-targets -D
+          # warnings` is clean in every state.
+          - name: sparq-trust (secprop-admissibility)
+            crate: sparq-trust
+            features: secprop-admissibility
+            test: true
           # [OPUS-4.8] sq-bevd3 (epic sq-0dksu, Phase 3): the per-method
           # security-properties ANNOTATION GRAPH + over-claim guards in sparq-zk. The
           # `secprop` module, its unit tests (the 3 guards + the drift/honesty checks),
@@ -607,6 +625,26 @@ jobs:
           - name: sparq-nlq (citations — provenance-join + citations + answer-qualification)
             crate: sparq-nlq
             features: citations
+            test: true
+          # [OPUS-4.8] sq-2489d.4 (GenAI-KB Phase 4): the structure-aware-vectorisation `kge`
+          # measurement foundation + the NEW provenance-weighting surface. `kge` IMPLIES `structure`,
+          # so this single leg compiles + clippies + tests BOTH the `kge`-gated suites AND the
+          # `structure`-gated ones — the gap this leg closes: NO prior leg exercised `structure`/`kge`
+          # at all, so the whole structure-aware estate (closure-before-vectorise, NegativeSampler,
+          # typed encoders, taxonomy, grounding, the DistMult/ComplEx trainer + eval harness) plus the
+          # net-new provenance-weighting reader/ablation went UNGATED in CI (the default workspace
+          # archive in ci.yml carries only approx-ann/filtered-ann/vec-predicate, per its GUARD). The
+          # net-new tests are `tests/kge.rs` (`#![cfg(feature = "kge")]` — incl. the 3 Phase-4
+          # weight-ablation tests: the exact-zero no-op on a provenance-free graph, the end-to-end
+          # ablation run, and "the weight reaches the SGD step") and `src/provenance.rs`'s 6 unit tests
+          # (`#[cfg(feature = "structure")]`). No new dep: `kge` is hand-rolled CPU-only SGD over
+          # sparq-reason/sparq-introspect (already in the `structure` graph). Verified locally: `cargo
+          # nextest list -p sparq-vectors --features kge` shows the kge + provenance tests; `clippy
+          # --all-targets -D warnings` is clean with the feature ON. Heavier than a typical leg (it
+          # trains small models), but bounded to the work-box-sized synthetic slices the tests use.
+          - name: sparq-vectors (kge — structure-aware + Phase-4 provenance-weighting)
+            crate: sparq-vectors
+            features: kge
             test: true
           # [OPUS-4.8] sq-uor3g (epic sq-0dksu, Phase 4): the sparq security-property
           # ODRL PROFILE in sparq-policy — the `secx:requires…` leftOperands made

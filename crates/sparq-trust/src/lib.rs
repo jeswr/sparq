@@ -135,6 +135,15 @@ pub mod delegation_prov;
 #[cfg_attr(docsrs, doc(cfg(feature = "did")))]
 pub mod did;
 pub mod policy;
+/// The N3 proof-admissibility ruleset over `sparq-reason` — the §4.3 ODRL →
+/// admissible-proof-set reduction (`strongerThan`-closure / `atLeast` /
+/// `overDimension` / `satisfies`) run as a runnable Notation3 ruleset, with the
+/// Rust default-deny universal (`sq-ufsi9`, Phase 2). Behind the default-OFF
+/// `secprop-admissibility` feature (which enables `secprop-vocab`): nothing in
+/// the lean default build depends on it.
+#[cfg(feature = "secprop-admissibility")]
+#[cfg_attr(docsrs, doc(cfg(feature = "secprop-admissibility")))]
+pub mod admissibility;
 #[cfg(feature = "secprop-vocab")]
 #[cfg_attr(docsrs, doc(cfg(feature = "secprop-vocab")))]
 pub mod secprop;
@@ -148,6 +157,8 @@ pub mod store;
 pub mod vocab;
 pub mod wire;
 
+#[cfg(feature = "secprop-admissibility")]
+pub use admissibility::{admissible, ruleset, Admissibility};
 pub use admit::{
     admit, admit_static, AdmittedFact, PresentedCredential, Session, StaticAdmittedFact,
 };
