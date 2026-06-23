@@ -1,0 +1,24 @@
+# Feature-matrix fragment for `sparq-mcp`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-0z43i (gh #909): the `stdio` transport is the only feature-gated
+# surface — it adds the line-delimited JSON-RPC serve loop. This leg builds + tests
+# the feature-ON state, including tests/stdio.rs (`#![cfg(feature = "stdio")]`: the
+# real serve-loop round-trip), with `clippy --all-targets -D warnings`. The DEFAULT
+# (feature-OFF) build — the transport-agnostic `handle_message` dispatch core and the
+# in-memory MCP round-trip — is covered by the workspace lane.
+- name: "sparq-mcp (stdio — JSON-RPC stdio transport serve loop)"
+  crate: "sparq-mcp"
+  features: "stdio"
+  test: true

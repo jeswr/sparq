@@ -3773,6 +3773,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-mcp"
+version = "0.1.0"
+dependencies = [
+ "oxttl 0.2.3",
+ "serde",
+ "serde_json",
+ "sparq-core",
+ "sparq-engine",
+ "sparq-introspect",
+]
+
+[[package]]
 name = "sparq-mpc"
 version = "0.1.0"
 dependencies = [
