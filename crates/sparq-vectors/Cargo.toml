@@ -239,6 +239,17 @@ required-features = ["structure"]
 name = "compose_ab"
 required-features = ["compose"]
 
+# [OPUS-4.8] sq-3pb7f (epic sq-mztg8): the K4 question-battery generator uses the same
+# `compose`-gated `compose` module (it renders answer-row bindings under both views), so it needs
+# the `compose` feature. Registering the requirement keeps `cargo build --all-targets` (and the
+# feature legs that do NOT enable `compose` — vec-predicate/provider, filtered-ann, kge) green when
+# the feature is out of the build (the body would otherwise fail to resolve `sparq_vectors::compose`,
+# E0432). It is a model-free question-battery emitter over the real PKG — no library code, no new
+# dependency; the real-model accuracy A/B that consumes it lives in bench/compose/k4/.
+[[example]]
+name = "compose_k4"
+required-features = ["compose"]
+
 # [OPUS-4.8] sq-hkud (epic sq-toze, gap MS-G4) — register the `kani` cfg so the
 # `#[cfg(kani)]` bounded-proof harness in `store.rs` does not trip `-D warnings`
 # (unexpected_cfgs) on the NORMAL build. `cargo kani` sets this cfg itself when it
