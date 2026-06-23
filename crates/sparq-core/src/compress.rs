@@ -604,6 +604,57 @@ mod tests {
         }
     }
 
+    /// [OPUS-4.8] sq-bif — `count_range` is the planner's cheap cardinality estimate and must
+    /// return EXACTLY `range(lo, hi).len()` without materialising the range. It only decodes
+    /// the two boundary blocks and adds `BLOCK` for each full interior block
+    /// (`first_count + (last - first - 1) * BLOCK + last_count`), so an off-by-one in that
+    /// arithmetic — or a wrong interior-block count — yields a count that disagrees with the
+    /// materialised range. This was previously only reached transitively through the planner;
+    /// here we pin the invariant directly, across single-block, two-block and many-interior-
+    /// block ranges, the empty / inverted range, and the exact boundary keys.
+    #[test]
+    fn count_range_equals_materialised_range_len() {
+        let rows = sample(5000);
+        let c = CompressedPerm::encode(&rows);
+        assert!(rows.len() > 3 * BLOCK, "need several blocks to exercise the interior arithmetic");
+
+        // Reference count: the length of the materialised range (itself proven correct above).
+        let want = |lo: [Id; 3], hi: [Id; 3]| -> usize { c.range(lo, hi).len() };
+
+        let cases: &[([Id; 3], [Id; 3])] = &[
+            // Whole permutation: spans every block (first + many interior + last).
+            ([Id::MIN; 3], [Id::MAX; 3]),
+            // A bound-subject prefix and a bound subject+predicate prefix.
+            ([100, Id::MIN, Id::MIN], [100, Id::MAX, Id::MAX]),
+            ([200, 5, Id::MIN], [200, 5, Id::MAX]),
+            // A subject that does not exist → empty count.
+            ([99999999, Id::MIN, Id::MIN], [99999999, Id::MAX, Id::MAX]),
+            // Exact single-row ranges at the start, middle, and end.
+            (rows[0], rows[0]),
+            (rows[rows.len() / 2], rows[rows.len() / 2]),
+            (rows[rows.len() - 1], rows[rows.len() - 1]),
+            // A wide interior span that crosses many full blocks (lo/hi land partway into
+            // their boundary blocks, so first_count and last_count are both partial).
+            (rows[BLOCK / 3], rows[rows.len() - BLOCK / 3]),
+            // Two adjacent rows that straddle a block boundary.
+            (rows[BLOCK - 1], rows[BLOCK]),
+        ];
+        for &(lo, hi) in cases {
+            assert_eq!(c.count_range(lo, hi), want(lo, hi), "count_range != range().len() for {lo:?}..={hi:?}");
+        }
+
+        // An inverted range (lo > hi) and an empty permutation both count 0.
+        assert_eq!(c.count_range([10, 0, 0], [1, 0, 0]), 0, "inverted range counts 0");
+        let empty = CompressedPerm::encode(&[]);
+        assert_eq!(empty.count_range([Id::MIN; 3], [Id::MAX; 3]), 0, "empty perm counts 0");
+
+        // Every single-row range over the whole permutation counts exactly 1 (each row is
+        // present once), which independently pins the boundary-block partition_point logic.
+        for &r in &rows {
+            assert_eq!(c.count_range(r, r), 1, "each present row counts exactly once: {r:?}");
+        }
+    }
+
     /// [OPUS-4.8] sq-vkz7 — for a NON-EMPTY perm the STREAMING [`CompressedPermWriter`] must
     /// produce a file BYTE-IDENTICAL to the in-RAM `encode(rows).write_to(..)`. Covers block
     /// boundaries (127/128/129), a partial last block, and a large run. The EMPTY case must

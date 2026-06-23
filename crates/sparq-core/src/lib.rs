@@ -8467,6 +8467,104 @@ mod tests {
         assert_eq!(scan.rows.len(), 2);
     }
 
+    /// [OPUS-4.8] sq-bif — `is_integer_datatype` decides whether a datatype's values are
+    /// exact integers (an `xsd:integer` subtype), which gates the exact-lexical disambiguation
+    /// path. It must accept `xsd:integer` and every derived integer subtype, but REJECT the
+    /// other numeric datatypes (`decimal` is exact but not an integer; `double`/`float` ARE
+    /// their f64) and every non-numeric datatype. Previously it had no direct test, so a typo
+    /// dropping a subtype — or accidentally admitting `decimal` — would go unnoticed.
+    #[test]
+    fn is_integer_datatype_accepts_integer_subtypes_only() {
+        // Every integer family member is accepted.
+        for dt in [
+            xsd::INTEGER,
+            xsd::LONG,
+            xsd::INT,
+            xsd::SHORT,
+            xsd::BYTE,
+            xsd::NON_NEGATIVE_INTEGER,
+            xsd::POSITIVE_INTEGER,
+            xsd::NON_POSITIVE_INTEGER,
+            xsd::NEGATIVE_INTEGER,
+            xsd::UNSIGNED_INT,
+            xsd::UNSIGNED_LONG,
+            xsd::UNSIGNED_SHORT,
+            xsd::UNSIGNED_BYTE,
+        ] {
+            assert!(is_integer_datatype(dt.as_str()), "{} must be an integer datatype", dt.as_str());
+        }
+        // Numeric-but-not-integer and non-numeric datatypes are rejected.
+        for dt in [xsd::DECIMAL, xsd::DOUBLE, xsd::FLOAT, xsd::STRING, xsd::BOOLEAN, xsd::DATE_TIME] {
+            assert!(!is_integer_datatype(dt.as_str()), "{} must NOT be an integer datatype", dt.as_str());
+        }
+        assert!(!is_integer_datatype("http://ex/custom"), "an unknown IRI is not an integer datatype");
+        assert!(!is_integer_datatype(""), "the empty datatype is not an integer datatype");
+    }
+
+    /// [OPUS-4.8] sq-bif — `exact_numeric_lexical` is the disambiguator the engine reaches for
+    /// only when two operands' f64 values compare EQUAL: it returns the EXACT lexical of an
+    /// integer-subtype or `xsd:decimal` literal (so `9007199254740993` ≠ `9007199254740992`
+    /// survives the f64 collapse at 2^53) and `None` for everything whose value already IS its
+    /// f64 (float/double) or is non-numeric. It had no test. We pin: the inline-integer path,
+    /// the dictionary integer path (including a value beyond f64's exact range), the decimal
+    /// path, and every `None` case.
+    #[test]
+    fn exact_numeric_lexical_returns_exact_form_or_none() {
+        // A big integer past 2^53 (where f64 cannot represent consecutive integers) and its
+        // neighbour: both are dictionary terms (out of the inline range), and their EXACT
+        // lexicals must survive even though their f64s are equal.
+        let big = "9007199254740993"; // 2^53 + 1
+        let big_neighbour = "9007199254740992"; // 2^53 — same f64 as `big`
+        let nt = format!(
+            "<http://ex/s> <http://ex/i> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
+             <http://ex/s> <http://ex/big> \"{big}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
+             <http://ex/s> <http://ex/big2> \"{big_neighbour}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
+             <http://ex/s> <http://ex/long> \"-5\"^^<http://www.w3.org/2001/XMLSchema#long> .\n\
+             <http://ex/s> <http://ex/dec> \"1.50\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n\
+             <http://ex/s> <http://ex/dbl> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#double> .\n\
+             <http://ex/s> <http://ex/flt> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#float> .\n\
+             <http://ex/s> <http://ex/str> \"hello\" .\n\
+             <http://ex/s> <http://ex/lang> \"bonjour\"@fr .\n"
+        );
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+
+        let lexical = |value: &str, dt: oxrdf::NamedNodeRef| -> Option<String> {
+            let lit = Term::Literal(Literal::new_typed_literal(value, dt));
+            g.exact_numeric_lexical(g.id_of(&lit).unwrap_or_else(|| panic!("{value} not interned")))
+        };
+
+        // Inline integer (small, in range): the inline id formats its value directly.
+        let small_id = g.id_of(&Term::Literal(Literal::new_typed_literal("42", xsd::INTEGER))).unwrap();
+        assert!(dict::is_inline(small_id), "42 is an inline integer");
+        assert_eq!(g.exact_numeric_lexical(small_id).as_deref(), Some("42"));
+
+        // Big dictionary integers: the EXACT lexical is preserved, disambiguating the f64 tie.
+        assert_eq!(lexical(big, xsd::INTEGER).as_deref(), Some(big));
+        assert_eq!(lexical(big_neighbour, xsd::INTEGER).as_deref(), Some(big_neighbour));
+        // The two lexicals differ even though they are the same f64 (the whole point).
+        assert_eq!(g.numeric_value(g.id_of(&Term::Literal(Literal::new_typed_literal(big, xsd::INTEGER))).unwrap()),
+                   g.numeric_value(g.id_of(&Term::Literal(Literal::new_typed_literal(big_neighbour, xsd::INTEGER))).unwrap()),
+                   "the two big integers collapse to the same f64");
+        assert_ne!(lexical(big, xsd::INTEGER), lexical(big_neighbour, xsd::INTEGER));
+
+        // An integer SUBTYPE (long) is also exact.
+        assert_eq!(lexical("-5", xsd::LONG).as_deref(), Some("-5"));
+        // `xsd:decimal` is exact (the trailing zero of "1.50" is preserved verbatim).
+        assert_eq!(lexical("1.50", xsd::DECIMAL).as_deref(), Some("1.50"));
+
+        // None: double / float values ARE their f64 (no exact-lexical disambiguation needed).
+        assert_eq!(lexical("1.5", xsd::DOUBLE), None);
+        assert_eq!(lexical("1.5", xsd::FLOAT), None);
+        // None: a plain string and a language-tagged literal are not numeric.
+        assert_eq!(g.exact_numeric_lexical(g.id_of(&Term::Literal(Literal::new_simple_literal("hello"))).unwrap()), None);
+        assert_eq!(
+            g.exact_numeric_lexical(g.id_of(&Term::Literal(Literal::new_language_tagged_literal_unchecked("bonjour", "fr"))).unwrap()),
+            None
+        );
+        // None: an IRI is not numeric.
+        assert_eq!(g.exact_numeric_lexical(g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/s"))).unwrap()), None);
+    }
+
     /// The full sorted term-triple set of a graph (overlay merged), for state comparison.
     fn dump_terms(g: &Graph) -> Vec<(String, String, String)> {
         let scan = g.store.scan(&[None, None, None]);
