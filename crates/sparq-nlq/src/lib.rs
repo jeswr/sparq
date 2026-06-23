@@ -18,6 +18,13 @@ pub use sparq_engine::{QueryBudget, QueryResult};
 #[cfg(feature = "live")]
 pub mod live;
 
+// [OPUS-4.8] sq-2m6zm.6 (PKG NL-tool PRODUCT flavor): the configurable, provider-agnostic
+// OpenAI-compatible endpoint client behind the opt-in `nlq-endpoint` feature. Off by
+// default so the lean loop carries no HTTP client; the productized counterpart of the
+// agent-flavor win (sq-zbyo7) for external users who bring their own cheap-model endpoint.
+#[cfg(feature = "nlq-endpoint")]
+pub mod endpoint;
+
 pub mod constrain;
 pub mod eval;
 pub mod link;

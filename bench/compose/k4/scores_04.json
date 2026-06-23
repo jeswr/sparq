@@ -1,0 +1,16 @@
+[
+  {"file": "j056.txt", "score": 1.0, "why": "verbatim match of the git-add/.beads rule"},
+  {"file": "j057.txt", "score": 1.0, "why": "correctly summarises /surface/cli + /surface/python tier-e walkthrough task"},
+  {"file": "j058.txt", "score": 1.0, "why": "exact topic: Sub-agent standing rules"},
+  {"file": "j059.txt", "score": 0.0, "why": "evasive 'cannot determine'; failed to give the Solid-showcase task subject"},
+  {"file": "j060.txt", "score": 1.0, "why": "names the SPARQL query surface correctly"},
+  {"file": "j061.txt", "score": 1.0, "why": "matches named-graph scoping task across introspect/sim/vectors"},
+  {"file": "j062.txt", "score": 1.0, "why": "matches HDT PFC block-sequential decode + borrowed-slice interning"},
+  {"file": "j063.txt", "score": 1.0, "why": "exact topic: Sub-agent standing rules"},
+  {"file": "j064.txt", "score": 1.0, "why": "exact topic: ZK/MPC claim + circuit discipline"},
+  {"file": "j065.txt", "score": 0.5, "why": "identifies the right finding via slug but does not give the required verbatim text"},
+  {"file": "j066.txt", "score": 1.0, "why": "verbatim match of stacked-PR auto-merge rule"},
+  {"file": "j067.txt", "score": 1.0, "why": "matches Solid-showcase own-queries site task incl gh-549/#757"},
+  {"file": "j068.txt", "score": 1.0, "why": "exact topic: Sub-agent standing rules"},
+  {"file": "j069.txt", "score": 1.0, "why": "names Merge discipline correctly"}
+]

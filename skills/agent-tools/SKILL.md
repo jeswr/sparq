@@ -1,0 +1,87 @@
+---
+name: agent-tools
+description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, read stats, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
+---
+
+# sparq agent-tools (MCP)
+
+The **MCP front door** of the sparq RDF + SPARQL engine: the opt-in **`sparq-mcp`**
+crate turns a loaded `sparq_core::Graph` into a **Model Context Protocol** server so an
+LLM/agent can use the dataset as first-class tools.
+
+It is **opt-in** (a separate crate; nothing in the workspace depends on it, the default
+engine build does not compile it) and a **thin wrapper** over existing surfaces — it adds
+no engine capability. JSON-RPC 2.0 framing is hand-rolled over `serde_json`; there is no
+heavy MCP-SDK dependency.
+
+## Tools
+
+| tool | wraps | returns |
+| --- | --- | --- |
+| `query` | `sparq_engine::query_json` (SELECT/ASK) | SPARQL 1.1 Query Results JSON |
+| `construct` | `sparq_engine::construct_ntriples` (CONSTRUCT/DESCRIBE) | N-Triples text |
+| `introspect` | `sparq_introspect::Introspection` | effective schema — JSON or token-budgeted text |
+| `stats` | graph count + introspection totals | small JSON object |
+| `update` *(gated, OFF by default)* | `sparq_engine::update_in_place_atomic` | new triple count |
+
+Every tool ships a proper MCP `inputSchema` (JSON-Schema). `tools/list` returns
+`name` / `description` / `inputSchema` per tool. A `tools/call` result is the MCP
+`CallToolResult` shape (`content` text item + `isError`); a bad SPARQL string is an MCP
+**tool error** (`isError: true`), not a JSON-RPC protocol error, so the agent can read it
+and retry.
+
+## Use it
+
+```rust,no_run
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use sparq_core::Graph;
+use sparq_mcp::{McpServer, ServerConfig};
+
+let graph = Graph::load_str("<a> <b> <c> .", "ntriples")?;
+
+// Embed: feed one JSON-RPC line, get one line back (no transport needed).
+let mut server = McpServer::new(graph); // read-only by default
+let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+let _reply = server.handle_message(init).unwrap();
+
+// Allow writes EXPLICITLY:
+let cfg = ServerConfig { allow_update: true, ..ServerConfig::default() };
+# let _ = cfg;
+# Ok(()) }
+```
+
+The standard MCP stdio transport is behind the **`stdio`** feature:
+`sparq_mcp::serve_stdio(&mut server)` runs the line-delimited JSON-RPC loop over this
+process's stdin/stdout. For an arbitrary reader/writer pair use `sparq_mcp::serve`.
+
+## Trust model (read this — no overclaim)
+
+This is a **local agent-tool server, not a hardened multi-tenant endpoint**. There is
+**no built-in authentication or authorization**: the MCP transport is the trust boundary
+you, the operator, establish, and whoever can speak to the server has exactly the access it
+was configured with.
+
+- **Read-only by default** — a default `McpServer` advertises and accepts only
+  `query` / `construct` / `introspect` / `stats`; it cannot mutate the dataset.
+- **`update` is a mutation surface**, exposed **only** when `ServerConfig::allow_update`
+  is set (or a binary's `--allow-update` flag). It is the single write switch; there is no
+  finer per-tool ACL.
+- **Queries are bounded** by a `QueryBudget` (deadline + row cap; default 30 s / 1M rows)
+  so one `tools/call` cannot run the server unbounded — a blunt anti-DoS ceiling, not a
+  fairness quota.
+
+## Status / scope
+
+Opt-in crate at workspace v0.1.0; verified against branch `main` (2026-06-23 [OPUS-4.8]).
+Tested by a real in-memory MCP round-trip (default features) **and** a real stdio
+serve-loop round-trip (feature `stdio`). Only the **stdio** transport plus the embeddable
+`handle_message` ship today; SSE/HTTP transports are **not implemented** (follow-up beads).
+The read-only default is proven fail-closed (a disabled `update` returns `-32601` and does
+not mutate the graph).
+
+## Learn more
+
+- **Crate** — [`sparq-mcp`](../../crates/sparq-mcp) (README + rustdoc).
+- **MCP spec** — <https://modelcontextprotocol.io>.
+- **NL→SPARQL & schema grounding** — [`genai-retrieval`](../genai-retrieval/SKILL.md).
+- **Underlying query API** — [`sparql-query`](../sparql-query/SKILL.md).

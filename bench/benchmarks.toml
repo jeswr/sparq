@@ -656,6 +656,29 @@ records_to  = "bench/terse/RESULTS.md (PR #1174)"
 featured    = false
 status      = "ok"
 
+# [OPUS-4.8] sq-v78l4 (gh-910): the opt-in sparq-arrow Apache Arrow columnar export.
+# Registry STUB (status = "planned"): this PR ships the QueryResult -> RecordBatch
+# export and its correctness suite (tests/record_batch.rs), not a throughput harness.
+# A real export-rate micro-bench (rows/s into a RecordBatch over a synthetic result of
+# N solutions, the term-decomposition cost) is a deliberate follow-up; registered now so
+# the new crate is catalogued (gate G1/G3) the moment it lands. No perf number is claimed.
+[[benchmark]]
+id          = "sparq-arrow"
+name        = "Apache Arrow columnar export (QueryResult -> RecordBatch) — registry stub"
+category    = "query"
+measures    = "PLANNED: RecordBatch export rate (solution rows/s) + the per-term struct-decomposition cost over a synthetic N-solution result. This PR ships the export + its correctness suite only; the throughput micro-bench is a follow-up"
+invoke      = "cargo test -p sparq-arrow --features arrow   # correctness suite today; export-rate micro-bench TBD"
+source      = "crates/sparq-arrow/src/export.rs, crates/sparq-arrow/tests/record_batch.rs"
+dataset     = "PLANNED: synthetic SELECT result of N solutions (mixed IRIs / typed + lang-tagged literals / unbound cells), generated in-process"
+quiet_box_sensitive = true
+pinning     = "PLANNED: seeded synthetic result generator + fixed N"
+records_to  = "PLANNED: stdout; sparq-arrow crate README (no committed perf number)"
+# featured = false: opt-in capability micro-bench (a registry stub today), not a
+# head-to-head dashboard competitor card — dashboard promotion is a DISPOSITION deferred
+# to a maintainer once the real micro-bench lands. No perf claim.
+featured    = false
+status      = "planning"
+
 # =============================================================================
 # ZK — commitment pipeline, trace seam, circuit gate counts, prove/verify
 # =============================================================================
@@ -956,6 +979,29 @@ status      = "ok"
 # FEATURED_SUITES competitor card. Promote-to-card (which makes a perf claim +
 # needs a canonical-host gather) is deferred to the maintainer. `featured = false`
 # is the documented escape hatch honored by gate G3 and the drift scanner (§5.D).
+featured    = false
+
+# [OPUS-4.8] sq-0z43i (gh #909) — sparq-mcp MCP dispatch-overhead micro-bench. The cost
+# the MCP layer ADDS around the engine (JSON-RPC parse + tool dispatch + result wrap),
+# isolated from engine compute by a tiny in-memory graph. Pure offline, no network, no
+# heavy dep. The committed STDOUT/JSON facts are the DETERMINISTIC structural counts
+# (graph triples, tools advertised); the per-call µs are advisory + box-sensitive +
+# NON-CANONICAL (this dev box) and are NOT baked into docs/gates.
+[[benchmark]]
+id          = "mcp-dispatch-overhead"
+name        = "sparq-mcp MCP round-trip dispatch overhead"
+category    = "query"
+measures    = "per-call µs for initialize/tools-list/query/stats round-trips (advisory, box-sensitive); deterministic structural counts"
+invoke      = "cargo run -p sparq-mcp --example mcp_roundtrip_bench --release"
+source      = "crates/sparq-mcp/examples/mcp_roundtrip_bench.rs"
+dataset     = "SYNTHETIC, generated in-process (a 5-triple in-memory graph) — no external dataset"
+quiet_box_sensitive = true
+pinning     = "none (in-process synthetic graph)"
+records_to  = "stdout (--json <path> for the deterministic structural counts)"
+status      = "ok"
+# [OPUS-4.8] sq-0z43i: trend-only DISPOSITION (featured = false). This is an internal
+# overhead micro-bench, not a head-to-head capability card; it makes no perf claim, so it
+# is intentionally UNFEATURED (the documented G3/drift-scan escape hatch).
 featured    = false
 
 # [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-nlq OFFLINE NL→SPARQL micro-bench.

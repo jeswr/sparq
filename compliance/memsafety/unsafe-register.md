@@ -46,7 +46,7 @@ register distinguishes two trust classes of `unsafe`:
 
 ## Register
 
-**59 `unsafe` sites** across 5 crates (the other 31 crates are `#![forbid(unsafe_code)]`).
+**63 `unsafe` sites** across 6 crates (the other 30 crates are `#![forbid(unsafe_code)]`).
 Counts and the file:line list are produced by `scripts/unsafe-gate.py --list` and
 must equal `bench/unsafe-snapshot.json`.
 
@@ -144,9 +144,33 @@ Recurring invariant shorthands used below:
 |---|---|---|---|
 | `src/main.rs:375` | `getrusage` FFI | `rusage` is a plain C struct (sound to zero-init); `getrusage(RUSAGE_SELF, &mut ru)` writes only into the valid out-param | return checked before any field read. Bench-only binary, not shipped. |
 
+### `sparq-py` — 4 sites (opt-in PyO3 binding; the Arrow C-Data-Interface stream-capsule bridge) [OPUS-4.8]
+
+(sq-lt1ml, gh-910.) The whole crate is `#![forbid(unsafe_code)]` **except**
+`src/arrow_export.rs`, which is `#![allow(unsafe_code)]` with module docs and a `// SAFETY:`
+comment on every site. The 4 sites are the single, canonical **Arrow C Data Interface**
+producer pattern — exporting one already-materialised `RecordBatch` as an
+`FFI_ArrowArrayStream` behind a `PyCapsule` named `arrow_array_stream` so `pyarrow.table(obj)`
+ingests it directly (no re-serialise). The pattern is line-for-line the upstream
+`pyo3::types::PyCapsule::new_with_pointer_and_destructor` **documented example** (pyo3 0.29:
+`Box::into_raw` → `NonNull` → `'static` CStr name → an `unsafe extern "C"` destructor that does
+`PyCapsule_GetPointer` + null-guard + `Box::from_raw`). Not a B5 (untrusted-input) surface: the
+pointer is produced *and* reclaimed by this process; nothing from disk or the consumer is
+dereferenced unchecked. The leak-free/double-free-free claim was verified against
+`arrow-array`'s `FFI_ArrowArrayStream::Drop`, which runs `self.release` only while it is `Some`
+and nulls it after — so whether or not pyarrow consumed (and thus released) the stream, our
+capsule destructor's drop is idempotent.
+
+| File:line | Kind | Invariant relied on | Why sound / how bounded |
+|---|---|---|---|
+| `src/arrow_export.rs:107` | `PyCapsule::new_with_pointer_and_destructor` (pyo3) | `ptr` is a freshly `Box::into_raw`'d, non-null, aligned `*mut FFI_ArrowArrayStream`; name is `'static`; destructor reclaims it | satisfies pyo3's documented `# Safety`: pointer valid for its use; data cleaned up by the destructor; destructor thread-safe (it only does `PyCapsule_GetPointer` + `Box::from_raw`). `NonNull::new(Box::into_raw(..)).expect(..)` guards null; called with the GIL held (`py: Python<'_>`). This is the only way to get the capsule's pointer to be the *value* pointer the C Data Interface mandates (`new_with_value` stores an internal box wrapper, not the value). |
+| `src/arrow_export.rs:119` | `unsafe extern "C" fn release_stream_capsule` | invoked only by CPython on the capsule it was registered on | the capsule's C destructor. Declared `unsafe extern "C"` per the `PyCapsule_Destructor` ABI; pyo3 aborts (does not unwind) if it panics. Its body's two inner sites (123, 125) are individually justified. Runs with the GIL held. |
+| `src/arrow_export.rs:123` | `ffi::PyCapsule_GetPointer` (CPython FFI) | `capsule` is the live capsule CPython passes; name matches the `'static` CStr it was created under | returns the leaked `*mut FFI_ArrowArrayStream` (or null on a name mismatch — guarded by the `!ptr.is_null()` check below). Raw CPython call, GIL held inside the destructor. |
+| `src/arrow_export.rs:125` | `Box::from_raw` (reclaim) | `ptr` is exactly the pointer leaked at :107 via `Box::into_raw`, of the same type, same allocator | reconstitutes and drops the `Box<FFI_ArrowArrayStream>` exactly once per capsule (null-guarded, so never on a name mismatch). `FFI_ArrowArrayStream::Drop` is idempotent on an already-released stream (`release` is set `None` after the first call), so no double free / no leak whether or not pyarrow consumed it. |
+
 ## NEEDS-REVIEW
 
-**None.** Every one of the 59 sites now carries a literal `// SAFETY:` comment
+**None.** Every one of the 63 sites now carries a literal `// SAFETY:` comment
 immediately preceding the `unsafe` block/impl, mechanically enforced by
 `clippy::undocumented_unsafe_blocks` (MS-G2 closed, sq-8wbn, [OPUS-4.8]). The 6 sites that
 previously relied on an adjacent block comment — the two `unsafe impl Send`/`Sync for

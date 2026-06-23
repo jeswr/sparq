@@ -718,6 +718,87 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// A longer shared-variable chain (0-1-2-3-4) must still collapse to ONE component with all
+    /// five patterns — the union-find path-compression over a transitive chain produces a single
+    /// connected component, exercising the multi-level `find` walk. A regression in the component
+    /// merge (e.g. losing transitivity) would split the chain. [OPUS-4.8] sq-bif.
+    #[test]
+    fn long_shared_variable_chain_is_one_component() {
+        // ?a p ?b . ?b p ?c . ?c p ?d . ?d p ?e . ?e p ?f  — a five-pattern chain, each joining
+        // the next on the shared variable.
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("a"), iri(SHARES_HOUSE), var("b")),
+            TriplePattern::new(var("b"), iri(NAME), var("c")),
+            TriplePattern::new(var("c"), iri(OWES), var("d")),
+            TriplePattern::new(var("d"), iri(MEMBER_OF), var("e")),
+            TriplePattern::new(var("e"), iri(SHARES_HOUSE), var("f")),
+        ]);
+        let sources = vec![source("http://a/", &[SHARES_HOUSE, NAME, OWES, MEMBER_OF])];
+        let sel = select_private_sources(&bgp, &sources, &[]).unwrap();
+        let out = prune_source_combinations(&bgp, &sources, &sel).unwrap();
+        assert!(out.bgp_satisfiable);
+        // Exactly one component covering the whole transitive chain, ascending.
+        assert_eq!(out.components.len(), 1);
+        assert_eq!(out.components[0].patterns, vec![0, 1, 2, 3, 4]);
+        assert!(out.components[0].satisfiable);
+    }
+
+    /// `BgpComponent::satisfiable` is per-component: in a disconnected BGP with one empty and one
+    /// non-empty component, the non-empty component reports `satisfiable == true` while the empty
+    /// one reports `false` — even though the WHOLE-BGP verdict is unsatisfiable. This pins the
+    /// distinction between the per-component flag and the global `bgp_satisfiable`. [OPUS-4.8]
+    /// sq-bif.
+    #[test]
+    fn per_component_satisfiability_is_independent_of_the_global_verdict() {
+        // Comp A: 0-1 chained on ?p, both non-empty (satisfiable). Comp B: 2 alone, empty.
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("p"), iri(SHARES_HOUSE), var("h")), // 0 comp A
+            TriplePattern::new(var("p"), iri(NAME), var("n")),         // 1 comp A
+            TriplePattern::new(var("z"), iri(ABSENT), var("w")),       // 2 comp B (empty)
+        ]);
+        let sources = vec![source("http://a/", &[SHARES_HOUSE, NAME])];
+        let sel = select_private_sources(&bgp, &sources, &[]).unwrap();
+        let out = prune_source_combinations(&bgp, &sources, &sel).unwrap();
+
+        // Global verdict: unsatisfiable (an empty conjunct kills the whole BGP).
+        assert!(!out.bgp_satisfiable);
+        assert_eq!(out.empty_patterns, vec![2]);
+
+        // But the per-component flag distinguishes the live component from the dead one.
+        assert_eq!(out.components.len(), 2);
+        let comp_a = out
+            .components
+            .iter()
+            .find(|c| c.patterns == vec![0, 1])
+            .expect("the {0,1} component exists");
+        assert!(
+            comp_a.satisfiable,
+            "the non-empty component is itself satisfiable"
+        );
+        let comp_b = out
+            .components
+            .iter()
+            .find(|c| c.patterns == vec![2])
+            .expect("the {2} component exists");
+        assert!(!comp_b.satisfiable, "the empty component is unsatisfiable");
+    }
+
+    /// `CombinationPruneReason::label` names the witnessing pattern explicitly (a regression that
+    /// blanked it or dropped the witness index would lose the audit-trail diagnostic). [OPUS-4.8]
+    /// sq-bif.
+    #[test]
+    fn combination_prune_reason_label_names_the_witness_pattern() {
+        let label = CombinationPruneReason::UnsatisfiableBgp { witness: 7 }.label();
+        assert!(
+            label.contains("unsatisfiable"),
+            "label names the cause: {label}"
+        );
+        assert!(
+            label.contains("pattern 7"),
+            "label names the witness pattern: {label}"
+        );
+    }
+
     /// A selection whose pattern count does not match the BGP is a fail-closed
     /// DescriptorMismatch (phase SourceCombination) — never guess the alignment.
     #[test]

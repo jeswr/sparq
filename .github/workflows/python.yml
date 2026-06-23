@@ -49,4 +49,37 @@ jobs:
         # micro-bench): it's quiet-box-sensitive + advisory, so it must not gate on a noisy
         # GitHub runner. The python-release profile above is the unwinding build the
         # panic-surface test needs. (sq-f9tu / sq-th1u)
+        # NOTE: this lean wheel is built WITHOUT `--features arrow` and WITHOUT pyarrow, so
+        # test_arrow.py auto-skips here; the dedicated `arrow` job below exercises that path.
         run: pytest crates/sparq-py/tests -q -m "not bench"
+
+  arrow:
+    # [OPUS-4.8] sq-lt1ml (gh-910): the opt-in Arrow export lane. Builds the wheel WITH
+    # `--features arrow` (the `Graph.query_arrow -> pyarrow.Table` surface), installs
+    # pyarrow (the consumer side of the Arrow C Data Interface), and runs the arrow-only
+    # pytest. Kept a SEPARATE job so the lean (no-arrow) job above stays pyarrow-free and
+    # the default wheel's test run is unaffected.
+    name: maturin build (arrow) + pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install maturin + pytest
+        run: pip install --require-hashes -r .github/requirements/python-build.txt
+      - name: Install pyarrow (Arrow C Data Interface consumer)
+        # HASH-pinned (Scorecard PinnedDependenciesID), same discipline as python-build.txt.
+        run: pip install --require-hashes -r .github/requirements/python-arrow.txt
+      - name: Build wheel with the arrow feature (python-release profile — unwinding panics)
+        run: maturin build --manifest-path crates/sparq-py/Cargo.toml --features arrow --profile python-release --out dist
+      - name: Install wheel
+        run: pip install dist/*.whl
+      - name: Run Arrow-export tests
+        # test_arrow.py is the REAL round-trip: SELECT -> Graph.query_arrow -> pyarrow.Table,
+        # asserting the term-struct columns, unbound -> null struct slot, and query_json parity.
+        run: pytest crates/sparq-py/tests/test_arrow.py -q

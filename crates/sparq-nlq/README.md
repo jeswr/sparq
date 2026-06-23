@@ -34,9 +34,10 @@ println!("{}\n{} rows, {} repair(s)", answer.sparql, answer.result.len(), answer
 # Ok(()) }
 ```
 
-The live path is opt-in (network): `cargo add sparq-nlq --features live`, set
-`ANTHROPIC_API_KEY`, and wrap `live::AnthropicLlm::from_env()?` in a `RecordingLlm` to
-record a replayable fixture as you go.
+Two opt-in network backends (both off by default): `--features live` wraps
+`live::AnthropicLlm::from_env()?` (set `ANTHROPIC_API_KEY`) in a `RecordingLlm` to
+capture replayable fixtures; `--features nlq-endpoint` points `endpoint::EndpointLlm` at
+**your own** OpenAI-compatible base URL (see the feature below).
 
 ## ✨ Features
 
@@ -69,18 +70,23 @@ record a replayable fixture as you go.
   `dcterms:source` anchor + `pkg:confidence` / `pkg:assurance`, rendering numbered
   footnotes. Citations are **emitted from provenance, never generated**, so each resolves
   to a real in-graph source (resolution rate 1.0, zero fabricated refs); a binding with no
-  provenance is reported as **"no source recorded"**, never guessed.
-  <!-- [OPUS-4.8] sq-2489d.1 -->
+  provenance is **"no source recorded"**, never guessed. <!-- [OPUS-4.8] sq-2489d.1 -->
 - **Answer-qualification — hedge + abstention** ([`qualify`](src/qualify.rs), opt-in via
   `--features citations` + `NlqConfig::qualify`, default **off**) — `Nlq::ask_qualified`
   folds the answer's supporting `pkg:assurance`/`pkg:confidence` (the same Phase-1 join)
   **weakest-link** into a verb hedge + verbal band, and below a `min_confidence` floor
   **abstains** ("insufficient confidence to answer"). The band *reflects asserted
-  assurance* — **not** a calibrated confidence (no reliability measurement exists yet).
-  <!-- [OPUS-4.8] sq-2489d.2 -->
+  assurance* — **not** calibrated confidence. <!-- [OPUS-4.8] sq-2489d.2 -->
 - **`Llm` trait — record/replay, offline CI** — `ReplayLlm` serves recorded pairs (the
   CI path); `RecordingLlm<L>` wraps any backend and `save()`s a fixture; `AnthropicLlm`
   is a thin blocking Messages-API client behind the non-default `live` feature.
+- **Configurable endpoint client** ([`endpoint`](src/endpoint.rs), opt-in via
+  `--features nlq-endpoint`, default **off**) — `EndpointLlm`, a **provider-agnostic**
+  OpenAI-compatible chat-completions client whose base URL, model, and (optional) key are
+  **entirely user-supplied** (args or `SPARQ_NLQ_ENDPOINT_*` env), so an external user
+  runs the round-trip against their **own** cheap-model endpoint (Ollama, vLLM, OpenAI…).
+  Nothing is baked in, it never phones home, and **quality depends on the user-chosen
+  model**. Stub-tested offline; no accuracy claim. <!-- [OPUS-4.8] sq-2m6zm.6 -->
 - **Exec-accuracy harness** ([`eval`](src/eval.rs)) — grades executed SPARQL the QALD
   way (**answer-set F1**, not query-string equality) against a live-recomputed gold
   query, reporting linking (oracle vs end-to-end) and grounding (grounded vs ungrounded)
@@ -89,25 +95,22 @@ record a replayable fixture as you go.
 ## Honest status — what is and is not measured
 
 - **Validated offline (the CI gate)**: the engine-side loop and the exec-accuracy
-  harness itself, end-to-end on real data with scripted/recorded backends. The
-  record→`save`→`from_file`→identical-scores round-trip is CI-gated, so a committed live
-  session is guaranteed replayable.
-- **NOT yet measured against a real model**: live-model exec-accuracy *numbers*, and
-  whether linking lifts them. The offline scores demonstrate the *harness* and the
-  *mechanism*, **not** a real model's accuracy; the live path (`#[cfg(feature = "live")]`
-  **and** `#[ignore]`'d) needs a key, the olympics dump, and a **canonical** measurement
-  host — open work in bead `sq-g0lw`. `AnthropicLlm` is compile-checked in CI but never
-  called; no test touches the network. <!-- [OPUS-4.8] sq-05rv sq-g0lw -->
-- **Partial scope**: grammar-constrained decoding stays unimplemented and unclaimed
-  (see the dictionary-grounded-repair feature above, bead `sq-9yjp`).
+  harness, end-to-end on real data with scripted/recorded backends; the
+  record→`save`→`from_file`→identical-scores round-trip is CI-gated.
+- **NOT yet measured against a real model**: live-model exec-accuracy *numbers*. The
+  offline scores demonstrate the *harness* + *mechanism*, **not** a real model's accuracy;
+  the live/endpoint paths need a key + a **canonical** host (bead `sq-g0lw`).
+  `AnthropicLlm`/`EndpointLlm` are stub-tested in CI, never call a live network.
+  Grammar-constrained decoding stays unimplemented and unclaimed (bead `sq-9yjp`).
+  <!-- [OPUS-4.8] sq-05rv sq-g0lw sq-9yjp -->
 
 ## 📚 Learn more
 
-- **How-to** — [`skills/genai-retrieval/SKILL.md`](../../skills/genai-retrieval/SKILL.md).
-- **API reference** — [docs.rs/sparq-nlq](https://docs.rs/sparq-nlq).
+- **How-to** — [`skills/genai-retrieval/SKILL.md`](../../skills/genai-retrieval/SKILL.md);
+  **API reference** — [docs.rs/sparq-nlq](https://docs.rs/sparq-nlq).
 - **Design** — [`research/genai-nl-to-sparql.md`](../../research/genai-nl-to-sparql.md)
-  (§4.3) and [`research/genai-design.md`](../../research/genai-design.md) (§4).
-- **Schema grounding** — [`sparq-introspect`](../sparq-introspect).
+  (§4.3), [`research/genai-design.md`](../../research/genai-design.md) (§4), and schema
+  grounding in [`sparq-introspect`](../sparq-introspect).
 - **Performance** — the eval harnesses run network-free in CI; tracked figures live on
   the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench), not in docs.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md).

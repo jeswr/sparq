@@ -34,6 +34,15 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # [OPUS-4.8] sq-shacl-flake: harden EVERY job against transient crates.io
+  # registry download hiccups. A `curl failed` mid-download of a single crate
+  # (observed: `download of al/lo/allocator-api2 failed`) aborts the build and,
+  # in the SHACL conformance job, then mis-reported as a phantom "conformance
+  # regressed below the ratchet" that jammed the merge queue. Raising cargo's
+  # network retry well above the default (3) lets these transients self-heal at
+  # the cargo layer before they ever sink a job. A genuine fetch failure (crate
+  # truly absent) still exhausts the retries and fails honestly.
+  CARGO_NET_RETRY: "10"
 
 jobs:
   # [OPUS-4.8] merge-throughput: path-filtered gate. Compute whether THIS change
@@ -760,7 +769,36 @@ jobs:
         # (sparq-conformance + sparq-inference-conformance + the consolidated
         # sparq-conformance-scoreboard), so a bare `cargo run -p sparq-conformance`
         # is ambiguous and exits 101.
-        run: cargo run --release -p sparq-conformance --bin sparq-conformance
+        # [OPUS-4.8] sq-shacl-flake (generalized from #1236): STEP-LEVEL transient
+        # self-heal. This `cargo run` WRITES conformance-report.md as a side effect;
+        # a transient crates.io download hiccup (`curl failed` mid-fetch) aborts the
+        # build BEFORE the report is written, leaving it missing/empty. The separate
+        # "Enforce ratchet" step then greps an absent report → PASS='' → TOTAL=0 and
+        # mis-reports a phantom "conformance regressed below the ratchet (0 < 1229)"
+        # that jammed the merge queue (this exact mode hit #1242). Re-running lets such
+        # a transient self-heal. A GENUINE regression still produces a real report and
+        # trips the floor honestly in the enforce step — the ratchet is never weakened.
+        # Not piped, so the run's own exit code ($?) is authoritative (no PIPESTATUS).
+        run: |
+          set -uo pipefail
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::W3C SPARQL conformance — attempt $attempt/$MAX_ATTEMPTS"
+            rc=0
+            cargo run --release -p sparq-conformance --bin sparq-conformance || rc=$?
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "W3C SPARQL conformance suites completed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::W3C SPARQL conformance run failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient. A real regression produces a report and trips the ratchet floor below; a 'curl failed'/download error is an infra flake, not a conformance change."
+              exit "$rc"
+            fi
+            echo "::warning::W3C SPARQL conformance attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before the report was written)."
+            attempt=$((attempt + 1))
+          done
       - name: Consolidated conformance scoreboard (all suites + floors)
         # [OPUS-4.8] sq-ncvq.16: surface the ONE central index of every conformance
         # ratchet across crates (SPARQL + inference + SHACL + GeoSPARQL) at the top
@@ -773,6 +811,17 @@ jobs:
       - name: Enforce ratchet (pass+divergence count must not regress)
         run: |
           RATCHET=1229
+          # [OPUS-4.8] sq-shacl-flake (generalized from #1236): distinguish "report
+          # never produced" (an infra/build flake aborted the run before
+          # conformance-report.md was written) from a GENUINE regression, so a
+          # missing/empty report is never mis-reported as "conformance regressed below
+          # the ratchet (0 < 1229)" — the exact phantom that jammed the queue (#1242).
+          # With the step-level retry above this should not happen, but if it does we
+          # fail with an HONEST, distinct diagnostic instead of a false regression.
+          if [ ! -s conformance-report.md ] || ! grep -qE '^## Overall' conformance-report.md; then
+            echo "::error::SPARQL conformance report is missing/empty — the run produced no '## Overall' section. This is an INFRA/build failure (e.g. a transient crates.io download aborting the run), NOT a conformance regression. Re-run the job; inspect the 'Run conformance suites' step output above."
+            exit 1
+          fi
           # The Overall section emits:
           # **<N> pass / <M> fail / <D> documented divergence / <K> skip — ...**
           # (group subtotals use the same shape, so parse the line after "## Overall")
@@ -814,13 +863,57 @@ jobs:
       - name: Run SHACL core + SHACL-SPARQL suites
         # The runners assert their own pinned floors; capture the scoreboards so
         # the grep gate below can re-check the pass counts.
+        # [OPUS-4.8] sq-shacl-flake: STEP-LEVEL transient self-heal (mirrors the
+        # sq-c76x retry idiom on the main nextest job). A transient crates.io
+        # download hiccup (`curl failed` mid-fetch) aborts `cargo test` BEFORE
+        # any test runs, leaving shacl-conformance.out empty; the previous
+        # single-shot invocation then let the ratchet step below mis-report that
+        # empty scoreboard as a phantom "conformance regressed below the ratchet"
+        # (`? < 98`) that jammed the merge queue across unrelated PRs. Re-running
+        # the whole invocation lets such a transient self-heal. A GENUINE
+        # conformance regression fails the runner's own `assert!(pass >= floor)`
+        # on every attempt and still correctly reds the job — the floor is never
+        # weakened. `rc` is captured explicitly (set -e-safe) so a real failure
+        # surfaces rather than silently exiting 0.
         run: |
-          cargo test -p sparq-shacl --test w3c_core --test w3c_sparql -- --nocapture \
-            | tee shacl-conformance.out
+          set -uo pipefail
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::SHACL conformance — attempt $attempt/$MAX_ATTEMPTS"
+            rc=0
+            # `tee` would mask cargo's exit code via the pipe, so capture it from
+            # PIPESTATUS[0] (cargo), not the pipeline's last command (tee).
+            cargo test -p sparq-shacl --test w3c_core --test w3c_sparql -- --nocapture \
+              | tee shacl-conformance.out
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "SHACL conformance suites passed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::SHACL conformance run failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient. Inspect the cargo/test output above (a real conformance regression trips the runner's own assert!(pass >= floor); a 'curl failed'/download error is an infra flake, not a conformance change)."
+              exit "$rc"
+            fi
+            echo "::warning::SHACL conformance attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before any test ran)."
+            attempt=$((attempt + 1))
+          done
       - name: Enforce ratchet (pass counts must not regress)
         run: |
           CORE_FLOOR=98
           SPARQL_FLOOR=5
+          # [OPUS-4.8] sq-shacl-flake: distinguish "scoreboard never produced"
+          # (the test step did not emit a TOTAL line — e.g. an infra/compile
+          # flake) from a GENUINE pass-count regression, so an empty scoreboard
+          # is never mis-reported as "conformance regressed below the ratchet"
+          # (the phantom `? < 98` that jammed the queue). With the step-level
+          # retry above this should not happen, but if it does we fail with an
+          # HONEST, distinct diagnostic instead of a false regression claim.
+          if ! grep -qE '^TOTAL ' shacl-conformance.out; then
+            echo "::error::SHACL conformance scoreboard is missing/empty — the test step produced no 'TOTAL' line. This is an INFRA/build failure (e.g. a transient crates.io download), NOT a conformance regression. Re-run the job; inspect the 'Run SHACL core + SHACL-SPARQL suites' step output above."
+            exit 1
+          fi
           # core runner prints: "TOTAL  <pass> <fail> <skip>"
           CORE_PASS=$(grep -E '^TOTAL ' shacl-conformance.out | awk '{print $2}' | head -1)
           # sparql runner prints: "pass <n> / fail <m> / skip <k>"
@@ -858,12 +951,50 @@ jobs:
       - name: Run OGC GeoSPARQL topology compliance ratchet
         # The runner asserts its own floor (OGC_RATCHET_FLOOR) + fail==0; capture the
         # scoreboard so the grep gate below re-checks the pass count.
+        # [OPUS-4.8] sq-shacl-flake (generalized from #1236): STEP-LEVEL transient
+        # self-heal. A transient crates.io download hiccup (`curl failed` mid-fetch)
+        # aborts `cargo test` BEFORE any test runs, leaving geo-conformance.out empty;
+        # a single-shot invocation then let the ratchet step below mis-report that
+        # empty scoreboard as a phantom "regressed below the ratchet". Re-running the
+        # whole invocation lets such a transient self-heal. A GENUINE regression fails
+        # the runner's own `assert!(pass >= floor)`/`fail == 0` on every attempt and
+        # still correctly reds the job — the floor is never weakened. `rc` is captured
+        # from PIPESTATUS[0] (cargo, not tee) so a real failure surfaces.
         run: |
-          cargo test -p sparq-geo --test ogc_compliance_ratchet -- --nocapture \
-            | tee geo-conformance.out
+          set -uo pipefail
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::OGC GeoSPARQL conformance — attempt $attempt/$MAX_ATTEMPTS"
+            rc=0
+            cargo test -p sparq-geo --test ogc_compliance_ratchet -- --nocapture \
+              | tee geo-conformance.out
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "OGC GeoSPARQL conformance suite passed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::OGC GeoSPARQL conformance run failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient. A real regression trips the runner's own assert!(pass >= floor)/fail==0; a 'curl failed'/download error is an infra flake, not a conformance change."
+              exit "$rc"
+            fi
+            echo "::warning::OGC GeoSPARQL conformance attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before any test ran)."
+            attempt=$((attempt + 1))
+          done
       - name: Enforce ratchet (topology pass count must not regress)
         run: |
           GEO_FLOOR=119
+          # [OPUS-4.8] sq-shacl-flake (generalized from #1236): distinguish
+          # "scoreboard never produced" (an infra/compile flake left the .out with no
+          # pass line) from a GENUINE regression, so an empty scoreboard is never
+          # mis-reported as "regressed below the ratchet". With the step-level retry
+          # above this should not happen, but if it does we fail with an HONEST,
+          # distinct diagnostic instead of a false regression claim.
+          if ! grep -qE 'pass [0-9]+ / fail' geo-conformance.out; then
+            echo "::error::OGC GeoSPARQL conformance scoreboard is missing/empty — the test step produced no 'pass N / fail M' line. This is an INFRA/build failure (e.g. a transient crates.io download), NOT a conformance regression. Re-run the job; inspect the 'Run OGC GeoSPARQL topology compliance ratchet' step output above."
+            exit 1
+          fi
           # runner prints: "pass <n> / fail <m> (floor <f>)"
           GEO_PASS=$(grep -oE 'pass [0-9]+ / fail' geo-conformance.out | grep -oE '[0-9]+' | head -1)
           echo "OGC GeoSPARQL topology pass: ${GEO_PASS:-unknown} (floor $GEO_FLOOR)"
@@ -908,13 +1039,47 @@ jobs:
       - name: Run Solid WAC + ACP decision-parity suites
         # The runners assert their own pinned floors; capture the output so the grep
         # gate below re-checks the scenario counts.
+        # [OPUS-4.8] sq-shacl-flake (generalized from #1236): STEP-LEVEL transient
+        # self-heal. A transient crates.io download hiccup aborts `cargo test` BEFORE
+        # any test runs, leaving solid-conformance.out empty; a single-shot invocation
+        # then let the ratchet step below mis-report that empty scoreboard as a phantom
+        # "regressed below the ratchet". Re-running lets such a transient self-heal. A
+        # GENUINE regression fails the runners' own `assert!(pass >= floor)` on every
+        # attempt and still reds the job — the floor is never weakened. `rc` is captured
+        # from PIPESTATUS[0] (cargo, not tee).
         run: |
-          cargo test -p sparq-solid --test conformance_wac --test conformance_acp -- --nocapture \
-            | tee solid-conformance.out
+          set -uo pipefail
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::Solid WAC/ACP conformance — attempt $attempt/$MAX_ATTEMPTS"
+            rc=0
+            cargo test -p sparq-solid --test conformance_wac --test conformance_acp -- --nocapture \
+              | tee solid-conformance.out
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "Solid WAC/ACP conformance suites passed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::Solid WAC/ACP conformance run failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient. A real regression trips the runners' own assert!(pass >= floor); a 'curl failed'/download error is an infra flake, not a conformance change."
+              exit "$rc"
+            fi
+            echo "::warning::Solid WAC/ACP conformance attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before any test ran)."
+            attempt=$((attempt + 1))
+          done
       - name: Enforce ratchet (scenario counts must not regress)
         run: |
           WAC_FLOOR=12
           ACP_FLOOR=12
+          # [OPUS-4.8] sq-shacl-flake (generalized from #1236): distinguish "scoreboard
+          # never produced" (an infra/compile flake) from a GENUINE regression, so an
+          # empty scoreboard is never mis-reported as "regressed below the ratchet".
+          if ! grep -qE '(WAC|ACP) scenarios pass [0-9]+ / fail' solid-conformance.out; then
+            echo "::error::Solid WAC/ACP conformance scoreboard is missing/empty — the test step produced no 'scenarios pass N / fail M' line. This is an INFRA/build failure (e.g. a transient crates.io download), NOT a conformance regression. Re-run the job; inspect the 'Run Solid WAC + ACP decision-parity suites' step output above."
+            exit 1
+          fi
           # runners print: "<WAC|ACP> scenarios pass <n> / fail <m> (floor <f>)"
           WAC_PASS=$(grep -oE 'WAC scenarios pass [0-9]+ / fail' solid-conformance.out | grep -oE '[0-9]+' | head -1)
           ACP_PASS=$(grep -oE 'ACP scenarios pass [0-9]+ / fail' solid-conformance.out | grep -oE '[0-9]+' | head -1)
@@ -967,12 +1132,46 @@ jobs:
       - name: Run SolidLab ODRL decision-parity suite
         # The runner asserts its own pinned floor; capture the output so the grep
         # gate below re-checks the pass count.
+        # [OPUS-4.8] sq-shacl-flake (generalized from #1236): STEP-LEVEL transient
+        # self-heal. A transient crates.io download hiccup aborts `cargo test` BEFORE
+        # any test runs, leaving odrl-conformance.out empty; a single-shot invocation
+        # then let the ratchet step below mis-report that empty scoreboard as a phantom
+        # "regressed below the ratchet". Re-running lets such a transient self-heal. A
+        # GENUINE regression fails the runner's own `assert!(pass >= floor)` on every
+        # attempt and still reds the job — the floor is never weakened. `rc` is captured
+        # from PIPESTATUS[0] (cargo, not tee).
         run: |
-          cargo test -p sparq-policy --test odrl_test_suite -- --nocapture \
-            | tee odrl-conformance.out
+          set -uo pipefail
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::SolidLab ODRL conformance — attempt $attempt/$MAX_ATTEMPTS"
+            rc=0
+            cargo test -p sparq-policy --test odrl_test_suite -- --nocapture \
+              | tee odrl-conformance.out
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "SolidLab ODRL conformance suite passed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::SolidLab ODRL conformance run failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient. A real regression trips the runner's own assert!(pass >= floor); a 'curl failed'/download error is an infra flake, not a conformance change."
+              exit "$rc"
+            fi
+            echo "::warning::SolidLab ODRL conformance attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before any test ran)."
+            attempt=$((attempt + 1))
+          done
       - name: Enforce ratchet (pass count must not regress)
         run: |
           ODRL_FLOOR=59
+          # [OPUS-4.8] sq-shacl-flake (generalized from #1236): distinguish "scoreboard
+          # never produced" (an infra/compile flake) from a GENUINE regression, so an
+          # empty scoreboard is never mis-reported as "regressed below the ratchet".
+          if ! grep -qE 'ODRL suite scenarios pass [0-9]+ / fail' odrl-conformance.out; then
+            echo "::error::SolidLab ODRL conformance scoreboard is missing/empty — the test step produced no 'ODRL suite scenarios pass N / fail M' line. This is an INFRA/build failure (e.g. a transient crates.io download), NOT a conformance regression. Re-run the job; inspect the 'Run SolidLab ODRL decision-parity suite' step output above."
+            exit 1
+          fi
           # runner prints: "ODRL suite scenarios pass <n> / fail <m> / not-implemented <k> (floor <f>)"
           ODRL_PASS=$(grep -oE 'ODRL suite scenarios pass [0-9]+ / fail' odrl-conformance.out | grep -oE '[0-9]+' | head -1)
           echo "SolidLab ODRL scenarios pass: ${ODRL_PASS:-unknown} (floor $ODRL_FLOOR)"
@@ -1031,13 +1230,48 @@ jobs:
       - name: Run JSON-LD toRdf + fromRdf + compact + frame suites (jsonld-suite feature ON)
         # The runner asserts its own pinned floors; capture the scoreboard so the
         # grep gate below re-checks the pass counts.
+        # [OPUS-4.8] sq-shacl-flake (generalized from #1236): STEP-LEVEL transient
+        # self-heal. A transient crates.io download hiccup aborts `cargo test` BEFORE
+        # any test runs, leaving jsonld-conformance.out empty; a single-shot invocation
+        # then let the ratchet step below mis-report that empty scoreboard as a phantom
+        # "regressed below the ratchet". Re-running lets such a transient self-heal. A
+        # GENUINE regression fails the runner's own `assert!(pass >= FLOOR)` on every
+        # attempt and still reds the job — the floors are never weakened. `rc` is
+        # captured from PIPESTATUS[0] (cargo, not tee).
         run: |
-          cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite -- --nocapture \
-            | tee jsonld-conformance.out
+          set -uo pipefail
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::JSON-LD conformance — attempt $attempt/$MAX_ATTEMPTS"
+            rc=0
+            cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite -- --nocapture \
+              | tee jsonld-conformance.out
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "JSON-LD conformance suites passed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::JSON-LD conformance run failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient. A real regression trips the runner's own assert!(pass >= FLOOR); a 'curl failed'/download error is an infra flake, not a conformance change."
+              exit "$rc"
+            fi
+            echo "::warning::JSON-LD conformance attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before any test ran)."
+            attempt=$((attempt + 1))
+          done
       - name: Enforce ratchet (pass counts must not regress)
         run: |
           TORDF_FLOOR=413
           FROMRDF_FLOOR=51
+          # [OPUS-4.8] sq-shacl-flake (generalized from #1236): distinguish "scoreboard
+          # never produced" (an infra/compile flake left the .out with no TOTAL line)
+          # from a GENUINE regression, so an empty scoreboard is never mis-reported as
+          # "regressed below the ratchet".
+          if ! grep -qE '^TOTAL (toRdf|fromRdf|compact|frame) ' jsonld-conformance.out; then
+            echo "::error::JSON-LD conformance scoreboard is missing/empty — the test step produced no 'TOTAL toRdf|fromRdf|compact|frame' line. This is an INFRA/build failure (e.g. a transient crates.io download), NOT a conformance regression. Re-run the job; inspect the 'Run JSON-LD ... suites' step output above."
+            exit 1
+          fi
           # [OPUS-4.8] sq-oy1f.16 — RAISED 163 → 186 after #978's compaction
           # faithfulness fixes (re-measured: 186 pass). Mirror the toRdf/fromRdf
           # belt-and-braces grep gate.
@@ -1096,12 +1330,50 @@ jobs:
       - name: Fetch inference test suites (pinned)
         run: ./scripts/fetch-inference-suites.sh
       - name: Run inference suites
-        run: cargo run --release -p sparq-conformance --bin sparq-inference-conformance
+        # [OPUS-4.8] sq-shacl-flake (generalized from #1236): STEP-LEVEL transient
+        # self-heal. This `cargo run` WRITES inference-conformance-report.md as a side
+        # effect; a transient crates.io download hiccup aborts the build BEFORE the
+        # report is written, leaving it missing/empty, and the "Enforce ratchet" step
+        # then greps an absent report → PASS='' → TOTAL=0 and mis-reports a phantom
+        # "inference conformance regressed below the ratchet (0 < 1967)". Re-running
+        # lets such a transient self-heal. A GENUINE regression still produces a real
+        # report and trips the floor honestly — the ratchet is never weakened. Not
+        # piped, so the run's own exit code ($?) is authoritative (no PIPESTATUS).
+        run: |
+          set -uo pipefail
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::Inference conformance — attempt $attempt/$MAX_ATTEMPTS"
+            rc=0
+            cargo run --release -p sparq-conformance --bin sparq-inference-conformance || rc=$?
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "Inference conformance suites completed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::Inference conformance run failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient. A real regression produces a report and trips the ratchet floor below; a 'curl failed'/download error is an infra flake, not a conformance change."
+              exit "$rc"
+            fi
+            echo "::warning::Inference conformance attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before the report was written)."
+            attempt=$((attempt + 1))
+          done
       - name: Summarize
         run: cat inference-conformance-report.md >> "$GITHUB_STEP_SUMMARY"
       - name: Enforce ratchet (pass+divergence count must not regress)
         run: |
           RATCHET=1967
+          # [OPUS-4.8] sq-shacl-flake (generalized from #1236): distinguish "report
+          # never produced" (an infra/build flake aborted the run before the report was
+          # written) from a GENUINE regression, so a missing/empty report is never
+          # mis-reported as "inference conformance regressed below the ratchet
+          # (0 < 1967)". With the step-level retry above this should not happen, but if
+          # it does we fail with an HONEST, distinct diagnostic.
+          if [ ! -s inference-conformance-report.md ] || ! grep -qE '^## Overall \(all inference suites\)' inference-conformance-report.md; then
+            echo "::error::Inference conformance report is missing/empty — the run produced no '## Overall (all inference suites)' section. This is an INFRA/build failure (e.g. a transient crates.io download aborting the run), NOT a conformance regression. Re-run the job; inspect the 'Run inference suites' step output above."
+            exit 1
+          fi
           # The Overall section emits:
           # **<N> pass / <M> fail / <D> documented divergence / <K> out-of-scope — ...**
           # (suite subtotals use the same shape, so parse the line after the

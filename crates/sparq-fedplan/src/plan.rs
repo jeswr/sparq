@@ -928,4 +928,42 @@ mod tests {
             "the disconnected (Cartesian) arm is deferred to last"
         );
     }
+
+    // ---- [OPUS-4.8] sq-bif: a DISCONNECTED candidate evaluated AFTER a connected best has
+    //      already been chosen in the same selection round must NOT displace it — the
+    //      `(connected=false, best_conn=true) => false` arm of the next-arm comparison. This is
+    //      the symmetric guard to `connected_arm_preferred_over_smaller_disconnected`: there the
+    //      connected arm wins by *appearing*; here we make the connected candidate the LOWER index
+    //      (so it is `best` first) and the disconnected candidate the higher index AND strictly
+    //      smaller, so only the `false`-arm can keep the Cartesian arm out — a regression that
+    //      let a smaller disconnected leaf overtake a connected best would reorder this plan.
+    #[test]
+    fn smaller_disconnected_later_candidate_never_overtakes_connected_best() {
+        // Seed ?s :p ?o (idx 0). Remaining iterate in index order: idx 1 = connected :q
+        // (shares ?o), idx 2 = disconnected :iso (smaller leaf, no shared var).
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+            TriplePattern::new(var("o"), iri("http://ex/q"), var("z")), // connected (lower idx).
+            TriplePattern::new(var("a"), iri("http://ex/iso"), var("b")), // disconnected, smaller.
+        ]);
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/p", 1, 1, 1)) // global-min ⇒ seed.
+            .predicate(pred("http://ex/q", 800, 800, 800)) // connected, LARGE.
+            .predicate(pred("http://ex/iso", 2, 2, 2)) // disconnected, TINY (< :q).
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let order = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default())
+            .unwrap()
+            .join_order();
+        // :q (connected, idx 1) is picked as the second arm despite the disconnected :iso (idx 2)
+        // being far smaller — the disconnected candidate's `false` arm refuses to overtake.
+        assert_eq!(order[0], 0, ":p seeds (global-min leaf)");
+        assert_eq!(
+            order[1], 1,
+            "the connected :q stays the chosen next arm; the smaller disconnected :iso cannot overtake it"
+        );
+        assert_eq!(order[2], 2, "the Cartesian :iso is deferred to last");
+    }
 }

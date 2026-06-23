@@ -1,0 +1,16 @@
+[
+  {"file": "j014.txt", "score": 1.0, "why": "matches gold count 1"},
+  {"file": "j015.txt", "score": 1.0, "why": "verbatim match of gold finding"},
+  {"file": "j016.txt", "score": 1.0, "why": "verbatim match of gold finding"},
+  {"file": "j017.txt", "score": 1.0, "why": "verbatim match of gold finding"},
+  {"file": "j018.txt", "score": 0.0, "why": "evasive 'cannot determine'; misses GeoSPARQL task subject"},
+  {"file": "j019.txt", "score": 0.0, "why": "evasive 'cannot determine'; misses CI lint task subject"},
+  {"file": "j020.txt", "score": 1.0, "why": "'Sub-agent rules' conveys same topic as gold"},
+  {"file": "j021.txt", "score": 1.0, "why": "verbatim match of gold topic"},
+  {"file": "j022.txt", "score": 1.0, "why": "verbatim match of gold finding"},
+  {"file": "j023.txt", "score": 1.0, "why": "verbatim match of gold topic"},
+  {"file": "j024.txt", "score": 1.0, "why": "verbatim match of gold topic"},
+  {"file": "j025.txt", "score": 0.0, "why": "evasive 'cannot determine'; misses named-graph scoping task subject"},
+  {"file": "j026.txt", "score": 1.0, "why": "'SHACL validation' is same surface as gold"},
+  {"file": "j027.txt", "score": 1.0, "why": "matches gold count 2"}
+]

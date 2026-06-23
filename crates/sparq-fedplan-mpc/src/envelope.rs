@@ -643,6 +643,151 @@ mod tests {
         assert!(outcome.is_ratified(), "four-flatmates plan must ratify");
     }
 
+    // ── Empty global-IRI operand: the disclosed-by-convention path (envelope label + C-B skip) ──
+
+    // A single-operator plan that discloses one global IRI binding NO specific predicate, plus the
+    // routing that matches it (so `assemble_leakage_envelope` accepts the pair). Returns
+    // (routing, ops). [OPUS-4.8] sq-bif.
+    fn disclosed_empty_global_iri_plan() -> (PrivateRouting, Vec<QueryOperator>) {
+        let ops = vec![QueryOperator::new(
+            "membership-join (anonymous global IRI)",
+            OperatorClass::EqualityJoin,
+            vec![Operand::GlobalIri {
+                // Empty predicate ⇒ a global IRI binding no specific predicate.
+                predicate: String::new(),
+            }],
+        )];
+        // No contributing privacy descriptor at all ⇒ the default policy discloses the global IRI.
+        let routing = route_operators(
+            &SelectedPrivateSources::default(),
+            &[],
+            &ops,
+            RoutingPolicy::Default,
+        )
+        .unwrap();
+        assert_eq!(routing.routing[0].routing, Routing::Disclosed);
+        (routing, ops)
+    }
+
+    /// An empty-predicate global-IRI operand, when disclosed, is recorded HONESTLY in the envelope
+    /// as the `<global-iri>` placeholder (not silently dropped, not a panic) — the disclosure of
+    /// *a* global IRI is enumerated even though it binds no named predicate. [OPUS-4.8] sq-bif.
+    #[test]
+    fn empty_global_iri_operand_is_recorded_as_the_placeholder() {
+        let (routing, ops) = disclosed_empty_global_iri_plan();
+        let env =
+            assemble_leakage_envelope(&routing, &ops, &SelectedPrivateSources::default()).unwrap();
+        assert_eq!(env.operators.len(), 1);
+        assert!(env.operators[0].disclosed);
+        assert_eq!(env.operators[0].disclosed_operands, vec!["<global-iri>"]);
+        // It counts as one distinct disclosed operand across the plan (a real, declared leak).
+        assert_eq!(
+            env.distinct_disclosed_operands(),
+            vec!["<global-iri>".to_string()]
+        );
+    }
+
+    /// The load-bearing C-B soundness boundary for the placeholder: a `<global-iri>` disclosure is
+    /// disclosed BY CONVENTION (it binds no holder's named predicate), so a holder's fail-closed
+    /// re-check must NOT spuriously reject it — even a deny-all holder ratifies. A regression that
+    /// dropped the `<global-iri>` skip would falsely reject every plan that discloses an anonymous
+    /// global IRI. [OPUS-4.8] sq-bif.
+    #[test]
+    fn placeholder_global_iri_is_not_held_against_a_deny_all_holder() {
+        let (routing, ops) = disclosed_empty_global_iri_plan();
+        let env =
+            assemble_leakage_envelope(&routing, &ops, &SelectedPrivateSources::default()).unwrap();
+        // A maximally-private holder discloses NOTHING — yet it must still ratify the placeholder,
+        // because the placeholder is not over any named predicate it could object to.
+        let deny_all = SourcePrivacyDescriptor::deny_all(SourceId::new("http://a/"));
+        assert_eq!(
+            ratify_envelope(&env, &[deny_all], None),
+            RatificationOutcome::Ratified,
+            "an anonymous global IRI is disclosed by convention; no holder can veto it"
+        );
+    }
+
+    /// The placeholder is skipped by the HOLDER check but still COUNTS against the VERIFIER budget:
+    /// it is a real disclosure (the verifier bounds total operand disclosure), so a budget of 0
+    /// rejects it on the verifier side even though every holder accepted. This pins the precise
+    /// asymmetry — holder-exempt, verifier-counted. [OPUS-4.8] sq-bif.
+    #[test]
+    fn placeholder_global_iri_counts_against_the_verifier_budget() {
+        let (routing, ops) = disclosed_empty_global_iri_plan();
+        let env =
+            assemble_leakage_envelope(&routing, &ops, &SelectedPrivateSources::default()).unwrap();
+        let holders = [SourcePrivacyDescriptor::deny_all(SourceId::new(
+            "http://a/",
+        ))];
+        // Budget 0: one distinct disclosed operand (`<global-iri>`) exceeds it ⇒ verifier rejects.
+        match ratify_envelope(&env, &holders, Some(0)) {
+            RatificationOutcome::VerifierRejected {
+                disclosed, budget, ..
+            } => {
+                assert_eq!(disclosed, 1);
+                assert_eq!(budget, 0);
+            }
+            other => panic!(
+                "expected a verifier rejection on a 0 budget, got {:?}",
+                other
+            ),
+        }
+        // Budget 1: it fits ⇒ ratified.
+        assert_eq!(
+            ratify_envelope(&env, &holders, Some(1)),
+            RatificationOutcome::Ratified
+        );
+    }
+
+    /// Phase-2 prune narrows the Phase-3 disclosure gating: a private holder that is PRUNED (it
+    /// declared non-participation) no longer gates a predicate's disclosability, so a predicate the
+    /// *remaining* sources all mark public becomes Disclosed — and the assembled envelope honestly
+    /// records that disclosure. This is the cross-phase interaction (selection → routing →
+    /// envelope) over the REAL path. [OPUS-4.8] sq-bif.
+    #[test]
+    fn pruned_private_holder_does_not_gate_disclosure_downstream() {
+        // Source A marks memberOf public and participates; source B marks it PRIVATE but declares
+        // non-participation, so Phase 2 prunes B. With only A contributing, memberOf is disclosable.
+        let a_pub = SourcePrivacyDescriptor::builder(SourceId::new("http://a/"))
+            .public_predicate(MEMBER_OF)
+            .participates(true)
+            .build();
+        let b_private_refuses = SourcePrivacyDescriptor::builder(SourceId::new("http://b/"))
+            .private_predicate(MEMBER_OF)
+            .participates(false)
+            .build();
+        let sources = vec![source("http://a/"), source("http://b/")];
+        let privacy = vec![a_pub.clone(), b_private_refuses];
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            Term::Var(Var::new("h")),
+            Term::Iri(MEMBER_OF.to_string()),
+            Term::Iri(FLAT_IRI.to_string()),
+        )]);
+        let selected = select_private_sources(&bgp, &sources, &privacy).unwrap();
+        // B was pruned (non-participating) ⇒ only A participates.
+        assert_eq!(
+            selected.participating_sources(),
+            vec![&SourceId::new("http://a/")]
+        );
+
+        let ops = vec![QueryOperator::new(
+            "membership-join",
+            OperatorClass::EqualityJoin,
+            vec![Operand::Predicate(MEMBER_OF.to_string())],
+        )];
+        // Routed over the REAL selection: only A gates memberOf, and A marks it public ⇒ Disclosed.
+        let routing = route_operators(&selected, &privacy, &ops, RoutingPolicy::Default).unwrap();
+        assert_eq!(routing.routing[0].routing, Routing::Disclosed);
+
+        let env = assemble_leakage_envelope(&routing, &ops, &selected).unwrap();
+        assert_eq!(env.operators[0].disclosed_operands, vec![MEMBER_OF]);
+        // Only A is declared participating, and only A ratifies (B is no longer a holder of record).
+        assert_eq!(
+            ratify_envelope(&env, &[a_pub], Some(4)),
+            RatificationOutcome::Ratified
+        );
+    }
+
     /// Determinism: same plan ⇒ identical envelope + identical outcome, twice.
     #[test]
     fn determinism_same_plan_same_envelope_and_outcome() {
