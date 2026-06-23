@@ -51,6 +51,7 @@ All on the `sparq.Graph` class (the only entry point). Constructors are static m
 - `g.save(dir) -> None` — persist indexes + dictionary into `dir` for later `Graph.open`.
 - `g.query(sparql) -> QueryResult` — SPARQL SELECT, materialised.
 - `g.query_json(sparql) -> str` — SELECT as a SPARQL 1.1 JSON results document string (fast path; skips per-cell Term objects).
+- `g.query_arrow(sparql) -> pyarrow.Table` — SELECT as a `pyarrow.Table` (**opt-in**: a wheel built with the `arrow` feature / `pip install sparq-rdf[arrow]`, and `pyarrow` ≥ 14 installed). One Arrow `struct<kind, value, datatype, language, direction>` column per variable — the faithful, round-trippable RDF-term projection of the `sparq-arrow` crate, bridged through the Arrow C Data Interface (no re-serialisation). An UNBOUND binding is a null struct slot (distinct from a bound empty-string literal). Same v1 boundary as `sparq-arrow`: no numeric narrowing yet (`42^^xsd:integer` is `"42"` + a `datatype`, not an Arrow `Int64`), RDF 1.2 triple terms stringified to N-Triples in `value`. Only present when the wheel was built with the feature; a missing `pyarrow` raises `ImportError`.
 - `g.ask(sparql) -> bool` — ASK query (a SELECT is also accepted: True iff it yields ≥1 row).
 - `g.construct(sparql) -> list[(Term, Term, Term)]` — CONSTRUCT; deduplicated, first-production order.
 - `g.describe(sparql) -> list[(Term, Term, Term)]` — DESCRIBE with concise-bounded-description (CBD) semantics.
@@ -78,6 +79,17 @@ ASK and the JSON fast path:
 g.ask('PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }')   # True
 import json
 doc = json.loads(g.query_json("SELECT ?s WHERE { ?s ?p ?o }"))      # SPARQL 1.1 JSON results
+```
+
+Arrow / dataframes (opt-in `arrow` wheel + `pyarrow`): one struct column per variable, ready for Polars/DuckDB/pandas without a CSV round-trip:
+
+```python
+# pip install sparq-rdf[arrow]    (wheel built with --features arrow; needs pyarrow >= 14)
+table = g.query_arrow("PREFIX ex: <http://ex/> SELECT ?s ?age WHERE { ?s ex:age ?age }")
+table.column_names                    # ['s', 'age'] — each an Arrow struct<kind,value,datatype,language,direction>
+table.to_pylist()[0]["age"]           # {'kind': 'literal', 'value': '30', 'datatype': '...#integer', ...}
+# An unbound (OPTIONAL) cell reads back as a null struct slot (None), not an empty literal.
+import polars as pl; pl.from_arrow(table)     # straight into a dataframe
 ```
 
 CONSTRUCT / DESCRIBE return Term triples (template triples with an unbound var or an illegal RDF position are silently dropped):
