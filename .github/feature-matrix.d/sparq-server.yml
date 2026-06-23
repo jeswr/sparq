@@ -79,3 +79,27 @@
   crate: "sparq-server"
   features: "terse"
   test: true
+
+# [OPUS-4.8] sq-2999l (gh-906): the OPT-IN CDC change-stream poll endpoint (`GET /streams`) in the
+# Amazon-Neptune-Streams `GetRecords` shape, over the merged durable change-stream (sq-b4fns /
+# #1223). The `streams_endpoint` handler, the `streams::*` pure builder (iterator-type resolution +
+# per-quad flattening + continuation maths) + its 9 in-module unit tests, the
+# `ServerConfig::change_stream_dir` field + its Default/from_env arms, the `AppState` change-log
+# field + the commit-recording hook on the update path, the route mount, and the
+# `tests/streams.rs` integration suite are ALL `#[cfg(feature = "change-stream")]`, so the DEFAULT
+# build never compiled, clippy'd or tested this code. This leg builds it, runs `clippy
+# --all-targets -D warnings` with the feature ON (the real gate), and runs the crate's tests —
+# which now include the 9 `streams::tests` unit tests AND the 9-test gated `tests/streams.rs`
+# integration suite that drives the REAL durable round-trip: write commits over the HTTP UPDATE
+# path → GET `/streams` from an offset → assert the EXACT ordered change sequence + the
+# continuation token (plus the opt-in 404, the four iterator types, `limit` paging/resume, the
+# fail-closed 400 on a missing anchor, the read-auth gate, and on-disk durability). `change-stream`
+# pulls `server` + `sparq-serve/change-stream` (no new external dependency — it reuses
+# sparq-engine's `serialize-rdf` N-Quads diff + the backup family's FNV-1a digest + the already-
+# present axum/serde_json), so the full async server compiles under it. Verified locally: `cargo
+# test -p sparq-server --features change-stream` runs both suites; `clippy --all-targets -D
+# warnings` is clean in the default, change-stream, and all-features states.
+- name: "sparq-server (change-stream — GET /streams CDC poll endpoint)"
+  crate: "sparq-server"
+  features: "change-stream"
+  test: true

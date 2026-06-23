@@ -425,6 +425,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (it never executes it). Off by default (env SPARQ_TERSE=1).
             #[cfg(feature = "terse")]
             "--terse" => config.terse = true,
+            // [OPUS-4.8] sq-2999l (gh-906): OPT-IN durable CDC change-stream at DIR. Enables both
+            // RECORDING every committed update to the segmented, fsync'd append-only log AND the
+            // Neptune-GetRecords-shaped poll endpoint GET /streams over it. Resumes the same stream
+            // gaplessly when DIR already holds segments. Off by default (env SPARQ_CHANGE_STREAM=DIR).
+            #[cfg(feature = "change-stream")]
+            "--change-stream" => {
+                let dir = args.next().ok_or("--change-stream requires a directory path")?;
+                if dir.is_empty() {
+                    return Err("--change-stream must not be empty".into());
+                }
+                config.change_stream_dir = Some(std::path::PathBuf::from(dir));
+            }
             // [OPUS-4.8] sq-4w18: SERVICE egress allowlist. Repeatable: each value adds one
             // host (`sparql.example.org`) or suffix wildcard (`*.example.org`). With NO
             // allowlist (the default) every SERVICE clause is refused (default-DENY-all).
@@ -492,6 +504,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [OPUS-4.8] sq-2999l: surface the OPT-IN CDC change-stream flag (feature change-stream).
+                let change_stream = if cfg!(feature = "change-stream") {
+                    " [--change-stream DIR]"
+                } else {
+                    ""
+                };
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
@@ -499,7 +517,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch}{terse}{backup} \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch}{terse}{backup}{change_stream} \
                      [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH] [--verbose] \
                      [--log-full-requests] [DATA_FILE]\n  \
                      or: sparq-server --health-probe [--health-probe-addr HOST:PORT]\n\n  \
@@ -535,6 +553,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      crash-safely so it survives a restart; without it the --restore/--persist \
                      combination is refused. The online route POST /admin/restore mirrors this: \
                      on a --persist server it needs ?persist=true (else 409).\n  \
+                     CHANGE-STREAM (the `change-stream` build feature): --change-stream DIR (env \
+                     SPARQ_CHANGE_STREAM) records every committed UPDATE as one ordered, durable \
+                     change record to a segmented fsync'd log at DIR, and serves the \
+                     Neptune-GetRecords-shaped poll endpoint GET /streams over it \
+                     (?iteratorType=TRIM_HORIZON|AT_SEQUENCE_NUMBER|AFTER_SEQUENCE_NUMBER|LATEST, \
+                     ?at=N / ?after=N, ?limit=N) returning the records + a nextSequenceNumber \
+                     continuation token. Resumes the same stream gaplessly across a restart. Off by \
+                     default; reading is gated by the read auth.\n  \
                      CORS: NO CORS headers by default (a cross-origin browser fetch cannot read \
                      responses). For a FIRST-PARTY browser app on another origin, allowlist its \
                      exact origin(s) via --cors-allow-origin ORIGIN (repeatable) / \
