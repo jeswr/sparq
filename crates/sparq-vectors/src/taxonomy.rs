@@ -284,7 +284,7 @@ impl<'a> EuclideanTaxonomyEncoder<'a> {
     /// [`Metric::Euclidean`]. Register it in a [`SchemaHeader`](crate::encode::SchemaHeader) so the
     /// row is self-describing and the metric guard is correct.
     pub fn block(&self, offset: usize) -> Block {
-        Block { encoder: Encoder::Taxonomy, metric: Metric::Euclidean, offset, width: self.width() }
+        Block::new(Encoder::Taxonomy, Metric::Euclidean, offset, self.width())
     }
 
     /// Encode the class with dense index `idx` into a freshly allocated block of [`width`](Self::width).
@@ -385,7 +385,7 @@ impl<'a> HyperbolicTaxonomyEncoder<'a> {
     /// [`GeometryGate::choose`] selected [`Geometry::Hyperbolic`]; the metric tag then makes a
     /// whole-row cosine search a detectable error.
     pub fn block(&self, offset: usize) -> Block {
-        Block { encoder: Encoder::Taxonomy, metric: Metric::NonEuclidean, offset, width: 2 }
+        Block::new(Encoder::Taxonomy, Metric::NonEuclidean, offset, 2)
     }
 }
 

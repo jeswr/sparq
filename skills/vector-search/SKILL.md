@@ -868,8 +868,35 @@ println!("Δmrr={:.4} se={:.4} adopt@2se={}", ab.mrr.mean, ab.mrr.se, ab.mrr_sig
 delta is **exactly zero** (the no-op invariant — a plain graph is unchanged). The
 confidence/literal-aware KGE literature reports *inconsistent* gains, so any lift is unproven and
 dataset-dependent; the bead's discipline is **adopt only if the measured lift clears a pre-registered
-bar, and ABANDON (and say so) otherwise**. Threading `w(t)` into the structural-sketch pooler and the
-per-`Block` query-time fusion weight (design §USE-1 points 2–3) is tracked as a follow-up bead.
+bar, and ABANDON (and say so) otherwise**.
+
+**Integration points 2–3 (sq-oy9ya, design §USE-1).** `w(t)` is now also threaded into the two
+other points `sparq-vectors` has, both behind the **same `WeightMode` ablation** and both no-ops
+under `Uniform` / a provenance-free graph:
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_vectors::{ProvenanceWeights, WeightMode, Block, Encoder, Metric};
+# fn demo(weights: &ProvenanceWeights, subj_a: u32, subj_b: u32) -> Result<(), String> {
+// (2) confidence-weighted STRUCTURAL-SKETCH / characteristic-set pooling: pool a node's
+//     multi-valued contributions weighted by each value's provenance, NOT a uniform mean.
+//     Under WeightMode::Uniform this is EXACTLY the arithmetic mean (the ablation-off baseline).
+let contribs = vec![(subj_a, vec![1.0, 0.0]), (subj_b, vec![0.0, 1.0])];
+let pooled = weights.pool_weighted(&contribs, WeightMode::Provenance)?; // higher-quality value dominates
+
+// (3) per-Block query-time FUSION weight: aggregate the incident-edge provenance into a per-block
+//     multiplier and attach it to a Block; the existing fuse_rrf_weighted / fuse_scores path
+//     consumes Block::fusion_weight() so a low-quality modality contributes less to the ranking.
+let bw = weights.block_weight([subj_a, subj_b], WeightMode::Provenance); // mean of the per-subject w(t)
+let block = Block::new(Encoder::Numeric, Metric::Euclidean, 0, 16).with_weight(bw);
+assert!(block.fusion_weight() > 0.0); // a valid (0,1] fuse weight; None ≡ 1.0 (fail-open)
+# let _ = pooled; let _ = block; Ok(()) }
+```
+
+The `.spqv` `SchemaHeader` round-trips the per-block weight (format **v2**; a **v1** sidecar still
+parses, every block read back as the fail-open `1.0`). The weight is **layout metadata**, not part
+of a `Block`'s identity — `PartialEq`/`Eq` ignore it, so the header round-trip contract is unchanged.
+**No accuracy claim**; like point 1, adoption is measurement-gated.
 
 ### 15. Typed-literal encoders — order-preserving numeric / boolean / date + schema header (opt-in, feature = `structure`)
 
@@ -904,7 +931,7 @@ let enc = NumericEncoder::fit([1.0, 30.0, 31.0, 70.0, 5000.0], /*dim*/ 16); // p
 let v30 = enc.encode(30.0);                                                 // order-preserving block
 assert_eq!(BooleanEncoder::decode(BooleanEncoder::encode(true)[0]), true);  // exact round-trip
 let header = SchemaHeader::new(vec![
-    Block { encoder: Encoder::Numeric, metric: Metric::Euclidean, offset: 0, width: 16 },
+    Block::new(Encoder::Numeric, Metric::Euclidean, 0, 16), // .with_weight(w) for a fusion weight
 ])?;
 header.check_euclidean()?;  // every block is L2-searchable
 # Ok::<(), String>(())
