@@ -7,3 +7,6 @@ verdict.json
 # The per-arm context cards are generated from the live crate/PKG by run.sh.
 schema-card.txt
 legend-card.txt
+# The full-session transcript fan-out (sq-bmpzd): tagged sub-agent transcripts +
+# generated briefs are collected here, mined by tokens.py --transcripts, then discarded.
+.fanout-transcripts/

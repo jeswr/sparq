@@ -447,8 +447,26 @@ pub enum Metric {
 }
 
 /// One partition block in the structured row: the encoder that produced it, the metric it is
-/// searched under, and its `[offset, offset+width)` span of `f32` dimensions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// searched under, its `[offset, offset+width)` span of `f32` dimensions, and an **optional
+/// per-block default fusion weight** (`weight`).
+///
+/// # The per-block fusion weight (design §USE-1 integration point 3, [OPUS-4.8] sq-oy9ya)
+///
+/// `weight` is the **query-time modality multiplier** for this block, consumed by the existing
+/// [`fuse_rrf_weighted`](crate::fuse_rrf_weighted) / [`fuse_scores`](crate::fuse_scores) path: a
+/// node's contribution from *this* modality (e.g. its numeric lane vs its taxonomy lane) is scaled
+/// by an aggregate of the **incident-edge provenance** that fed the block (built by
+/// [`crate::provenance::ProvenanceWeights::block_weight`]). `None` means "no provenance-derived
+/// weight is recorded" and is treated **exactly** as `Some(1.0)` everywhere — so a plain
+/// (provenance-free) graph, and every header written before this field existed, is **unchanged**
+/// (fail-open). The accessor [`Block::fusion_weight`] resolves that default for callers.
+///
+/// `weight` is **excluded from [`Block`]'s identity**: [`PartialEq`]/[`Eq`] compare only
+/// `(encoder, metric, offset, width)` so the [`SchemaHeader`] round-trip `PartialEq` contract
+/// (`tests/structure_shacl.rs` + the `encode.rs` byte round-trip) holds whether or not a weight is
+/// present, and `Block` stays `Eq` despite carrying an `f32` (a derive could not). The weight is
+/// *layout metadata*, not part of which partition a block **is**.
+#[derive(Clone, Copy, Debug)]
 pub struct Block {
     /// The encoder family that produced this block (the datatype router result, [`Encoder`]).
     pub encoder: Encoder,
@@ -458,14 +476,58 @@ pub struct Block {
     pub offset: usize,
     /// Number of `f32` dimensions in this block.
     pub width: usize,
+    /// Optional per-block default **fusion weight** (the design §USE-1 point-3 query-time modality
+    /// multiplier). `None` ≡ `1.0` (fail-open). Read via [`Block::fusion_weight`]; set via
+    /// [`Block::with_weight`]. **Not** part of the block's identity ([`PartialEq`]/[`Eq`] ignore
+    /// it). [OPUS-4.8] sq-oy9ya
+    pub weight: Option<f32>,
 }
 
 impl Block {
+    /// A block with **no** recorded fusion weight (`weight: None`, i.e. the fail-open `1.0`
+    /// default). This is the constructor the typed encoders and the byte parser use; attach a
+    /// provenance-derived weight afterwards with [`with_weight`](Self::with_weight). [OPUS-4.8]
+    pub fn new(encoder: Encoder, metric: Metric, offset: usize, width: usize) -> Block {
+        Block { encoder, metric, offset, width, weight: None }
+    }
+
+    /// This block with its per-block fusion `weight` set to `w` (clamped to `>= 0` and finite; a
+    /// non-finite or negative `w` is coerced to the fail-open `1.0`, never propagated as a poison
+    /// value into the fusion path). [OPUS-4.8] sq-oy9ya
+    pub fn with_weight(mut self, w: f32) -> Block {
+        self.weight = Some(if w.is_finite() && w >= 0.0 { w } else { 1.0 });
+        self
+    }
+
     /// The half-open dimension span `[offset, offset + width)`.
     pub fn end(&self) -> usize {
         self.offset + self.width
     }
+
+    /// The resolved per-block fusion weight: the recorded [`weight`](Self::weight) if any, else the
+    /// fail-open default `1.0`. This is the scalar the query-time fusion path multiplies a node's
+    /// contribution from this modality by. [OPUS-4.8] sq-oy9ya
+    pub fn fusion_weight(&self) -> f32 {
+        self.weight.unwrap_or(1.0)
+    }
 }
+
+// [OPUS-4.8] sq-oy9ya: `weight` is layout METADATA, not part of the block's identity. Hand-write
+// `PartialEq`/`Eq` over only `(encoder, metric, offset, width)` so (a) `Block` stays `Eq` despite
+// carrying an `f32` field (a derive could not), and (b) the `SchemaHeader` round-trip `PartialEq`
+// contract holds regardless of whether a weight is attached — a header that round-trips its layout
+// is still equal even if one side carries a fusion weight and the other does not. (`Block` is not
+// used as a hash key anywhere, so no `Hash` impl is needed; the original type carried none.)
+impl PartialEq for Block {
+    fn eq(&self, other: &Block) -> bool {
+        self.encoder == other.encoder
+            && self.metric == other.metric
+            && self.offset == other.offset
+            && self.width == other.width
+    }
+}
+
+impl Eq for Block {}
 
 /// The **`.spqv` schema header** (design §3 "a per-store SCHEMA HEADER recording which
 /// predicate/datatype maps to which block offset, geometry, and metric"): the self-describing
@@ -488,15 +550,25 @@ pub struct SchemaHeader {
 
 /// Magic bytes for a serialised [`SchemaHeader`] sidecar — `"SPQS"` (sparq vectors **s**chema).
 pub const SPQS_MAGIC: [u8; 4] = *b"SPQS";
-/// On-disk/byte-string version of the [`SchemaHeader`] format.
-pub const SPQS_VERSION: u32 = 1;
+/// On-disk/byte-string version of the [`SchemaHeader`] format. **`2`** since [OPUS-4.8] sq-oy9ya:
+/// each block record gained a trailing 4-byte little-endian `f32` **fusion weight** (design §USE-1
+/// point 3). A **version-`1`** header — every header written before this field existed — still
+/// parses: its block records are the old 10-byte form and every block is read back with
+/// `weight: None` (the fail-open `1.0`), so old sidecars round-trip unchanged.
+pub const SPQS_VERSION: u32 = 2;
+/// Byte length of one serialised block record in a **version-1** [`SchemaHeader`]: `encoder(1) |
+/// metric(1) | offset(4) | width(4)` — no per-block fusion weight. Read for back-compat only.
+const SPQS_BLOCK_LEN_V1: usize = 10;
+/// Byte length of one serialised block record in a **version-2** [`SchemaHeader`]: the v1 record
+/// plus a trailing 4-byte little-endian `f32` fusion weight ([OPUS-4.8] sq-oy9ya).
+const SPQS_BLOCK_LEN_V2: usize = 14;
 
 impl SchemaHeader {
     /// Build a header from blocks given **in row order**, validating contiguity: the first block
     /// must start at `0`, each block must start exactly where the previous ended, every width must
     /// be `>= 1`, and the result covers `[0, dim)` with no gap or overlap. Returns `Err`
     /// describing the first violation — a malformed partition is a layout bug, never silently
-    /// accepted.
+    /// accepted. The blocks keep any attached per-block [`fusion weight`](Block::fusion_weight).
     pub fn new(blocks: Vec<Block>) -> Result<SchemaHeader, String> {
         let mut expected = 0usize;
         for (i, b) in blocks.iter().enumerate() {
@@ -550,9 +622,12 @@ impl SchemaHeader {
     }
 
     /// Serialise to a deterministic little-endian byte string: `magic | version | dim | n_blocks |
-    /// (encoder, metric, offset, width)*`. The inverse of [`from_bytes`](Self::from_bytes).
+    /// (encoder, metric, offset, width, weight)*`, where `weight` is a 4-byte little-endian `f32`
+    /// ([OPUS-4.8] sq-oy9ya — design §USE-1 point 3). An absent per-block weight (`None`)
+    /// serialises as the fail-open `1.0`, so a freshly-parsed header is byte-identical whether the
+    /// weight was explicit or defaulted. The inverse of [`from_bytes`](Self::from_bytes).
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(16 + self.blocks.len() * 10);
+        let mut out = Vec::with_capacity(16 + self.blocks.len() * SPQS_BLOCK_LEN_V2);
         out.extend_from_slice(&SPQS_MAGIC);
         out.extend_from_slice(&SPQS_VERSION.to_le_bytes());
         out.extend_from_slice(&(self.dim as u32).to_le_bytes());
@@ -562,6 +637,8 @@ impl SchemaHeader {
             out.push(metric_tag(b.metric));
             out.extend_from_slice(&(b.offset as u32).to_le_bytes());
             out.extend_from_slice(&(b.width as u32).to_le_bytes());
+            // The fusion weight (design §USE-1 point 3). `None` ≡ the fail-open 1.0.
+            out.extend_from_slice(&b.fusion_weight().to_le_bytes());
         }
         out
     }
@@ -569,6 +646,12 @@ impl SchemaHeader {
     /// Parse a byte string produced by [`to_bytes`](Self::to_bytes). Fail-closed: a bad magic,
     /// unknown version, truncated body, unknown tag, or a partition that does not validate via
     /// [`new`](Self::new) is an `Err`, never a silent partial parse.
+    ///
+    /// **Back-compatible** ([OPUS-4.8] sq-oy9ya): a **version-`1`** header (10-byte block records,
+    /// no fusion weight) parses with every block read back as `weight: None` (the fail-open `1.0`);
+    /// a **version-`2`** header (14-byte records) reads the trailing `f32` weight per block. A
+    /// non-finite or negative serialised weight is normalised to the fail-open `1.0` rather than
+    /// propagated (so a corrupt weight never poisons the fusion path).
     pub fn from_bytes(bytes: &[u8]) -> Result<SchemaHeader, String> {
         if bytes.len() < 16 {
             return Err("SchemaHeader: truncated header (< 16 bytes)".to_string());
@@ -577,25 +660,39 @@ impl SchemaHeader {
             return Err("SchemaHeader: bad magic".to_string());
         }
         let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-        if version != SPQS_VERSION {
-            return Err(format!("SchemaHeader: unsupported version {}", version));
-        }
+        // Record width is version-dependent: v1 has no per-block weight (10 bytes), v2 appends a
+        // 4-byte f32 weight (14 bytes). Any other version is rejected (fail-closed).
+        let record_len = match version {
+            1 => SPQS_BLOCK_LEN_V1,
+            2 => SPQS_BLOCK_LEN_V2,
+            other => return Err(format!("SchemaHeader: unsupported version {}", other)),
+        };
         let n_blocks = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
         let body = &bytes[16..];
-        if body.len() != n_blocks * 10 {
+        if body.len() != n_blocks * record_len {
             return Err(format!(
-                "SchemaHeader: body length {} != n_blocks*10 ({})",
+                "SchemaHeader: body length {} != n_blocks*{} ({})",
                 body.len(),
-                n_blocks * 10
+                record_len,
+                n_blocks * record_len
             ));
         }
         let mut blocks = Vec::with_capacity(n_blocks);
-        for chunk in body.chunks_exact(10) {
+        for chunk in body.chunks_exact(record_len) {
             let encoder = encoder_of_tag(chunk[0])?;
             let metric = metric_of_tag(chunk[1])?;
             let offset = u32::from_le_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]) as usize;
             let width = u32::from_le_bytes([chunk[6], chunk[7], chunk[8], chunk[9]]) as usize;
-            blocks.push(Block { encoder, metric, offset, width });
+            let mut block = Block::new(encoder, metric, offset, width);
+            if record_len == SPQS_BLOCK_LEN_V2 {
+                let w = f32::from_le_bytes([chunk[10], chunk[11], chunk[12], chunk[13]]);
+                // Only attach a non-trivial weight; a serialised 1.0 (or a corrupt value) stays
+                // `None` so a defaulted block round-trips to a defaulted block (PartialEq-stable).
+                if w.is_finite() && w >= 0.0 && w != 1.0 {
+                    block = block.with_weight(w);
+                }
+            }
+            blocks.push(block);
         }
         // Re-validate contiguity via `new`, which also recomputes `dim` from the blocks; cross-check
         // it against the stored dim field so a tampered header that lies about dim is rejected.
@@ -952,9 +1049,9 @@ mod tests {
 
     fn sample_header() -> SchemaHeader {
         SchemaHeader::new(vec![
-            Block { encoder: Encoder::Numeric, metric: Metric::Euclidean, offset: 0, width: 16 },
-            Block { encoder: Encoder::Date, metric: Metric::Euclidean, offset: 16, width: 8 },
-            Block { encoder: Encoder::Boolean, metric: Metric::Euclidean, offset: 24, width: 1 },
+            Block::new(Encoder::Numeric, Metric::Euclidean, 0, 16),
+            Block::new(Encoder::Date, Metric::Euclidean, 16, 8),
+            Block::new(Encoder::Boolean, Metric::Euclidean, 24, 1),
         ])
         .unwrap()
     }
@@ -971,18 +1068,13 @@ mod tests {
 
         // A gap is rejected.
         let gap = SchemaHeader::new(vec![
-            Block { encoder: Encoder::Numeric, metric: Metric::Euclidean, offset: 0, width: 4 },
-            Block { encoder: Encoder::Boolean, metric: Metric::Euclidean, offset: 8, width: 1 },
+            Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4),
+            Block::new(Encoder::Boolean, Metric::Euclidean, 8, 1),
         ]);
         assert!(gap.is_err(), "non-contiguous blocks must be rejected");
 
         // A zero-width block is rejected.
-        let zero = SchemaHeader::new(vec![Block {
-            encoder: Encoder::Numeric,
-            metric: Metric::Euclidean,
-            offset: 0,
-            width: 0,
-        }]);
+        let zero = SchemaHeader::new(vec![Block::new(Encoder::Numeric, Metric::Euclidean, 0, 0)]);
         assert!(zero.is_err(), "zero-width block must be rejected");
     }
 
@@ -993,8 +1085,8 @@ mod tests {
 
         // A non-Euclidean block makes whole-row L2/cosine a DETECTABLE error.
         let h = SchemaHeader::new(vec![
-            Block { encoder: Encoder::Numeric, metric: Metric::Euclidean, offset: 0, width: 4 },
-            Block { encoder: Encoder::Other, metric: Metric::NonEuclidean, offset: 4, width: 4 },
+            Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4),
+            Block::new(Encoder::Other, Metric::NonEuclidean, 4, 4),
         ])
         .unwrap();
         let err = h.check_euclidean().unwrap_err();
@@ -1040,5 +1132,103 @@ mod tests {
         }
         assert!(encoder_of_tag(99).is_err());
         assert!(metric_of_tag(99).is_err());
+    }
+
+    // ---- [OPUS-4.8] sq-oy9ya: per-block fusion weight (design §USE-1 point 3) ----
+
+    #[test]
+    fn block_fusion_weight_defaults_to_one_and_is_settable() {
+        // A freshly-constructed block carries no weight → the fail-open 1.0.
+        let b = Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4);
+        assert_eq!(b.weight, None);
+        assert_eq!(b.fusion_weight(), 1.0);
+
+        // with_weight records it and fusion_weight resolves it.
+        let w = b.with_weight(0.3);
+        assert_eq!(w.weight, Some(0.3));
+        assert!((w.fusion_weight() - 0.3).abs() < 1e-6);
+
+        // A non-finite or negative weight is coerced to the fail-open 1.0, never propagated.
+        assert_eq!(b.with_weight(f32::NAN).fusion_weight(), 1.0);
+        assert_eq!(b.with_weight(-2.0).fusion_weight(), 1.0);
+        assert_eq!(b.with_weight(f32::INFINITY).fusion_weight(), 1.0);
+        // Zero is a legitimate (muting) weight and is kept.
+        assert_eq!(b.with_weight(0.0).fusion_weight(), 0.0);
+    }
+
+    #[test]
+    fn block_weight_is_not_part_of_identity() {
+        // Two blocks with the SAME layout but DIFFERENT weights are equal — weight is layout
+        // metadata, not identity. This is what keeps the SchemaHeader round-trip PartialEq contract
+        // (tests/structure_shacl.rs + the byte round-trip) stable across weight presence.
+        let plain = Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4);
+        let weighted = plain.with_weight(0.2);
+        assert_eq!(plain, weighted, "weight must not change block identity (PartialEq)");
+
+        // And a header is equal regardless of one side carrying weights.
+        let h_plain = SchemaHeader::new(vec![plain]).unwrap();
+        let h_weighted = SchemaHeader::new(vec![weighted]).unwrap();
+        assert_eq!(h_plain, h_weighted, "header identity ignores per-block weight");
+    }
+
+    #[test]
+    fn schema_header_weight_byte_roundtrip() {
+        // A header with a non-trivial per-block weight round-trips the weight through bytes.
+        let weighted = SchemaHeader::new(vec![
+            Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4).with_weight(0.25),
+            Block::new(Encoder::Boolean, Metric::Euclidean, 4, 1),
+        ])
+        .unwrap();
+        let back = SchemaHeader::from_bytes(&weighted.to_bytes()).unwrap();
+        assert_eq!(back, weighted, "layout round-trips (identity ignores weight)");
+        // The resolved fusion weight survives the round-trip.
+        assert!((back.blocks()[0].fusion_weight() - 0.25).abs() < 1e-6);
+        assert_eq!(back.blocks()[1].fusion_weight(), 1.0);
+
+        // A defaulted (weight-None) block round-trips to a defaulted block: a serialised 1.0 reads
+        // back as None, so the value is PartialEq-stable AND fusion_weight-stable.
+        let plain = SchemaHeader::new(vec![Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4)])
+            .unwrap();
+        let back_plain = SchemaHeader::from_bytes(&plain.to_bytes()).unwrap();
+        assert_eq!(back_plain.blocks()[0].weight, None);
+        assert_eq!(back_plain.blocks()[0].fusion_weight(), 1.0);
+    }
+
+    #[test]
+    fn schema_header_v1_back_compat_reads_weight_none() {
+        // A version-1 header (10-byte block records, NO per-block weight) must still parse — every
+        // header written before the fusion weight existed. Build a v1 byte string by hand from the
+        // current header's logical layout, then assert it parses with weight: None everywhere.
+        let h = sample_header();
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(&SPQS_MAGIC);
+        v1.extend_from_slice(&1u32.to_le_bytes()); // version 1
+        v1.extend_from_slice(&(h.dim() as u32).to_le_bytes());
+        v1.extend_from_slice(&(h.blocks().len() as u32).to_le_bytes());
+        for b in h.blocks() {
+            v1.push(encoder_tag(b.encoder));
+            v1.push(metric_tag(b.metric));
+            v1.extend_from_slice(&(b.offset as u32).to_le_bytes());
+            v1.extend_from_slice(&(b.width as u32).to_le_bytes());
+            // NO weight bytes — the v1 record is exactly 10 bytes.
+        }
+        let back = SchemaHeader::from_bytes(&v1).expect("v1 header must parse");
+        assert_eq!(back, h, "v1 layout must equal the current header");
+        for b in back.blocks() {
+            assert_eq!(b.weight, None, "v1 blocks read back with no weight (fail-open 1.0)");
+            assert_eq!(b.fusion_weight(), 1.0);
+        }
+        // A v1 header with a wrong body length (claims one too many blocks) is still fail-closed.
+        let mut bad = v1.clone();
+        bad[12] = bad[12].wrapping_add(1);
+        assert!(SchemaHeader::from_bytes(&bad).is_err(), "v1 body-length mismatch rejected");
+    }
+
+    #[test]
+    fn schema_header_unknown_version_rejected() {
+        let h = sample_header();
+        let mut bytes = h.to_bytes();
+        bytes[4] = 99; // an unknown version
+        assert!(SchemaHeader::from_bytes(&bytes).is_err(), "unknown version must fail-closed");
     }
 }

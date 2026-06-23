@@ -1,0 +1,32 @@
+# Feature-matrix fragment for `sparq-solid`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-h3uk: the ODRL->AUTH_GRAPH bridge (pulls the optional
+# sparq-policy ODRL evaluator) — keeps the opt-in ON path from rotting.
+- name: "sparq-solid (odrl-bridge)"
+  crate: "sparq-solid"
+  features: "odrl-bridge"
+  test: true
+
+# [OPUS-4.8] sq-58mh: sparq-solid STATEFUL `odrl:count` wired THROUGH the bridge
+# (a bridged grant self-retracts on exhaustion). The whole
+# tests/odrl_count_bridge.rs file is `#![cfg(feature = "count-enforcement")]`
+# and `materialize_odrl_permission_counted` + the `count` module are
+# feature-gated, so without this leg the bridge's count path NEVER runs. The
+# feature implies `odrl-bridge` + `sparq-policy/count-enforcement` (std-only, no
+# new dep) — keeps the opt-in ON path from rotting.
+- name: "sparq-solid (count-enforcement)"
+  crate: "sparq-solid"
+  features: "count-enforcement"
+  test: true
