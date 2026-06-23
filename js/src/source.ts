@@ -4,12 +4,14 @@
 // (https://rdf.js.org/stream-spec/). This completes the term/factory/dataset surface with the
 // Stream/Source/Sink corner the conformance audit flagged.
 //
-// The store itself exposes the synchronous, materialised `match(...)` → `Quad[]` shape (the
-// shape SPARQL consumers want); these adapters re-view that as the spec's EVENT-BASED `Stream`
-// (a `data`-per-quad-then-`end` EventEmitter) WITHOUT pulling in `node:events`, so they run
-// unchanged in the browser.
+// `Source.match` re-views the store's `matchStream(...)` GENERATOR — which pulls solutions from
+// the engine in ~64 KiB chunks (see {@link SparqStore.queryBindingsStream}) rather than
+// materialising the whole result — as the spec's EVENT-BASED `Stream` (a `data`-per-quad-then-
+// `end` EventEmitter). The stream PULLS the next quad from that iterator on demand, so a very
+// large `match` is never held whole on the JS side. It does this WITHOUT pulling in
+// `node:events`, so it runs unchanged in the browser.
 import type * as RDF from '@rdfjs/types';
-import { DefaultGraph, NamedNode, type Quad } from './terms.js';
+import { DefaultGraph, NamedNode } from './terms.js';
 import type { SparqStore } from './store.js';
 
 const DEFAULT_GRAPH = new DefaultGraph();
@@ -17,73 +19,104 @@ const DEFAULT_GRAPH = new DefaultGraph();
 /** RDF/JS `match()` term position: a concrete term, or `null`/`undefined` for a wildcard. */
 type MatchTerm = RDF.Term | null | undefined;
 
-/** An event listener registered on {@link QuadStream}. */
+/**
+ * An event listener registered on {@link QuadStream}. The RDF/JS Stream events this class emits
+ * (`data` / `end` / `error`) all carry AT MOST ONE argument (the quad, or the error — `end`
+ * carries none), so the listener takes a single optional argument, matching how {@link
+ * QuadStream.emit} invokes it.
+ */
 type StreamListener = (arg?: unknown) => void;
 
 /**
- * A minimal, browser-safe RDF/JS `Stream<Quad>` over an in-memory array of quads. It implements
- * exactly the `EventEmitter` subset the RDF/JS Stream spec exercises (`on` / `once` /
+ * A minimal, browser-safe RDF/JS `Stream<Quad>` that PULLS quads lazily from an underlying
+ * iterable (a generator over the store's match) rather than holding a materialised array. It
+ * implements exactly the `EventEmitter` subset the RDF/JS Stream spec exercises (`on` / `once` /
  * `removeListener` / `off` / `emit` / `read`) rather than depending on `node:events`, so it runs
- * unchanged in the browser. It emits a `data` event per quad then `end` on the next microtask, so
- * listeners attached synchronously after construction still receive every event; it is also
- * `read()`-able per the spec (pulls the next buffered quad, or `null`).
+ * unchanged in the browser. It pulls one quad at a time: `read()` returns the next quad (or
+ * `null` at end), and on the next microtask it drains the iterator, emitting a `data` event per
+ * quad then `end` (or `error` if the iterator throws). Listeners attached synchronously after
+ * construction still receive every event.
  *
  * It implements the `EventEmitter` SUBSET the RDF/JS Stream spec actually exercises rather than
  * the full `node:events` surface (so it stays browser-safe); call sites bridge to the full
  * `RDF.Stream` type via {@link asStream}.
  */
 export class QuadStream {
-  readonly #quads: RDF.Quad[];
-  #i = 0;
+  readonly #iterator: Iterator<RDF.Quad>;
+  #done = false;
   #flushed = false;
   readonly #listeners = new Map<string, Set<StreamListener>>();
 
-  constructor(quads: RDF.Quad[]) {
-    this.#quads = quads;
+  /**
+   * @param source the quads to stream — any iterable (a generator/iterator-backed source is
+   *   pulled lazily one quad at a time; an array is iterated without being copied). Defaults to
+   *   an empty stream (for the consume/`removeMatches` paths that only ever emit `end`/`error`).
+   */
+  constructor(source: Iterable<RDF.Quad> = []) {
+    this.#iterator = source[Symbol.iterator]();
     queueMicrotask(() => this.#flush());
   }
 
+  /** Pulls the next quad from the underlying source, or `null` once exhausted (per the spec). */
   read(): RDF.Quad | null {
-    return this.#i < this.#quads.length ? this.#quads[this.#i++]! : null;
+    if (this.#done) return null;
+    const next = this.#iterator.next();
+    if (next.done) {
+      this.#done = true;
+      return null;
+    }
+    return next.value;
   }
 
-  on(event: string | symbol, listener: (...args: never[]) => void): this {
+  on(event: string | symbol, listener: StreamListener): this {
     const key = String(event);
     let set = this.#listeners.get(key);
     if (!set) this.#listeners.set(key, (set = new Set()));
-    set.add(listener as StreamListener);
+    set.add(listener);
     return this;
   }
 
-  once(event: string | symbol, listener: (...args: never[]) => void): this {
+  once(event: string | symbol, listener: StreamListener): this {
     const wrapper: StreamListener = (arg) => {
-      this.removeListener(event, wrapper as (...args: never[]) => void);
-      (listener as StreamListener)(arg);
+      this.removeListener(event, wrapper);
+      listener(arg);
     };
-    return this.on(event, wrapper as (...args: never[]) => void);
+    return this.on(event, wrapper);
   }
 
-  removeListener(event: string | symbol, listener: (...args: never[]) => void): this {
-    this.#listeners.get(String(event))?.delete(listener as StreamListener);
+  removeListener(event: string | symbol, listener: StreamListener): this {
+    this.#listeners.get(String(event))?.delete(listener);
     return this;
   }
 
-  off(event: string | symbol, listener: (...args: never[]) => void): this {
+  off(event: string | symbol, listener: StreamListener): this {
     return this.removeListener(event, listener);
   }
 
-  emit(event: string | symbol, ...args: unknown[]): boolean {
+  emit(event: string | symbol, arg?: unknown): boolean {
     const set = this.#listeners.get(String(event));
     if (!set || set.size === 0) return false;
-    for (const listener of [...set]) listener(args[0]);
+    // Iterate the listener Set directly: a `once` wrapper deletes itself before invoking the
+    // user callback, and deleting the current entry mid-iteration is well-defined for a Set.
+    for (const listener of set) listener(arg);
     return true;
   }
 
+  /** Drains the underlying iterator on the microtask, emitting `data` per quad then `end`. */
   #flush(): void {
     if (this.#flushed) return;
     this.#flushed = true;
-    for (const q of this.#quads) this.emit('data', q);
-    this.emit('end');
+    try {
+      for (let next = this.#iterator.next(); !next.done; next = this.#iterator.next()) {
+        this.#done = false;
+        this.emit('data', next.value);
+      }
+      this.#done = true;
+      this.emit('end');
+    } catch (err) {
+      this.#done = true;
+      this.emit('error', err instanceof Error ? err : new Error(String(err)));
+    }
   }
 }
 
@@ -118,9 +151,14 @@ export class SparqSource implements RDF.Store<RDF.Quad> {
     return this.#store;
   }
 
-  /** RDF/JS `Source.match`: a quad `Stream` of the quads matching the pattern (wildcards are `null`). */
+  /**
+   * RDF/JS `Source.match`: a quad `Stream` of the quads matching the pattern (wildcards are
+   * `null`). The stream PULLS lazily from the store's {@link SparqStore.matchStream} generator —
+   * which streams solutions from the engine in ~64 KiB chunks — so a very large match is never
+   * materialised whole on the JS side.
+   */
   match(subject?: MatchTerm, predicate?: MatchTerm, object?: MatchTerm, graph?: MatchTerm): RDF.Stream<RDF.Quad> {
-    return asStream(new QuadStream(this.#store.match(subject, predicate, object, graph) as Quad[]));
+    return asStream(new QuadStream(this.#store.matchStream(subject, predicate, object, graph)));
   }
 
   /**
@@ -139,7 +177,7 @@ export class SparqSource implements RDF.Store<RDF.Quad> {
 
   /** RDF/JS `Store.removeMatches`: removes every quad matching the pattern; signals `end` when done. */
   removeMatches(subject?: MatchTerm, predicate?: MatchTerm, object?: MatchTerm, graph?: MatchTerm): RDF.Stream<RDF.Quad> {
-    const out = new QuadStream([]);
+    const out = new QuadStream();
     queueMicrotask(() => {
       try {
         const toRemove = this.#store.match(subject, predicate, object, graph);
@@ -164,7 +202,7 @@ export class SparqSource implements RDF.Store<RDF.Quad> {
   }
 
   #consume(stream: RDF.Stream<RDF.Quad>, apply: (quads: RDF.Quad[]) => void): RDF.Stream<RDF.Quad> {
-    const out = new QuadStream([]);
+    const out = new QuadStream();
     const buffered: RDF.Quad[] = [];
     stream.on('data', (quad: RDF.Quad) => buffered.push(quad));
     stream.on('error', (err: Error) => out.emit('error', err));

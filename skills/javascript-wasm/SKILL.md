@@ -83,6 +83,7 @@ validate(data: string, shapes: string, format?: RdfFormat): ValidationReport  //
 
 // RDF/JS quad lookup (null/undefined/Variable = wildcard; generated SELECT under the hood)
 match(s?, p?, o?, g?): Quad[]
+matchStream(s?, p?, o?, g?): Generator<Quad>          // lazy match(): pulls from the engine in chunks, never materialised whole (backs Source.match)
 countQuads(s?, p?, o?, g?): number
 
 // Mutation (all IN PLACE through the engine's O(batch) delta overlay)

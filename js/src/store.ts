@@ -545,7 +545,20 @@ export class SparqStore {
    * there.
    */
   match(subject?: MatchTerm, predicate?: MatchTerm, object?: MatchTerm, graph?: MatchTerm): Quad[] {
-    if (graph && !['Variable', 'DefaultGraph', 'NamedNode', 'BlankNode'].includes(graph.termType)) return [];
+    return [...this.matchStream(subject, predicate, object, graph)];
+  }
+
+  /**
+   * [OPUS-4.8] sq-iwhl8 (#1116): the LAZY counterpart of {@link match} — a generator that yields
+   * one matching {@link Quad} at a time, PULLING solutions from the engine via
+   * {@link queryBindingsStream} (which crosses the wasm boundary in ~64 KiB chunks) instead of
+   * materialising the whole result. The semantics are identical to {@link match} (`match` is
+   * `[...matchStream(...)]`); the difference is that a very large match is never held whole on the
+   * JS side. This backs the RDF/JS `Source.match` quad `Stream`, which pulls quads on demand.
+   * `null`/`undefined`/Variable positions are wildcards; blank-node positions are matched by label.
+   */
+  *matchStream(subject?: MatchTerm, predicate?: MatchTerm, object?: MatchTerm, graph?: MatchTerm): Generator<Quad, void, undefined> {
+    if (graph && !['Variable', 'DefaultGraph', 'NamedNode', 'BlankNode'].includes(graph.termType)) return;
 
     const s = position(subject, 's');
     const p = position(predicate, 'p');
@@ -556,8 +569,7 @@ export class SparqStore {
     const pattern = `${allFixed ? '?s' : s.sparql} ${p.sparql} ${o.sparql}`;
     const sparql = `SELECT * WHERE ${SparqStore.#graphScope(pattern, graph)}`;
 
-    const quads: Quad[] = [];
-    for (const row of this.queryBindings(sparql)) {
+    for (const row of this.queryBindingsStream(sparql)) {
       const subjectTerm = s.fixed && !allFixed ? s.fixed : row.get('s')!;
       const predicateTerm = p.fixed ?? row.get('p')!;
       const objectTerm = o.fixed ?? row.get('o')!;
@@ -570,16 +582,13 @@ export class SparqStore {
       if (object?.termType === 'BlankNode' && !object.equals(objectTerm)) continue;
       if (graph?.termType === 'BlankNode' && !graph.equals(graphTerm)) continue;
       if (allFixed && subject && !subject.equals(subjectTerm)) continue;
-      quads.push(
-        new Quad(
-          subjectTerm as RDF.Quad_Subject,
-          predicateTerm as RDF.Quad_Predicate,
-          objectTerm as RDF.Quad_Object,
-          graphTerm,
-        ),
+      yield new Quad(
+        subjectTerm as RDF.Quad_Subject,
+        predicateTerm as RDF.Quad_Predicate,
+        objectTerm as RDF.Quad_Object,
+        graphTerm,
       );
     }
-    return quads;
   }
 
   /** `match(…).length` without materialising terms where possible. */
