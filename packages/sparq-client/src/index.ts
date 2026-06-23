@@ -584,6 +584,20 @@ export {
   formatSparqlJson,
 } from "./results.js";
 
+// [OPUS-4.8] sq-9w4t (#817) — paginated result rendering + a bounded read-ahead page cache:
+// slice ONE display-page of a kept SELECT result, warming ~2 pages ahead so the next page is
+// instant, while holding at most a bounded window of shaped slices. Pure shaping over the rows
+// already streamed into JS (the engine result path is still materialised — the demand-driven
+// EVALUATION half is gated on a pull/iterator exec model; see results.ts + gui-design.md §A.4).
+export {
+  type ResultPage,
+  type PageCache,
+  pageCount,
+  clampPage,
+  paginateTable,
+  createPageCache,
+} from "./results.js";
+
 // ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-2mke — endpoint mode: the SPARQL 1.1 Protocol HTTP client.
 // The companion to the in-tab WASM `Store` above — run the SAME editor against any
