@@ -65,6 +65,20 @@ secprop-admissibility = ["secprop-vocab"]
 # graph; the audit is a small fixed triple set emitted directly). Strictly additive: the
 # lean default build is byte-identical with it OFF.
 delegation-prov = []
+# [OPUS-4.8] sq-pfae.7 — live credential status / revocation over a W3C Bitstring Status
+# List + a minimal PROV-O denial justification (the P6 status stratum). Fetch (pluggable
+# `StatusListResolver`) + decode (hand-rolled multibase base64url/base58btc over a pluggable
+# `GzipDecoder` seam) a status list, gate derivations **fail-closed on set/unknown/stale**,
+# and render a minimal `prov:`/`trust:` justification per allow OR deny. The base layer is
+# DEPENDENCY-FREE (the multibase decode + the PROV-O render are pure `oxrdf` over a
+# caller-supplied decoder) — NO new dependency on the lean default build, strictly additive
+# (byte-identical with it OFF).
+status-list = []
+# The built-in `flate2` GZIP decoder (`Flate2GzipDecoder`) for the spec-mandated GZIP
+# `encodedList` payload. Nested under `status-list`: it pulls `flate2` ONLY when a caller
+# opts into the convenience codec; the plain `status-list` feature stays dependency-free and
+# decodes over a caller-supplied `GzipDecoder`.
+status-list-flate2 = ["status-list", "dep:flate2"]
 
 [dependencies]
 sparq-core = { path = "../sparq-core", default-features = false }
@@ -80,6 +94,10 @@ oxrdf.workspace = true
 # OPTIONAL — `did` feature only. Parses a fetched `did:web` DID document (JSON). The
 # `did:key` path needs no JSON; the default build pulls neither.
 serde_json = { version = "1", optional = true }
+# OPTIONAL — `status-list-flate2` feature only. The built-in GZIP decoder for the
+# spec-mandated GZIP `encodedList` payload (`sq-pfae.7`). The plain `status-list` feature is
+# dependency-free over a caller-supplied decoder; the default build pulls neither.
+flate2 = { version = "1", optional = true }
 
 # Test-only: parse-validate the published machine-readable vocabulary
 # `ontologies/trust/trust.ttl` so the Turtle a working group reads stays valid

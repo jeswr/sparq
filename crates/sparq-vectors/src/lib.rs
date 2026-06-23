@@ -38,11 +38,11 @@ pub mod units;
 // a parsed `sparq-shacl` shapes model (no SHACL changes — a read-only reader). `structure-shacl`
 // feature only: it is the ONLY feature pulling `sparq-shacl` into this crate's graph, so neither the
 // default build nor the lean `structure` feature gains a SHACL/engine dependency.
-#[cfg(feature = "structure-shacl")]
-pub mod shacl_priors;
 #[cfg(feature = "filtered-ann")]
 pub mod filter;
 pub mod fingerprint;
+#[cfg(feature = "structure-shacl")]
+pub mod shacl_priors;
 // [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e): the P4 structure-aware-vectorisation FLEXIBLE
 // MINIMAL-AND-COMPLETE GROUNDING selector + verbaliser — a modality dispatcher on the consumer's
 // declared output type producing the minimal-and-complete object (subgraph / typed sub-vector / NL
@@ -51,6 +51,14 @@ pub mod fingerprint;
 // carries zero grounding code.
 #[cfg(feature = "structure")]
 pub mod grounding;
+// [OPUS-4.8] sq-mztg8.1 (epic sq-mztg8, design research/fo-llm-bridge.md §2.3/§3.3/§6 Phase 3):
+// the READ-PATH URI-HIDING "compose" step + a closed NL→NL A/B fidelity/cost harness — present an
+// answer-row binding to the agent as a label/grounded view instead of a raw IRI, behind the
+// #1074 echo/confidence envelope, and measure (model-free) whether the hidden view preserves
+// answer identity. `compose` feature only (implies `structure`, reusing `verbalize`); the default
+// build carries zero compose code and the accuracy half (real-model A/B) is registered UNMEASURED.
+#[cfg(feature = "compose")]
+pub mod compose;
 pub mod fuse;
 pub mod import;
 pub mod labels;
@@ -124,13 +132,13 @@ pub use cost::{
 };
 // [OPUS-4.8] (sq-ip3a) Pluggable ANN backend + iterative over-fetch filtered path — `filtered-ann`
 // only. `ApproxBackend` is additionally `approx-ann` (re-exported below).
+#[cfg(all(feature = "filtered-ann", feature = "approx-ann"))]
+pub use backend::ApproxBackend;
 #[cfg(feature = "filtered-ann")]
 pub use backend::{
     nearest_filtered_overfetch, nearest_filtered_overfetch_default, AnnBackend, ExactBackend,
     DEFAULT_MAX_ROUNDS,
 };
-#[cfg(all(feature = "filtered-ann", feature = "approx-ann"))]
-pub use backend::ApproxBackend;
 pub use fingerprint::{check_against, Artifact, CheckResult, Fingerprint, FINGERPRINT_LEN};
 pub use fuse::{fuse_rrf, fuse_rrf_weighted, fuse_scores, hybrid_search, Retriever, RRF_K};
 pub use import::{ImportBinding, ImportSpec, MAX_NPY_HEADER_LEN};
@@ -175,9 +183,9 @@ pub use provenance::{ProvenanceWeights, WeightConfig, WeightMode};
 #[cfg(feature = "kge")]
 pub use eval::{
     run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, run_weight_ablation,
-    synthetic_gufo_ttl, synthetic_gufo_ttl_sized, synthetic_provenance_ttl, synthetic_relational_ttl,
-    AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, PairedAblation,
-    PairedDelta, Splits, WeightAblation, SCHEMA_PREDICATES,
+    synthetic_gufo_ttl, synthetic_gufo_ttl_sized, synthetic_provenance_ttl,
+    synthetic_relational_ttl, AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics,
+    MultiSeedCell, PairedAblation, PairedDelta, Splits, WeightAblation, SCHEMA_PREDICATES,
 };
 #[cfg(feature = "kge")]
 pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};

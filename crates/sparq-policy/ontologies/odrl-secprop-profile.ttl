@@ -1,0 +1,156 @@
+# odrl-secprop-profile.ttl — the sparq security-property ODRL profile.
+#
+# [OPUS-4.8] sq-uor3g (epic sq-0dksu, Phase 4; design record
+# research/security-properties-ontology-design.md §4.3.1 + §9). 🤖 SPARQ agent —
+# security-properties ontology. Written while Fable unavailable; flag for re-review
+# when Fable returns.
+#
+# WHAT THIS IS. A tiny, standards-conformant W3C ODRL 2.2 *profile* document that
+# declares the custom `secx:requires…` **leftOperands** the privacy-preference
+# bridge uses to express "admit only a proof method whose security posture meets
+# THIS bar" (design §4.3.1). It is REQUIRED, not decorative: a `rightOperand`
+# natively accepts any IRI with no declaration, but a custom `leftOperand` MUST be
+# declared in a published ODRL profile (as `owl:NamedIndividual, odrl:LeftOperand,
+# skos:Concept` with `rdfs:isDefinedBy` → the profile) and a policy using them must
+# assert `odrl:profile <…/odrl-secprop-profile#>` — a conforming ODRL processor MAY
+# reject an undeclared leftOperand. Real precedents: the ODRL Regulatory-Compliance
+# Profile and the 2025 Spatial-Axis Profile (15 custom leftOperands).
+#
+# WHAT IT IS NOT. This profile is the BRIDGE VOCABULARY only — it maps each
+# leftOperand to the `secx:` security-property dimension it ranges over
+# (`secx:overDimension`). It does NOT itself perform the admissibility reduction
+# (that is the N3 ruleset, Phase 2, sq-ufsi9, over the per-method annotation graph,
+# Phase 3, sq-bevd3) and it makes NO security claim about any sparq method. Whether a
+# method actually HAS a property is recorded — with its epistemic basis — by the
+# annotation graph; sparq's whole ZK estate is research-grade and NOT externally
+# audited (bead sq-qhy4). This document only NAMES the requireable dimensions.
+#
+# DESUGARING (design §4.5). Each `secx:requiresX` leftOperand is convenience sugar
+# for the single generic primitive "a constraint over the dimension X": the one
+# `secx:overDimension` fact per leftOperand is what the admissibility rule reads, so
+# a working group standardises only the generic `hasProperty`/`overDimension`/
+# `atLeast` machinery, not one bespoke rule per leftOperand. ONE rule covers all.
+#
+# This file is pinned byte-for-byte to the Rust constants in
+# `crates/sparq-policy/src/secprop.rs` by the `secprop` module's drift tests (the
+# `secprop-leftoperands` feature) — the two cannot diverge.
+
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix secx: <https://w3id.org/zkp-sparql/sec-prop#> .   # the sparq sec-prop: extension (design §4.1)
+@prefix sparqorl: <https://sparq.dev/ns/odrl-secprop-profile#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+
+# --- the profile resource ----------------------------------------------------
+
+<https://sparq.dev/ns/odrl-secprop-profile#> a odrl:Profile ;
+  rdfs:label "sparq security-property ODRL profile"@en-GB ;
+  dcterms:description """Declares the custom secx:requires… leftOperands that let a
+W3C ODRL 2.2 policy express a privacy/security preference over the security
+properties of a ZK proof method (the design §4.3.1 admissibility bridge). A policy
+using any of these leftOperands MUST assert `odrl:profile
+<https://sparq.dev/ns/odrl-secprop-profile#>`. Each leftOperand carries one
+`secx:overDimension` fact naming the security-property dimension it ranges over; the
+right-operand of such a constraint is a level IRI (or a numeric parameter) of that
+dimension. This profile is research-grade and asserts NO security property of any
+method (sq-qhy4)."""@en-GB ;
+  rdfs:seeAlso <https://w3id.org/zkp-sparql/sec-prop#> .
+
+# --- the secx: dimension-mapping property (the single primitive) -------------
+# One fact per leftOperand maps it to the dimension a constraint over it ranges
+# over. The admissibility rule (Phase 2) reads ONLY this property, so adding a new
+# requireable dimension is one leftOperand + one overDimension fact — no new rule.
+
+secx:overDimension a owl:ObjectProperty ;
+  rdfs:label "over dimension"@en-GB ;
+  rdfs:comment "Maps a secx:requires… ODRL leftOperand to the secx: security-property dimension a constraint over it ranges over."@en-GB ;
+  rdfs:range secx:SecurityProperty .
+
+# --- the requireable leftOperands (one per requireable dimension) ------------
+# Each is `owl:NamedIndividual, odrl:LeftOperand, skos:Concept` with
+# `rdfs:isDefinedBy` → this profile (the ODRL-profile declaration contract), plus
+# its `secx:overDimension` fact. The right-operand of a constraint over one of these
+# is a level IRI of the named dimension (e.g. secx:CrossPresentation) or, for the
+# parametric dimensions, a numeric literal (e.g. a secx:nistLevel / secx:anonymitySet).
+
+secx:requiresUnlinkabilityScope a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires unlinkability scope"@en-GB ;
+  secx:overDimension secx:UnlinkabilityScope .
+
+secx:requiresUnlinkabilityStrength a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires unlinkability strength"@en-GB ;
+  secx:overDimension secx:UnlinkabilityStrength .
+
+secx:requiresPostQuantumForgery a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires post-quantum forgery resistance"@en-GB ;
+  secx:overDimension secx:PostQuantumForgery .
+
+secx:requiresPostQuantumSnooping a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires post-quantum snooping resistance"@en-GB ;
+  secx:overDimension secx:PostQuantumSnooping .
+
+secx:requiresZeroKnowledge a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires zero-knowledge type"@en-GB ;
+  secx:overDimension secx:ZeroKnowledgeType .
+
+secx:requiresSoundness a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires soundness"@en-GB ;
+  secx:overDimension secx:Soundness .
+
+secx:requiresCompleteness a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires completeness"@en-GB ;
+  secx:overDimension secx:Completeness .
+
+secx:requiresHiding a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires hiding"@en-GB ;
+  secx:overDimension secx:Hiding .
+
+secx:requiresBinding a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires binding"@en-GB ;
+  secx:overDimension secx:Binding .
+
+secx:requiresAnonymity a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires anonymity"@en-GB ;
+  secx:overDimension secx:Anonymity .
+
+secx:requiresSelectiveDisclosure a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires selective disclosure"@en-GB ;
+  secx:overDimension secx:SelectiveDisclosure .
+
+secx:requiresSingleUse a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires single use"@en-GB ;
+  secx:overDimension secx:SingleUse .
+
+secx:requiresSetup a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires setup model"@en-GB ;
+  secx:overDimension secx:Setup .
+
+secx:requiresInteractivity a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires interactivity"@en-GB ;
+  secx:overDimension secx:Interactivity .
+
+# The CONSERVATIVE assurance gate — opt in to "only audited / proven claims count".
+# `requiresAssurance gteq secx:Proven` mechanically removes every unaudited sparq
+# method from the admissible set (no special-casing): this is how the open external
+# audit (sq-qhy4) enters the admissibility DATA FLOW, not merely the prose.
+secx:requiresAssurance a owl:NamedIndividual, odrl:LeftOperand, skos:Concept ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/odrl-secprop-profile#> ;
+  skos:prefLabel "requires assurance level"@en-GB ;
+  secx:overDimension secx:AssuranceLevel .
