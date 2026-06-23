@@ -724,4 +724,157 @@ mod tests {
         );
         assert!(multiset_eq(&got, &oracle));
     }
+
+    // ============================================================================
+    // [OPUS-4.8] sq-bif — correctness suite: the public `Tuple` value type's documented
+    // invariants (canonical variable-sorted bindings, duplicate-variable-keeps-first,
+    // `get` lookup incl. the missing-var `None`), the `encode`/`decode` spill round-trip
+    // (incl. the previously-uncovered empty-tuple line), and the load-bearing arrival-order
+    // independence of `merge_ordered`. These drive the REAL operator code and each asserts a
+    // specific documented behaviour a regression would break — not a "does not panic".
+    // ============================================================================
+
+    // ---- `Tuple::bindings` is in canonical *variable-sorted* order regardless of the input
+    //      order. This is load-bearing: equal tuples must be byte-identical so spill/compare
+    //      and the `PartialEq` used by the multiset oracle agree. Two tuples built from the
+    //      same pairs in different orders MUST be equal.
+    #[test]
+    fn tuple_bindings_are_canonical_and_order_independent() {
+        // Built object-first then subject-first — the canonical form sorts by variable name.
+        let a = Tuple::new([
+            (Var::new("z"), "26".to_string()),
+            (Var::new("a"), "1".to_string()),
+            (Var::new("m"), "13".to_string()),
+        ]);
+        // Bindings come back ascending by variable name (a, m, z), values carried along.
+        assert_eq!(
+            a.bindings(),
+            &[
+                (Var::new("a"), "1".to_string()),
+                (Var::new("m"), "13".to_string()),
+                (Var::new("z"), "26".to_string()),
+            ]
+        );
+        // A different *insertion* order yields an EQUAL tuple (canonicalisation is total).
+        let b = Tuple::new([
+            (Var::new("m"), "13".to_string()),
+            (Var::new("z"), "26".to_string()),
+            (Var::new("a"), "1".to_string()),
+        ]);
+        assert_eq!(
+            a, b,
+            "tuple equality is insertion-order-independent (canonical)"
+        );
+        // …and they encode to byte-identical lines (the property the spill path relies on).
+        assert_eq!(a.encode(), b.encode());
+    }
+
+    // ---- `Tuple::new` keeps the FIRST value on a duplicate variable (documented). A regression
+    //      to last-wins would silently change join results, so assert the exact retained value.
+    #[test]
+    fn tuple_new_duplicate_variable_keeps_first_value() {
+        let dup = Tuple::new([
+            (Var::new("s"), "first".to_string()),
+            (Var::new("s"), "second".to_string()), // dropped — first wins.
+            (Var::new("o"), "x".to_string()),
+        ]);
+        assert_eq!(dup.get(&Var::new("s")), Some("first"));
+        // Exactly one binding survives for the duplicated variable (plus the unique `o`).
+        assert_eq!(dup.bindings().len(), 2);
+    }
+
+    // ---- `Tuple::get` returns the bound value for a present variable and `None` for an absent
+    //      one (the key/merge logic depends on this distinction).
+    #[test]
+    fn tuple_get_present_and_absent() {
+        let tup = t(&[("s", "alice"), ("o", "bob")]);
+        assert_eq!(tup.get(&Var::new("s")), Some("alice"));
+        assert_eq!(tup.get(&Var::new("o")), Some("bob"));
+        assert_eq!(
+            tup.get(&Var::new("missing")),
+            None,
+            "an unbound variable looks up to None"
+        );
+    }
+
+    // ---- `encode` → `decode` is a round-trip for a non-trivial multi-binding tuple (the spill
+    //      backing store serialises with `encode` and rehydrates with `decode`, so a regression
+    //      here would corrupt spilled partitions and break the spill correctness invariant).
+    #[test]
+    fn tuple_encode_decode_round_trip() {
+        let original = t(&[("s", "http://ex/a"), ("p", "1"), ("o", "literal value")]);
+        let line = original.encode();
+        let back = Tuple::decode(&line);
+        assert_eq!(back, original, "encode∘decode is the identity on a tuple");
+        // The decoded tuple is itself canonical (decode re-canonicalises defensively).
+        assert_eq!(back.bindings(), original.bindings());
+    }
+
+    // ---- `decode("")` yields the EMPTY tuple (previously-uncovered empty-line branch). An empty
+    //      tuple — zero bindings — is what a key-less / projected-away row encodes to, and it must
+    //      round-trip through the spill store rather than mis-parsing into a phantom binding.
+    #[test]
+    fn tuple_decode_empty_line_is_empty_tuple() {
+        let empty = Tuple::new(std::iter::empty::<(Var, String)>());
+        assert!(empty.bindings().is_empty());
+        assert_eq!(
+            empty.encode(),
+            "",
+            "an empty tuple encodes to the empty string"
+        );
+        let decoded = Tuple::decode("");
+        assert!(
+            decoded.bindings().is_empty(),
+            "decoding the empty line yields a binding-less tuple, not a phantom one"
+        );
+        assert_eq!(decoded, empty);
+    }
+
+    // ---- Arrival-order independence (the documented `merge_ordered` invariant): the SAME pair
+    //      of matching tuples must produce the SAME merged binding set whether the left or the
+    //      right arrives first. The discriminating case is a NON-join variable bound by BOTH sides
+    //      to DIFFERENT values: `merge` keeps the LEFT side's value on a conflict, so the canonical
+    //      `merge_ordered` must pick the left value regardless of which side arrived last. A
+    //      regression that merged in arrival order would still pass the multiset COUNT tests but
+    //      flip this shared variable's value when the right arrives last — this pins it.
+    #[test]
+    fn merge_result_is_independent_of_arrival_order() {
+        // Join on `s`; both sides ALSO bind `c` (a non-join var) to different values. The
+        // canonical merge keeps the LEFT side's `c = leftc`.
+        let l = t(&[("s", "k"), ("c", "leftc"), ("o", "leftval")]);
+        let r = t(&[("s", "k"), ("c", "rightc"), ("n", "rightval")]);
+
+        // Schedule 1: left arrives first, then right completes the match.
+        let mut j1 = StreamJoin::new(jv(&["s"]), StreamJoinOptions::default());
+        assert!(j1.push_left(l.clone()).is_empty());
+        let out_lr = j1.push_right(r.clone());
+
+        // Schedule 2: right arrives first, then left completes the match.
+        let mut j2 = StreamJoin::new(jv(&["s"]), StreamJoinOptions::default());
+        assert!(j2.push_right(r.clone()).is_empty());
+        let out_rl = j2.push_left(l.clone());
+
+        assert_eq!(out_lr.len(), 1);
+        assert_eq!(out_rl.len(), 1);
+        // The single merged row is byte-identical across the two arrival orders.
+        let merged = &out_lr[0];
+        assert_eq!(
+            merged, &out_rl[0],
+            "merge result is independent of which side arrives last"
+        );
+        assert_eq!(merged.get(&Var::new("s")), Some("k"));
+        assert_eq!(merged.get(&Var::new("o")), Some("leftval"));
+        assert_eq!(merged.get(&Var::new("n")), Some("rightval"));
+        // The discriminating assertion: the LEFT side's value of the conflicting non-join var
+        // wins in BOTH arrival orders (an arrival-order merge would yield `rightc` for j2).
+        assert_eq!(
+            merged.get(&Var::new("c")),
+            Some("leftc"),
+            "the left side's value wins a non-join-variable conflict, regardless of arrival order"
+        );
+        // It also equals the blocking oracle's merge of the same pair (left.merge(right)).
+        let oracle = blocking_hash_join(&[l], &[r], &jv(&["s"]));
+        assert_eq!(oracle.len(), 1);
+        assert_eq!(merged, &oracle[0]);
+    }
 }
