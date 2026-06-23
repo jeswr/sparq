@@ -67,3 +67,23 @@
   crate: "sparq-vectors"
   features: "compose"
   test: true
+
+# [OPUS-4.8] sq-0wo9e.6 (epic sq-0wo9e, structure-aware-vectorisation P5): the
+# NEURO-SYMBOLIC propose(neural)-then-verify(deductive) grounding pipeline. The whole
+# `src/verify.rs` module (incl. the load-bearing soundness test that a vector-proposed-but-
+# shape-invalid candidate is REJECTED, the OWL-disjointness-clash reject, the fail-closed
+# reject, and the verify-shrinks-to-sound subset property) is `#[cfg(feature =
+# "neuro-symbolic")]` behind `default = []`, so the default build (and ci.yml's `--workspace
+# --all-targets` archive, which passes NO `--features`) compiled it EMPTY and ran ZERO of its
+# 6 unit tests — the silent gap this leg closes. `neuro-symbolic` IMPLIES `structure-shacl`
+# (and thus `structure`), so it reuses the sparq-shacl + sparq-reason + sparq-introspect deps
+# those features already pull and adds NO new dependency. This leg builds the module, runs
+# `cargo test` (the 6 verify tests run only with the feature ON), and `clippy --all-targets
+# -D warnings` with it ON (the real gate). Verified locally: `cargo test -p sparq-vectors
+# --features neuro-symbolic --lib verify::` runs the 6 tests; `clippy --all-targets -D
+# warnings` is clean with the feature ON. Appended at the END to minimise the recurring
+# feature-matrix merge conflict.
+- name: "sparq-vectors (neuro-symbolic — propose-then-verify grounding)"
+  crate: "sparq-vectors"
+  features: "neuro-symbolic"
+  test: true

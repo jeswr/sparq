@@ -71,6 +71,20 @@ compose = ["structure"]
 # enum CODEBOOK encoder and the QUDT UNIT normaliser themselves ship under `structure` (pure, no
 # SHACL dep); only the *reader* that mines them from shapes needs sparq-shacl.
 structure-shacl = ["structure", "dep:sparq-shacl"]
+# [OPUS-4.8] sq-0wo9e.6 (epic sq-0wo9e, design research/structure-aware-vectorisation.md §5 (B) +
+# §6.A): P5 — the NEURO-SYMBOLIC propose(neural)-then-verify(deductive) grounding pipeline
+# (`verify.rs`). The neural PROPOSE side reuses the in-crate vector ANN (a candidate GENERATOR,
+# recall only — no soundness); the deductive VERIFY side is the SOUNDNESS GATE: a vector-proposed
+# binding is admitted only if adding it introduces NO new SHACL violation (`sparq-shacl`) AND no
+# new OWL inconsistency / disjoint-class clash (`sparq-reason::inconsistencies` over the
+# materialised closure). A candidate that FAILS the deductive check is REJECTED (not down-ranked),
+# and the gate FAILS CLOSED (an uncheckable candidate is never surfaced as verified). OPT-IN and
+# OFF by default; it IMPLIES `structure-shacl` (and thus `structure`), so it reuses exactly the
+# `sparq-shacl` + `sparq-reason` + `sparq-introspect` deps those features already pull and adds NO
+# new dependency. With it OFF the default `sparq-vectors` build (and the core query path) carry
+# ZERO pipeline code. It serves no exact answer and makes NO accuracy claim — the value is the
+# pipeline + its on/off ablation (recall is empirical, EC2-gated, never asserted here).
+neuro-symbolic = ["structure-shacl"]
 # [OPUS-4.8] sq-1wc1: predicate-constrained (filtered) ANN — the RDF-native vector
 # differentiator. A SPARQL BGP carves out a candidate dict-id set (the "visit mask") and the
 # nearest-neighbour search returns only neighbours inside it. OPT-IN and OFF by default; it is a
