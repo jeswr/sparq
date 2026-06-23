@@ -46,3 +46,17 @@ oxrdf.workspace = true
 # adapter). ALL std-only — no new deps (the operator brings their own Redis/SQL client); it
 # does NOT change the stateless `evaluate` path.
 count-enforcement = []
+
+# [OPUS-4.8] sq-uor3g (epic sq-0dksu, Phase 4): the sparq security-property ODRL
+# PROFILE — the custom `secx:requires…` leftOperands made FIRST-CLASS (their IRIs as
+# Rust constants + the leftOperand→dimension map + a recogniser + the published
+# `odrl:Profile` IRI). OFF by default (lean core): the default evaluator already
+# parses + evaluates such a constraint as an opaque custom leftOperand; this feature
+# adds the `secprop` module + the published profile document
+# (`ontologies/odrl-secprop-profile.ttl`) so a conforming ODRL processor admits the
+# leftOperands and a host can recognise them. Std-only — NO new dep (`const &str` data
+# + a TTL drift test, strictly additive); it does NOT change the `evaluate` path. The
+# bridge NAMES the requireable security-property dimensions; it asserts NO security
+# property of any method (sparq's ZK estate is research-grade + externally UNAUDITED,
+# sq-qhy4 — the admissibility reduction itself is Phases 2/5, not this profile).
+secprop-leftoperands = []

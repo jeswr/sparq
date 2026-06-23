@@ -10,7 +10,8 @@ typed model (Permission / Prohibition / Duty / Action / Constraint) and **evalua
 a request to a **fail-closed** ALLOW/DENY `Decision`. The full public-API surface —
 the fail-closed evaluator, every constraint dimension (purpose / recipient /
 dateTime / spatial / count), the deny-overrides conflict semantics, the static
-conflict/containment lints, and the stateful `count-enforcement` counter stores —
+conflict/containment lints, the stateful `count-enforcement` counter stores, and the
+opt-in `secprop-leftoperands` security-property ODRL profile (research-grade; sq-qhy4) —
 lives in [`skills/usage-control-policy/SKILL.md`](../../skills/usage-control-policy/SKILL.md).
 
 > **Internal crate — not published** to crates.io (`publish = false`); opt-in,
