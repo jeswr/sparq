@@ -31,6 +31,12 @@ pub mod odrl_bridge;
 pub mod trust_wire;
 mod rewrite;
 mod update; // [OPUS-4.8] sq-xor3: write/update-path enforcement
+// [OPUS-4.8] issue #992 FR-3 (sq-snopa.5): the AUTHORITATIVE ACL write-through —
+// `PodStore::put_acl`/`delete_acl` replace (or remove) a `.acl`/`.acr` graph AND
+// re-materialize `<urn:sparq:auth>` as ONE atomic, fail-closed unit, keeping SPARQ the
+// source of truth. Always compiled (no feature gate): it adds no dependency, reusing only
+// the always-present materialize + named-graph machinery — mirroring `update_as`/`decide`.
+mod write_through;
 // [OPUS-4.8] sq-3jtd.8: library-level WAC conformance harness — the table-driven
 // scenario sibling of `conformance` (ACP), over the WAC engine (materialize_wac +
 // AuthIndex::accessible). Shares the decision/expectation/report vocabulary with
@@ -61,6 +67,9 @@ pub use odrl_bridge::{BridgeEntry, BridgeKind, BridgeLedger};
 #[cfg(feature = "trust-graph")]
 pub use trust_wire::{TrustAdmissionOutcome, TrustStaticOutcome};
 pub use rewrite::{rewrite_for, wrap_for_view};
+// [OPUS-4.8] issue #992 FR-3 (sq-snopa.5): the authoritative ACL write-through outcome type
+// (the `put_acl`/`delete_acl` methods live on `PodStore` in `write_through`).
+pub use write_through::AclWriteOutcome;
 
 use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashMap;
