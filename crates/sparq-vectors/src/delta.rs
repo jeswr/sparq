@@ -399,4 +399,105 @@ mod tests {
         v[4..8].copy_from_slice(&999u32.to_le_bytes());
         assert!(VectorDelta::from_bytes(&v).unwrap_err().contains("unsupported version"));
     }
+
+    #[test]
+    fn a_zero_dimension_header_is_rejected() {
+        // [OPUS-4.8] dim==0 is a corrupt header (no valid append stride): the decoder must reject it
+        // up front, never divide-by / produce a degenerate zero-width delta. A from-scratch builder
+        // can never emit it (`to_bytes` is only called with the base store's dim ≥ 1), so this only
+        // arises from a corrupt/forged sidecar — fail closed.
+        let mut bytes = VectorDelta::new(Some(fp(1, 1, 1))).to_bytes(4);
+        bytes[8..12].copy_from_slice(&0u32.to_le_bytes()); // dim -> 0
+        let err = VectorDelta::from_bytes(&bytes).expect_err("a zero-dim header must be rejected");
+        assert!(err.contains("zero vector dimension"), "err was: {err}");
+    }
+
+    #[test]
+    fn a_trailing_garbage_file_is_rejected_as_a_length_mismatch() {
+        // [OPUS-4.8] The length guard rejects a LONGER file too (trailing garbage), not only a short
+        // one — a sidecar with extra bytes after the declared body is corrupt, never silently
+        // ignored (which would let a partial overwrite go undetected).
+        let mut bytes = sample(Some(fp(4, 2, 7))).to_bytes(4);
+        let good_len = bytes.len();
+        bytes.extend_from_slice(&[0xAB, 0xCD, 0xEF]); // append trailing garbage
+        let err = VectorDelta::from_bytes(&bytes).expect_err("a longer-than-declared file must error");
+        assert!(err.contains("length mismatch"), "err was: {err}");
+        // Sanity: the un-extended bytes still decode, so it is the trailing bytes that are rejected.
+        assert!(VectorDelta::from_bytes(&bytes[..good_len]).is_ok());
+    }
+
+    #[test]
+    fn a_non_finite_appended_component_is_rejected() {
+        // [OPUS-4.8] The in-RAM `add`/`update` path rejects non-finite vectors, so a `.spqd` carrying
+        // one is corrupt — the decoder re-checks (a forged/corrupt file could carry a NaN/inf the
+        // builder never would), and must reject it so a non-finite vector can never re-enter the store
+        // through a replay and poison cosine. Forge a NaN into the single append's body.
+        let mut d = VectorDelta::new(Some(fp(2, 1, 1)));
+        d.appended.insert(9, vec![1.0, 2.0]); // dim 2
+        let mut bytes = d.to_bytes(2);
+        // Body layout: header (SPQD_HEADER_LEN), then [id: u32][f32 × dim]. The first component of the
+        // single append starts at SPQD_HEADER_LEN + 4.
+        let comp0 = SPQD_HEADER_LEN + 4;
+        bytes[comp0..comp0 + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+        let err = VectorDelta::from_bytes(&bytes).expect_err("a NaN component must be rejected");
+        assert!(err.contains("non-finite"), "err was: {err}");
+
+        // ...and +inf is rejected the same way.
+        bytes[comp0..comp0 + 4].copy_from_slice(&f32::INFINITY.to_le_bytes());
+        assert!(VectorDelta::from_bytes(&bytes).unwrap_err().contains("non-finite"));
+    }
+
+    #[test]
+    fn a_duplicate_id_in_the_append_section_is_rejected() {
+        // [OPUS-4.8] An id may appear at most once per section. A file repeating an append id is
+        // corrupt (the in-RAM map could never produce it) — reject rather than silently keep the last,
+        // which would mask a corrupt sidecar. Forge two appends of id 5 by hand-building the body.
+        let mut bytes = VectorDelta::new(Some(fp(1, 1, 1))).to_bytes(2);
+        // Set the header to declare 2 appends, 0 tombstones, dim 2.
+        bytes[12..20].copy_from_slice(&2u64.to_le_bytes()); // append_count = 2
+        bytes[20..28].copy_from_slice(&0u64.to_le_bytes()); // tomb_count   = 0
+        // Append id 5 twice with valid (finite) bodies.
+        for _ in 0..2 {
+            bytes.extend_from_slice(&5u32.to_le_bytes());
+            bytes.extend_from_slice(&1.0f32.to_le_bytes());
+            bytes.extend_from_slice(&2.0f32.to_le_bytes());
+        }
+        let err = VectorDelta::from_bytes(&bytes).expect_err("a repeated append id must be rejected");
+        assert!(err.contains("twice in the append section"), "err was: {err}");
+    }
+
+    #[test]
+    fn a_duplicate_id_in_the_tombstone_section_is_rejected() {
+        // [OPUS-4.8] Same invariant for tombstones: a repeated tombstone id is a corrupt file.
+        let mut bytes = VectorDelta::new(Some(fp(1, 1, 1))).to_bytes(2);
+        bytes[12..20].copy_from_slice(&0u64.to_le_bytes()); // append_count = 0
+        bytes[20..28].copy_from_slice(&2u64.to_le_bytes()); // tomb_count   = 2
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes()); // id 8 twice
+        let err = VectorDelta::from_bytes(&bytes).expect_err("a repeated tombstone id must be rejected");
+        assert!(err.contains("twice in the tombstone section"), "err was: {err}");
+    }
+
+    #[test]
+    fn an_id_both_appended_and_tombstoned_is_rejected_as_corrupt() {
+        // [OPUS-4.8] The load-bearing delta invariant is "an id is in AT MOST one of appended /
+        // tombstoned" — `add`/`update` clears the tombstone and `remove` drops the append, so the two
+        // sets are always disjoint. A `.spqd` that lists the same id in BOTH sections is corrupt
+        // (no valid in-RAM delta could have produced it), and the decoder must reject it rather than
+        // silently pick one — otherwise a replay would resolve a removed id to a stale vector (or
+        // vice-versa). The inline test module's own header comment claims this path is covered; this
+        // is the test that actually exercises it. Forge id 5 into both sections.
+        let mut bytes = VectorDelta::new(Some(fp(1, 1, 1))).to_bytes(2);
+        bytes[12..20].copy_from_slice(&1u64.to_le_bytes()); // append_count = 1
+        bytes[20..28].copy_from_slice(&1u64.to_le_bytes()); // tomb_count   = 1
+        // append id 5 with a finite body...
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        bytes.extend_from_slice(&2.0f32.to_le_bytes());
+        // ...then tombstone the same id 5.
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        let err = VectorDelta::from_bytes(&bytes)
+            .expect_err("an id in both sections must be rejected as corrupt");
+        assert!(err.contains("both appended and tombstoned"), "err was: {err}");
+    }
 }

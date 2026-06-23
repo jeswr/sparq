@@ -513,6 +513,161 @@ pub mod provider {
             let err = e.embed(&["a", "b"]).unwrap_err();
             assert!(err.contains("duplicate embedding index 1"), "got: {err}");
         }
+
+        // [OPUS-4.8] The rest of the `RemoteEmbedder::embed` response-validation contract — the
+        // fail-closed protocol-violation branches. Each is a *distinct* error a buggy or hostile
+        // provider could trigger; the Embedder contract is "one finite, dim()-length vector per
+        // input, in input order", and a violation must be a descriptive `Err`, never a silently
+        // wrong vector. A regression that drops any of these checks would let a malformed response
+        // poison the store, so each branch gets a transport that produces exactly that violation.
+
+        /// A config with `dim: 2` and a transport returning `body` verbatim — the harness for the
+        /// response-validation tests. `api_key: None` so no auth header is required.
+        fn embed_with_body(body: &'static str) -> Result<Vec<Vec<f32>>, String> {
+            struct Body(&'static str);
+            impl Transport for Body {
+                fn post_json(&self, _: &str, _: &[(String, String)], _: &str) -> Result<String, String> {
+                    Ok(self.0.to_string())
+                }
+            }
+            let e = RemoteEmbedder::new(
+                ProviderConfig {
+                    endpoint: "https://example.test/v1/embeddings".into(),
+                    model: "m".into(),
+                    api_key: None,
+                    dim: 2,
+                },
+                Body(body),
+            );
+            e.embed(&["a", "b"])
+        }
+
+        #[test]
+        fn remote_embedder_empty_input_short_circuits_without_a_request() {
+            // An empty `texts` returns `Ok([])` WITHOUT calling the transport at all — a transport
+            // that panics if hit proves no request is sent.
+            struct NeverCalled;
+            impl Transport for NeverCalled {
+                fn post_json(&self, _: &str, _: &[(String, String)], _: &str) -> Result<String, String> {
+                    panic!("empty input must not issue a request");
+                }
+            }
+            let e = RemoteEmbedder::new(
+                ProviderConfig {
+                    endpoint: "https://example.test/v1/embeddings".into(),
+                    model: "m".into(),
+                    api_key: None,
+                    dim: 2,
+                },
+                NeverCalled,
+            );
+            assert_eq!(e.embed(&[]).unwrap(), Vec::<Vec<f32>>::new());
+        }
+
+        #[test]
+        fn remote_embedder_propagates_a_transport_error() {
+            // A transport-level failure (network/HTTP/status error) surfaces verbatim, not swallowed.
+            struct Failing;
+            impl Transport for Failing {
+                fn post_json(&self, _: &str, _: &[(String, String)], _: &str) -> Result<String, String> {
+                    Err("embeddings API error (503): upstream down".into())
+                }
+            }
+            let e = RemoteEmbedder::new(
+                ProviderConfig {
+                    endpoint: "https://example.test/v1/embeddings".into(),
+                    model: "m".into(),
+                    api_key: None,
+                    dim: 2,
+                },
+                Failing,
+            );
+            let err = e.embed(&["a", "b"]).unwrap_err();
+            assert!(err.contains("503") && err.contains("upstream down"), "got: {err}");
+        }
+
+        #[test]
+        fn remote_embedder_rejects_non_json_response() {
+            let err = embed_with_body("this is not json").unwrap_err();
+            assert!(err.contains("bad response JSON"), "got: {err}");
+        }
+
+        #[test]
+        fn remote_embedder_rejects_response_without_a_data_array() {
+            let err = embed_with_body(r#"{"object":"list"}"#).unwrap_err();
+            assert!(err.contains("no `data` array"), "got: {err}");
+        }
+
+        #[test]
+        fn remote_embedder_rejects_wrong_embedding_count() {
+            // Asked for 2 embeddings, the provider returned 1 — a count mismatch, not silently padded.
+            let err = embed_with_body(r#"{"data":[{"index":0,"embedding":[1.0,0.0]}]}"#).unwrap_err();
+            assert!(err.contains("asked for 2 embeddings, got 1"), "got: {err}");
+        }
+
+        #[test]
+        fn remote_embedder_rejects_wrong_dimension() {
+            // A vector whose length != cfg.dim (here a 3-d vector for a dim-2 store) is rejected, never
+            // truncated/padded to fit the store.
+            let err = embed_with_body(
+                r#"{"data":[{"index":0,"embedding":[1.0,0.0,9.0]},{"index":1,"embedding":[0.0,1.0,9.0]}]}"#,
+            )
+            .unwrap_err();
+            assert!(err.contains("dim 3 (expected 2)"), "got: {err}");
+        }
+
+        #[test]
+        fn remote_embedder_rejects_non_finite_components() {
+            // A NaN component (here from a JSON null, which `as_f64` turns into NaN) is a non-finite
+            // value the store would reject — caught at the embedder boundary with the dim/finite check.
+            let err = embed_with_body(
+                r#"{"data":[{"index":0,"embedding":[1.0,null]},{"index":1,"embedding":[0.0,1.0]}]}"#,
+            )
+            .unwrap_err();
+            assert!(err.contains("non-finite"), "got: {err}");
+        }
+
+        #[test]
+        fn remote_embedder_rejects_an_out_of_range_index() {
+            // An `index` past the requested count would write out of bounds; it must be a clean error.
+            let err = embed_with_body(
+                r#"{"data":[{"index":0,"embedding":[1.0,0.0]},{"index":7,"embedding":[0.0,1.0]}]}"#,
+            )
+            .unwrap_err();
+            assert!(err.contains("index 7 out of range"), "got: {err}");
+        }
+
+        #[test]
+        fn remote_embedder_rejects_a_missing_index() {
+            // Two items but both claim index 0 — index 1 is never filled. The "one vector per input"
+            // contract is violated, so the assemble step reports the missing index rather than
+            // returning a vector with a hole (which a `vec![None; n]` of the wrong shape would).
+            let err = embed_with_body(
+                r#"{"data":[{"index":0,"embedding":[1.0,0.0]},{"index":0,"embedding":[0.5,0.5]}]}"#,
+            )
+            .unwrap_err();
+            // The duplicate index 0 trips the duplicate guard before the missing-index assemble — both
+            // are "this response is malformed" errors; assert it is one of those two specific messages.
+            assert!(
+                err.contains("duplicate embedding index 0") || err.contains("missing embedding index 1"),
+                "got: {err}"
+            );
+        }
+
+        #[test]
+        fn remote_embedder_rejects_an_item_without_index_or_embedding() {
+            // A data item missing its `index` field, and (separately) one missing `embedding`.
+            let no_index = embed_with_body(
+                r#"{"data":[{"embedding":[1.0,0.0]},{"index":1,"embedding":[0.0,1.0]}]}"#,
+            )
+            .unwrap_err();
+            assert!(no_index.contains("without `index`"), "got: {no_index}");
+            let no_emb = embed_with_body(
+                r#"{"data":[{"index":0},{"index":1,"embedding":[0.0,1.0]}]}"#,
+            )
+            .unwrap_err();
+            assert!(no_emb.contains("without `embedding`"), "got: {no_emb}");
+        }
     }
 }
 
