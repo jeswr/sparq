@@ -34,6 +34,15 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # [OPUS-4.8] sq-shacl-flake: harden EVERY job against transient crates.io
+  # registry download hiccups. A `curl failed` mid-download of a single crate
+  # (observed: `download of al/lo/allocator-api2 failed`) aborts the build and,
+  # in the SHACL conformance job, then mis-reported as a phantom "conformance
+  # regressed below the ratchet" that jammed the merge queue. Raising cargo's
+  # network retry well above the default (3) lets these transients self-heal at
+  # the cargo layer before they ever sink a job. A genuine fetch failure (crate
+  # truly absent) still exhausts the retries and fails honestly.
+  CARGO_NET_RETRY: "10"
 
 jobs:
   # [OPUS-4.8] merge-throughput: path-filtered gate. Compute whether THIS change
@@ -814,13 +823,57 @@ jobs:
       - name: Run SHACL core + SHACL-SPARQL suites
         # The runners assert their own pinned floors; capture the scoreboards so
         # the grep gate below can re-check the pass counts.
+        # [OPUS-4.8] sq-shacl-flake: STEP-LEVEL transient self-heal (mirrors the
+        # sq-c76x retry idiom on the main nextest job). A transient crates.io
+        # download hiccup (`curl failed` mid-fetch) aborts `cargo test` BEFORE
+        # any test runs, leaving shacl-conformance.out empty; the previous
+        # single-shot invocation then let the ratchet step below mis-report that
+        # empty scoreboard as a phantom "conformance regressed below the ratchet"
+        # (`? < 98`) that jammed the merge queue across unrelated PRs. Re-running
+        # the whole invocation lets such a transient self-heal. A GENUINE
+        # conformance regression fails the runner's own `assert!(pass >= floor)`
+        # on every attempt and still correctly reds the job — the floor is never
+        # weakened. `rc` is captured explicitly (set -e-safe) so a real failure
+        # surfaces rather than silently exiting 0.
         run: |
-          cargo test -p sparq-shacl --test w3c_core --test w3c_sparql -- --nocapture \
-            | tee shacl-conformance.out
+          set -uo pipefail
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::SHACL conformance — attempt $attempt/$MAX_ATTEMPTS"
+            rc=0
+            # `tee` would mask cargo's exit code via the pipe, so capture it from
+            # PIPESTATUS[0] (cargo), not the pipeline's last command (tee).
+            cargo test -p sparq-shacl --test w3c_core --test w3c_sparql -- --nocapture \
+              | tee shacl-conformance.out
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "SHACL conformance suites passed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::SHACL conformance run failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient. Inspect the cargo/test output above (a real conformance regression trips the runner's own assert!(pass >= floor); a 'curl failed'/download error is an infra flake, not a conformance change)."
+              exit "$rc"
+            fi
+            echo "::warning::SHACL conformance attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before any test ran)."
+            attempt=$((attempt + 1))
+          done
       - name: Enforce ratchet (pass counts must not regress)
         run: |
           CORE_FLOOR=98
           SPARQL_FLOOR=5
+          # [OPUS-4.8] sq-shacl-flake: distinguish "scoreboard never produced"
+          # (the test step did not emit a TOTAL line — e.g. an infra/compile
+          # flake) from a GENUINE pass-count regression, so an empty scoreboard
+          # is never mis-reported as "conformance regressed below the ratchet"
+          # (the phantom `? < 98` that jammed the queue). With the step-level
+          # retry above this should not happen, but if it does we fail with an
+          # HONEST, distinct diagnostic instead of a false regression claim.
+          if ! grep -qE '^TOTAL ' shacl-conformance.out; then
+            echo "::error::SHACL conformance scoreboard is missing/empty — the test step produced no 'TOTAL' line. This is an INFRA/build failure (e.g. a transient crates.io download), NOT a conformance regression. Re-run the job; inspect the 'Run SHACL core + SHACL-SPARQL suites' step output above."
+            exit 1
+          fi
           # core runner prints: "TOTAL  <pass> <fail> <skip>"
           CORE_PASS=$(grep -E '^TOTAL ' shacl-conformance.out | awk '{print $2}' | head -1)
           # sparql runner prints: "pass <n> / fail <m> / skip <k>"
