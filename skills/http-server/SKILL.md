@@ -215,6 +215,33 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   update-side `using-*` override), `enum QueryForm { Select, Ask, Construct, Describe }`; module
   `sparq_server::results`.
 
+### In-process embedding seam — `sparq_serve::embed` ([OPUS-4.8] sq-xa15c, #1248)
+
+When the consumer is **another Rust process** (e.g. `solid-server-rs`) and wants to
+drop the HTTP hop entirely, embed the engine in-process via the `sparq_serve::embed`
+facade instead of running `sparq-server` and talking to it over HTTP. It is the
+documented **embedding seam**: thin wrappers over the engine entry points plus a
+re-export of the runtime-agnostic concurrency wrapper. No axum/tokio, no HTTP.
+
+- Data path (over one `&Graph` / `&mut Graph`): `embed::query_json(&Graph, sparql)
+  -> Result<String, _>` (SPARQL-JSON), `embed::query(&Graph, sparql) ->
+  Result<QueryResult, _>`, `embed::ask(&Graph, sparql) -> Result<bool, _>`,
+  `embed::update_in_place(&mut Graph, sparql)` (+ `..._atomic` for all-or-nothing on
+  one graph), `embed::apply_delta_nquads(&mut Graph, inserts, deletes)` (quad-level,
+  per-graph; blank nodes by label), and the probes `embed::exists(&Graph) -> bool`,
+  `embed::named_graph_exists(&Graph, &Term) -> bool`, `embed::metadata(&Graph) ->
+  Metadata { triples, named_graphs }`. `query_json_with_budget` takes a `QueryBudget`.
+- Concurrency wrapper (re-exported from the crate root): `GenerationRing` /
+  `Generation` / `GraphApplier` / `Writer` (+ `RingConfig`, `WriterConfig`, `PodId`,
+  `TimeTravelConfig`) — the SAME `fork → update → publish` + generation-pinning model
+  `sparq-server` wraps behind its endpoint. A reader `ring.current()` pins an
+  immutable snapshot; the writer publishes new generations without blocking readers.
+- **Stability:** the INTENDED stable embedding API, but **NOT yet a frozen
+  semver-tier-1 surface** — the formal freeze is the maintainer's to ratify on #1248
+  (pre-`1.0` minor releases MAY still change it). Pin to `sparq_serve::embed` rather
+  than reaching into `sparq-core` / `sparq-engine` directly so the freeze, when
+  ratified, has one well-defined shape.
+
 ## Common recipes
 
 **1. Query forms and result negotiation.** Default result media is SPARQL-JSON. Set
