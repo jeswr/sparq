@@ -1,0 +1,48 @@
+{
+  "name": "@rdfjs-test/conformance",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reusable RDF/JS conformance test suites (DataFactory / DatasetCore + Dataset algebra / Stream) that run against ANY RDF/JS implementation, driven by Node's built-in node:test — zero external test-framework dependency. Candidate contribution for github.com/rdfjs.",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.mjs"
+    }
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test"
+  },
+  "keywords": [
+    "rdf",
+    "rdfjs",
+    "conformance",
+    "test-suite",
+    "data-model",
+    "dataset"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeswr/sparq.git",
+    "directory": "packages/rdfjs-conformance"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@rdfjs/dataset": "^2.0.2",
+    "@rdfjs/types": "^2.0.1",
+    "@types/node": "^25.9.3",
+    "n3": "^1.26.0",
+    "typescript": "^6.0.3"
+  }
+}
