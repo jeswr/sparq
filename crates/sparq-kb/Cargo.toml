@@ -45,6 +45,17 @@ query = ["validate", "dep:sparq-engine", "dep:spargebra", "dep:serde", "dep:serd
 # itself depends solely on `sparq-core`, already in the `query` build), so it stays
 # light. `close` implies `query`. [OPUS-4.8] sq-2m6zm.3
 close = ["query", "dep:sparq-reason"]
+# OPT-IN (default-OFF). Enables the `literature` ingestion scaffolding (GenAI-KB Phase 5,
+# sq-2489d.5): the connector adapter + record/replay extract trait + deterministic
+# grounding-resolver + the pipeline that emits machine-tier PROV-O Findings + the run
+# sidecar. Exercised over COMMITTED FIXTURES only — it makes ZERO network and ZERO
+# live-model calls (the live pilot is the credential-gated Phase-6 bead, sq-t5f3l).
+# Pulls in only `serde_json` (already an optional dep used by `query`) to read the
+# recorded connector/extraction JSON fixtures; it does NOT pull the SPARQL engine — the
+# scaffolding is a pure deterministic data-transform. The SHACL gate over the emitted TTL
+# is run by the `literature_pipeline` integration test, which additionally enables
+# `validate`. [OPUS-4.8] sq-2489d.5
+literature = ["dep:serde_json"]
 
 [dependencies]
 # Engine graph type (only behind `validate`). default-features=false keeps it lean.

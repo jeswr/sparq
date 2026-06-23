@@ -26,6 +26,7 @@
 //! the default-OFF `validate` feature so the lean default build of this crate is a
 //! pure data + constants crate.
 
+pub mod literature;
 pub mod vocab;
 
 /// The PKG ontology (Turtle), `ontology/pkg/pkg.ttl`.
