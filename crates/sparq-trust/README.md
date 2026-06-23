@@ -63,49 +63,49 @@ view; `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
   signature over the commitment (`sparq-zk`, never a self-asserted triple), enforce statement-type scoping
   via a real SHACL shape (`sparq-shacl`), freshness, and the clear-WebID holder binding. Default-deny.
 - **N3 merge** (`wire`) — feed admitted facts into `sparq-reason`; the `.acr` ABAC rule derives the grant (age>18 e2e).
-- **Storage / authoring model** (`store`, **opt-in `store` feature**, `sq-pfae.5`) — a server-wide
-  default + per-`.acr` documents that **NARROW, never broaden** the server ceiling (`effective_rules`);
-  monotone versioning (stale rejected) + revocation; the `AdmissionCacheKey` (evidence hash + policy
-  version) composes with the sparq-solid epoch cache (edit/revoke invalidates the verdict). No new dep.
-- **Static / dynamic admission split** (`admit_static` + `derive_conditional_grants`, `sq-xc4y`) —
-  decides the **session-independent** class (signature, type-scope, scope) once at materialise-time and
-  defers the **per-request** class (holder + freshness) to an `auth:ConditionalGrant` re-checked per request.
-- **The invocation-binding gate** (`delegation`, `sq-l5og`) — verify a carried ZCAP/UCAN-style delegation
-  chain (each hop a CHECKED delegator signature over delegator/delegate **keys** + capability + expiry),
-  enforce monotone attenuation (`child ⊆ parent`), and bind **authenticated invoker == the chain's terminal
-  delegate, key-proven per request** via a fresh-challenge PoP. Folding each hop's `delegate_key` into the
-  signed preimage defeats the key-substitution stolen-chain replay; the forgery matrix runs end-to-end.
+- **Storage / authoring model** (`store`, **opt-in `store` feature**, `sq-pfae.5`) — a server-wide default +
+  per-`.acr` documents that **NARROW, never broaden** the server ceiling (`effective_rules`); monotone versioning
+  (stale rejected) + revocation; the `AdmissionCacheKey` (evidence hash + policy version) composes with the
+  sparq-solid epoch cache (edit/revoke invalidates the verdict). No new dep.
+- **Static / dynamic admission split** (`admit_static` + `derive_conditional_grants`, `sq-xc4y`) — decides the
+  **session-independent** class once at materialise-time and defers the **per-request** class (holder + freshness)
+  to an `auth:ConditionalGrant` re-checked per request.
+- **The invocation-binding gate** (`delegation`, `sq-l5og`) — verify a carried ZCAP/UCAN-style delegation chain
+  (each hop a CHECKED delegator signature over delegator/delegate **keys** + capability + expiry), enforce monotone
+  attenuation (`child ⊆ parent`), and bind **authenticated invoker == the chain's terminal delegate, key-proven per
+  request** via a fresh-challenge PoP — folding `delegate_key` into the preimage defeats the stolen-chain replay.
 - **Delegation PROV-O audit** (`delegation_prov`, **opt-in `delegation-prov`**, `sq-pfae.6`) — render an
-  invocation-bound chain as a minimal W3C PROV-O graph: `prov:actedOnBehalfOf` per hop, the human/AI
-  principal as an attested attribute (`trust:HumanPrincipal`/`AiAgent`, §4.2), the effective grant as `auth:*`
-  RDF. Pure `oxrdf`, NO `sparq-prov` edge. A record, never authority: emitted *after* the gate (never broader).
+  invocation-bound chain as a minimal W3C PROV-O graph (`prov:actedOnBehalfOf` per hop, human/AI principal as an
+  attested attribute, the effective grant as `auth:*` RDF). Pure `oxrdf`, NO `sparq-prov` edge; a record, never authority.
 - **DID issuer-key binding** (`did`, **opt-in `did` feature**, `sq-pfae.3`) — a rule may name its issuer by
-  `trust:issuerDid` instead of `trust:issuerKey` hex. `DidKeyResolver` decodes a `did:key` offline;
-  `DidWebResolver` reads `did:web` via a **pluggable** fetcher (no default HTTP client). **Narrows** D′ (no absolute anchor).
-- **Security-properties vocabulary** (`secprop`, **opt-in `secprop-vocab`**, `sq-5oru9`) — the sparq
-  **`sec-prop:` extension** (constants + [`secprop-ext.ttl`](ontologies/zkp-sparql/secprop-ext.ttl)): orthogonal
-  proof-system dimensions + the **assurance / audit-status axis** the vendored `sec-prop:` lacks (extend, not
-  fork). Records a claim + basis, NOT a proof; default `Claimed`, no `Proven` while `sq-qhy4` open.
-- **N3 proof-admissibility** (`admissibility`, **opt-in `secprop-admissibility`**, `sq-ufsi9`) — the §4.3 ODRL →
-  admissible-proof-set reduction (`strongerThan`-closure / `atLeast` / `overDimension` / `satisfies`) as a
-  RUNNABLE N3 ruleset on `sparq-reason`, with the Rust **default-deny** universal (`admissible`). Reasons over
+  `trust:issuerDid` instead of `trust:issuerKey` hex (`DidKeyResolver` decodes `did:key` offline; `DidWebResolver`
+  reads `did:web` via a **pluggable** fetcher). **Narrows** the forgery vector D′ (no absolute anchor).
+- **Security properties** (`secprop` / `admissibility`, **opt-in `secprop-vocab` / `secprop-admissibility`**,
+  `sq-5oru9` / `sq-ufsi9`) — the sparq **`sec-prop:` extension** ([`secprop-ext.ttl`](ontologies/zkp-sparql/secprop-ext.ttl);
+  orthogonal proof-system dimensions + the **assurance / audit-status axis** the vendored ontology lacks) and the §4.3
+  ODRL → admissible-proof-set reduction as a RUNNABLE N3 ruleset on `sparq-reason` (Rust **default-deny**). Reasons over
   ANNOTATIONS, not crypto: `requiresAssurance gteq Proven` empties the admissible set today (`sq-qhy4`).
+- **Live status / revocation** (`status_list`, **opt-in `status-list`**, `sq-pfae.7`) — gate derivations on a **live
+  W3C Bitstring Status List** instead of the `revoked: bool` flag: fetch (pluggable `StatusListResolver`) + decode
+  (hand-rolled multibase over a pluggable `GzipDecoder`; built-in `Flate2GzipDecoder` behind `status-list-flate2`),
+  then `admit_with_status` admits ONLY a `LiveStatus::Live` credential — **fail-closed on set/unknown/stale** — and
+  emits a minimal `prov:`/`trust:` denial justification. No new default dep; the list VC's own signature is not yet
+  verified (resolver is the trust seam; follow-up bead captured).
 
 ## Honest scope — what this does and does NOT do
 
 - **No privacy / unlinkability / anonymity.** The credential is admitted **in the clear**; the
   verifier learns the exact value (`age 25`, not "≥ 18"). This does **not** match ZKAPs-grade unlinkable presentation.
-- **Holder binding is the clear-WebID, non-anonymous degraded path** (`sq-wvne`):
-  `credentialSubject == Session.agent` authenticates the WebID in the clear — not silently "solved"; presentations stay linkable by requester identity.
-- **Issuer keys: operator-asserted by default; DID-bindable (opt-in, `sq-pfae.3`).** The default
-  `trust:issuerKey` hex binding is the live forgery vector D′ (§3.3); the `did` feature binds from a
-  `trust:issuerDid` instead — **narrows** D′ but no absolute anchor (`did:key` self-cert; `did:web` host/TLS).
-- **Delegation invocation is the clear-WebID, non-anonymous path too** (`sq-l5og`): the gate
-  authenticates the invoker AS the terminal delegate's WebID in the clear. The `delegate_key` binding
-  defeats key-substitution stolen-chain replay but **not** full non-replayability; deep-chain
-  *incremental* revocation stays open. The `delegation-prov` PROV-O audit adds NO security property —
-  it records *who acted on whose behalf* (a record, not an authority; rustdoc has the full reasoning).
-- **Open problems respected as documented limitations:** `sq-tu4e` (no in-reasoner NAF; `revoked` input-only) + `sq-wvne` (ZK privacy) are **out of PoC scope**; `sq-xc4y` RESOLVED; `sq-l5og` **specified + enforced + tested**.
+- **Holder binding + delegation invocation are the clear-WebID, non-anonymous paths** (`sq-wvne` / `sq-l5og`):
+  `credentialSubject == Session.agent` (and the invoker == terminal delegate) authenticate the WebID in the clear —
+  not silently "solved"; presentations stay linkable by requester identity. The `delegate_key` binding defeats the
+  key-substitution stolen-chain replay but not full non-replayability. The `delegation-prov` / `status_list` PROV-O
+  records add NO security property — an audit fact, not authority.
+- **Issuer keys: operator-asserted by default; DID-bindable (opt-in, `sq-pfae.3`).** The default `trust:issuerKey`
+  hex binding is the live forgery vector D′ (§3.3); the `did` feature binds from a `trust:issuerDid` instead —
+  **narrows** D′ but no absolute anchor (`did:key` self-cert; `did:web` host/TLS).
+- **Open problems respected:** `sq-wvne` (ZK privacy) is **out of PoC scope**; `sq-xc4y` RESOLVED; `sq-l5og`
+  **specified + enforced + tested**; `sq-tu4e` (live status) is now the opt-in `status-list` gate (`sq-pfae.7`).
 - **Strict additivity (G6):** with `sparq-solid`'s `trust-graph` feature OFF the crate is not compiled — `sparq-solid` behaves exactly as WAC/ACP do today (byte-identical).
 
 ## 📚 Learn more

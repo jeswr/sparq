@@ -646,6 +646,27 @@ jobs:
             crate: sparq-vectors
             features: kge
             test: true
+          # [OPUS-4.8] sq-pfae.7 (epic sq-pfae P6): the live-status / revocation stratum. The
+          # whole `status_list` module + the `admit::admit_with_status` wiring + the
+          # `tests/live_status_e2e.rs` integration suite (`#![cfg(feature = "status-list")]`)
+          # are behind the default-OFF `status-list` feature, so ci.yml's default-feature
+          # `nextest archive --workspace --all-targets` (which passes NO `--features`) compiles
+          # them EMPTY and runs ZERO of the 18 module unit tests + the 5 e2e fail-closed tests —
+          # the silent-skip gap (#1171) this leg closes. The `status-list-flate2` SUPERSET
+          # feature additionally compiles the built-in `flate2` GZIP decoder + its real-gzip
+          # round-trip test, so a single leg with that feature reaches EVERY status-list cfg
+          # (the leg's `--features` set is a superset of both `status-list` and
+          # `status-list-flate2`). The leg runs `clippy --all-targets -D warnings` with the
+          # feature ON (the real gate) + `cargo test`, which drives the REAL gate path
+          # (admit_with_status → derive_grants over a decoded Bitstring Status List) and the
+          # load-bearing SAFETY invariant: fail-closed on set/unknown/stale + a minimal denial
+          # justification. Verified: `cargo nextest list -p sparq-trust --features
+          # status-list-flate2` lists the status_list::tests unit suite + the live_status_e2e
+          # integration tests.
+          - name: sparq-trust (status-list-flate2 — live status/revocation + denial justification)
+            crate: sparq-trust
+            features: status-list-flate2
+            test: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install Rust (stable)
