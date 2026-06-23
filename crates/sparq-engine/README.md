@@ -53,17 +53,23 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   arguments, numeric `RANGE` offsets, and a computed-expression `PARTITION BY` are inline-deferred
   (use the programmatic API). When the feature is off, zero window/aggregate-registry code compiles
   and the default build is byte-identical (no new deps).
+- **Parameterized prepared queries** *(opt-in `params` feature, OFF by default)* — the canonical
+  mitigation for SPARQL injection (#901). `PreparedQuery::bind(name, oxrdf::Term)` and
+  `PreparedUpdate::bind` substitute a typed value into a free placeholder variable via a pure
+  **algebra rewrite** — *never* string concatenation — so a hostile bound IRI/literal (e.g. one
+  containing `> } INSERT … {` or a `"` break-out) is carried as opaque DATA and cannot alter the
+  query structure. Covers SELECT/ASK/CONSTRUCT/DESCRIBE + UPDATE; fail-closed (rejects an unknown
+  placeholder, a `BIND`/aggregate/`VALUES` output, or a blank node in a predicate/graph slot). Off,
+  zero code compiles, the default build is byte-identical, no new deps. See
+  [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
 - **Materialised-view / query-result cache** *(opt-in `result-cache` feature, OFF by default)* —
   a bounded, version-aware LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed
-  by `(parsed query algebra, caller graph-version)`, so an endpoint that re-serves the same read
-  query against a slowly-changing graph can replay the materialised result instead of re-executing.
-  **Caching is sound only under a contract**: the caller bumps a `u64` *version* on every mutation
-  (the engine can't observe writes through a borrowed `&Graph`), and the cache **refuses to store
-  non-deterministic queries** — `NOW`/`RAND`/`UUID`/`STRUUID`/`BNODE`, a remote `SERVICE`, or any
-  custom function / aggregate (detected conservatively by `is_cacheable`); those always evaluate
-  fresh. Keying on the parsed algebra makes the cache insensitive to whitespace / comments / prefix
-  spelling. When the feature is off, zero cache code compiles, the default build is byte-identical,
-  and no new dependencies are added (std `HashMap`/`Mutex`/`Arc` only).
+  by `(parsed query algebra, caller graph-version)`, replaying it instead of re-executing the same
+  read query against a slowly-changing graph. **Sound only under a contract**: the caller bumps a
+  `u64` *version* on every mutation, and the cache **refuses non-deterministic queries**
+  (`NOW`/`RAND`/`UUID`/`STRUUID`/`BNODE`, remote `SERVICE`, any custom fn/aggregate — via
+  `is_cacheable`). When off, zero cache code compiles, the default build is byte-identical, no new
+  deps (std `HashMap`/`Mutex`/`Arc`).
 - **MVCC / ACID transaction isolation** *(opt-in `txn` feature, OFF by default)* —
   a `txn::TransactionManager` over a single logical `Graph` giving **snapshot-isolation** read
   transactions (`begin_read` → a cheap point-in-time `GraphSnapshot`, immune to later commits) and

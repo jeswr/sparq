@@ -116,3 +116,22 @@
   crate: "sparq-engine"
   features: "query-solution"
   test: true
+
+# [OPUS-4.8] sq-rp3um: parameterized prepared queries — safe value binding to
+# prevent SPARQL injection (#901). The whole `params` module (`pub mod params`:
+# `PreparedQuery::bind`, `PreparedUpdate`, the `params::value::*` term ctors and
+# the 16 in-src unit tests `params::tests::*` — incl. the load-bearing #901
+# injection scenarios) AND the new `update`-path helpers `update_prepared` /
+# `update_in_place_prepared(_with_budget)` are all `#[cfg(feature = "params")]`, so
+# the default build (and ci.yml's `--workspace --all-targets` archive, which passes
+# NO `--features`) compiled them EMPTY and ran ZERO of the 16 tests — the silent
+# "compiled EMPTY ... tests never ran" gap this lane exists to close, and `params`
+# had NO leg here. No new dep (`params = []`, only the already-direct oxrdf
+# `Term`/`Variable`/`Literal`/`NamedNode`/`BlankNode` + spargebra algebra) and no
+# `not(feature=…)` divergence, so a single isolated leg covers it; verified `cargo
+# nextest list -p sparq-engine --features params` shows the 16 params tests and
+# `cargo clippy -p sparq-engine --all-targets --features params -- -D warnings` is clean.
+- name: "sparq-engine (params)"
+  crate: "sparq-engine"
+  features: "params"
+  test: true
