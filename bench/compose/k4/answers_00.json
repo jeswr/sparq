@@ -1,0 +1,12 @@
+[
+  {"file": "q00_hidden.txt", "answer": "Merge discipline"},
+  {"file": "q00_raw.txt", "answer": "Merge discipline"},
+  {"file": "q01_hidden.txt", "answer": "Sub-agent standing rules"},
+  {"file": "q01_raw.txt", "answer": "Sub-agent rules"},
+  {"file": "q02_hidden.txt", "answer": "Sub-agent standing rules"},
+  {"file": "q02_raw.txt", "answer": "Sub-agent rules"},
+  {"file": "q03_hidden.txt", "answer": "Sub-agent standing rules"},
+  {"file": "q03_raw.txt", "answer": "Sub-agent rules"},
+  {"file": "q04_hidden.txt", "answer": "Sub-agent standing rules"},
+  {"file": "q04_raw.txt", "answer": "Sub-agent rules"}
+]

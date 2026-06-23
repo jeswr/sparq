@@ -516,17 +516,23 @@ shown label the hide is lossy (it would silently change the answer), so the harn
 collisions and the bench example exits non-zero. This is the same envelope discipline as the terse
 surface: a convenience that always shows its work, never an oracle.
 
-**Honest scope — this is a structural/legibility tool, NOT an established token- or accuracy-win.**
-`compose` and `ab_report` measure only the two model-free properties: round-trip *fidelity* (is the
-hidden view safe?) and *presentation cost* (`AbReport::char_ratio`, chars the agent reads). The
-headline question — does hiding URIs actually help a real small model answer (open question **K4**)?
-— needs a real-model NL→NL fan-out and is **UNMEASURED** (no API key on the work box; pre-registered
-NEUTRAL null). And the model-free A/B over the in-tree PKG already kills the naive assumption: the
-hidden view is sound (zero collisions, full coverage) but **larger to read, not smaller** — PKG task
-/finding labels are long descriptions, so `char_ratio` runs *above* 1.0 overall, not below. So
-URI-hiding is not a token-saver here; treat it like the terse-dialect verdict — a representation-level
-rewrite whose token/accuracy payoff is not established. The measured figures live in
-`bench/compose/RESULTS.md` (work-box, NON-CANONICAL). [OPUS-4.8]
+**Honest scope — a legibility + (conditional) accuracy tool, NOT a token-saver.** `compose` and
+`ab_report` measure the two model-free properties: round-trip *fidelity* (is the hidden view safe?)
+and *presentation cost* (`AbReport::char_ratio`, chars the agent reads). The headline accuracy
+question (open question **K4** — does hiding actually help a real model answer?) is now **MEASURED**
+(sq-3pb7f): a real-model, blinded, paired NL→answer A/B over the real PKG found the hidden view
+**matches-or-beats** raw IRIs on every question and **never regresses one** (a significant overall
+gain). But the win is **conditional, not universal** — it is concentrated on bindings whose **IRI
+local name is an opaque id** (e.g. `kb:task-sq-XXXX` task nodes, where the raw arm scores ~zero and
+the label rescues the answer) and is **~zero where the slug is already informative** (e.g.
+`topic-merge-discipline`, `surface-genai-retrieval`, which the agent reconstructs from the local
+name). So the right mental model is "**hiding rescues opaque-id bindings**," not "labels beat IRIs
+everywhere." And it is still **not a token-saver**: the model-free A/B shows the hidden view is sound
+(zero collisions, full coverage) but **larger to read, not smaller** — PKG task/finding labels are
+long descriptions, so `char_ratio` runs *above* 1.0 overall, and the very class that drives the
+accuracy gain (long task titles) is the one that inflates the read cost — hiding buys accuracy on
+opaque ids *with* tokens, it does not save them. The measured figures + the per-kind breakdown live
+in `bench/compose/RESULTS.md` and `bench/compose/k4/` (work-box, NON-CANONICAL). [OPUS-4.8]
 
 ## Gotchas / feature flags / prerequisites
 

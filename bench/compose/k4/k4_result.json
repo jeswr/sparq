@@ -1,0 +1,49 @@
+{
+  "n_questions": 35,
+  "n_pairs": 35,
+  "raw_accuracy": 0.6429,
+  "hidden_accuracy": 1.0,
+  "mean_delta_hidden_minus_raw": 0.3571,
+  "paired_hidden_wins": 16,
+  "paired_raw_wins": 0,
+  "paired_ties": 19,
+  "sign_test_p_two_sided": 0.0,
+  "per_kind": {
+    "about-topic": {
+      "n": 11,
+      "raw_acc": 0.955,
+      "hidden_acc": 1.0,
+      "delta": 0.045
+    },
+    "dep-count": {
+      "n": 4,
+      "raw_acc": 1.0,
+      "hidden_acc": 1.0,
+      "delta": 0.0
+    },
+    "disambiguate-finding": {
+      "n": 6,
+      "raw_acc": 0.417,
+      "hidden_acc": 1.0,
+      "delta": 0.583
+    },
+    "punct-concept": {
+      "n": 1,
+      "raw_acc": 0.5,
+      "hidden_acc": 1.0,
+      "delta": 0.5
+    },
+    "task-title": {
+      "n": 8,
+      "raw_acc": 0.0,
+      "hidden_acc": 1.0,
+      "delta": 1.0
+    },
+    "technique-name": {
+      "n": 5,
+      "raw_acc": 1.0,
+      "hidden_acc": 1.0,
+      "delta": 0.0
+    }
+  }
+}

@@ -1,0 +1,16 @@
+[
+  {"file": "j000.txt", "score": 1.0, "why": "exact match: Merge discipline"},
+  {"file": "j001.txt", "score": 1.0, "why": "exact match: 1"},
+  {"file": "j002.txt", "score": 1.0, "why": "Sub-agent rules conveys same topic as Sub-agent standing rules"},
+  {"file": "j003.txt", "score": 0.0, "why": "evasive 'cannot be determined'; missed HDT PFC dict decode subject"},
+  {"file": "j004.txt", "score": 1.0, "why": "exact match: Sub-agent standing rules"},
+  {"file": "j005.txt", "score": 0.5, "why": "identified correct finding via slug but gave IRI not the verbatim finding text"},
+  {"file": "j006.txt", "score": 1.0, "why": "matches MS-G2 clippy undocumented_unsafe_blocks + SAFETY tokens"},
+  {"file": "j007.txt", "score": 1.0, "why": "exact match: ZK/MPC claim + circuit discipline"},
+  {"file": "j008.txt", "score": 1.0, "why": "exact match: ZK/MPC claim + circuit discipline"},
+  {"file": "j009.txt", "score": 1.0, "why": "HTTP server matches http-server surface"},
+  {"file": "j010.txt", "score": 1.0, "why": "GenAI retrieval matches genai-retrieval surface"},
+  {"file": "j011.txt", "score": 0.0, "why": "evasive 'cannot be determined'; missed inputs-needed tracking subject"},
+  {"file": "j012.txt", "score": 1.0, "why": "Sub-agent rules conveys same topic as Sub-agent standing rules"},
+  {"file": "j013.txt", "score": 0.5, "why": "right ZK area but generic 'ZK discipline', hedged; misses claim+circuit specificity"}
+]

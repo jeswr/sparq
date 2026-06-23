@@ -1,0 +1,352 @@
+{
+"j000": {
+"id": 7,
+"arm": "hidden",
+"kind": "about-topic"
+},
+"j001": {
+"id": 33,
+"arm": "raw",
+"kind": "dep-count"
+},
+"j002": {
+"id": 3,
+"arm": "raw",
+"kind": "about-topic"
+},
+"j003": {
+"id": 21,
+"arm": "raw",
+"kind": "task-title"
+},
+"j004": {
+"id": 3,
+"arm": "hidden",
+"kind": "about-topic"
+},
+"j005": {
+"id": 11,
+"arm": "raw",
+"kind": "disambiguate-finding"
+},
+"j006": {
+"id": 19,
+"arm": "hidden",
+"kind": "task-title"
+},
+"j007": {
+"id": 9,
+"arm": "raw",
+"kind": "about-topic"
+},
+"j008": {
+"id": 8,
+"arm": "raw",
+"kind": "about-topic"
+},
+"j009": {
+"id": 26,
+"arm": "hidden",
+"kind": "technique-name"
+},
+"j010": {
+"id": 25,
+"arm": "raw",
+"kind": "technique-name"
+},
+"j011": {
+"id": 20,
+"arm": "raw",
+"kind": "task-title"
+},
+"j012": {
+"id": 2,
+"arm": "raw",
+"kind": "about-topic"
+},
+"j013": {
+"id": 10,
+"arm": "raw",
+"kind": "about-topic"
+},
+"j014": {
+"id": 31,
+"arm": "raw",
+"kind": "dep-count"
+},
+"j015": {
+"id": 12,
+"arm": "hidden",
+"kind": "disambiguate-finding"
+},
+"j016": {
+"id": 14,
+"arm": "hidden",
+"kind": "disambiguate-finding"
+},
+"j017": {
+"id": 16,
+"arm": "hidden",
+"kind": "disambiguate-finding"
+},
+"j018": {
+"id": 22,
+"arm": "raw",
+"kind": "task-title"
+},
+"j019": {
+"id": 24,
+"arm": "raw",
+"kind": "task-title"
+},
+"j020": {
+"id": 4,
+"arm": "raw",
+"kind": "about-topic"
+},
+"j021": {
+"id": 9,
+"arm": "hidden",
+"kind": "about-topic"
+},
+"j022": {
+"id": 11,
+"arm": "hidden",
+"kind": "disambiguate-finding"
+},
+"j023": {
+"id": 5,
+"arm": "hidden",
+"kind": "about-topic"
+},
+"j024": {
+"id": 30,
+"arm": "hidden",
+"kind": "punct-concept"
+},
+"j025": {
+"id": 23,
+"arm": "raw",
+"kind": "task-title"
+},
+"j026": {
+"id": 27,
+"arm": "hidden",
+"kind": "technique-name"
+},
+"j027": {
+"id": 34,
+"arm": "raw",
+"kind": "dep-count"
+},
+"j028": {
+"id": 18,
+"arm": "raw",
+"kind": "task-title"
+},
+"j029": {
+"id": 12,
+"arm": "raw",
+"kind": "disambiguate-finding"
+},
+"j030": {
+"id": 15,
+"arm": "raw",
+"kind": "disambiguate-finding"
+},
+"j031": {
+"id": 26,
+"arm": "raw",
+"kind": "technique-name"
+},
+"j032": {
+"id": 4,
+"arm": "hidden",
+"kind": "about-topic"
+},
+"j033": {
+"id": 24,
+"arm": "hidden",
+"kind": "task-title"
+},
+"j034": {
+"id": 10,
+"arm": "hidden",
+"kind": "about-topic"
+},
+"j035": {
+"id": 28,
+"arm": "raw",
+"kind": "technique-name"
+},
+"j036": {
+"id": 5,
+"arm": "raw",
+"kind": "about-topic"
+},
+"j037": {
+"id": 0,
+"arm": "raw",
+"kind": "about-topic"
+},
+"j038": {
+"id": 32,
+"arm": "raw",
+"kind": "dep-count"
+},
+"j039": {
+"id": 30,
+"arm": "raw",
+"kind": "punct-concept"
+},
+"j040": {
+"id": 32,
+"arm": "hidden",
+"kind": "dep-count"
+},
+"j041": {
+"id": 25,
+"arm": "hidden",
+"kind": "technique-name"
+},
+"j042": {
+"id": 13,
+"arm": "raw",
+"kind": "disambiguate-finding"
+},
+"j043": {
+"id": 29,
+"arm": "hidden",
+"kind": "technique-name"
+},
+"j044": {
+"id": 20,
+"arm": "hidden",
+"kind": "task-title"
+},
+"j045": {
+"id": 22,
+"arm": "hidden",
+"kind": "task-title"
+},
+"j046": {
+"id": 6,
+"arm": "raw",
+"kind": "about-topic"
+},
+"j047": {
+"id": 33,
+"arm": "hidden",
+"kind": "dep-count"
+},
+"j048": {
+"id": 27,
+"arm": "raw",
+"kind": "technique-name"
+},
+"j049": {
+"id": 19,
+"arm": "raw",
+"kind": "task-title"
+},
+"j050": {
+"id": 16,
+"arm": "raw",
+"kind": "disambiguate-finding"
+},
+"j051": {
+"id": 34,
+"arm": "hidden",
+"kind": "dep-count"
+},
+"j052": {
+"id": 31,
+"arm": "hidden",
+"kind": "dep-count"
+},
+"j053": {
+"id": 29,
+"arm": "raw",
+"kind": "technique-name"
+},
+"j054": {
+"id": 0,
+"arm": "hidden",
+"kind": "about-topic"
+},
+"j055": {
+"id": 1,
+"arm": "raw",
+"kind": "about-topic"
+},
+"j056": {
+"id": 13,
+"arm": "hidden",
+"kind": "disambiguate-finding"
+},
+"j057": {
+"id": 18,
+"arm": "hidden",
+"kind": "task-title"
+},
+"j058": {
+"id": 2,
+"arm": "hidden",
+"kind": "about-topic"
+},
+"j059": {
+"id": 17,
+"arm": "raw",
+"kind": "task-title"
+},
+"j060": {
+"id": 28,
+"arm": "hidden",
+"kind": "technique-name"
+},
+"j061": {
+"id": 23,
+"arm": "hidden",
+"kind": "task-title"
+},
+"j062": {
+"id": 21,
+"arm": "hidden",
+"kind": "task-title"
+},
+"j063": {
+"id": 6,
+"arm": "hidden",
+"kind": "about-topic"
+},
+"j064": {
+"id": 8,
+"arm": "hidden",
+"kind": "about-topic"
+},
+"j065": {
+"id": 14,
+"arm": "raw",
+"kind": "disambiguate-finding"
+},
+"j066": {
+"id": 15,
+"arm": "hidden",
+"kind": "disambiguate-finding"
+},
+"j067": {
+"id": 17,
+"arm": "hidden",
+"kind": "task-title"
+},
+"j068": {
+"id": 1,
+"arm": "hidden",
+"kind": "about-topic"
+},
+"j069": {
+"id": 7,
+"arm": "raw",
+"kind": "about-topic"
+}
+}
