@@ -101,6 +101,8 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   no second materialisation (eases Rust Oxigraph interop / migration). Off, zero code compiles, the
   default build is byte-identical, no new deps. See
   [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
+- **Structured EXPLAIN** *(opt-in `explain-json` feature, OFF by default)* — `explain_plan` /
+  `explain_plan_analyze` → a typed `PlanNode` tree (BGP `estimated`, `actual`/`nanos`, per-operator **q-error**) + `to_json()` + a bounded `SlowQueryRing`; off, build byte-identical.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more
