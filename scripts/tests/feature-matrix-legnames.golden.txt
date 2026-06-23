@@ -43,6 +43,7 @@ opt-in sparq-nlq (citations — provenance-join + citations + answer-qualificati
 opt-in sparq-nlq (nlq-endpoint — configurable OpenAI-compatible endpoint client)
 opt-in sparq-policy (count-enforcement)
 opt-in sparq-policy (secprop-leftoperands — ODRL security-property profile)
+opt-in sparq-py (arrow — Graph.query_arrow -> pyarrow.Table export)
 opt-in sparq-reason (explain)
 opt-in sparq-reason-el (hasse — transitive reduction / direct-subsumer Hasse)
 opt-in sparq-reason-el (rbox — CR10/CR11 RBox saturation)

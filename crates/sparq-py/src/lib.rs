@@ -29,7 +29,22 @@
 //!
 //! Long-running engine calls release the GIL (`py.detach`) so other Python
 //! threads keep running during parse / query / reasoning.
-#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
+//!
+//! * `Graph.query_arrow` (opt-in `arrow` feature / PyPI `arrow` extra) runs a SELECT
+//!   and hands the result to `pyarrow` as a [`pyarrow.Table`][arrow] over the merged
+//!   `sparq-arrow` columnar export — one struct column per variable, bridged through
+//!   the Arrow C Data Interface (no re-serialisation). OFF by default, so the lean
+//!   wheel carries no Arrow code. See the `arrow_export` module.
+//!
+//! [arrow]: https://arrow.apache.org/docs/python/generated/pyarrow.Table.html
+// [OPUS-4.8] sq-emay: the crate has zero `unsafe` EXCEPT the opt-in `arrow` C Data
+// Interface bridge (`arrow_export`), which needs one tightly-scoped `unsafe` block to
+// hand pyarrow a `PyCapsule` over an `FFI_ArrowArrayStream` pointer (the standard Arrow
+// producer pattern — see that module). So `forbid` holds for the whole default crate and
+// is relaxed to `deny` only when the `arrow` feature compiles that one module in, which
+// carries its own `#[allow(unsafe_code)]` with a per-block SAFETY justification.
+#![cfg_attr(not(feature = "arrow"), forbid(unsafe_code))]
+#![cfg_attr(feature = "arrow", deny(unsafe_code))]
 
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
@@ -38,6 +53,9 @@ use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph as CoreGraph;
 use sparq_text::TextIndex;
 use spargebra::{Query, SparqlParser};
+
+#[cfg(feature = "arrow")]
+mod arrow_export;
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 
@@ -371,6 +389,31 @@ impl Graph {
     fn query_json(&self, py: Python<'_>, sparql: &str) -> PyResult<String> {
         py.detach(|| sparq_engine::query_json(&self.inner, sparql))
             .map_err(engine_err)
+    }
+
+    /// Run a SPARQL SELECT and return the solutions as a `pyarrow.Table`
+    /// (opt-in `arrow` feature / PyPI `arrow` extra; `pip install sparq-rdf[arrow]`).
+    ///
+    /// The table has one column per SELECT variable, each an Arrow
+    /// `struct<kind, value, datatype, language, direction>` of nullable strings —
+    /// the faithful, round-trippable RDF-term projection from the `sparq-arrow`
+    /// crate (an **unbound** binding is a null struct slot, distinct from a bound
+    /// empty-string literal). The RecordBatch is handed to pyarrow through the Arrow
+    /// C Data Interface (a `PyCapsule`), so the columns are NOT re-serialised.
+    ///
+    /// Same v1 boundary as `sparq-arrow`: no numeric narrowing yet (`42^^xsd:integer`
+    /// is the string `"42"` plus its `datatype`, not an Arrow `Int64`) and RDF 1.2
+    /// triple terms are stringified to N-Triples in `value`.
+    ///
+    /// Requires `pyarrow` at call time (the term-struct ingestion uses pyarrow's
+    /// Arrow-PyCapsule support, i.e. `pyarrow >= 14`); a clear `ImportError` is raised
+    /// if it is missing.
+    #[cfg(feature = "arrow")]
+    fn query_arrow<'py>(&self, py: Python<'py>, sparql: &str) -> PyResult<Bound<'py, PyAny>> {
+        let res = py
+            .detach(|| sparq_engine::query(&self.inner, sparql))
+            .map_err(engine_err)?;
+        arrow_export::query_result_to_pyarrow_table(py, &res)
     }
 
     /// Answer an ASK query (a SELECT is also accepted: True iff it has rows).
