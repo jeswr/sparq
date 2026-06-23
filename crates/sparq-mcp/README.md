@@ -48,8 +48,21 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
 - **`introspect`** — the effective schema the graph actually uses (classes, predicates,
   prefixes, characteristic sets) as full JSON or a token-budgeted text summary for LLM
   grounding — exact counts from the store indexes, no sampling.
+- **`shapes`** — given a class IRI, the data-grounded SHACL-style shape of that class:
+  the valid predicates, their datatypes/object-kinds, observed range, and the
+  cardinalities the data supports (`min_count`/`max_count` only when proven, never
+  fabricated). Structured grounding so a **client** LLM can write NL→SPARQL — **no
+  server-side model**. Ships in the default build.
 - **`stats`** — dataset totals (triples, distinct subjects, typed entities, class /
   predicate / namespace counts).
+- **`ask`** *(feature `nlq`, OFF by default)* — answer a natural-language question
+  **server-side**: NL→SPARQL→validate→execute via `sparq-nlq`, returning the executed
+  SPARQL + the real result rows (+ in-graph citations). It embeds a **configurable** LLM
+  call — cost/quality depend on the model **you** configure (`ANTHROPIC_API_KEY`, or an
+  OpenAI-compatible `SPARQ_NLQ_ENDPOINT_URL`+`_MODEL`); no model is bundled. With no
+  backend configured it is unadvertised and a call returns a clear "not configured"
+  error — never a fabricated answer. This is an ergonomics/grounding aid (no
+  token-saving claim); the structured tools are the no-LLM default.
 - **`update`** *(gated, OFF by default)* — apply an atomic SPARQL 1.1 Update. Neither
   advertised in `tools/list` nor callable unless `ServerConfig::allow_update` is set.
 

@@ -51,6 +51,14 @@ pub mod shacl_priors;
 // carries zero grounding code.
 #[cfg(feature = "structure")]
 pub mod grounding;
+// [OPUS-4.8] sq-0wo9e.6 (epic sq-0wo9e): the P5 NEURO-SYMBOLIC propose(neural)-then-verify(deductive)
+// grounding pipeline — vector ANN PROPOSES candidates (recall only, NOT sound), then a DEDUCTIVE GATE
+// admits a binding only if it introduces no new SHACL violation (`sparq-shacl`) and no new OWL
+// inconsistency (`sparq-reason::inconsistencies` over the closure); a failing candidate is REJECTED
+// (fail-closed). `neuro-symbolic` feature only (implies `structure-shacl` → reuses sparq-shacl +
+// sparq-reason); the default build carries zero pipeline code and makes no accuracy claim.
+#[cfg(feature = "neuro-symbolic")]
+pub mod verify;
 // [OPUS-4.8] sq-mztg8.1 (epic sq-mztg8, design research/fo-llm-bridge.md §2.3/§3.3/§6 Phase 3):
 // the READ-PATH URI-HIDING "compose" step + a closed NL→NL A/B fidelity/cost harness — present an
 // answer-row binding to the agent as a label/grounded view instead of a raw IRI, behind the
@@ -230,4 +238,12 @@ pub use grounding::{
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,
     ObjectKind, PropertyGroup,
+};
+// [OPUS-4.8] sq-0wo9e.6 (epic sq-0wo9e): the structure-aware-vectorisation P5 surface — the
+// neuro-symbolic propose(neural)-then-verify(deductive) grounding pipeline. `neuro-symbolic`
+// feature only (implies `structure-shacl`).
+#[cfg(feature = "neuro-symbolic")]
+pub use verify::{
+    propose_by_vector, propose_then_verify, verify_candidate, verify_candidates, Rejection, Source,
+    Verdict, VerifyConfig, VerifyReport,
 };

@@ -1098,6 +1098,49 @@ the **projection** half only: the "ANN proposes, exact engine re-validates" loop
 opt into **cross-unit reconciliation** via `reconcile_units` (above) — known units canonicalise via
 the P2 QUDT `normalise` (recipe 16; sq-0wo9e.3, sq-t80n4), unknown/compound units stay as declared.
 
+### 19. Neuro-symbolic propose-then-verify grounding (opt-in, feature = `neuro-symbolic`)
+
+<!-- [OPUS-4.8] sq-0wo9e.6 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §5 (B) + §6.A). -->
+Research-grade **P5**: grounding a tool slot `(subject, predicate, ?)` has two halves with
+**deliberately asymmetric guarantees**, and the `verify` module keeps them honestly separate:
+
+- **PROPOSE (neural — recall only, NOT sound).** `propose_by_vector(store, seed, k)` returns the `k`
+  nearest neighbours of `seed`'s stored vector as candidate objects. It is a candidate **generator**:
+  a returned id may be type-inconsistent, shape-invalid, or wrong for the slot. **No soundness
+  claim.**
+- **VERIFY (deductive — the soundness GATE).** `verify_candidate` adds the binding to the graph and
+  **rejects** it if doing so introduces a **new SHACL violation** (`sparq-shacl`; datatype /
+  cardinality / enum / `sh:class` / node-kind) **or** a **new OWL inconsistency**
+  (`sparq-reason::inconsistencies` over the materialised closure — `cax-dw` disjoint-class clash,
+  `differentFrom`/`sameAs`, max-cardinality-0). A failing candidate is **REJECTED, not down-ranked**,
+  and the gate **fails closed** (an uncheckable candidate is never surfaced as verified). The check is
+  **differential**: only a defect the base graph did not already have blocks the candidate.
+
+`propose_then_verify` runs both: the returned `VerifyReport::verified()` is **guaranteed a subset of
+the proposed candidates** and contains only deductively-admissible bindings — the design's
+**verify-shrinks-to-sound** property.
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features neuro-symbolic
+use sparq_vectors::{propose_then_verify, VerifyConfig};
+use sparq_shacl::ShapesModel;
+
+let shapes = ShapesModel::parse(&shapes_graph);
+let report = propose_then_verify(
+    &graph, &store, /*seed*/ alice, /*subject*/ alice, /*predicate*/ works_on,
+    /*k*/ 8, Some(&shapes), &VerifyConfig::default(),
+);
+for object in report.verified() { /* a vector-proposed binding that PASSED the deductive gate */ }
+for v in report.rejected() { /* audit: WHY each unsound proposal was dropped */ }
+```
+
+**Honesty.** The neural propose is a high-**recall** generator with **no soundness guarantee**; the
+deductive verify is the **only** soundness gate (correctness comes from it, never from the vector
+step). *Verify-shrinks-to-sound* is **provable + tested** (the load-bearing test asserts a
+vector-proposed-but-shape-invalid candidate is rejected). Whether the neural periphery raises end-task
+**recall** is **empirical, dataset-dependent, EC2-gated** (GraphRAG/KG-RAG does not uniformly beat
+vector RAG) — measured by the on/off ablation harness (recipe 14; sq-0wo9e.7), **never asserted here**.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in.** Nothing in the workspace depends on `sparq-vectors`; the default engine
@@ -1134,6 +1177,15 @@ the P2 QUDT `normalise` (recipe 16; sq-0wo9e.3, sq-t80n4), unknown/compound unit
   `Cardinality` (recipe 16): a **read-only** reader that mines enum/datatype/cardinality priors out of
   a parsed `ShapesModel` (no SHACL behaviour change). The enum codebook + QUDT normaliser themselves
   ship under plain `structure` (pure, no SHACL dep) — only the *reader* needs `structure-shacl`.
+- **The neuro-symbolic propose-then-verify pipeline is the non-default `neuro-symbolic` feature (sq-0wo9e.6 P5).**
+  It **implies `structure-shacl`** (and thus `structure`), so it reuses exactly the `sparq-shacl` +
+  `sparq-reason` + `sparq-introspect` deps those features already pull and adds **no new dependency**.
+  With it OFF the default build compiles zero pipeline code; with it ON it exposes `propose_by_vector`
+  / `verify_candidate` / `verify_candidates` / `propose_then_verify` + `VerifyReport` / `Verdict` /
+  `Rejection` / `Source` / `VerifyConfig` (recipe 19). The neural propose is **recall only (NOT
+  sound)**; the deductive verify is the soundness gate — a failing candidate is **rejected**
+  (fail-closed), the verified set only **shrinks to a sound subset**, and **no recall/accuracy number
+  is claimed** (empirical, EC2-gated).
 - **The KGE measurement foundation is the non-default `kge` feature (sq-0wo9e.8 / P6).** It **implies
   `structure`** and adds **no new dependency** (a hand-rolled CPU-only trainer — no ML crate). With it
   OFF the default build compiles zero trainer/eval code; with it ON it exposes `train` / `TrainConfig`

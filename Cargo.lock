@@ -3785,6 +3785,7 @@ dependencies = [
  "sparq-core",
  "sparq-engine",
  "sparq-introspect",
+ "sparq-nlq",
 ]
 
 [[package]]

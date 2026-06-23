@@ -67,12 +67,76 @@ fn read_only_server_lists_read_tools_only() {
     assert!(names.contains(&"query"));
     assert!(names.contains(&"construct"));
     assert!(names.contains(&"introspect"));
+    assert!(names.contains(&"shapes"));
     assert!(names.contains(&"stats"));
     assert!(!names.contains(&"update"), "update must NOT be advertised by default");
+    // The NL `ask` tool is feature-gated AND backend-gated: never advertised in the
+    // default build (the `nlq` feature is off here).
+    assert!(!names.contains(&"ask"), "ask must NOT be advertised in the default build");
     // Each tool ships a proper inputSchema object.
     for tool in resp["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["type"], "object");
     }
+}
+
+#[test]
+fn shapes_tool_returns_data_grounded_constraints_for_a_class() {
+    // [OPUS-4.8] sq-zak4f: the structured shape tool, exercised through the REAL MCP
+    // dispatch (no mock bypasses the introspection miner).
+    let mut server = McpServer::new(graph());
+    let req = r#"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{
+        "name":"shapes",
+        "arguments":{"class":"http://ex/Person"}
+    }}"#;
+    let resp = call(&mut server, req);
+    let result = &resp["result"];
+    assert_eq!(result["isError"], false, "{resp}");
+    let shape: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(shape["class"], "http://ex/Person");
+    assert_eq!(shape["instances"], 2, "alice + bob");
+
+    let preds: Vec<&str> = shape["predicates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["predicate"].as_str().unwrap())
+        .collect();
+    // name (on both) and knows (on alice only) are reported; rdf:type is NOT (carried by
+    // the class targeting itself).
+    assert!(preds.contains(&"http://ex/name"), "{preds:?}");
+    assert!(preds.contains(&"http://ex/knows"), "{preds:?}");
+    assert!(
+        !preds.contains(&"http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
+        "rdf:type must not appear as a property: {preds:?}"
+    );
+
+    // name is on both instances exactly once ⇒ min_count 1, max_count 1.
+    let name = shape["predicates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["predicate"] == "http://ex/name")
+        .unwrap();
+    assert_eq!(name["min_count"], 1);
+    assert_eq!(name["max_count"], 1);
+    assert_eq!(name["coverage"], 1.0);
+}
+
+#[test]
+fn shapes_tool_unknown_class_is_a_tool_error_not_a_protocol_error() {
+    let mut server = McpServer::new(graph());
+    let req = r#"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{
+        "name":"shapes",
+        "arguments":{"class":"http://ex/Nope"}
+    }}"#;
+    let resp = call(&mut server, req);
+    // A missing class is a TOOL error (isError true, the client reads + corrects), not a
+    // JSON-RPC protocol error.
+    assert!(resp["result"]["isError"].as_bool().unwrap(), "{resp}");
+    assert!(resp["error"].is_null());
+    let msg = resp["result"]["content"][0]["text"].as_str().unwrap();
+    // It names the classes that DO exist so the client can self-correct.
+    assert!(msg.contains("http://ex/Person"), "{msg}");
 }
 
 #[test]
