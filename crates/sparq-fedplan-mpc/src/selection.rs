@@ -511,4 +511,119 @@ mod tests {
         let b = select_private_sources(&bgp, &sources, &privacy).unwrap();
         assert_eq!(a, b);
     }
+
+    // A two-pattern BGP `?s p1 ?o . ?s p2 ?o2` (joins on ?s) so a source can appear in BOTH
+    // patterns and a per-pattern cardinality sum is non-trivial. [OPUS-4.8] sq-bif.
+    fn bgp_two_preds(p1: &str, p2: &str) -> Bgp {
+        Bgp::new(vec![
+            TriplePattern::new(
+                Term::Var(sparq_fedplan::Var::new("s")),
+                Term::Iri(p1.to_string()),
+                Term::Var(sparq_fedplan::Var::new("o")),
+            ),
+            TriplePattern::new(
+                Term::Var(sparq_fedplan::Var::new("s")),
+                Term::Iri(p2.to_string()),
+                Term::Var(sparq_fedplan::Var::new("o2")),
+            ),
+        ])
+    }
+
+    /// `total_cardinality` sums ONLY the surviving candidates, and it excludes a pruned one — a
+    /// regression that summed pruned candidates (or the wrong field) would change the number. The
+    /// surviving sum must equal the upstream per-pattern total minus the pruned source's estimate.
+    /// [OPUS-4.8] sq-bif.
+    #[test]
+    fn total_cardinality_sums_only_surviving_candidates() {
+        let pred = "http://ex/p";
+        let bgp = bgp_pred(pred);
+        let sources = vec![
+            source_with_pred("http://a/", pred),
+            source_with_pred("http://b/", pred),
+        ];
+        // Source B is non-participating ⇒ pruned; only A's estimate should remain in the total.
+        let privacy = vec![SourcePrivacyDescriptor::builder(SourceId::new("http://b/"))
+            .participates(false)
+            .build()];
+
+        let upstream = select_sources(&bgp, &sources);
+        let upstream_total = upstream[0].total_cardinality();
+        // The pruned source's upstream estimate (B is index 1).
+        let pruned_estimate = upstream[0]
+            .candidates
+            .iter()
+            .find(|c| c.source == 1)
+            .map(|c| c.estimated_cardinality)
+            .expect("upstream retained B before the prune");
+
+        let sel = select_private_sources(&bgp, &sources, &privacy).unwrap();
+        let surviving_total = sel.per_pattern[0].total_cardinality();
+
+        // The surviving total is the kept candidate's estimate — A only.
+        assert_eq!(sel.per_pattern[0].candidates.len(), 1);
+        assert_eq!(
+            surviving_total,
+            sel.per_pattern[0].candidates[0].estimated_cardinality
+        );
+        // …and it is strictly the upstream total minus the pruned source's contribution (so a
+        // regression that left B in the sum would be caught).
+        assert_eq!(surviving_total, upstream_total - pruned_estimate);
+        assert!(
+            surviving_total < upstream_total,
+            "pruning a contributing source must lower the per-pattern total"
+        );
+    }
+
+    /// `participating_sources` deduplicates a source that contributes to MULTIPLE patterns — it
+    /// returns each distinct id once, ascending. A regression that concatenated per-pattern ids
+    /// without the dedup would report the source twice.  [OPUS-4.8] sq-bif.
+    #[test]
+    fn participating_sources_dedups_a_source_across_patterns() {
+        let p1 = "http://ex/p1";
+        let p2 = "http://ex/p2";
+        let bgp = bgp_two_preds(p1, p2);
+        // One source holding BOTH predicates ⇒ it is a candidate for pattern 0 AND pattern 1.
+        let sources = vec![SourceDescriptor::builder(SourceId::new("http://a/"))
+            .total_triples(100)
+            .predicate(PredPartition {
+                predicate: p1.to_string(),
+                triples: 100,
+                distinct_subjects: 10,
+                distinct_objects: 10,
+            })
+            .predicate(PredPartition {
+                predicate: p2.to_string(),
+                triples: 100,
+                distinct_subjects: 10,
+                distinct_objects: 10,
+            })
+            .authorities_complete()
+            .build()];
+        let sel = select_private_sources(&bgp, &sources, &[]).unwrap();
+        // The source survives in both patterns…
+        assert_eq!(sel.per_pattern.len(), 2);
+        assert_eq!(sel.per_pattern[0].candidates.len(), 1);
+        assert_eq!(sel.per_pattern[1].candidates.len(), 1);
+        // …but participating_sources reports it exactly ONCE (deduped), not twice.
+        assert_eq!(
+            sel.participating_sources(),
+            vec![&SourceId::new("http://a/")]
+        );
+    }
+
+    /// The audit-trail `PruneReason::label` is the human-readable diagnostic surfaced to a relying
+    /// party. Pin its content (a regression that blanked or reworded it past the load-bearing
+    /// `participates=false` token would be caught). [OPUS-4.8] sq-bif.
+    #[test]
+    fn prune_reason_label_names_the_non_participation_cause() {
+        let label = PruneReason::NonParticipating.label();
+        assert!(
+            label.contains("non-participating"),
+            "label must name the cause: {label}"
+        );
+        assert!(
+            label.contains("participates=false"),
+            "label must name the load-bearing flag: {label}"
+        );
+    }
 }
