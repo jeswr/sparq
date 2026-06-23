@@ -20,8 +20,9 @@
 //! ```
 //!
 //! **It makes ZERO network and ZERO live-model calls.** The only LLM-in-the-loop step —
-//! extraction — is isolated behind the [`extract::Extractor`] **record/replay trait**, and
-//! the only adapter shipped here is [`extract::RecordedExtractor`], which **replays a
+//! extraction — is isolated behind the `extract::Extractor` **record/replay trait** (a
+//! `literature`-feature item), and the only adapter shipped here is
+//! `extract::RecordedExtractor`, which **replays a
 //! committed tape**. The live extractor (a real cheap-model batch) is the separate,
 //! credential-gated Phase-6 bead (`sq-t5f3l`, `needs-access`); an agent cannot mint the
 //! S2/OpenAlex/Anthropic credentials it needs, so Phases 1–5 are deliberately built and
@@ -30,24 +31,24 @@
 //! ## The load-bearing honesty invariants
 //!
 //! 1. **Quarantine, never silently drop.** Every candidate Finding that fails grounding
-//!    or that the caller's SHACL gate rejects is recorded in the [`pipeline::Sidecar`]
+//!    or that the caller's SHACL gate rejects is recorded in the `pipeline::Sidecar`
 //!    (`quarantined`), with its reason — never dropped. This is the sidecar-honesty
 //!    pattern (`.quarantine`) the design (§4.7) requires.
 //! 2. **Propose-then-verify (the deterministic grounding-resolver, §4.3).** A cheap model
-//!    hallucinates. So [`ground`] requires every committed Finding's `justification` to be
+//!    hallucinates. So `ground` requires every committed Finding's `justification` to be
 //!    an **entailed span of the source abstract** AND every cited DOI to **resolve to a
 //!    `pkg:Source` actually in the batch**. A candidate that fails either check is
 //!    quarantined, not committed. The SHACL gate checks *structure*; grounding checks that
 //!    the claim is *anchored in the text* — neither checks *truth*, and the docs say so.
 //! 3. **The machine tier never outranks a human.** Every emitted Finding is
-//!    `prov:wasAttributedTo` a [`pipeline::MACHINE_AGENT_IRI`] (`pkg:MachineAgent`) and
+//!    `prov:wasAttributedTo` a `pipeline::MACHINE_AGENT_IRI` (`pkg:MachineAgent`) and
 //!    carries `secx:Conjectured` with a bounded confidence. `shapes/literature.shapes.ttl`
 //!    enforces this declaratively at the write-gate (a machine Finding may never stamp
 //!    `secx:Proven`).
 //!
 //! ## The metric (Phase-5 acceptance bar)
 //!
-//! On a frozen fixture batch the pipeline reports a [`pipeline::Sidecar`] carrying the
+//! On a frozen fixture batch the pipeline reports a `pipeline::Sidecar` carrying the
 //! **citation-grounding rate** (candidates whose grounding passed / total candidates) and
 //! the inputs for the **SHACL-conformance rate** (the caller runs the SHACL gate over the
 //! emitted TTL with `shapes/literature.shapes.ttl` and records the conformance). No
