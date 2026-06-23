@@ -1114,7 +1114,13 @@ core spine; **P5, P6, P7** depend on P3/P4; **P7 (privacy) is hard-gated on `sq-
 6. **P6 — Live status/revocation + minimal justification (prototype, G5/G6).** Fetch+decode a
    W3C Bitstring Status List; gate derivations on validity; emit a *minimal* PROV-O
    justification subset for each grant (sparq has PROV-O lineage but not minimal proof trees).
-   *Blocked-on: P3.*
+   *Blocked-on: P3.* **PROTOTYPED** (`sq-pfae.7`, opt-in `status-list` feature): the
+   `sparq_trust::status_list` module decodes a Bitstring Status List (pluggable resolver +
+   GZIP seam, MSB-first clear-index — distinct from the LSB-first ZK `StatusListSnapshot`
+   mirror), `admit_with_status` gates the REAL admission path **fail-closed on
+   set/unknown/stale**, and `justify_status_decision` renders the minimal PROV-O allow/deny
+   justification. Open residue (captured beads): verifying the status-list VC's own issuer
+   signature; incremental (non-re-materialise) revocation. [OPUS-4.8]
 7. **P7 — Privacy/ZK admission feasibility (design + caveated prototype, G4).** Show the
    trust-graph derivation can run under sparq's ZK estate to give ZKAP-equivalent unlinkable
    predicate access. ZKAPs-grade unlinkability needs the **three-part composite** (§5.3): the

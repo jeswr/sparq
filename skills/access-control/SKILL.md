@@ -595,6 +595,33 @@ open), and `requiresPostQuantumForgery gteq …` removes the DL-signature method
 **principled refusal** ("no admissible proof") over silently serving a non-conforming one. The §4.3.3
 worked example is the golden test: empty under Alice's strict preference, non-empty under the relaxed one.
 
+### Live status / revocation + minimal denial justification — opt-in `status-list` ([OPUS-4.8] sq-pfae.7, design §6.1 P6)
+
+The `sparq_trust::status_list` module (behind the **default-OFF `status-list`** cargo feature) gates
+admission on a **live W3C Bitstring Status List** instead of the PoC's per-credential `revoked: bool`
+flag. A credential's `StatusListEntry` (`{ status_list_credential, status_list_index, purpose }`) is
+checked by a `LiveStatusCheck::new(resolver, decoder, max_age_secs)` — a **pluggable**
+`StatusListResolver` (the network seam; the crate ships no HTTP client) + a **pluggable** `GzipDecoder`
+(the compression seam; the multibase base64url/base58btc decode is hand-rolled and dependency-free, the
+built-in `Flate2GzipDecoder` lives behind the nested `status-list-flate2` feature that pulls `flate2`).
+`LiveStatusCheck::check(&entry, now)` returns a `LiveStatus`, and `LiveStatus::admits()` is `true` for
+`LiveStatus::Live` **only** — **fail-closed on `Set` (revoked), `Unknown` (unresolvable / undecodable /
+out-of-range), and `Stale` (snapshot older than `max_age_secs`)**, exactly as the bead requires. The
+bitstring is MSB-first per the spec (`StatusBitstring`), distinct from the LSB-first
+`sparq-zk-compose::StatusListSnapshot` ZK mirror — this is the **clear-index** gate, not the hidden-index
+ZK proof. `sparq_trust::admit_with_status(cred, rules, session, target, &entry, &check)` wires the gate
+into the REAL admission path: it runs the live-status check FIRST (deny the whole credential on a
+non-admitting status) and otherwise delegates to the unchanged `admit` — strictly additive (it can only
+NARROW). `justify_status_decision(grant, &entry, status, at_time)` renders a **minimal PROV-O
+justification** for the allow OR the deny (a `prov:Activity` typed `trust:StatusCheck`, `prov:generated`
+the grant, with `trust:statusDecision` = the reason token + the checked index/purpose) — the bead's
+*minimal denial justification*. Two honesty boundaries: (i) it adds **no privacy** (the index + list are
+clear; the resolver learns which credential is checked); (ii) v1 does **not** verify the status-list
+credential's OWN issuer signature (the resolver is the trust seam — a captured follow-up bead).
+Revocation propagates by **full re-materialise** (the §4.4 stale window is *bounded* by `max_age_secs`,
+not closed — no in-reasoner incremental retraction). Pure-Rust base layer (no new default dep); OFF in
+the default build.
+
 ## Related skills
 
 - [`http-server`](../http-server/SKILL.md) — the sparq SPARQL HTTP server has **no**
