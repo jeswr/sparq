@@ -20,7 +20,20 @@
 // data-result-view="table" wrapping a <table> with the binding.
 
 import * as React from "react";
-import { Play, Loader2, Square, Network, Activity, Telescope, Gauge, History } from "lucide-react";
+import {
+  Play,
+  Loader2,
+  Square,
+  Network,
+  Activity,
+  Telescope,
+  Gauge,
+  History,
+  ChevronFirst,
+  ChevronLast,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +47,7 @@ import {
 } from "@/lib/engine-context";
 import {
   extractTable,
+  createPageCache,
   resultsToCsv,
   resultsToTsv,
   formatSparqlJson,
@@ -70,49 +84,152 @@ const VIEWS: { id: ResultView; label: string }[] = [
 // View bodies.
 // ---------------------------------------------------------------------------
 
+/** The page-size choices the results table offers (rows rendered per page). */
+const PAGE_SIZES = [50, 100, 250, 500] as const;
+const DEFAULT_PAGE_SIZE = 100;
+
+// [OPUS-4.8] sq-9w4t (#817) — paginated SELECT table. Only the VISIBLE page of rows is shaped
+// into <td> cells (serialising/rendering the whole kept result is the per-render cost #817
+// calls out), and a bounded read-ahead PAGE CACHE (createPageCache, ~2 pages ahead) warms the
+// next page so ⏭ is instant. The cache is rebuilt only when the underlying result or page size
+// changes — paging itself never re-extracts the table. NOTE this paginates over the rows the
+// engine ALREADY streamed into JS; demand-driven query EVALUATION up to the current page needs
+// a pull-iterator exec model the engine lacks today (gated — see results.ts / gui-design.md).
 function SelectTable({ results }: { results: SparqlResults }) {
-  const table = extractTable(results);
+  const table = React.useMemo(() => extractTable(results), [results]);
+  const [pageSize, setPageSize] = React.useState<number>(DEFAULT_PAGE_SIZE);
+  const [page, setPage] = React.useState(0);
+
+  // One cache per (result, pageSize). Reset to the first page whenever either changes so a new
+  // run / resize never strands the view on an out-of-range page.
+  const cache = React.useMemo(
+    () => createPageCache(table, pageSize, 2),
+    [table, pageSize],
+  );
+  React.useEffect(() => {
+    setPage(0);
+  }, [cache]);
+
   if (table.vars.length === 0) {
     return <p className="p-3 text-sm text-muted-foreground">No projected variables.</p>;
   }
+
+  // `cache.get` clamps + warms the read-ahead window; render only its returned slice.
+  const current = cache.get(page);
+  const { rows, totalRows, totalPages, startRow } = current;
+  const firstRow = totalRows === 0 ? 0 : startRow + 1;
+  const lastRow = startRow + rows.length;
+  const atFirst = current.page <= 0;
+  const atLast = current.page >= totalPages - 1;
+
   return (
-    <div className="overflow-auto" data-result-view="table">
-      <table className="w-full border-collapse text-sm">
-        <thead className="sticky top-0 bg-card">
-          <tr>
-            {table.vars.map((v) => (
-              <th
-                key={v}
-                className="border-b px-3 py-1.5 text-left font-mono text-xs font-semibold"
-              >
-                ?{v}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {table.rows.length === 0 ? (
+    <div className="flex h-full flex-col" data-result-view="table">
+      <div className="min-h-0 flex-1 overflow-auto">
+        <table className="w-full border-collapse text-sm">
+          <thead className="sticky top-0 bg-card">
             <tr>
-              <td
-                colSpan={table.vars.length}
-                className="px-3 py-3 text-center text-muted-foreground"
-              >
-                0 rows
-              </td>
+              {table.vars.map((v) => (
+                <th
+                  key={v}
+                  className="border-b px-3 py-1.5 text-left font-mono text-xs font-semibold"
+                >
+                  ?{v}
+                </th>
+              ))}
             </tr>
-          ) : (
-            table.rows.map((row, i) => (
-              <tr key={i} className="odd:bg-muted/30">
-                {row.map((cell, j) => (
-                  <td key={j} className="border-b px-3 py-1 font-mono text-xs">
-                    {cell}
-                  </td>
-                ))}
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={table.vars.length}
+                  className="px-3 py-3 text-center text-muted-foreground"
+                >
+                  0 rows
+                </td>
               </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+            ) : (
+              rows.map((row, i) => (
+                <tr key={startRow + i} className="odd:bg-muted/30">
+                  {row.map((cell, j) => (
+                    <td key={j} className="border-b px-3 py-1 font-mono text-xs">
+                      {cell}
+                    </td>
+                  ))}
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+      {/* Pager: only shown when there is more than one page of kept rows. */}
+      {totalRows > 0 && (
+        <div
+          className="flex items-center gap-2 border-t bg-card px-3 py-1 text-[11px] text-muted-foreground"
+          data-result-pager
+        >
+          <span className="tabular" data-pager-range>
+            {firstRow.toLocaleString()}–{lastRow.toLocaleString()} of{" "}
+            {totalRows.toLocaleString()}
+          </span>
+          <div className="ml-auto flex items-center gap-1">
+            <label className="flex items-center gap-1">
+              <span>Rows / page</span>
+              <select
+                className="rounded border bg-background px-1 py-0.5 text-[11px]"
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value))}
+                aria-label="Rows per page"
+              >
+                {PAGE_SIZES.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className="rounded p-0.5 hover:bg-accent/40 disabled:opacity-30"
+              onClick={() => setPage(0)}
+              disabled={atFirst}
+              title="First page"
+              aria-label="First page"
+            >
+              <ChevronFirst className="size-3.5" />
+            </button>
+            <button
+              className="rounded p-0.5 hover:bg-accent/40 disabled:opacity-30"
+              onClick={() => setPage((p) => p - 1)}
+              disabled={atFirst}
+              title="Previous page"
+              aria-label="Previous page"
+            >
+              <ChevronLeft className="size-3.5" />
+            </button>
+            <span className="tabular px-1" data-pager-page>
+              Page {(current.page + 1).toLocaleString()} / {totalPages.toLocaleString()}
+            </span>
+            <button
+              className="rounded p-0.5 hover:bg-accent/40 disabled:opacity-30"
+              onClick={() => setPage((p) => p + 1)}
+              disabled={atLast}
+              title="Next page"
+              aria-label="Next page"
+            >
+              <ChevronRight className="size-3.5" />
+            </button>
+            <button
+              className="rounded p-0.5 hover:bg-accent/40 disabled:opacity-30"
+              onClick={() => setPage(totalPages - 1)}
+              disabled={atLast}
+              title="Last page"
+              aria-label="Last page"
+            >
+              <ChevronLast className="size-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
