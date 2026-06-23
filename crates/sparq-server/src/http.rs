@@ -648,6 +648,22 @@ pub struct ServerConfig {
     /// `vectors`-gated extension (the `V()` ambiguity caveat is tracked by `sq-26fdp`).
     #[cfg(feature = "terse")]
     pub terse: bool,
+    /// [OPUS-4.8] (sq-2999l, gh-906) OPT-IN durable CDC change-stream directory. When `Some(dir)`,
+    /// the server (1) RECORDS every committed SPARQL Update as one ordered change record to the
+    /// segmented, fsync'd append-only `sparq_serve::ChangeLog` rooted at `dir`, and (2) serves the
+    /// Amazon-Neptune-Streams `GetRecords`-shaped poll endpoint `GET /streams` over that log
+    /// (`iteratorType` / `at` / `after` / `limit`, returning the ordered records + a continuation
+    /// token). `None` (the default) leaves both off: `/streams` is `404` and nothing is recorded —
+    /// byte-identical to before. The log resumes after a restart (`ChangeLog::open` re-reads the
+    /// segments), so pointing the server at an existing dir continues the same stream gaplessly.
+    ///
+    /// This field exists only with the `change-stream` cargo feature (like [`tpf`](Self::tpf)
+    /// under `tpf`); a build without that feature compiles no change-stream code and pays zero
+    /// cost. Set by the binary's `--change-stream <DIR>` flag / `SPARQ_CHANGE_STREAM` env. At-rest
+    /// encryption + cryptographic authenticity of the records are out of scope (the same boundary
+    /// as the backup family); a consumer needing an authentic feed wraps its own signing.
+    #[cfg(feature = "change-stream")]
+    pub change_stream_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -764,6 +780,12 @@ impl Default for ServerConfig {
             // SPARQ_TERSE=1).
             #[cfg(feature = "terse")]
             terse: false,
+            // [OPUS-4.8] sq-2999l: safe default — no durable CDC change-stream directory, so the
+            // `GET /streams` endpoint is OFF (404) and nothing is recorded even when the feature is
+            // compiled in (the operator opts in deliberately via --change-stream DIR /
+            // SPARQ_CHANGE_STREAM).
+            #[cfg(feature = "change-stream")]
+            change_stream_dir: None,
         }
     }
 }
@@ -1030,6 +1052,14 @@ impl ServerConfig {
         #[cfg(feature = "terse")]
         if let Ok(v) = std::env::var("SPARQ_TERSE") {
             cfg.terse = env_truthy(&v);
+        }
+        // [OPUS-4.8] sq-2999l: SPARQ_CHANGE_STREAM=<DIR> enables the durable CDC change-stream
+        // (recording + the `GET /streams` poll endpoint) rooted at the given directory (the
+        // binary's --change-stream flag overrides it). An empty value is "unset". Only present with
+        // the `change-stream` feature.
+        #[cfg(feature = "change-stream")]
+        if let Ok(v) = std::env::var("SPARQ_CHANGE_STREAM") {
+            cfg.change_stream_dir = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
         }
         Ok(cfg)
     }
@@ -2019,6 +2049,15 @@ pub struct AppState {
     /// configured one (`--access-audit` / `SPARQ_ACCESS_AUDIT`); shared across handlers.
     #[cfg(feature = "access-audit")]
     access_audit_sink: Option<Arc<dyn crate::access_audit::AuditSink>>,
+    /// [OPUS-4.8] (sq-2999l) The opt-in durable CDC change-stream log. `Some(mutex)` only when the
+    /// operator configured a directory (`--change-stream` / `SPARQ_CHANGE_STREAM`); shared across
+    /// handlers behind a [`std::sync::Mutex`] because the log is single-writer (it serialises the
+    /// commit-recording append) while a concurrent reader [`poll`](sparq_serve::ChangeLog::poll)s
+    /// the SAME on-disk directory through a separate `ChangeLog::open` handle in the endpoint. The
+    /// recording path holds this lock across an update's pre/post generation pin so the recorded
+    /// `(from, to)` pair is exactly that commit (gapless, monotonic — the `ChangeLog` contract).
+    #[cfg(feature = "change-stream")]
+    change_log: Option<Arc<std::sync::Mutex<sparq_serve::ChangeLog>>>,
 }
 
 impl AppState {
@@ -2133,6 +2172,20 @@ impl AppState {
             ),
             None => None,
         };
+        // [OPUS-4.8] sq-2999l: open (creating + recovering) the durable CDC change-stream log when a
+        // directory is configured. `ChangeLog::open` re-reads any existing segments and resumes at
+        // the next seq, so restarting on the same dir continues the stream gaplessly. A corrupt log
+        // (bad digest / out-of-order seq / unknown segment version) is surfaced as a clean startup
+        // error (fail-closed) rather than silently serving a wrong feed — the operator asked for a
+        // durable change stream.
+        #[cfg(feature = "change-stream")]
+        let change_log = match &config.change_stream_dir {
+            Some(dir) => Some(Arc::new(std::sync::Mutex::new(
+                sparq_serve::ChangeLog::open(dir)
+                    .map_err(|e| format!("change-stream log open failed: {e}"))?,
+            ))),
+            None => None,
+        };
         Ok(Self {
             // [OPUS-4.8] (sq-o5bi, sq-0g6g) DEFAULT: hold ring+writer directly (pre-#941). Under
             // `backup`: wrap them in the swappable `ServingCore` so an online restore can swap.
@@ -2148,12 +2201,52 @@ impl AppState {
             metrics: Arc::new(crate::metrics::Metrics::default()),
             #[cfg(feature = "access-audit")]
             access_audit_sink,
+            #[cfg(feature = "change-stream")]
+            change_log,
         })
     }
 
     /// The server's Prometheus metrics (T22).
     pub(crate) fn metrics(&self) -> &crate::metrics::Metrics {
         &self.metrics
+    }
+
+    /// [OPUS-4.8] (sq-2999l) Whether the durable CDC change-stream is configured (a directory was
+    /// set via `--change-stream` / `SPARQ_CHANGE_STREAM`). When `false`, `GET /streams` is `404`.
+    #[cfg(feature = "change-stream")]
+    pub(crate) fn change_stream_enabled(&self) -> bool {
+        self.change_log.is_some()
+    }
+
+    /// [OPUS-4.8] (sq-2999l) Polls the durable CDC change-stream for every recorded change record
+    /// with `seq >= from_seq`, in order (the resume primitive backing `GET /streams`). Reads the
+    /// segments from disk through the shared single-writer log handle, so it observes every
+    /// durably-appended record and never returns a half-written trailing one — and stops
+    /// **fail-closed** on a mid-stream corruption (a bad digest / out-of-order seq before the tail).
+    /// Returns `Ok(None)` when the change-stream is not configured (the caller answers `404`).
+    /// A poll-time read error (corruption, an I/O fault) is `Err(msg)` (the caller answers `500`).
+    #[cfg(feature = "change-stream")]
+    pub(crate) fn poll_change_stream(
+        &self,
+        from_seq: u64,
+    ) -> Result<Option<Vec<sparq_serve::ChangeRecord>>, String> {
+        match &self.change_log {
+            Some(log) => {
+                let guard = log.lock().unwrap_or_else(|p| p.into_inner());
+                guard.poll(from_seq).map(Some).map_err(|e| e.to_string())
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// [OPUS-4.8] (sq-2999l) The seq the NEXT recorded commit will get — i.e. the count of records
+    /// already in the log, the `nextSeq` continuation token a caller persists to resume. `None`
+    /// when the change-stream is not configured.
+    #[cfg(feature = "change-stream")]
+    pub(crate) fn change_stream_next_seq(&self) -> Option<u64> {
+        self.change_log
+            .as_ref()
+            .map(|log| log.lock().unwrap_or_else(|p| p.into_inner()).next_seq())
     }
 
     /// Pins the current generation for a request: lock-free, never blocked
@@ -2239,7 +2332,41 @@ impl AppState {
         // default-graph / dynamically-scoped writes still fall back to the global pod
         // (conservative, never under-invalidating). See [`touched_pods`].
         let touched = touched_pods(sparql);
-        match self.writer().submit(sparql.to_string(), touched) {
+        // [OPUS-4.8] sq-2999l: when a durable CDC change-stream is configured, record this commit.
+        // Acquire the log lock FIRST, then — UNDER the lock — capture the predecessor generation and
+        // run the submit, and HOLD the lock across both. Because every recording update takes this
+        // same lock, only the lock-holder is ever inside `submit`, so under the lock no other thread
+        // can publish: the pin captured here is the last published generation (== the log's
+        // `last_generation`), and the post-submit `current()` is exactly THIS commit's published
+        // generation. The recorded `(pin, post)` pair is therefore exactly this commit — gapless +
+        // monotonic, the `ChangeLog` contract. Capturing the pin BEFORE the lock would race a
+        // concurrent commit and break the gapless chain; capturing it after is load-bearing. The
+        // whole dance is on the recording path only, so the default build is byte-identical.
+        #[cfg(feature = "change-stream")]
+        let _record = self.change_log.clone();
+        #[cfg(feature = "change-stream")]
+        let _record_lock_and_pin = _record
+            .as_ref()
+            .map(|log| (log.lock().unwrap_or_else(|p| p.into_inner()), self.current()));
+        let result = self.writer().submit(sparql.to_string(), touched);
+        #[cfg(feature = "change-stream")]
+        if let (Ok(_number), Some((mut guard, pin))) = (&result, _record_lock_and_pin) {
+            // The published generation is `current()` — holding the lock guarantees no concurrent
+            // update advanced it past this commit. Record only when it moved forward (a batch-mate
+            // sharing the generation, or a no-op update, records nothing; the log would reject a
+            // non-forward range, so this guard preserves the gapless contract proactively).
+            let post = self.current();
+            if post.number() > pin.number() {
+                // A recording I/O failure must NOT lose the already-committed update (it is durable
+                // + published). Surface it to the OPERATOR's log and continue serving; the next poll
+                // simply will not see this one record (an honest gap the operator can detect).
+                if let Err(e) = guard.record_commit(&pin, &post) {
+                    // [OPUS-4.8] positional format arg (CodeQL rust/unused-variable false-positive).
+                    tracing::warn!(target: "sparq_server", detail = %e, "change-stream record append failed (update committed; record dropped)");
+                }
+            }
+        }
+        match result {
             Ok(number) => {
                 // Monotonic max: batch-mates share a generation number and may ack in
                 // any order relative to a later batch's submitters.
@@ -2599,6 +2726,12 @@ pub fn router(state: AppState) -> Router {
     // canonical SPARQL it expands to (it never executes it). See [`terse_transpile_endpoint`].
     #[cfg(feature = "terse")]
     let routes = routes.route("/terse/transpile", post(terse_transpile_endpoint));
+    // [OPUS-4.8] sq-2999l (gh-906): OPT-IN CDC change-stream poll endpoint (Neptune GetRecords
+    // shape). Compiled only with the `change-stream` feature; even then the handler refuses (404)
+    // unless a durable log directory is configured. READ-only — a GET (with HEAD) only. See
+    // [`streams_endpoint`].
+    #[cfg(feature = "change-stream")]
+    let routes = routes.route("/streams", get(streams_endpoint).head(streams_endpoint));
     // [OPUS-4.8] (sq-pj6u) Categorised unmatched-route 404. Without an explicit fallback,
     // axum answers an unmatched path with a 404 whose body is EMPTY; `json_error_bodies`
     // then wraps that into the uncategorised `{"error":""}` envelope — leak-free but with no
@@ -3420,6 +3553,103 @@ fn terse_expansion_to_json(expansion: &sparq_terse::Expansion) -> String {
     });
     // `to_string` on a serde_json::Value never fails.
     value.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-2999l (gh-906) — OPT-IN CDC change-stream poll endpoint (GET /streams)
+// ---------------------------------------------------------------------------
+
+/// [OPUS-4.8] sq-2999l: `GET /streams` — poll the durable change-data-capture stream in the
+/// Amazon-Neptune-Streams `GetRecords` shape, over the merged durable change-stream
+/// (sq-b4fns / #1223).
+///
+/// OPT-IN: returns `404` unless a durable log directory is configured
+/// ([`ServerConfig::change_stream_dir`], `--change-stream <DIR>` / `SPARQ_CHANGE_STREAM`); the
+/// route is mounted only with the `change-stream` feature, AND the handler refuses unless the
+/// directory is set — the same double-opt-in as `/tpf`.
+///
+/// **Contract.** Read-only — `GET` / `HEAD` only (other methods are `405` with `Allow: GET, HEAD`).
+/// Parameters (see [`crate::streams`]):
+///   * `iteratorType` — `TRIM_HORIZON` (replay all, the default), `AT_SEQUENCE_NUMBER` (`at=N`),
+///     `AFTER_SEQUENCE_NUMBER` (`after=N`, the resume case), or `LATEST` (tail only);
+///   * `at` / `after` — the sequence-number anchor for the anchored iterator types (a bare
+///     `?after=N` / `?at=N` infers the type);
+///   * `limit` — the max number of change records (commits) in one response page (default
+///     [`crate::streams::DEFAULT_LIMIT`], clamped to [`crate::streams::MAX_LIMIT`]).
+///
+/// It returns the ordered change records (each commit's quad-level changes flattened to one stream
+/// record per `(op, quad)`, with a `{ commitNum, opNum }` event id) plus a continuation token
+/// (`nextSequenceNumber`) the consumer persists to resume — gaplessly, across a process restart
+/// (the on-disk log is the source of truth). A poll is a READ over the durable log, so the endpoint
+/// is gated by the read auth like any GET.
+#[cfg(feature = "change-stream")]
+async fn streams_endpoint(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    use crate::streams::{page, parse_limit, to_json, IteratorType};
+
+    // Double-opt-in: 404 unless the durable log directory is configured.
+    if !state.change_stream_enabled() {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    }
+    if method != Method::GET && method != Method::HEAD {
+        return method_not_allowed(&[Method::GET, Method::HEAD]);
+    }
+    // A poll is a READ over the durable log; gate it with the read auth like any GET.
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+        return resp;
+    }
+    let head_only = method == Method::HEAD;
+
+    let params = parse_form(raw_query.as_deref().unwrap_or(""));
+    let iterator_type = params.get("iteratorType").map(String::as_str);
+    let at = params.get("at").map(String::as_str);
+    let after = params.get("after").map(String::as_str);
+
+    // Resolve the start offset. A missing anchor for an anchored iterator type is a 400 (fail-
+    // closed — never silently replay the whole stream and re-deliver processed records). The error
+    // names only the offending parameter (never echoing unbounded caller input), so it is safe to
+    // return to the client.
+    let iter = match IteratorType::parse(iterator_type, at, after) {
+        Ok(it) => it,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+    };
+    let limit = parse_limit(params.get("limit").map(String::as_str));
+
+    // `LATEST` starts at the log's current tail; the others ignore `next_seq`. Reading it under the
+    // log lock is cheap (no disk scan). Absent (disabled) is the 404 above, so this is `Some`.
+    let next_seq = state.change_stream_next_seq().unwrap_or(0);
+    let from_seq = iter.from_seq(next_seq);
+
+    // Poll the durable log from the resolved offset (re-reads the segments from disk; fail-closed on
+    // a mid-stream corruption). `None` only if the stream is unconfigured (handled above).
+    let records = match state.poll_change_stream(from_seq) {
+        Ok(Some(recs)) => recs,
+        // The stream became unconfigured between the gate and the poll — answer 404 consistently.
+        Ok(None) => return json_error(StatusCode::NOT_FOUND, "not found"),
+        // A read error (corruption / I/O fault) is a 500; the detail goes to the operator's log,
+        // never the client (the #241 info-leak posture).
+        Err(e) => {
+            // [OPUS-4.8] positional format arg (CodeQL rust/unused-variable false-positive).
+            tracing::warn!(target: "sparq_server", detail = %e, "change-stream poll failed (detail withheld from client)");
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "change-stream read error",
+            );
+        }
+    };
+
+    let page = page(&records, from_seq, limit);
+    let body = to_json(&page);
+    text_response(
+        StatusCode::OK,
+        "application/json; charset=utf-8",
+        body,
+        head_only,
+    )
 }
 
 /// Applies the T15 hardening middleware stack to a router (outermost first):
