@@ -51,6 +51,16 @@ structure = ["dep:sparq-reason", "dep:sparq-introspect"]
 # carry ZERO trainer/eval code and gain no new deps. It TRAINS a research-grade model only to
 # MEASURE the priors — it makes no accuracy claim and serves no exact answer.
 kge = ["structure"]
+# [OPUS-4.8] sq-mztg8.1 (epic sq-mztg8, design research/fo-llm-bridge.md §2.3/§3.3/§6 Phase 3):
+# the READ-PATH URI-HIDING "compose" step + a closed NL→NL A/B fidelity/cost harness (`compose.rs`).
+# OPT-IN and OFF by default; it IMPLIES `structure` so it reuses the `verbalize` label machinery and
+# adds NO new dependency (it consumes only oxrdf + sparq-core's public read API). With it OFF the
+# default `sparq-vectors` build (and the core query path) carry ZERO compose code. The module is the
+# DETERMINISTIC mechanism + a MODEL-FREE fidelity harness (round-trip identity + presentation cost);
+# the accuracy half — the real-model NL→NL A/B that resolves open question K4 — is UNMEASURED in-tree
+# (no API key on the work box) and registered as such in bench/EXPERIMENTS.md. It serves no exact
+# answer and makes no accuracy claim.
+compose = ["structure"]
 # [OPUS-4.8] sq-0wo9e.3 (epic sq-0wo9e, design research/structure-aware-vectorisation.md §2 + §7):
 # P2 — the SHACL/OWL PRIOR EXTRACTOR (`shacl_priors.rs`). Reads enum (`sh:in`) / datatype
 # (`sh:datatype`) / cardinality (`sh:min,maxCount`, `owl:FunctionalProperty`) priors out of a parsed
@@ -218,6 +228,16 @@ required-features = ["kge"]
 [[example]]
 name = "bench_typed_encoders"
 required-features = ["structure"]
+
+# [OPUS-4.8] sq-mztg8.1 (epic sq-mztg8): the closed NL→NL URI-hiding A/B harness uses the
+# `compose`-gated `compose` module, so it needs the `compose` feature. Registering the requirement
+# keeps `cargo build --all-targets` (default features) green when the feature is out of the build
+# (the body would otherwise fail to resolve `sparq_vectors::compose`). It is a model-free
+# fidelity/cost harness over the real PKG — no library code, no new dependency; the accuracy half
+# is UNMEASURED (no API key) and registered as such in bench/EXPERIMENTS.md.
+[[example]]
+name = "compose_ab"
+required-features = ["compose"]
 
 # [OPUS-4.8] sq-hkud (epic sq-toze, gap MS-G4) — register the `kani` cfg so the
 # `#[cfg(kani)]` bounded-proof harness in `store.rs` does not trip `-D warnings`
