@@ -240,6 +240,26 @@ jsonld = ["server", "sparq-core/jsonld", "sparq-engine/serialize-rdf"]
 # sparq-core / sparq-engine / the wasm bundle untouched either way (sparq-wasm depends on
 # sparq-core/-engine directly, never on sparq-server). Needs `server`.
 terse = ["server", "dep:sparq-terse"]
+# [OPUS-4.8] (sq-2999l, gh-906) `change-stream` (default OFF) mounts the OPT-IN HTTP CDC poll
+# endpoint `GET /streams` in the Amazon-Neptune-Streams `GetRecords` shape over the MERGED durable
+# change-stream (sq-b4fns / #1223, in sparq-serve). The endpoint reads the segmented, fsync'd
+# append-only `ChangeLog` and returns the ordered change records (op / quads / seq / generation /
+# timestamp) as JSON from a given offset, with a continuation token, driven by `iteratorType` /
+# `at` / `after` / `limit` parameters. The same feature also turns on RECORDING: when the durable
+# log directory is configured, every committed SPARQL Update appends one ordered change record to
+# the log (the in-server publish path), so the endpoint serves a live, resumable feed. It turns on
+# `sparq-serve/change-stream` (the segmented log + N-Quads same-lineage quad-set diff + the backup
+# family's self-contained FNV-1a digest — std-only IO, NO new external dependency, no extra HTTP/
+# async beyond the already-present axum + serde_json). STILL OFF AT RUNTIME by default even when
+# compiled in — the operator must additionally point the server at a log directory via
+# `--change-stream <DIR>` / `SPARQ_CHANGE_STREAM` (`ServerConfig::change_stream_dir`); with no dir
+# the route is `404` and nothing is recorded, mirroring `tpf` / `shacl` / `federation-descriptors`.
+# Without the feature the route + the recording hook are `#[cfg]`-stripped, so a build without it is
+# byte-identical to before; sparq-core / sparq-engine / the wasm bundle untouched either way
+# (sparq-wasm depends on sparq-core/-engine directly, never on sparq-server). At-rest encryption +
+# cryptographic authenticity of the records are out of scope (same boundary as the backup family).
+# Needs `server`.
+change-stream = ["server", "sparq-serve/change-stream"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

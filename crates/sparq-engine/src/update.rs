@@ -27,6 +27,7 @@ use spargebra::term::{
 };
 use spargebra::GraphUpdateOperation;
 use spargebra::SparqlParser;
+use spargebra::Update;
 
 /// A graph slot: `None` = the default graph, `Some(term)` = that named graph.
 type GraphSlot = Option<Term>;
@@ -500,11 +501,39 @@ fn apply_op(ds: &mut Dataset, op: &GraphUpdateOperation) -> Result<(), String> {
 /// non-SILENT failing LOAD.
 pub fn update(graph: &Graph, sparql: &str) -> Result<Graph, String> {
     let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
+    apply_update_rebuild(graph, &upd)
+}
+
+/// The shared rebuild loop over an ALREADY-PARSED `Update` (decode → apply ops →
+/// rebuild). Shared by [`update`] and, under the `params` feature, the parameterized
+/// prepared-update path so the bound algebra is applied DIRECTLY (no re-serialise /
+/// re-parse — a hostile bound value can never re-enter the parser). [OPUS-4.8] (sq-rp3um)
+fn apply_update_rebuild(graph: &Graph, upd: &Update) -> Result<Graph, String> {
     let mut ds = Dataset::decode(graph);
     for op in &upd.operations {
         apply_op(&mut ds, op)?;
     }
     Ok(ds.build())
+}
+
+/// [OPUS-4.8] (sq-rp3um) [`update`] over an ALREADY-PARSED bound `Update` — the rebuild
+/// path for a parameterized [`crate::PreparedUpdate`] (`params` feature).
+#[cfg(feature = "params")]
+pub(crate) fn update_prepared_impl(graph: &Graph, upd: &Update) -> Result<Graph, String> {
+    apply_update_rebuild(graph, upd)
+}
+
+/// [OPUS-4.8] (sq-rp3um) [`update_in_place_with_budget`] over an ALREADY-PARSED bound
+/// `Update` (parameterized [`crate::PreparedUpdate`], `params` feature). Applies the
+/// bound algebra in place through the delta overlay without re-serialising it.
+#[cfg(feature = "params")]
+pub(crate) fn update_in_place_prepared_with_budget(
+    graph: &mut Graph,
+    upd: &Update,
+    budget: &crate::QueryBudget,
+) -> Result<(), String> {
+    let _budget = crate::exec::budget::install(budget);
+    apply_update_in_place(graph, upd, None)
 }
 
 // --- the delta-overlay path ------------------------------------------------------------------
@@ -694,10 +723,22 @@ fn update_in_place_core(
     graph: &mut Graph,
     sparql: &str,
     budget: &crate::QueryBudget,
-    mut sink: EffectSink,
+    sink: EffectSink,
 ) -> Result<(), String> {
     let _budget = crate::exec::budget::install(budget);
     let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
+    apply_update_in_place(graph, &upd, sink)
+}
+
+/// The shared per-operation in-place apply loop over an ALREADY-PARSED `Update`.
+/// Split out of [`update_in_place_core`] so the parameterized prepared-update path
+/// ([`crate::PreparedUpdate`], `params` feature) can apply a bound algebra without
+/// re-serialising it to a string. [OPUS-4.8] (sq-rp3um)
+fn apply_update_in_place(
+    graph: &mut Graph,
+    upd: &Update,
+    mut sink: EffectSink,
+) -> Result<(), String> {
     for op in &upd.operations {
         match op {
             GraphUpdateOperation::InsertData { data } => {

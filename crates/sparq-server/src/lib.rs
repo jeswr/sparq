@@ -93,6 +93,18 @@ pub mod descriptors;
 #[cfg(feature = "tpf")]
 pub mod tpf;
 
+/// [OPUS-4.8] (sq-2999l, gh-906) OPT-IN HTTP change-data-capture (CDC) poll endpoint in the
+/// Amazon-Neptune-Streams `GetRecords` shape (`GET /streams`), over the durable change-stream
+/// (sq-b4fns / #1223). PURE response builder (parameter resolution + per-quad flattening +
+/// continuation maths; the async disk-poll handler is in [`http`]). Compiled ONLY behind the
+/// `change-stream` feature, and served only when [`ServerConfig::change_stream_dir`] is also set
+/// (`--change-stream <DIR>` / `SPARQ_CHANGE_STREAM`) — the same double-opt-in as [`tpf`]. The same
+/// feature also records every commit to the durable log on the update path (see [`http`]). With
+/// the feature off this module + the route + the recording hook are `#[cfg]`-stripped, byte-
+/// identical to before.
+#[cfg(feature = "change-stream")]
+pub mod streams;
+
 /// [OPUS-4.8] (sq-hj4n, gh-916) OPT-IN Solid-style **N3-Patch** parsing (`text/n3`) for the
 /// Graph-Store-Protocol `PATCH` method — the `solid:InsertDeletePatch` dialect (`solid:where` /
 /// `solid:deletes` / `solid:inserts` formulas), translated into ONE atomic graph-scoped SPARQL

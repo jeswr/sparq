@@ -85,25 +85,25 @@ view; `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
   orthogonal proof-system dimensions + the **assurance / audit-status axis** the vendored ontology lacks) and the §4.3
   ODRL → admissible-proof-set reduction as a RUNNABLE N3 ruleset on `sparq-reason` (Rust **default-deny**). Reasons over
   ANNOTATIONS, not crypto: `requiresAssurance gteq Proven` empties the admissible set today (`sq-qhy4`).
+- **Property-admissibility pre-check** (`admit_with_precheck`, **opt-in `secprop-precheck`**, `sq-dt5hv` Phase 5) —
+  an OPTIONAL pre-admission check: given the requester's ODRL privacy preference + the proof's method IRI, the gate
+  consults the reduction above and **fails closed** (admits nothing) when the method does not satisfy every constraint —
+  *before* the sig/holder checks. With NO preference it is **byte-identical** to `admit` (strict additivity); it can only DENY.
 - **Live status / revocation** (`status_list`, **opt-in `status-list`**, `sq-pfae.7`) — gate derivations on a **live
-  W3C Bitstring Status List** instead of the `revoked: bool` flag: fetch (pluggable `StatusListResolver`) + decode
-  (hand-rolled multibase over a pluggable `GzipDecoder`; built-in `Flate2GzipDecoder` behind `status-list-flate2`),
-  then `admit_with_status` admits ONLY a `LiveStatus::Live` credential — **fail-closed on set/unknown/stale** — and
-  emits a minimal `prov:`/`trust:` denial justification. No new default dep; the list VC's own signature is not yet
-  verified (resolver is the trust seam; follow-up bead captured).
+  W3C Bitstring Status List** instead of `revoked: bool`: fetch (pluggable `StatusListResolver`) + decode (multibase
+  over a pluggable `GzipDecoder`; built-in `Flate2GzipDecoder` behind `status-list-flate2`); `admit_with_status` admits
+  ONLY a `LiveStatus::Live` credential — **fail-closed on set/unknown/stale** — with a minimal `prov:`/`trust:` justification.
 
 ## Honest scope — what this does and does NOT do
 
-- **No privacy / unlinkability / anonymity.** The credential is admitted **in the clear**; the
-  verifier learns the exact value (`age 25`, not "≥ 18"). This does **not** match ZKAPs-grade unlinkable presentation.
+- **No privacy / unlinkability / anonymity.** The credential is admitted **in the clear** — the verifier learns the
+  exact value (`age 25`, not "≥ 18"); this does **not** match ZKAPs-grade unlinkable presentation.
 - **Holder binding + delegation invocation are the clear-WebID, non-anonymous paths** (`sq-wvne` / `sq-l5og`):
-  `credentialSubject == Session.agent` (and the invoker == terminal delegate) authenticate the WebID in the clear —
-  not silently "solved"; presentations stay linkable by requester identity. The `delegate_key` binding defeats the
-  key-substitution stolen-chain replay but not full non-replayability. The `delegation-prov` / `status_list` PROV-O
-  records add NO security property — an audit fact, not authority.
-- **Issuer keys: operator-asserted by default; DID-bindable (opt-in, `sq-pfae.3`).** The default `trust:issuerKey`
-  hex binding is the live forgery vector D′ (§3.3); the `did` feature binds from a `trust:issuerDid` instead —
-  **narrows** D′ but no absolute anchor (`did:key` self-cert; `did:web` host/TLS).
+  `credentialSubject == Session.agent` (and invoker == terminal delegate) authenticate the WebID in the clear — not
+  silently "solved"; presentations stay linkable by requester identity. The `delegate_key` binding defeats the
+  key-substitution stolen-chain replay but not full non-replayability. PROV-O records add NO security property.
+- **Issuer keys: operator-asserted by default; DID-bindable (opt-in, `sq-pfae.3`).** The default `trust:issuerKey` hex
+  binding is the live forgery vector D′ (§3.3); the `did` feature binds from a `trust:issuerDid` — **narrows**, not anchors.
 - **Open problems respected:** `sq-wvne` (ZK privacy) is **out of PoC scope**; `sq-xc4y` RESOLVED; `sq-l5og`
   **specified + enforced + tested**; `sq-tu4e` (live status) is now the opt-in `status-list` gate (`sq-pfae.7`).
 - **Strict additivity (G6):** with `sparq-solid`'s `trust-graph` feature OFF the crate is not compiled — `sparq-solid` behaves exactly as WAC/ACP do today (byte-identical).

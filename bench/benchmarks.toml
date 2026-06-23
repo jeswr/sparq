@@ -958,6 +958,29 @@ status      = "ok"
 # is the documented escape hatch honored by gate G3 and the drift scanner (§5.D).
 featured    = false
 
+# [OPUS-4.8] sq-0z43i (gh #909) — sparq-mcp MCP dispatch-overhead micro-bench. The cost
+# the MCP layer ADDS around the engine (JSON-RPC parse + tool dispatch + result wrap),
+# isolated from engine compute by a tiny in-memory graph. Pure offline, no network, no
+# heavy dep. The committed STDOUT/JSON facts are the DETERMINISTIC structural counts
+# (graph triples, tools advertised); the per-call µs are advisory + box-sensitive +
+# NON-CANONICAL (this dev box) and are NOT baked into docs/gates.
+[[benchmark]]
+id          = "mcp-dispatch-overhead"
+name        = "sparq-mcp MCP round-trip dispatch overhead"
+category    = "query"
+measures    = "per-call µs for initialize/tools-list/query/stats round-trips (advisory, box-sensitive); deterministic structural counts"
+invoke      = "cargo run -p sparq-mcp --example mcp_roundtrip_bench --release"
+source      = "crates/sparq-mcp/examples/mcp_roundtrip_bench.rs"
+dataset     = "SYNTHETIC, generated in-process (a 5-triple in-memory graph) — no external dataset"
+quiet_box_sensitive = true
+pinning     = "none (in-process synthetic graph)"
+records_to  = "stdout (--json <path> for the deterministic structural counts)"
+status      = "ok"
+# [OPUS-4.8] sq-0z43i: trend-only DISPOSITION (featured = false). This is an internal
+# overhead micro-bench, not a head-to-head capability card; it makes no perf claim, so it
+# is intentionally UNFEATURED (the documented G3/drift-scan escape hatch).
+featured    = false
+
 # [OPUS-4.8] sq-ncvq.12 (drift catch-up A) — sparq-nlq OFFLINE NL→SPARQL micro-bench.
 # Closes the bench-missing drift item for sparq-nlq. Pure offline: the LLM is an
 # in-example fixed-completion stub (no `live` feature, no network), so it measures

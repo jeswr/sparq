@@ -209,6 +209,40 @@ mod tests {
         assert_eq!(count_focus_nodes(&empty, &model), 0);
     }
 
+    /// [OPUS-4.8] (sq-bif) `count_focus_nodes` unions EVERY target kind — node,
+    /// subjects-of, objects-of — deduplicated. A node selected by two distinct
+    /// targets is counted once.
+    #[test]
+    fn focus_node_count_unions_all_target_kinds() {
+        let data = Graph::load_str(
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice ex:knows ex:bob .
+            ex:carol ex:knows ex:alice .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        // sh:targetNode ex:alice, sh:targetSubjectsOf ex:knows (= {alice, carol}),
+        // sh:targetObjectsOf ex:knows (= {bob, alice}). The deduplicated union is
+        // {alice, bob, carol} = 3 (alice appears via all three but counts once).
+        let shapes = Graph::load_str(
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:S a sh:NodeShape ;
+              sh:targetNode ex:alice ;
+              sh:targetSubjectsOf ex:knows ;
+              sh:targetObjectsOf ex:knows ;
+              sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let model = ShapesModel::parse(&shapes);
+        assert_eq!(count_focus_nodes(&data, &model), 3);
+    }
+
     /// The Turtle rendering must itself be valid Turtle.
     #[test]
     fn report_turtle_parses() {
@@ -412,6 +446,78 @@ mod tests {
             .results
             .iter()
             .any(|x| x.source_component.ends_with("MinCountConstraintComponent")));
+    }
+
+    // [OPUS-4.8] (sq-bif) `load_turtle_with_base` resolves relative IRIs against
+    // the supplied base (the seam `Graph::load_str` does not expose, used by the
+    // W3C manifest loaders) and surfaces a parse error as an `Err(String)`.
+    #[test]
+    fn load_turtle_with_base_resolves_relatives_and_reports_errors() {
+        // `<rel>` and `<#frag>` resolve against the base.
+        let g = load_turtle_with_base(
+            "<rel> <http://example.org/p> <#frag> .",
+            "http://base.example/dir/",
+        )
+        .unwrap();
+        let v = view::GraphView::new(&g);
+        // The relative subject resolved to base + "rel".
+        assert!(v.contains(
+            &oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+                "http://base.example/dir/rel"
+            )),
+            "http://example.org/p",
+            &oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+                "http://base.example/dir/#frag"
+            )),
+        ));
+        // A malformed Turtle document is an Err, not a panic (Graph has no Debug,
+        // so map to the error string before asserting).
+        let err = load_turtle_with_base("this is not turtle @@@", "http://base.example/").err();
+        assert!(err.is_some(), "malformed Turtle must Err");
+        // An invalid base IRI is also a (different) Err.
+        assert!(load_turtle_with_base("", "not a valid base").is_err());
+    }
+
+    // [OPUS-4.8] (sq-bif) `graph_from_triples` interns oxrdf triples — including
+    // a BLANK-NODE subject (the subject match arm `Graph::load_str` round-trips
+    // but the helper handles explicitly) — into a queryable Graph.
+    #[test]
+    fn graph_from_triples_interns_iri_and_blank_subjects() {
+        use oxrdf::{BlankNode, NamedNode, NamedOrBlankNode, Term, Triple};
+        let p = NamedNode::new_unchecked("http://example.org/p");
+        let bnode = BlankNode::default();
+        let triples = vec![
+            // IRI subject.
+            Triple::new(
+                NamedOrBlankNode::NamedNode(NamedNode::new_unchecked("http://example.org/s")),
+                p.clone(),
+                Term::NamedNode(NamedNode::new_unchecked("http://example.org/o")),
+            ),
+            // Blank-node subject (the BlankNode arm of the subject match).
+            Triple::new(
+                NamedOrBlankNode::BlankNode(bnode.clone()),
+                p.clone(),
+                Term::Literal(oxrdf::Literal::new_simple_literal("x")),
+            ),
+        ];
+        let g = graph_from_triples(triples);
+        let v = view::GraphView::new(&g);
+        // Both triples are present and queryable.
+        assert!(v.contains(
+            &Term::NamedNode(NamedNode::new_unchecked("http://example.org/s")),
+            "http://example.org/p",
+            &Term::NamedNode(NamedNode::new_unchecked("http://example.org/o")),
+        ));
+        assert!(v.contains(
+            &Term::BlankNode(bnode),
+            "http://example.org/p",
+            &Term::Literal(oxrdf::Literal::new_simple_literal("x")),
+        ));
+        // An empty iterator yields an empty graph.
+        let empty = graph_from_triples(std::iter::empty());
+        assert!(view::GraphView::new(&empty)
+            .triples(None, Some("http://example.org/p"), None)
+            .is_empty());
     }
 
     #[test]

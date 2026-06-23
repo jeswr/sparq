@@ -103,3 +103,25 @@
   crate: "sparq-trust"
   features: "status-list-flate2"
   test: true
+
+# [OPUS-4.8] sq-dt5hv (epic sq-0dksu, Phase 5): the opt-in property-admissibility
+# PRE-CHECK in the admission gate. The `admit::precheck` module
+# (`admit_with_precheck` + `AdmissibilityPreference` + `PrecheckOutcome`), its 7
+# `admit::precheck::tests` unit tests, and the `secprop_precheck_e2e.rs` golden
+# integration suite (`#![cfg(feature = "secprop-precheck")]`) are ALL behind the
+# default-OFF `secprop-precheck` feature, so ci.yml's default-feature `nextest archive`
+# compiles them EMPTY and runs ZERO of them — the silent-skip gap (#1171) this leg
+# closes. The feature enables `secprop-admissibility` (it drives the merged Phase-2
+# reduction) and adds NO new dependency. The leg runs `clippy --all-targets -D warnings`
+# with the feature ON (the real gate) + `cargo test`, which drives the REAL admit path
+# behind the pre-check and the load-bearing SAFETY invariant: with NO preference the gate
+# is byte-identical to `admit`, and an unsatisfied ODRL preference (e.g.
+# `requiresAssurance gteq Proven` while sq-qhy4 is open) FAILS CLOSED — admits nothing,
+# derives no grant — despite a perfectly valid credential. Verified locally: `cargo test
+# -p sparq-trust --features secprop-precheck` runs the 7 precheck unit tests + the 4
+# `secprop_precheck_e2e.rs` golden tests; `clippy --all-targets -D warnings` is clean in
+# every state.
+- name: "sparq-trust (secprop-precheck — property-admissibility pre-check in admit)"
+  crate: "sparq-trust"
+  features: "secprop-precheck"
+  test: true

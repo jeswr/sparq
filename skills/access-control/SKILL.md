@@ -595,6 +595,27 @@ open), and `requiresPostQuantumForgery gteq …` removes the DL-signature method
 **principled refusal** ("no admissible proof") over silently serving a non-conforming one. The §4.3.3
 worked example is the golden test: empty under Alice's strict preference, non-empty under the relaxed one.
 
+### Property-admissibility PRE-CHECK in the admission gate — opt-in `secprop-precheck` ([OPUS-4.8] sq-dt5hv, Phase 5, design §5b)
+
+`sparq_trust::admit_with_precheck(cred, rules, session, target, preference)` (behind the **default-OFF
+`secprop-precheck`** feature, which enables `secprop-admissibility`) wires the admissibility reduction
+above into the REAL admission path as an **optional pre-admission check**. The `preference:
+Option<&AdmissibilityPreference>` carries the requester's machine-reasonable **ODRL privacy preference**
+— the presented proof's `method_iri` (the `zk:scheme`/`zk:cryptosuite` the registry records), the
+`constraint_iris` (`secx:requires…` `gteq` constraints), the `policy_n3`, and the method's
+`annotations_n3`. Before the existing signature / freshness / holder checks, the gate calls `admissible`
+over those four inputs and **fails closed** when the method does not satisfy every constraint — returning
+an EMPTY admitted set + a `PrecheckOutcome::{Admitted, Denied { unsatisfied }, ReductionError { error }}`
+(a reduction error is ALSO a fail-closed denial — a pre-check that cannot be evaluated never admits).
+**OPT-IN strict additivity:** with `preference == None` it is **byte-identical** to `admit` (no reasoning
+runs); the pre-check can only ever **DENY**, never broaden, and never weakens a downstream crypto check
+(`admit` still verifies the checked issuer signature, scope, freshness, and holder binding). The golden
+e2e invariant (`tests/secprop_precheck_e2e.rs`): a perfectly valid credential is admitted with `None` and
+under a relaxed preference, but `requiresAssurance gteq secx:Proven` (Alice's strict preference, every
+sparq ZK method is `Claimed`-only while `sq-qhy4` is open) **admits nothing and derives no grant** — the
+principled refusal, in the data flow, not just the prose. Research-grade, externally **unaudited**
+(`sq-qhy4`); it reasons over recorded ANNOTATIONS, not cryptography.
+
 ### Live status / revocation + minimal denial justification — opt-in `status-list` ([OPUS-4.8] sq-pfae.7, design §6.1 P6)
 
 The `sparq_trust::status_list` module (behind the **default-OFF `status-list`** cargo feature) gates

@@ -315,6 +315,14 @@ pub(crate) mod trace {
         pub(crate) depth: usize,
         pub(crate) rows: usize,
         pub(crate) nanos: u64,
+        /// The planner's estimated output cardinality for this operator, when the
+        /// operator has a cardinality model (BGP nodes); `None` for operators whose
+        /// output size the planner does not estimate. Used by the structured EXPLAIN
+        /// (`explain-json`) to compute the per-operator q-error; the text trace
+        /// ignores it. Present only under `explain-json` so the default trace node is
+        /// byte-identical. [OPUS-4.8] sq-u4lgr
+        #[cfg(feature = "explain-json")]
+        pub(crate) est: Option<f64>,
     }
 
     thread_local! {
@@ -355,7 +363,14 @@ pub(crate) mod trace {
         });
         NODES.with(|n| {
             let mut n = n.borrow_mut();
-            n.push(Node { label, depth, rows: 0, nanos: 0 });
+            n.push(Node {
+                label,
+                depth,
+                rows: 0,
+                nanos: 0,
+                #[cfg(feature = "explain-json")]
+                est: None,
+            });
             n.len() - 1
         })
     }
@@ -366,6 +381,19 @@ pub(crate) mod trace {
             if let Some(node) = n.borrow_mut().get_mut(idx) {
                 node.rows = rows;
                 node.nanos = nanos;
+            }
+        });
+    }
+
+    /// Records the planner's estimated output cardinality for the node opened at
+    /// `idx` (called by `eval_graph_pattern_traced` only when the BGP estimate is
+    /// computed). Separate from [`exit`] so the estimate is captured at ENTER time,
+    /// before the (recursive) child evaluation runs. [OPUS-4.8] sq-u4lgr
+    #[cfg(feature = "explain-json")]
+    pub(crate) fn set_est(idx: usize, est: f64) {
+        NODES.with(|n| {
+            if let Some(node) = n.borrow_mut().get_mut(idx) {
+                node.est = Some(est);
             }
         });
     }
@@ -1988,6 +2016,17 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
 #[cold]
 fn eval_graph_pattern_traced(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
     let idx = trace::enter(trace_label(p));
+    // Structured EXPLAIN (`explain-json`): attach the planner's estimated output
+    // cardinality to conjunctive (BGP) nodes so the q-error compares the engine's own
+    // estimate against the ANALYZE actual. Only BGP nodes carry a cardinality model;
+    // an estimate failure (e.g. an unresolvable constant) just leaves `est = None`.
+    // [OPUS-4.8] sq-u4lgr
+    #[cfg(feature = "explain-json")]
+    if is_conjunctive(p) {
+        if let Ok(est) = bgp_estimate(graph, p) {
+            trace::set_est(idx, est);
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     let start = std::time::Instant::now();
     let r = eval_graph_pattern_inner(graph, local, p);
@@ -1998,6 +2037,14 @@ fn eval_graph_pattern_traced(graph: &Graph, local: &mut LocalVocab, p: &GraphPat
     let nanos = 0u64;
     trace::exit(idx, r.as_ref().map_or(0, |b| b.rows.len()), nanos);
     r
+}
+
+/// Crate-internal accessor for [`trace_label`], used by the structured EXPLAIN
+/// (`explain-json`) to label planning-only tree nodes with the SAME operator labels
+/// the text ANALYZE trace prints. [OPUS-4.8] sq-u4lgr
+#[cfg(feature = "explain-json")]
+pub(crate) fn trace_label_pub(p: &GraphPattern) -> String {
+    trace_label(p)
 }
 
 /// The operator label an EXPLAIN ANALYZE trace node carries (only built while tracing).
@@ -4062,6 +4109,50 @@ pub(crate) fn prepare_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<V
         prepared.push(Prepared { id_pat, pos_vars, est, unsatisfiable: unsat });
     }
     Ok(prepared)
+}
+
+/// The planner's estimated FINAL output cardinality of a conjunctive (BGP) subtree —
+/// the same number the EXPLAIN dry-run prints as the last `est N rows`, computed by
+/// REPLAYING the GOO loop (`goo_seed` → `goo_pick`) without executing anything. Used
+/// only by the structured EXPLAIN (`explain-json`) to attach the BGP node's estimate
+/// next to its ANALYZE actual-row count so the q-error is the engine's own estimate
+/// vs reality (not a re-derived number). Returns `0.0` for an empty/unsatisfiable BGP.
+/// [OPUS-4.8] sq-u4lgr
+#[cfg(feature = "explain-json")]
+pub(crate) fn bgp_estimate(graph: &Graph, p: &GraphPattern) -> Result<f64, String> {
+    let mut patterns = Vec::new();
+    let mut filters = Vec::new();
+    flatten_conjunction(p, &mut patterns, &mut filters);
+    let _ = &filters; // selectivity of post-join filters is not modelled (matches the dry run).
+    if patterns.is_empty() {
+        return Ok(0.0);
+    }
+    let prepared = prepare_bgp(graph, &patterns)?;
+    if prepared.iter().any(|p| p.unsatisfiable) {
+        return Ok(0.0);
+    }
+    if !bgp_uses_binary(&patterns) {
+        // WCOJ (cyclic) path: the dry run does not print a single final estimate, so
+        // approximate with the smallest single-pattern estimate (a conservative lower
+        // bound the q-error treats like any other estimate).
+        return Ok(prepared.iter().map(|p| p.est).min().unwrap_or(0) as f64);
+    }
+    let mut cs_ctx = CsCtx::new(&prepared);
+    let seed = goo_seed(&prepared);
+    let mut cur_card = prepared[seed].est as f64;
+    let mut var_ndv: FxHashMap<Variable, f64> = FxHashMap::default();
+    let mut done = vec![false; prepared.len()];
+    done[seed] = true;
+    cs_ctx.note_done(seed);
+    record_pattern_ndv(graph, &prepared, seed, cur_card, &mut var_ndv, &cs_ctx);
+    for _ in 2..=prepared.len() {
+        let (i, new_card, _connected) = goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
+        cur_card = new_card;
+        done[i] = true;
+        cs_ctx.note_done(i);
+        record_pattern_ndv(graph, &prepared, i, cur_card, &mut var_ndv, &cs_ctx);
+    }
+    Ok(cur_card.max(0.0))
 }
 
 /// GOO seed choice: the pattern with the smallest single-pattern cardinality.
