@@ -345,3 +345,83 @@ fn empty_graph_is_safe() {
     assert_eq!(direct.direct_edge_count(), 0);
     assert_eq!(direct.equivalence_class_count(), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// [OPUS-4.8] sq-bif: Hasse public-accessor edge-case coverage. The fixtures above assert the
+// reduction over REPRESENTATIVE rows + the count metrics; the additions below pin the documented
+// fallbacks of the three lookup accessors on inputs the existing suite never passes them: a class
+// equivalent to nothing, an unknown dict id, and a NON-representative clique member (whose row and
+// equivalents must be derived through its representative, not its own absent entry).
+
+#[test]
+fn accessor_fallbacks_for_non_equivalent_unknown_and_clique_member() {
+    // A ⊑ B, plus an equivalence clique X ≡ Y, all under nothing else. Exercises every accessor's
+    // documented fallback in one fixture.
+    let ttl = format!(
+        "{PRE}
+         :A rdfs:subClassOf :B .
+         :X rdfs:subClassOf :Y . :Y rdfs:subClassOf :X . :X rdfs:subClassOf :B ."
+    );
+    let (dict, triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let closure = Classifier::classify(&dict, &triples);
+    let direct = DirectHierarchy::from_closure(&closure);
+    let (a, b, x, y) = (
+        iri(&dict, "A"),
+        iri(&dict, "B"),
+        iri(&dict, "X"),
+        iri(&dict, "Y"),
+    );
+
+    // (1) A class equivalent to nothing is its OWN representative and has an EMPTY equivalents set.
+    assert_eq!(direct.representative(a), a, "A is its own representative");
+    assert!(
+        direct.equivalent_classes(a).is_empty(),
+        "A has no equivalents"
+    );
+
+    // (2) An unknown dict id falls back to itself as representative, with empty direct supers /
+    // equivalents — no panic, no spurious membership.
+    let absent = dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(
+        "http://ex/absent".to_string(),
+    )));
+    assert_eq!(
+        direct.representative(absent),
+        absent,
+        "unknown id maps to itself"
+    );
+    assert!(
+        direct.direct_super_classes(absent).is_empty(),
+        "unknown id has no direct supers"
+    );
+    assert!(
+        direct.equivalent_classes(absent).is_empty(),
+        "unknown id has no equivalents"
+    );
+
+    // (3) X and Y form one clique. WHICHEVER is the non-representative member must still report the
+    // SAME representative, the SAME direct supers (the clique's shared parent B, looked up via the
+    // rep), and the OTHER member as its equivalent (rep-relative, minus itself).
+    let rep = direct.representative(x);
+    assert_eq!(
+        direct.representative(y),
+        rep,
+        "X and Y share a representative"
+    );
+    assert!(rep == x || rep == y, "the rep is one of the clique members");
+    let non_rep = if rep == x { y } else { x };
+    assert_eq!(
+        direct.direct_super_classes(non_rep),
+        &[b][..],
+        "the non-representative member sees the clique's direct super B"
+    );
+    assert_eq!(
+        direct.equivalent_classes(non_rep),
+        vec![rep],
+        "the non-representative member's only equivalent is the representative"
+    );
+    assert_eq!(
+        direct.equivalent_classes(rep),
+        vec![non_rep],
+        "the representative's only equivalent is the other member"
+    );
+}

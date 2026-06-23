@@ -198,3 +198,69 @@ fn no_chain_no_spurious_composition() {
     );
     assert_closure(&ttl, &["A", "B", "D", "E"], &[("B", "E")]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// [OPUS-4.8] sq-bif: RBox correctness-coverage additions. The fixtures above all use the LEFT
+// (`r ∘ s ⊑ r`) right-identity and the transitive special case; the additions below close the
+// distinct RIGHT-identity `r ∘ s ⊑ s` direction (the super-role is the SECOND chain component —
+// indexed in `comp_by_second` not `comp_by_first`), a chain that fires through a SUPER-role of a
+// composed link (CR10 over a CR11 result), and the honest-report invariant that an RBox axiom is
+// NOT double-counted as a skipped non-EL class axiom under the active fragment.
+
+#[test]
+fn cr11_right_identity_super_is_second_component() {
+    // r ∘ s ⊑ s — the OTHER right-identity (the existing `cr11_property_chain_right_identity` uses
+    // r ∘ s ⊑ r, where the super-role is the FIRST component). Here the super-role `s` is the
+    // SECOND chain component, so the link must compose onto R(s), not R(r). A ⊑ ∃r.B, B ⊑ ∃s.D,
+    // ∃s.D ⊑ E: (A,B)∈R(r) ∘ (B,D)∈R(s) ⇒ (A,D)∈R(s), and CR4 over `∃s.D ⊑ E` derives A ⊑ E. B ⊑ E
+    // holds directly via (B,D)∈R(s); no other named subsumption.
+    let ttl = format!(
+        "{PRE}
+         :s owl:propertyChainAxiom ( :r :s ) .
+         :A rdfs:subClassOf [ owl:onProperty :r ; owl:someValuesFrom :B ] .
+         :B rdfs:subClassOf [ owl:onProperty :s ; owl:someValuesFrom :D ] .
+         [ owl:onProperty :s ; owl:someValuesFrom :D ] rdfs:subClassOf :E ."
+    );
+    assert_closure(&ttl, &["A", "B", "D", "E"], &[("A", "E"), ("B", "E")]);
+}
+
+#[test]
+fn cr10_lifts_a_cr11_composed_link_to_a_super_role() {
+    // Compose THEN lift: t is transitive (t ∘ t ⊑ t) and t ⊑ u (a super-role). A ⊑ ∃t.B, B ⊑ ∃t.D
+    // compose to (A,D) ∈ R(t) (CR11), which CR10 then lifts to (A,D) ∈ R(u). With `∃u.D ⊑ G` only
+    // the lifted link reaches the axiom, so A ⊑ G holds ONLY if CR10 fires over the CR11 result. A
+    // soundness+completeness witness for the interaction of the two role rules on a derived link.
+    let ttl = format!(
+        "{PRE}
+         :t rdf:type owl:TransitiveProperty .  :t rdfs:subPropertyOf :u .
+         :A rdfs:subClassOf [ owl:onProperty :t ; owl:someValuesFrom :B ] .
+         :B rdfs:subClassOf [ owl:onProperty :t ; owl:someValuesFrom :D ] .
+         [ owl:onProperty :u ; owl:someValuesFrom :D ] rdfs:subClassOf :G ."
+    );
+    assert_closure(&ttl, &["A", "B", "D", "G"], &[("A", "G"), ("B", "G")]);
+}
+
+#[test]
+fn rbox_axioms_are_not_counted_as_skipped_class_axioms() {
+    // With `rbox` ON, a role inclusion + a property chain are APPLIED, not skipped — so they must
+    // NOT inflate `Report::skipped_axioms` (which counts only out-of-fragment CLASS axioms). The
+    // sole class axiom here (A ⊑ B) is in-fragment, so the count must be exactly 0. Guards against a
+    // regression that routed RBox triples through the class-axiom skip path.
+    let ttl = format!(
+        "{PRE}
+         :r rdfs:subPropertyOf :s .
+         :t owl:propertyChainAxiom ( :r :s ) .
+         :A rdfs:subClassOf :B ."
+    );
+    let (dict, triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let h = Classifier::classify(&dict, &triples);
+    assert_eq!(
+        h.report().skipped_axioms,
+        0,
+        "RBox axioms are applied under `rbox`, never counted as skipped class axioms"
+    );
+    assert!(
+        h.is_subclass_of(iri(&dict, "A"), iri(&dict, "B")),
+        "the in-fragment class axiom still classifies"
+    );
+}
