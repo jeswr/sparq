@@ -58,12 +58,20 @@ cargo run -p sparq-server -- --format turtle data.ttl
   `backup::import` re-hydrates a `Graph` from one, **fail-closed** on a corrupt/mismatched
   artifact. Distinct from the offline `sparq-cli save` and the `--persist` WAL. At-rest
   encryption is out of scope. `sparq-server` mounts `/admin/backup` + `/admin/restore` on it.
-- **Incremental change-stream / PITR** (same `backup` feature) — `backup_delta::export_delta`
+- **Incremental delta / PITR** (same `backup` feature) — `backup_delta::export_delta`
   captures the quad-set change between two **same-lineage** generations as a self-describing
   delta artifact keyed off the generation/writer-seq range; `backup_delta::replay` applies an
   ordered chain forward onto a restored base to reach a chosen recovery point (fail-closed on a
   corrupt or discontinuous chain). `sparq-server` adds `/admin/backup/delta?from=N` +
   `--restore-delta` for point-in-time recovery.
+- **Durable change-data-capture stream** *(opt-in: `--features change-stream`, OFF by
+  default)* — `change_stream::ChangeLog` persists each commit as an ordered,
+  monotonically-sequenced change record (op + quad(s) + commit seq/generation + timestamp) to a
+  segmented, fsync'd append-only log (Neptune-Streams shape). A consumer `poll(from_seq)`s from
+  any offset and **replays after a restart** (`ChangeLog::open` re-reads the segments) — a raw
+  durable cross-service feed, unlike the ephemeral in-process WebSocket subscriptions. Same
+  N-Quads same-lineage diff + fail-closed FNV-1a digest as the backup family (no new dependency;
+  no HTTP/async). At-rest encryption + authenticity are out of scope.
 - **Response-bytes result cache** *(opt-in: `--features result-cache`, OFF by
   default)* — see below.
 
