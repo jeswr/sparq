@@ -199,7 +199,10 @@ impl McpServer {
             "query" => self.tool_query(&args),
             "construct" => self.tool_construct(&args),
             "introspect" => self.tool_introspect(&args),
+            "shapes" => self.tool_shapes(&args),
             "stats" => self.tool_stats(),
+            #[cfg(feature = "nlq")]
+            "ask" => self.tool_ask(&args),
             "update" => self.tool_update(&args),
             other => {
                 return Err(RpcError::new(
@@ -247,6 +250,25 @@ impl McpServer {
             }
             other => Err(format!("unknown format `{}` (expected \"json\" or \"text\")", other)),
         }
+    }
+
+    /// `shapes`: the data-grounded shape (valid predicates + datatypes + cardinalities)
+    /// of one class IRI, as structured JSON for a client LLM to ground NL→SPARQL on. No
+    /// server-side model — reuses the introspection schema miner. [OPUS-4.8] sq-zak4f
+    fn tool_shapes(&self, args: &Value) -> Result<String, String> {
+        let class_iri = arg_str(args, "class")?;
+        let ix = Introspection::build(&self.graph);
+        let shape = crate::shapes::class_shape(&ix, class_iri)?;
+        Ok(serde_json::to_string_pretty(&shape).unwrap_or_else(|_| shape.to_string()))
+    }
+
+    /// `ask` (feature `nlq`): server-side NL→SPARQL→execute via sparq-nlq. Degrades
+    /// cleanly — returns a clear "not configured" tool error when no LLM backend is set,
+    /// never a fabricated answer or a panic. [OPUS-4.8] sq-jxjgr
+    #[cfg(feature = "nlq")]
+    fn tool_ask(&self, args: &Value) -> Result<String, String> {
+        let question = arg_str(args, "question")?;
+        crate::nlq::ask(&self.graph, question, &self.budget())
     }
 
     /// `stats`: dataset totals as a small JSON object.

@@ -8,7 +8,13 @@
 //! - `construct` → `sparq_engine::construct_ntriples` (CONSTRUCT/DESCRIBE; N-Triples).
 //! - `introspect` → `sparq_introspect::Introspection::build(...).to_json()` /
 //!   `to_text_summary(...)` (classes, predicates, prefixes, characteristic sets).
+//! - `shapes` → `crate::shapes::class_shape(...)` (the data-grounded predicate/datatype/
+//!   cardinality constraints for one class IRI; structured grounding for a client LLM —
+//!   no server-side model). [OPUS-4.8] sq-zak4f
 //! - `stats` → graph triple count + introspection totals.
+//! - `ask` (feature `nlq`, OFF by default) → `crate::nlq` (server-side NL→SPARQL→execute
+//!   via `sparq-nlq`; embeds a configurable LLM call, degrades cleanly when none is
+//!   configured). [OPUS-4.8] sq-jxjgr
 //! - `update` (gated, OFF by default) → `sparq_engine::update_in_place_atomic`.
 
 use serde_json::{json, Value};
@@ -114,6 +120,40 @@ pub const INTROSPECT: ToolSpec = ToolSpec {
     },
 };
 
+/// The `shapes` tool: the data-grounded predicate/datatype/cardinality constraints for
+/// one class IRI, as structured JSON for a CLIENT LLM to ground NL→SPARQL on. No
+/// server-side model — this is the lean, structured grounding aid (`sq-zak4f`).
+/// [OPUS-4.8]
+pub const SHAPES: ToolSpec = ToolSpec {
+    name: "shapes",
+    description: "Given a class/type IRI, return the data-grounded SHACL-style shape of \
+                  that class: which predicates instances actually use, each with its \
+                  coverage, observed datatypes, object-kind split (IRI vs literal), \
+                  observed range, and the cardinalities the data supports (min_count=1 \
+                  for a predicate present on every instance; max_count=1 for a \
+                  single-valued one — emitted only when the data proves the bound, never \
+                  fabricated). Use this to ground a SPARQL query for instances of the \
+                  class: it tells you the valid predicates and whether to bind a literal \
+                  or an IRI. Constraints describe the EFFECTIVE schema (what the graph \
+                  asserts), not an aspirational contract. No LLM is involved.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "class": {
+                    "type": "string",
+                    "description": "The full class IRI (e.g. \
+                                    \"http://xmlns.com/foaf/0.1/Person\"). Call \
+                                    `introspect` first to discover the classes the \
+                                    dataset uses."
+                }
+            },
+            "required": ["class"],
+            "additionalProperties": false
+        })
+    },
+};
+
 /// The `stats` tool: dataset totals (triples, distinct subjects, typed entities, …).
 pub const STATS: ToolSpec = ToolSpec {
     name: "stats",
@@ -153,15 +193,58 @@ pub const UPDATE: ToolSpec = ToolSpec {
     },
 };
 
-/// The read-only tool set, always advertised.
-pub const READ_ONLY: &[&ToolSpec] = &[&QUERY, &CONSTRUCT, &INTROSPECT, &STATS];
+/// The `ask` tool: server-side natural-language → SPARQL → execute, behind the opt-in
+/// `nlq` feature (`sq-jxjgr`). HONEST framing in the description: it embeds a configurable
+/// LLM call, so cost/quality depend on the user's model, and it returns the executed
+/// SPARQL + an honest rendering of the result rows (and, with `nlq/citations`, in-graph
+/// citations) — NOT a free-form prose paragraph the model could fabricate. The structured
+/// `shapes` / `introspect` tools are the no-LLM default; this trades a model call for the
+/// convenience of not writing SPARQL yourself. [OPUS-4.8]
+#[cfg(feature = "nlq")]
+pub const ASK: ToolSpec = ToolSpec {
+    name: "ask",
+    description: "Answer a natural-language question by generating, validating, and \
+                  running a SPARQL query SERVER-SIDE, then returning the executed SPARQL \
+                  plus the result rows it produced (and in-graph citations when available). \
+                  HONEST FRAMING: this embeds a configurable LLM call — cost, latency, and \
+                  answer quality depend entirely on the model/endpoint YOU configure (via \
+                  ANTHROPIC_API_KEY, or an OpenAI-compatible SPARQ_NLQ_ENDPOINT_URL + \
+                  _MODEL); the server ships no default model and never phones home. If no \
+                  model is configured the tool returns a clear 'not configured' error — \
+                  it NEVER fabricates an answer. The returned answer is grounded in the \
+                  executed query's real result rows, not a free-form paragraph. For a \
+                  no-LLM path, use `shapes` + `introspect` and write the query yourself.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "A natural-language question about the loaded dataset."
+                }
+            },
+            "required": ["question"],
+            "additionalProperties": false
+        })
+    },
+};
+
+/// The read-only tool set, always advertised in the default build. `ask` (feature `nlq`)
+/// is appended by [`advertised`] only when a model backend is configured.
+pub const READ_ONLY: &[&ToolSpec] = &[&QUERY, &CONSTRUCT, &INTROSPECT, &SHAPES, &STATS];
 
 /// The full list of tools this server advertises, given its config — `UPDATE` is
-/// appended only when [`McpServer`] was built with update enabled.
+/// appended only when [`McpServer`] was built with update enabled, and `ask` (feature
+/// `nlq`) only when an LLM backend is configured (so a feature-on server with no key
+/// configured does not advertise an unusable tool — it degrades cleanly).
 pub fn advertised(server: &McpServer) -> Vec<&'static ToolSpec> {
     let mut tools: Vec<&'static ToolSpec> = READ_ONLY.to_vec();
     if server.allow_update() {
         tools.push(&UPDATE);
+    }
+    #[cfg(feature = "nlq")]
+    if crate::nlq::backend_configured() {
+        tools.push(&ASK);
     }
     tools
 }
