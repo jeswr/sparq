@@ -2311,4 +2311,166 @@ mod tests {
         assert_eq!(r.len(), n as usize);
         assert!(r.rows.iter().all(|row| row[0].is_some()));
     }
+
+    // [OPUS-4.8] (sq-bif) The public `count` / `count_prepared` entry points — the
+    // id-level solution counter that the server's budgeted ASK path leans on. The
+    // local `count` helper above routes through `query().len()`; these exercise the
+    // REAL `crate::count` (no result materialisation) and pin its agreement with the
+    // materialised count plus its form-rejection error path.
+
+    /// `count` must agree with `query(..).len()` across the modifier shapes that
+    /// change the cardinality (DISTINCT collapses duplicates, LIMIT caps, the
+    /// projection of a constant). A divergence here means the count fast path and
+    /// the materialising path disagree — a real correctness bug.
+    #[test]
+    fn count_agrees_with_materialized_len() {
+        let g = g();
+        let cases = [
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a }",
+            "PREFIX ex: <http://ex/> SELECT DISTINCT ?a WHERE { ?s ex:knows ?b ; ex:age ?a }",
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } LIMIT 2",
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } ORDER BY ?a LIMIT 1",
+            // Empty result: an unsatisfiable pattern.
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:nope ?a }",
+            // A cross/star join.
+            "PREFIX ex: <http://ex/> SELECT ?a ?b WHERE { ?a ex:knows ?b . ?b ex:age ?x }",
+        ];
+        for q in cases {
+            assert_eq!(
+                crate::count(&g, q).unwrap(),
+                query(&g, q).unwrap().len(),
+                "count disagrees with materialised len for {q:?}"
+            );
+        }
+    }
+
+    /// An ASK counts its single unit row: 1 when satisfiable, 0 otherwise — the
+    /// `usize::from(bool)` arm of `count_prepared_with_budget`.
+    #[test]
+    fn count_of_ask_is_zero_or_one() {
+        let g = g();
+        let cnt = |q: &str| crate::count(&g, q).unwrap();
+        assert_eq!(cnt("PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }"), 1);
+        assert_eq!(cnt("PREFIX ex: <http://ex/> ASK { ?s ex:nope ?a }"), 0);
+    }
+
+    /// `count` (and `query_json`) only support SELECT / ASK; the graph-valued
+    /// forms (CONSTRUCT / DESCRIBE) are an explicit error, not a panic or a wrong
+    /// number. This guards the `_ => Err(...)` arms that have no other coverage.
+    #[test]
+    fn count_and_query_json_reject_graph_forms() {
+        let g = g();
+        let construct = "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:a ?a } WHERE { ?s ex:age ?a }";
+        let describe = "DESCRIBE <http://ex/alice>";
+        let rejects = |e: String, q: &str| assert!(e.contains("only SELECT and ASK"), "{q:?}: {e}");
+        for q in [construct, describe] {
+            rejects(crate::count(&g, q).unwrap_err(), q);
+            rejects(query_json(&g, q).unwrap_err(), q);
+        }
+        // count_prepared takes the same path over a pre-parsed query.
+        let prepared = PreparedQuery::parse(construct).unwrap();
+        assert!(count_prepared(&g, &prepared).is_err());
+    }
+
+    /// `query_json` of an ASK emits the SPARQL-results-JSON boolean document
+    /// (`{"head":{},"boolean":…}`), distinct from the SELECT `bindings` document.
+    #[test]
+    fn query_json_ask_emits_boolean_document() {
+        let g = g();
+        assert_eq!(
+            query_json(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }").unwrap(),
+            r#"{"head":{},"boolean":true}"#
+        );
+        assert_eq!(
+            query_json(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?a }").unwrap(),
+            r#"{"head":{},"boolean":false}"#
+        );
+    }
+
+    /// The `PreparedQuery` round-trips: parse / `From<Query>` / `FromStr` /
+    /// `into_query` all produce the SAME execution. A query built programmatically
+    /// from algebra (the sparq-rsp / rewrite seam) must evaluate identically to the
+    /// parsed string form.
+    #[test]
+    fn prepared_query_construction_round_trips() {
+        let g = g();
+        let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } ORDER BY ?s";
+
+        let from_parse = PreparedQuery::parse(q).unwrap();
+        // FromStr is the same as parse.
+        let from_str: PreparedQuery = q.parse().unwrap();
+        // From<Query> wraps already-parsed algebra; into_query unwraps it back.
+        let algebra = from_parse.clone().into_query();
+        let from_algebra = PreparedQuery::from(algebra);
+
+        let want = query_prepared(&g, &from_parse).unwrap();
+        for p in [&from_str, &from_algebra] {
+            let got = query_prepared(&g, p).unwrap();
+            assert_eq!(got.vars, want.vars);
+            assert_eq!(got.rows, want.rows);
+        }
+        // `query()` exposes the wrapped algebra without consuming it.
+        assert!(matches!(from_parse.query(), Query::Select { .. }));
+        // A malformed query is a parse error, not a panic.
+        assert!(PreparedQuery::parse("SELECT ?s WHERE { ?s ?p").is_err());
+        assert!("not a query".parse::<PreparedQuery>().is_err());
+    }
+
+    /// `QueryResult::len` / `is_empty` track the row count exactly — including the
+    /// degenerate one-unbound-row case a no-match aggregate produces (NOT empty),
+    /// which is a classic off-by-one trap.
+    #[test]
+    fn query_result_len_and_is_empty() {
+        let g = g();
+        let run = |q: &str| query(&g, q).unwrap();
+
+        let some = run("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a }");
+        assert_eq!(some.len(), 3);
+        assert!(!some.is_empty());
+
+        let none = run("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:nope ?a }");
+        assert_eq!(none.len(), 0);
+        assert!(none.is_empty());
+
+        // A whole-dataset aggregate over an empty match is ONE row (the unbound
+        // group), so the result is NOT empty even though the pattern matched nothing.
+        let agg = run("PREFIX ex: <http://ex/> SELECT (COUNT(*) AS ?c) WHERE { ?s ex:nope ?a }");
+        assert_eq!(agg.len(), 1);
+        assert!(!agg.is_empty());
+    }
+
+    /// [OPUS-4.8] (sq-bif) The `FunctionRegistry` introspection accessors
+    /// (`new`/`is_empty`/`len`/`get`/`iris`) that the Service-Description path
+    /// advertises from, plus the documented "register REPLACES a duplicate IRI"
+    /// behaviour — none of which had a direct assertion.
+    #[test]
+    fn function_registry_accessors_and_replace() {
+        let mut reg = FunctionRegistry::new();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+        assert!(reg.get("http://ex/fn#id").is_none());
+        assert_eq!(reg.iris().count(), 0);
+
+        reg.register("http://ex/fn#a", |args: &[Term]| Ok(args[0].clone()));
+        reg.register("http://ex/fn#b", |args: &[Term]| Ok(args[0].clone()));
+        assert!(!reg.is_empty());
+        assert_eq!(reg.len(), 2);
+        assert!(reg.get("http://ex/fn#a").is_some());
+        let mut iris: Vec<&str> = reg.iris().collect();
+        iris.sort_unstable();
+        assert_eq!(iris, ["http://ex/fn#a", "http://ex/fn#b"]);
+
+        // Re-registering the SAME IRI replaces the closure (and never grows len).
+        let replaced = Term::NamedNode(oxrdf::NamedNode::new("http://ex/replaced").unwrap());
+        let r2 = replaced.clone();
+        reg.register("http://ex/fn#a", move |_: &[Term]| Ok(r2.clone()));
+        assert_eq!(reg.len(), 2, "duplicate IRI must replace, not add");
+        let q = "SELECT ?r WHERE { BIND(<http://ex/fn#a>(<http://ex/x>) AS ?r) }";
+        let r = query_with_functions(&g(), q, &reg).unwrap();
+        assert_eq!(
+            r.rows[0][0].as_ref().unwrap(),
+            &replaced,
+            "the replacement closure, not the original, must run"
+        );
+    }
 }
