@@ -171,7 +171,7 @@ impl ColumnBuilder {
                 }
             }
             Term::Triple(_) => {
-                // RDF 1.2 quoted triple: stringify to N-Triples in `value`. oxrdf's
+                // RDF 1.2 triple term: stringify to N-Triples in `value`. oxrdf's
                 // Display for Term emits the N-Triples form `<< s p o >>`.
                 self.kind.append_value("triple");
                 self.value.append_value(term.to_string());

@@ -8,7 +8,7 @@
 //! list of *solution rows*, where each cell is either **unbound** or an RDF term —
 //! an IRI, a blank node, a literal (with an optional datatype IRI **or** an optional
 //! language tag, itself optionally carrying an RDF 1.2 base direction), or an RDF 1.2
-//! quoted triple. Arrow has no native RDF-term type, so any export must choose how to
+//! triple term. Arrow has no native RDF-term type, so any export must choose how to
 //! widen it. The honest options (issue #910) are *(a)* a single widened string per
 //! column plus a side-channel for the type, or *(b)* a **struct** per column that
 //! keeps the term's components in separate fields. This crate takes **(b)** because it
@@ -41,7 +41,7 @@
 //!   field — NOT an Arrow `Int64`. A typed-column projection (numbers/dates → native Arrow
 //!   types, with the term struct as a fallback) is a deliberate follow-up (see the crate
 //!   README); this v1 is the faithful, lossless baseline that a typed view can build on.
-//! * **Quoted triples are stringified.** An RDF 1.2 triple term is encoded into its
+//! * **Triple terms are stringified.** An RDF 1.2 triple term is encoded into its
 //!   N-Triples form in `value` (`kind = "triple"`); its components are not exploded into
 //!   nested struct fields. RDF-1.2 triple terms in result *bindings* are rare; a nested
 //!   encoding is left to the same typed-view follow-up.

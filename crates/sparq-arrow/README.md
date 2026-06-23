@@ -58,7 +58,7 @@ literal. `term_schema(&vars)` builds the schema without materialising rows.
   field, not an Arrow `Int64`. A typed-column projection (numbers/dates → native Arrow
   types, term-struct fallback) is a deliberate follow-up — this v1 is the lossless
   baseline a typed view can build on.
-- **Quoted triples are stringified** to N-Triples in `value` (`kind = "triple"`), not
+- **Triple terms are stringified** to N-Triples in `value` (`kind = "triple"`), not
   exploded into nested struct fields.
 - This is a **projection for transport**, not a canonical RDF serialisation: the Arrow
   batch is not itself an RDF document (round-tripping from the five fields is trivial).

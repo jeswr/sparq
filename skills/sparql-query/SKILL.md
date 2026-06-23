@@ -493,7 +493,7 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   `sparq_arrow::RDF_TERM_FIELDS`). Faithful & round-trippable: an **unbound** binding is a `null`
   struct slot (distinct from a bound empty string); `xsd:string` is written **explicitly** (not
   elided). Honest v1 boundaries — **no numeric narrowing** (`42^^xsd:integer` is the string `"42"`
-  + a datatype field, not an `Int64`; a typed-column view is a follow-up) and **quoted triples are
+  + a datatype field, not an `Int64`; a typed-column view is a follow-up) and **triple terms are
   stringified** to N-Triples in `value`. The intended on-ramp into Polars/DuckDB/pandas; a
   `sparq-py` `Graph.query_arrow() -> pyarrow.Table` PyO3 binding is a follow-up (bead `sq-lt1ml`).
 
