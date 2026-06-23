@@ -15,6 +15,12 @@ mod dataset;
 mod exec;
 mod explain;
 pub mod json;
+// [OPUS-4.8] (sq-rp3um) Parameterized prepared queries — safe value binding
+// (`PreparedQuery::bind` / `PreparedUpdate`) to prevent SPARQL injection (#901).
+// NON-DEFAULT `params` feature; when off, zero of this code compiles. Pulls in no
+// new deps (oxrdf + spargebra are already direct deps).
+#[cfg(feature = "params")]
+pub mod params;
 // SPARQL 1.1 federated query (SERVICE). NON-DEFAULT `service` feature; pulls a
 // blocking HTTP client (ureq) + serde_json, both gated off wasm. When off, zero
 // federation code compiles. [OPUS-4.8]
@@ -498,6 +504,31 @@ impl PreparedQuery {
     pub fn into_query(self) -> Query {
         self.query
     }
+
+    /// Safely binds a typed RDF value to a free placeholder variable, returning a
+    /// NEW prepared query — the canonical mitigation for SPARQL injection (#901).
+    ///
+    /// `name` is the placeholder variable (with or without a leading `?`/`$`).
+    /// Every free occurrence is replaced *in the parsed algebra* by `value`
+    /// ([`oxrdf::Term`]) — a pure structural rewrite, **never** string
+    /// concatenation — so a hostile value (an IRI/literal containing
+    /// `> } INSERT … {`, a `"` break-out, etc.) is carried as opaque DATA and can
+    /// NEVER alter the query structure. The template is parsed once and reusable:
+    /// bind different values for different requests, plan-cache stays effective.
+    ///
+    /// **Fail-closed.** Returns [`params::BindError`] (as a `String`) if the
+    /// placeholder does not occur free (typo'd name), if it is a projected /
+    /// aggregate / `BIND` / `VALUES` *result* variable (binding it would change the
+    /// result shape — rename the placeholder), or if a blank node is bound into a
+    /// predicate / graph-name slot.
+    ///
+    /// Only available with the opt-in `params` feature. See the crate
+    /// [`params`] module for the safety argument and convenience value
+    /// constructors ([`params::value`]).
+    #[cfg(feature = "params")]
+    pub fn bind(&self, name: &str, value: oxrdf::Term) -> Result<PreparedQuery, String> {
+        params::bind_query(&self.query, name, value).map_err(|e| e.to_string())
+    }
 }
 
 impl From<Query> for PreparedQuery {
@@ -513,6 +544,90 @@ impl std::str::FromStr for PreparedQuery {
     fn from_str(s: &str) -> Result<PreparedQuery, String> {
         PreparedQuery::parse(s)
     }
+}
+
+/// A SPARQL 1.1 UPDATE parsed ONCE, with safe value binding ([`PreparedUpdate::bind`])
+/// to prevent SPARQL injection on the write path (#901, bead `sq-rp3um`). The
+/// UPDATE counterpart of [`PreparedQuery`]: a `DELETE`/`INSERT … WHERE` template is
+/// parsed into algebra, a free placeholder variable is `bind`-substituted by a typed
+/// [`oxrdf::Term`] via a pure algebra rewrite (NEVER string concatenation), and the
+/// bound algebra is applied DIRECTLY by [`update_prepared`] / [`update_in_place_prepared`]
+/// — so a hostile bound value never re-enters the parser. See the [`params`] module.
+///
+/// Only available with the opt-in `params` feature.
+#[cfg(feature = "params")]
+#[derive(Debug, Clone)]
+pub struct PreparedUpdate {
+    update: spargebra::Update,
+}
+
+#[cfg(feature = "params")]
+impl PreparedUpdate {
+    /// Parses a SPARQL UPDATE string into its reusable algebra form.
+    pub fn parse(sparql: &str) -> Result<PreparedUpdate, String> {
+        Ok(PreparedUpdate {
+            update: SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?,
+        })
+    }
+
+    /// Wraps already-parsed (or programmatically rewritten) UPDATE algebra.
+    pub(crate) fn from_algebra(update: spargebra::Update) -> PreparedUpdate {
+        PreparedUpdate { update }
+    }
+
+    /// The wrapped `spargebra` UPDATE algebra.
+    pub fn update(&self) -> &spargebra::Update {
+        &self.update
+    }
+
+    /// Safely binds a typed RDF value to a free placeholder variable in the UPDATE
+    /// template, returning a NEW prepared update. Same fail-closed semantics and
+    /// injection-safety guarantee as [`PreparedQuery::bind`]: the placeholder is
+    /// substituted in the parsed algebra (`DELETE`/`INSERT` templates + the WHERE
+    /// pattern), never by string concatenation, so a hostile value such as an IRI
+    /// containing `> } ; DROP ALL ; INSERT { … }` is carried as opaque DATA.
+    ///
+    /// Returns an `Err` if the placeholder is not free, is a `BIND`/`GROUP`/aggregate
+    /// output of the WHERE clause, or a blank node is bound into a predicate /
+    /// graph-name / ground-`DELETE` slot.
+    pub fn bind(&self, name: &str, value: oxrdf::Term) -> Result<PreparedUpdate, String> {
+        params::bind_update(&self.update, name, value).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(feature = "params")]
+impl std::str::FromStr for PreparedUpdate {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<PreparedUpdate, String> {
+        PreparedUpdate::parse(s)
+    }
+}
+
+/// [OPUS-4.8] (sq-rp3um) Apply a parameterized [`PreparedUpdate`] to `graph`, returning
+/// the updated graph (the [`update`] rebuild path over the bound algebra). Only with the
+/// opt-in `params` feature.
+#[cfg(feature = "params")]
+pub fn update_prepared(graph: &Graph, prepared: &PreparedUpdate) -> Result<Graph, String> {
+    update::update_prepared_impl(graph, &prepared.update)
+}
+
+/// [OPUS-4.8] (sq-rp3um) Apply a parameterized [`PreparedUpdate`] IN PLACE through the
+/// delta overlay (the [`update_in_place`] path over the bound algebra). Only with the
+/// opt-in `params` feature.
+#[cfg(feature = "params")]
+pub fn update_in_place_prepared(graph: &mut Graph, prepared: &PreparedUpdate) -> Result<(), String> {
+    update_in_place_prepared_with_budget(graph, prepared, &QueryBudget::unlimited())
+}
+
+/// [OPUS-4.8] (sq-rp3um) [`update_in_place_prepared`] under a cooperative [`QueryBudget`].
+#[cfg(feature = "params")]
+pub fn update_in_place_prepared_with_budget(
+    graph: &mut Graph,
+    prepared: &PreparedUpdate,
+    budget: &QueryBudget,
+) -> Result<(), String> {
+    update::update_in_place_prepared_with_budget(graph, &prepared.update, budget)
 }
 
 /// Executes a SPARQL query string against a graph, materialising the solutions.

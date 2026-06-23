@@ -126,6 +126,18 @@ txn = []
 # byte-identical. Pulls in ZERO new dependencies (oxrdf — `Term`/`Variable`/
 # `VariableRef` — is already a direct dep) and contains no `unsafe`.
 query-solution = []
+# [OPUS-4.8] (sq-rp3um) Parameterized prepared queries — safe value binding to
+# prevent SPARQL injection (#901). Adds `PreparedQuery::bind` and `PreparedUpdate`
+# (the `params` module): a free placeholder `Variable` is substituted by a typed
+# `oxrdf::Term` via a pure ALGEBRA REWRITE over the parsed AST (`Variable` ->
+# `NamedNode`/`Literal`/`BlankNode`/triple-term) — never string concatenation — so a
+# hostile bound value (e.g. an IRI/literal containing `> } INSERT ... {` or a `"`
+# break-out) is carried as opaque DATA and cannot alter the query structure. Covers
+# SELECT/ASK/CONSTRUCT/DESCRIBE + UPDATE. OPT-IN and OFF by default: when off, zero of
+# this code compiles and the default native + wasm builds are byte-identical. Pulls in
+# ZERO new dependencies (oxrdf + spargebra are already direct deps) and contains no
+# `unsafe`.
+params = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
