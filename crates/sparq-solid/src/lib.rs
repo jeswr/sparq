@@ -535,7 +535,8 @@ impl PodStore {
     /// exists anywhere up to the pod root (an un-protected resource — the caller should
     /// fail closed). The walk is exactly the loader's slash-semantics `parent_iri` chain,
     /// so this per-resource discovery and the materialize-time inheritance can never
-    /// disagree. Feeds [`PodStore::decide`]'s `governing_acl`/`scope` (and FR-5 later).
+    /// disagree. Feeds [`PodStore::decide`]'s `governing_acl`/`scope`, which
+    /// [`WacDecision::acl_link_header`] turns into the FR-5 `Link: rel="acl"` surface.
     ///
     /// # Examples
     ///

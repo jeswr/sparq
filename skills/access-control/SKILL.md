@@ -147,6 +147,16 @@ Materialize the authorization view from the access-control documents, then enfor
   grant; `granted_modes` carries the full mode set in one decision (build a `WAC-Allow`
   body without four sweeps). `decide_batch` builds the structural ACL index ONCE for a page
   of resources. Always-present API (no cargo gate; mirrors `wac_allow`).
+- `WacDecision::acl_link_header() -> Option<String>` / `AclScope::as_acl_predicate() ->
+  &'static str` — **effective-ACL provenance surface** (FR-5, sq-snopa.4): the `<acl-iri>;
+  rel="acl"` RFC-8288 [`Link`](https://solidproject.org/TR/protocol#acl-resource) value a
+  server emits alongside `wac_allow` so a client can discover/edit the governing ACL, plus
+  the WAC predicate IRI (`acl:accessTo`/`acl:default`) for the scope in structured logs.
+  Built straight from the `governing_acl`/`scope` FR-1 already puts on the decision (so it
+  can never point at a document discovery did not find). **Fail-closed:** `None` when no
+  governing ACL was discovered (`NoAcl`/`Transient`) — nothing to advertise; `Some` on
+  `Unloaded` (the ACL *is* discovered, even on a retryable 503). It surfaces *where* the ACL
+  is, never a verdict, so it is safe to emit on a deny.
 - `AclStatus` — the **typed fail-closed load/error contract** (FR-6, sq-snopa.2): a server
   maps `Resolved` (authoritative — `allow` is the real verdict; a deny is **403**), `NoAcl`
   (no governing ACL anywhere up the chain — definitive **403/401**), `Unloaded` (a governing
@@ -162,7 +172,8 @@ Materialize the authorization view from the access-control documents, then enfor
   ancestor container — instead of N round-trips. The walk is exactly the loader's
   slash-semantics `parent_iri` chain, so per-resource discovery and the materialize-time
   inheritance can never disagree; `None` ⇒ un-protected ⇒ fail closed. Feeds `decide`'s
-  `governing_acl`/`scope` (and FR-5 provenance later). **Honest scope:** Phase-1 implements
+  `governing_acl`/`scope`, which `WacDecision::acl_link_header()` turns into the FR-5
+  `Link: rel="acl"` surface (above). **Honest scope:** Phase-1 implements
   the WAC `accessTo` + container-`default` subset of [issue #992](https://github.com/jeswr/sparq/issues/992)
   (FR-1/6/7) — the per-resource decision + fail-closed contract + ACL walk; it is NOT the
   full WAC HTTP surface (FR-4's `POST /authz/*` on `sparq-server` is the separate sq-snopa.6
@@ -270,12 +281,17 @@ Per request: `session_from_request(...)` → `may(&mut store, &s, Mode::Read, &r
 to allow/deny (a deny is `403`/`404` per your fail-closed policy) → set the response's
 `WAC-Allow` header to `store.wac_allow(&s, &resource)`. `wac_allow` runs four
 `accessible` sweeps that share the per-session cache (each an O(1) hash check over the
-materialized index), so it is cheap. **Scope caveat:** sparq-solid is a *library-level*
-authoriser — there is no HTTP surface here (no `Link`/`acl:` resource discovery, no
-`.well-known`), so mapping a **request path to its named graph** (`resource`) and
-authenticating the WebID are the server's job (see `research/sparq-solid-scope.md` §4).
-`wac_allow` builds the header *value* from the authorization verdict; it is not itself a
-conformance-tested HTTP layer.
+materialized index), so it is cheap. To pair the `WAC-Allow` advertisement with the WAC
+**ACL-discovery** header, run `store.decide(&s, "<resource-iri>", Mode::Read)` and emit its
+`acl_link_header()` (`Some("<acl-iri>; rel=\"acl\"")`) as the response `Link` header value
+when present (FR-5) — fail-closed: it is `None` when no governing ACL was discovered, so
+nothing leaks on an un-protected resource. **Scope caveat:** sparq-solid is a
+*library-level* authoriser — there is no HTTP surface here (no `.well-known`, no served
+`acl:` resource); `acl_link_header()` builds the `Link` header *value* from the discovered
+governing ACL, but emitting it (and mapping a **request path to its named graph**, and
+authenticating the WebID) is the server's job (see `research/sparq-solid-scope.md` §4).
+`wac_allow`/`acl_link_header` build header *values* from the authorization verdict +
+discovery; neither is itself a conformance-tested HTTP layer.
 
 ## Capability notes (WAC + ACP)
 
