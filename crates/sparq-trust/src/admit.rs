@@ -474,6 +474,285 @@ fn subject_is(t: &Triple, agent: &NamedNode) -> bool {
     matches!(&t.subject, NamedOrBlankNode::NamedNode(n) if n.as_str() == agent.as_str())
 }
 
+// ── Phase 5: the opt-in property-admissibility PRE-CHECK (sq-dt5hv) ────────────
+//
+// A single OPTIONAL pre-admission check (design §5b), behind the default-OFF
+// `secprop-precheck` feature. Before the existing signature / freshness / holder
+// checks, consult the merged secprop admissibility reduction
+// (`crate::admissibility::admissible`) to decide whether the PRESENTED proof method
+// satisfies the requester's ODRL privacy preference. Fail-closed (default-deny): a
+// method that does NOT satisfy every constraint admits NOTHING — a **principled
+// refusal** ("no admissible proof") rather than serving a non-conforming one.
+//
+// STRICT ADDITIVITY: the pre-check is consulted ONLY when a caller passes a
+// `AdmissibilityPreference`; with `None` the gate is **byte-identical** to `admit`
+// (the opt-in property G6 — the same posture the rest of this crate keeps). It does NOT
+// redefine the reduction: it is a thin driver that hands the method's annotation graph
+// and the requester's `gteq` constraints to the Phase-2 `admissible()` API.
+
+#[cfg(feature = "secprop-precheck")]
+#[cfg_attr(docsrs, doc(cfg(feature = "secprop-precheck")))]
+pub use precheck::{admit_with_precheck, AdmissibilityPreference, PrecheckOutcome};
+
+#[cfg(feature = "secprop-precheck")]
+mod precheck {
+    use super::{admit, AdmittedFact, PresentedCredential, Session};
+    use crate::admissibility::admissible;
+    use oxrdf::NamedNode;
+
+    /// A requester's machine-reasonable ODRL **privacy preference** to enforce against
+    /// the presented proof method BEFORE admission (design §5b). It pairs the method's
+    /// recorded `secprop` property annotations with the `gteq` constraints the requester
+    /// requires — exactly the four inputs the Phase-2 `crate::admissibility::admissible`
+    /// reduction reads.
+    ///
+    /// The honesty of the verdict is exactly the honesty of the `annotations` graph: it
+    /// reasons over recorded (method, property)→level claims, **not** over cryptography,
+    /// and every sparq ZK property is at most `secx:Claimed` while the external audit
+    /// (`sq-qhy4`) is open. A `requiresAssurance gteq secx:Proven` constraint therefore
+    /// mechanically denies **every** sparq ZK method today — the principled refusal.
+    #[derive(Debug, Clone)]
+    pub struct AdmissibilityPreference {
+        /// The presented proof's method IRI (the `zk:scheme` / `zk:cryptosuite` the
+        /// `sparq-zk` registry records, e.g. `zk:poseidon2-rdfc10-v1`). The annotation
+        /// graph is keyed on this IRI; a method with no matching annotation block
+        /// satisfies nothing and is denied (fail-closed).
+        pub method_iri: NamedNode,
+        /// The requester's policy constraint IRIs — each an `odrl:Constraint` carrying
+        /// `odrl:leftOperand` (a `secx:requires…` leftOperand) / `operator odrl:gteq` /
+        /// `rightOperand`. The method must satisfy **every** one (default-deny). An
+        /// EMPTY set is vacuously satisfied — the caller is responsible for not handing
+        /// an empty preference where one is required (the `admissible` contract).
+        pub constraint_iris: Vec<String>,
+        /// The constraints' triples as an N3/Turtle fragment **without** the `@prefix`
+        /// preamble (it is prepended by the reduction).
+        pub policy_n3: String,
+        /// The method's `secprop` `secx:hasProperty` annotation graph as an N3/Turtle
+        /// fragment **without** the `@prefix` preamble.
+        pub annotations_n3: String,
+    }
+
+    /// Why a pre-check DENIED admission — the honest, machine-readable refusal detail
+    /// (`PrecheckOutcome::Denied` carries it; an empty admitted set is the effect).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum PrecheckOutcome {
+        /// The method satisfied every constraint — admission proceeded normally.
+        Admitted,
+        /// The method failed at least one constraint; admission was refused
+        /// (fail-closed). Carries the **sorted** constraint IRIs the method does not
+        /// `secx:satisfies` — the "why no admissible proof" detail.
+        Denied {
+            /// The policy constraint IRIs the method fails (sorted, non-empty).
+            unsatisfied: Vec<String>,
+        },
+        /// The reduction itself errored (a malformed policy/annotation fragment). This
+        /// is **also** a fail-closed denial — a pre-check that cannot be evaluated must
+        /// NEVER admit. Carries the reasoner's error string.
+        ReductionError {
+            /// The `sparq-reason` parse/closure error the reduction returned.
+            error: String,
+        },
+    }
+
+    /// Run the admission gate with an OPTIONAL Phase-5 property-admissibility pre-check.
+    ///
+    /// With `preference == None` this is **byte-identical** to `admit` (strict
+    /// additivity — the opt-in property): no reasoning runs, no behaviour changes.
+    ///
+    /// With `preference == Some(p)` the gate FIRST consults
+    /// `crate::admissibility::admissible` over `p`'s method IRI, constraints, policy, and
+    /// annotation graph. If the method does **not** satisfy every constraint — or the
+    /// reduction errors — the gate **fails closed**: it returns an EMPTY admitted set and
+    /// the `PrecheckOutcome` explaining the refusal, and the existing signature /
+    /// freshness / holder checks are **never reached**. Only when the pre-check is
+    /// satisfied does the unchanged `admit` gate run.
+    ///
+    /// The pre-check is **default-deny and orthogonal** to the cryptographic checks: it
+    /// constrains *which proof method* is acceptable, NOT whether the signature
+    /// verifies. A satisfied pre-check does NOT weaken any downstream check — `admit`
+    /// still verifies the checked issuer signature, freshness, statement-type scope, and
+    /// the clear-WebID holder binding. The pre-check can only ever DENY, never broaden.
+    ///
+    /// Returns the admitted facts (empty on a pre-check denial — default-deny) and the
+    /// `PrecheckOutcome`.
+    pub fn admit_with_precheck(
+        cred: &PresentedCredential,
+        rules: &[crate::policy::TrustRule],
+        session: &Session,
+        target: &NamedNode,
+        preference: Option<&AdmissibilityPreference>,
+    ) -> (Vec<AdmittedFact>, PrecheckOutcome) {
+        let Some(pref) = preference else {
+            // OPT-IN: no preference => byte-identical to the current gate.
+            return (
+                admit(cred, rules, session, target),
+                PrecheckOutcome::Admitted,
+            );
+        };
+
+        let constraint_refs: Vec<&str> = pref.constraint_iris.iter().map(String::as_str).collect();
+        match admissible(
+            pref.method_iri.as_str(),
+            &constraint_refs,
+            &pref.policy_n3,
+            &pref.annotations_n3,
+        ) {
+            // The method satisfies every constraint: proceed to the unchanged gate.
+            Ok(a) if a.admissible => (
+                admit(cred, rules, session, target),
+                PrecheckOutcome::Admitted,
+            ),
+            // The method fails at least one constraint: fail-closed, admit nothing.
+            Ok(a) => (
+                Vec::new(),
+                PrecheckOutcome::Denied {
+                    unsatisfied: a.unsatisfied,
+                },
+            ),
+            // The reduction errored: ALSO fail-closed (a pre-check that cannot be
+            // evaluated must never admit).
+            Err(error) => (Vec::new(), PrecheckOutcome::ReductionError { error }),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::policy::TrustRule;
+        use oxrdf::NamedNode;
+
+        const METHOD: &str = "https://sparq.dev/ns/zk#poseidon2-rdfc10-v1";
+
+        /// The string-canonical method's annotation block (the §4.3.3 levels) — keyed on
+        /// the method IRI the pre-check is handed. Used by every test below.
+        const ANNOTATIONS: &str = "\
+zk:poseidon2-rdfc10-v1\n\
+  secx:hasProperty [ secx:property secx:UnlinkabilityScope ; secx:level secx:PerPresentation ] ,\n\
+                   [ secx:property secx:AssuranceLevel ; secx:level secx:Claimed ] .\n";
+
+        fn pref(
+            method: &str,
+            constraint_iris: &[&str],
+            policy_n3: &str,
+        ) -> AdmissibilityPreference {
+            AdmissibilityPreference {
+                method_iri: NamedNode::new(method).unwrap(),
+                constraint_iris: constraint_iris.iter().map(|s| (*s).to_owned()).collect(),
+                policy_n3: policy_n3.to_owned(),
+                annotations_n3: ANNOTATIONS.to_owned(),
+            }
+        }
+
+        /// The pre-check NEVER admits without a real `admit` pass: it returns no facts
+        /// here (no rules), so the OUTCOME — not the fact set — is what these unit tests
+        /// pin. The `admit` integration path is covered end-to-end in
+        /// `tests/secprop_precheck_e2e.rs` (with a real signed credential).
+        fn run(p: Option<&AdmissibilityPreference>) -> PrecheckOutcome {
+            let cred = PresentedCredential {
+                graph: Vec::new(),
+                issuer_signature_hex: String::new(),
+                salt: [0u8; 32],
+                issued_at_unix_secs: 0,
+                revoked: false,
+            };
+            let rules: Vec<TrustRule> = Vec::new();
+            let session = Session {
+                agent: NamedNode::new("https://a.ex/me").unwrap(),
+                now_unix_secs: 0,
+            };
+            let target = NamedNode::new("https://pod.ex/r").unwrap();
+            let (_facts, outcome) = admit_with_precheck(&cred, &rules, &session, &target, p);
+            outcome
+        }
+
+        /// With NO preference the outcome is `Admitted` and the gate runs unchanged
+        /// (strict additivity — the opt-in property). No reasoning happens.
+        #[test]
+        fn no_preference_is_admitted_and_runs_the_unchanged_gate() {
+            assert_eq!(run(None), PrecheckOutcome::Admitted);
+        }
+
+        /// A satisfiable `gteq` preference admits: the method holds PerPresentation, which
+        /// is `atLeast` the required PerPresentation (reflexive), and Claimed ≥ Claimed.
+        #[test]
+        fn satisfiable_preference_admits() {
+            let policy = "\
+zk:cUnlink odrl:leftOperand secx:requiresUnlinkabilityScope ; odrl:operator odrl:gteq ; odrl:rightOperand secx:PerPresentation .\n\
+zk:cAssur  odrl:leftOperand secx:requiresAssurance          ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .\n";
+            let p = pref(
+                METHOD,
+                &[
+                    "https://sparq.dev/ns/zk#cUnlink",
+                    "https://sparq.dev/ns/zk#cAssur",
+                ],
+                policy,
+            );
+            assert_eq!(run(Some(&p)), PrecheckOutcome::Admitted);
+        }
+
+        /// An unsatisfiable constraint FAILS CLOSED: `requiresAssurance gteq Proven`
+        /// removes the Claimed-only method — every sparq ZK method while `sq-qhy4` is
+        /// open. The outcome names the unsatisfied constraint (the honest refusal).
+        #[test]
+        fn assurance_gteq_proven_denies_fail_closed() {
+            let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Proven .";
+            let p = pref(METHOD, &["https://sparq.dev/ns/zk#cAssur"], policy);
+            assert_eq!(
+                run(Some(&p)),
+                PrecheckOutcome::Denied {
+                    unsatisfied: vec!["https://sparq.dev/ns/zk#cAssur".to_owned()]
+                },
+            );
+        }
+
+        /// A constraint over a dimension the method is NOT annotated for also fails
+        /// closed (the method satisfies nothing on that dimension).
+        #[test]
+        fn unannotated_dimension_denies_fail_closed() {
+            let policy = "zk:cZk odrl:leftOperand secx:requiresZeroKnowledge ; odrl:operator odrl:gteq ; odrl:rightOperand secx:PerfectZK .";
+            let p = pref(METHOD, &["https://sparq.dev/ns/zk#cZk"], policy);
+            assert!(matches!(run(Some(&p)), PrecheckOutcome::Denied { .. }));
+        }
+
+        /// A method IRI with NO annotation block satisfies nothing ⇒ fail closed (the
+        /// graph is keyed on the IRI; a wrong/unknown method is denied).
+        #[test]
+        fn unknown_method_denies_fail_closed() {
+            let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .";
+            let p = pref(
+                "https://sparq.dev/ns/zk#no-such-method",
+                &["https://sparq.dev/ns/zk#cAssur"],
+                policy,
+            );
+            assert!(matches!(run(Some(&p)), PrecheckOutcome::Denied { .. }));
+        }
+
+        /// An EMPTY constraint set is vacuously satisfied (the `admissible` contract) —
+        /// admitted. (A caller wanting deny-on-empty must not hand an empty preference.)
+        #[test]
+        fn empty_constraint_set_is_vacuously_admitted() {
+            let p = pref(METHOD, &[], "");
+            assert_eq!(run(Some(&p)), PrecheckOutcome::Admitted);
+        }
+
+        /// A malformed policy fragment makes the reduction ERROR — and that is a
+        /// fail-closed denial (a pre-check that cannot be evaluated must never admit).
+        #[test]
+        fn reduction_error_fails_closed() {
+            // Unterminated/garbage N3 the reasoner cannot parse.
+            let p = pref(
+                METHOD,
+                &["https://sparq.dev/ns/zk#c"],
+                "this is not valid n3 @@@ {",
+            );
+            assert!(matches!(
+                run(Some(&p)),
+                PrecheckOutcome::ReductionError { .. }
+            ));
+        }
+    }
+}
+
 fn subject_term(s: &NamedOrBlankNode) -> Term {
     match s {
         NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),

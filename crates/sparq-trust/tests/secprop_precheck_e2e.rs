@@ -1,0 +1,310 @@
+//! GOLDEN end-to-end test for the Phase-5 property-admissibility PRE-CHECK
+//! (`sq-dt5hv`, design §5b) — `sparq_trust::admit_with_precheck` over the REAL
+//! admission path (RDFC-1.0 commit + CHECKED issuer Schnorr signature + SHACL
+//! statement-type scoping + the clear-WebID holder binding) plus the Phase-2 secprop
+//! admissibility reduction in front of it.
+//!
+//! The load-bearing invariants (design §5b / §4.3.3):
+//!
+//! - **OPT-IN strict additivity** — with `preference == None` the pre-check gate is
+//!   byte-identical to the plain `admit` gate (same admitted facts), so an existing
+//!   caller sees no behaviour change.
+//! - **Satisfied preference admits + derives** — a method that satisfies the
+//!   requester's relaxed `gteq` preference passes the pre-check, the real gate runs,
+//!   and the age>18 grant still derives end-to-end.
+//! - **Unsatisfied preference FAILS CLOSED** — Alice's strict `requiresAssurance gteq
+//!   Proven` removes every (Claimed-only) sparq method while `sq-qhy4` is open, so the
+//!   gate admits NOTHING and NO grant derives, even though the credential signature,
+//!   freshness, and holder binding are all perfectly valid. The pre-check is a
+//!   *principled refusal*, not a cryptographic failure.
+//!
+//! Runs only with the `secprop-precheck` feature; the `feature-matrix.yml` /
+//! `feature-matrix.d/sparq-trust.yml` leg EXECUTES it.
+//!
+//! 🤖 SPARQ agent — sq-dt5hv (epic sq-0dksu, Phase 5) [OPUS-4.8]. Flag for re-review
+//! when Fable returns.
+#![cfg(feature = "secprop-precheck")]
+
+use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
+use sparq_trust::admit::{admit, admit_with_precheck, AdmissibilityPreference, PrecheckOutcome};
+use sparq_trust::policy::{parse_policy, ControlGate, TrustRule};
+use sparq_trust::vocab;
+use sparq_trust::wire::derive_grants;
+use sparq_zk::commit::commit_triples;
+use sparq_zk::encode::salt_from_bytes;
+use sparq_zk::sig::{public_key_to_hex, PublicKey, SecretKey};
+
+const JESSE: &str = "https://jesse.ex/card#me";
+const GOV_ISSUER: &str = "https://gov.example/issuer";
+const SCHEMA_AGE: &str = "http://schema.org/age";
+const RESOURCE_X: &str = "https://pod.ex/resourceX";
+const SALT_BYTES: [u8; 32] = [7u8; 32];
+const NOW: i64 = 1_700_000_000;
+const ISSUED_FRESH: i64 = NOW - 86_400;
+
+/// The presented proof method IRI (the `zk:scheme` the registry records).
+const METHOD: &str = "https://sparq.dev/ns/zk#poseidon2-rdfc10-v1";
+
+const ACR_ABAC_RULE: &str = r#"@prefix schema: <http://schema.org/> .
+@prefix math:   <http://www.w3.org/2000/10/swap/math#> .
+@prefix auth:   <https://sparq.dev/ns/auth#> .
+{ ?x schema:age ?y . ?y math:greaterThan 18 } => { ?x auth:read <https://pod.ex/resourceX> } .
+"#;
+
+/// The method's secprop annotation block (the §4.3.3 levels; assurance is `Claimed` —
+/// `Proven` is barred while `sq-qhy4` is open).
+const ANNOTATIONS: &str = "\
+zk:poseidon2-rdfc10-v1\n\
+  secx:hasProperty [ secx:property secx:UnlinkabilityScope ; secx:level secx:PerPresentation ] ,\n\
+                   [ secx:property secx:AssuranceLevel ; secx:level secx:Claimed ] .\n";
+
+fn iri(s: &str) -> NamedNode {
+    NamedNode::new(s).unwrap()
+}
+
+fn age_credential_graph(subject: &str, value: &str) -> Vec<Triple> {
+    vec![Triple::new(
+        NamedOrBlankNode::NamedNode(iri(subject)),
+        iri(SCHEMA_AGE),
+        Term::Literal(Literal::new_typed_literal(
+            value,
+            iri("http://www.w3.org/2001/XMLSchema#integer"),
+        )),
+    )]
+}
+
+fn gov_key() -> (SecretKey, PublicKey) {
+    let sk = SecretKey::from_seed(0xC0FFEE);
+    let pk = sk.public_key();
+    (sk, pk)
+}
+
+fn sign_graph(sk: &SecretKey, graph: &[Triple]) -> String {
+    let salt = salt_from_bytes(&SALT_BYTES);
+    let commitment = commit_triples(graph, salt).expect("credential graph commits");
+    sk.sign_commitment(&commitment.commitment)
+}
+
+fn gov_age_policy(issuer: &str, key: &PublicKey, scope: &str) -> Vec<TrustRule> {
+    let rule = NamedNode::new("https://pod.ex/.acr#trustrule").unwrap();
+    let policy: Vec<Triple> = vec![
+        Triple::new(
+            NamedOrBlankNode::NamedNode(rule.clone()),
+            iri(vocab::RDF_TYPE),
+            Term::NamedNode(iri(vocab::TRUST_RULE)),
+        ),
+        Triple::new(
+            NamedOrBlankNode::NamedNode(rule.clone()),
+            iri(vocab::SOURCE),
+            Term::NamedNode(iri(issuer)),
+        ),
+        Triple::new(
+            NamedOrBlankNode::NamedNode(rule.clone()),
+            iri(vocab::ISSUER_KEY),
+            Term::Literal(Literal::new_simple_literal(public_key_to_hex(key))),
+        ),
+        Triple::new(
+            NamedOrBlankNode::NamedNode(rule.clone()),
+            iri(vocab::FOR_PREDICATE),
+            Term::NamedNode(iri(SCHEMA_AGE)),
+        ),
+        Triple::new(
+            NamedOrBlankNode::NamedNode(rule.clone()),
+            iri(vocab::SCOPE),
+            Term::NamedNode(iri(scope)),
+        ),
+        Triple::new(
+            NamedOrBlankNode::NamedNode(rule),
+            iri(vocab::FRESH_WITHIN),
+            Term::Literal(Literal::new_typed_literal(
+                "P30D",
+                iri("http://www.w3.org/2001/XMLSchema#duration"),
+            )),
+        ),
+    ];
+    parse_policy(&policy, ControlGate::assert_control_gated()).expect("policy parses")
+}
+
+fn session(agent: &str, now: i64) -> sparq_trust::admit::Session {
+    sparq_trust::admit::Session {
+        agent: iri(agent),
+        now_unix_secs: now,
+    }
+}
+
+fn fresh_cred(sk: &SecretKey, graph: Vec<Triple>) -> sparq_trust::admit::PresentedCredential {
+    let sig = sign_graph(sk, &graph);
+    sparq_trust::admit::PresentedCredential {
+        graph,
+        issuer_signature_hex: sig,
+        salt: SALT_BYTES,
+        issued_at_unix_secs: ISSUED_FRESH,
+        revoked: false,
+    }
+}
+
+fn read_granted(grants: &[Triple], subject: &str) -> bool {
+    grants.iter().any(|t| {
+        t.predicate.as_str() == "https://sparq.dev/ns/auth#read"
+            && matches!(&t.subject, NamedOrBlankNode::NamedNode(n) if n.as_str() == subject)
+            && matches!(&t.object, Term::NamedNode(o) if o.as_str() == RESOURCE_X)
+    })
+}
+
+fn pref(constraint_iris: &[&str], policy_n3: &str) -> AdmissibilityPreference {
+    AdmissibilityPreference {
+        method_iri: iri(METHOD),
+        constraint_iris: constraint_iris.iter().map(|s| (*s).to_owned()).collect(),
+        policy_n3: policy_n3.to_owned(),
+        annotations_n3: ANNOTATIONS.to_owned(),
+    }
+}
+
+/// OPT-IN strict additivity: `preference == None` is byte-identical to plain `admit`.
+#[test]
+fn no_preference_is_byte_identical_to_plain_admit() {
+    let (sk, pk) = gov_key();
+    let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
+    let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
+
+    let plain = admit(&cred, &rules, &session(JESSE, NOW), &iri(RESOURCE_X));
+    let (with_pre, outcome) =
+        admit_with_precheck(&cred, &rules, &session(JESSE, NOW), &iri(RESOURCE_X), None);
+
+    assert_eq!(
+        outcome,
+        PrecheckOutcome::Admitted,
+        "no preference => Admitted"
+    );
+    assert_eq!(
+        with_pre, plain,
+        "with NO preference, admit_with_precheck must admit EXACTLY the same facts as admit"
+    );
+    assert_eq!(with_pre.len(), 1, "the age fact is admitted");
+}
+
+/// A satisfiable preference passes the pre-check, the real gate runs, and the age>18
+/// grant still derives end-to-end.
+#[test]
+fn satisfiable_preference_admits_and_derives_the_grant() {
+    let (sk, pk) = gov_key();
+    let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
+    let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
+
+    // Relaxed: unlinkability >= PerPresentation (held), assurance >= Claimed (held).
+    let policy = "\
+zk:rUnlink odrl:leftOperand secx:requiresUnlinkabilityScope ; odrl:operator odrl:gteq ; odrl:rightOperand secx:PerPresentation .\n\
+zk:rAssur  odrl:leftOperand secx:requiresAssurance          ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .\n";
+    let p = pref(
+        &[
+            "https://sparq.dev/ns/zk#rUnlink",
+            "https://sparq.dev/ns/zk#rAssur",
+        ],
+        policy,
+    );
+
+    let (admitted, outcome) = admit_with_precheck(
+        &cred,
+        &rules,
+        &session(JESSE, NOW),
+        &iri(RESOURCE_X),
+        Some(&p),
+    );
+    assert_eq!(
+        outcome,
+        PrecheckOutcome::Admitted,
+        "the relaxed preference is satisfied"
+    );
+    assert_eq!(
+        admitted.len(),
+        1,
+        "the age fact passes the gate after the pre-check"
+    );
+
+    let grants = derive_grants(&admitted, ACR_ABAC_RULE).expect("derivation runs");
+    assert!(
+        read_granted(&grants, JESSE),
+        "with a satisfied pre-check the age>18 grant derives end-to-end"
+    );
+}
+
+/// Alice's STRICT `requiresAssurance gteq Proven` removes every Claimed-only sparq
+/// method while `sq-qhy4` is open: the gate admits NOTHING and NO grant derives, even
+/// though the signature, freshness, and holder binding are all valid. A principled
+/// refusal, not a cryptographic failure.
+#[test]
+fn strict_assurance_preference_fails_closed_despite_a_valid_credential() {
+    let (sk, pk) = gov_key();
+    let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
+    let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
+
+    let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Proven .";
+    let p = pref(&["https://sparq.dev/ns/zk#cAssur"], policy);
+
+    // Sanity: the SAME credential admits without the pre-check (so the denial below is
+    // the pre-check's doing, not a broken credential).
+    let baseline = admit(&cred, &rules, &session(JESSE, NOW), &iri(RESOURCE_X));
+    assert_eq!(
+        baseline.len(),
+        1,
+        "the credential is otherwise perfectly admittable"
+    );
+
+    let (admitted, outcome) = admit_with_precheck(
+        &cred,
+        &rules,
+        &session(JESSE, NOW),
+        &iri(RESOURCE_X),
+        Some(&p),
+    );
+    assert_eq!(
+        outcome,
+        PrecheckOutcome::Denied {
+            unsatisfied: vec!["https://sparq.dev/ns/zk#cAssur".to_owned()]
+        },
+        "requiresAssurance gteq Proven names the unsatisfied constraint (the honest refusal)"
+    );
+    assert!(
+        admitted.is_empty(),
+        "fail-closed: a method that fails the property pre-check admits NOTHING"
+    );
+
+    let grants = derive_grants(&admitted, ACR_ABAC_RULE).expect("derivation runs");
+    assert!(
+        !read_granted(&grants, JESSE),
+        "with the pre-check denied, NO grant derives — the principled 'no admissible proof' refusal"
+    );
+}
+
+/// A preference whose method IRI does not match the annotation block fails closed (the
+/// graph is keyed on the IRI; a wrong/unknown method satisfies nothing).
+#[test]
+fn unknown_method_iri_fails_closed() {
+    let (sk, pk) = gov_key();
+    let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
+    let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
+
+    let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .";
+    let p = AdmissibilityPreference {
+        method_iri: iri("https://sparq.dev/ns/zk#no-such-method"),
+        constraint_iris: vec!["https://sparq.dev/ns/zk#cAssur".to_owned()],
+        policy_n3: policy.to_owned(),
+        annotations_n3: ANNOTATIONS.to_owned(),
+    };
+
+    let (admitted, outcome) = admit_with_precheck(
+        &cred,
+        &rules,
+        &session(JESSE, NOW),
+        &iri(RESOURCE_X),
+        Some(&p),
+    );
+    assert!(
+        matches!(outcome, PrecheckOutcome::Denied { .. }),
+        "unknown method denies"
+    );
+    assert!(
+        admitted.is_empty(),
+        "a method with no annotation block admits nothing"
+    );
+}

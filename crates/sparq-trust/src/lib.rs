@@ -174,6 +174,8 @@ pub use admit::{
 };
 #[cfg(feature = "status-list")]
 pub use admit::admit_with_status;
+#[cfg(feature = "secprop-precheck")]
+pub use admit::{admit_with_precheck, AdmissibilityPreference, PrecheckOutcome};
 pub use delegation::{
     effective_against_current, hop_message, invoke, Capability, DelegationChain, DelegationHop,
     EffectiveCapability, Invocation, InvocationDenied,
