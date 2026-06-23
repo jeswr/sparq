@@ -142,7 +142,17 @@ Extension functions (SPARQL 17.6) and dataset views:
   `ROWS`/`RANGE` frames, and a reusable named `WINDOW w AS (…)` clause (sq-hqhc)).
 
 Introspection: `explain(&Graph, &str)` (plan-only) and `explain_analyze(&Graph, &str)` (plan + per-
-operator execution trace).
+operator execution trace) return human-readable TEXT (the default).
+
+Structured EXPLAIN *(opt-in `explain-json` feature, OFF by default)* — a MACHINE-READABLE plan:
+`explain_plan(&Graph, &str)` and `explain_plan_analyze(&Graph, &str)` return a typed `PlanNode` tree
+(`operator`, `estimated` cardinality on BGP nodes, and — after ANALYZE — `actual` rows, wall `nanos`,
+and the per-operator **q-error** = `max(est/actual, actual/est)`; 1.0 is a perfect estimate, larger is
+worse in either direction). `PlanNode::to_json()` emits a hand-written JSON projection (no serde dep);
+`PlanNode::max_q_error()` is the whole-plan worst. `SlowQueryRing::new(n)` is a bounded ring keeping the
+N worst-by-wall-time analyzed plans (`record` / `push` / `slowest` / `to_json`) for an ops slow-query
+view. Honest boundaries: only BGP nodes carry an estimate (the only operators the planner sizes);
+q-error is `None` when either side is 0; `nanos` are always 0 on wasm32.
 
 ## Common recipes
 

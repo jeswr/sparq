@@ -135,3 +135,23 @@
   crate: "sparq-engine"
   features: "params"
   test: true
+
+# [OPUS-4.8] sq-u4lgr (#902): structured EXPLAIN — the typed `PlanNode` plan tree,
+# its hand-written JSON projection, per-operator q-error, and the bounded
+# `SlowQueryRing`. The whole `explain_json` module (`pub mod explain_json` + the
+# `PlanNode`/`SlowQuery`/`SlowQueryRing` re-exports), the trace node's `est` field,
+# the planner-replay estimate helper (`exec::bgp_estimate`) and the 6 in-src unit
+# tests (`explain_json::tests::*`, incl. the load-bearing q-error + JSON-round-trip +
+# slow-ring-worst-by-time checks) are ALL `#[cfg(feature = "explain-json")]`, so the
+# default build (and ci.yml's `--workspace --all-targets` archive, which passes NO
+# `--features`) compiled them EMPTY and ran ZERO of the 6 — the silent "compiled
+# EMPTY ... tests never ran" gap this lane exists to close, and `explain-json` had NO
+# leg here. No new dep (`explain-json = []`; the JSON is hand-rolled and serde_json is
+# a DEV-dependency only) and no `not(feature=…)` divergence, so a single isolated leg
+# (matching the per-feature engine legs above) covers it; verified `cargo test -p
+# sparq-engine --features explain-json explain_json` runs all 6 and `cargo clippy -p
+# sparq-engine --all-targets --features explain-json -- -D warnings` is clean.
+- name: "sparq-engine (explain-json)"
+  crate: "sparq-engine"
+  features: "explain-json"
+  test: true

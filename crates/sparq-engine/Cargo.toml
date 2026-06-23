@@ -138,6 +138,18 @@ query-solution = []
 # ZERO new dependencies (oxrdf + spargebra are already direct deps) and contains no
 # `unsafe`.
 params = []
+# [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN: a typed `PlanNode` plan tree
+# (`explain_json` module) with a hand-written JSON projection, per-operator q-error
+# = max(est/actual, actual/est) attached from the existing ANALYZE trace, and a
+# bounded `SlowQueryRing` of the worst-by-wall-time recent analyzed plans. The
+# human-readable text EXPLAIN (`explain`/`explain_analyze`) stays the default. OPT-IN
+# and OFF by default: when off, the `explain_json` module, the trace node's `est`
+# field, and the planner-replay estimate helper (`exec::bgp_estimate`) all compile
+# EMPTY, so the default native + wasm builds are byte-identical. Pulls in ZERO new
+# dependencies — the JSON is hand-rolled like the existing `json`/`serialize` writers
+# (serde_json is a DEV-dependency only, used to verify the round trip) — and contains
+# no `unsafe`.
+explain-json = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

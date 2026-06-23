@@ -14,6 +14,12 @@ mod cs_gate;
 mod dataset;
 mod exec;
 mod explain;
+// [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN: typed `PlanNode` plan tree + JSON +
+// per-operator q-error + bounded slow-query ring. NON-DEFAULT `explain-json` feature —
+// when off, zero of this code compiles and the default native + wasm builds are
+// byte-identical (no new deps; the human-readable text EXPLAIN stays the default).
+#[cfg(feature = "explain-json")]
+pub mod explain_json;
 pub mod json;
 // [OPUS-4.8] (sq-rp3um) Parameterized prepared queries — safe value binding
 // (`PreparedQuery::bind` / `PreparedUpdate`) to prevent SPARQL injection (#901).
@@ -71,6 +77,12 @@ pub mod txn;
 #[cfg(feature = "cs-planner")]
 pub use cs::{with_cs_table, CsSet, CsTable};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
+// [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN re-exports — gated on `explain-json`.
+#[cfg(feature = "explain-json")]
+pub use explain_json::{
+    explain_plan, explain_plan_analyze, explain_plan_analyze_with_budget, PlanNode, SlowQuery,
+    SlowQueryRing,
+};
 pub use update::{
     apply_effects, update, update_in_place, update_in_place_atomic,
     update_in_place_atomic_with_budget, update_in_place_capturing, update_in_place_with_budget,
