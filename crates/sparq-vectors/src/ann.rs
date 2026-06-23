@@ -275,3 +275,55 @@ impl VectorIndex {
         Ok(self.nearest_term(term, graph, store, k))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // [OPUS-4.8] Default-feature unit gate for the `cosine` primitive that the exact searcher, the
+    // filtered pre-filter and the quantizers all rank with. The integration tests use it transitively
+    // for ranking but never pin its documented numeric contract directly — these do, so a regression
+    // in the zero-vector guard (which would emit a NaN instead of 0.0 and silently break every
+    // ranking) or in the lane-tail handling is caught.
+    use super::cosine;
+
+    #[test]
+    fn cosine_known_values_unit_orthogonal_and_opposite() {
+        // Identical direction → 1, orthogonal → 0, opposite → −1 (length cancels: cosine is
+        // magnitude-invariant, so 3·a and a give the same score).
+        assert!((cosine(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
+        assert!((cosine(&[1.0, 0.0], &[3.0, 0.0]) - 1.0).abs() < 1e-6, "cosine ignores magnitude");
+        assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6, "orthogonal vectors are 0");
+        assert!((cosine(&[1.0, 0.0], &[-1.0, 0.0]) + 1.0).abs() < 1e-6, "opposite vectors are -1");
+        // 45° between (1,0) and (1,1): cos = 1/√2.
+        assert!((cosine(&[1.0, 0.0], &[1.0, 1.0]) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_zero_vector_is_zero_not_nan() {
+        // A zero vector has no direction — the documented contract is a defined `0.0`, NEVER a NaN
+        // (which `dot / (0 * …)` would otherwise produce and which would poison `total_cmp` sorting).
+        let z = [0.0f32, 0.0, 0.0];
+        let v = [1.0f32, 2.0, 3.0];
+        assert_eq!(cosine(&z, &v), 0.0, "zero on the left is 0, not NaN");
+        assert_eq!(cosine(&v, &z), 0.0, "zero on the right is 0, not NaN");
+        assert_eq!(cosine(&z, &z), 0.0, "both zero is 0, not NaN");
+        assert!(!cosine(&z, &v).is_nan());
+    }
+
+    #[test]
+    fn cosine_handles_a_non_lane_multiple_length() {
+        // dim 11 is not a multiple of the 8 SIMD lanes, so the scalar tail loop must run. A vector
+        // against itself is still exactly 1.0 — proving the tail accumulators are summed in.
+        let v: Vec<f32> = (1..=11).map(|i| i as f32).collect();
+        assert!((cosine(&v, &v) - 1.0).abs() < 1e-5, "self-cosine over a tail length must be 1.0");
+        // And a length below one full lane (dim 3) goes entirely through the tail loop.
+        let w = [2.0f32, -1.0, 4.0];
+        assert!((cosine(&w, &w) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    #[should_panic(expected = "cosine over mismatched dims")]
+    fn cosine_panics_on_mismatched_dims() {
+        // A dim mismatch is a programming error, not a silently-truncated comparison.
+        cosine(&[1.0, 0.0, 0.0], &[1.0, 0.0]);
+    }
+}
