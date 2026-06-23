@@ -34,3 +34,17 @@
   crate: "sparq-nlq"
   features: "citations"
   test: true
+
+# [OPUS-4.8] sq-2m6zm.6 (PKG NL-tool PRODUCT flavor): the configurable,
+# provider-agnostic OpenAI-compatible endpoint client (`EndpointLlm`). Unlike `live`
+# (a real Anthropic network call, never tested in CI), the `nlq-endpoint` tests drive
+# the REAL request/response/parse path against a loopback `TcpListener` stub
+# (`tests/endpoint_stub.rs`, `#![cfg(feature = "nlq-endpoint")]`) — fully offline, no
+# live network — so this leg gates the productized NL-tool round-trip. `cargo test -p
+# sparq-nlq --features nlq-endpoint --all-targets` runs the in-`endpoint.rs` unit tests
+# plus the stub integration suite; `clippy --all-targets -D warnings` covers the
+# feature-ON state. The DEFAULT (feature-OFF) build is covered by the workspace lane.
+- name: "sparq-nlq (nlq-endpoint — configurable OpenAI-compatible endpoint client)"
+  crate: "sparq-nlq"
+  features: "nlq-endpoint"
+  test: true
