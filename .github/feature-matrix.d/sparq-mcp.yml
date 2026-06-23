@@ -22,3 +22,19 @@
   crate: "sparq-mcp"
   features: "stdio"
   test: true
+
+# [OPUS-4.8] sq-jxjgr (2026-06-23 design call): the opt-in server-side natural-language
+# `ask` tool wiring sparq-nlq's NL→SPARQL loop behind the `nlq` feature (OFF by default —
+# it pulls sparq-nlq + the configurable LLM backends, so it must not touch the lean
+# default build). This leg builds + tests the feature-ON state — the src/nlq.rs unit
+# suite (the REAL loop with a scripted in-process backend, no network) PLUS the
+# tests/ask.rs integration suite (`#![cfg(feature = "nlq")]`: the fail-closed
+# "not configured" degrade path through the real MCP dispatch) — with `clippy
+# --all-targets -D warnings`. The structured `shapes` tool (sq-zak4f) is NOT
+# feature-gated (it ships in the default build with no model), so it is covered by the
+# workspace lane, not here. The DEFAULT (feature-OFF) build is covered by the workspace
+# lane.
+- name: "sparq-mcp (nlq — server-side NL ask tool wiring sparq-nlq)"
+  crate: "sparq-mcp"
+  features: "nlq"
+  test: true
