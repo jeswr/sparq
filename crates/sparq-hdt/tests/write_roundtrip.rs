@@ -187,6 +187,96 @@ fn save_empty_graph() {
     assert!(reloaded.is_empty());
 }
 
+/// [OPUS-4.8] sq-bif: `save` MUST fail closed on a graph carrying an RDF 1.2 triple
+/// term (`<<( s p o )>>`). Standard HDT's dictionary has no quoted-triple representation,
+/// so `hdt_term_string` returns `Error::Term` rather than silently emitting a malformed /
+/// lossy archive — a documented contract (`save`'s rustdoc + `encode::hdt_term_string`)
+/// that no test exercised. The triple-term object is loaded through sparq's own N-Triples
+/// parser (which accepts `<<( … )>>` in object position), so this drives the REAL encode
+/// path, not a hand-built dict.
+#[test]
+fn save_rejects_rdf12_triple_term_graph() {
+    // An object-position triple term — the only place RDF 1.2 admits one.
+    let nt = "<http://example.org/s> <http://example.org/says> \
+              <<( <http://example.org/a> <http://example.org/b> <http://example.org/c> )>> .\n";
+    let g = Graph::load_str(nt, "ntriples").expect("N-Triples with a triple term must load");
+    // Guard: the fixture really does carry a triple term (so the rejection below is the
+    // triple-term arm firing, not an empty / malformed graph failing for another reason).
+    assert_eq!(
+        g.store.len(),
+        1,
+        "the triple-term graph holds exactly one triple"
+    );
+
+    let dir = scratch_dir();
+    let path = dir.path().join("triple-term.hdt");
+    let err = sparq_hdt::save(&g, &path).expect_err(
+        "saving a graph with an RDF 1.2 triple term must be rejected, not silently \
+                     written as a malformed archive",
+    );
+    // It is specifically the dictionary-term error (Error::Term), with the documented
+    // explanation — never an I/O error or a panic.
+    assert!(
+        matches!(err, sparq_hdt::Error::Term(_)),
+        "expected Error::Term for a triple-term graph, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("triple term") && msg.contains("HDT"),
+        "the rejection must explain HDT cannot represent a triple term, got: {msg}"
+    );
+}
+
+/// [OPUS-4.8] sq-bif: the OUTPUT-container selection (`out_container`) keys off the path's
+/// final extension, lower-cased — so the same archive is produced for `.gz`/`.GZ`/`.Gz`,
+/// and `.zst` AND its `.zstd` alias both select zstd. Only lowercase `.gz`/`.zst`/`.bz2`
+/// were exercised; this pins the case-insensitivity and the `.zstd` alias by asserting the
+/// CONTAINER MAGIC BYTES the reader sniffs, then a full transparent round trip back to the
+/// original term set. (A regression dropping `to_ascii_lowercase`, or the `Some("zstd")`
+/// arm, would write a BARE `$HDT` here and this would catch it via the magic-byte check.)
+#[test]
+fn save_extension_matching_is_case_insensitive_and_aliases_zstd() {
+    let original = Graph::load_str(ZOO, "ntriples").unwrap();
+    let reference = triple_set(&original);
+    let dir = scratch_dir();
+
+    // (uppercased / mixed-case extension, expected container magic prefix)
+    let gzip = &[0x1f, 0x8b][..];
+    let zstd = &[0x28, 0xb5, 0x2f, 0xfd][..];
+    let bzip2 = &[0x42, 0x5a, 0x68][..];
+    for (name, magic) in [
+        ("zoo.hdt.GZ", gzip),   // uppercase gz
+        ("zoo.hdt.Gz", gzip),   // mixed-case gz
+        ("zoo.hdt.ZST", zstd),  // uppercase zst
+        ("zoo.hdt.zstd", zstd), // the `.zstd` alias (4-letter), selects zstd
+        ("zoo.hdt.Zstd", zstd), // mixed-case alias
+        ("zoo.hdt.BZ2", bzip2), // uppercase bz2
+    ] {
+        let path = dir.path().join(name);
+        sparq_hdt::save(&original, &path).unwrap_or_else(|e| panic!("[{name}] save: {e}"));
+        let head = std::fs::read(&path).unwrap();
+        assert!(
+            head.starts_with(magic),
+            "[{name}] extension must select its container regardless of case / alias \
+             (got head {:02x?})",
+            &head[..magic.len().min(head.len())],
+        );
+        // …and the reader sniffs it back (by magic, not name) to the same triples.
+        let g = sparq_hdt::load(&path).unwrap_or_else(|e| panic!("[{name}] load: {e}"));
+        assert_eq!(triple_set(&g), reference, "[{name}] round-trip term set");
+    }
+
+    // An unrecognised extension (here a doubled, non-container suffix) writes a BARE `.hdt`
+    // — the `_ => None` arm. Confirms the matcher does not over-eagerly compress.
+    let bare = dir.path().join("zoo.hdt.txt");
+    sparq_hdt::save(&original, &bare).unwrap();
+    assert_eq!(
+        &std::fs::read(&bare).unwrap()[..4],
+        b"$HDT",
+        "an unrecognised extension must write a bare, uncompressed $HDT archive"
+    );
+}
+
 /// `save` then re-`load` then re-`save` is STABLE: a second save of the reloaded
 /// graph yields the identical triple set (the path is idempotent on content).
 #[test]
