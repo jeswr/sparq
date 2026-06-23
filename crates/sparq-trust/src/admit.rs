@@ -340,6 +340,52 @@ pub fn admit_static(
     admitted
 }
 
+/// Run the admission gate over a presented credential, gating on a **live** credential
+/// status (the P6 status stratum, `sq-pfae.7`) instead of the PoC's per-credential
+/// `revoked: bool` flag. This is the OPT-IN (`status-list` feature) wiring of the
+/// [`crate::status_list`] gate into the REAL admission path.
+///
+/// The credential's [`crate::status_list::StatusListEntry`] is checked against the live
+/// W3C Bitstring Status List via the caller's [`crate::status_list::LiveStatusCheck`] at
+/// `session.now_unix_secs`. The credential is admitted ONLY when the status
+/// [`crate::status_list::LiveStatus::admits`] (i.e. the bit is unset, the list resolved +
+/// decoded, the index is in range, and the snapshot is fresh) — **fail-closed on
+/// set/unknown/stale** exactly as the bead requires. On a non-admitting status the WHOLE
+/// credential is denied (empty result), mirroring where the `cred.revoked` flag dropped it.
+///
+/// When the status admits, this delegates to the unchanged [`admit`] — every other gate
+/// (signature, statement-type scope, freshness, holder binding) is untouched, so this is
+/// strictly additive: it can only NARROW, never broaden, what [`admit`] admits.
+///
+/// Returns `(admitted, status)`: the admitted facts and the [`crate::status_list::LiveStatus`]
+/// the decision rested on, so the caller can render a [`crate::status_list::justify_status_decision`]
+/// justification for the allow OR the deny.
+#[cfg(feature = "status-list")]
+#[cfg_attr(docsrs, doc(cfg(feature = "status-list")))]
+pub fn admit_with_status<R, D>(
+    cred: &PresentedCredential,
+    rules: &[TrustRule],
+    session: &Session,
+    target: &NamedNode,
+    status_entry: &crate::status_list::StatusListEntry,
+    status_check: &crate::status_list::LiveStatusCheck<R, D>,
+) -> (Vec<AdmittedFact>, crate::status_list::LiveStatus)
+where
+    R: crate::status_list::StatusListResolver,
+    D: crate::status_list::GzipDecoder,
+{
+    // The live status gate runs FIRST (fail-closed): a set/unknown/stale status denies the
+    // whole credential before any fact is admitted. This replaces the `cred.revoked` flag
+    // with a check against the live list — the bead's "gate derivations on validity".
+    let status = status_check.check(status_entry, session.now_unix_secs);
+    if !status.admits() {
+        return (Vec::new(), status);
+    }
+    // Status admits ⇒ run the unchanged gate. (The `cred.revoked` boolean still applies as
+    // the PoC's belt-and-braces input guard; a caller using the live path sets it `false`.)
+    (admit(cred, rules, session, target), status)
+}
+
 /// `scope_covers(scope, target)` — exact-IRI or ancestor-container containment
 /// (Solid slash-semantics). v1 is exact-or-prefix: a rule scoped to a container
 /// covers its members; a rule scoped to a resource covers exactly that resource. A

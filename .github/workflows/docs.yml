@@ -32,21 +32,26 @@
 name: docs
 
 on:
-  # [OPUS-4.8] sq-5f1s4 / sq-im8u — self-guarding path filter: the build embeds source it does
-  # NOT live next to. `book/src/getting-started/install.md` does
-  # `{{#rustdoc_include ../../../crates/sparq-engine/examples/quickstart.rs:quickstart}}`, and
+  # [OPUS-4.8] sq-5f1s4 / sq-im8u / sq-g4h0c — self-guarding path filter: the build embeds
+  # source it does NOT live next to. `book/src/getting-started/install.md` does
+  # `{{#rustdoc_include ../../../crates/sparq-engine/examples/quickstart.rs:quickstart}}`;
   # (as of sq-im8u) the guide pages `{{#include}}` canonical prose from `README.md`
   # (`lead`/`quickstart-cli` anchors) and `skills/{zk-query-proofs,mpc}/SKILL.md`
-  # (`scaffold-caveat` anchors). `mdbook build`/`mdbook test` resolve those anchors, so if an
-  # anchor were renamed/removed (or the included example stopped compiling) and the filter only
-  # watched `book/**`, the break would land on main undetected — no `book/`-touching commit
-  # would re-run this lane to catch it (the gui.yml/#1081 blind-spot class). So every embedded
-  # source is listed too. (mdBook EXITs 0 on a broken include — the build step greps the log
-  # for `[ERROR]` — so re-running THIS lane on a source edit is the only thing that catches it.)
+  # (`scaffold-caveat` anchors); and (as of sq-g4h0c) `capabilities.md` `{{#include}}`s the
+  # README `features-core`/`interfaces` anchors, whose repo-relative links are then rewritten by
+  # the `link-fixup` preprocessor `scripts/mdbook-rewrite-links.py` (wired in book.toml).
+  # `mdbook build`/`mdbook test` resolve every anchor AND run the preprocessor, so if an anchor
+  # were renamed/removed (or the example stopped compiling, or the preprocessor regressed) and
+  # the filter only watched `book/**`, the break would land on main undetected — no
+  # `book/`-touching commit would re-run this lane to catch it (the gui.yml/#1081 blind-spot
+  # class). So every embedded source AND the preprocessor are listed too. (mdBook EXITs 0 on a
+  # broken include — the build step greps the log for `[ERROR]` — so re-running THIS lane on a
+  # source/preprocessor edit is the only thing that catches it.)
   push:
     branches: [main]
     paths:
       - "book/**"
+      - "scripts/mdbook-rewrite-links.py"
       - "crates/sparq-engine/examples/quickstart.rs"
       - "README.md"
       - "skills/zk-query-proofs/SKILL.md"
@@ -55,6 +60,7 @@ on:
   pull_request:
     paths:
       - "book/**"
+      - "scripts/mdbook-rewrite-links.py"
       - "crates/sparq-engine/examples/quickstart.rs"
       - "README.md"
       - "skills/zk-query-proofs/SKILL.md"

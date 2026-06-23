@@ -54,6 +54,12 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
   JSON-LD **parse + serialise + full 1.1 Compaction/Framing**; full conneg-conformance ratcheting
   is on the [sq-oy1f](https://github.com/jeswr/sparq/issues/757) roadmap.
 - **`--reason <rdfs|owl-rl|n3>`** — opt-in forward-chaining materialization before query.
+- **`terse <query | ->`** *(opt-in `terse` feature; [OPUS-4.8] sq-vczh2)* — transpile a terse query
+  (the `K:<name>` keyword layer over canonical SPARQL) into the **canonical SPARQL** it expands to,
+  printing the verifiable JSON `{ canonical_sparql, keywords, resolutions, warnings, legendVersion }`
+  (the same contract the server's `POST /terse/transpile` returns). It never executes the query —
+  pipe `canonical_sparql` into `query`. Loud-fails (exit 2) on an unknown keyword or a `V(...)`
+  construct rather than guessing. Lean build — depends only on `spargebra`. `--features terse`.
 - **Transparent decompression** — `.gz` / `.bz2` / `.zst` inputs detected by content.
   The gzip path defaults to the pure-Rust `miniz_oxide` backend; the opt-in, native-only
   `zlib-ng` cargo feature (`cargo build -p sparq-cli --features zlib-ng`, or

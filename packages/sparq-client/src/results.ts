@@ -163,3 +163,168 @@ export function resultsToTsv(results: SparqlResults): string {
 export function formatSparqlJson(results: SparqlResults): string {
   return JSON.stringify(results, null, 2);
 }
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-9w4t (#817) — PAGINATED result rendering + a bounded read-ahead page cache.
+//
+// WHY. Maintainer #817: serialising/rendering the WHOLE kept result is the main per-render
+// overhead, but the user only ever LOOKS at one screenful. So the panel should render (and
+// shape into display cells) only the VISIBLE slice, advancing on a page change, materialising
+// a couple of pages ahead so the next ⏭ is instant. This is the RENDERING half of the bead —
+// pure data shaping over the rows already streamed into JS, with no DOM and no framework, so
+// it lives here in `@sparq/client` and the React panel just draws what it returns.
+//
+// SCOPE — what this is NOT. The bead's note is correct: the engine result path is currently
+// MATERIALISED (the wasm `SolutionCursor` slices an already-evaluated `result.rows` —
+// crates/sparq-wasm/src/lib.rs), so there is no PULL iterator to drive *demand-driven query
+// EVALUATION* (computing the engine work only up to the current page). That LAZY-EVAL half is
+// gated on a pull/iterator exec model in `sparq-engine` and is tracked separately (a follow-up
+// bead + research/gui-design.md §A.4); this module paginates over the rows already in hand and
+// makes no performance claim.
+// ---------------------------------------------------------------------------
+
+/** A single page of a paginated {@link ResultTable}: the slice plus where it sits. */
+export interface ResultPage {
+  /** The column headers (the whole result's `vars`, unchanged across pages). */
+  vars: string[];
+  /** The display-shaped rows for THIS page only (≤ `pageSize`). */
+  rows: string[][];
+  /** 0-based index of this page. */
+  page: number;
+  /** Rows per page this page was sliced at. */
+  pageSize: number;
+  /** 0-based index of the first row of this page within the whole result. */
+  startRow: number;
+  /** Total rows across the whole (kept) result — the denominator for "x–y of N". */
+  totalRows: number;
+  /** Total number of pages at this `pageSize` (≥ 1, even for an empty result). */
+  totalPages: number;
+}
+
+/** Total number of pages `totalRows` rows split into, at `pageSize` rows per page (≥ 1). */
+export function pageCount(totalRows: number, pageSize: number): number {
+  if (pageSize <= 0) return 1;
+  if (totalRows <= 0) return 1;
+  return Math.ceil(totalRows / pageSize);
+}
+
+/** Clamp a (possibly out-of-range) 0-based page index into `[0, pageCount-1]`. */
+export function clampPage(page: number, totalRows: number, pageSize: number): number {
+  const last = pageCount(totalRows, pageSize) - 1;
+  if (!Number.isFinite(page) || page < 0) return 0;
+  return page > last ? last : Math.floor(page);
+}
+
+/**
+ * [OPUS-4.8] sq-9w4t — slice ONE page of display-shaped cells out of a {@link ResultTable}.
+ * The `page` is clamped into range (an out-of-range page yields the nearest valid page, never
+ * an empty slice on a non-empty result). `pageSize ≤ 0` is treated as "one page of everything".
+ * Only the `pageSize` rows of the requested page are shaped — the whole-table `table.rows` is
+ * already display-shaped by {@link extractTable}, so this is a bounded slice, not a re-render of
+ * every row.
+ */
+export function paginateTable(
+  table: ResultTable,
+  page: number,
+  pageSize: number,
+): ResultPage {
+  const totalRows = table.rows.length;
+  const effectiveSize = pageSize > 0 ? pageSize : Math.max(totalRows, 1);
+  const totalPages = pageCount(totalRows, effectiveSize);
+  const clamped = clampPage(page, totalRows, effectiveSize);
+  const startRow = clamped * effectiveSize;
+  return {
+    vars: table.vars,
+    rows: table.rows.slice(startRow, startRow + effectiveSize),
+    page: clamped,
+    pageSize: effectiveSize,
+    startRow,
+    totalRows,
+    totalPages,
+  };
+}
+
+/**
+ * A bounded read-ahead cache over a paginated {@link ResultTable}. {@link PageCache.get} returns
+ * the requested page (computing + memoising its slice on first access) and, as a side effect,
+ * WARMS the next `readAhead` pages so a forward ⏭ is already materialised. The cache keeps at
+ * most `1 + 2·readAhead` page slices live (the current page, `readAhead` ahead, `readAhead`
+ * behind) and evicts the page furthest from the last-requested one — so paging through a large
+ * result never holds more than that bounded window of shaped slices in memory at once.
+ */
+export interface PageCache {
+  /** The page at `page` (clamped), warming the read-ahead window as a side effect. */
+  get(page: number): ResultPage;
+  /** How many page slices are currently materialised (for tests / introspection). */
+  readonly size: number;
+  /** Rows per page this cache paginates at. */
+  readonly pageSize: number;
+  /** Total pages at this page size (≥ 1). */
+  readonly totalPages: number;
+}
+
+/**
+ * [OPUS-4.8] sq-9w4t — build a {@link PageCache} over `table`. `pageSize` is the rows-per-page;
+ * `readAhead` (default 2 — the maintainer's "~2 pages ahead") is how many pages forward to warm
+ * on each `get`, and also bounds the retained window. The slices are computed lazily by
+ * {@link paginateTable}, so constructing the cache shapes NOTHING — only the pages actually
+ * visited (and their read-ahead) are ever materialised.
+ */
+export function createPageCache(
+  table: ResultTable,
+  pageSize: number,
+  readAhead = 2,
+): PageCache {
+  const ahead = Math.max(0, Math.floor(readAhead));
+  const total = pageCount(table.rows.length, pageSize > 0 ? pageSize : table.rows.length || 1);
+  // Map page-index -> shaped slice, plus a parallel "last touched" tick for LRU-by-distance
+  // eviction. `Map` preserves insertion order, but we evict by DISTANCE from the focus page
+  // (not insertion order) so a back-and-forth around the focus keeps the hot window.
+  const slices = new Map<number, ResultPage>();
+  const cap = 1 + 2 * ahead;
+  let focus = 0;
+
+  const materialise = (p: number): ResultPage => {
+    const existing = slices.get(p);
+    if (existing) return existing;
+    const slice = paginateTable(table, p, pageSize);
+    // `paginateTable` clamps, so key by the CLAMPED page to avoid duplicate entries for the
+    // same physical page (e.g. warming past the last page).
+    const keyed = slices.get(slice.page);
+    if (keyed) return keyed;
+    slices.set(slice.page, slice);
+    return slice;
+  };
+
+  const evictBeyondWindow = () => {
+    if (slices.size <= cap) return;
+    // Drop the entries furthest from the focus page until we are back within the window.
+    const byDistance = [...slices.keys()].sort(
+      (a, b) => Math.abs(b - focus) - Math.abs(a - focus),
+    );
+    for (const k of byDistance) {
+      if (slices.size <= cap) break;
+      slices.delete(k);
+    }
+  };
+
+  return {
+    get(page: number): ResultPage {
+      const current = materialise(page);
+      focus = current.page;
+      // Warm the read-ahead window (forward, where a ⏭ goes next) AND one behind, so a ⏮ after
+      // a ⏭ is also warm — all bounded by `cap` via the eviction below.
+      for (let d = 1; d <= ahead; d += 1) {
+        if (current.page + d < total) materialise(current.page + d);
+        if (current.page - d >= 0) materialise(current.page - d);
+      }
+      evictBeyondWindow();
+      return current;
+    },
+    get size() {
+      return slices.size;
+    },
+    pageSize: pageSize > 0 ? pageSize : table.rows.length || 1,
+    totalPages: total,
+  };
+}

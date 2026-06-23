@@ -112,6 +112,11 @@
 //!                             (`text/n3`) dialect on the Graph-Store-Protocol `PATCH` method. The
 //!                             always-on `application/sparql-update` PATCH dialect needs no flag.
 //!                             Off by default                            [off, env SPARQ_N3_PATCH=1]
+//!   --terse                   [OPUS-4.8 sq-vczh2] (feature `terse`) serve the OPT-IN, VERIFIABLE
+//!                             LLM-ergonomic transpiler endpoint `POST /terse/transpile`: POST a terse
+//!                             query (the `K:<name>` keyword layer over canonical SPARQL), the server
+//!                             returns the CANONICAL SPARQL it expands to (it never executes it). Off
+//!                             by default                                 [off, env SPARQ_TERSE=1]
 //!   --verbose                 per-request logging (TraceLayer)
 //!   --log-full-requests       [OPUS-4.8 sq-toze.34] OPT OUT of request-log redaction: log the
 //!                             raw request URI (incl. the full `?query=` SPARQL text) verbatim.
@@ -415,6 +420,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (env SPARQ_N3_PATCH=1).
             #[cfg(feature = "n3-patch")]
             "--n3-patch" => config.n3_patch = true,
+            // [OPUS-4.8] sq-vczh2: OPT-IN verifiable terse-transpiler endpoint — POST a terse
+            // query to /terse/transpile and the server returns the canonical SPARQL it expands to
+            // (it never executes it). Off by default (env SPARQ_TERSE=1).
+            #[cfg(feature = "terse")]
+            "--terse" => config.terse = true,
             // [OPUS-4.8] sq-4w18: SERVICE egress allowlist. Repeatable: each value adds one
             // host (`sparql.example.org`) or suffix wildcard (`*.example.org`). With NO
             // allowlist (the default) every SERVICE clause is refused (default-DENY-all).
@@ -470,6 +480,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [OPUS-4.8] sq-vczh2: surface the OPT-IN terse-transpiler endpoint flag (feature terse).
+                let terse = if cfg!(feature = "terse") {
+                    " [--terse]"
+                } else {
+                    ""
+                };
                 // [OPUS-4.8] sq-o5bi / sq-ft7u: surface the OPT-IN restore flags (feature backup).
                 let backup = if cfg!(feature = "backup") {
                     " [--restore FILE] [--restore-persist]"
@@ -483,7 +499,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch}{backup} \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch}{terse}{backup} \
                      [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH] [--verbose] \
                      [--log-full-requests] [DATA_FILE]\n  \
                      or: sparq-server --health-probe [--health-probe-addr HOST:PORT]\n\n  \

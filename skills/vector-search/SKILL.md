@@ -819,6 +819,58 @@ synthetic, work-box, single-seed figures — adoption requires a **real dataset*
 subset), on a **canonical machine**, under the **asymmetric model**, with **multi-seed** reporting.
 The gUFO-prior cell (`AblationCell::gufo_prior`) is an exposed ablation axis the later phase wires into.
 
+### 14b. Provenance-weighting `w(t)` — weight training by PROV-O/DQV quality (opt-in, feature = `structure`; measurement under `kge`)
+
+<!-- [OPUS-4.8] sq-2489d.4 (epic sq-2489d, GenAI-KB Phase 4; design research/provenance-driven-genai-kb.md §USE-1 / §5 Phase 4). -->
+Research-grade **Phase 4** of the provenance-driven GenAI-KB epic: derive a per-triple
+**provenance-quality weight** `w(t) ∈ (0,1]` from a graph's PROV-O / DQV annotations so a
+high-assurance fact contributes a full-strength training gradient and a low-assurance / low-source
+fact a down-weighted one (the CKRL confidence-weighted-loss move). `ProvenanceWeights` **mirrors
+`ShaclPriors`**: a read-only id-level scan of `pkg:confidence` / `pkg:assurance` /
+`prov:wasDerivedFrom` (the same terms the Phase-1 `sparq-nlq` join reads and the Phase-3 `pkg.ttl`
+DQV terms declare) that pulls **no engine** — it consumes only `sparq-core`'s public id-scan API, so
+the `structure` feature stays lean.
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_vectors::{close_for_vectorise, ProvenanceWeights, WeightMode};
+use sparq_reason::Profile;
+let closed = close_for_vectorise(ttl, "turtle", Profile::Rdfs)?;
+let weights = ProvenanceWeights::mine(&closed.graph);
+// w(t) = clamp(assurance_mult · head_confidence · min_source_reliability, floor, 1.0).
+// Uniform mode is the ablation-OFF baseline (always 1.0); Provenance mode applies the quality weight.
+let w = weights.weight_of([h, r, t], WeightMode::Provenance); // a head with NO provenance → 1.0 (fail-open)
+# Ok::<(), String>(())
+```
+
+`w(t)` combines the head's `pkg:confidence` (epistemic weight), an **assurance multiplier**
+(`secx:Proven` → high, `Claimed` → mid, `Conjectured` → low; configurable via `WeightConfig`), and
+the **min** `pkg:confidence` over its `prov:wasDerivedFrom` sources (a fact is only as reliable as
+its least-reliable source). It is clamped to `[floor, 1.0]` so a positive is **down-weighted, never
+dropped** (a zero weight would silently delete it from the loss). The `kge` trainer reads it via the
+new `TrainConfig::weight_mode` (default `Uniform`); under `Provenance` the **positive** step's
+effective LR is scaled by `w(t)` (negatives are unweighted — a corruption has no provenance).
+
+**Ablation + the adopt/abandon bar.** `run_weight_ablation` trains the **same** config twice per seed
+(weighting ON vs OFF, holding closure + type-negatives fixed) and returns a **paired** per-seed MRR /
+Hits@10 delta — `WeightAblation::mrr_significant_at(k)` is the firm-up gate:
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features kge
+use sparq_vectors::{run_weight_ablation, synthetic_provenance_ttl, EvalConfig};
+let ttl = synthetic_provenance_ttl(160, 5); // low-assurance edges are deliberately the NOISIER ones
+let ab = run_weight_ablation(&ttl, "turtle", EvalConfig::small(21), &[1,2,3,4])?;
+println!("Δmrr={:.4} se={:.4} adopt@2se={}", ab.mrr.mean, ab.mrr.se, ab.mrr_significant_at(2.0));
+# Ok::<(), String>(())
+```
+
+**No accuracy claim is made.** Over a provenance-free graph the two arms are byte-identical and the
+delta is **exactly zero** (the no-op invariant — a plain graph is unchanged). The
+confidence/literal-aware KGE literature reports *inconsistent* gains, so any lift is unproven and
+dataset-dependent; the bead's discipline is **adopt only if the measured lift clears a pre-registered
+bar, and ABANDON (and say so) otherwise**. Threading `w(t)` into the structural-sketch pooler and the
+per-`Block` query-time fusion weight (design §USE-1 points 2–3) is tracked as a follow-up bead.
+
 ### 15. Typed-literal encoders — order-preserving numeric / boolean / date + schema header (opt-in, feature = `structure`)
 
 <!-- [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §3.1/§3.2/§6.A). -->

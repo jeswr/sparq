@@ -19,6 +19,14 @@ pub mod count_file;
 #[cfg(feature = "count-enforcement")]
 pub mod count_backend;
 
+// [OPUS-4.8] sq-uor3g (epic sq-0dksu, Phase 4): the sparq security-property ODRL
+// PROFILE — the `secx:requires…` leftOperands made first-class (Rust constants + the
+// leftOperand→dimension map + a recogniser + the published `odrl:Profile`), gated on
+// `secprop-leftoperands` (OFF by default — the default build carries zero secprop
+// code, no new dep). It does NOT change the stateless `evaluate` path.
+#[cfg(feature = "secprop-leftoperands")]
+pub mod secprop;
+
 // [OPUS-4.8] sq-zabv: static (request-free) policy analysis — permission/prohibition
 // conflict + policy containment/refinement, on the query-containment comparison
 // semantics. Always compiled (no feature gate); it adds no deps and no core cost.

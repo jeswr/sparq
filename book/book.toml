@@ -1,13 +1,14 @@
-# [OPUS-4.8] sq-h0tr / sq-im8u — mdBook guide scaffold for the sparq docs site.
+# [OPUS-4.8] sq-h0tr / sq-im8u / sq-g4h0c — mdBook guide scaffold for the sparq docs site.
 #
 # Scaffold (book.toml + SUMMARY.md + the content pages) from sq-h0tr; as of sq-im8u
 # the content pages are thin {{#include}} wrappers that single-source their prose
 # (build-time content injection) from the canonical README.md / skills/<surface>/SKILL.md
 # `ANCHOR` regions, so the guide cannot drift from the source of truth. Tested-example
 # {{#rustdoc_include}} embedding (the library snippet) is sq-384j. The only original
-# prose left in book/src is SUMMARY.md + one-line section intros; the capability
-# link-TABLE keeps mount-portable absolute URLs (see capabilities.md header for why it
-# is not included from the README's repo-relative Features list).
+# prose left in book/src is SUMMARY.md + one-line section intros; as of sq-g4h0c even the
+# capability link-list + interfaces line are {{#include}}d from the README's Features
+# anchors — see the `link-fixup` preprocessor below for how their repo-relative links
+# (kept that way for the lychee gate) are made mount-portable at build time.
 #
 # Reproducible build (CI pins the exact mdbook version — see .github/workflows/docs.yml):
 #   mdbook build book      # → book/book/ (the rendered site)
@@ -25,6 +26,18 @@ build-dir = "book"
 # mdBook EXITS 0 even on a broken {{#include}}/anchor (rust-lang/mdBook#1094), so
 # the CI workflow greps the build log for "[ERROR]" in addition to this flag.
 create-missing = false
+
+# [OPUS-4.8] sq-g4h0c — repo-relative → mount-portable link rewriting at build time.
+# The canonical README.md / SKILL.md keep REPO-RELATIVE per-surface guide links
+# (required by the lychee internal-links gate); when those are {{#include}}d into a
+# chapter, mdBook would resolve them against the page mount and 404 under Pages. This
+# preprocessor rewrites such links to https://github.com/jeswr/sparq/blob/main/... so
+# the single-sourced content renders correctly under the mdBook mount. The command is
+# resolved relative to the dir `mdbook` runs in (the repo root: `mdbook build book`).
+# Run after the built-in `links` preprocessor so it sees the post-{{#include}} text.
+[preprocessor.link-fixup]
+command = "python3 scripts/mdbook-rewrite-links.py"
+after = ["links"]
 
 [output.html]
 # Pages will eventually serve this under /sparq/... (a sub-path of the GitHub
