@@ -1,0 +1,16 @@
+[
+  {"file": "j028.txt", "score": 0.0, "why": "evasive 'cannot determine'; failed to identify the CLI+Python walkthrough task"},
+  {"file": "j029.txt", "score": 0.5, "why": "correctly identifies the right finding by slug but gives IRI+paraphrase, not the verbatim text requested"},
+  {"file": "j030.txt", "score": 0.0, "why": "names wrong finding (find-zk-arming-model) instead of the stacked-PR auto-merge rule"},
+  {"file": "j031.txt", "score": 1.0, "why": "HTTP server matches http-server surface"},
+  {"file": "j032.txt", "score": 1.0, "why": "exact match: Sub-agent standing rules"},
+  {"file": "j033.txt", "score": 1.0, "why": "accurately conveys the taiki-e install-action CI lint task"},
+  {"file": "j034.txt", "score": 1.0, "why": "exact match: ZK/MPC claim + circuit discipline"},
+  {"file": "j035.txt", "score": 1.0, "why": "SPARQL query matches sparql-query surface"},
+  {"file": "j036.txt", "score": 1.0, "why": "matches Sub-agent standing rules"},
+  {"file": "j037.txt", "score": 1.0, "why": "exact match: Merge discipline"},
+  {"file": "j038.txt", "score": 1.0, "why": "correct count: 1"},
+  {"file": "j039.txt", "score": 0.5, "why": "IRI slug zk-discipline maps to right topic but not the verbatim name requested"},
+  {"file": "j040.txt", "score": 1.0, "why": "correct count: 1"},
+  {"file": "j041.txt", "score": 1.0, "why": "GenAI retrieval matches genai-retrieval surface"}
+]

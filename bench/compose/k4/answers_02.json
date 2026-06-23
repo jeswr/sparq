@@ -1,0 +1,42 @@
+[
+  {
+    "file": "q10_hidden.txt",
+    "answer": "ZK/MPC claim + circuit discipline"
+  },
+  {
+    "file": "q10_raw.txt",
+    "answer": "The topic identified by https://sparq.dev/ns/pkg/kb#topic-zk-discipline, i.e. ZK (zero-knowledge) discipline. The row is an opaque IRI; from its slug the topic is ZK discipline."
+  },
+  {
+    "file": "q11_hidden.txt",
+    "answer": "A PR merges only when ci-summary is green and every review thread is resolved"
+  },
+  {
+    "file": "q11_raw.txt",
+    "answer": "https://sparq.dev/ns/pkg/kb#find-merge-ci-summary-gate (the rows are opaque IRIs; this one's slug, find-merge-ci-summary-gate, matches the merge-when-ci-summary-green-and-threads-resolved rule)"
+  },
+  {
+    "file": "q12_hidden.txt",
+    "answer": "Every mutating sub-agent runs in its OWN isolated worktree+branch, never the shared main checkout"
+  },
+  {
+    "file": "q12_raw.txt",
+    "answer": "https://sparq.dev/ns/pkg/kb#find-subagent-worktree-isolation (the rows are opaque IRIs; this one's slug, find-subagent-worktree-isolation, matches the mutating-sub-agent-in-its-own-isolated-worktree-and-branch rule)"
+  },
+  {
+    "file": "q13_hidden.txt",
+    "answer": "Sub-agents stage only changed files by explicit path; never git add -A and never stage .beads/"
+  },
+  {
+    "file": "q13_raw.txt",
+    "answer": "https://sparq.dev/ns/pkg/kb#find-subagent-staging (the rows are opaque IRIs; this one's slug, find-subagent-staging, matches the never-git-add-A-and-never-stage-.beads/ rule)"
+  },
+  {
+    "file": "q14_hidden.txt",
+    "answer": "Any ZK/MPC privacy or soundness claim must stay hedged/negative — the privacy-claims gate is a HARD ci-summary job"
+  },
+  {
+    "file": "q14_raw.txt",
+    "answer": "https://sparq.dev/ns/pkg/kb#find-zk-privacy-claims-gate (the rows are opaque IRIs; this one's slug, find-zk-privacy-claims-gate, matches the ZK/MPC-privacy-or-soundness-claim-must-stay-hedged-because-of-a-hard-CI-gate rule)"
+  }
+]

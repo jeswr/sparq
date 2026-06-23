@@ -1,0 +1,12 @@
+[
+  {"file": "q30_hidden.txt", "answer": "ZK/MPC claim + circuit discipline"},
+  {"file": "q30_raw.txt", "answer": "https://sparq.dev/ns/pkg/kb#topic-zk-discipline"},
+  {"file": "q31_hidden.txt", "answer": "1"},
+  {"file": "q31_raw.txt", "answer": "1"},
+  {"file": "q32_hidden.txt", "answer": "1"},
+  {"file": "q32_raw.txt", "answer": "1"},
+  {"file": "q33_hidden.txt", "answer": "1"},
+  {"file": "q33_raw.txt", "answer": "1"},
+  {"file": "q34_hidden.txt", "answer": "2"},
+  {"file": "q34_raw.txt", "answer": "2"}
+]

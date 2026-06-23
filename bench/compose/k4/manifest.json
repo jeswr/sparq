@@ -1,0 +1,212 @@
+[
+{
+"id": 0,
+"kind": "about-topic",
+"gold": "Merge discipline",
+"n_bindings": 1
+},
+{
+"id": 1,
+"kind": "about-topic",
+"gold": "Sub-agent standing rules",
+"n_bindings": 1
+},
+{
+"id": 2,
+"kind": "about-topic",
+"gold": "Sub-agent standing rules",
+"n_bindings": 1
+},
+{
+"id": 3,
+"kind": "about-topic",
+"gold": "Sub-agent standing rules",
+"n_bindings": 1
+},
+{
+"id": 4,
+"kind": "about-topic",
+"gold": "Sub-agent standing rules",
+"n_bindings": 1
+},
+{
+"id": 5,
+"kind": "about-topic",
+"gold": "Sub-agent standing rules",
+"n_bindings": 1
+},
+{
+"id": 6,
+"kind": "about-topic",
+"gold": "Sub-agent standing rules",
+"n_bindings": 1
+},
+{
+"id": 7,
+"kind": "about-topic",
+"gold": "Merge discipline",
+"n_bindings": 1
+},
+{
+"id": 8,
+"kind": "about-topic",
+"gold": "ZK/MPC claim + circuit discipline",
+"n_bindings": 1
+},
+{
+"id": 9,
+"kind": "about-topic",
+"gold": "ZK/MPC claim + circuit discipline",
+"n_bindings": 1
+},
+{
+"id": 10,
+"kind": "about-topic",
+"gold": "ZK/MPC claim + circuit discipline",
+"n_bindings": 1
+},
+{
+"id": 11,
+"kind": "disambiguate-finding",
+"gold": "A PR merges only when ci-summary is green and every review thread is resolved",
+"n_bindings": 11
+},
+{
+"id": 12,
+"kind": "disambiguate-finding",
+"gold": "Every mutating sub-agent runs in its OWN isolated worktree+branch, never the shared main checkout",
+"n_bindings": 11
+},
+{
+"id": 13,
+"kind": "disambiguate-finding",
+"gold": "Sub-agents stage only changed files by explicit path; never git add -A and never stage .beads/",
+"n_bindings": 11
+},
+{
+"id": 14,
+"kind": "disambiguate-finding",
+"gold": "Any ZK/MPC privacy or soundness claim must stay hedged/negative \u2014 the privacy-claims gate is a HARD ci-summary job",
+"n_bindings": 11
+},
+{
+"id": 15,
+"kind": "disambiguate-finding",
+"gold": "A verified-clean non-perf PR auto-arms; never arm auto-merge on a stacked PR whose base is not main",
+"n_bindings": 11
+},
+{
+"id": 16,
+"kind": "disambiguate-finding",
+"gold": "Sub-agents proceed without the maintainer's greenlight, documenting the default and filing a feedback issue",
+"n_bindings": 11
+},
+{
+"id": 17,
+"kind": "task-title",
+"gold": "site: let visitors write their OWN queries on the Solid showcase (gh-549) \u2014 overlaps #757 access-controlled-queries-without-OIDC steer",
+"n_bindings": 1
+},
+{
+"id": 18,
+"kind": "task-title",
+"gold": "page: /surface/cli + /surface/python (tier-e walkthrough)",
+"n_bindings": 1
+},
+{
+"id": 19,
+"kind": "task-title",
+"gold": "MS-G2: enable clippy::undocumented_unsafe_blocks first-party + normalize // SAFETY: tokens",
+"n_bindings": 1
+},
+{
+"id": 20,
+"kind": "task-title",
+"gold": "Mechanism for tracking inputs-needed-from-user (researched)",
+"n_bindings": 1
+},
+{
+"id": 21,
+"kind": "task-title",
+"gold": "HDT: PFC block-sequential dict decode + borrowed-slice interning",
+"n_bindings": 1
+},
+{
+"id": 22,
+"kind": "task-title",
+"gold": "GeoSPARQL: close R9 (geometry-metadata properties) + R16 (empty gmlLiteral) OGC conformance gaps",
+"n_bindings": 1
+},
+{
+"id": 23,
+"kind": "task-title",
+"gold": "Document (and optionally support) named-graph scoping in sparq-introspect / sparq-sim / sparq-vectors (currently default-graph only)",
+"n_bindings": 1
+},
+{
+"id": 24,
+"kind": "task-title",
+"gold": "CI lint: fail if any taiki-e/install-action step lacks an explicit 'with: tool:' input (SHA-pinning drops the @<tool> selector \u2192 installs nothing \u2192 silent vacuous gate)",
+"n_bindings": 1
+},
+{
+"id": 25,
+"kind": "technique-name",
+"gold": "genai-retrieval surface",
+"n_bindings": 1
+},
+{
+"id": 26,
+"kind": "technique-name",
+"gold": "http-server surface",
+"n_bindings": 1
+},
+{
+"id": 27,
+"kind": "technique-name",
+"gold": "shacl-validation surface",
+"n_bindings": 1
+},
+{
+"id": 28,
+"kind": "technique-name",
+"gold": "sparql-query surface",
+"n_bindings": 1
+},
+{
+"id": 29,
+"kind": "technique-name",
+"gold": "vector-search surface",
+"n_bindings": 1
+},
+{
+"id": 30,
+"kind": "punct-concept",
+"gold": "ZK/MPC claim + circuit discipline",
+"n_bindings": 3
+},
+{
+"id": 31,
+"kind": "dep-count",
+"gold": "1",
+"n_bindings": 1
+},
+{
+"id": 32,
+"kind": "dep-count",
+"gold": "1",
+"n_bindings": 1
+},
+{
+"id": 33,
+"kind": "dep-count",
+"gold": "1",
+"n_bindings": 1
+},
+{
+"id": 34,
+"kind": "dep-count",
+"gold": "2",
+"n_bindings": 2
+}
+]

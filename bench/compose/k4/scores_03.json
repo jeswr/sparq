@@ -1,0 +1,16 @@
+[
+  {"file": "j042.txt", "score": 0.5, "why": "identifies the correct finding by slug but does not give the requested verbatim text"},
+  {"file": "j043.txt", "score": 1.0, "why": "vector search matches vector-search surface"},
+  {"file": "j044.txt", "score": 1.0, "why": "correctly summarizes inputs-needed-from-user tracking task (researched)"},
+  {"file": "j045.txt", "score": 1.0, "why": "matches GeoSPARQL R9+R16 conformance gap task"},
+  {"file": "j046.txt", "score": 1.0, "why": "states sub-agent standing rules topic"},
+  {"file": "j047.txt", "score": 1.0, "why": "1 matches gold"},
+  {"file": "j048.txt", "score": 1.0, "why": "SHACL validation matches shacl-validation surface"},
+  {"file": "j049.txt", "score": 0.0, "why": "evasive cannot-determine, fails to give MS-G2 task subject"},
+  {"file": "j050.txt", "score": 0.5, "why": "identifies correct finding by slug but does not give the requested verbatim text"},
+  {"file": "j051.txt", "score": 1.0, "why": "2 matches gold"},
+  {"file": "j052.txt", "score": 1.0, "why": "1 matches gold"},
+  {"file": "j053.txt", "score": 1.0, "why": "vector search matches vector-search surface"},
+  {"file": "j054.txt", "score": 1.0, "why": "merge discipline matches gold exactly"},
+  {"file": "j055.txt", "score": 1.0, "why": "sub-agent rules conveys sub-agent standing rules"}
+]

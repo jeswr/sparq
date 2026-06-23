@@ -1,0 +1,42 @@
+[
+  {
+    "file": "q20_hidden.txt",
+    "answer": "It is a (researched) task about designing a mechanism for tracking which inputs are still needed from the user."
+  },
+  {
+    "file": "q20_raw.txt",
+    "answer": "The row gives only an opaque task identifier (task-sq-da2g) with no description, so its subject cannot be determined from the rows."
+  },
+  {
+    "file": "q21_hidden.txt",
+    "answer": "It is about HDT dictionary decoding, specifically block-sequential Plain Front Coding (PFC) decode using borrowed-slice interning."
+  },
+  {
+    "file": "q21_raw.txt",
+    "answer": "The row gives only an opaque task identifier (task-sq-ijz) with no description, so its subject cannot be determined from the rows."
+  },
+  {
+    "file": "q22_hidden.txt",
+    "answer": "It is about closing two GeoSPARQL OGC conformance gaps: R9 (geometry-metadata properties) and R16 (empty gmlLiteral)."
+  },
+  {
+    "file": "q22_raw.txt",
+    "answer": "The row gives only an opaque task identifier (task-sq-mzmh) with no description, so its subject cannot be determined from the rows."
+  },
+  {
+    "file": "q23_hidden.txt",
+    "answer": "It is about documenting (and optionally supporting) named-graph scoping in sparq-introspect, sparq-sim, and sparq-vectors, which currently handle only the default graph."
+  },
+  {
+    "file": "q23_raw.txt",
+    "answer": "The row gives only an opaque task identifier (task-sq-quuu) with no description, so its subject cannot be determined from the rows."
+  },
+  {
+    "file": "q24_hidden.txt",
+    "answer": "It is about adding a CI lint that fails when a taiki-e/install-action step lacks an explicit 'with: tool:' input, since SHA-pinning drops the @<tool> selector and would silently install nothing, creating a vacuous gate."
+  },
+  {
+    "file": "q24_raw.txt",
+    "answer": "The row gives only an opaque task identifier (task-sq-ur7o) with no description, so its subject cannot be determined from the rows."
+  }
+]
