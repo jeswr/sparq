@@ -15,7 +15,11 @@
 //!    the common label predicates (`rdfs:label`, `skos:prefLabel`, `schema:name`,
 //!    `foaf:name`, `dc:title`, `dcterms:title`) resolves a mention to candidate
 //!    entities; exact label equality outranks containment, and rarer (higher-IDF) label
-//!    predicates outrank `rdfs:label`.
+//!    predicates outrank `rdfs:label`. **A verbatim full-label hit short-circuits first**
+//!    (`sq-26fdp`): when the WHOLE input is itself an entire label — case/whitespace
+//!    normalised, punctuation preserved — it binds that one entity exactly *before* the
+//!    token n-gram path can split it into shared tokens, so a phrase that IS a `prefLabel`
+//!    (e.g. `"ZK/MPC claim + circuit discipline"`) never goes ambiguous.
 //! 3. **Structural expansion (sparq-sim)** — each linked entity is expanded with its
 //!    top structurally-similar siblings via [`sparq_sim::Sim::most_similar`] (the wiring
 //!    `sq-uw40` calls for), so the model sees a few worked examples of the entity's
@@ -143,6 +147,14 @@ pub struct EntityLinker<'g> {
     sim: Sim<'g>,
     /// lowercased label -> the best (entity, original-label, score) for it.
     labels: BTreeMap<String, (NamedNode, String, f64)>,
+    /// **Whitespace-collapsed**, lowercased full label -> the best (entity, original-label,
+    /// score) for it. Used by the verbatim-phrase exact match (`sq-26fdp`) so a phrase that
+    /// IS an entire label — punctuation and all, e.g. `"ZK/MPC claim + circuit discipline"` —
+    /// resolves at the strongest signal BEFORE the token n-gram path can split it into
+    /// shared tokens and (correctly) loud-fail as ambiguous. A separate index keeps the
+    /// per-mention `labels.get` lookups untouched; this one only normalises interior
+    /// whitespace (it preserves punctuation, so distinct labels never collapse together).
+    norm_labels: BTreeMap<String, (NamedNode, String, f64)>,
     /// lowercased predicate local-name -> (predicate IRI, triple count).
     predicates: BTreeMap<String, (NamedNode, u64)>,
     /// How many similar siblings to attach per linked entity.
@@ -157,10 +169,12 @@ impl<'g> EntityLinker<'g> {
     /// `max_links` bounds the entities and relations rendered into the prompt.
     pub fn build(graph: &'g Graph, expand_k: usize, max_links: usize) -> Self {
         let labels = build_label_index(graph);
+        let norm_labels = build_norm_label_index(&labels);
         let predicates = build_predicate_index(graph);
         EntityLinker {
             sim: Sim::new(graph),
             labels,
+            norm_labels,
             predicates,
             expand_k,
             max_links,
@@ -169,6 +183,18 @@ impl<'g> EntityLinker<'g> {
 
     /// Links `question` to entities and relations in the graph.
     pub fn link(&self, question: &str) -> Linking {
+        // ---- Verbatim-phrase exact match FIRST (sq-26fdp). ----
+        // When the WHOLE input is itself an entire entity label — e.g. a `V("phrase")`
+        // resolution where the phrase is a verbatim `skos:prefLabel` such as
+        // `"ZK/MPC claim + circuit discipline"` — that single entity is the unambiguous
+        // answer at the strongest lexical signal. Otherwise the token n-gram path below
+        // would split the label into shared tokens (`discipline`) and (correctly) loud-fail
+        // as ambiguous, so a phrase that IS an exact label never resolves. This only fires
+        // on a full normalised-label hit, so a genuine multi-concept question (whose whole
+        // text is not a single label) is unaffected and still flows to the token path. The
+        // matched entity still gets the usual structural expansion below.
+        let exact_phrase = self.exact_phrase_entity(question);
+
         let mentions = mentions(question);
 
         // ---- Entity linking: best candidate per mention, exact beats substring. ----
@@ -209,6 +235,13 @@ impl<'g> EntityLinker<'g> {
                 .then(ea.iri.as_str().cmp(eb.iri.as_str()))
         });
         let mut entities: Vec<LinkedEntity> = ranked.into_iter().map(|(e, _)| e).collect();
+        // A verbatim full-label hit (sq-26fdp) is the unambiguous answer: it becomes the
+        // SOLE entity, so a downstream resolver sees no runner-up and binds at full
+        // confidence instead of stalling on the shared-token ambiguity. The matched entity
+        // is still expanded structurally below.
+        if let Some(e) = exact_phrase {
+            entities = vec![e];
+        }
         entities.truncate(self.max_links);
 
         // ---- Structural expansion via sparq-sim (the sq-uw40 wiring). ----
@@ -253,6 +286,28 @@ impl<'g> EntityLinker<'g> {
             entities,
             relations,
         }
+    }
+
+    /// The verbatim-phrase exact match (`sq-26fdp`): if the WHOLE `phrase`, after the same
+    /// case-fold + interior-whitespace collapse applied to every indexed label, equals an
+    /// entire entity label, return that entity as a fully `exact` [`LinkedEntity`] (no
+    /// siblings yet — the caller expands it). `None` when the phrase is not itself a complete
+    /// label, in which case the regular token n-gram path runs. The normalisation preserves
+    /// punctuation, so it tolerates only spacing/case drift and never collapses two distinct
+    /// labels into one.
+    fn exact_phrase_entity(&self, phrase: &str) -> Option<LinkedEntity> {
+        let key = normalise_label(phrase);
+        if key.is_empty() {
+            return None;
+        }
+        let (iri, label, _score) = self.norm_labels.get(&key)?;
+        Some(LinkedEntity {
+            mention: phrase.trim().to_lowercase(),
+            iri: iri.clone(),
+            label: label.clone(),
+            exact: true,
+            similar: Vec::new(),
+        })
     }
 
     /// The best entity for one mention: exact label match wins over substring; among
@@ -344,6 +399,42 @@ fn build_label_index(graph: &Graph) -> BTreeMap<String, (NamedNode, String, f64)
                 _ => {
                     idx.insert(key, candidate);
                 }
+            }
+        }
+    }
+    idx
+}
+
+/// Case/space-normalised form of a label or candidate phrase used for the verbatim-phrase
+/// exact match (`sq-26fdp`): lower-cased, with every maximal run of Unicode whitespace
+/// collapsed to a single ASCII space and the ends trimmed. Punctuation is preserved, so
+/// `"ZK/MPC claim + circuit discipline"` and `" zk/mpc   claim + circuit discipline "`
+/// share a key while two genuinely distinct labels never collapse together.
+fn normalise_label(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Derives the whitespace-collapsed label index from the per-mention `labels` index. Each
+/// label's [`normalise_label`] key maps to the same best `(entity, original-label, score)`;
+/// on a collision (two distinct labels normalising equal) the higher score wins, else the
+/// lexicographically smaller IRI, keeping it deterministic and order-independent.
+fn build_norm_label_index(
+    labels: &BTreeMap<String, (NamedNode, String, f64)>,
+) -> BTreeMap<String, (NamedNode, String, f64)> {
+    let mut idx: BTreeMap<String, (NamedNode, String, f64)> = BTreeMap::new();
+    for (iri, orig, score) in labels.values() {
+        let key = normalise_label(orig);
+        if key.is_empty() {
+            continue;
+        }
+        match idx.get(&key) {
+            Some((existing_iri, _, existing_score))
+                if (*existing_score, existing_iri.as_str()) >= (*score, iri.as_str()) => {}
+            _ => {
+                idx.insert(key, (iri.clone(), orig.clone(), *score));
             }
         }
     }
@@ -515,6 +606,112 @@ mod tests {
                 .map(|r| r.iri.as_str())
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// The `sq-26fdp` regression graph: two SKOS concepts whose prefLabels share the token
+    /// "discipline"; one prefLabel contains punctuation (`/`, `+`).
+    fn discipline_graph() -> Graph {
+        let ttl = r#"
+            @prefix kb: <https://sparq.dev/ns/pkg/kb#> .
+            @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+            kb:topic-merge-discipline a skos:Concept ; skos:prefLabel "Merge discipline" .
+            kb:topic-zk-discipline a skos:Concept ;
+                skos:prefLabel "ZK/MPC claim + circuit discipline" .
+        "#;
+        Graph::load_str(ttl, "turtle").expect("graph parses")
+    }
+
+    #[test]
+    fn verbatim_preflabel_with_punctuation_resolves_unambiguously() {
+        // Bug sq-26fdp: V("ZK/MPC claim + circuit discipline") is a VERBATIM prefLabel, yet
+        // the token n-gram path scored both discipline topics equally on the shared token
+        // and the phrase went ambiguous. The verbatim-phrase exact match must bind it to the
+        // single right concept, as the SOLE entity (no runner-up to stall on).
+        let g = discipline_graph();
+        let linker = EntityLinker::build(&g, 0, 16);
+        let l = linker.link("ZK/MPC claim + circuit discipline");
+        assert_eq!(
+            l.entities.len(),
+            1,
+            "a verbatim full prefLabel must resolve to exactly one entity, got {:?}",
+            l.entities
+                .iter()
+                .map(|e| e.iri.as_str())
+                .collect::<Vec<_>>()
+        );
+        let e = &l.entities[0];
+        assert_eq!(
+            e.iri.as_str(),
+            "https://sparq.dev/ns/pkg/kb#topic-zk-discipline"
+        );
+        assert!(e.exact, "a full-label hit is exact");
+        assert_eq!(e.label, "ZK/MPC claim + circuit discipline");
+    }
+
+    #[test]
+    fn verbatim_preflabel_match_is_case_and_whitespace_tolerant() {
+        let g = discipline_graph();
+        let linker = EntityLinker::build(&g, 0, 16);
+        // Lower-cased, padded, and with collapsed interior whitespace — still the same label.
+        let l = linker.link("  zk/mpc   claim + circuit DISCIPLINE  ");
+        assert_eq!(
+            l.entities.len(),
+            1,
+            "normalised verbatim label still resolves"
+        );
+        assert_eq!(
+            l.entities[0].iri.as_str(),
+            "https://sparq.dev/ns/pkg/kb#topic-zk-discipline"
+        );
+        assert!(l.entities[0].exact);
+    }
+
+    #[test]
+    fn other_verbatim_preflabel_still_resolves_to_its_own_concept() {
+        // The sibling label "Merge discipline" must still bind to ITS topic, not be dragged
+        // to the zk concept by the shared "discipline" token.
+        let g = discipline_graph();
+        let linker = EntityLinker::build(&g, 0, 16);
+        let l = linker.link("Merge discipline");
+        assert_eq!(l.entities.len(), 1);
+        assert_eq!(
+            l.entities[0].iri.as_str(),
+            "https://sparq.dev/ns/pkg/kb#topic-merge-discipline"
+        );
+        assert!(l.entities[0].exact);
+    }
+
+    #[test]
+    fn non_label_question_is_unaffected_by_verbatim_path() {
+        // A real question whose WHOLE text is not a single label must NOT hit the verbatim
+        // path — it still flows through the token n-gram linker. Here the shared "discipline"
+        // token only substring-matches (never an exact full-label hit), so whatever entity it
+        // surfaces is non-exact: the verbatim short-circuit did not fire.
+        let g = discipline_graph();
+        let linker = EntityLinker::build(&g, 0, 16);
+        let l = linker.link("Which findings are about discipline in general?");
+        assert!(
+            !l.entities.is_empty(),
+            "the token path still links the shared token"
+        );
+        assert!(
+            l.entities.iter().all(|e| !e.exact),
+            "a non-label question must produce only substring (non-exact) links, got {:?}",
+            l.entities
+                .iter()
+                .map(|e| (e.iri.as_str(), e.exact))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn normalise_label_collapses_whitespace_and_case_keeps_punctuation() {
+        assert_eq!(
+            normalise_label("  ZK/MPC   claim + circuit Discipline "),
+            "zk/mpc claim + circuit discipline"
+        );
+        assert_eq!(normalise_label("Merge\tdiscipline"), "merge discipline");
+        assert_eq!(normalise_label("   "), "");
     }
 
     #[test]

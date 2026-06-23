@@ -36,6 +36,21 @@ commitment-value-only = []
 # documented INV-VL downgrade (#769 accepted, CR-G8 / sq-qhy4); NOT externally
 # audited. LEAN: adds NO dependency (reuses the existing blake3 / poseidon2).
 dual-leaf = []
+# [OPUS-4.8] sq-bevd3 (Phase 3, epic sq-0dksu): the PER-METHOD security-properties
+# annotation graph (`secprop` module) — the machine-readable form of the
+# zk-configurable-commitment-security.md §4 posture table, keyed on the `zk:scheme` /
+# `zk:cryptosuite` IRIs this crate's registry records, plus the over-claim GUARDS
+# (no `Proven` on a positive property while sq-qhy4 is open; completeness; the
+# source-layer-only non-transfer rule). OFF by default: the default build is
+# byte-unchanged and the `secprop` module is compiled out. Pulls in the `oxttl`
+# Turtle parser to load the static graph. The `secx:` IRIs the graph references are
+# owned by sparq-trust's `secprop-vocab` vocabulary; sparq-trust depends on sparq-zk
+# (so sparq-zk CANNOT depend on sparq-trust — that is a cycle), therefore the
+# `secx:` constants this module needs are declared LOCALLY and a drift test pins them
+# to the canonical published `secprop-ext.ttl` via `include_str!` (a compile-time
+# file read, NOT a crate edge). RECORDS claims + their epistemic basis; asserts NO
+# soundness/privacy property (estate NOT externally audited, sq-qhy4).
+secprop-annotations = ["dep:oxttl"]
 
 [dependencies]
 # sparq term model / store / engine. The engine dep turns on its non-default
@@ -63,6 +78,12 @@ ark-ff = { version = "0.6", default-features = false }
 
 # Off-circuit string hash h_s (plan §2.2: Enc_t(term) = h_2(type_code, h_s(value))).
 blake3 = "1"
+
+# [OPUS-4.8] sq-bevd3 — OPTIONAL, `secprop-annotations` feature only. The oxigraph
+# Turtle parser used to load the static per-method annotation graph
+# (`ontologies/secprop-methods.ttl`). Same `oxttl` the rest of the workspace uses
+# (sparq-core / sparq-trust). The default build pulls neither it nor the module.
+oxttl = { workspace = true, optional = true }
 
 # [OPUS-4.8] sq-u8a8 (epic sq-toze / from side-channel analysis sq-egx6, gap
 # CR-G5): secret-memory hygiene + constant-time-equality PRIMITIVES for the

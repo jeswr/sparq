@@ -79,6 +79,7 @@
 //! (`SPARQ_KGE_DATASET`) run on a **canonical machine** with the **asymmetric model** and
 //! **multi-seed** reporting — never on these synthetic, work-box, single-seed figures.
 
+use crate::provenance::WeightMode;
 use crate::structure::{materialise_closure, ClosedGraph, TypeConstraints};
 use crate::train::{train, TrainConfig, TrainReport, TrainedModel};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -803,6 +804,106 @@ pub fn run_ablation_multiseed_paired(
     })
 }
 
+// ---- Phase-4 PROVENANCE-WEIGHTING ablation (sq-2489d.4) ----------------------------------------
+
+/// The result of a paired provenance-weighting ablation ([`run_weight_ablation`], sq-2489d.4): the
+/// two per-arm metric aggregates (weighting OFF vs ON) plus the **paired** per-seed MRR delta.
+///
+/// This is the instrument the bead's acceptance bar reads: *"measure filtered Hits@k / MRR with
+/// provenance-weighting ON vs OFF on a held-out link-prediction split; adopt ONLY if the lift clears
+/// a pre-registered bar, and ABANDON otherwise"*. The two arms share — per seed — the split, init
+/// stream, negative draws, closure, and type-negative setting (common random numbers), so the
+/// per-seed paired delta `Δ_s = MRR(prov-on)_s − MRR(prov-off)_s` cancels the shared noise and
+/// [`PairedDelta::significant_at`] gates the firm-up exactly as for the closure axis. **No bar is
+/// hard-coded and no accuracy claim is made** — the caller picks `k`, and a non-positive / non-clearing
+/// delta is the honest signal to ABANDON provenance-weighting for that dataset.
+#[derive(Clone, Debug)]
+pub struct WeightAblation {
+    /// Provenance-weighting OFF ([`WeightMode::Uniform`]) — the baseline arm, aggregated over seeds.
+    pub off: CellStats,
+    /// Provenance-weighting ON ([`WeightMode::Provenance`]) — the treatment arm, aggregated over seeds.
+    pub on: CellStats,
+    /// Paired per-seed MRR delta `MRR(on) − MRR(off)` (variance-reduced). The headline statistic.
+    pub mrr: PairedDelta,
+    /// Paired per-seed Hits@10 delta `Hits@10(on) − Hits@10(off)`.
+    pub hits10: PairedDelta,
+}
+
+impl WeightAblation {
+    /// Convenience: is the provenance-weighting MRR lift significant at `k` standard errors of its
+    /// paired spread (`n ≥ 2` required)? This is the adopt/abandon gate — `false` means **abandon**
+    /// (no measured lift), per the bead's pre-registered-bar discipline.
+    pub fn mrr_significant_at(&self, k: f64) -> bool {
+        self.mrr.significant_at(k)
+    }
+}
+
+/// Run the **provenance-weighting ON vs OFF** ablation per seed and return the paired MRR/Hits@10
+/// deltas (sq-2489d.4, GenAI-KB Phase 4). Closure and type-constrained-negatives are held at the
+/// `template.train` / `template.profile` settings (the established P0 priors); only the
+/// `weight_mode` axis is ablated, so the delta isolates the provenance-weighting effect.
+///
+/// For each seed the two arms are produced from the **same** split, restricted train graph, and
+/// type constraints — they differ *only* in whether each positive's SGD step is scaled by `w(t)`
+/// — so the paired delta is the cleanest possible estimate of the weighting effect. The model is
+/// `template.train.model` (use [`ModelKind::ComplEx`](crate::train::ModelKind) — the directional
+/// slices are near-random under symmetric DistMult).
+///
+/// The graph must carry PROV-O / DQV provenance for the ON arm to differ from OFF; over a
+/// provenance-free graph the two arms are byte-identical and the delta is exactly zero (the honest
+/// no-op). [`synthetic_provenance_ttl`] builds a slice where low-assurance edges are deliberately
+/// the *noisier* ones, the only setting where down-weighting them can help.
+pub fn run_weight_ablation(
+    text: &str,
+    format: &str,
+    template: EvalConfig,
+    seeds: &[u64],
+) -> Result<WeightAblation, String> {
+    assert!(!seeds.is_empty(), "need at least one seed");
+    let (base_dict, base_triples) = Graph::parse_to_triples(text, format)?;
+
+    let mut off = BucketSamples::default();
+    let mut on = BucketSamples::default();
+    let mut mrr_deltas: Vec<f64> = Vec::with_capacity(seeds.len());
+    let mut hits10_deltas: Vec<f64> = Vec::with_capacity(seeds.len());
+
+    for &seed in seeds {
+        // Build the (optionally closed) graph for this seed, once — both arms share it.
+        let closed: ClosedGraph =
+            materialise_closure(base_dict.clone(), base_triples.clone(), template.profile);
+        let graph = &closed.graph;
+        let splits = Splits::split(graph, template.train_frac, template.valid_frac, seed ^ 0xF00D);
+
+        // Train graph + type constraints are shared across the two arms (no leakage either way).
+        let train_graph = restrict_to_train(graph, &splits);
+        let train_tc = TypeConstraints::mine(&train_graph);
+
+        let metric_for = |mode: WeightMode| -> Metrics {
+            let mut tcfg = template.train;
+            tcfg.seed = seed;
+            tcfg.weight_mode = mode;
+            let (model, _report) = train(&train_graph, &train_tc, tcfg);
+            let (metrics, _long_tail) = evaluate(&model, &splits, template.long_tail_threshold);
+            metrics
+        };
+
+        let m_off = metric_for(WeightMode::Uniform);
+        let m_on = metric_for(WeightMode::Provenance);
+
+        mrr_deltas.push(m_on.mrr - m_off.mrr);
+        hits10_deltas.push(m_on.hits10 - m_off.hits10);
+        off.push(&m_off);
+        on.push(&m_on);
+    }
+
+    Ok(WeightAblation {
+        off: off.finish(),
+        on: on.finish(),
+        mrr: PairedDelta::of(&mrr_deltas),
+        hits10: PairedDelta::of(&hits10_deltas),
+    })
+}
+
 /// Per-cell accumulator of one metric sample per seed, for the overall/head/tail buckets.
 #[derive(Default)]
 struct CellSamples {
@@ -1128,6 +1229,87 @@ pub fn synthetic_relational_ttl(n_entities: usize, seed: u64) -> String {
             }
             if let Some(t) = tgt {
                 out.push_str(&format!("ex:v{} ex:entails ex:v{} .\n", i, t));
+            }
+        }
+    }
+    out
+}
+
+/// Build a small synthetic **provenance-annotated** relational slice for the Phase-4 weighting
+/// ablation ([`run_weight_ablation`], sq-2489d.4). It is the only synthetic graph here that carries
+/// PROV-O / DQV annotations, and it is constructed so provenance-weighting *could* help: a fraction
+/// of the edges are **deliberately wrong** (random cross-cluster noise) and those noisy edges carry
+/// **low** assurance (`secx:Conjectured`, low `pkg:confidence`), while the clean within-cluster
+/// edges carry **high** assurance (`secx:Proven`, high confidence). Down-weighting the low-assurance
+/// (noisier) positives is therefore the setting where the CKRL move can plausibly lift MRR — but the
+/// generator is still NOT rigged to guarantee a win (the noise is a minority and the embedding must
+/// recover the cluster signal regardless), so the measurement is honest. Deterministic in `seed`,
+/// sized by `n_entities`. The vocabulary mirrors the real `pkg.ttl` predicate set so the reader
+/// exercises the REAL provenance path, not a mock.
+pub fn synthetic_provenance_ttl(n_entities: usize, seed: u64) -> String {
+    let mut state = seed ^ 0x0BAD_F00D_C0FF_EE11;
+    let mut next = |m: usize| -> usize { (splitmix64(&mut state) as usize) % m.max(1) };
+
+    let mut out = String::new();
+    out.push_str(
+        "@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+         @prefix pkg:  <https://sparq.dev/ns/pkg#> .\n\
+         @prefix prov: <http://www.w3.org/ns/prov#> .\n\
+         @prefix secx: <https://sparq.dev/ns/secx#> .\n\
+         @prefix ex:   <http://ex/> .\n\n",
+    );
+    // A class + a relation with a declared domain/range (so type-constrained negatives bite).
+    out.push_str("ex:Node a rdfs:Class .\n");
+    out.push_str("ex:rel rdfs:domain ex:Node ; rdfs:range ex:Node .\n");
+    // Two source nodes of differing reliability (folded into w(t) as the source-reliability factor).
+    out.push_str("ex:src-reliable pkg:confidence \"1.0\" .\n");
+    out.push_str("ex:src-weak     pkg:confidence \"0.5\" .\n\n");
+
+    let n = n_entities.max(12);
+    for i in 0..n {
+        out.push_str(&format!("ex:e{} a ex:Node .\n", i));
+    }
+    out.push('\n');
+
+    // Latent clusters drive the TRUE edges (recoverable signal). Noisy edges connect random
+    // cross-cluster pairs and are annotated low-assurance.
+    let n_clusters = 5usize;
+    let cluster = |i: usize| -> usize { (i.wrapping_mul(2654435761) >> 3) % n_clusters };
+
+    // Each node emits one within-cluster edge (clean, high-assurance) and, with a 1-in-4 chance, one
+    // cross-cluster NOISE edge (low-assurance). Reifying the per-fact provenance on the SUBJECT node
+    // (the head) matches how the reader derives w(t) from the head's annotations.
+    for i in 0..n {
+        // Clean within-cluster edge: target is another node in the same cluster.
+        let mut tgt = None;
+        for _ in 0..12 {
+            let cand = next(n);
+            if cand != i && cluster(cand) == cluster(i) {
+                tgt = Some(cand);
+                break;
+            }
+        }
+        if let Some(t) = tgt {
+            out.push_str(&format!("ex:e{} ex:rel ex:e{} .\n", i, t));
+            // HIGH assurance on the clean fact's head.
+            out.push_str(&format!(
+                "ex:e{} pkg:assurance secx:Proven ; pkg:confidence \"0.95\" ; prov:wasDerivedFrom ex:src-reliable .\n",
+                i
+            ));
+        }
+
+        // NOISE edge (minority): a random cross-cluster pair, annotated LOW assurance so the ON arm
+        // down-weights it. We annotate a DISTINCT noise-head node so the clean head keeps its high
+        // assurance (a head carries one assurance basis in this slice).
+        if next(4) == 0 {
+            let t = next(n);
+            if t != i {
+                out.push_str(&format!("ex:noise{} a ex:Node ; ex:rel ex:e{} .\n", i, t));
+                out.push_str(&format!(
+                    "ex:noise{} pkg:assurance secx:Conjectured ; pkg:confidence \"0.2\" ; prov:wasDerivedFrom ex:src-weak .\n",
+                    i
+                ));
             }
         }
     }

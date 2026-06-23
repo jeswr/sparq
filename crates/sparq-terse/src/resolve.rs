@@ -379,4 +379,74 @@ mod tests {
         assert_eq!(r.method, Method::Lexical);
         assert_eq!(r.iri, "http://ex/cat");
     }
+
+    /// End-to-end `V()` resolution (`sq-26fdp`): a verbatim `skos:prefLabel` that shares a
+    /// token with a sibling concept must bind unambiguously at the strongest lexical signal,
+    /// not loud-fail as ambiguous. Exercises the REAL `ResolveCtx::resolve` lexical path.
+    #[cfg(feature = "vectors")]
+    mod verbatim_preflabel {
+        use crate::{Method, ResolveCtx};
+        use sparq_core::Graph;
+
+        fn graph() -> Graph {
+            // Two SKOS concepts sharing the token "discipline"; one prefLabel carries
+            // punctuation (`/`, `+`) — the exact bug-report shape. Two extra concepts
+            // (`alpha thing` / `beta gadget`) give a phrase that substring-matches two
+            // DIFFERENT concepts via two different tokens, i.e. a genuinely ambiguous fuzzy
+            // phrase the gate must still loud-fail on.
+            let ttl = r#"
+                @prefix kb: <https://sparq.dev/ns/pkg/kb#> .
+                @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+                kb:topic-merge-discipline a skos:Concept ; skos:prefLabel "Merge discipline" .
+                kb:topic-zk-discipline a skos:Concept ;
+                    skos:prefLabel "ZK/MPC claim + circuit discipline" .
+                kb:topic-alpha a skos:Concept ; skos:prefLabel "alpha thing" .
+                kb:topic-beta a skos:Concept ; skos:prefLabel "beta gadget" .
+            "#;
+            Graph::load_str(ttl, "turtle").expect("graph parses")
+        }
+
+        #[test]
+        fn verbatim_punctuated_preflabel_binds_at_full_confidence() {
+            let g = graph();
+            let ctx = ResolveCtx::lexical(&g);
+            // Before the fix this loud-failed AMBIGUOUS on the shared "discipline" token.
+            let res = ctx
+                .resolve("ZK/MPC claim + circuit discipline", None)
+                .expect("a verbatim prefLabel must resolve, not loud-fail");
+            assert_eq!(res.iri, "https://sparq.dev/ns/pkg/kb#topic-zk-discipline");
+            assert_eq!(res.method, Method::Lexical);
+            assert_eq!(res.score, 1.0, "an exact full-label hit is the strongest signal");
+            assert!(res.runner_up.is_none(), "the verbatim hit is the sole candidate");
+            assert_eq!(res.confidence, 1.0, "no runner-up => full confidence");
+        }
+
+        #[test]
+        fn sibling_verbatim_preflabel_still_resolves_to_its_own_concept() {
+            // The pre-existing working case stays working: "Merge discipline" -> its topic.
+            let g = graph();
+            let ctx = ResolveCtx::lexical(&g);
+            let res = ctx.resolve("Merge discipline", None).expect("resolves");
+            assert_eq!(res.iri, "https://sparq.dev/ns/pkg/kb#topic-merge-discipline");
+            assert_eq!(res.score, 1.0);
+            assert!(res.runner_up.is_none());
+        }
+
+        #[test]
+        fn genuinely_ambiguous_fuzzy_phrase_still_loud_fails() {
+            // The fix must NOT weaken the loud-fail: a phrase that is not a whole label and
+            // substring-matches two DIFFERENT concepts at the same score is still ambiguous.
+            // "alpha beta" is not a label; "alpha" -> topic-alpha, "beta" -> topic-beta, both
+            // non-exact (0.6) => a tie the gate must refuse rather than guess.
+            let g = graph();
+            let ctx = ResolveCtx::lexical(&g);
+            let err = ctx
+                .resolve("alpha beta", None)
+                .expect_err("a tie across two concepts must loud-fail, never guess");
+            assert!(
+                matches!(err, crate::TerseError::Unresolved { .. }),
+                "expected Unresolved, got {err:?}"
+            );
+        }
+    }
 }
