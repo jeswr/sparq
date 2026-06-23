@@ -1,0 +1,29 @@
+# Feature-matrix fragment for `sparq-zk`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-bevd3 (epic sq-0dksu, Phase 3): the per-method
+# security-properties ANNOTATION GRAPH + over-claim guards in sparq-zk. The
+# `secprop` module, its unit tests (the 3 guards + the drift/honesty checks),
+# and the `secprop_annotations.rs` integration suite
+# (`#![cfg(feature = "secprop-annotations")]`) are ALL behind the default-OFF
+# `secprop-annotations` feature, so ci.yml's default-feature lane compiles
+# them EMPTY and runs ZERO of them — the silent-skip gap (#1171) this leg
+# closes. The feature pulls only `oxttl` (already a workspace dep). Verified
+# locally: `cargo test -p sparq-zk --features secprop-annotations` runs the
+# 11 `secprop::tests` + the `secprop_annotations.rs` integration tests, and
+# `clippy --all-targets -D warnings` is clean in every state.
+- name: "sparq-zk (secprop-annotations — per-method annotation graph + over-claim guards)"
+  crate: "sparq-zk"
+  features: "secprop-annotations"
+  test: true

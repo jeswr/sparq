@@ -1,0 +1,63 @@
+# GOLDEN: the GATE-CRITICAL set of check-run names emitted by feature-matrix.yml's
+# `opt-in-features` job (each leg is `opt-in <name>`). [OPUS-4.8] bead sq-ibrze.
+#
+# The single required `ci-summary / gate` aggregator + branch protection discover every
+# REQUIRED opt-in leg BY THIS NAME. This snapshot is the byte-for-byte set from BEFORE
+# the static `include:` list was split into per-crate fragment files, so the test
+# scripts/tests/test_feature_matrix_assemble.py can prove the dynamic assembler still
+# emits the IDENTICAL set — i.e. the split did not rename, drop, or add any gating leg.
+#
+# When you ADD a legitimate new opt-in leg (edit a `.github/feature-matrix.d/<crate>.yml`
+# fragment), this test will FAIL until you ALSO add the new `opt-in <name>` line here.
+# That failure is the intended tripwire: a new gating check has appeared and the golden
+# must be updated DELIBERATELY (and the new name must stay free of the whole words
+# "advisory"/"informational" or it will not gate). Keep this list sorted (LC_ALL=C).
+# Lines starting with '#' are comments; blank lines are ignored.
+#
+opt-in sparq-cli (serialize-rdf)
+opt-in sparq-cli (terse)
+opt-in sparq-core (compact-index)
+opt-in sparq-core (jsonld)
+opt-in sparq-core (mmap, dict-spill)
+opt-in sparq-engine (cs-planner)
+opt-in sparq-engine (query-solution)
+opt-in sparq-engine (result-cache)
+opt-in sparq-engine (serialize-rdf)
+opt-in sparq-engine (service)
+opt-in sparq-engine (txn)
+opt-in sparq-engine (vectorized)
+opt-in sparq-engine (window-functions)
+opt-in sparq-engine (zk)
+opt-in sparq-fedclient (fedclient)
+opt-in sparq-fedplan (adaptive-replan, implies fedplan)
+opt-in sparq-geo (reproject)
+opt-in sparq-kb (close, implies query — maximal feature set)
+opt-in sparq-kb (query, implies validate)
+opt-in sparq-kb (validate)
+opt-in sparq-mpc (insecure-test-rng)
+opt-in sparq-nlq (citations — provenance-join + citations + answer-qualification)
+opt-in sparq-policy (count-enforcement)
+opt-in sparq-policy (secprop-leftoperands — ODRL security-property profile)
+opt-in sparq-reason (explain)
+opt-in sparq-reason-el (hasse — transitive reduction / direct-subsumer Hasse)
+opt-in sparq-reason-el (rbox — CR10/CR11 RBox saturation)
+opt-in sparq-server (audit-log, access-audit + server features)
+opt-in sparq-server (brtpf)
+opt-in sparq-server (federation-descriptors, service, time-travel, geo, test-seams)
+opt-in sparq-server (terse)
+opt-in sparq-server (tpf)
+opt-in sparq-shacl (shacl-af)
+opt-in sparq-solid (count-enforcement)
+opt-in sparq-solid (odrl-bridge)
+opt-in sparq-terse (vectors — V() lexical-first concept resolution)
+opt-in sparq-trust (delegation-prov)
+opt-in sparq-trust (secprop-admissibility)
+opt-in sparq-trust (secprop-vocab)
+opt-in sparq-trust (status-list-flate2 — live status/revocation + denial justification)
+opt-in sparq-trust (store)
+opt-in sparq-vc (did-web — did:web resolver over a pluggable fetcher)
+opt-in sparq-vectors (compose — read-path URI-hiding NL→NL A/B)
+opt-in sparq-vectors (kge — structure-aware + Phase-4 provenance-weighting)
+opt-in sparq-vectors (vec-predicate, filtered-ann)
+opt-in sparq-vectors (vec-predicate, provider)
+opt-in sparq-zk (secprop-annotations — per-method annotation graph + over-claim guards)

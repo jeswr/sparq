@@ -1,0 +1,25 @@
+# Feature-matrix fragment for `sparq-shacl`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-wuft: SHACL Advanced Features (SHACL-AF) rules — the `sh:rule`
+# module (sparq-shacl/src/rules.rs + the gated arms of eval.rs/model.rs/lib.rs) is
+# entirely `#[cfg(feature = "shacl-af")]`, so the default build/clippy/test never
+# compiled it. This leg compiles it, runs `clippy --all-targets -D warnings` with the
+# feature ON (the real gate), and runs the crate's tests — including the 11 in-module
+# `rules.rs` unit tests, which only exist when `shacl-af` is enabled. No new dep: the
+# rule engine reuses the same sparq-engine SPARQL machinery the `sh:sparql` path uses.
+- name: "sparq-shacl (shacl-af)"
+  crate: "sparq-shacl"
+  features: "shacl-af"
+  test: true

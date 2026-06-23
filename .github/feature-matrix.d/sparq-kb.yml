@@ -1,0 +1,81 @@
+# Feature-matrix fragment for `sparq-kb`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-u6nmt: the sparq-kb Project-Knowledge-Graph dogfooding crate
+# (added by PR #1069). The DEFAULT build is a pure data + Rust-vocab crate; its
+# SHACL-dogfood + ingest suites are entirely behind default-OFF features:
+#   • tests/dogfood_shacl.rs + tests/ingest_shacl.rs are `#![cfg(feature =
+#     "validate")]` (load the PKG ontology/instances, run the SHACL shapes); and
+#   • tests/ingest_query.rs is `#![cfg(feature = "query")]` (the SPARQL proof
+#     over the ingested PKG graph).
+# ci.yml's `cargo nextest archive --workspace --all-targets` passes NO
+# `--features validate`/`query`, so it compiled all of those test bodies EMPTY and
+# ran ZERO of them — the silent-skip gap this lane exists to close — and sparq-kb
+# had NO leg here at all. TWO legs cover every suite + every documented opt-in
+# state of the crate:
+#   (1) `validate` runs dogfood_shacl + ingest_shacl (the suites gated on
+#       `validate` but NOT `query`); and
+#   (2) `query` IMPLIES `validate` (Cargo.toml: `query = ["validate", …]`) and is
+#       the crate's MAXIMAL feature set, so this leg is equivalent to
+#       `--all-features` for sparq-kb today: it runs ingest_query AND re-runs the
+#       validate suites, and its `clippy --all-targets -D warnings` gates the full
+#       feature surface. (The crate's `--all-features` clippy/build is ALSO already
+#       covered workspace-wide by ci.yml's `cargo clippy --workspace --all-targets
+#       --all-features` + `cargo doc --workspace --all-features`; what was missing
+#       — and what these legs add — is the all-features TEST execution.)
+# No `not(feature = …)` divergence in the crate, so two isolated legs (matching the
+# per-feature convention above) suffice. Cheap: sparq-kb is tiny; `validate` pulls
+# sparq-core + sparq-shacl (+ oxttl/oxrdf), `query` additionally sparq-engine, all
+# already compiled by sibling legs / the warm cache. Verified locally on origin/main:
+# `cargo test -p sparq-kb --features validate` runs 3 dogfood_shacl + 2 ingest_shacl
+# (+1 vocab unit) tests, `--features query` adds the 3 ingest_query tests, and
+# `clippy --all-targets -D warnings` is clean in every state.
+# [OPUS-4.8] sq-8cuf8: the optional `close` feature (Cargo.toml: `close =
+# ["query", "dep:sparq-reason"]`) landed on main with PR #1075, so the leg the
+# NOTE above deferred is now wired below. `close` is a TRUE `not(feature=…)`
+# divergence — NOT just an additive superset of `query` — so it gets its OWN
+# isolated leg per rule (b) of the GUARD above, for two reasons:
+#   (1) `tests/query_canned.rs` is `#![cfg(feature = "query")]` AND contains
+#       `closure_materialises_the_blockedby_inverse`, an extra
+#       `#[cfg(feature = "close")]` test. The `query` leg above COMPILES that
+#       test body EMPTY (it passes `--features query`, not `close`), so the
+#       inverse-/symmetric-edge closure proof ran ZERO times — the silent gap
+#       this leg closes; and
+#   (2) `src/bin/pkg_query.rs` has divergent `#[cfg(feature = "close")]` vs
+#       `#[cfg(not(feature = "close"))]` arms of `load_closed` (real OWL-RL
+#       closure vs the "--close needs the `close` feature" error). The `query`
+#       leg exercises the `not(close)` arm; THIS leg compiles + clippies the
+#       `close` arm (the one that actually pulls sparq-reason and materialises
+#       the closure), so neither code path rots.
+# `close` implies `query` (⊃ `validate`), so it is the crate's MAXIMAL feature
+# set today and equivalent to `--all-features` for sparq-kb. It adds only the
+# already-built sparq-reason dep (sparq-reason depends solely on sparq-core, in
+# the `query` build), so the leg is cheap. Verified locally on this branch:
+# `cargo test -p sparq-kb --features close` runs all of `query`'s suites PLUS
+# the previously-skipped close test (query_canned: 9 vs 8 under `query`), and
+# `clippy --all-targets -D warnings` is clean with the feature ON.
+- name: "sparq-kb (validate)"
+  crate: "sparq-kb"
+  features: "validate"
+  test: true
+
+- name: "sparq-kb (query, implies validate)"
+  crate: "sparq-kb"
+  features: "query"
+  test: true
+
+- name: "sparq-kb (close, implies query — maximal feature set)"
+  crate: "sparq-kb"
+  features: "close"
+  test: true
