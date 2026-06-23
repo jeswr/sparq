@@ -28,6 +28,52 @@ const DATA: &str = r#"@prefix ex: <http://ex/> .
     ex:alice ex:name "Alice" ; ex:age 30 ; ex:knows ex:bob .
     ex:bob ex:name "Bob"@en ; ex:age 25 ."#;
 
+/// Extracts the `"value"` strings of every `?<var>` binding from a SPARQL-JSON batch, in
+/// document order. [OPUS-4.8]
+///
+/// We anchor on the binding KEY (`"<var>":{ … "value":"<v>"`) rather than scanning every
+/// `"value":"` in the batch, so the extraction stays correct if a row gains a second
+/// projected variable (whose own `"value"` would otherwise be conflated). We deliberately
+/// do NOT pull in `serde_json` to parse here: this crate's SPARQL-JSON is produced by its
+/// own hand-rolled, dependency-free serializer with a fixed key order (see
+/// `crates/sparq-wasm/src/serialize.rs` — "**dependency-free** … no `serde_json`"), and a
+/// dev-only JSON dep purely for this assertion would be disproportionate. The key-anchored
+/// scan below is robust against the only realistic fragility (a stray `"value":"` from a
+/// different binding). (Addresses Copilot review on PR #1239.)
+fn select_binding_values(batch: &str, var: &str) -> Vec<String> {
+    let key = format!("\"{var}\":{{");
+    let needle = "\"value\":\"";
+    batch
+        .match_indices(&key)
+        .filter_map(|(start, _)| {
+            // The binding object for `?var` ends at its closing brace; scan only within it.
+            let obj = &batch[start + key.len()..];
+            let end = obj.find('}').unwrap_or(obj.len());
+            let obj = &obj[..end];
+            obj.find(needle).map(|vi| {
+                let rest = &obj[vi + needle.len()..];
+                rest[..rest.find('"').unwrap_or(rest.len())].to_string()
+            })
+        })
+        .collect()
+}
+
+/// Normalises an N-Triples document to its SORTED set of non-empty lines. [OPUS-4.8]
+///
+/// A CONSTRUCT/DESCRIBE graph has SET semantics: the document is the *set* of its triples,
+/// and the engine makes no ordering guarantee on triple emission (see
+/// `sparq_engine::construct::instantiate` — "first-production order", driven by the
+/// `eval_select` row order). Comparing two SEPARATE query executions byte-for-byte would
+/// therefore over-specify the contract and could flake if emission order ever changed.
+/// Normalising to sorted lines pins the load-bearing invariant — both paths yield the SAME
+/// set of triples — while leaving the chunk-count / chunk-size assertions to enforce the
+/// partitioning. (Addresses Copilot review on PR #1239.)
+fn sorted_nt_lines(nt: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = nt.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    lines.sort_unstable();
+    lines
+}
+
 // ---- load / size / heap_bytes ----------------------------------------------
 
 /// The exported `Store::load` parses Turtle and the getters report the deduplicated
@@ -298,14 +344,11 @@ fn exported_query_cursor_partial_trailing_batch() {
     );
 
     // The rows, in order across the batches, are exactly 1..=5 with no gap/dup/reorder.
+    // Extract the ?n binding values (key-anchored, so a future second projected var would
+    // not be conflated — see `select_binding_values`). [OPUS-4.8]
     let values: Vec<String> = [&b0, &b1, &b2]
         .iter()
-        .flat_map(|b| {
-            b.match_indices("\"value\":\"").map(move |(i, _)| {
-                let rest = &b[i + "\"value\":\"".len()..];
-                rest[..rest.find('"').unwrap()].to_string()
-            })
-        })
+        .flat_map(|b| select_binding_values(b, "n"))
         .collect();
     assert_eq!(
         values,
@@ -385,9 +428,12 @@ fn exported_query_quads_chunks_reassemble() {
         reassembled.push_str(&c);
     }
     assert_eq!(n, 2, "batch_size 1 over 2 triples => 2 batches");
+    // SET-equal: both paths must yield the same triples (emission order is unspecified for
+    // CONSTRUCT, so compare the sorted line sets rather than byte-for-byte). [OPUS-4.8]
     assert_eq!(
-        reassembled, whole,
-        "chunked N-Triples must reassemble to the whole document"
+        sorted_nt_lines(&reassembled),
+        sorted_nt_lines(&whole),
+        "chunked N-Triples must reassemble to the whole document (as a set)"
     );
 }
 
@@ -410,11 +456,14 @@ fn exported_query_quads_describe_cbd() {
         nt.contains("<http://ex/bob> <http://ex/age>"),
         "outgoing age triple in CBD: {nt}"
     );
-    // ex:alice ex:knows ex:bob is INBOUND to ex:bob — a CBD must NOT include it (that would
-    // be the bug where DESCRIBE leaked the whole neighbourhood).
+    // ex:alice ex:knows ex:bob is INBOUND to ex:bob — a CBD (outgoing triples only) must NOT
+    // include it (that would be the bug where DESCRIBE leaked the whole neighbourhood). Pin
+    // the SPECIFIC inbound triple's absence rather than any mention of ex:alice, so the test
+    // would still pass if ex:alice legitimately appeared as the OBJECT of an outgoing triple
+    // (it does not here, but the invariant is "no inbound edge", not "no alice"). [OPUS-4.8]
     assert!(
-        !nt.contains("<http://ex/alice>"),
-        "CBD must not pull in the inbound knows-subject: {nt}"
+        !nt.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob>"),
+        "CBD must not pull in the inbound knows triple: {nt}"
     );
 }
 
@@ -449,9 +498,12 @@ fn exported_query_quads_chunks_partial_tail() {
         [2, 2, 1],
         "5 triples, batch_size 2 => chunk sizes [2, 2, 1]"
     );
+    // SET-equal: no triple dropped at the short tail (emission order is unspecified, so
+    // compare the sorted line sets rather than byte-for-byte). [OPUS-4.8]
     assert_eq!(
-        reassembled, whole,
-        "the partial-tail chunked N-Triples must reassemble to the whole document"
+        sorted_nt_lines(&reassembled),
+        sorted_nt_lines(&whole),
+        "the partial-tail chunked N-Triples must reassemble to the whole document (as a set)"
     );
 }
 
