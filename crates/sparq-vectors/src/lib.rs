@@ -224,7 +224,8 @@ pub use taxonomy::{
 // flexible minimal-and-complete grounding selector + verbaliser. `structure` feature only.
 #[cfg(feature = "structure")]
 pub use grounding::{
-    ground, GroundFact, Grounding, GroundingConfig, Modality, OutputType, TypedValue,
+    ground, reconcile_quantity, GroundFact, Grounding, GroundingConfig, Modality, OutputType,
+    TypedValue,
 };
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,

@@ -1059,6 +1059,17 @@ same node projected into whichever object a tool needs. `ground` (the `grounding
 - **`Modality::TypedValue`** — a single typed slot filled directly: `TypedValue::{Boolean, Number,
   Quantity, Enum}`. **Exact** (no cosine threshold, no recall loss).
 
+<!-- [OPUS-4.8] sq-t80n4: cross-unit reconciliation (consumes the P2 units.rs table, sq-0wo9e.3). -->
+**Cross-unit reconciliation (opt-in `GroundingConfig::reconcile_units`, default off).** A quantity
+renders **as declared** by default. Set `reconcile_units` and each quantity whose unit is **known** to
+the P2 table (recipe 16, `units::normalise`) is rendered in the **canonical SI unit of its
+`QuantityKind`** — so `1 mi` and `1.609344 km` (both `Length`) collapse to the same `1609.344 M`, and
+`0 °C` / `273.15 K` to the same `273.15 K`, before grounding / comparison / NL render. **Conservative
+on unknown:** an unknown or **compound / rate** unit (`unit:KiloM-PER-HR` = km/h is *not* in the
+simple-unit table) is left as declared — never a fabricated conversion; only same-`QuantityKind` units
+reconcile. `reconcile_quantity(TypedValue) -> TypedValue` is the standalone primitive. No accuracy
+claim — a correctness/ergonomics feature.
+
 ```rust,ignore
 # // cargo build -p sparq-vectors --features structure
 use sparq_vectors::{ground, Grounding, GroundingConfig, Modality, OutputType};
@@ -1083,8 +1094,9 @@ if let Some(Grounding::Subgraph(facts)) =
 (relative to the *materialised entailment profile* + declared shapes) are **profile-relative, not
 absolute** — and **NOT** end-task answer-completeness (no answer-completeness claim is made). This is
 the **projection** half only: the "ANN proposes, exact engine re-validates" loop is the
-`filtered-ann` / `vec-predicate` path (recipes 8–9). Quantities render **as declared** (value + unit
-label); cross-unit normalisation reuses the P2 QUDT `normalise` (recipe 16; sq-0wo9e.3).
+`filtered-ann` / `vec-predicate` path (recipes 8–9). Quantities render **as declared** by default;
+opt into **cross-unit reconciliation** via `reconcile_units` (above) — known units canonicalise via
+the P2 QUDT `normalise` (recipe 16; sq-0wo9e.3, sq-t80n4), unknown/compound units stay as declared.
 
 ## Gotchas / feature flags / prerequisites
 
