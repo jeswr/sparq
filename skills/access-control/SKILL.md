@@ -115,6 +115,19 @@ Materialize the authorization view from the access-control documents, then enfor
 - `store.update_as(&Session, sparql)` / `store.update_as_acp(...)` — **write-path
   gating**: check every graph an update could mutate *before* applying, and
   auto-re-materialize on `.acl`/`.acr` writes.
+- `store.put_acl(acl_iri, content, format) -> AclWriteOutcome` /
+  `store.delete_acl(acl_iri)` (+ `…_acp` variants) — **authoritative ACL write-through**
+  ([OPUS-4.8] issue #992 FR-3, sq-snopa.5): the LDP `PUT`/`DELETE /resource.acl` STORAGE
+  primitive. Replaces (or removes) the `.acl`/`.acr` GRAPH and re-materializes
+  `<urn:sparq:auth>` as ONE **atomic, fail-closed** unit, so SPARQ stays the source of
+  truth (the auth view is always a pure function of the present `.acl` graphs — no stale
+  grant survives a rule change). `content` is parsed FIRST (malformed ⇒ `Err`, nothing
+  mutated); a re-materialization failure (e.g. a reserved-encoding principal) ROLLS BACK to
+  the prior content + prior auth view (all-or-nothing). A non-`.acl`/`.acr` target IRI is
+  rejected (write content graphs through `update_as`). It performs **NO session
+  authorization** — the server authorizes the request itself (e.g. `decide(.., Mode::Control)`)
+  and `update_as` remains the session-checked write path. Always-present API (no cargo gate;
+  mirrors `update_as`/`decide` — adds no dependency).
 - `store.accessible(&Session, Mode) -> Arc<Vec<NamedNode>>` /
   `store.accessible_set(...)` / `store.view_for(...) -> DatasetView` /
   `store.auth() -> &AuthIndex` — inspect the authorized graph set or the materialized
