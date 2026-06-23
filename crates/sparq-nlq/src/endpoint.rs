@@ -254,6 +254,15 @@ mod tests {
     /// variable name so it does not race the integration-suite env tests. [OPUS-4.8]
     #[test]
     fn non_empty_env_rejects_unset_and_empty() {
+        // Serialize every env-mutating test in this binary against ONE process-wide lock:
+        // `set_var` / `remove_var` are NOT thread-safe (they mutate process-global state
+        // and race any concurrent `getenv`/`setenv` from another thread — UB even though
+        // the probe key below is unique to this test), and cargo runs this binary's unit
+        // tests on a thread pool. Mirrors the `ENV_LOCK` guard in `tests/endpoint_stub.rs`.
+        // [OPUS-4.8]
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
         const VAR: &str = "SPARQ_NLQ_TEST_NON_EMPTY_ENV_PROBE";
         std::env::remove_var(VAR);
         let err = non_empty_env(VAR).unwrap_err();
