@@ -455,6 +455,16 @@ mod tests {
         // Malformed entries are reported, not panicked on.
         assert!(intern_hdt_term(&mut dict, "\"open").is_err());
         assert!(intern_hdt_term(&mut dict, "\"x\"^^<>").is_err());
+        // [OPUS-4.8] sq-bif: the BARE (bracket-less) empty datatype `"x"^^` is the
+        // distinct sibling of the bracketed-empty `"x"^^<>` above: the `strip_prefix('<')`
+        // does NOT fire, so `dt` is the empty string straight from `^^`, and the
+        // `dt.is_empty()` guard must still reject it (an empty datatype IRI is never a
+        // valid literal). Without this, only the bracketed branch of the empty-datatype
+        // check was exercised.
+        assert!(
+            intern_hdt_term(&mut dict, "\"x\"^^").is_err(),
+            "a bare empty datatype `\"x\"^^` must be rejected, like the bracketed `\"x\"^^<>`"
+        );
         assert!(intern_hdt_term(&mut dict, "\"x\"!!").is_err());
         assert!(intern_hdt_term(&mut dict, "").is_err());
     }
