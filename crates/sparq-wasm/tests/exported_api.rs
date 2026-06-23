@@ -252,6 +252,101 @@ fn exported_query_cursor_empty() {
     );
 }
 
+/// [OPUS-4.8] sq-bif: cursor PARTITIONING with a `batch_size > 1` over MULTIPLE batches —
+/// the case the existing tests never reach (they use only batch_size 1, where every step
+/// advances by exactly one row, or an oversized single batch). A 5-row result with
+/// batch_size 2 must split into batches of `[2, 2, 1]` (the trailing PARTIAL batch via
+/// `min(pos + batch_size, total)`), the per-batch row counts must be exact, and the rows —
+/// in `ORDER BY` order — must reassemble with NO drop, duplication, or reorder. This pins
+/// the `end`/`pos` advancement against an off-by-one and drives the `pos == total`
+/// exhaustion branch from a step larger than one (the existing batch_size-1 test reaches
+/// it one row at a time; this reaches it after a partial trailing step).
+#[test]
+fn exported_query_cursor_partial_trailing_batch() {
+    let data = "@prefix ex: <http://ex/> .\n\
+        ex:a ex:n \"1\" . ex:b ex:n \"2\" . ex:c ex:n \"3\" . ex:d ex:n \"4\" . ex:e ex:n \"5\" .";
+    let store = Store::load(data, "turtle").unwrap();
+    let q = "PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:n ?n } ORDER BY ?n";
+    let mut cur = store.query_cursor(q, 2).unwrap();
+    assert_eq!(cur.row_count(), 5);
+    assert_eq!(cur.batch_size(), 2);
+
+    let b0 = cur.next().expect("batch 0");
+    let b1 = cur.next().expect("batch 1");
+    let b2 = cur.next().expect("batch 2 (partial)");
+    assert!(
+        cur.next().is_none(),
+        "exhausted after the trailing partial batch"
+    );
+
+    // Per-batch row counts: [2, 2, 1] — the partition is exact (the final batch is the
+    // remainder, not a full batch_size, and never an empty extra batch).
+    assert_eq!(
+        b0.matches("\"n\":{").count(),
+        2,
+        "first full batch has 2 rows: {b0}"
+    );
+    assert_eq!(
+        b1.matches("\"n\":{").count(),
+        2,
+        "second full batch has 2 rows: {b1}"
+    );
+    assert_eq!(
+        b2.matches("\"n\":{").count(),
+        1,
+        "trailing batch has the 1 remainder: {b2}"
+    );
+
+    // The rows, in order across the batches, are exactly 1..=5 with no gap/dup/reorder.
+    let values: Vec<String> = [&b0, &b1, &b2]
+        .iter()
+        .flat_map(|b| {
+            b.match_indices("\"value\":\"").map(move |(i, _)| {
+                let rest = &b[i + "\"value\":\"".len()..];
+                rest[..rest.find('"').unwrap()].to_string()
+            })
+        })
+        .collect();
+    assert_eq!(
+        values,
+        ["1", "2", "3", "4", "5"],
+        "ordered partition: {values:?}"
+    );
+}
+
+/// [OPUS-4.8] sq-bif: cursor partitioning when `row_count` is an EXACT MULTIPLE of
+/// `batch_size` (4 rows, batch_size 2 → two full batches, NO trailing empty batch). This is
+/// the boundary the exhaustion guard `pos == total && total != 0` is written for: after the
+/// second batch `pos` lands exactly on `total` from a step of 2, and the next call must
+/// return `None` rather than emitting a spurious empty batch (the bug a naive `pos < total`
+/// loop would have). Distinct from the empty-result case (which DOES emit one empty batch)
+/// and from batch_size 1 (where `pos` reaches `total` one row at a time).
+#[test]
+fn exported_query_cursor_exact_multiple_no_trailing_empty() {
+    let data = "@prefix ex: <http://ex/> .\n\
+        ex:a ex:n \"1\" . ex:b ex:n \"2\" . ex:c ex:n \"3\" . ex:d ex:n \"4\" .";
+    let store = Store::load(data, "turtle").unwrap();
+    let q = "PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:n ?n } ORDER BY ?n";
+    let mut cur = store.query_cursor(q, 2).unwrap();
+    assert_eq!(cur.row_count(), 4);
+
+    let b0 = cur.next().expect("batch 0");
+    let b1 = cur.next().expect("batch 1");
+    // The KEY assertion: no third (empty) batch even though row_count is a multiple of the
+    // batch size — the `pos == total` guard exits cleanly.
+    assert!(
+        cur.next().is_none(),
+        "an exact-multiple result must NOT emit a trailing empty batch"
+    );
+    assert_eq!(b0.matches("\"n\":{").count(), 2, "{b0}");
+    assert_eq!(b1.matches("\"n\":{").count(), 2, "{b1}");
+    // A non-empty final batch (b1) — distinct from the empty-result single-empty-batch case.
+    assert!(
+        !b1.contains("\"bindings\":[]"),
+        "final batch is non-empty: {b1}"
+    );
+}
+
 // ---- queryQuads / queryQuadsChunks / QuadChunks ----------------------------
 
 /// `Store::queryQuads` (CONSTRUCT) returns the constructed graph as N-Triples through the
@@ -293,6 +388,70 @@ fn exported_query_quads_chunks_reassemble() {
     assert_eq!(
         reassembled, whole,
         "chunked N-Triples must reassemble to the whole document"
+    );
+}
+
+/// [OPUS-4.8] sq-bif: DESCRIBE through the exported `Store::queryQuads`. The existing quad
+/// tests only exercise CONSTRUCT; DESCRIBE is the OTHER graph-valued form routed through the
+/// same export, and it returns the Concise Bounded Description (the resource's OUTGOING
+/// triples only). This asserts the CBD reaches the N-Triples document across the binding and
+/// — the load-bearing CBD invariant — that an INBOUND subject is NOT pulled in (so the
+/// binding can never accidentally return a CONSTRUCT-shaped whole-neighbourhood graph).
+#[test]
+fn exported_query_quads_describe_cbd() {
+    let store = Store::load(DATA, "turtle").unwrap();
+    let nt = store.query_quads("DESCRIBE <http://ex/bob>").unwrap();
+    // ex:bob's CBD = its outgoing triples (name "Bob"@en + age 25), nothing inbound.
+    assert!(
+        nt.contains("<http://ex/bob> <http://ex/name> \"Bob\"@en ."),
+        "outgoing name triple in CBD: {nt}"
+    );
+    assert!(
+        nt.contains("<http://ex/bob> <http://ex/age>"),
+        "outgoing age triple in CBD: {nt}"
+    );
+    // ex:alice ex:knows ex:bob is INBOUND to ex:bob — a CBD must NOT include it (that would
+    // be the bug where DESCRIBE leaked the whole neighbourhood).
+    assert!(
+        !nt.contains("<http://ex/alice>"),
+        "CBD must not pull in the inbound knows-subject: {nt}"
+    );
+}
+
+/// [OPUS-4.8] sq-bif: `queryQuadsChunks` PARTITIONING at a NON-multiple boundary. The
+/// existing test uses batch_size 1 over 2 triples (an even split); this constructs 5
+/// triples and batches by 2, so the partition is `[2, 2, 1]` — a trailing PARTIAL chunk
+/// (`triples.chunks(2)` over 5). It pins both the exact batch count (3) and that
+/// concatenation still reproduces `queryQuads` byte-for-byte (no triple dropped at the
+/// short tail), the regression a wrong `chunks()` size or a lost remainder would cause.
+#[test]
+fn exported_query_quads_chunks_partial_tail() {
+    let data = "@prefix ex: <http://ex/> .\n\
+        ex:a ex:n \"1\" . ex:b ex:n \"2\" . ex:c ex:n \"3\" . ex:d ex:n \"4\" . ex:e ex:n \"5\" .";
+    let store = Store::load(data, "turtle").unwrap();
+    let q = "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:n ?n }";
+    let whole = store.query_quads(q).unwrap();
+    assert_eq!(
+        whole.lines().filter(|l| !l.trim().is_empty()).count(),
+        5,
+        "5 constructed triples: {whole}"
+    );
+
+    let mut chunks = store.query_quads_chunks(q, 2).unwrap();
+    let mut reassembled = String::new();
+    let mut sizes = Vec::new();
+    while let Some(c) = chunks.next() {
+        sizes.push(c.lines().filter(|l| !l.trim().is_empty()).count());
+        reassembled.push_str(&c);
+    }
+    assert_eq!(
+        sizes,
+        [2, 2, 1],
+        "5 triples, batch_size 2 => chunk sizes [2, 2, 1]"
+    );
+    assert_eq!(
+        reassembled, whole,
+        "the partial-tail chunked N-Triples must reassemble to the whole document"
     );
 }
 
