@@ -1,0 +1,69 @@
+# Feature-matrix fragment for `sparq-vectors`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# sparq-vectors: the vec: magic predicates (pulls sparq-engine), and the
+# /v1/embeddings provider request/response shape (serde only, no socket).
+- name: "sparq-vectors (vec-predicate, provider)"
+  crate: "sparq-vectors"
+  features: "vec-predicate,provider"
+  test: true
+
+# [OPUS-4.8] sq-wuft (actionable part): predicate-constrained (filtered) ANN.
+# tests/filtered_bgp.rs + tests/filtered_bgp_transitive.rs are
+# `#![cfg(all(feature = "vec-predicate", feature = "filtered-ann"))]`, so BOTH
+# features must be ON together for the engine-side BGP→IdMask wiring tests to run.
+# The existing `(vec-predicate, provider)` leg lacks `filtered-ann`, so those
+# suites were never exercised in CI — this leg runs them.
+- name: "sparq-vectors (vec-predicate, filtered-ann)"
+  crate: "sparq-vectors"
+  features: "vec-predicate,filtered-ann"
+  test: true
+
+# [OPUS-4.8] sq-2489d.4 (GenAI-KB Phase 4): the structure-aware-vectorisation `kge`
+# measurement foundation + the NEW provenance-weighting surface. `kge` IMPLIES `structure`,
+# so this single leg compiles + clippies + tests BOTH the `kge`-gated suites AND the
+# `structure`-gated ones — the gap this leg closes: NO prior leg exercised `structure`/`kge`
+# at all, so the whole structure-aware estate (closure-before-vectorise, NegativeSampler,
+# typed encoders, taxonomy, grounding, the DistMult/ComplEx trainer + eval harness) plus the
+# net-new provenance-weighting reader/ablation went UNGATED in CI (the default workspace
+# archive in ci.yml carries only approx-ann/filtered-ann/vec-predicate, per its GUARD). The
+# net-new tests are `tests/kge.rs` (`#![cfg(feature = "kge")]` — incl. the 3 Phase-4
+# weight-ablation tests: the exact-zero no-op on a provenance-free graph, the end-to-end
+# ablation run, and "the weight reaches the SGD step") and `src/provenance.rs`'s 6 unit tests
+# (`#[cfg(feature = "structure")]`). No new dep: `kge` is hand-rolled CPU-only SGD over
+# sparq-reason/sparq-introspect (already in the `structure` graph). Verified locally: `cargo
+# nextest list -p sparq-vectors --features kge` shows the kge + provenance tests; `clippy
+# --all-targets -D warnings` is clean with the feature ON. Heavier than a typical leg (it
+# trains small models), but bounded to the work-box-sized synthetic slices the tests use.
+- name: "sparq-vectors (kge — structure-aware + Phase-4 provenance-weighting)"
+  crate: "sparq-vectors"
+  features: "kge"
+  test: true
+
+# [OPUS-4.8] sq-mztg8.1 (epic sq-mztg8, FO-LLM-bridge Phase 3): the read-path
+# URI-hiding `compose` module + the closed NL→NL A/B fidelity/cost harness. The whole
+# `src/compose.rs` module (9 unit tests) and the `examples/compose_ab.rs` harness are
+# `#[cfg(feature = "compose")]` / `required-features = ["compose"]` behind `default = []`,
+# so the default build (and ci.yml's `--workspace --all-targets` archive, which passes NO
+# `--features`) compiled them EMPTY and ran ZERO of them. This leg builds the module, runs
+# `clippy --all-targets -D warnings` with the feature ON (the real gate — it also clippies
+# the example), and runs `cargo test`, which executes the 9 compose unit tests (URI-hide
+# round-trip fidelity, the collision/lost-identity guard, the fall-open confidence floor).
+# `compose` IMPLIES `structure` (it reuses the verbalize label machinery) and adds NO new
+# dependency. Appended at the END of the legs list to minimise the recurring feature-matrix
+# merge conflict.
+- name: "sparq-vectors (compose — read-path URI-hiding NL→NL A/B)"
+  crate: "sparq-vectors"
+  features: "compose"
+  test: true

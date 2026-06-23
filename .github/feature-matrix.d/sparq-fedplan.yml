@@ -1,0 +1,28 @@
+# Feature-matrix fragment for `sparq-fedplan`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-vya1: sparq-fedplan. The ENTIRE crate (lib.rs + every module) is
+# `#[cfg(feature = "fedplan")]` and `default = []`, so the default build compiled
+# it empty and ci.yml's archive listed ZERO of its 48 in-src `#[test]`s — the
+# single biggest silent gap this bead found, and sparq-fedplan had NO leg here.
+# `adaptive-replan` IMPLIES `fedplan` and its tests are a strict SUPERSET (32 with
+# `fedplan` ⊂ 48 with `adaptive-replan`; the extra 16 are adaptive.rs); the only
+# `not(feature=…)` cfg in the crate is a harmless `allow(dead_code)`, so there is
+# NO divergent code path that a `fedplan`-only leg would reach — ONE
+# `adaptive-replan` leg covers everything. Verified: `cargo nextest run -p
+# sparq-fedplan --features adaptive-replan` => 48 tests run, 48 passed.
+- name: "sparq-fedplan (adaptive-replan, implies fedplan)"
+  crate: "sparq-fedplan"
+  features: "adaptive-replan"
+  test: true

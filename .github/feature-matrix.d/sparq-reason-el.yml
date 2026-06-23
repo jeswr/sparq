@@ -1,0 +1,46 @@
+# Feature-matrix fragment for `sparq-reason-el`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-xetf7 (Phase E2): sparq-reason-el's `rbox` feature — RBox / property
+# chain + transitive-role saturation (CR10 role inclusion + CR11 role composition).
+# The NOTE at the head of this file (sq-evb1) anticipated this leg: E1 ships the
+# crate with NO intra-crate feature, but E2 adds the default-OFF `rbox` feature, so
+# without a leg here the whole RBox surface goes UNGATED in CI. tests/rbox_differential.rs
+# is `#![cfg(feature = "rbox")]` (8 CR10/CR11 closure-oracle tests) and the rbox.rs +
+# extract.rs/classify.rs role-automaton arms are all `#[cfg(feature = "rbox")]`, so the
+# default build (and ci.yml's `--workspace --all-targets` archive, which passes NO
+# `--features`) compiled them EMPTY and ran ZERO of them — the silent gap this leg
+# closes. No new dep (`rbox = []`, reuses oxrdf + rustc-hash). Verified locally: `cargo
+# nextest list -p sparq-reason-el --features rbox` shows the 8 rbox_differential tests +
+# the 4 in-src rbox::tests, and `clippy --all-targets -D warnings` is clean with it on.
+- name: "sparq-reason-el (rbox — CR10/CR11 RBox saturation)"
+  crate: "sparq-reason-el"
+  features: "rbox"
+  test: true
+
+# [OPUS-4.8] sq-s2nob (Phase E3): sparq-reason-el's `hasse` feature — transitive
+# reduction to the DIRECT-subsumer Hasse diagram (`DirectHierarchy` + `classify_hasse_
+# graph`) + equivalence-class collapse + the membership-indexed reduction. Same gap as
+# the rbox leg above: tests/hasse_reduction.rs is `#![cfg(feature = "hasse")]` (8 Hasse
+# closure-oracle + edge-count tests) and the whole hasse.rs module is `#[cfg(feature =
+# "hasse")]`, so the default build (and ci.yml's `--workspace --all-targets` archive,
+# which passes NO `--features`) compiles them EMPTY and runs ZERO of them — this leg is
+# the ONLY thing that executes them. The `hasse_bench` example is `required-features =
+# ["hasse"]` so it compiles here too. No new dep (`hasse = []`, reuses rustc-hash).
+# Verified locally: `cargo nextest list -p sparq-reason-el --features hasse` shows the 8
+# hasse_reduction tests, and `clippy --all-targets -D warnings` is clean with it on.
+- name: "sparq-reason-el (hasse — transitive reduction / direct-subsumer Hasse)"
+  crate: "sparq-reason-el"
+  features: "hasse"
+  test: true

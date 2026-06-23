@@ -1,0 +1,32 @@
+# Feature-matrix fragment for `sparq-cli`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# sparq-cli: the `dump` re-serializer (forwards sparq-engine/serialize-rdf).
+- name: "sparq-cli (serialize-rdf)"
+  crate: "sparq-cli"
+  features: "serialize-rdf"
+  test: true
+
+# [OPUS-4.8] sq-vczh2 (epic sq-2m6zm): the `terse` subcommand (forwards the LEAN
+# `sparq-terse` build). The `cmd_terse` / `terse_expansion_to_json` dispatch + the
+# `tests/terse_cli.rs` integration suite are `#[cfg(feature = "terse")]`, so the default CLI
+# build never compiled, clippy'd or ran them. This leg builds the subcommand, runs
+# `clippy --all-targets -D warnings` with the feature ON, and runs the gated `terse_cli`
+# suite (keyword-echo, identity pass-through, unknown-keyword + V() loud-fail, stdin). No new
+# heavy dep — sparq-terse's lean build depends only on spargebra, already in the CLI's tree.
+# Verified: `cargo nextest list -p sparq-cli --features terse` shows the 5 terse_cli tests.
+- name: "sparq-cli (terse)"
+  crate: "sparq-cli"
+  features: "terse"
+  test: true

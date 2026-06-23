@@ -1,0 +1,36 @@
+# Feature-matrix fragment for `sparq-nlq`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-2489d.1 (GenAI-KB Phase 1): the opt-in citation renderer +
+# cross-cutting provenance-join primitive. The feature is pure offline read-only
+# logic (no network, unlike `live`), so it belongs in this lane — the leg runs
+# the provenance/cite unit suites PLUS the end-to-end tests/citations.rs
+# integration suite (it is `#![cfg(feature = "citations")]`, so it ONLY runs with
+# the feature ON: the citation-resolution-rate-1.0 + zero-fabrication +
+# no-source-recorded acceptance bar) and `clippy --all-targets -D warnings` in
+# that state. The DEFAULT (feature-OFF) build is covered by the workspace lane.
+# [OPUS-4.8] sq-2489d.2 (GenAI-KB Phase 2): the SAME leg now ALSO covers
+# answer-qualification (hedge + abstention) — the new `qualify` module's in-src
+# unit tests AND the `tests/qualification.rs` integration suite (also
+# `#![cfg(feature = "citations")]`: the abstention precision/recall=1.0 + monotone
+# verbal-band reliability acceptance bar). Phase 2 is gated on the SAME `citations`
+# feature (it reuses the Phase-1 provenance join — no second feature), so NO new
+# leg is needed: this leg's `cargo test -p sparq-nlq --features citations
+# --all-targets` is already a superset of every feature the new suites' cfg names,
+# so the previously-skipped tests now EXECUTE here. Verified `cargo nextest list -p
+# sparq-nlq --features citations` shows the qualify::tests + qualification suites.
+- name: "sparq-nlq (citations — provenance-join + citations + answer-qualification)"
+  crate: "sparq-nlq"
+  features: "citations"
+  test: true

@@ -1,0 +1,81 @@
+# Feature-matrix fragment for `sparq-server`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# sparq-server: discoverable-federation descriptors, the SERVICE passthrough,
+# time-travel reads, the geof: registry, and the durable-write test seam — all
+# opt-in, combined into one compile of the async server.
+- name: "sparq-server (federation-descriptors, service, time-travel, geo, test-seams)"
+  crate: "sparq-server"
+  features: "federation-descriptors,service,time-travel,geo,test-seams"
+  test: true
+
+# [OPUS-4.8] sq-21kp: the OPT-IN per-query access audit log (CDMC CD-2 /
+# ISO 27001 A.8.15 / EU CRA logging) — exercises tests/audit_log.rs, which is
+# `#![cfg(feature = "audit-log")]` and so never ran under the default build.
+# `audit-log` pulls `server` (it operates on the async HTTP Response + tracing);
+# composed with the same server feature set as the leg above so it compiles + the
+# gated test is discovered and actually executes.
+# [OPUS-4.8] sq-vya1: `access-audit` ADDED here. tests/access_audit.rs is
+# `#![cfg(feature = "access-audit")]` and the 7 in-src `access_audit::tests::*`
+# unit tests are `#[cfg(feature = "access-audit")]`, so the default build (and
+# EVERY prior leg) compiled them EMPTY and ran ZERO of them — the silent gap this
+# bead closes. `access-audit` only pulls `server` (no conflict — it is a SECOND,
+# independent audit sink alongside `audit-log`), so it co-enables cleanly with this
+# leg's set; verified: `cargo nextest list -p sparq-server --features access-audit,…`
+# now shows the 9 access_audit tests, and the leg's `clippy --all-targets -D
+# warnings` gates the feature surface. Folded in here (not a new leg) to avoid a
+# near-duplicate full-server-compile.
+- name: "sparq-server (audit-log, access-audit + server features)"
+  crate: "sparq-server"
+  features: "audit-log,access-audit,federation-descriptors,service,time-travel,geo,test-seams"
+  test: true
+
+# [OPUS-4.8] sq-dxhb: the Triple Pattern Fragments / Linked Data Fragments READ-ONLY
+# source endpoint (`GET /tpf`). The handler + the Hydra paging vocabulary + the
+# `tpf::evaluate` pager + the in-module `tpf` unit tests are all `#[cfg(feature =
+# "tpf")]`, so the DEFAULT build never compiled, clippy'd or tested this code. This
+# leg builds it, runs `clippy --all-targets -D warnings` with the feature ON (the real
+# gate), and runs the crate's tests — which now include the gated `tpf` page/Hydra
+# suites. `tpf` pulls `server`, so the full async server compiles under it.
+- name: "sparq-server (tpf)"
+  crate: "sparq-server"
+  features: "tpf"
+  test: true
+
+# [OPUS-4.8] sq-dxhb: bind-restricted Triple Pattern Fragments (brTPF). `brtpf` implies
+# `tpf` and additionally compiles `tpf::evaluate_brtpf`, the `values`/POST bindings
+# parser, the `merge_term`/`merge_predicate` semi-join pushdown and the extra
+# `hydra:mapping` control — all `#[cfg(feature = "brtpf")]`. The in-module `brtpf` test
+# mod (binding restriction, dedup union, empty-bindings==plain-TPF, page partitioning)
+# is gated the same way, so it only runs when this feature is on. This leg is what
+# actually compiles + clippies + tests the brTPF + Hydra-paging code the PR adds.
+- name: "sparq-server (brtpf)"
+  crate: "sparq-server"
+  features: "brtpf"
+  test: true
+
+# [OPUS-4.8] sq-vczh2 (epic sq-2m6zm): the OPT-IN verifiable terse-transpiler endpoint
+# (`POST /terse/transpile`). The `terse_transpile_endpoint` handler, the `ServerConfig::terse`
+# field + its Default/from_env arms, the route mount and the `tests/terse_transpile.rs`
+# integration suite are ALL `#[cfg(feature = "terse")]`, so the DEFAULT build never compiled,
+# clippy'd or tested this code. This leg builds it, runs `clippy --all-targets -D warnings`
+# with the feature ON (the real gate), and runs the crate's tests — which now include the
+# 8-test gated `terse_transpile` suite (opt-in 404, keyword-echo contract, identity
+# pass-through, loud-fail 400s, 405, read-auth). `terse` pulls `server`, so the full async
+# server compiles under it. Verified: `cargo nextest list -p sparq-server --features terse`
+# shows the 8 terse_transpile tests.
+- name: "sparq-server (terse)"
+  crate: "sparq-server"
+  features: "terse"
+  test: true
