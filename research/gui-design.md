@@ -167,6 +167,36 @@ REPL's built-in-dataset picker and explanatory captions (datasets live in the le
 and runs full-height with multiple co-resident result views (Table | Graph | Raw JSON |
 N-Triples/Turtle) against the persistent store rather than a sample graph.
 
+#### A.5.1 Paginated results + the lazy-evaluation gate (`sq-9w4t`, #817)
+
+[OPUS-4.8] Maintainer #817 observed that **serialising / rendering the whole kept result is
+the dominant per-render cost**, while the user only ever looks at one screenful. The SELECT
+**Table** view is therefore **paginated**: only the visible page of rows is shaped into DOM
+cells, and a **bounded read-ahead page cache** (`@sparq/client`'s `createPageCache`, default
+~2 pages ahead) warms the next page so a ⏭ is instant while never holding more than
+`1 + 2·readAhead` shaped slices live. The pure page-math (`paginateTable` / `pageCount` /
+`clampPage` / `createPageCache`) lives in `@sparq/client/results.ts` (host-agnostic, unit-
+tested in `site/test/results-pagination.test.mjs`); the React pager is in `query-workbench.tsx`.
+
+This is the **rendering** half. The bead's other half — **demand-driven query *evaluation***
+that computes the engine work only up to the current page and advances on a page change — is
+**deliberately NOT shipped** and is gated on a design pre-condition that does not hold today:
+
+- The engine result path is **materialised**, not pull-based. The wasm `SolutionCursor`
+  (`crates/sparq-wasm/src/lib.rs`) slices an already-fully-evaluated `result.rows`; `next()`
+  hands out `result.rows[pos..end]`. There is no pull/iterator that can stop after page *k*'s
+  worth of solutions, so "page-wise evaluation" would today still evaluate the whole query and
+  only **chunk the already-computed rows** — exactly what `streamQueryRows` already does.
+- Real lazy page-wise evaluation needs **one** of: (a) a **pull/Volcano iterator execution
+  model** in `sparq-engine` whose top operator can be driven `n` rows at a time and paused; or
+  (b) a **query-rewrite** strategy (`… ORDER BY … LIMIT pageSize OFFSET k·pageSize`) re-run per
+  page — which is only correct under a **stable total order** (an `ORDER BY` the user did not
+  necessarily write) and re-pays the scan each page, so it is a trade, not a clear win.
+
+Until that exec-model decision is made and measured, pagination over the streamed-in-hand rows
+is the honest, shippable surface; the evaluation half is tracked as a separate follow-up bead
+(no performance number is claimed for either half).
+
 ## 0. Ground truth — what exists today
 
 <!-- [OPUS-4.8] sq-uau8 — CORRECTED. The earlier draft said "Nothing is built yet /

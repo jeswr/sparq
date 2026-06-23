@@ -205,6 +205,26 @@ match contains(&provider_policy, &request_policy) {
 - **`contains(outer, inner) -> Containment`** — does `outer` permit everything `inner` permits (refinement / requester-vs-provider containment)? `Containment::Contains` **only** when every `inner` permission is *provably* subsumed by some `outer` permission AND no `outer` prohibition could carve into it; `Containment::NotContained` when an `inner` permission *provably* grants a request `outer` denies (disjoint concrete target/action, or `inner` leaves a dimension `outer` restricts wide open); `Containment::Unknown` otherwise. An `inner` with no permissions is contained vacuously.
 - **Soundness boundary (honest).** Constraint satisfiability / query containment is undecidable in the general ODRL constraint language. This module decides only what it can *prove* from rule structure plus a conservative per-dimension constraint comparison (identical constraints; `eq v` admitted by an `outer` bound; a *tighter* same-direction order bound — `lt`/`lteq`, `gt`/`gteq` — implying a looser one). Everything else degrades to `Possible` / `Unknown` — it **never** reports `Certain` / `Contains` it cannot prove (that is the fail-OPEN failure mode: claiming an ask is covered when it is not). It also does not (yet) prove `NotContained` from a *looser* inner numeric bound reaching above a tighter outer one — that case honestly returns `Unknown`. DPV/`isPartOf` set-subset refinement is a deferred bead.
 
+## Security-property ODRL profile — `secx:requires…` leftOperands (opt-in `secprop-leftoperands`) — [OPUS-4.8] sq-uor3g
+
+A privacy/security preference — *"admit only a proof method whose security posture meets THIS bar"* — is expressed as an ODRL constraint over a **custom `secx:requires…` leftOperand** (`research/security-properties-ontology-design.md` §4.3.1). The load-bearing ODRL nuance: a `rightOperand` natively accepts any IRI, but a **custom `leftOperand` MUST be declared in a published [`odrl:Profile`](https://www.w3.org/TR/odrl-model/#profile)** and a policy using it must assert `odrl:profile <profileIRI>` — a conforming ODRL processor MAY reject an undeclared leftOperand. Phase 4 (this feature) ships that **profile document** (`crates/sparq-policy/ontologies/odrl-secprop-profile.ttl`) and makes the leftOperands **first-class** in the Rust model.
+
+Behind the off-by-default `secprop-leftoperands` cargo feature (the default build already *parses* + *evaluates* such a constraint as an opaque custom leftOperand — this feature adds **recognition metadata**, not new eval semantics; the stateless `evaluate` path is unchanged). The `secprop` module gives the leftOperand IRIs as constants, the published profile IRI, a recogniser, and the leftOperand → security-property-dimension map (`secx:overDimension`):
+
+```rust,ignore
+// cargo: sparq-policy with --features secprop-leftoperands
+use sparq_policy::secprop::{is_secprop_left_operand, over_dimension, PROFILE_IRI, REQUIRES_ASSURANCE};
+
+assert!(is_secprop_left_operand(REQUIRES_ASSURANCE));
+// the single fact the admissibility reduction reads: leftOperand -> dimension
+assert_eq!(over_dimension(REQUIRES_ASSURANCE), Some("https://w3id.org/zkp-sparql/sec-prop#AssuranceLevel"));
+// a policy using a secx: leftOperand must assert `odrl:profile <PROFILE_IRI>`
+let _ = PROFILE_IRI; // https://sparq.dev/ns/odrl-secprop-profile#
+```
+
+- **One leftOperand per requireable dimension** (`requiresUnlinkabilityScope`, `requiresPostQuantumForgery`, `requiresZeroKnowledge`, `requiresSoundness`, `requiresSelectiveDisclosure`, `requiresSingleUse`, `requiresAssurance`, …); the full set is `secprop::SECPROP_LEFT_OPERANDS`. Each is **sugar** for the generic primitive "a constraint over dimension X" — the one `secx:overDimension` fact per leftOperand is what the admissibility rule reads, so one rule covers all (design §4.5).
+- **This is the bridge VOCABULARY only.** It NAMES the requireable dimensions; it does **not** perform the admissibility reduction (that is the N3 ruleset, Phase 2 `sq-ufsi9`, over the per-method annotation graph, Phase 3 `sq-bevd3` in `sparq-zk`), and it asserts **NO** security property of any method. Whether a sparq method actually *has* a property is recorded — with its epistemic basis — elsewhere; **sparq's whole ZK estate is research-grade and externally UNAUDITED** (bead `sq-qhy4`), and `sparq-mpc` is semi-honest-only. The conservative `requiresAssurance gteq secx:Proven` gate mechanically removes every unaudited method — this is how `sq-qhy4` enters the admissibility data flow, not merely the prose.
+
 ## Bridge to WAC/ACP enforcement (opt-in `odrl-bridge`) — [OPUS-4.8] sq-h3uk
 
 `sparq-solid` can **materialize** a matched ODRL permission into its `<urn:sparq:auth>` AUTH_GRAPH so the existing graph-level WAC/ACP enforcement applies it — **no new enforcement engine**. Behind the off-by-default `odrl-bridge` cargo feature on `sparq-solid` (it pulls in `sparq-policy` only when enabled; the default solid build stays ODRL-free). This is the **single-node** bridge of epic sq-3183, **research-track**, NOT the (gated) federated/ZK-disclosure path.

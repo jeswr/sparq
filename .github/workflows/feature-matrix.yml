@@ -259,6 +259,18 @@ jobs:
             crate: sparq-cli
             features: serialize-rdf
             test: true
+          # [OPUS-4.8] sq-vczh2 (epic sq-2m6zm): the `terse` subcommand (forwards the LEAN
+          # `sparq-terse` build). The `cmd_terse` / `terse_expansion_to_json` dispatch + the
+          # `tests/terse_cli.rs` integration suite are `#[cfg(feature = "terse")]`, so the default CLI
+          # build never compiled, clippy'd or ran them. This leg builds the subcommand, runs
+          # `clippy --all-targets -D warnings` with the feature ON, and runs the gated `terse_cli`
+          # suite (keyword-echo, identity pass-through, unknown-keyword + V() loud-fail, stdin). No new
+          # heavy dep — sparq-terse's lean build depends only on spargebra, already in the CLI's tree.
+          # Verified: `cargo nextest list -p sparq-cli --features terse` shows the 5 terse_cli tests.
+          - name: sparq-cli (terse)
+            crate: sparq-cli
+            features: terse
+            test: true
           # sparq-server: discoverable-federation descriptors, the SERVICE passthrough,
           # time-travel reads, the geof: registry, and the durable-write test seam — all
           # opt-in, combined into one compile of the async server.
@@ -307,6 +319,20 @@ jobs:
           - name: sparq-server (brtpf)
             crate: sparq-server
             features: brtpf
+            test: true
+          # [OPUS-4.8] sq-vczh2 (epic sq-2m6zm): the OPT-IN verifiable terse-transpiler endpoint
+          # (`POST /terse/transpile`). The `terse_transpile_endpoint` handler, the `ServerConfig::terse`
+          # field + its Default/from_env arms, the route mount and the `tests/terse_transpile.rs`
+          # integration suite are ALL `#[cfg(feature = "terse")]`, so the DEFAULT build never compiled,
+          # clippy'd or tested this code. This leg builds it, runs `clippy --all-targets -D warnings`
+          # with the feature ON (the real gate), and runs the crate's tests — which now include the
+          # 8-test gated `terse_transpile` suite (opt-in 404, keyword-echo contract, identity
+          # pass-through, loud-fail 400s, 405, read-auth). `terse` pulls `server`, so the full async
+          # server compiles under it. Verified: `cargo nextest list -p sparq-server --features terse`
+          # shows the 8 terse_transpile tests.
+          - name: sparq-server (terse)
+            crate: sparq-server
+            features: terse
             test: true
           # sparq-vectors: the vec: magic predicates (pulls sparq-engine), and the
           # /v1/embeddings provider request/response shape (serde only, no socket).
@@ -552,6 +578,24 @@ jobs:
             crate: sparq-trust
             features: secprop-vocab
             test: true
+          # [OPUS-4.8] sq-ufsi9 (epic sq-0dksu, Phase 2): the N3 proof-admissibility
+          # ruleset over `sparq-reason` (the §4.3 ODRL → admissible-proof-set
+          # reduction). The `admissibility` module + its `admissibility::tests` unit
+          # suite + the `secprop_admissibility.rs` golden integration suite
+          # (`#![cfg(feature = "secprop-admissibility")]`) are ALL behind the default-OFF
+          # `secprop-admissibility` feature, so ci.yml's default-feature `nextest archive`
+          # compiles them EMPTY and runs ZERO of them — the silent-skip gap (#1171) this
+          # leg closes. The feature is dependency-free (N3-text data + a thin driver over
+          # the `sparq-reason` edge the crate already carries), so this leg is cheap and
+          # reaches every admissibility test. Verified locally: `cargo test -p sparq-trust
+          # --features secprop-admissibility` runs the 6 `admissibility::tests` unit tests
+          # + the 3 `secprop_admissibility.rs` golden tests (empty under the strict
+          # preference, non-empty under the relaxed one); `clippy --all-targets -D
+          # warnings` is clean in every state.
+          - name: sparq-trust (secprop-admissibility)
+            crate: sparq-trust
+            features: secprop-admissibility
+            test: true
           # [OPUS-4.8] sq-bevd3 (epic sq-0dksu, Phase 3): the per-method
           # security-properties ANNOTATION GRAPH + over-claim guards in sparq-zk. The
           # `secprop` module, its unit tests (the 3 guards + the drift/honesty checks),
@@ -607,6 +651,83 @@ jobs:
           - name: sparq-nlq (citations — provenance-join + citations + answer-qualification)
             crate: sparq-nlq
             features: citations
+            test: true
+          # [OPUS-4.8] sq-2489d.4 (GenAI-KB Phase 4): the structure-aware-vectorisation `kge`
+          # measurement foundation + the NEW provenance-weighting surface. `kge` IMPLIES `structure`,
+          # so this single leg compiles + clippies + tests BOTH the `kge`-gated suites AND the
+          # `structure`-gated ones — the gap this leg closes: NO prior leg exercised `structure`/`kge`
+          # at all, so the whole structure-aware estate (closure-before-vectorise, NegativeSampler,
+          # typed encoders, taxonomy, grounding, the DistMult/ComplEx trainer + eval harness) plus the
+          # net-new provenance-weighting reader/ablation went UNGATED in CI (the default workspace
+          # archive in ci.yml carries only approx-ann/filtered-ann/vec-predicate, per its GUARD). The
+          # net-new tests are `tests/kge.rs` (`#![cfg(feature = "kge")]` — incl. the 3 Phase-4
+          # weight-ablation tests: the exact-zero no-op on a provenance-free graph, the end-to-end
+          # ablation run, and "the weight reaches the SGD step") and `src/provenance.rs`'s 6 unit tests
+          # (`#[cfg(feature = "structure")]`). No new dep: `kge` is hand-rolled CPU-only SGD over
+          # sparq-reason/sparq-introspect (already in the `structure` graph). Verified locally: `cargo
+          # nextest list -p sparq-vectors --features kge` shows the kge + provenance tests; `clippy
+          # --all-targets -D warnings` is clean with the feature ON. Heavier than a typical leg (it
+          # trains small models), but bounded to the work-box-sized synthetic slices the tests use.
+          - name: sparq-vectors (kge — structure-aware + Phase-4 provenance-weighting)
+            crate: sparq-vectors
+            features: kge
+            test: true
+          # [OPUS-4.8] sq-mztg8.1 (epic sq-mztg8, FO-LLM-bridge Phase 3): the read-path
+          # URI-hiding `compose` module + the closed NL→NL A/B fidelity/cost harness. The whole
+          # `src/compose.rs` module (9 unit tests) and the `examples/compose_ab.rs` harness are
+          # `#[cfg(feature = "compose")]` / `required-features = ["compose"]` behind `default = []`,
+          # so the default build (and ci.yml's `--workspace --all-targets` archive, which passes NO
+          # `--features`) compiled them EMPTY and ran ZERO of them. This leg builds the module, runs
+          # `clippy --all-targets -D warnings` with the feature ON (the real gate — it also clippies
+          # the example), and runs `cargo test`, which executes the 9 compose unit tests (URI-hide
+          # round-trip fidelity, the collision/lost-identity guard, the fall-open confidence floor).
+          # `compose` IMPLIES `structure` (it reuses the verbalize label machinery) and adds NO new
+          # dependency. Appended at the END of the legs list to minimise the recurring feature-matrix
+          # merge conflict.
+          - name: sparq-vectors (compose — read-path URI-hiding NL→NL A/B)
+            crate: sparq-vectors
+            features: compose
+            test: true
+          # [OPUS-4.8] sq-pfae.7 (epic sq-pfae P6): the live-status / revocation stratum. The
+          # whole `status_list` module + the `admit::admit_with_status` wiring + the
+          # `tests/live_status_e2e.rs` integration suite (`#![cfg(feature = "status-list")]`)
+          # are behind the default-OFF `status-list` feature, so ci.yml's default-feature
+          # `nextest archive --workspace --all-targets` (which passes NO `--features`) compiles
+          # them EMPTY and runs ZERO of the 18 module unit tests + the 5 e2e fail-closed tests —
+          # the silent-skip gap (#1171) this leg closes. The `status-list-flate2` SUPERSET
+          # feature additionally compiles the built-in `flate2` GZIP decoder + its real-gzip
+          # round-trip test, so a single leg with that feature reaches EVERY status-list cfg
+          # (the leg's `--features` set is a superset of both `status-list` and
+          # `status-list-flate2`). The leg runs `clippy --all-targets -D warnings` with the
+          # feature ON (the real gate) + `cargo test`, which drives the REAL gate path
+          # (admit_with_status → derive_grants over a decoded Bitstring Status List) and the
+          # load-bearing SAFETY invariant: fail-closed on set/unknown/stale + a minimal denial
+          # justification. Verified: `cargo nextest list -p sparq-trust --features
+          # status-list-flate2` lists the status_list::tests unit suite + the live_status_e2e
+          # integration tests.
+          - name: sparq-trust (status-list-flate2 — live status/revocation + denial justification)
+            crate: sparq-trust
+            features: status-list-flate2
+            test: true
+          # [OPUS-4.8] sq-uor3g (epic sq-0dksu, Phase 4): the sparq security-property
+          # ODRL PROFILE in sparq-policy — the `secx:requires…` leftOperands made
+          # first-class. The whole `secprop` module (Rust constants + leftOperand→
+          # dimension map + recogniser) is `#[cfg(feature = "secprop-leftoperands")]`,
+          # its `secprop::tests` unit drift-checks (TTL↔constants, fail-closed eval) and
+          # the `tests/secprop_leftoperands.rs` integration suite are
+          # `#![cfg(feature = "secprop-leftoperands")]`, so ci.yml's default-feature
+          # `nextest archive` compiles them EMPTY and runs ZERO of them — the silent-skip
+          # gap (#1171) this leg closes. The feature is dependency-free (`const &str` data
+          # + a published `.ttl` drift test, strictly additive — it does NOT touch the
+          # stateless `evaluate` path), so this leg is cheap and reaches every
+          # secprop-leftoperands test. Verified locally: `cargo test -p sparq-policy
+          # --features secprop-leftoperands` runs the 11 `secprop::tests` unit checks +
+          # the 4 `secprop_leftoperands.rs` integration tests, and `clippy --all-targets
+          # -D warnings` is clean in every state. Appended at the END to minimise the
+          # recurring feature-matrix.yml conflict.
+          - name: sparq-policy (secprop-leftoperands — ODRL security-property profile)
+            crate: sparq-policy
+            features: secprop-leftoperands
             test: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
