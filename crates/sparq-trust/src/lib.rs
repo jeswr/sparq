@@ -154,6 +154,16 @@ pub mod secprop;
 #[cfg(feature = "store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "store")))]
 pub mod store;
+/// Live credential status / revocation over a W3C Bitstring Status List + a minimal PROV-O
+/// denial justification (the P6 status stratum, `sq-pfae.7`): fetch (pluggable resolver) +
+/// decode (multibase + a pluggable GZIP seam) a status list, gate derivations **fail-closed
+/// on set/unknown/stale** status, and render a minimal `prov:`/`trust:` justification per
+/// allow OR deny. Behind the default-OFF `status-list` feature (dependency-free; the nested
+/// `status-list-flate2` feature adds the built-in `flate2` GZIP decoder): nothing in the lean
+/// default build depends on it.
+#[cfg(feature = "status-list")]
+#[cfg_attr(docsrs, doc(cfg(feature = "status-list")))]
+pub mod status_list;
 pub mod vocab;
 pub mod wire;
 
@@ -162,6 +172,8 @@ pub use admissibility::{admissible, ruleset, Admissibility};
 pub use admit::{
     admit, admit_static, AdmittedFact, PresentedCredential, Session, StaticAdmittedFact,
 };
+#[cfg(feature = "status-list")]
+pub use admit::admit_with_status;
 pub use delegation::{
     effective_against_current, hop_message, invoke, Capability, DelegationChain, DelegationHop,
     EffectiveCapability, Invocation, InvocationDenied,
@@ -181,5 +193,11 @@ pub use policy::{resolve_rule_keys, IssuerBinding};
 #[cfg(feature = "store")]
 pub use store::{
     AdmissionCacheKey, PolicyVersion, StoreError, TrustDocument, TrustLayer, TrustStore,
+};
+#[cfg(feature = "status-list")]
+pub use status_list::{
+    decode_encoded_list, justify_status_decision, GzipDecoder, IdentityGzipDecoder, LiveStatus,
+    LiveStatusCheck, StatusBitstring, StatusJustification, StatusListEntry, StatusListResolver,
+    StatusPurpose,
 };
 pub use wire::{derive_conditional_grants, derive_grants, ConditionalGrant};
