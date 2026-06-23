@@ -491,6 +491,21 @@ history of that base (blank-node labels are stable within a lineage, which is wh
 relies on); cross-lineage diffing is unsupported. At-rest encryption is out of scope, same as the
 base.
 
+**Durable, replayable change-data-capture stream (`sparq-serve` feature `change-stream`,
+default OFF; `sq-b4fns`, gh-906).** Where the delta above is the PITR *backup* companion, this is
+a **continuous CDC stream** in the Amazon-Neptune-Streams shape: `sparq_serve::change_stream::ChangeLog`
+records **every** commit as one ordered, monotonically-sequenced **change record** —
+`(seq, generation, timestamp, +inserts / −deletes as N-Quads)` — to a **segmented, fsync'd
+append-only log on disk**. A consumer `poll(from_seq)`s from any offset and **replays after a
+process restart** (`ChangeLog::open` re-reads the segments, recovers a torn tail, and resumes at the
+next seq) — a raw durable cross-service feed (replication / live downstream index / triggers),
+distinct from the *ephemeral* in-process WebSocket/SSE subscriptions (a disconnect misses every
+change). Same N-Quads same-lineage quad-set diff + fail-closed FNV-1a digest as the backup family
+(no new dependency; no HTTP/async in the library). At-rest encryption + authenticity are out of
+scope, same as the backup family. The library primitive lands first; the `sparq-server`
+`GET /streams` HTTP poll endpoint (Neptune-style `GetRecords`) and a `ChangeSink` trait for an
+external broker (Kafka/NATS) are tracked as **separate later opt-ins** (deferred follow-up beads).
+
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
 `application/sparql-update` operation uses — so they share its atomicity, snapshot

@@ -13,8 +13,28 @@ mod applier;
 /// (fail-closed on a corrupt/mismatched artifact). Compiled only behind the opt-in `backup`
 /// feature (default OFF); the serving core is fully buildable without it. See the module docs
 /// for the Option-A artifact format and the at-rest-encryption out-of-scope boundary.
+///
+/// [OPUS-4.8] (sq-b4fns) Also compiled (privately) when the `change-stream` feature is on
+/// WITHOUT `backup`: the change stream reuses this module's `BackupError` and the
+/// self-contained FNV-1a `body_digest`, so the two share one integrity scheme + error type.
+/// In that case the module is `pub(crate)` (the `export`/`import` backup surface is NOT part
+/// of the change-stream feature's public API). `#[allow(dead_code)]` covers the
+/// backup-only export/import helpers that go unused in a change-stream-only build.
 #[cfg(feature = "backup")]
 pub mod backup;
+#[cfg(all(feature = "change-stream", not(feature = "backup")))]
+#[allow(dead_code)]
+pub(crate) mod backup;
+/// [OPUS-4.8] (sq-b4fns, gh-906) DURABLE, REPLAYABLE change-data-capture stream in the
+/// Neptune-Streams shape — each commit emits an ordered, monotonically-sequenced change
+/// record (op, quad(s), commit seq/generation, timestamp) persisted to a segmented, fsync'd
+/// append-only log so a consumer can [`poll`](change_stream::ChangeLog::poll) from a given
+/// offset and REPLAY after a restart ([`open`](change_stream::ChangeLog::open) re-reads the
+/// segments). Compiled only behind the opt-in `change-stream` feature (default OFF); the
+/// serving core is byte-identical without it. See the module docs for the segment format and
+/// the same-lineage / fail-closed boundaries.
+#[cfg(feature = "change-stream")]
+pub mod change_stream;
 /// [OPUS-4.8] (sq-bu1a) The INCREMENTAL DELTA-STREAM / point-in-time-recovery companion to the
 /// Option-A base backup ([`backup`]): export the change between two same-lineage generations as a
 /// self-describing delta artifact keyed off generation/writer-seq, and replay an ordered chain of
@@ -60,6 +80,20 @@ pub use backup_delta::{
     export_delta as backup_export_delta, import_delta as backup_import_delta,
     replay as backup_replay, Delta, DeltaMeta, DELTA_MAGIC,
 };
+// [OPUS-4.8] (sq-b4fns, gh-906) The durable change-data-capture stream (feature
+// `change-stream`): `ChangeLog` is the segmented, fsync'd append-only log; `record_commit`
+// appends one ordered change record per commit and `poll(from_seq)` replays from an offset
+// (resumable after a restart via `ChangeLog::open`). `ChangeRecord`/`Change`/`ChangeOp` are
+// the read-back forms; `ChangeLogConfig` tunes segment size + fsync; `SEGMENT_MAGIC` is the
+// distinguishing magic line. `BackupError` (re-exported here too so a change-stream-only
+// consumer can name the error type) is the shared fail-closed error of the backup family.
+#[cfg(feature = "change-stream")]
+pub use change_stream::{
+    Change, ChangeLog, ChangeLogConfig, ChangeOp, ChangeRecord, DEFAULT_SEGMENT_TARGET_BYTES,
+    SEGMENT_MAGIC,
+};
+#[cfg(all(feature = "change-stream", not(feature = "backup")))]
+pub use backup::BackupError;
 pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 pub use epoch::{Epoch, PodEpochs, PodId};
 pub use footprint::{Footprint, TargetGraph};
