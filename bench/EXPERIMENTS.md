@@ -7,10 +7,13 @@ links to its detailed record; the numbers live in the linked `bench/.../RESULTS*
 
 ✨ **Two cross-cutting findings the experiments keep reproducing:**
 
-1. **Real measurement beats proxies — proxies inverted the verdict twice.** A
-   char/byte *proxy* said "don't adopt PKG-query" and "outline-before-read is the
-   big lever"; the **real cache-discounted transcript measurement reversed both**.
-   Re-measure work-levers with real tokens before codifying them.
+1. **Real measurement beats proxies — proxies inverted the verdict THREE times.** A
+   char/byte *proxy* said "don't adopt PKG-query", "outline-before-read is the big
+   lever", and "the `K:` terse layer saves ≈20% tokens"; the **real cache-discounted
+   transcript measurement reversed all three** (PKG-query halves tokens; outline-first
+   costs *more*; `K:` saves only ~0.02% once the fixed full-session floor is counted).
+   The proxy reliably **over-claims the token lever**. Re-measure work-levers with real
+   tokens before codifying them.
 2. **For an LLM agent, fluency beats formal superiority.** The agent-facing win
    came from what the model wields fluently (a Haiku NL-tool; `schema.org` terms),
    not from the formally-richest option (`ast-grep`/outline; academic `gUFO`).
@@ -25,7 +28,7 @@ links to its detailed record; the numbers live in the linked `bench/.../RESULTS*
 | **FO-KM Metric 1** | Does any foundational ontology beat gUFO / no-FO for the agent's KM tasks? | 16 | **schema.org-as-top wins (0.84)** ≫ DOLCE-DUL (0.64) > no-FO (0.58) > **gUFO (0.54, *below* no-FO)**. Driver = **LLM fluency**, not formal richness. | `bench/fo-km/RESULTS.md` (PRs #1107/#1108, landing) |
 | **bd → sparq bridge eval** | Can sparq replace the bead tracker? | — | **Bridge, don't replace** (0/4 replacement criteria met). The real value is the research↔beads JOIN (links designs to their covering beads; surfaces dormant designs). | `crates/sparq-kb` README + PR #1076 |
 | **gUFO closure-prior (KGE)** | Does gUFO closure firm up the link-prediction MRR lift? | multi-seed | **Not robust** — the lift is sign-unstable across synthetic slices (within per-seed spread). A real schema-bearing KG run is needed. | PR #1094 / `crates/sparq-vectors` eval |
-| **sparq-terse query-authoring A/B** | Does the terse dialect (`K:` keywords / `V()`) save query-authoring tokens vs plain SPARQL, at equal correctness? | 30 | **Split, per lever.** Lever 1 (`K:` keyword) clears the token bar **and ties** plain SPARQL on quality → **conditional adopt** (proxy fidelity; pending the transcript fan-out). Lever 3 (`V()`) **does-not-adopt on quality** — it loud-fails (correctly) on a punctuation-heavy prefLabel, so `resolution_correctness < 1.0`. A `V()` is a clean-label convenience, not a drop-in for an explicit IRI. | [`terse/RESULTS.md`](terse/RESULTS.md) |
+| **sparq-terse query-authoring A/B** | Does the terse dialect (`K:` keywords / `V()`) save query-authoring tokens vs plain SPARQL, at equal correctness? | 30 (60 real transcripts) | **`K:` does-not-adopt for tokens — the proxy was wrong (3rd reversal).** At REAL full-session-transcript fidelity (sq-bmpzd) `K:` saves **0.02%** (p=0.13, CI [0,18] includes 0), not the ≈20% the input-authoring proxy reported — every session costs ~14.1k eff tokens, the fixed session floor dwarfs the shorter query body. `K:` **ties** plain SPARQL on quality (parses/grounded/F1 all equal), so it is a legibility convenience, **not** a token-saver. Lever 3 (`V()`) was out of scope here; its prefLabel gap is fixed (`sq-26fdp`). | [`terse/RESULTS.md`](terse/RESULTS.md) |
 
 ## Designs (context for the above)
 

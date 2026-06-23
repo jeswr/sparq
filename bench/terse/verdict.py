@@ -91,7 +91,16 @@ def load(path: str):
 
 
 def lever_verdict(name: str, arm: str, tok_eff, tok_eff_nocard, grades, tasks_by_id) -> dict:
-    """arm is 'B' (lever keyword) or 'C' (lever V). Paired deltas A - arm."""
+    """arm is 'B' (lever keyword) or 'C' (lever V). Paired deltas A - arm.
+
+    A targeted fan-out may run only the arms a bead is scoped to (e.g. sq-bmpzd is the
+    K:-keyword upgrade, so it fans out arms A + B only). If this lever's arm has no token
+    rows, the lever is reported SKIPPED rather than crashing on empty data — the verdict
+    for the arm that WAS run is unaffected."""
+    if not tok_eff.get(arm) or not tok_eff.get("A"):
+        return {"lever": name, "fidelity": "n/a", "skipped": True,
+                "skip_reason": f"no token rows for arm {arm} in this run (lever not fanned out)",
+                "token_win": False, "honest": True, "recommend_adopt": False}
     paired = []
     paired_nocard = []
     for tid in tok_eff["A"]:
@@ -202,6 +211,9 @@ def main(argv: list[str]) -> int:
     vk = lever_verdict("keyword", "B", eff, eff_nc, grades, tasks)
     vv = lever_verdict("V", "C", eff, eff_nc, grades, tasks)
     for v in (vk, vv):
+        if v.get("skipped"):
+            v["recommend_adopt_conditional"] = False
+            continue
         v["fidelity"] = fidelity
         # a proxy run can at most CONDITIONALLY recommend
         if fidelity != "full-session-transcript" and v["recommend_adopt"]:
@@ -229,6 +241,9 @@ def main(argv: list[str]) -> int:
     print(f"=== sparq-terse Phase-5 verdict (N={len(tasks)}, fidelity={fidelity}) ===")
     for v in (vk, vv):
         print(f"\nLEVER {v['lever']} (arm {'B' if v['lever']=='keyword' else 'C'}):")
+        if v.get("skipped"):
+            print(f"  SKIPPED — {v['skip_reason']}")
+            continue
         print(f"  median eff A={v['median_eff_A']} arm={v['median_eff_arm']}  "
               f"delta={v['token_delta_median_pct']}%  CI={v['token_delta_ci']}  "
               f"p={v['wilcoxon_p']}")
