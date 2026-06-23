@@ -1414,3 +1414,239 @@ fn purpose_subsumption_bulk_taxonomy_builder() {
         "bulk taxonomy builder computes the transitive closure"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Additional correctness coverage. [OPUS-4.8] sq-bif.
+//
+// These pin behaviours the suite above did not assert: the **conjunction of
+// multiple duties** (every duty must be discharged, not just one), the duty
+// **default action** (a duty with no `odrl:action` falls back to the `use`
+// umbrella), the `isPartOf` set **separators** (`,` as well as `|`/space), the
+// **typed-value boundary** for `isPartOf` (a `Value::Num` carries no string so it
+// never matches a set, while the same value as a `Value::Str` does), **cross-type**
+// value equality (an `Iri` actual matches a `Str` right-operand with the same
+// canonical string — the parser's intentional reading), `odrl:rightOperandReference`
+// parsing (an IRI right-operand named via the reference predicate), and the
+// **malformed-typed-literal fallback** (an `xsd:integer` whose lexical form is not a
+// number is carried as a `Str`, not silently treated as 0 or dropped).
+// ---------------------------------------------------------------------------
+
+// A permission carrying TWO duties grants ONLY when BOTH are discharged — the
+// duties are conjoined (ANDed). Discharging just one is a DENY: the regression this
+// catches is an evaluator that grants on the first (or any) duty rather than all.
+#[test]
+fn multiple_duties_all_must_be_discharged() {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/d2> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:duty [ odrl:action odrl:anonymize ] ;
+    odrl:duty [ odrl:action odrl:compensate ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    assert_eq!(p.permissions[0].duties.len(), 2, "both duties parsed");
+    let base = Request::new(left("read")).on("urn:asset/x");
+    // No duty discharged → DENY.
+    assert!(!evaluate(&p, &base).allow);
+    // Only ONE of the two discharged → still DENY (the other is undischarged).
+    assert!(
+        !evaluate(&p, &base.clone().discharge(left("anonymize"))).allow,
+        "one of two duties is not enough"
+    );
+    assert!(
+        !evaluate(&p, &base.clone().discharge(left("compensate"))).allow,
+        "the other single duty is not enough either"
+    );
+    // BOTH discharged → ALLOW.
+    let both = base
+        .discharge(left("anonymize"))
+        .discharge(left("compensate"));
+    assert!(evaluate(&p, &both).allow, "both duties discharged → grant");
+}
+
+// A duty with no explicit `odrl:action` defaults to the `odrl:use` umbrella action
+// (the same default a rule's action takes when omitted), so it is discharged by
+// `use` — not by some other action and not vacuously.
+#[test]
+fn duty_with_no_action_defaults_to_use() {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/du> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:duty [ odrl:assignee <https://x.ex/me> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    assert_eq!(p.permissions[0].duties.len(), 1);
+    assert_eq!(
+        p.permissions[0].duties[0].action.0,
+        left("use"),
+        "an action-less duty defaults to the use umbrella"
+    );
+    let base = Request::new(left("read")).on("urn:asset/x");
+    // Undischarged → DENY; discharging the *use* action → ALLOW.
+    assert!(!evaluate(&p, &base).allow);
+    assert!(
+        evaluate(&p, &base.clone().discharge(left("use"))).allow,
+        "the default-use duty is discharged by use"
+    );
+    // Discharging an UNRELATED action does NOT discharge the use duty.
+    assert!(
+        !evaluate(&p, &base.discharge(left("anonymize"))).allow,
+        "an unrelated discharge does not satisfy the use duty"
+    );
+}
+
+// `odrl:isPartOf` set membership accepts a comma-separated right operand (not only
+// `|`/space-separated), so a recipient listed in `a,b,c` is a member.
+#[test]
+fn is_part_of_accepts_comma_separated_set() {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/cs> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand "a,b,c" ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let base = Request::new(left("read")).on("urn:asset/x");
+    // `b` is a member of `a,b,c` → ALLOW.
+    let member = base.clone().with(left("recipient"), Value::Str("b".into()));
+    assert!(evaluate(&p, &member).allow, "b ∈ {{a,b,c}}");
+    // `z` is not a member → DENY.
+    let nonmember = base.with(left("recipient"), Value::Str("z".into()));
+    assert!(!evaluate(&p, &nonmember).allow, "z ∉ {{a,b,c}}");
+}
+
+// The typed-value boundary for `isPartOf`: a `Value::Num` carries no string form, so
+// it can never be a member of a string set, whereas the SAME value supplied as a
+// `Value::Str` matches. This pins that set membership is a string operation (a
+// regression that string-ified numbers would silently widen the set match).
+#[test]
+fn is_part_of_numeric_actual_never_matches_string_set() {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/ns> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:count ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand "1 2 3" ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    let base = Request::new(left("read")).on("urn:asset/x");
+    // A numeric 2 does NOT match the string set (Num has no string form).
+    assert!(
+        !evaluate(&p, &base.clone().with(left("count"), Value::Num(2.0))).allow,
+        "a Value::Num is not a member of a string set"
+    );
+    // The same value as a string DOES match the set.
+    assert!(
+        evaluate(&p, &base.with(left("count"), Value::Str("2".into()))).allow,
+        "the string '2' is a member of the set"
+    );
+}
+
+// Cross-type value equality: an `eq` constraint whose right operand parses as a
+// plain-literal `Str` is satisfied by a request value supplied as an `Iri` with the
+// same canonical string (and vice-versa). The evaluator compares by canonical string
+// across the Iri/Str type split — pinning the parser's intentional reading so a later
+// "compare types strictly" change cannot silently start denying.
+#[test]
+fn eq_matches_across_iri_and_str_value_types() {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/ct> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+                      odrl:rightOperand "urn:purpose/r" ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    // The right operand parsed to a Str; an Iri actual with the same string matches.
+    assert!(
+        matches!(&p.permissions[0].constraints[0].right, Value::Str(s) if s == "urn:purpose/r"),
+        "right operand is a plain-literal Str"
+    );
+    let base = Request::new(left("read")).on("urn:asset/x");
+    let iri_actual = base.clone().for_purpose(Value::Iri("urn:purpose/r".into()));
+    assert!(
+        evaluate(&p, &iri_actual).allow,
+        "an Iri actual equals a Str right-operand with the same canonical string"
+    );
+    // A different string still denies (the canonical-string compare is exact).
+    let other = base.for_purpose(Value::Iri("urn:purpose/other".into()));
+    assert!(!evaluate(&p, &other).allow);
+}
+
+// `odrl:rightOperandReference` is an accepted spelling of the right operand (an IRI
+// reference), parsed to the same `Value::Iri` and matched identically to a plain
+// `odrl:rightOperand`. A regression that ignored the reference predicate would parse
+// a constraint with a missing right operand → the unsatisfiable guard → wrongly DENY.
+#[test]
+fn right_operand_reference_is_parsed_and_matched() {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+<urn:pol/ror> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:spatial ; odrl:operator odrl:eq ;
+                      odrl:rightOperandReference <urn:country/EU> ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    assert_eq!(
+        p.permissions[0].constraints.len(),
+        1,
+        "the reference-form constraint is a well-formed atomic constraint"
+    );
+    assert_eq!(
+        p.permissions[0].constraints[0].right,
+        Value::Iri("urn:country/EU".into()),
+        "rightOperandReference parses to the same Value::Iri"
+    );
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .with(left("spatial"), Value::Iri("urn:country/EU".into()));
+    assert!(
+        evaluate(&p, &req).allow,
+        "a rightOperandReference bound matches like rightOperand"
+    );
+}
+
+// A typed numeric literal whose lexical form is NOT a number (`"x"^^xsd:integer`)
+// falls back to a `Value::Str` rather than being dropped or coerced to 0. The rule
+// then still parses (no panic, no silent unsatisfiable guard from a missing operand)
+// and an `eq` against the same string succeeds — pinning the fail-soft typing.
+#[test]
+fn malformed_numeric_literal_falls_back_to_string() {
+    let ttl = format!(
+        r#"
+@prefix odrl: <{ODRL}> .
+@prefix xsd: <{XSD_DT_NS}> .
+<urn:pol/mn> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:count ; odrl:operator odrl:eq ;
+                      odrl:rightOperand "notanumber"^^xsd:integer ] ] .
+"#
+    );
+    let p = parse_policy_str(&ttl, "turtle").unwrap();
+    assert_eq!(
+        p.permissions[0].constraints[0].right,
+        Value::Str("notanumber".into()),
+        "an unparseable xsd:integer is carried as a Str, not coerced/dropped"
+    );
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .with(left("count"), Value::Str("notanumber".into()));
+    assert!(
+        evaluate(&p, &req).allow,
+        "the string-fallback bound still compares by string equality"
+    );
+}

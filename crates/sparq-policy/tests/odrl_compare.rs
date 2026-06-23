@@ -456,3 +456,103 @@ fn tighter_numeric_bound_is_contained() {
     // over-claiming `NotContained`. (See the module soundness contract.)
     assert_eq!(contains(&inner, &outer), Containment::Unknown);
 }
+
+// ---------------------------------------------------------------------------
+// COMPOUND-CONSTRAINT DEGRADATION (the sq-a0zef fail-OPEN guards). [OPUS-4.8] sq-bif.
+//
+// The static analyser does NOT model compound `odrl:LogicalConstraint`s. The existing
+// `Possible`/`Unknown` cases above degrade on an *atomic* constraint the analyser
+// cannot prove total; these pin the distinct **compound-constraint** guards:
+//
+//  * a prohibition carrying ANY compound constraint can never be proven to carve out
+//    the WHOLE permission → the conflict is `Possible`, never `Certain` (even though
+//    its atomic+structural footprint matches the permission exactly); and
+//  * an OUTER permission carrying a compound constraint may be strictly narrower than
+//    its atomic+structural footprint suggests → containment degrades to `Unknown`,
+//    never `Contains` (claiming `Contains` would be the fail-OPEN error).
+//
+// A regression that dropped either guard would over-claim `Certain`/`Contains`.
+// ---------------------------------------------------------------------------
+
+/// A prohibition whose ONLY refinement is a compound `LogicalConstraint` — its
+/// action/target/assignee match the permission exactly and it carries no *atomic*
+/// constraint, so a naive analyser would call the conflict `Certain`. Because the
+/// compound is not modelled, the verdict honestly degrades to `Possible`.
+#[test]
+fn compound_constrained_prohibition_is_only_possible() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/p> a odrl:Set ;
+  odrl:permission  [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+  odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or
+        [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+          odrl:rightOperand "2024-01-01T00:00:00Z"^^xsd:dateTime ] ,
+        [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gt ;
+          odrl:rightOperand "2030-01-01T00:00:00Z"^^xsd:dateTime ] ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    // The compound is parsed onto the prohibition (so it really exercises the guard,
+    // not an empty-constraints shortcut).
+    assert_eq!(
+        p.prohibitions[0].logical_constraints.len(),
+        1,
+        "the prohibition carries a compound constraint"
+    );
+    assert!(
+        p.prohibitions[0].constraints.is_empty(),
+        "and NO atomic constraint — only the compound could make it Possible"
+    );
+    let conflicts = detect_conflicts(&p);
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    assert_eq!(
+        conflicts[0].overlap,
+        Overlap::Possible,
+        "a compound on the prohibition forbids a Certain verdict"
+    );
+}
+
+/// An OUTER permission whose only refinement is a compound `LogicalConstraint`,
+/// against an unconstrained INNER permission on the same action/target. Structurally
+/// `outer ⊇ inner`, but the unmodelled compound could make `outer` strictly narrower,
+/// so containment is `Unknown` (never `Contains`). The atomic-footprint twin
+/// (`unconstrained_outer_contains_constrained_inner`) returns `Contains`; this is the
+/// compound-guard counterpart.
+#[test]
+fn compound_constrained_outer_makes_containment_unknown() {
+    let outer = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/outer> a odrl:Set ;
+  odrl:permission [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or
+        [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+          odrl:rightOperand "2024-01-01T00:00:00Z"^^xsd:dateTime ] ,
+        [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gt ;
+          odrl:rightOperand "2030-01-01T00:00:00Z"^^xsd:dateTime ] ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let inner = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/inner> a odrl:Set ;
+  odrl:permission [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    assert_eq!(
+        outer.permissions[0].logical_constraints.len(),
+        1,
+        "the outer permission carries the compound that drives the Unknown"
+    );
+    assert_eq!(
+        contains(&outer, &inner),
+        Containment::Unknown,
+        "a compound on the outer permission forbids a Contains verdict"
+    );
+}
