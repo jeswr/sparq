@@ -238,4 +238,141 @@ mod tests {
         assert!(Temporal::of_lit("13:00:00", "http://www.w3.org/2001/XMLSchema#time").is_none());
         assert!(Temporal::of_lit("42", "http://www.w3.org/2001/XMLSchema#integer").is_none());
     }
+
+    // [OPUS-4.8] sq-bif — the tests below close real gaps in this module's default surface:
+    // `Timeline::cmp_tl` (the direct timeline-comparison API — previously only `Temporal::cmp_t`
+    // was exercised), `parse_date`'s timezone-OFFSET branch (only the `Z` branch was covered),
+    // the `parse_tz` / `parse_civil_date` parsers' boundary + rejection behaviour, the
+    // dateTime/dateTimeStamp shared family, and `instant()`'s timezone normalisation.
+
+    /// `Timeline::cmp_tl` is the public timeline comparison the engine calls before a cache
+    /// cell exists; it must follow the SAME XPath rules as the cached `Temporal::cmp_t` —
+    /// both-zoned/both-floating compare directly, mixed presence is indeterminate inside the
+    /// ±14h window and decidable outside it. Previously untested.
+    #[test]
+    fn cmp_tl_matches_xpath_and_temporal_cmp() {
+        let p = |s: &str| Timeline::parse_datetime(s).unwrap();
+        // Equal instants across timezones compare Equal.
+        assert_eq!(
+            Timeline::cmp_tl(p("2024-03-15T13:00:00Z"), p("2024-03-15T14:00:00+01:00")),
+            Some(Equal),
+        );
+        // Both floating (no tz): a direct compare.
+        assert_eq!(Timeline::cmp_tl(p("2024-03-15T12:00:00"), p("2024-03-15T13:00:00")), Some(Less));
+        // Mixed presence inside the ±14h window: indeterminate (a SPARQL type error).
+        assert_eq!(Timeline::cmp_tl(p("2024-03-15T13:00:00Z"), p("2024-03-15T13:00:00")), None);
+        // Mixed presence OUTSIDE the window: decidable.
+        assert_eq!(Timeline::cmp_tl(p("2024-03-15T13:00:00Z"), p("2024-03-17T13:00:00")), Some(Less));
+
+        // And `cmp_tl` agrees with the cached `Temporal::cmp_t` on the same lexicals.
+        for (a, b) in [
+            ("2024-03-15T13:00:00Z", "2024-03-15T14:00:00+01:00"),
+            ("2024-03-15T13:00:00Z", "2024-03-15T13:00:00"),
+            ("2024-03-15T13:00:00Z", "2024-03-17T13:00:00"),
+            ("2024-03-15T12:00:00", "2024-03-15T13:00:00"),
+        ] {
+            assert_eq!(Timeline::cmp_tl(p(a), p(b)), Temporal::cmp_t(dt(a), dt(b)), "cmp_tl/cmp_t disagree on {a} vs {b}");
+        }
+    }
+
+    /// `parse_date` must accept a timezone OFFSET suffix (`+hh:mm` / `-hh:mm`), not only `Z`,
+    /// and must NOT mistake a bare date's own hyphens for an offset sign. The offset branch
+    /// (the `len > 10 && sign && ':'` path) was previously uncovered.
+    #[test]
+    fn parse_date_handles_timezone_offset_and_bare_date() {
+        // Bare date: no timezone, midnight UTC, day 0 == 1970-01-01.
+        let epoch = Timeline::parse_date("1970-01-01").unwrap();
+        assert_eq!(epoch.secs, 0);
+        assert!(epoch.tz.is_none());
+
+        // `Z` suffix: tz present and 0.
+        let z = Timeline::parse_date("2024-03-15Z").unwrap();
+        assert_eq!(z.tz, Some(0));
+
+        // Positive and negative OFFSET suffixes are parsed (the previously-untested branch).
+        let plus = Timeline::parse_date("2024-03-15+05:00").unwrap();
+        assert_eq!(plus.tz, Some(5 * 3600));
+        let minus = Timeline::parse_date("2024-03-15-09:30").unwrap();
+        assert_eq!(minus.tz, Some(-(9 * 3600 + 30 * 60)));
+        // The civil date is the same regardless of the offset suffix.
+        assert_eq!(plus.secs, minus.secs);
+        assert_eq!(plus.secs, Timeline::parse_date("2024-03-15").unwrap().secs);
+
+        // A NEGATIVE-YEAR bare date must not be read as having a trailing offset (its leading
+        // `-` is the year sign, and there is no `:` six chars from the end).
+        let bce = Timeline::parse_date("-0044-03-15").unwrap();
+        assert!(bce.tz.is_none(), "a BCE year sign must not be parsed as a timezone offset");
+        assert!(bce.secs < 0, "44 BCE is before the epoch");
+    }
+
+    /// `parse_tz` directly: `Z` is +0, signed `±hh:mm` offsets resolve to seconds, and a
+    /// malformed offset is rejected.
+    #[test]
+    fn parse_tz_parses_offsets_and_rejects_malformed() {
+        assert_eq!(parse_tz("Z"), Some(0));
+        assert_eq!(parse_tz("+00:00"), Some(0));
+        assert_eq!(parse_tz("+05:30"), Some(5 * 3600 + 30 * 60));
+        assert_eq!(parse_tz("-08:00"), Some(-8 * 3600));
+        // Missing the `:hh` minute field is malformed.
+        assert_eq!(parse_tz("+05"), None);
+        assert_eq!(parse_tz("garbage"), None);
+    }
+
+    /// `parse_civil_date` (Howard Hinnant's days_from_civil): the epoch is day 0, ordering is
+    /// monotonic, negative (BCE) years parse, and out-of-range month/day or extra components
+    /// are rejected.
+    #[test]
+    fn parse_civil_date_epoch_ordering_and_validation() {
+        assert_eq!(parse_civil_date("1970-01-01"), Some(0), "epoch is day 0");
+        assert_eq!(parse_civil_date("1970-01-02"), Some(1));
+        assert_eq!(parse_civil_date("1969-12-31"), Some(-1));
+        // A whole non-leap year later is +365 days.
+        assert_eq!(parse_civil_date("1971-01-01"), Some(365));
+        // 2000 is a leap year (divisible by 400): Feb 29 is valid and day-of-year ordered.
+        assert!(parse_civil_date("2000-02-29").is_some());
+        assert!(parse_civil_date("2000-02-29") < parse_civil_date("2000-03-01"));
+        // BCE years parse to large-negative day counts.
+        assert!(parse_civil_date("-0001-12-31").unwrap() < 0);
+
+        // Rejections: month/day out of the 1..=12 / 1..=31 ranges, and an extra component.
+        assert!(parse_civil_date("2024-13-01").is_none(), "month 13 rejected");
+        assert!(parse_civil_date("2024-00-01").is_none(), "month 0 rejected");
+        assert!(parse_civil_date("2024-01-32").is_none(), "day 32 rejected");
+        assert!(parse_civil_date("2024-01-00").is_none(), "day 0 rejected");
+        assert!(parse_civil_date("2024-01-01-01").is_none(), "extra component rejected");
+        assert!(parse_civil_date("notanumber").is_none());
+    }
+
+    /// `xsd:dateTime` and `xsd:dateTimeStamp` share ONE temporal family (they compare on the
+    /// timeline together), while `xsd:date` is disjoint. Only the dateTime path was exercised
+    /// before; this pins dateTimeStamp's family membership and cross-family indeterminacy.
+    #[test]
+    fn datetime_and_datetimestamp_share_a_family_date_is_disjoint() {
+        let stamp = Temporal::of_lit("2024-03-15T13:00:00Z", XSD_DATE_TIME_STAMP).unwrap();
+        assert_eq!(stamp.kind, TemporalKind::DateTime, "dateTimeStamp caches as the DateTime family");
+        let dttime = dt("2024-03-15T13:00:00Z");
+        // Same instant, both in the DateTime family: comparable and Equal.
+        assert_eq!(Temporal::cmp_t(stamp, dttime), Some(Equal));
+        // A date is a disjoint family: comparing across families is a type error (None).
+        let date = Temporal::of_lit("2024-03-15", XSD_DATE).unwrap();
+        assert_eq!(date.kind, TemporalKind::Date);
+        assert_eq!(Temporal::cmp_t(stamp, date), None);
+    }
+
+    /// `Timeline::instant()` normalises a zoned time to UTC (subtracting the offset) and treats
+    /// an absent timezone as UTC, so two lexicals naming the same absolute instant share one
+    /// `instant`, and the fractional second is carried.
+    #[test]
+    fn instant_normalises_timezone_to_utc() {
+        let utc = Timeline::parse_datetime("2024-03-15T13:00:00Z").unwrap();
+        let off = Timeline::parse_datetime("2024-03-15T14:00:00+01:00").unwrap();
+        // Same absolute instant despite different wall clock + offset.
+        assert_eq!(utc.instant().to_bits(), off.instant().to_bits());
+        // A floating (no-tz) time is treated as UTC, so it equals the same wall time zoned `Z`.
+        let floating = Timeline::parse_datetime("2024-03-15T13:00:00").unwrap();
+        assert_eq!(floating.instant(), utc.instant());
+        // The fractional second survives into the instant.
+        let frac = Timeline::parse_datetime("2024-03-15T13:00:00.25Z").unwrap();
+        assert_eq!(frac.instant() - utc.instant(), 0.25);
+    }
 }

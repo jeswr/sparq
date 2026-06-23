@@ -491,6 +491,37 @@ history of that base (blank-node labels are stable within a lineage, which is wh
 relies on); cross-lineage diffing is unsupported. At-rest encryption is out of scope, same as the
 base.
 
+**Durable, replayable change-data-capture stream (`sparq-serve` feature `change-stream`,
+default OFF; `sq-b4fns`, gh-906).** Where the delta above is the PITR *backup* companion, this is
+a **continuous CDC stream** in the Amazon-Neptune-Streams shape: `sparq_serve::change_stream::ChangeLog`
+records **every** commit as one ordered, monotonically-sequenced **change record** —
+`(seq, generation, timestamp, +inserts / −deletes as N-Quads)` — to a **segmented, fsync'd
+append-only log on disk**. A consumer `poll(from_seq)`s from any offset and **replays after a
+process restart** (`ChangeLog::open` re-reads the segments, recovers a torn tail, and resumes at the
+next seq) — a raw durable cross-service feed (replication / live downstream index / triggers),
+distinct from the *ephemeral* in-process WebSocket/SSE subscriptions (a disconnect misses every
+change). Same N-Quads same-lineage quad-set diff + fail-closed FNV-1a digest as the backup family
+(no new dependency; no HTTP/async in the library). At-rest encryption + authenticity are out of
+scope, same as the backup family. A `ChangeSink` trait for an external broker (Kafka/NATS) is
+tracked as a **separate later opt-in** (deferred follow-up bead `sq-l6zks`).
+
+**`GET /streams` — CDC poll endpoint (`sparq-server` feature `change-stream`, default OFF;
+`sq-2999l`, gh-906).** The HTTP poll surface over that durable log, in the Amazon-Neptune-Streams
+`GetRecords` shape. Configure a log directory (`--change-stream DIR` / `SPARQ_CHANGE_STREAM`,
+`ServerConfig::change_stream_dir`) and the server (1) RECORDS every committed SPARQL Update as one
+ordered change record on the update path, and (2) serves `GET /streams` over it (the route is `404`
+unless the directory is set — the same double-opt-in as `/tpf`). Parameters: `iteratorType`
+(`TRIM_HORIZON` = replay all, the default; `AT_SEQUENCE_NUMBER` + `at=N`; `AFTER_SEQUENCE_NUMBER` +
+`after=N`, the resume case; `LATEST` = tail only) and `limit` (max commits per page, default 100,
+clamped to 10000). The JSON response flattens each commit's quad-level changes to one stream record
+per `(op, quad)` — `{ eventId: { commitNum: <seq>, opNum: <1-based> }, op: ADD|REMOVE, generation,
+commitTimestampNanos, data: { stmt: "<n-quads line>" } }` — plus a `nextSequenceNumber` continuation
+token (pass as `at=`/`after=`), `lastSequenceNumber`, `totalRecords` (commit count) and
+`hasMoreRecords`. A poll is a READ (gated by the read auth). A sequence-anchored `iteratorType` with
+no anchor is a fail-closed `400` (never a silent replay-all). With the feature off the route + the
+recording hook are `#[cfg]`-stripped (byte-identical); recording serialises updates only while the
+stream is on. The `ChangeSink` broker trait stays a separate later opt-in (`sq-l6zks`).
+
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
 `application/sparql-update` operation uses — so they share its atomicity, snapshot

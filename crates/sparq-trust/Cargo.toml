@@ -56,6 +56,13 @@ secprop-vocab = []
 # dependency. Enables `secprop-vocab` (it reuses the secprop namespace constant). The
 # lean default build is byte-identical with it OFF.
 secprop-admissibility = ["secprop-vocab"]
+# [OPUS-4.8] sq-dt5hv — the Phase 5 property-admissibility PRE-CHECK in the admission
+# gate (`admit::admit_with_precheck`): before the existing sig/holder checks, consult
+# the secprop reasoning to verify the presented proof method satisfies the requester's
+# ODRL privacy preference; fail-closed (default-deny) on non-satisfaction. OPT-IN: with
+# NO preference the gate is byte-identical to `admit` (strict additivity). Pure Rust over
+# the `secprop-admissibility` reduction this crate already carries — NO new dependency.
+secprop-precheck = ["secprop-admissibility"]
 # [OPUS-4.8] sq-pfae.6 — the delegation stratum's AUDIT half: render an invocation-bound
 # delegation chain + effective capability as a minimal W3C PROV-O audit graph
 # (`prov:actedOnBehalfOf` lineage + the effective grant as `auth:*` RDF), with the

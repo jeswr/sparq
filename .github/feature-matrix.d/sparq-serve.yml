@@ -1,0 +1,36 @@
+# Feature-matrix fragment for `sparq-serve`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-b4fns (gh-906): the DURABLE, REPLAYABLE change-data-capture stream
+# (Neptune-Streams shape). The whole `change_stream` module + its `change_stream::tests`
+# unit suite (the load-bearing `replay_from_offset_after_restart_is_exact`,
+# segment-roll/recover, torn-tail recovery, and the fail-closed corruption/discontinuity
+# checks) are ALL behind the default-OFF `change-stream` feature, so ci.yml's
+# default-feature `nextest archive --workspace --all-targets` (which passes NO `--features`)
+# compiles them EMPTY and runs ZERO of them — the silent-skip gap (#1171) this leg closes.
+# The feature is dependency-free (it reuses sparq-engine's `serialize-rdf` N-Quads diff +
+# the backup family's self-contained FNV-1a digest + std file IO; no new external dep, no
+# HTTP/async), so this leg is cheap and reaches every change-stream test. The leg runs
+# `clippy --all-targets -D warnings` with the feature ON (the real gate) + `cargo test`,
+# which drives the REAL durable round-trip: write commits → drop the handle (restart) →
+# reopen from disk → poll from an offset and assert the EXACT ordered change sequence, plus
+# the SAFETY invariants (fail-closed on a non-forward/discontinuous commit and on
+# mid-stream corruption; torn-tail recovery resumes from the last complete record).
+# Verified locally: `cargo test -p sparq-serve --features change-stream --lib change_stream`
+# runs the 8 change_stream unit tests; `clippy --all-targets -D warnings` is clean in the
+# default, change-stream, and all-features states.
+- name: "sparq-serve (change-stream — durable replayable CDC stream)"
+  crate: "sparq-serve"
+  features: "change-stream"
+  test: true

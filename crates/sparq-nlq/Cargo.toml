@@ -30,6 +30,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 # `live` enables AnthropicLlm (network access to the Anthropic Messages API).
 # OFF by default: CI and the eval harness run entirely on recorded fixtures.
 live = ["dep:reqwest"]
+# [OPUS-4.8] sq-2m6zm.6 (PKG NL-tool PRODUCT flavor): `nlq-endpoint` enables
+# `EndpointLlm`, a CONFIGURABLE, provider-agnostic OpenAI-compatible chat-completions
+# client (user-supplied base-url + model + key, from args or env — NOTHING is baked in).
+# This is the productization of the measured agent-flavor win (sq-zbyo7) for external
+# users who bring their OWN cheap-model endpoint. OFF by default; pulls only `reqwest`
+# (already optional, shared with `live`). Unlike `live`, the loopback-stub tests
+# exercise the real request/parse path OFFLINE — so this lane is in the feature matrix.
+nlq-endpoint = ["dep:reqwest"]
 # [OPUS-4.8] sq-2489d.1 (GenAI-KB Phase 1): `citations` enables the cross-cutting
 # provenance-join primitive (`provenance`) and the PKG-native citation renderer
 # (`cite`) + the `Answer::citations` accessor. OFF by default: keeps the lean NL→SPARQL

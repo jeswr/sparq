@@ -113,6 +113,15 @@ Prepared (parse/plan once, execute many):
 - `PreparedQuery::parse(&str) -> Result<PreparedQuery, String>` (also `FromStr`, and
   `From<spargebra::Query>` for programmatically built algebra); `query_prepared`, `ask_prepared`,
   `count_prepared`, `construct_prepared`, `describe_prepared` (+ `_with_budget`).
+- *(opt-in `params`)* **Parameterized prepared queries — safe value binding (SPARQL-injection
+  mitigation, #901).** `PreparedQuery::bind(name, oxrdf::Term) -> Result<PreparedQuery, String>`
+  and `PreparedUpdate::{parse, bind}` + `update_prepared` / `update_in_place_prepared`
+  (+ `_with_budget`). `bind` substitutes a typed value into a free placeholder variable via a pure
+  **algebra rewrite** (`Variable` -> term node), NEVER string concatenation, so a hostile bound
+  value cannot alter query structure. Convenience term constructors: `params::value::{iri, string,
+  lang_string, typed, blank}`. Fail-closed (rejects an unknown placeholder, a `BIND`/aggregate/
+  `VALUES` output, or a blank node in a predicate/graph slot). The placeholder name may be written
+  `who`, `?who`, or `$who`. **Always prefer this over building a query string from untrusted input.**
 
 Extension functions (SPARQL 17.6) and dataset views:
 
@@ -133,7 +142,17 @@ Extension functions (SPARQL 17.6) and dataset views:
   `ROWS`/`RANGE` frames, and a reusable named `WINDOW w AS (…)` clause (sq-hqhc)).
 
 Introspection: `explain(&Graph, &str)` (plan-only) and `explain_analyze(&Graph, &str)` (plan + per-
-operator execution trace).
+operator execution trace) return human-readable TEXT (the default).
+
+Structured EXPLAIN *(opt-in `explain-json` feature, OFF by default)* — a MACHINE-READABLE plan:
+`explain_plan(&Graph, &str)` and `explain_plan_analyze(&Graph, &str)` return a typed `PlanNode` tree
+(`operator`, `estimated` cardinality on BGP nodes, and — after ANALYZE — `actual` rows, wall `nanos`,
+and the per-operator **q-error** = `max(est/actual, actual/est)`; 1.0 is a perfect estimate, larger is
+worse in either direction). `PlanNode::to_json()` emits a hand-written JSON projection (no serde dep);
+`PlanNode::max_q_error()` is the whole-plan worst. `SlowQueryRing::new(n)` is a bounded ring keeping the
+N worst-by-wall-time analyzed plans (`record` / `push` / `slowest` / `to_json`) for an ops slow-query
+view. Honest boundaries: only BGP nodes carry an estimate (the only operators the planner sizes);
+q-error is `None` when either side is 0; `nanos` are always 0 on wasm32.
 
 ## Common recipes
 
@@ -391,6 +410,30 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   `PARTITION BY` are inline-deferred (use the programmatic API). The custom-aggregate side DOES ride real SPARQL `GROUP BY` (a declared aggregate
   IRI is part of the SPARQL 1.1 extension grammar). When the feature is off, zero window/aggregate-registry
   code compiles and the default build is byte-identical (no new dependencies). See the recipes above.
+- **Parameterized prepared queries (SPARQL-injection mitigation)** are the non-default `params`
+  cargo feature (bead `sq-rp3um`, #901). When you build a query/update from untrusted input, do NOT
+  concatenate it into the string — parse a *template* once and `bind` typed values. Binding is a
+  pure algebra rewrite (`Variable` -> term node), so a hostile value is matched as DATA and can
+  never inject syntax. Covers SELECT/ASK/CONSTRUCT/DESCRIBE + UPDATE; `bind` is **fail-closed**.
+
+  ```rust
+  // Cargo.toml: sparq-engine = { version = "0.1", features = ["params"] }
+  use sparq_engine::{params::value, query_prepared, update_prepared, PreparedQuery, PreparedUpdate};
+  // A hostile literal: under string concat this would break out and inject an UPDATE.
+  let hostile = r#"Bob" } INSERT DATA { <http://ex/evil> <http://ex/p> <http://ex/o> } #"#;
+  let pq = PreparedQuery::parse("SELECT ?s WHERE { ?s <http://ex/name> ?nameVal }")?
+      .bind("nameVal", value::string(hostile))?;  // carried as one literal — matches nothing
+  let _ = query_prepared(&graph, &pq)?;
+  // Bind an IRI into a subject/predicate slot (the IRI constructor validates it):
+  let pq = PreparedQuery::parse("SELECT ?o WHERE { ?who <http://ex/name> ?o }")?
+      .bind("who", value::iri("http://ex/alice")?)?;
+  let _ = query_prepared(&graph, &pq)?;
+  // UPDATE templates bind the same way (DELETE/INSERT/WHERE):
+  let pu = PreparedUpdate::parse("INSERT { <http://ex/x> <http://ex/note> ?n } WHERE { }")?
+      .bind("n", value::string(hostile))?;        // exactly one op — no injected DROP/INSERT
+  let _g2 = update_prepared(&graph, &pu)?;
+  # Ok::<(), String>(())
+  ```
 - **Vectorized columnar primitives** are the non-default `vectorized` cargo feature (M4 plan, bead
   `sq-hvfe`): the `chunk` module's `DataChunk` (a column-major, vector-at-a-time id-level batch),
   a numeric FILTER comparison kernel (`DataChunk::select_numeric` → a `SelVec`), and a
