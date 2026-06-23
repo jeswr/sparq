@@ -1,0 +1,33 @@
+# Feature-matrix fragment for `sparq-arrow`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-v78l4 (gh-910): the sparq-arrow opt-in Apache Arrow columnar export.
+# Only the `arrow` leg lives here: it pulls arrow-array/arrow-schema/arrow-buffer and
+# runs the RecordBatch export integration suite (tests/record_batch.rs is
+# `#![cfg(feature = "arrow")]`, so it ONLY runs with the feature ON): the QueryResult ->
+# RecordBatch mapping (columns/rows/types, the term-kind field decomposition, unbound ->
+# null struct slot, the duplicate-variable error) plus `clippy --all-targets -D warnings`
+# in that state.
+# NOTE: the DEFAULT (no-feature) build — only the dependency-free field-name constants +
+# the schema docs, no Arrow dependency — is already exercised by the workspace-wide
+# default lane in ci.yml (`cargo nextest archive --workspace --all-targets`, `cargo clippy
+# --workspace --all-targets -- -D warnings`, `cargo doc --workspace --no-deps`), so a
+# dedicated default leg here would be redundant. (A matrix leg cannot pass an EMPTY
+# `features:` — the shared steps interpolate `--features ${{ matrix.features }}`, and
+# cargo rejects a bare `--features` with no value; the default build belongs in the
+# workspace lane.)
+- name: "sparq-arrow (arrow — QueryResult -> RecordBatch columnar export)"
+  crate: "sparq-arrow"
+  features: "arrow"
+  test: true

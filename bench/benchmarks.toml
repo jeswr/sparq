@@ -656,6 +656,29 @@ records_to  = "bench/terse/RESULTS.md (PR #1174)"
 featured    = false
 status      = "ok"
 
+# [OPUS-4.8] sq-v78l4 (gh-910): the opt-in sparq-arrow Apache Arrow columnar export.
+# Registry STUB (status = "planned"): this PR ships the QueryResult -> RecordBatch
+# export and its correctness suite (tests/record_batch.rs), not a throughput harness.
+# A real export-rate micro-bench (rows/s into a RecordBatch over a synthetic result of
+# N solutions, the term-decomposition cost) is a deliberate follow-up; registered now so
+# the new crate is catalogued (gate G1/G3) the moment it lands. No perf number is claimed.
+[[benchmark]]
+id          = "sparq-arrow"
+name        = "Apache Arrow columnar export (QueryResult -> RecordBatch) — registry stub"
+category    = "query"
+measures    = "PLANNED: RecordBatch export rate (solution rows/s) + the per-term struct-decomposition cost over a synthetic N-solution result. This PR ships the export + its correctness suite only; the throughput micro-bench is a follow-up"
+invoke      = "cargo test -p sparq-arrow --features arrow   # correctness suite today; export-rate micro-bench TBD"
+source      = "crates/sparq-arrow/src/export.rs, crates/sparq-arrow/tests/record_batch.rs"
+dataset     = "PLANNED: synthetic SELECT result of N solutions (mixed IRIs / typed + lang-tagged literals / unbound cells), generated in-process"
+quiet_box_sensitive = true
+pinning     = "PLANNED: seeded synthetic result generator + fixed N"
+records_to  = "PLANNED: stdout; sparq-arrow crate README (no committed perf number)"
+# featured = false: opt-in capability micro-bench (a registry stub today), not a
+# head-to-head dashboard competitor card — dashboard promotion is a DISPOSITION deferred
+# to a maintainer once the real micro-bench lands. No perf claim.
+featured    = false
+status      = "planning"
+
 # =============================================================================
 # ZK — commitment pipeline, trace seam, circuit gate counts, prove/verify
 # =============================================================================

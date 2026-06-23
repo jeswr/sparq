@@ -485,11 +485,24 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   prefer `PreparedQuery` when running one query against many graphs (e.g. continuous/RSP queries).
 - **CLI/HTTP alternative**: `sparq-cli` and `sparq-server` (W3C SPARQL Protocol, `?explain=`,
   result formats JSON/XML/CSV/TSV, `/metrics`) wrap this same surface if you don't want to embed.
+- **Apache Arrow columnar export** is the opt-in `sparq-arrow` crate (separate leaf crate +
+  its own `arrow` feature, both OFF the default build — the `arrow-*` deps NEVER reach
+  `sparq-core`/`sparq-engine`/wasm). `sparq_arrow::to_record_batch(&QueryResult) -> RecordBatch`
+  projects a SELECT result into one Arrow **struct column per variable** —
+  `Struct<kind, value, datatype, language, direction>` (all nullable `Utf8`; the field names are
+  `sparq_arrow::RDF_TERM_FIELDS`). Faithful & round-trippable: an **unbound** binding is a `null`
+  struct slot (distinct from a bound empty string); `xsd:string` is written **explicitly** (not
+  elided). Honest v1 boundaries — **no numeric narrowing** (`42^^xsd:integer` is the string `"42"`
+  + a datatype field, not an `Int64`; a typed-column view is a follow-up) and **quoted triples are
+  stringified** to N-Triples in `value`. The intended on-ramp into Polars/DuckDB/pandas; a
+  `sparq-py` `Graph.query_arrow() -> pyarrow.Table` PyO3 binding is a follow-up (bead `sq-lt1ml`).
 
 ## See also
 
 - `rust-parallel-parsing` / `fused-decompress-parse` — fast/compressed RDF ingest into a `Graph`.
 - `hdt-format` — loading `.hdt` archives into a `Graph` (`sparq-hdt`).
+- `sparq-arrow` — opt-in Apache Arrow columnar export of a SELECT `QueryResult` into a
+  `RecordBatch` (one struct column per variable) for transfer into the dataframe ecosystem.
 - `sparql-formal-semantics` — the algebra/semantics reference for the SPARQL fragment.
 - `noir-circuit-patterns` / `verifiable-credentials-zk` / `mpc-protocols` — the ZK/MPC estate built
   on the `zk` trace seam (non-default `zk` feature; consumed by `sparq-zk`).
