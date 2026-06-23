@@ -3,9 +3,10 @@
 //!
 //! [OPUS-4.8] (sq-0z43i, gh #909) [`McpServer::handle_message`] is the single
 //! entry point: it takes one raw JSON-RPC message string and returns the raw
-//! response string (or `None` for a notification). The stdio transport in
-//! [`crate::transport`] is a thin loop around it; the round-trip test calls it
-//! directly, so the test exercises the real dispatch path with no process spawn.
+//! response string (or `None` for a notification). The stdio transport in the
+//! `transport` module (feature `stdio`) is a thin loop around it; the round-trip
+//! test calls it directly, so the test exercises the real dispatch path with no
+//! process spawn.
 
 use std::time::Duration;
 
@@ -66,7 +67,7 @@ impl Default for ServerConfig {
 ///
 /// Construct it with a loaded graph and a [`ServerConfig`], then drive it either via
 /// [`McpServer::handle_message`] (embed your own transport) or, with the `stdio`
-/// feature, [`crate::serve_stdio`] (the standard MCP stdio transport).
+/// feature, the `serve_stdio` loop (the standard MCP stdio transport).
 pub struct McpServer {
     graph: Graph,
     config: ServerConfig,
