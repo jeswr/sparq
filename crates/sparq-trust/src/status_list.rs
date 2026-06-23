@@ -1,0 +1,847 @@
+//! # `status_list.rs` — live credential status / revocation + a minimal denial justification (`sq-pfae.7`)
+//!
+//! The **P6 status stratum** (design `research/solid-trust-graph-authz-design.md` §6.1
+//! item 6; issue #940 / gh-940): replace the PoC's per-request `revoked: bool` input flag
+//! (the `sq-tu4e` input-only guard) with a check against a **live W3C Bitstring Status
+//! List** ([VC-BITSTRING-STATUS-LIST](https://www.w3.org/TR/vc-bitstring-status-list/)),
+//! and render a **minimal PROV-O justification** for the resulting allow OR deny.
+//!
+//! It is **OPT-IN**: the whole module sits behind the default-OFF `status-list` cargo
+//! feature, so the lean default `sparq-trust` build (and the byte-identical default
+//! `sparq-solid` build) gain nothing — strict additivity (design §2.2 G6) is preserved.
+//!
+//! ## What a credential's status entry says
+//!
+//! A `BitstringStatusListEntry` (the credential's `credentialStatus`) names:
+//! - a `statusListCredential` IRI (where the published list lives),
+//! - a `statusListIndex` (this credential's slot in that list), and
+//! - a `statusPurpose` (`revocation` / `suspension`).
+//!
+//! The published list is itself a Verifiable Credential whose `credentialSubject` carries
+//! an `encodedList`: a **multibase** string (`u` = base64url-no-pad per the current spec,
+//! or the legacy `z`-base58btc StatusList2021 form) over the **GZIP-compressed** status
+//! bitstring. Bit `i` is `bits[i >> 3] & (0x80 >> (i & 7))` — **MSB-first within each byte**,
+//! the Bitstring-Status-List §3.2 "leftmost bit is index 0" convention (this is the
+//! *opposite* of the legacy StatusList2021 LSB-first layout the ZK
+//! `sparq-zk-compose::StatusListSnapshot` mirror uses; that mirror is for the hidden-index
+//! ZK proof, NOT this clear-index gate — see *Why a separate decoder*).
+//!
+//! ## Fail-closed by construction (`sq-pfae.7`: "fail-closed on unknown/stale")
+//!
+//! The check returns a [`LiveStatus`] that is **`Live` only** when EVERY condition holds:
+//! the list resolved, decoded, the index is in range, the bit is **unset**, and the
+//! snapshot is **fresh** (its `as_of_unix_secs` is within the caller's `max_age_secs`).
+//! Every other outcome **denies**:
+//! - [`LiveStatus::Set`] — the status bit is set (revoked/suspended): deny.
+//! - [`LiveStatus::Unknown`] — no resolver wired, the list did not resolve, did not
+//!   decode, or the index is out of range: deny (**fail-closed on unknown**, NOT
+//!   fail-open). An out-of-range index is treated as not-covered (Unknown), never Live.
+//! - [`LiveStatus::Stale`] — the snapshot is older than `max_age_secs`: deny
+//!   (**fail-closed on stale**).
+//!
+//! [`LiveStatus::admits`] is the single fail-closed predicate: `true` for `Live` ONLY.
+//! Wire it into [`crate::admit::admit`] by mapping `!status.admits()` onto the existing
+//! `cred.revoked` guard — a revoked / unknown / stale credential is dropped exactly where
+//! the `revoked` flag dropped it, with NO change to the rest of the gate.
+//!
+//! ## Re-materialise on change — full re-run, not incremental (design §3.3 / G5)
+//!
+//! v1 is **full re-materialisation**: a status change (or a snapshot ageing past
+//! `max_age_secs`) invalidates the admission verdict and the caller re-runs the gate; there
+//! is **no** in-reasoner incremental retraction (the §4.4 stale-authority window is
+//! *bounded* by `max_age_secs`, not closed). This is the SAME discipline the `store` module
+//! documents for trust-document revocation: revocation propagates by re-materialise.
+//!
+//! ## Why a separate decoder (NOT the ZK `StatusListSnapshot`)
+//!
+//! `sparq-zk-compose::StatusListSnapshot` is the **host-side mirror for the hidden-index
+//! revocation ZK proof** — it is LSB-first (legacy StatusList2021), lives in the heavy ZK
+//! estate, and exists to commit a Merkle root the circuit binds. Pulling it here would drag
+//! `sparq-zk-compose` (Noir/circuit tooling) onto this crate and break lean-core. This
+//! module is the **clear-index** gate: a dependency-light, MSB-first Bitstring-Status-List
+//! decoder. The two are deliberately distinct (clear-index gate vs hidden-index proof).
+//!
+//! ## Network + GZIP are seams — the default build pulls NEITHER
+//!
+//! Like the `did:web` fetcher, the network fetch is a **pluggable** [`StatusListResolver`]
+//! (the crate ships no HTTP client). GZIP decompression is likewise a pluggable
+//! [`GzipDecoder`]: the base64url/base58btc multibase decode is hand-rolled and
+//! dependency-free, but inflate needs a codec. A built-in `Flate2GzipDecoder` is offered
+//! ONLY behind the nested default-OFF `status-list-flate2` feature (it pulls `flate2`); the
+//! plain `status-list` feature is dependency-free and decode-only over a caller-supplied
+//! decoder. An [`IdentityGzipDecoder`] (no compression) is always available for
+//! already-inflated lists and tests.
+//!
+//! ## Honest scope — what this does and does NOT do
+//!
+//! - **No privacy / unlinkability.** The status check is over the **clear** index and the
+//!   **clear** list; the resolver learns which credential is being checked. It does NOT
+//!   deliver the hidden-index ZK revocation proof (`sq-3e5`/`sq-h2v`, the ZK estate — still
+//!   externally **UNAUDITED**, `sq-qhy4`). This is the in-the-clear, fail-closed gate.
+//! - **The list itself is trusted as fetched.** v1 does NOT verify the status-list
+//!   credential's OWN issuer signature (the resolver is the trust seam — a TLS-fetched or
+//!   pre-validated list). Verifying the list VC's signature against a trusted status
+//!   authority is a documented follow-up (a captured bead), not silently solved.
+//! - **The justification is an AUDIT record, never an authority.** Like
+//!   [`crate::delegation_prov`], the PROV-O graph is emitted *after* the verdict — feeding
+//!   it back as input grants nothing (no admission rule trusts a `prov:` triple; the §2.4
+//!   reserved-predicate guard is unchanged).
+//!
+//! [OPUS-4.8] sq-pfae.7 (issue #940 / gh-940, epic sq-pfae P6). Written while Fable
+//! unavailable — flag for re-review when Fable returns. 🤖 SPARQ agent — trust-graph
+//! live-status / revocation gate.
+
+use oxrdf::vocab::{rdf, xsd};
+use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
+
+/// The W3C PROV-O namespace base (the justification uses the standard terms so the graph
+/// round-trips through any PROV-O consumer — same posture as [`crate::delegation_prov`]).
+const PROV_NS: &str = "http://www.w3.org/ns/prov#";
+
+/// The W3C Bitstring-Status-List vocabulary namespace (the status-entry terms).
+const STATUS_NS: &str = "https://www.w3.org/ns/credentials/status#";
+
+/// The `trust:` justification terms reuse the crate vocab namespace.
+const TRUST_NS: &str = crate::vocab::TRUST_NS;
+
+/// `prov:` term IRI. Every `local` here is a valid IRI suffix, so `new_unchecked` is safe.
+fn prov(local: &str) -> NamedNode {
+    NamedNode::new_unchecked(format!("{}{}", PROV_NS, local))
+}
+
+/// `trust:` term IRI for a justification predicate (constructed from the crate namespace).
+fn trust(local: &str) -> NamedNode {
+    NamedNode::new_unchecked(format!("{}{}", TRUST_NS, local))
+}
+
+/// `status:` term IRI (the W3C Bitstring-Status-List vocabulary).
+fn status(local: &str) -> NamedNode {
+    NamedNode::new_unchecked(format!("{}{}", STATUS_NS, local))
+}
+
+/// The status purpose a list serves — the W3C `statusPurpose` (a list slot is purpose-
+/// specific; a "revocation" list and a "suspension" list are distinct bitstrings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusPurpose {
+    /// `revocation` — a permanent, irreversible status change.
+    Revocation,
+    /// `suspension` — a reversible status change.
+    Suspension,
+}
+
+impl StatusPurpose {
+    /// The spec string for this purpose (`"revocation"` / `"suspension"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StatusPurpose::Revocation => "revocation",
+            StatusPurpose::Suspension => "suspension",
+        }
+    }
+}
+
+/// A credential's `BitstringStatusListEntry` — the `credentialStatus` that points at the
+/// credential's slot in a published status list (W3C Bitstring-Status-List §2).
+///
+/// This is the per-credential input the gate consults; it carries NO bit of its own (the
+/// authoritative status lives in the resolved list, never in a credential-asserted flag —
+/// the `sq-tu4e` "input-only, never self-asserted" discipline, now over a LIVE list).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusListEntry {
+    /// `statusListCredential` — the IRI of the published list VC to resolve.
+    pub status_list_credential: NamedNode,
+    /// `statusListIndex` — this credential's slot (bit index) in that list.
+    pub status_list_index: u64,
+    /// `statusPurpose` — the status this slot encodes.
+    pub purpose: StatusPurpose,
+}
+
+/// A decoded status bitstring: the inflated bytes + a freshness timestamp.
+///
+/// Bit `i` is **MSB-first within each byte** (Bitstring-Status-List §3.2: the leftmost bit
+/// of the first byte is index 0). An index past the end of the bytes reads as **set**
+/// (fail-closed padding — an out-of-range slot is treated as revoked at the bit level; the
+/// higher-level [`LiveStatusCheck`] reports such an index as `Unknown`, never `Live`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusBitstring {
+    /// The inflated status bits (MSB-first within each byte).
+    bits: Vec<u8>,
+    /// When this snapshot was produced/observed (Unix seconds) — the freshness anchor the
+    /// staleness check compares against `now - max_age_secs`.
+    as_of_unix_secs: i64,
+}
+
+impl StatusBitstring {
+    /// Build a snapshot from already-inflated MSB-first bytes observed at `as_of_unix_secs`.
+    pub fn from_bits(bits: Vec<u8>, as_of_unix_secs: i64) -> Self {
+        StatusBitstring {
+            bits,
+            as_of_unix_secs,
+        }
+    }
+
+    /// The bit at `index` (MSB-first within each byte). An out-of-range index reads as
+    /// **set** (`true`) — fail-closed padding, an unknown slot is treated as revoked.
+    pub fn is_set(&self, index: u64) -> bool {
+        let byte = (index >> 3) as usize;
+        let bit_in_byte = (index & 7) as u8; // 0 = MSB
+        match self.bits.get(byte) {
+            // MSB-first: leftmost bit is index 0 within the byte.
+            Some(b) => (b >> (7 - bit_in_byte)) & 1 == 1,
+            None => true, // out of range ⇒ fail-closed (treated as set/revoked)
+        }
+    }
+
+    /// When this snapshot was observed (Unix seconds).
+    pub fn as_of_unix_secs(&self) -> i64 {
+        self.as_of_unix_secs
+    }
+
+    /// The number of bytes in the bitstring.
+    pub fn len_bytes(&self) -> usize {
+        self.bits.len()
+    }
+}
+
+/// A pluggable GZIP decoder for the `encodedList`'s compressed payload. The multibase
+/// decode (base64url / base58btc) is hand-rolled and dependency-free, but inflate needs a
+/// codec — this is the **compression seam** that keeps the default build dependency-free.
+pub trait GzipDecoder {
+    /// Inflate `gzipped` (RFC 1952 GZIP) to the raw status bytes, or a human-readable error.
+    fn inflate(&self, gzipped: &[u8]) -> Result<Vec<u8>, String>;
+}
+
+/// A no-compression decoder: returns the input unchanged. For already-inflated lists and
+/// tests. Always available (the spec mandates GZIP, so this is NOT spec-conformant on a
+/// real `encodedList` — it is the test/seam fallback).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IdentityGzipDecoder;
+
+impl GzipDecoder for IdentityGzipDecoder {
+    fn inflate(&self, gzipped: &[u8]) -> Result<Vec<u8>, String> {
+        Ok(gzipped.to_vec())
+    }
+}
+
+/// The built-in GZIP decoder over `flate2` — ONLY behind the nested default-OFF
+/// `status-list-flate2` feature (it pulls the `flate2` dependency). The plain `status-list`
+/// feature is dependency-free and uses a caller-supplied [`GzipDecoder`].
+#[cfg(feature = "status-list-flate2")]
+#[cfg_attr(docsrs, doc(cfg(feature = "status-list-flate2")))]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Flate2GzipDecoder;
+
+#[cfg(feature = "status-list-flate2")]
+impl GzipDecoder for Flate2GzipDecoder {
+    fn inflate(&self, gzipped: &[u8]) -> Result<Vec<u8>, String> {
+        use std::io::Read as _;
+        let mut decoder = flate2::read::GzDecoder::new(gzipped);
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| format!("gzip inflate failed: {}", e))?;
+        Ok(out)
+    }
+}
+
+/// The multibase prefix for base64url-no-pad (`u`), the current Bitstring-Status-List form.
+const MULTIBASE_BASE64URL: char = 'u';
+/// The multibase prefix for base58btc (`z`), the legacy StatusList2021 form.
+const MULTIBASE_BASE58BTC: char = 'z';
+
+/// Decode a multibase `encodedList` string + inflate it into a [`StatusBitstring`].
+///
+/// Accepts the current base64url-no-pad (`u`) form and the legacy base58btc (`z`) form.
+/// Fails closed (returns `None`) on an unknown multibase prefix, malformed base, or a
+/// decoder inflate error. `as_of_unix_secs` stamps the resulting snapshot's freshness.
+pub fn decode_encoded_list<D: GzipDecoder>(
+    encoded_list: &str,
+    decoder: &D,
+    as_of_unix_secs: i64,
+) -> Option<StatusBitstring> {
+    let prefix = encoded_list.chars().next()?;
+    let body = &encoded_list[prefix.len_utf8()..];
+    let compressed = match prefix {
+        MULTIBASE_BASE64URL => base64url_decode(body)?,
+        MULTIBASE_BASE58BTC => base58btc_decode(body)?,
+        _ => return None, // unknown multibase prefix ⇒ fail closed
+    };
+    let bits = decoder.inflate(&compressed).ok()?;
+    Some(StatusBitstring::from_bits(bits, as_of_unix_secs))
+}
+
+/// A pluggable resolver for a published status-list credential. Hands the gate the
+/// `encodedList` string + the snapshot's `as_of` timestamp, or signals the list could not
+/// be obtained (mapped to a fail-closed [`LiveStatus::Unknown`]).
+///
+/// This is the **network seam** — the crate ships no HTTP client, so the default build
+/// forces no `reqwest`/`ureq` onto anyone and the resolver stays offline-testable (an
+/// in-memory map is a perfectly valid resolver for tests / a pre-fetched registry).
+pub trait StatusListResolver {
+    /// Resolve the list at `status_list_credential`. Return `(encoded_list, as_of_unix_secs)`
+    /// — the multibase `encodedList` string and when the snapshot was observed — or `None`
+    /// if the list could not be obtained (⇒ fail-closed `Unknown`).
+    fn resolve(&self, status_list_credential: &NamedNode) -> Option<(String, i64)>;
+}
+
+/// The verdict of a live status check — fail-closed by construction: ONLY [`LiveStatus::Live`]
+/// admits ([`LiveStatus::admits`]). Every other variant denies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveStatus {
+    /// The list resolved + decoded, the index is in range, the bit is **unset**, and the
+    /// snapshot is **fresh**. The ONLY variant that admits.
+    Live,
+    /// The status bit is **set** (revoked / suspended): deny.
+    Set,
+    /// The list did not resolve / decode, no resolver is wired, or the index is out of
+    /// range (not covered by the list): deny (**fail-closed on unknown**, never fail-open).
+    Unknown,
+    /// The resolved snapshot is older than the caller's `max_age_secs` (or from the
+    /// future): deny (**fail-closed on stale**).
+    Stale,
+}
+
+impl LiveStatus {
+    /// The single fail-closed admission predicate: `true` for [`LiveStatus::Live`] ONLY.
+    pub fn admits(self) -> bool {
+        matches!(self, LiveStatus::Live)
+    }
+
+    /// A short machine-readable reason token for the denial justification (or `"live"`).
+    pub fn reason(self) -> &'static str {
+        match self {
+            LiveStatus::Live => "live",
+            LiveStatus::Set => "status-set",
+            LiveStatus::Unknown => "status-unknown",
+            LiveStatus::Stale => "status-stale",
+        }
+    }
+}
+
+/// A live status check: a pluggable [`StatusListResolver`] + a [`GzipDecoder`] + a freshness
+/// budget. Consult it with [`Self::check`] for a credential's [`StatusListEntry`] at `now`.
+///
+/// Fail-closed by construction: a missing resolver, an unresolvable / undecodable list, an
+/// out-of-range index, a set bit, or a snapshot older than `max_age_secs` ALL deny.
+pub struct LiveStatusCheck<R: StatusListResolver, D: GzipDecoder> {
+    resolver: R,
+    decoder: D,
+    /// The maximum age (seconds) a resolved snapshot may have before it is treated as
+    /// stale (fail-closed). Bounds the §4.4 stale-authority window.
+    max_age_secs: i64,
+}
+
+impl<R: StatusListResolver, D: GzipDecoder> LiveStatusCheck<R, D> {
+    /// Build a check over the given resolver + decoder with a `max_age_secs` freshness
+    /// budget. A non-positive `max_age_secs` means "no snapshot is ever fresh enough" —
+    /// every check is `Stale` (the maximally fail-closed setting).
+    pub fn new(resolver: R, decoder: D, max_age_secs: i64) -> Self {
+        LiveStatusCheck {
+            resolver,
+            decoder,
+            max_age_secs,
+        }
+    }
+
+    /// Check a credential's status entry against the live list at instant `now_unix_secs`.
+    /// Returns the fail-closed [`LiveStatus`].
+    pub fn check(&self, entry: &StatusListEntry, now_unix_secs: i64) -> LiveStatus {
+        // Resolve the published list (network seam). No list ⇒ fail-closed Unknown.
+        let Some((encoded, as_of)) = self.resolver.resolve(&entry.status_list_credential) else {
+            return LiveStatus::Unknown;
+        };
+        // Decode + inflate. A bad multibase / inflate error ⇒ fail-closed Unknown.
+        let Some(snapshot) = decode_encoded_list(&encoded, &self.decoder, as_of) else {
+            return LiveStatus::Unknown;
+        };
+        // Freshness: a snapshot older than max_age_secs (or from the future) is stale.
+        let age = now_unix_secs.saturating_sub(snapshot.as_of_unix_secs());
+        if self.max_age_secs <= 0 || age < 0 || age > self.max_age_secs {
+            return LiveStatus::Stale;
+        }
+        // The bit. We distinguish a genuine in-range set bit from an out-of-range read so
+        // the justification is honest: an out-of-range index is `Unknown` (the slot is not
+        // covered by the list), NOT a positive revocation — but still fail-closed (deny).
+        let byte = (entry.status_list_index >> 3) as usize;
+        if byte >= snapshot.len_bytes() {
+            return LiveStatus::Unknown; // index not covered by the list ⇒ fail-closed Unknown
+        }
+        if snapshot.is_set(entry.status_list_index) {
+            LiveStatus::Set
+        } else {
+            LiveStatus::Live
+        }
+    }
+}
+
+// --- minimal PROV-O justification (the "minimal justification" half of sq-pfae.7) --------
+
+/// A minimal PROV-O justification for a status DECISION over a single grant — an **audit
+/// record, never an authority** (same posture as [`crate::delegation_prov`]: emitted AFTER
+/// the verdict; feeding it back grants nothing).
+///
+/// For an allow it records the grant as live; for a deny (the bead's *minimal denial
+/// justification*) it records WHY — the [`LiveStatus::reason`] token + the status entry that
+/// was checked — so an auditor can replay the decision without re-fetching the list.
+#[derive(Debug, Clone)]
+pub struct StatusJustification {
+    triples: Vec<Triple>,
+}
+
+impl StatusJustification {
+    /// The justification triples (a small fixed set, like the delegation audit).
+    pub fn triples(&self) -> &[Triple] {
+        &self.triples
+    }
+
+    /// Consume the justification, returning the owned triples.
+    pub fn into_triples(self) -> Vec<Triple> {
+        self.triples
+    }
+}
+
+/// Render a **minimal PROV-O justification** for a status decision over `grant`.
+///
+/// The activity (a fresh blank node) is a `prov:Activity` (also `trust:StatusCheck`) that
+/// `prov:generated` the grant entity; the activity `prov:used` the named
+/// `statusListCredential` entity and carries the checked index, the purpose, the decision
+/// (`trust:statusDecision` = `live` / the deny reason), and (when supplied) `prov:atTime`.
+/// For a DENY the decision token is the [`LiveStatus::reason`] — the *minimal denial
+/// justification* the bead names.
+///
+/// `grant` is the `auth:*` (or any) grant triple the decision gates; its subject is recorded
+/// as `trust:aboutSubject` and its predicate as `trust:grantPredicate`. The activity is the
+/// SAME PROV-O shape the delegation audit uses, so the two compose in one audit graph.
+pub fn justify_status_decision(
+    grant: &Triple,
+    entry: &StatusListEntry,
+    decision: LiveStatus,
+    at_time_unix_secs: Option<i64>,
+) -> StatusJustification {
+    let mut triples = Vec::new();
+    let activity = NamedOrBlankNode::BlankNode(oxrdf::BlankNode::default());
+    let grant_entity = NamedOrBlankNode::BlankNode(oxrdf::BlankNode::default());
+
+    // The activity is a prov:Activity, typed trust:StatusCheck so an auditor can find it.
+    triples.push(Triple::new(
+        activity.clone(),
+        NamedNode::from(rdf::TYPE),
+        Term::NamedNode(prov("Activity")),
+    ));
+    triples.push(Triple::new(
+        activity.clone(),
+        NamedNode::from(rdf::TYPE),
+        Term::NamedNode(trust("StatusCheck")),
+    ));
+    // It used the named status list credential (a prov:Entity input).
+    let list_entity = entry.status_list_credential.clone();
+    triples.push(Triple::new(
+        activity.clone(),
+        prov("used"),
+        Term::NamedNode(list_entity.clone()),
+    ));
+    triples.push(Triple::new(
+        NamedOrBlankNode::NamedNode(list_entity),
+        NamedNode::from(rdf::TYPE),
+        Term::NamedNode(prov("Entity")),
+    ));
+    // The checked index + purpose (so the audit binds the exact slot).
+    triples.push(Triple::new(
+        activity.clone(),
+        status("statusListIndex"),
+        Term::Literal(Literal::new_typed_literal(
+            entry.status_list_index.to_string(),
+            xsd::NON_NEGATIVE_INTEGER,
+        )),
+    ));
+    triples.push(Triple::new(
+        activity.clone(),
+        status("statusPurpose"),
+        Term::Literal(Literal::new_simple_literal(entry.purpose.as_str())),
+    ));
+    // The decision token (live / the deny reason — the minimal justification).
+    triples.push(Triple::new(
+        activity.clone(),
+        trust("statusDecision"),
+        Term::Literal(Literal::new_simple_literal(decision.reason())),
+    ));
+    // Whether the decision admits (a boolean an auditor can act on directly).
+    triples.push(Triple::new(
+        activity.clone(),
+        trust("statusAdmits"),
+        Term::Literal(Literal::new_typed_literal(
+            if decision.admits() { "true" } else { "false" },
+            xsd::BOOLEAN,
+        )),
+    ));
+    // The grant entity the activity generated, and the grant triple it is about.
+    triples.push(Triple::new(
+        activity.clone(),
+        prov("generated"),
+        Term::from(grant_entity.clone()),
+    ));
+    triples.push(Triple::new(
+        grant_entity.clone(),
+        NamedNode::from(rdf::TYPE),
+        Term::NamedNode(prov("Entity")),
+    ));
+    triples.push(Triple::new(
+        grant_entity.clone(),
+        trust("aboutSubject"),
+        subject_term(&grant.subject),
+    ));
+    triples.push(Triple::new(
+        grant_entity,
+        trust("grantPredicate"),
+        Term::NamedNode(grant.predicate.clone()),
+    ));
+    // Optional activity timestamp.
+    if let Some(t) = at_time_unix_secs {
+        triples.push(Triple::new(
+            activity,
+            prov("atTime"),
+            Term::Literal(Literal::new_typed_literal(t.to_string(), xsd::INTEGER)),
+        ));
+    }
+    StatusJustification { triples }
+}
+
+/// Lift a triple subject into an object term (named node or blank node).
+fn subject_term(s: &NamedOrBlankNode) -> Term {
+    match s {
+        NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
+        NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.clone()),
+    }
+}
+
+// --- dependency-free base decoders (hand-rolled, like did.rs's base58btc) ----------------
+
+/// Decode base64url-no-pad (RFC 4648 §5, no `=` padding) — the current Bitstring-Status-List
+/// multibase `u` form. Returns `None` on any non-alphabet character or a non-canonical
+/// (non-zero) final-sextet remainder.
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    fn val(b: u8) -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None, // including '=' (no-pad form) and base64-std '+'/'/'
+        }
+    }
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut nbits: u32 = 0;
+    for &b in bytes {
+        let v = val(b)? as u32;
+        acc = (acc << 6) | v;
+        nbits += 6;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((acc >> nbits) as u8);
+        }
+    }
+    // Any leftover bits beyond a partial final sextet must be zero (canonical no-pad).
+    if nbits > 0 && (acc & ((1u32 << nbits) - 1)) != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// Decode base58btc (Bitcoin alphabet) — the legacy StatusList2021 multibase `z` form.
+/// Hand-rolled (dependency-free), matching the `did.rs` base58 decoder's semantics.
+fn base58btc_decode(input: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    // Leading '1's encode leading zero bytes.
+    let mut leading_zeros = 0usize;
+    for &c in input.as_bytes() {
+        if c == b'1' {
+            leading_zeros += 1;
+        } else {
+            break;
+        }
+    }
+    let mut bytes: Vec<u8> = Vec::new();
+    for &c in input.as_bytes() {
+        let digit = ALPHABET.iter().position(|&a| a == c)? as u32;
+        let mut carry = digit;
+        for byte in bytes.iter_mut() {
+            carry += (*byte as u32) * 58;
+            *byte = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            bytes.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    // `bytes` is little-endian; reverse and prepend the leading zeros.
+    let mut out = vec![0u8; leading_zeros];
+    out.extend(bytes.iter().rev());
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(index: u64) -> StatusListEntry {
+        StatusListEntry {
+            status_list_credential: NamedNode::new_unchecked("https://issuer.ex/status/list#list"),
+            status_list_index: index,
+            purpose: StatusPurpose::Revocation,
+        }
+    }
+
+    /// Encode bytes as base64url-no-pad (test helper — the encoder side of the decoder).
+    fn base64url_encode(input: &[u8]) -> String {
+        const ALPHA: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        let mut acc: u32 = 0;
+        let mut nbits: u32 = 0;
+        for &b in input {
+            acc = (acc << 8) | b as u32;
+            nbits += 8;
+            while nbits >= 6 {
+                nbits -= 6;
+                out.push(ALPHA[((acc >> nbits) & 0x3f) as usize] as char);
+            }
+        }
+        if nbits > 0 {
+            out.push(ALPHA[((acc << (6 - nbits)) & 0x3f) as usize] as char);
+        }
+        out
+    }
+
+    #[test]
+    fn base64url_round_trips() {
+        for case in [
+            &b""[..],
+            &b"f"[..],
+            &b"fo"[..],
+            &b"foo"[..],
+            &b"foob"[..],
+            &b"fooba"[..],
+            &b"foobar"[..],
+            &[0u8, 1, 2, 3, 0xff, 0x80][..],
+        ] {
+            let enc = base64url_encode(case);
+            let dec = base64url_decode(&enc).expect("decodes");
+            assert_eq!(dec, case, "round-trip for {:?}", case);
+        }
+    }
+
+    #[test]
+    fn base64url_rejects_non_alphabet_and_padding() {
+        assert!(base64url_decode("ab=c").is_none(), "'=' padding rejected");
+        assert!(base64url_decode("ab cd").is_none(), "space rejected");
+        assert!(
+            base64url_decode("ab+cd").is_none(),
+            "'+' (base64 std) rejected"
+        );
+    }
+
+    #[test]
+    fn bitstring_is_msb_first_and_fail_closed_past_end() {
+        // 0b1000_0000 → index 0 set (MSB-first), indices 1..=7 unset.
+        let bs = StatusBitstring::from_bits(vec![0x80], 1000);
+        assert!(bs.is_set(0), "MSB is index 0");
+        for i in 1..8 {
+            assert!(!bs.is_set(i), "index {} unset", i);
+        }
+        // Out of range ⇒ fail-closed set (at the bit level).
+        assert!(bs.is_set(8), "out-of-range index reads as set");
+        assert!(bs.is_set(1_000_000), "far out-of-range reads as set");
+    }
+
+    #[test]
+    fn decode_encoded_list_u_prefix_identity() {
+        // 0x80 = index-0-set; base64url-no-pad with the 'u' multibase prefix; identity codec.
+        let encoded = format!("{}{}", MULTIBASE_BASE64URL, base64url_encode(&[0x80]));
+        let bs = decode_encoded_list(&encoded, &IdentityGzipDecoder, 500).expect("decodes");
+        assert!(bs.is_set(0));
+        assert!(!bs.is_set(1));
+        assert_eq!(bs.as_of_unix_secs(), 500);
+    }
+
+    #[test]
+    fn decode_encoded_list_rejects_unknown_multibase() {
+        // 'm' is base64-standard multibase, which this decoder does not accept.
+        assert!(decode_encoded_list("mgA", &IdentityGzipDecoder, 0).is_none());
+        assert!(decode_encoded_list("", &IdentityGzipDecoder, 0).is_none());
+    }
+
+    /// An in-memory resolver mapping the one list IRI to an encoded list + as_of.
+    struct MapResolver {
+        encoded: Option<(String, i64)>,
+    }
+    impl StatusListResolver for MapResolver {
+        fn resolve(&self, _iri: &NamedNode) -> Option<(String, i64)> {
+            self.encoded.clone()
+        }
+    }
+
+    fn check_with(bits: &[u8], as_of: i64, max_age: i64, now: i64, index: u64) -> LiveStatus {
+        let encoded = format!("{}{}", MULTIBASE_BASE64URL, base64url_encode(bits));
+        let resolver = MapResolver {
+            encoded: Some((encoded, as_of)),
+        };
+        let check = LiveStatusCheck::new(resolver, IdentityGzipDecoder, max_age);
+        check.check(&entry(index), now)
+    }
+
+    #[test]
+    fn live_when_unset_fresh_in_range() {
+        // index 1 unset (byte 0x80 = only index 0 set), fresh snapshot.
+        assert_eq!(check_with(&[0x80], 1000, 3600, 1500, 1), LiveStatus::Live);
+    }
+
+    #[test]
+    fn set_bit_denies() {
+        // index 0 set ⇒ Set (deny).
+        let s = check_with(&[0x80], 1000, 3600, 1500, 0);
+        assert_eq!(s, LiveStatus::Set);
+        assert!(!s.admits());
+    }
+
+    #[test]
+    fn stale_snapshot_denies_fail_closed() {
+        // snapshot at 1000, now 99999, max_age 3600 ⇒ Stale.
+        let s = check_with(&[0x00], 1000, 3600, 99999, 1);
+        assert_eq!(s, LiveStatus::Stale);
+        assert!(!s.admits());
+    }
+
+    #[test]
+    fn future_snapshot_denies_fail_closed() {
+        // snapshot timestamped in the future (now < as_of) ⇒ Stale (negative age).
+        let s = check_with(&[0x00], 5000, 3600, 1000, 1);
+        assert_eq!(s, LiveStatus::Stale);
+    }
+
+    #[test]
+    fn non_positive_max_age_is_maximally_fail_closed() {
+        // max_age 0 ⇒ nothing is ever fresh enough ⇒ Stale even at as_of == now.
+        let s = check_with(&[0x00], 1000, 0, 1000, 1);
+        assert_eq!(s, LiveStatus::Stale);
+    }
+
+    #[test]
+    fn unresolvable_list_is_unknown_fail_closed() {
+        let resolver = MapResolver { encoded: None };
+        let check = LiveStatusCheck::new(resolver, IdentityGzipDecoder, 3600);
+        let s = check.check(&entry(0), 1000);
+        assert_eq!(s, LiveStatus::Unknown);
+        assert!(!s.admits());
+    }
+
+    #[test]
+    fn out_of_range_index_is_unknown_not_set() {
+        // 1-byte list covers indices 0..=7; index 8 is not covered ⇒ Unknown, not Set.
+        let s = check_with(&[0x00], 1000, 3600, 1500, 8);
+        assert_eq!(s, LiveStatus::Unknown);
+        assert!(!s.admits());
+    }
+
+    #[test]
+    fn undecodable_list_is_unknown_fail_closed() {
+        // A bad multibase prefix ('m') ⇒ the decoder returns None ⇒ Unknown.
+        let resolver = MapResolver {
+            encoded: Some(("mZZZ".to_string(), 1000)),
+        };
+        let check = LiveStatusCheck::new(resolver, IdentityGzipDecoder, 3600);
+        assert_eq!(check.check(&entry(0), 1500), LiveStatus::Unknown);
+    }
+
+    #[test]
+    fn only_live_admits() {
+        assert!(LiveStatus::Live.admits());
+        assert!(!LiveStatus::Set.admits());
+        assert!(!LiveStatus::Unknown.admits());
+        assert!(!LiveStatus::Stale.admits());
+    }
+
+    #[test]
+    fn justification_records_the_decision_and_reason() {
+        let grant = Triple::new(
+            NamedNode::new_unchecked("https://jesse.ex/card#me"),
+            NamedNode::new_unchecked("https://sparq.dev/ns/auth#read"),
+            Term::NamedNode(NamedNode::new_unchecked("https://pod.ex/resourceX")),
+        );
+        // Deny case: a revoked status ⇒ the minimal denial justification.
+        let j = justify_status_decision(&grant, &entry(7), LiveStatus::Set, Some(1500));
+        let joined: String = j
+            .triples()
+            .iter()
+            .map(|t| format!("{} {} {}\n", t.subject, t.predicate, t.object))
+            .collect();
+        // The decision token is the deny reason (minimal justification).
+        assert!(
+            joined.contains("statusDecision") && joined.contains("status-set"),
+            "records the deny reason:\n{}",
+            joined
+        );
+        // It records statusAdmits=false.
+        assert!(
+            joined.contains("statusAdmits") && joined.contains("false"),
+            "records admits=false:\n{}",
+            joined
+        );
+        // It binds the checked index (7) + purpose.
+        assert!(joined.contains("statusListIndex"), "binds the index");
+        assert!(joined.contains("revocation"), "binds the purpose");
+        // PROV-O shape: a prov:Activity that generated a grant entity.
+        assert!(joined.contains("prov#Activity"), "is a prov:Activity");
+        assert!(joined.contains("prov#generated"), "generated the grant");
+    }
+
+    #[test]
+    fn justification_allow_records_live() {
+        let grant = Triple::new(
+            NamedNode::new_unchecked("https://jesse.ex/card#me"),
+            NamedNode::new_unchecked("https://sparq.dev/ns/auth#read"),
+            Term::NamedNode(NamedNode::new_unchecked("https://pod.ex/resourceX")),
+        );
+        let j = justify_status_decision(&grant, &entry(1), LiveStatus::Live, None);
+        let joined: String = j
+            .triples()
+            .iter()
+            .map(|t| format!("{} {} {}\n", t.subject, t.predicate, t.object))
+            .collect();
+        assert!(!joined.contains("status-set"), "not a deny token");
+        assert!(joined.contains("statusDecision"));
+        assert!(joined.contains("statusAdmits") && joined.contains("true"));
+    }
+
+    #[test]
+    fn base58btc_decodes_leading_zero() {
+        // A single '1' decodes to one zero byte (leading-zero convention).
+        let decoded = base58btc_decode("1").expect("single '1' decodes to one zero byte");
+        assert_eq!(decoded, vec![0u8]);
+    }
+
+    /// The built-in `flate2` GZIP decoder inflates a REAL gzip-compressed `encodedList`
+    /// (the spec-mandated codec) — exercised ONLY under the `status-list-flate2` feature.
+    #[cfg(feature = "status-list-flate2")]
+    #[test]
+    fn flate2_decoder_inflates_a_real_gzip_encoded_list() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write as _;
+
+        // 0x80 = index-0-set, 0x00 = indices 8..=15 unset.
+        let raw = [0x80u8, 0x00];
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&raw).unwrap();
+        let gzipped = enc.finish().unwrap();
+        // Multibase `u` (base64url) over the GZIP bytes — the real `encodedList` shape.
+        let encoded = format!("{}{}", MULTIBASE_BASE64URL, base64url_encode(&gzipped));
+        let bs = decode_encoded_list(&encoded, &Flate2GzipDecoder, 1000)
+            .expect("decodes + inflates the real gzip list");
+        assert!(bs.is_set(0), "MSB of byte 0 is index 0 (set)");
+        assert!(!bs.is_set(1));
+        assert!(!bs.is_set(8), "byte 1 is 0x00 ⇒ index 8 unset");
+        assert_eq!(bs.len_bytes(), 2);
+    }
+}
