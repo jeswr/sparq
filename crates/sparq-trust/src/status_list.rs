@@ -78,10 +78,20 @@
 //!   **clear** list; the resolver learns which credential is being checked. It does NOT
 //!   deliver the hidden-index ZK revocation proof (`sq-3e5`/`sq-h2v`, the ZK estate — still
 //!   externally **UNAUDITED**, `sq-qhy4`). This is the in-the-clear, fail-closed gate.
-//! - **The list itself is trusted as fetched.** v1 does NOT verify the status-list
-//!   credential's OWN issuer signature (the resolver is the trust seam — a TLS-fetched or
-//!   pre-validated list). Verifying the list VC's signature against a trusted status
-//!   authority is a documented follow-up (a captured bead), not silently solved.
+//! - **The list VC's OWN issuer signature is verifiable (`sq-pfae.13`).** The base
+//!   [`LiveStatusCheck`] trusts the list as fetched (the resolver is the trust seam — a
+//!   TLS-fetched or pre-validated list). The opt-in [`VerifyingLiveStatusCheck`] CLOSES
+//!   that gap: it resolves the status-list VC as a **signed graph** (a [`SignedStatusList`]
+//!   over a [`VerifiedStatusListResolver`]) and verifies the list's OWN issuer signature
+//!   over its RDFC-1.0 commitment — the SAME `sparq-zk` Schnorr-over-RDFC-1.0 path
+//!   [`crate::admit::admit`] uses — against a **trusted status-authority key** BEFORE
+//!   trusting its `encodedList`. **Fail-closed**: an unsigned, bad-signature,
+//!   wrong-key, or unresolvable-issuer status-list VC is rejected (treated as
+//!   [`LiveStatus::Unknown`] — deny), **never** trusted. With the `did` feature the
+//!   authority key can be bound from a `did:key`/`did:web` issuer DID
+//!   ([`VerifyingLiveStatusCheck::with_did_issuer`]) instead of a raw key. This is
+//!   research-grade and **externally UNAUDITED** (`sq-qhy4`) — a verified issuer
+//!   signature, NOT a privacy/unlinkability guarantee.
 //! - **The justification is an AUDIT record, never an authority.** Like
 //!   [`crate::delegation_prov`], the PROV-O graph is emitted *after* the verdict — feeding
 //!   it back as input grants nothing (no admission rule trusts a `prov:` triple; the §2.4
@@ -353,23 +363,228 @@ impl<R: StatusListResolver, D: GzipDecoder> LiveStatusCheck<R, D> {
         let Some(snapshot) = decode_encoded_list(&encoded, &self.decoder, as_of) else {
             return LiveStatus::Unknown;
         };
-        // Freshness: a snapshot older than max_age_secs (or from the future) is stale.
-        let age = now_unix_secs.saturating_sub(snapshot.as_of_unix_secs());
-        if self.max_age_secs <= 0 || age < 0 || age > self.max_age_secs {
-            return LiveStatus::Stale;
+        // Freshness + bit logic (shared with the verifying gate — an out-of-range index is
+        // `Unknown`, NOT a positive revocation, but still fail-closed; a stale snapshot
+        // denies).
+        status_from_snapshot(&snapshot, entry, self.max_age_secs, now_unix_secs)
+    }
+}
+
+// --- verified status-list VC (the list's OWN issuer signature — sq-pfae.13) ---------------
+
+/// The W3C VC `encodedList` term — the multibase status bitstring on the published
+/// status-list credential's `credentialSubject`. The verified path reads the
+/// `encodedList` from the **signed** VC graph, so the bits it gates on are exactly the
+/// bits the status authority signed.
+fn encoded_list_predicate() -> NamedNode {
+    status("encodedList")
+}
+
+/// A published status-list credential as a **signed graph** — the verifiable unit the
+/// verified gate consumes (`sq-pfae.13`). It is the SAME signed-graph shape
+/// [`crate::admit::PresentedCredential`] uses: the VC claim graph, the issuer Schnorr
+/// signature over its RDFC-1.0 commitment, and the per-graph salt the commitment was
+/// minted under.
+///
+/// The graph MUST carry the `status:encodedList` triple (the multibase status bitstring
+/// on the credential subject); the verified gate extracts the `encodedList` from THIS
+/// graph **after** the signature verifies, so the bits it trusts are exactly the bits the
+/// status authority signed. A graph with no (or a non-string) `encodedList` fails closed.
+#[derive(Debug, Clone)]
+pub struct SignedStatusList {
+    /// The status-list VC claim graph (must contain a `status:encodedList` literal).
+    pub graph: Vec<Triple>,
+    /// The status authority's Schnorr signature over `commitment_message(C(graph))`,
+    /// hex-encoded exactly as `sparq_zk::sig::SecretKey::sign_commitment` produces. An
+    /// absent / forged signature fails closed (the list is treated as `Unknown`).
+    pub issuer_signature_hex: String,
+    /// The 32-byte per-graph salt the RDFC-1.0 commitment was minted under. The verifier
+    /// re-commits under the same salt; a mismatched salt yields a different `C(graph)` and
+    /// fails the signature check.
+    pub salt: [u8; 32],
+}
+
+impl SignedStatusList {
+    /// Extract the multibase `encodedList` string from the (already verified) VC graph.
+    /// Returns `None` if the graph carries no `status:encodedList` literal — fail-closed:
+    /// a verified VC that does not actually publish a list cannot admit anything.
+    fn encoded_list(&self) -> Option<&str> {
+        let pred = encoded_list_predicate();
+        self.graph.iter().find_map(|t| {
+            if t.predicate == pred {
+                if let Term::Literal(l) = &t.object {
+                    return Some(l.value());
+                }
+            }
+            None
+        })
+    }
+}
+
+/// A pluggable resolver for a published status-list credential **as a signed graph**.
+/// Unlike [`StatusListResolver`] (which hands back the bare `encodedList` string, trusted
+/// as fetched), this returns a [`SignedStatusList`] whose OWN issuer signature the
+/// [`VerifyingLiveStatusCheck`] verifies against a trusted status authority before
+/// trusting any bit (`sq-pfae.13`).
+///
+/// Like [`StatusListResolver`] this is the **network seam** — the crate ships no HTTP
+/// client, so an in-memory map (a pre-fetched signed registry) is a valid resolver and
+/// the default build forces no `reqwest`/`ureq` onto anyone.
+pub trait VerifiedStatusListResolver {
+    /// Resolve the list at `status_list_credential` to its signed VC + the snapshot's
+    /// `as_of_unix_secs`, or `None` if it could not be obtained (⇒ fail-closed `Unknown`).
+    fn resolve_signed(&self, status_list_credential: &NamedNode)
+        -> Option<(SignedStatusList, i64)>;
+}
+
+/// A live status check that **verifies the status-list VC's OWN issuer signature**
+/// (`sq-pfae.13`) before trusting its bits.
+///
+/// It resolves the published list as a [`SignedStatusList`] (a signed graph) via a
+/// [`VerifiedStatusListResolver`], then — **before** decoding the `encodedList` —
+/// verifies the list's issuer Schnorr signature over its RDFC-1.0 commitment against a
+/// **trusted status-authority key**, reusing the EXACT `sparq-zk` Schnorr-over-RDFC-1.0
+/// path [`crate::admit::admit`] uses. Only on a valid signature does it read the
+/// `encodedList` from the verified graph and run the SAME freshness + bit logic as
+/// [`LiveStatusCheck`].
+///
+/// **Fail-closed by construction** (`sq-pfae.13`): an unsigned, malformed-signature,
+/// wrong-key, or unresolvable-issuer status-list VC, or a verified graph with no
+/// `encodedList`, ALL yield [`LiveStatus::Unknown`] (deny) — the bits are **never**
+/// trusted. Set-bit / stale / out-of-range outcomes are unchanged from [`LiveStatusCheck`].
+///
+/// The trusted key is supplied by the caller. With the `did` feature it can be bound from
+/// a status-authority issuer DID via [`Self::with_did_issuer`] (the same `did:key`/`did:web`
+/// binding the admission gate uses). Research-grade, externally **UNAUDITED** (`sq-qhy4`):
+/// a verified issuer signature, NOT a privacy/unlinkability guarantee.
+pub struct VerifyingLiveStatusCheck<R: VerifiedStatusListResolver, D: GzipDecoder> {
+    resolver: R,
+    decoder: D,
+    /// The trusted status-authority verifying key. A list VC whose signature does not
+    /// verify against THIS key fails closed (`Unknown`).
+    authority_key: sparq_zk::sig::PublicKey,
+    /// The maximum age (seconds) a resolved snapshot may have before it is treated as
+    /// stale (fail-closed). Bounds the §4.4 stale-authority window.
+    max_age_secs: i64,
+}
+
+impl<R: VerifiedStatusListResolver, D: GzipDecoder> VerifyingLiveStatusCheck<R, D> {
+    /// Build a verifying check over a [`VerifiedStatusListResolver`] + a [`GzipDecoder`],
+    /// a trusted status-authority `authority_key`, and a `max_age_secs` freshness budget.
+    /// A non-positive `max_age_secs` means "no snapshot is ever fresh enough" — every check
+    /// is `Stale` (the maximally fail-closed setting), exactly as [`LiveStatusCheck::new`].
+    pub fn new(
+        resolver: R,
+        decoder: D,
+        authority_key: sparq_zk::sig::PublicKey,
+        max_age_secs: i64,
+    ) -> Self {
+        VerifyingLiveStatusCheck {
+            resolver,
+            decoder,
+            authority_key,
+            max_age_secs,
         }
-        // The bit. We distinguish a genuine in-range set bit from an out-of-range read so
-        // the justification is honest: an out-of-range index is `Unknown` (the slot is not
-        // covered by the list), NOT a positive revocation — but still fail-closed (deny).
-        let byte = (entry.status_list_index >> 3) as usize;
-        if byte >= snapshot.len_bytes() {
-            return LiveStatus::Unknown; // index not covered by the list ⇒ fail-closed Unknown
+    }
+
+    /// Build a verifying check whose trusted status-authority key is resolved from a
+    /// status-authority **DID** (`did:key` offline self-cert or a pluggable `did:web`),
+    /// using the SAME [`crate::did::DidResolver`] binding the admission gate uses. Fails
+    /// closed (returns the [`crate::did::DidError`]) if the DID does not resolve to a key —
+    /// so a status authority named by an unresolvable DID can verify nothing.
+    ///
+    /// `did` feature only.
+    #[cfg(feature = "did")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "did")))]
+    pub fn with_did_issuer<Res: crate::did::DidResolver>(
+        resolver: R,
+        decoder: D,
+        did_resolver: &Res,
+        authority_did: &str,
+        max_age_secs: i64,
+    ) -> Result<Self, crate::did::DidError> {
+        let authority_key = did_resolver.resolve_str(authority_did)?;
+        Ok(Self::new(resolver, decoder, authority_key, max_age_secs))
+    }
+
+    /// Check a credential's status entry against the **verified** live list at instant
+    /// `now_unix_secs`. Returns the fail-closed [`LiveStatus`]. The status-list VC's own
+    /// issuer signature is verified against the trusted authority key BEFORE any bit is
+    /// trusted; a non-verifying VC is [`LiveStatus::Unknown`] (deny).
+    pub fn check(&self, entry: &StatusListEntry, now_unix_secs: i64) -> LiveStatus {
+        // Resolve the published list AS A SIGNED GRAPH (network seam). No list ⇒ Unknown.
+        let Some((signed, as_of)) = self.resolver.resolve_signed(&entry.status_list_credential)
+        else {
+            return LiveStatus::Unknown;
+        };
+        // Verify the list VC's OWN issuer signature over its RDFC-1.0 commitment against the
+        // trusted status authority — the SAME Schnorr-over-RDFC-1.0 path the admit gate uses.
+        // A bad / absent / wrong-key signature ⇒ fail-closed Unknown (NEVER trust the bits).
+        if !verify_status_list_signature(&signed, &self.authority_key) {
+            return LiveStatus::Unknown;
         }
-        if snapshot.is_set(entry.status_list_index) {
-            LiveStatus::Set
-        } else {
-            LiveStatus::Live
-        }
+        // Read the encodedList from the VERIFIED graph (so the bits are exactly those the
+        // authority signed). A verified VC with no encodedList ⇒ fail-closed Unknown.
+        let Some(encoded) = signed.encoded_list() else {
+            return LiveStatus::Unknown;
+        };
+        // Decode + inflate. A bad multibase / inflate error ⇒ fail-closed Unknown.
+        let Some(snapshot) = decode_encoded_list(encoded, &self.decoder, as_of) else {
+            return LiveStatus::Unknown;
+        };
+        // Freshness + bit logic is identical to the unverified gate.
+        status_from_snapshot(&snapshot, entry, self.max_age_secs, now_unix_secs)
+    }
+}
+
+/// Verify a [`SignedStatusList`]'s issuer signature over its RDFC-1.0 commitment against
+/// the trusted status-authority `authority_key`. Returns `false` (fail-closed) on an
+/// uncommittable graph, a malformed signature hex, or a signature that does not verify —
+/// the SAME `commit_triples` → `commitment_message` → `verify` path [`crate::admit::admit`]
+/// runs over a presented credential.
+fn verify_status_list_signature(
+    signed: &SignedStatusList,
+    authority_key: &sparq_zk::sig::PublicKey,
+) -> bool {
+    use sparq_zk::commit::commit_triples;
+    use sparq_zk::encode::salt_from_bytes;
+    use sparq_zk::sig::{commitment_message, signature_from_hex, verify};
+
+    let salt = salt_from_bytes(&signed.salt);
+    let Ok(commitment) = commit_triples(&signed.graph, salt) else {
+        return false; // uncommittable graph ⇒ fail closed
+    };
+    let Some(signature) = signature_from_hex(&signed.issuer_signature_hex) else {
+        return false; // malformed signature hex ⇒ fail closed
+    };
+    let msg = commitment_message(&commitment.commitment);
+    verify(authority_key, &msg, &signature)
+}
+
+/// The shared freshness + bit decision over an already-decoded [`StatusBitstring`] — the
+/// tail both [`LiveStatusCheck::check`] and [`VerifyingLiveStatusCheck::check`] run once
+/// they hold a snapshot, so the two gates stay bit-for-bit identical from this point on.
+fn status_from_snapshot(
+    snapshot: &StatusBitstring,
+    entry: &StatusListEntry,
+    max_age_secs: i64,
+    now_unix_secs: i64,
+) -> LiveStatus {
+    // Freshness: a snapshot older than max_age_secs (or from the future) is stale.
+    let age = now_unix_secs.saturating_sub(snapshot.as_of_unix_secs());
+    if max_age_secs <= 0 || age < 0 || age > max_age_secs {
+        return LiveStatus::Stale;
+    }
+    // An out-of-range index is `Unknown` (the slot is not covered), NOT a positive
+    // revocation — but still fail-closed (deny).
+    let byte = (entry.status_list_index >> 3) as usize;
+    if byte >= snapshot.len_bytes() {
+        return LiveStatus::Unknown;
+    }
+    if snapshot.is_set(entry.status_list_index) {
+        LiveStatus::Set
+    } else {
+        LiveStatus::Live
     }
 }
 
@@ -843,5 +1058,219 @@ mod tests {
         assert!(!bs.is_set(1));
         assert!(!bs.is_set(8), "byte 1 is 0x00 ⇒ index 8 unset");
         assert_eq!(bs.len_bytes(), 2);
+    }
+
+    // --- verified status-list VC: the list's OWN issuer signature (sq-pfae.13) ------------
+
+    use sparq_zk::sig::{PublicKey, SecretKey};
+
+    /// The status-authority key the verified tests sign / verify against.
+    fn authority_key() -> (SecretKey, PublicKey) {
+        let sk = SecretKey::from_seed(0x0bad_c0de_dead_beef);
+        let pk = sk.public_key();
+        (sk, pk)
+    }
+
+    /// Build the status-list VC claim graph carrying a multibase `encodedList` over `bits`.
+    fn status_list_vc_graph(bits: &[u8]) -> Vec<Triple> {
+        let encoded = format!("{}{}", MULTIBASE_BASE64URL, base64url_encode(bits));
+        let subject = NamedNode::new_unchecked("https://issuer.ex/status/list#list");
+        vec![
+            Triple::new(
+                subject.clone(),
+                NamedNode::from(rdf::TYPE),
+                Term::NamedNode(status("BitstringStatusList")),
+            ),
+            Triple::new(
+                subject,
+                status("encodedList"),
+                Term::Literal(Literal::new_simple_literal(encoded)),
+            ),
+        ]
+    }
+
+    /// Sign the VC graph's RDFC-1.0 commitment with `sk`, returning a [`SignedStatusList`]
+    /// — the SAME commit→sign path the admit gate uses on a presented credential.
+    fn sign_status_list(graph: Vec<Triple>, sk: &SecretKey) -> SignedStatusList {
+        use sparq_zk::commit::commit_triples;
+        use sparq_zk::encode::salt_from_bytes;
+        let salt_bytes = [7u8; 32];
+        let commitment = commit_triples(&graph, salt_from_bytes(&salt_bytes)).expect("commits");
+        let sig_hex = sk.sign_commitment(&commitment.commitment);
+        SignedStatusList {
+            graph,
+            issuer_signature_hex: sig_hex,
+            salt: salt_bytes,
+        }
+    }
+
+    /// An in-memory resolver returning a fixed signed VC + as_of (or `None`).
+    struct SignedMapResolver {
+        signed: Option<(SignedStatusList, i64)>,
+    }
+    impl VerifiedStatusListResolver for SignedMapResolver {
+        fn resolve_signed(&self, _iri: &NamedNode) -> Option<(SignedStatusList, i64)> {
+            self.signed.clone()
+        }
+    }
+
+    fn verifying_check_with(
+        signed: Option<(SignedStatusList, i64)>,
+        key: PublicKey,
+        max_age: i64,
+    ) -> VerifyingLiveStatusCheck<SignedMapResolver, IdentityGzipDecoder> {
+        VerifyingLiveStatusCheck::new(
+            SignedMapResolver { signed },
+            IdentityGzipDecoder,
+            key,
+            max_age,
+        )
+    }
+
+    #[test]
+    fn verified_validly_signed_status_list_is_accepted() {
+        let (sk, pk) = authority_key();
+        // index 1 unset (byte 0x80 ⇒ only index 0 set), fresh snapshot.
+        let signed = sign_status_list(status_list_vc_graph(&[0x80]), &sk);
+        let check = verifying_check_with(Some((signed, 1000)), pk, 3600);
+        // A validly-signed list is trusted: index 1 is Live, index 0 (set) denies.
+        assert_eq!(check.check(&entry(1), 1500), LiveStatus::Live);
+        assert_eq!(check.check(&entry(0), 1500), LiveStatus::Set);
+    }
+
+    #[test]
+    fn verified_unsigned_status_list_is_rejected_fail_closed() {
+        let (_sk, pk) = authority_key();
+        // An empty signature hex never parses ⇒ fail-closed Unknown (NEVER trusted).
+        let unsigned = SignedStatusList {
+            graph: status_list_vc_graph(&[0x00]),
+            issuer_signature_hex: String::new(),
+            salt: [7u8; 32],
+        };
+        let check = verifying_check_with(Some((unsigned, 1000)), pk, 3600);
+        // index 1 is unset in the bits, but the VC is unsigned ⇒ Unknown, never Live.
+        let s = check.check(&entry(1), 1500);
+        assert_eq!(s, LiveStatus::Unknown);
+        assert!(
+            !s.admits(),
+            "an unsigned status-list VC must not be trusted"
+        );
+    }
+
+    #[test]
+    fn verified_tampered_bits_are_rejected_fail_closed() {
+        let (sk, pk) = authority_key();
+        // Sign the all-unset list, then TAMPER: swap in an all-set encodedList AFTER signing.
+        let mut signed = sign_status_list(status_list_vc_graph(&[0x00]), &sk);
+        let tampered_encoded = format!("{}{}", MULTIBASE_BASE64URL, base64url_encode(&[0xff]));
+        for t in signed.graph.iter_mut() {
+            if t.predicate == status("encodedList") {
+                *t = Triple::new(
+                    t.subject.clone(),
+                    t.predicate.clone(),
+                    Term::Literal(Literal::new_simple_literal(tampered_encoded.clone())),
+                );
+            }
+        }
+        let check = verifying_check_with(Some((signed, 1000)), pk, 3600);
+        // The signature was over the ORIGINAL graph; the tampered graph no longer verifies
+        // ⇒ Unknown (the attacker-supplied bits are rejected, never trusted as Live/Set).
+        let s = check.check(&entry(1), 1500);
+        assert_eq!(s, LiveStatus::Unknown);
+        assert!(!s.admits());
+    }
+
+    #[test]
+    fn verified_wrong_authority_key_is_rejected_fail_closed() {
+        let (sk, _pk) = authority_key();
+        let signed = sign_status_list(status_list_vc_graph(&[0x00]), &sk);
+        // Verify against a DIFFERENT key than the one that signed ⇒ fail-closed Unknown.
+        let other_pk = SecretKey::from_seed(0x1111_2222_3333_4444).public_key();
+        let check = verifying_check_with(Some((signed, 1000)), other_pk, 3600);
+        assert_eq!(check.check(&entry(1), 1500), LiveStatus::Unknown);
+    }
+
+    #[test]
+    fn verified_unresolvable_list_is_unknown_fail_closed() {
+        let (_sk, pk) = authority_key();
+        let check = verifying_check_with(None, pk, 3600);
+        let s = check.check(&entry(0), 1500);
+        assert_eq!(s, LiveStatus::Unknown);
+        assert!(!s.admits());
+    }
+
+    #[test]
+    fn verified_graph_without_encoded_list_is_unknown_fail_closed() {
+        let (sk, pk) = authority_key();
+        // A VALIDLY-signed graph that carries no encodedList ⇒ fail-closed Unknown (a
+        // verified VC that publishes no list cannot admit anything).
+        let subject = NamedNode::new_unchecked("https://issuer.ex/status/list#list");
+        let graph = vec![Triple::new(
+            subject,
+            NamedNode::from(rdf::TYPE),
+            Term::NamedNode(status("BitstringStatusList")),
+        )];
+        let signed = sign_status_list(graph, &sk);
+        let check = verifying_check_with(Some((signed, 1000)), pk, 3600);
+        assert_eq!(check.check(&entry(0), 1500), LiveStatus::Unknown);
+    }
+
+    #[test]
+    fn verified_stale_signed_snapshot_denies_fail_closed() {
+        let (sk, pk) = authority_key();
+        // Validly signed + unset bit, but the snapshot is older than max_age ⇒ Stale.
+        let signed = sign_status_list(status_list_vc_graph(&[0x00]), &sk);
+        let check = verifying_check_with(Some((signed, 1000)), pk, 3600);
+        let s = check.check(&entry(1), 99999);
+        assert_eq!(s, LiveStatus::Stale);
+        assert!(!s.admits());
+    }
+
+    /// The `did`-bound authority-key constructor resolves the status authority's key from a
+    /// `did:key` and verifies a list signed by the matching key — exercised under `did`.
+    #[cfg(feature = "did")]
+    #[test]
+    fn verified_with_did_issuer_resolves_authority_key() {
+        use crate::did::{did_key_for, DidKeyResolver};
+        let (sk, pk) = authority_key();
+        let authority_did = did_key_for(&pk);
+        let signed = sign_status_list(status_list_vc_graph(&[0x80]), &sk);
+        let check = VerifyingLiveStatusCheck::with_did_issuer(
+            SignedMapResolver {
+                signed: Some((signed, 1000)),
+            },
+            IdentityGzipDecoder,
+            &DidKeyResolver,
+            &authority_did,
+            3600,
+        )
+        .expect("did:key resolves the authority key");
+        // index 1 unset ⇒ Live (the DID-bound key verifies the signature).
+        assert_eq!(check.check(&entry(1), 1500), LiveStatus::Live);
+        assert_eq!(check.check(&entry(0), 1500), LiveStatus::Set);
+    }
+
+    /// A `did:key` authority whose DID does NOT match the signing key rejects the list
+    /// (fail-closed) — the DID binding is enforced, not cosmetic.
+    #[cfg(feature = "did")]
+    #[test]
+    fn verified_with_did_issuer_wrong_did_is_rejected() {
+        use crate::did::{did_key_for, DidKeyResolver};
+        let (sk, _pk) = authority_key();
+        let signed = sign_status_list(status_list_vc_graph(&[0x00]), &sk);
+        // A DID for a DIFFERENT key than signed the list.
+        let other_pk = SecretKey::from_seed(0xaaaa_bbbb_cccc_dddd).public_key();
+        let wrong_did = did_key_for(&other_pk);
+        let check = VerifyingLiveStatusCheck::with_did_issuer(
+            SignedMapResolver {
+                signed: Some((signed, 1000)),
+            },
+            IdentityGzipDecoder,
+            &DidKeyResolver,
+            &wrong_did,
+            3600,
+        )
+        .expect("did:key parses");
+        assert_eq!(check.check(&entry(1), 1500), LiveStatus::Unknown);
     }
 }
