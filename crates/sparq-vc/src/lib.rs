@@ -57,7 +57,8 @@
 //!   [`ProofConfig`] for how the proof options are supplied.
 //! - **DID methods:** `did:key` (offline, self-certifying) by default; `did:web`
 //!   (document-fetched, host-rooted) behind the opt-in `did-web` feature, over a
-//!   pluggable [`did::DidDocumentFetcher`] so this crate ships no HTTP client.
+//!   pluggable `did::DidDocumentFetcher` (a `did-web`-feature item) so this crate
+//!   ships no HTTP client.
 //!
 //! ## Opt-in by construction
 //!

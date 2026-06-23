@@ -25,11 +25,12 @@
 //!   DID *is* the key. What it buys is a stable, round-trippable, method-tagged
 //!   identifier — **not** a stronger root of trust (whoever can choose the DID can
 //!   choose the key).
-//! - **`did:web`** ([`DidWebResolver`], `did-web` feature) — **document-fetched,
+//! - **`did:web`** (`DidWebResolver`, `did-web` feature) — **document-fetched,
 //!   host-rooted.** The DID maps to an `https://` URL serving a DID document; the key
 //!   is read from a verification method. The root of trust is **whoever controls the
 //!   host + its TLS**. The HTTP fetch is **not** performed here — the caller supplies
-//!   a [`DidDocumentFetcher`], so this crate ships no HTTP client and stays
+//!   a `DidDocumentFetcher` (a `did-web`-feature item), so this crate ships no HTTP
+//!   client and stays
 //!   offline-testable.
 
 use ed25519_dalek::VerifyingKey;
