@@ -104,6 +104,30 @@
   features: "status-list-flate2"
   test: true
 
+# [OPUS-4.8] sq-pfae.13 (epic sq-pfae P6 follow-up): the VERIFIED status-list issuer
+# signature. The `status_list::VerifyingLiveStatusCheck` path verifies the status-list
+# VC's OWN issuer signature (the same sparq-zk Schnorr-over-RDFC-1.0 path `admit` uses)
+# against a trusted status-authority key BEFORE trusting its bits — fail-closed on
+# unsigned/bad-sig/wrong-key/unresolvable. Its DID-BOUND constructor
+# (`VerifyingLiveStatusCheck::with_did_issuer`) + the two `verified_with_did_issuer_*`
+# unit tests are `#[cfg(all(feature = "status-list", feature = "did"))]` — covered by NO
+# single existing leg (`status-list-flate2` has `did` OFF; there is no `did` leg for this
+# crate), so without this leg the DID-bound verified path runs ONLY under the
+# clippy/rustdoc `--all-features` lane, never under a `cargo test` leg. This leg's
+# `status-list-flate2,did` feature set is a SUPERSET of `status-list`, `status-list-flate2`,
+# and the `status-list + did` combo, so a single leg reaches EVERY status-list + did test
+# in the crate (the clear-key verified tests AND the DID-bound ones AND the `did` module's
+# own resolver tests). The leg runs `clippy --all-targets -D warnings` with both features ON
+# (the real gate) + `cargo test`, driving the REAL verify path (commit_triples →
+# commitment_message → verify) and the load-bearing SAFETY invariant: a tampered/unsigned
+# status-list VC is rejected (Unknown/deny), a validly-signed one accepted. Verified: `cargo
+# test -p sparq-trust --features status-list-flate2,did` runs the status_list verified-sig
+# unit tests (incl. the two did-bound ones) + the did module tests; clippy clean in every state.
+- name: "sparq-trust (status-list-flate2,did — verified status-list issuer signature)"
+  crate: "sparq-trust"
+  features: "status-list-flate2,did"
+  test: true
+
 # [OPUS-4.8] sq-dt5hv (epic sq-0dksu, Phase 5): the opt-in property-admissibility
 # PRE-CHECK in the admission gate. The `admit::precheck` module
 # (`admit_with_precheck` + `AdmissibilityPreference` + `PrecheckOutcome`), its 7
