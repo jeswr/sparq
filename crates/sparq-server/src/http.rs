@@ -630,6 +630,24 @@ pub struct ServerConfig {
     /// gated by `--auth-token` exactly like an UPDATE.
     #[cfg(feature = "n3-patch")]
     pub n3_patch: bool,
+    /// [OPUS-4.8] (sq-vczh2, epic sq-2m6zm, design `research/llm-ergonomic-sparql-surface.md` §4)
+    /// OPT-IN, VERIFIABLE LLM-ergonomic transpiler endpoint. When `true`, the server serves
+    /// `POST /terse/transpile`: the client POSTs a *terse* query (the `K:<name>` keyword layer
+    /// over canonical SPARQL) and the server returns the CANONICAL, conformant SPARQL it expands
+    /// to PLUS the keyword expansions / warnings / legend version, as JSON. The network contract
+    /// is the verifiable EXPANSION the agent inspects — the endpoint NEVER executes the query
+    /// (the agent runs the returned `canonical_sparql` through the normal `/sparql` path). `false`
+    /// (the default) leaves it off: `/terse/transpile` is `404`.
+    ///
+    /// This field exists only with the `terse` cargo feature (like [`tpf`](Self::tpf) under
+    /// `tpf`); a build without that feature compiles no terse code and pays zero cost. Set by the
+    /// binary's `--terse` flag / `SPARQ_TERSE=1` env. Transpiling neither reads nor mutates the
+    /// store, but it is a query-shaped operation, so the endpoint is gated by the read auth like a
+    /// GET. The server compiles the LEAN `sparq-terse` build (no `vectors`): a `V("phrase")`
+    /// construct loud-FAILS with a `400` rather than guessing — concept resolution is a future
+    /// `vectors`-gated extension (the `V()` ambiguity caveat is tracked by `sq-26fdp`).
+    #[cfg(feature = "terse")]
+    pub terse: bool,
 }
 
 impl Default for ServerConfig {
@@ -741,6 +759,11 @@ impl Default for ServerConfig {
             // SPARQ_N3_PATCH=1). The always-on application/sparql-update PATCH dialect is unaffected.
             #[cfg(feature = "n3-patch")]
             n3_patch: false,
+            // [OPUS-4.8] sq-vczh2: safe default — the OPT-IN terse-transpiler endpoint is OFF even
+            // when the feature is compiled in (the operator opts in deliberately via --terse /
+            // SPARQ_TERSE=1).
+            #[cfg(feature = "terse")]
+            terse: false,
         }
     }
 }
@@ -1001,6 +1024,12 @@ impl ServerConfig {
         #[cfg(feature = "n3-patch")]
         if let Ok(v) = std::env::var("SPARQ_N3_PATCH") {
             cfg.n3_patch = env_truthy(&v);
+        }
+        // [OPUS-4.8] sq-vczh2: SPARQ_TERSE truthy ("1"/"true"/"yes"/"on") serves the OPT-IN
+        // terse-transpiler endpoint. Off by default. Only present with the `terse` feature.
+        #[cfg(feature = "terse")]
+        if let Ok(v) = std::env::var("SPARQ_TERSE") {
+            cfg.terse = env_truthy(&v);
         }
         Ok(cfg)
     }
@@ -2564,6 +2593,12 @@ pub fn router(state: AppState) -> Router {
     // See [`shacl_validate_endpoint`].
     #[cfg(feature = "shacl")]
     let routes = routes.route("/shacl/validate", post(shacl_validate_endpoint));
+    // [OPUS-4.8] sq-vczh2 (epic sq-2m6zm): OPT-IN verifiable terse-transpiler endpoint.
+    // Compiled only with the `terse` feature; even then the handler refuses (404) unless the
+    // config flag is set. POST only — the client sends a terse query and the server returns the
+    // canonical SPARQL it expands to (it never executes it). See [`terse_transpile_endpoint`].
+    #[cfg(feature = "terse")]
+    let routes = routes.route("/terse/transpile", post(terse_transpile_endpoint));
     // [OPUS-4.8] (sq-pj6u) Categorised unmatched-route 404. Without an explicit fallback,
     // axum answers an unmatched path with a 404 whose body is EMPTY; `json_error_bodies`
     // then wraps that into the uncategorised `{"error":""}` envelope — leak-free but with no
@@ -3260,6 +3295,131 @@ fn shacl_report_to_json(report: &sparq_shacl::ValidationReport) -> String {
     }
     out.push_str("]}");
     out
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-vczh2 (epic sq-2m6zm) — OPT-IN verifiable terse-transpiler endpoint
+// ---------------------------------------------------------------------------
+
+/// [OPUS-4.8] sq-vczh2: `POST /terse/transpile` — transpile a *terse* query into the canonical,
+/// conformant SPARQL it expands to, returning the verifiable EXPANSION (NOT an answer).
+///
+/// OPT-IN: returns `404` unless [`ServerConfig::terse`] is set (the route is mounted only with
+/// the `terse` feature, and the handler refuses unless the operator also turned the flag on).
+///
+/// **Contract.** The request BODY is the terse query text (`text/plain` / unspecified — it is
+/// read verbatim as UTF-8, decoded under the shared gzip zip-bomb cap). The server runs the LEAN
+/// [`sparq_terse::terse_to_sparql`] (the `K:<name>` keyword layer over canonical SPARQL, plus the
+/// silent-rewrite canary) and returns JSON:
+///
+/// ```json
+/// { "canonical_sparql": "SELECT ?s WHERE { ?s <http://www.w3.org/ns/prov#wasDerivedFrom> ?o }",
+///   "keywords":    [ { "keyword": "derivedFrom", "iri": "http://www.w3.org/ns/prov#wasDerivedFrom",
+///                      "legendVersion": "pkg-keywords/v1" } ],
+///   "resolutions": [],
+///   "warnings":    [],
+///   "legendVersion": "pkg-keywords/v1" }
+/// ```
+///
+/// The whole CONTRACT is `canonical_sparql`: it is standard SPARQL, it is what the agent then
+/// runs through the normal `/sparql` path, and it is what the agent can inspect — "a convenience
+/// that shows its work, never an oracle that hides it" (design §6). The endpoint NEVER executes
+/// the query and never touches the store, so `resolutions` is always `[]` in this lean server
+/// build: `V("phrase")` concept resolution needs a graph-bound resolver + an embedder (the
+/// crate's `vectors` feature), which is a future extension — a `V(...)` construct therefore
+/// loud-FAILS with a `400` here rather than being guessed (the `V()` ambiguity caveat is tracked
+/// by `sq-26fdp`). An unknown `K:<name>` keyword, a `PREFIX K:` collision or non-conformant input
+/// (the canary) is likewise a `400` with the transpiler's loud message — never a silent rewrite.
+///
+/// Transpiling neither reads nor mutates the store, but it is a query-shaped operation, so the
+/// endpoint is gated by the read auth like a GET.
+#[cfg(feature = "terse")]
+async fn terse_transpile_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !state.config().terse {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    }
+    // Transpiling is a query-shaped op; gate it with the read auth like a GET.
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+        return resp;
+    }
+    // Decode the (possibly gzip'd) body under the shared decompression-ratio cap.
+    let body = match decode_request_body(&body, &headers, state.config()) {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
+    // The terse query is UTF-8 text. Reject a non-UTF-8 body with a 400 rather than lossily
+    // mangling it (a mangled query would transpile to a different canonical SPARQL — exactly the
+    // silent-rewrite the surface refuses).
+    let src = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "terse query body must be valid UTF-8",
+            )
+        }
+    };
+    match sparq_terse::terse_to_sparql(src) {
+        Ok(expansion) => text_response(
+            StatusCode::OK,
+            "application/json; charset=utf-8",
+            terse_expansion_to_json(&expansion),
+            false,
+        ),
+        // Every terse failure is a loud, client-facing input error (unknown keyword, `PREFIX K:`
+        // collision, an un-resolvable `V(...)` in this lean build, or the conformance canary), so
+        // it maps to a 400 carrying the transpiler's own message — never a silent rewrite.
+        Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+    }
+}
+
+/// [OPUS-4.8] sq-vczh2: serialise a [`sparq_terse::Expansion`] to the verifiable JSON contract
+/// (`{ canonical_sparql, keywords, resolutions, warnings, legendVersion }`). `serde_json` is
+/// already a `server`-feature dependency, so the JSON is built with the same escaping discipline
+/// the rest of the server's JSON uses.
+#[cfg(feature = "terse")]
+fn terse_expansion_to_json(expansion: &sparq_terse::Expansion) -> String {
+    let keywords: Vec<serde_json::Value> = expansion
+        .keywords
+        .iter()
+        .map(|k| {
+            serde_json::json!({
+                "keyword": k.keyword,
+                "iri": k.iri,
+                "legendVersion": k.legend_version,
+            })
+        })
+        .collect();
+    // `resolutions` is always empty in this lean (no-`vectors`) server build, but the field is in
+    // the contract so a future `vectors`-enabled server can populate it without a shape change.
+    let resolutions: Vec<serde_json::Value> = expansion
+        .resolutions
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "phrase": r.phrase,
+                "iri": r.iri,
+                "score": r.score,
+                "runnerUp": r.runner_up,
+                "runnerUpScore": r.runner_up_score,
+                "confidence": r.confidence,
+                "method": r.method.as_str(),
+            })
+        })
+        .collect();
+    let value = serde_json::json!({
+        "canonical_sparql": expansion.canonical_sparql,
+        "keywords": keywords,
+        "resolutions": resolutions,
+        "warnings": expansion.warnings,
+        "legendVersion": sparq_terse::LEGEND_VERSION,
+    });
+    // `to_string` on a serde_json::Value never fails.
+    value.to_string()
 }
 
 /// Applies the T15 hardening middleware stack to a router (outermost first):

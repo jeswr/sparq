@@ -259,6 +259,18 @@ jobs:
             crate: sparq-cli
             features: serialize-rdf
             test: true
+          # [OPUS-4.8] sq-vczh2 (epic sq-2m6zm): the `terse` subcommand (forwards the LEAN
+          # `sparq-terse` build). The `cmd_terse` / `terse_expansion_to_json` dispatch + the
+          # `tests/terse_cli.rs` integration suite are `#[cfg(feature = "terse")]`, so the default CLI
+          # build never compiled, clippy'd or ran them. This leg builds the subcommand, runs
+          # `clippy --all-targets -D warnings` with the feature ON, and runs the gated `terse_cli`
+          # suite (keyword-echo, identity pass-through, unknown-keyword + V() loud-fail, stdin). No new
+          # heavy dep — sparq-terse's lean build depends only on spargebra, already in the CLI's tree.
+          # Verified: `cargo nextest list -p sparq-cli --features terse` shows the 5 terse_cli tests.
+          - name: sparq-cli (terse)
+            crate: sparq-cli
+            features: terse
+            test: true
           # sparq-server: discoverable-federation descriptors, the SERVICE passthrough,
           # time-travel reads, the geof: registry, and the durable-write test seam — all
           # opt-in, combined into one compile of the async server.
@@ -307,6 +319,20 @@ jobs:
           - name: sparq-server (brtpf)
             crate: sparq-server
             features: brtpf
+            test: true
+          # [OPUS-4.8] sq-vczh2 (epic sq-2m6zm): the OPT-IN verifiable terse-transpiler endpoint
+          # (`POST /terse/transpile`). The `terse_transpile_endpoint` handler, the `ServerConfig::terse`
+          # field + its Default/from_env arms, the route mount and the `tests/terse_transpile.rs`
+          # integration suite are ALL `#[cfg(feature = "terse")]`, so the DEFAULT build never compiled,
+          # clippy'd or tested this code. This leg builds it, runs `clippy --all-targets -D warnings`
+          # with the feature ON (the real gate), and runs the crate's tests — which now include the
+          # 8-test gated `terse_transpile` suite (opt-in 404, keyword-echo contract, identity
+          # pass-through, loud-fail 400s, 405, read-auth). `terse` pulls `server`, so the full async
+          # server compiles under it. Verified: `cargo nextest list -p sparq-server --features terse`
+          # shows the 8 terse_transpile tests.
+          - name: sparq-server (terse)
+            crate: sparq-server
+            features: terse
             test: true
           # sparq-vectors: the vec: magic predicates (pulls sparq-engine), and the
           # /v1/embeddings provider request/response shape (serde only, no socket).
