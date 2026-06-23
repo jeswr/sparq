@@ -652,6 +652,24 @@ jobs:
             crate: sparq-nlq
             features: citations
             test: true
+          # [OPUS-4.8] sq-ylbrq (issue #908): sparq-vc's opt-in `did:web` resolver. The
+          # `DidDocumentFetcher` trait + `DidWebResolver` struct + the JSON DID-document
+          # parser arm of did.rs, AND the three in-module `did::tests::did_web_*` unit
+          # tests (document-url mapping, Ed25519-multibase extraction, fail-closed on a
+          # no-key document) are ALL `#[cfg(feature = "did-web")]`. sparq-vc is a non-default
+          # workspace member, so ci.yml's `--workspace` archive compiles the crate's DEFAULT
+          # (did:key) surface — but it passes NO `--features did-web`, so those 3 tests are
+          # compiled EMPTY and run ZERO times (verified: `cargo nextest list -p sparq-vc`
+          # lists 14, `--features did-web` lists 17 — the 3 `did_web_*` are the delta). This
+          # leg is the ONLY thing that executes them. `did-web` adds only `serde_json` (an
+          # already-vetted, in-tree dep) — no socket: the HTTP fetch is the pluggable
+          # `DidDocumentFetcher` seam, so the tests use an in-memory fetcher. Verified locally:
+          # `cargo test -p sparq-vc --features did-web` runs the 3 did_web tests and
+          # `clippy -p sparq-vc --features did-web --all-targets -- -D warnings` is clean.
+          - name: sparq-vc (did-web — did:web resolver over a pluggable fetcher)
+            crate: sparq-vc
+            features: did-web
+            test: true
           # [OPUS-4.8] sq-2489d.4 (GenAI-KB Phase 4): the structure-aware-vectorisation `kge`
           # measurement foundation + the NEW provenance-weighting surface. `kge` IMPLIES `structure`,
           # so this single leg compiles + clippies + tests BOTH the `kge`-gated suites AND the
