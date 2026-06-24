@@ -248,6 +248,31 @@ let r = query_with_aggregates(&g,
 // vendored spargebra (a parser limitation, tracked as a follow-up bead); non-DISTINCT works.
 ```
 
+**`MULTIPLICITY()` inside an aggregate** (no feature needed; default build) — a **NON-STANDARD
+extension** exposing the SPARQL 1.2 algebra's `multiplicity(μ|Ω)` device (which replaced the informal
+`card[Ω](μ)`). It is a zero-argument builtin valid ONLY inside an aggregate's argument expression: it
+evaluates to the bag cardinality of the current group member's solution within its group multiset.
+W3C SPARQL 1.2 defines `multiplicity` only as an algebra/semantics device — there is **no callable
+`multiplicity()` builtin in the rec and no conformance test for it** — so this is a sparq extension,
+not a 1.2-conformance feature.
+
+```rust
+// A sub-SELECT projecting away the subject collapses several rows to identical solutions
+// (bag semantics), so the group's distinct member carries a multiplicity > 1.
+let g = Graph::load_str(
+    "@prefix ex: <http://ex/> . ex:a ex:v 10 . ex:b ex:v 10 . ex:c ex:v 10 . ex:d ex:v 20 . ex:e ex:v 20 .",
+    "turtle").unwrap();
+// SUM(?x * MULTIPLICITY()) folds the DISTINCT solutions {10(×3), 20(×2)} = 10·3 + 20·2 = 70,
+// which equals plain SUM(?x) over the bag {10,10,10,20,20}. This is the whole point of the device.
+let r = sparq_engine::query(&g,
+    "PREFIX ex: <http://ex/> SELECT (SUM(?x * MULTIPLICITY()) AS ?w) WHERE { SELECT ?x WHERE { ?s ex:v ?x } }").unwrap();
+```
+
+Semantics: when an aggregate argument calls `MULTIPLICITY()`, sparq folds the group's **distinct**
+solutions, each weighted by its bag cardinality (per the Set-Function algebra), so a value occurring
+`k` times contributes `k·x`, not `k²·x`. Outside an aggregate (e.g. a plain `BIND`) `MULTIPLICITY()`
+is an expression error → unbound. An aggregate that never mentions it is byte-for-byte unchanged.
+
 **Window functions** (opt-in `window-functions` feature) — **NON-STANDARD extension**: SPARQL has no
 W3C-REC `OVER (PARTITION BY … ORDER BY …)` syntax, so sparq exposes windowing two ways, both following
 the SQL:2003 window model (the surface Stardog / AnzoGraph expose) and neither touching the engine's

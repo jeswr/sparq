@@ -320,4 +320,38 @@ mod tests {
             distinct.rows[0][0]
         );
     }
+
+    /// [OPUS-4.8] (sq-v411r, survey §B2) `MULTIPLICITY()` is observable inside a CUSTOM
+    /// aggregate's argument too (the `window-functions` registry path), not just the
+    /// builtins. A summing custom aggregate over `?x * MULTIPLICITY()` folds the DISTINCT
+    /// solutions weighted by their bag cardinality, so over the bag {10,10,10,20,20}
+    /// (built by a sub-SELECT that projects only `?x`) it equals the plain bag sum 70:
+    /// 10·3 + 20·2 = 70.
+    #[test]
+    fn multiplicity_inside_custom_aggregate() {
+        let mut reg = CustomAggregateRegistry::new();
+        reg.register("http://ex/agg#sum", |members: &[Option<Term>]| {
+            let mut acc: i64 = 0;
+            for m in members {
+                if let Some(Term::Literal(l)) = m {
+                    acc += l.value().parse::<i64>().map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(Some(Term::Literal(Literal::from(acc))))
+        });
+        let data = r#"
+            @prefix ex: <http://ex/> .
+            ex:a ex:v 10 . ex:b ex:v 10 . ex:c ex:v 10 .
+            ex:d ex:v 20 . ex:e ex:v 20 .
+        "#;
+        let graph = Graph::load_str(data, "turtle").unwrap();
+        let q = "PREFIX ex: <http://ex/> PREFIX agg: <http://ex/agg#> \
+                 SELECT (agg:sum(?x * MULTIPLICITY()) AS ?w) WHERE { SELECT ?x WHERE { ?s ex:v ?x } }";
+        let r = query_with_aggregates(&graph, q, &reg).unwrap();
+        assert!(
+            r.rows[0][0].as_ref().unwrap().to_string().contains("\"70\""),
+            "custom Σ(?x·multiplicity) over distinct {{10×3,20×2}} = 70, got {:?}",
+            r.rows[0][0]
+        );
+    }
 }
