@@ -155,6 +155,64 @@ fn resolve_acl_nearest_ancestor_one_call() {
     assert_eq!(eff.scope, AclScope::Default);
 }
 
+// ─── FR-5: effective-ACL provenance surface — Link: rel="acl" + scope predicate ───────
+
+#[test]
+fn acl_link_header_surfaces_governing_acl_over_real_decide() {
+    // The FR-5 discoverability surface, exercised through the REAL public `decide` path
+    // (materialize → AuthIndex::accessible → decision), not the internal helper.
+    let mut acl = AclBuilder::new();
+    acl.document("https://pod.ex/notes/n1.ttl");
+    acl.document("https://pod.ex/notes/own.ttl");
+    acl.default_for("https://pod.ex/", |a| a.agent(ALICE).mode(Mode::Read));
+    acl.access_to("https://pod.ex/notes/own.ttl", |a| a.agent(BOB).mode(Mode::Read));
+    let store = store(acl);
+
+    // Inherited (Default scope) → the ancestor .acl is advertised as the rel=acl Link.
+    let n1 = store.decide(&session(Some(ALICE)), "https://pod.ex/notes/n1.ttl", Mode::Read);
+    assert_eq!(
+        n1.acl_link_header().as_deref(),
+        Some(r#"<https://pod.ex/.acl>; rel="acl""#)
+    );
+    assert_eq!(n1.scope.map(AclScope::as_acl_predicate), Some("http://www.w3.org/ns/auth/acl#default"));
+
+    // Own ACL (AccessTo scope) → the resource's OWN .acl is advertised.
+    let own = store.decide(&session(Some(BOB)), "https://pod.ex/notes/own.ttl", Mode::Read);
+    assert!(own.allow);
+    assert_eq!(
+        own.acl_link_header().as_deref(),
+        Some(r#"<https://pod.ex/notes/own.ttl.acl>; rel="acl""#)
+    );
+    assert_eq!(own.scope.map(AclScope::as_acl_predicate), Some("http://www.w3.org/ns/auth/acl#accessTo"));
+
+    // The Link surface is independent of the verdict — an authoritative DENY still tells the
+    // client WHERE the governing ACL is (safe: it surfaces provenance, never the grant).
+    let denied = store.decide(&session(Some(BOB)), "https://pod.ex/notes/n1.ttl", Mode::Read);
+    assert!(!denied.allow, "bob has no grant on n1");
+    assert_eq!(denied.status, AclStatus::Resolved);
+    assert_eq!(
+        denied.acl_link_header().as_deref(),
+        Some(r#"<https://pod.ex/.acl>; rel="acl""#)
+    );
+}
+
+#[test]
+fn acl_link_header_none_is_fail_closed_over_real_decide() {
+    // Fail-closed: an un-protected resource (NoAcl) and a malformed IRI (Transient) have no
+    // governing ACL, so there is nothing to advertise — `acl_link_header()` is `None`.
+    let mut acl = AclBuilder::new();
+    acl.document("https://pod.ex/open.ttl"); // a doc with zero authorizations anywhere
+    let store = store(acl);
+
+    let no_acl = store.decide(&session(Some(ALICE)), "https://pod.ex/open.ttl", Mode::Read);
+    assert_eq!(no_acl.status, AclStatus::NoAcl);
+    assert!(no_acl.acl_link_header().is_none(), "no ACL ⇒ nothing to advertise");
+
+    let transient = store.decide(&session(Some(ALICE)), "not a valid iri", Mode::Read);
+    assert_eq!(transient.status, AclStatus::Transient);
+    assert!(transient.acl_link_header().is_none());
+}
+
 // ─── FR-6: the fail-closed load/error contract (the security core) ────────────────────
 
 #[test]

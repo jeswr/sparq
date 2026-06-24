@@ -28,7 +28,8 @@ use sparq_core::Graph;
 
 /// Where a governing ACL grant applies relative to the resource it governs — the WAC
 /// `acl:accessTo` / `acl:default` distinction (FR-7, sq-snopa.3), surfaced for
-/// debuggability and the `Link: rel="acl"` surface (FR-5 will build on it).
+/// debuggability ([`AclScope::as_acl_predicate`]) and the `Link: rel="acl"` surface
+/// ([`WacDecision::acl_link_header`], FR-5, sq-snopa.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AclScope {
     /// The resource has its **own** access-control document (`<R> + ".acl"`/`".acr"`),
@@ -37,6 +38,19 @@ pub enum AclScope {
     /// No own ACL; the governing document is the **nearest ancestor container's** ACL,
     /// inherited via WAC `acl:default` (Solid container-`default` inheritance).
     Default,
+}
+
+impl AclScope {
+    /// The WAC predicate IRI this scope corresponds to — `acl:accessTo` for
+    /// [`AclScope::AccessTo`], `acl:default` for [`AclScope::Default`] (FR-5, sq-snopa.4).
+    /// Surfaced for debuggability and structured logs: a server can record *why* an ACL
+    /// governs a resource (its own vs an inherited container default) by the exact WAC term.
+    pub fn as_acl_predicate(self) -> &'static str {
+        match self {
+            AclScope::AccessTo => "http://www.w3.org/ns/auth/acl#accessTo",
+            AclScope::Default => "http://www.w3.org/ns/auth/acl#default",
+        }
+    }
 }
 
 /// The typed fail-closed load/error contract for a decision (FR-6, sq-snopa.2).
@@ -156,6 +170,48 @@ impl WacDecision {
     /// constructor for every uncertainty path, so deny-by-default is impossible to forget.
     fn deny(status: AclStatus) -> WacDecision {
         WacDecision { allow: false, granted_modes: Vec::new(), governing_acl: None, scope: None, status }
+    }
+
+    /// The Solid [`Link: rel="acl"`](https://solidproject.org/TR/protocol#acl-resource)
+    /// response-header **value** advertising the governing ACL document, as an RFC 8288
+    /// link-value: `<acl-iri>; rel="acl"` (FR-5, sq-snopa.4). This is the discoverability
+    /// surface a resource server emits alongside [`crate::PodStore::wac_allow`] so a client
+    /// can fetch/edit the effective ACL — built straight from the provenance FR-1 already
+    /// puts on the decision, so it can never point at a document discovery did not find.
+    ///
+    /// **`None` when no governing ACL was discovered** (`status == NoAcl`, or a `Transient`
+    /// error): there is no ACL to advertise, so nothing is emitted. Fail-closed — the link
+    /// surfaces *where* the governing ACL is, never a verdict, so it is safe on a deny.
+    /// `Some` exactly when [`WacDecision::governing_acl`] is `Some` (including `Unloaded`,
+    /// where the ACL was discovered but the view is not yet materialized).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sparq_solid::{Mode, PodStore, Session};
+    ///
+    /// let nquads = r#"
+    /// <https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hi" <https://pod.ex/notes/n1> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .
+    /// "#;
+    /// let mut store = PodStore::new(sparq_core::Graph::load_dataset(nquads, "nquads")?);
+    /// store.materialize_wac()?;
+    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
+    /// let d = store.decide(&alice, "https://pod.ex/notes/n1", Mode::Read);
+    /// assert_eq!(d.acl_link_header().as_deref(), Some(r#"<https://pod.ex/.acl>; rel="acl""#));
+    /// // No ACL anywhere ⇒ no link to advertise.
+    /// let none = store.decide(&alice, "https://other.ex/x", Mode::Read);
+    /// assert!(none.acl_link_header().is_none());
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn acl_link_header(&self) -> Option<String> {
+        // [OPUS-4.8] POSITIONAL format args (CodeQL rust/unused-variable false positive).
+        self.governing_acl
+            .as_ref()
+            .map(|acl| format!("<{}>; rel=\"acl\"", acl.as_str()))
     }
 }
 
@@ -398,6 +454,63 @@ mod tests {
         assert_eq!(d.status, AclStatus::Transient);
         assert!(d.status.is_retryable());
         assert!(d.governing_acl.is_none());
+    }
+
+    #[test]
+    fn acl_scope_predicate_iris() {
+        // FR-5: the scope maps to the exact WAC predicate term for structured logs.
+        assert_eq!(
+            AclScope::AccessTo.as_acl_predicate(),
+            "http://www.w3.org/ns/auth/acl#accessTo"
+        );
+        assert_eq!(
+            AclScope::Default.as_acl_predicate(),
+            "http://www.w3.org/ns/auth/acl#default"
+        );
+    }
+
+    #[test]
+    fn acl_link_header_built_from_governing_acl() {
+        // FR-5: the resolved decision advertises the governing ACL as a rel=acl Link value.
+        let g = graph(ROOT_ACL);
+        let ix = AclIndex::build(&g);
+        let auth = AuthIndex::default(); // unmaterialized → Unloaded, but ACL still discovered
+        let alice = Session {
+            agent: Some("https://alice.ex/card#me"),
+            client: None,
+            issuer: None,
+            now: None,
+        };
+        let d = decide_one(&ix, &auth, &alice, "https://pod.ex/notes/n1", Mode::Read);
+        // Unloaded still discovers the ACL, so the link surfaces (the resource server can
+        // still tell the client WHERE the ACL is even on a retryable 503).
+        assert_eq!(d.status, AclStatus::Unloaded);
+        assert_eq!(
+            d.acl_link_header().as_deref(),
+            Some(r#"<https://pod.ex/.acl>; rel="acl""#)
+        );
+    }
+
+    #[test]
+    fn acl_link_header_none_when_no_governing_acl() {
+        // FR-5 fail-closed: NoAcl and Transient have no governing ACL ⇒ no link to emit.
+        let nquads = "<https://pod.ex/d#it> <https://ex.dev/ns#k> \"v\" <https://pod.ex/d> .\n";
+        let g = graph(nquads);
+        let ix = AclIndex::build(&g);
+        let auth = AuthIndex::default();
+        let alice = Session {
+            agent: Some("https://alice.ex/card#me"),
+            client: None,
+            issuer: None,
+            now: None,
+        };
+        let no_acl = decide_one(&ix, &auth, &alice, "https://pod.ex/d", Mode::Read);
+        assert_eq!(no_acl.status, AclStatus::NoAcl);
+        assert!(no_acl.acl_link_header().is_none());
+
+        let transient = decide_one(&ix, &auth, &alice, "not a valid iri", Mode::Read);
+        assert_eq!(transient.status, AclStatus::Transient);
+        assert!(transient.acl_link_header().is_none());
     }
 
     #[test]
