@@ -86,6 +86,20 @@ pkg:Document a owl:Class ;
   rdfs:comment "A concrete document realising a Source (an in-repo file, a PDF, a web page). Reuses fabio:Expression; a pkg:Source frbr:realizationOf the work, a pkg:Document the in-repo/dereferenceable realisation."@en-GB ;
   rdfs:subClassOf fabio:Expression .
 
+# --- the machine-extraction tier (sq-2489d.5). A pkg:MachineAgent is the prov:Agent a
+#     machine-extracted Finding is prov:wasAttributedTo (e.g. agent:haiku-extractor). It
+#     reuses prov:SoftwareAgent; it carries NO net-new predicate. It is the declarative
+#     hook the literature-tier SHACL shapes (shapes/literature.shapes.ttl §4.5) target:
+#     a Finding attributed to a pkg:MachineAgent sits on the low-trust tier (must be
+#     secx:Conjectured, bounded confidence, no dangling cito:citesAsEvidence). A
+#     hand-authored Finding is NOT attributed to a pkg:MachineAgent, so those constraints
+#     do not bind it. The extraction event itself is a plain prov:Activity (prov:used the
+#     Source's abstract, prov:wasAssociatedWith the agent) — no new class needed.
+pkg:MachineAgent a owl:Class ;
+  rdfs:label "Machine agent"@en-GB ;
+  rdfs:comment "A non-human software agent that produces Findings by extraction (e.g. a cheap-model literature extractor). Reuses prov:SoftwareAgent. A Finding prov:wasAttributedTo a pkg:MachineAgent is on the low-trust machine-extraction tier — see shapes/literature.shapes.ttl (research/provenance-driven-genai-kb.md §4.5). The extraction quality boundary is load-bearing: a cheap model hallucinates, so the tier is capped at secx:Conjectured with a bounded confidence and a grounding-verified citation; a machine extraction must never outrank a hand-authored Finding."@en-GB ;
+  rdfs:subClassOf prov:SoftwareAgent .
+
 # --- NET-NEW: the explored-status axis (a SKOS scheme so it is queryable +
 #     extensible). Aligned to schema.org ActionStatusType via skos:closeMatch.
 pkg:ExplorationStatus a skos:ConceptScheme ;

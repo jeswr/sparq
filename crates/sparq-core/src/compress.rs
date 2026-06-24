@@ -98,6 +98,150 @@ impl Blocks {
     }
 }
 
+/// [OPUS-4.8] sq-wihld (survey §A1) — OPT-IN per-block Bloom filters on the leading
+/// (column-0) ids of a block-compressed permutation. The directory's first-triple already
+/// gives an implicit min/max zone map that prunes RANGE scans, but for an EQUALITY-BOUND
+/// leading column (a point/prefix lookup, `lo[0] == hi[0]`) whose id falls inside several
+/// overlapping blocks' `[min,max]` spans — the common case on a high-NDV subject/object
+/// column — nothing skips a block that cannot contain the id. A tiny per-block Bloom bitset
+/// fixes exactly that gap: probe the block's filter and skip its `decode_block_at` when the
+/// id is provably absent.
+///
+/// CORRECTNESS (load-bearing): zero false NEGATIVES by construction — a leading id that is
+/// present in a block always probes as "maybe present", so no matching row is ever skipped.
+/// A false POSITIVE costs one wasted block decode whose rows the existing range trim then
+/// discards, so the `range` output is byte-identical to the no-Bloom path. The filter is an
+/// in-RAM/build-time acceleration only: it is NEVER written to the on-disk `SPQCPRM1` format,
+/// so a perm built with the feature on and one built with it off persist identically.
+///
+/// This module is compiled only under the `block-bloom` cargo feature; with the feature off
+/// the `CompressedPerm` carries no `bloom` field and `range` is the original code verbatim.
+#[cfg(feature = "block-bloom")]
+mod block_bloom {
+    use super::{Id, BLOCK};
+
+    /// Bits per block filter. A block holds at most [`BLOCK`] (=128) rows, so at most 128
+    /// distinct leading ids; 256 bits (32 bytes/block ≈ 0.25 B/triple) keeps the
+    /// false-positive rate low at the [`HASHES`] count below while staying a flat,
+    /// WASM-trivial bitset. The directory already costs ~0.13 B/triple, so this roughly
+    /// triples the resident directory of a Bloom-enabled column — paid only on the high-NDV
+    /// columns the density gate admits.
+    const BITS: usize = 256;
+    /// Machine words (u64) per block filter.
+    const WORDS: usize = BITS / 64;
+    /// Hash probes per id. Two independent probes (double hashing off one 64-bit hash) is
+    /// the sweet spot for ~128 keys in 256 bits; more probes would over-fill the bitset.
+    const HASHES: u32 = 2;
+
+    /// FNV-1a 64-bit hash of a leading-column id, the seed for double hashing. Deterministic
+    /// and endian-stable (we hash the little-endian id bytes), so a filter built on one host
+    /// probes identically on another — though filters are never serialised, this keeps the
+    /// build reproducible.
+    #[inline]
+    fn hash_id(id: Id) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in id.to_le_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    /// A flat array of fixed-size per-block Bloom filters over each block's distinct
+    /// column-0 ids, one filter per directory entry (same index space as the directory).
+    pub struct BlockBloomDir {
+        /// `WORDS` u64 words per block, laid out contiguously: block `b` occupies
+        /// `words[b * WORDS .. (b + 1) * WORDS]`.
+        words: Vec<u64>,
+    }
+
+    impl BlockBloomDir {
+        /// Inserts `id` into block `b`'s filter via [`HASHES`] double-hashed probes.
+        #[inline]
+        fn insert(words: &mut [u64], b: usize, id: Id) {
+            let h = hash_id(id);
+            let (h1, h2) = (h as usize, ((h >> 32) | 1) as usize); // odd step ⇒ distinct probes
+            let base = b * WORDS;
+            for k in 0..HASHES as usize {
+                let bit = (h1.wrapping_add(k.wrapping_mul(h2))) % BITS;
+                words[base + bit / 64] |= 1u64 << (bit % 64);
+            }
+        }
+
+        /// `true` if block `b`'s filter says `id` MIGHT be present (never a false negative);
+        /// `false` ⇒ `id` is definitely absent, so the block can be skipped.
+        #[inline]
+        pub fn maybe_contains(&self, b: usize, id: Id) -> bool {
+            let h = hash_id(id);
+            let (h1, h2) = (h as usize, ((h >> 32) | 1) as usize);
+            let base = b * WORDS;
+            for k in 0..HASHES as usize {
+                let bit = (h1.wrapping_add(k.wrapping_mul(h2))) % BITS;
+                if self.words[base + bit / 64] & (1u64 << (bit % 64)) == 0 {
+                    return false;
+                }
+            }
+            true
+        }
+
+        /// Resident bytes of the filter array.
+        #[inline]
+        pub fn heap_bytes(&self) -> usize {
+            self.words.capacity() * std::mem::size_of::<u64>()
+        }
+
+        /// Builds one filter per block over each block's distinct leading (column-0) ids,
+        /// but ONLY when the leading column is high-NDV enough for a filter to ever skip a
+        /// block. Returns `None` for a low-NDV leading column (e.g. a predicate-leading
+        /// permutation, where every block's id set is tiny and overlapping blocks are rare),
+        /// so dense columns pay no filter bytes. The density gate: build only if the average
+        /// number of DISTINCT leading ids per block is at least [`MIN_AVG_DISTINCT_PER_BLOCK`]
+        /// — i.e. the column actually varies fast enough within a block that an out-of-cluster
+        /// point lookup lands in blocks that do not contain it.
+        pub fn build(blocks: &[&[[Id; 3]]]) -> Option<Self> {
+            if blocks.is_empty() {
+                return None;
+            }
+            // First pass: estimate density (total distinct leading ids across blocks).
+            let mut total_distinct: usize = 0;
+            for chunk in blocks {
+                let mut prev: Option<Id> = None;
+                for r in chunk.iter() {
+                    if prev != Some(r[0]) {
+                        total_distinct += 1;
+                        prev = Some(r[0]);
+                    }
+                }
+            }
+            let avg = total_distinct as f64 / blocks.len() as f64;
+            if avg < MIN_AVG_DISTINCT_PER_BLOCK {
+                return None; // low-NDV leading column: a Bloom filter would never skip.
+            }
+            // Second pass: build the filters. Rows within a block are sorted, so equal
+            // leading ids are contiguous — insert each distinct id once.
+            let mut words = vec![0u64; blocks.len() * WORDS];
+            for (b, chunk) in blocks.iter().enumerate() {
+                let mut prev: Option<Id> = None;
+                for r in chunk.iter() {
+                    if prev != Some(r[0]) {
+                        Self::insert(&mut words, b, r[0]);
+                        prev = Some(r[0]);
+                    }
+                }
+            }
+            Some(BlockBloomDir { words })
+        }
+    }
+
+    /// Density gate (see [`BlockBloomDir::build`]). A column whose blocks average fewer than
+    /// this many distinct leading ids is so clustered that the min/max zone map already
+    /// prunes effectively and a Bloom filter would virtually never skip a block — so we skip
+    /// the filter to keep the directory lean. Chosen conservatively (a full BLOCK of distinct
+    /// ids is 128; this admits columns where at least an eighth of a block's rows start a new
+    /// leading id).
+    const MIN_AVG_DISTINCT_PER_BLOCK: f64 = (BLOCK / 8) as f64;
+}
+
 /// A block-compressed, random-accessible sorted permutation.
 pub struct CompressedPerm {
     /// One entry per block: (its first triple, its byte offset into `blocks`).
@@ -105,6 +249,12 @@ pub struct CompressedPerm {
     /// The concatenated encoded blocks.
     blocks: Blocks,
     len: usize,
+    /// [OPUS-4.8] sq-wihld — OPT-IN (`block-bloom` feature) per-block Bloom filters over the
+    /// leading column, parallel to `dir`. `None` when the feature built no filter for this
+    /// perm (low-NDV leading column, empty perm, or a perm opened from disk — filters are not
+    /// serialised). Used only to skip blocks on an equality-bound leading column in `range`.
+    #[cfg(feature = "block-bloom")]
+    bloom: Option<block_bloom::BlockBloomDir>,
 }
 
 /// Encodes one block (`chunk`, 1..=`BLOCK` sorted rows) into `out`, appending its
@@ -147,7 +297,18 @@ impl CompressedPerm {
             dir.push((chunk[0], blocks.len() as u32));
             encode_block(chunk, &mut blocks);
         }
-        CompressedPerm { dir, blocks: Blocks::Owned(blocks), len: rows.len() }
+        // [OPUS-4.8] sq-wihld — build the OPT-IN per-block Bloom directory over the leading
+        // column (off the same chunks, so it is exactly aligned with `dir`). `build` returns
+        // `None` on a low-NDV leading column, so dense columns pay nothing.
+        #[cfg(feature = "block-bloom")]
+        let bloom = block_bloom::BlockBloomDir::build(&rows.chunks(BLOCK).collect::<Vec<_>>());
+        CompressedPerm {
+            dir,
+            blocks: Blocks::Owned(blocks),
+            len: rows.len(),
+            #[cfg(feature = "block-bloom")]
+            bloom,
+        }
     }
 
     /// Writes the COMPRESSED on-disk permutation format (auto-detected on open by its
@@ -222,7 +383,18 @@ impl CompressedPerm {
             }
             dir.push(([rd32(e), rd32(e + 4), rd32(e + 8)], off));
         }
-        let perm = CompressedPerm { dir, blocks: Blocks::Mapped { map, off: dir_end }, len };
+        // [OPUS-4.8] sq-wihld — the on-disk `SPQCPRM1` format carries NO Bloom filters (they
+        // are an in-RAM acceleration, never serialised), so a memory-mapped perm has none. The
+        // mmap/out-of-core path therefore behaves exactly as before this feature; the Bloom
+        // skip only ever fires on an in-RAM `encode`d perm. This keeps the on-disk format and
+        // the mmap scan path byte-identical regardless of the `block-bloom` feature.
+        let perm = CompressedPerm {
+            dir,
+            blocks: Blocks::Mapped { map, off: dir_end },
+            len,
+            #[cfg(feature = "block-bloom")]
+            bloom: None,
+        };
         // [OPUS-4.8] sq-ed2i: decode-validate every block ONCE, here, so the (unchecked,
         // hot-path) `get_varint`/`decode_block_at` are provably in-bounds on later scans.
         // A bounded one-pass walk: each block's varints must stay within the stream and the
@@ -296,7 +468,13 @@ impl CompressedPerm {
             #[cfg(feature = "mmap")]
             Blocks::Mapped { .. } => 0,
         };
-        self.dir.capacity() * std::mem::size_of::<([Id; 3], u32)>() + stream
+        // [OPUS-4.8] sq-wihld — the OPT-IN per-block Bloom directory (when built) is resident
+        // heap; count it so `heap_bytes` stays honest for the memory-budget paths.
+        #[cfg(feature = "block-bloom")]
+        let bloom = self.bloom.as_ref().map_or(0, block_bloom::BlockBloomDir::heap_bytes);
+        #[cfg(not(feature = "block-bloom"))]
+        let bloom = 0;
+        self.dir.capacity() * std::mem::size_of::<([Id; 3], u32)>() + stream + bloom
     }
 
     /// Decodes the block starting at byte `off` into `out` (appending).
@@ -382,8 +560,27 @@ impl CompressedPerm {
         let last = self.dir.partition_point(|&(k, _)| k <= hi).saturating_sub(1);
         let last = last.max(first);
 
+        // [OPUS-4.8] sq-wihld — when the LEADING column is equality-bound (`lo[0] == hi[0]`,
+        // i.e. a point/prefix lookup on a constant subject/object), an OPT-IN per-block Bloom
+        // filter can skip blocks whose `[min,max]` zone-map span overlaps the constant but
+        // that do not actually contain it (the high-NDV overlapping-block case the min/max map
+        // cannot prune). The filter has zero false negatives, so any block it skips provably
+        // holds no row with that leading id — the trimmed range below is unchanged. We only
+        // consult it for the leading-equality shape; a range / full scan runs the loop as before.
+        #[cfg(feature = "block-bloom")]
+        let bloom_key: Option<Id> = match &self.bloom {
+            Some(_) if lo[0] == hi[0] => Some(lo[0]),
+            _ => None,
+        };
+
         let mut decoded = Vec::with_capacity((last - first + 1) * BLOCK);
         for b in first..=last {
+            #[cfg(feature = "block-bloom")]
+            if let (Some(key), Some(bloom)) = (bloom_key, &self.bloom) {
+                if !bloom.maybe_contains(b, key) {
+                    continue; // block provably holds no row with this leading id.
+                }
+            }
             self.decode_block_at(self.dir[b].1 as usize, &mut decoded);
         }
         // Trim to the exact inclusive range.
@@ -392,6 +589,36 @@ impl CompressedPerm {
         decoded.drain(..s);
         decoded.truncate(e - s);
         decoded
+    }
+
+    /// [OPUS-4.8] sq-wihld — test-only: was a per-block Bloom directory built for this perm?
+    /// Lets a test confirm the density gate admitted a high-NDV leading column (and so the
+    /// skip path is actually exercised), versus declining a low-NDV one.
+    #[cfg(all(test, feature = "block-bloom"))]
+    fn has_bloom(&self) -> bool {
+        self.bloom.is_some()
+    }
+
+    /// [OPUS-4.8] sq-wihld — test-only: for an equality-bound leading id `key`, returns
+    /// `(candidate_blocks, bloom_skipped)` over the zone-map span the `range` loop would
+    /// visit — `candidate_blocks` is the number of blocks whose `[min,max]` span overlaps the
+    /// point lookup (what the min/max zone map alone leaves to decode) and `bloom_skipped` is
+    /// how many of those the Bloom filter proves cannot contain `key` (so `range` skips their
+    /// decode). A positive `bloom_skipped` proves the optimisation does real work; the value is
+    /// purely diagnostic and never asserted as a performance number.
+    #[cfg(all(test, feature = "block-bloom"))]
+    fn bloom_skip_stats(&self, key: Id) -> (usize, usize) {
+        let lo = [key, Id::MIN, Id::MIN];
+        let hi = [key, Id::MAX, Id::MAX];
+        if self.dir.is_empty() {
+            return (0, 0);
+        }
+        let first = self.dir.partition_point(|&(k, _)| k <= lo).saturating_sub(1);
+        let last = self.dir.partition_point(|&(k, _)| k <= hi).saturating_sub(1).max(first);
+        let candidates = last - first + 1;
+        let bloom = self.bloom.as_ref().expect("bloom_skip_stats requires a built filter");
+        let skipped = (first..=last).filter(|&b| !bloom.maybe_contains(b, key)).count();
+        (candidates, skipped)
     }
 }
 
@@ -604,6 +831,57 @@ mod tests {
         }
     }
 
+    /// [OPUS-4.8] sq-bif — `count_range` is the planner's cheap cardinality estimate and must
+    /// return EXACTLY `range(lo, hi).len()` without materialising the range. It only decodes
+    /// the two boundary blocks and adds `BLOCK` for each full interior block
+    /// (`first_count + (last - first - 1) * BLOCK + last_count`), so an off-by-one in that
+    /// arithmetic — or a wrong interior-block count — yields a count that disagrees with the
+    /// materialised range. This was previously only reached transitively through the planner;
+    /// here we pin the invariant directly, across single-block, two-block and many-interior-
+    /// block ranges, the empty / inverted range, and the exact boundary keys.
+    #[test]
+    fn count_range_equals_materialised_range_len() {
+        let rows = sample(5000);
+        let c = CompressedPerm::encode(&rows);
+        assert!(rows.len() > 3 * BLOCK, "need several blocks to exercise the interior arithmetic");
+
+        // Reference count: the length of the materialised range (itself proven correct above).
+        let want = |lo: [Id; 3], hi: [Id; 3]| -> usize { c.range(lo, hi).len() };
+
+        let cases: &[([Id; 3], [Id; 3])] = &[
+            // Whole permutation: spans every block (first + many interior + last).
+            ([Id::MIN; 3], [Id::MAX; 3]),
+            // A bound-subject prefix and a bound subject+predicate prefix.
+            ([100, Id::MIN, Id::MIN], [100, Id::MAX, Id::MAX]),
+            ([200, 5, Id::MIN], [200, 5, Id::MAX]),
+            // A subject that does not exist → empty count.
+            ([99999999, Id::MIN, Id::MIN], [99999999, Id::MAX, Id::MAX]),
+            // Exact single-row ranges at the start, middle, and end.
+            (rows[0], rows[0]),
+            (rows[rows.len() / 2], rows[rows.len() / 2]),
+            (rows[rows.len() - 1], rows[rows.len() - 1]),
+            // A wide interior span that crosses many full blocks (lo/hi land partway into
+            // their boundary blocks, so first_count and last_count are both partial).
+            (rows[BLOCK / 3], rows[rows.len() - BLOCK / 3]),
+            // Two adjacent rows that straddle a block boundary.
+            (rows[BLOCK - 1], rows[BLOCK]),
+        ];
+        for &(lo, hi) in cases {
+            assert_eq!(c.count_range(lo, hi), want(lo, hi), "count_range != range().len() for {lo:?}..={hi:?}");
+        }
+
+        // An inverted range (lo > hi) and an empty permutation both count 0.
+        assert_eq!(c.count_range([10, 0, 0], [1, 0, 0]), 0, "inverted range counts 0");
+        let empty = CompressedPerm::encode(&[]);
+        assert_eq!(empty.count_range([Id::MIN; 3], [Id::MAX; 3]), 0, "empty perm counts 0");
+
+        // Every single-row range over the whole permutation counts exactly 1 (each row is
+        // present once), which independently pins the boundary-block partition_point logic.
+        for &r in &rows {
+            assert_eq!(c.count_range(r, r), 1, "each present row counts exactly once: {r:?}");
+        }
+    }
+
     /// [OPUS-4.8] sq-vkz7 — for a NON-EMPTY perm the STREAMING [`CompressedPermWriter`] must
     /// produce a file BYTE-IDENTICAL to the in-RAM `encode(rows).write_to(..)`. Covers block
     /// boundaries (127/128/129), a partial last block, and a large run. The EMPTY case must
@@ -649,5 +927,145 @@ mod tests {
             assert_eq!(perm.decode_all(), rows, "decoded rows mismatch at n={n}");
         }
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// [OPUS-4.8] sq-wihld — a HIGH-NDV leading column: many distinct subjects, several with
+    /// runs long enough to straddle block boundaries (so a different bound subject's lookup
+    /// lands in a block that does not contain it — the exact overlapping-block case a per-block
+    /// Bloom filter prunes but the min/max zone map cannot). Sorted + deduplicated, like a real
+    /// permutation column.
+    #[cfg(feature = "block-bloom")]
+    fn high_ndv_sample(n: usize) -> Vec<[Id; 3]> {
+        let mut v = Vec::with_capacity(n);
+        let mut state = 0x1234_5678u32;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        for _ in 0..n {
+            // Wide subject domain (high NDV) but a fraction of subjects repeat a few times,
+            // producing runs that cross BLOCK boundaries → overlapping per-block [min,max].
+            let s = 1 + (next() % (n as u32 / 2).max(1));
+            let reps = 1 + (next() % 4); // 1..=4 rows per (s) on average
+            for _ in 0..reps {
+                let p = 1 + (next() % 8);
+                let o = 1 + (next() % 5_000_000);
+                v.push([s, p, o]);
+            }
+        }
+        v.sort_unstable();
+        v.dedup();
+        v.truncate(n.max(1));
+        v
+    }
+
+    /// [OPUS-4.8] sq-wihld (survey §A1) — LOAD-BEARING equivalence: with the `block-bloom`
+    /// feature ON, `range` over an equality-bound LEADING column must return EXACTLY the rows
+    /// a raw binary search returns — the Bloom skip never drops a matching row (zero false
+    /// negatives by construction). This is the feature-on-vs-off result-equivalence contract:
+    /// the raw binary search is the feature-OFF oracle (it has no Bloom path), so equality here
+    /// proves the optimisation is correctness-neutral. We also confirm the density gate built a
+    /// filter for this high-NDV column AND that the filter skips at least one candidate block
+    /// across the keys — otherwise the test would pass trivially without exercising the skip.
+    #[cfg(feature = "block-bloom")]
+    #[test]
+    fn bloom_range_equals_binary_search_and_skips_blocks() {
+        let rows = high_ndv_sample(8000);
+        assert!(rows.len() > 4 * BLOCK, "need many blocks to exercise overlap + skipping");
+        let c = CompressedPerm::encode(&rows);
+
+        // The density gate must admit this high-NDV leading column, or the skip path is never
+        // reached and the test is vacuous.
+        assert!(c.has_bloom(), "high-NDV leading column should get a Bloom directory");
+
+        // Feature-OFF oracle: a raw binary-search range over the sorted rows (no Bloom).
+        let raw_range = |lo: [Id; 3], hi: [Id; 3]| -> Vec<[Id; 3]> {
+            let s = rows.partition_point(|r| *r < lo);
+            let e = rows.partition_point(|r| *r <= hi);
+            rows[s..e].to_vec()
+        };
+
+        // Every DISTINCT leading id present, plus a swathe of ABSENT ids (the false-positive /
+        // definite-absent path). For each, the Bloom-enabled `range` must match the oracle.
+        let mut present: Vec<Id> = rows.iter().map(|r| r[0]).collect();
+        present.dedup();
+        let max_present = *present.last().unwrap();
+
+        let mut total_candidates = 0usize;
+        let mut total_skipped = 0usize;
+        for &k in &present {
+            let lo = [k, Id::MIN, Id::MIN];
+            let hi = [k, Id::MAX, Id::MAX];
+            assert_eq!(c.range(lo, hi), raw_range(lo, hi), "present key {k} range mismatch");
+            let (cand, skip) = c.bloom_skip_stats(k);
+            total_candidates += cand;
+            total_skipped += skip;
+            // A present key must NEVER be skipped in the block(s) that hold it: the materialised
+            // range is non-empty, so at least one candidate block survived the filter.
+            assert!(cand > skip, "present key {k} had all candidate blocks skipped");
+        }
+        // Absent keys interleaved through and beyond the domain: results are empty, and these
+        // are where the Bloom earns its keep (definite-absent → skip without decode).
+        for k in (1..=max_present + 16).step_by(7) {
+            let lo = [k, Id::MIN, Id::MIN];
+            let hi = [k, Id::MAX, Id::MAX];
+            assert_eq!(c.range(lo, hi), raw_range(lo, hi), "absent/odd key {k} range mismatch");
+        }
+
+        // The optimisation must do REAL work on this high-NDV column: across the present keys
+        // at least one candidate block was Bloom-skipped (proves it is engaged, not a no-op).
+        // This is a structural assertion, not a performance number.
+        assert!(
+            total_skipped > 0,
+            "Bloom skipped no blocks ({total_skipped}/{total_candidates}) — optimisation never engaged"
+        );
+    }
+
+    /// [OPUS-4.8] sq-wihld — the Bloom skip must be inert for NON-equality-bound shapes (a full
+    /// scan and a multi-key range), and for ALL shapes it must agree with the raw binary search.
+    /// Re-runs the existing `range` oracle cases under the feature so the feature-on path is
+    /// proven byte-for-byte equivalent to the raw permutation across the same query shapes the
+    /// plan-agreement tests rely on.
+    #[cfg(feature = "block-bloom")]
+    #[test]
+    fn bloom_inert_for_non_equality_shapes() {
+        let rows = high_ndv_sample(6000);
+        let c = CompressedPerm::encode(&rows);
+        let raw_range = |lo: [Id; 3], hi: [Id; 3]| -> Vec<[Id; 3]> {
+            if lo > hi {
+                return Vec::new(); // matches `range`'s inverted-range early-out
+            }
+            let s = rows.partition_point(|r| *r < lo);
+            let e = rows.partition_point(|r| *r <= hi);
+            rows[s..e].to_vec()
+        };
+        let mid = rows[rows.len() / 2][0];
+        let cases: &[([Id; 3], [Id; 3])] = &[
+            // Full scan (leading column NOT equality-bound).
+            ([Id::MIN; 3], [Id::MAX; 3]),
+            // A multi-key leading RANGE (lo[0] != hi[0]) — the Bloom path is bypassed.
+            ([mid, Id::MIN, Id::MIN], [mid + 50, Id::MAX, Id::MAX]),
+            // An empty / inverted range.
+            ([Id::MAX, 0, 0], [Id::MIN, 0, 0]),
+        ];
+        for &(lo, hi) in cases {
+            assert_eq!(c.range(lo, hi), raw_range(lo, hi), "non-equality shape {lo:?}..={hi:?}");
+        }
+    }
+
+    /// [OPUS-4.8] sq-wihld — `decode_all` (whole-permutation iteration) is unaffected by the
+    /// Bloom directory: it never consults the filter, so it must reproduce the rows exactly,
+    /// feature on or off.
+    #[cfg(feature = "block-bloom")]
+    #[test]
+    fn bloom_decode_all_roundtrips() {
+        for &n in &[0usize, 1, 200, 2000, 8000] {
+            let rows = high_ndv_sample(n);
+            let c = CompressedPerm::encode(&rows);
+            assert_eq!(c.decode_all(), rows, "decode_all mismatch at n={n}");
+            assert_eq!(c.len(), rows.len(), "len mismatch at n={n}");
+        }
     }
 }

@@ -215,6 +215,33 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   update-side `using-*` override), `enum QueryForm { Select, Ask, Construct, Describe }`; module
   `sparq_server::results`.
 
+### In-process embedding seam — `sparq_serve::embed` ([OPUS-4.8] sq-xa15c, #1248)
+
+When the consumer is **another Rust process** (e.g. `solid-server-rs`) and wants to
+drop the HTTP hop entirely, embed the engine in-process via the `sparq_serve::embed`
+facade instead of running `sparq-server` and talking to it over HTTP. It is the
+documented **embedding seam**: thin wrappers over the engine entry points plus a
+re-export of the runtime-agnostic concurrency wrapper. No axum/tokio, no HTTP.
+
+- Data path (over one `&Graph` / `&mut Graph`): `embed::query_json(&Graph, sparql)
+  -> Result<String, _>` (SPARQL-JSON), `embed::query(&Graph, sparql) ->
+  Result<QueryResult, _>`, `embed::ask(&Graph, sparql) -> Result<bool, _>`,
+  `embed::update_in_place(&mut Graph, sparql)` (+ `..._atomic` for all-or-nothing on
+  one graph), `embed::apply_delta_nquads(&mut Graph, inserts, deletes)` (quad-level,
+  per-graph; blank nodes by label), and the probes `embed::exists(&Graph) -> bool`,
+  `embed::named_graph_exists(&Graph, &Term) -> bool`, `embed::metadata(&Graph) ->
+  Metadata { triples, named_graphs }`. `query_json_with_budget` takes a `QueryBudget`.
+- Concurrency wrapper (re-exported from the crate root): `GenerationRing` /
+  `Generation` / `GraphApplier` / `Writer` (+ `RingConfig`, `WriterConfig`, `PodId`,
+  `TimeTravelConfig`) — the SAME `fork → update → publish` + generation-pinning model
+  `sparq-server` wraps behind its endpoint. A reader `ring.current()` pins an
+  immutable snapshot; the writer publishes new generations without blocking readers.
+- **Stability:** the INTENDED stable embedding API, but **NOT yet a frozen
+  semver-tier-1 surface** — the formal freeze is the maintainer's to ratify on #1248
+  (pre-`1.0` minor releases MAY still change it). Pin to `sparq_serve::embed` rather
+  than reaching into `sparq-core` / `sparq-engine` directly so the freeze, when
+  ratified, has one well-defined shape.
+
 ## Common recipes
 
 **1. Query forms and result negotiation.** Default result media is SPARQL-JSON. Set
@@ -226,6 +253,18 @@ CONSTRUCT/DESCRIBE):
 | SELECT | `application/sparql-results+json` (default) / `+xml` / `text/csv` / `text/tab-separated-values` | matching results media |
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` |
 | CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` / `application/ld+json` (the `jsonld` feature — **default-on**) | matching RDF media; N-Triples, prefix-compacting Turtle, RDF/XML, <!-- [OPUS-4.8] sq-rt6v --> or flattened JSON-LD <!-- [OPUS-4.8] sq-oy1f.1/.4 --> |
+
+<!-- [OPUS-4.8] sq-u79ee (survey §C1 / FINDINGS F21) -->
+Per the W3C SPARQL Results TSV format, the **TSV** serialiser abbreviates an
+`xsd:integer` / `xsd:decimal` / `xsd:double` / `xsd:boolean` literal whose lexical form is
+a valid Turtle token to its **bare** token (no quotes, no `^^datatype`) — e.g. `30`, `2.2`,
+`1.0E6`, `true`; everything else (incl. integer/decimal *subtypes* like `xsd:negativeInteger`
+and custom datatypes) stays quoted + typed, and `xsd:string` keeps the implicit-datatype short
+form. The bare token is the literal's **own** lexical form, so a data-sourced literal
+round-trips its original spelling (`"1.0E6"^^xsd:double` → `1.0E6`, not canonicalised);
+**computed** numerics arrive already in the engine's canonical form, so they serialise
+canonically. **CSV** writes each value's bare lexical string (datatype/lang dropped — lossy by
+spec); **JSON/XML** carry the full term (value + datatype) unchanged.
 
 ```sh
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/sparql-results+xml' \
@@ -491,6 +530,37 @@ history of that base (blank-node labels are stable within a lineage, which is wh
 relies on); cross-lineage diffing is unsupported. At-rest encryption is out of scope, same as the
 base.
 
+**Durable, replayable change-data-capture stream (`sparq-serve` feature `change-stream`,
+default OFF; `sq-b4fns`, gh-906).** Where the delta above is the PITR *backup* companion, this is
+a **continuous CDC stream** in the Amazon-Neptune-Streams shape: `sparq_serve::change_stream::ChangeLog`
+records **every** commit as one ordered, monotonically-sequenced **change record** —
+`(seq, generation, timestamp, +inserts / −deletes as N-Quads)` — to a **segmented, fsync'd
+append-only log on disk**. A consumer `poll(from_seq)`s from any offset and **replays after a
+process restart** (`ChangeLog::open` re-reads the segments, recovers a torn tail, and resumes at the
+next seq) — a raw durable cross-service feed (replication / live downstream index / triggers),
+distinct from the *ephemeral* in-process WebSocket/SSE subscriptions (a disconnect misses every
+change). Same N-Quads same-lineage quad-set diff + fail-closed FNV-1a digest as the backup family
+(no new dependency; no HTTP/async in the library). At-rest encryption + authenticity are out of
+scope, same as the backup family. A `ChangeSink` trait for an external broker (Kafka/NATS) is
+tracked as a **separate later opt-in** (deferred follow-up bead `sq-l6zks`).
+
+**`GET /streams` — CDC poll endpoint (`sparq-server` feature `change-stream`, default OFF;
+`sq-2999l`, gh-906).** The HTTP poll surface over that durable log, in the Amazon-Neptune-Streams
+`GetRecords` shape. Configure a log directory (`--change-stream DIR` / `SPARQ_CHANGE_STREAM`,
+`ServerConfig::change_stream_dir`) and the server (1) RECORDS every committed SPARQL Update as one
+ordered change record on the update path, and (2) serves `GET /streams` over it (the route is `404`
+unless the directory is set — the same double-opt-in as `/tpf`). Parameters: `iteratorType`
+(`TRIM_HORIZON` = replay all, the default; `AT_SEQUENCE_NUMBER` + `at=N`; `AFTER_SEQUENCE_NUMBER` +
+`after=N`, the resume case; `LATEST` = tail only) and `limit` (max commits per page, default 100,
+clamped to 10000). The JSON response flattens each commit's quad-level changes to one stream record
+per `(op, quad)` — `{ eventId: { commitNum: <seq>, opNum: <1-based> }, op: ADD|REMOVE, generation,
+commitTimestampNanos, data: { stmt: "<n-quads line>" } }` — plus a `nextSequenceNumber` continuation
+token (pass as `at=`/`after=`), `lastSequenceNumber`, `totalRecords` (commit count) and
+`hasMoreRecords`. A poll is a READ (gated by the read auth). A sequence-anchored `iteratorType` with
+no anchor is a fail-closed `400` (never a silent replay-all). With the feature off the route + the
+recording hook are `#[cfg]`-stripped (byte-identical); recording serialises updates only while the
+stream is on. The `ChangeSink` broker trait stays a separate later opt-in (`sq-l6zks`).
+
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
 `application/sparql-update` operation uses — so they share its atomicity, snapshot
@@ -748,6 +818,45 @@ compiled only with the `shacl` cargo feature **and** served only when `--shacl` 
 is also set (mirrors `tpf` / `federation-descriptors`). Without the feature, zero cost (no route,
 no SHACL code — `sparq-core`/the wasm bundle are untouched); with the feature but not the flag,
 `/shacl/validate` is `404`. Reads are gated by `--auth-token-read` like any GET.
+
+**5f. Terse transpiler endpoint (OPT-IN, `sq-vczh2`, epic `sq-2m6zm`; feature `terse`).** Transpile
+a **terse** query (the `K:<name>` keyword layer over canonical SPARQL) into the **canonical,
+conformant SPARQL** it expands to, returning the **verifiable expansion** — NOT an answer. This is
+the LLM-ergonomic surface from `research/llm-ergonomic-sparql-surface.md` §4: the network contract
+is the auditable expansion the agent can inspect, never an opaque oracle.
+
+- `POST /terse/transpile` — the request **body** is the terse query text (read verbatim as UTF-8,
+  gzip-decoded under the same zip-bomb cap). The server runs the LEAN `sparq_terse::terse_to_sparql`
+  (the `K:<name>` keyword layer + the silent-rewrite canary) and returns JSON:
+  `{ "canonical_sparql", "keywords": [{ "keyword", "iri", "legendVersion" }], "resolutions": [],
+  "warnings": [], "legendVersion" }`.
+- The whole **contract** is `canonical_sparql` — standard SPARQL the agent then runs through the
+  normal `/sparql` path. The endpoint **never executes** the query and never reads the store.
+- **Loud-fail**, never a silent guess: an unknown `K:<name>` keyword, a `PREFIX K:` collision, or
+  non-conformant input (the canary) is a `400` carrying the transpiler's own message; a non-`POST`
+  method is a `405`.
+- `resolutions` is always `[]` in this server build: `V("phrase")` concept resolution needs a
+  graph-bound resolver + an embedder (the crate's `vectors` feature), a **future** extension, so a
+  `V(...)` construct is a `400` here rather than guessed. **Caveat (`sq-26fdp`):** the lexical
+  linker can loud-fail a phrase that IS a verbatim `skos:prefLabel` when it shares a token with a
+  sibling — a known soundness-conservative behaviour, fix tracked separately.
+
+```sh
+cargo run -p sparq-server --features terse -- data.ttl --terse
+# expand the K: keyword layer to canonical SPARQL (the agent then runs canonical_sparql at /sparql)
+curl -X POST --data-binary 'SELECT ?s WHERE { ?s K:derivedFrom ?o }' \
+  http://127.0.0.1:3030/terse/transpile
+# → {"canonical_sparql":"SELECT ?s WHERE { ?s <http://www.w3.org/ns/prov#wasDerivedFrom> ?o }",
+#    "keywords":[{"keyword":"derivedFrom","iri":"http://www.w3.org/ns/prov#wasDerivedFrom",
+#    "legendVersion":"pkg-keywords/v1"}],"resolutions":[],"warnings":[],"legendVersion":"pkg-keywords/v1"}
+```
+
+**Double opt-in**, OFF by default: compiled only with the `terse` cargo feature **and** served only
+when `--terse` / `SPARQ_TERSE=1` is also set (mirrors `shacl` / `tpf`). Without the feature, zero
+cost (no route, no terse code — `sparq-core`/`sparq-engine`/the wasm bundle untouched); with the
+feature but not the flag, `/terse/transpile` is `404`. Transpiling is query-shaped, so it is gated
+by `--auth-token-read` like a GET. The CLI exposes the same transpiler as `sparq-cli terse` (see the
+`cli` skill).
 
 **6. Hardening — flags / env / library.** Each flag overrides its `SPARQ_*` env var; the
 env overrides the default.

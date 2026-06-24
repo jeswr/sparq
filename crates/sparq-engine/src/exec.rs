@@ -315,6 +315,14 @@ pub(crate) mod trace {
         pub(crate) depth: usize,
         pub(crate) rows: usize,
         pub(crate) nanos: u64,
+        /// The planner's estimated output cardinality for this operator, when the
+        /// operator has a cardinality model (BGP nodes); `None` for operators whose
+        /// output size the planner does not estimate. Used by the structured EXPLAIN
+        /// (`explain-json`) to compute the per-operator q-error; the text trace
+        /// ignores it. Present only under `explain-json` so the default trace node is
+        /// byte-identical. [OPUS-4.8] sq-u4lgr
+        #[cfg(feature = "explain-json")]
+        pub(crate) est: Option<f64>,
     }
 
     thread_local! {
@@ -355,7 +363,14 @@ pub(crate) mod trace {
         });
         NODES.with(|n| {
             let mut n = n.borrow_mut();
-            n.push(Node { label, depth, rows: 0, nanos: 0 });
+            n.push(Node {
+                label,
+                depth,
+                rows: 0,
+                nanos: 0,
+                #[cfg(feature = "explain-json")]
+                est: None,
+            });
             n.len() - 1
         })
     }
@@ -366,6 +381,19 @@ pub(crate) mod trace {
             if let Some(node) = n.borrow_mut().get_mut(idx) {
                 node.rows = rows;
                 node.nanos = nanos;
+            }
+        });
+    }
+
+    /// Records the planner's estimated output cardinality for the node opened at
+    /// `idx` (called by `eval_graph_pattern_traced` only when the BGP estimate is
+    /// computed). Separate from [`exit`] so the estimate is captured at ENTER time,
+    /// before the (recursive) child evaluation runs. [OPUS-4.8] sq-u4lgr
+    #[cfg(feature = "explain-json")]
+    pub(crate) fn set_est(idx: usize, est: f64) {
+        NODES.with(|n| {
+            if let Some(node) = n.borrow_mut().get_mut(idx) {
+                node.est = Some(est);
             }
         });
     }
@@ -1451,7 +1479,16 @@ fn try_capped(graph: &Graph, inner: &GraphPattern, cap: usize) -> Result<Option<
             }
             let filt = pat_filters[0];
             let sort_col = filt.map(|(c, _)| c);
-            Ok(Some(scan_to_bindings(graph, &id_pat, &pos_vars, sort_col, filt, Some(cap))))
+            Ok(Some(scan_to_bindings(
+                graph,
+                &id_pat,
+                &pos_vars,
+                sort_col,
+                filt,
+                Some(cap),
+                #[cfg(feature = "semijoin-bitmap")]
+                None,
+            )))
         }
         _ => Ok(None),
     }
@@ -1988,6 +2025,17 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
 #[cold]
 fn eval_graph_pattern_traced(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
     let idx = trace::enter(trace_label(p));
+    // Structured EXPLAIN (`explain-json`): attach the planner's estimated output
+    // cardinality to conjunctive (BGP) nodes so the q-error compares the engine's own
+    // estimate against the ANALYZE actual. Only BGP nodes carry a cardinality model;
+    // an estimate failure (e.g. an unresolvable constant) just leaves `est = None`.
+    // [OPUS-4.8] sq-u4lgr
+    #[cfg(feature = "explain-json")]
+    if is_conjunctive(p) {
+        if let Ok(est) = bgp_estimate(graph, p) {
+            trace::set_est(idx, est);
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     let start = std::time::Instant::now();
     let r = eval_graph_pattern_inner(graph, local, p);
@@ -1998,6 +2046,14 @@ fn eval_graph_pattern_traced(graph: &Graph, local: &mut LocalVocab, p: &GraphPat
     let nanos = 0u64;
     trace::exit(idx, r.as_ref().map_or(0, |b| b.rows.len()), nanos);
     r
+}
+
+/// Crate-internal accessor for [`trace_label`], used by the structured EXPLAIN
+/// (`explain-json`) to label planning-only tree nodes with the SAME operator labels
+/// the text ANALYZE trace prints. [OPUS-4.8] sq-u4lgr
+#[cfg(feature = "explain-json")]
+pub(crate) fn trace_label_pub(p: &GraphPattern) -> String {
+    trace_label(p)
 }
 
 /// The operator label an EXPLAIN ANALYZE trace node carries (only built while tracing).
@@ -3964,7 +4020,18 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     let seed = goo_seed(&prepared);
     let seed_sort_col = goo_seed_sort(&prepared, seed, pfilter(seed).map(|(c, _)| c));
 
-    let mut result = scan_to_bindings(graph, &prepared[seed].id_pat, &prepared[seed].pos_vars, seed_sort_col, pfilter(seed), None);
+    let mut result = scan_to_bindings(
+        graph,
+        &prepared[seed].id_pat,
+        &prepared[seed].pos_vars,
+        seed_sort_col,
+        pfilter(seed),
+        None,
+        // The seed is the FIRST scan — there is no materialised side to build a
+        // semi-join prefilter from yet.
+        #[cfg(feature = "semijoin-bitmap")]
+        None,
+    );
     let mut done = vec![false; prepared.len()];
     done[seed] = true;
     cs_ctx.note_done(seed);
@@ -4009,7 +4076,38 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
         let filt = pfilter(i);
         let merge_var = result.sorted_by.clone().filter(|sv| var_pos(i, sv).is_some());
         let scan_sort = filt.map(|(c, _)| c).or_else(|| merge_var.as_ref().map(|jv| var_pos(i, jv).unwrap()));
-        let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, scan_sort, filt, None);
+
+        // [OPUS-4.8] (sq-gr8mb / §A3) Semi-join prefilter: build a membership filter over
+        // ONE connecting variable's ids from the already-materialised `result`, and pass
+        // it to the scan so rows that cannot survive the join are dropped before they are
+        // built/joined. A row survives the downstream join only if it matches on EVERY
+        // shared variable, so filtering on one of them removes only rows that would fail
+        // anyway — the result is identical, just fewer rows scanned. Built only when a
+        // single-column membership test is well-defined: a connecting variable that does
+        // not repeat in the pattern (a repeat is handled by `build_row`'s consistency
+        // check; the prefilter checks the variable's first canonical position).
+        #[cfg(feature = "semijoin-bitmap")]
+        let prefilter_keys = result
+            .vars
+            .iter()
+            .find_map(|v| var_pos(i, v).map(|pos| (v.clone(), pos)))
+            .and_then(|(v, pos)| {
+                let rk = result.col(&v)?;
+                crate::semijoin::KeyFilter::build(result.rows.iter().map(|r| r[rk])).map(|kf| (pos, kf))
+            });
+        #[cfg(feature = "semijoin-bitmap")]
+        let prefilter = prefilter_keys.as_ref().map(|(pos, kf)| (*pos, kf));
+
+        let rhs = scan_to_bindings(
+            graph,
+            &prepared[i].id_pat,
+            &prepared[i].pos_vars,
+            scan_sort,
+            filt,
+            None,
+            #[cfg(feature = "semijoin-bitmap")]
+            prefilter,
+        );
         let connected = prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v));
         // Merge only when both sides are sorted on the join variable (a filter may
         // have forced the scan into a different order).
@@ -4062,6 +4160,50 @@ pub(crate) fn prepare_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<V
         prepared.push(Prepared { id_pat, pos_vars, est, unsatisfiable: unsat });
     }
     Ok(prepared)
+}
+
+/// The planner's estimated FINAL output cardinality of a conjunctive (BGP) subtree —
+/// the same number the EXPLAIN dry-run prints as the last `est N rows`, computed by
+/// REPLAYING the GOO loop (`goo_seed` → `goo_pick`) without executing anything. Used
+/// only by the structured EXPLAIN (`explain-json`) to attach the BGP node's estimate
+/// next to its ANALYZE actual-row count so the q-error is the engine's own estimate
+/// vs reality (not a re-derived number). Returns `0.0` for an empty/unsatisfiable BGP.
+/// [OPUS-4.8] sq-u4lgr
+#[cfg(feature = "explain-json")]
+pub(crate) fn bgp_estimate(graph: &Graph, p: &GraphPattern) -> Result<f64, String> {
+    let mut patterns = Vec::new();
+    let mut filters = Vec::new();
+    flatten_conjunction(p, &mut patterns, &mut filters);
+    let _ = &filters; // selectivity of post-join filters is not modelled (matches the dry run).
+    if patterns.is_empty() {
+        return Ok(0.0);
+    }
+    let prepared = prepare_bgp(graph, &patterns)?;
+    if prepared.iter().any(|p| p.unsatisfiable) {
+        return Ok(0.0);
+    }
+    if !bgp_uses_binary(&patterns) {
+        // WCOJ (cyclic) path: the dry run does not print a single final estimate, so
+        // approximate with the smallest single-pattern estimate (a conservative lower
+        // bound the q-error treats like any other estimate).
+        return Ok(prepared.iter().map(|p| p.est).min().unwrap_or(0) as f64);
+    }
+    let mut cs_ctx = CsCtx::new(&prepared);
+    let seed = goo_seed(&prepared);
+    let mut cur_card = prepared[seed].est as f64;
+    let mut var_ndv: FxHashMap<Variable, f64> = FxHashMap::default();
+    let mut done = vec![false; prepared.len()];
+    done[seed] = true;
+    cs_ctx.note_done(seed);
+    record_pattern_ndv(graph, &prepared, seed, cur_card, &mut var_ndv, &cs_ctx);
+    for _ in 2..=prepared.len() {
+        let (i, new_card, _connected) = goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
+        cur_card = new_card;
+        done[i] = true;
+        cs_ctx.note_done(i);
+        record_pattern_ndv(graph, &prepared, i, cur_card, &mut var_ndv, &cs_ctx);
+    }
+    Ok(cur_card.max(0.0))
 }
 
 /// GOO seed choice: the pattern with the smallest single-pattern cardinality.
@@ -4706,7 +4848,22 @@ fn prepare_pattern(graph: &Graph, tp: &TriplePattern) -> Result<(IdPattern, [Opt
     Ok((id_pat, pos_vars, unsat))
 }
 
-fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variable>; 3], sort_col: Option<usize>, filter: Option<(usize, ScanCmp)>, limit: Option<usize>) -> Bindings {
+fn scan_to_bindings(
+    graph: &Graph,
+    id_pat: &IdPattern,
+    pos_vars: &[Option<Variable>; 3],
+    sort_col: Option<usize>,
+    filter: Option<(usize, ScanCmp)>,
+    limit: Option<usize>,
+    // [OPUS-4.8] (sq-gr8mb / §A3) Optional semi-join prefilter: `(canonical position of
+    // the connecting variable, membership filter over the other side's join keys)`. A
+    // scanned row whose key at that position is ABSENT from the filter cannot match the
+    // downstream join, so it is dropped before projection. The filter is membership-exact
+    // (no false positives), so this never changes the RESULT — only fewer rows are kept.
+    // Only present under the opt-in `semijoin-bitmap` feature, so the default build's
+    // signature and per-row path are byte-identical.
+    #[cfg(feature = "semijoin-bitmap")] prefilter: Option<(usize, &crate::semijoin::KeyFilter)>,
+) -> Bindings {
     let mut vars: Vec<Variable> = Vec::new();
     let mut var_positions: Vec<Vec<usize>> = Vec::new();
     for (pos, v) in pos_vars.iter().enumerate() {
@@ -4751,10 +4908,21 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
         }
     }
 
-    // Per-row builder: apply the pushed-down filter, then project (with the
-    // repeated-variable consistency check); `None` drops the row.
+    // Per-row builder: apply the semi-join prefilter (if any) and the pushed-down
+    // filter, then project (with the repeated-variable consistency check); `None`
+    // drops the row.
     let build_row = |row: &[Id; 3]| -> Option<Row> {
         let spo = scan.to_spo(row);
+        // [OPUS-4.8] (sq-gr8mb / §A3) Semi-join prefilter: drop a row whose connecting-
+        // variable id is absent from the other side's join-key set — it cannot survive the
+        // downstream join. EXACT membership, so the result is unchanged (only this wasted
+        // row is skipped before projection). Checked first: it is the cheapest reject.
+        #[cfg(feature = "semijoin-bitmap")]
+        if let Some((jpos, kf)) = prefilter {
+            if !kf.contains(spo[jpos]) {
+                return None;
+            }
+        }
         if let Some((fpos, cmp)) = filter {
             if !cmp.test_id(graph, spo[fpos]) {
                 return None;

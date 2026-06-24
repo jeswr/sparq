@@ -1,0 +1,12 @@
+[
+  {"file": "q25_hidden.txt", "answer": "GenAI retrieval"},
+  {"file": "q25_raw.txt", "answer": "GenAI retrieval"},
+  {"file": "q26_hidden.txt", "answer": "HTTP server"},
+  {"file": "q26_raw.txt", "answer": "HTTP server"},
+  {"file": "q27_hidden.txt", "answer": "SHACL validation"},
+  {"file": "q27_raw.txt", "answer": "SHACL validation"},
+  {"file": "q28_hidden.txt", "answer": "SPARQL query"},
+  {"file": "q28_raw.txt", "answer": "SPARQL query"},
+  {"file": "q29_hidden.txt", "answer": "Vector search"},
+  {"file": "q29_raw.txt", "answer": "Vector search"}
+]

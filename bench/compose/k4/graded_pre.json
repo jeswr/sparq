@@ -1,0 +1,632 @@
+[
+ {
+  "id": 0,
+  "kind": "about-topic",
+  "arm": "raw",
+  "prompt": "A PKG finding states: \"A PR merges only when ci-summary is green and every review thread is resolved\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Merge discipline",
+  "answer": "Merge discipline",
+  "n_bindings": 1
+ },
+ {
+  "id": 0,
+  "kind": "about-topic",
+  "arm": "hidden",
+  "prompt": "A PKG finding states: \"A PR merges only when ci-summary is green and every review thread is resolved\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Merge discipline",
+  "answer": "Merge discipline",
+  "n_bindings": 1
+ },
+ {
+  "id": 1,
+  "kind": "about-topic",
+  "arm": "raw",
+  "prompt": "A PKG finding states: \"Sub-agents commit in-worktree (no push/merge), gate in-worktree without weakening a gate, and self-identify in every comment\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent rules",
+  "n_bindings": 1
+ },
+ {
+  "id": 1,
+  "kind": "about-topic",
+  "arm": "hidden",
+  "prompt": "A PKG finding states: \"Sub-agents commit in-worktree (no push/merge), gate in-worktree without weakening a gate, and self-identify in every comment\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent standing rules",
+  "n_bindings": 1
+ },
+ {
+  "id": 2,
+  "kind": "about-topic",
+  "arm": "raw",
+  "prompt": "A PKG finding states: \"Sub-agents proceed without the maintainer's greenlight, documenting the default and filing a feedback issue\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent rules",
+  "n_bindings": 1
+ },
+ {
+  "id": 2,
+  "kind": "about-topic",
+  "arm": "hidden",
+  "prompt": "A PKG finding states: \"Sub-agents proceed without the maintainer's greenlight, documenting the default and filing a feedback issue\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent standing rules",
+  "n_bindings": 1
+ },
+ {
+  "id": 3,
+  "kind": "about-topic",
+  "arm": "raw",
+  "prompt": "A PKG finding states: \"Sub-agents tag [OPUS-4.8] + the Opus trailer and keep ZK/MPC + perf claims gate-safe\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent rules",
+  "n_bindings": 1
+ },
+ {
+  "id": 3,
+  "kind": "about-topic",
+  "arm": "hidden",
+  "prompt": "A PKG finding states: \"Sub-agents tag [OPUS-4.8] + the Opus trailer and keep ZK/MPC + perf claims gate-safe\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent standing rules",
+  "n_bindings": 1
+ },
+ {
+  "id": 4,
+  "kind": "about-topic",
+  "arm": "raw",
+  "prompt": "A PKG finding states: \"Every dispatched sub-agent follows the shared contract; task briefs state the task only\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent rules",
+  "n_bindings": 1
+ },
+ {
+  "id": 4,
+  "kind": "about-topic",
+  "arm": "hidden",
+  "prompt": "A PKG finding states: \"Every dispatched sub-agent follows the shared contract; task briefs state the task only\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent standing rules",
+  "n_bindings": 1
+ },
+ {
+  "id": 5,
+  "kind": "about-topic",
+  "arm": "raw",
+  "prompt": "A PKG finding states: \"Sub-agents stage only changed files by explicit path; never git add -A and never stage .beads/\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent standing rules (topic-subagent-rules)",
+  "n_bindings": 1
+ },
+ {
+  "id": 5,
+  "kind": "about-topic",
+  "arm": "hidden",
+  "prompt": "A PKG finding states: \"Sub-agents stage only changed files by explicit path; never git add -A and never stage .beads/\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent standing rules",
+  "n_bindings": 1
+ },
+ {
+  "id": 6,
+  "kind": "about-topic",
+  "arm": "raw",
+  "prompt": "A PKG finding states: \"Every mutating sub-agent runs in its OWN isolated worktree+branch, never the shared main checkout\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent standing rules (topic-subagent-rules)",
+  "n_bindings": 1
+ },
+ {
+  "id": 6,
+  "kind": "about-topic",
+  "arm": "hidden",
+  "prompt": "A PKG finding states: \"Every mutating sub-agent runs in its OWN isolated worktree+branch, never the shared main checkout\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Sub-agent standing rules",
+  "answer": "Sub-agent standing rules",
+  "n_bindings": 1
+ },
+ {
+  "id": 7,
+  "kind": "about-topic",
+  "arm": "raw",
+  "prompt": "A PKG finding states: \"A verified-clean non-perf PR auto-arms; never arm auto-merge on a stacked PR whose base is not main\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Merge discipline",
+  "answer": "Merge discipline (topic-merge-discipline)",
+  "n_bindings": 1
+ },
+ {
+  "id": 7,
+  "kind": "about-topic",
+  "arm": "hidden",
+  "prompt": "A PKG finding states: \"A verified-clean non-perf PR auto-arms; never arm auto-merge on a stacked PR whose base is not main\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "Merge discipline",
+  "answer": "Merge discipline",
+  "n_bindings": 1
+ },
+ {
+  "id": 8,
+  "kind": "about-topic",
+  "arm": "raw",
+  "prompt": "A PKG finding states: \"A ZK-circuit change re-runs forge_gates + differential_fuzz + the gate-count snapshot and re-opens the soundness audit\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "ZK/MPC claim + circuit discipline",
+  "answer": "ZK/MPC claim + circuit discipline (topic-zk-discipline)",
+  "n_bindings": 1
+ },
+ {
+  "id": 8,
+  "kind": "about-topic",
+  "arm": "hidden",
+  "prompt": "A PKG finding states: \"A ZK-circuit change re-runs forge_gates + differential_fuzz + the gate-count snapshot and re-opens the soundness audit\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "ZK/MPC claim + circuit discipline",
+  "answer": "ZK/MPC claim + circuit discipline",
+  "n_bindings": 1
+ },
+ {
+  "id": 9,
+  "kind": "about-topic",
+  "arm": "raw",
+  "prompt": "A PKG finding states: \"Adding/removing a zk/compose member needs the gate-count snapshot updated and the Rust gate run, not just nargo test\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "ZK/MPC claim + circuit discipline",
+  "answer": "ZK/MPC claim + circuit discipline (topic-zk-discipline)",
+  "n_bindings": 1
+ },
+ {
+  "id": 9,
+  "kind": "about-topic",
+  "arm": "hidden",
+  "prompt": "A PKG finding states: \"Adding/removing a zk/compose member needs the gate-count snapshot updated and the Rust gate run, not just nargo test\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "ZK/MPC claim + circuit discipline",
+  "answer": "ZK/MPC claim + circuit discipline",
+  "n_bindings": 1
+ },
+ {
+  "id": 10,
+  "kind": "about-topic",
+  "arm": "raw",
+  "prompt": "A PKG finding states: \"Any ZK/MPC privacy or soundness claim must stay hedged/negative \u2014 the privacy-claims gate is a HARD ci-summary job\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "ZK/MPC claim + circuit discipline",
+  "answer": "The topic identified by https://sparq.dev/ns/pkg/kb#topic-zk-discipline, i.e. ZK (zero-knowledge) discipline. The row is an opaque IRI; from its slug the topic is ZK discipline.",
+  "n_bindings": 1
+ },
+ {
+  "id": 10,
+  "kind": "about-topic",
+  "arm": "hidden",
+  "prompt": "A PKG finding states: \"Any ZK/MPC privacy or soundness claim must stay hedged/negative \u2014 the privacy-claims gate is a HARD ci-summary job\". The query below returned the single topic this finding is ABOUT. In one short phrase, what is that topic?",
+  "gold": "ZK/MPC claim + circuit discipline",
+  "answer": "ZK/MPC claim + circuit discipline",
+  "n_bindings": 1
+ },
+ {
+  "id": 11,
+  "kind": "disambiguate-finding",
+  "arm": "raw",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that a change reaches main only when the aggregate CI check is green and all review threads are resolved. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "A PR merges only when ci-summary is green and every review thread is resolved",
+  "answer": "https://sparq.dev/ns/pkg/kb#find-merge-ci-summary-gate (the rows are opaque IRIs; this one's slug, find-merge-ci-summary-gate, matches the merge-when-ci-summary-green-and-threads-resolved rule)",
+  "n_bindings": 11
+ },
+ {
+  "id": 11,
+  "kind": "disambiguate-finding",
+  "arm": "hidden",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that a change reaches main only when the aggregate CI check is green and all review threads are resolved. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "A PR merges only when ci-summary is green and every review thread is resolved",
+  "answer": "A PR merges only when ci-summary is green and every review thread is resolved",
+  "n_bindings": 11
+ },
+ {
+  "id": 12,
+  "kind": "disambiguate-finding",
+  "arm": "raw",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that a mutating sub-agent must run in its own isolated worktree and branch. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "Every mutating sub-agent runs in its OWN isolated worktree+branch, never the shared main checkout",
+  "answer": "https://sparq.dev/ns/pkg/kb#find-subagent-worktree-isolation (the rows are opaque IRIs; this one's slug, find-subagent-worktree-isolation, matches the mutating-sub-agent-in-its-own-isolated-worktree-and-branch rule)",
+  "n_bindings": 11
+ },
+ {
+  "id": 12,
+  "kind": "disambiguate-finding",
+  "arm": "hidden",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that a mutating sub-agent must run in its own isolated worktree and branch. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "Every mutating sub-agent runs in its OWN isolated worktree+branch, never the shared main checkout",
+  "answer": "Every mutating sub-agent runs in its OWN isolated worktree+branch, never the shared main checkout",
+  "n_bindings": 11
+ },
+ {
+  "id": 13,
+  "kind": "disambiguate-finding",
+  "arm": "raw",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that sub-agents must never run `git add -A` and never stage the beads directory. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "Sub-agents stage only changed files by explicit path; never git add -A and never stage .beads/",
+  "answer": "https://sparq.dev/ns/pkg/kb#find-subagent-staging (the rows are opaque IRIs; this one's slug, find-subagent-staging, matches the never-git-add-A-and-never-stage-.beads/ rule)",
+  "n_bindings": 11
+ },
+ {
+  "id": 13,
+  "kind": "disambiguate-finding",
+  "arm": "hidden",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that sub-agents must never run `git add -A` and never stage the beads directory. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "Sub-agents stage only changed files by explicit path; never git add -A and never stage .beads/",
+  "answer": "Sub-agents stage only changed files by explicit path; never git add -A and never stage .beads/",
+  "n_bindings": 11
+ },
+ {
+  "id": 14,
+  "kind": "disambiguate-finding",
+  "arm": "raw",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that any ZK or MPC privacy/soundness claim must stay hedged because of a hard CI gate. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "Any ZK/MPC privacy or soundness claim must stay hedged/negative \u2014 the privacy-claims gate is a HARD ci-summary job",
+  "answer": "https://sparq.dev/ns/pkg/kb#find-zk-privacy-claims-gate (the rows are opaque IRIs; this one's slug, find-zk-privacy-claims-gate, matches the ZK/MPC-privacy-or-soundness-claim-must-stay-hedged-because-of-a-hard-CI-gate rule)",
+  "n_bindings": 11
+ },
+ {
+  "id": 14,
+  "kind": "disambiguate-finding",
+  "arm": "hidden",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that any ZK or MPC privacy/soundness claim must stay hedged because of a hard CI gate. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "Any ZK/MPC privacy or soundness claim must stay hedged/negative \u2014 the privacy-claims gate is a HARD ci-summary job",
+  "answer": "Any ZK/MPC privacy or soundness claim must stay hedged/negative \u2014 the privacy-claims gate is a HARD ci-summary job",
+  "n_bindings": 11
+ },
+ {
+  "id": 15,
+  "kind": "disambiguate-finding",
+  "arm": "raw",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that you must never arm auto-merge on a stacked PR whose base is not main. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "A verified-clean non-perf PR auto-arms; never arm auto-merge on a stacked PR whose base is not main",
+  "answer": "The rows are opaque IRIs, so I cannot read the finding text verbatim. The matching finding is the one identified as https://sparq.dev/ns/pkg/kb#find-zk-arming-model (row 8).",
+  "n_bindings": 11
+ },
+ {
+  "id": 15,
+  "kind": "disambiguate-finding",
+  "arm": "hidden",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that you must never arm auto-merge on a stacked PR whose base is not main. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "A verified-clean non-perf PR auto-arms; never arm auto-merge on a stacked PR whose base is not main",
+  "answer": "A verified-clean non-perf PR auto-arms; never arm auto-merge on a stacked PR whose base is not main",
+  "n_bindings": 11
+ },
+ {
+  "id": 16,
+  "kind": "disambiguate-finding",
+  "arm": "raw",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that sub-agents proceed without waiting for the maintainer's greenlight. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "Sub-agents proceed without the maintainer's greenlight, documenting the default and filing a feedback issue",
+  "answer": "The rows are opaque IRIs, so I cannot read the finding text verbatim. The matching finding is the one identified as https://sparq.dev/ns/pkg/kb#find-subagent-proceed-no-greenlight (row 3).",
+  "n_bindings": 11
+ },
+ {
+  "id": 16,
+  "kind": "disambiguate-finding",
+  "arm": "hidden",
+  "prompt": "The query below returned several PKG findings (the read-path candidate set). Exactly one of them is: the rule that sub-agents proceed without waiting for the maintainer's greenlight. Reply with the full text of THAT finding (verbatim) and nothing else.",
+  "gold": "Sub-agents proceed without the maintainer's greenlight, documenting the default and filing a feedback issue",
+  "answer": "Sub-agents proceed without the maintainer's greenlight, documenting the default and filing a feedback issue",
+  "n_bindings": 11
+ },
+ {
+  "id": 17,
+  "kind": "task-title",
+  "arm": "raw",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "site: let visitors write their OWN queries on the Solid showcase (gh-549) \u2014 overlaps #757 access-controlled-queries-without-OIDC steer",
+  "answer": "Cannot determine the subject from the rows; the only row is an opaque task identifier (https://sparq.dev/ns/pkg/kb#task-sq-01w1y).",
+  "n_bindings": 1
+ },
+ {
+  "id": 17,
+  "kind": "task-title",
+  "arm": "hidden",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "site: let visitors write their OWN queries on the Solid showcase (gh-549) \u2014 overlaps #757 access-controlled-queries-without-OIDC steer",
+  "answer": "It's a site task to let visitors write their own SPARQL queries on the Solid showcase (gh-549), overlapping the #757 access-controlled-queries-without-OIDC steer.",
+  "n_bindings": 1
+ },
+ {
+  "id": 18,
+  "kind": "task-title",
+  "arm": "raw",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "page: /surface/cli + /surface/python (tier-e walkthrough)",
+  "answer": "Cannot determine the subject from the rows; the only row is an opaque task identifier (https://sparq.dev/ns/pkg/kb#task-sq-4gju).",
+  "n_bindings": 1
+ },
+ {
+  "id": 18,
+  "kind": "task-title",
+  "arm": "hidden",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "page: /surface/cli + /surface/python (tier-e walkthrough)",
+  "answer": "It's a task to create the /surface/cli and /surface/python pages as a tier-e walkthrough.",
+  "n_bindings": 1
+ },
+ {
+  "id": 19,
+  "kind": "task-title",
+  "arm": "raw",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "MS-G2: enable clippy::undocumented_unsafe_blocks first-party + normalize // SAFETY: tokens",
+  "answer": "Cannot determine the subject from the rows; the only row is an opaque task identifier (https://sparq.dev/ns/pkg/kb#task-sq-8wbn).",
+  "n_bindings": 1
+ },
+ {
+  "id": 19,
+  "kind": "task-title",
+  "arm": "hidden",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "MS-G2: enable clippy::undocumented_unsafe_blocks first-party + normalize // SAFETY: tokens",
+  "answer": "It's task MS-G2: enable the clippy::undocumented_unsafe_blocks lint on first-party code and normalize the // SAFETY: comment tokens.",
+  "n_bindings": 1
+ },
+ {
+  "id": 20,
+  "kind": "task-title",
+  "arm": "raw",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "Mechanism for tracking inputs-needed-from-user (researched)",
+  "answer": "The row gives only an opaque task identifier (task-sq-da2g) with no description, so its subject cannot be determined from the rows.",
+  "n_bindings": 1
+ },
+ {
+  "id": 20,
+  "kind": "task-title",
+  "arm": "hidden",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "Mechanism for tracking inputs-needed-from-user (researched)",
+  "answer": "It is a (researched) task about designing a mechanism for tracking which inputs are still needed from the user.",
+  "n_bindings": 1
+ },
+ {
+  "id": 21,
+  "kind": "task-title",
+  "arm": "raw",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "HDT: PFC block-sequential dict decode + borrowed-slice interning",
+  "answer": "The row gives only an opaque task identifier (task-sq-ijz) with no description, so its subject cannot be determined from the rows.",
+  "n_bindings": 1
+ },
+ {
+  "id": 21,
+  "kind": "task-title",
+  "arm": "hidden",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "HDT: PFC block-sequential dict decode + borrowed-slice interning",
+  "answer": "It is about HDT dictionary decoding, specifically block-sequential Plain Front Coding (PFC) decode using borrowed-slice interning.",
+  "n_bindings": 1
+ },
+ {
+  "id": 22,
+  "kind": "task-title",
+  "arm": "raw",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "GeoSPARQL: close R9 (geometry-metadata properties) + R16 (empty gmlLiteral) OGC conformance gaps",
+  "answer": "The row gives only an opaque task identifier (task-sq-mzmh) with no description, so its subject cannot be determined from the rows.",
+  "n_bindings": 1
+ },
+ {
+  "id": 22,
+  "kind": "task-title",
+  "arm": "hidden",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "GeoSPARQL: close R9 (geometry-metadata properties) + R16 (empty gmlLiteral) OGC conformance gaps",
+  "answer": "It is about closing two GeoSPARQL OGC conformance gaps: R9 (geometry-metadata properties) and R16 (empty gmlLiteral).",
+  "n_bindings": 1
+ },
+ {
+  "id": 23,
+  "kind": "task-title",
+  "arm": "raw",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "Document (and optionally support) named-graph scoping in sparq-introspect / sparq-sim / sparq-vectors (currently default-graph only)",
+  "answer": "The row gives only an opaque task identifier (task-sq-quuu) with no description, so its subject cannot be determined from the rows.",
+  "n_bindings": 1
+ },
+ {
+  "id": 23,
+  "kind": "task-title",
+  "arm": "hidden",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "Document (and optionally support) named-graph scoping in sparq-introspect / sparq-sim / sparq-vectors (currently default-graph only)",
+  "answer": "It is about documenting (and optionally supporting) named-graph scoping in sparq-introspect, sparq-sim, and sparq-vectors, which currently handle only the default graph.",
+  "n_bindings": 1
+ },
+ {
+  "id": 24,
+  "kind": "task-title",
+  "arm": "raw",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "CI lint: fail if any taiki-e/install-action step lacks an explicit 'with: tool:' input (SHA-pinning drops the @<tool> selector \u2192 installs nothing \u2192 silent vacuous gate)",
+  "answer": "The row gives only an opaque task identifier (task-sq-ur7o) with no description, so its subject cannot be determined from the rows.",
+  "n_bindings": 1
+ },
+ {
+  "id": 24,
+  "kind": "task-title",
+  "arm": "hidden",
+  "prompt": "The query below returned exactly one PKG task. In one sentence, what is that task about? (Summarise its subject; do not just echo an identifier.)",
+  "gold": "CI lint: fail if any taiki-e/install-action step lacks an explicit 'with: tool:' input (SHA-pinning drops the @<tool> selector \u2192 installs nothing \u2192 silent vacuous gate)",
+  "answer": "It is about adding a CI lint that fails when a taiki-e/install-action step lacks an explicit 'with: tool:' input, since SHA-pinning drops the @<tool> selector and would silently install nothing, creating a vacuous gate.",
+  "n_bindings": 1
+ },
+ {
+  "id": 25,
+  "kind": "technique-name",
+  "arm": "raw",
+  "prompt": "The query below returned one sparq capability surface. Name the surface in a short phrase.",
+  "gold": "genai-retrieval surface",
+  "answer": "GenAI retrieval",
+  "n_bindings": 1
+ },
+ {
+  "id": 25,
+  "kind": "technique-name",
+  "arm": "hidden",
+  "prompt": "The query below returned one sparq capability surface. Name the surface in a short phrase.",
+  "gold": "genai-retrieval surface",
+  "answer": "GenAI retrieval",
+  "n_bindings": 1
+ },
+ {
+  "id": 26,
+  "kind": "technique-name",
+  "arm": "raw",
+  "prompt": "The query below returned one sparq capability surface. Name the surface in a short phrase.",
+  "gold": "http-server surface",
+  "answer": "HTTP server",
+  "n_bindings": 1
+ },
+ {
+  "id": 26,
+  "kind": "technique-name",
+  "arm": "hidden",
+  "prompt": "The query below returned one sparq capability surface. Name the surface in a short phrase.",
+  "gold": "http-server surface",
+  "answer": "HTTP server",
+  "n_bindings": 1
+ },
+ {
+  "id": 27,
+  "kind": "technique-name",
+  "arm": "raw",
+  "prompt": "The query below returned one sparq capability surface. Name the surface in a short phrase.",
+  "gold": "shacl-validation surface",
+  "answer": "SHACL validation",
+  "n_bindings": 1
+ },
+ {
+  "id": 27,
+  "kind": "technique-name",
+  "arm": "hidden",
+  "prompt": "The query below returned one sparq capability surface. Name the surface in a short phrase.",
+  "gold": "shacl-validation surface",
+  "answer": "SHACL validation",
+  "n_bindings": 1
+ },
+ {
+  "id": 28,
+  "kind": "technique-name",
+  "arm": "raw",
+  "prompt": "The query below returned one sparq capability surface. Name the surface in a short phrase.",
+  "gold": "sparql-query surface",
+  "answer": "SPARQL query",
+  "n_bindings": 1
+ },
+ {
+  "id": 28,
+  "kind": "technique-name",
+  "arm": "hidden",
+  "prompt": "The query below returned one sparq capability surface. Name the surface in a short phrase.",
+  "gold": "sparql-query surface",
+  "answer": "SPARQL query",
+  "n_bindings": 1
+ },
+ {
+  "id": 29,
+  "kind": "technique-name",
+  "arm": "raw",
+  "prompt": "The query below returned one sparq capability surface. Name the surface in a short phrase.",
+  "gold": "vector-search surface",
+  "answer": "Vector search",
+  "n_bindings": 1
+ },
+ {
+  "id": 29,
+  "kind": "technique-name",
+  "arm": "hidden",
+  "prompt": "The query below returned one sparq capability surface. Name the surface in a short phrase.",
+  "gold": "vector-search surface",
+  "answer": "Vector search",
+  "n_bindings": 1
+ },
+ {
+  "id": 30,
+  "kind": "punct-concept",
+  "arm": "raw",
+  "prompt": "The query below returned the PKG's topic catalog. Which ONE of these topics covers the honesty + gate-count discipline specific to the ZK / MPC estate? Reply with its name verbatim.",
+  "gold": "ZK/MPC claim + circuit discipline",
+  "answer": "https://sparq.dev/ns/pkg/kb#topic-zk-discipline",
+  "n_bindings": 3
+ },
+ {
+  "id": 30,
+  "kind": "punct-concept",
+  "arm": "hidden",
+  "prompt": "The query below returned the PKG's topic catalog. Which ONE of these topics covers the honesty + gate-count discipline specific to the ZK / MPC estate? Reply with its name verbatim.",
+  "gold": "ZK/MPC claim + circuit discipline",
+  "answer": "ZK/MPC claim + circuit discipline",
+  "n_bindings": 3
+ },
+ {
+  "id": 31,
+  "kind": "dep-count",
+  "arm": "raw",
+  "prompt": "The query below returned the tasks that the task \"GUI: adopt npm/pnpm workspaces + re-export the generated sparq_wasm.d.ts in @sparq/client\" DEPENDS ON. How many tasks does it depend on? Answer with the number.",
+  "gold": "1",
+  "answer": "1",
+  "n_bindings": 1
+ },
+ {
+  "id": 31,
+  "kind": "dep-count",
+  "arm": "hidden",
+  "prompt": "The query below returned the tasks that the task \"GUI: adopt npm/pnpm workspaces + re-export the generated sparq_wasm.d.ts in @sparq/client\" DEPENDS ON. How many tasks does it depend on? Answer with the number.",
+  "gold": "1",
+  "answer": "1",
+  "n_bindings": 1
+ },
+ {
+  "id": 32,
+  "kind": "dep-count",
+  "arm": "raw",
+  "prompt": "The query below returned the tasks that the task \"HDT write Path B: direct in-memory FourSectDict+BitmapTriples builder (skip NT text round-trip)\" DEPENDS ON. How many tasks does it depend on? Answer with the number.",
+  "gold": "1",
+  "answer": "1",
+  "n_bindings": 1
+ },
+ {
+  "id": 32,
+  "kind": "dep-count",
+  "arm": "hidden",
+  "prompt": "The query below returned the tasks that the task \"HDT write Path B: direct in-memory FourSectDict+BitmapTriples builder (skip NT text round-trip)\" DEPENDS ON. How many tasks does it depend on? Answer with the number.",
+  "gold": "1",
+  "answer": "1",
+  "n_bindings": 1
+ },
+ {
+  "id": 33,
+  "kind": "dep-count",
+  "arm": "raw",
+  "prompt": "The query below returned the tasks that the task \"EPIC: MPC research track \u2014 configurable security models + comprehensive (model \u00d7 N \u00d7 query) benchmarking + deep performance/privacy frontier research for MPC-over-SPARQL\" DEPENDS ON. How many tasks does it depend on? Answer with the number.",
+  "gold": "1",
+  "answer": "1",
+  "n_bindings": 1
+ },
+ {
+  "id": 33,
+  "kind": "dep-count",
+  "arm": "hidden",
+  "prompt": "The query below returned the tasks that the task \"EPIC: MPC research track \u2014 configurable security models + comprehensive (model \u00d7 N \u00d7 query) benchmarking + deep performance/privacy frontier research for MPC-over-SPARQL\" DEPENDS ON. How many tasks does it depend on? Answer with the number.",
+  "gold": "1",
+  "answer": "1",
+  "n_bindings": 1
+ },
+ {
+  "id": 34,
+  "kind": "dep-count",
+  "arm": "raw",
+  "prompt": "The query below returned the tasks that the task \"page: /surface/inference (tier-b live)\" DEPENDS ON. How many tasks does it depend on? Answer with the number.",
+  "gold": "2",
+  "answer": "2",
+  "n_bindings": 2
+ },
+ {
+  "id": 34,
+  "kind": "dep-count",
+  "arm": "hidden",
+  "prompt": "The query below returned the tasks that the task \"page: /surface/inference (tier-b live)\" DEPENDS ON. How many tasks does it depend on? Answer with the number.",
+  "gold": "2",
+  "answer": "2",
+  "n_bindings": 2
+ }
+]

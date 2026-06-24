@@ -302,4 +302,82 @@ ex:bare a pkg:Finding ;
         assert!(block.contains("no source recorded"));
         assert!(block.contains("<http://ex/bare>"));
     }
+
+    /// A subject derived from TWO sources must cite BOTH, with the numbering continuing
+    /// across the two citations (not reset per subject) — the `render` contract: "one
+    /// `Citation` per distinct source link" / "a Finding derived from two sources cites
+    /// both". This is the multi-source branch of the `for link in &rec.sources` loop, which
+    /// no single-source fixture exercises. [OPUS-4.8]
+    #[test]
+    fn subject_with_two_sources_cites_both_with_continuing_numbers() {
+        let g = Graph::load_str(
+            r#"@prefix pkg:  <https://sparq.dev/ns/pkg#> .
+               @prefix prov: <http://www.w3.org/ns/prov#> .
+               @prefix ex:   <http://ex/> .
+               ex:multi a pkg:Finding ;
+                 prov:wasDerivedFrom ex:src-a , ex:src-b ;
+                 pkg:confidence "0.8" .
+               ex:src-a a pkg:Source .
+               ex:src-b a pkg:Source ."#,
+            "turtle",
+        )
+        .unwrap();
+        // Bind ONLY the multi-source finding so the citation count is exactly its sources.
+        let result = query_with_budget(
+            &g,
+            "PREFIX pkg: <https://sparq.dev/ns/pkg#> \
+             SELECT ?f WHERE { VALUES ?f { <http://ex/multi> } ?f a pkg:Finding }",
+            &QueryBudget::unlimited(),
+        )
+        .unwrap();
+        let cited = cite_result(&g, &result);
+
+        // Two citations, BOTH for the same subject, BOTH to a real distinct source.
+        assert_eq!(cited.citations.len(), 2, "both sources must be cited");
+        assert!(cited
+            .citations
+            .iter()
+            .all(|c| c.subject == nn("http://ex/multi")));
+        let mut srcs: Vec<&str> = cited.citations.iter().map(|c| c.source.as_str()).collect();
+        srcs.sort_unstable();
+        assert_eq!(srcs, vec!["http://ex/src-a", "http://ex/src-b"]);
+        // Numbering continues 1,2 across the sources — it does NOT reset to 1 per source.
+        let mut nums: Vec<usize> = cited.citations.iter().map(|c| c.number).collect();
+        nums.sort_unstable();
+        assert_eq!(nums, vec![1, 2]);
+        // The subject's shared confidence is carried onto each per-source citation.
+        assert!(cited
+            .citations
+            .iter()
+            .all(|c| c.confidence.as_deref() == Some("0.8")));
+        // The multi-source path keeps the resolution guarantee.
+        assert_eq!(cited.resolution_rate(&g), 1.0);
+    }
+
+    /// Citation numbering is a stable, document-wide index across distinct subjects — the
+    /// property a downstream `[n]` marker relies on. Asserts the markers render `[1]`/`[2]`
+    /// and each footnote leads with its own marker. [OPUS-4.8]
+    #[test]
+    fn numbering_is_document_wide_and_marker_leads_footnote() {
+        let g = graph();
+        let cited = cite_result(&g, &all_findings(&g));
+        assert_eq!(cited.citations.len(), 2);
+        assert_eq!(cited.citations[0].marker(), "[1]");
+        assert_eq!(cited.citations[1].marker(), "[2]");
+        assert!(cited.citations[0].footnote().starts_with("[1] "));
+        assert!(cited.citations[1].footnote().starts_with("[2] "));
+    }
+
+    /// `render` over an EMPTY record list yields a citation-free answer with an empty
+    /// footnote block and a vacuous resolution rate of 1.0 — the degenerate input that
+    /// `cite_result` over an empty result table produces. [OPUS-4.8]
+    #[test]
+    fn render_of_no_records_is_empty_and_vacuously_resolved() {
+        let g = graph();
+        let cited = render(&[]);
+        assert!(!cited.has_citations());
+        assert!(cited.no_source_recorded.is_empty());
+        assert_eq!(cited.footnotes(), "");
+        assert_eq!(cited.resolution_rate(&g), 1.0);
+    }
 }

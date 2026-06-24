@@ -174,6 +174,8 @@ pub use admit::{
 };
 #[cfg(feature = "status-list")]
 pub use admit::admit_with_status;
+#[cfg(feature = "secprop-precheck")]
+pub use admit::{admit_with_precheck, AdmissibilityPreference, PrecheckOutcome};
 pub use delegation::{
     effective_against_current, hop_message, invoke, Capability, DelegationChain, DelegationHop,
     EffectiveCapability, Invocation, InvocationDenied,
@@ -197,7 +199,7 @@ pub use store::{
 #[cfg(feature = "status-list")]
 pub use status_list::{
     decode_encoded_list, justify_status_decision, GzipDecoder, IdentityGzipDecoder, LiveStatus,
-    LiveStatusCheck, StatusBitstring, StatusJustification, StatusListEntry, StatusListResolver,
-    StatusPurpose,
+    LiveStatusCheck, SignedStatusList, StatusBitstring, StatusJustification, StatusListEntry,
+    StatusListResolver, StatusPurpose, VerifiedStatusListResolver, VerifyingLiveStatusCheck,
 };
 pub use wire::{derive_conditional_grants, derive_grants, ConditionalGrant};

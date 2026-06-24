@@ -1,0 +1,12 @@
+[
+  {"file": "q05_hidden.txt", "answer": "Sub-agent standing rules"},
+  {"file": "q05_raw.txt", "answer": "Sub-agent standing rules (topic-subagent-rules)"},
+  {"file": "q06_hidden.txt", "answer": "Sub-agent standing rules"},
+  {"file": "q06_raw.txt", "answer": "Sub-agent standing rules (topic-subagent-rules)"},
+  {"file": "q07_hidden.txt", "answer": "Merge discipline"},
+  {"file": "q07_raw.txt", "answer": "Merge discipline (topic-merge-discipline)"},
+  {"file": "q08_hidden.txt", "answer": "ZK/MPC claim + circuit discipline"},
+  {"file": "q08_raw.txt", "answer": "ZK/MPC claim + circuit discipline (topic-zk-discipline)"},
+  {"file": "q09_hidden.txt", "answer": "ZK/MPC claim + circuit discipline"},
+  {"file": "q09_raw.txt", "answer": "ZK/MPC claim + circuit discipline (topic-zk-discipline)"}
+]

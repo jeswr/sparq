@@ -3268,4 +3268,47 @@ mod tests {
         assert!(!is_inline(id));
         assert_eq!(d.term(id), iri);
     }
+
+    /// [OPUS-4.8] sq-bif — `inline_id_of_int` is the engine's fast path for resolving a
+    /// COMPUTED integer (BIND / aggregate result) directly to its inline id, with no term or
+    /// lexical built. Previously it had no test. The id it returns MUST be the very id the
+    /// canonical `xsd:integer` literal of that value interns to (so a computed value and a
+    /// parsed literal collide on one id), and the in-range/out-of-range boundary must match
+    /// `is_inline`. Values below 0 or above `INLINE_MAX` fall back to the dictionary (`None`).
+    #[test]
+    fn inline_id_of_int_matches_intern_and_respects_boundaries() {
+        let mut d = Dict::new();
+        // In-range values: the fast-path id equals interning the canonical integer literal,
+        // and decodes back to that value via the inline partition.
+        for v in [0i64, 1, 2, 42, 1_000_000, INLINE_MAX as i64 - 1, INLINE_MAX as i64] {
+            let id = inline_id_of_int(v).unwrap_or_else(|| panic!("{v} is in range"));
+            assert!(is_inline(id), "{v} maps to an inline id");
+            assert_eq!(id, INLINE_BASE + v as u32, "exact inline encoding for {v}");
+            assert_eq!(id, d.intern(&int(&v.to_string())), "fast-path id == canonical literal's id for {v}");
+        }
+        // Out-of-range: negative and just past INLINE_MAX both fall back to the dictionary.
+        assert_eq!(inline_id_of_int(-1), None, "negative integers are not inline");
+        assert_eq!(inline_id_of_int(i64::MIN), None);
+        assert_eq!(inline_id_of_int(INLINE_MAX as i64 + 1), None, "one past the inline ceiling is not inline");
+        assert_eq!(inline_id_of_int(i64::MAX), None);
+        // The dictionary stayed empty: no inline value was ever stored as a term.
+        assert_eq!(d.len(), 0);
+    }
+
+    /// [OPUS-4.8] sq-bif — `is_inline` must classify the id partition EXACTLY at its
+    /// boundaries: `NO_ID`(0) and every dictionary id are NOT inline; `INLINE_BASE` (value 0)
+    /// up to `INLINE_BASE + INLINE_MAX` (the inline ceiling) ARE; the first id ABOVE the
+    /// inline range (the engine's local-vocab space) is NOT. A drift here would silently
+    /// misread a local-vocab id as an integer value.
+    #[test]
+    fn is_inline_partition_boundaries() {
+        assert!(!is_inline(NO_ID), "0 / NO_ID is not inline");
+        assert!(!is_inline(1), "the first dictionary id is not inline");
+        assert!(!is_inline(INLINE_BASE - 1), "the last dictionary id is not inline");
+        assert!(is_inline(INLINE_BASE), "INLINE_BASE (value 0) is inline");
+        assert!(is_inline(INLINE_BASE + INLINE_MAX), "the inline ceiling is inline");
+        // One past the inline range is the engine's local-vocab space, NOT an inline integer.
+        assert!(!is_inline(INLINE_BASE + INLINE_MAX + 1), "above the inline range is not inline");
+        assert!(!is_inline(u32::MAX), "the very top of the id space is not inline");
+    }
 }

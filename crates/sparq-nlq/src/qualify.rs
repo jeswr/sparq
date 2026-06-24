@@ -429,6 +429,58 @@ ex:bare a pkg:Finding ;
         assert_eq!(cfg.band_for(1.0 / 3.0), ConfidenceBand::Medium);
     }
 
+    /// The DOCUMENTED degenerate-config invariant: an out-of-order `low_band > high_band`
+    /// does not panic but COLLAPSES the `Medium` band to empty — every confidence is then
+    /// `High` (>= high_band) or `Low` (< low_band), and `High` wins the `>=` check first.
+    /// Asserts that no value maps to `Medium` under the inverted thresholds. [OPUS-4.8]
+    #[test]
+    fn band_for_inverted_thresholds_collapses_medium() {
+        let cfg = QualifyConfig {
+            low_band: 0.8,
+            high_band: 0.2,
+            ..QualifyConfig::default()
+        };
+        // 0.5 is >= high_band(0.2) → High (the `>=` branch is checked first).
+        assert_eq!(cfg.band_for(0.5), ConfidenceBand::High);
+        // 0.1 is < low_band(0.8) and < high_band → still hits the High `>=`? No: 0.1 < 0.2.
+        assert_eq!(cfg.band_for(0.1), ConfidenceBand::Low);
+        // Sweep a range: nothing lands in Medium under the inverted split.
+        for i in 0..=10 {
+            let c = i as f64 / 10.0;
+            assert_ne!(
+                cfg.band_for(c),
+                ConfidenceBand::Medium,
+                "inverted thresholds must collapse Medium, but {c} mapped to Medium"
+            );
+        }
+    }
+
+    /// `min_confidence` floor at the EXACT boundary: confidence == floor does NOT abstain
+    /// (the floor is "strictly below"); a hair under it does. Locks the `< floor` predicate
+    /// against an accidental `<=`. [OPUS-4.8]
+    #[test]
+    fn abstention_floor_is_strict_less_than() {
+        let g = graph();
+        let exactly = qualify_records(
+            &[provenance::provenance_for(&g, &nn("http://ex/claimed-mid"))],
+            &QualifyConfig {
+                min_confidence: Some(0.5), // claimed-mid is exactly 0.5
+                ..QualifyConfig::default()
+            },
+        );
+        assert_eq!(exactly.min_confidence, Some(0.5));
+        assert!(!exactly.abstain, "0.5 == floor must NOT abstain (strict <)");
+
+        let under = qualify_records(
+            &[provenance::provenance_for(&g, &nn("http://ex/claimed-mid"))],
+            &QualifyConfig {
+                min_confidence: Some(0.5001),
+                ..QualifyConfig::default()
+            },
+        );
+        assert!(under.abstain, "0.5 < 0.5001 floor must abstain");
+    }
+
     #[test]
     fn weakest_link_min_confidence_drives_band() {
         // Answer over the Proven-high (0.9) AND Claimed-mid (0.5) findings: the WEAKEST

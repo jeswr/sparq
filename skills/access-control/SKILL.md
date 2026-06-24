@@ -611,6 +611,27 @@ open), and `requiresPostQuantumForgery gteq …` removes the DL-signature method
 **principled refusal** ("no admissible proof") over silently serving a non-conforming one. The §4.3.3
 worked example is the golden test: empty under Alice's strict preference, non-empty under the relaxed one.
 
+### Property-admissibility PRE-CHECK in the admission gate — opt-in `secprop-precheck` ([OPUS-4.8] sq-dt5hv, Phase 5, design §5b)
+
+`sparq_trust::admit_with_precheck(cred, rules, session, target, preference)` (behind the **default-OFF
+`secprop-precheck`** feature, which enables `secprop-admissibility`) wires the admissibility reduction
+above into the REAL admission path as an **optional pre-admission check**. The `preference:
+Option<&AdmissibilityPreference>` carries the requester's machine-reasonable **ODRL privacy preference**
+— the presented proof's `method_iri` (the `zk:scheme`/`zk:cryptosuite` the registry records), the
+`constraint_iris` (`secx:requires…` `gteq` constraints), the `policy_n3`, and the method's
+`annotations_n3`. Before the existing signature / freshness / holder checks, the gate calls `admissible`
+over those four inputs and **fails closed** when the method does not satisfy every constraint — returning
+an EMPTY admitted set + a `PrecheckOutcome::{Admitted, Denied { unsatisfied }, ReductionError { error }}`
+(a reduction error is ALSO a fail-closed denial — a pre-check that cannot be evaluated never admits).
+**OPT-IN strict additivity:** with `preference == None` it is **byte-identical** to `admit` (no reasoning
+runs); the pre-check can only ever **DENY**, never broaden, and never weakens a downstream crypto check
+(`admit` still verifies the checked issuer signature, scope, freshness, and holder binding). The golden
+e2e invariant (`tests/secprop_precheck_e2e.rs`): a perfectly valid credential is admitted with `None` and
+under a relaxed preference, but `requiresAssurance gteq secx:Proven` (Alice's strict preference, every
+sparq ZK method is `Claimed`-only while `sq-qhy4` is open) **admits nothing and derives no grant** — the
+principled refusal, in the data flow, not just the prose. Research-grade, externally **unaudited**
+(`sq-qhy4`); it reasons over recorded ANNOTATIONS, not cryptography.
+
 ### Live status / revocation + minimal denial justification — opt-in `status-list` ([OPUS-4.8] sq-pfae.7, design §6.1 P6)
 
 The `sparq_trust::status_list` module (behind the **default-OFF `status-list`** cargo feature) gates
@@ -631,12 +652,24 @@ non-admitting status) and otherwise delegates to the unchanged `admit` — stric
 NARROW). `justify_status_decision(grant, &entry, status, at_time)` renders a **minimal PROV-O
 justification** for the allow OR the deny (a `prov:Activity` typed `trust:StatusCheck`, `prov:generated`
 the grant, with `trust:statusDecision` = the reason token + the checked index/purpose) — the bead's
-*minimal denial justification*. Two honesty boundaries: (i) it adds **no privacy** (the index + list are
-clear; the resolver learns which credential is checked); (ii) v1 does **not** verify the status-list
-credential's OWN issuer signature (the resolver is the trust seam — a captured follow-up bead).
-Revocation propagates by **full re-materialise** (the §4.4 stale window is *bounded* by `max_age_secs`,
-not closed — no in-reasoner incremental retraction). Pure-Rust base layer (no new default dep); OFF in
-the default build.
+*minimal denial justification*. Revocation propagates by **full re-materialise** (the §4.4 stale window
+is *bounded* by `max_age_secs`, not closed — no in-reasoner incremental retraction). Pure-Rust base layer
+(no new default dep); OFF in the default build. One honesty boundary remains: it adds **no privacy** (the
+index + list are clear; the resolver learns which credential is checked).
+
+**Verified status-list issuer signature** (`VerifyingLiveStatusCheck`, same `status-list` feature,
+[OPUS-4.8] `sq-pfae.13`). The base `LiveStatusCheck` trusts the list AS FETCHED. `VerifyingLiveStatusCheck`
+closes that gap: it resolves the status-list VC as a **signed graph** (a `SignedStatusList` `{ graph,
+issuer_signature_hex, salt }` over a pluggable `VerifiedStatusListResolver`), and **before** trusting any
+bit, verifies the list's OWN issuer signature over its RDFC-1.0 commitment — the SAME
+`commit_triples → commitment_message → verify` Schnorr-over-RDFC-1.0 path `admit` uses — against a
+**trusted status-authority key**. Only on a valid signature does it read the `status:encodedList` from the
+*verified* graph and run the identical freshness + bit logic. **Fail-closed**: an unsigned / bad-signature /
+wrong-key / unresolvable-issuer list VC, or a verified graph with no `encodedList`, all yield
+`LiveStatus::Unknown` (deny) — never trusted. The trusted key is caller-supplied, or bound from a
+status-authority `did:key`/`did:web` issuer DID via `VerifyingLiveStatusCheck::with_did_issuer(.., did_resolver,
+authority_did, ..)` (the `did` feature, same binding the admission gate uses). Research-grade, externally
+**UNAUDITED** (`sq-qhy4`): a verified issuer signature, NOT a privacy/unlinkability guarantee.
 
 ## Related skills
 

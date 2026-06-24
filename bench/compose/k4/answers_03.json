@@ -1,0 +1,42 @@
+[
+  {
+    "file": "q15_hidden.txt",
+    "answer": "A verified-clean non-perf PR auto-arms; never arm auto-merge on a stacked PR whose base is not main"
+  },
+  {
+    "file": "q15_raw.txt",
+    "answer": "The rows are opaque IRIs, so I cannot read the finding text verbatim. The matching finding is the one identified as https://sparq.dev/ns/pkg/kb#find-zk-arming-model (row 8)."
+  },
+  {
+    "file": "q16_hidden.txt",
+    "answer": "Sub-agents proceed without the maintainer's greenlight, documenting the default and filing a feedback issue"
+  },
+  {
+    "file": "q16_raw.txt",
+    "answer": "The rows are opaque IRIs, so I cannot read the finding text verbatim. The matching finding is the one identified as https://sparq.dev/ns/pkg/kb#find-subagent-proceed-no-greenlight (row 3)."
+  },
+  {
+    "file": "q17_hidden.txt",
+    "answer": "It's a site task to let visitors write their own SPARQL queries on the Solid showcase (gh-549), overlapping the #757 access-controlled-queries-without-OIDC steer."
+  },
+  {
+    "file": "q17_raw.txt",
+    "answer": "Cannot determine the subject from the rows; the only row is an opaque task identifier (https://sparq.dev/ns/pkg/kb#task-sq-01w1y)."
+  },
+  {
+    "file": "q18_hidden.txt",
+    "answer": "It's a task to create the /surface/cli and /surface/python pages as a tier-e walkthrough."
+  },
+  {
+    "file": "q18_raw.txt",
+    "answer": "Cannot determine the subject from the rows; the only row is an opaque task identifier (https://sparq.dev/ns/pkg/kb#task-sq-4gju)."
+  },
+  {
+    "file": "q19_hidden.txt",
+    "answer": "It's task MS-G2: enable the clippy::undocumented_unsafe_blocks lint on first-party code and normalize the // SAFETY: comment tokens."
+  },
+  {
+    "file": "q19_raw.txt",
+    "answer": "Cannot determine the subject from the rows; the only row is an opaque task identifier (https://sparq.dev/ns/pkg/kb#task-sq-8wbn)."
+  }
+]

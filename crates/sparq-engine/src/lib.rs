@@ -14,7 +14,19 @@ mod cs_gate;
 mod dataset;
 mod exec;
 mod explain;
+// [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN: typed `PlanNode` plan tree + JSON +
+// per-operator q-error + bounded slow-query ring. NON-DEFAULT `explain-json` feature —
+// when off, zero of this code compiles and the default native + wasm builds are
+// byte-identical (no new deps; the human-readable text EXPLAIN stays the default).
+#[cfg(feature = "explain-json")]
+pub mod explain_json;
 pub mod json;
+// [OPUS-4.8] (sq-rp3um) Parameterized prepared queries — safe value binding
+// (`PreparedQuery::bind` / `PreparedUpdate`) to prevent SPARQL injection (#901).
+// NON-DEFAULT `params` feature; when off, zero of this code compiles. Pulls in no
+// new deps (oxrdf + spargebra are already direct deps).
+#[cfg(feature = "params")]
+pub mod params;
 // SPARQL 1.1 federated query (SERVICE). NON-DEFAULT `service` feature; pulls a
 // blocking HTTP client (ureq) + serde_json, both gated off wasm. When off, zero
 // federation code compiles. [OPUS-4.8]
@@ -65,6 +77,12 @@ pub mod txn;
 #[cfg(feature = "cs-planner")]
 pub use cs::{with_cs_table, CsSet, CsTable};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
+// [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN re-exports — gated on `explain-json`.
+#[cfg(feature = "explain-json")]
+pub use explain_json::{
+    explain_plan, explain_plan_analyze, explain_plan_analyze_with_budget, PlanNode, SlowQuery,
+    SlowQueryRing,
+};
 pub use update::{
     apply_effects, update, update_in_place, update_in_place_atomic,
     update_in_place_atomic_with_budget, update_in_place_capturing, update_in_place_with_budget,
@@ -229,6 +247,17 @@ pub use cache::{is_cacheable, CacheStats, ResultCache};
 pub mod chunk;
 #[cfg(feature = "vectorized")]
 pub use chunk::{DataChunk, SelVec, VecCmp};
+
+// [OPUS-4.8] (sq-gr8mb, survey §A3) Exact-bitmap semi-join reducer on dense u32 ids
+// (CIDR'26 "Not Yannakakis"; research/optimization-techniques.md §1.1/§2(a)). The binary
+// BGP executor builds a membership filter over a join's connecting-variable ids and
+// passes it to the next pattern's scan, dropping rows whose join key cannot match before
+// they enter the join. INTERNAL (`pub(crate)`) — the executor's only consumer is
+// `exec.rs`, so no public surface is added. NON-DEFAULT `semijoin-bitmap` feature: when
+// off, zero of this code compiles and the default native + wasm builds are byte-identical
+// (no new dependencies — sparq-core + rustc-hash are already direct deps; no `unsafe`).
+#[cfg(feature = "semijoin-bitmap")]
+pub(crate) mod semijoin;
 
 // [OPUS-4.8] (sq-xj29q) Oxigraph-shaped per-solution view over `QueryResult` —
 // `QueryResult::solutions()` yields borrowed, zero-copy `QuerySolution` views (per-row
@@ -498,6 +527,31 @@ impl PreparedQuery {
     pub fn into_query(self) -> Query {
         self.query
     }
+
+    /// Safely binds a typed RDF value to a free placeholder variable, returning a
+    /// NEW prepared query — the canonical mitigation for SPARQL injection (#901).
+    ///
+    /// `name` is the placeholder variable (with or without a leading `?`/`$`).
+    /// Every free occurrence is replaced *in the parsed algebra* by `value`
+    /// ([`oxrdf::Term`]) — a pure structural rewrite, **never** string
+    /// concatenation — so a hostile value (an IRI/literal containing
+    /// `> } INSERT … {`, a `"` break-out, etc.) is carried as opaque DATA and can
+    /// NEVER alter the query structure. The template is parsed once and reusable:
+    /// bind different values for different requests, plan-cache stays effective.
+    ///
+    /// **Fail-closed.** Returns [`params::BindError`] (as a `String`) if the
+    /// placeholder does not occur free (typo'd name), if it is a projected /
+    /// aggregate / `BIND` / `VALUES` *result* variable (binding it would change the
+    /// result shape — rename the placeholder), or if a blank node is bound into a
+    /// predicate / graph-name slot.
+    ///
+    /// Only available with the opt-in `params` feature. See the crate
+    /// [`params`] module for the safety argument and convenience value
+    /// constructors ([`params::value`]).
+    #[cfg(feature = "params")]
+    pub fn bind(&self, name: &str, value: oxrdf::Term) -> Result<PreparedQuery, String> {
+        params::bind_query(&self.query, name, value).map_err(|e| e.to_string())
+    }
 }
 
 impl From<Query> for PreparedQuery {
@@ -513,6 +567,90 @@ impl std::str::FromStr for PreparedQuery {
     fn from_str(s: &str) -> Result<PreparedQuery, String> {
         PreparedQuery::parse(s)
     }
+}
+
+/// A SPARQL 1.1 UPDATE parsed ONCE, with safe value binding ([`PreparedUpdate::bind`])
+/// to prevent SPARQL injection on the write path (#901, bead `sq-rp3um`). The
+/// UPDATE counterpart of [`PreparedQuery`]: a `DELETE`/`INSERT … WHERE` template is
+/// parsed into algebra, a free placeholder variable is `bind`-substituted by a typed
+/// [`oxrdf::Term`] via a pure algebra rewrite (NEVER string concatenation), and the
+/// bound algebra is applied DIRECTLY by [`update_prepared`] / [`update_in_place_prepared`]
+/// — so a hostile bound value never re-enters the parser. See the [`params`] module.
+///
+/// Only available with the opt-in `params` feature.
+#[cfg(feature = "params")]
+#[derive(Debug, Clone)]
+pub struct PreparedUpdate {
+    update: spargebra::Update,
+}
+
+#[cfg(feature = "params")]
+impl PreparedUpdate {
+    /// Parses a SPARQL UPDATE string into its reusable algebra form.
+    pub fn parse(sparql: &str) -> Result<PreparedUpdate, String> {
+        Ok(PreparedUpdate {
+            update: SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?,
+        })
+    }
+
+    /// Wraps already-parsed (or programmatically rewritten) UPDATE algebra.
+    pub(crate) fn from_algebra(update: spargebra::Update) -> PreparedUpdate {
+        PreparedUpdate { update }
+    }
+
+    /// The wrapped `spargebra` UPDATE algebra.
+    pub fn update(&self) -> &spargebra::Update {
+        &self.update
+    }
+
+    /// Safely binds a typed RDF value to a free placeholder variable in the UPDATE
+    /// template, returning a NEW prepared update. Same fail-closed semantics and
+    /// injection-safety guarantee as [`PreparedQuery::bind`]: the placeholder is
+    /// substituted in the parsed algebra (`DELETE`/`INSERT` templates + the WHERE
+    /// pattern), never by string concatenation, so a hostile value such as an IRI
+    /// containing `> } ; DROP ALL ; INSERT { … }` is carried as opaque DATA.
+    ///
+    /// Returns an `Err` if the placeholder is not free, is a `BIND`/`GROUP`/aggregate
+    /// output of the WHERE clause, or a blank node is bound into a predicate /
+    /// graph-name / ground-`DELETE` slot.
+    pub fn bind(&self, name: &str, value: oxrdf::Term) -> Result<PreparedUpdate, String> {
+        params::bind_update(&self.update, name, value).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(feature = "params")]
+impl std::str::FromStr for PreparedUpdate {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<PreparedUpdate, String> {
+        PreparedUpdate::parse(s)
+    }
+}
+
+/// [OPUS-4.8] (sq-rp3um) Apply a parameterized [`PreparedUpdate`] to `graph`, returning
+/// the updated graph (the [`update`] rebuild path over the bound algebra). Only with the
+/// opt-in `params` feature.
+#[cfg(feature = "params")]
+pub fn update_prepared(graph: &Graph, prepared: &PreparedUpdate) -> Result<Graph, String> {
+    update::update_prepared_impl(graph, &prepared.update)
+}
+
+/// [OPUS-4.8] (sq-rp3um) Apply a parameterized [`PreparedUpdate`] IN PLACE through the
+/// delta overlay (the [`update_in_place`] path over the bound algebra). Only with the
+/// opt-in `params` feature.
+#[cfg(feature = "params")]
+pub fn update_in_place_prepared(graph: &mut Graph, prepared: &PreparedUpdate) -> Result<(), String> {
+    update_in_place_prepared_with_budget(graph, prepared, &QueryBudget::unlimited())
+}
+
+/// [OPUS-4.8] (sq-rp3um) [`update_in_place_prepared`] under a cooperative [`QueryBudget`].
+#[cfg(feature = "params")]
+pub fn update_in_place_prepared_with_budget(
+    graph: &mut Graph,
+    prepared: &PreparedUpdate,
+    budget: &QueryBudget,
+) -> Result<(), String> {
+    update::update_in_place_prepared_with_budget(graph, &prepared.update, budget)
 }
 
 /// Executes a SPARQL query string against a graph, materialising the solutions.
@@ -2310,5 +2448,167 @@ mod tests {
         .unwrap();
         assert_eq!(r.len(), n as usize);
         assert!(r.rows.iter().all(|row| row[0].is_some()));
+    }
+
+    // [OPUS-4.8] (sq-bif) The public `count` / `count_prepared` entry points — the
+    // id-level solution counter that the server's budgeted ASK path leans on. The
+    // local `count` helper above routes through `query().len()`; these exercise the
+    // REAL `crate::count` (no result materialisation) and pin its agreement with the
+    // materialised count plus its form-rejection error path.
+
+    /// `count` must agree with `query(..).len()` across the modifier shapes that
+    /// change the cardinality (DISTINCT collapses duplicates, LIMIT caps, the
+    /// projection of a constant). A divergence here means the count fast path and
+    /// the materialising path disagree — a real correctness bug.
+    #[test]
+    fn count_agrees_with_materialized_len() {
+        let g = g();
+        let cases = [
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a }",
+            "PREFIX ex: <http://ex/> SELECT DISTINCT ?a WHERE { ?s ex:knows ?b ; ex:age ?a }",
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } LIMIT 2",
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } ORDER BY ?a LIMIT 1",
+            // Empty result: an unsatisfiable pattern.
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:nope ?a }",
+            // A cross/star join.
+            "PREFIX ex: <http://ex/> SELECT ?a ?b WHERE { ?a ex:knows ?b . ?b ex:age ?x }",
+        ];
+        for q in cases {
+            assert_eq!(
+                crate::count(&g, q).unwrap(),
+                query(&g, q).unwrap().len(),
+                "count disagrees with materialised len for {q:?}"
+            );
+        }
+    }
+
+    /// An ASK counts its single unit row: 1 when satisfiable, 0 otherwise — the
+    /// `usize::from(bool)` arm of `count_prepared_with_budget`.
+    #[test]
+    fn count_of_ask_is_zero_or_one() {
+        let g = g();
+        let cnt = |q: &str| crate::count(&g, q).unwrap();
+        assert_eq!(cnt("PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }"), 1);
+        assert_eq!(cnt("PREFIX ex: <http://ex/> ASK { ?s ex:nope ?a }"), 0);
+    }
+
+    /// `count` (and `query_json`) only support SELECT / ASK; the graph-valued
+    /// forms (CONSTRUCT / DESCRIBE) are an explicit error, not a panic or a wrong
+    /// number. This guards the `_ => Err(...)` arms that have no other coverage.
+    #[test]
+    fn count_and_query_json_reject_graph_forms() {
+        let g = g();
+        let construct = "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:a ?a } WHERE { ?s ex:age ?a }";
+        let describe = "DESCRIBE <http://ex/alice>";
+        let rejects = |e: String, q: &str| assert!(e.contains("only SELECT and ASK"), "{q:?}: {e}");
+        for q in [construct, describe] {
+            rejects(crate::count(&g, q).unwrap_err(), q);
+            rejects(query_json(&g, q).unwrap_err(), q);
+        }
+        // count_prepared takes the same path over a pre-parsed query.
+        let prepared = PreparedQuery::parse(construct).unwrap();
+        assert!(count_prepared(&g, &prepared).is_err());
+    }
+
+    /// `query_json` of an ASK emits the SPARQL-results-JSON boolean document
+    /// (`{"head":{},"boolean":…}`), distinct from the SELECT `bindings` document.
+    #[test]
+    fn query_json_ask_emits_boolean_document() {
+        let g = g();
+        assert_eq!(
+            query_json(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }").unwrap(),
+            r#"{"head":{},"boolean":true}"#
+        );
+        assert_eq!(
+            query_json(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?a }").unwrap(),
+            r#"{"head":{},"boolean":false}"#
+        );
+    }
+
+    /// The `PreparedQuery` round-trips: parse / `From<Query>` / `FromStr` /
+    /// `into_query` all produce the SAME execution. A query built programmatically
+    /// from algebra (the sparq-rsp / rewrite seam) must evaluate identically to the
+    /// parsed string form.
+    #[test]
+    fn prepared_query_construction_round_trips() {
+        let g = g();
+        let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } ORDER BY ?s";
+
+        let from_parse = PreparedQuery::parse(q).unwrap();
+        // FromStr is the same as parse.
+        let from_str: PreparedQuery = q.parse().unwrap();
+        // From<Query> wraps already-parsed algebra; into_query unwraps it back.
+        let algebra = from_parse.clone().into_query();
+        let from_algebra = PreparedQuery::from(algebra);
+
+        let want = query_prepared(&g, &from_parse).unwrap();
+        for p in [&from_str, &from_algebra] {
+            let got = query_prepared(&g, p).unwrap();
+            assert_eq!(got.vars, want.vars);
+            assert_eq!(got.rows, want.rows);
+        }
+        // `query()` exposes the wrapped algebra without consuming it.
+        assert!(matches!(from_parse.query(), Query::Select { .. }));
+        // A malformed query is a parse error, not a panic.
+        assert!(PreparedQuery::parse("SELECT ?s WHERE { ?s ?p").is_err());
+        assert!("not a query".parse::<PreparedQuery>().is_err());
+    }
+
+    /// `QueryResult::len` / `is_empty` track the row count exactly — including the
+    /// degenerate one-unbound-row case a no-match aggregate produces (NOT empty),
+    /// which is a classic off-by-one trap.
+    #[test]
+    fn query_result_len_and_is_empty() {
+        let g = g();
+        let run = |q: &str| query(&g, q).unwrap();
+
+        let some = run("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a }");
+        assert_eq!(some.len(), 3);
+        assert!(!some.is_empty());
+
+        let none = run("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:nope ?a }");
+        assert_eq!(none.len(), 0);
+        assert!(none.is_empty());
+
+        // A whole-dataset aggregate over an empty match is ONE row (the unbound
+        // group), so the result is NOT empty even though the pattern matched nothing.
+        let agg = run("PREFIX ex: <http://ex/> SELECT (COUNT(*) AS ?c) WHERE { ?s ex:nope ?a }");
+        assert_eq!(agg.len(), 1);
+        assert!(!agg.is_empty());
+    }
+
+    /// [OPUS-4.8] (sq-bif) The `FunctionRegistry` introspection accessors
+    /// (`new`/`is_empty`/`len`/`get`/`iris`) that the Service-Description path
+    /// advertises from, plus the documented "register REPLACES a duplicate IRI"
+    /// behaviour — none of which had a direct assertion.
+    #[test]
+    fn function_registry_accessors_and_replace() {
+        let mut reg = FunctionRegistry::new();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+        assert!(reg.get("http://ex/fn#id").is_none());
+        assert_eq!(reg.iris().count(), 0);
+
+        reg.register("http://ex/fn#a", |args: &[Term]| Ok(args[0].clone()));
+        reg.register("http://ex/fn#b", |args: &[Term]| Ok(args[0].clone()));
+        assert!(!reg.is_empty());
+        assert_eq!(reg.len(), 2);
+        assert!(reg.get("http://ex/fn#a").is_some());
+        let mut iris: Vec<&str> = reg.iris().collect();
+        iris.sort_unstable();
+        assert_eq!(iris, ["http://ex/fn#a", "http://ex/fn#b"]);
+
+        // Re-registering the SAME IRI replaces the closure (and never grows len).
+        let replaced = Term::NamedNode(oxrdf::NamedNode::new("http://ex/replaced").unwrap());
+        let r2 = replaced.clone();
+        reg.register("http://ex/fn#a", move |_: &[Term]| Ok(r2.clone()));
+        assert_eq!(reg.len(), 2, "duplicate IRI must replace, not add");
+        let q = "SELECT ?r WHERE { BIND(<http://ex/fn#a>(<http://ex/x>) AS ?r) }";
+        let r = query_with_functions(&g(), q, &reg).unwrap();
+        assert_eq!(
+            r.rows[0][0].as_ref().unwrap(),
+            &replaced,
+            "the replacement closure, not the original, must run"
+        );
     }
 }

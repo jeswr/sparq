@@ -120,7 +120,7 @@ Conformance nests: `"1.1"` ⊆ `"1.2-basic"` ⊆ `"1.2"`. Processors MAY treat u
 ### 1.4 Other deltas (federation, results, properties)
 
 - **Property paths**: unchanged in 1.2 (the grammar productions [94]–[102] are identical to 1.1).
-- **Aggregation**: no new aggregates; only editorial fixes to the Sum/Group/set-function definitions, plus the `multiplicity` function replacing `card[Ω](μ)` ([§18.4](https://www.w3.org/TR/sparql12-query/#x18-4-basic-graph-patterns)), and tightened `SELECT *` restriction under implicit grouping.
+- **Aggregation**: no new aggregates; only editorial fixes to the Sum/Group/set-function definitions, plus the `multiplicity(μ|Ω)` algebra **notation** renaming the informal `card[Ω](μ)` ([§18.4](https://www.w3.org/TR/sparql12-query/#x18-4-basic-graph-patterns)), and tightened `SELECT *` restriction under implicit grouping. (`multiplicity` is a semantics device, **not** a callable `BuiltInCall` — there is no `multiplicity()` builtin in the 1.2 grammar and no conformance suite for one; sparq exposes it as a labelled vendor extension `MULTIPLICITY()`, see PR #1257 / survey §B2.)
 - **Federated Query / SERVICE**: **no new SERVICE features.** [Federated Query Changes](https://www.w3.org/TR/sparql12-federated-query/) are editorial only ("RDF data model not data format", errata-fq-1 fix to the SERVICE+VALUES example, 1.1→1.2 reference bumps). Triple terms simply pass through `SERVICE`.
 - **Results formats**: now carry triple terms and base direction (see §4 below).
 - **Update**: triple-term/reifier syntax in `INSERT DATA`/`DELETE DATA`/templates; revised `LOAD` for documents containing a dataset ([Update Changes](https://www.w3.org/TR/sparql12-update/#a-changes-between-sparql-1-1-update-and-sparql-1-2-update)).

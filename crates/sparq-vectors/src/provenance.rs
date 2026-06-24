@@ -259,6 +259,108 @@ impl ProvenanceWeights {
         // Clamp to [floor, 1.0]: never zero (would drop the positive), never above 1.0.
         w.clamp(cfg.floor.max(f32::MIN_POSITIVE), 1.0)
     }
+
+    // ---- integration point 2: confidence-weighted structural-sketch pooling -------------------
+    // [OPUS-4.8] sq-oy9ya (design §USE-1 point 2). When a node has MULTIPLE values for a
+    // multi-valued predicate (a characteristic set / structural sketch), the standard pooling is a
+    // uniform mean of the value contributions. These helpers pool **confidence-weighted** instead:
+    // each contribution is weighted by the provenance weight of the SUBJECT it came from, so a fact
+    // a low-assurance/low-confidence source asserted pulls the pooled vector less. With uniform
+    // weights (all 1.0, i.e. a provenance-free graph) this reduces EXACTLY to the arithmetic mean —
+    // a plain graph is unchanged. No accuracy claim is made; it ships behind the same on/off
+    // ablation (`WeightMode`).
+
+    /// **Confidence-weighted pool** of a node's per-value contributions for one multi-valued
+    /// predicate (design §USE-1 point 2). `contributions` is the list of `(subject_id,
+    /// value_vector)` pairs that feed this node's block for the predicate — one entry per asserted
+    /// value, `subject_id` being the head whose provenance qualifies that value. The pooled vector
+    /// is `Σ w_i · v_i / Σ w_i`, with `w_i = self.weight_of([subject_i, _, _], mode)`.
+    ///
+    /// Under [`WeightMode::Uniform`] every `w_i = 1.0`, so the result is the **plain arithmetic
+    /// mean** — byte-identical to the unweighted pooler (the ablation-off baseline). Under
+    /// [`WeightMode::Provenance`] a value from a lower-quality source contributes proportionally
+    /// less. Returns `None` for an empty `contributions` list, or `Err` if the vectors differ in
+    /// length (a layout bug, never silently truncated). The denominator can never be zero: the
+    /// weight floor (`> 0`) guarantees `Σ w_i > 0` whenever there is at least one contribution.
+    pub fn pool_weighted(
+        &self,
+        contributions: &[(Id, Vec<f32>)],
+        mode: WeightMode,
+    ) -> Result<Option<Vec<f32>>, String> {
+        if contributions.is_empty() {
+            return Ok(None);
+        }
+        let dim = contributions[0].1.len();
+        let mut acc = vec![0.0f32; dim];
+        let mut wsum = 0.0f32;
+        for (subject, vec) in contributions {
+            if vec.len() != dim {
+                return Err(format!(
+                    "pool_weighted: contribution vectors differ in length ({} vs {})",
+                    vec.len(),
+                    dim
+                ));
+            }
+            let w = self.weight_of([*subject, NO_ID, NO_ID], mode);
+            wsum += w;
+            for (a, x) in acc.iter_mut().zip(vec.iter()) {
+                *a += w * *x;
+            }
+        }
+        // wsum > 0 always (each w >= floor > 0 under Provenance, and == 1.0 under Uniform), so the
+        // division is safe; guard anyway so a degenerate (all-zero) weight set fails open to the
+        // mean rather than producing NaNs.
+        if wsum <= 0.0 {
+            let n = contributions.len() as f32;
+            for (a, _) in acc.iter_mut().zip(0..dim) {
+                *a /= n;
+            }
+            return Ok(Some(acc));
+        }
+        for a in acc.iter_mut() {
+            *a /= wsum;
+        }
+        Ok(Some(acc))
+    }
+
+    // ---- integration point 3 (producer): per-Block default fusion weight ----------------------
+    // [OPUS-4.8] sq-oy9ya (design §USE-1 point 3). The query-time per-`Block` fusion weight is an
+    // AGGREGATE of the provenance of the edges that fed the block. `block_weight` computes that
+    // aggregate; the caller attaches it to a `Block` via `Block::with_weight` and the existing
+    // `fuse_rrf_weighted`/`fuse_scores` path consumes it.
+
+    /// The aggregate per-block **fusion weight** for a set of `subjects` whose incident edges fed a
+    /// block (design §USE-1 point 3). It is the **mean** of the subjects' provenance weights under
+    /// `mode` — a block fed mostly by low-quality facts gets a smaller multiplier, so at query time
+    /// that modality contributes less to the fused ranking.
+    ///
+    /// Under [`WeightMode::Uniform`] this is **always** `1.0` (every subject weighs 1.0), so the
+    /// block is the fail-open default and the fusion path is unchanged — the ablation-off baseline.
+    /// An empty `subjects` set is also `1.0` (a block with no provenance-bearing edges is not
+    /// penalised). The result is in `(0, 1]` (the per-subject floor lifts to a per-block floor), so
+    /// it is a valid non-negative [`fuse_rrf_weighted`](crate::fuse_rrf_weighted) weight.
+    pub fn block_weight(&self, subjects: impl IntoIterator<Item = Id>, mode: WeightMode) -> f32 {
+        let mut sum = 0.0f32;
+        let mut n = 0u32;
+        for s in subjects {
+            sum += self.weight_for_subject_under(s, mode);
+            n += 1;
+        }
+        if n == 0 {
+            return 1.0;
+        }
+        sum / n as f32
+    }
+
+    /// [`weight_for_subject`](Self::weight_for_subject) gated by `mode`: `1.0` under
+    /// [`WeightMode::Uniform`], the provenance weight under [`WeightMode::Provenance`]. The
+    /// mode-aware form the pooler and the block-weight aggregator share. [OPUS-4.8]
+    pub fn weight_for_subject_under(&self, h: Id, mode: WeightMode) -> f32 {
+        match mode {
+            WeightMode::Uniform => 1.0,
+            WeightMode::Provenance => self.weight_for_subject(h),
+        }
+    }
 }
 
 // ---- helpers ----------------------------------------------------------------------------------
@@ -430,5 +532,125 @@ ex:b ex:rel ex:a .
         let rel = id(&g, "http://ex/rel");
         // No parseable confidence + no assurance → w = 1.0.
         assert_eq!(pw.weight_of([a, rel, b], WeightMode::Provenance), 1.0);
+    }
+
+    // ---- integration point 2: confidence-weighted structural-sketch pooling (sq-oy9ya) --------
+
+    #[test]
+    fn pool_uniform_mode_is_the_arithmetic_mean() {
+        // The ablation-OFF baseline: every contribution weighs 1.0, so the pool is the plain mean,
+        // byte-identical to the unweighted pooler — a plain graph is unchanged.
+        let g = graph();
+        let pw = ProvenanceWeights::mine(&g);
+        let alice = id(&g, "http://ex/alice");
+        let bob = id(&g, "http://ex/bob");
+        let carol = id(&g, "http://ex/carol");
+        let contribs =
+            vec![(alice, vec![3.0, 0.0]), (bob, vec![0.0, 3.0]), (carol, vec![3.0, 3.0])];
+        let pooled = pw.pool_weighted(&contribs, WeightMode::Uniform).unwrap().unwrap();
+        // Mean of (3,0),(0,3),(3,3) = (2,2).
+        assert!((pooled[0] - 2.0).abs() < 1e-6 && (pooled[1] - 2.0).abs() < 1e-6, "{pooled:?}");
+    }
+
+    #[test]
+    fn pool_provenance_mode_downweights_low_quality_contributions() {
+        // alice (Proven, conf 0.9, reliable source) weighs 0.9; bob (Claimed 0.7 · conf 0.8 ·
+        // source 0.5) weighs 0.28. The pooled vector must lean toward alice's contribution.
+        let g = graph();
+        let pw = ProvenanceWeights::mine(&g);
+        let alice = id(&g, "http://ex/alice");
+        let bob = id(&g, "http://ex/bob");
+        let wa = pw.weight_for_subject(alice);
+        let wb = pw.weight_for_subject(bob);
+        assert!(wb < wa, "precondition: bob is lower quality ({wb} < {wa})");
+
+        // alice → (1,0), bob → (0,1). Weighted pool = (wa, wb)/(wa+wb): more mass on dim 0.
+        let contribs = vec![(alice, vec![1.0, 0.0]), (bob, vec![0.0, 1.0])];
+        let pooled = pw.pool_weighted(&contribs, WeightMode::Provenance).unwrap().unwrap();
+        let expect0 = wa / (wa + wb);
+        let expect1 = wb / (wa + wb);
+        assert!((pooled[0] - expect0).abs() < 1e-6, "dim0 {} vs {}", pooled[0], expect0);
+        assert!((pooled[1] - expect1).abs() < 1e-6, "dim1 {} vs {}", pooled[1], expect1);
+        // The load-bearing invariant: alice's (higher-quality) contribution dominates.
+        assert!(pooled[0] > pooled[1], "higher-quality contribution must dominate the pool");
+    }
+
+    #[test]
+    fn pool_empty_is_none_and_mismatched_lengths_err() {
+        let g = graph();
+        let pw = ProvenanceWeights::mine(&g);
+        let alice = id(&g, "http://ex/alice");
+        let bob = id(&g, "http://ex/bob");
+        assert!(pw.pool_weighted(&[], WeightMode::Provenance).unwrap().is_none());
+        let bad = vec![(alice, vec![1.0, 2.0]), (bob, vec![1.0])];
+        assert!(pw.pool_weighted(&bad, WeightMode::Provenance).is_err(), "length mismatch is Err");
+    }
+
+    #[test]
+    fn pool_single_contribution_is_itself() {
+        // A single value pools to itself under either mode (the weighted mean of one item).
+        let g = graph();
+        let pw = ProvenanceWeights::mine(&g);
+        let bob = id(&g, "http://ex/bob");
+        let one = vec![(bob, vec![7.0, -2.0, 0.5])];
+        for mode in [WeightMode::Uniform, WeightMode::Provenance] {
+            let pooled = pw.pool_weighted(&one, mode).unwrap().unwrap();
+            assert_eq!(pooled, vec![7.0, -2.0, 0.5], "single contribution pools to itself ({mode:?})");
+        }
+    }
+
+    // ---- integration point 3 (producer): per-block fusion weight aggregate (sq-oy9ya) ---------
+
+    #[test]
+    fn block_weight_uniform_is_one_and_provenance_is_mean() {
+        let g = graph();
+        let pw = ProvenanceWeights::mine(&g);
+        let alice = id(&g, "http://ex/alice");
+        let bob = id(&g, "http://ex/bob");
+        let carol = id(&g, "http://ex/carol"); // no provenance → 1.0
+
+        // Uniform: always 1.0 (ablation-off baseline).
+        assert_eq!(pw.block_weight([alice, bob, carol], WeightMode::Uniform), 1.0);
+
+        // Provenance: the MEAN of the per-subject weights.
+        let wa = pw.weight_for_subject(alice);
+        let wb = pw.weight_for_subject(bob);
+        let wc = pw.weight_for_subject(carol); // 1.0
+        let got = pw.block_weight([alice, bob, carol], WeightMode::Provenance);
+        assert!((got - (wa + wb + wc) / 3.0).abs() < 1e-6, "block weight is the mean: {got}");
+        // It is a valid (0,1] fuse weight.
+        assert!(got > 0.0 && got <= 1.0, "block weight must be a valid fuse weight: {got}");
+
+        // A block fed by only low-quality edges weighs less than one fed by high-quality edges.
+        let high = pw.block_weight([alice], WeightMode::Provenance);
+        let low = pw.block_weight([bob], WeightMode::Provenance);
+        assert!(low < high, "lower-quality block must get a smaller fusion weight ({low} < {high})");
+
+        // An empty subject set is the fail-open 1.0 (a block with no provenance edges).
+        assert_eq!(pw.block_weight(std::iter::empty(), WeightMode::Provenance), 1.0);
+    }
+
+    #[test]
+    fn block_weight_feeds_weighted_rrf() {
+        // End-to-end: the block weight is a real fuse_rrf_weighted weight. A low-quality modality
+        // (bob-fed block) down-weights its list relative to a high-quality one (alice-fed) — the
+        // design §USE-1 point-3 query-time effect, exercised through the REAL fusion path.
+        use crate::fuse::fuse_rrf_weighted;
+        let g = graph();
+        let pw = ProvenanceWeights::mine(&g);
+        let alice = id(&g, "http://ex/alice");
+        let bob = id(&g, "http://ex/bob");
+
+        let high_w = pw.block_weight([alice], WeightMode::Provenance) as f64;
+        let low_w = pw.block_weight([bob], WeightMode::Provenance) as f64;
+
+        // Two modalities each rank a different item first. With provenance weights, the
+        // high-quality modality's top item should win the fusion.
+        let high_list: Vec<(&str, f64)> = vec![("from_high", 1.0)];
+        let low_list: Vec<(&str, f64)> = vec![("from_low", 1.0)];
+        let fused =
+            fuse_rrf_weighted(&[(&high_list, high_w), (&low_list, low_w)], crate::RRF_K, 10);
+        assert_eq!(fused[0].0, "from_high", "the higher-provenance modality must rank first");
+        assert!(fused[0].1 > fused[1].1, "and strictly outrank the lower-provenance one");
     }
 }

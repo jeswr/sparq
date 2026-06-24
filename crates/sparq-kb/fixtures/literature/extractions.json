@@ -1,0 +1,62 @@
+{
+  "_comment": "GenAI-KB Phase 5 (sq-2489d.5) RECORDED extraction tape (record/replay). This is the FROZEN output a cheap-model extractor (e.g. claude-haiku-4-5) WOULD have produced for each fixture paper — committed so CI replays it and makes ZERO live model calls. The live extraction is the gated Phase-6 bead (sq-t5f3l, needs-access). Keyed by the source DOI. Each candidate Finding carries: verdict, confidence in [0,1], assurance in {Proven,Claimed,Conjectured}, a justification (which the grounding-resolver requires to be an ENTAILED SPAN of the abstract), and cited DOIs. Some candidates are DELIBERATELY bad to exercise the propose-then-verify quarantine: one justification is fabricated (not a span of the abstract); one cites a DOI absent from the batch; one over-claims secx:Proven on the machine tier.",
+  "extractions": [
+    {
+      "source_doi": "https://doi.org/10.5555/example.rdf-parallel-parse",
+      "candidates": [
+        {
+          "verdict": "partial",
+          "confidence": 0.6,
+          "assurance": "Conjectured",
+          "justification": "We present a chunk-parallel scanner for N-Triples that splits the input on record boundaries and parses each chunk independently.",
+          "cited_dois": ["https://doi.org/10.5555/example.rdf-parallel-parse"]
+        },
+        {
+          "verdict": "yes",
+          "confidence": 0.55,
+          "assurance": "Conjectured",
+          "justification": "The approach guarantees a 10x speedup on every workload and is provably optimal.",
+          "cited_dois": ["https://doi.org/10.5555/example.rdf-parallel-parse"]
+        }
+      ]
+    },
+    {
+      "source_doi": "https://doi.org/10.5555/example.zk-sparql-soundness",
+      "candidates": [
+        {
+          "verdict": "partial",
+          "confidence": 0.5,
+          "assurance": "Conjectured",
+          "justification": "a full machine-checked soundness proof is left as future work and the security argument is informal.",
+          "cited_dois": ["https://doi.org/10.5555/example.zk-sparql-soundness"]
+        },
+        {
+          "verdict": "yes",
+          "confidence": 0.9,
+          "assurance": "Proven",
+          "justification": "This paper sketches a zero-knowledge protocol for proving the existence of a BGP match over a committed RDF graph.",
+          "cited_dois": ["https://doi.org/10.5555/example.zk-sparql-soundness"]
+        }
+      ]
+    },
+    {
+      "source_doi": "https://doi.org/10.5555/example.semi-honest-mpc-join",
+      "candidates": [
+        {
+          "verdict": "yes",
+          "confidence": 0.65,
+          "assurance": "Conjectured",
+          "justification": "The protocol is secure in the semi-honest model; malicious security is not addressed.",
+          "cited_dois": ["https://doi.org/10.5555/example.semi-honest-mpc-join"]
+        },
+        {
+          "verdict": "yes",
+          "confidence": 0.4,
+          "assurance": "Conjectured",
+          "justification": "We give a secret-sharing protocol for a two-party federated join.",
+          "cited_dois": ["https://doi.org/10.5555/example.nonexistent-citation"]
+        }
+      ]
+    }
+  ]
+}

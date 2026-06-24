@@ -379,34 +379,169 @@ fn write_turtle_body(triples: &[Triple], prefixes: &Prefixes, indent: usize, out
     }
 
     for (i, subj) in order.iter().enumerate() {
-        let group = &groups[i];
-        out.push_str(&pad);
-        match subj {
-            NamedOrBlankNode::NamedNode(n) => write_iri(n.as_str(), prefixes, out),
-            NamedOrBlankNode::BlankNode(b) => {
-                out.push_str("_:");
-                out.push_str(b.as_str());
-            }
-        }
-        out.push(' ');
-        for (pi, pkey) in group.order.iter().enumerate() {
-            if pi > 0 {
-                out.push_str(" ;\n");
-                out.push_str(&pad);
-                out.push_str("    ");
-            }
-            out.push_str(pkey);
-            out.push(' ');
-            let objs = &group.objects[pkey];
-            for (oi, o) in objs.iter().enumerate() {
-                if oi > 0 {
-                    out.push_str(", ");
-                }
-                write_term(o, prefixes, out);
-            }
-        }
-        out.push_str(" .\n");
+        render_subject_block(subj, &groups[i], prefixes, &pad, out);
     }
+}
+
+/// Renders ONE subject's complete Turtle statement (`s p1 o1, o2 ; p2 o3 .\n`) into `out`
+/// at the given `pad` indent. This is the single source of truth for a subject block's
+/// bytes, shared by the buffered [`write_turtle_body`] and (under `streaming-serialization`)
+/// the streaming writer, so the two paths are byte-identical by construction.
+fn render_subject_block(
+    subj: &NamedOrBlankNode,
+    group: &PredObjects,
+    prefixes: &Prefixes,
+    pad: &str,
+    out: &mut String,
+) {
+    out.push_str(pad);
+    match subj {
+        NamedOrBlankNode::NamedNode(n) => write_iri(n.as_str(), prefixes, out),
+        NamedOrBlankNode::BlankNode(b) => {
+            out.push_str("_:");
+            out.push_str(b.as_str());
+        }
+    }
+    out.push(' ');
+    for (pi, pkey) in group.order.iter().enumerate() {
+        if pi > 0 {
+            out.push_str(" ;\n");
+            out.push_str(pad);
+            out.push_str("    ");
+        }
+        out.push_str(pkey);
+        out.push(' ');
+        let objs = &group.objects[pkey];
+        for (oi, o) in objs.iter().enumerate() {
+            if oi > 0 {
+                out.push_str(", ");
+            }
+            write_term(o, prefixes, out);
+        }
+    }
+    out.push_str(" .\n");
+}
+
+// ---------------------------------------------------------------------------
+// Streaming Turtle / TriG (opt-in `streaming-serialization`).
+//
+// [OPUS-4.8] (sq-townn, survey §A7) The buffered `write_turtle` / `write_trig` build a
+// FULL in-memory `String` for the whole graph, so a CONSTRUCT/DESCRIBE over a large graph
+// holds BOTH the materialised triples AND the fully-rendered string at once. These
+// `*_streaming` writers render the body directly into a `W: std::io::Write`, buffering only
+// ONE subject's block at a time (emitting on subject change), so the rendered output is
+// never materialised whole. That enables HTTP chunked streaming of a CONSTRUCT response.
+//
+// BYTE-EQUALITY: the streamed bytes equal the buffered `write_turtle` bytes for the SAME
+// triples — same used-prefix header, same subject grouping, same predicate-object lists —
+// because both call the shared `write_prefix_header` (header) and `render_subject_block`
+// (per-subject body). The one precondition for that equality is that triples for the same
+// subject are CONTIGUOUS in the iterator (the streaming buffer holds one subject at a time
+// and cannot merge a subject that reappears after an intervening subject). Graph-sourced
+// triples ALWAYS satisfy this: `Graph::iter_ids` walks the SPO permutation, which is sorted
+// subject-major, so `graph_triples` (the CONSTRUCT/DESCRIBE feed) is subject-contiguous by
+// construction. The `graph_to_turtle_streaming` wrapper feeds exactly that order, so its
+// bytes equal `graph_to_turtle`'s; the `streamed_equals_buffered` test asserts it.
+//
+// The memory / time-to-first-byte payoff (no whole-output `String`, first bytes flushed
+// after the first subject instead of after the last) is a measurable HYPOTHESIS to confirm
+// on the canonical perf host — NOT a baked-in number.
+// ---------------------------------------------------------------------------
+
+/// Accumulates one triple's predicate-object into a per-subject [`PredObjects`], preserving
+/// the buffered writer's stable order (predicate keys in first-seen order, objects in input
+/// order, `a` for `rdf:type`). Shared by the streaming body so a single subject's block is
+/// grouped identically to the buffered path.
+#[cfg(feature = "streaming-serialization")]
+fn accumulate_pred_object(group: &mut PredObjects, t: &Triple, prefixes: &Prefixes) {
+    let pkey = if t.predicate.as_str() == RDF_TYPE {
+        "a".to_string()
+    } else {
+        let mut s = String::new();
+        write_iri(t.predicate.as_str(), prefixes, &mut s);
+        s
+    };
+    if !group.objects.contains_key(&pkey) {
+        group.order.push(pkey.clone());
+    }
+    group.objects.entry(pkey).or_default().push(t.object.clone());
+}
+
+/// Streams the Turtle statement body (no header) for `triples` into `w` at the given indent,
+/// buffering only the current subject's block. Emits a subject block whenever the subject
+/// changes (subjects must be contiguous — see the module note). Used directly by
+/// [`write_turtle_streaming`] and, indented, inside each streamed TriG `GRAPH { … }` block.
+#[cfg(feature = "streaming-serialization")]
+fn write_turtle_body_streaming<I, W>(
+    triples: I,
+    prefixes: &Prefixes,
+    indent: usize,
+    w: &mut W,
+) -> std::io::Result<()>
+where
+    I: IntoIterator<Item = Triple>,
+    W: std::io::Write,
+{
+    let pad = " ".repeat(indent);
+    // The one-subject-at-a-time buffer: the current subject + its grouped predicate-objects,
+    // and a reusable render scratch String (so a block's bytes are produced exactly once,
+    // then flushed and the scratch cleared — the whole-output String is never built).
+    let mut cur: Option<(NamedOrBlankNode, PredObjects)> = None;
+    let mut scratch = String::new();
+    for t in triples {
+        let subj: NamedOrBlankNode = t.subject.clone();
+        match &mut cur {
+            Some((s, group)) if *s == subj => {
+                accumulate_pred_object(group, &t, prefixes);
+            }
+            _ => {
+                // Subject changed: flush the previous block, then start a new buffer.
+                if let Some((s, group)) = cur.take() {
+                    scratch.clear();
+                    render_subject_block(&s, &group, prefixes, &pad, &mut scratch);
+                    w.write_all(scratch.as_bytes())?;
+                }
+                let mut group = PredObjects {
+                    order: Vec::new(),
+                    objects: std::collections::HashMap::new(),
+                };
+                accumulate_pred_object(&mut group, &t, prefixes);
+                cur = Some((subj, group));
+            }
+        }
+    }
+    if let Some((s, group)) = cur.take() {
+        scratch.clear();
+        render_subject_block(&s, &group, prefixes, &pad, &mut scratch);
+        w.write_all(scratch.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// [OPUS-4.8] (sq-townn, survey §A7) Streams `triples` as Turtle into `w` WITHOUT building
+/// the whole rendered output `String` in memory: the used-prefix `@prefix` header followed
+/// by grouped predicate-object lists, one subject block buffered at a time.
+///
+/// The bytes written are IDENTICAL to [`write_turtle`] over the same `triples`, provided
+/// triples for one subject are contiguous (graph-sourced triples always are — see
+/// [`graph_to_turtle_streaming`]). The header is computed by one pass over `triples` (so the
+/// `@prefix` lines match the buffered writer exactly); the body is then streamed in a second
+/// pass over the slice. Taking `&[Triple]` lets the header pass and the body pass share the
+/// already-materialised triple slice with ZERO extra triple allocation — the saving is the
+/// rendered output `String`, not the triples (which CONSTRUCT/DESCRIBE already hold).
+///
+/// This is the front door for HTTP chunked CONSTRUCT/DESCRIBE responses: the first subject
+/// block can be flushed to the socket before the last subject is rendered.
+#[cfg(feature = "streaming-serialization")]
+pub fn write_turtle_streaming<W: std::io::Write>(
+    triples: &[Triple],
+    prefixes: &Prefixes,
+    w: &mut W,
+) -> std::io::Result<()> {
+    let mut header = String::new();
+    write_prefix_header(triples, prefixes, &mut header);
+    w.write_all(header.as_bytes())?;
+    write_turtle_body_streaming(triples.iter().cloned(), prefixes, 0, w)
 }
 
 // ---------------------------------------------------------------------------
@@ -442,19 +577,7 @@ pub fn write_trig(graphs: &[NamedGraph<'_>], prefixes: &Prefixes) -> String {
             None => write_turtle_body(ts, prefixes, 0, &mut out),
             Some(g) => {
                 out.push_str("GRAPH ");
-                match g {
-                    Term::NamedNode(n) => write_iri(n.as_str(), prefixes, &mut out),
-                    Term::BlankNode(b) => {
-                        out.push_str("_:");
-                        out.push_str(b.as_str());
-                    }
-                    other => {
-                        // A literal/triple-term graph name is not legal RDF; render its
-                        // canonical N-Triples form so nothing is silently lost (the parser
-                        // will reject it, surfacing the bad input rather than corrupting).
-                        let _ = write!(out, "{other}");
-                    }
-                }
+                write_graph_name(g, prefixes, &mut out);
                 out.push_str(" {\n");
                 write_turtle_body(ts, prefixes, 4, &mut out);
                 out.push_str("}\n");
@@ -462,6 +585,75 @@ pub fn write_trig(graphs: &[NamedGraph<'_>], prefixes: &Prefixes) -> String {
         }
     }
     out
+}
+
+/// Renders a TriG named-graph name (`GRAPH <g>`) — an IRI or blank node — into `out`. A
+/// literal/triple-term graph name is not legal RDF; its canonical N-Triples form is emitted
+/// so nothing is silently lost (the parser rejects it, surfacing the bad input rather than
+/// corrupting). Shared by the buffered [`write_trig`] and the streaming TriG writer.
+fn write_graph_name(g: &Term, prefixes: &Prefixes, out: &mut String) {
+    match g {
+        Term::NamedNode(n) => write_iri(n.as_str(), prefixes, out),
+        Term::BlankNode(b) => {
+            out.push_str("_:");
+            out.push_str(b.as_str());
+        }
+        other => {
+            let _ = write!(out, "{other}");
+        }
+    }
+}
+
+/// [OPUS-4.8] (sq-townn, survey §A7) Streams `graphs` as TriG into `w` WITHOUT building the
+/// whole rendered output `String`: the shared used-prefix `@prefix` header (one pass over
+/// the union of every graph's triples), then the default graph's statements (unwrapped),
+/// then each named graph as `GRAPH <g> { … }` — each graph's body streamed one subject block
+/// at a time, exactly as [`write_turtle_streaming`] does.
+///
+/// The bytes written are IDENTICAL to [`write_trig`] over the same `graphs` under the same
+/// subject-contiguity precondition (graph-sourced triples always satisfy it — see
+/// [`graph_to_trig_streaming`]). Only the constant per-graph framing (`GRAPH <g> {`, the
+/// inter-graph blank line, the closing `}`) and a single subject block are ever buffered.
+#[cfg(feature = "streaming-serialization")]
+pub fn write_trig_streaming<W: std::io::Write>(
+    graphs: &[NamedGraph<'_>],
+    prefixes: &Prefixes,
+    w: &mut W,
+) -> std::io::Result<()> {
+    // Header over the union of every graph's triples — one pass, matching `write_trig`.
+    let all: Vec<Triple> = graphs
+        .iter()
+        .flat_map(|(_, ts)| ts.iter().cloned())
+        .collect();
+    let mut header = String::new();
+    write_prefix_header(&all, prefixes, &mut header);
+    w.write_all(header.as_bytes())?;
+
+    let mut first = true;
+    // Reusable framing scratch (constant-size per graph — never the whole body).
+    let mut frame = String::new();
+    for (name, ts) in graphs {
+        if ts.is_empty() {
+            continue;
+        }
+        if !first {
+            w.write_all(b"\n")?;
+        }
+        first = false;
+        match name {
+            None => write_turtle_body_streaming(ts.iter().cloned(), prefixes, 0, w)?,
+            Some(g) => {
+                frame.clear();
+                frame.push_str("GRAPH ");
+                write_graph_name(g, prefixes, &mut frame);
+                frame.push_str(" {\n");
+                w.write_all(frame.as_bytes())?;
+                write_turtle_body_streaming(ts.iter().cloned(), prefixes, 4, w)?;
+                w.write_all(b"}\n")?;
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -542,6 +734,24 @@ pub fn graph_to_turtle_with(graph: &Graph, prefixes: &Prefixes) -> String {
     write_turtle(&graph_triples(graph), prefixes)
 }
 
+/// [OPUS-4.8] (sq-townn, survey §A7) Streams a [`Graph`]'s default graph as Turtle into `w`
+/// with a caller-supplied prefix map, WITHOUT building the whole rendered output `String` —
+/// the front door for HTTP chunked CONSTRUCT/DESCRIBE responses over a large graph.
+///
+/// The bytes written equal [`graph_to_turtle_with`] over the same graph and prefixes: both
+/// feed `graph_triples` (the SPO-ordered, hence subject-contiguous, store walk), so the
+/// streaming writer's per-subject buffering produces byte-identical output. Only the triple
+/// slice (which `graph_to_turtle_with` already materialises) plus one subject block live in
+/// memory at once — the rendered output `String` is never built.
+#[cfg(feature = "streaming-serialization")]
+pub fn graph_to_turtle_streaming<W: std::io::Write>(
+    graph: &Graph,
+    prefixes: &Prefixes,
+    w: &mut W,
+) -> std::io::Result<()> {
+    write_turtle_streaming(&graph_triples(graph), prefixes, w)
+}
+
 /// Collects the default + named graphs of a [`Graph`] as owned `(name, triples)` pairs for
 /// the dataset writers.
 fn dataset_graphs(graph: &Graph) -> Vec<(Option<Term>, Vec<Triple>)> {
@@ -568,6 +778,28 @@ pub fn graph_to_trig_with(graph: &Graph, prefixes: &Prefixes) -> String {
         .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
         .collect();
     write_trig(&view, prefixes)
+}
+
+/// [OPUS-4.8] (sq-townn, survey §A7) Streams a [`Graph`] (default + named graphs) as TriG
+/// into `w` with a caller-supplied prefix map, WITHOUT building the whole rendered output
+/// `String`. The streaming counterpart to [`graph_to_trig_with`].
+///
+/// The bytes written equal [`graph_to_trig_with`] over the same graph and prefixes: both
+/// feed `dataset_graphs` (each graph's `graph_triples` is the SPO-ordered, subject-contiguous
+/// store walk), so the streaming writer's per-subject buffering produces byte-identical
+/// output. Only the triple slices plus a single subject block live in memory at once.
+#[cfg(feature = "streaming-serialization")]
+pub fn graph_to_trig_streaming<W: std::io::Write>(
+    graph: &Graph,
+    prefixes: &Prefixes,
+    w: &mut W,
+) -> std::io::Result<()> {
+    let owned = dataset_graphs(graph);
+    let view: Vec<NamedGraph<'_>> = owned
+        .iter()
+        .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
+        .collect();
+    write_trig_streaming(&view, prefixes, w)
 }
 
 /// Serializes a [`Graph`] (default + named graphs) as N-Quads.
@@ -3311,6 +3543,265 @@ ex:bob
         // And round-trips (re-parses to the same triple set).
         let g2 = Graph::load_str(&ttl, "turtle").unwrap();
         assert_eq!(nt_sorted(&g), nt_sorted(&g2), "custom-prefix Turtle round-trip:\n{ttl}");
+    }
+
+    // =======================================================================
+    // [OPUS-4.8] (sq-townn, survey §A7) Streaming Turtle / TriG tests.
+    //
+    // The load-bearing invariant: the STREAMED bytes equal the BUFFERED
+    // `write_turtle` / `write_trig` bytes for the SAME graph — same used-prefix
+    // header, same subject grouping, same predicate-object lists, same ordering.
+    // These call the REAL streaming path (`write_turtle_streaming` /
+    // `write_trig_streaming` into a `Vec<u8>`), not a mock, and assert
+    // BYTE-EQUALITY against the buffered writer over graphs that exercise multiple
+    // subjects (grouping / emit-on-change), multiple predicates per subject, prefix
+    // usage, blank nodes, typed / lang literals, and the empty graph.
+    // =======================================================================
+    #[cfg(feature = "streaming-serialization")]
+    mod streaming {
+        use super::*;
+
+        /// Streams `triples` to a `Vec<u8>` via the REAL `write_turtle_streaming` and
+        /// returns the bytes as a `String` (the writer only emits UTF-8).
+        fn turtle_streamed(triples: &[Triple], prefixes: &Prefixes) -> String {
+            let mut buf: Vec<u8> = Vec::new();
+            write_turtle_streaming(triples, prefixes, &mut buf).expect("vec write never fails");
+            String::from_utf8(buf).expect("turtle writer emits UTF-8")
+        }
+
+        /// Asserts the streamed Turtle bytes equal the buffered `write_turtle` bytes for
+        /// the SAME triple slice and prefixes (the core streamed==buffered contract).
+        fn assert_streamed_eq_buffered(triples: &[Triple], prefixes: &Prefixes) {
+            let buffered = write_turtle(triples, prefixes);
+            let streamed = turtle_streamed(triples, prefixes);
+            assert_eq!(
+                buffered, streamed,
+                "streamed Turtle must be byte-identical to buffered write_turtle\n\
+                 --- buffered ---\n{buffered}\n--- streamed ---\n{streamed}"
+            );
+        }
+
+        /// The same assertion driven from a parsed graph: `graph_to_turtle_streaming`
+        /// bytes must equal `graph_to_turtle` bytes. This is the REAL CONSTRUCT/DESCRIBE
+        /// path (store-ordered, subject-contiguous triples).
+        fn assert_graph_streamed_eq_buffered(ttl: &str) {
+            let g = Graph::load_str(ttl, "turtle").unwrap();
+            let buffered = graph_to_turtle(&g);
+            let mut buf: Vec<u8> = Vec::new();
+            graph_to_turtle_streaming(&g, &default_prefixes(), &mut buf).unwrap();
+            let streamed = String::from_utf8(buf).unwrap();
+            assert_eq!(
+                buffered, streamed,
+                "graph_to_turtle_streaming must be byte-identical to graph_to_turtle\n\
+                 --- buffered ---\n{buffered}\n--- streamed ---\n{streamed}"
+            );
+            // And the streamed bytes still re-parse to the same triple set.
+            let g2 = Graph::load_str(&streamed, "turtle").unwrap();
+            assert_eq!(nt_sorted(&g), nt_sorted(&g2), "streamed Turtle round-trip:\n{streamed}");
+        }
+
+        #[test]
+        fn streamed_multiple_subjects_and_predicates() {
+            // Three subjects, each with multiple predicates and multi-object lists —
+            // exercises subject grouping (emit-on-change) and predicate-object lists.
+            let ex = "http://ex/";
+            let triples = vec![
+                Triple::new(nn(&format!("{ex}alice")), nn(RDF_TYPE), nn(&format!("{ex}Person"))),
+                Triple::new(
+                    nn(&format!("{ex}alice")),
+                    nn(&format!("{ex}knows")),
+                    nn(&format!("{ex}bob")),
+                ),
+                Triple::new(
+                    nn(&format!("{ex}alice")),
+                    nn(&format!("{ex}knows")),
+                    nn(&format!("{ex}carol")),
+                ),
+                Triple::new(
+                    nn(&format!("{ex}bob")),
+                    nn(&format!("{ex}name")),
+                    Literal::new_simple_literal("Bob"),
+                ),
+                Triple::new(
+                    nn(&format!("{ex}carol")),
+                    nn(&format!("{ex}name")),
+                    Literal::new_simple_literal("Carol"),
+                ),
+            ];
+            let prefixes = prefixes_from_pairs([("ex", ex)]);
+            assert_streamed_eq_buffered(&triples, &prefixes);
+            // Sanity: the streamed output actually used the prefix, the `a` shorthand and
+            // grouped the two `ex:knows` objects on one predicate-object list.
+            let out = turtle_streamed(&triples, &prefixes);
+            assert!(out.contains("@prefix ex: <http://ex/> ."), "prefix header:\n{out}");
+            assert!(out.contains("ex:alice a ex:Person"), "rdf:type as `a`:\n{out}");
+            assert!(out.contains("ex:knows ex:bob, ex:carol"), "object list:\n{out}");
+        }
+
+        #[test]
+        fn streamed_blank_nodes() {
+            let ex = "http://ex/";
+            let triples = vec![
+                Triple::new(
+                    NamedOrBlankNode::BlankNode(BlankNode::new_unchecked("b0")),
+                    nn(&format!("{ex}p")),
+                    nn(&format!("{ex}o")),
+                ),
+                Triple::new(
+                    NamedOrBlankNode::BlankNode(BlankNode::new_unchecked("b0")),
+                    nn(&format!("{ex}q")),
+                    Term::BlankNode(BlankNode::new_unchecked("b1")),
+                ),
+            ];
+            let prefixes = prefixes_from_pairs([("ex", ex)]);
+            assert_streamed_eq_buffered(&triples, &prefixes);
+            let out = turtle_streamed(&triples, &prefixes);
+            assert!(out.contains("_:b0"), "blank subject:\n{out}");
+            assert!(out.contains("_:b1"), "blank object:\n{out}");
+        }
+
+        #[test]
+        fn streamed_typed_and_lang_literals() {
+            let ex = "http://ex/";
+            let xsd = "http://www.w3.org/2001/XMLSchema#";
+            let triples = vec![
+                Triple::new(
+                    nn(&format!("{ex}s")),
+                    nn(&format!("{ex}age")),
+                    Literal::new_typed_literal("30", nn(&format!("{xsd}integer"))),
+                ),
+                Triple::new(
+                    nn(&format!("{ex}s")),
+                    nn(&format!("{ex}label")),
+                    Literal::new_language_tagged_literal_unchecked("chat", "fr"),
+                ),
+                Triple::new(
+                    nn(&format!("{ex}s")),
+                    nn(&format!("{ex}label")),
+                    Literal::new_language_tagged_literal_unchecked("hi", "en"),
+                ),
+            ];
+            let prefixes = prefixes_from_pairs([("ex", ex), ("xsd", xsd)]);
+            assert_streamed_eq_buffered(&triples, &prefixes);
+            let out = turtle_streamed(&triples, &prefixes);
+            assert!(out.contains("\"30\"^^xsd:integer"), "typed literal:\n{out}");
+            assert!(out.contains("\"chat\"@fr"), "lang literal:\n{out}");
+        }
+
+        #[test]
+        fn streamed_empty_graph_is_empty() {
+            let triples: Vec<Triple> = Vec::new();
+            let prefixes = default_prefixes();
+            // No triples => no used prefixes => empty header and empty body.
+            assert_streamed_eq_buffered(&triples, &prefixes);
+            assert_eq!(turtle_streamed(&triples, &prefixes), "");
+        }
+
+        #[test]
+        fn streamed_subject_change_emits_on_change() {
+            // Two subjects emitted back-to-back: the buffer must flush subject 1 before
+            // accumulating subject 2 (the emit-on-change path).
+            let ex = "http://ex/";
+            let triples = vec![
+                Triple::new(nn(&format!("{ex}s1")), nn(&format!("{ex}p")), nn(&format!("{ex}o1"))),
+                Triple::new(nn(&format!("{ex}s2")), nn(&format!("{ex}p")), nn(&format!("{ex}o2"))),
+            ];
+            let prefixes = prefixes_from_pairs([("ex", ex)]);
+            assert_streamed_eq_buffered(&triples, &prefixes);
+            let out = turtle_streamed(&triples, &prefixes);
+            assert!(out.contains("ex:s1 ex:p ex:o1 .\n"), "subject 1 block:\n{out}");
+            assert!(out.contains("ex:s2 ex:p ex:o2 .\n"), "subject 2 block:\n{out}");
+        }
+
+        #[test]
+        fn streamed_full_iri_fallback_when_no_prefix() {
+            // An IRI with no registered prefix must fall back to a full <IRI>, identically
+            // in both paths.
+            let triples = vec![Triple::new(
+                nn("http://no.prefix/s"),
+                nn("http://no.prefix/p"),
+                nn("http://no.prefix/o"),
+            )];
+            let prefixes = Prefixes::new();
+            assert_streamed_eq_buffered(&triples, &prefixes);
+            let out = turtle_streamed(&triples, &prefixes);
+            assert!(out.contains("<http://no.prefix/s>"), "full IRI fallback:\n{out}");
+        }
+
+        #[test]
+        fn streamed_graph_path_matches_buffered() {
+            // The REAL CONSTRUCT/DESCRIBE path: a parsed graph rendered both ways must be
+            // byte-identical (store order is subject-contiguous), across prefixed IRIs,
+            // blank nodes, multi-object lists and typed/lang literals.
+            assert_graph_streamed_eq_buffered(
+                r#"@prefix ex: <http://ex/> .
+                   @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+                   ex:alice a ex:Person ; ex:knows ex:bob, ex:carol ;
+                            ex:age "30"^^xsd:integer ; ex:name "Alice"@en .
+                   ex:bob ex:name "Bob" .
+                   ex:carol ex:knows [ ex:name "anon" ] ."#,
+            );
+        }
+
+        #[test]
+        fn streamed_trig_matches_buffered() {
+            // TriG: default graph + two named graphs. Streamed bytes must equal
+            // `graph_to_trig_with` bytes (shared header, GRAPH framing, indented bodies),
+            // and re-parse to the same dataset.
+            let data = r#"@prefix ex: <http://ex/> .
+                ex:a ex:p ex:b ; ex:q ex:c .
+                GRAPH ex:g1 { ex:x ex:y ex:z . ex:x ex:k "in g1" . }
+                GRAPH ex:g2 { ex:m ex:n ex:o . }"#;
+            let g = Graph::load_dataset(data, "trig").unwrap();
+            let prefixes = prefixes_from_pairs([("ex", "http://ex/")]);
+            let buffered = graph_to_trig_with(&g, &prefixes);
+            let mut buf: Vec<u8> = Vec::new();
+            graph_to_trig_streaming(&g, &prefixes, &mut buf).unwrap();
+            let streamed = String::from_utf8(buf).unwrap();
+            assert_eq!(
+                buffered, streamed,
+                "graph_to_trig_streaming must be byte-identical to graph_to_trig_with\n\
+                 --- buffered ---\n{buffered}\n--- streamed ---\n{streamed}"
+            );
+            let g2 = Graph::load_dataset(&streamed, "trig").unwrap();
+            assert_dataset_iso(&g, &g2, &streamed);
+        }
+
+        #[test]
+        fn streamed_trig_empty_graph_is_empty() {
+            let g = Graph::default();
+            let mut buf: Vec<u8> = Vec::new();
+            graph_to_trig_streaming(&g, &default_prefixes(), &mut buf).unwrap();
+            assert_eq!(graph_to_trig_with(&g, &default_prefixes()), String::from_utf8(buf).unwrap());
+        }
+
+        #[test]
+        fn streamed_write_trig_direct_named_only() {
+            // Drive `write_trig_streaming` directly (no Graph) with a named-graph-only
+            // dataset to cover the inter-graph blank-line + GRAPH framing branch.
+            let ex = "http://ex/";
+            let g1_triples = vec![Triple::new(
+                nn(&format!("{ex}x")),
+                nn(&format!("{ex}y")),
+                nn(&format!("{ex}z")),
+            )];
+            let g2_triples = vec![Triple::new(
+                nn(&format!("{ex}m")),
+                nn(&format!("{ex}n")),
+                nn(&format!("{ex}o")),
+            )];
+            let g1: Term = nn(&format!("{ex}g1")).into();
+            let g2: Term = nn(&format!("{ex}g2")).into();
+            let view: Vec<NamedGraph<'_>> = vec![
+                (Some(&g1), g1_triples.as_slice()),
+                (Some(&g2), g2_triples.as_slice()),
+            ];
+            let prefixes = prefixes_from_pairs([("ex", ex)]);
+            let buffered = write_trig(&view, &prefixes);
+            let mut buf: Vec<u8> = Vec::new();
+            write_trig_streaming(&view, &prefixes, &mut buf).unwrap();
+            assert_eq!(buffered, String::from_utf8(buf).unwrap());
+        }
     }
 
     // =======================================================================

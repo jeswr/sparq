@@ -368,6 +368,54 @@ ex:bare a pkg:Finding ;
         assert!(!r.has_provenance());
     }
 
+    /// A subject with TWO `prov:wasDerivedFrom` sources resolves to TWO distinct
+    /// [`SourceLink`]s — the multi-source fold (`records_from` dedup of the OPTIONAL
+    /// cross-product into one link per distinct `(source, anchor)`). No existing fixture
+    /// has a subject with more than one source. [OPUS-4.8]
+    #[test]
+    fn provenance_for_subject_with_two_sources() {
+        let g = Graph::load_str(
+            r#"@prefix prov: <http://www.w3.org/ns/prov#> .
+               @prefix pkg:  <https://sparq.dev/ns/pkg#> .
+               @prefix ex:   <http://ex/> .
+               ex:m a pkg:Finding ;
+                 prov:wasDerivedFrom ex:s1 , ex:s2 ;
+                 pkg:assurance <https://sparq.dev/ns/secx#Claimed> ;
+                 pkg:confidence "0.6" ."#,
+            "turtle",
+        )
+        .unwrap();
+        let r = provenance_for(&g, &nn("http://ex/m"));
+        assert!(r.has_provenance());
+        // Both sources present, de-duplicated and order-independent.
+        let mut sources: Vec<&str> = r.sources.iter().map(|l| l.source.as_str()).collect();
+        sources.sort_unstable();
+        assert_eq!(sources, vec!["http://ex/s1", "http://ex/s2"]);
+        // The single-valued quality axes are read once, not duplicated per source row.
+        assert_eq!(r.confidence.as_deref(), Some("0.6"));
+        assert_eq!(
+            r.assurance.as_deref(),
+            Some("https://sparq.dev/ns/secx#Claimed")
+        );
+    }
+
+    /// `lookup_query` is deterministic and embeds the subject in EVERY axis clause — the
+    /// shape a caller inspecting "exactly what is executed" depends on. [OPUS-4.8]
+    #[test]
+    fn lookup_query_embeds_subject_in_every_axis() {
+        let q = lookup_query("http://ex/s").expect("embeddable");
+        // The subject appears once per OPTIONAL axis (5 axes).
+        assert_eq!(q.matches("<http://ex/s>").count(), 5);
+        // All five provenance predicates are present.
+        assert!(q.contains("prov:wasDerivedFrom"));
+        assert!(q.contains("dcterms:source"));
+        assert!(q.contains("pkg:confidence"));
+        assert!(q.contains("pkg:assurance"));
+        assert!(q.contains("cito:citesAsEvidence"));
+        // Determinism: same input → byte-identical query.
+        assert_eq!(lookup_query("http://ex/s").unwrap(), q);
+    }
+
     #[test]
     fn join_resolves_every_bound_iri() {
         let g = graph();

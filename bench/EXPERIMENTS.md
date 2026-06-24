@@ -7,10 +7,13 @@ links to its detailed record; the numbers live in the linked `bench/.../RESULTS*
 
 ✨ **Two cross-cutting findings the experiments keep reproducing:**
 
-1. **Real measurement beats proxies — proxies inverted the verdict twice.** A
-   char/byte *proxy* said "don't adopt PKG-query" and "outline-before-read is the
-   big lever"; the **real cache-discounted transcript measurement reversed both**.
-   Re-measure work-levers with real tokens before codifying them.
+1. **Real measurement beats proxies — proxies inverted the verdict THREE times.** A
+   char/byte *proxy* said "don't adopt PKG-query", "outline-before-read is the big
+   lever", and "the `K:` terse layer saves ≈20% tokens"; the **real cache-discounted
+   transcript measurement reversed all three** (PKG-query halves tokens; outline-first
+   costs *more*; `K:` saves only ~0.02% once the fixed full-session floor is counted).
+   The proxy reliably **over-claims the token lever**. Re-measure work-levers with real
+   tokens before codifying them.
 2. **For an LLM agent, fluency beats formal superiority.** The agent-facing win
    came from what the model wields fluently (a Haiku NL-tool; `schema.org` terms),
    not from the formally-richest option (`ast-grep`/outline; academic `gUFO`).
@@ -25,8 +28,8 @@ links to its detailed record; the numbers live in the linked `bench/.../RESULTS*
 | **FO-KM Metric 1** | Does any foundational ontology beat gUFO / no-FO for the agent's KM tasks? | 16 | **schema.org-as-top wins (0.84)** ≫ DOLCE-DUL (0.64) > no-FO (0.58) > **gUFO (0.54, *below* no-FO)**. Driver = **LLM fluency**, not formal richness. | `bench/fo-km/RESULTS.md` (PRs #1107/#1108, landing) |
 | **bd → sparq bridge eval** | Can sparq replace the bead tracker? | — | **Bridge, don't replace** (0/4 replacement criteria met). The real value is the research↔beads JOIN (links designs to their covering beads; surfaces dormant designs). | `crates/sparq-kb` README + PR #1076 |
 | **gUFO closure-prior (KGE)** | Does gUFO closure firm up the link-prediction MRR lift? | multi-seed | **Not robust** — the lift is sign-unstable across synthetic slices (within per-seed spread). A real schema-bearing KG run is needed. | PR #1094 / `crates/sparq-vectors` eval |
-| **sparq-terse query-authoring A/B** | Does the terse dialect (`K:` keywords / `V()`) save query-authoring tokens vs plain SPARQL, at equal correctness? | 30 | **Split, per lever.** Lever 1 (`K:` keyword) clears the token bar **and ties** plain SPARQL on quality → **conditional adopt** (proxy fidelity; pending the transcript fan-out). Lever 3 (`V()`) **does-not-adopt on quality** — it loud-fails (correctly) on a punctuation-heavy prefLabel, so `resolution_correctness < 1.0`. A `V()` is a clean-label convenience, not a drop-in for an explicit IRI. | [`terse/RESULTS.md`](terse/RESULTS.md) |
-| **Read-path URI-hiding A/B (FO-bridge Phase 3)** | Does presenting answer bindings as labels instead of raw IRIs help the agent (open question K4)? | 1487 IRIs | **Sound, not a saver — accuracy UNMEASURED.** The hidden view loses **zero** answer identity over the PKG (0 collisions, coverage 1.0) → safe to A/B. But it is **~2.4× LARGER to read** than the short opaque IRIs (PKG labels are long descriptions), so the naive "hiding is cheaper" assumption is **false here**. The headline **accuracy** half (does it help a real model?) needs a real-model NL→NL fan-out and is **UNMEASURED** (no API key) with a pre-registered NEUTRAL null. | [`compose/RESULTS.md`](compose/RESULTS.md) |
+| **sparq-terse query-authoring A/B** | Does the terse dialect (`K:` keywords / `V()`) save query-authoring tokens vs plain SPARQL, at equal correctness? | 30 (60 real transcripts) | **`K:` does-not-adopt for tokens — the proxy was wrong (3rd reversal).** At REAL full-session-transcript fidelity (sq-bmpzd) `K:` saves **0.02%** (p=0.13, CI [0,18] includes 0), not the ≈20% the input-authoring proxy reported — every session costs ~14.1k eff tokens, the fixed session floor dwarfs the shorter query body. `K:` **ties** plain SPARQL on quality (parses/grounded/F1 all equal), so it is a legibility convenience, **not** a token-saver. Lever 3 (`V()`) was out of scope here; its prefLabel gap is fixed (`sq-26fdp`). | [`terse/RESULTS.md`](terse/RESULTS.md) |
+| **Read-path URI-hiding A/B (FO-bridge Phase 3)** | Does presenting answer bindings as labels instead of raw IRIs help the agent (open question K4)? | 1487 IRIs (fidelity) + 35 paired Q (accuracy) | **Sound, helps accuracy on opaque-id bindings, still not a saver — K4 KEPT (does not fire).** Model-free half: hidden view loses **zero** answer identity (0 collisions, coverage 1.0) but is **~2.4× LARGER to read** (PKG labels are long descriptions) — not a token-saver. **Accuracy half (sq-3pb7f, real-model A/B):** HIDDEN 1.00 vs RAW 0.64, Δ +0.357, **16 hidden-wins / 0 raw-wins / 19 ties** (sign-test p ≈ 3e-5) — hiding **matches-or-beats RAW on all 35, never hurts**. But the win is **concentrated where the IRI local name is opaque** (`task-title` RAW 0.00→1.00) and **~0 where the slug is informative** (`technique-name`/`about-topic` tie); `dep-count` null control = exactly Δ0. So URI-hiding is a real, conditional **accuracy** win (it rescues opaque-id bindings), **not** a dead end and **not** a token-saver. | [`compose/RESULTS.md`](compose/RESULTS.md) · [`compose/k4/`](compose/k4/) |
 
 ## Designs (context for the above)
 

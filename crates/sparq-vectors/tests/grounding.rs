@@ -55,18 +55,8 @@ fn typed_sub_vector_projects_only_requested_blocks() {
 
     // A 6-dim structured row: a 4-dim numeric block + a 2-dim text block.
     let header = SchemaHeader::new(vec![
-        Block {
-            encoder: Encoder::Numeric,
-            metric: Metric::Euclidean,
-            offset: 0,
-            width: 4,
-        },
-        Block {
-            encoder: Encoder::Other,
-            metric: Metric::Euclidean,
-            offset: 4,
-            width: 2,
-        },
+        Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4),
+        Block::new(Encoder::Other, Metric::Euclidean, 4, 2),
     ])
     .unwrap();
 
@@ -111,13 +101,8 @@ fn typed_sub_vector_projects_only_requested_blocks() {
 #[test]
 fn typed_sub_vector_none_when_node_has_no_vector() {
     let g = Graph::load_str(TTL, "turtle").unwrap();
-    let header = SchemaHeader::new(vec![Block {
-        encoder: Encoder::Numeric,
-        metric: Metric::Euclidean,
-        offset: 0,
-        width: 4,
-    }])
-    .unwrap();
+    let header =
+        SchemaHeader::new(vec![Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4)]).unwrap();
     let mut store = VectorStore::create(tmp("novec"), 4).unwrap();
     // Put a DIFFERENT node's vector; bolt has none.
     let other = g.id_of(&iri("http://ex/Car")).unwrap();

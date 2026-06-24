@@ -61,6 +61,15 @@ oxrdf.workspace = true
 # Used only to classify the query form in `Graph.ask` (ASK runs the engine's
 # native early-exiting entry point; SELECT is answered via the lazy count).
 spargebra.workspace = true
+# [OPUS-4.8] sq-lt1ml (gh-910): opt-in Arrow export. Only behind the `arrow` feature,
+# so the lean wheel pulls ZERO Arrow code. `sparq-arrow/arrow` gives the QueryResult ->
+# RecordBatch projection (one struct column per variable); `arrow-array`/`arrow-schema`
+# with their `ffi` feature give the C Data Interface (`FFI_ArrowArrayStream`) we hand to
+# pyarrow as a PyCapsule (no re-serialisation). Versions are workspace-pinned to match
+# sparq-arrow's arrow 55 exactly so the `RecordBatch` type is byte-identical across the edge.
+sparq-arrow = { path = "../sparq-arrow", features = ["arrow"], optional = true }
+arrow-array = { version = "55", features = ["ffi"], optional = true }
+arrow-schema = { version = "55", features = ["ffi"], optional = true }
 
 [features]
 # [OPUS-4.8] sq-oy1f.20: JSON-LD is DEFAULT-ON in the Python wheel — the maintainer-
@@ -76,3 +85,9 @@ spargebra.workspace = true
 # fails closed (sparq-core rejects the unknown format rather than mis-parsing it).
 default = ["jsonld"]
 jsonld = ["sparq-core/jsonld"]
+# [OPUS-4.8] sq-lt1ml (gh-910): `Graph.query_arrow(sparql) -> pyarrow.Table`. OFF by
+# default — the lean wheel pays nothing (no Arrow dependency, no extra code compiled).
+# A wheel built with `--features arrow` (the `arrow` PyPI extra is wired through this
+# cargo feature) gains the Arrow columnar export. Pulls sparq-arrow's RecordBatch
+# projection + the arrow C Data Interface used to hand the batch to pyarrow zero-copy.
+arrow = ["dep:sparq-arrow", "dep:arrow-array", "dep:arrow-schema"]

@@ -42,6 +42,19 @@ default = []
 # Pulls sparq-engine's (dependency-free) `serialize-rdf` so the artifact body can be written
 # as N-Quads via `sparq_engine::serialize::graph_to_nquads`.
 backup = ["sparq-engine/serialize-rdf"]
+# [OPUS-4.8] sq-b4fns (gh-906): `change-stream` (default OFF) — a DURABLE, REPLAYABLE
+# change-data-capture stream in the Neptune-Streams shape. Each commit emits an ordered,
+# monotonically-sequenced change record (op, quad(s), commit seq/generation, timestamp)
+# persisted to a segmented, fsync'd append-only log so a consumer can REPLAY from a given
+# offset after restart (`ChangeLog::open` re-reads the segments; `ChangeLog::poll(from_seq)`
+# streams onward) — not just an in-memory broadcast. The serving core (ring + sequenced
+# writer) is fully buildable WITHOUT it: the `change_stream` module is `#[cfg]`-stripped, so
+# a build without the feature is byte-identical to before. It is a LEAN feature: like
+# `backup`, it adds NO new external dependency (the change-set is the same N-Quads quad-set
+# diff via sparq-engine's dependency-free `serialize-rdf`; the digest reuses `backup`'s
+# self-contained FNV-1a; framing/IO is std-only). No HTTP, no async runtime (library-first
+# §6.1). sparq-server's `GET /streams` HTTP poll endpoint is a SEPARATE later opt-in.
+change-stream = ["sparq-engine/serialize-rdf"]
 # [OPUS-4.8] sq-jluc: the response-bytes result cache (research/concurrent-serving.md
 # §5 row 2 + §6.3) — OPT-IN and OFF by default. It is a LEAN feature: it adds NO new
 # dependency (the cache key/map reuse the in-tree `rustc-hash` and `std::hash`; the
@@ -56,6 +69,12 @@ result-cache = []
 # a workspace dependency) — no other crate should reach for it casually; the
 # generation ring is the one sanctioned place for arc-swap in the tree.
 arc-swap = "1"
+# [OPUS-4.8] sq-xa15c (#1248): the embedding seam's named-graph existence probe
+# (`embed::named_graph_exists`) names `oxrdf::Term` — the type `Graph::named_graph`
+# already takes. Workspace dep (same version sparq-core/sparq-engine already pull
+# in transitively); already vetted at the workspace level, so NO new cargo-vet
+# exemption. No HTTP/async — does not break the library-first §6.1 guard.
+oxrdf.workspace = true
 rustc-hash.workspace = true
 # Promoted from dev-dependencies by Wave A2 (as the A1 comment anticipated): the
 # sequenced writer's production `ApplyUpdates` strategy (`GraphApplier`) applies

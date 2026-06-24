@@ -40,6 +40,11 @@ use sparq_core::Graph;
 //   without it those strings also error rather than mis-parsing. [OPUS-4.8] sq-oy1f.4: the
 //   `sparq-cli` and `sparq-server` BINARIES enable `jsonld` by DEFAULT (a maintainer-directed
 //   exception), so they read/write JSON-LD out of the box; a library embedder opts in explicitly.
+//   [OPUS-4.8] sq-f47w1 (survey §B1): RDF/XML ("rdfxml"/"rdf-xml"/"application/rdf+xml")
+//   likewise needs the OPT-IN `rdfxml` feature on `sparq-core` (OFF by default — it links
+//   `oxrdfxml`/`quick-xml`, kept off the lean wasm bundle); without it those strings error
+//   rather than mis-parsing. RDF/XML has no named-graph syntax, so it loads via `load_str` /
+//   `parse_to_triples` (not the dataset path), serial-only (XML is not line-delimited).
 let ttl = r#"@prefix ex: <http://ex/> .
 ex:alice ex:knows ex:bob ."#;
 let g = Graph::load_str(ttl, "turtle").expect("parse");
@@ -296,6 +301,22 @@ ordering unchanged, round-trips to the identical RDF, and stays dependency-free 
 hand-written JSON re-indenter — no `serde_json`, which is dev-only). Indentation is presentation
 only; the document content is byte-for-byte the minified form plus newlines/indent.
 
+**Streaming Turtle / TriG (opt-in `streaming-serialization`, implies `serialize-rdf`).** The plain
+`write_turtle` / `write_trig` build a *full* in-memory `String` for the whole graph, so a large
+CONSTRUCT/DESCRIBE holds both the materialised triples and the fully-rendered string at once. The
+opt-in `streaming-serialization` feature adds `write_turtle_streaming(triples, &prefixes, &mut w)`
+and `write_trig_streaming(&named_graphs, &prefixes, &mut w)` (plus the whole-graph
+`graph_to_turtle_streaming(&g, &prefixes, &mut w)` / `graph_to_trig_streaming`) that render the body
+directly into any `W: std::io::Write`, buffering only **one subject block at a time** (emitting on
+subject change) — so the whole rendered output is never materialised, enabling HTTP chunked
+CONSTRUCT/DESCRIBE responses (first bytes flushed after the first subject, not the last). The
+streamed bytes are **byte-identical** to the buffered `write_turtle` / `write_trig` for the same
+graph (same used-prefix header, same subject grouping, same ordering): both share the prefix-header
+and per-subject-block rendering, and graph-sourced triples are subject-contiguous (`iter_ids()` walks
+the SPO permutation), which is the precondition for that equality. The memory / time-to-first-byte
+payoff is a measurable hypothesis on the canonical host, not a baked-in number. Zero new deps (std
+`io::Write` only). Reproduce: `cargo test -p sparq-engine --features streaming-serialization`.
+
 **Full W3C JSON-LD 1.1 Compaction (caller `@context`).** `JsonLdForm::Compacted` above is the
 *lighter* prefix-only `@context` (it just abbreviates IRIs to `prefix:local` CURIEs). For the
 real **W3C JSON-LD 1.1 Compaction Algorithm** against a caller-supplied `@context`, use
@@ -493,6 +514,18 @@ cargo build -p sparq-cli --features serialize-rdf
 - **`load_dataset` is in-memory only.** Numeric/temporal filter caches are built on load
   in all in-memory paths; `into_compressed()` / `load_str_compressed()` trade a small
   per-scan decode for ~2.5× more triples per byte of RAM (browser target).
+- **`block-bloom` (opt-in, OFF by default).** A block-compressed permutation already has an
+  implicit min/max zone map (the directory's first-triple) that prunes RANGE scans, but for an
+  EQUALITY-BOUND leading column (a point/prefix lookup on a constant subject/object) whose id
+  overlaps several blocks' `[min,max]` spans on a high-NDV column, only a per-block Bloom filter
+  can skip the blocks that cannot contain it. The `block-bloom` feature builds a tiny per-block
+  Bloom bitset over each block's distinct leading ids (built only for high-NDV columns past a
+  density gate; pure-std, no new dep) and probes it in `range` before decoding a block. Zero
+  false negatives by construction, so results are IDENTICAL to the feature-off path — only fewer
+  blocks decode. The filter is in-RAM/build-time only: it is NEVER written to the on-disk
+  `SPQCPRM1` format, so a perm built with the feature on persists byte-identically to one built
+  with it off, and a memory-mapped perm carries no filter. Whether the hypothesised block-skip
+  win materialises is to be confirmed on the canonical perf host (no number is asserted here).
 - **JSON-LD W3C conformance is RATCHETED (honest baseline, not 100%).** A ratcheted W3C
   JSON-LD 1.1 conformance gate (sq-oy1f.2 + sq-3uos5 + sq-oy1f.19) drives the official
   `w3c/json-ld-api` suite AND the SEPARATE `w3c/json-ld-framing` suite through the real paths:

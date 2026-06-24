@@ -113,6 +113,15 @@ Prepared (parse/plan once, execute many):
 - `PreparedQuery::parse(&str) -> Result<PreparedQuery, String>` (also `FromStr`, and
   `From<spargebra::Query>` for programmatically built algebra); `query_prepared`, `ask_prepared`,
   `count_prepared`, `construct_prepared`, `describe_prepared` (+ `_with_budget`).
+- *(opt-in `params`)* **Parameterized prepared queries — safe value binding (SPARQL-injection
+  mitigation, #901).** `PreparedQuery::bind(name, oxrdf::Term) -> Result<PreparedQuery, String>`
+  and `PreparedUpdate::{parse, bind}` + `update_prepared` / `update_in_place_prepared`
+  (+ `_with_budget`). `bind` substitutes a typed value into a free placeholder variable via a pure
+  **algebra rewrite** (`Variable` -> term node), NEVER string concatenation, so a hostile bound
+  value cannot alter query structure. Convenience term constructors: `params::value::{iri, string,
+  lang_string, typed, blank}`. Fail-closed (rejects an unknown placeholder, a `BIND`/aggregate/
+  `VALUES` output, or a blank node in a predicate/graph slot). The placeholder name may be written
+  `who`, `?who`, or `$who`. **Always prefer this over building a query string from untrusted input.**
 
 Extension functions (SPARQL 17.6) and dataset views:
 
@@ -133,7 +142,17 @@ Extension functions (SPARQL 17.6) and dataset views:
   `ROWS`/`RANGE` frames, and a reusable named `WINDOW w AS (…)` clause (sq-hqhc)).
 
 Introspection: `explain(&Graph, &str)` (plan-only) and `explain_analyze(&Graph, &str)` (plan + per-
-operator execution trace).
+operator execution trace) return human-readable TEXT (the default).
+
+Structured EXPLAIN *(opt-in `explain-json` feature, OFF by default)* — a MACHINE-READABLE plan:
+`explain_plan(&Graph, &str)` and `explain_plan_analyze(&Graph, &str)` return a typed `PlanNode` tree
+(`operator`, `estimated` cardinality on BGP nodes, and — after ANALYZE — `actual` rows, wall `nanos`,
+and the per-operator **q-error** = `max(est/actual, actual/est)`; 1.0 is a perfect estimate, larger is
+worse in either direction). `PlanNode::to_json()` emits a hand-written JSON projection (no serde dep);
+`PlanNode::max_q_error()` is the whole-plan worst. `SlowQueryRing::new(n)` is a bounded ring keeping the
+N worst-by-wall-time analyzed plans (`record` / `push` / `slowest` / `to_json`) for an ops slow-query
+view. Honest boundaries: only BGP nodes carry an estimate (the only operators the planner sizes);
+q-error is `None` when either side is 0; `nanos` are always 0 on wasm32.
 
 ## Common recipes
 
@@ -391,6 +410,30 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   `PARTITION BY` are inline-deferred (use the programmatic API). The custom-aggregate side DOES ride real SPARQL `GROUP BY` (a declared aggregate
   IRI is part of the SPARQL 1.1 extension grammar). When the feature is off, zero window/aggregate-registry
   code compiles and the default build is byte-identical (no new dependencies). See the recipes above.
+- **Parameterized prepared queries (SPARQL-injection mitigation)** are the non-default `params`
+  cargo feature (bead `sq-rp3um`, #901). When you build a query/update from untrusted input, do NOT
+  concatenate it into the string — parse a *template* once and `bind` typed values. Binding is a
+  pure algebra rewrite (`Variable` -> term node), so a hostile value is matched as DATA and can
+  never inject syntax. Covers SELECT/ASK/CONSTRUCT/DESCRIBE + UPDATE; `bind` is **fail-closed**.
+
+  ```rust
+  // Cargo.toml: sparq-engine = { version = "0.1", features = ["params"] }
+  use sparq_engine::{params::value, query_prepared, update_prepared, PreparedQuery, PreparedUpdate};
+  // A hostile literal: under string concat this would break out and inject an UPDATE.
+  let hostile = r#"Bob" } INSERT DATA { <http://ex/evil> <http://ex/p> <http://ex/o> } #"#;
+  let pq = PreparedQuery::parse("SELECT ?s WHERE { ?s <http://ex/name> ?nameVal }")?
+      .bind("nameVal", value::string(hostile))?;  // carried as one literal — matches nothing
+  let _ = query_prepared(&graph, &pq)?;
+  // Bind an IRI into a subject/predicate slot (the IRI constructor validates it):
+  let pq = PreparedQuery::parse("SELECT ?o WHERE { ?who <http://ex/name> ?o }")?
+      .bind("who", value::iri("http://ex/alice")?)?;
+  let _ = query_prepared(&graph, &pq)?;
+  // UPDATE templates bind the same way (DELETE/INSERT/WHERE):
+  let pu = PreparedUpdate::parse("INSERT { <http://ex/x> <http://ex/note> ?n } WHERE { }")?
+      .bind("n", value::string(hostile))?;        // exactly one op — no injected DROP/INSERT
+  let _g2 = update_prepared(&graph, &pu)?;
+  # Ok::<(), String>(())
+  ```
 - **Vectorized columnar primitives** are the non-default `vectorized` cargo feature (M4 plan, bead
   `sq-hvfe`): the `chunk` module's `DataChunk` (a column-major, vector-at-a-time id-level batch),
   a numeric FILTER comparison kernel (`DataChunk::select_numeric` → a `SelVec`), and a
@@ -398,6 +441,20 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   wired into the query evaluator — `query`/`query_json`/etc. are unchanged whether the feature is on
   or off. When off, zero columnar code compiles and the default native + wasm builds are
   byte-identical (no new dependencies; no `unsafe`).
+- **Exact-bitmap semi-join reducer** is the non-default `semijoin-bitmap` cargo feature (M4 plan,
+  survey §A3, bead `sq-gr8mb`; CIDR'26 "Not Yannakakis"). When a binary BGP join scans the next
+  pattern, the executor first builds a membership filter over the already-materialised side's
+  connecting-variable ids — a flat **bitmap** over the dense `u32` ids (the dictionary assigns dense
+  ids, so the bitmap is a perfect-hash, zero-false-positive membership test) or an exact **hash set**
+  when the keys are sparse+huge — and passes it to the scan, which DROPS a row whose join key cannot
+  match **before** that row enters the join. This is a transparent PERFORMANCE optimisation: the
+  filter is membership-exact, so it removes only rows the join would have dropped anyway and the
+  RESULT is byte-identical to the feature-off path — `query`/`query_json`/etc. return the SAME answers
+  whether it is on or off (proven by the on-vs-off equivalence suite `tests/semijoin_differential.rs`);
+  only fewer rows are scanned. Its payoff on star/snowflake workloads is a measurable hypothesis for
+  the canonical perf host, not a baked-in number. When off, zero of this code compiles and the default
+  native + wasm builds are byte-identical (no new dependencies — sparq-core + rustc-hash are already
+  direct deps; no `unsafe`).
 - **Materialised-view / query-result cache** is the non-default `result-cache` cargo feature (bead
   `sq-a9cn`): `ResultCache::new(capacity)` is a bounded, version-aware LRU that stores a SELECT/ASK
   `QueryResult` keyed by `(parsed query algebra, caller graph-version)`; serve a query through
@@ -485,11 +542,24 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   prefer `PreparedQuery` when running one query against many graphs (e.g. continuous/RSP queries).
 - **CLI/HTTP alternative**: `sparq-cli` and `sparq-server` (W3C SPARQL Protocol, `?explain=`,
   result formats JSON/XML/CSV/TSV, `/metrics`) wrap this same surface if you don't want to embed.
+- **Apache Arrow columnar export** is the opt-in `sparq-arrow` crate (separate leaf crate +
+  its own `arrow` feature, both OFF the default build — the `arrow-*` deps NEVER reach
+  `sparq-core`/`sparq-engine`/wasm). `sparq_arrow::to_record_batch(&QueryResult) -> RecordBatch`
+  projects a SELECT result into one Arrow **struct column per variable** —
+  `Struct<kind, value, datatype, language, direction>` (all nullable `Utf8`; the field names are
+  `sparq_arrow::RDF_TERM_FIELDS`). Faithful & round-trippable: an **unbound** binding is a `null`
+  struct slot (distinct from a bound empty string); `xsd:string` is written **explicitly** (not
+  elided). Honest v1 boundaries — **no numeric narrowing** (`42^^xsd:integer` is the string `"42"`
+  + a datatype field, not an `Int64`; a typed-column view is a follow-up) and **triple terms are
+  stringified** to N-Triples in `value`. The intended on-ramp into Polars/DuckDB/pandas; a
+  `sparq-py` `Graph.query_arrow() -> pyarrow.Table` PyO3 binding is a follow-up (bead `sq-lt1ml`).
 
 ## See also
 
 - `rust-parallel-parsing` / `fused-decompress-parse` — fast/compressed RDF ingest into a `Graph`.
 - `hdt-format` — loading `.hdt` archives into a `Graph` (`sparq-hdt`).
+- `sparq-arrow` — opt-in Apache Arrow columnar export of a SELECT `QueryResult` into a
+  `RecordBatch` (one struct column per variable) for transfer into the dataframe ecosystem.
 - `sparql-formal-semantics` — the algebra/semantics reference for the SPARQL fragment.
 - `noir-circuit-patterns` / `verifiable-credentials-zk` / `mpc-protocols` — the ZK/MPC estate built
   on the `zk` trace seam (non-default `zk` feature; consumed by `sparq-zk`).

@@ -35,6 +35,12 @@ fn main() {
         // when built with `--features serialize-rdf`.
         #[cfg(feature = "serialize-rdf")]
         Some("dump") => cmd_dump(&args),
+        // [OPUS-4.8] (sq-vczh2) `terse` transpiles a terse query (the `K:<name>` keyword layer
+        // over canonical SPARQL) into the canonical SPARQL it expands to, printing the verifiable
+        // JSON contract. Gated behind the opt-in `terse` feature: the default CLI build carries no
+        // terse code, so the subcommand is only present when built with `--features terse`.
+        #[cfg(feature = "terse")]
+        Some("terse") => cmd_terse(&args),
         _ => {
             eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli compact <persist-dir>                   # WAL compact/vacuum: physically purge erased data (offline)\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
@@ -1044,6 +1050,131 @@ fn cmd_dump(args: &[String]) {
         }
     };
     print!("{serialized}");
+}
+
+/// [OPUS-4.8] (sq-vczh2, epic sq-2m6zm) `terse <terse-query>` — transpile a *terse* query into
+/// the canonical, conformant SPARQL it expands to, printing the verifiable JSON contract
+/// (`{ canonical_sparql, keywords, resolutions, warnings, legendVersion }`) — the SAME shape the
+/// server's `POST /terse/transpile` endpoint returns.
+///
+/// The terse query is read from the positional argument, or — when that argument is `-` — from
+/// stdin (so a query with shell-hostile characters can be piped). It is the LEAN `sparq-terse`
+/// build: the `K:<name>` keyword layer is fully on; a `V("phrase")` construct loud-FAILS (exit 2)
+/// rather than being guessed (concept resolution is a future `vectors`-gated extension; the V()
+/// ambiguity caveat is tracked by sq-26fdp). It NEVER executes the query — pipe the printed
+/// `canonical_sparql` into `query`/`query-mmap` to run it. Behind the opt-in `terse` cargo feature.
+#[cfg(feature = "terse")]
+fn cmd_terse(args: &[String]) {
+    let src: String = match args.get(2).map(String::as_str) {
+        Some("-") => {
+            let mut buf = String::new();
+            if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                eprintln!("error reading terse query from stdin: {e}");
+                std::process::exit(1);
+            }
+            buf
+        }
+        Some(q) => q.to_string(),
+        None => {
+            eprintln!(
+                "usage: sparq-cli terse <terse-query | ->\n  \
+                 Transpiles a terse query (the `K:<name>` keyword layer over canonical SPARQL) and\n  \
+                 prints the canonical SPARQL it expands to, as JSON. Pass `-` to read the query from\n  \
+                 stdin. It does NOT execute the query — pipe the canonical_sparql into `query`."
+            );
+            std::process::exit(2);
+        }
+    };
+    match sparq_terse::terse_to_sparql(&src) {
+        Ok(expansion) => println!("{}", terse_expansion_to_json(&expansion)),
+        // Every terse failure is a loud, deterministic input error (unknown keyword, `PREFIX K:`
+        // collision, an un-resolvable `V(...)` in this lean build, or the conformance canary): it
+        // goes to stderr with the transpiler's own message and a non-zero exit, never a guess.
+        Err(e) => {
+            eprintln!("terse: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// [OPUS-4.8] (sq-vczh2) Hand-build the verifiable terse-expansion JSON (the CLI runtime binary
+/// carries no `serde_json` — it hand-builds JSON like `bench`'s `--json`). The shape mirrors the
+/// server's `POST /terse/transpile` body so a caller gets the SAME contract from either surface.
+#[cfg(feature = "terse")]
+fn terse_expansion_to_json(expansion: &sparq_terse::Expansion) -> String {
+    // Minimal JSON-string escaper (the same control-char + quote/backslash discipline the server's
+    // hand-rolled JSON uses); positional `format!` args avoid the CodeQL rust/unused-variable
+    // false positive on inline-captured identifiers.
+    fn esc(out: &mut String, s: &str) {
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+
+    let mut out = String::from("{\"canonical_sparql\":");
+    esc(&mut out, &expansion.canonical_sparql);
+    out.push_str(",\"keywords\":[");
+    for (i, k) in expansion.keywords.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"keyword\":");
+        esc(&mut out, &k.keyword);
+        out.push_str(",\"iri\":");
+        esc(&mut out, &k.iri);
+        out.push_str(",\"legendVersion\":");
+        esc(&mut out, &k.legend_version);
+        out.push('}');
+    }
+    // `resolutions` is always empty in this lean (no-`vectors`) CLI build, but the field is in the
+    // contract so a future `vectors`-enabled build can populate it without a shape change.
+    out.push_str("],\"resolutions\":[");
+    for (i, r) in expansion.resolutions.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"phrase\":");
+        esc(&mut out, &r.phrase);
+        out.push_str(",\"iri\":");
+        esc(&mut out, &r.iri);
+        out.push_str(&format!(",\"score\":{}", r.score));
+        match &r.runner_up {
+            Some(ru) => {
+                out.push_str(",\"runnerUp\":");
+                esc(&mut out, ru);
+            }
+            None => out.push_str(",\"runnerUp\":null"),
+        }
+        match r.runner_up_score {
+            Some(s) => out.push_str(&format!(",\"runnerUpScore\":{}", s)),
+            None => out.push_str(",\"runnerUpScore\":null"),
+        }
+        out.push_str(&format!(",\"confidence\":{}", r.confidence));
+        out.push_str(",\"method\":");
+        esc(&mut out, r.method.as_str());
+        out.push('}');
+    }
+    out.push_str("],\"warnings\":[");
+    for (i, w) in expansion.warnings.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        esc(&mut out, w);
+    }
+    out.push_str("],\"legendVersion\":");
+    esc(&mut out, sparq_terse::LEGEND_VERSION);
+    out.push('}');
+    out
 }
 
 /// [OPUS-4.8] (sq-l4ki) Output serialisation chosen by `query --format`. `Table` (the

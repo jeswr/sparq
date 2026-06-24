@@ -1,0 +1,67 @@
+# [OPUS-4.8] (sq-0z43i, gh #909) sparq-mcp — an OPT-IN crate exposing the sparq
+# engine as Model Context Protocol (MCP) agent tools. It is opt-in by virtue of
+# being a SEPARATE workspace crate: nothing in the workspace depends on it, and
+# the default `cargo build` of sparq-core/sparq-engine never compiles it. It is a
+# THIN wrapper over the existing read API (sparq-engine query path + sparq-introspect
+# schema mining) — it adds zero engine capability and pulls no heavy dependency.
+[package]
+name = "sparq-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in Model Context Protocol (MCP) server exposing the sparq RDF/SPARQL engine as agent tools: SPARQL query, dataset introspection, and stats over JSON-RPC 2.0 (stdio); SPARQL update is OFF by default and gated behind an explicit allow-update flag"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# [OPUS-4.8] Render the README as the docs.rs front page and build with all features
+# so the `stdio` transport items appear; `--cfg docsrs` enables doc-cfg gating.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+# The transport-agnostic dispatch core (`McpServer::handle_message`, the tool
+# schemas, JSON-RPC framing types) is ALWAYS compiled — it is pure serde_json over
+# `String`s and needs no I/O, so the in-memory round-trip test exercises the real
+# path with zero feature flags. The `stdio` feature adds the blocking serve loop
+# (`serve_stdio`) that reads line-delimited JSON-RPC from one reader and writes
+# responses to a writer — the standard MCP stdio transport. It is OFF by default
+# (a server binary opts in) and uses only `std::io`, so it pulls no new dependency;
+# gating it keeps the library surface a pure data-transform for embedders that wire
+# their own transport. [OPUS-4.8]
+default = []
+stdio = []
+# [OPUS-4.8] sq-jxjgr: the opt-in server-side natural-language `ask` tool. OFF by default —
+# it pulls in `sparq-nlq` (and through it the configurable LLM backends), so the default
+# `sparq-mcp` build stays a thin, model-free wrapper exactly as before. The structured
+# `shapes`/`introspect` tools are the no-LLM default; `nlq` only adds the `ask` tool, which
+# embeds a CONFIGURABLE LLM call (no model is bundled; the backend is read from the env). It
+# enables sparq-nlq's two configurable backends (`live` = Anthropic, `nlq-endpoint` =
+# OpenAI-compatible) plus `citations` so the `ask` answer can carry in-graph provenance.
+# The `citations` feature on THIS crate is exposed only to forward sparq-nlq's so the
+# all-features rustdoc/clippy lane compiles the citation path. [OPUS-4.8]
+nlq = ["dep:sparq-nlq", "sparq-nlq/live", "sparq-nlq/nlq-endpoint", "citations"]
+citations = ["sparq-nlq?/citations"]
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io.
+sparq-core = { path = "../sparq-core", version = "0.1.0" }
+sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
+sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
+# [OPUS-4.8] sq-jxjgr: the NL→SPARQL loop powering the opt-in `ask` tool. OPTIONAL — pulled
+# in ONLY by the `nlq` feature (default off), so the default build never compiles it and the
+# core/engine stay lean. A reviewed cargo-vet exemption covers the new edge (sparq-mcp ->
+# sparq-nlq under the feature).
+sparq-nlq = { path = "../sparq-nlq", version = "0.1.0", optional = true }
+# The MCP wire format is JSON-RPC 2.0; serde_json (already ubiquitous in the tree —
+# sparq-engine/introspect/nlq all use it) is the only dependency the framing needs.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# The round-trip tests load a graph from Turtle text.
+oxttl.workspace = true

@@ -1,0 +1,151 @@
+# Feature-matrix fragment for `sparq-trust`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-pfae.5: the trust-document STORAGE/AUTHORING model. The whole
+# `store` module + the `tests/trust_store_cache_key.rs` integration suite are
+# `#[cfg(feature = "store")]` behind `default = []`, so the default build/clippy/
+# test (and ci.yml's archive) compile them EMPTY and run ZERO of the store unit
+# tests + the 3 cache-key/narrowing integration tests. This leg compiles the module,
+# runs `clippy --all-targets -D warnings` with the feature ON (the real gate), and
+# runs `cargo test`, which drives the REAL TrustStore + admit path (cache-key
+# invalidation on policy edit/revoke, per-`.acr` freshness narrowing, distinct
+# evidence hashes). `store` is std-only (no new dep — it reuses the sparq-zk
+# commitment + std hashing), so this is a fast leg. Verified: `cargo nextest list -p
+# sparq-trust --features store` lists the 7 store unit tests + 3 integration tests.
+- name: "sparq-trust (store)"
+  crate: "sparq-trust"
+  features: "store"
+  test: true
+
+# [OPUS-4.8] sq-pfae.6: the delegation stratum's PROV-O AUDIT half. The whole
+# `delegation_prov` module + the `tests/delegation_prov_audit.rs` integration suite
+# are `#[cfg(feature = "delegation-prov")]` / `#![cfg(feature = "delegation-prov")]`
+# behind `default = []`, so the default build/clippy/test (and ci.yml's
+# `--workspace --all-targets` archive, which passes NO `--features`) compile them
+# EMPTY and run ZERO of the 7 module unit tests + the 4 audit integration tests. This
+# leg compiles the module, runs `clippy --all-targets -D warnings` with the feature
+# ON (the real gate), and runs `cargo test` — which drives the REAL invoke() →
+# effective_against_current() → audit_invocation() path (on-behalf-of lineage, the
+# human/AI principal attestation, and the load-bearing SAFETY invariant: the audit
+# never renders a grant broader than the gate conferred). `delegation-prov` is
+# std-only over oxrdf (NO new dep, NO sparq-prov edge), so this is a fast leg.
+# Verified: `cargo nextest list -p sparq-trust --features delegation-prov` lists the
+# 7 delegation_prov unit tests + the 4 delegation_prov_audit integration tests.
+- name: "sparq-trust (delegation-prov)"
+  crate: "sparq-trust"
+  features: "delegation-prov"
+  test: true
+
+# [OPUS-4.8] sq-5oru9 (epic sq-0dksu): the sparq sec-prop: EXTENSION vocab.
+# The `secprop` module (Rust constants) + the `secprop_ttl.rs` integration
+# suite (`#![cfg(feature = "secprop-vocab")]`) + the `secprop::tests` unit
+# tests are ALL behind the default-OFF `secprop-vocab` feature, so ci.yml's
+# default-feature `nextest archive` compiles them EMPTY and runs ZERO of
+# them — the silent-skip gap (#1171) this leg closes. The feature is
+# dependency-free (`const &str` data + a TTL drift test, strictly additive),
+# so this leg is cheap and reaches every secprop-vocab test. Verified
+# locally: `cargo test -p sparq-trust --features secprop-vocab` runs the 5
+# `secprop::tests` unit drift-checks + the 3 `secprop_ttl.rs` integration
+# tests; `clippy --all-targets -D warnings` is clean in every state.
+- name: "sparq-trust (secprop-vocab)"
+  crate: "sparq-trust"
+  features: "secprop-vocab"
+  test: true
+
+# [OPUS-4.8] sq-ufsi9 (epic sq-0dksu, Phase 2): the N3 proof-admissibility
+# ruleset over `sparq-reason` (the §4.3 ODRL → admissible-proof-set
+# reduction). The `admissibility` module + its `admissibility::tests` unit
+# suite + the `secprop_admissibility.rs` golden integration suite
+# (`#![cfg(feature = "secprop-admissibility")]`) are ALL behind the default-OFF
+# `secprop-admissibility` feature, so ci.yml's default-feature `nextest archive`
+# compiles them EMPTY and runs ZERO of them — the silent-skip gap (#1171) this
+# leg closes. The feature is dependency-free (N3-text data + a thin driver over
+# the `sparq-reason` edge the crate already carries), so this leg is cheap and
+# reaches every admissibility test. Verified locally: `cargo test -p sparq-trust
+# --features secprop-admissibility` runs the 6 `admissibility::tests` unit tests
+# + the 3 `secprop_admissibility.rs` golden tests (empty under the strict
+# preference, non-empty under the relaxed one); `clippy --all-targets -D
+# warnings` is clean in every state.
+- name: "sparq-trust (secprop-admissibility)"
+  crate: "sparq-trust"
+  features: "secprop-admissibility"
+  test: true
+
+# [OPUS-4.8] sq-pfae.7 (epic sq-pfae P6): the live-status / revocation stratum. The
+# whole `status_list` module + the `admit::admit_with_status` wiring + the
+# `tests/live_status_e2e.rs` integration suite (`#![cfg(feature = "status-list")]`)
+# are behind the default-OFF `status-list` feature, so ci.yml's default-feature
+# `nextest archive --workspace --all-targets` (which passes NO `--features`) compiles
+# them EMPTY and runs ZERO of the 18 module unit tests + the 5 e2e fail-closed tests —
+# the silent-skip gap (#1171) this leg closes. The `status-list-flate2` SUPERSET
+# feature additionally compiles the built-in `flate2` GZIP decoder + its real-gzip
+# round-trip test, so a single leg with that feature reaches EVERY status-list cfg
+# (the leg's `--features` set is a superset of both `status-list` and
+# `status-list-flate2`). The leg runs `clippy --all-targets -D warnings` with the
+# feature ON (the real gate) + `cargo test`, which drives the REAL gate path
+# (admit_with_status → derive_grants over a decoded Bitstring Status List) and the
+# load-bearing SAFETY invariant: fail-closed on set/unknown/stale + a minimal denial
+# justification. Verified: `cargo nextest list -p sparq-trust --features
+# status-list-flate2` lists the status_list::tests unit suite + the live_status_e2e
+# integration tests.
+- name: "sparq-trust (status-list-flate2 — live status/revocation + denial justification)"
+  crate: "sparq-trust"
+  features: "status-list-flate2"
+  test: true
+
+# [OPUS-4.8] sq-pfae.13 (epic sq-pfae P6 follow-up): the VERIFIED status-list issuer
+# signature. The `status_list::VerifyingLiveStatusCheck` path verifies the status-list
+# VC's OWN issuer signature (the same sparq-zk Schnorr-over-RDFC-1.0 path `admit` uses)
+# against a trusted status-authority key BEFORE trusting its bits — fail-closed on
+# unsigned/bad-sig/wrong-key/unresolvable. Its DID-BOUND constructor
+# (`VerifyingLiveStatusCheck::with_did_issuer`) + the two `verified_with_did_issuer_*`
+# unit tests are `#[cfg(all(feature = "status-list", feature = "did"))]` — covered by NO
+# single existing leg (`status-list-flate2` has `did` OFF; there is no `did` leg for this
+# crate), so without this leg the DID-bound verified path runs ONLY under the
+# clippy/rustdoc `--all-features` lane, never under a `cargo test` leg. This leg's
+# `status-list-flate2,did` feature set is a SUPERSET of `status-list`, `status-list-flate2`,
+# and the `status-list + did` combo, so a single leg reaches EVERY status-list + did test
+# in the crate (the clear-key verified tests AND the DID-bound ones AND the `did` module's
+# own resolver tests). The leg runs `clippy --all-targets -D warnings` with both features ON
+# (the real gate) + `cargo test`, driving the REAL verify path (commit_triples →
+# commitment_message → verify) and the load-bearing SAFETY invariant: a tampered/unsigned
+# status-list VC is rejected (Unknown/deny), a validly-signed one accepted. Verified: `cargo
+# test -p sparq-trust --features status-list-flate2,did` runs the status_list verified-sig
+# unit tests (incl. the two did-bound ones) + the did module tests; clippy clean in every state.
+- name: "sparq-trust (status-list-flate2,did — verified status-list issuer signature)"
+  crate: "sparq-trust"
+  features: "status-list-flate2,did"
+  test: true
+
+# [OPUS-4.8] sq-dt5hv (epic sq-0dksu, Phase 5): the opt-in property-admissibility
+# PRE-CHECK in the admission gate. The `admit::precheck` module
+# (`admit_with_precheck` + `AdmissibilityPreference` + `PrecheckOutcome`), its 7
+# `admit::precheck::tests` unit tests, and the `secprop_precheck_e2e.rs` golden
+# integration suite (`#![cfg(feature = "secprop-precheck")]`) are ALL behind the
+# default-OFF `secprop-precheck` feature, so ci.yml's default-feature `nextest archive`
+# compiles them EMPTY and runs ZERO of them — the silent-skip gap (#1171) this leg
+# closes. The feature enables `secprop-admissibility` (it drives the merged Phase-2
+# reduction) and adds NO new dependency. The leg runs `clippy --all-targets -D warnings`
+# with the feature ON (the real gate) + `cargo test`, which drives the REAL admit path
+# behind the pre-check and the load-bearing SAFETY invariant: with NO preference the gate
+# is byte-identical to `admit`, and an unsatisfied ODRL preference (e.g.
+# `requiresAssurance gteq Proven` while sq-qhy4 is open) FAILS CLOSED — admits nothing,
+# derives no grant — despite a perfectly valid credential. Verified locally: `cargo test
+# -p sparq-trust --features secprop-precheck` runs the 7 precheck unit tests + the 4
+# `secprop_precheck_e2e.rs` golden tests; `clippy --all-targets -D warnings` is clean in
+# every state.
+- name: "sparq-trust (secprop-precheck — property-admissibility pre-check in admit)"
+  crate: "sparq-trust"
+  features: "secprop-precheck"
+  test: true

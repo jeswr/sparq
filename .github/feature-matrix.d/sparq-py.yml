@@ -1,0 +1,27 @@
+# Feature-matrix fragment for `sparq-py`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-4.8] sq-lt1ml (gh-910): the sparq-py opt-in Arrow export (`Graph.query_arrow ->
+# pyarrow.Table`). This leg compiles + clippies the `arrow` feature (which pulls
+# sparq-arrow's RecordBatch projection + arrow-array/arrow-schema's C Data Interface and
+# the one cfg-gated `arrow_export` module). It catches build/clippy rot in that path,
+# which the workspace-wide default ci.yml lane does NOT cover (arrow is OFF by default).
+# test: false — sparq-py has `[lib] test = false` (pyo3 extension-module test binaries do
+# not link on macOS), so there are NO `cargo test` tests to run; the FUNCTIONAL Arrow
+# round-trip is exercised by the maturin-built `arrow` pytest job in python.yml
+# (crates/sparq-py/tests/test_arrow.py), which a `cargo test` leg cannot reproduce.
+- name: "sparq-py (arrow — Graph.query_arrow -> pyarrow.Table export)"
+  crate: "sparq-py"
+  features: "arrow"
+  test: false

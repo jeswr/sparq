@@ -1,0 +1,1125 @@
+//! [OPUS-4.8] (sq-b4fns, gh-906) A DURABLE, REPLAYABLE change-data-capture (CDC)
+//! stream in the Amazon-Neptune-Streams shape — the serialized, on-disk form of the
+//! in-memory group-commit delta the [`Writer`](crate::Writer) already produces.
+//!
+//! ## What this is (and what it is NOT)
+//!
+//! Every committed generation emits ONE ordered, monotonically-sequenced **change
+//! record**: a `(seq, generation, timestamp, inserts[], deletes[])` tuple persisted to
+//! a segmented, fsync'd append-only log. A consumer polls the log by sequence number
+//! and **replays from any offset after a restart** ([`open`](ChangeLog::open) re-reads the
+//! segments from disk and resumes mid-stream) — unlike the in-process WebSocket SELECT-diff
+//! subscriptions path, which is ephemeral (a disconnect misses every change) and per-query
+//! rather than a raw durable cross-service change log.
+//!
+//! ```text
+//!   commit G3 ──▶ record seq=3 (gen 3, +2 inserts, −1 delete)
+//!   commit G4 ──▶ record seq=4 (gen 4, +0 inserts, −3 deletes)
+//!                  └─ poll(from_seq=3) ⇒ [record 3, record 4, …]   (resumable after restart)
+//! ```
+//!
+//! This is the **opt-in `change-stream` feature** (default OFF). The serving core (ring +
+//! sequenced writer) builds, clips, and tests byte-identically without it; turning it on
+//! pulls only `sparq-engine/serialize-rdf` (the N-Quads serialiser already used by
+//! [`backup`](crate::backup)) — no new external dependency, no HTTP, no async runtime
+//! (library-first §6.1).
+//!
+//! ## Where the change-set comes from (same-lineage quad diff)
+//!
+//! A change record is computed exactly like a [`backup_delta`](crate::backup_delta):
+//! the **quad-set difference** of two consecutive same-lineage generations' N-Quads
+//! serialisations — a quad in `to` but not `from` is an insert, a quad in `from` but not
+//! `to` is a delete. This is correct precisely because the two generations share a writer
+//! lineage (the writer forks a generation and applies updates, preserving every surviving
+//! term's blank-node identity). The load-bearing boundary is identical to `backup_delta`'s:
+//! diffing snapshots from two unrelated load paths is NOT supported and is not what the
+//! change stream does — [`record_commit`](ChangeLog::record_commit) takes the predecessor
+//! and successor generations of ONE ring's commit.
+//!
+//! ## Durability + ordering contract (Neptune-Streams shape)
+//!
+//! - **Ordered, gapless, monotonic.** Sequence numbers start at the first recorded
+//!   generation and increase by exactly one per record; a record's `generation` equals its
+//!   `seq` for a single-writer ring (recorded explicitly so the two never silently drift).
+//!   [`record_commit`](ChangeLog::record_commit) rejects a non-forward or out-of-order
+//!   commit (fail-closed).
+//! - **Durable.** Each appended record is followed by an `fsync` of the active segment file
+//!   before the call returns (configurable via [`ChangeLogConfig::fsync`]), so an
+//!   acknowledged record survives a crash.
+//! - **Segmented.** Records roll into a new segment file once the active segment reaches
+//!   [`ChangeLogConfig::segment_target_bytes`], so retention/truncation can drop whole old
+//!   segments (the truncation policy is a later, separate concern — see the deferred bead).
+//! - **Replayable after restart.** [`ChangeLog::open`] re-reads every segment in order,
+//!   validates each record's framing + digest (fail-closed on a torn tail — a half-written
+//!   trailing record is truncated, not silently replayed), and resumes appending at the next
+//!   seq. [`ChangeLog::poll`] streams records from any `from_seq` onward.
+//!
+//! ## Fail-closed, same digest family as backup
+//!
+//! Each record is length-framed and carries the SAME non-cryptographic FNV-1a body digest
+//! the [`backup`](crate::backup) family uses: it detects truncation/corruption/version
+//! mismatch, NOT tampering. At-rest **encryption + cryptographic authenticity are out of
+//! scope** (a separate concern), exactly as for backup. A consumer that needs an authentic
+//! cross-service feed must wrap its own signing around the records.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use sparq_core::Graph;
+
+use crate::backup::{body_digest, BackupError};
+use crate::ring::Generation;
+
+/// Magic line that opens every change-stream SEGMENT file — distinct from the backup /
+/// delta magics so the three artifact kinds can never be confused (opening a segment as a
+/// base/delta, or vice-versa, fails closed at the magic line).
+pub const SEGMENT_MAGIC: &str = "SPARQ-CHANGESTREAM";
+
+/// Change-stream segment format version. Bumped independently of the backup/delta
+/// versions; [`ChangeLog::open`] rejects an unknown version (fail-closed) rather than
+/// mis-reading a newer layout.
+const SEGMENT_FORMAT_VERSION: u32 = 1;
+
+/// Default roll-over size for a segment file (bytes). Once the active segment reaches this
+/// many bytes, the next record opens a fresh segment, so retention can drop whole old
+/// segments. Tune via [`ChangeLogConfig`].
+pub const DEFAULT_SEGMENT_TARGET_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Filename prefix + extension for segment files: `changestream-<first-seq>.cdc`.
+const SEGMENT_PREFIX: &str = "changestream-";
+const SEGMENT_EXT: &str = "cdc";
+
+/// One quad-level change operation within a commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ChangeOp {
+    /// The quad was added between the predecessor and successor generation.
+    Insert,
+    /// The quad was removed between the predecessor and successor generation.
+    Delete,
+}
+
+impl ChangeOp {
+    /// The single-character tag persisted in the segment body (`+` insert, `-` delete).
+    fn tag(self) -> char {
+        match self {
+            ChangeOp::Insert => '+',
+            ChangeOp::Delete => '-',
+        }
+    }
+}
+
+/// One quad-level change: a [`ChangeOp`] plus the affected quad as a single N-Quads line
+/// (default graph or named graph — the line is rendered verbatim by the serialiser, so the
+/// graph term, if any, is its fourth position).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    /// Whether this quad was inserted or deleted in the commit.
+    pub op: ChangeOp,
+    /// The affected quad, as one N-Quads line (no trailing newline).
+    pub quad: String,
+}
+
+/// One ordered, monotonically-sequenced change record — the unit of the CDC stream, one
+/// per committed generation (Neptune-Streams shape). Records are produced by
+/// [`ChangeLog::record_commit`] and read back by [`ChangeLog::poll`] / [`ChangeLog::open`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeRecord {
+    /// The record's monotonic sequence number — the poll offset. Increases by exactly one
+    /// per record across the whole log (gapless), so `poll(from_seq)` resumes deterministically.
+    pub seq: u64,
+    /// The generation/writer-seq this record captures the commit TO (its predecessor is the
+    /// previous recorded generation). Recorded explicitly so `seq` and `generation` never
+    /// silently drift (they are equal for a single-writer ring).
+    pub generation: u64,
+    /// Commit timestamp in nanoseconds since the Unix epoch (wall clock at
+    /// [`record_commit`](ChangeLog::record_commit) time). Advisory ordering metadata only —
+    /// `seq` is the authoritative order.
+    pub timestamp_unix_nanos: u128,
+    /// The quad-level changes of this commit (inserts first, then deletes — each sorted).
+    pub changes: Vec<Change>,
+}
+
+impl ChangeRecord {
+    /// The number of inserted quads in this record.
+    pub fn insert_count(&self) -> usize {
+        self.changes
+            .iter()
+            .filter(|c| c.op == ChangeOp::Insert)
+            .count()
+    }
+
+    /// The number of deleted quads in this record.
+    pub fn delete_count(&self) -> usize {
+        self.changes
+            .iter()
+            .filter(|c| c.op == ChangeOp::Delete)
+            .count()
+    }
+}
+
+/// Configuration for a [`ChangeLog`].
+#[derive(Clone, Debug)]
+pub struct ChangeLogConfig {
+    /// Roll into a new segment file once the active segment reaches this many bytes
+    /// ([`DEFAULT_SEGMENT_TARGET_BYTES`]). A single record always lands in one segment even
+    /// if it alone exceeds the target (records are never split across segments).
+    pub segment_target_bytes: u64,
+    /// `fsync` the active segment after every appended record before
+    /// [`record_commit`](ChangeLog::record_commit) returns (durability; default `true`).
+    /// Set `false` only for tests/throughput experiments where a crash may lose the tail.
+    pub fsync: bool,
+}
+
+impl Default for ChangeLogConfig {
+    fn default() -> Self {
+        ChangeLogConfig {
+            segment_target_bytes: DEFAULT_SEGMENT_TARGET_BYTES,
+            fsync: true,
+        }
+    }
+}
+
+/// The durable, segmented, append-only change-data-capture log over one ring's commit
+/// history. Append with [`record_commit`](Self::record_commit); read with
+/// [`poll`](Self::poll); reopen after a restart with [`open`](Self::open) and resume.
+///
+/// One `ChangeLog` owns one log directory; it is single-writer (mirroring the single
+/// sequenced [`Writer`](crate::Writer)). A reader can [`poll`](Self::poll) the same
+/// directory concurrently through a SEPARATE `ChangeLog::open` handle — segments are
+/// append-only and a poll never observes a half-written trailing record (it stops at the
+/// last fully-framed, digest-valid record).
+#[derive(Debug)]
+pub struct ChangeLog {
+    dir: PathBuf,
+    config: ChangeLogConfig,
+    /// The active (most-recent) segment file, open for append.
+    active: File,
+    /// The first seq stored in the active segment (its filename key).
+    active_first_seq: u64,
+    /// Current size of the active segment in bytes (avoids an fstat per append).
+    active_bytes: u64,
+    /// The seq the NEXT recorded commit will get. `0` for a fresh, empty log.
+    next_seq: u64,
+    /// The generation of the last recorded commit (`None` for an empty log), used to reject
+    /// a non-forward commit.
+    last_generation: Option<u64>,
+}
+
+impl ChangeLog {
+    /// Opens (creating if absent) the change log rooted at `dir`, recovering any existing
+    /// stream: every segment is re-read in order, each record's framing + digest validated,
+    /// and the next append resumes at the recovered seq. **Fail-closed on corruption** — a
+    /// bad digest, an out-of-order seq, or an unknown segment version yields a [`BackupError`]
+    /// and opens NOTHING (the operator gets a clean error, never a silently-wrong log).
+    ///
+    /// A clean torn TAIL (the process died mid-append) is the one corruption that is
+    /// *recovered* rather than rejected: a trailing record whose framed length runs past the
+    /// end of the file is treated as never-committed and the segment is truncated back to the
+    /// last complete record, so the log resumes from the last durably-acknowledged commit.
+    pub fn open(dir: impl AsRef<Path>) -> Result<Self, BackupError> {
+        Self::open_with_config(dir, ChangeLogConfig::default())
+    }
+
+    /// [`open`](Self::open) with an explicit [`ChangeLogConfig`].
+    pub fn open_with_config(
+        dir: impl AsRef<Path>,
+        config: ChangeLogConfig,
+    ) -> Result<Self, BackupError> {
+        let dir = dir.as_ref().to_path_buf();
+        fs::create_dir_all(&dir)?;
+
+        let mut segments = segment_files(&dir)?;
+        segments.sort_by_key(|(seq, _)| *seq);
+
+        // Recover the stream by reading every segment in order; the last record's seq + the
+        // recovered next-seq / last-generation drive resumed appends.
+        let mut next_seq = 0u64;
+        let mut last_generation: Option<u64> = None;
+        let mut active_first_seq = 0u64;
+        let mut active_path: Option<PathBuf> = None;
+        let mut active_valid_bytes = 0u64;
+
+        for (first_seq, path) in &segments {
+            let (records_end, recovered) = recover_segment(path, next_seq)?;
+            for rec in &recovered {
+                next_seq = rec.seq + 1;
+                last_generation = Some(rec.generation);
+            }
+            active_first_seq = *first_seq;
+            active_path = Some(path.clone());
+            active_valid_bytes = records_end;
+        }
+
+        // No segment yet (fresh log): start a first segment keyed at seq 0.
+        let (active, active_first_seq, active_bytes) = match active_path {
+            Some(path) => {
+                // Truncate any torn tail back to the last valid record, then open for append.
+                let mut f = OpenOptions::new().read(true).write(true).open(&path)?;
+                f.set_len(active_valid_bytes)?;
+                f.seek_end()?;
+                (f, active_first_seq, active_valid_bytes)
+            }
+            None => {
+                let path = segment_path(&dir, 0);
+                let (f, bytes) = create_segment(&path)?;
+                (f, 0, bytes)
+            }
+        };
+
+        Ok(ChangeLog {
+            dir,
+            config,
+            active,
+            active_first_seq,
+            active_bytes,
+            next_seq,
+            last_generation,
+        })
+    }
+
+    /// The seq the NEXT [`record_commit`](Self::record_commit) will assign — i.e. the count
+    /// of records already in the log, and the resume offset after a restart.
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
+    /// The generation of the last recorded commit, or `None` for an empty log.
+    pub fn last_generation(&self) -> Option<u64> {
+        self.last_generation
+    }
+
+    /// Records ONE commit — the change between the same-lineage `from` and `to` generations
+    /// — as the next ordered change record, durably appended (and fsync'd, per config) before
+    /// returning the assigned [`ChangeRecord`]. `to` must be strictly later than `from`
+    /// (`to.number() > from.number()`), and `from.number()` must equal the
+    /// [`last_generation`](Self::last_generation) of the previous record (or, for the first
+    /// record, be the base the stream starts from) — a non-forward or out-of-order commit is
+    /// rejected **fail-closed** ([`BackupError::Format`]) and nothing is appended.
+    ///
+    /// Both generations are already immutable (held by their `Arc`s), so this runs **while
+    /// serving** — nothing here touches the ring or the writer; the diff reads two pinned
+    /// snapshots.
+    pub fn record_commit(
+        &mut self,
+        from: &Generation<Graph>,
+        to: &Generation<Graph>,
+    ) -> Result<ChangeRecord, BackupError> {
+        if to.number() <= from.number() {
+            return Err(BackupError::Format(format!(
+                "change record range must move forward: from-generation {} >= to-generation {}",
+                from.number(),
+                to.number()
+            )));
+        }
+        if let Some(last) = self.last_generation {
+            if from.number() != last {
+                return Err(BackupError::Format(format!(
+                    "change record discontinuity: previous record ended at generation {}, \
+                     but this commit starts from generation {}",
+                    last,
+                    from.number()
+                )));
+            }
+        }
+
+        let changes = diff_changes(from.snapshot(), to.snapshot());
+        let timestamp_unix_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let record = ChangeRecord {
+            seq: self.next_seq,
+            generation: to.number(),
+            timestamp_unix_nanos,
+            changes,
+        };
+
+        self.append(&record)?;
+        self.next_seq = record.seq + 1;
+        self.last_generation = Some(record.generation);
+        Ok(record)
+    }
+
+    /// Appends one already-built record to the active segment (rolling first if the segment
+    /// is at target), then fsyncs per config. The on-disk frame is `length-line + body +
+    /// terminator`, so a torn tail is detectable on recovery.
+    fn append(&mut self, record: &ChangeRecord) -> Result<(), BackupError> {
+        let body = encode_record_body(record);
+        let body_bytes = body.as_bytes();
+        let digest = body_digest(body_bytes);
+        // Frame: `record <byte-len> <fnv1a64-hex>\n` + body + `\n`. The length lets a reader
+        // read the body in one shot and a truncated tail (short read) is rejected.
+        let frame_header = format!("record {} {:016x}\n", body_bytes.len(), digest);
+        let frame_len = frame_header.len() as u64 + body_bytes.len() as u64 + 1;
+
+        // Roll to a new segment if the active one is at/over target AND already holds at least
+        // one record (a single oversize record still lands in its own segment, never split).
+        let holds_record = self.next_seq > self.active_first_seq;
+        if holds_record && self.active_bytes >= self.config.segment_target_bytes {
+            self.roll_segment()?;
+        }
+
+        self.active.write_all(frame_header.as_bytes())?;
+        self.active.write_all(body_bytes)?;
+        self.active.write_all(b"\n")?;
+        self.active.flush()?;
+        if self.config.fsync {
+            self.active.sync_data()?;
+        }
+        self.active_bytes += frame_len;
+        Ok(())
+    }
+
+    /// Closes the active segment and opens a fresh one keyed at the next seq.
+    fn roll_segment(&mut self) -> Result<(), BackupError> {
+        let path = segment_path(&self.dir, self.next_seq);
+        let (file, bytes) = create_segment(&path)?;
+        self.active = file;
+        self.active_first_seq = self.next_seq;
+        self.active_bytes = bytes;
+        Ok(())
+    }
+
+    /// Polls the durable log, returning every change record with `seq >= from_seq`, in order.
+    /// This re-reads the segments from disk (so it observes everything durably appended,
+    /// including by a separate writer handle) and stops at the last fully-framed, digest-valid
+    /// record — a half-written trailing record is never returned. **Fail-closed** on a
+    /// mid-stream corruption (a bad digest or out-of-order seq before the tail).
+    ///
+    /// This is the resume primitive: after a restart a consumer that persisted its last-seen
+    /// `seq` calls `poll(last_seen + 1)` and continues exactly where it left off.
+    pub fn poll(&self, from_seq: u64) -> Result<Vec<ChangeRecord>, BackupError> {
+        read_from(&self.dir, from_seq)
+    }
+}
+
+/// Reads all records with `seq >= from_seq` from the segments in `dir`, in order. Shared by
+/// [`ChangeLog::poll`] and the recovery path's cross-check. Fail-closed on mid-stream
+/// corruption; tolerates a torn tail (stops).
+fn read_from(dir: &Path, from_seq: u64) -> Result<Vec<ChangeRecord>, BackupError> {
+    let mut segments = segment_files(dir)?;
+    segments.sort_by_key(|(seq, _)| *seq);
+
+    let mut out = Vec::new();
+    let mut expected_seq = 0u64;
+    for (_first_seq, path) in &segments {
+        let (_end, recovered) = recover_segment(path, expected_seq)?;
+        for rec in recovered {
+            expected_seq = rec.seq + 1;
+            if rec.seq >= from_seq {
+                out.push(rec);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Re-reads one segment file, validating framing + digest + monotonic seq starting at
+/// `expected_first_seq`. Returns `(valid_bytes, records)` where `valid_bytes` is the byte
+/// offset just past the last COMPLETE record (the truncation point for a torn tail).
+///
+/// Fail-closed on a mid-stream corruption (bad magic/version, bad digest, or a seq that is
+/// not exactly `expected`); a torn TAIL (a frame header whose declared body length runs past
+/// EOF, or a missing body terminator) stops reading cleanly and is reported via `valid_bytes`
+/// so the caller can truncate it away on open.
+fn recover_segment(
+    path: &Path,
+    expected_first_seq: u64,
+) -> Result<(u64, Vec<ChangeRecord>), BackupError> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+
+    // --- Magic + version line ---
+    let header = read_line_opt(&mut reader)?
+        .ok_or_else(|| BackupError::Format(format!("empty change-stream segment {:?}", path)))?;
+    let mut parts = header.splitn(2, ' ');
+    let magic = parts.next().unwrap_or("");
+    if magic != SEGMENT_MAGIC {
+        return Err(BackupError::Format(format!(
+            "not a sparq change-stream segment (expected magic {:?})",
+            SEGMENT_MAGIC
+        )));
+    }
+    let version: u32 = parts
+        .next()
+        .and_then(|v| v.trim().parse().ok())
+        .ok_or_else(|| BackupError::Format("missing/invalid segment format version".into()))?;
+    if version != SEGMENT_FORMAT_VERSION {
+        return Err(BackupError::Format(format!(
+            "unsupported change-stream segment version {} (this build reads/writes {})",
+            version, SEGMENT_FORMAT_VERSION
+        )));
+    }
+
+    // The byte offset just past the header line == the start of the first record frame.
+    let mut valid_bytes = header.len() as u64 + 1; // +1 for the '\n'
+    let mut records = Vec::new();
+    let mut expected_seq = expected_first_seq;
+
+    loop {
+        // Read a frame header line: `record <len> <digest-hex>`. EOF here = clean end.
+        let frame = match read_line_opt(&mut reader)? {
+            None => break, // clean EOF at a record boundary
+            Some(l) => l,
+        };
+        let frame_bytes = frame.len() as u64 + 1;
+        let mut fp = frame.splitn(3, ' ');
+        let kind = fp.next().unwrap_or("");
+        if kind != "record" {
+            break; // a torn tail (partial header line) — not a complete record
+        }
+        let len: usize = match fp.next().and_then(|v| v.parse().ok()) {
+            Some(n) => n,
+            None => break, // partial/garbled header → torn tail
+        };
+        let digest_hdr: u64 = match fp
+            .next()
+            .and_then(|v| u64::from_str_radix(v.trim(), 16).ok())
+        {
+            Some(d) => d,
+            None => break, // partial/garbled header → torn tail
+        };
+
+        // Read exactly `len` body bytes + the trailing '\n'. A short read = torn tail.
+        let mut body = vec![0u8; len];
+        if reader.read_exact(&mut body).is_err() {
+            break; // torn tail: body shorter than declared
+        }
+        let mut nl = [0u8; 1];
+        if reader.read_exact(&mut nl).is_err() || nl[0] != b'\n' {
+            break; // torn tail: missing body terminator
+        }
+
+        // Digest is a HARD check (mid-stream corruption is fail-closed, not a tail).
+        let actual = body_digest(&body);
+        if actual != digest_hdr {
+            return Err(BackupError::Corrupt(format!(
+                "change-stream record digest mismatch in {:?} (header {:016x}, computed {:016x})",
+                path, digest_hdr, actual
+            )));
+        }
+        let body_str = String::from_utf8(body)
+            .map_err(|_| BackupError::Corrupt(format!("record body not UTF-8 in {:?}", path)))?;
+        let record = decode_record_body(&body_str, path)?;
+        if record.seq != expected_seq {
+            return Err(BackupError::Corrupt(format!(
+                "change-stream seq gap in {:?} (expected {}, found {})",
+                path, expected_seq, record.seq
+            )));
+        }
+        expected_seq = record.seq + 1;
+        valid_bytes += frame_bytes + len as u64 + 1;
+        records.push(record);
+    }
+
+    Ok((valid_bytes, records))
+}
+
+/// Encodes a record body: a small line-oriented header (`seq` / `generation` / `timestamp` /
+/// `inserts` / `deletes`) followed by the change lines (`+`/`-` tag, then the N-Quads line).
+/// Deterministic so the digest is reproducible.
+fn encode_record_body(record: &ChangeRecord) -> String {
+    let mut s = String::new();
+    let ins = record.insert_count();
+    let del = record.delete_count();
+    // [OPUS-4.8] positional format args (CodeQL rust/unused-variable false-positive).
+    s.push_str(&format!("seq {}\n", record.seq));
+    s.push_str(&format!("generation {}\n", record.generation));
+    s.push_str(&format!("timestamp {}\n", record.timestamp_unix_nanos));
+    s.push_str(&format!("inserts {}\n", ins));
+    s.push_str(&format!("deletes {}\n", del));
+    for c in &record.changes {
+        s.push(c.op.tag());
+        s.push(' ');
+        s.push_str(&c.quad);
+        s.push('\n');
+    }
+    s
+}
+
+/// Decodes a record body produced by [`encode_record_body`]. Fail-closed on a malformed
+/// header, a missing field, a change line that does not start with a `+`/`-` tag, or a
+/// declared-vs-actual count mismatch.
+fn decode_record_body(body: &str, path: &Path) -> Result<ChangeRecord, BackupError> {
+    let mut seq: Option<u64> = None;
+    let mut generation: Option<u64> = None;
+    let mut timestamp: Option<u128> = None;
+    let mut declared_inserts: Option<usize> = None;
+    let mut declared_deletes: Option<usize> = None;
+
+    let mut change_lines: Vec<&str> = Vec::new();
+    let mut in_changes = false;
+    for line in body.lines() {
+        if !in_changes {
+            let mut kv = line.splitn(2, ' ');
+            let key = kv.next().unwrap_or("");
+            let val = kv.next().unwrap_or("").trim();
+            match key {
+                "seq" => seq = Some(parse_num(val, "seq", path)?),
+                "generation" => generation = Some(parse_num(val, "generation", path)?),
+                "timestamp" => timestamp = Some(parse_u128(val, "timestamp", path)?),
+                "inserts" => declared_inserts = Some(parse_usize(val, "inserts", path)?),
+                "deletes" => {
+                    declared_deletes = Some(parse_usize(val, "deletes", path)?);
+                    in_changes = true; // `deletes` is the last header line; changes follow
+                }
+                other => {
+                    return Err(BackupError::Corrupt(format!(
+                        "unknown change-record header key {:?} in {:?}",
+                        other, path
+                    )))
+                }
+            }
+        } else {
+            change_lines.push(line);
+        }
+    }
+
+    let seq = seq.ok_or_else(|| miss("seq", path))?;
+    let generation = generation.ok_or_else(|| miss("generation", path))?;
+    let timestamp = timestamp.ok_or_else(|| miss("timestamp", path))?;
+    let declared_inserts = declared_inserts.ok_or_else(|| miss("inserts", path))?;
+    let declared_deletes = declared_deletes.ok_or_else(|| miss("deletes", path))?;
+
+    let mut changes = Vec::with_capacity(change_lines.len());
+    let (mut n_ins, mut n_del) = (0usize, 0usize);
+    for line in change_lines {
+        // The tag is the first char; the quad is the remainder after a single space.
+        let mut chars = line.chars();
+        let tag = chars.next();
+        let after_tag = chars.as_str();
+        let rest = after_tag.strip_prefix(' ').unwrap_or(after_tag);
+        let op = match tag {
+            Some('+') => {
+                n_ins += 1;
+                ChangeOp::Insert
+            }
+            Some('-') => {
+                n_del += 1;
+                ChangeOp::Delete
+            }
+            other => {
+                return Err(BackupError::Corrupt(format!(
+                    "invalid change-line tag {:?} in {:?}",
+                    other, path
+                )))
+            }
+        };
+        changes.push(Change {
+            op,
+            quad: rest.to_string(),
+        });
+    }
+    if n_ins != declared_inserts || n_del != declared_deletes {
+        return Err(BackupError::Corrupt(format!(
+            "change-record count mismatch in {:?} (declared +{} -{}, found +{} -{})",
+            path, declared_inserts, declared_deletes, n_ins, n_del
+        )));
+    }
+
+    Ok(ChangeRecord {
+        seq,
+        generation,
+        timestamp_unix_nanos: timestamp,
+        changes,
+    })
+}
+
+/// Computes the inserts + deletes between two same-lineage generations as the quad-set
+/// difference of their N-Quads serialisations (same approach + same-lineage boundary as
+/// [`backup_delta`](crate::backup_delta)). Deterministic order: inserts (sorted) first, then
+/// deletes (sorted).
+fn diff_changes(from: &Graph, to: &Graph) -> Vec<Change> {
+    use sparq_engine::serialize::graph_to_nquads;
+    use std::collections::BTreeSet;
+
+    let from_lines: BTreeSet<String> = graph_to_nquads(from)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(String::from)
+        .collect();
+    let to_lines: BTreeSet<String> = graph_to_nquads(to)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(String::from)
+        .collect();
+
+    let mut changes = Vec::new();
+    for line in to_lines.difference(&from_lines) {
+        changes.push(Change {
+            op: ChangeOp::Insert,
+            quad: line.clone(),
+        });
+    }
+    for line in from_lines.difference(&to_lines) {
+        changes.push(Change {
+            op: ChangeOp::Delete,
+            quad: line.clone(),
+        });
+    }
+    changes
+}
+
+// --- segment file helpers ---
+
+/// Builds the path of a segment whose first record is `first_seq`.
+fn segment_path(dir: &Path, first_seq: u64) -> PathBuf {
+    dir.join(format!(
+        "{}{:020}.{}",
+        SEGMENT_PREFIX, first_seq, SEGMENT_EXT
+    ))
+}
+
+/// Creates a new (empty) segment file, writing its magic+version header, and returns the
+/// open-for-append file plus its current byte length.
+fn create_segment(path: &Path) -> Result<(File, u64), BackupError> {
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    let header = format!("{} {}\n", SEGMENT_MAGIC, SEGMENT_FORMAT_VERSION);
+    f.write_all(header.as_bytes())?;
+    f.flush()?;
+    f.sync_data()?;
+    Ok((f, header.len() as u64))
+}
+
+/// Lists every change-stream segment file in `dir` as `(first_seq, path)`. Non-segment files
+/// are ignored. A filename whose seq key does not parse is a [`BackupError::Format`]
+/// (fail-closed: a foreign file under the segment naming scheme is a misconfiguration).
+fn segment_files(dir: &Path) -> Result<Vec<(u64, PathBuf)>, BackupError> {
+    let mut out = Vec::new();
+    let suffix = format!(".{}", SEGMENT_EXT);
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(SEGMENT_PREFIX) else {
+            continue;
+        };
+        let Some(seq_str) = rest.strip_suffix(&suffix) else {
+            continue;
+        };
+        let seq: u64 = seq_str.parse().map_err(|_| {
+            BackupError::Format(format!(
+                "malformed change-stream segment filename {:?}",
+                name
+            ))
+        })?;
+        out.push((seq, path));
+    }
+    Ok(out)
+}
+
+/// Reads one line (without the trailing `\n`/`\r`) or `None` at EOF.
+fn read_line_opt<R: io::BufRead>(reader: &mut R) -> Result<Option<String>, BackupError> {
+    let mut s = String::new();
+    let n = reader.read_line(&mut s)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    while s.ends_with('\n') || s.ends_with('\r') {
+        s.pop();
+    }
+    Ok(Some(s))
+}
+
+fn parse_num(val: &str, field: &str, path: &Path) -> Result<u64, BackupError> {
+    val.parse().map_err(|_| {
+        BackupError::Corrupt(format!("invalid `{}` value {:?} in {:?}", field, val, path))
+    })
+}
+
+fn parse_usize(val: &str, field: &str, path: &Path) -> Result<usize, BackupError> {
+    val.parse().map_err(|_| {
+        BackupError::Corrupt(format!("invalid `{}` value {:?} in {:?}", field, val, path))
+    })
+}
+
+fn parse_u128(val: &str, field: &str, path: &Path) -> Result<u128, BackupError> {
+    val.parse().map_err(|_| {
+        BackupError::Corrupt(format!("invalid `{}` value {:?} in {:?}", field, val, path))
+    })
+}
+
+fn miss(field: &str, path: &Path) -> BackupError {
+    BackupError::Corrupt(format!(
+        "missing `{}` in change record in {:?}",
+        field, path
+    ))
+}
+
+/// `File` seek helper: position at end for append-after-truncate (recovery path).
+trait SeekEnd {
+    fn seek_end(&mut self) -> io::Result<()>;
+}
+
+impl SeekEnd for File {
+    fn seek_end(&mut self) -> io::Result<()> {
+        use std::io::Seek;
+        self.seek(io::SeekFrom::End(0))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::epoch::PodId;
+    use crate::ring::GenerationRing;
+
+    fn graph_with(nq: &str) -> Graph {
+        Graph::load_dataset(nq, "nquads").expect("seed parses")
+    }
+
+    /// Sorted (op, quad) pairs of a record — the equality oracle for "same change set".
+    fn change_pairs(rec: &ChangeRecord) -> Vec<(ChangeOp, String)> {
+        let mut v: Vec<(ChangeOp, String)> =
+            rec.changes.iter().map(|c| (c.op, c.quad.clone())).collect();
+        v.sort();
+        v
+    }
+
+    /// A `Result<T, BackupError>` where `T` is not `Debug`: pull the error without
+    /// Debug-formatting Ok.
+    fn err_of<T>(res: Result<T, BackupError>) -> BackupError {
+        match res {
+            Ok(_) => panic!("expected a fail-closed error, but it succeeded"),
+            Err(e) => e,
+        }
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sparq-cdc-{}-{}-{:?}",
+            tag,
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    /// THE load-bearing invariant (sq-b4fns): write commits, replay from offset N AFTER a
+    /// restart, and assert the EXACT ordered change sequence. Build a ring, record three
+    /// commits with real inserts/deletes across default + named graphs, drop the log handle
+    /// (simulating a process restart), REOPEN from disk, and poll from offset 1 — the
+    /// recovered records must be exactly G1→G2 and G2→G3 in order, quad-for-quad.
+    #[test]
+    fn replay_from_offset_after_restart_is_exact() {
+        let tmp = scratch("restart");
+        let _ = fs::remove_dir_all(&tmp);
+
+        let pod = PodId::new("http://ex/g");
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(
+            "<http://ex/s0> <http://ex/p> <http://ex/o0> .\n",
+        ));
+        let g0 = ring.current();
+        // G1: add a default + a named-graph triple.
+        let g1 = ring.publish(
+            graph_with(
+                "<http://ex/s0> <http://ex/p> <http://ex/o0> .\n\
+                 <http://ex/s1> <http://ex/p> <http://ex/o1> .\n\
+                 <http://ex/s1> <http://ex/p> \"in-g\" <http://ex/g> .\n",
+            ),
+            [pod.clone()],
+        );
+        // G2: delete the original default triple, add another named-graph triple.
+        let g2 = ring.publish(
+            graph_with(
+                "<http://ex/s1> <http://ex/p> <http://ex/o1> .\n\
+                 <http://ex/s1> <http://ex/p> \"in-g\" <http://ex/g> .\n\
+                 <http://ex/s2> <http://ex/p> \"in-g\" <http://ex/g> .\n",
+            ),
+            [pod.clone()],
+        );
+        // G3: delete the named-graph triple added in G1.
+        let g3 = ring.publish(
+            graph_with(
+                "<http://ex/s1> <http://ex/p> <http://ex/o1> .\n\
+                 <http://ex/s2> <http://ex/p> \"in-g\" <http://ex/g> .\n",
+            ),
+            [pod.clone()],
+        );
+
+        // Record three commits into a durable log, then DROP the handle (restart).
+        {
+            let mut log = ChangeLog::open(&tmp).expect("open log");
+            assert_eq!(log.next_seq(), 0);
+            let r1 = log.record_commit(&g0, &g1).expect("record 0->1");
+            let r2 = log.record_commit(&g1, &g2).expect("record 1->2");
+            let r3 = log.record_commit(&g2, &g3).expect("record 2->3");
+            assert_eq!((r1.seq, r2.seq, r3.seq), (0, 1, 2));
+            assert_eq!((r1.generation, r2.generation, r3.generation), (1, 2, 3));
+            assert_eq!(log.next_seq(), 3);
+        }
+
+        // REOPEN from disk (process restart) and resume from offset 1.
+        let reopened = ChangeLog::open(&tmp).expect("reopen log");
+        assert_eq!(reopened.next_seq(), 3, "resumes at the recovered seq");
+        assert_eq!(reopened.last_generation(), Some(3));
+        let replayed = reopened.poll(1).expect("poll from offset 1");
+
+        // Exactly records seq 1 and seq 2 (the G1->G2 and G2->G3 commits), in order.
+        assert_eq!(replayed.len(), 2, "poll(1) skips seq 0");
+        assert_eq!(replayed[0].seq, 1);
+        assert_eq!(replayed[0].generation, 2);
+        assert_eq!(replayed[1].seq, 2);
+        assert_eq!(replayed[1].generation, 3);
+
+        // G1->G2: delete s0 (default), add s2 (named graph).
+        assert_eq!(
+            change_pairs(&replayed[0]),
+            vec![
+                (
+                    ChangeOp::Insert,
+                    "<http://ex/s2> <http://ex/p> \"in-g\" <http://ex/g> .".to_string()
+                ),
+                (
+                    ChangeOp::Delete,
+                    "<http://ex/s0> <http://ex/p> <http://ex/o0> .".to_string()
+                ),
+            ]
+        );
+        // G2->G3: delete the s1 named-graph triple, nothing inserted.
+        assert_eq!(
+            change_pairs(&replayed[1]),
+            vec![(
+                ChangeOp::Delete,
+                "<http://ex/s1> <http://ex/p> \"in-g\" <http://ex/g> .".to_string()
+            )]
+        );
+        assert_eq!(replayed[1].insert_count(), 0);
+        assert_eq!(replayed[1].delete_count(), 1);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Polling from offset 0 replays the WHOLE stream (every record from the start).
+    #[test]
+    fn poll_from_zero_replays_all() {
+        let tmp = scratch("all");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with(
+                "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
+                 <http://ex/c> <http://ex/p> <http://ex/d> .\n",
+            ),
+            [],
+        );
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        log.record_commit(&g0, &g1).expect("0->1");
+        log.record_commit(&g1, &g2).expect("1->2");
+        let all = log.poll(0).expect("poll 0");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].seq, 0);
+        assert_eq!(all[1].seq, 1);
+        assert_eq!(all[0].insert_count(), 1);
+        assert_eq!(all[1].insert_count(), 1);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Segment rolling: a tiny segment target forces one segment per record, and recovery +
+    /// poll stitch the segments back into one ordered, gapless stream.
+    #[test]
+    fn segments_roll_and_recover_in_order() {
+        let tmp = scratch("seg");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let mut prev = ring.current();
+        let config = ChangeLogConfig {
+            segment_target_bytes: 1, // roll after every record
+            fsync: false,
+        };
+        {
+            let mut log = ChangeLog::open_with_config(&tmp, config.clone()).expect("open");
+            for i in 0..5u64 {
+                let next = ring.publish(
+                    graph_with(&format!(
+                        "<http://ex/s{}> <http://ex/p> <http://ex/o{}> .\n",
+                        i, i
+                    )),
+                    [],
+                );
+                log.record_commit(&prev, &next).expect("record");
+                prev = next;
+            }
+        }
+        // Multiple segment files exist.
+        let segs = segment_files(&tmp).expect("list");
+        assert!(
+            segs.len() >= 2,
+            "expected multiple segments, got {}",
+            segs.len()
+        );
+
+        // Reopen and replay the whole stream — gapless, in order.
+        let reopened = ChangeLog::open_with_config(&tmp, config).expect("reopen");
+        assert_eq!(reopened.next_seq(), 5);
+        let all = reopened.poll(0).expect("poll");
+        assert_eq!(all.len(), 5);
+        for (i, rec) in all.iter().enumerate() {
+            assert_eq!(rec.seq, i as u64);
+            assert_eq!(rec.generation, i as u64 + 1);
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A non-forward commit is rejected fail-closed (and appends nothing).
+    #[test]
+    fn rejects_non_forward_commit() {
+        let tmp = scratch("nf");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        let err = err_of(log.record_commit(&g1, &g0)); // backwards
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        assert_eq!(log.next_seq(), 0, "nothing appended");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A discontinuous commit (its `from` does not match the last recorded generation) is
+    /// rejected fail-closed — the gapless-ordering contract.
+    #[test]
+    fn rejects_discontinuous_commit() {
+        let tmp = scratch("disc");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        log.record_commit(&g0, &g1).expect("0->1");
+        // Skip 1->2; recording g0->g2 has from-gen 0 != last recorded generation 1.
+        let err = err_of(log.record_commit(&g0, &g2));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A mid-stream corrupted record body (digest mismatch) is rejected fail-closed on
+    /// recovery — it is NOT mistaken for a torn tail.
+    #[test]
+    fn recover_rejects_midstream_corruption() {
+        let tmp = scratch("corrupt");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with(
+                "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
+                 <http://ex/c> <http://ex/p> <http://ex/d> .\n",
+            ),
+            [],
+        );
+        {
+            let mut log = ChangeLog::open(&tmp).expect("open");
+            log.record_commit(&g0, &g1).expect("0->1");
+            log.record_commit(&g1, &g2).expect("1->2");
+        }
+        // Corrupt the FIRST record's body (a mid-stream record, not the tail) by flipping a
+        // byte well inside the first segment, after its header line + first frame header line.
+        let seg = segment_path(&tmp, 0);
+        let mut bytes = fs::read(&seg).expect("read seg");
+        let first_nl = bytes.iter().position(|&b| b == b'\n').expect("magic nl") + 1;
+        let frame_nl = bytes[first_nl..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .expect("frame nl")
+            + first_nl
+            + 1;
+        bytes[frame_nl + 1] ^= 0xff; // flip a body byte of record 0
+        fs::write(&seg, &bytes).expect("write back");
+        let err = err_of(ChangeLog::open(&tmp));
+        assert!(matches!(err, BackupError::Corrupt(_)), "{:?}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A torn TAIL (process died mid-append: a trailing record whose body is truncated) is
+    /// RECOVERED — the log resumes from the last complete record, not rejected.
+    #[test]
+    fn recover_truncates_torn_tail() {
+        let tmp = scratch("tail");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with(
+                "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
+                 <http://ex/c> <http://ex/p> <http://ex/d> .\n",
+            ),
+            [],
+        );
+        {
+            let mut log = ChangeLog::open(&tmp).expect("open");
+            log.record_commit(&g0, &g1).expect("0->1");
+            log.record_commit(&g1, &g2).expect("1->2");
+        }
+        // Chop the tail mid-way through the SECOND record (simulate a crash during append).
+        let seg = segment_path(&tmp, 0);
+        let mut bytes = fs::read(&seg).expect("read seg");
+        bytes.truncate(bytes.len() - 4); // lose the tail of record 1
+        fs::write(&seg, &bytes).expect("write back");
+
+        let reopened = ChangeLog::open(&tmp).expect("reopen recovers torn tail");
+        assert_eq!(
+            reopened.next_seq(),
+            1,
+            "resumes after the last complete record"
+        );
+        let all = reopened.poll(0).expect("poll");
+        assert_eq!(all.len(), 1, "only the complete first record survives");
+        assert_eq!(all[0].seq, 0);
+        // A fresh commit after recovery extends the stream cleanly from seq 1. The new
+        // commit's `from` must be the last recorded generation (g1 == generation 1).
+        let mut log = reopened;
+        let g3 = ring.publish(
+            graph_with("<http://ex/e> <http://ex/p> <http://ex/f> .\n"),
+            [],
+        );
+        let r = log.record_commit(&g1, &g3).expect("record after recovery");
+        assert_eq!(r.seq, 1);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A segment file with the wrong KIND of magic (a backup base masquerading as a segment)
+    /// fails closed — the three artifact kinds can never be confused.
+    #[test]
+    fn open_rejects_wrong_magic_segment() {
+        let tmp = scratch("magic");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("mkdir");
+        let seg = segment_path(&tmp, 0);
+        fs::write(&seg, b"SPARQ-BACKUP 1\ngeneration 0\n\n").expect("write fake");
+        let err = err_of(ChangeLog::open(&tmp));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+}

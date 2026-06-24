@@ -1,0 +1,198 @@
+# Feature-matrix fragment for `sparq-engine`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# sparq-engine: RDF serializer matrix, CS-table star-join planner, zk-trace
+# seam, and SPARQL 1.1 federated SERVICE (tests use loopback only — no net).
+- name: "sparq-engine (serialize-rdf)"
+  crate: "sparq-engine"
+  features: "serialize-rdf"
+  test: true
+
+- name: "sparq-engine (cs-planner)"
+  crate: "sparq-engine"
+  features: "cs-planner"
+  test: true
+
+- name: "sparq-engine (zk)"
+  crate: "sparq-engine"
+  features: "zk"
+  test: true
+
+- name: "sparq-engine (service)"
+  crate: "sparq-engine"
+  features: "service"
+  test: true
+
+# [OPUS-4.8] sq-vya1: SPARQL window functions + the custom-aggregate registry.
+# The `window` module, the `AggregateFunction::Custom` eval arm and their 8 in-src
+# tests (`window::tests::*` + `aggregate::tests::custom_*`/`unregistered_*`) are all
+# `#[cfg(feature = "window-functions")]`, so the default build (and ci.yml's archive)
+# compiled them EMPTY and no prior engine leg enabled the feature — 8 tests never ran.
+# No new dep (oxrdf already direct) and no `not(feature)` divergence, so a single
+# isolated leg (matching the per-feature engine legs above) covers it; verified
+# `cargo nextest list -p sparq-engine --features window-functions` shows the 8 tests.
+- name: "sparq-engine (window-functions)"
+  crate: "sparq-engine"
+  features: "window-functions"
+  test: true
+
+# [OPUS-4.8] sq-it1x: opt-in MVCC / ACID transaction isolation. The whole `txn`
+# module (`src/txn.rs`, gated `pub mod txn` in lib.rs) and its in-src unit tests
+# (`txn::tests::*`, 3) plus the whole-file `tests/mvcc_txn.rs` suite (13;
+# `#![cfg(feature = "txn")]`) are all `#[cfg(feature = "txn")]`, so the default
+# build (and ci.yml's `--workspace --all-targets` archive, which passes NO
+# `--features`) compiled them EMPTY and ran ZERO of the 16 tests — the silent
+# "compiled EMPTY ... tests never ran" gap this lane exists to close. No new dep
+# (`txn = []`, reuses the existing snapshot/delta-overlay substrate) and no
+# `not(feature)` divergence, so a single isolated leg (matching the per-feature
+# engine legs above) covers it; verified `cargo test -p sparq-engine --features
+# txn` runs all 16 tests and `cargo clippy -p sparq-engine --features txn
+# --all-targets -- -D warnings` is clean.
+- name: "sparq-engine (txn)"
+  crate: "sparq-engine"
+  features: "txn"
+  test: true
+
+# [OPUS-4.8] sq-bif.12: vectorized (columnar / vector-at-a-time) primitives. The
+# `chunk` module (`pub mod chunk` + the `DataChunk`/`VecCmp`/`SelVec` re-exports),
+# its 9 in-src unit tests AND the new end-to-end differential suite
+# (`tests/vectorized_exec_differential.rs`, `#![cfg(feature = "vectorized")]`,
+# which proves the columnar gather/selection kernels are multiset-equal to the
+# scalar SPARQL FILTER path) are ALL `#[cfg(feature = "vectorized")]`, so the
+# default build (and ci.yml's `--workspace --all-targets` archive, which passes NO
+# `--features`) compiled them EMPTY and ran ZERO of them — the silent gap this lane
+# exists to close, and `vectorized` had NO leg here. No new dep (`vectorized = []`,
+# only sparq-core's already-direct `Graph`/`Id`) and no `not(feature=…)`
+# divergence, so one isolated leg (matching the per-feature engine legs above)
+# covers it; verified `cargo nextest list -p sparq-engine --features vectorized`
+# shows the previously-skipped differential tests.
+- name: "sparq-engine (vectorized)"
+  crate: "sparq-engine"
+  features: "vectorized"
+  test: true
+
+# [OPUS-4.8] sq-bif.12: the materialised-view / query-result cache. The `cache`
+# module + the `ResultCache`/`CacheStats`/`is_cacheable` re-exports and the whole
+# `tests/result_cache.rs` suite (`#![cfg(feature = "result-cache")]`, incl. the new
+# INSERT/DELETE/UPDATE/CLEAR write-invalidation tests) are all
+# `#[cfg(feature = "result-cache")]`, so the default build compiled them EMPTY and
+# ran ZERO of them — `result-cache` had NO leg here (a pre-existing silent gap). No
+# new dep (`result-cache = []`, std `HashMap`/`Mutex`/`Arc` only) and no
+# `not(feature=…)` divergence, so one isolated leg covers it; verified `cargo
+# nextest list -p sparq-engine --features result-cache` shows the result_cache tests.
+- name: "sparq-engine (result-cache)"
+  crate: "sparq-engine"
+  features: "result-cache"
+  test: true
+
+# [OPUS-4.8] sq-xj29q: the Oxigraph-shaped per-solution accessor on QueryResult.
+# `pub mod solution` (the zero-copy `QuerySolution`/`QuerySolutionIter`/
+# `QuerySolutionBindings`/`VarIndex` views over the columnar `rows`) is
+# `#[cfg(feature = "query-solution")]` in lib.rs, so its in-module `#[cfg(test)]
+# mod tests` (6 unit tests: solutions_match_columnar_rows / missing_and_unbound_are_none
+# / iter_yields_bound_pairs_only / index_returns_bound_term / index_panics_on_missing
+# / empty_result_no_solutions) AND the doctest on `QueryResult::solutions` are compiled
+# EMPTY by the default build (and by ci.yml's `--workspace --all-targets` archive, which
+# passes NO `--features`) — so all 7 ran ZERO times and `query-solution` had NO leg here:
+# the silent "compiled EMPTY ... tests never ran" gap this lane exists to close. No new
+# dep (`query-solution = []`, only the already-direct oxrdf `Term`/`Variable` and the
+# crate's own `QueryResult`) and no `not(feature=…)` divergence, so a single isolated leg
+# (matching the per-feature engine legs above) covers it; verified `cargo test -p
+# sparq-engine --features query-solution` runs all 6 unit tests + the doctest, the
+# default `cargo test -p sparq-engine` shows ZERO `solution::tests`, and `cargo clippy
+# -p sparq-engine --all-targets --features query-solution -- -D warnings` is clean.
+- name: "sparq-engine (query-solution)"
+  crate: "sparq-engine"
+  features: "query-solution"
+  test: true
+
+# [OPUS-4.8] sq-rp3um: parameterized prepared queries — safe value binding to
+# prevent SPARQL injection (#901). The whole `params` module (`pub mod params`:
+# `PreparedQuery::bind`, `PreparedUpdate`, the `params::value::*` term ctors and
+# the 16 in-src unit tests `params::tests::*` — incl. the load-bearing #901
+# injection scenarios) AND the new `update`-path helpers `update_prepared` /
+# `update_in_place_prepared(_with_budget)` are all `#[cfg(feature = "params")]`, so
+# the default build (and ci.yml's `--workspace --all-targets` archive, which passes
+# NO `--features`) compiled them EMPTY and ran ZERO of the 16 tests — the silent
+# "compiled EMPTY ... tests never ran" gap this lane exists to close, and `params`
+# had NO leg here. No new dep (`params = []`, only the already-direct oxrdf
+# `Term`/`Variable`/`Literal`/`NamedNode`/`BlankNode` + spargebra algebra) and no
+# `not(feature=…)` divergence, so a single isolated leg covers it; verified `cargo
+# nextest list -p sparq-engine --features params` shows the 16 params tests and
+# `cargo clippy -p sparq-engine --all-targets --features params -- -D warnings` is clean.
+- name: "sparq-engine (params)"
+  crate: "sparq-engine"
+  features: "params"
+  test: true
+
+# [OPUS-4.8] sq-u4lgr (#902): structured EXPLAIN — the typed `PlanNode` plan tree,
+# its hand-written JSON projection, per-operator q-error, and the bounded
+# `SlowQueryRing`. The whole `explain_json` module (`pub mod explain_json` + the
+# `PlanNode`/`SlowQuery`/`SlowQueryRing` re-exports), the trace node's `est` field,
+# the planner-replay estimate helper (`exec::bgp_estimate`) and the 6 in-src unit
+# tests (`explain_json::tests::*`, incl. the load-bearing q-error + JSON-round-trip +
+# slow-ring-worst-by-time checks) are ALL `#[cfg(feature = "explain-json")]`, so the
+# default build (and ci.yml's `--workspace --all-targets` archive, which passes NO
+# `--features`) compiled them EMPTY and ran ZERO of the 6 — the silent "compiled
+# EMPTY ... tests never ran" gap this lane exists to close, and `explain-json` had NO
+# leg here. No new dep (`explain-json = []`; the JSON is hand-rolled and serde_json is
+# a DEV-dependency only) and no `not(feature=…)` divergence, so a single isolated leg
+# (matching the per-feature engine legs above) covers it; verified `cargo test -p
+# sparq-engine --features explain-json explain_json` runs all 6 and `cargo clippy -p
+# sparq-engine --all-targets --features explain-json -- -D warnings` is clean.
+- name: "sparq-engine (explain-json)"
+  crate: "sparq-engine"
+  features: "explain-json"
+  test: true
+
+# [OPUS-4.8] sq-gr8mb (survey §A3): exact-bitmap semi-join reducer on dense u32 ids.
+# The `semijoin` module (`src/semijoin.rs`, `pub(crate) mod semijoin` in lib.rs — the
+# `KeyFilter` membership filter) + its 6 in-src unit tests (`semijoin::tests::*`) AND the
+# `scan_to_bindings` prefilter parameter + its construction in `eval_bgp_binary` are ALL
+# `#[cfg(feature = "semijoin-bitmap")]`, so the default build (and ci.yml's `--workspace
+# --all-targets` archive, which passes NO `--features`) compiled them EMPTY. The
+# end-to-end equivalence suite `tests/semijoin_differential.rs` is INTENTIONALLY NOT
+# feature-gated (it runs in both states to prove on==off), but the in-src unit tests are
+# gated and run ZERO times by default — the silent gap this lane closes. No new dep
+# (`semijoin-bitmap = []`, only the already-direct sparq-core + rustc-hash) and no
+# `not(feature=…)` divergence (the off path is byte-identical), so a single isolated leg
+# (matching the per-feature engine legs above) covers it; verified `cargo test -p
+# sparq-engine --features semijoin-bitmap` runs the 6 unit tests + the 5 differential
+# tests and `cargo clippy -p sparq-engine --all-targets --features semijoin-bitmap
+# -- -D warnings` is clean.
+- name: "sparq-engine (semijoin-bitmap)"
+  crate: "sparq-engine"
+  features: "semijoin-bitmap"
+  test: true
+
+# [OPUS-4.8] sq-townn (survey §A7): streaming Turtle / TriG serialisation. The whole
+# streaming surface (`write_turtle_streaming` / `write_trig_streaming` + the
+# `graph_to_*_streaming` wrappers, the per-subject-buffered `write_turtle_body_streaming`,
+# and the `accumulate_pred_object` helper in `src/serialize.rs`) is gated
+# `#[cfg(feature = "streaming-serialization")]`, AND its 10 in-src unit tests
+# (`serialize::tests::streaming::*` — the streamed==buffered byte-equality contracts over
+# multiple subjects / predicates / blank nodes / typed+lang literals / empty graph / TriG)
+# are likewise gated, so the default build (and ci.yml's `--workspace --all-targets`
+# archive, which passes NO `--features`) compiled them EMPTY and ran ZERO of the 10 — the
+# silent "compiled EMPTY ... tests never ran" gap this lane closes. The feature IMPLIES
+# `serialize-rdf` (the shared rendering helpers live there); the off path is byte-identical.
+# No new dep (`streaming-serialization = ["serialize-rdf"]`, std `io::Write` only) and no
+# `not(feature=…)` divergence, so a single isolated leg covers it; verified `cargo test -p
+# sparq-engine --features streaming-serialization` runs the 10 streaming tests and `cargo
+# clippy -p sparq-engine --all-targets --features streaming-serialization -- -D warnings`
+# is clean.
+- name: "sparq-engine (streaming-serialization)"
+  crate: "sparq-engine"
+  features: "streaming-serialization"
+  test: true

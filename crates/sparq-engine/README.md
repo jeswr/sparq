@@ -41,61 +41,53 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   [SPARQL extension mechanism](https://www.w3.org/TR/sparql11-query/#extensionFunctions));
   see [`docs/extension-functions.md`](../../docs/extension-functions.md).
 - **Custom aggregates + window functions** *(opt-in `window-functions` feature, OFF by default)* —
-  register a named user aggregate (`CustomAggregateRegistry`) callable from a real SPARQL `GROUP BY`,
-  and a window-function surface (`ROW_NUMBER`/`RANK`/`DENSE_RANK`, the offset/positional
-  `LAG`/`LEAD`/`NTILE`, + windowed `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, with `PARTITION BY` + `ORDER BY`
-  and an optional `ROWS`/`RANGE` frame) available two ways: a programmatic pass
-  (`window::apply_window` over a `QueryResult`) and an inline `OVER(…)` query syntax (`query_over`,
-  plus a reusable `WINDOW w AS (…)` clause). **Window functions are a NON-STANDARD extension** —
-  SPARQL has no W3C-REC `OVER` syntax. The inline form is a *source rewrite* recognised ONLY on
-  `query_over` (it does NOT touch the vendored parser), so the standard `query`/`ask`/… surface
-  stays exactly SPARQL 1.1 and conformance is unaffected; `DISTINCT`/computed-expression function
-  arguments, numeric `RANGE` offsets, and a computed-expression `PARTITION BY` are inline-deferred
-  (use the programmatic API). When the feature is off, zero window/aggregate-registry code compiles
-  and the default build is byte-identical (no new deps).
+  register a named user aggregate (`CustomAggregateRegistry`) callable from a real `GROUP BY`, plus a
+  window surface (`ROW_NUMBER`/`RANK`/`DENSE_RANK`, `LAG`/`LEAD`/`NTILE`, windowed
+  `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, `PARTITION BY` + `ORDER BY`, optional `ROWS`/`RANGE` frame), both
+  programmatic (`window::apply_window`) and via inline `OVER(…)` syntax (`query_over` + reusable
+  `WINDOW w AS (…)`). **NON-STANDARD extension** (SPARQL has no W3C-REC `OVER`): the inline form is a
+  *source rewrite* recognised ONLY on `query_over`, so the standard `query`/`ask`/… surface stays
+  exactly SPARQL 1.1 (see the rustdoc for the inline-deferred cases). Off, build byte-identical, no new deps.
+- **Parameterized prepared queries** *(opt-in `params` feature, OFF by default)* — the canonical
+  mitigation for SPARQL injection (#901). `PreparedQuery::bind(name, oxrdf::Term)` and
+  `PreparedUpdate::bind` substitute a typed value into a free placeholder variable via a pure
+  **algebra rewrite** — *never* string concatenation — so a hostile bound IRI/literal (e.g. one
+  containing `> } INSERT … {` or a `"` break-out) is carried as opaque DATA and cannot alter the
+  query structure. Covers SELECT/ASK/CONSTRUCT/DESCRIBE + UPDATE; fail-closed (rejects an unknown
+  placeholder, a `BIND`/aggregate/`VALUES` output, or a blank node in a predicate/graph slot). Off,
+  zero code compiles, the default build is byte-identical, no new deps. See
+  [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
 - **Materialised-view / query-result cache** *(opt-in `result-cache` feature, OFF by default)* —
   a bounded, version-aware LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed
-  by `(parsed query algebra, caller graph-version)`, so an endpoint that re-serves the same read
-  query against a slowly-changing graph can replay the materialised result instead of re-executing.
-  **Caching is sound only under a contract**: the caller bumps a `u64` *version* on every mutation
-  (the engine can't observe writes through a borrowed `&Graph`), and the cache **refuses to store
-  non-deterministic queries** — `NOW`/`RAND`/`UUID`/`STRUUID`/`BNODE`, a remote `SERVICE`, or any
-  custom function / aggregate (detected conservatively by `is_cacheable`); those always evaluate
-  fresh. Keying on the parsed algebra makes the cache insensitive to whitespace / comments / prefix
-  spelling. When the feature is off, zero cache code compiles, the default build is byte-identical,
-  and no new dependencies are added (std `HashMap`/`Mutex`/`Arc` only).
+  by `(parsed query algebra, caller graph-version)`, replaying it instead of re-executing the same
+  read query against a slowly-changing graph. **Sound only under a contract**: the caller bumps a
+  `u64` *version* on every mutation, and the cache **refuses non-deterministic queries**
+  (`NOW`/`RAND`/`UUID`/`STRUUID`/`BNODE`, remote `SERVICE`, any custom fn/aggregate — via
+  `is_cacheable`). When off, zero cache code compiles, the default build is byte-identical, no new
+  deps (std `HashMap`/`Mutex`/`Arc`).
 - **MVCC / ACID transaction isolation** *(opt-in `txn` feature, OFF by default)* —
-  a `txn::TransactionManager` over a single logical `Graph` giving **snapshot-isolation** read
-  transactions (`begin_read` → a cheap point-in-time `GraphSnapshot`, immune to later commits) and
-  serialized **write** transactions (`begin_write` → a private copy-on-write fork) with
-  **first-committer-wins** write-write conflict detection (optimistic concurrency control). A
-  `WriteTxn` has read-your-own-writes, applies SPARQL `UPDATE`s to its fork, and on `commit` either
-  publishes a new committed generation (advancing a `u64` version) or returns
-  `CommitError::Conflict` if a concurrent writer published an overlapping write set since it began —
-  in which case the whole body is discarded (atomic rollback). A stale but *non*-conflicting writer
-  has its resolved delta replayed onto the current generation (no lost update). For a *single
-  writer* the conflict check never fires, so SI is serializability (see
-  `research/concurrent-serving-litreview-A-mvcc-benchmarks.md` §A.1); durability is inherited from a
-  directory-backed `Graph`'s WAL. Built entirely on the existing COW delta-overlay substrate
-  (`Graph::fork`/`snapshot`/`apply_delta` + `update_in_place_capturing`/`apply_effects`); when the
-  feature is off, zero transaction code compiles, the default build is byte-identical, and no new
-  dependencies are added.
+  a `txn::TransactionManager` over one logical `Graph` giving **snapshot-isolation** reads
+  (`begin_read` → a cheap point-in-time `GraphSnapshot`, immune to later commits) and serialized
+  **write** transactions (`begin_write` → a private COW fork) with **first-committer-wins** write-write
+  conflict detection (OCC). A `WriteTxn` has read-your-own-writes, applies `UPDATE`s to its fork, and
+  on `commit` either publishes a new generation (advancing a `u64` version) or returns
+  `CommitError::Conflict` on an overlapping concurrent write set (atomic rollback); a stale but
+  *non*-conflicting writer has its delta replayed (no lost update). For a *single writer* SI is
+  serializability (see `research/concurrent-serving-litreview-A-mvcc-benchmarks.md` §A.1); durability
+  is inherited from a directory-backed `Graph`'s WAL. Built entirely on the existing COW delta-overlay
+  substrate; off, zero code compiles, the default build is byte-identical, no new deps.
 - **RDF writer matrix** *(`serialize-rdf` feature — OFF for a library embedder, but the `sparq-cli`/`sparq-server`
   BINARIES enable it via their default-on `jsonld` feature, [OPUS-4.8] sq-oy1f.4)* — write a `Graph` (or
   `&[oxrdf::Triple]`) back out as Turtle / TriG / N-Quads / JSON-LD 1.1
   (`serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads, graph_to_jsonld, …}`; the `*_with`
-  variants + `prefixes_from_pairs([(prefix, iri), …])` accept a caller's own prefix policy). Plus
-  deterministic **pretty** (indented) variants for Turtle / TriG / JSON-LD (`graph_to_turtle_pretty`
-  / `graph_to_trig_pretty` / `graph_to_jsonld_pretty`, or `write_turtle_pretty` with
-  `PrettyOptions { indent, abbreviate }`): subject grouping, p-o/object lists, `a` for `rdf:type`,
-  used-only `@prefix`, *emission-order-independent* (sorted) — round-trip-correct. For true **W3C
-  JSON-LD 1.1 Compaction** against a caller `@context`, `graph_to_jsonld_compact(&g, &ctx)` /
-  `write_jsonld_compact` (+ `_pretty` variants) apply the full algorithm (term definitions, `@vocab`,
-  `@container` coercion, `@reverse`, value/node/IRI compaction), plus **JSON-LD 1.1 Framing**
-  (`graph_to_jsonld_framed`) — hand-rolled, dependency-free, **pyld-faithful** (differentially
-  verified; see the `serialize::compact` rustdoc). The N-Triples writer (`triples_to_ntriples`) is
-  always on; off, zero serializer code compiles, **no new dependencies**. See
-  [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
+  variants + `prefixes_from_pairs` accept a caller's prefix policy), plus deterministic **pretty**
+  (indented, sorted, round-trip-correct) variants and true **W3C JSON-LD 1.1 Compaction**
+  (`graph_to_jsonld_compact`) and **Framing** (`graph_to_jsonld_framed`) — hand-rolled,
+  dependency-free, **pyld-faithful** (differentially verified; see the `serialize::compact` rustdoc).
+  The N-Triples writer (`triples_to_ntriples`) is always on; off, zero serializer code compiles, **no
+  new dependencies**. The opt-in `streaming-serialization` feature (implies `serialize-rdf`) adds
+  `write_turtle_streaming`/`write_trig_streaming` (+ `graph_to_*_streaming`) — render Turtle/TriG into a
+  `std::io::Write` one subject-block at a time, **byte-identical** to the buffered writer (chunked CONSTRUCT). See [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
 - **Oxigraph-shaped per-solution accessor** *(opt-in `query-solution` feature, OFF by default)* —
   `QueryResult::solutions()` yields borrowed, zero-copy `QuerySolution` views (one per row) matching
   Oxigraph's `QuerySolution` API — `get` by name / `VariableRef` / position, `iter` over the bound
@@ -103,6 +95,14 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   no second materialisation (eases Rust Oxigraph interop / migration). Off, zero code compiles, the
   default build is byte-identical, no new deps. See
   [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
+- **Structured EXPLAIN** *(opt-in `explain-json` feature, OFF by default)* — `explain_plan` /
+  `explain_plan_analyze` → a typed `PlanNode` tree (BGP `estimated`, `actual`/`nanos`, per-operator **q-error**) + `to_json()` + a bounded `SlowQueryRing`; off, build byte-identical.
+- **Exact-bitmap semi-join reducer** *(opt-in `semijoin-bitmap` feature, OFF by default)* — a binary
+  BGP join prefilters the next scan by a membership filter (`KeyFilter`: a flat bitmap over the dense
+  `u32` ids, or an exact hash set when sparse+huge) built over the other side's join keys, dropping
+  rows that cannot match **before** they enter the join. The filter is membership-EXACT, so the RESULT
+  is **identical** to the feature-off path — only fewer rows are scanned (proven by the on-vs-off
+  differential). Off, zero code compiles, the default build is byte-identical, no new deps.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more

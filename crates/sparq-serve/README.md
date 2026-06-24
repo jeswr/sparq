@@ -21,14 +21,25 @@ The crate is **sync, runtime-agnostic, and library-first**: it exposes no HTTP
 or async-runtime types (consumers such as `sparq-server` wrap it), and it must
 never enter `sparq-wasm`'s dependency graph.
 
-> **Library-internal core, not a standalone surface.** It is wrapped by
-> `sparq-server` and has no public API of its own — the [surface map in
-> `AGENTS.md`](../../AGENTS.md) does not list it as a usage entry point. It is
-> nonetheless a *publishable* crate (its `Cargo.toml` does **not** set
-> `publish = false`), and it must stay that way: the published `sparq-server`
-> depends on it, and a crates.io crate cannot depend on a `publish = false`
-> crate. So it ships to crates.io as plumbing for `sparq-server`, not as an
-> independently useful library.
+> **Mostly library-internal plumbing — with one deliberate public surface** (the
+> `embed` seam below). It is wrapped by `sparq-server` and otherwise has no
+> standalone API. It is a *publishable* crate (its `Cargo.toml` does **not** set
+> `publish = false`) and must stay that way: the published `sparq-server` depends
+> on it, and a crates.io crate cannot depend on a `publish = false` crate.
+
+## 🔌 `embed` — in-process embedding seam (#1248)
+
+[OPUS-4.8] The `embed` module is a documented facade that lets an external host
+(e.g. `solid-server-rs`) call the engine **in-process** instead of over HTTP — the
+read/write/probe entry points (`query_json` / `ask` / `update_in_place` /
+`apply_delta_nquads` / `exists`+`metadata`, thin wrappers, no new behaviour) plus a
+re-export of the runtime-agnostic concurrency wrapper (`GenerationRing` +
+`GraphApplier` / `Writer`, factored out of `sparq-server`'s axum/tokio glue so an
+embedder reuses sparq's *tested* fork → update → publish + generation-pinning model).
+It is the surface the maintainer **intends** to commit to as the stable embedding
+API ([#1248](https://github.com/jeswr/sparq/issues/1248)) — but **NOT yet a frozen
+semver-tier-1 surface**: the formal freeze is the maintainer's to ratify on #1248,
+and until then a minor pre-`1.0` release MAY still change it.
 
 ## 🚀 Quickstart
 
@@ -52,27 +63,27 @@ cargo run -p sparq-server -- --format turtle data.ttl
   run strictly between batches — never racing a commit.
 - **Sync, runtime-agnostic, library-first** — no HTTP or async-runtime types;
   consumers wrap it. It must never enter `sparq-wasm`'s dependency graph.
-- **Online backup/restore** (opt-in `backup` feature, default OFF) — `backup::export`
-  serialises an already-immutable pinned `Generation` (triples + per-pod epoch vectors +
-  writer seq) to one self-describing artifact **while serving** (no stop-the-world);
-  `backup::import` re-hydrates a `Graph` from one, **fail-closed** on a corrupt/mismatched
-  artifact. Distinct from the offline `sparq-cli save` and the `--persist` WAL. At-rest
-  encryption is out of scope. `sparq-server` mounts `/admin/backup` + `/admin/restore` on it.
-- **Incremental change-stream / PITR** (same `backup` feature) — `backup_delta::export_delta`
-  captures the quad-set change between two **same-lineage** generations as a self-describing
-  delta artifact keyed off the generation/writer-seq range; `backup_delta::replay` applies an
-  ordered chain forward onto a restored base to reach a chosen recovery point (fail-closed on a
-  corrupt or discontinuous chain). `sparq-server` adds `/admin/backup/delta?from=N` +
-  `--restore-delta` for point-in-time recovery.
-- **Response-bytes result cache** *(opt-in: `--features result-cache`, OFF by
-  default)* — see below.
+- **Online backup/restore** (opt-in `backup` feature, default OFF) —
+  `backup::export` serialises an already-immutable pinned `Generation` to one
+  self-describing artifact **while serving** (no stop-the-world); `backup::import`
+  re-hydrates a `Graph` from one, **fail-closed** on a corrupt/mismatched artifact.
+  `sparq-server` mounts `/admin/backup` + `/admin/restore`. At-rest encryption is
+  out of scope. (Same feature: `backup_delta` incremental-delta / point-in-time
+  recovery between **same-lineage** generations — see rustdoc.)
+- **Durable change-data-capture stream** *(opt-in `change-stream`, OFF by default)*
+  — `change_stream::ChangeLog` persists each commit as an ordered,
+  monotonically-sequenced change record to a segmented, fsync'd append-only log
+  (Neptune-Streams shape); a consumer `poll(from_seq)`s from any offset and
+  **replays after a restart**. No new dependency, no HTTP/async; at-rest encryption
+  + authenticity out of scope. See rustdoc for the segment format.
+- **Response-bytes result cache** *(opt-in `result-cache`, OFF by default)* — see
+  below.
 
 ## 🗃️ Result cache (opt-in, `result-cache` feature)
 
 A serving-layer cache from a request *identity* to the complete pre-serialized
-response body, so a repeated read returns bytes in tens of nanoseconds instead of
-re-executing. **OFF by default**; the default build carries zero cache code and no
-extra dependency.
+response body, so a repeated read returns bytes without re-executing. **OFF by
+default**; the default build carries zero cache code and no extra dependency.
 
 - **Key = (canonical-query × visibility-scope × per-pod epoch-vector)** (design
   §6.3). The query is cheaply canonicalized (whitespace, and opt-in variable
@@ -91,13 +102,11 @@ extra dependency.
   Queries with an unbounded read footprint pin the global generation (invalidated
   by any write).
 - **Single-flight leases** collapse a stampede on a hot uncached key into one
-  execution + N waiters. **Byte-budget LRU + admission**: oversize/streaming bodies
-  are never cached.
+  execution + N waiters; **byte-budget LRU + admission** never cache oversize bodies.
 
-The cache stores opaque `Arc<[u8]>` bodies and a caller-derived `ScopeKey`; it never
-depends on `sparq-solid` and never parses a query. It is a **different layer** from
-`sparq-engine`'s embedded `result-cache` (the in-engine algebra-keyed LRU). Perf
-targets (design §6.3) require a canonical host and are validated there, not in-tree.
+The cache stores opaque `Arc<[u8]>` bodies + a caller-derived `ScopeKey`; it never
+depends on `sparq-solid` and never parses a query, and is a **different layer** from
+`sparq-engine`'s embedded `result-cache` (the in-engine algebra-keyed LRU).
 
 ## 📚 Learn more
 

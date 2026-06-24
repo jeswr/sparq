@@ -38,6 +38,10 @@ pub const PKG_NS: &str = "https://sparq.dev/ns/pkg#";
 pub const SOURCE: &str = "https://sparq.dev/ns/pkg#Source";
 /// `pkg:Document` — a concrete document realising a Source (`fabio:Expression`).
 pub const DOCUMENT: &str = "https://sparq.dev/ns/pkg#Document";
+/// `pkg:MachineAgent` — a non-human software agent (an extraction agent) a machine-
+/// extracted Finding is `prov:wasAttributedTo` (`prov:SoftwareAgent`). The hook the
+/// literature-tier SHACL shapes target (sq-2489d.5).
+pub const MACHINE_AGENT: &str = "https://sparq.dev/ns/pkg#MachineAgent";
 /// `pkg:Finding` — a reified discovery/claim (generalises `sig-impl:Assertion`).
 pub const FINDING: &str = "https://sparq.dev/ns/pkg#Finding";
 /// `pkg:Technique` — an algorithm/technique/method (`skos:Concept`).
@@ -170,6 +174,7 @@ pub const SOURCE_RELIABILITY_MEASUREMENT: &str =
 pub const ALL: &[&str] = &[
     SOURCE,
     DOCUMENT,
+    MACHINE_AGENT,
     FINDING,
     TECHNIQUE,
     TASK,

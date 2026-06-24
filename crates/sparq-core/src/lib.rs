@@ -32,6 +32,10 @@ type ChunkPartials = Vec<(Dict, Vec<[Id; 3]>)>;
 // default (lean) wasm bundle never links `oxjsonld`.
 #[cfg(feature = "jsonld")]
 use oxjsonld::JsonLdParser;
+// [OPUS-4.8] sq-f47w1 (survey §B1): RDF/XML parser is OPT-IN behind the `rdfxml` feature
+// so the default (lean) wasm bundle never links `oxrdfxml` (which pulls `quick-xml`).
+#[cfg(feature = "rdfxml")]
+use oxrdfxml::RdfXmlParser;
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};
 use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
@@ -726,6 +730,18 @@ impl Graph {
                     push_triple!(&q.subject, &q.predicate, &q.object);
                 }
             }
+            // [OPUS-4.8] sq-f47w1 (survey §B1): RDF/XML. A whole-document XML parse (NOT
+            // line-oriented, so no parallel chunking applies) yielding TRIPLES — RDF/XML has
+            // no named-graph syntax, so nothing is folded. OPT-IN behind the `rdfxml` feature
+            // (keeps the lean bundle free of oxrdfxml / quick-xml). Same proven parser the
+            // sparq-server GSP write-body + conformance paths already use.
+            #[cfg(feature = "rdfxml")]
+            _ if is_rdfxml_format(format) => {
+                for t in RdfXmlParser::new().for_slice(bytes) {
+                    let t = t.map_err(|e| e.to_string())?;
+                    push_triple!(&t.subject, &t.predicate, &t.object);
+                }
+            }
             // [OPUS-4.8] (sq-m2pc) Turtle is gated on its explicit alias set — NOT a
             // catch-all — so a typo'd or unsupported `format` errors below instead of
             // silently parsing as Turtle and returning `Ok`.
@@ -808,6 +824,19 @@ impl Graph {
                 for q in parser.for_slice(bytes) {
                     let q = q.map_err(|e| e.to_string())?;
                     push_triple!(&q.subject, &q.predicate, &q.object);
+                }
+            }
+            // [OPUS-4.8] sq-f47w1 (survey §B1): RDF/XML with a document base — `rdf:ID`
+            // fragments and relative IRIs resolve against `base` (the URL load path). RDF/XML
+            // has no named graphs, so nothing is folded. OPT-IN behind the `rdfxml` feature.
+            #[cfg(feature = "rdfxml")]
+            _ if is_rdfxml_format(format) => {
+                let parser = RdfXmlParser::new()
+                    .with_base_iri(base)
+                    .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
+                for t in parser.for_slice(bytes) {
+                    let t = t.map_err(|e| e.to_string())?;
+                    push_triple!(&t.subject, &t.predicate, &t.object);
                 }
             }
             // [OPUS-4.8] (sq-m2pc) Turtle is gated on its explicit alias set, mirroring
@@ -4019,6 +4048,18 @@ fn is_jsonld_format(format: &str) -> bool {
     matches!(format, "jsonld" | "json-ld" | "application/ld+json")
 }
 
+/// [OPUS-4.8] sq-f47w1 (survey §B1) Whether `format` names the RDF/XML serialization: the
+/// short key, the hyphenated spelling, and the IANA media type (`application/rdf+xml`, what
+/// an `Accept`-negotiated URL load reports). Kept in one place so every RDF/XML loader arm
+/// (`parse_to_triples` / `…_with_base`) recognises the same set. OPT-IN behind the `rdfxml`
+/// feature; every call site is gated on the same feature, so the helper is only compiled
+/// when RDF/XML is. When the feature is OFF these strings fall through to `unknown_format_err`
+/// (NOT mis-parsed as Turtle), exactly as a `"jsonld"` string does in a non-`jsonld` build.
+#[cfg(feature = "rdfxml")]
+fn is_rdfxml_format(format: &str) -> bool {
+    matches!(format, "rdfxml" | "rdf-xml" | "application/rdf+xml")
+}
+
 /// [OPUS-4.8] (sq-m2pc) Whether `format` names the Turtle serialization. The single
 /// authority for the Turtle alias set, kept in lock-step with the CLI's `is_known_format`.
 /// `parse_to_triples`/`parse_to_triples_with_base` previously fell back to Turtle for ANY
@@ -4060,10 +4101,13 @@ fn is_dataset_format(format: &str) -> bool {
 /// "unknown ⇒ Turtle" catch-all. The `jsonld` entry only appears when that opt-in
 /// feature is compiled in (the only build in which a "jsonld"/"json-ld" string parses).
 fn unknown_format_err(format: &str) -> String {
-    let known = if cfg!(feature = "jsonld") {
-        "turtle | ntriples | nquads | trig | jsonld"
-    } else {
-        "turtle | ntriples | nquads | trig"
+    // [OPUS-4.8] sq-f47w1: the `jsonld` / `rdfxml` entries only appear when their opt-in
+    // feature is compiled in (the only build in which those strings parse rather than error).
+    let known = match (cfg!(feature = "jsonld"), cfg!(feature = "rdfxml")) {
+        (true, true) => "turtle | ntriples | nquads | trig | jsonld | rdfxml",
+        (true, false) => "turtle | ntriples | nquads | trig | jsonld",
+        (false, true) => "turtle | ntriples | nquads | trig | rdfxml",
+        (false, false) => "turtle | ntriples | nquads | trig",
     };
     format!("unknown RDF format {format:?} (known: {known})")
 }
@@ -5744,6 +5788,155 @@ mod tests {
         assert!(Graph::load_str("{ not json", "jsonld").is_err());
     }
 
+    // [OPUS-4.8] sq-f47w1 (survey §B1) — RDF/XML ingest. These tests exercise the REAL
+    // `parse_to_triples` RDF/XML arm (not a mock), and are gated on the OPT-IN `rdfxml`
+    // feature so the lean default build (where `oxrdfxml` is not linked) does not see them.
+
+    /// A small RDF/XML document parses through `load_str` for EVERY accepted alias
+    /// (`rdfxml` / `rdf-xml` / `application/rdf+xml`) to the same triple set: an IRI object,
+    /// a plain literal, and a typed (`xsd:integer`) literal. Directly line-covers the new
+    /// dispatch arm + `is_rdfxml_format` matcher for the per-crate coverage ratchet.
+    #[cfg(feature = "rdfxml")]
+    #[test]
+    fn rdfxml_load_str_object() {
+        let doc = r#"<?xml version="1.0"?>
+            <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+                     xmlns:ex="http://ex/">
+              <rdf:Description rdf:about="http://ex/alice">
+                <ex:name>Alice</ex:name>
+                <ex:age rdf:datatype="http://www.w3.org/2001/XMLSchema#integer">30</ex:age>
+                <ex:knows rdf:resource="http://ex/bob"/>
+              </rdf:Description>
+            </rdf:RDF>"#;
+        for fmt in ["rdfxml", "rdf-xml", "application/rdf+xml"] {
+            let g = Graph::load_str(doc, fmt).unwrap_or_else(|e| panic!("{fmt}: {e}"));
+            assert_eq!(g.len(), 3, "{fmt}: subject has three predicates");
+            let terms = dump_terms(&g);
+            let has = |s: &str, p: &str, o: &str| {
+                terms.iter().any(|(ts, tp, to)| ts == s && tp == p && to == o)
+            };
+            assert!(
+                has("<http://ex/alice>", "<http://ex/name>", "\"Alice\""),
+                "{fmt}: name triple missing: {terms:?}"
+            );
+            assert!(
+                has(
+                    "<http://ex/alice>",
+                    "<http://ex/age>",
+                    "\"30\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+                ),
+                "{fmt}: typed age triple missing: {terms:?}"
+            );
+            assert!(
+                has("<http://ex/alice>", "<http://ex/knows>", "<http://ex/bob>"),
+                "{fmt}: knows IRI triple missing: {terms:?}"
+            );
+        }
+    }
+
+    /// Relative IRIs / `rdf:ID` in an RDF/XML document resolve against the supplied base — the
+    /// URL load path (a document fetched from `https://host/dir/data.rdf`) relies on this.
+    /// Line-covers the `parse_to_triples_with_base` RDF/XML arm.
+    #[cfg(feature = "rdfxml")]
+    #[test]
+    fn rdfxml_load_str_with_base_resolves_relative() {
+        let doc = r#"<?xml version="1.0"?>
+            <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+                     xmlns:ex="http://ex/knows#">
+              <rdf:Description rdf:about="alice">
+                <ex:knows rdf:resource="bob"/>
+              </rdf:Description>
+            </rdf:RDF>"#;
+        let g = Graph::load_str_with_base(doc, "rdfxml", "http://base.example/dir/").unwrap();
+        let terms = dump_terms(&g);
+        assert!(
+            terms.iter().any(|(s, p, o)| s == "<http://base.example/dir/alice>"
+                && p == "<http://ex/knows#knows>"
+                && o == "<http://base.example/dir/bob>"),
+            "relative IRIs must resolve against the base: {terms:?}"
+        );
+    }
+
+    /// Malformed RDF/XML surfaces a parse error (not a silent empty graph), so a loader can
+    /// report the failure inline rather than swallowing it.
+    #[cfg(feature = "rdfxml")]
+    #[test]
+    fn rdfxml_malformed_errors() {
+        // Not well-formed XML (unclosed element).
+        assert!(Graph::load_str("<rdf:RDF><not closed", "rdfxml").is_err());
+    }
+
+    /// ROUND-TRIP: a known graph serialised to RDF/XML (via `oxrdfxml::RdfXmlSerializer`, the
+    /// same writer the sparq-server GSP/conformance paths use) and parsed back through
+    /// `parse_to_triples` recovers the SAME triple set. This is the load-bearing invariant for
+    /// the arm — serialise→parse equivalence — so a future regression in the dispatch wiring or
+    /// term interning is caught. Covers an IRI object, a plain literal, a language-tagged
+    /// literal, and a typed literal (the term shapes RDF/XML must preserve).
+    #[cfg(feature = "rdfxml")]
+    #[test]
+    fn rdfxml_load_str_round_trip() {
+        use oxrdf::{Literal, NamedNode, Triple};
+        use oxrdfxml::RdfXmlSerializer;
+
+        // `Triple::new` takes `impl Into<Subject>` / `impl Into<Term>`, so a `NamedNode`
+        // converts directly — no need to name the deprecated `oxrdf::Subject` alias.
+        let s = NamedNode::new("http://ex/alice").unwrap();
+        let triples = vec![
+            Triple::new(
+                s.clone(),
+                NamedNode::new("http://ex/knows").unwrap(),
+                NamedNode::new("http://ex/bob").unwrap(),
+            ),
+            Triple::new(
+                s.clone(),
+                NamedNode::new("http://ex/name").unwrap(),
+                Literal::new_simple_literal("Alice"),
+            ),
+            Triple::new(
+                s.clone(),
+                NamedNode::new("http://ex/greeting").unwrap(),
+                Literal::new_language_tagged_literal("hi", "en").unwrap(),
+            ),
+            Triple::new(
+                s,
+                NamedNode::new("http://ex/age").unwrap(),
+                Literal::new_typed_literal(
+                    "30",
+                    NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+                ),
+            ),
+        ];
+
+        // Serialise to RDF/XML. An in-memory writer cannot fail, so the `expect`s are inert.
+        let mut ser = RdfXmlSerializer::new().for_writer(Vec::new());
+        for t in &triples {
+            ser.serialize_triple(t.as_ref()).expect("serialise RDF/XML triple");
+        }
+        let bytes = ser.finish().expect("finish RDF/XML serialisation");
+        let xml = String::from_utf8(bytes).expect("RDF/XML serialiser emits UTF-8");
+
+        // Parse it back through the real dispatch and compare the recovered triple SET.
+        let g = Graph::load_str(&xml, "rdfxml")
+            .unwrap_or_else(|e| panic!("round-trip RDF/XML must re-parse, got {e}\n{xml}"));
+        let got: std::collections::BTreeSet<_> = dump_terms(&g).into_iter().collect();
+
+        let want: std::collections::BTreeSet<(String, String, String)> = [
+            ("<http://ex/alice>", "<http://ex/knows>", "<http://ex/bob>"),
+            ("<http://ex/alice>", "<http://ex/name>", "\"Alice\""),
+            ("<http://ex/alice>", "<http://ex/greeting>", "\"hi\"@en"),
+            (
+                "<http://ex/alice>",
+                "<http://ex/age>",
+                "\"30\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+            ),
+        ]
+        .into_iter()
+        .map(|(s, p, o)| (s.to_string(), p.to_string(), o.to_string()))
+        .collect();
+
+        assert_eq!(got, want, "RDF/XML serialise→parse must round-trip the triple set");
+    }
+
     /// [OPUS-4.8] (sq-zz8z, gh-51) The graph-IRI prefix RANGE SCAN returns EXACTLY the named graphs
     /// whose `STR(name)` starts with the prefix, and its lazily-built cache stays coherent across
     /// add/remove (which change `named.len()`, the cache key) on the SAME graph object. Adjacent
@@ -6631,7 +6824,11 @@ mod tests {
 
         // Unknown / typo'd / unsupported strings now ERROR instead of silently parsing as
         // Turtle. Empty string is included — it must not be a Turtle alias either.
-        for bogus in ["bogusfmt", "turtl", "Turtle", "rdfxml", "n3", ""] {
+        // [OPUS-4.8] sq-f47w1 (survey §B1): `"rdfxml"` moved OUT of this always-bogus list —
+        // it is an accepted format when the OPT-IN `rdfxml` feature is built (asserted below /
+        // in `rdfxml_load_str_round_trip`), and only bogus when the feature is OFF (asserted in
+        // the `not(feature = "rdfxml")` block), exactly mirroring how `"jsonld"` is gated.
+        for bogus in ["bogusfmt", "turtl", "Turtle", "n3", ""] {
             // (`Result::Ok` carries `(Dict, Vec<…>)`, which is not `Debug`, so `expect_err`
             // cannot be used — match on the error directly.)
             let e = match Graph::parse_to_triples(ttl, bogus) {
@@ -6645,6 +6842,21 @@ mod tests {
             );
             // The public `load_str` wrappers propagate the same error.
             assert!(Graph::load_str(ttl, bogus).is_err(), "load_str must reject {bogus:?}");
+        }
+
+        // [OPUS-4.8] sq-f47w1: with the OPT-IN `rdfxml` feature OFF, the RDF/XML aliases are
+        // NOT recognised — they must ERROR (fall through to `unknown_format_err`), NOT be
+        // mis-parsed as Turtle, exactly as `"jsonld"` does in a non-`jsonld` build.
+        #[cfg(not(feature = "rdfxml"))]
+        for off in ["rdfxml", "rdf-xml", "application/rdf+xml"] {
+            assert!(
+                Graph::parse_to_triples(ttl, off).is_err(),
+                "without the `rdfxml` feature {off:?} must error"
+            );
+            assert!(
+                Graph::parse_to_triples_with_base(ttl, off, "http://base/").is_err(),
+                "without the `rdfxml` feature {off:?} (base) must error"
+            );
         }
     }
 
@@ -6677,7 +6889,13 @@ mod tests {
 
         // Unknown / typo'd / unsupported strings now ERROR instead of silently parsing as TriG.
         // `trg` is the load-bearing case: previously it hit the catch-all and parsed as TriG.
-        for bogus in ["bogusfmt", "trg", "TriG", "rdfxml", ""] {
+        // [OPUS-4.8] sq-f47w1 (survey §B1): `"rdfxml"` moved OUT of this list. RDF/XML has no
+        // named-graph syntax, so it is NOT a dataset format — `load_dataset_serial` rejects it
+        // regardless of the feature (asserted below, unconditionally), but the public
+        // `load_dataset` routes a non-dataset format to `load_str`, which ACCEPTS RDF/XML when
+        // the OPT-IN `rdfxml` feature is built, so the blanket `load_dataset(...).is_err()`
+        // assertion no longer holds for it. Handled in the dedicated block after this loop.
+        for bogus in ["bogusfmt", "trg", "TriG", ""] {
             let e = match Graph::load_dataset_serial(trig, bogus) {
                 Err(e) => e,
                 Ok(_) => panic!("unknown format {bogus:?} must error, not fall back to TriG"),
@@ -6688,6 +6906,16 @@ mod tests {
             assert!(
                 Graph::load_dataset(trig, bogus).is_err(),
                 "public load_dataset must reject {bogus:?}"
+            );
+        }
+
+        // [OPUS-4.8] sq-f47w1: the RDF/XML aliases are NOT dataset formats — `load_dataset_serial`
+        // (the per-graph serial reference) rejects them whether or not the `rdfxml` feature is
+        // built, because RDF/XML carries no named graphs and never reaches a quad-bearing parser.
+        for off in ["rdfxml", "rdf-xml", "application/rdf+xml"] {
+            assert!(
+                Graph::load_dataset_serial(trig, off).is_err(),
+                "RDF/XML {off:?} is not a dataset serial format — must error"
             );
         }
     }
@@ -8465,6 +8693,104 @@ mod tests {
         let pat = g.pattern(None, Some(&p), Some(&b)).unwrap();
         let scan = g.store.scan(&pat);
         assert_eq!(scan.rows.len(), 2);
+    }
+
+    /// [OPUS-4.8] sq-bif — `is_integer_datatype` decides whether a datatype's values are
+    /// exact integers (an `xsd:integer` subtype), which gates the exact-lexical disambiguation
+    /// path. It must accept `xsd:integer` and every derived integer subtype, but REJECT the
+    /// other numeric datatypes (`decimal` is exact but not an integer; `double`/`float` ARE
+    /// their f64) and every non-numeric datatype. Previously it had no direct test, so a typo
+    /// dropping a subtype — or accidentally admitting `decimal` — would go unnoticed.
+    #[test]
+    fn is_integer_datatype_accepts_integer_subtypes_only() {
+        // Every integer family member is accepted.
+        for dt in [
+            xsd::INTEGER,
+            xsd::LONG,
+            xsd::INT,
+            xsd::SHORT,
+            xsd::BYTE,
+            xsd::NON_NEGATIVE_INTEGER,
+            xsd::POSITIVE_INTEGER,
+            xsd::NON_POSITIVE_INTEGER,
+            xsd::NEGATIVE_INTEGER,
+            xsd::UNSIGNED_INT,
+            xsd::UNSIGNED_LONG,
+            xsd::UNSIGNED_SHORT,
+            xsd::UNSIGNED_BYTE,
+        ] {
+            assert!(is_integer_datatype(dt.as_str()), "{} must be an integer datatype", dt.as_str());
+        }
+        // Numeric-but-not-integer and non-numeric datatypes are rejected.
+        for dt in [xsd::DECIMAL, xsd::DOUBLE, xsd::FLOAT, xsd::STRING, xsd::BOOLEAN, xsd::DATE_TIME] {
+            assert!(!is_integer_datatype(dt.as_str()), "{} must NOT be an integer datatype", dt.as_str());
+        }
+        assert!(!is_integer_datatype("http://ex/custom"), "an unknown IRI is not an integer datatype");
+        assert!(!is_integer_datatype(""), "the empty datatype is not an integer datatype");
+    }
+
+    /// [OPUS-4.8] sq-bif — `exact_numeric_lexical` is the disambiguator the engine reaches for
+    /// only when two operands' f64 values compare EQUAL: it returns the EXACT lexical of an
+    /// integer-subtype or `xsd:decimal` literal (so `9007199254740993` ≠ `9007199254740992`
+    /// survives the f64 collapse at 2^53) and `None` for everything whose value already IS its
+    /// f64 (float/double) or is non-numeric. It had no test. We pin: the inline-integer path,
+    /// the dictionary integer path (including a value beyond f64's exact range), the decimal
+    /// path, and every `None` case.
+    #[test]
+    fn exact_numeric_lexical_returns_exact_form_or_none() {
+        // A big integer past 2^53 (where f64 cannot represent consecutive integers) and its
+        // neighbour: both are dictionary terms (out of the inline range), and their EXACT
+        // lexicals must survive even though their f64s are equal.
+        let big = "9007199254740993"; // 2^53 + 1
+        let big_neighbour = "9007199254740992"; // 2^53 — same f64 as `big`
+        let nt = format!(
+            "<http://ex/s> <http://ex/i> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
+             <http://ex/s> <http://ex/big> \"{big}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
+             <http://ex/s> <http://ex/big2> \"{big_neighbour}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n\
+             <http://ex/s> <http://ex/long> \"-5\"^^<http://www.w3.org/2001/XMLSchema#long> .\n\
+             <http://ex/s> <http://ex/dec> \"1.50\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n\
+             <http://ex/s> <http://ex/dbl> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#double> .\n\
+             <http://ex/s> <http://ex/flt> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#float> .\n\
+             <http://ex/s> <http://ex/str> \"hello\" .\n\
+             <http://ex/s> <http://ex/lang> \"bonjour\"@fr .\n"
+        );
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+
+        let lexical = |value: &str, dt: oxrdf::NamedNodeRef| -> Option<String> {
+            let lit = Term::Literal(Literal::new_typed_literal(value, dt));
+            g.exact_numeric_lexical(g.id_of(&lit).unwrap_or_else(|| panic!("{value} not interned")))
+        };
+
+        // Inline integer (small, in range): the inline id formats its value directly.
+        let small_id = g.id_of(&Term::Literal(Literal::new_typed_literal("42", xsd::INTEGER))).unwrap();
+        assert!(dict::is_inline(small_id), "42 is an inline integer");
+        assert_eq!(g.exact_numeric_lexical(small_id).as_deref(), Some("42"));
+
+        // Big dictionary integers: the EXACT lexical is preserved, disambiguating the f64 tie.
+        assert_eq!(lexical(big, xsd::INTEGER).as_deref(), Some(big));
+        assert_eq!(lexical(big_neighbour, xsd::INTEGER).as_deref(), Some(big_neighbour));
+        // The two lexicals differ even though they are the same f64 (the whole point).
+        assert_eq!(g.numeric_value(g.id_of(&Term::Literal(Literal::new_typed_literal(big, xsd::INTEGER))).unwrap()),
+                   g.numeric_value(g.id_of(&Term::Literal(Literal::new_typed_literal(big_neighbour, xsd::INTEGER))).unwrap()),
+                   "the two big integers collapse to the same f64");
+        assert_ne!(lexical(big, xsd::INTEGER), lexical(big_neighbour, xsd::INTEGER));
+
+        // An integer SUBTYPE (long) is also exact.
+        assert_eq!(lexical("-5", xsd::LONG).as_deref(), Some("-5"));
+        // `xsd:decimal` is exact (the trailing zero of "1.50" is preserved verbatim).
+        assert_eq!(lexical("1.50", xsd::DECIMAL).as_deref(), Some("1.50"));
+
+        // None: double / float values ARE their f64 (no exact-lexical disambiguation needed).
+        assert_eq!(lexical("1.5", xsd::DOUBLE), None);
+        assert_eq!(lexical("1.5", xsd::FLOAT), None);
+        // None: a plain string and a language-tagged literal are not numeric.
+        assert_eq!(g.exact_numeric_lexical(g.id_of(&Term::Literal(Literal::new_simple_literal("hello"))).unwrap()), None);
+        assert_eq!(
+            g.exact_numeric_lexical(g.id_of(&Term::Literal(Literal::new_language_tagged_literal_unchecked("bonjour", "fr"))).unwrap()),
+            None
+        );
+        // None: an IRI is not numeric.
+        assert_eq!(g.exact_numeric_lexical(g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/s"))).unwrap()), None);
     }
 
     /// The full sorted term-triple set of a graph (overlay merged), for state comparison.

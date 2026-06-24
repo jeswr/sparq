@@ -18,6 +18,13 @@ pub use sparq_engine::{QueryBudget, QueryResult};
 #[cfg(feature = "live")]
 pub mod live;
 
+// [OPUS-4.8] sq-2m6zm.6 (PKG NL-tool PRODUCT flavor): the configurable, provider-agnostic
+// OpenAI-compatible endpoint client behind the opt-in `nlq-endpoint` feature. Off by
+// default so the lean loop carries no HTTP client; the productized counterpart of the
+// agent-flavor win (sq-zbyo7) for external users who bring their own cheap-model endpoint.
+#[cfg(feature = "nlq-endpoint")]
+pub mod endpoint;
+
 pub mod constrain;
 pub mod eval;
 pub mod link;
@@ -740,6 +747,97 @@ mod tests {
             "SELECT ?s WHERE { ?s ?p ?o }"
         );
         assert_eq!(extract_sparql("I cannot answer that."), None);
+    }
+
+    /// An EMPTY fenced block yields `None` (the `(!q.is_empty())` guard in `extract_fenced`),
+    /// not an empty string the loop would then mis-report as `NoSparql`-via-parse. An
+    /// UNCLOSED fence (opener, no closing ```` ``` ````) likewise yields `None` — the
+    /// `body_end` search fails. Neither path is exercised by the happy-path tests. [OPUS-4.8]
+    #[test]
+    fn extract_returns_none_for_empty_or_unclosed_fence() {
+        // Empty `sparql` fence body → None (not Some("")).
+        assert_eq!(extract_sparql("```sparql\n```"), None);
+        // Whitespace-only fence body trims to empty → None.
+        assert_eq!(extract_sparql("```sparql\n   \n```"), None);
+        // Opener present but no closing fence → None (no body_end).
+        assert_eq!(
+            extract_sparql("```sparql\nSELECT * WHERE { ?s ?p ?o }"),
+            None
+        );
+        // Anonymous empty fence → None as well.
+        assert_eq!(extract_sparql("```\n```"), None);
+    }
+
+    /// Bare-text extraction is case-insensitive on the leading keyword and accepts `ASK`,
+    /// `SELECT`, and `PREFIX` starts — but rejects other leading words. Guards the
+    /// `to_ascii_uppercase().starts_with(...)` branch. [OPUS-4.8]
+    #[test]
+    fn extract_bare_text_is_case_insensitive_and_keyword_gated() {
+        assert_eq!(
+            extract_sparql("ask { ?s ?p ?o }").unwrap(),
+            "ask { ?s ?p ?o }"
+        );
+        assert_eq!(
+            extract_sparql("prefix ex: <http://e/> select ?s {}").unwrap(),
+            "prefix ex: <http://e/> select ?s {}"
+        );
+        // A non-SPARQL leading keyword is NOT picked up as a bare query.
+        assert_eq!(extract_sparql("DESCRIBE is unsupported here"), None);
+        assert_eq!(extract_sparql("construct your own"), None);
+    }
+
+    /// `RecordingLlm` records ONLY successful calls — the documented invariant ("Failed
+    /// calls are not recorded; a fixture replays the happy path"). A failing inner call
+    /// propagates the error and leaves the recording empty, so a saved fixture never carries
+    /// a recorded failure. [OPUS-4.8]
+    #[test]
+    fn recording_llm_does_not_record_failed_calls() {
+        let rec = RecordingLlm::new(FnLlm(|p: &str| {
+            if p.contains("boom") {
+                Err("inner failure".into())
+            } else {
+                Ok("ok-completion".into())
+            }
+        }));
+        // A failing call propagates the error and records nothing.
+        assert_eq!(rec.complete("boom"), Err("inner failure".into()));
+        assert!(
+            rec.exchanges().is_empty(),
+            "failed call must not be recorded"
+        );
+        // A successful call IS recorded.
+        assert_eq!(rec.complete("fine").unwrap(), "ok-completion");
+        assert_eq!(rec.exchanges().len(), 1);
+        assert_eq!(rec.exchanges()[0].prompt, "fine");
+        assert_eq!(rec.exchanges()[0].completion, "ok-completion");
+        // A second failure still does not grow the recording past the one success.
+        assert!(rec.complete("boom again? boom").is_err());
+        assert_eq!(rec.exchanges().len(), 1);
+    }
+
+    /// `ReplayLlm::from_json` over the empty fixture `[]` is `is_empty()`, `len()==0`, and
+    /// every lookup misses with the diagnosable re-record error. Also: a malformed fixture
+    /// surfaces an `invalid replay fixture` error rather than panicking. [OPUS-4.8]
+    #[test]
+    fn replay_llm_empty_and_malformed_fixtures() {
+        let empty = ReplayLlm::from_json("[]").expect("empty array is a valid fixture");
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        let err = empty
+            .complete("Question: anything")
+            .expect_err("an empty fixture always misses");
+        assert!(err.contains("replay miss"), "{err}");
+        assert!(err.contains("0 recorded exchanges"), "{err}");
+
+        // A malformed fixture is an error, never a panic. (`ReplayLlm` is not `Debug`, so
+        // match on the result rather than `unwrap_err`.)
+        match ReplayLlm::from_json("{not json") {
+            Err(e) => assert!(
+                e.contains("invalid replay fixture"),
+                "malformed fixture must surface a descriptive error, got {e}"
+            ),
+            Ok(_) => panic!("malformed JSON must not parse as a fixture"),
+        }
     }
 
     #[test]

@@ -868,8 +868,35 @@ println!("Δmrr={:.4} se={:.4} adopt@2se={}", ab.mrr.mean, ab.mrr.se, ab.mrr_sig
 delta is **exactly zero** (the no-op invariant — a plain graph is unchanged). The
 confidence/literal-aware KGE literature reports *inconsistent* gains, so any lift is unproven and
 dataset-dependent; the bead's discipline is **adopt only if the measured lift clears a pre-registered
-bar, and ABANDON (and say so) otherwise**. Threading `w(t)` into the structural-sketch pooler and the
-per-`Block` query-time fusion weight (design §USE-1 points 2–3) is tracked as a follow-up bead.
+bar, and ABANDON (and say so) otherwise**.
+
+**Integration points 2–3 (sq-oy9ya, design §USE-1).** `w(t)` is now also threaded into the two
+other points `sparq-vectors` has, both behind the **same `WeightMode` ablation** and both no-ops
+under `Uniform` / a provenance-free graph:
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_vectors::{ProvenanceWeights, WeightMode, Block, Encoder, Metric};
+# fn demo(weights: &ProvenanceWeights, subj_a: u32, subj_b: u32) -> Result<(), String> {
+// (2) confidence-weighted STRUCTURAL-SKETCH / characteristic-set pooling: pool a node's
+//     multi-valued contributions weighted by each value's provenance, NOT a uniform mean.
+//     Under WeightMode::Uniform this is EXACTLY the arithmetic mean (the ablation-off baseline).
+let contribs = vec![(subj_a, vec![1.0, 0.0]), (subj_b, vec![0.0, 1.0])];
+let pooled = weights.pool_weighted(&contribs, WeightMode::Provenance)?; // higher-quality value dominates
+
+// (3) per-Block query-time FUSION weight: aggregate the incident-edge provenance into a per-block
+//     multiplier and attach it to a Block; the existing fuse_rrf_weighted / fuse_scores path
+//     consumes Block::fusion_weight() so a low-quality modality contributes less to the ranking.
+let bw = weights.block_weight([subj_a, subj_b], WeightMode::Provenance); // mean of the per-subject w(t)
+let block = Block::new(Encoder::Numeric, Metric::Euclidean, 0, 16).with_weight(bw);
+assert!(block.fusion_weight() > 0.0); // a valid (0,1] fuse weight; None ≡ 1.0 (fail-open)
+# let _ = pooled; let _ = block; Ok(()) }
+```
+
+The `.spqv` `SchemaHeader` round-trips the per-block weight (format **v2**; a **v1** sidecar still
+parses, every block read back as the fail-open `1.0`). The weight is **layout metadata**, not part
+of a `Block`'s identity — `PartialEq`/`Eq` ignore it, so the header round-trip contract is unchanged.
+**No accuracy claim**; like point 1, adoption is measurement-gated.
 
 ### 15. Typed-literal encoders — order-preserving numeric / boolean / date + schema header (opt-in, feature = `structure`)
 
@@ -904,7 +931,7 @@ let enc = NumericEncoder::fit([1.0, 30.0, 31.0, 70.0, 5000.0], /*dim*/ 16); // p
 let v30 = enc.encode(30.0);                                                 // order-preserving block
 assert_eq!(BooleanEncoder::decode(BooleanEncoder::encode(true)[0]), true);  // exact round-trip
 let header = SchemaHeader::new(vec![
-    Block { encoder: Encoder::Numeric, metric: Metric::Euclidean, offset: 0, width: 16 },
+    Block::new(Encoder::Numeric, Metric::Euclidean, 0, 16), // .with_weight(w) for a fusion weight
 ])?;
 header.check_euclidean()?;  // every block is L2-searchable
 # Ok::<(), String>(())
@@ -1032,6 +1059,17 @@ same node projected into whichever object a tool needs. `ground` (the `grounding
 - **`Modality::TypedValue`** — a single typed slot filled directly: `TypedValue::{Boolean, Number,
   Quantity, Enum}`. **Exact** (no cosine threshold, no recall loss).
 
+<!-- [OPUS-4.8] sq-t80n4: cross-unit reconciliation (consumes the P2 units.rs table, sq-0wo9e.3). -->
+**Cross-unit reconciliation (opt-in `GroundingConfig::reconcile_units`, default off).** A quantity
+renders **as declared** by default. Set `reconcile_units` and each quantity whose unit is **known** to
+the P2 table (recipe 16, `units::normalise`) is rendered in the **canonical SI unit of its
+`QuantityKind`** — so `1 mi` and `1.609344 km` (both `Length`) collapse to the same `1609.344 M`, and
+`0 °C` / `273.15 K` to the same `273.15 K`, before grounding / comparison / NL render. **Conservative
+on unknown:** an unknown or **compound / rate** unit (`unit:KiloM-PER-HR` = km/h is *not* in the
+simple-unit table) is left as declared — never a fabricated conversion; only same-`QuantityKind` units
+reconcile. `reconcile_quantity(TypedValue) -> TypedValue` is the standalone primitive. No accuracy
+claim — a correctness/ergonomics feature.
+
 ```rust,ignore
 # // cargo build -p sparq-vectors --features structure
 use sparq_vectors::{ground, Grounding, GroundingConfig, Modality, OutputType};
@@ -1056,8 +1094,52 @@ if let Some(Grounding::Subgraph(facts)) =
 (relative to the *materialised entailment profile* + declared shapes) are **profile-relative, not
 absolute** — and **NOT** end-task answer-completeness (no answer-completeness claim is made). This is
 the **projection** half only: the "ANN proposes, exact engine re-validates" loop is the
-`filtered-ann` / `vec-predicate` path (recipes 8–9). Quantities render **as declared** (value + unit
-label); cross-unit normalisation reuses the P2 QUDT `normalise` (recipe 16; sq-0wo9e.3).
+`filtered-ann` / `vec-predicate` path (recipes 8–9). Quantities render **as declared** by default;
+opt into **cross-unit reconciliation** via `reconcile_units` (above) — known units canonicalise via
+the P2 QUDT `normalise` (recipe 16; sq-0wo9e.3, sq-t80n4), unknown/compound units stay as declared.
+
+### 19. Neuro-symbolic propose-then-verify grounding (opt-in, feature = `neuro-symbolic`)
+
+<!-- [OPUS-4.8] sq-0wo9e.6 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §5 (B) + §6.A). -->
+Research-grade **P5**: grounding a tool slot `(subject, predicate, ?)` has two halves with
+**deliberately asymmetric guarantees**, and the `verify` module keeps them honestly separate:
+
+- **PROPOSE (neural — recall only, NOT sound).** `propose_by_vector(store, seed, k)` returns the `k`
+  nearest neighbours of `seed`'s stored vector as candidate objects. It is a candidate **generator**:
+  a returned id may be type-inconsistent, shape-invalid, or wrong for the slot. **No soundness
+  claim.**
+- **VERIFY (deductive — the soundness GATE).** `verify_candidate` adds the binding to the graph and
+  **rejects** it if doing so introduces a **new SHACL violation** (`sparq-shacl`; datatype /
+  cardinality / enum / `sh:class` / node-kind) **or** a **new OWL inconsistency**
+  (`sparq-reason::inconsistencies` over the materialised closure — `cax-dw` disjoint-class clash,
+  `differentFrom`/`sameAs`, max-cardinality-0). A failing candidate is **REJECTED, not down-ranked**,
+  and the gate **fails closed** (an uncheckable candidate is never surfaced as verified). The check is
+  **differential**: only a defect the base graph did not already have blocks the candidate.
+
+`propose_then_verify` runs both: the returned `VerifyReport::verified()` is **guaranteed a subset of
+the proposed candidates** and contains only deductively-admissible bindings — the design's
+**verify-shrinks-to-sound** property.
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features neuro-symbolic
+use sparq_vectors::{propose_then_verify, VerifyConfig};
+use sparq_shacl::ShapesModel;
+
+let shapes = ShapesModel::parse(&shapes_graph);
+let report = propose_then_verify(
+    &graph, &store, /*seed*/ alice, /*subject*/ alice, /*predicate*/ works_on,
+    /*k*/ 8, Some(&shapes), &VerifyConfig::default(),
+);
+for object in report.verified() { /* a vector-proposed binding that PASSED the deductive gate */ }
+for v in report.rejected() { /* audit: WHY each unsound proposal was dropped */ }
+```
+
+**Honesty.** The neural propose is a high-**recall** generator with **no soundness guarantee**; the
+deductive verify is the **only** soundness gate (correctness comes from it, never from the vector
+step). *Verify-shrinks-to-sound* is **provable + tested** (the load-bearing test asserts a
+vector-proposed-but-shape-invalid candidate is rejected). Whether the neural periphery raises end-task
+**recall** is **empirical, dataset-dependent, EC2-gated** (GraphRAG/KG-RAG does not uniformly beat
+vector RAG) — measured by the on/off ablation harness (recipe 14; sq-0wo9e.7), **never asserted here**.
 
 ## Gotchas / feature flags / prerequisites
 
@@ -1095,6 +1177,15 @@ label); cross-unit normalisation reuses the P2 QUDT `normalise` (recipe 16; sq-0
   `Cardinality` (recipe 16): a **read-only** reader that mines enum/datatype/cardinality priors out of
   a parsed `ShapesModel` (no SHACL behaviour change). The enum codebook + QUDT normaliser themselves
   ship under plain `structure` (pure, no SHACL dep) — only the *reader* needs `structure-shacl`.
+- **The neuro-symbolic propose-then-verify pipeline is the non-default `neuro-symbolic` feature (sq-0wo9e.6 P5).**
+  It **implies `structure-shacl`** (and thus `structure`), so it reuses exactly the `sparq-shacl` +
+  `sparq-reason` + `sparq-introspect` deps those features already pull and adds **no new dependency**.
+  With it OFF the default build compiles zero pipeline code; with it ON it exposes `propose_by_vector`
+  / `verify_candidate` / `verify_candidates` / `propose_then_verify` + `VerifyReport` / `Verdict` /
+  `Rejection` / `Source` / `VerifyConfig` (recipe 19). The neural propose is **recall only (NOT
+  sound)**; the deductive verify is the soundness gate — a failing candidate is **rejected**
+  (fail-closed), the verified set only **shrinks to a sound subset**, and **no recall/accuracy number
+  is claimed** (empirical, EC2-gated).
 - **The KGE measurement foundation is the non-default `kge` feature (sq-0wo9e.8 / P6).** It **implies
   `structure`** and adds **no new dependency** (a hand-rolled CPU-only trainer — no ML crate). With it
   OFF the default build compiles zero trainer/eval code; with it ON it exposes `train` / `TrainConfig`

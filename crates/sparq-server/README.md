@@ -53,10 +53,12 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   (`?generation=N` snapshot pinning), `geo` (`geof:` functions), `service` (SERVICE federation,
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
   `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
-  (`POST /shacl/validate`), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
+  (`POST /shacl/validate`), `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic
+  `K:<name>`→canonical-SPARQL transpiler), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
   `backup` (no-stop-the-world `/admin/backup` snapshot + PITR delta `/admin/backup/delta` +
   `/admin/restore`; on `--persist`, `?persist=true`/`--restore-persist` writes the restore through to
-  disk crash-safely so it survives a restart), `audit-log`/`access-audit`, `zlib-ng`.
+  disk crash-safely so it survives a restart), `change-stream` (durable CDC — commits recorded to a segmented fsync'd log + the Neptune-`GetRecords`-shaped `GET /streams` poll, `--change-stream DIR`),
+  `audit-log`/`access-audit`, `zlib-ng`.
 - **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4, epic sq-oy1f) — the `jsonld` feature is in the
   server's **default** set: `application/ld+json` joins q-value-aware RDF conneg out of the box, **both
   directions** (flattened JSON-LD on CONSTRUCT/DESCRIBE/GSP-read; `oxjsonld` GSP write body). Off via

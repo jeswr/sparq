@@ -32,6 +32,10 @@
 #                     stated EXPLICITLY so a future refactor that decouples dict-spill from
 #                     mmap cannot silently drop the security-code coverage this gate exists
 #                     to enforce. [OPUS-4.8]
+#                       * rdfxml      -> the OPT-IN RDF/XML parse arm in `parse_to_triples` /
+#                                       `…_with_base` (`#[cfg(feature = "rdfxml")]`) + its
+#                                       direct unit tests are otherwise compiled out / 0%.
+#                                       [OPUS-4.8] sq-f47w1 (survey §B1).
 #   - sparq-vectors   the two `*_recall_at_10_vs_brute_force_on_50k` tests (HNSW +
 #                     DiskANN) are EXCLUDED from the per-commit subset via `--skip`
 #                     (they dominate wall-clock under instrumentation). They are
@@ -223,8 +227,12 @@ measure_merged() {
   local -a features=("conformance-merge")
   local -a feat_flags=()
   # sparq-core keeps its mmap,dict-spill security surface (see PER-CRATE QUIRKS).
+  # [OPUS-4.8] sq-f47w1 (survey §B1): `rdfxml` is added so the OPT-IN RDF/XML parse arm
+  # (`#[cfg(feature = "rdfxml")]` in `parse_to_triples` / `…_with_base`) is COMPILED and its
+  # direct unit tests run, MEASURING the new lines for the coverage ratchet (without the
+  # feature those lines are cfg'd out and never enter the report).
   if [ "$crate" = "sparq-core" ]; then
-    feat_flags+=(--features mmap,dict-spill); features+=("mmap" "dict-spill")
+    feat_flags+=(--features mmap,dict-spill,rdfxml); features+=("mmap" "dict-spill" "rdfxml")
   fi
   local start end rc=0 json="$WORK/$crate.json" err="$WORK/$crate.err"
   start=$(date +%s)
@@ -320,7 +328,9 @@ measure() {
       # mmap is named EXPLICITLY (not relied on via the dict-spill -> mmap transitive
       # dep) so the on-disk-store security surface this gate guards is always compiled +
       # exercised. See the PER-CRATE QUIRKS header for the full rationale. [OPUS-4.8]
-      cargo_args+=(--features mmap,dict-spill); features+=("mmap" "dict-spill") ;;
+      # [OPUS-4.8] sq-f47w1: `rdfxml` so the OPT-IN RDF/XML parse arm is compiled + its
+      # direct tests run (measured by the ratchet); cfg'd out otherwise. Mirrors line 227.
+      cargo_args+=(--features mmap,dict-spill,rdfxml); features+=("mmap" "dict-spill" "rdfxml") ;;
     sparq-vectors)
       # Only skip the heavy 50k tests OUTSIDE the nightly/full tiers.
       if [ "$TIER" = "per-commit" ]; then

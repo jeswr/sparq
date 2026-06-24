@@ -521,6 +521,67 @@ mod tests {
         assert!(f1.is_exact());
     }
 
+    /// The ASYMMETRIC empty cases — only one of the two sides is empty — which the
+    /// perfect/partial/disjoint and empty-vs-empty tests never reach. An empty PREDICTED
+    /// against a non-empty gold is a total miss (recall 0); a non-empty predicted against
+    /// an empty gold is a total false-positive (precision 0). Both score F1 0 and are NOT
+    /// exact. This is the `p == 0` / `g == 0` ratio guard in `F1::score`. [OPUS-4.8]
+    #[test]
+    fn f1_one_side_empty_scores_zero_and_is_not_exact() {
+        let g = tiny_graph();
+        let people =
+            AnswerSet::from_result(&query_with_budget(&g, PEOPLE, &oracle_budget()).unwrap());
+        let empty = AnswerSet::default();
+        assert!(!people.is_empty());
+
+        // Predicted nothing, gold has rows → recall 0, precision 0 (no intersection).
+        let miss = F1::score(&empty, &people);
+        assert_eq!(miss.precision, 0.0);
+        assert_eq!(miss.recall, 0.0);
+        assert_eq!(miss.f1, 0.0);
+        assert_eq!(miss.intersection, 0);
+        assert_eq!(miss.predicted, 0);
+        assert_eq!(miss.gold, people.len());
+        assert!(!miss.is_exact());
+
+        // Predicted rows, gold is empty → over-answered: precision 0, recall 0.
+        let over = F1::score(&people, &empty);
+        assert_eq!(over.precision, 0.0);
+        assert_eq!(over.recall, 0.0);
+        assert_eq!(over.f1, 0.0);
+        assert_eq!(over.predicted, people.len());
+        assert_eq!(over.gold, 0);
+        assert!(!over.is_exact());
+    }
+
+    /// Answer-set comparison is a MULTISET — duplicate rows are preserved, so a query that
+    /// returns a row twice does NOT collapse it. Guards the `intersection_count` greedy
+    /// merge over duplicates and the `from_result` dup-keeping. [OPUS-4.8]
+    #[test]
+    fn answer_set_is_a_multiset_over_duplicate_rows() {
+        let g = tiny_graph();
+        // UNION of the same person twice yields two identical rows (no DISTINCT).
+        let dup_q = "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n\
+             PREFIX ex: <http://example.org/>\n\
+             SELECT ?p WHERE { { ?p rdf:type ex:Person FILTER(?p = ex:alice) } \
+             UNION { ?p rdf:type ex:Person FILTER(?p = ex:alice) } }";
+        let dup = AnswerSet::from_result(&query_with_budget(&g, dup_q, &oracle_budget()).unwrap());
+        assert_eq!(dup.len(), 2, "the duplicate row is kept, not collapsed");
+
+        // The single-row version (alice once) intersects the multiset in exactly one row,
+        // so precision against the 2-row predicted set is 1/2.
+        let single_q = "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n\
+             PREFIX ex: <http://example.org/>\n\
+             SELECT ?p WHERE { ?p rdf:type ex:Person FILTER(?p = ex:alice) }";
+        let single =
+            AnswerSet::from_result(&query_with_budget(&g, single_q, &oracle_budget()).unwrap());
+        assert_eq!(single.len(), 1);
+        let f1 = F1::score(&dup, &single);
+        assert_eq!(f1.intersection, 1, "one of the two duplicate rows matches");
+        assert_eq!(f1.precision, 0.5);
+        assert_eq!(f1.recall, 1.0);
+    }
+
     #[test]
     fn oracle_linking_scores_perfect_without_the_llm() {
         let g = tiny_graph();
