@@ -85,7 +85,9 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   (`graph_to_jsonld_compact`) and **Framing** (`graph_to_jsonld_framed`) — hand-rolled,
   dependency-free, **pyld-faithful** (differentially verified; see the `serialize::compact` rustdoc).
   The N-Triples writer (`triples_to_ntriples`) is always on; off, zero serializer code compiles, **no
-  new dependencies**. See [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
+  new dependencies**. The opt-in `streaming-serialization` feature (implies `serialize-rdf`) adds
+  `write_turtle_streaming`/`write_trig_streaming` (+ `graph_to_*_streaming`) — render Turtle/TriG into a
+  `std::io::Write` one subject-block at a time, **byte-identical** to the buffered writer (chunked CONSTRUCT). See [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
 - **Oxigraph-shaped per-solution accessor** *(opt-in `query-solution` feature, OFF by default)* —
   `QueryResult::solutions()` yields borrowed, zero-copy `QuerySolution` views (one per row) matching
   Oxigraph's `QuerySolution` API — `get` by name / `VariableRef` / position, `iter` over the bound
