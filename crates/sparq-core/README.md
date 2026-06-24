@@ -38,7 +38,9 @@ assert_eq!(count, 1);
   `insert_triple(s, p, o)` / `remove_triple(s, p, o)` a single triple from `oxrdf` terms, or apply
   a whole batch with `apply_delta` — in place, with an optional write-ahead log.
 - **Out-of-core store** — query datasets larger than RAM from a memory-mapped on-disk store,
-  with optional block compression and near-zero resident heap.
+  with optional block compression and near-zero resident heap. The opt-in `block-bloom` feature
+  adds per-block Bloom filters on high-NDV columns to skip blocks on equality-bound point lookups
+  (result-equivalent, never serialised).
 - **Named graphs & RDF 1.2** — full quad storage and
   [triple terms](https://www.w3.org/TR/rdf12-concepts/).
 - **Thread-safe sharing** — `Graph` is `Send + Sync`, so one store serves many server threads;

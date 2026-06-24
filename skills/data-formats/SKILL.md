@@ -493,6 +493,18 @@ cargo build -p sparq-cli --features serialize-rdf
 - **`load_dataset` is in-memory only.** Numeric/temporal filter caches are built on load
   in all in-memory paths; `into_compressed()` / `load_str_compressed()` trade a small
   per-scan decode for ~2.5× more triples per byte of RAM (browser target).
+- **`block-bloom` (opt-in, OFF by default).** A block-compressed permutation already has an
+  implicit min/max zone map (the directory's first-triple) that prunes RANGE scans, but for an
+  EQUALITY-BOUND leading column (a point/prefix lookup on a constant subject/object) whose id
+  overlaps several blocks' `[min,max]` spans on a high-NDV column, only a per-block Bloom filter
+  can skip the blocks that cannot contain it. The `block-bloom` feature builds a tiny per-block
+  Bloom bitset over each block's distinct leading ids (built only for high-NDV columns past a
+  density gate; pure-std, no new dep) and probes it in `range` before decoding a block. Zero
+  false negatives by construction, so results are IDENTICAL to the feature-off path — only fewer
+  blocks decode. The filter is in-RAM/build-time only: it is NEVER written to the on-disk
+  `SPQCPRM1` format, so a perm built with the feature on persists byte-identically to one built
+  with it off, and a memory-mapped perm carries no filter. Whether the hypothesised block-skip
+  win materialises is to be confirmed on the canonical perf host (no number is asserted here).
 - **JSON-LD W3C conformance is RATCHETED (honest baseline, not 100%).** A ratcheted W3C
   JSON-LD 1.1 conformance gate (sq-oy1f.2 + sq-3uos5 + sq-oy1f.19) drives the official
   `w3c/json-ld-api` suite AND the SEPARATE `w3c/json-ld-framing` suite through the real paths:
