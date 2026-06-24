@@ -254,6 +254,18 @@ CONSTRUCT/DESCRIBE):
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` |
 | CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` / `application/ld+json` (the `jsonld` feature — **default-on**) | matching RDF media; N-Triples, prefix-compacting Turtle, RDF/XML, <!-- [OPUS-4.8] sq-rt6v --> or flattened JSON-LD <!-- [OPUS-4.8] sq-oy1f.1/.4 --> |
 
+<!-- [OPUS-4.8] sq-u79ee (survey §C1 / FINDINGS F21) -->
+Per the W3C SPARQL Results TSV format, the **TSV** serialiser abbreviates an
+`xsd:integer` / `xsd:decimal` / `xsd:double` / `xsd:boolean` literal whose lexical form is
+a valid Turtle token to its **bare** token (no quotes, no `^^datatype`) — e.g. `30`, `2.2`,
+`1.0E6`, `true`; everything else (incl. integer/decimal *subtypes* like `xsd:negativeInteger`
+and custom datatypes) stays quoted + typed, and `xsd:string` keeps the implicit-datatype short
+form. The bare token is the literal's **own** lexical form, so a data-sourced literal
+round-trips its original spelling (`"1.0E6"^^xsd:double` → `1.0E6`, not canonicalised);
+**computed** numerics arrive already in the engine's canonical form, so they serialise
+canonically. **CSV** writes each value's bare lexical string (datatype/lang dropped — lossy by
+spec); **JSON/XML** carry the full term (value + datatype) unchanged.
+
 ```sh
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/sparql-results+xml' \
      --data-urlencode 'query=SELECT ?s WHERE { ?s ?p ?o }'

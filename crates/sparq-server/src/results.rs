@@ -26,6 +26,10 @@ pub const CSV_MEDIA: &str = "text/csv";
 pub const TSV_MEDIA: &str = "text/tab-separated-values";
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 
 // ---------------------------------------------------------------------------
 // SELECT → XML  (https://www.w3.org/TR/rdf-sparql-XMLres/)
@@ -220,6 +224,19 @@ fn csv_field(out: &mut String, v: &str) {
 }
 
 /// TSV value: full SPARQL term syntax with TSV escaping inside literals.
+///
+/// Per the SPARQL 1.1 Query Results TSV format (`§ Encoding terms`, and matching the
+/// W3C `csv-tsv-res` `csvtsv01`/`csvtsv03` expected files and the oxigraph reference
+/// serialiser), an `xsd:integer` / `xsd:decimal` / `xsd:double` / `xsd:boolean` literal
+/// whose lexical form is already a valid Turtle numeric/boolean token is written **bare**
+/// (no quotes, no `^^datatype`) — e.g. `"30"^^xsd:integer` → `30`, `"2.2"^^xsd:decimal` →
+/// `2.2`, `"1.0E6"^^xsd:double` → `1.0E6`. Crucially the bare token is the literal's OWN
+/// lexical form, NOT a canonicalised one: a data-sourced literal round-trips its original
+/// spelling (sq-u79ee / survey §C1 / FINDINGS F21 — preserve data, canonical for computed;
+/// computed numerics already arrive in canonical form from the engine and are valid tokens
+/// too, so they abbreviate canonically). `xsd:string` and `rdf:langString` keep the
+/// implicit-datatype short forms; every other datatype (incl. integer/decimal SUBTYPES like
+/// `xsd:negativeInteger`, and custom datatypes) is quoted + typed.
 fn term_to_tsv(s: &mut String, t: &Term) {
     match t {
         Term::NamedNode(n) => {
@@ -232,6 +249,24 @@ fn term_to_tsv(s: &mut String, t: &Term) {
             s.push_str(b.as_str());
         }
         Term::Literal(l) => {
+            // Numeric / boolean abbreviation: write the bare lexical form when its datatype
+            // is exactly integer/decimal/double/boolean AND the form is a valid Turtle token.
+            if l.language().is_none() {
+                let value = l.value();
+                let dt = l.datatype();
+                let bare = match dt.as_str() {
+                    XSD_INTEGER => is_turtle_integer(value),
+                    XSD_DECIMAL => is_turtle_decimal(value),
+                    XSD_DOUBLE => is_turtle_double(value),
+                    XSD_BOOLEAN => is_turtle_boolean(value),
+                    _ => false,
+                };
+                if bare {
+                    // Tokens contain no TAB/newline/quote/backslash, so no escaping needed.
+                    s.push_str(value);
+                    return;
+                }
+            }
             s.push('"');
             tsv_escape(s, l.value());
             s.push('"');
@@ -248,6 +283,68 @@ fn term_to_tsv(s: &mut String, t: &Term) {
             }
         }
         other => s.push_str(&other.to_string()),
+    }
+}
+
+// --- Turtle numeric / boolean token recognisers (SPARQL Results TSV abbreviation) ---
+//
+// Grammar productions mirror the Turtle spec (and oxigraph's `sparesults` reference
+// serialiser) so a literal abbreviated here parses BACK to the same RDF term:
+//   [19]   INTEGER  ::= [+-]? [0-9]+
+//   [20]   DECIMAL  ::= [+-]? [0-9]* '.' [0-9]+
+//   [21]   DOUBLE   ::= [+-]? ([0-9]+ '.' [0-9]* EXPONENT | '.' [0-9]+ EXPONENT | [0-9]+ EXPONENT)
+//   [154s] EXPONENT ::= [eE] [+-]? [0-9]+
+//   [133s] BooleanLiteral ::= 'true' | 'false'
+
+fn is_turtle_boolean(value: &str) -> bool {
+    matches!(value, "true" | "false")
+}
+
+fn is_turtle_integer(value: &str) -> bool {
+    let value = strip_sign(value.as_bytes());
+    !value.is_empty() && value.iter().all(u8::is_ascii_digit)
+}
+
+fn is_turtle_decimal(value: &str) -> bool {
+    let mut value = strip_sign(value.as_bytes());
+    while value.first().is_some_and(u8::is_ascii_digit) {
+        value = &value[1..];
+    }
+    let Some(value) = value.strip_prefix(b".") else {
+        return false;
+    };
+    !value.is_empty() && value.iter().all(u8::is_ascii_digit)
+}
+
+fn is_turtle_double(value: &str) -> bool {
+    let mut value = strip_sign(value.as_bytes());
+    let mut with_before = false;
+    while value.first().is_some_and(u8::is_ascii_digit) {
+        value = &value[1..];
+        with_before = true;
+    }
+    let mut with_after = false;
+    if let Some(v) = value.strip_prefix(b".") {
+        value = v;
+        while value.first().is_some_and(u8::is_ascii_digit) {
+            value = &value[1..];
+            with_after = true;
+        }
+    }
+    // EXPONENT is mandatory for a DOUBLE token (a form with no exponent is a DECIMAL).
+    value = match value.split_first() {
+        Some((b'e' | b'E', rest)) => rest,
+        _ => return false,
+    };
+    value = strip_sign(value);
+    (with_before || with_after) && !value.is_empty() && value.iter().all(u8::is_ascii_digit)
+}
+
+/// Strips a single leading `+`/`-` sign, returning the remaining bytes.
+fn strip_sign(value: &[u8]) -> &[u8] {
+    match value.split_first() {
+        Some((b'+' | b'-', rest)) => rest,
+        _ => value,
     }
 }
 
@@ -459,9 +556,159 @@ mod tests {
         let header = tsv.lines().next().unwrap();
         assert_eq!(header, "?s\t?a\t?n");
         assert!(tsv.contains("<http://ex/alice>"));
-        assert!(tsv.contains("\"30\"^^<http://www.w3.org/2001/XMLSchema#integer>"));
+        // xsd:integer is abbreviated to its bare Turtle token (sq-u79ee / TSV §Encoding terms).
+        assert!(tsv.contains("\t30\t") || tsv.contains("\t30\n"), "integer not abbreviated: {tsv}");
+        assert!(!tsv.contains("\"30\"^^"), "integer should not be quoted+typed: {tsv}");
         assert!(tsv.contains("\"Bob\"@en"));
         // plain string: just quoted, no datatype
         assert!(tsv.contains("\"Alice\""));
+    }
+
+    /// sq-u79ee / survey §C1 / FINDINGS F21: the SPARQL Results TSV serialiser abbreviates
+    /// `xsd:integer` / `xsd:decimal` / `xsd:double` / `xsd:boolean` literals to their bare
+    /// Turtle token, PRESERVING the data-sourced literal's own lexical form, and quotes every
+    /// other typed literal. Mirrors the W3C `csv-tsv-res/csvtsv03` expected file.
+    #[test]
+    fn tsv_numeric_abbreviation_preserves_data_lexical_form() {
+        // Mirrors data2.ttl from the W3C csv-tsv-res suite (tsv03), with explicit lexical forms.
+        let data = r#"@prefix : <http://example.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+:s1 :p1 "1"^^xsd:string .
+:s2 :p2 "2.2"^^xsd:decimal .
+:s3 :p3 "-3"^^xsd:negativeInteger .
+:s4 :p4 "4,4"^^xsd:string .
+:s5 :p5 "5,5"^^:myCustomDatatype .
+:s6 :p6 "1.0E6"^^xsd:double .
+:s7 :p7 "a7"^^xsd:hexBinary ."#;
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let r = query(&g, "SELECT ?s ?o WHERE { ?s ?p ?o } ORDER BY ?s").unwrap();
+        let tsv = select_to_tsv(&r);
+
+        // Bare numeric tokens (the data's OWN lexical form is preserved — NOT canonicalised:
+        // the double stays "1.0E6", it is not rewritten to "1.0e6" or "1000000").
+        assert!(line_ends_with(&tsv, "\t2.2"), "decimal not abbreviated: {tsv}");
+        assert!(line_ends_with(&tsv, "\t1.0E6"), "double lexical form not preserved: {tsv}");
+        assert!(!tsv.contains("1.0e6"), "double must not be canonicalised: {tsv}");
+        assert!(!tsv.contains("1000000"), "double must not be canonicalised: {tsv}");
+        // xsd:string keeps the quoted short form (no datatype) even when it looks numeric.
+        assert!(line_ends_with(&tsv, "\t\"1\""), "xsd:string `1` should stay quoted: {tsv}");
+        assert!(line_ends_with(&tsv, "\t\"4,4\""), "xsd:string `4,4` should stay quoted: {tsv}");
+        // Integer/decimal SUBTYPES and custom datatypes stay quoted + typed.
+        assert!(
+            line_ends_with(&tsv, "\t\"-3\"^^<http://www.w3.org/2001/XMLSchema#negativeInteger>"),
+            "negativeInteger should not be abbreviated: {tsv}"
+        );
+        assert!(
+            line_ends_with(&tsv, "\t\"5,5\"^^<http://example.org/myCustomDatatype>"),
+            "custom datatype should stay quoted+typed: {tsv}"
+        );
+        assert!(
+            line_ends_with(&tsv, "\t\"a7\"^^<http://www.w3.org/2001/XMLSchema#hexBinary>"),
+            "hexBinary should stay quoted+typed: {tsv}"
+        );
+    }
+
+    /// sq-u79ee: a COMPUTED double (from an arithmetic expression) carries the engine's
+    /// canonical lexical form — the "canonical for computed" half of the preserve-data /
+    /// canonical-computed contract. The engine's integral-double convention spells
+    /// `1.0E6 + 0.0` as the plain `1000000` (no exponent); since that is NOT a valid Turtle
+    /// DOUBLE token, the TSV serialiser keeps it quoted + `^^xsd:double` rather than emitting
+    /// a bare `1000000` that would round-trip to `xsd:integer`. Abbreviation never silently
+    /// changes a term's datatype.
+    #[test]
+    fn tsv_computed_double_stays_canonical() {
+        let g = Graph::load_str(
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             <http://e/s> <http://e/p> \"1.0E6\"^^xsd:double .",
+            "turtle",
+        )
+        .unwrap();
+        let r = query(
+            &g,
+            "SELECT (?o + \"0.0\"^^<http://www.w3.org/2001/XMLSchema#double> AS ?c) WHERE { ?s ?p ?o }",
+        )
+        .unwrap();
+        let tsv = select_to_tsv(&r);
+        // Canonical engine form, datatype preserved (not abbreviated to a bare integer token).
+        assert!(
+            cell_is(&tsv, "\"1000000\"^^<http://www.w3.org/2001/XMLSchema#double>"),
+            "computed double should keep its canonical form + datatype: {tsv}"
+        );
+        // The data spelling 1.0E6 is NOT echoed for a computed value.
+        assert!(!tsv.contains("1.0E6"), "computed value should not carry the data lexical form: {tsv}");
+    }
+
+    /// sq-u79ee: a COMPUTED double whose canonical form lands in scientific notation IS a
+    /// valid Turtle DOUBLE token, so it abbreviates bare — confirming computed doubles still
+    /// serialise in the engine's canonical (mantissa-E-exponent) spelling, never the data's.
+    #[test]
+    fn tsv_computed_fractional_double_is_canonical_scientific() {
+        let g = Graph::load_str(
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             <http://e/s> <http://e/p> \"3.0\"^^xsd:double .",
+            "turtle",
+        )
+        .unwrap();
+        // 3.0 / 8.0 = 0.375 → canonical xsd:double "3.75E-1".
+        let r = query(
+            &g,
+            "SELECT (?o / \"8.0\"^^<http://www.w3.org/2001/XMLSchema#double> AS ?c) WHERE { ?s ?p ?o }",
+        )
+        .unwrap();
+        let tsv = select_to_tsv(&r);
+        assert!(cell_is(&tsv, "3.75E-1"), "computed double not canonical scientific + bare: {tsv}");
+        assert!(!tsv.contains("\"3.75E-1\"^^"), "valid Turtle double token should be bare: {tsv}");
+    }
+
+    /// sq-u79ee: integer/decimal/double subtype + token edge cases for the TSV abbreviation
+    /// recognisers — exercises the bare-vs-quoted decision directly.
+    #[test]
+    fn tsv_abbreviation_edge_cases() {
+        let data = r#"@prefix : <http://e/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+:a :p "+42"^^xsd:integer .
+:b :p "007"^^xsd:integer .
+:c :p "-0.5"^^xsd:decimal .
+:d :p ".5"^^xsd:decimal .
+:e :p "1e10"^^xsd:double .
+:f :p ".5e3"^^xsd:double .
+:g :p "true"^^xsd:boolean .
+:h :p "1"^^xsd:double .
+:i :p "NaN"^^xsd:double ."#;
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let r = query(&g, "SELECT ?s ?o WHERE { ?s ?p ?o } ORDER BY ?s").unwrap();
+        let tsv = select_to_tsv(&r);
+        // Signed/leading-zero integers abbreviate, preserving spelling.
+        assert!(line_ends_with(&tsv, "\t+42"), "signed integer: {tsv}");
+        assert!(line_ends_with(&tsv, "\t007"), "leading-zero integer preserved: {tsv}");
+        // Decimal forms.
+        assert!(line_ends_with(&tsv, "\t-0.5"), "signed decimal: {tsv}");
+        assert!(line_ends_with(&tsv, "\t.5"), "leading-dot decimal: {tsv}");
+        // Doubles require an exponent.
+        assert!(line_ends_with(&tsv, "\t1e10"), "double with exponent: {tsv}");
+        assert!(line_ends_with(&tsv, "\t.5e3"), "leading-dot double: {tsv}");
+        // boolean true.
+        assert!(line_ends_with(&tsv, "\ttrue"), "boolean: {tsv}");
+        // "1"^^xsd:double has no exponent → NOT a valid Turtle DOUBLE token → quoted+typed.
+        assert!(
+            line_ends_with(&tsv, "\t\"1\"^^<http://www.w3.org/2001/XMLSchema#double>"),
+            "double without exponent must stay quoted+typed: {tsv}"
+        );
+        // "NaN"^^xsd:double is a legal XSD double VALUE but not a Turtle DOUBLE token → quoted.
+        assert!(
+            line_ends_with(&tsv, "\t\"NaN\"^^<http://www.w3.org/2001/XMLSchema#double>"),
+            "NaN must stay quoted+typed: {tsv}"
+        );
+    }
+
+    /// Helper: true iff some line of `tsv` ends with `suffix` (TSV rows are LF-terminated).
+    fn line_ends_with(tsv: &str, suffix: &str) -> bool {
+        tsv.lines().any(|l| l.ends_with(suffix))
+    }
+
+    /// Helper: true iff some TAB-separated CELL (in any data row) equals `value` exactly —
+    /// robust for single-column results where the cell is the whole line.
+    fn cell_is(tsv: &str, value: &str) -> bool {
+        tsv.lines().skip(1).flat_map(|l| l.split('\t')).any(|c| c == value)
     }
 }
