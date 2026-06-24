@@ -55,18 +55,28 @@
 //! - **No ANN re-ranking.** This module *projects* an already-identified node into a modality. The
 //!   "structure-aware ANN proposes candidates the exact engine re-validates" loop is the existing
 //!   `filtered-ann` / `vec-predicate` path; P4 is the **projection** half, deliberately decoupled.
-//! - **This module renders quantities AS DECLARED; cross-unit normalisation is wired separately.**
+//! - **Quantities render AS DECLARED by default; opt-in cross-unit reconciliation (sq-t80n4).**
 //!   The typed-value / NL paths recognise the QUDT `qudt:numericValue` + `qudt:unit` shape and
-//!   render the magnitude *as declared* (value + unit label), deliberately **not** converting
-//!   between units (e.g. miles→km) — a grounding object stays faithful to the underlying triple.
-//!   The P2 SHACL/QUDT slice (sq-0wo9e.3) has since landed: [`crate::units::normalise`] now
-//!   converts `(value, unit_iri)` to a canonical SI value + [`crate::units::QuantityKind`] for the
-//!   *encoder* layout. Threading that converter into the grounding *render* path (so a consumer can
-//!   opt into reconciled units, while the default stays as-declared) is the tracked follow-up
-//!   **sq-t80n4** — until then two quantities in different units are rendered in their own units.
+//!   render the magnitude *as declared* (value + unit label) by default — a grounding object stays
+//!   faithful to the underlying triple. [`GroundingConfig::reconcile_units`] (default `false`) opts
+//!   into **cross-unit reconciliation**: each known-unit quantity is converted to the **canonical
+//!   SI unit of its [`crate::units::QuantityKind`]** via the landed P2 table
+//!   ([`crate::units::normalise`], sq-0wo9e.3), so two quantities in **different but commensurable**
+//!   units (e.g. `1 mi` vs `1.609344 km`, or `0 °C` vs `273.15 K`) collapse to the *same* canonical
+//!   unit before grounding / comparison / NL render, instead of reading as distinct.
+//!
+//!   **Conservative on unknown (load-bearing soundness stance).** Reconciliation is applied *only*
+//!   when [`crate::units::normalise`] resolves the unit in the bundled table. If the unit is absent
+//!   — including every **compound / rate** unit such as `unit:KiloM-PER-HR` (km/h), which the
+//!   simple-unit table does **not** carry — the quantity is left rendered in its **own** declared
+//!   unit, never converted with a fabricated factor. Only same-[`crate::units::QuantityKind`] units
+//!   are ever reconciled (a length is never "converted" to a mass): the table establishes
+//!   commensurability or the as-declared fallback holds. No accuracy / embedding claim is made —
+//!   this is a grounding-ergonomics + correctness feature; any downstream payoff is empirical.
 
 use crate::encode::{numeric_value, route, temporal_value, Encoder};
 use crate::store::VectorStore;
+use crate::units::{normalise, QuantityKind, QUDT_UNIT_NS};
 use crate::verbalize::{verbalize, EntityTextConfig};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{self, Id, TermParts};
@@ -143,9 +153,11 @@ pub enum TypedValue {
     Boolean(bool),
     /// A numeric literal's value (any `xsd` numeric subtype), with the datatype IRI it carried.
     Number { value: f64, datatype: String },
-    /// A unit-typed quantity: a magnitude plus the unit IRI it was declared with. **Rendered as
-    /// declared — NOT converted** (cross-unit normalisation via the landed [`crate::units::normalise`]
-    /// is the tracked render-path follow-up sq-t80n4).
+    /// A unit-typed quantity: a magnitude plus the unit IRI it was declared with. **As declared**
+    /// by default; under [`GroundingConfig::reconcile_units`] a *known* unit is reconciled to the
+    /// canonical SI unit of its [`crate::units::QuantityKind`] (so commensurable quantities share a
+    /// unit), while an unknown / compound unit is left as declared (the conservative fallback). Both
+    /// `value` and `unit` reflect whichever was rendered.
     Quantity { value: f64, unit: String },
     /// An enum member — an IRI object rendered by its own label (the closed-world enum slot). The
     /// `member` is the IRI; `label` its rendered name when one was found.
@@ -204,10 +216,21 @@ pub struct GroundingConfig {
     /// [`verbalize`] passage, within the `text.max_chars` budget (design §4.3 "extended to render
     /// unit-normalised quantities and enum labels"). The base verbaliser leaves raw numbers OUT of
     /// the embedded text on purpose; this flag is for an LLM-facing NL grounding where a typed slot
-    /// IS the useful content, distinct from the text that gets embedded. **Quantities are rendered
-    /// as declared, NOT unit-converted** (the landed QUDT normalisation table is wired in via the
-    /// render-path follow-up sq-t80n4). Default `false` (the base passage only).
+    /// IS the useful content, distinct from the text that gets embedded. Quantities honour
+    /// [`GroundingConfig::reconcile_units`] (default as-declared). Default `false` (the base passage
+    /// only).
     pub render_typed_values: bool,
+    /// **Cross-unit reconciliation** for [`TypedValue::Quantity`] (sq-t80n4, consuming the landed P2
+    /// table sq-0wo9e.3). When `true`, every quantity whose unit is **known** to
+    /// [`crate::units::normalise`] is rendered in the **canonical SI unit of its
+    /// [`crate::units::QuantityKind`]** (value converted, `unit` set to that canonical unit's IRI),
+    /// so two quantities in **different but commensurable** units (e.g. `mi` vs `km`, `°C` vs `K`)
+    /// reconcile to the same unit before grounding / comparison / NL render. **Conservative on
+    /// unknown:** an unknown or **compound / rate** unit (e.g. `unit:KiloM-PER-HR`, not in the
+    /// simple-unit table) is left **as declared**, never converted with a fabricated factor; only
+    /// same-`QuantityKind` units are ever reconciled. Default `false` (render every quantity exactly
+    /// as the triple declared it).
+    pub reconcile_units: bool,
     /// For [`Modality::TypedSubVector`], which encoder families to keep. Empty = keep all blocks.
     /// Default empty (keep all).
     pub keep_blocks: Vec<Encoder>,
@@ -220,6 +243,7 @@ impl Default for GroundingConfig {
             max_facts: 64,
             text: EntityTextConfig::default(),
             render_typed_values: false,
+            reconcile_units: false,
             keep_blocks: Vec::new(),
         }
     }
@@ -267,7 +291,7 @@ pub fn ground(
                 .map(|(values, blocks)| Grounding::TypedSubVector { values, blocks })
         }
         Modality::TypedValue => {
-            let vals = typed_values(graph, id);
+            let vals = typed_values(graph, id, cfg.reconcile_units);
             if vals.is_empty() {
                 None
             } else {
@@ -288,7 +312,7 @@ fn nl_string(graph: &Graph, node: &oxrdf::Term, id: Id, cfg: &GroundingConfig) -
     if !cfg.render_typed_values {
         return base;
     }
-    let typed = typed_value_clauses(graph, id);
+    let typed = typed_value_clauses(graph, id, cfg.reconcile_units);
     match (base, typed.is_empty()) {
         (base, true) => base,
         (None, false) => {
@@ -306,10 +330,12 @@ fn nl_string(graph: &Graph, node: &oxrdf::Term, id: Id, cfg: &GroundingConfig) -
 }
 
 /// Render each typed value to a short NL clause: `"colour: Red"`, `"top speed: 300 unit:KiloM-PER-HR"`,
-/// `"electric: true"`. Deterministic order (the [`typed_values`] order). Unit quantities are
-/// rendered AS DECLARED (the unit label is the unit IRI's local name — no cross-unit conversion).
-fn typed_value_clauses(graph: &Graph, id: Id) -> Vec<String> {
-    typed_values(graph, id)
+/// `"electric: true"`. Deterministic order (the [`typed_values`] order). Unit quantities are rendered
+/// as declared unless `reconcile` is set (then a *known* unit is reconciled to its canonical SI unit;
+/// an unknown / compound unit stays as declared) — the unit label is the rendered unit IRI's local
+/// name.
+fn typed_value_clauses(graph: &Graph, id: Id, reconcile: bool) -> Vec<String> {
+    typed_values(graph, id, reconcile)
         .into_iter()
         .map(|v| match v {
             TypedValue::Boolean(b) => b.to_string(),
@@ -511,7 +537,12 @@ fn superclasses_of(graph: &Graph, classes: &[Id]) -> FxHashMap<Id, FxHashSet<Id>
 /// `qudt:numericValue`/`qudt:value` + `qudt:unit` shape on a directly-attached quantity-value
 /// node), and enum members (IRI objects of predicates whose object is an entity). Deterministic
 /// order (predicate IRI, then value). **Exact** — each value is the literal's own value.
-fn typed_values(graph: &Graph, id: Id) -> Vec<TypedValue> {
+///
+/// When `reconcile` is set, each [`TypedValue::Quantity`] whose unit the bundled table knows is
+/// converted to the canonical SI unit of its [`QuantityKind`] (see [`reconcile_quantity`]); an
+/// unknown / compound unit is left as declared (the conservative fallback). The deterministic
+/// ordering key is computed *after* reconciliation, so two commensurable quantities sort identically.
+fn typed_values(graph: &Graph, id: Id, reconcile: bool) -> Vec<TypedValue> {
     let mut out: Vec<(String, TypedValue)> = Vec::new();
     let scan = graph.store.scan(&[Some(id), None, None]);
     for row in scan.rows.iter() {
@@ -521,9 +552,10 @@ fn typed_values(graph: &Graph, id: Id) -> Vec<TypedValue> {
         };
         // A unit-typed quantity: the object is a blank/IRI quantity-value node with a magnitude +
         // a unit. Recognised before the literal path so a QUDT structured value renders as a
-        // Quantity, not as the raw blank node.
+        // Quantity, not as the raw blank node. Reconciled to canonical SI units only when asked AND
+        // the unit is known — otherwise rendered exactly as declared (conservative on unknown).
         if let Some(q) = quantity_value(graph, o) {
-            out.push((pred, q));
+            out.push((pred, if reconcile { reconcile_quantity(q) } else { q }));
             continue;
         }
         match literal_typed_value(graph, o) {
@@ -595,9 +627,9 @@ fn literal_typed_value(graph: &Graph, o: Id) -> Option<TypedValue> {
 
 /// Recognise a directly-attached **QUDT quantity value**: `o` is a blank/IRI node carrying a
 /// magnitude (`qudt:numericValue` or `qudt:value`) and a `qudt:unit`. Returns the
-/// [`TypedValue::Quantity`] **as declared** — the value is not converted between units. The landed
-/// P2 `units::normalise` could canonicalise it; wiring that into this render path is the tracked
-/// follow-up sq-t80n4. `None` when `o` is not such a node.
+/// [`TypedValue::Quantity`] **as declared** — the value is not converted between units here; the
+/// optional cross-unit reconciliation is [`reconcile_quantity`], applied by [`typed_values`] only
+/// under [`GroundingConfig::reconcile_units`]. `None` when `o` is not such a node.
 fn quantity_value(graph: &Graph, o: Id) -> Option<TypedValue> {
     if dict::is_inline(o) {
         return None;
@@ -612,6 +644,41 @@ fn quantity_value(graph: &Graph, o: Id) -> Option<TypedValue> {
         .or_else(|| first_numeric(graph, o, QUDT_VALUE))?;
     let unit = first_iri_object(graph, o, QUDT_UNIT)?;
     Some(TypedValue::Quantity { value, unit })
+}
+
+/// Reconcile a [`TypedValue::Quantity`] to the **canonical SI unit of its [`QuantityKind`]** via the
+/// landed P2 table ([`crate::units::normalise`], sq-0wo9e.3), so two quantities in **different but
+/// commensurable** units (e.g. `1 mi` and `1.609344 km`, both `Length`; or `0 °C` and `273.15 K`,
+/// both `Temperature`) reconcile to the same `(value, unit)` and are no longer read as distinct.
+///
+/// **Soundness — conservative on unknown.** Reconciliation happens *only* when
+/// [`crate::units::normalise`] resolves the declared unit in the bundled table; the result then
+/// carries the canonical SI value and that kind's canonical-unit IRI. If the unit is **absent** —
+/// any unit the curated simple-unit table does not list, **including every compound / rate unit**
+/// such as `unit:KiloM-PER-HR` (km/h) — the input is returned **unchanged** (rendered in its own
+/// declared unit), never converted with a fabricated factor. Because [`crate::units::normalise`]
+/// keys conversion on a single [`QuantityKind`], commensurability is established by the table or the
+/// as-declared fallback holds — a length is never "converted" to a mass. A non-[`TypedValue::Quantity`]
+/// is returned unchanged. This is exposed so a caller can reconcile a quantity it extracted directly
+/// (the same primitive the grounding render path uses under [`GroundingConfig::reconcile_units`]).
+pub fn reconcile_quantity(v: TypedValue) -> TypedValue {
+    let TypedValue::Quantity { value, unit } = &v else {
+        return v;
+    };
+    match normalise(*value, unit) {
+        Some(n) => TypedValue::Quantity {
+            value: n.canonical_value,
+            unit: canonical_unit_iri(n.kind),
+        },
+        // Unknown / compound unit, or a non-finite magnitude — leave exactly as declared.
+        None => v,
+    }
+}
+
+/// The full QUDT IRI of a [`QuantityKind`]'s canonical SI unit (e.g. `Length` → `…/unit/M`), so a
+/// reconciled quantity carries a resolvable unit IRI rather than a bare local name.
+fn canonical_unit_iri(kind: QuantityKind) -> String {
+    format!("{}{}", QUDT_UNIT_NS, kind.canonical_unit())
 }
 
 /// The first numeric object of `(subject, predicate)`, parsed to `f64`, or `None`.
@@ -1111,5 +1178,186 @@ ex:other a ex:Car ;
             "minimal must drop Car superclass: {:?}",
             minimal
         );
+    }
+
+    // ---- sq-t80n4: cross-unit reconciliation (consuming the landed P2 units.rs table) ----------
+
+    // Two entities whose quantities are in DIFFERENT but COMMENSURABLE simple units the bundled
+    // table knows: a length declared in miles vs the same length in kilometres, and a temperature
+    // in °C vs the same point in K. Plus a compound rate unit (km/h) the simple-unit table does NOT
+    // carry, for the conservative-on-unknown negative case.
+    const UNITS_TTL: &str = r#"
+@prefix qudt: <http://qudt.org/schema/qudt/> .
+@prefix unit: <http://qudt.org/vocab/unit/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:   <http://ex/> .
+
+# 1 mile == 1.609344 km (same Length; reconciles to metres).
+ex:a ex:dist ex:a-dist .
+ex:a-dist qudt:numericValue "1"^^xsd:decimal ; qudt:unit unit:MI .
+ex:b ex:dist ex:b-dist .
+ex:b-dist qudt:numericValue "1.609344"^^xsd:decimal ; qudt:unit unit:KiloM .
+
+# 0 °C == 273.15 K (same Temperature, AFFINE; reconciles to kelvin).
+ex:c ex:temp ex:c-temp .
+ex:c-temp qudt:numericValue "0"^^xsd:decimal ; qudt:unit unit:DEG_C .
+ex:d ex:temp ex:d-temp .
+ex:d-temp qudt:numericValue "273.15"^^xsd:decimal ; qudt:unit unit:K .
+
+# A compound rate unit (km/h) the simple-unit table does NOT know — must stay as declared.
+ex:e ex:speed ex:e-speed .
+ex:e-speed qudt:numericValue "300"^^xsd:decimal ; qudt:unit unit:KiloM-PER-HR .
+"#;
+
+    fn units_graph() -> sparq_core::Graph {
+        sparq_core::Graph::load_str(UNITS_TTL, "turtle").unwrap()
+    }
+
+    fn quantity_of(g: &sparq_core::Graph, node: &str, reconcile: bool) -> TypedValue {
+        let id = g.id_of(&iri(node)).unwrap();
+        typed_values(g, id, reconcile)
+            .into_iter()
+            .find(|v| matches!(v, TypedValue::Quantity { .. }))
+            .unwrap_or_else(|| panic!("no quantity on {node}"))
+    }
+
+    // POSITIVE round-trip: two commensurable quantities in DIFFERENT units reconcile to the SAME
+    // canonical unit + value (mi/km → metres) within a tight epsilon; without reconciliation they
+    // stay distinct (the as-declared default). This is the load-bearing correctness invariant.
+    #[test]
+    fn commensurable_length_reconciles_mi_and_km() {
+        let g = units_graph();
+
+        // As declared (reconcile OFF): the two quantities are DISTINCT — different units, raw value.
+        let mi_raw = quantity_of(&g, "http://ex/a", false);
+        let km_raw = quantity_of(&g, "http://ex/b", false);
+        assert!(
+            matches!(&mi_raw, TypedValue::Quantity { value, unit }
+                if *value == 1.0 && unit.ends_with("/MI")),
+            "as-declared mile: {mi_raw:?}"
+        );
+        assert_ne!(mi_raw, km_raw, "different units must read as distinct when not reconciled");
+
+        // Reconciled (reconcile ON): BOTH collapse to the canonical metre with the SAME value.
+        let mi = quantity_of(&g, "http://ex/a", true);
+        let km = quantity_of(&g, "http://ex/b", true);
+        let (TypedValue::Quantity { value: vm, unit: um }, TypedValue::Quantity { value: vk, unit: uk }) =
+            (&mi, &km)
+        else {
+            panic!("expected reconciled quantities: {mi:?} {km:?}");
+        };
+        assert_eq!(um, "http://qudt.org/vocab/unit/M", "reconciled to canonical metre");
+        assert_eq!(uk, "http://qudt.org/vocab/unit/M", "reconciled to canonical metre");
+        assert!((vm - 1_609.344).abs() < 1e-9, "1 mi == 1609.344 m: {vm}");
+        assert!((vm - vk).abs() < 1e-9, "1 mi == 1.609344 km after reconciliation: {vm} vs {vk}");
+        assert_eq!(mi, km, "commensurable quantities reconcile to an identical value");
+    }
+
+    // POSITIVE affine round-trip: °C and K (offset units) reconcile to the same kelvin value.
+    #[test]
+    fn commensurable_temperature_reconciles_celsius_and_kelvin() {
+        let g = units_graph();
+        let c = quantity_of(&g, "http://ex/c", true);
+        let k = quantity_of(&g, "http://ex/d", true);
+        let (TypedValue::Quantity { value: vc, unit: uc }, TypedValue::Quantity { value: vk, unit: uk }) =
+            (&c, &k)
+        else {
+            panic!("expected reconciled temperatures: {c:?} {k:?}");
+        };
+        assert_eq!(uc, "http://qudt.org/vocab/unit/K");
+        assert_eq!(uk, "http://qudt.org/vocab/unit/K");
+        assert!((vc - 273.15).abs() < 1e-9, "0 °C == 273.15 K: {vc}");
+        assert!((vc - vk).abs() < 1e-9, "0 °C == 273.15 K after reconciliation: {vc} vs {vk}");
+        assert_eq!(c, k, "affine-commensurable quantities reconcile to an identical value");
+    }
+
+    // NEGATIVE: a compound / unknown unit (km/h) is left AS DECLARED even with reconcile ON — never
+    // a fabricated conversion. The conservative-on-unknown soundness stance.
+    #[test]
+    fn unknown_compound_unit_is_left_as_declared() {
+        let g = units_graph();
+        let declared = quantity_of(&g, "http://ex/e", false);
+        let reconciled = quantity_of(&g, "http://ex/e", true);
+        assert_eq!(
+            declared, reconciled,
+            "an unknown/compound unit (km/h) must be untouched by reconciliation: {reconciled:?}"
+        );
+        assert!(
+            matches!(&reconciled, TypedValue::Quantity { value, unit }
+                if *value == 300.0 && unit == "http://qudt.org/vocab/unit/KiloM-PER-HR"),
+            "km/h must stay 300 KiloM-PER-HR, never a fabricated conversion: {reconciled:?}"
+        );
+    }
+
+    // The standalone `reconcile_quantity` primitive: same conservative contract, and a non-quantity
+    // passes through unchanged.
+    #[test]
+    fn reconcile_quantity_primitive_is_conservative() {
+        // Known simple unit → canonical SI.
+        let r = reconcile_quantity(TypedValue::Quantity {
+            value: 1.0,
+            unit: "http://qudt.org/vocab/unit/KiloM".into(),
+        });
+        assert!(matches!(r, TypedValue::Quantity { value, unit }
+            if (value - 1000.0).abs() < 1e-9 && unit == "http://qudt.org/vocab/unit/M"));
+        // Bare local name resolves too (units.rs accepts either form).
+        let r2 = reconcile_quantity(TypedValue::Quantity { value: 1.0, unit: "MI".into() });
+        assert!(matches!(r2, TypedValue::Quantity { value, .. } if (value - 1609.344).abs() < 1e-9));
+        // Unknown unit → unchanged (NOT fabricated).
+        let unknown = TypedValue::Quantity {
+            value: 42.0,
+            unit: "http://qudt.org/vocab/unit/NotARealUnit".into(),
+        };
+        assert_eq!(reconcile_quantity(unknown.clone()), unknown);
+        // A non-quantity typed value is returned unchanged.
+        let b = TypedValue::Boolean(true);
+        assert_eq!(reconcile_quantity(b.clone()), b);
+    }
+
+    // Reconciliation flows through the NL render path too: a reconciled quantity's canonical unit +
+    // value appears in the NL string; the as-declared default keeps the original unit.
+    #[test]
+    fn nl_render_honours_reconcile_units() {
+        let g = units_graph();
+        let base = EntityTextConfig {
+            max_chars: 200,
+            ..Default::default()
+        };
+        let cfg_on = GroundingConfig {
+            render_typed_values: true,
+            reconcile_units: true,
+            text: base.clone(),
+            ..Default::default()
+        };
+        let Some(Grounding::NlString(on)) = ground(
+            &g,
+            &iri("http://ex/a"),
+            Modality::NlString,
+            &cfg_on,
+            None,
+            None,
+        ) else {
+            panic!("expected an NL string");
+        };
+        assert!(on.contains("1609.344 M"), "reconciled NL should render canonical metres: {on:?}");
+        assert!(!on.contains(" MI"), "reconciled NL should not keep the declared mile: {on:?}");
+
+        let cfg_off = GroundingConfig {
+            render_typed_values: true,
+            reconcile_units: false,
+            text: base,
+            ..Default::default()
+        };
+        let Some(Grounding::NlString(off)) = ground(
+            &g,
+            &iri("http://ex/a"),
+            Modality::NlString,
+            &cfg_off,
+            None,
+            None,
+        ) else {
+            panic!("expected an NL string");
+        };
+        assert!(off.contains("1 MI"), "as-declared NL keeps the original mile: {off:?}");
     }
 }

@@ -43,13 +43,11 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
 - **Custom aggregates + window functions** *(opt-in `window-functions` feature, OFF by default)* —
   register a named user aggregate (`CustomAggregateRegistry`) callable from a real `GROUP BY`, plus a
   window surface (`ROW_NUMBER`/`RANK`/`DENSE_RANK`, `LAG`/`LEAD`/`NTILE`, windowed
-  `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, with `PARTITION BY` + `ORDER BY` and an optional `ROWS`/`RANGE`
-  frame) two ways: programmatic (`window::apply_window`) and inline `OVER(…)` syntax (`query_over`, +
-  a reusable `WINDOW w AS (…)` clause). **NON-STANDARD extension** — SPARQL has no W3C-REC `OVER`. The
-  inline form is a *source rewrite* recognised ONLY on `query_over` (the vendored parser is untouched),
-  so the standard `query`/`ask`/… surface stays exactly SPARQL 1.1; `DISTINCT`/computed function args,
-  numeric `RANGE` offsets, and computed `PARTITION BY` are inline-deferred (use the programmatic API).
-  Off, zero code compiles, the default build is byte-identical (no new deps).
+  `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, `PARTITION BY` + `ORDER BY`, optional `ROWS`/`RANGE` frame), both
+  programmatic (`window::apply_window`) and via inline `OVER(…)` syntax (`query_over` + reusable
+  `WINDOW w AS (…)`). **NON-STANDARD extension** (SPARQL has no W3C-REC `OVER`): the inline form is a
+  *source rewrite* recognised ONLY on `query_over`, so the standard `query`/`ask`/… surface stays
+  exactly SPARQL 1.1 (see the rustdoc for the inline-deferred cases). Off, build byte-identical, no new deps.
 - **Parameterized prepared queries** *(opt-in `params` feature, OFF by default)* — the canonical
   mitigation for SPARQL injection (#901). `PreparedQuery::bind(name, oxrdf::Term)` and
   `PreparedUpdate::bind` substitute a typed value into a free placeholder variable via a pure
@@ -82,18 +80,14 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   BINARIES enable it via their default-on `jsonld` feature, [OPUS-4.8] sq-oy1f.4)* — write a `Graph` (or
   `&[oxrdf::Triple]`) back out as Turtle / TriG / N-Quads / JSON-LD 1.1
   (`serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads, graph_to_jsonld, …}`; the `*_with`
-  variants + `prefixes_from_pairs([(prefix, iri), …])` accept a caller's own prefix policy). Plus
-  deterministic **pretty** (indented) variants for Turtle / TriG / JSON-LD (`graph_to_turtle_pretty`
-  / `graph_to_trig_pretty` / `graph_to_jsonld_pretty`, or `write_turtle_pretty` with
-  `PrettyOptions { indent, abbreviate }`): subject grouping, p-o/object lists, `a` for `rdf:type`,
-  used-only `@prefix`, *emission-order-independent* (sorted) — round-trip-correct. For true **W3C
-  JSON-LD 1.1 Compaction** against a caller `@context`, `graph_to_jsonld_compact(&g, &ctx)` /
-  `write_jsonld_compact` (+ `_pretty` variants) apply the full algorithm (term definitions, `@vocab`,
-  `@container` coercion, `@reverse`, value/node/IRI compaction), plus **JSON-LD 1.1 Framing**
-  (`graph_to_jsonld_framed`) — hand-rolled, dependency-free, **pyld-faithful** (differentially
-  verified; see the `serialize::compact` rustdoc). The N-Triples writer (`triples_to_ntriples`) is
-  always on; off, zero serializer code compiles, **no new dependencies**. See
-  [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
+  variants + `prefixes_from_pairs` accept a caller's prefix policy), plus deterministic **pretty**
+  (indented, sorted, round-trip-correct) variants and true **W3C JSON-LD 1.1 Compaction**
+  (`graph_to_jsonld_compact`) and **Framing** (`graph_to_jsonld_framed`) — hand-rolled,
+  dependency-free, **pyld-faithful** (differentially verified; see the `serialize::compact` rustdoc).
+  The N-Triples writer (`triples_to_ntriples`) is always on; off, zero serializer code compiles, **no
+  new dependencies**. The opt-in `streaming-serialization` feature (implies `serialize-rdf`) adds
+  `write_turtle_streaming`/`write_trig_streaming` (+ `graph_to_*_streaming`) — render Turtle/TriG into a
+  `std::io::Write` one subject-block at a time, **byte-identical** to the buffered writer (chunked CONSTRUCT). See [`skills/data-formats/SKILL.md`](../../skills/data-formats/SKILL.md) recipe 6.
 - **Oxigraph-shaped per-solution accessor** *(opt-in `query-solution` feature, OFF by default)* —
   `QueryResult::solutions()` yields borrowed, zero-copy `QuerySolution` views (one per row) matching
   Oxigraph's `QuerySolution` API — `get` by name / `VariableRef` / position, `iter` over the bound
@@ -103,6 +97,12 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   [`skills/sparql-query/SKILL.md`](../../skills/sparql-query/SKILL.md).
 - **Structured EXPLAIN** *(opt-in `explain-json` feature, OFF by default)* — `explain_plan` /
   `explain_plan_analyze` → a typed `PlanNode` tree (BGP `estimated`, `actual`/`nanos`, per-operator **q-error**) + `to_json()` + a bounded `SlowQueryRing`; off, build byte-identical.
+- **Exact-bitmap semi-join reducer** *(opt-in `semijoin-bitmap` feature, OFF by default)* — a binary
+  BGP join prefilters the next scan by a membership filter (`KeyFilter`: a flat bitmap over the dense
+  `u32` ids, or an exact hash set when sparse+huge) built over the other side's join keys, dropping
+  rows that cannot match **before** they enter the join. The filter is membership-EXACT, so the RESULT
+  is **identical** to the feature-off path — only fewer rows are scanned (proven by the on-vs-off
+  differential). Off, zero code compiles, the default build is byte-identical, no new deps.
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more

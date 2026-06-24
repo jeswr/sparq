@@ -258,6 +258,9 @@ name = "arrow-schema"
 version = "55.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af7686986a3bf2254c9fb130c623cdcb2f8e1f15763e7c71c310f0834da3d292"
+dependencies = [
+ "bitflags",
+]
 
 [[package]]
 name = "ash"
@@ -3639,6 +3642,7 @@ dependencies = [
  "memmap2",
  "oxjsonld",
  "oxrdf 0.3.3",
+ "oxrdfxml",
  "oxttl 0.2.3",
  "rayon",
  "rustc-hash 2.1.2",
@@ -3782,6 +3786,7 @@ dependencies = [
  "sparq-core",
  "sparq-engine",
  "sparq-introspect",
+ "sparq-nlq",
 ]
 
 [[package]]
@@ -3845,10 +3850,13 @@ dependencies = [
 name = "sparq-py"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-schema",
  "oxrdf 0.3.3",
  "pyo3",
  "pyo3-build-config",
  "spargebra",
+ "sparq-arrow",
  "sparq-core",
  "sparq-engine",
  "sparq-reason",
@@ -3918,6 +3926,7 @@ name = "sparq-serve"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "oxrdf 0.3.3",
  "rustc-hash 2.1.2",
  "spargebra",
  "sparq-core",

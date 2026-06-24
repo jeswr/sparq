@@ -1479,7 +1479,16 @@ fn try_capped(graph: &Graph, inner: &GraphPattern, cap: usize) -> Result<Option<
             }
             let filt = pat_filters[0];
             let sort_col = filt.map(|(c, _)| c);
-            Ok(Some(scan_to_bindings(graph, &id_pat, &pos_vars, sort_col, filt, Some(cap))))
+            Ok(Some(scan_to_bindings(
+                graph,
+                &id_pat,
+                &pos_vars,
+                sort_col,
+                filt,
+                Some(cap),
+                #[cfg(feature = "semijoin-bitmap")]
+                None,
+            )))
         }
         _ => Ok(None),
     }
@@ -4011,7 +4020,18 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     let seed = goo_seed(&prepared);
     let seed_sort_col = goo_seed_sort(&prepared, seed, pfilter(seed).map(|(c, _)| c));
 
-    let mut result = scan_to_bindings(graph, &prepared[seed].id_pat, &prepared[seed].pos_vars, seed_sort_col, pfilter(seed), None);
+    let mut result = scan_to_bindings(
+        graph,
+        &prepared[seed].id_pat,
+        &prepared[seed].pos_vars,
+        seed_sort_col,
+        pfilter(seed),
+        None,
+        // The seed is the FIRST scan — there is no materialised side to build a
+        // semi-join prefilter from yet.
+        #[cfg(feature = "semijoin-bitmap")]
+        None,
+    );
     let mut done = vec![false; prepared.len()];
     done[seed] = true;
     cs_ctx.note_done(seed);
@@ -4056,7 +4076,38 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
         let filt = pfilter(i);
         let merge_var = result.sorted_by.clone().filter(|sv| var_pos(i, sv).is_some());
         let scan_sort = filt.map(|(c, _)| c).or_else(|| merge_var.as_ref().map(|jv| var_pos(i, jv).unwrap()));
-        let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, scan_sort, filt, None);
+
+        // [OPUS-4.8] (sq-gr8mb / §A3) Semi-join prefilter: build a membership filter over
+        // ONE connecting variable's ids from the already-materialised `result`, and pass
+        // it to the scan so rows that cannot survive the join are dropped before they are
+        // built/joined. A row survives the downstream join only if it matches on EVERY
+        // shared variable, so filtering on one of them removes only rows that would fail
+        // anyway — the result is identical, just fewer rows scanned. Built only when a
+        // single-column membership test is well-defined: a connecting variable that does
+        // not repeat in the pattern (a repeat is handled by `build_row`'s consistency
+        // check; the prefilter checks the variable's first canonical position).
+        #[cfg(feature = "semijoin-bitmap")]
+        let prefilter_keys = result
+            .vars
+            .iter()
+            .find_map(|v| var_pos(i, v).map(|pos| (v.clone(), pos)))
+            .and_then(|(v, pos)| {
+                let rk = result.col(&v)?;
+                crate::semijoin::KeyFilter::build(result.rows.iter().map(|r| r[rk])).map(|kf| (pos, kf))
+            });
+        #[cfg(feature = "semijoin-bitmap")]
+        let prefilter = prefilter_keys.as_ref().map(|(pos, kf)| (*pos, kf));
+
+        let rhs = scan_to_bindings(
+            graph,
+            &prepared[i].id_pat,
+            &prepared[i].pos_vars,
+            scan_sort,
+            filt,
+            None,
+            #[cfg(feature = "semijoin-bitmap")]
+            prefilter,
+        );
         let connected = prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v));
         // Merge only when both sides are sorted on the join variable (a filter may
         // have forced the scan into a different order).
@@ -4797,7 +4848,22 @@ fn prepare_pattern(graph: &Graph, tp: &TriplePattern) -> Result<(IdPattern, [Opt
     Ok((id_pat, pos_vars, unsat))
 }
 
-fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variable>; 3], sort_col: Option<usize>, filter: Option<(usize, ScanCmp)>, limit: Option<usize>) -> Bindings {
+fn scan_to_bindings(
+    graph: &Graph,
+    id_pat: &IdPattern,
+    pos_vars: &[Option<Variable>; 3],
+    sort_col: Option<usize>,
+    filter: Option<(usize, ScanCmp)>,
+    limit: Option<usize>,
+    // [OPUS-4.8] (sq-gr8mb / §A3) Optional semi-join prefilter: `(canonical position of
+    // the connecting variable, membership filter over the other side's join keys)`. A
+    // scanned row whose key at that position is ABSENT from the filter cannot match the
+    // downstream join, so it is dropped before projection. The filter is membership-exact
+    // (no false positives), so this never changes the RESULT — only fewer rows are kept.
+    // Only present under the opt-in `semijoin-bitmap` feature, so the default build's
+    // signature and per-row path are byte-identical.
+    #[cfg(feature = "semijoin-bitmap")] prefilter: Option<(usize, &crate::semijoin::KeyFilter)>,
+) -> Bindings {
     let mut vars: Vec<Variable> = Vec::new();
     let mut var_positions: Vec<Vec<usize>> = Vec::new();
     for (pos, v) in pos_vars.iter().enumerate() {
@@ -4842,10 +4908,21 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
         }
     }
 
-    // Per-row builder: apply the pushed-down filter, then project (with the
-    // repeated-variable consistency check); `None` drops the row.
+    // Per-row builder: apply the semi-join prefilter (if any) and the pushed-down
+    // filter, then project (with the repeated-variable consistency check); `None`
+    // drops the row.
     let build_row = |row: &[Id; 3]| -> Option<Row> {
         let spo = scan.to_spo(row);
+        // [OPUS-4.8] (sq-gr8mb / §A3) Semi-join prefilter: drop a row whose connecting-
+        // variable id is absent from the other side's join-key set — it cannot survive the
+        // downstream join. EXACT membership, so the result is unchanged (only this wasted
+        // row is skipped before projection). Checked first: it is the cheapest reject.
+        #[cfg(feature = "semijoin-bitmap")]
+        if let Some((jpos, kf)) = prefilter {
+            if !kf.contains(spo[jpos]) {
+                return None;
+            }
+        }
         if let Some((fpos, cmp)) = filter {
             if !cmp.test_id(graph, spo[fpos]) {
                 return None;

@@ -66,6 +66,16 @@
 //! tracking to match EYE) and `math:greaterThanOrEqual`-style names that are
 //! not in the SWAP/EYE vocabulary.
 //!
+//! POLICY — import cycles: N3 is Turing-complete, so a `log:semantics` document
+//! whose closure re-imports a document active up the resolution stack — directly
+//! (A→A), indirectly (A→B→A), or via a re-used node in a diamond — would drive
+//! the closure recursion forever under a LIVE resolver. The engine tracks the
+//! formulae whose closure is in progress and, on re-entering one already in
+//! progress, returns it UNCLOSED rather than recursing — cwm's "a document
+//! already being loaded is not re-loaded" behaviour — so reasoning always
+//! TERMINATES. A diamond that re-uses a shared document across SIBLING branches
+//! is NOT a cycle and still resolves on every branch.
+//!
 //! Next increments: `log:collectAllIn` (scoped aggregation), full
 //! `log:conclusion` parity on deep multi-document closures (cwm_includes
 //! conclusion.n3 is the one remaining honest reasoner-suite fail).
@@ -154,20 +164,51 @@ const BW_DEPTH: usize = 64;
 /// unless the caller supplies one of these.
 pub type Resolver = dyn Fn(&str) -> Option<String>;
 
+/// Keys of the quoted formulae whose closure is currently in progress up the call stack —
+/// the import-cycle guard. `log:semantics` parses a resolved document into a quoted formula
+/// which `log:supports` / `log:conclusion` then close (`formula_closure` → a NESTED
+/// [`run_closure`]). Since N3 is Turing-complete, a document that imports itself (A→A),
+/// imports a document that imports it (A→B→A), or is re-used across a diamond can otherwise
+/// drive that `formula_closure` recursion forever with a LIVE resolver. We mark a formula's
+/// content key on entry to its closure and remove it on exit (depth-first), so re-entering
+/// the SAME closure that is already in progress is detected and broken, while sibling re-use
+/// across a diamond (the marks are already popped) still succeeds. Shared (`Rc`) so the SAME
+/// set is threaded into every nested closure of one top-level run, not reset per level.
+/// Keying on formula CONTENT (not the document IRI) means the guard needs no extra plumbing
+/// through the lazy `log:semantics` → `log:supports` evaluation hand-off, and is exact for
+/// the recursion that actually loops (a formula closing itself, transitively).
+type VisitedDocs = std::rc::Rc<std::cell::RefCell<FxHashSet<u64>>>;
+
+/// A stable structural key for a quoted formula, used by the import-cycle guard
+/// ([`VisitedDocs`]) to recognise a closure that is already in progress up the stack.
+fn formula_key(ts: &[[Term; 3]]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    ts.hash(&mut h);
+    h.finish()
+}
+
 /// Goal-directed context: the document's backward (`<=`) rules plus a counter for renaming
 /// rule variables apart (standardizing apart, so nested applications of the same rule do not
-/// capture each other's bindings); also carries the document base and the
-/// optional [`Resolver`] for the document-access builtins.
+/// capture each other's bindings); also carries the document base, the optional [`Resolver`]
+/// for the document-access builtins, and the import-cycle guard ([`VisitedDocs`]).
 struct BwCtx<'a> {
     rules: &'a [Rule],
     rename: std::cell::Cell<usize>,
     base: String,
     resolver: Option<&'a Resolver>,
+    visited: VisitedDocs,
 }
 
 impl<'a> BwCtx<'a> {
     fn new(rules: &'a [Rule]) -> BwCtx<'a> {
-        BwCtx { rules, rename: std::cell::Cell::new(0), base: String::new(), resolver: None }
+        BwCtx {
+            rules,
+            rename: std::cell::Cell::new(0),
+            base: String::new(),
+            resolver: None,
+            visited: VisitedDocs::default(),
+        }
     }
 }
 
@@ -186,7 +227,7 @@ pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
     // No derivation tracking ([`StepMode::None`]): skips per-firing premise materialization
     // in the hot loop and the proof-step interning pass entirely.
     let parsed = parser::parse(src)?;
-    let (facts, steps) = run_closure(parsed, None, StepMode::None);
+    let (facts, steps) = run_closure(parsed, None, None, StepMode::None);
     Ok(intern_closure(dict, &facts, &steps)?.0)
 }
 
@@ -194,7 +235,7 @@ pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
 /// triple, in derivation order) — the EYE `--proof` analogue.
 pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
     let parsed = parser::parse(src)?;
-    let (facts, steps) = run_closure(parsed, None, StepMode::Full);
+    let (facts, steps) = run_closure(parsed, None, None, StepMode::Full);
     intern_closure(dict, &facts, &steps)
 }
 
@@ -206,7 +247,7 @@ pub(crate) fn reason_n3_terms_proof(
     src: &str,
 ) -> Result<(FxHashSet<[Term; 3]>, Vec<DerivationStep>), String> {
     let parsed = parser::parse(src)?;
-    let (facts, steps) = run_closure(parsed, None, StepMode::Full);
+    let (facts, steps) = run_closure(parsed, None, None, StepMode::Full);
     Ok((facts.all, steps))
 }
 
@@ -246,7 +287,7 @@ pub fn reason_n3_terms_with_resolver(
     };
     let (n_rules, n_backward_rules) = (parsed.rules.len(), parsed.backward_rules.len());
     // `derived` needs the conclusions in derivation order but never the premises.
-    let (facts, steps) = run_closure(parsed, resolver, StepMode::Conclusions);
+    let (facts, steps) = run_closure(parsed, resolver, None, StepMode::Conclusions);
     Ok(N3Closure {
         facts: facts.all.into_iter().collect(),
         derived: steps.into_iter().map(|(g, _, _)| g).collect(),
@@ -277,6 +318,10 @@ enum StepMode {
 fn run_closure(
     parsed: parser::Parsed,
     resolver: Option<&Resolver>,
+    // The import-cycle guard ([`VisitedDocs`]). `None` for a TOP-LEVEL run (a fresh,
+    // empty set); a nested run reached through `formula_closure` passes the PARENT's set so
+    // a `log:semantics` / `log:content` document IRI active up the stack is still recognised.
+    visited: Option<VisitedDocs>,
     mode: StepMode,
 ) -> (FactIndex, Vec<DerivationStep>) {
     let parser::Parsed { facts: facts0, mut rules, mut backward_rules, base } = parsed;
@@ -291,6 +336,9 @@ fn run_closure(
     let mut bw = BwCtx::new(&backward_rules);
     bw.base = base;
     bw.resolver = resolver;
+    if let Some(v) = visited {
+        bw.visited = v;
+    }
     // Derivation steps at the term level (interned to ids once at the end).
     let mut steps: Vec<DerivationStep> = Vec::new();
 
@@ -1540,6 +1588,17 @@ fn reencode_statements(parsed: parser::Parsed) -> Vec<[Term; 3]> {
 /// (log:supports / log:conclusion): the original triples plus everything a
 /// fixpoint run over them derives.
 fn formula_closure(ts: &[[Term; 3]], bw: &BwCtx) -> Vec<[Term; 3]> {
+    // Import-cycle guard ([`VisitedDocs`]). If this exact formula's closure is already in
+    // progress up the stack, re-closing it would recurse forever (the A→A / A→B→A / diamond
+    // re-import non-termination path through a LIVE `log:semantics` resolver). Break the cycle
+    // by returning the statements UNCLOSED — their own facts are preserved, no derivation is
+    // lost that a finite closure would have added, and reasoning terminates. (No resolver, no
+    // cycle: with `bw.resolver` `None` the set stays empty and this is a no-op.)
+    let key = formula_key(ts);
+    if !bw.visited.borrow_mut().insert(key) {
+        return ts.to_vec();
+    }
+
     let mut facts: Vec<[Term; 3]> = Vec::new();
     let mut rules: Vec<Rule> = Vec::new();
     let mut backward: Vec<Rule> = Vec::new();
@@ -1556,7 +1615,11 @@ fn formula_closure(ts: &[[Term; 3]], bw: &BwCtx) -> Vec<[Term; 3]> {
     }
     let parsed =
         parser::Parsed { facts, rules, backward_rules: backward, base: bw.base.clone() };
-    let (closed, _steps) = run_closure(parsed, bw.resolver, StepMode::None);
+    // Inherit the parent's import-cycle guard ([`VisitedDocs`]) so a `log:semantics` /
+    // `log:content` document active up the stack is still recognised when its own closure
+    // re-imports it through this nested run.
+    let (closed, _steps) =
+        run_closure(parsed, bw.resolver, Some(bw.visited.clone()), StepMode::None);
     // Original statements (including the rule statements, which cwm keeps in
     // log:conclusion output) plus the derivations.
     let mut seen: FxHashSet<[Term; 3]> = ts.iter().cloned().collect();
@@ -1566,6 +1629,7 @@ fn formula_closure(ts: &[[Term; 3]], bw: &BwCtx) -> Vec<[Term; 3]> {
             result.push(f);
         }
     }
+    bw.visited.borrow_mut().remove(&key);
     result
 }
 
@@ -2176,6 +2240,11 @@ fn eval_functional(
                 if matches!(f, Func::Content) {
                     Term::Lit(text, XSD_STRING.into(), None)
                 } else {
+                    // cwm-faithful: `log:semantics` returns the document's PARSED statements
+                    // (rules re-encoded as `=>` triples), NOT their closure — the closure is
+                    // taken later by `log:supports` / `log:conclusion`, which is where the
+                    // import-cycle guard ([`VisitedDocs`]) applies. Resolution itself does no
+                    // recursion, so no marking is needed here.
                     let parsed = parser::parse_with_base(&text, doc).ok()?;
                     Term::Formula(reencode_statements(parsed))
                 }

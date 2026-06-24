@@ -62,9 +62,10 @@ literal. `term_schema(&vars)` builds the schema without materialising rows.
   exploded into nested struct fields.
 - This is a **projection for transport**, not a canonical RDF serialisation: the Arrow
   batch is not itself an RDF document (round-tripping from the five fields is trivial).
-- **Python binding is a follow-up.** Issue #910 frames a `sparq-py` `Graph.query_arrow()
-  -> pyarrow.Table`; this PR ships the Rust side. The PyO3 binding is tracked separately
-  in bead `sq-lt1ml`. No performance numbers are claimed here.
+- **Python binding.** Issue #910 frames a `sparq-py` `Graph.query_arrow() ->
+  pyarrow.Table` over this export; that PyO3 binding lives in the opt-in `arrow` feature
+  of `sparq-py` (bead `sq-lt1ml`) — it reuses `to_record_batch` here and bridges the
+  batch to pyarrow through the Arrow C Data Interface. No performance numbers are claimed.
 
 ## License
 

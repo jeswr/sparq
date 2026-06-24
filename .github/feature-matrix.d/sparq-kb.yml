@@ -79,3 +79,18 @@
   crate: "sparq-kb"
   features: "close"
   test: true
+
+# [OPUS-4.8] sq-2489d.5: the GenAI-KB Phase-5 `literature` ingestion scaffolding
+# (PR #1187). `literature` is an INDEPENDENT opt-in (Cargo.toml: `literature =
+# ["dep:serde_json"]`) — it does NOT imply `validate`, so it is NOT covered by the
+# `validate`/`query`/`close` legs above. tests/literature_pipeline.rs is gated on BOTH
+# features: it drives the fixtures pipeline under `literature` AND runs the SHACL gate
+# over the emitted PROV-O TTL under `validate`, so the leg combines them as
+# `literature,validate`. The scaffolding makes ZERO network / ZERO live-model calls
+# (fixtures only; the live pilot is the credential-gated Phase-6 bead sq-t5f3l), so the
+# leg is cheap — it pulls only serde_json (already built) plus the `validate` deps
+# (sparq-core + sparq-shacl + oxttl/oxrdf, already compiled by the validate leg).
+- name: "sparq-kb (literature + validate — fixtures pipeline + SHACL gate)"
+  crate: "sparq-kb"
+  features: "literature,validate"
+  test: true

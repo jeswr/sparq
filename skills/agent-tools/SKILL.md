@@ -21,7 +21,9 @@ heavy MCP-SDK dependency.
 | `query` | `sparq_engine::query_json` (SELECT/ASK) | SPARQL 1.1 Query Results JSON |
 | `construct` | `sparq_engine::construct_ntriples` (CONSTRUCT/DESCRIBE) | N-Triples text |
 | `introspect` | `sparq_introspect::Introspection` | effective schema — JSON or token-budgeted text |
+| `shapes` | `sparq_introspect::Introspection` (per-class) | data-grounded SHACL-style shape for one class IRI |
 | `stats` | graph count + introspection totals | small JSON object |
+| `ask` *(feature `nlq`, OFF by default)* | `sparq_nlq` NL→SPARQL loop | executed SPARQL + real result rows (+ citations) |
 | `update` *(gated, OFF by default)* | `sparq_engine::update_in_place_atomic` | new triple count |
 
 Every tool ships a proper MCP `inputSchema` (JSON-Schema). `tools/list` returns
@@ -29,6 +31,33 @@ Every tool ships a proper MCP `inputSchema` (JSON-Schema). `tools/list` returns
 `CallToolResult` shape (`content` text item + `isError`); a bad SPARQL string is an MCP
 **tool error** (`isError: true`), not a JSON-RPC protocol error, so the agent can read it
 and retry.
+
+### Two grounding tools (2026-06-23 design call — `shapes` + `ask`)
+
+Two complementary ways to turn a natural-language question into a SPARQL answer, chosen
+**both, opt-in** on the 2026-06-23 call:
+
+- **`shapes`** (structured, **no LLM**, default build) — give it a **class IRI** and it
+  returns the predicates instances of that class actually use, each with coverage,
+  observed datatypes / object-kind (IRI vs literal), observed range, and the
+  cardinalities the data proves (`min_count`/`max_count` emitted **only** when the data
+  establishes the bound). The **client's own** LLM grounds NL→SPARQL on this. Reuses the
+  introspection miner; describes the **effective** schema (what the graph asserts), not an
+  aspirational contract.
+- **`ask`** (NL, **opt-in `nlq` feature**) — runs the whole NL→SPARQL→validate→execute
+  loop **server-side** via `sparq-nlq` and returns the **executed SPARQL** + the **real
+  result rows** (+ in-graph citations). It embeds a **configurable** LLM call: cost and
+  quality depend on the model **you** configure — `ANTHROPIC_API_KEY`, or an
+  OpenAI-compatible `SPARQ_NLQ_ENDPOINT_URL` + `SPARQ_NLQ_ENDPOINT_MODEL` (+ optional
+  `_KEY`). **No model is bundled**, nothing phones home. With the feature ON but **no**
+  backend configured, `ask` is unadvertised and a direct call returns a clear *"not
+  configured"* error — **never** a fabricated answer, never a panic. The answer is the
+  query's real rows, not a free-form paragraph.
+
+These are **ergonomics / grounding aids pending measurement** — *not* a token-saving
+claim (the project measured representation/token tricks as duds). `shapes` is the lean
+no-model default; `ask` trades a model call for not writing SPARQL yourself. The two
+overlap deliberately (`shapes` puts the model on the client; `ask` on the server).
 
 ## Use it
 

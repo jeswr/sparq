@@ -205,3 +205,74 @@ impl Llm for EndpointLlm {
         Ok(text)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `EndpointConfig` builder chain sets each field and leaves the others at their
+    /// defaults — the config invariant the loopback-stub integration tests assume but never
+    /// assert on `with_max_tokens` / `with_timeout`. [OPUS-4.8]
+    #[test]
+    fn config_builder_chain_sets_each_field() {
+        let cfg = EndpointConfig::new("http://h/v1", "m")
+            .with_api_key("sk-xyz")
+            .with_max_tokens(64)
+            .with_timeout(std::time::Duration::from_secs(7));
+        assert_eq!(cfg.base_url, "http://h/v1");
+        assert_eq!(cfg.model, "m");
+        assert_eq!(cfg.api_key.as_deref(), Some("sk-xyz"));
+        assert_eq!(cfg.max_tokens, 64);
+        assert_eq!(cfg.timeout, std::time::Duration::from_secs(7));
+
+        // A bare `new` leaves the documented defaults in place.
+        let bare = EndpointConfig::new("http://h", "m");
+        assert!(bare.api_key.is_none());
+        assert_eq!(bare.max_tokens, DEFAULT_MAX_TOKENS);
+        assert_eq!(bare.timeout, DEFAULT_TIMEOUT);
+    }
+
+    /// The request URL is `{base_url}/chat/completions` with at most one separating slash —
+    /// a trailing slash on the base is trimmed (no doubled `//chat`), an absent one is
+    /// added. Guards the `trim_end_matches('/')` join. [OPUS-4.8]
+    #[test]
+    fn request_url_join_normalises_trailing_slash() {
+        let no_slash = EndpointLlm::new(EndpointConfig::new("http://h/v1", "m")).unwrap();
+        assert_eq!(no_slash.request_url, "http://h/v1/chat/completions");
+        assert_eq!(no_slash.model(), "m");
+
+        let with_slash = EndpointLlm::new(EndpointConfig::new("http://h/v1/", "m")).unwrap();
+        assert_eq!(with_slash.request_url, "http://h/v1/chat/completions");
+
+        // Multiple trailing slashes are all trimmed (trim_end_matches strips the run).
+        let many = EndpointLlm::new(EndpointConfig::new("http://h/v1///", "m")).unwrap();
+        assert_eq!(many.request_url, "http://h/v1/chat/completions");
+    }
+
+    /// `non_empty_env` distinguishes "unset" and "empty" from a real value, mapping both
+    /// failure modes to the same actionable error naming the variable. Uses a unique
+    /// variable name so it does not race the integration-suite env tests. [OPUS-4.8]
+    #[test]
+    fn non_empty_env_rejects_unset_and_empty() {
+        // Serialize every env-mutating test in this binary against ONE process-wide lock:
+        // `set_var` / `remove_var` are NOT thread-safe (they mutate process-global state
+        // and race any concurrent `getenv`/`setenv` from another thread — UB even though
+        // the probe key below is unique to this test), and cargo runs this binary's unit
+        // tests on a thread pool. Mirrors the `ENV_LOCK` guard in `tests/endpoint_stub.rs`.
+        // [OPUS-4.8]
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        const VAR: &str = "SPARQ_NLQ_TEST_NON_EMPTY_ENV_PROBE";
+        std::env::remove_var(VAR);
+        let err = non_empty_env(VAR).unwrap_err();
+        assert!(err.contains(VAR), "error names the variable: {err}");
+
+        std::env::set_var(VAR, "");
+        assert!(non_empty_env(VAR).is_err(), "empty value is rejected");
+
+        std::env::set_var(VAR, "value");
+        assert_eq!(non_empty_env(VAR).unwrap(), "value");
+        std::env::remove_var(VAR);
+    }
+}

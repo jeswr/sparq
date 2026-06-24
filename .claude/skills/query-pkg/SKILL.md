@@ -310,6 +310,30 @@ round-trip** against the prior hand-authored tier
 parser + resolver are self-tested by `scripts/tests/test_yamlld_compile.py`). See
 `research/fo-llm-bridge.md` §3.4 / §6 Phase 4.
 
+## Literature-ingestion scaffolding — fixtures only (`literature` feature, `sq-2489d.5`)
+
+[OPUS-4.8] The **scaffolding** for the scaled, provenance-stamped literature-trawling tier
+(GenAI-KB Phase 5, design `research/provenance-driven-genai-kb.md` §4/§5) lives behind the
+default-OFF `literature` feature in `crates/sparq-kb/src/literature/`. It exercises the
+`[connector] → [normalise] → [extract (record/replay)] → [ground] → [emit TTL] →
+[SHACL gate] → [sidecar]` pipeline over **committed fixtures** and makes **ZERO network and
+ZERO live-model calls** — the only LLM-in-the-loop step (extraction) is isolated behind the
+`Extractor` **record/replay trait**, and the shipped adapter (`RecordedExtractor`) replays
+a frozen tape. The live pilot (a real cheap-model batch over OpenAlex/S2) is the separate,
+credential-gated **Phase-6** bead (`needs-access`).
+
+Load-bearing honesty invariants the scaffolding enforces: the **deterministic
+grounding-resolver** (`literature::ground`) requires every committed Finding's
+justification to be an entailed span of the source abstract AND every cited DOI to resolve
+to an in-batch `pkg:Source` — failures are **quarantined to the sidecar, never silently
+dropped** (`literature::pipeline::Sidecar`). Every emitted Finding sits on the low-trust
+machine tier (`prov:wasAttributedTo` a `pkg:MachineAgent`, capped at `secx:Conjectured`
+with a bounded confidence) enforced declaratively by `shapes/literature.shapes.ttl`. The
+Phase-5 metric (the **citation-grounding rate**) is *computed at run time* from the fixture
+batch — no hard-coded number. NOT appended to `pkg-instances.ttl`: bulk ingestion is gated
+on the Phase-6 per-topic recommend-adopt verdict. Run:
+`cargo test -p sparq-kb --features literature,validate --test literature_pipeline`.
+
 ## When NOT to use this
 
 - The fact is **not in the head slice** (PKG is a Phase-1 subset) → an empty/partial
@@ -340,3 +364,8 @@ parser + resolver are self-tested by `scripts/tests/test_yamlld_compile.py`). Se
   `crates/sparq-kb/ingest/agents-findings.yaml.ld`, deterministic compiler
   `crates/sparq-kb/ingest/yamlld_compile.py`, gates
   `crates/sparq-kb/tests/yamlld_write_path.rs` + `scripts/tests/test_yamlld_compile.py`.
+- Literature-ingestion scaffolding (`literature` feature, `sq-2489d.5`):
+  `crates/sparq-kb/src/literature/` (`connector` / `extract` / `ground` / `pipeline`),
+  shapes `crates/sparq-kb/shapes/literature.shapes.ttl`, fixtures
+  `crates/sparq-kb/fixtures/literature/`, gate
+  `crates/sparq-kb/tests/literature_pipeline.rs`.

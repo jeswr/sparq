@@ -155,3 +155,44 @@
   crate: "sparq-engine"
   features: "explain-json"
   test: true
+
+# [OPUS-4.8] sq-gr8mb (survey §A3): exact-bitmap semi-join reducer on dense u32 ids.
+# The `semijoin` module (`src/semijoin.rs`, `pub(crate) mod semijoin` in lib.rs — the
+# `KeyFilter` membership filter) + its 6 in-src unit tests (`semijoin::tests::*`) AND the
+# `scan_to_bindings` prefilter parameter + its construction in `eval_bgp_binary` are ALL
+# `#[cfg(feature = "semijoin-bitmap")]`, so the default build (and ci.yml's `--workspace
+# --all-targets` archive, which passes NO `--features`) compiled them EMPTY. The
+# end-to-end equivalence suite `tests/semijoin_differential.rs` is INTENTIONALLY NOT
+# feature-gated (it runs in both states to prove on==off), but the in-src unit tests are
+# gated and run ZERO times by default — the silent gap this lane closes. No new dep
+# (`semijoin-bitmap = []`, only the already-direct sparq-core + rustc-hash) and no
+# `not(feature=…)` divergence (the off path is byte-identical), so a single isolated leg
+# (matching the per-feature engine legs above) covers it; verified `cargo test -p
+# sparq-engine --features semijoin-bitmap` runs the 6 unit tests + the 5 differential
+# tests and `cargo clippy -p sparq-engine --all-targets --features semijoin-bitmap
+# -- -D warnings` is clean.
+- name: "sparq-engine (semijoin-bitmap)"
+  crate: "sparq-engine"
+  features: "semijoin-bitmap"
+  test: true
+
+# [OPUS-4.8] sq-townn (survey §A7): streaming Turtle / TriG serialisation. The whole
+# streaming surface (`write_turtle_streaming` / `write_trig_streaming` + the
+# `graph_to_*_streaming` wrappers, the per-subject-buffered `write_turtle_body_streaming`,
+# and the `accumulate_pred_object` helper in `src/serialize.rs`) is gated
+# `#[cfg(feature = "streaming-serialization")]`, AND its 10 in-src unit tests
+# (`serialize::tests::streaming::*` — the streamed==buffered byte-equality contracts over
+# multiple subjects / predicates / blank nodes / typed+lang literals / empty graph / TriG)
+# are likewise gated, so the default build (and ci.yml's `--workspace --all-targets`
+# archive, which passes NO `--features`) compiled them EMPTY and ran ZERO of the 10 — the
+# silent "compiled EMPTY ... tests never ran" gap this lane closes. The feature IMPLIES
+# `serialize-rdf` (the shared rendering helpers live there); the off path is byte-identical.
+# No new dep (`streaming-serialization = ["serialize-rdf"]`, std `io::Write` only) and no
+# `not(feature=…)` divergence, so a single isolated leg covers it; verified `cargo test -p
+# sparq-engine --features streaming-serialization` runs the 10 streaming tests and `cargo
+# clippy -p sparq-engine --all-targets --features streaming-serialization -- -D warnings`
+# is clean.
+- name: "sparq-engine (streaming-serialization)"
+  crate: "sparq-engine"
+  features: "streaming-serialization"
+  test: true

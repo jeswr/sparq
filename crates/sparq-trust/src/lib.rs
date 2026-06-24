@@ -199,7 +199,7 @@ pub use store::{
 #[cfg(feature = "status-list")]
 pub use status_list::{
     decode_encoded_list, justify_status_decision, GzipDecoder, IdentityGzipDecoder, LiveStatus,
-    LiveStatusCheck, StatusBitstring, StatusJustification, StatusListEntry, StatusListResolver,
-    StatusPurpose,
+    LiveStatusCheck, SignedStatusList, StatusBitstring, StatusJustification, StatusListEntry,
+    StatusListResolver, StatusPurpose, VerifiedStatusListResolver, VerifyingLiveStatusCheck,
 };
 pub use wire::{derive_conditional_grants, derive_grants, ConditionalGrant};

@@ -215,6 +215,33 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   update-side `using-*` override), `enum QueryForm { Select, Ask, Construct, Describe }`; module
   `sparq_server::results`.
 
+### In-process embedding seam — `sparq_serve::embed` ([OPUS-4.8] sq-xa15c, #1248)
+
+When the consumer is **another Rust process** (e.g. `solid-server-rs`) and wants to
+drop the HTTP hop entirely, embed the engine in-process via the `sparq_serve::embed`
+facade instead of running `sparq-server` and talking to it over HTTP. It is the
+documented **embedding seam**: thin wrappers over the engine entry points plus a
+re-export of the runtime-agnostic concurrency wrapper. No axum/tokio, no HTTP.
+
+- Data path (over one `&Graph` / `&mut Graph`): `embed::query_json(&Graph, sparql)
+  -> Result<String, _>` (SPARQL-JSON), `embed::query(&Graph, sparql) ->
+  Result<QueryResult, _>`, `embed::ask(&Graph, sparql) -> Result<bool, _>`,
+  `embed::update_in_place(&mut Graph, sparql)` (+ `..._atomic` for all-or-nothing on
+  one graph), `embed::apply_delta_nquads(&mut Graph, inserts, deletes)` (quad-level,
+  per-graph; blank nodes by label), and the probes `embed::exists(&Graph) -> bool`,
+  `embed::named_graph_exists(&Graph, &Term) -> bool`, `embed::metadata(&Graph) ->
+  Metadata { triples, named_graphs }`. `query_json_with_budget` takes a `QueryBudget`.
+- Concurrency wrapper (re-exported from the crate root): `GenerationRing` /
+  `Generation` / `GraphApplier` / `Writer` (+ `RingConfig`, `WriterConfig`, `PodId`,
+  `TimeTravelConfig`) — the SAME `fork → update → publish` + generation-pinning model
+  `sparq-server` wraps behind its endpoint. A reader `ring.current()` pins an
+  immutable snapshot; the writer publishes new generations without blocking readers.
+- **Stability:** the INTENDED stable embedding API, but **NOT yet a frozen
+  semver-tier-1 surface** — the formal freeze is the maintainer's to ratify on #1248
+  (pre-`1.0` minor releases MAY still change it). Pin to `sparq_serve::embed` rather
+  than reaching into `sparq-core` / `sparq-engine` directly so the freeze, when
+  ratified, has one well-defined shape.
+
 ## Common recipes
 
 **1. Query forms and result negotiation.** Default result media is SPARQL-JSON. Set
@@ -226,6 +253,18 @@ CONSTRUCT/DESCRIBE):
 | SELECT | `application/sparql-results+json` (default) / `+xml` / `text/csv` / `text/tab-separated-values` | matching results media |
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` |
 | CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` / `application/ld+json` (the `jsonld` feature — **default-on**) | matching RDF media; N-Triples, prefix-compacting Turtle, RDF/XML, <!-- [OPUS-4.8] sq-rt6v --> or flattened JSON-LD <!-- [OPUS-4.8] sq-oy1f.1/.4 --> |
+
+<!-- [OPUS-4.8] sq-u79ee (survey §C1 / FINDINGS F21) -->
+Per the W3C SPARQL Results TSV format, the **TSV** serialiser abbreviates an
+`xsd:integer` / `xsd:decimal` / `xsd:double` / `xsd:boolean` literal whose lexical form is
+a valid Turtle token to its **bare** token (no quotes, no `^^datatype`) — e.g. `30`, `2.2`,
+`1.0E6`, `true`; everything else (incl. integer/decimal *subtypes* like `xsd:negativeInteger`
+and custom datatypes) stays quoted + typed, and `xsd:string` keeps the implicit-datatype short
+form. The bare token is the literal's **own** lexical form, so a data-sourced literal
+round-trips its original spelling (`"1.0E6"^^xsd:double` → `1.0E6`, not canonicalised);
+**computed** numerics arrive already in the engine's canonical form, so they serialise
+canonically. **CSV** writes each value's bare lexical string (datatype/lang dropped — lossy by
+spec); **JSON/XML** carry the full term (value + datatype) unchanged.
 
 ```sh
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/sparql-results+xml' \

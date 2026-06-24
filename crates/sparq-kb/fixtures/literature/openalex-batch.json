@@ -1,0 +1,26 @@
+{
+  "_comment": "GenAI-KB Phase 5 (sq-2489d.5) RECORDED connector fixture. These are FABRICATED, illustrative OpenAlex-shaped 'works' records committed for the offline pipeline test — NOT a captured live API response, and not real bibliographic metadata. The pipeline makes ZERO network calls; this file IS the connector's input. The shape mirrors the subset of OpenAlex /works fields the adapter reads (doi, title, abstract_inverted_index or reconstructed abstract, publication_year, authorships). The DOIs are example.org placeholders, not real DOIs.",
+  "results": [
+    {
+      "doi": "https://doi.org/10.5555/example.rdf-parallel-parse",
+      "title": "Chunk-Parallel Scanning of Line-Delimited RDF",
+      "abstract": "We present a chunk-parallel scanner for N-Triples that splits the input on record boundaries and parses each chunk independently. Blank-node and prefix scope is handled per chunk. The approach avoids a custom parser and reuses an existing tokenizer.",
+      "publication_year": 2023,
+      "authorships": [{ "author": { "display_name": "A. Researcher" } }]
+    },
+    {
+      "doi": "https://doi.org/10.5555/example.zk-sparql-soundness",
+      "title": "Soundness of Zero-Knowledge Proofs over SPARQL Basic Graph Patterns",
+      "abstract": "This paper sketches a zero-knowledge protocol for proving the existence of a BGP match over a committed RDF graph. The construction is presented; a full machine-checked soundness proof is left as future work and the security argument is informal.",
+      "publication_year": 2025,
+      "authorships": [{ "author": { "display_name": "B. Author" } }]
+    },
+    {
+      "doi": "https://doi.org/10.5555/example.semi-honest-mpc-join",
+      "title": "Semi-Honest Multi-Party Computation for Federated Joins",
+      "abstract": "We give a secret-sharing protocol for a two-party federated join. The protocol is secure in the semi-honest model; malicious security is not addressed. We do not claim privacy against an actively corrupted party.",
+      "publication_year": 2024,
+      "authorships": [{ "author": { "display_name": "C. Coauthor" } }]
+    }
+  ]
+}

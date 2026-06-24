@@ -98,6 +98,18 @@ jobs:
       - name: Test (node --test)
         run: npm test
 
+      # [OPUS-4.8] sq-iwhl8 (#1116): the contributable RDF/JS conformance harness
+      # (packages/rdfjs-conformance, a candidate rdfjs/ contribution). Typecheck it and run its
+      # OWN parity suites — they drive the harness against N3.js + @rdfjs/dataset to prove it is
+      # implementation-agnostic. The `js` test step above already runs the harness against
+      # @jeswr/sparq (js/test/rdfjs-conformance.test.mjs). Run from the repo root so the
+      # workspace-linked harness + its devDeps resolve.
+      - name: RDF/JS conformance harness (typecheck + N3 parity)
+        working-directory: packages/rdfjs-conformance
+        run: |
+          npm run typecheck
+          npm test
+
       # Publish guardrail + git-pin verification (sq-bkag): `prepare` wired, the
       # `files` allowlist intact, and the packed tarball actually ships dist/ + wasm/.
       - name: Package guardrail check
