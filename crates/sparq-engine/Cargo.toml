@@ -150,6 +150,22 @@ params = []
 # (serde_json is a DEV-dependency only, used to verify the round trip) — and contains
 # no `unsafe`.
 explain-json = []
+# [OPUS-4.8] (sq-gr8mb, survey §A3) Exact-bitmap semi-join reducer on dense u32 ids
+# (CIDR'26 "Not Yannakakis"; research/optimization-techniques.md §1.1/§2(a)). After the
+# binary-join executor materialises a join's left side, it builds a membership filter
+# (`semijoin::KeyFilter`) over the connecting variable's DISTINCT ids — a flat bitmap
+# when the keys are dense (the common case, since the dictionary assigns dense u32 ids)
+# and an exact hash set when they are sparse+huge — and passes it to the next pattern's
+# scan, which DROPS a row whose join key is absent before it enters the join. The filter
+# is membership-EXACT (no false positives), so it removes ONLY rows that would fail the
+# downstream join: the RESULT is identical to the feature-off path, just fewer rows
+# scanned. OPT-IN and OFF by default: when off, the `semijoin` module and its single call
+# site compile EMPTY, so the default native + wasm builds are byte-identical. Pulls in
+# ZERO new dependencies (sparq-core + rustc-hash are already direct deps) and contains no
+# `unsafe`. The payoff (intermediate-row-count and end-to-end-latency reduction on
+# star/snowflake workloads) is a measurable HYPOTHESIS to confirm on the canonical perf
+# host (sq-0g6g), NOT a baked-in number.
+semijoin-bitmap = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

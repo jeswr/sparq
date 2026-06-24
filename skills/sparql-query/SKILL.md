@@ -441,6 +441,20 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   wired into the query evaluator — `query`/`query_json`/etc. are unchanged whether the feature is on
   or off. When off, zero columnar code compiles and the default native + wasm builds are
   byte-identical (no new dependencies; no `unsafe`).
+- **Exact-bitmap semi-join reducer** is the non-default `semijoin-bitmap` cargo feature (M4 plan,
+  survey §A3, bead `sq-gr8mb`; CIDR'26 "Not Yannakakis"). When a binary BGP join scans the next
+  pattern, the executor first builds a membership filter over the already-materialised side's
+  connecting-variable ids — a flat **bitmap** over the dense `u32` ids (the dictionary assigns dense
+  ids, so the bitmap is a perfect-hash, zero-false-positive membership test) or an exact **hash set**
+  when the keys are sparse+huge — and passes it to the scan, which DROPS a row whose join key cannot
+  match **before** that row enters the join. This is a transparent PERFORMANCE optimisation: the
+  filter is membership-exact, so it removes only rows the join would have dropped anyway and the
+  RESULT is byte-identical to the feature-off path — `query`/`query_json`/etc. return the SAME answers
+  whether it is on or off (proven by the on-vs-off equivalence suite `tests/semijoin_differential.rs`);
+  only fewer rows are scanned. Its payoff on star/snowflake workloads is a measurable hypothesis for
+  the canonical perf host, not a baked-in number. When off, zero of this code compiles and the default
+  native + wasm builds are byte-identical (no new dependencies — sparq-core + rustc-hash are already
+  direct deps; no `unsafe`).
 - **Materialised-view / query-result cache** is the non-default `result-cache` cargo feature (bead
   `sq-a9cn`): `ResultCache::new(capacity)` is a bounded, version-aware LRU that stores a SELECT/ASK
   `QueryResult` keyed by `(parsed query algebra, caller graph-version)`; serve a query through
