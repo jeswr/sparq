@@ -100,6 +100,26 @@ where per-row requests overtake a full scan; tune the round-trip penalty with
 cardinality (`Σ_{C⊇Q} count(C)·Π avg_mult`) for intermediate sizes, capturing the
 predicate correlation an independence product loses.
 
+### Predicate-selectivity-aware non-star cardinality (opt-in, `use_predicate_selectivity`, sq-jsuzr)
+
+By default a connected **non-star** join (e.g. a chain `?s :p ?o . ?o :q ?z`) falls back to a
+coarse independence estimate `out = |L|·|R| / max(|L|, |R|)` that approximates the join-key
+distinct-value count by the larger leaf cardinality. Setting
+`PlanOptions::use_predicate_selectivity = true` instead folds the candidate's *actual*
+per-predicate distinct counts — `distinct_subjects` when the join variable sits in the
+candidate's subject position, `distinct_objects` when in its object position, summed (union)
+over the candidate's retained sources — into the ndv, giving a skew-aware estimate
+`out = |L|·|R| / Σ distinct(join-key)`. These are the same VoID stats every `SourceDescriptor`
+already carries. When the relevant distinct count is absent (VoID leaves it 0 when unknown), or
+the join key is in neither position, it falls back to the identical max-leaf estimate, so it
+never fabricates an ndv. **Cost-estimate-only**: this changes the planner's cardinality (hence
+its join order and bind-vs-hash choice), but never the *result multiset* — BGP join is
+commutative/associative, so any order over the same patterns answers identically. The flag is
+**OFF by default** so the prior estimate is preserved byte-for-byte for A/B comparison; star
+arms keep using the characteristic-set estimate regardless. Whether the tighter estimate yields
+faster plans is a measurable hypothesis to confirm on the canonical perf host (sq-0g6g), not a
+claim made here.
+
 ## Non-blocking streaming join + spill (`StreamJoin`, sq-vf7q)
 
 The planner's `JoinAlgo::Streaming` choice corresponds to an execution-side operator:

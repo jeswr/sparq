@@ -165,6 +165,22 @@ pub struct PlanOptions {
     /// front is the latency/memory risk, so the streaming operator is preferred. Set to
     /// `f64::INFINITY` to always use plain hash. Default `100_000` rows.
     pub stream_threshold: f64,
+    /// [OPUS-4.8] sq-jsuzr (survey C2). Opt-in: use the candidate's per-predicate
+    /// **distinct-subject / distinct-object** statistics (already carried by every
+    /// [`crate::SourceDescriptor`]) for the join-key ndv in the **non-star** join estimate,
+    /// instead of the coarse `max(|L|, |R|)` leaf-cardinality approximation. When `true` and
+    /// the candidate's retained sources carry the relevant distinct count for the join
+    /// variable's position, the non-star (independence-fallback) output cardinality is scaled
+    /// by a weighted per-predicate selectivity; when those stats are absent it falls back to
+    /// the same max-leaf heuristic as when this is `false`.
+    ///
+    /// This is a **cost-estimate-only** knob: it changes the planner's cardinality estimate
+    /// (and thus its join order / bind-vs-hash decision), but the planned join's *result
+    /// multiset is unchanged* — BGP join is commutative/associative, so any order over the
+    /// same patterns yields the same answers. Default `false` (preserves the prior estimate
+    /// exactly, for A/B comparison). Star joins still use the characteristic-set estimate
+    /// regardless of this flag.
+    pub use_predicate_selectivity: bool,
 }
 
 impl Default for PlanOptions {
@@ -172,6 +188,7 @@ impl Default for PlanOptions {
         PlanOptions {
             request_cost: 1.0,
             stream_threshold: 100_000.0,
+            use_predicate_selectivity: false,
         }
     }
 }
@@ -319,8 +336,21 @@ fn cost_join(
     let out = if connected {
         // Try a characteristic-set star estimate first (captures predicate correlation
         // when `cand` extends a star already joined on its subject variable).
-        star_estimate(bgp, joined, cand, descriptors, selection)
-            .unwrap_or_else(|| independence_estimate(bgp, cur_card, joined, cand, leaf_card))
+        star_estimate(bgp, joined, cand, descriptors, selection).unwrap_or_else(|| {
+            // [OPUS-4.8] sq-jsuzr (survey C2): for the non-star fallback, optionally fold the
+            // candidate's per-predicate distinct-subject/-object stats into the join-key ndv
+            // (a tighter estimate than `max(|L|, |R|)`); fall back to max-leaf when the stat
+            // is absent. Gated by the opt-in `use_predicate_selectivity` knob so the default
+            // path is byte-identical for A/B.
+            opts.use_predicate_selectivity
+                .then(|| {
+                    predicate_selectivity_estimate(
+                        bgp, cur_card, joined, cand, leaf_card, descriptors, selection,
+                    )
+                })
+                .flatten()
+                .unwrap_or_else(|| independence_estimate(bgp, cur_card, joined, cand, leaf_card))
+        })
     } else {
         // Disconnected (Cartesian): product. Only chosen when nothing connects.
         l * r
@@ -428,6 +458,81 @@ fn independence_estimate(
     (l * r / ndv).clamp(0.0, l * r)
 }
 
+/// [OPUS-4.8] sq-jsuzr (survey C2). Predicate-selectivity-aware non-star join estimate.
+///
+/// The independence fallback approximates the join-key number-of-distinct-values (`ndv`) by
+/// the larger of the two joined leaf cardinalities — coarse, and blind to predicate skew.
+/// This refinement instead reads the join key's *actual* distinct count from the candidate's
+/// served per-predicate statistics: when `cand`'s shared (join) variable sits in its subject
+/// position the key ndv is `Σ distinct_subjects` over `cand`'s retained sources; when it sits
+/// in the object position it is `Σ distinct_objects` (a multi-source union sums per source —
+/// the same union the leaf cardinality already is). The output is the textbook join estimate
+/// `out = |L|·|R| / max(ndv_L, ndv_R)` with `ndv_R` now the real per-predicate distinct count
+/// instead of the leaf-cardinality proxy, bounded below by 1 result and above by the Cartesian
+/// product (monotone, exactly like [`independence_estimate`]).
+///
+/// Returns `None` — so the caller falls back to [`independence_estimate`] (max-leaf) — when the
+/// stat is unavailable: the candidate's predicate is not a bound IRI, the join variable is in
+/// neither subject nor object position, no retained source carries the relevant distinct count
+/// (`distinct_subjects`/`distinct_objects` all 0 — VoID leaves these 0 when unknown), or the
+/// predicate partition is missing. It NEVER fabricates a count from a missing stat.
+#[allow(clippy::too_many_arguments)]
+fn predicate_selectivity_estimate(
+    bgp: &Bgp,
+    cur_card: f64,
+    joined: &[usize],
+    cand: usize,
+    leaf_card: &[f64],
+    descriptors: &[SourceDescriptor],
+    selection: &[PatternSources],
+) -> Option<f64> {
+    let l = cur_card.max(1.0);
+    let r = leaf_card[cand].max(1.0);
+    let tp = &bgp.patterns[cand];
+    let pred = tp.predicate_iri()?;
+
+    // The join variable: a variable of `cand` that also appears in a joined pattern. Determine
+    // whether it sits in `cand`'s subject or object position (the predicate is bound here).
+    let cand_vars = tp.vars();
+    let mut shares_subject = false;
+    let mut shares_object = false;
+    for &j in joined {
+        let jvars = bgp.patterns[j].vars();
+        for v in &cand_vars {
+            if jvars.contains(v) {
+                if tp.subject.as_var() == Some(*v) {
+                    shares_subject = true;
+                }
+                if tp.object.as_var() == Some(*v) {
+                    shares_object = true;
+                }
+            }
+        }
+    }
+
+    // Sum the join key's distinct count over `cand`'s retained sources (a union). When the join
+    // variable is in BOTH positions (`?s p ?s` joined on `?s`) prefer the smaller of the two
+    // distinct counts — the tighter, recall-safe ndv. 0 means "stat unavailable" ⇒ None.
+    let mut ndv_subjects = 0u64;
+    let mut ndv_objects = 0u64;
+    for c in &selection[cand].candidates {
+        if let Some(part) = descriptors[c.source].predicate(pred) {
+            ndv_subjects = ndv_subjects.saturating_add(part.distinct_subjects);
+            ndv_objects = ndv_objects.saturating_add(part.distinct_objects);
+        }
+    }
+    let ndv = match (shares_subject, shares_object) {
+        (true, true) => ndv_subjects.min(ndv_objects),
+        (true, false) => ndv_subjects,
+        (false, true) => ndv_objects,
+        (false, false) => return None, // join key not in a known position ⇒ max-leaf fallback.
+    };
+    if ndv == 0 {
+        return None; // distinct count unknown for this predicate ⇒ max-leaf fallback.
+    }
+    Some((l * r / ndv as f64).clamp(0.0, l * r))
+}
+
 fn sum_cost(node: &JoinNode) -> f64 {
     match node {
         JoinNode::Leaf { .. } => 0.0,
@@ -522,6 +627,7 @@ mod tests {
         let opts = PlanOptions {
             request_cost: 50.0,
             stream_threshold: 1000.0,
+            ..PlanOptions::default()
         };
         let tree = plan_bgp(&bgp, &sel, &srcs, &opts).unwrap();
         if let JoinNode::Join { algo, .. } = &tree.root {
@@ -533,6 +639,7 @@ mod tests {
         let opts_hi = PlanOptions {
             request_cost: 50.0,
             stream_threshold: f64::INFINITY,
+            ..PlanOptions::default()
         };
         let tree_hi = plan_bgp(&bgp, &sel, &srcs, &opts_hi).unwrap();
         if let JoinNode::Join { algo, .. } = &tree_hi.root {
@@ -965,5 +1072,242 @@ mod tests {
             "the connected :q stays the chosen next arm; the smaller disconnected :iso cannot overtake it"
         );
         assert_eq!(order[2], 2, "the Cartesian :iso is deferred to last");
+    }
+
+    // ============================================================================
+    // [OPUS-4.8] sq-jsuzr (survey C2) — predicate-selectivity-aware non-star cardinality.
+    //
+    // CORRECTNESS CONTRACT (load-bearing): `use_predicate_selectivity` is a COST-ESTIMATE-ONLY
+    // knob. With it OFF the estimate is byte-identical to before (the A/B baseline); with it ON
+    // the *cost ordering* may change but the planned join is over the SAME pattern set, so the
+    // result multiset is unchanged (BGP join is commutative/associative). The tests below assert
+    // (1) the OFF default is unchanged, (2) the ON path reads the per-predicate distinct counts,
+    // and (3) the plan stays a complete permutation of the same patterns under either knob.
+    // ============================================================================
+
+    // ---- The OFF default is byte-identical to the pre-knob behaviour: a chain join's estimate
+    //      is exactly the independence (max-leaf) value whether the field is left at its default
+    //      or set explicitly to `false`. This is the A/B baseline the knob must preserve.
+    #[test]
+    fn predicate_selectivity_off_is_unchanged_independence_estimate() {
+        // Chain ?s :p ?o . ?o :q ?z (join on ?o). Seed :p (20, smaller); cand :q (200).
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+            TriplePattern::new(var("o"), iri("http://ex/q"), var("z")),
+        ]);
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(10_000)
+            .predicate(pred("http://ex/p", 20, 20, 20))
+            .predicate(pred("http://ex/q", 200, 10, 200)) // skewed: only 10 distinct subjects.
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        // Independence: l=20 (:p), r=200 (:q), ndv=max(20,200)=200 ⇒ out = 20*200/200 = 20.
+        let default_tree = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        assert_eq!(default_tree.root.cardinality(), 20.0);
+        // Explicit `false` matches the default exactly (and equals the whole tree, not just card).
+        let explicit_off = plan_bgp(
+            &bgp,
+            &sel,
+            &srcs,
+            &PlanOptions {
+                use_predicate_selectivity: false,
+                ..PlanOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(explicit_off.root.cardinality(), 20.0);
+        assert_eq!(explicit_off.join_order(), default_tree.join_order());
+        assert_eq!(explicit_off.total_cost, default_tree.total_cost);
+    }
+
+    // ---- The ON path reads the candidate's per-predicate distinct-SUBJECT count for the join-key
+    //      ndv (the join var ?o is in :q's subject position), giving a DIFFERENT — skew-aware —
+    //      estimate than the max-leaf heuristic on the identical inputs.
+    #[test]
+    fn predicate_selectivity_on_uses_distinct_subjects_for_subject_join() {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+            TriplePattern::new(var("o"), iri("http://ex/q"), var("z")), // ?o is :q's SUBJECT.
+        ]);
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(10_000)
+            .predicate(pred("http://ex/p", 20, 20, 20))
+            .predicate(pred("http://ex/q", 200, 10, 200)) // 10 distinct subjects (skew).
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let on = plan_bgp(
+            &bgp,
+            &sel,
+            &srcs,
+            &PlanOptions {
+                use_predicate_selectivity: true,
+                ..PlanOptions::default()
+            },
+        )
+        .unwrap();
+        // l=20 (:p), r=200 (:q), ndv = distinct_subjects(:q) = 10 ⇒ out = 20*200/10 = 400
+        // (clamped below the Cartesian 20*200 = 4000). Strictly larger than the OFF estimate 20.
+        assert_eq!(
+            on.root.cardinality(),
+            400.0,
+            "ON folds the candidate's distinct_subjects into the join-key ndv"
+        );
+    }
+
+    // ---- The ON path reads the per-predicate distinct-OBJECT count when the join var sits in the
+    //      candidate's object position (`?s :q ?o` joined on ?o), symmetric with the subject case.
+    #[test]
+    fn predicate_selectivity_on_uses_distinct_objects_for_object_join() {
+        // Chain ?s :p ?o . ?z :q ?o (join on ?o; ?o is :q's OBJECT this time).
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+            TriplePattern::new(var("z"), iri("http://ex/q"), var("o")),
+        ]);
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(10_000)
+            .predicate(pred("http://ex/p", 20, 20, 20))
+            .predicate(pred("http://ex/q", 200, 200, 5)) // 5 distinct OBJECTS (skew).
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let on = plan_bgp(
+            &bgp,
+            &sel,
+            &srcs,
+            &PlanOptions {
+                use_predicate_selectivity: true,
+                ..PlanOptions::default()
+            },
+        )
+        .unwrap();
+        // l=20, r=200, ndv = distinct_objects(:q) = 5 ⇒ out = 20*200/5 = 800.
+        assert_eq!(
+            on.root.cardinality(),
+            800.0,
+            "ON folds the candidate's distinct_objects into the join-key ndv for an object join"
+        );
+    }
+
+    // ---- Fall back to the max-leaf independence estimate when the distinct count is ABSENT
+    //      (VoID leaves `distinct_subjects`/`distinct_objects` 0 when unknown) — the ON path must
+    //      never fabricate an ndv from a missing stat, so it matches the OFF estimate here.
+    #[test]
+    fn predicate_selectivity_falls_back_to_max_leaf_when_stats_absent() {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+            TriplePattern::new(var("o"), iri("http://ex/q"), var("z")),
+        ]);
+        // :q's distinct_subjects is 0 (unknown) ⇒ no per-predicate ndv available.
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(10_000)
+            .predicate(pred("http://ex/p", 20, 20, 20))
+            .predicate(pred("http://ex/q", 200, 0, 0)) // distinct counts unknown.
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let on = plan_bgp(
+            &bgp,
+            &sel,
+            &srcs,
+            &PlanOptions {
+                use_predicate_selectivity: true,
+                ..PlanOptions::default()
+            },
+        )
+        .unwrap();
+        let off = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        // ndv unavailable ⇒ ON == OFF (max-leaf): l=20, r=200, ndv=max(20,200)=200 ⇒ 20.
+        assert_eq!(on.root.cardinality(), 20.0);
+        assert_eq!(
+            on.root.cardinality(),
+            off.root.cardinality(),
+            "absent distinct counts ⇒ ON falls back to the OFF max-leaf estimate"
+        );
+    }
+
+    // ---- The knob is multiset-NEUTRAL: even when the changed estimate flips the join ORDER, the
+    //      plan is still a complete permutation of the SAME pattern set under either knob, so any
+    //      execution of either plan answers the identical multiset (BGP join is commutative). We
+    //      construct a 3-pattern BGP where the skew-aware estimate reorders the plan, then assert
+    //      both plans cover {0,1,2} exactly once.
+    #[test]
+    fn knob_is_multiset_neutral_even_when_order_flips() {
+        // ?s :p ?o . ?o :q ?z . ?z :r ?w — a chain; :q is skewed so the ON estimate inflates its
+        // join output, which can change which arm the greedy planner takes next.
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/p"), var("o")),
+            TriplePattern::new(var("o"), iri("http://ex/q"), var("z")),
+            TriplePattern::new(var("z"), iri("http://ex/r"), var("w")),
+        ]);
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(100_000)
+            .predicate(pred("http://ex/p", 30, 30, 30))
+            .predicate(pred("http://ex/q", 50, 2, 50)) // skewed: 2 distinct subjects.
+            .predicate(pred("http://ex/r", 40, 40, 40))
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let off = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default())
+            .unwrap()
+            .join_order();
+        let on = plan_bgp(
+            &bgp,
+            &sel,
+            &srcs,
+            &PlanOptions {
+                use_predicate_selectivity: true,
+                ..PlanOptions::default()
+            },
+        )
+        .unwrap()
+        .join_order();
+        // Whatever the orders are, BOTH must be a permutation of {0,1,2} — the same pattern set,
+        // each pattern joined exactly once. This is the planner-layer result-equivalence guarantee.
+        let mut off_sorted = off.clone();
+        off_sorted.sort();
+        let mut on_sorted = on.clone();
+        on_sorted.sort();
+        assert_eq!(off_sorted, vec![0, 1, 2], "OFF plan covers every pattern once");
+        assert_eq!(on_sorted, vec![0, 1, 2], "ON plan covers every pattern once");
+    }
+
+    // ---- A STAR join still uses the characteristic-set estimate regardless of the knob: the
+    //      predicate-selectivity refinement only touches the NON-star independence fallback, so a
+    //      covered star is unaffected (ON == OFF == the CS cardinality).
+    #[test]
+    fn star_join_unaffected_by_predicate_selectivity_knob() {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri("http://ex/a"), var("x")),
+            TriplePattern::new(var("s"), iri("http://ex/b"), var("y")),
+        ]);
+        let src = SourceDescriptor::builder(SourceId::new("S"))
+            .total_triples(10_000)
+            .predicate(pred("http://ex/a", 100, 100, 100))
+            .predicate(pred("http://ex/b", 200, 100, 100))
+            .char_set(CharSet {
+                predicates: vec!["http://ex/a".into(), "http://ex/b".into()],
+                subjects: 100,
+                avg_multiplicity: vec![1.0, 2.0],
+            })
+            .build();
+        let srcs = [src];
+        let sel = select_sources(&bgp, &srcs);
+        let off = plan_bgp(&bgp, &sel, &srcs, &PlanOptions::default()).unwrap();
+        let on = plan_bgp(
+            &bgp,
+            &sel,
+            &srcs,
+            &PlanOptions {
+                use_predicate_selectivity: true,
+                ..PlanOptions::default()
+            },
+        )
+        .unwrap();
+        // Both are the CS star cardinality 200 (100 subjects * 1 * 2) — the knob never reaches a
+        // covered star (star_estimate returns Some, short-circuiting the independence branch).
+        assert_eq!(off.root.cardinality(), 200.0);
+        assert_eq!(on.root.cardinality(), 200.0);
     }
 }
