@@ -3642,6 +3642,7 @@ dependencies = [
  "memmap2",
  "oxjsonld",
  "oxrdf 0.3.3",
+ "oxrdfxml",
  "oxttl 0.2.3",
  "rayon",
  "rustc-hash 2.1.2",

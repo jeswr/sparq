@@ -30,9 +30,10 @@ assert_eq!(count, 1);
 ## ✨ Features
 
 - **RDF parsing & ingest** — load Turtle, N-Triples, N-Quads, and TriG from a `&str` or any
-  `Read`. `load_reader*` accepts any `Read`, so you can wrap a `gzip` / `bzip2` / `zstd`
-  decoder around your file and stream it in — sparq does not content-sniff or auto-decompress
-  ([guide](../../skills/data-formats/SKILL.md)).
+  `Read`; the opt-in `jsonld` and `rdfxml` features add JSON-LD and RDF/XML ingest (kept off
+  the lean default/wasm build). `load_reader*` accepts any `Read`, so you can wrap a `gzip` /
+  `bzip2` / `zstd` decoder around your file and stream it in — sparq does not content-sniff or
+  auto-decompress ([guide](../../skills/data-formats/SKILL.md)).
 - **Triple-pattern scans** — look up any triple pattern over the loaded graph.
 - **Incremental updates** — start from `Graph::new()` / `Graph::default()` (an empty graph) and
   `insert_triple(s, p, o)` / `remove_triple(s, p, o)` a single triple from `oxrdf` terms, or apply
