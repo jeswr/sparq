@@ -248,6 +248,17 @@ pub mod chunk;
 #[cfg(feature = "vectorized")]
 pub use chunk::{DataChunk, SelVec, VecCmp};
 
+// [OPUS-4.8] (sq-gr8mb, survey §A3) Exact-bitmap semi-join reducer on dense u32 ids
+// (CIDR'26 "Not Yannakakis"; research/optimization-techniques.md §1.1/§2(a)). The binary
+// BGP executor builds a membership filter over a join's connecting-variable ids and
+// passes it to the next pattern's scan, dropping rows whose join key cannot match before
+// they enter the join. INTERNAL (`pub(crate)`) — the executor's only consumer is
+// `exec.rs`, so no public surface is added. NON-DEFAULT `semijoin-bitmap` feature: when
+// off, zero of this code compiles and the default native + wasm builds are byte-identical
+// (no new dependencies — sparq-core + rustc-hash are already direct deps; no `unsafe`).
+#[cfg(feature = "semijoin-bitmap")]
+pub(crate) mod semijoin;
+
 // [OPUS-4.8] (sq-xj29q) Oxigraph-shaped per-solution view over `QueryResult` —
 // `QueryResult::solutions()` yields borrowed, zero-copy `QuerySolution` views (per-row
 // map from `Variable` to bound `Term`: `get`, `iter`, `Index`) matching Oxigraph's
