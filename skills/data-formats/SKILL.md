@@ -40,6 +40,11 @@ use sparq_core::Graph;
 //   without it those strings also error rather than mis-parsing. [OPUS-4.8] sq-oy1f.4: the
 //   `sparq-cli` and `sparq-server` BINARIES enable `jsonld` by DEFAULT (a maintainer-directed
 //   exception), so they read/write JSON-LD out of the box; a library embedder opts in explicitly.
+//   [OPUS-4.8] sq-f47w1 (survey §B1): RDF/XML ("rdfxml"/"rdf-xml"/"application/rdf+xml")
+//   likewise needs the OPT-IN `rdfxml` feature on `sparq-core` (OFF by default — it links
+//   `oxrdfxml`/`quick-xml`, kept off the lean wasm bundle); without it those strings error
+//   rather than mis-parsing. RDF/XML has no named-graph syntax, so it loads via `load_str` /
+//   `parse_to_triples` (not the dataset path), serial-only (XML is not line-delimited).
 let ttl = r#"@prefix ex: <http://ex/> .
 ex:alice ex:knows ex:bob ."#;
 let g = Graph::load_str(ttl, "turtle").expect("parse");

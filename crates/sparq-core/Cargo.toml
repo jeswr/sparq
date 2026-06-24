@@ -49,6 +49,14 @@ block-bloom = []
 # whole-document JSON parse (not chunkable), so it has no parallel/streaming variant to
 # gate further. Consumers that want JSON-LD (the site REPL upload/URL path) enable this.
 jsonld = ["dep:oxjsonld"]
+# [OPUS-4.8] sq-f47w1 (survey §B1): RDF/XML ingest for the in-memory loaders
+# (`load_str` / `load_str_with_base` / `parse_to_triples`). OPT-IN and OFF by default,
+# mirroring `jsonld`, so the DEFAULT lean wasm bundle (which the perf-gate tracks via
+# `cargo build -p sparq-wasm`, no features) does NOT link `oxrdfxml` (it pulls `quick-xml`)
+# and stays under the wasm_bundle_bytes floor. RDF/XML is a whole-document XML parse (not
+# line-delimited / chunkable), so it has no parallel/streaming variant to gate further.
+# The dependency is already proven in-tree (sparq-server's GSP + conformance paths use it).
+rdfxml = ["dep:oxrdfxml"]
 # Spillable BUILD-time term dictionary (native only, off by default): bound the peak
 # build RSS by a configurable memory budget — term occurrences spill to disk and are
 # externally sorted/deduplicated into the SAME ids (byte-identical output) as the
@@ -71,6 +79,11 @@ oxttl.workspace = true
 # `jsonld` feature (OFF by default) so the tracked lean wasm bundle never links it and
 # stays under the wasm_bundle_bytes perf floor — the site REPL enables the feature.
 oxjsonld = { workspace = true, optional = true }
+# [OPUS-4.8] sq-f47w1 (survey §B1): RDF/XML ingest for the in-memory loaders. Same
+# oxigraph family as oxrdf/oxttl, OPT-IN behind the `rdfxml` feature (OFF by default) so
+# the tracked lean wasm bundle never links it (it pulls `quick-xml`) and stays under the
+# wasm_bundle_bytes perf floor. Already proven in-tree (sparq-server pins the same version).
+oxrdfxml = { workspace = true, optional = true }
 rustc-hash.workspace = true
 hashbrown.workspace = true
 rayon = { workspace = true, optional = true }
