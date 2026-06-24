@@ -7,6 +7,16 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod applier;
+/// [OPUS-4.8] sq-xa15c (#1248 items 1+2) — the **in-process embedding seam**: a small,
+/// documented facade over the engine's read/write/probe entry points
+/// ([`query_json`](embed::query_json) / [`ask`](embed::ask) /
+/// [`update_in_place`](embed::update_in_place) / [`apply_delta_nquads`](embed::apply_delta_nquads)
+/// / [`exists`](embed::exists)+[`metadata`](embed::metadata)) plus a re-export of the
+/// runtime-agnostic concurrency wrapper ([`GenerationRing`] + [`GraphApplier`] / [`Writer`]),
+/// so an external host can call sparq in-process instead of over HTTP. INTENDED stable embedding
+/// API; the formal semver-tier-1 freeze is **pending maintainer ratification on #1248** (see the
+/// module docs) — not unilaterally frozen here. Thin re-exports only; no new behaviour.
+pub mod embed;
 /// [OPUS-4.8] (sq-o5bi) ONLINE consistent-snapshot backup + restore for the serving store
 /// — export an already-immutable pinned [`Generation`] to a single self-describing artifact
 /// WHILE SERVING (no stop-the-world), and re-hydrate a [`sparq_core::Graph`] from one

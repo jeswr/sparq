@@ -3925,6 +3925,7 @@ name = "sparq-serve"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "oxrdf 0.3.3",
  "rustc-hash 2.1.2",
  "spargebra",
  "sparq-core",

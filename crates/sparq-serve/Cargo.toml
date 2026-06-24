@@ -69,6 +69,12 @@ result-cache = []
 # a workspace dependency) — no other crate should reach for it casually; the
 # generation ring is the one sanctioned place for arc-swap in the tree.
 arc-swap = "1"
+# [OPUS-4.8] sq-xa15c (#1248): the embedding seam's named-graph existence probe
+# (`embed::named_graph_exists`) names `oxrdf::Term` — the type `Graph::named_graph`
+# already takes. Workspace dep (same version sparq-core/sparq-engine already pull
+# in transitively); already vetted at the workspace level, so NO new cargo-vet
+# exemption. No HTTP/async — does not break the library-first §6.1 guard.
+oxrdf.workspace = true
 rustc-hash.workspace = true
 # Promoted from dev-dependencies by Wave A2 (as the A1 comment anticipated): the
 # sequenced writer's production `ApplyUpdates` strategy (`GraphApplier`) applies
