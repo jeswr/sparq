@@ -73,7 +73,7 @@ Headline at sparq `454593c`+round-3 / rdf-tests `f25dbc0`, full scope (1229 test
 | SPARQL 1.0 query eval | 268 / 3 / 12 | 268 / 3 / 12 | unchanged (skips are FROM/FROM NAMED) |
 | SPARQL 1.1 query eval | 220 / 4 / 1 | 222 / 2 / 1 | +2: empty named graphs now registered |
 | SPARQL 1.1 update eval | 23 / 20 / 51 | **94 / 0 / 0** | F19: suite is 100%, zero skips |
-| 1.1 result formats | 6 / 1 / 0 | 6 / 1 / 0 | tsv03 = F21 (lexical preservation) |
+| 1.1 result formats | 6 / 1 / 0 | 6 / 1 / 0 | tsv03 = F21 (documented divergence, see below) |
 | SPARQL 1.2 eval | 25 / 41 / 0 | **65 / 1 / 0** | F14–F18; last fail is upstream-parser F20 |
 | syntax (1.0/1.1/1.2) | 550 / 4 / 0 | 550 / 4 / 0 | all F20 (spargebra 0.4.6 posture) |
 
@@ -125,8 +125,9 @@ not a leaked feature).
 
 - 5× **F20 upstream spargebra 0.4.6** (4 syntax-negative + the 1.2 grouping eval test
   that fails at parse) + *case-insensitive booleans* (F13).
-- 3× **lexical-form preservation / suite-convention conflicts**: *xsd:decimal cast*,
-  *tsv03* (F21), *SUM DISTINCT with GROUP BY* (canonical-vs-plain double, see round 2).
+- 3× **suite-convention conflicts** (expected file diverges, engine term is correct):
+  *xsd:decimal cast*, *tsv03* (F21 — TSV serialisation; the store already preserves data
+  lexical forms, see F21 below), *SUM DISTINCT with GROUP BY* (canonical-vs-plain double, round 2).
 - *"/" on mixed datatypes* (suites disagree on integer-division scale, round-2 note).
 - *dawg-optional-filter-005-not-simplified* (algebra-duality, round-2 note).
 
@@ -215,11 +216,21 @@ The syntax suites measure the parser dependency; sparq inherits these:
 Everything else parses cleanly: 550/554 — including all 113 positive triple-term
 documents, VERSION declarations and codepoint escapes.
 
-#### F21. Lexical forms of data terms not preserved — 1 test (`csv-tsv-res` tsv03)
-`"1.0e6"^^xsd:double` from the data comes back as `"1.0E6"` — the store normalises
-numeric lexical forms instead of preserving them; SPARQL requires bound values to keep
-the original lexical form. (Adjacent to round-1 F4 but the inverse: F4 wants
-*canonical* forms for computed values, F21 wants *preserved* forms for data values.)
+#### F21. `tsv03` — DOCUMENTED_DIVERGENCE (TSV serialisation, conformance-neutral)
+**Premise corrected by the build phase (PR #1258, sq-u79ee).** The earlier text here claimed
+"the store normalises numeric lexical forms instead of preserving them". That is **false** on
+current `main`: the load + projection path **already preserves** the original lexical form
+(`"1.0E6"^^xsd:double` → `1.0E6`, `"1.0e6"^^xsd:double` → `1.0e6`), so no `sparq-core` Dict
+change was needed. The single real gap was the SPARQL-Results **TSV** writer, which quoted every
+typed literal instead of abbreviating `xsd:integer`/`xsd:decimal`/`xsd:double`/`xsd:boolean` to
+their bare Turtle token; PR #1258 fixed that in `sparq_server::results::term_to_tsv`.
+
+`tsv03` itself stays a tracked DOCUMENTED_DIVERGENCE and is **conformance-neutral**: its expected
+file writes `1.0e6` for the data term `"1.0E6"^^xsd:double` (a *different* RDF term under identity
+projection), and the harness compares **parsed expected terms vs in-memory `QueryResult` terms**,
+never the serialised TSV string — so the divergence is a suite-convention mismatch, not a fixable
+engine failure. (Adjacent to round-1 F4 but the inverse: F4 wants *canonical* forms for computed
+values; F21 concerns *preserved* forms for data values, which the store already honours.)
 
 Other 1.2 notes: `sparql12/rdf11` (singleton bnode graphs, plain-vs-xsd:string) passes
 3/3; codepoint-escape evaluation passes 4/4 (+1 CONSTRUCT skip); 1.2 CONSTRUCT tests
