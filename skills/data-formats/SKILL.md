@@ -296,6 +296,22 @@ ordering unchanged, round-trips to the identical RDF, and stays dependency-free 
 hand-written JSON re-indenter — no `serde_json`, which is dev-only). Indentation is presentation
 only; the document content is byte-for-byte the minified form plus newlines/indent.
 
+**Streaming Turtle / TriG (opt-in `streaming-serialization`, implies `serialize-rdf`).** The plain
+`write_turtle` / `write_trig` build a *full* in-memory `String` for the whole graph, so a large
+CONSTRUCT/DESCRIBE holds both the materialised triples and the fully-rendered string at once. The
+opt-in `streaming-serialization` feature adds `write_turtle_streaming(triples, &prefixes, &mut w)`
+and `write_trig_streaming(&named_graphs, &prefixes, &mut w)` (plus the whole-graph
+`graph_to_turtle_streaming(&g, &prefixes, &mut w)` / `graph_to_trig_streaming`) that render the body
+directly into any `W: std::io::Write`, buffering only **one subject block at a time** (emitting on
+subject change) — so the whole rendered output is never materialised, enabling HTTP chunked
+CONSTRUCT/DESCRIBE responses (first bytes flushed after the first subject, not the last). The
+streamed bytes are **byte-identical** to the buffered `write_turtle` / `write_trig` for the same
+graph (same used-prefix header, same subject grouping, same ordering): both share the prefix-header
+and per-subject-block rendering, and graph-sourced triples are subject-contiguous (`iter_ids()` walks
+the SPO permutation), which is the precondition for that equality. The memory / time-to-first-byte
+payoff is a measurable hypothesis on the canonical host, not a baked-in number. Zero new deps (std
+`io::Write` only). Reproduce: `cargo test -p sparq-engine --features streaming-serialization`.
+
 **Full W3C JSON-LD 1.1 Compaction (caller `@context`).** `JsonLdForm::Compacted` above is the
 *lighter* prefix-only `@context` (it just abbreviates IRIs to `prefix:local` CURIEs). For the
 real **W3C JSON-LD 1.1 Compaction Algorithm** against a caller-supplied `@context`, use

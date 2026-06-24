@@ -64,6 +64,20 @@ service = ["dep:serde_json", "dep:ureq", "dep:quick-xml"]
 # pull in ZERO new dependencies (oxrdf is already a direct dep), so the default build's
 # dependency graph is byte-for-byte unchanged when this is off.
 serialize-rdf = []
+# [OPUS-4.8] (sq-townn, survey §A7) Streaming Turtle / TriG serialisation. The buffered
+# `write_turtle` / `write_trig` build a FULL in-memory `String` for the whole graph, so a
+# CONSTRUCT/DESCRIBE over a large graph holds BOTH the materialised triples AND the fully
+# rendered string at once. This adds `write_turtle_streaming` / `write_trig_streaming` (and
+# the `graph_to_*_streaming` wrappers) that render the body directly into a `W: std::io::Write`,
+# buffering only ONE subject block at a time (emitting on subject change) — enabling HTTP
+# chunked CONSTRUCT/DESCRIBE responses without materialising the whole rendered output. The
+# streamed bytes are BYTE-IDENTICAL to the buffered `write_turtle`/`write_trig` for the same
+# graph (same used-prefix header, same subject grouping, same ordering). IMPLIES `serialize-rdf`
+# (the whole writer matrix, incl. the shared rendering helpers it reuses, lives there). OPT-IN
+# and OFF by default: when off, zero streaming code compiles and the existing buffered path is
+# byte-identical to before. Pulls in ZERO new dependencies (std `io::Write` only) and contains
+# no `unsafe`.
+streaming-serialization = ["serialize-rdf"]
 # [OPUS-4.8] (sq-5qz9) SPARQL window functions + custom aggregate registry.
 # Two extension surfaces, OFF by default:
 #   * a `CustomAggregateRegistry` whose named (IRI) user aggregates are callable in
