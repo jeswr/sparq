@@ -147,7 +147,9 @@ async fn negotiate_tsv() {
     );
     let body = resp.text().await.unwrap();
     assert!(body.starts_with("?s\t?a\n"));
-    assert!(body.contains("\"30\"^^<http://www.w3.org/2001/XMLSchema#integer>"));
+    // sq-u79ee: SPARQL Results TSV abbreviates xsd:integer to its bare Turtle token.
+    assert!(body.lines().any(|l| l.ends_with("\t30")), "integer not abbreviated: {body}");
+    assert!(!body.contains("\"30\"^^"), "integer should not be quoted+typed: {body}");
 }
 
 // ---------------------------------------------------------------------------
