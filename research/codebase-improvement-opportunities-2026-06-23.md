@@ -24,8 +24,9 @@ The single most concentrated cluster of real, high-leverage, buildable-now wins 
 but the code does **not** yet implement: per-block Bloom filters, Elias-Fano compressed-seek
 columns, and the exact-bitmap semi-join reducer. These are designed-and-prioritised but
 unbuilt. The second cluster is a small number of **standalone correctness/functionality gaps**
-(RDF/XML parse, lexical-form preservation, streaming Turtle serialisation, N3 `log:semantics`
-cycle-safety, SPARQL 1.2 `multiplicity()`).
+(RDF/XML parse, numeric/boolean TSV abbreviation, streaming Turtle serialisation, N3
+`log:semantics` cycle-safety, the `MULTIPLICITY()` algebra-device vendor extension). *Two of
+this cluster's original premises were corrected during the build phase — see §B2 and §C1.*
 
 Several headline "opportunities" in the raw set were **false-premise** and are dropped:
 SPARQL Protocol is *already* implemented in `sparq-server`; `$currentShape` is *already* bound
@@ -234,19 +235,26 @@ in `sparq-shacl`; per-predicate coverage and samples are *already* rendered in t
   dependency, trivial dispatch). **Measured by:** round-trip correctness and W3C RDF/XML test
   pass count.
 
-### B2. SPARQL 1.2 `multiplicity()` builtin function
+### B2. `MULTIPLICITY()` aggregate device — a vendor extension, *not* a 1.2 conformance gap
+- **Premise corrected by the build phase (PR #1257, sq-v411r).** This item originally claimed
+  "SPARQL 1.2 adds the standard `multiplicity()` function" and treated it as a *conformance* gap.
+  That was **wrong**: there is **no callable `multiplicity()` builtin** in the SPARQL 1.2 grammar
+  / `BuiltInCall` production, and **no W3C conformance suite** for one (verified against the
+  pinned `w3c/rdf-tests @ f25dbc0` — no `multiplicity` test directory). "multiplicity" appears
+  **only as algebra/semantics NOTATION** — the `card[Ω](μ)` device renamed `multiplicity(μ|Ω)` in
+  the §18.4 BGP-matching and Set-Function definitions (see `research/sparql12-engine.md` §1.4).
 - **Current state.** No `multiplicity` in the engine (the `multiplicity` references in
   `crates/sparq-engine/src/cs.rs` are the *cardinality-estimation* characteristic-set model, a
-  different concept). `research/sparql12-engine.md` §1.4 notes SPARQL 1.2 adds the standard
-  `multiplicity()` function (replacing the informal `card[Ω](μ)`) for accessing a solution's
-  group multiplicity inside an aggregate (e.g. `SUM(?x * multiplicity())`).
-- **Opportunity.** A standard SPARQL 1.2 function for full 1.2 conformance; small, side-effect
-  free.
-- **Approach.** Add the builtin in the aggregate evaluator (`aggregate.rs`): when an aggregate
-  argument contains `multiplicity()`, substitute the current group member's cardinality; wire
-  into function dispatch; verify against the SPARQL 1.2 suite cases.
-- **Feasibility.** buildable-now. **Crate:** `sparq-engine`. **Risk:** very low. **Measured
-  by:** SPARQL 1.2 `multiplicity` conformance-suite pass count.
+  different concept).
+- **What landed.** sparq ships `MULTIPLICITY()` as a **clearly-labelled VENDOR EXTENSION**
+  (reserved IRI `urn:sparq:fn:multiplicity`) that exposes the 1.2 algebra device inside an
+  aggregate argument (e.g. `SUM(?x * MULTIPLICITY())`), gated behind `sparql-12`. It is **not** a
+  conformance feature; the boundary is documented in the engine README, the `sparql-query` SKILL,
+  and `vendor/spargebra/SPARQ-PATCHES.md` §10. PR #1257 verified the existing
+  aggregate/grouping/subquery conformance lanes are unchanged (no regression).
+- **Feasibility.** delivered (additive, side-effect-free). **Crate:** `sparq-engine`. **Risk:**
+  very low. **Measured by:** existing aggregate/grouping/subquery suites stay green; there is no
+  `multiplicity` conformance suite to pass.
 
 ### B3. RDF 1.2 triple-term (quoted-triple) support in the RDF/JS surface
 - **Current state.** The engine parses/queries RDF-star, but the JS RDF/JS surface does not
@@ -286,21 +294,28 @@ in `sparq-shacl`; per-predicate coverage and samples are *already* rendered in t
 
 ## C. Accuracy / Conformance
 
-### C1. Lexical-form preservation for data-sourced literals (F21)
-- **Current state.** `crates/sparq-conformance/FINDINGS.md` F21 (lines 218–222): a data term
-  `"1.0e6"^^xsd:double` comes back as `"1.0E6"` — the store normalises numeric lexical forms,
-  but SPARQL 1.1 §18.2 requires a bound value drawn from the input data to **preserve its
-  original lexical form**. Documented as a real spec deviation (`csv-tsv-res/tsv03`), not yet a
-  standalone bead (the broad test epic `sq-bif` covers correctness generally, not this fix).
-- **Opportunity.** Preserve the original spelling for literals interned from source data and
-  emit it on projection/serialisation, falling back to canonical form for *computed* values.
-- **Approach.** Optional preserved-lexical-form field on literal terms, populated at parse/load
-  only; serialisers prefer it when present; careful coverage across JSON/CSV/TSV/XML in both
-  `sparq-engine` and `sparq-server`.
-- **Feasibility.** buildable-now. **Crate:** `sparq-core` (Dict) + `sparq-engine` (serialise).
-  **Risk:** low — additive, no hot-path impact; small per-unique-literal memory cost.
-  **Measured by:** `csv-tsv-res/tsv03` (and the F4 canonical-form sibling cases) passing without
-  regressing other result-format tests; SPARQL result-format suite delta.
+### C1. Spec-conformant numeric/boolean TSV abbreviation (F21)
+- **Premise corrected by the build phase (PR #1258, sq-u79ee).** This item originally claimed
+  "the store normalises numeric lexical forms" and proposed a `sparq-core` Dict change. A proven
+  repro on current `main` shows that is **false**: the N-Quads/Turtle load + projection path
+  **already preserves** the original lexical form (`"1.0E6"^^xsd:double` → `1.0E6`,
+  `"1.0e6"^^xsd:double` → `1.0e6`), and a computed double already serialises canonical. So **no
+  `sparq-core` Dict change was needed** — a preserved-lexical-form field would have been dead
+  storage, and the per-unique-literal memory cost flagged below is **not** incurred.
+- **What landed.** The single real, narrow gap was the SPARQL-Results **TSV** writer
+  (`sparq_server::results::term_to_tsv`), which quoted **every** typed literal instead of
+  abbreviating `xsd:integer`/`xsd:decimal`/`xsd:double`/`xsd:boolean` to their bare Turtle token
+  per the [W3C CSV/TSV results format](https://www.w3.org/TR/sparql11-results-csv-tsv/), matching
+  the oxigraph `sparesults` reference. CSV already wrote bare values; JSON/XML carry the full
+  term — all unaffected.
+- **`tsv03` stays a DOCUMENTED_DIVERGENCE (conformance-neutral).** The W3C `tsv03` expected file
+  writes `1.0e6` for the data term `"1.0E6"^^xsd:double` — a *different* RDF term under identity
+  projection. The conformance harness compares **parsed expected terms vs in-memory
+  `QueryResult` terms**, never the serialised TSV string, so this fix is conformance-neutral
+  there; `tsv03` remains a tracked divergence (now better explained), not a fixable failure.
+- **Feasibility.** delivered. **Crate:** `sparq-server` (serialise only — *not* `sparq-core`).
+  **Risk:** low — additive, no hot-path impact. **Measured by:** `csv-tsv-res` suite unchanged
+  (2 pass / 0 fail / 1 documented divergence), no SPARQL result-format regression.
 
 ### C2. Predicate-selectivity-aware cardinality in non-star federated joins
 - **Current state.** `crates/sparq-fedplan/src/plan.rs` `independence_estimate` (line 412+)
@@ -371,14 +386,16 @@ buildable-now beats gated.
    technique-fit; localised; reused by A4.
 3. **B1 — RDF/XML parsing** (`sparq-core`). Real standard-syntax gap; proven in-tree dependency;
    very low risk.
-4. **C1 — Lexical-form preservation (F21)** (`sparq-core`/`sparq-engine`). Concrete documented
-   conformance failure; narrow; not individually beaded.
+4. **C1 — Numeric/boolean TSV abbreviation (F21)** (`sparq-server`). Narrow serialiser gap; the
+   store already preserves data lexical forms, so *not* a `sparq-core` change (premise corrected,
+   PR #1258).
 5. **A7 — Streaming Turtle serialisation** (`sparq-engine`). Mostly refactor; real memory win
    for large CONSTRUCT/DESCRIBE; enables HTTP streaming.
 6. **A10 — N3 `log:semantics` cycle detection** (`sparq-reason`). Genuine safety/DoS fix for
    live resolvers; cheap, standard.
-7. **B2 — SPARQL 1.2 `multiplicity()`** (`sparq-engine`). Small standard-function gap; trivial,
-   suite-verified.
+7. **B2 — `MULTIPLICITY()` vendor extension** (`sparq-engine`). Exposes the 1.2 algebra device;
+   *not* a conformance gap (no `multiplicity()` builtin exists in the spec — premise corrected,
+   PR #1257).
 8. **C2 — Predicate-selectivity in fedplan non-star joins** (`sparq-fedplan`). Real estimate
    gap using stats already present; correctness-neutral.
 9. **A2 — Elias-Fano compressed-seek codec** (`sparq-core`). Highest *storage* upside but
@@ -485,7 +502,7 @@ buildable-now beats gated.
 > 🤖 **SPARQ agent** — Conclusion: the genuinely-open, high-value, buildable-now wins are
 > concentrated and few. Build the storage-layer trio the maintainer's own research already
 > blessed (**A1 Bloom, A3 bitmap semi-join, A2 Elias-Fano**), close the small standalone
-> correctness/functionality gaps (**B1 RDF/XML, C1 lexical preservation, B2 multiplicity,
-> A10 N3 cycle-safety, A7 streaming Turtle**), and fold the rest into existing epics rather
-> than spawning duplicate beads. Every perf claim here is a hypothesis to be confirmed on the
+> correctness/functionality gaps (**B1 RDF/XML, C1 TSV abbreviation, B2 `MULTIPLICITY()`
+> vendor extension, A10 N3 cycle-safety, A7 streaming Turtle**), and fold the rest into existing
+> epics rather than spawning duplicate beads. Every perf claim here is a hypothesis to be confirmed on the
 > canonical perf host (`sq-0g6g`); no numbers are asserted.
