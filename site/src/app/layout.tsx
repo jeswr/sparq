@@ -77,10 +77,20 @@ export default function RootLayout({
         />
       </head>
       <body className={`${inter.variable} font-sans antialiased`}>
+        {/* [OPUS-4.8] sq-vw3ax — DARK-FIRST default (the approved bold redesign direction).
+            Was `defaultTheme="system"` + `enableSystem`; the lead is now genuinely dark to
+            match the mockups (proposals/web-{home,try,capabilities}.html lead in .dark).
+            `enableSystem` is turned OFF so a no-preference visitor gets the dark lead rather
+            than their OS scheme; the ThemeToggle still flips to light and persists the
+            choice (next-themes localStorage), so the light toggle keeps working. This is
+            SAFE for un-redesigned routes: every page already renders coherently under the
+            complete `.dark` OKLCH palette in globals.css. The atmospheric .bg-atmos/.bg-grid
+            utilities are OPT-IN per page, so this flip changes only the default colour
+            scheme, never any page's structure. */}
         <ThemeProvider
           attribute="class"
-          defaultTheme="system"
-          enableSystem
+          defaultTheme="dark"
+          enableSystem={false}
           disableTransitionOnChange
         >
           <TooltipProvider>
