@@ -165,11 +165,11 @@ export function DatasetControls({
   );
 
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-2">
-      <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-        <Database className="size-3.5" /> Dataset
-      </span>
-
+    // [OPUS-4.8] sq-vw3ax — restyled for the narrow IDE rail: the built-in picker spans the
+    // panel, the on-load mode + Upload / From URL fall into a compact grid. The enclosing
+    // ReplPanel owns the "Dataset" header + border. All control ids (`repl-dataset`,
+    // `repl-mode`) + the file input + button labels are unchanged.
+    <div className="space-y-2">
       <label htmlFor="repl-dataset" className="sr-only">
         Built-in dataset
       </label>
@@ -178,7 +178,7 @@ export function DatasetControls({
         value={activeBuiltinId ?? "__custom__"}
         disabled={disabled}
         onChange={(e) => onSelectBuiltin(e.target.value)}
-        className="h-7 rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:opacity-50"
+        className="h-8 w-full rounded-md border bg-background px-2 text-xs font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:opacity-50"
       >
         {BUILTIN_DATASETS.map((d) => (
           <option key={d.id} value={d.id}>
@@ -190,11 +190,8 @@ export function DatasetControls({
         )}
       </select>
 
-      <span className="ml-auto flex items-center gap-2">
-        <label
-          htmlFor="repl-mode"
-          className="text-[11px] text-muted-foreground"
-        >
+      <div className="flex items-center gap-1.5">
+        <label htmlFor="repl-mode" className="text-[11px] text-muted-foreground">
           On load
         </label>
         <select
@@ -202,21 +199,23 @@ export function DatasetControls({
           value={mode}
           disabled={disabled}
           onChange={(e) => setMode(e.target.value as "replace" | "add")}
-          className="h-7 rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:opacity-50"
+          className="h-7 flex-1 rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:opacity-50"
         >
           <option value="replace">Replace</option>
           <option value="add">Add to current</option>
         </select>
+      </div>
 
-        <input
-          ref={fileRef}
-          type="file"
-          // [OPUS-4.8] sq-spita — also accept gzip/zip archives (incl. compound suffixes
-          // such as .ttl.gz / .nt.gz); they decompress in-tab before parsing.
-          accept=".ttl,.turtle,.nt,.ntriples,.nq,.nquads,.trig,.jsonld,.gz,.zip,.ttl.gz,.nt.gz,.nq.gz,.trig.gz,text/turtle,application/n-triples,application/n-quads,application/trig,application/ld+json,application/gzip,application/zip"
-          className="hidden"
-          onChange={onFile}
-        />
+      <input
+        ref={fileRef}
+        type="file"
+        // [OPUS-4.8] sq-spita — also accept gzip/zip archives (incl. compound suffixes
+        // such as .ttl.gz / .nt.gz); they decompress in-tab before parsing.
+        accept=".ttl,.turtle,.nt,.ntriples,.nq,.nquads,.trig,.jsonld,.gz,.zip,.ttl.gz,.nt.gz,.nq.gz,.trig.gz,text/turtle,application/n-triples,application/n-quads,application/trig,application/ld+json,application/gzip,application/zip"
+        className="hidden"
+        onChange={onFile}
+      />
+      <div className="grid grid-cols-2 gap-1.5">
         <Button
           variant="outline"
           size="sm"
@@ -233,7 +232,7 @@ export function DatasetControls({
         >
           <Link2 className="size-3.5" /> From URL
         </Button>
-      </span>
+      </div>
 
       {/* [OPUS-4.8] sq-spita — a failed upload (e.g. an unsupported zip member, or a
           parse error in the decompressed RDF) surfaces inline rather than silently. */}

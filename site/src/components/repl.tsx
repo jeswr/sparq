@@ -5,10 +5,11 @@ import {
   Play,
   Loader2,
   Database,
-  Zap,
+  Code2,
   CheckCircle2,
   Table2,
   Braces,
+  Share2,
   Download,
   PlugZap,
   Telescope,
@@ -23,20 +24,21 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+// [OPUS-4.8] sq-vw3ax (bold /try redesign) — the local IDE-workbench panel chrome + the
+// data-tool result rendering (typed-value cells + the live-derived aggregate mini-viz).
+import { ReplPanel } from "@/components/repl-panel";
+import {
+  ResultCell,
+  ResultMiniViz,
+  deriveViz,
+} from "@/components/repl-result-cells";
 import {
   loadSparq,
   loadIntoStore,
   prewarmSparqWhenIdle,
   storeToNQuads,
   datasetSize,
-  extractTable,
   resultsToCsv,
   resultsToTsv,
   formatSparqlJson,
@@ -943,119 +945,177 @@ export function Repl() {
 
   useRegisterPaletteCommands("repl", paletteCommands);
 
+  // [OPUS-4.8] sq-vw3ax (bold /try redesign) — the live status line shared by the run toolbar.
+  // Every figure here is REAL: row/triple counts from the engine's result document and the
+  // wall-clock `ms` measured around the actual execution. No illustrative numbers.
+  const statusLine = (
+    <>
+      {state.kind === "select" &&
+        `${state.results.results.bindings.length} rows · ${state.ms.toFixed(2)} ms`}
+      {state.kind === "boolean" && `ASK · ${state.ms.toFixed(2)} ms`}
+      {state.kind === "graph" && `${state.triples} triples · ${state.ms.toFixed(2)} ms`}
+      {state.kind === "update" &&
+        (state.endpoint
+          ? `endpoint write acknowledged · ${state.ms.toFixed(2)} ms`
+          : `store ${state.sizeBefore} → ${state.sizeAfter} triples · ${state.ms.toFixed(2)} ms`)}
+      {state.kind === "explain" &&
+        `plan ${state.analyze ? "+ trace " : ""}· ${state.ms.toFixed(2)} ms`}
+      {state.kind === "running" &&
+        (endpointActive
+          ? "Running on the endpoint…"
+          : mode === "run"
+            ? "Running on the wasm engine…"
+            : "Planning on the wasm engine…")}
+      {state.kind === "idle" &&
+        !endpointActive &&
+        engine === "warming" &&
+        "Pre-warming the wasm engine…"}
+    </>
+  );
+
   return (
-    <Card>
-      <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Zap className="size-4 text-primary" />
-          Live SPARQL REPL
-        </CardTitle>
-        <div className="flex items-center gap-2">
-          {endpointActive ? (
-            // [OPUS-4.8] sq-2mke — in endpoint mode the in-tab WASM engine state + triple
-            // count are irrelevant; show that queries route to the remote endpoint.
-            <Badge variant="default" aria-live="polite">
-              <PlugZap className="size-3" /> Endpoint mode
-            </Badge>
-          ) : (
-            <>
-              <EngineIndicator engine={engine} />
-              {size !== null && (
-                <button
-                  type="button"
-                  onClick={() => setViewerOpen(true)}
-                  aria-label={`View the ${size} triples in the loaded dataset`}
-                  className="rounded-4xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
-                >
-                  <Badge
-                    variant="muted"
-                    className="tabular cursor-pointer transition-colors hover:bg-muted-foreground/20"
-                  >
-                    <Database className="size-3" /> {size} triples
-                  </Badge>
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
+    // [OPUS-4.8] sq-vw3ax — the 3-pane IDE workbench grid. Rail (workspace / dataset / graphs),
+    // center (examples + editor + run toolbar + Connect), results (typed table / plan-tree /
+    // mini-viz) sit side-by-side so the query and its answer read together. Collapses to a single
+    // column below the lg breakpoint. The heavy state/logic above is unchanged — this is the
+    // layout + the data-tool result treatment only.
+    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[270px_minmax(0,1.15fr)_minmax(0,1fr)]">
+      {/* ── LEFT RAIL: workspace + dataset + graphs ─────────────────────────────────────── */}
+      <aside className="flex min-w-0 flex-col gap-4">
         {/* [OPUS-4.8] sq-atb0 — the persistent cross-session workspace panel: save / open the
             loaded dataset (as a snapshot) + the imported-source list + the SPARQL editor state,
             so a session survives an app/browser restart. Backend resolves to Tauri disk on the
             desktop app, browser localStorage on GitHub Pages, or an in-memory session fallback. */}
-        <WorkspacePanel
-          ready={workspaces.ready}
-          backend={workspaces.backend}
-          list={workspaces.list}
-          currentId={currentWorkspaceId}
-          onOpen={(id) => void openWorkspace(id)}
-          onSave={() => void saveWorkspace()}
-          onSaveAs={(name) => void saveWorkspaceAs(name)}
-          onNew={() => void newScratchSession()}
-          onRename={(name) => void renameWorkspace(name)}
-          onDelete={(id) => void deleteWorkspace(id)}
-          busy={workspaceBusy}
-        />
+        <ReplPanel title="Workspace" icon={FolderOpen}>
+          <WorkspacePanel
+            ready={workspaces.ready}
+            backend={workspaces.backend}
+            list={workspaces.list}
+            currentId={currentWorkspaceId}
+            onOpen={(id) => void openWorkspace(id)}
+            onSave={() => void saveWorkspace()}
+            onSaveAs={(name) => void saveWorkspaceAs(name)}
+            onNew={() => void newScratchSession()}
+            onRename={(name) => void renameWorkspace(name)}
+            onDelete={(id) => void deleteWorkspace(id)}
+            busy={workspaceBusy}
+          />
+        </ReplPanel>
 
-        <ConnectPanel
-          config={endpointConfig}
-          onConfigChange={setEndpointConfig}
-          active={endpointActive}
-          onActiveChange={setEndpointActive}
-        />
-
-        {/* The in-tab dataset controls manage the WASM store; in endpoint mode the
-            endpoint owns the data, so they are disabled with an honest note. */}
-        {endpointActive ? (
-          <p className="rounded-lg border bg-muted/30 p-2.5 text-xs text-muted-foreground">
-            Endpoint mode is active — queries run against the configured server, which owns
-            its own dataset. The in-tab dataset picker below is for the WASM engine; switch
-            back to <span className="font-medium">In-tab WASM</span> to use it.
-          </p>
-        ) : null}
-        <DatasetControls
-          activeBuiltinId={activeBuiltinId}
-          onSelectBuiltin={selectBuiltin}
-          onLoadText={loadText}
-          disabled={controlsDisabled || endpointActive}
-        />
+        <ReplPanel
+          title="Dataset"
+          icon={Database}
+          trailing={
+            endpointActive ? (
+              <Badge variant="default" aria-live="polite">
+                <PlugZap className="size-3" /> Endpoint
+              </Badge>
+            ) : (
+              <EngineIndicator engine={engine} />
+            )
+          }
+        >
+          <div className="space-y-2.5">
+            {/* The in-tab dataset controls manage the WASM store; in endpoint mode the
+                endpoint owns the data, so they are disabled with an honest note. */}
+            {endpointActive ? (
+              <p className="rounded-lg border bg-muted/30 p-2.5 text-xs text-muted-foreground">
+                Endpoint mode is active — queries run against the configured server, which owns
+                its own dataset. The in-tab dataset picker is for the WASM engine; switch back to{" "}
+                <span className="font-medium">In-tab WASM</span> to use it.
+              </p>
+            ) : null}
+            <DatasetControls
+              activeBuiltinId={activeBuiltinId}
+              onSelectBuiltin={selectBuiltin}
+              onLoadText={loadText}
+              disabled={controlsDisabled || endpointActive}
+            />
+            {/* The triple-count badge doubles as the dataset-viewer affordance (kept from the
+                old header). Real count from the engine. */}
+            {!endpointActive && size !== null && (
+              <button
+                type="button"
+                onClick={() => setViewerOpen(true)}
+                aria-label={`View the ${size} triples in the loaded dataset`}
+                className="rounded-4xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+              >
+                <Badge
+                  variant="muted"
+                  className="tabular cursor-pointer transition-colors hover:bg-muted-foreground/20"
+                >
+                  <Database className="size-3" /> {size} triples · browse
+                </Badge>
+              </button>
+            )}
+          </div>
+        </ReplPanel>
 
         {/* [OPUS-4.8] sq-daru — the dataset panel: the loaded dataset's graphs (default +
             named) with per-graph triple counts, refreshed on every content change. Hidden
             in endpoint mode (the remote server owns its own dataset). */}
-        <DatasetPanel
-          store={storeRef.current}
-          refreshKey={datasetVersion}
-          hidden={endpointActive}
-        />
+        {!endpointActive && (
+          <ReplPanel title="Graphs" icon={Layers}>
+            <DatasetPanel
+              store={storeRef.current}
+              refreshKey={datasetVersion}
+              hidden={false}
+            />
+          </ReplPanel>
+        )}
+      </aside>
 
+      {/* ── CENTER: examples + editor + run toolbar + Connect ───────────────────────────── */}
+      <main className="flex min-w-0 flex-col gap-4">
         <div className="flex flex-wrap gap-1.5">
           {EXAMPLE_QUERIES.map((q) => (
-            <Button
+            <button
               key={q.label}
-              variant="outline"
-              size="sm"
+              type="button"
               onClick={() => setSparql(q.sparql)}
+              className={cn(
+                "rounded-full border border-border bg-card/70 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors",
+                "hover:border-primary/40 hover:text-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+                sparql === q.sparql &&
+                  "border-transparent bg-primary text-primary-foreground hover:text-primary-foreground",
+              )}
             >
               {q.label}
-            </Button>
+            </button>
           ))}
         </div>
 
-        <label htmlFor="repl-query" className="sr-only">
-          SPARQL query
-        </label>
-        <SparqlEditor
-          id="repl-query"
-          ariaLabel="SPARQL query"
-          value={sparql}
-          onChange={setSparql}
-          rows={9}
-        />
+        <ReplPanel
+          glow
+          title="Query"
+          icon={Code2}
+          bodyClassName="p-0"
+          trailing={
+            <Badge variant="muted" className="uppercase">
+              {form}
+            </Badge>
+          }
+        >
+          <div className="p-3.5">
+            <label htmlFor="repl-query" className="sr-only">
+              SPARQL query
+            </label>
+            <SparqlEditor
+              id="repl-query"
+              ariaLabel="SPARQL query"
+              value={sparql}
+              onChange={setSparql}
+              rows={10}
+            />
+          </div>
+        </ReplPanel>
 
         <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={() => void run()} disabled={busy}>
+          <Button
+            onClick={() => void run()}
+            disabled={busy}
+            className="bg-[var(--hero-grad)] text-primary-foreground shadow-elevation-glow hover:opacity-95"
+          >
             {busy ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
@@ -1070,32 +1130,31 @@ export function Repl() {
             form={form}
             endpointMode={endpointActive}
           />
-          <p aria-live="polite" className="text-xs text-muted-foreground">
-            {state.kind === "select" &&
-              `${state.results.results.bindings.length} rows · ${state.ms.toFixed(1)} ms`}
-            {state.kind === "boolean" && `${state.ms.toFixed(1)} ms`}
-            {state.kind === "graph" &&
-              `${state.triples} triples · ${state.ms.toFixed(1)} ms`}
-            {state.kind === "update" &&
-              (state.endpoint
-                ? `endpoint write acknowledged · ${state.ms.toFixed(1)} ms`
-                : `store ${state.sizeBefore} → ${state.sizeAfter} triples · ${state.ms.toFixed(1)} ms`)}
-            {state.kind === "explain" &&
-              `plan ${state.analyze ? "+ trace " : ""}· ${state.ms.toFixed(1)} ms`}
-            {state.kind === "running" &&
-              (endpointActive
-                ? "Running on the endpoint…"
-                : mode === "run"
-                  ? "Running on the wasm engine…"
-                  : "Planning on the wasm engine…")}
-            {state.kind === "idle" &&
-              !endpointActive &&
-              engine === "warming" &&
-              "Pre-warming the wasm engine…"}
+          <p
+            aria-live="polite"
+            className="ml-auto font-mono text-xs text-muted-foreground tabular"
+          >
+            {statusLine}
           </p>
         </div>
 
-        <ResultPanel state={state} />
+        <ConnectPanel
+          config={endpointConfig}
+          onConfigChange={setEndpointConfig}
+          active={endpointActive}
+          onActiveChange={setEndpointActive}
+        />
+      </main>
+
+      {/* ── RIGHT: results + EXPLAIN plan-tree + mini-viz ──────────────────────────────── */}
+      <section className="flex min-w-0 flex-col gap-4">
+        <ReplPanel
+          title={state.kind === "explain" ? "Explain · Analyze" : "Results"}
+          icon={state.kind === "explain" ? Telescope : Table2}
+          bodyClassName="p-0"
+        >
+          <ResultPanel state={state} statusLine={statusLine} />
+        </ReplPanel>
 
         {/* [OPUS-4.8] sq-9ij6 — the live subscriptions view. Only meaningful in endpoint
             mode (it streams from a real, mutating server's /subscriptions/sse), so it
@@ -1109,7 +1168,7 @@ export function Repl() {
             Like the subscriptions view, it only runs in endpoint mode and reuses the SAME
             endpoint config + bearer/connection-safety posture. */}
         <ServerHealthPanel config={endpointConfig} active={endpointActive} />
-      </CardContent>
+      </section>
 
       <DatasetViewer
         open={viewerOpen}
@@ -1118,7 +1177,7 @@ export function Repl() {
         size={size}
         active={active}
       />
-    </Card>
+    </div>
   );
 }
 
@@ -1223,27 +1282,59 @@ function ModeTabs({
   );
 }
 
-function ResultPanel({ state }: { state: RunState }) {
+// [OPUS-4.8] sq-vw3ax (bold /try redesign) — the results pane body. It renders flush inside the
+// `ReplPanel` (the panel owns the header + border), so each result variant supplies its own
+// padding. The SELECT table scrolls itself (sticky mono ?var headers); everything else is a
+// padded card. `statusLine` is the SAME real-data status the run toolbar shows, repeated as a
+// footer so the answer pane is self-describing.
+function ResultPanel({
+  state,
+  statusLine,
+}: {
+  state: RunState;
+  statusLine: React.ReactNode;
+}) {
+  if (state.kind === "idle" || state.kind === "running") {
+    return (
+      <div className="flex min-h-32 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-muted-foreground">
+        {state.kind === "running" ? (
+          <Loader2 className="size-5 animate-spin text-primary" />
+        ) : (
+          <Table2 className="size-5 text-muted-foreground/60" />
+        )}
+        <p>{statusLine || "Run a query to see its results here."}</p>
+      </div>
+    );
+  }
   if (state.kind === "error") {
     return (
-      <pre className="overflow-x-auto rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+      <pre
+        data-result-kind="error"
+        className="m-3.5 overflow-x-auto rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"
+      >
         {state.message}
       </pre>
     );
   }
   if (state.kind === "boolean") {
     return (
-      <div
-        data-result-kind="boolean"
-        data-ask-value={state.value ? "true" : "false"}
-        className={cn(
-          "rounded-lg p-3 text-sm font-medium",
-          state.value
-            ? "bg-[color-mix(in_oklch,var(--success)_15%,transparent)] text-[var(--success)]"
-            : "bg-muted text-muted-foreground",
-        )}
-      >
-        ASK → {state.value ? "true" : "false"}
+      <div className="p-3.5">
+        <div
+          data-result-kind="boolean"
+          data-ask-value={state.value ? "true" : "false"}
+          className={cn(
+            "flex items-center gap-3 rounded-lg p-3.5 text-sm font-semibold",
+            state.value
+              ? "bg-[color-mix(in_oklch,var(--success)_15%,transparent)] text-[var(--success)]"
+              : "bg-muted text-muted-foreground",
+          )}
+        >
+          ASK
+          <span className="rounded-md bg-black/20 px-2 py-0.5 font-mono">
+            {state.value ? "true" : "false"}
+          </span>
+        </div>
+        <ResultFooter statusLine={statusLine} />
       </div>
     );
   }
@@ -1252,7 +1343,7 @@ function ResultPanel({ state }: { state: RunState }) {
     // 204 with no body), so we cannot show a before/after count without inventing one.
     if (state.endpoint) {
       return (
-        <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+        <div className="m-3.5 rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
           <span className="font-medium text-foreground">Update applied</span> on the
           endpoint — the server acknowledged the write (HTTP 204, no body). Run a SELECT
           against the same endpoint to see the change.
@@ -1262,7 +1353,7 @@ function ResultPanel({ state }: { state: RunState }) {
     const delta = state.sizeAfter - state.sizeBefore;
     const sign = delta > 0 ? "+" : "";
     return (
-      <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+      <div className="m-3.5 rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
         <span className="font-medium text-foreground">Update applied</span> to the
         in-tab store — {state.sizeBefore} → {state.sizeAfter} triples ({sign}
         {delta}). Switch the example to a SELECT and re-run to see the change.
@@ -1272,29 +1363,103 @@ function ResultPanel({ state }: { state: RunState }) {
   if (state.kind === "graph") {
     if (state.triples === 0) {
       return (
-        <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+        <p className="m-3.5 rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
           Empty graph — the template produced no triples.
         </p>
       );
     }
     return (
-      <GraphResult
-        ntriples={state.ntriples}
-        query={state.query}
-        triples={state.triples}
-      />
+      <div className="p-3.5">
+        <GraphResult
+          ntriples={state.ntriples}
+          query={state.query}
+          triples={state.triples}
+        />
+        <ResultFooter statusLine={statusLine} />
+      </div>
     );
   }
   if (state.kind === "explain") {
     return (
-      <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed">
-        {state.plan}
-      </pre>
+      <div className="p-3.5">
+        <PlanView plan={state.plan} />
+        <ResultFooter statusLine={statusLine} />
+      </div>
     );
   }
   if (state.kind !== "select") return null;
 
-  return <SelectResult results={state.results} />;
+  return <SelectResult results={state.results} statusLine={statusLine} />;
+}
+
+// [OPUS-4.8] sq-vw3ax — the data-tool result footer: the real-data status repeated below the
+// answer so the results pane reads independently of the run toolbar.
+function ResultFooter({ statusLine }: { statusLine: React.ReactNode }) {
+  return (
+    <div className="mt-3 border-t pt-2.5 font-mono text-[11.5px] text-muted-foreground tabular">
+      {statusLine}
+    </div>
+  );
+}
+
+// [OPUS-4.8] sq-vw3ax — the EXPLAIN / ANALYZE plan-tree pane. The engine emits the plan as
+// indented text (operator · cost · rows); we render it verbatim in a mono block and lightly
+// tint the recognisable tokens (operator names, `rows=`, `cost`) using the foundation chart
+// tokens, so it reads like a plan tree without re-parsing or inventing any figure. The text —
+// including every count and cost — is the engine's OWN `explain` / `explainAnalyze` output.
+function PlanView({ plan }: { plan: string }) {
+  return (
+    <pre
+      data-result-kind="explain"
+      className="max-h-[26rem] overflow-auto rounded-lg border bg-[color-mix(in_oklch,var(--background)_55%,var(--card))] p-3.5 font-mono text-[12px] leading-[1.7] whitespace-pre"
+    >
+      {plan.split("\n").map((line, i) => (
+        <PlanLine key={i} line={line} />
+      ))}
+    </pre>
+  );
+}
+
+function PlanLine({ line }: { line: string }) {
+  // Split the tree-drawing prefix (└─ / ├─ / │ / spaces) from the operator body so the prefix
+  // can be dimmed and the body tinted. Purely visual; the characters are unchanged.
+  const m = /^([\s│├└─]*)(.*)$/.exec(line);
+  const prefix = m?.[1] ?? "";
+  const body = m?.[2] ?? line;
+  // The operator name is the leading word of the body; the rest (cost / rows annotations) trails.
+  const opMatch = /^(\w+)(.*)$/.exec(body);
+  if (!opMatch) {
+    return (
+      <span>
+        <span className="text-muted-foreground/60">{prefix}</span>
+        {body}
+        {"\n"}
+      </span>
+    );
+  }
+  const [, op, rest] = opMatch;
+  // Tint the well-known annotation tokens (rows=, cost) inside the trailer.
+  const parts = rest.split(/(rows=\S+|cost\S*[\d.]+|≈[\d.]+)/g);
+  return (
+    <span>
+      <span className="text-muted-foreground/60">{prefix}</span>
+      <span className="font-semibold text-primary">{op}</span>
+      {parts.map((p, i) =>
+        /^rows=/.test(p) ? (
+          <span key={i} className="text-muted-foreground">
+            {p}
+          </span>
+        ) : /cost|≈/.test(p) ? (
+          <span key={i} className="sq-tok-number">
+            {p}
+          </span>
+        ) : (
+          <React.Fragment key={i}>{p}</React.Fragment>
+        ),
+      )}
+      {"\n"}
+    </span>
+  );
 }
 
 // [OPUS-4.8] sq-oy1f.3 / sq-oy1f.7 — the CONSTRUCT / DESCRIBE result-graph view with an
@@ -1489,22 +1654,36 @@ function GraphFormatTabs({
 // `@sparq/client` helpers, so this component is just the React host that draws them (and the
 // Tauri webview draws the SAME cells from the SAME helpers). The view-mode is local to one
 // result render; switching the view never re-runs the query.
-type ResultView = "table" | "json";
+// [OPUS-4.8] sq-vw3ax (bold /try redesign) — the THIRD result view: an aggregate "Graph"
+// (chart) of the live result set. The Table ⇄ JSON toggle (sq-x0kp) is preserved verbatim
+// (same view values, tab labels, and `data-result-view` anchors the e2e suite keys off); the
+// new Graph view charts what `deriveViz` extracted from the engine's OWN rows, never a baked
+// shape.
+type ResultView = "table" | "json" | "graph";
 
-function SelectResult({ results }: { results: SparqlResults }) {
+function SelectResult({
+  results,
+  statusLine,
+}: {
+  results: SparqlResults;
+  statusLine: React.ReactNode;
+}) {
   const [view, setView] = React.useState<ResultView>("table");
   // Re-default to the table whenever a NEW result arrives (a re-run yields a fresh `results`
   // object), so a fresh query always lands on the typed table, not whatever view was last
   // toggled. `results` identity changes per run.
   React.useEffect(() => setView("table"), [results]);
 
-  const table = React.useMemo(() => extractTable(results), [results]);
-  const hasRows = table.rows.length > 0;
+  const vars = results.head?.vars ?? [];
+  const bindings = results.results?.bindings ?? [];
+  const hasRows = bindings.length > 0;
+  // The live-derived aggregate (or null when the result has no chartable numeric column).
+  const viz = React.useMemo(() => deriveViz(results), [results]);
 
   return (
-    <div className="space-y-2" data-result-kind="select">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <ResultViewTabs view={view} onChange={setView} />
+    <div className="p-3.5" data-result-kind="select">
+      <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+        <ResultViewTabs view={view} onChange={setView} hasViz={viz !== null} />
         {/* Exports operate on the WHOLE result (every solution), independent of the view. */}
         <div className="flex items-center gap-1.5">
           <ExportButton
@@ -1539,10 +1718,25 @@ function SelectResult({ results }: { results: SparqlResults }) {
       {view === "json" ? (
         <pre
           data-result-view="json"
-          className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed"
+          className="max-h-[26rem] overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[12.5px] leading-relaxed"
         >
           {formatSparqlJson(results)}
         </pre>
+      ) : view === "graph" ? (
+        <div
+          data-result-view="graph"
+          className="overflow-hidden rounded-lg border bg-muted/20"
+        >
+          {viz ? (
+            <ResultMiniViz bars={viz} />
+          ) : (
+            <p className="p-4 text-sm text-muted-foreground">
+              This result has no numeric column to chart. The Graph view plots a numeric
+              aggregate against a label column; try an aggregate query (e.g. a{" "}
+              <code className="font-mono">GROUP BY … COUNT</code>).
+            </p>
+          )}
+        </div>
       ) : !hasRows ? (
         <p
           data-result-view="table"
@@ -1551,29 +1745,39 @@ function SelectResult({ results }: { results: SparqlResults }) {
           No solutions.
         </p>
       ) : (
+        // The typed-value table: sticky monospace ?var headers + per-cell typed colouring
+        // (IRI / literal / number reuse the foundation chart tokens). Real bindings only.
         <div
           data-result-view="table"
-          className="max-h-96 overflow-auto rounded-lg border"
+          className="max-h-[26rem] overflow-auto rounded-lg border"
         >
-          <table className="w-full text-left text-sm">
-            <thead className="sticky top-0 bg-muted/80 backdrop-blur">
+          <table className="w-full border-collapse text-left text-sm tabular">
+            <thead>
               <tr>
-                {table.vars.map((v) => (
-                  <th key={v} className="px-3 py-2 font-medium">
-                    ?{v}
+                {vars.map((v) => (
+                  <th
+                    key={v}
+                    className="sticky top-0 border-b bg-[color-mix(in_oklch,var(--card)_92%,var(--muted))] px-3.5 py-2.5 text-[11px] font-semibold uppercase tracking-[0.05em] text-muted-foreground"
+                  >
+                    <span className="font-mono text-[12px] normal-case tracking-normal sq-tok-variable">
+                      ?{v}
+                    </span>
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {table.rows.map((row, i) => (
-                <tr key={i} className="border-t">
-                  {row.map((cell, j) => (
+              {bindings.map((row, i) => (
+                <tr
+                  key={i}
+                  className="transition-colors hover:bg-[color-mix(in_oklch,var(--primary)_7%,transparent)]"
+                >
+                  {vars.map((v) => (
                     <td
-                      key={table.vars[j]}
-                      className="px-3 py-1.5 font-mono text-[12.5px]"
+                      key={v}
+                      className="border-b border-border/60 px-3.5 py-2 align-top font-mono text-[12.5px]"
                     >
-                      {cell}
+                      <ResultCell term={row[v]} />
                     </td>
                   ))}
                 </tr>
@@ -1582,23 +1786,61 @@ function SelectResult({ results }: { results: SparqlResults }) {
           </table>
         </div>
       )}
+
+      {/* The live-derived aggregate strip sits below the table (the mockup's inline mini-viz),
+          shown only when the result actually has a chartable numeric column. */}
+      {view === "table" && hasRows && viz && (
+        <div className="mt-2.5 overflow-hidden rounded-lg border bg-muted/20">
+          <ResultMiniViz bars={viz} />
+        </div>
+      )}
+
+      <ResultFooter statusLine={statusLine} />
     </div>
   );
 }
 
-// [OPUS-4.8] sq-x0kp — the TABLE ⇄ JSON view toggle for a SELECT result. Same `role="tablist"`
-// design-token pattern as the Run/EXPLAIN ModeTabs above, so the two selectors read as one
-// family.
+// [OPUS-4.8] sq-x0kp / sq-vw3ax — the Table ⇄ JSON ⇄ Graph view toggle for a SELECT result.
+// Same `role="tablist"` design-token pattern as the Run/EXPLAIN ModeTabs, so the selectors read
+// as one family. The Graph tab is disabled (with an honest title) when the result has no
+// chartable numeric column, so it never offers an empty chart.
 function ResultViewTabs({
   view,
   onChange,
+  hasViz,
 }: {
   view: ResultView;
   onChange: (v: ResultView) => void;
+  hasViz: boolean;
 }) {
-  const tabs: { value: ResultView; label: string; Icon: typeof Table2 }[] = [
-    { value: "table", label: "Table", Icon: Table2 },
-    { value: "json", label: "JSON", Icon: Braces },
+  const tabs: {
+    value: ResultView;
+    label: string;
+    Icon: typeof Table2;
+    disabled?: boolean;
+    title: string;
+  }[] = [
+    {
+      value: "table",
+      label: "Table",
+      Icon: Table2,
+      title: "Show the bindings as a typed table",
+    },
+    {
+      value: "json",
+      label: "JSON",
+      Icon: Braces,
+      title: "Show the raw SPARQL 1.1 JSON results document",
+    },
+    {
+      value: "graph",
+      label: "Graph",
+      Icon: Share2,
+      disabled: !hasViz,
+      title: hasViz
+        ? "Chart a numeric aggregate column against its label column"
+        : "No numeric column to chart — run an aggregate query",
+    },
   ];
   return (
     <div
@@ -1612,14 +1854,12 @@ function ResultViewTabs({
           type="button"
           role="tab"
           aria-selected={view === t.value}
-          title={
-            t.value === "table"
-              ? "Show the bindings as a typed table"
-              : "Show the raw SPARQL 1.1 JSON results document"
-          }
+          aria-disabled={t.disabled}
+          disabled={t.disabled}
+          title={t.title}
           onClick={() => onChange(t.value)}
           className={cn(
-            "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+            "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-40",
             view === t.value
               ? "bg-background text-foreground shadow-sm"
               : "text-muted-foreground hover:text-foreground",

@@ -92,87 +92,98 @@ export function WorkspacePanel({
   const current = list.find((w) => w.id === currentId) ?? null;
 
   return (
-    <div className="space-y-1.5">
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-2">
-        <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-          <FolderOpen className="size-3.5" /> Workspace
-        </span>
+    // [OPUS-4.8] sq-vw3ax — restyled for the narrow IDE rail: the picker spans the panel, the
+    // backend badge sits on its own meta row, and the actions fall into a compact grid. The
+    // enclosing ReplPanel owns the "Workspace" header + border. All control ids / labels (the
+    // `#repl-workspace` picker, the `__scratch__` value, the Save / Save as / Rename / Delete
+    // buttons) are unchanged so the workspace e2e flow keeps working.
+    <div className="space-y-2.5">
+      <label htmlFor="repl-workspace" className="sr-only">
+        Open workspace
+      </label>
+      <select
+        id="repl-workspace"
+        value={currentId ?? "__scratch__"}
+        disabled={disabled}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === "__scratch__") onNew();
+          else onOpen(v);
+        }}
+        className="h-8 w-full rounded-md border bg-background px-2 text-xs font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:opacity-50"
+      >
+        <option value="__scratch__">
+          {currentId === null ? "Unsaved scratch session" : "New scratch session…"}
+        </option>
+        {list.length > 0 && (
+          <optgroup label="Saved workspaces">
+            {list.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.name}
+                {w.approxTriples > 0 ? ` · ${w.approxTriples} triples` : ""}
+              </option>
+            ))}
+          </optgroup>
+        )}
+      </select>
 
-        <label htmlFor="repl-workspace" className="sr-only">
-          Open workspace
-        </label>
-        <select
-          id="repl-workspace"
-          value={currentId ?? "__scratch__"}
+      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <BackendBadge ready={ready} backend={backend} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-1.5">
+        <Button
+          variant="outline"
+          size="sm"
           disabled={disabled}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v === "__scratch__") onNew();
-            else onOpen(v);
-          }}
-          className="h-7 min-w-40 rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:opacity-50"
+          title="Save the current dataset + editor state as a new named workspace"
+          onClick={() => setSaveAsOpen(true)}
         >
-          <option value="__scratch__">
-            {currentId === null ? "Unsaved scratch session" : "New scratch session…"}
-          </option>
-          {list.length > 0 && (
-            <optgroup label="Saved workspaces">
-              {list.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                  {w.approxTriples > 0 ? ` · ${w.approxTriples} triples` : ""}
-                </option>
-              ))}
-            </optgroup>
-          )}
-        </select>
-
-        <span className="ml-auto flex flex-wrap items-center gap-1.5">
-          <BackendBadge ready={ready} backend={backend} />
-
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={disabled || currentId === null}
-            title="Overwrite the open workspace with the current dataset + editor state"
-            onClick={onSave}
-          >
-            <Save className="size-3.5" /> Save
-          </Button>
+          <Plus className="size-3.5" /> Save as
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={disabled}
+          title="Start a fresh scratch session"
+          onClick={onNew}
+        >
+          <FolderOpen className="size-3.5" /> New
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={disabled || currentId === null}
+          title="Overwrite the open workspace with the current dataset + editor state"
+          onClick={onSave}
+        >
+          <Save className="size-3.5" /> Save
+        </Button>
+        {currentId !== null && (
           <Button
             variant="outline"
             size="sm"
             disabled={disabled}
-            title="Save the current dataset + editor state as a new named workspace"
-            onClick={() => setSaveAsOpen(true)}
+            title="Rename the open workspace"
+            onClick={() => setRenameOpen(true)}
           >
-            <Plus className="size-3.5" /> Save as
+            <Pencil className="size-3.5" /> Rename
           </Button>
-          {currentId !== null && (
-            <>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={disabled}
-                title="Rename the open workspace"
-                onClick={() => setRenameOpen(true)}
-              >
-                <Pencil className="size-3.5" /> Rename
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={disabled}
-                title="Delete the open workspace"
-                onClick={() => {
-                  onDelete(currentId);
-                }}
-              >
-                <Trash2 className="size-3.5" /> Delete
-              </Button>
-            </>
-          )}
-        </span>
+        )}
+        {currentId !== null && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={disabled}
+            title="Delete the open workspace"
+            className="col-span-2"
+            onClick={() => {
+              onDelete(currentId);
+            }}
+          >
+            <Trash2 className="size-3.5" /> Delete
+          </Button>
+        )}
       </div>
 
       {/* Honest, persistent note about what the snapshot cache does and does NOT round-trip. */}
