@@ -99,13 +99,14 @@ function DatasetsTree() {
       )}
 
       {/* [OPUS-4.8] sq-ixc3.13 — the working "+ Import" entry point (opens the Import drawer). */}
+      {/* [OPUS-4.8] sq-vw3ax (#820 redesign) — a dashed teal "drop zone" affordance for import. */}
       <button
         onClick={() => setOpen(true)}
-        className="mt-1 flex w-full items-center gap-1.5 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-sidebar-accent/40 hover:text-foreground"
+        className="mt-2 flex w-full items-center gap-1.5 rounded-md border border-dashed border-teal-line px-2 py-1.5 text-xs text-muted-foreground hover:bg-teal-faint hover:text-foreground"
         title="Import RDF from a disk file (compressed / HDT), a URL, or pasted text"
         data-import-trigger="rail"
       >
-        <Plus className="size-3" /> Import
+        <Plus className="size-3" /> Import data…
       </button>
     </div>
   );
@@ -140,7 +141,7 @@ export function LeftRail({ tools, activeId, onOpenTool }: LeftRailProps) {
           className="flex w-full items-center gap-1.5 rounded-md border bg-background px-2 py-1.5 text-left text-xs hover:bg-sidebar-accent/40"
           title="Workspace switcher — persistent workspaces are a later phase (sq-atb0)"
         >
-          <Circle className="size-2.5 fill-[var(--success)] text-[var(--success)]" />
+          <Circle className="size-2.5 fill-[var(--success)] text-[var(--success)] drop-shadow-[0_0_5px_var(--success)]" />
           <span className="flex-1 truncate font-medium">default workspace</span>
           <ChevronDown className="size-3 text-muted-foreground" />
         </button>
@@ -167,11 +168,18 @@ export function LeftRail({ tools, activeId, onOpenTool }: LeftRailProps) {
                   onClick={() => onOpenTool(tool.id)}
                   className={cn(
                     "group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-sidebar-accent/50",
-                    isActive && "bg-sidebar-accent/70 font-medium",
+                    // [OPUS-4.8] sq-vw3ax (#820 redesign) — the active tool gets the accent-lit
+                    // teal spine (a glowing left bar), not just a tint, so the brand leads.
+                    isActive && "sq-active-spine font-medium",
                   )}
                   title={`${tool.blurb} — ${tier.label}`}
                 >
-                  <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+                  <Icon
+                    className={cn(
+                      "size-3.5 shrink-0",
+                      isActive ? "text-primary" : "text-muted-foreground",
+                    )}
+                  />
                   <span className="min-w-0 flex-1 truncate">{tool.label}</span>
                   <span
                     className={cn("size-2 shrink-0 rounded-full", tier.dot)}

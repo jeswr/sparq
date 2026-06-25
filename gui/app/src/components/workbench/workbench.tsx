@@ -22,6 +22,7 @@ import * as React from "react";
 import { PanelsTopLeft, X, Layers, Upload } from "lucide-react";
 
 import { LeftRail } from "@/components/workbench/left-rail";
+import { TitleBar } from "@/components/workbench/title-bar";
 import { TopBar } from "@/components/workbench/top-bar";
 import { TabStrip } from "@/components/workbench/tab-strip";
 import { StatusBar } from "@/components/workbench/status-bar";
@@ -101,7 +102,20 @@ export function Workbench() {
           onSelectTab={setActiveId}
           onCloseTab={closeTab}
         />
-        <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
+        {/* [OPUS-4.8] sq-vw3ax (#820 redesign) — a native-feeling dark workspace. The ambient teal
+            aura (a faint radial wash behind the chrome) makes the brand the lead, not garnish; the
+            title bar above the top bar signals a real desktop window. */}
+        <div className="relative flex h-screen flex-col overflow-hidden bg-background text-foreground">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 top-0 z-0 h-56 opacity-60"
+            style={{
+              background:
+                "radial-gradient(900px 220px at 22% -10%, var(--teal-glow), transparent 60%), radial-gradient(700px 200px at 92% 0%, color-mix(in oklch, var(--primary) 18%, transparent), transparent 62%)",
+            }}
+          />
+          <div className="relative z-10 flex min-h-0 flex-1 flex-col">
+          <TitleBar />
           <TopBar />
           <div className="flex min-h-0 flex-1">
             <LeftRail tools={TOOLS} activeId={activeId} onOpenTool={openTool} />
@@ -126,6 +140,7 @@ export function Workbench() {
               </div>
               <StatusBar />
             </main>
+          </div>
           </div>
         </div>
         </ImportDrawerProvider>

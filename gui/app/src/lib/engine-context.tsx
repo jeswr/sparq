@@ -167,10 +167,41 @@ export interface ImportResult {
   bytes: number;
 }
 
+/**
+ * [OPUS-4.8] sq-vw3ax (#820) — the live INGEST signal the status bar's unintrusive ingest meter
+ * reads. While an import is decoding/merging, `active` is true and `label` names the source; the
+ * elapsed time is MEASURED by the status bar from `startedAt` (performance.now). The native + WASM
+ * loaders are SYNCHRONOUS (no byte-level progress callback exists), so this is honestly an
+ * indeterminate "ingesting <file>…" with a real elapsed — never a fabricated percentage or ETA.
+ * `null` when no import is in flight.
+ */
+export interface IngestState {
+  /** A human label for the source being ingested (filename / URL tail / "pasted document"). */
+  label: string;
+  /** performance.now() at ingest start — the status bar derives the live elapsed from this. */
+  startedAt: number;
+}
+
+/**
+ * [OPUS-4.8] sq-vw3ax (#820) — the live on-device store FOOTPRINT the status bar's disk gauge
+ * reads. This is the REAL byte length of the whole-dataset N-Quads snapshot the workspace persists
+ * (the `dataSnapshot` save/open cache, sq-atb0) — i.e. the actual size of what is written to disk
+ * on the desktop target (or to localStorage on the web). It is a real measured figure, not a
+ * fabricated capacity: there is no fixed cap, so the gauge shows the snapshot bytes, recomputed
+ * after every load/import/update. A precise filesystem probe of the app-data dir (vs this snapshot
+ * estimate) is a follow-up that needs a new Tauri command + capability (beaded).
+ */
 export interface EngineContextValue {
   status: EngineStatus;
   /** Total quads in the live store (default + all named graphs). */
   storeSize: number;
+  /**
+   * [OPUS-4.8] sq-vw3ax (#820) — the REAL on-device store footprint in bytes (the UTF-8 length of
+   * the persisted whole-dataset N-Quads snapshot). 0 before the store warms. Honest measured value.
+   */
+  storeBytes: number;
+  /** [OPUS-4.8] sq-vw3ax (#820) — the in-flight import, or null. Drives the status bar ingest meter. */
+  ingest: IngestState | null;
   /** Per-graph counts for the datasets tree. */
   graphs: GraphSummary[];
   /** The latency (ms) of the most recent run, or null before any run. */
@@ -332,9 +363,25 @@ function summariseGraphs(store: WasmStore): { size: number; graphs: GraphSummary
   return { size, graphs };
 }
 
+/**
+ * [OPUS-4.8] sq-vw3ax (#820) — the REAL on-device footprint of a store: the UTF-8 byte length of
+ * its whole-dataset N-Quads snapshot (exactly what the workspace persists to disk / localStorage).
+ * Used for the status bar disk gauge — a measured figure, never a fabricated capacity.
+ */
+function snapshotBytes(store: WasmStore): number {
+  try {
+    return new Blob([storeToNQuads(store)]).size;
+  } catch {
+    return 0;
+  }
+}
+
 export function EngineProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = React.useState<EngineStatus>({ kind: "cold" });
   const [storeSize, setStoreSize] = React.useState(0);
+  // [OPUS-4.8] sq-vw3ax (#820) — the live on-device footprint (snapshot bytes) + in-flight import.
+  const [storeBytes, setStoreBytes] = React.useState(0);
+  const [ingest, setIngest] = React.useState<IngestState | null>(null);
   const [graphs, setGraphs] = React.useState<GraphSummary[]>([]);
   const [lastLatencyMs, setLastLatencyMs] = React.useState<number | null>(null);
   const [lastRowCount, setLastRowCount] = React.useState<number | null>(null);
@@ -356,6 +403,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         storeRef.current = store;
         const { size, graphs: gs } = summariseGraphs(store);
         setStoreSize(size);
+        setStoreBytes(snapshotBytes(store));
         setGraphs(gs);
         setStatus({ kind: "ready" });
       })
@@ -376,6 +424,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     if (!store) return;
     const { size, graphs: gs } = summariseGraphs(store);
     setStoreSize(size);
+    setStoreBytes(snapshotBytes(store));
     setGraphs(gs);
   }, []);
 
@@ -387,13 +436,9 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   // `loadDataset(_, "nquads")` so every named graph of both sides survives. On the hosted web
   // target (no native loader), `paste`/`url` parse directly in the in-tab WASM engine; a `file`
   // import is rejected there with a clear message (browsers cannot read an arbitrary disk path).
-  const importRdf = React.useCallback(
-    async (req: ImportRequest): Promise<ImportResult> => {
-      const Store = ctorRef.current;
-      if (!Store) {
-        throw new Error("The engine is not ready yet — wait for the store to warm.");
-      }
-
+  // The actual ingest body (separated so `importRdf` can bracket it with the ingest signal).
+  const runImport = React.useCallback(
+    async (req: ImportRequest, Store: WasmStoreCtor): Promise<ImportResult> => {
       // 1. Decode the incoming document to N-Quads (native loader when available, else in-tab).
       let incomingNQuads: string;
       let added: number;
@@ -446,14 +491,43 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       const merged = Store.loadDataset(combined, "nquads");
       storeRef.current = merged;
 
-      // 3. Refresh the datasets tree + store size from the new store.
+      // 3. Refresh the datasets tree + store size + on-device footprint from the new store.
       const { size, graphs: gs } = summariseGraphs(merged);
       setStoreSize(size);
+      setStoreBytes(snapshotBytes(merged));
       setGraphs(gs);
 
       return { added, storeSize: size, loadedNatively, format, bytes };
     },
     [],
+  );
+
+  // [OPUS-4.8] sq-ixc3.13 — the Import drawer's ingest. A `file` import (a disk path) goes
+  // through the NATIVE loader IPC (`load_path`: compressed + native-only HDT, no wasm-tab
+  // ceiling) inside the Tauri shell; `paste`/`url` documents go through native `load_text` there
+  // too. Either way the loader hands back the document as N-QUADS (named-graph-preserving), which
+  // we MERGE (concatenate with the live store's N-Quads) or REPLACE, then re-load with
+  // `loadDataset(_, "nquads")` so every named graph of both sides survives. On the hosted web
+  // target (no native loader), `paste`/`url` parse directly in the in-tab WASM engine; a `file`
+  // import is rejected there with a clear message (browsers cannot read an arbitrary disk path).
+  const importRdf = React.useCallback(
+    async (req: ImportRequest): Promise<ImportResult> => {
+      const Store = ctorRef.current;
+      if (!Store) {
+        throw new Error("The engine is not ready yet — wait for the store to warm.");
+      }
+      // [OPUS-4.8] sq-vw3ax (#820) — mark the ingest in-flight so the status bar shows the
+      // unintrusive ingest meter (the real file label + a live measured elapsed). Cleared in the
+      // `finally` whether the import succeeds or fails. The loaders are synchronous, so this is an
+      // honest "ingesting <file>…" indicator, not a fabricated progress percentage or ETA.
+      setIngest({ label: req.label, startedAt: performance.now() });
+      try {
+        return await runImport(req, Store);
+      } finally {
+        setIngest(null);
+      }
+    },
+    [runImport],
   );
 
   const run = React.useCallback(
@@ -601,6 +675,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     () => ({
       status,
       storeSize,
+      storeBytes,
+      ingest,
       graphs,
       lastLatencyMs,
       lastRowCount,
@@ -613,6 +689,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     [
       status,
       storeSize,
+      storeBytes,
+      ingest,
       graphs,
       lastLatencyMs,
       lastRowCount,

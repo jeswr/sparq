@@ -51,6 +51,15 @@
   --sidebar-accent-foreground: oklch(0.24 0.05 215);
   --sidebar-border: oklch(0.91 0.012 220);
   --sidebar-ring: oklch(0.52 0.094 205);
+
+  /* [OPUS-4.8] sq-vw3ax / #820 redesign — derived teal-forward surfaces for the bold dark-first
+     workbench chrome. Each is a MIX of the existing brand `--primary` (no new hue invented),
+     so it follows the theme automatically and adds no palette. Translated from the approved
+     desktop-gui.html proposal; light-theme strengths kept slightly softer than dark. */
+  --teal-glow: color-mix(in oklch, var(--primary) 30%, transparent);
+  --teal-faint: color-mix(in oklch, var(--primary) 8%, transparent);
+  --teal-line: color-mix(in oklch, var(--primary) 22%, transparent);
+  --hero-from: color-mix(in oklch, var(--primary) 9%, var(--card));
 }
 
 .dark {
@@ -92,6 +101,13 @@
   --sidebar-accent-foreground: oklch(0.96 0.006 210);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.7 0.1 200);
+
+  /* [OPUS-4.8] sq-vw3ax / #820 redesign — the DARK lead. Teal-forward surfaces pushed harder
+     than the light strip (the proposal's dark block is the lead). Still pure mixes of --primary. */
+  --teal-glow: color-mix(in oklch, var(--primary) 38%, transparent);
+  --teal-faint: color-mix(in oklch, var(--primary) 12%, transparent);
+  --teal-line: color-mix(in oklch, var(--primary) 26%, transparent);
+  --hero-from: color-mix(in oklch, var(--primary) 16%, var(--background));
 }
 
 @theme inline {
@@ -124,6 +140,13 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+
+  /* [OPUS-4.8] sq-vw3ax / #820 redesign — expose the derived teal surfaces as Tailwind colours
+     (bg-teal-faint / border-teal-line / text-teal-glow …) for the bold chrome components. */
+  --color-teal-glow: var(--teal-glow);
+  --color-teal-faint: var(--teal-faint);
+  --color-teal-line: var(--teal-line);
+  --color-hero-from: var(--hero-from);
 
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", "Menlo", monospace;
@@ -188,5 +211,127 @@
   .sq-tok-comment {
     color: var(--muted-foreground);
     font-style: italic;
+  }
+
+  /* ==========================================================================
+     [OPUS-4.8] sq-vw3ax / #820 redesign — the BOLD dark-first workbench chrome.
+     Faithful to /home/ubuntu/sparq-design-system/proposals/desktop-gui.html: a
+     native-feeling titlebar, a teal-forward top bar, an accent-lit Run button,
+     a teal-capped result/status atmosphere — all from the existing OKLCH tokens
+     (the --teal-* surfaces above), so light + dark follow the theme.
+     ========================================================================== */
+
+  /* (1) Native title bar — a thin branded strip with a subtle vertical sheen. */
+  .sq-titlebar {
+    background: linear-gradient(
+      180deg,
+      color-mix(in oklch, var(--card) 82%, var(--background)),
+      var(--card)
+    );
+  }
+
+  /* (2) Top bar — the teal-forward hero gradient (the brand as identity, not garnish). */
+  .sq-topbar {
+    background: linear-gradient(180deg, var(--hero-from), var(--card));
+  }
+
+  /* The brand wordmark's teal full-stop. */
+  .sq-brand-dot {
+    color: var(--primary);
+  }
+
+  /* The primary Run / Import button: a lit teal gradient with an ambient glow. */
+  .sq-glow-btn {
+    background: linear-gradient(
+      180deg,
+      color-mix(in oklch, var(--primary) 90%, white),
+      var(--primary)
+    );
+    color: var(--primary-foreground);
+    box-shadow:
+      0 0 22px -6px var(--teal-glow),
+      0 1px 0 0 oklch(1 0 0 / 20%) inset;
+  }
+  .sq-glow-btn:hover {
+    filter: brightness(1.04);
+  }
+
+  /* The accent spine on the active rail tool / IDE tab — a teal bar with a soft glow. */
+  .sq-active-spine {
+    position: relative;
+    background: linear-gradient(90deg, var(--teal-faint), transparent 80%);
+  }
+  .sq-active-spine::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 6px;
+    bottom: 6px;
+    width: 2.5px;
+    border-radius: 2px;
+    background: var(--primary);
+    box-shadow: 0 0 10px var(--primary);
+  }
+
+  /* Status bar — a quiet card gradient strip carrying the measured/disk/ingest fields. */
+  .sq-statusbar {
+    background: linear-gradient(
+      180deg,
+      var(--card),
+      color-mix(in oklch, var(--card) 80%, var(--background))
+    );
+  }
+
+  /* The #820 disk-usage ring — a tiny conic gauge whose filled arc is set inline
+     (`--disk-pct`) from the REAL store footprint; never a baked-in figure. */
+  .sq-disk-ring {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: conic-gradient(
+      var(--primary) 0 calc(var(--disk-pct, 0) * 1%),
+      var(--secondary) calc(var(--disk-pct, 0) * 1%) 100%
+    );
+    -webkit-mask: radial-gradient(circle 3px at center, transparent 99%, #000 100%);
+    mask: radial-gradient(circle 3px at center, transparent 99%, #000 100%);
+  }
+
+  /* The #820 ingest meter — an indeterminate sweep while a real ingest is in flight (no
+     fabricated %); the loader is synchronous, so the bar conveys "working", with the
+     measured elapsed shown beside it as text. */
+  .sq-ingest-bar {
+    width: 72px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--secondary);
+    overflow: hidden;
+  }
+  .sq-ingest-fill {
+    display: block;
+    height: 100%;
+    width: 40%;
+    border-radius: 999px;
+    background: linear-gradient(
+      90deg,
+      var(--primary),
+      color-mix(in oklch, var(--primary) 50%, var(--success))
+    );
+    box-shadow: 0 0 8px var(--teal-glow);
+    animation: sq-ingest-sweep 1.1s ease-in-out infinite;
+  }
+  @keyframes sq-ingest-sweep {
+    0% {
+      transform: translateX(-120%);
+    }
+    100% {
+      transform: translateX(280%);
+    }
+  }
+
+  /* Teal-capped sticky result-table header (the IDE typographic rhythm of the proposal). */
+  .sq-result-head th {
+    color: var(--primary);
+    border-bottom-color: var(--teal-line);
+    background: color-mix(in oklch, var(--card) 84%, var(--background));
   }
 }

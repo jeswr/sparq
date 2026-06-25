@@ -126,7 +126,9 @@ function SelectTable({ results }: { results: SparqlResults }) {
     <div className="flex h-full flex-col" data-result-view="table">
       <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full border-collapse text-sm">
-          <thead className="sticky top-0 bg-card">
+          {/* [OPUS-4.8] sq-vw3ax (#820 redesign) — teal-capped sticky header (the proposal's IDE
+              result rhythm). The token colour follows the theme. */}
+          <thead className="sq-result-head sticky top-0">
             <tr>
               {table.vars.map((v) => (
                 <th
@@ -594,6 +596,7 @@ export function QueryWorkbench() {
               size="sm"
               onClick={() => void onRun("run")}
               disabled={!ready || running}
+              className="sq-glow-btn border-transparent"
               title="Run the query against the live store (⌘↵)"
             >
               {running ? <Loader2 className="animate-spin" /> : <Play />}
