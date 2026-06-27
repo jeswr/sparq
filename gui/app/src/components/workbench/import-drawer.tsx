@@ -97,7 +97,7 @@ function ImportDrawer({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { importRdf, snapshotStore } = useEngine();
+  const { importRdf, snapshotStore, refreshDiskUsage } = useEngine();
   const { recordImport } = useWorkspace();
   const native = hasNativeLoader();
 
@@ -137,6 +137,9 @@ function ImportDrawer({
         const { source, storeSize, added } = await run();
         // Record the source + persist a fresh snapshot of the now-updated live store.
         await recordImport(source, snapshotStore());
+        // [OPUS-4.8] sq-cno90 — the snapshot was just written to disk; re-probe the OS-reported
+        // footprint so the desktop status bar reflects the new on-disk bytes (no-op on the web).
+        refreshDiskUsage();
         setFeedback({
           kind: "ok",
           message: `Imported ${added.toLocaleString()} quad${added === 1 ? "" : "s"} (${sourceKind}). Store now holds ${storeSize.toLocaleString()}.`,
@@ -150,7 +153,7 @@ function ImportDrawer({
         setBusy(false);
       }
     },
-    [recordImport, snapshotStore],
+    [recordImport, snapshotStore, refreshDiskUsage],
   );
 
   // FILE — pick via the native dialog, then load via the native loader.

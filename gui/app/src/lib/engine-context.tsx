@@ -29,6 +29,7 @@ import { basePath } from "@/lib/base-path";
 import { SAMPLE_TURTLE, SAMPLE_FORMAT } from "@/data/sample-graph";
 import {
   hasNativeLoader,
+  nativeDiskUsage,
   nativeLoadPath,
   nativeLoadText,
   type LoadedDocument,
@@ -196,10 +197,26 @@ export interface EngineContextValue {
   /** Total quads in the live store (default + all named graphs). */
   storeSize: number;
   /**
-   * [OPUS-4.8] sq-vw3ax (#820) — the REAL on-device store footprint in bytes (the UTF-8 length of
-   * the persisted whole-dataset N-Quads snapshot). 0 before the store warms. Honest measured value.
+   * [OPUS-4.8] sq-vw3ax (#820) — the on-device store footprint ESTIMATE in bytes (the UTF-8 length
+   * of the persisted whole-dataset N-Quads snapshot). 0 before the store warms. Honest measured
+   * value, but an estimate of the on-disk size — it omits the workspace index JSON + encoding
+   * overhead. On the desktop shell {@link diskBytes} reports the OS's exact figure instead.
    */
   storeBytes: number;
+  /**
+   * [OPUS-4.8] sq-cno90 (#820 follow-up) — the OS-REPORTED on-disk byte total of the
+   * `$APPLOCALDATA/workspaces` tree (a recursive native `stat()` sum via the `disk_usage` command),
+   * or `null` on the web target / before the first probe / if the probe failed. When present this
+   * is the precise on-disk footprint the status bar PREFERS over the {@link storeBytes} estimate;
+   * when `null` the gauge falls back to the estimate, labelled as such. Never fabricated.
+   */
+  diskBytes: number | null;
+  /**
+   * [OPUS-4.8] sq-cno90 (#820 follow-up) — re-run the OS-reported `disk_usage` probe (e.g. after a
+   * workspace SAVE, which an import triggers, so {@link diskBytes} reflects the just-written file).
+   * A no-op on the web target. Best-effort: a failure leaves the last value, never a fabrication.
+   */
+  refreshDiskUsage: () => void;
   /** [OPUS-4.8] sq-vw3ax (#820) — the in-flight import, or null. Drives the status bar ingest meter. */
   ingest: IngestState | null;
   /** Per-graph counts for the datasets tree. */
@@ -381,6 +398,9 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   const [storeSize, setStoreSize] = React.useState(0);
   // [OPUS-4.8] sq-vw3ax (#820) — the live on-device footprint (snapshot bytes) + in-flight import.
   const [storeBytes, setStoreBytes] = React.useState(0);
+  // [OPUS-4.8] sq-cno90 (#820 follow-up) — the OS-reported on-disk byte total of the workspaces
+  // tree (desktop only); null on the web target, where the gauge uses the snapshot estimate.
+  const [diskBytes, setDiskBytes] = React.useState<number | null>(null);
   const [ingest, setIngest] = React.useState<IngestState | null>(null);
   const [graphs, setGraphs] = React.useState<GraphSummary[]>([]);
   const [lastLatencyMs, setLastLatencyMs] = React.useState<number | null>(null);
@@ -419,6 +439,29 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  // [OPUS-4.8] sq-cno90 (#820 follow-up) — probe the OS-reported on-disk byte total of the
+  // workspaces tree via the native `disk_usage` command. On the desktop shell this is the precise
+  // figure the status bar prefers; on the web target (no native FS) it stays `null` and the gauge
+  // shows the snapshot estimate instead. Best-effort: a probe failure leaves the last value (or
+  // `null`) — the gauge never fabricates a number. The on-disk figure lags a freshly persisted
+  // snapshot by one write, so we re-probe after the workspace save that an import/update triggers.
+  const refreshDiskUsage = React.useCallback(() => {
+    nativeDiskUsage()
+      .then((du) => {
+        if (du) setDiskBytes(du.bytes);
+      })
+      .catch(() => {
+        /* a probe failure must never break the status bar — keep the last value / estimate */
+      });
+  }, []);
+
+  // [OPUS-4.8] sq-cno90 — probe the OS-reported on-disk footprint once on mount (desktop only; a
+  // no-op that leaves diskBytes null on the web target). A restored workspace already has bytes on
+  // disk, so this surfaces the real figure on first paint of the desktop shell.
+  React.useEffect(() => {
+    refreshDiskUsage();
+  }, [refreshDiskUsage]);
+
   const refreshSummary = React.useCallback(() => {
     const store = storeRef.current;
     if (!store) return;
@@ -426,7 +469,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     setStoreSize(size);
     setStoreBytes(snapshotBytes(store));
     setGraphs(gs);
-  }, []);
+    refreshDiskUsage();
+  }, [refreshDiskUsage]);
 
   // [OPUS-4.8] sq-ixc3.13 — the Import drawer's ingest. A `file` import (a disk path) goes
   // through the NATIVE loader IPC (`load_path`: compressed + native-only HDT, no wasm-tab
@@ -676,6 +720,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       status,
       storeSize,
       storeBytes,
+      diskBytes,
+      refreshDiskUsage,
       ingest,
       graphs,
       lastLatencyMs,
@@ -690,6 +736,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       status,
       storeSize,
       storeBytes,
+      diskBytes,
+      refreshDiskUsage,
       ingest,
       graphs,
       lastLatencyMs,

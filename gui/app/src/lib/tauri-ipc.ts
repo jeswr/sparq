@@ -35,6 +35,22 @@ export interface LoadedDocument {
   format: string;
 }
 
+/**
+ * [OPUS-4.8] sq-cno90 (#820 follow-up) — what the native disk-usage probe (`disk_usage`) hands
+ * back, byte-for-byte the Rust `DiskUsage` (gui/src-tauri/src/disk.rs): the resolved
+ * `$APPLOCALDATA/workspaces` path, its REAL on-disk byte total (a recursive `stat()` sum of every
+ * file), and whether the dir exists yet. This is the OS-reported store footprint the desktop
+ * status bar PREFERS over the snapshot-bytes estimate.
+ */
+export interface DiskUsage {
+  /** The resolved absolute path of the `$APPLOCALDATA/workspaces` tree the figure covers. */
+  path: string;
+  /** The summed real byte size of every regular file under `path` (apparent size, `du --bytes`). */
+  bytes: number;
+  /** Whether the workspaces dir exists yet (false on a fresh install → `bytes` is 0). */
+  exists: boolean;
+}
+
 /** Re-export the runtime detector so callers need only one import. */
 export { isTauriRuntime };
 
@@ -143,4 +159,23 @@ export async function nativeLoadText(
 /** True when the native loader IPC path is available (we are inside a Tauri webview). */
 export function hasNativeLoader(): boolean {
   return isTauriRuntime();
+}
+
+/**
+ * [OPUS-4.8] sq-cno90 (#820 follow-up) — probe the REAL on-disk byte size of the
+ * `$APPLOCALDATA/workspaces` tree through the native `disk_usage` command, or `null` outside the
+ * desktop shell (the web target has no native FS — the status bar falls back to the snapshot-bytes
+ * estimate there). This is the OS-reported store footprint: a recursive `stat()` sum the desktop
+ * status bar PREFERS over the snapshot estimate. Never fabricated — a real value or `null`.
+ */
+export async function nativeDiskUsage(): Promise<DiskUsage | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return null;
+  try {
+    return await invoke<DiskUsage>("disk_usage");
+  } catch {
+    // A path-resolution failure (or an old desktop build without the command) must not break the
+    // status bar — fall back to the snapshot estimate by reporting "no OS figure available".
+    return null;
+  }
 }
