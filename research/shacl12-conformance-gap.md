@@ -23,6 +23,8 @@ follow-on feature waves are measurable rather than guesswork.
 > interpret a `sh:deactivated`/`sh:message`/`sh:severity` reifier as an override
 > of a SPECIFIC constraint statement (bead `sq-pb0wm`, see §6).
 
+<!-- -->
+
 > **[OPUS-4.8] (sq-pb0wm) update — the FINAL core gap is CLOSED.** The
 > per-constraint-statement reified-annotation overrides are now interpreted, so
 > `misc/{deactivated-003,message-002,severity-003}` move FAIL → PASS. New measured
