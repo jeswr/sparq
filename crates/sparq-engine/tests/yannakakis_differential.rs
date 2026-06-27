@@ -135,7 +135,7 @@ fn project(bag: Vec<Vec<(String, String)>>, keep: &[&str]) -> Vec<Vec<(String, S
 
 /// A snowflake/star dataset: `n` persons each with a `name`, an `age`, and a `city`; each
 /// `city` has a `country`. A star join on `?p` plus a chain `?p -> ?city -> ?country`.
-/// Sized by `n`: pass an `n` above ~1400 to push the per-person relations over the prepass
+/// Sized by `n`: pass an `n` >= 4096 to push the per-person relations over the prepass
 /// cost-gate (≥4096 rows) so the reduction actually engages under the feature.
 fn social_dataset(n: usize) -> Vec<T> {
     let mut v: Vec<T> = vec![];
@@ -161,8 +161,10 @@ fn social_dataset(n: usize) -> Vec<T> {
 #[test]
 fn chain_join_matches_brute_force() {
     // A line of `len` nodes plus a fan of dead-ends at each step (rows that join nowhere
-    // downstream — exactly the dangling tuples the full reducer removes).
-    let len = 1600usize;
+    // downstream — exactly the dangling tuples the full reducer removes). `len*2` ex:next
+    // triples must clear the prepass cost-gate (>=4096) so the reduction actually engages
+    // under the feature (else this would silently exercise only the binary fallback).
+    let len = 2200usize;
     let mut triples: Vec<T> = vec![];
     for i in 0..len {
         triples.push((format!("<http://ex/e/{i}>"), "<http://ex/next>".into(), format!("<http://ex/e/{}>", i + 1)));
@@ -190,7 +192,9 @@ fn chain_join_matches_brute_force() {
 /// the prepass engages. Answer equals the brute-force bag (only non-joining rows dropped).
 #[test]
 fn star_join_large_matches_brute_force() {
-    let triples = social_dataset(1500);
+    // n persons => n triples per per-person predicate; >=4096 clears the cost-gate so the
+    // prepass genuinely engages (not the binary fallback) under the feature-on leg.
+    let triples = social_dataset(4200);
     let g = load(&triples);
     let engine = result_bag(
         &g,
@@ -241,7 +245,8 @@ fn star_join_small_matches_brute_force() {
 /// relation — the regime the reducer targets. Above the cost-gate so the prepass engages.
 #[test]
 fn snowflake_join_matches_brute_force() {
-    let triples = social_dataset(1500);
+    // >=4096 persons clears the cost-gate so the prepass engages on this snowflake shape.
+    let triples = social_dataset(4200);
     let g = load(&triples);
     let engine = result_bag(
         &g,
@@ -266,7 +271,8 @@ fn snowflake_join_matches_brute_force() {
 /// attributes). The prepass removes nothing; the answer must be unchanged and complete.
 #[test]
 fn no_reduction_case_matches_brute_force() {
-    let triples = social_dataset(1500);
+    // >=4096 persons clears the cost-gate so the prepass engages even when it removes nothing.
+    let triples = social_dataset(4200);
     let g = load(&triples);
     let engine = result_bag(
         &g,
@@ -281,7 +287,7 @@ fn no_reduction_case_matches_brute_force() {
         ],
     );
     assert_eq!(engine, reference, "complete star: prepass removes nothing");
-    assert_eq!(engine.len(), 1500, "every person contributes exactly one row");
+    assert_eq!(engine.len(), 4200, "every person contributes exactly one row");
 }
 
 /// CYCLIC triangle: `?x->?y, ?y->?z, ?z->?x`. A cyclic BGP must route to LFTJ, NOT the
@@ -329,7 +335,9 @@ fn disjoint_join_is_empty_both_ways() {
 /// answer must equal the brute-force bag (filter applied in the reference too).
 #[test]
 fn filtered_join_matches_brute_force() {
-    let triples = social_dataset(1500);
+    // >=4096 persons: the unfiltered ex:age/ex:name relations clear the cost-gate so the
+    // prepass engages and threads the pushed-down sargable FILTER through its scans.
+    let triples = social_dataset(4200);
     let g = load(&triples);
     // ages are i % 50; keep only ages < 10 (a selective sargable filter), joined to name.
     let engine = result_bag(
