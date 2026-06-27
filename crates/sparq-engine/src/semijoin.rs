@@ -160,6 +160,11 @@ impl KeyFilter {
 /// and (when not the root) its parent. The tree is rooted and the edges connect relations
 /// that share at least one join variable, with the running-intersection property when the
 /// BGP is α-acyclic.
+///
+/// Yannakakis-ONLY: gated to the `yannakakis` feature (the only consumer is the prepass in
+/// `exec.rs`). Under the sibling `semijoin-bitmap` feature alone this type does not exist,
+/// so the opt-in stays lean and `-D dead_code` is satisfied.
+#[cfg(feature = "yannakakis")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TreeNode {
     /// Index of the relation (BGP pattern) this node stands for.
@@ -168,6 +173,7 @@ pub(crate) struct TreeNode {
     pub(crate) parent: usize,
 }
 
+#[cfg(feature = "yannakakis")]
 impl TreeNode {
     /// `true` for the (single) root node, which has no parent.
     #[inline]
@@ -195,6 +201,11 @@ impl TreeNode {
 /// semijoin sweep is answer-preserving for any spanning structure (see the module note),
 /// a maximum-overlap spanning forest is sufficient and, for α-acyclic BGPs, recovers a
 /// running-intersection tree.
+///
+/// Yannakakis-ONLY: gated to the `yannakakis` feature; its sole caller is the prepass in
+/// `exec.rs`. Absent under `semijoin-bitmap` alone (keeps the opt-in lean, satisfies
+/// `-D dead_code`).
+#[cfg(feature = "yannakakis")]
 pub(crate) fn build_join_tree(rel_vars: &[Vec<u32>]) -> Vec<TreeNode> {
     let n = rel_vars.len();
     let mut placed = vec![false; n];
@@ -329,9 +340,13 @@ mod tests {
     }
 
     // ---- [OPUS-4.8] (sq-5zf8i / §A4) join-tree builder ---------------------
+    // Yannakakis-ONLY: these exercise `build_join_tree`/`TreeNode`, both gated to the
+    // `yannakakis` feature, so the tests must be too — otherwise the `semijoin-bitmap`-only
+    // test build would reference items that don't exist.
 
     /// Every relation is placed exactly once, and every non-root parent points at an
     /// earlier (already-placed) node — the pre-order invariant the sweep relies on.
+    #[cfg(feature = "yannakakis")]
     fn assert_tree_well_formed(rel_vars: &[Vec<u32>], nodes: &[TreeNode]) {
         assert_eq!(nodes.len(), rel_vars.len(), "every relation is a node exactly once");
         let mut seen = vec![false; rel_vars.len()];
@@ -349,6 +364,7 @@ mod tests {
         assert!(roots >= 1, "at least one root");
     }
 
+    #[cfg(feature = "yannakakis")]
     #[test]
     fn chain_join_tree_is_a_single_spine() {
         // Chain: r0(?a,?b) r1(?b,?c) r2(?c,?d) — adjacency a-b, b-c, c-d.
@@ -359,6 +375,7 @@ mod tests {
         assert_eq!(nodes.iter().filter(|n| n.is_root()).count(), 1);
     }
 
+    #[cfg(feature = "yannakakis")]
     #[test]
     fn star_join_tree_roots_at_the_hub() {
         // Star: hub r0(?p,?a) and spokes r1(?p,?b) r2(?p,?c) r3(?p,?d), all share ?p (=0).
@@ -370,6 +387,7 @@ mod tests {
         assert!(nodes[0].is_root() && nodes[0].rel == 0);
     }
 
+    #[cfg(feature = "yannakakis")]
     #[test]
     fn disconnected_bgp_yields_one_root_per_component() {
         // Two independent edges: {r0(?a,?b), r1(?b,?c)} and {r2(?x,?y)} — a cross product.
@@ -379,6 +397,7 @@ mod tests {
         assert_eq!(nodes.iter().filter(|n| n.is_root()).count(), 2, "two components => two roots");
     }
 
+    #[cfg(feature = "yannakakis")]
     #[test]
     fn single_relation_is_its_own_root() {
         let rel_vars = vec![vec![0u32, 1]];
@@ -388,6 +407,7 @@ mod tests {
         assert!(nodes[0].is_root());
     }
 
+    #[cfg(feature = "yannakakis")]
     #[test]
     fn snowflake_join_tree_well_formed() {
         // Star on ?p plus a chain ?p->?city->?country:
