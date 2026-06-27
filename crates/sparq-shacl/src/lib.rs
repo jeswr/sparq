@@ -24,7 +24,11 @@ pub use model::{Component, Shape, ShapesModel, Target};
 pub use path::Path;
 // [OPUS-4.8] (sq-lz99x) `ShapeDiagnostic` surfaces a constraint the validator
 // SKIPPED because it could not be evaluated (e.g. an uncompilable `sh:pattern`).
-pub use report::{ShapeDiagnostic, ValidationReport, ValidationResult};
+// [OPUS-4.8] (sq-sx15d) `DEFAULT_CONFORMANCE_DISALLOWS` is the SHACL 1.2 default
+// disallowed-severity set used to compute `ValidationReport::conforms`.
+pub use report::{
+    ShapeDiagnostic, ValidationReport, ValidationResult, DEFAULT_CONFORMANCE_DISALLOWS,
+};
 
 // [OPUS-4.8] (sq-v0b8) SHACL Compact Syntax parser public surface (feature `scs`).
 #[cfg(feature = "scs")]
@@ -263,8 +267,11 @@ mod tests {
             .any(|t| t.predicate.as_str().ends_with("conforms")));
     }
 
-    /// `sh:conforms` counts every result regardless of severity (what the W3C
-    /// suite checks); `conforms_violations_only` is the severity-aware toggle.
+    /// [OPUS-4.8] (sq-sx15d) `sh:conforms` fails when ANY result is in the SHACL-1.2
+    /// default disallowed set {Violation, Warning, Info}; `conforms_violations_only`
+    /// is the strictly-weaker CI toggle that fails only on `sh:Violation`. A
+    /// Warning result fails `conforms` (Warning is disallowed by default) but
+    /// passes the violations-only toggle.
     #[test]
     fn severity_aware_conformance_toggle() {
         let data = Graph::load_str(
@@ -303,6 +310,12 @@ mod tests {
         let r = validate(&data, &shapes("sh:Violation"));
         assert!(!r.conforms);
         assert!(!r.conforms_violations_only());
+        // A sh:Debug result is below the default threshold: conforms is true even
+        // though a result is reported (the violations-only toggle agrees).
+        let r = validate(&data, &shapes("sh:Debug"));
+        assert!(r.conforms, "Debug result must not break default conformance");
+        assert_eq!(r.results.len(), 1);
+        assert!(r.conforms_violations_only());
         // Conforming data conforms under both.
         let ok = Graph::load_str(
             "@prefix ex: <http://example.org/> . ex:a a ex:Person ; ex:age 3 .",

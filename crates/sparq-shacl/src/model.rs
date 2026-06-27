@@ -33,6 +33,12 @@ pub enum Target {
 #[derive(Debug, Clone)]
 pub enum Component {
     Class(Term),
+    /// [OPUS-4.8] (sq-sx15d) `sh:class` with a SHACL-list object
+    /// (`sh:class ( ex:A ex:B )`, SHACL 1.2): a value node conforms iff it is a
+    /// SHACL instance of ANY listed class (`sh:ClassConstraintComponent`).
+    /// Mirrors the disjunctive `sh:datatype` / `sh:nodeKind` list spelling; a
+    /// single IRI object stays [`Component::Class`].
+    ClassIn(Vec<Term>),
     /// `sh:datatype` — the allowed-datatype set (SHACL §4.5.2). A single IRI
     /// object is a singleton set; the SHACL-1.2 disjunctive list form
     /// `sh:datatype ( xsd:string rdf:langString )` is the multi-element set. A
@@ -58,10 +64,42 @@ pub enum Component {
     },
     LanguageIn(Vec<String>),
     UniqueLang,
-    Equals(String),
-    Disjoint(String),
-    LessThan(String),
-    LessThanOrEquals(String),
+    /// [OPUS-4.8] (sq-sx15d) `sh:equals` — the value set of the shape's path must
+    /// equal the value set of the comparand. SHACL 1.2 lets the comparand be a
+    /// full property [`Path`] (often an RDF-list sequence), not just a predicate
+    /// IRI; a bare IRI parses to a trivial [`Path::Predicate`], so the SHACL 1.0
+    /// `-001` predicate form stays backward-compatible.
+    Equals(Path),
+    /// [OPUS-4.8] (sq-sx15d) `sh:disjoint` — the value set of the shape's path
+    /// must be disjoint from the comparand's. The comparand is a [`Path`] (SHACL
+    /// 1.2 list/path form; a bare IRI is a trivial path).
+    Disjoint(Path),
+    /// [OPUS-4.8] (sq-sx15d) `sh:lessThan` — every path value must be `<` every
+    /// comparand value. The comparand is a [`Path`] (SHACL 1.2).
+    LessThan(Path),
+    /// [OPUS-4.8] (sq-sx15d) `sh:lessThanOrEquals` — every path value must be
+    /// `<=` every comparand value. The comparand is a [`Path`] (SHACL 1.2).
+    LessThanOrEquals(Path),
+    /// [OPUS-4.8] (sq-sx15d) `sh:subsetOf` (SHACL 1.2) — the value set of the
+    /// shape's path must be a SUBSET of the comparand path's value set
+    /// (`sh:SubsetOfConstraintComponent`). One result per path value absent from
+    /// the comparand set. The comparand is a [`Path`].
+    SubsetOf(Path),
+    /// [OPUS-4.8] (sq-sx15d) `sh:someValue` (SHACL 1.2) — EXISTENTIAL: at least
+    /// one value node must conform to the nested shape
+    /// (`sh:SomeValueConstraintComponent`). The index is into
+    /// [`ShapesModel::shapes`]. One result on the focus/path when NONE conform.
+    SomeValue(usize),
+    /// [OPUS-4.8] (sq-sx15d) `sh:singleLine true` (SHACL 1.2) — each string value
+    /// must contain no line-break characters (LF/CR/FF/VT)
+    /// (`sh:SingleLineConstraintComponent`). `sh:singleLine false` imposes no
+    /// constraint (not parsed into a component).
+    SingleLine,
+    /// [OPUS-4.8] (sq-sx15d) `sh:rootClass` (SHACL 1.2) — each value node must be
+    /// the named class or a transitive `rdfs:subClassOf`-descendant of it
+    /// (`sh:RootClassConstraintComponent`). Reuses the `sh:class` subclass
+    /// closure.
+    RootClass(Term),
     Not(usize),
     And(Vec<usize>),
     Or(Vec<usize>),
@@ -596,8 +634,24 @@ impl ShapesModel {
         }
 
         let c = &mut shape.components;
+        // [OPUS-4.8] (sq-sx15d) `sh:class` accepts a single class IRI/blank node or
+        // the SHACL-1.2 disjunctive SHACL-list form `( ex:A ex:B )` — a value node
+        // conforms iff it is an instance of ANY listed class. A blank-node object
+        // that is a well-formed SHACL list (≥1 member) is the disjunctive form;
+        // any other object is a single class. Mirrors the `sh:datatype` /
+        // `sh:nodeKind` disjunctive handling above.
         for o in g.objects(node, &sh("class")) {
-            c.push(Component::Class(o));
+            match &o {
+                Term::BlankNode(_) => {
+                    let members = g.list(&o);
+                    if members.is_empty() {
+                        c.push(Component::Class(o));
+                    } else {
+                        c.push(Component::ClassIn(members));
+                    }
+                }
+                _ => c.push(Component::Class(o)),
+            }
         }
         // [OPUS-4.8] (sq-vg3y) `sh:datatype` / `sh:nodeKind` accept either a single
         // IRI or the SHACL-1.2 disjunctive SHACL-list form (`( a b )`). `iri_set`
@@ -675,20 +729,40 @@ impl ShapesModel {
         {
             c.push(Component::UniqueLang);
         }
+        // [OPUS-4.8] (sq-sx15d) `sh:equals` / `sh:disjoint` / `sh:lessThan` /
+        // `sh:lessThanOrEquals` / `sh:subsetOf` carry a comparand SHACL property
+        // PATH in SHACL 1.2 (often an RDF-list sequence), not just a predicate
+        // IRI. Parse the comparand with the same `Path` parser used for `sh:path`
+        // (a bare NamedNode → `Path::Predicate`, so the SHACL-1.0 predicate forms
+        // stay backward-compatible); an ill-formed comparand is dropped (lenient).
         for (pred, ctor) in [
-            ("equals", Component::Equals as fn(String) -> Component),
-            ("disjoint", Component::Disjoint as fn(String) -> Component),
-            ("lessThan", Component::LessThan as fn(String) -> Component),
+            ("equals", Component::Equals as fn(Path) -> Component),
+            ("disjoint", Component::Disjoint as fn(Path) -> Component),
+            ("lessThan", Component::LessThan as fn(Path) -> Component),
             (
                 "lessThanOrEquals",
-                Component::LessThanOrEquals as fn(String) -> Component,
+                Component::LessThanOrEquals as fn(Path) -> Component,
             ),
+            ("subsetOf", Component::SubsetOf as fn(Path) -> Component),
         ] {
             for o in g.objects(node, &sh(pred)) {
-                if let Term::NamedNode(n) = o {
-                    c.push(ctor(n.as_str().to_string()));
+                if let Ok(path) = Path::parse(g, &o) {
+                    c.push(ctor(path));
                 }
             }
+        }
+        // [OPUS-4.8] (sq-sx15d) `sh:rootClass` (SHACL 1.2): each value node must be
+        // the named class or a transitive `rdfs:subClassOf`-descendant of it. The
+        // object is a single class term.
+        for o in g.objects(node, &sh("rootClass")) {
+            c.push(Component::RootClass(o));
+        }
+        // [OPUS-4.8] (sq-sx15d) `sh:singleLine true` (SHACL 1.2): string values must
+        // contain no line-break characters. `sh:singleLine false` (or any non-true
+        // object) imposes no constraint.
+        if matches!(g.object(node, &sh("singleLine")), Some(Term::Literal(l)) if l.value() == "true")
+        {
+            c.push(Component::SingleLine);
         }
         for o in g.objects(node, &sh("hasValue")) {
             c.push(Component::HasValue(o));
@@ -776,6 +850,14 @@ impl ShapesModel {
         for o in g.objects(node, &sh("node")) {
             let id = self.shape_id(g, &o);
             shape.components.push(Component::Node(id));
+        }
+        // [OPUS-4.8] (sq-sx15d) `sh:someValue` (SHACL 1.2): EXISTENTIAL — at least
+        // one value node must conform to the referenced (nested) shape. Parsed/
+        // interned recursively like `sh:node`; the quantifier is inverted at eval
+        // time (a violation iff NO value conforms).
+        for o in g.objects(node, &sh("someValue")) {
+            let id = self.shape_id(g, &o);
+            shape.components.push(Component::SomeValue(id));
         }
         for o in g.objects(node, &sh("property")) {
             let id = self.shape_id(g, &o);

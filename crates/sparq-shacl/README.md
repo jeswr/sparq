@@ -42,8 +42,9 @@ let report = sparq_shacl::validate(&data, &shapes);
 if !report.conforms {
     eprintln!("{}", report.to_text());   // or report.to_turtle() for the report graph
 }
-// `conforms` counts EVERY result; for "warnings don't fail the build":
-if report.conforms_violations_only() { /* only sh:Warning / sh:Info results */ }
+// `conforms` fails on the SHACL-1.2 default disallowed set {Violation,Warning,Info}
+// (Debug/Trace are reported but conform); `conforms_violations_only` fails on Violation only:
+if report.conforms_violations_only() { /* a stricter-threshold CI toggle */ }
 # assert!(!report.conforms);
 # Ok(()) }
 ```
@@ -58,9 +59,12 @@ For many data graphs against one shapes graph, parse once with
   section of the official [w3c/data-shapes](https://github.com/w3c/data-shapes) suite
   (pinned commit `b6e73695`). Run it: `crates/sparq-shacl/fetch-shacl-tests.sh` then
   `cargo test -p sparq-shacl --test w3c_core`.
-- **SHACL 1.2 core constraints** — `sh:memberShape`, `sh:uniqueMembers`,
-  `sh:{min,max}ListLength`, `sh:uniqueValuesFor`, `sh:closed sh:ByTypes`, and the
-  disjunctive-list forms of `sh:datatype`/`sh:nodeKind` (sq-vg3y). The 1.2 harness
+- **SHACL 1.2 core constraints** — `sh:memberShape`/`sh:uniqueMembers`/
+  `sh:{min,max}ListLength`/`sh:uniqueValuesFor`/`sh:closed sh:ByTypes` (sq-vg3y),
+  disjunctive-list `sh:datatype`/`sh:nodeKind`/`sh:class`, path-valued comparands for
+  `sh:equals`/`sh:disjoint`/`sh:lessThan`/`sh:lessThanOrEquals`, `sh:subsetOf`/
+  `sh:someValue`/`sh:singleLine`/`sh:rootClass`, and severity-threshold `conforms`
+  (default disallows {Violation,Warning,Info}) (sq-sx15d). The 1.2 harness
   passes strictly **44/45** with `shacl-af` off — the one SKIP is `nodeByExpression-001`,
   a `shacl-af` constraint — and **45/45** with it on; it stays SKIP-tolerant only for a
   constraint predicate the build still lacks, never masking a regression.
@@ -86,13 +90,10 @@ For many data graphs against one shapes graph, parse once with
   SCS surface; the *display* direction ships client-side in the site). It round-trips
   **32/32** of the vendored W3C `shacl12-cs` valid fixtures graph-isomorphically
   (`cargo test -p sparq-shacl --features scs --test scs_roundtrip`). A hand-rolled lexer +
-  recursive-descent parser over the `SHACLC.g4` grammar — directives (`BASE`/`IMPORTS`/
-  `PREFIX` with the four implicit prefixes), `shape`/`shapeClass`, path expressions
-  (`^` / `/` / `|` / `?*+` / grouping), `[min..max]` counts, `nodeKind`, bare-IRI
-  `sh:datatype`-vs-`sh:class`, `@`shape-refs, `param=value`, `!`negation (`sh:not`),
-  `|` disjunction (`sh:or`), nested `{...}` shapes and `[ ... ]` arrays. Adds **zero new
-  dependencies**; unsupported constructs return a typed `ScsError` (never a silent
-  mis-parse). Off ⇒ none of it compiles. The wasm `Store` binding is deferred (sq-quly).
+  recursive-descent parser over the `SHACLC.g4` grammar (directives, `shape`/`shapeClass`,
+  path expressions, counts, negation/disjunction, nested shapes/arrays — full list in
+  the SKILL). Adds **zero new dependencies**; unsupported constructs return a typed
+  `ScsError` (never a silent mis-parse). Off ⇒ none of it compiles.
 
 ## 📚 Learn more
 
@@ -105,14 +106,13 @@ For many data graphs against one shapes graph, parse once with
 
 ## Scope and non-goals
 
-The remaining out-of-scope item is the full `sparql/pre-binding` semantics (rejecting
-variable re-binding, `$shapesGraph`) — see `bd list -l area:sparq-shacl`. Validation
-results are **not deduplicated** across traversal routes (matching the test suite: a
-nested shape reached through two parents reports twice), and re-entrant recursion on the
-same focus/shape pair counts as conforming (SHACL leaves recursion undefined). An
-**uncompilable `sh:pattern`** (e.g. a `(?!…)` lookahead — unsupported by Rust `regex`
-*and* by XML Schema regex) is **skipped**, surfaced in `report.diagnostics`, never
-fail-closed onto every value.
+Out of scope: full `sparql/pre-binding` semantics (rejecting variable re-binding,
+`$shapesGraph`) — see `bd list -l area:sparq-shacl`. Validation results are **not
+deduplicated** across traversal routes (a nested shape reached through two parents
+reports twice, matching the suite), re-entrant recursion on the same focus/shape pair
+counts as conforming (SHACL leaves recursion undefined), and an **uncompilable
+`sh:pattern`** (e.g. a `(?!…)` lookahead) is **skipped** into `report.diagnostics`,
+never fail-closed onto every value.
 
 ## License
 
