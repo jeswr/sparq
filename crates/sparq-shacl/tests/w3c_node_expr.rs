@@ -43,20 +43,20 @@
 //!
 //! ## Scope (honest)
 //!
-//! The runner covers the **implemented algebra** end-to-end. The suite's
-//! `shnex:var "<name>"` entries that resolve a *test-harness* `sht:scope-<name>`
-//! binding (a conformance-suite scope-injection convention, not a SHACL feature)
-//! have no counterpart in the crate's evaluation — the crate binds only the
-//! `"focusNode"` variable — so those entries are recorded as **xfail** (a known,
-//! documented divergence, see the bead noted at [`XFAIL_VAR_SCOPE`]), not faked.
-//! Any other entry whose form the crate cannot parse is a SKIP. The gate is an
-//! honest floor over exactly what the production path evaluates.
+//! The runner covers the **implemented algebra** end-to-end. [OPUS-4.8] (sq-u5rxj)
+//! The suite's `shnex:var "<name>"` entries that resolve a `sht:scope-<name>`
+//! action binding are now driven through the crate's real evaluation: the harness
+//! builds a [`sparq_shacl::Scope`] from those bindings and passes it to
+//! [`sparq_shacl::eval_node_expression_with_scope`], so `var-bound` PASSES (the
+//! previous `XFAIL_VAR_SCOPE` divergence is closed). Any entry whose form the
+//! crate cannot parse is a SKIP. The gate is an honest floor over exactly what the
+//! production path evaluates.
 
 #![cfg(feature = "shacl-af")]
 
 use oxrdf::Term;
 use sparq_core::Graph;
-use sparq_shacl::eval_node_expression;
+use sparq_shacl::eval_node_expression_with_scope;
 use sparq_shacl::view::GraphView;
 use std::collections::BTreeMap;
 use std::path::{Path as FsPath, PathBuf};
@@ -64,8 +64,6 @@ use std::path::{Path as FsPath, PathBuf};
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const MF: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#";
 const SHT: &str = "http://www.w3.org/ns/shacl-test#";
-const SH: &str = "http://www.w3.org/ns/shacl#";
-const SHNEX: &str = "http://www.w3.org/ns/shacl-node-expr#";
 
 /// Pass-rate floor: the number of `sht:EvalNodeExpr` entries the crate's REAL
 /// node-expression evaluation gets right at the pinned suite commit
@@ -74,23 +72,13 @@ const SHNEX: &str = "http://www.w3.org/ns/shacl-node-expr#";
 /// fails the build; raising it is a deliberate bump.
 ///
 /// [OPUS-4.8] (sq-mue75) Recalibrated when the harness moved from an inline
-/// re-implementation (set-blind) to driving `eval_node_expression`. The previous
-/// inline harness passed 63 of the runnable `sht:EvalNodeExpr` entries; the real
-/// crate path passes 62 + 1 xfail (the `shnex:var`/`sht:scope-*` harness-scope
-/// entry the crate's evaluation has no counterpart for — see [`XFAIL_VAR_SCOPE`]),
-/// so `pass + xfail` preserves the previous runnable count. The genuine crate gap
-/// surfaced by driving real code (a `sum` decimal that rendered `42` not `42.0`)
-/// was FIXED, not faked.
-const BASELINE_PASS: usize = 62;
-
-/// [OPUS-4.8] (sq-mue75) The number of `sht:EvalNodeExpr` entries that exercise
-/// the test-suite's `sht:scope-<name>` variable-injection convention (a
-/// `shnex:var "<name>"` whose value comes from a harness scope binding, not the
-/// focus node). The crate's evaluation binds only `"focusNode"`, so these are a
-/// known divergence recorded as xfail (asserted exactly so the split is
-/// documented and a change in the suite's scope-entry set is caught). Tracked for
-/// follow-up (caller-supplied node-expression variable scope).
-const XFAIL_VAR_SCOPE: usize = 1;
+/// re-implementation (set-blind) to driving `eval_node_expression`.
+///
+/// [OPUS-4.8] (sq-u5rxj) Raised 62 → 63: the `shnex:var "bound"` /
+/// `sht:scope-bound` entry now PASSES via the caller-supplied variable scope
+/// ([`sparq_shacl::eval_node_expression_with_scope`]) the harness threads in — the
+/// previous documented xfail is closed, so all runnable entries now pass.
+const BASELINE_PASS: usize = 63;
 
 fn suite_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -110,26 +98,16 @@ fn w3c_shacl_node_expr_suite() {
     let mut score = Scoreboard::default();
     walk_manifest(&root.join("manifest.ttl"), &root, &mut score);
 
-    let (mut pass, mut fail, mut skip, mut xfail) = (0, 0, 0, 0);
+    let (mut pass, mut fail, mut skip) = (0, 0, 0);
     println!("\nW3C SHACL node-expr suite scoreboard");
-    println!(
-        "{:<28} {:>5} {:>5} {:>6} {:>5}",
-        "group", "pass", "fail", "xfail", "skip"
-    );
+    println!("{:<28} {:>5} {:>5} {:>5}", "group", "pass", "fail", "skip");
     for (group, c) in &score.by_group {
-        println!(
-            "{group:<28} {:>5} {:>5} {:>6} {:>5}",
-            c.pass, c.fail, c.xfail, c.skip
-        );
+        println!("{group:<28} {:>5} {:>5} {:>5}", c.pass, c.fail, c.skip);
         pass += c.pass;
         fail += c.fail;
-        xfail += c.xfail;
         skip += c.skip;
     }
-    println!(
-        "{:<28} {pass:>5} {fail:>5} {xfail:>6} {skip:>5}",
-        "TOTAL"
-    );
+    println!("{:<28} {pass:>5} {fail:>5} {skip:>5}", "TOTAL");
     if !score.relaxed.is_empty() {
         println!(
             "\norder-insensitive PASS (matched by multiset, not sequence): {}",
@@ -145,12 +123,6 @@ fn w3c_shacl_node_expr_suite() {
             println!("  {id}: {why}");
         }
     }
-    if !score.xfails.is_empty() {
-        println!("\nxfail (harness var scope — crate binds only focusNode):");
-        for id in &score.xfails {
-            println!("  {id}");
-        }
-    }
     if !score.skips.is_empty() {
         println!("\nskipped (unsupported form / harness):");
         for (id, why) in &score.skips {
@@ -163,11 +135,7 @@ fn w3c_shacl_node_expr_suite() {
     );
     assert!(
         pass >= BASELINE_PASS,
-        "SHACL node-expr pass count regressed: {pass} < baseline {BASELINE_PASS} (xfail {xfail}, skipped {skip})"
-    );
-    assert_eq!(
-        xfail, XFAIL_VAR_SCOPE,
-        "SHACL node-expr: expected {XFAIL_VAR_SCOPE} var-scope xfail entries, found {xfail} — the harness-scope entry set changed"
+        "SHACL node-expr pass count regressed: {pass} < baseline {BASELINE_PASS} (skipped {skip})"
     );
 }
 
@@ -175,7 +143,6 @@ fn w3c_shacl_node_expr_suite() {
 struct Counts {
     pass: usize,
     fail: usize,
-    xfail: usize,
     skip: usize,
 }
 
@@ -183,7 +150,6 @@ struct Counts {
 struct Scoreboard {
     by_group: BTreeMap<String, Counts>,
     failures: Vec<(String, String)>,
-    xfails: Vec<String>,
     skips: Vec<(String, String)>,
     /// Entries that PASSED only after relaxing sequence → multiset comparison.
     relaxed: Vec<String>,
@@ -202,10 +168,6 @@ impl Scoreboard {
                 e.fail += 1;
                 self.failures.push((id.to_string(), why));
             }
-            Outcome::Xfail => {
-                e.xfail += 1;
-                self.xfails.push(id.to_string());
-            }
             Outcome::Skip(why) => {
                 e.skip += 1;
                 self.skips.push((id.to_string(), why));
@@ -219,8 +181,6 @@ enum Outcome {
     /// Matched by multiset (order-insensitive operator) — a PASS, tracked apart.
     PassRelaxed,
     Fail(String),
-    /// A known divergence (harness `sht:scope-*` variable injection).
-    Xfail,
     Skip(String),
 }
 
@@ -309,17 +269,15 @@ fn run_entry(g: &Graph, view: &GraphView, entry: &Term) -> Outcome {
         .object(&action, &format!("{SHT}focusNode"))
         .unwrap_or_else(|| iri("urn:x-sparq:no-focus"));
 
-    // A `shnex:var "<name>"` that resolves a harness `sht:scope-<name>` binding is
-    // a conformance-suite scope-injection convention with no crate counterpart
-    // (the crate binds only the focus node), so record it as a known xfail rather
-    // than faking the scope. Detected structurally on the expression tree.
-    if uses_harness_scope_var(view, &action, &expr) {
-        return Outcome::Xfail;
-    }
+    // [OPUS-4.8] (sq-u5rxj) Build the caller-supplied node-expression variable
+    // scope from the suite's `sht:scope-<name>` action bindings. A `shnex:var
+    // "<name>"` (other than `"focusNode"`) now resolves against this scope through
+    // the crate's real evaluation, rather than being recorded as a divergence.
+    let scope = harness_scope(view, &action);
 
     // Drive the crate's REAL parse + evaluation. The test graph is both the data
     // and the shapes graph (the suite declares filter shapes inline).
-    let actual = match eval_node_expression(g, g, &expr, &focus) {
+    let actual = match eval_node_expression_with_scope(g, g, &expr, &focus, &scope) {
         Some(v) => v,
         None => return Outcome::Skip("crate could not parse the node expression".into()),
     };
@@ -337,34 +295,22 @@ fn run_entry(g: &Graph, view: &GraphView, entry: &Term) -> Outcome {
     }
 }
 
-/// Does the expression (transitively) use a `shnex:var "<name>"` whose value is a
-/// harness `sht:scope-<name>` binding on the action (i.e. not `"focusNode"`)?
-fn uses_harness_scope_var(view: &GraphView, action: &Term, expr: &Term) -> bool {
-    // Bounded structural walk over the blank-node expression tree.
-    fn walk(view: &GraphView, action: &Term, node: &Term, depth: usize) -> bool {
-        if depth > 64 {
-            return false;
-        }
-        if let Some(Term::Literal(name)) = view
-            .object(node, &format!("{SHNEX}var"))
-            .or_else(|| view.object(node, &format!("{SH}var")))
-        {
-            if name.value() != "focusNode" {
-                let scope_pred = format!("{SHT}scope-{}", name.value());
-                if view.object(action, &scope_pred).is_some() {
-                    return true;
-                }
+/// [OPUS-4.8] (sq-u5rxj) Builds the caller-supplied node-expression variable scope
+/// from the suite's `sht:scope-<name>` action bindings: each
+/// `[action] sht:scope-<name> <value>` becomes `name -> { value }`. A `shnex:var
+/// "<name>"` resolves against this map (the crate threads it through
+/// `eval_node_expression_with_scope`). Empty when the action declares no scope.
+fn harness_scope(view: &GraphView, action: &Term) -> sparq_shacl::Scope {
+    let mut scope = sparq_shacl::Scope::default();
+    let prefix = format!("{SHT}scope-");
+    for (p, o) in view.predicate_objects(action) {
+        if let Term::NamedNode(pred) = &p {
+            if let Some(name) = pred.as_str().strip_prefix(&prefix) {
+                scope.entry(name.to_string()).or_default().push(o);
             }
         }
-        // Descend into every object of this node (operands, list members).
-        for (_, o) in view.predicate_objects(node) {
-            if matches!(o, Term::BlankNode(_)) && walk(view, action, &o, depth + 1) {
-                return true;
-            }
-        }
-        false
     }
-    walk(view, action, expr, 0)
+    scope
 }
 
 /// Sequence equality: same terms, same order, duplicates significant.

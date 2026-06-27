@@ -22,13 +22,13 @@
 //! node-expression constraints. Those are a different surface, so counting them
 //! as FAILs would be noise.
 //!
-//! Every *other* entry is compared strictly. Some of those entries exercise
-//! SHACL-**1.2** behaviour this crate does not yet fully implement (the
-//! path-list spelling of `sh:disjoint` / `sh:equals` / `sh:lessThan{,OrEquals}`,
-//! and the new `sh:reifierShape` / `sh:rootClass` / `sh:singleLine` /
-//! `sh:someValue` / `sh:subsetOf` / `sh:targetWhere` / `sh:shape` /
-//! `sh:ShapeClass` features), so they produce the wrong report and are honest
-//! **FAIL**s — they are the live gap map in `research/shacl12-conformance-gap.md`.
+//! Every *other* entry is compared strictly. A few entries still exercise
+//! SHACL-**1.2** behaviour this crate does not yet fully implement — currently the
+//! per-constraint-statement RDF-1.2 reified-annotation overrides
+//! (`sh:datatype X {| sh:deactivated/sh:message/sh:severity … |}`,
+//! `misc/{deactivated-003,message-002,severity-003}`) — so they produce the wrong
+//! report and are honest **FAIL**s, the live gap map in
+//! `research/shacl12-conformance-gap.md`.
 //! This harness deliberately does **not** assert `fail == 0` for the full tree:
 //! that would be a false claim of full SHACL-1.2 conformance.
 //!
@@ -109,13 +109,20 @@ fn unimplemented() -> Vec<String> {
 /// constraints (sq-sx15d / #1267) and the 1.2 TARGET features added here —
 /// `sh:targetWhere`, the `sh:shape` data-graph link, and the `sh:ShapeClass`
 /// implicit class target (`targets/` now 10/10).
-const BASELINE_PASS_CORE: usize = 129;
+///
+/// [OPUS-4.8] (sq-0mjfd / sq-5q76d) Raised 129 → 133: this wave closes the
+/// `property/reifierShape-001,002` (`sh:reifierShape` / `sh:reificationRequired`),
+/// `property/uniqueLang-003` (the `rdf:dirLangString` base-direction key) and
+/// `validation-reports/conformance-disallows-001` (shapes-graph
+/// `sh:conformanceDisallows` threading) gaps. EQUALS the measured default-state
+/// pass count exactly (not above it — see the #1271 near-failure note).
+const BASELINE_PASS_CORE: usize = 133;
 
 /// Pass-floor over the FULL core tree with `shacl-af` ON: the `shacl-af`
 /// `sh:nodeByExpression` core/node entry becomes implemented and PASSes, so the
-/// floor rises by one. [OPUS-4.8] (sq-rnkdh) Raised 115 → 130 in lock-step with
+/// floor rises by one. [OPUS-4.8] (sq-0mjfd) Raised 130 → 134 in lock-step with
 /// [`BASELINE_PASS_CORE`].
-const BASELINE_PASS_AF: usize = 130;
+const BASELINE_PASS_AF: usize = 134;
 
 /// Fail-ceiling over the FULL core tree — the count of entries whose SHACL-1.2
 /// behaviour this crate does not yet implement (the gap map). A *new* mismatch (a
@@ -124,13 +131,18 @@ const BASELINE_PASS_AF: usize = 130;
 /// states: the `shacl-af`-gated entries flip SKIP↔PASS, never to/from FAIL.
 ///
 /// [OPUS-4.8] (sq-rnkdh) Lowered 22 → 7: sq-sx15d (#1267) closed the value-constraint
-/// gaps and this change closes the `targets/` gaps. The remaining 7 are the live gap
-/// map (reifierShape ×2, deactivated-003, message-002, severity-003, uniqueLang-003,
-/// conformance-disallows-001) — see `research/shacl12-conformance-gap.md`.
-const BASELINE_FAIL_CORE: usize = 7;
+/// gaps and this change closes the `targets/` gaps.
+///
+/// [OPUS-4.8] (sq-0mjfd / sq-5q76d) Lowered 7 → 3: reifierShape ×2, uniqueLang-003 and
+/// conformance-disallows-001 now PASS. The remaining 3 are `misc/{deactivated-003,
+/// message-002, severity-003}` — each needs PER-CONSTRAINT-STATEMENT RDF-1.2
+/// reified-annotation interpretation (`sh:datatype X {| sh:deactivated/message/severity … |}`),
+/// a deeper SHACL-model feature (the `{| |}` parser already works — see
+/// `research/shacl12-conformance-gap.md` and the dedicated bead).
+const BASELINE_FAIL_CORE: usize = 3;
 
 /// Fail-ceiling with `shacl-af` ON — identical to [`BASELINE_FAIL_CORE`].
-const BASELINE_FAIL_AF: usize = 7;
+const BASELINE_FAIL_AF: usize = 3;
 
 fn baseline_pass() -> usize {
     if cfg!(feature = "shacl-af") {

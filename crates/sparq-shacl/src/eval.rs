@@ -15,6 +15,9 @@ use std::cmp::Ordering;
 
 const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+/// [OPUS-4.8] (sq-0mjfd) The RDF-1.2 reification predicate: a reifier `?r` reifies
+/// a triple-term via `?r rdf:reifies <<( s p o )>>`. Used by `sh:reifierShape`.
+const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
 
 /// Runs every targeted shape over its focus nodes. Results are deliberately NOT
 /// deduplicated: the SHACL test suite expects one result per constraint-component
@@ -312,6 +315,32 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// [OPUS-4.8] (sq-0mjfd) The reifiers of the asserted triple
+    /// `(subject, predicate, object)` — the subjects of
+    /// `?r rdf:reifies <<(subject predicate object)>>` (the RDF-1.2
+    /// reified-annotation `{| … |}` form; the parser stores the triple-term as a
+    /// regular `rdf:reifies` object). Returns the reifier nodes (each an
+    /// IRI/blank node validated against `sh:reifierShape`). Empty when `subject`
+    /// is not an IRI/blank node, or no reifier exists.
+    fn reifiers_of(&self, subject: &Term, predicate: &str, object: &Term) -> Vec<Term> {
+        use oxrdf::{NamedNode, NamedOrBlankNode, Triple};
+        let subj: NamedOrBlankNode = match subject {
+            Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n.clone()),
+            Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b.clone()),
+            _ => return Vec::new(),
+        };
+        let triple_term = Term::Triple(Box::new(Triple::new(
+            subj,
+            NamedNode::new_unchecked(predicate),
+            object.clone(),
+        )));
+        self.data
+            .triples(None, Some(RDF_REIFIES), Some(&triple_term))
+            .into_iter()
+            .map(|[s, _, _]| s)
+            .collect()
+    }
+
     #[allow(clippy::too_many_lines)]
     fn eval_component(
         &mut self,
@@ -533,12 +562,22 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+            // [OPUS-4.8] (sq-0mjfd) `sh:uniqueLang true` — no language may repeat
+            // across the value set. The key includes the BASE DIRECTION (RDF-1.2
+            // `rdf:dirLangString`, `@ar--ltr`): `"X"@ar`, `"Y"@ar--ltr` and
+            // `"Z"@ar--rtl` are THREE distinct keys, so a value set with one of each
+            // conforms, while two `@ar--ltr` values collide (uniqueLang-003).
             Component::UniqueLang => {
                 let mut counts: FxHashMap<String, usize> = FxHashMap::default();
                 for v in values {
                     if let Term::Literal(l) = v {
                         if let Some(lang) = l.language() {
-                            *counts.entry(lang.to_lowercase()).or_insert(0) += 1;
+                            // [OPUS-4.8] positional format args (rust/unused-variable CodeQL FP).
+                            let key = match l.direction() {
+                                Some(dir) => format!("{}--{}", lang.to_lowercase(), dir),
+                                None => lang.to_lowercase(),
+                            };
+                            *counts.entry(key).or_insert(0) += 1;
                         }
                     }
                 }
@@ -554,7 +593,7 @@ impl<'a> Validator<'a> {
                         focus,
                         None,
                         "UniqueLangConstraintComponent",
-                        format!("Language \"{lang}\" is used more than once"),
+                        format!("Language \"{}\" is used more than once", lang),
                     ));
                 }
             }
@@ -771,6 +810,42 @@ impl<'a> Validator<'a> {
                             Some(v.clone()),
                             "NodeConstraintComponent",
                             "Value does not conform to the node shape".into(),
+                        ));
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-0mjfd) `sh:reifierShape` (SHACL 1.2): for each value
+            // `v`, the reifiers of the asserted triple `(focus, predicate, v)` must
+            // conform to the referenced shape; `required` additionally demands a
+            // reifier exist. The predicate is the shape's path when it is a single
+            // predicate (the only path form for which a reified triple is defined).
+            Component::ReifierShape {
+                shape: inner,
+                required,
+            } => {
+                let predicate = match &self.shapes.shapes[sid].path {
+                    Some(Path::Predicate(p)) => Some(p.clone()),
+                    _ => None,
+                };
+                for v in values {
+                    let reifiers = match &predicate {
+                        Some(p) => self.reifiers_of(focus, p, v),
+                        None => Vec::new(),
+                    };
+                    let conforms = if reifiers.is_empty() {
+                        // No reifier: conforms unless reification is required.
+                        !*required
+                    } else {
+                        reifiers.iter().all(|r| self.conforms(r, *inner))
+                    };
+                    if !conforms {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "ReifierShapeConstraintComponent",
+                            "A reifier of the value's triple does not conform to sh:reifierShape"
+                                .into(),
                         ));
                     }
                 }

@@ -20,7 +20,7 @@ pub mod scs;
 mod sparql;
 pub mod view;
 
-pub use model::{Component, Shape, ShapesModel, Target};
+pub use model::{Component, PreBindingFailure, Shape, ShapesModel, Target};
 pub use path::Path;
 // [OPUS-4.8] (sq-lz99x) `ShapeDiagnostic` surfaces a constraint the validator
 // SKIPPED because it could not be evaluated (e.g. an uncompilable `sh:pattern`).
@@ -37,8 +37,8 @@ pub use scs::{parse as parse_scs, parse_to_graph as parse_scs_to_graph, ScsError
 // [OPUS-4.8] SHACL-AF rules + node-expression public surface (feature `shacl-af`).
 #[cfg(feature = "shacl-af")]
 pub use rules::{
-    apply_rules, apply_rules_with_model, conforms, eval_node_expression, expand, ConformanceCheck,
-    Inference,
+    apply_rules, apply_rules_with_model, conforms, eval_node_expression,
+    eval_node_expression_with_scope, expand, ConformanceCheck, Inference, Scope,
 };
 
 use oxrdf::Triple;
@@ -54,9 +54,75 @@ pub fn validate(data: &Graph, shapes: &Graph) -> ValidationReport {
 
 /// [`validate`] against an already-parsed shapes model (amortises shape
 /// parsing across many data graphs).
+///
+/// [OPUS-4.8] (sq-5q76d) `ValidationReport::conforms` honours a shapes-graph
+/// `sh:conformanceDisallows` declaration ([`ShapesModel::conformance_disallows`])
+/// when present, falling back to the default {Violation, Warning, Info} set.
 pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationReport {
     let (results, diagnostics) = eval::validate_graph(data, model);
-    ValidationReport::with_diagnostics(results, diagnostics)
+    ValidationReport::with_diagnostics_and_disallows(
+        results,
+        diagnostics,
+        model.conformance_disallows(),
+    )
+}
+
+/// [OPUS-4.8] (sq-0mjfd) A SHACL processing **failure** (W3C SHACL §3.4): the
+/// shapes graph declares a constraint a conformant processor cannot soundly
+/// evaluate, so the spec says it MUST signal a *failure* rather than produce a
+/// validation report. The only producer today is a SHACL-SPARQL pre-binding
+/// violation (a `sh:sparql` constraint or constraint-component validator using
+/// `MINUS` / `VALUES` / `SERVICE` / a sub-`SELECT` that drops a pre-bound
+/// variable / a `BIND` that re-binds one). Carries the offending nodes + the
+/// violated rule for diagnostics.
+#[derive(Debug, Clone)]
+pub struct ShaclFailure {
+    /// The pre-binding failures that triggered the overall failure (at least one).
+    pub pre_binding: Vec<model::PreBindingFailure>,
+}
+
+impl std::fmt::Display for ShaclFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // [OPUS-4.8] positional format args (rust/unused-variable CodeQL FP).
+        write!(
+            f,
+            "SHACL failure: {} unsound SHACL-SPARQL pre-binding(s)",
+            self.pre_binding.len()
+        )?;
+        if let Some(first) = self.pre_binding.first() {
+            write!(f, " — e.g. {}: {}", first.node, first.message)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ShaclFailure {}
+
+/// [OPUS-4.8] (sq-0mjfd) STRICT validation (W3C SHACL §3.4 failure outcome): like
+/// [`validate`], but returns `Err(ShaclFailure)` when the shapes graph declares a
+/// constraint a conformant processor MUST reject — currently a SHACL-SPARQL
+/// pre-binding violation. The lenient [`validate`] instead skips such a
+/// constraint (its lenient ill-formed-shape policy), so use this when the
+/// distinction matters (e.g. the W3C `mf:result sht:Failure` entries).
+pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport, ShaclFailure> {
+    let model = ShapesModel::parse(shapes);
+    validate_strict_with_model(data, &model)
+}
+
+/// [OPUS-4.8] (sq-0mjfd) [`validate_strict`] against an already-parsed model: an
+/// `Err` if the model recorded any pre-binding failure
+/// ([`ShapesModel::pre_binding_failures`]), else the lenient validation report.
+pub fn validate_strict_with_model(
+    data: &Graph,
+    model: &ShapesModel,
+) -> Result<ValidationReport, ShaclFailure> {
+    let failures = model.pre_binding_failures();
+    if !failures.is_empty() {
+        return Err(ShaclFailure {
+            pre_binding: failures.to_vec(),
+        });
+    }
+    Ok(validate_with_model(data, model))
 }
 
 /// Builds a queryable [`Graph`] from already-parsed triples. The seam for
@@ -150,6 +216,98 @@ mod tests {
         );
         assert!(r.conforms, "unexpected results: {}", r.to_text());
         assert!(r.to_turtle().contains("sh:conforms true"));
+    }
+
+    /// [OPUS-4.8] (sq-5q76d) A shapes-graph `sh:conformanceDisallows` (here only
+    /// `sh:Violation`) OVERRIDES the default {Violation,Warning,Info} set: a
+    /// Warning-only result then conforms (mirrors conformance-disallows-001).
+    #[test]
+    fn shapes_graph_conformance_disallows_threaded() {
+        let g = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:S a sh:NodeShape ; sh:targetNode ex:bob ;
+              sh:property [ sh:path ex:age ; sh:severity sh:Warning ; sh:datatype xsd:integer ] .
+            ex:bob ex:age "x" .
+            [] a sh:ValidationReport ; sh:conformanceDisallows sh:Violation .
+        "#;
+        let graph = Graph::load_str(g, "turtle").unwrap();
+        let r = validate(&graph, &graph);
+        assert_eq!(r.results.len(), 1, "one Warning result expected");
+        // Only sh:Violation is disallowed, so the Warning result still conforms.
+        assert!(r.conforms, "Warning result must conform under the custom set");
+        // Without the override (default set) the same Warning would NOT conform.
+        let g2 = g.replace("sh:conformanceDisallows sh:Violation", "");
+        let graph2 = Graph::load_str(&g2, "turtle").unwrap();
+        assert!(!validate(&graph2, &graph2).conforms);
+    }
+
+    /// [OPUS-4.8] (sq-0mjfd) `validate_strict` REJECTS a shapes graph whose
+    /// `sh:sparql` constraint violates the pre-binding rules (here a MINUS), while
+    /// the lenient `validate` skips it and returns a (conforming) report.
+    #[test]
+    fn validate_strict_rejects_pre_binding_violation() {
+        let g = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:S a sh:NodeShape ; sh:targetNode ex:x ;
+              sh:sparql [ a sh:SPARQLConstraint ;
+                sh:select "SELECT $this WHERE { $this ?p ?o . MINUS { $this ?p \"v\" } }" ] .
+        "#;
+        let graph = Graph::load_str(g, "turtle").unwrap();
+        assert!(
+            validate_strict(&graph, &graph).is_err(),
+            "strict validation must reject a MINUS pre-binding"
+        );
+        // Lenient validate skips the constraint (no panic, no failure).
+        assert!(validate(&graph, &graph).conforms);
+    }
+
+    /// [OPUS-4.8] (sq-0mjfd) `sh:reifierShape`: a value whose reifier fails the
+    /// reifier shape produces a `sh:ReifierShapeConstraintComponent` result.
+    #[test]
+    fn reifier_shape_validates_reifiers() {
+        let g = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:r ex:p "v" {| ex:q false |} .
+            ex:Reify a sh:NodeShape ; sh:property [ sh:path ex:q ; sh:in ( true ) ] .
+            ex:S a sh:NodeShape ; sh:targetNode ex:r ;
+              sh:property [ sh:path ex:p ; sh:reifierShape ex:Reify ] .
+        "#;
+        let graph = Graph::load_str(g, "turtle").unwrap();
+        let r = validate(&graph, &graph);
+        assert!(!r.conforms, "reifier (q=false) must fail q in (true)");
+        assert!(r
+            .results
+            .iter()
+            .any(|res| res.source_component.ends_with("ReifierShapeConstraintComponent")));
+    }
+
+    /// [OPUS-4.8] (sq-0mjfd) `sh:uniqueLang` distinguishes base direction: two
+    /// `@ar--ltr` values collide, but `@ar`, `@ar--ltr`, `@ar--rtl` are distinct.
+    #[test]
+    fn unique_lang_keys_on_base_direction() {
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:S a sh:NodeShape ; sh:targetNode ex:bad , ex:good ;
+              sh:property [ sh:path ex:p ; sh:uniqueLang true ] .
+        "#;
+        let bad = r#"@prefix ex: <http://example.org/> .
+            ex:bad ex:p "A"@ar--ltr , "B"@ar--ltr ."#;
+        let good = r#"@prefix ex: <http://example.org/> .
+            ex:good ex:p "A"@ar , "A"@ar--ltr , "A"@ar--rtl ."#;
+        let sg = Graph::load_str(shapes, "turtle").unwrap();
+        let bad_r = validate(&Graph::load_str(bad, "turtle").unwrap(), &sg);
+        assert!(!bad_r.conforms, "two @ar--ltr values must collide");
+        let good_r = validate(&Graph::load_str(good, "turtle").unwrap(), &sg);
+        assert!(
+            good_r.conforms,
+            "@ar / @ar--ltr / @ar--rtl are distinct keys: {}",
+            good_r.to_text()
+        );
     }
 
     #[test]
