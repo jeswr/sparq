@@ -76,12 +76,16 @@ g.ask("PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }")   # -> True
   release the GIL. `Graph.load` treats a `str` as a **file path** only when a file
   with that name exists and the string has no newline; `os.PathLike` is always a
   path; otherwise the string is parsed as RDF content.
-- **Opt-in Arrow export** (`pip install sparq-rdf[arrow]`, needs `pyarrow ≥ 14`) —
-  `g.query_arrow(sparql)` returns a `pyarrow.Table` (one
+- **Opt-in Arrow export** — `g.query_arrow(sparql)` returns a `pyarrow.Table` (one
   `struct<kind,value,datatype,language,direction>` column per variable; unbound → null
   struct slot) over the merged `sparq-arrow` projection, bridged through the Arrow C
   Data Interface (no re-serialisation). OFF by default, so the lean wheel pays nothing.
-  v1 boundary: no numeric narrowing yet, RDF 1.2 triple terms stringified.
+  v1 boundary: no numeric narrowing yet, RDF 1.2 triple terms stringified. The `arrow`
+  extra (`pip install sparq-rdf[arrow]`) pulls in the `pyarrow ≥ 14` consumer side, but
+  `query_arrow` only EXISTS in a wheel built with the cargo `arrow` feature
+  (`maturin build --features arrow`). Which published PyPI wheels ship with `arrow`
+  baked in is the broader release-matrix question (sq-v286); until then, build/install
+  an `--features arrow` wheel yourself.
 
 ## 📚 Learn more
 
