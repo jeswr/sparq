@@ -6,6 +6,25 @@ use crate::path::Path;
 use oxrdf::Term;
 use std::fmt::Write as _;
 
+/// [OPUS-4.8] (sq-sx15d) The DEFAULT `sh:conformanceDisallows` severity set
+/// (SHACL 1.2 Core §3.9): a data graph fails to conform when ANY validation
+/// result carries one of these severities. Results at `sh:Debug` / `sh:Trace`
+/// (below `sh:Info` in the `sh:Trace < sh:Debug < sh:Info < sh:Warning <
+/// sh:Violation` ordering) are reported but do not break conformance.
+pub const DEFAULT_CONFORMANCE_DISALLOWS: &[&str] = &[
+    "http://www.w3.org/ns/shacl#Violation",
+    "http://www.w3.org/ns/shacl#Warning",
+    "http://www.w3.org/ns/shacl#Info",
+];
+
+/// [OPUS-4.8] (sq-sx15d) `true` iff none of `results` carries a severity in the
+/// `disallowed` set — the SHACL 1.2 conformance test (default or custom set).
+fn conforms_over(results: &[ValidationResult], disallowed: &[&str]) -> bool {
+    !results
+        .iter()
+        .any(|r| disallowed.iter().any(|d| r.severity == *d))
+}
+
 /// One validation result (one constraint violation/warning/info).
 #[derive(Debug, Clone)]
 pub struct ValidationResult {
@@ -85,20 +104,40 @@ impl ValidationReport {
         results: Vec<ValidationResult>,
         diagnostics: Vec<ShapeDiagnostic>,
     ) -> Self {
+        // [OPUS-4.8] (sq-sx15d) SHACL 1.2 conformance: the graph conforms iff NO
+        // result carries a severity in the DEFAULT disallowed set (sh:Violation /
+        // sh:Warning / sh:Info). Results at sh:Debug / sh:Trace (and any custom
+        // severity outside the default set) are reported but do not break
+        // conformance — so a Debug/Trace-only report conforms. (A custom
+        // disallowed set, when a caller carries `sh:conformanceDisallows`, is
+        // recomputed via `conforms_with_disallowed`.)
+        let conforms = conforms_over(&results, DEFAULT_CONFORMANCE_DISALLOWS);
         ValidationReport {
-            conforms: results.is_empty(),
+            conforms,
             results,
             diagnostics,
         }
     }
 
+    /// [OPUS-4.8] (sq-sx15d) Recompute conformance against a CUSTOM disallowed
+    /// severity set (the SHACL 1.2 `sh:conformanceDisallows` of a results graph,
+    /// SHACL Core §3.9): `true` iff no result carries a severity in `disallowed`.
+    /// `disallowed` holds full severity IRIs (e.g.
+    /// `http://www.w3.org/ns/shacl#Violation`). The public [`conforms`](Self::conforms)
+    /// field uses the default set [`DEFAULT_CONFORMANCE_DISALLOWS`]; this lets a
+    /// caller that read an explicit `sh:conformanceDisallows` apply it instead
+    /// (e.g. a Warning result conforms when only `sh:Violation` is disallowed).
+    pub fn conforms_with_disallowed(&self, disallowed: &[&str]) -> bool {
+        conforms_over(&self.results, disallowed)
+    }
+
     /// Severity-aware conformance: `true` iff no result carries
     /// `sh:Violation` severity — i.e. `sh:Warning` / `sh:Info` (and custom
-    /// severities) are reported but not conformance-breaking. The spec's
-    /// `sh:conforms` ([`conforms`](Self::conforms), what the W3C suite
-    /// checks) counts EVERY result regardless of severity; this is the
+    /// severities) are reported but not conformance-breaking. This is the
     /// "violations only" toggle several implementations expose for CI-style
-    /// gating.
+    /// gating (equivalent to `conforms_with_disallowed(&[sh:Violation])`). It is
+    /// strictly weaker than the spec default [`conforms`](Self::conforms) field,
+    /// which also disallows `sh:Warning` / `sh:Info`.
     pub fn conforms_violations_only(&self) -> bool {
         self.results_with_severity(&format!("{SH}Violation"))
             .next()
@@ -523,8 +562,10 @@ mod tests {
                 vec![],
             ),
         ]);
-        // sh:conforms counts every result; the violations-only toggle passes
-        // because neither result is a sh:Violation.
+        // [OPUS-4.8] (sq-sx15d) sh:conforms uses the DEFAULT disallowed set
+        // {Violation, Warning, Info}: a Warning/Info report does NOT conform.
+        // The violations-only toggle is strictly weaker and passes here (no
+        // sh:Violation).
         assert!(!r.conforms);
         assert!(r.conforms_violations_only());
         assert_eq!(r.results_with_severity(&format!("{SH}Warning")).count(), 1);
@@ -544,5 +585,55 @@ mod tests {
             vec![],
         )]);
         assert!(!r.conforms_violations_only());
+    }
+
+    // [OPUS-4.8] (sq-sx15d) SHACL-1.2 conformance threshold: results below
+    // sh:Info (sh:Debug / sh:Trace) are reported but DO NOT break the default
+    // `conforms`; a custom disallowed set is applied via
+    // `conforms_with_disallowed`.
+    #[test]
+    fn severity_threshold_default_and_custom_disallowed() {
+        // A Debug-only and a Trace-only report each conform under the default set.
+        for sev in ["Debug", "Trace"] {
+            let r = ValidationReport::new(vec![result(
+                iri(&format!("{EX}x")),
+                None,
+                None,
+                "DatatypeConstraintComponent",
+                sev,
+                vec![],
+            )]);
+            assert!(r.conforms, "a {sev}-only report must conform by default");
+            // Still reported (one result), just below the threshold.
+            assert_eq!(r.results.len(), 1);
+        }
+
+        // A Warning result breaks the default conformance...
+        let r = ValidationReport::new(vec![result(
+            iri(&format!("{EX}w")),
+            None,
+            None,
+            "DatatypeConstraintComponent",
+            "Warning",
+            vec![],
+        )]);
+        assert!(!r.conforms);
+        // ...but conforms under the custom set {sh:Violation} only.
+        assert!(r.conforms_with_disallowed(&[&format!("{SH}Violation")]));
+        // The default set is exactly {Violation, Warning, Info}.
+        assert_eq!(DEFAULT_CONFORMANCE_DISALLOWS.len(), 3);
+        assert!(DEFAULT_CONFORMANCE_DISALLOWS.contains(&format!("{SH}Violation").as_str()));
+        assert!(DEFAULT_CONFORMANCE_DISALLOWS.contains(&format!("{SH}Info").as_str()));
+        // A custom set that disallows Debug catches a Debug result.
+        let r = ValidationReport::new(vec![result(
+            iri(&format!("{EX}d")),
+            None,
+            None,
+            "DatatypeConstraintComponent",
+            "Debug",
+            vec![],
+        )]);
+        assert!(r.conforms);
+        assert!(!r.conforms_with_disallowed(&[&format!("{SH}Debug")]));
     }
 }

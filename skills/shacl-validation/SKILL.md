@@ -1,6 +1,6 @@
 ---
 name: shacl-validation
-description: "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype incl. the SHACL-1.2 disjunctive list form, cardinality, ranges, paths, logical, node/property, qualified, closed incl. sh:ByTypes, in/hasValue, and the SHACL-1.2 list constraints sh:memberShape / sh:uniqueMembers / sh:min+maxListLength / sh:uniqueValuesFor), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report (W3C report vocabulary as Turtle or human text). Also runs opt-in SHACL Advanced Features (SHACL-AF) rules — sh:rule (sh:TripleRule + sh:SPARQLRule) — to INFER triples (feature `shacl-af`). Use when an agent needs to check whether a sparq_core::Graph conforms to shapes, run shape validation, produce a SHACL validation report, or apply SHACL rules to infer/expand a graph in Rust."
+description: "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype incl. the SHACL-1.2 disjunctive list form, cardinality, ranges, paths, logical, node/property, qualified, closed incl. sh:ByTypes, in/hasValue, the SHACL-1.2 list constraints sh:memberShape / sh:uniqueMembers / sh:min+maxListLength / sh:uniqueValuesFor, and the SHACL-1.2 value constraints sh:subsetOf / sh:someValue / sh:singleLine / sh:rootClass with path-valued sh:equals/disjoint/lessThan comparands and severity-threshold sh:conforms), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report (W3C report vocabulary as Turtle or human text). Also runs opt-in SHACL Advanced Features (SHACL-AF) rules — sh:rule (sh:TripleRule + sh:SPARQLRule) — to INFER triples (feature `shacl-af`). Use when an agent needs to check whether a sparq_core::Graph conforms to shapes, run shape validation, produce a SHACL validation report, or apply SHACL rules to infer/expand a graph in Rust."
 ---
 
 # sparq-shacl-validation
@@ -122,10 +122,12 @@ pub fn ShapesModel::parse(shapes_graph: &Graph) -> ShapesModel;   // parse once,
 `ValidationReport` (`sparq_shacl::ValidationReport`):
 
 ```rust
-pub conforms: bool;                         // true iff results is empty (spec sh:conforms — counts EVERY result)
+pub conforms: bool;                         // SHACL-1.2 sh:conforms: false iff any result is in the
+                                            // default disallowed set {Violation,Warning,Info}; Debug/Trace conform
 pub results: Vec<ValidationResult>;
 pub diagnostics: Vec<ShapeDiagnostic>;      // skipped-constraint diagnostics (e.g. uncompilable sh:pattern); never affect `conforms`
-pub fn conforms_violations_only(&self) -> bool;                       // ignore sh:Warning / sh:Info
+pub fn conforms_violations_only(&self) -> bool;                       // stricter-threshold toggle: ignore sh:Warning / sh:Info
+pub fn conforms_with_disallowed(&self, disallowed: &[&str]) -> bool;  // custom sh:conformanceDisallows set (full severity IRIs)
 pub fn results_with_severity<'a>(&'a self, severity: &'a str)         // full IRI, e.g. ".../shacl#Warning"
     -> impl Iterator<Item = &'a ValidationResult>;
 pub fn to_turtle(&self) -> String;          // W3C report vocabulary (valid, round-trippable Turtle)
@@ -162,8 +164,10 @@ expression used in `sh:resultPath`.
 
 ## Common recipes
 
-**CI gating — fail on violations, allow warnings.** `report.conforms` counts every
-result; use the severity-aware toggle so `sh:Warning`/`sh:Info` don't fail the build:
+**CI gating — fail on violations, allow warnings.** `report.conforms` follows the
+SHACL-1.2 default (also disallows `sh:Warning`/`sh:Info`); use the stricter-threshold
+toggle so only `sh:Violation` fails the build (or `conforms_with_disallowed` for a
+custom `sh:conformanceDisallows` set):
 
 ```rust
 let report = sparq_shacl::validate(&data, &shapes);
@@ -232,6 +236,18 @@ and `sh:uniqueValuesFor` (the listed properties' values are unique across the
 shape's target nodes — one IRI, or a SHACL list for a composite key). A value that
 is not a well-formed SHACL list violates the list constraints; a node with no
 values for any `sh:uniqueValuesFor` property is never reported.
+
+**SHACL-1.2 value constraints (always on, sq-sx15d).** `sh:class` also takes a
+disjunctive SHACL-list object (`sh:class ( ex:A ex:B )` — a value conforms iff it is a
+SHACL instance of ANY listed class, subclass-aware). The comparand of `sh:equals` /
+`sh:disjoint` / `sh:lessThan` / `sh:lessThanOrEquals` — and the new `sh:subsetOf`
+(path value set ⊆ comparand value set) — is a full SHACL property PATH (often an
+RDF-list sequence `( ex:p ex:q )`), not just a predicate IRI; a bare IRI parses to a
+trivial predicate path, so the SHACL-1.0 forms stay unchanged. `sh:someValue [ shape ]`
+is EXISTENTIAL (at least one value node must conform to the nested shape; one result on
+the focus/path when none do). `sh:singleLine true` flags string values containing a
+line break (LF/CR/FF/VT). `sh:rootClass C` requires each value node to be `C` or a
+transitive `rdfs:subClassOf`-descendant of it.
 
 **Custom SPARQL-based constraint component (`sh:ConstraintComponent`, §6).** Declare
 the component (parameters + an `sh:ask`/`sh:select` validator) IN THE SHAPES GRAPH; it
@@ -406,9 +422,10 @@ conforms/violations).
   pass infers nothing, capped at `rules::MAX_ITERATIONS` (100); `Inference::capped`
   flags a non-terminating rule set (e.g. a CONSTRUCT minting a fresh blank node each
   pass) whose inferred set may be incomplete.
-- **`sh:conforms` counts EVERY result regardless of severity** (matches the W3C suite).
-  For "warnings don't fail" gating use `conforms_violations_only()` /
-  `results_with_severity(..)`, NOT `conforms`.
+- **`sh:conforms` uses the SHACL-1.2 default disallowed set {Violation,Warning,Info}**
+  (sq-sx15d): a Debug/Trace-only report conforms; a Warning/Info result does NOT. For a
+  stricter "only Violation fails" gate use `conforms_violations_only()`; for a custom
+  `sh:conformanceDisallows` set use `conforms_with_disallowed(&[..])`.
 - **Ill-formed shapes are skipped, not errored.** A shape never declared, an
   unparsable path, or an `sh:select` that fails to parse (e.g. undeclared prefix)
   contributes no results; the rest of validation still runs. `validate` never returns

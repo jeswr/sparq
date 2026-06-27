@@ -227,6 +227,27 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+            // [OPUS-4.8] (sq-sx15d) `sh:class ( ex:A ex:B )` (SHACL 1.2): a value
+            // conforms iff it is a SHACL instance of ANY listed class (the
+            // subclass-aware `is_instance_of` is reused per listed class).
+            Component::ClassIn(classes) => {
+                for v in values {
+                    if !classes.iter().any(|cls| self.data.is_instance_of(v, cls)) {
+                        let joined = classes
+                            .iter()
+                            .map(|c| c.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "ClassConstraintComponent",
+                            format!("Value does not have any of the allowed classes {joined}"),
+                        ));
+                    }
+                }
+            }
             // [OPUS-4.8] (sq-vg3y) A value conforms iff it is a literal whose
             // (well-formed) datatype is ANY of the allowed datatypes — the single
             // IRI is a singleton set, the SHACL-1.2 list form is the disjunction.
@@ -429,8 +450,12 @@ impl<'a> Validator<'a> {
                     ));
                 }
             }
+            // [OPUS-4.8] (sq-sx15d) `sh:equals` — the comparand is a SHACL property
+            // PATH (SHACL 1.2; a bare predicate IRI is a trivial path). The value
+            // sets must be equal: one result per path value absent from the
+            // comparand set, and one per comparand value absent from the path set.
             Component::Equals(p) => {
-                let others = self.data.objects(focus, p);
+                let others = p.values(&self.data, focus);
                 for v in values {
                     if !others.contains(v) {
                         out.push(self.result(
@@ -438,7 +463,7 @@ impl<'a> Validator<'a> {
                             focus,
                             Some(v.clone()),
                             "EqualsConstraintComponent",
-                            format!("Value missing from <{p}>"),
+                            format!("Value missing from {}", p.to_turtle()),
                         ));
                     }
                 }
@@ -449,28 +474,32 @@ impl<'a> Validator<'a> {
                             focus,
                             Some(o.clone()),
                             "EqualsConstraintComponent",
-                            format!("Value of <{p}> missing from the path values"),
+                            format!("Value of {} missing from the path values", p.to_turtle()),
                         ));
                     }
                 }
             }
+            // [OPUS-4.8] (sq-sx15d) `sh:disjoint` — the comparand is a PATH (SHACL
+            // 1.2). A path value shared with the comparand value set is a result.
             Component::Disjoint(p) => {
+                let others = p.values(&self.data, focus);
                 for v in values {
-                    if self.data.contains(focus, p, v) {
+                    if others.contains(v) {
                         out.push(self.result(
                             sid,
                             focus,
                             Some(v.clone()),
                             "DisjointConstraintComponent",
-                            format!("Value shared with <{p}>"),
+                            format!("Value shared with {}", p.to_turtle()),
                         ));
                     }
                 }
             }
             // One result per FAILING PAIR (value, other) — the suite expects e.g.
             // `1 < "a"` and `1 < "b"` to report `sh:value 1` twice.
+            // [OPUS-4.8] (sq-sx15d) the comparand is a PATH (SHACL 1.2).
             Component::LessThan(p) => {
-                let others = self.data.objects(focus, p);
+                let others = p.values(&self.data, focus);
                 for v in values {
                     for o in &others {
                         if !matches!(cmp_terms(v, o), Some(Ordering::Less)) {
@@ -479,14 +508,14 @@ impl<'a> Validator<'a> {
                                 focus,
                                 Some(v.clone()),
                                 "LessThanConstraintComponent",
-                                format!("Value is not less than {o} (via <{p}>)"),
+                                format!("Value is not less than {o} (via {})", p.to_turtle()),
                             ));
                         }
                     }
                 }
             }
             Component::LessThanOrEquals(p) => {
-                let others = self.data.objects(focus, p);
+                let others = p.values(&self.data, focus);
                 for v in values {
                     for o in &others {
                         if !matches!(cmp_terms(v, o), Some(Ordering::Less | Ordering::Equal)) {
@@ -495,9 +524,80 @@ impl<'a> Validator<'a> {
                                 focus,
                                 Some(v.clone()),
                                 "LessThanOrEqualsConstraintComponent",
-                                format!("Value is not less than or equal to {o} (via <{p}>)"),
+                                format!(
+                                    "Value is not less than or equal to {o} (via {})",
+                                    p.to_turtle()
+                                ),
                             ));
                         }
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-sx15d) `sh:subsetOf` (SHACL 1.2) — the value set of the
+            // shape's path must be a SUBSET of the comparand path's value set. One
+            // result per path value absent from the comparand set.
+            Component::SubsetOf(p) => {
+                let others = p.values(&self.data, focus);
+                for v in values {
+                    if !others.contains(v) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "SubsetOfConstraintComponent",
+                            format!("Value not in the value set of {}", p.to_turtle()),
+                        ));
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-sx15d) `sh:someValue` (SHACL 1.2) — EXISTENTIAL: at
+            // least one value node must conform to the nested shape. One result on
+            // the focus/path (NO sh:value) when NONE conform. An empty value set
+            // also fails (no value can satisfy the existential).
+            Component::SomeValue(inner) => {
+                if !values.iter().any(|v| self.conforms(v, *inner)) {
+                    out.push(self.result(
+                        sid,
+                        focus,
+                        None,
+                        "SomeValueConstraintComponent",
+                        "No value node conforms to the sh:someValue shape".into(),
+                    ));
+                }
+            }
+            // [OPUS-4.8] (sq-sx15d) `sh:singleLine true` (SHACL 1.2) — each string
+            // value must contain no line-break character (LF / CR / FF / VT). A
+            // non-string value contributes its lexical form; a blank node has none
+            // and conforms vacuously (no string to break).
+            Component::SingleLine => {
+                for v in values {
+                    if let Some(s) = string_repr(v) {
+                        if s.chars().any(is_line_break) {
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                Some(v.clone()),
+                                "SingleLineConstraintComponent",
+                                "Value contains a line break".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-sx15d) `sh:rootClass` (SHACL 1.2) — each value node must
+            // be the named class or a transitive `rdfs:subClassOf`-descendant of it
+            // (reuses the `sh:class` subclass closure).
+            Component::RootClass(cls) => {
+                let closure = self.data.subclass_closure(cls);
+                for v in values {
+                    if !closure.contains(v) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "RootClassConstraintComponent",
+                            format!("Value is not {cls} or a subclass of it"),
+                        ));
                     }
                 }
             }
@@ -1322,6 +1422,13 @@ fn value_signature(data: &GraphView, node: &Term, props: &[String]) -> Vec<Vec<S
             vs
         })
         .collect()
+}
+
+/// [OPUS-4.8] (sq-sx15d) A line-break character for `sh:singleLine`: line feed
+/// (U+000A), carriage return (U+000D), form feed (U+000C) or vertical tab
+/// (U+000B). The W3C `singleLine-001` test exercises all four.
+fn is_line_break(c: char) -> bool {
+    matches!(c, '\u{000A}' | '\u{000D}' | '\u{000C}' | '\u{000B}')
 }
 
 /// The string a value node contributes to sh:minLength/maxLength/pattern:
