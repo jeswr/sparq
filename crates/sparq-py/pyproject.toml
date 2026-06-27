@@ -35,6 +35,18 @@ Issues = "https://github.com/jeswr/sparq/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8.4.2"]
+# [OPUS-4.8] sq-5jjei (gh-910): the `arrow` extra makes `pip install sparq-rdf[arrow]`
+# pull in pyarrow — the CONSUMER side of the Arrow C Data Interface the opt-in
+# `Graph.query_arrow() -> pyarrow.Table` surface uses (the binding hands the batch over a
+# PyCapsule stream, no re-serialisation). This extra is necessary BUT NOT SUFFICIENT to
+# use query_arrow: the
+# method only EXISTS in a wheel compiled with the cargo `arrow` feature (`maturin build
+# --features arrow`). Which PUBLISHED-PyPI wheels ship with `arrow` baked in is the
+# broader sq-v286 release-matrix question (NOTE: not resolved here — see the README's
+# "Arrow export" note); until that lands, install an `--features arrow` wheel yourself.
+# Floor `pyarrow>=14`: the first release exposing the PyCapsule-based C Data Interface
+# import path (a `pyarrow.Table` built from a stream capsule) this binding relies on.
+arrow = ["pyarrow>=14"]
 
 [tool.maturin]
 # [OPUS-4.8] sq-8slf: pin the IMPORT/module name to `sparq` independently of the
