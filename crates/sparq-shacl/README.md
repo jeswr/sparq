@@ -49,9 +49,8 @@ if report.conforms_violations_only() { /* a stricter-threshold CI toggle */ }
 # Ok(()) }
 ```
 
-For many data graphs against one shapes graph, parse once with
-`ShapesModel::parse(&shapes)` and call `validate_with_model`. A CLI run is
-`cargo run -p sparq-shacl --example validate -- data.ttl shapes.ttl [--turtle]`.
+For many data graphs against one shapes graph, parse once with `ShapesModel::parse(&shapes)`
+and call `validate_with_model`. CLI: `cargo run -p sparq-shacl --example validate -- data.ttl shapes.ttl [--turtle]`.
 
 ## ✨ Features
 
@@ -66,16 +65,17 @@ For many data graphs against one shapes graph, parse once with
   `sh:someValue`/`sh:singleLine`/`sh:rootClass`, and severity-threshold `conforms`
   (default disallows {Violation,Warning,Info}) (sq-sx15d). The **full** vendored
   1.2 suite is gated by a ratchet (sq-6glcr): core / SPARQL (incl. expected-rejection
-  `sht:Failure` entries) / node-expr pass counts must not drop and the gap must not
-  grow, in both feature states — gap map in
-  [`research/shacl12-conformance-gap.md`](../../research/shacl12-conformance-gap.md).
-- **SHACL-SPARQL + custom §6 components** — `sh:sparql` (§5.2) and SPARQL-based
-  constraint *components* (custom `sh:ConstraintComponent` with `sh:parameter` /
-  `sh:validator`, §6), pinned by the W3C `sparql/*` sub-suites.
+  `sht:Failure` entries) / node-expr pass counts must not drop and the gap must not grow,
+  in both feature states — gap map in [`research/shacl12-conformance-gap.md`](../../research/shacl12-conformance-gap.md).
+- **SHACL-SPARQL + custom §6 components** — `sh:sparql` (§5.2, results carry
+  `sh:sourceConstraint`; `$this`/`$value` pre-binding propagates into UNION branches,
+  sibling joins and projecting sub-SELECTs, sq-mue75) and SPARQL-based constraint
+  *components* (`sh:ConstraintComponent` + `sh:parameter`/`sh:validator`, §6), pinned
+  by the W3C `sparql/*` sub-suites.
 - **SHACL Advanced Features (opt-in `shacl-af`)** — a rule **inference** step
   (`sh:rule` / `sh:values`, not part of `validate`): `sh:TripleRule`, `sh:SPARQLRule`,
-  value rules, the SHACL 1.2 node-expression algebra + function registry, and the
-  `sh:expression` / `sh:nodeByExpression` constraints. Off ⇒ none of it compiles.
+  value rules, the SHACL 1.2 node-expression algebra + function registry (`shnex:`/`sh:`),
+  and `sh:expression` / `sh:nodeByExpression`. Off ⇒ none of it compiles.
 - **Differential fuzzing** — a deterministic SplitMix64 fuzzer
   (`tests/diff_fuzz.rs`) cross-checks reports against pluggable reference engines
   (pySHACL, Apache Jena SHACL, the Zazuko / `rdf-validate-shacl` Node engines); it is
@@ -92,9 +92,9 @@ For many data graphs against one shapes graph, parse once with
   **32/32** of the vendored W3C `shacl12-cs` valid fixtures graph-isomorphically
   (`cargo test -p sparq-shacl --features scs --test scs_roundtrip`). A hand-rolled lexer +
   recursive-descent parser over the `SHACLC.g4` grammar (directives, `shape`/`shapeClass`,
-  path expressions, counts, negation/disjunction, nested shapes/arrays — full list in
-  the SKILL). Adds **zero new dependencies**; unsupported constructs return a typed
-  `ScsError` (never a silent mis-parse). Off ⇒ none of it compiles.
+  paths, counts, negation/disjunction, nested shapes/arrays — full list in the SKILL).
+  Adds **zero new dependencies**; unsupported constructs return a typed `ScsError`
+  (never a silent mis-parse). Off ⇒ none of it compiles.
 
 ## 📚 Learn more
 
@@ -107,13 +107,13 @@ For many data graphs against one shapes graph, parse once with
 
 ## Scope and non-goals
 
-Out of scope: full `sparql/pre-binding` semantics (rejecting variable re-binding,
-`$shapesGraph`) — see `bd list -l area:sparq-shacl`. Validation results are **not
-deduplicated** across traversal routes (a nested shape reached through two parents
-reports twice, matching the suite), re-entrant recursion on the same focus/shape pair
-counts as conforming (SHACL leaves recursion undefined), and an **uncompilable
-`sh:pattern`** (e.g. a `(?!…)` lookahead) is **skipped** into `report.diagnostics`,
-never fail-closed onto every value.
+Out of scope: the `sparql/pre-binding` *rejection* channel (signalling a failure for a
+variable re-binding / `SELECT *` sub-select) and `$shapesGraph` — see
+`bd list -l area:sparq-shacl`. Validation results are **not deduplicated** across
+traversal routes (a nested shape reached through two parents reports twice, matching the
+suite), re-entrant recursion on the same focus/shape pair counts as conforming (SHACL
+leaves recursion undefined), and an **uncompilable `sh:pattern`** (e.g. a `(?!…)`
+lookahead) is **skipped** into `report.diagnostics`, never fail-closed onto every value.
 
 ## License
 

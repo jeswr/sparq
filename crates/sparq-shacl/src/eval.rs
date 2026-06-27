@@ -302,6 +302,8 @@ impl<'a> Validator<'a> {
             path: shape.path.clone(),
             value,
             source_shape: shape.node.clone(),
+            // Core components have no `sh:SPARQLConstraint` node (sq-mue75).
+            source_constraint: None,
             source_component: sh(component),
             severity: shape.severity.clone(),
             messages: shape.messages.clone(),
@@ -1145,6 +1147,9 @@ impl<'a> Validator<'a> {
             .unwrap_or_else(|| shape.severity.clone());
         let (shape_node, shape_path, shape_messages) =
             (shape.node.clone(), shape.path.clone(), shape.messages.clone());
+        // [OPUS-4.8] (sq-mue75) stamp the originating `sh:SPARQLConstraint` node
+        // onto each result as `sh:sourceConstraint` (SHACL §5.2.2).
+        let constraint_node = constraint.node.clone();
         let data = self.data.graph();
         prepared.evaluate(
             data,
@@ -1157,6 +1162,7 @@ impl<'a> Validator<'a> {
                 path: fields.path.or_else(|| shape_path.clone()),
                 value: fields.value,
                 source_shape: shape_node.clone(),
+                source_constraint: Some(constraint_node.clone()),
                 source_component: component.clone(),
                 severity: severity.clone(),
                 messages: shape_messages.clone(),
@@ -1248,6 +1254,9 @@ impl<'a> Validator<'a> {
                             path: shape_path.clone(),
                             value: Some(v.clone()),
                             source_shape: shape_node.clone(),
+                            // A SPARQL-based constraint COMPONENT has no single
+                            // `sh:SPARQLConstraint` node (sq-mue75).
+                            source_constraint: None,
                             source_component: component_iri.clone(),
                             severity: severity.clone(),
                             messages: shape_messages.clone(),
@@ -1274,6 +1283,9 @@ impl<'a> Validator<'a> {
                         path: fields.path.or_else(|| shape_path.clone()),
                         value: fields.value,
                         source_shape: shape_node.clone(),
+                        // A SPARQL-based constraint COMPONENT has no single
+                        // `sh:SPARQLConstraint` node (sq-mue75).
+                        source_constraint: None,
                         source_component: component_iri.clone(),
                         severity: severity.clone(),
                         messages: shape_messages.clone(),

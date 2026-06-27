@@ -141,6 +141,7 @@ pub focus_node: oxrdf::Term;
 pub path: Option<sparq_shacl::Path>;        // sh:resultPath (property shapes / sh:closed)
 pub value: Option<oxrdf::Term>;             // offending value node
 pub source_shape: oxrdf::Term;
+pub source_constraint: Option<oxrdf::Term>; // sh:sourceConstraint — the sh:SPARQLConstraint node (sh:sparql results only; None for Core + §6 components)
 pub source_component: String;               // constraint-component IRI, e.g. ".../MinCountConstraintComponent"
 pub severity: String;                       // severity IRI (default ".../shacl#Violation")
 pub messages: Vec<oxrdf::Term>;             // sh:message literals
@@ -403,13 +404,14 @@ semantics are gated even when the suite is absent. The SCS parser's fail-closed
 error paths and the SHACL-SPARQL §5.2/§6 edge cases get the same treatment
 (`tests/scs_error_paths.rs` under `scs`, `tests/sparql_edge_cases.rs`). The
 pre-binding's deep-algebra arms (`push_values_down` over Group / Slice / Distinct /
-Reduced / OrderBy / Minus-left / LeftJoin-left) and the fail-closed runtime-error
-paths (an inexpressible blank-node focus, a `SERVICE`-clause runtime query error) are
-pinned directly by the in-`src/sparql.rs` unit module (`sparql::tests`, sq-qcnn.1):
-each modifier arm is asserted both structurally (the `VALUES` table lands BELOW the
-modifier at the deepest leaf, so `$this`/`$value`/`$param` stays in scope) and
-semantically (a real validator over real data yields the SHACL-spec-correct
-conforms/violations).
+Reduced / OrderBy / Minus-left / LeftJoin-left, plus the multi-scope arms — both
+UNION branches, sibling joins, and a projecting sub-SELECT, sq-mue75) and the
+fail-closed runtime-error paths (an inexpressible blank-node focus, a `SERVICE`-clause
+runtime query error) are pinned directly by the in-`src/sparql.rs` unit module
+(`sparql::tests`, sq-qcnn.1 / sq-mue75): each arm is asserted both structurally (the
+`VALUES` table lands BELOW the modifier / inside every branch so `$this`/`$value`/
+`$param` stays in scope) and semantically (a real validator over real data yields the
+SHACL-spec-correct conforms/violations).
 
 ## Gotchas / feature flags / prerequisites
 
@@ -460,20 +462,27 @@ conforms/violations).
   counts as conforming (SHACL leaves recursion undefined); cyclic `sh:node`/`sh:property`
   terminate without stack overflow.
 - **`sh:sparql` pre-binding:** `$this` (and `$PATH` on property shapes) is injected via
-  an algebra-level VALUES on the parsed query — it lands below solution modifiers, so
-  `LIMIT`/`ORDER BY`/`DISTINCT`/`SELECT *` behave correctly. `sh:prefixes` chases
-  `sh:declare`(`sh:prefix`/`sh:namespace`) transitively through `owl:imports`.
+  an algebra-level VALUES on the parsed query — it lands below solution modifiers (so
+  `LIMIT`/`ORDER BY`/`DISTINCT` behave correctly) AND propagates into every scope the
+  variable can reach: both UNION branches, sibling joins, and a sub-SELECT that
+  explicitly projects the variable (sq-mue75). A `SELECT *` sub-select re-scopes the
+  variable, so the VALUES is joined above it (the spec-rejection case). Each `sh:sparql`
+  result carries `sh:sourceConstraint` (the `sh:SPARQLConstraint` node).  `sh:prefixes`
+  chases `sh:declare`(`sh:prefix`/`sh:namespace`) transitively through `owl:imports`.
 - **§6 limits:** the W3C `sparql/component/*` suite `owl:imports` the external
   `http://datashapes.org/dash` vocabulary; it is run offline (`tests/w3c_sparql_component.rs`)
   by resolving that import against a vendored, minimal pinned excerpt at
-  `crates/sparq-shacl/tests/vendor/dash.ttl`. Full `sparql/pre-binding` semantics (rejecting
-  variable re-binding, `$shapesGraph`) are out of scope — see the crate's open beads (`bd list -l area:sparq-shacl`).
+  `crates/sparq-shacl/tests/vendor/dash.ttl`. Still out of scope: the `sparql/pre-binding`
+  *rejection* channel (signalling a failure for a re-binding / `SELECT *` sub-select) and
+  `$shapesGraph` — see the crate's open beads (`bd list -l area:sparq-shacl`).
 - **W3C conformance:** 98/98 of the *1.0/1.1* core `sht:Validate` suite passes
   (`--test w3c_core`). The **full vendored SHACL 1.2** tree is gated by a ratchet
-  (sq-6glcr) in BOTH feature states: full core **114/115** of 137
-  (`--test w3c_core_full_shacl12`), 1.2 SPARQL **10** of 24 incl. 7 expected-rejection
-  `sht:Failure` entries (`--test w3c_sparql_shacl12`), node-expr **65/65**
-  (`--test w3c_node_expr{,_constraints}`, `shacl-af`). Pass must not drop, the gap must
+  (sq-6glcr) in BOTH feature states: full core **129** (default) / **130** (`shacl-af`)
+  (`--test w3c_core_full_shacl12`), 1.2 SPARQL **17** of 24 incl. 7 expected-rejection
+  `sht:Failure` entries (`--test w3c_sparql_shacl12`), node-expr **62 + 1 xfail**
+  (driven through the REAL `eval_node_expression`, `--test w3c_node_expr`, `shacl-af`;
+  the xfail is the harness `sht:scope-*` var entry the crate's eval has no counterpart
+  for). Pass must not drop, the gap must
   not grow — the not-yet-passing entries are the honest per-category gap map in
   `research/shacl12-conformance-gap.md` (clustered into beads sq-sx15d / sq-rnkdh /
   sq-mue75 / sq-0mjfd under epic sq-waf9o). Reproduce with

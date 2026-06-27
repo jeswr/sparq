@@ -37,6 +37,14 @@ pub struct ValidationResult {
     pub value: Option<Term>,
     /// The shape the failing constraint is declared on.
     pub source_shape: Term,
+    /// [OPUS-4.8] (sq-mue75) The constraint node a SPARQL-based result came from
+    /// (`sh:sourceConstraint`): the `sh:SPARQLConstraint` node (the object of
+    /// `sh:sparql`). SHACL §5.2.2 stamps this on `sh:sparql` results so a report
+    /// can point at the exact constraint, distinct from `sh:sourceShape` (the
+    /// shape) and `sh:sourceConstraintComponent`. `None` for every non-`sh:sparql`
+    /// component (Core constraints and SPARQL-based constraint COMPONENTS have no
+    /// single `sh:SPARQLConstraint` node, so the spec omits it there).
+    pub source_constraint: Option<Term>,
     /// The constraint-component IRI (e.g. `sh:MinCountConstraintComponent`).
     pub source_component: String,
     /// Severity IRI (sh:Violation / sh:Warning / sh:Info, or custom).
@@ -241,6 +249,11 @@ fn write_result_node(out: &mut String, r: &ValidationResult) {
     // A blank-node source shape has no graph-independent identity; emit its
     // label so the report stays self-consistent and parseable.
     let _ = writeln!(out, "    sh:sourceShape {} ;", r.source_shape);
+    // [OPUS-4.8] (sq-mue75) `sh:sourceConstraint` — the originating
+    // `sh:SPARQLConstraint` node, present only on `sh:sparql` results.
+    if let Some(c) = &r.source_constraint {
+        let _ = writeln!(out, "    sh:sourceConstraint {c} ;");
+    }
     for m in r.effective_messages() {
         let _ = writeln!(out, "    sh:resultMessage {m} ;");
     }
@@ -306,6 +319,7 @@ mod tests {
             path,
             value,
             source_shape: iri(&format!("{EX}Shape")),
+            source_constraint: None,
             source_component: format!("{SH}{component}"),
             severity: format!("{SH}{severity}"),
             messages,
