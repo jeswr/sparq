@@ -23,6 +23,15 @@ follow-on feature waves are measurable rather than guesswork.
 > interpret a `sh:deactivated`/`sh:message`/`sh:severity` reifier as an override
 > of a SPECIFIC constraint statement (bead `sq-pb0wm`, see §6).
 
+> **[OPUS-4.8] (sq-pb0wm) update — the FINAL core gap is CLOSED.** The
+> per-constraint-statement reified-annotation overrides are now interpreted, so
+> `misc/{deactivated-003,message-002,severity-003}` move FAIL → PASS. New measured
+> floors: **core 136 (default) / 137 (`shacl-af`)**, fail-ceiling **0** in BOTH
+> feature states — every in-scope full-core entry passes. The two-sided ratchet is
+> kept (not switched to an all-pass assert) so a future regression in either
+> direction is still caught. See §6 for the resolved divergence and the one draft
+> ambiguity that had to be decided.
+
 The vendored suite is the W3C `w3c/data-shapes` repo pinned at
 `b6e73695d6196f33d7ce3ba47094a10fbc298e65` (`crates/sparq-shacl/fetch-shacl-tests.sh`),
 under `crates/sparq-shacl/tests/shacl/data-shapes/shacl12-test-suite/tests/`.
@@ -95,7 +104,7 @@ under the epic.
 | 9 | `sh:targetWhere` target | `targets/targetWhere-001` | SPARQL-ish target selector | `sq-rnkdh` |
 | 10 | `sh:shape` implicit / `sh:ShapeClass` target | `targets/shape-001`, `targets/targetClassImplicit-002` | `sh:shape` value-target + `sh:ShapeClass` implicit class target | `sq-rnkdh` |
 | 11 | `sh:reifierShape` constraint | `property/reifierShape-001`, `property/reifierShape-002` | `sh:ReifierShapeConstraintComponent` (RDF-1.2 reifiers) | `sq-0mjfd` |
-| 12 | RDF-1.2 reified-annotation parsing | `misc/deactivated-003`, `misc/message-002` | the `{\| sh:deactivated true \|}` / `{\| sh:message ... \|}` triple-term annotation syntax on a constraint | `sq-0mjfd` |
+| 12 | Per-statement reified-annotation overrides | `misc/deactivated-003`, `misc/message-002`, `misc/severity-003` | a `{\| sh:deactivated/message/severity … \|}` annotation on a constraint statement overrides ONLY that occurrence (DONE) | `sq-pb0wm` |
 | 13 | `sh:uniqueLang` over `rdf:dirLangString` | `property/uniqueLang-003` | direction-tagged language strings | `sq-0mjfd` |
 
 Clusters 1–8 (eight beads' worth of "value constraints", 13 entries) are `sq-sx15d`;
@@ -155,12 +164,12 @@ grouped into four implementation beads under epic `sq-waf9o`:
 - **`sq-mue75`** — SHACL-SPARQL pre-binding VALUES propagation (cluster 17, 3
   entries) + node-expr harness fidelity + `sh:sourceConstraint`.
 - **`sq-0mjfd`** — the draft / hard zone (clusters 11, 13, 18; +5q76d/u5rxj):
-  **DONE except the per-statement annotation overrides** — `sh:reifierShape` /
-  `sh:reificationRequired` (cluster 11, 2 core), `rdf:dirLangString` `uniqueLang`
-  (cluster 13, 1 core), and the `sht:Failure` pre-binding **rejection channel**
-  (cluster 18, 7 SPARQL) all PASS now. The remaining cluster 12
-  (`misc/{deactivated-003,message-002,severity-003}`) is the honest divergence in
-  §6, moved to its own bead (the `{| |}` parser is NOT the blocker).
+  `sh:reifierShape` / `sh:reificationRequired` (cluster 11, 2 core),
+  `rdf:dirLangString` `uniqueLang` (cluster 13, 1 core), and the `sht:Failure`
+  pre-binding **rejection channel** (cluster 18, 7 SPARQL) all PASS.
+- **`sq-pb0wm`** — the per-constraint-statement reified-annotation overrides
+  (cluster 12, `misc/{deactivated-003,message-002,severity-003}`, 3 core): **DONE**
+  (see §6). This was the FINAL core gap; full core is now 136/137, fail-ceiling 0.
 - **`sq-5q76d`** — shapes-graph `sh:conformanceDisallows` → `validate()` default
   `conforms` (cluster 8 remainder, `validation-reports/conformance-disallows-001`,
   1 core): DONE.
@@ -183,27 +192,64 @@ grouped into four implementation beads under epic `sq-waf9o`:
 
 ## 5. Why a ratchet, not all-pass
 
-The Core validator is correct on the constraints it implements (the 115/137
-core + 10/24 SPARQL passing entries are compared strictly — a wrong report
-there is a FAIL, never laundered into a SKIP). The remaining entries exercise
-SHACL-1.2 features that simply are not built yet. Asserting all-pass would force
-either a false green or disabling real comparison; the two-sided ratchet keeps
-the gate honest *and* regression-proof. When a bead lands, its cluster's entries
-move FAIL → PASS, the per-runner floor is bumped in the same commit, and this
-table shrinks.
+The Core validator is correct on the constraints it implements (the full-core
+**136/137** + SPARQL **24/24** passing entries are compared strictly — a wrong
+report there is a FAIL, never laundered into a SKIP). As of `sq-pb0wm` every
+in-scope full-core entry passes (fail-ceiling 0); a handful of node/SPARQL/JS
+entries remain SKIP because they use a constraint surface out of scope for the
+Core path. Asserting all-pass would force either a false green or disabling real
+comparison; the two-sided ratchet keeps the gate honest *and* regression-proof.
+When a bead lands, its cluster's entries move FAIL → PASS, the per-runner floor is
+bumped in the same commit, and this table shrinks.
 
 ---
 
-## 6. Honest divergence — the 3 remaining core FAILs (per-statement reified-annotation overrides)
+## 6. Resolved divergence — per-statement reified-annotation overrides (sq-pb0wm)
 
-**[OPUS-4.8] (sq-0mjfd)** The only core entries this wave did NOT close are the
-three `misc/` reified-annotation OVERRIDE tests:
+**[OPUS-4.8] (sq-pb0wm, epic sq-waf9o)** The three `misc/` reified-annotation
+OVERRIDE entries — the final core gap — are now CLOSED. Each is matched through
+the REAL `validate()`:
 
-| Entry | What it asserts | Why it still fails |
+| Entry | What it asserts | How it now passes |
 | --- | --- | --- |
-| `misc/deactivated-003` | `sh:datatype X {\| sh:deactivated true \|}` and `sh:property S {\| sh:deactivated true \|}` deactivate **that specific constraint occurrence** | the model reads `sh:datatype` / `sh:property` as plain triples; it does not consult the triple's reifier for a per-statement `sh:deactivated` |
-| `misc/message-002` | `sh:datatype X {\| sh:message "…"@en \|}` attaches a message to **that constraint's** results | same — the per-statement reifier message is not threaded onto the result |
-| `misc/severity-003` | `sh:datatype X {\| sh:severity sh:Warning \|}` overrides **that constraint's** severity | same — the per-statement reifier severity is not applied |
+| `misc/deactivated-003` | `sh:datatype X {\| sh:deactivated true \|}` and `sh:property S {\| sh:deactivated true \|}` deactivate **that specific constraint occurrence** | `parse_shape` resolves the reifier of each constraint triple `(shape, P, O)`; eval skips ONLY that component (the shape keeps validating its others) — conforms |
+| `misc/message-002` | `sh:datatype X {\| sh:message "…"@en \|}` attaches a message to **that constraint's** results | the per-statement message is threaded as a `ComponentMeta` override and applied in `result()` for ONLY that occurrence's results |
+| `misc/severity-003` | `sh:datatype X {\| sh:severity sh:Warning \|}` overrides **that constraint's** severity | the per-statement severity is applied in `result()`, scoped to that occurrence (a sibling constraint keeps the default `sh:Violation`) |
+
+### Implementation (the threading change)
+
+For each constraint triple `(shape, P, O)` turned into a `Component`,
+`ShapesModel::attach_component_meta` looks up the reifier
+`?r rdf:reifies <<( shape P O )>>` in the SHAPES graph and captures any
+`sh:deactivated` / `sh:message` / `sh:severity` into a `ComponentMeta` held in a
+vector PARALLEL to `Shape::components`. `validate_shape` skips a per-statement
+deactivated occurrence and sets the active `ComponentMeta` so `result()` applies a
+per-occurrence message/severity — distinct from the shape-level
+`deactivated`/`messages`/`severity` (which still work). The `{| … |}` syntax is
+parsed by the already-pinned `oxttl 0.2.3` (`rdf-12`); **no Cargo dependency
+change** was needed.
+
+### Draft ambiguity decided (the brief's `divergences`)
+
+Per-statement annotation semantics are the least-settled corner of the SHACL-1.2
+draft; the W3C suite pins only the cases above. Two readings had to be chosen:
+
+1. **Scope of the override = the single annotated occurrence, not the shape.** A
+   `{| sh:deactivated true |}` on ONE constraint does NOT deactivate the whole
+   shape (that is the shape-level `sh:deactivated`). This is exactly what
+   `deactivated-003` encodes (the shape conforms because BOTH its constraints are
+   individually deactivated, while a third un-annotated constraint would still
+   fire) — implemented as written.
+2. **A `{| sh:message |}` / `{| sh:severity |}` on a `sh:property` / `sh:node`
+   statement governs the COMPOSITE component's own results, not the nested
+   shape's.** The nested shape's results carry the nested shape's own
+   metas/severity (it is a separate focus/shape evaluation). The suite does not
+   exercise a message/severity annotation on a shape-referencing constraint, so
+   this is the conservative, occurrence-local reading; `sh:property` deactivation
+   (which IS in the suite) is unambiguous and implemented. Only single-statement
+   Core constraints with a faithfully-recoverable object term carry an override;
+   list-/path-valued operands (e.g. the disjunctive `sh:datatype ( … )`, an
+   RDF-list comparand) are multi-triple and are NOT annotated.
 
 ### oxttl / oxrdf upgrade assessment (the item-6 question)
 

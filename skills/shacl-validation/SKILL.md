@@ -265,6 +265,21 @@ the focus/path when none do). `sh:singleLine true` flags string values containin
 line break (LF/CR/FF/VT). `sh:rootClass C` requires each value node to be `C` or a
 transitive `rdfs:subClassOf`-descendant of it.
 
+**SHACL-1.2 per-constraint-statement reified-annotation overrides (always on, sq-pb0wm).**
+An RDF-1.2 reified annotation on a single constraint statement —
+`ex:S sh:datatype xsd:integer {| sh:deactivated true |}` (likewise `{| sh:message … |}` /
+`{| sh:severity … |}`) — overrides JUST that constraint occurrence, distinct from the
+shape-level `sh:deactivated`/`sh:message`/`sh:severity` (which apply to the whole shape).
+`{| sh:deactivated true |}` suppresses ONLY that constraint (the shape's other constraints
+still validate); `{| sh:message "…"@en |}` sets `sh:resultMessage` for ONLY that
+constraint's results; `{| sh:severity sh:Warning |}` sets `sh:resultSeverity` for ONLY that
+constraint's violations. The `{| … |}` is parsed by oxttl's rdf-12 Turtle support and stored
+as `_:r rdf:reifies <<( ex:S sh:datatype xsd:integer )>> . _:r sh:deactivated|message|severity V`;
+the override resolves per occurrence from that reifier (`misc/{deactivated-003,message-002,
+severity-003}`). Supported on single-statement Core constraints (`sh:datatype`, `sh:nodeKind`,
+`sh:class`, `sh:hasValue`, `sh:rootClass`, `sh:node`, `sh:property`, `sh:not`, `sh:someValue`,
+`sh:memberShape`); list-/path-valued operands are not single statements and carry no override.
+
 **SHACL-1.2 targets & SPARQL node expressions (always on, no feature flag, sq-rnkdh).**
 Beyond `sh:targetNode`/`Class`/`SubjectsOf`/`ObjectsOf` + implicit class targets:
 - **`sh:targetWhere [ <inline shape> ]`** — focus nodes are every data-graph node that
@@ -498,8 +513,10 @@ SHACL-spec-correct conforms/violations).
   `$shapesGraph` — see the crate's open beads (`bd list -l area:sparq-shacl`).
 - **W3C conformance:** 98/98 of the *1.0/1.1* core `sht:Validate` suite passes
   (`--test w3c_core`). The **full vendored SHACL 1.2** tree is gated by a ratchet
-  (sq-6glcr) in BOTH feature states: full core **129** (default) / **130** (`shacl-af`)
-  (`--test w3c_core_full_shacl12`), 1.2 SPARQL **17** of 24 incl. 7 expected-rejection
+  (sq-6glcr) in BOTH feature states: full core **136** (default) / **137** (`shacl-af`)
+  — every in-scope core entry passes, 0 honest FAILs (sq-pb0wm closed the final
+  per-statement reified-annotation gap) — (`--test w3c_core_full_shacl12`), 1.2 SPARQL
+  **24** of 24 incl. 7 expected-rejection
   `sht:Failure` entries (`--test w3c_sparql_shacl12`), node-expr **62 + 1 xfail**
   (driven through the REAL `eval_node_expression`, `--test w3c_node_expr`, `shacl-af`;
   the xfail is the harness `sht:scope-*` var entry the crate's eval has no counterpart

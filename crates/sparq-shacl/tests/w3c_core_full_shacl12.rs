@@ -22,15 +22,15 @@
 //! node-expression constraints. Those are a different surface, so counting them
 //! as FAILs would be noise.
 //!
-//! Every *other* entry is compared strictly. A few entries still exercise
-//! SHACL-**1.2** behaviour this crate does not yet fully implement — currently the
-//! per-constraint-statement RDF-1.2 reified-annotation overrides
-//! (`sh:datatype X {| sh:deactivated/sh:message/sh:severity … |}`,
-//! `misc/{deactivated-003,message-002,severity-003}`) — so they produce the wrong
-//! report and are honest **FAIL**s, the live gap map in
-//! `research/shacl12-conformance-gap.md`.
-//! This harness deliberately does **not** assert `fail == 0` for the full tree:
-//! that would be a false claim of full SHACL-1.2 conformance.
+//! Every *other* entry is compared strictly. As of sq-pb0wm (the per-constraint-
+//! statement RDF-1.2 reified-annotation overrides
+//! `sh:datatype X {| sh:deactivated/sh:message/sh:severity … |}`,
+//! `misc/{deactivated-003,message-002,severity-003}`) the full core tree has NO
+//! honest FAILs in either feature state — the fail-ceiling is 0. This harness
+//! still does **not** hard-assert `fail == 0` as the gate; it keeps the two-sided
+//! ratchet (pass-floor + fail-ceiling) so a future regression in *either*
+//! direction is caught while the live gap map in
+//! `research/shacl12-conformance-gap.md` records the (now-empty) residual.
 //!
 //! ## Ratchet (two-sided)
 //!
@@ -116,13 +116,23 @@ fn unimplemented() -> Vec<String> {
 /// `validation-reports/conformance-disallows-001` (shapes-graph
 /// `sh:conformanceDisallows` threading) gaps. EQUALS the measured default-state
 /// pass count exactly (not above it — see the #1271 near-failure note).
-const BASELINE_PASS_CORE: usize = 133;
+///
+/// [OPUS-4.8] (sq-pb0wm, epic sq-waf9o) Raised 133 → 136: the FINAL SHACL 1.2 core
+/// conformance gap — per-constraint-statement RDF-1.2 reified-annotation overrides
+/// (`<constraint> {| sh:deactivated/sh:message/sh:severity … |}`) — now interpreted,
+/// so `misc/{deactivated-003,message-002,severity-003}` move FAIL → PASS (`misc`
+/// 10/10). EQUALS the measured default-state pass count exactly (not above it).
+const BASELINE_PASS_CORE: usize = 136;
 
 /// Pass-floor over the FULL core tree with `shacl-af` ON: the `shacl-af`
 /// `sh:nodeByExpression` core/node entry becomes implemented and PASSes, so the
 /// floor rises by one. [OPUS-4.8] (sq-0mjfd) Raised 130 → 134 in lock-step with
 /// [`BASELINE_PASS_CORE`].
-const BASELINE_PASS_AF: usize = 134;
+///
+/// [OPUS-4.8] (sq-pb0wm) Raised 134 → 137 in lock-step with [`BASELINE_PASS_CORE`]
+/// (the misc reified-annotation trio). With `shacl-af` ON the whole core tree now
+/// PASSes (137 pass, 0 fail, 0 skip).
+const BASELINE_PASS_AF: usize = 137;
 
 /// Fail-ceiling over the FULL core tree — the count of entries whose SHACL-1.2
 /// behaviour this crate does not yet implement (the gap map). A *new* mismatch (a
@@ -134,15 +144,19 @@ const BASELINE_PASS_AF: usize = 134;
 /// gaps and this change closes the `targets/` gaps.
 ///
 /// [OPUS-4.8] (sq-0mjfd / sq-5q76d) Lowered 7 → 3: reifierShape ×2, uniqueLang-003 and
-/// conformance-disallows-001 now PASS. The remaining 3 are `misc/{deactivated-003,
+/// conformance-disallows-001 now PASS. The remaining 3 were `misc/{deactivated-003,
 /// message-002, severity-003}` — each needs PER-CONSTRAINT-STATEMENT RDF-1.2
-/// reified-annotation interpretation (`sh:datatype X {| sh:deactivated/message/severity … |}`),
-/// a deeper SHACL-model feature (the `{| |}` parser already works — see
-/// `research/shacl12-conformance-gap.md` and the dedicated bead).
-const BASELINE_FAIL_CORE: usize = 3;
+/// reified-annotation interpretation (`sh:datatype X {| sh:deactivated/message/severity … |}`).
+///
+/// [OPUS-4.8] (sq-pb0wm, epic sq-waf9o) Lowered 3 → 0: that final gap is now closed
+/// (the per-statement reified-annotation overrides are interpreted), so NO full-core
+/// entry is an honest FAIL in either feature state. The two-sided ratchet still
+/// guards against a regression in either direction — a previously-correct entry
+/// breaking would push the count above this 0 ceiling and fail the build.
+const BASELINE_FAIL_CORE: usize = 0;
 
 /// Fail-ceiling with `shacl-af` ON — identical to [`BASELINE_FAIL_CORE`].
-const BASELINE_FAIL_AF: usize = 3;
+const BASELINE_FAIL_AF: usize = 0;
 
 fn baseline_pass() -> usize {
     if cfg!(feature = "shacl-af") {
