@@ -455,6 +455,24 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   the canonical perf host, not a baked-in number. When off, zero of this code compiles and the default
   native + wasm builds are byte-identical (no new dependencies — sparq-core + rustc-hash are already
   direct deps; no `unsafe`).
+- **Yannakakis full-semijoin prepass** is the non-default `yannakakis` cargo feature (survey §A4, bead
+  `sq-5zf8i`; arxiv 2504.03279 + research/optimization-techniques.md §1.1/§2(a2)) — the complementary
+  bottom-up reducer to `semijoin-bitmap` (which it IMPLIES, reusing the same exact `KeyFilter`). Where
+  the A3 reducer prefilters one scan against the accumulated result *during* the join loop, the
+  Yannakakis prepass runs *before* the main join: it materialises each relation of an **acyclic** BGP
+  once, then sweeps the join tree bottom-up (leaf→root) and top-down (root→leaf), semijoining each
+  relation against its neighbours so that no "dangling" tuple (one that joins with nothing downstream)
+  is ever materialised by the join — directly cutting the intermediate-result blow-up. Routing reuses
+  the executor's existing GYO acyclicity test (`bgp_is_cyclic`/`bgp_uses_binary`): **acyclic ⇒
+  semijoin-reduce then join; cyclic ⇒ existing LFTJ, unchanged**. A semijoin is a pure FILTER (removes
+  only rows the final join would itself drop), so the RESULT is **identical** to the feature-off binary
+  plan — `query`/`query_json`/etc. return the SAME answers (proven by the on-vs-off equivalence suite
+  `tests/yannakakis_differential.rs` over chain/star/snowflake/cyclic/empty/no-reduction shapes). The
+  prepass is **cost-gated** — skipped when the intermediates are already tiny (a pure-overhead guard) —
+  so a tiny BGP transparently uses the ordinary binary plan. Payoff on chain/snowflake workloads is a
+  measurable hypothesis for the canonical perf host (bead `sq-0g6g`), not a baked-in number. When off,
+  zero of this code compiles and the default native + wasm builds are byte-identical (no new deps; no
+  `unsafe`).
 - **Materialised-view / query-result cache** is the non-default `result-cache` cargo feature (bead
   `sq-a9cn`): `ResultCache::new(capacity)` is a bounded, version-aware LRU that stores a SELECT/ASK
   `QueryResult` keyed by `(parsed query algebra, caller graph-version)`; serve a query through

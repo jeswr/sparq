@@ -130,6 +130,129 @@ impl KeyFilter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-5zf8i / survey §A4) Yannakakis bottom-up full-semijoin PREPASS.
+//
+// The A3 reducer above filters one scan against the *already-materialised* join
+// result during the binary-join loop (a top-down, per-step prefilter). The
+// Yannakakis prepass is the complementary, classical move: BEFORE the main join,
+// reduce every relation against its neighbours in the acyclic join tree so that no
+// "dangling" tuple (one that joins with nothing downstream) is ever materialised by
+// the join. A full reducer (the bottom-up then top-down sweep) leaves every surviving
+// tuple participating in the final answer, so the subsequent join runs in
+// O(input + output) — no intermediate blow-up.
+//
+// This file owns only the PURE, store-free topology of that prepass: which relations
+// are adjacent (share a join variable), and a join tree / reverse-topological visiting
+// order over them. The row-level reduction (which reuses [`KeyFilter`] for the exact
+// membership test) lives next to the materialised `Bindings` in `exec.rs`. Splitting it
+// this way keeps the tree logic unit-testable without a `Graph`.
+//
+// CORRECTNESS NOTE (load-bearing). A semijoin is a pure FILTER: `R ⋉ S` keeps exactly
+// the rows of `R` that have a join partner in `S`, so it can only ever DROP rows that
+// the final join would itself drop — it never adds or alters a row. The prepass is
+// therefore answer-preserving for ANY adjacency choice; the acyclic *join tree*
+// (running-intersection) is what makes it a FULL reducer (removes ALL dangling tuples),
+// which is the performance guarantee, not a correctness precondition. The executor only
+// runs the prepass on the acyclic branch (cyclic BGPs keep the existing LFTJ).
+
+/// A node of the join tree built over the relations of an acyclic BGP — a relation index
+/// and (when not the root) its parent. The tree is rooted and the edges connect relations
+/// that share at least one join variable, with the running-intersection property when the
+/// BGP is α-acyclic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TreeNode {
+    /// Index of the relation (BGP pattern) this node stands for.
+    pub(crate) rel: usize,
+    /// Index INTO THE NODE LIST of this node's parent, or `usize::MAX` for the root.
+    pub(crate) parent: usize,
+}
+
+impl TreeNode {
+    /// `true` for the (single) root node, which has no parent.
+    #[inline]
+    pub(crate) fn is_root(&self) -> bool {
+        self.parent == usize::MAX
+    }
+}
+
+/// Builds a rooted join tree (really a forest, joined under a synthetic root order) over
+/// `rel_vars` — one entry per relation, each the set of JOIN-variable ids that relation
+/// binds (an id per distinct variable; constants are not included). Two relations are
+/// adjacent when their variable sets intersect. The returned nodes are in a PRE-ORDER
+/// (each parent precedes its children), so:
+///   * iterating the slice in REVERSE visits children before parents — the bottom-up
+///     (leaf → root) semijoin order, and
+///   * iterating it FORWARD visits parents before children — the top-down order.
+///
+/// The construction is a greedy BFS over the adjacency graph: it seeds a component at its
+/// lowest-index relation and attaches each newly reached relation to the already-placed
+/// neighbour it shares the most variables with. A disconnected BGP (independent
+/// components, i.e. a cross product) yields several roots; each component is still fully
+/// reduced within itself, and the cross product across components is handled by the join.
+///
+/// This is intentionally simple and robust rather than a textbook GYO tree: because the
+/// semijoin sweep is answer-preserving for any spanning structure (see the module note),
+/// a maximum-overlap spanning forest is sufficient and, for α-acyclic BGPs, recovers a
+/// running-intersection tree.
+pub(crate) fn build_join_tree(rel_vars: &[Vec<u32>]) -> Vec<TreeNode> {
+    let n = rel_vars.len();
+    let mut placed = vec![false; n];
+    let mut nodes: Vec<TreeNode> = Vec::with_capacity(n);
+
+    // Number of shared variables between two relations' (small, sorted-or-not) var sets.
+    let overlap = |a: usize, b: usize| -> usize {
+        rel_vars[a].iter().filter(|v| rel_vars[b].contains(v)).count()
+    };
+
+    while placed.iter().any(|p| !p) {
+        // Seed a new component at the lowest unplaced relation (a fresh root).
+        let seed = (0..n).find(|&i| !placed[i]).unwrap();
+        placed[seed] = true;
+        let root_node = nodes.len();
+        nodes.push(TreeNode { rel: seed, parent: usize::MAX });
+
+        // Grow the component: repeatedly attach the unplaced relation that shares the most
+        // variables with SOME already-placed node of this component, as that node's child.
+        loop {
+            let mut best: Option<(usize, usize, usize)> = None; // (overlap, child_rel, parent_node)
+            // The component's already-placed nodes are `nodes[root_node..]`; this snapshot is
+            // stable for the inner search (nodes only grows AFTER a child is chosen, below).
+            let placed_end = nodes.len();
+            for (node_idx, node) in nodes.iter().enumerate().take(placed_end).skip(root_node) {
+                let prel = node.rel;
+                for (cand, &is_placed) in placed.iter().enumerate() {
+                    if is_placed {
+                        continue;
+                    }
+                    let ov = overlap(prel, cand);
+                    if ov == 0 {
+                        continue;
+                    }
+                    // Prefer the largest overlap; break ties by smallest candidate index so
+                    // the tree is deterministic (the result never depends on it, but a
+                    // stable shape keeps tests and EXPLAIN reproducible).
+                    let better = match best {
+                        None => true,
+                        Some((bov, bcand, _)) => ov > bov || (ov == bov && cand < bcand),
+                    };
+                    if better {
+                        best = Some((ov, cand, node_idx));
+                    }
+                }
+            }
+            match best {
+                Some((_, cand, parent_node)) => {
+                    placed[cand] = true;
+                    nodes.push(TreeNode { rel: cand, parent: parent_node });
+                }
+                None => break, // component exhausted
+            }
+        }
+    }
+    nodes
+}
+
 /// Whether `id` is a DICTIONARY id (the dense `[1, INLINE_BASE)` range the bitmap path is
 /// designed for) rather than an inline integer / local-vocab id high in the `u32` space.
 /// Not used to gate correctness (the filter is exact for any id) — kept as a documented
@@ -203,5 +326,75 @@ mod tests {
         assert!(is_dense_dict_id(dict::INLINE_BASE - 1));
         assert!(!is_dense_dict_id(dict::NO_ID));
         assert!(!is_dense_dict_id(dict::INLINE_BASE)); // first inline integer id
+    }
+
+    // ---- [OPUS-4.8] (sq-5zf8i / §A4) join-tree builder ---------------------
+
+    /// Every relation is placed exactly once, and every non-root parent points at an
+    /// earlier (already-placed) node — the pre-order invariant the sweep relies on.
+    fn assert_tree_well_formed(rel_vars: &[Vec<u32>], nodes: &[TreeNode]) {
+        assert_eq!(nodes.len(), rel_vars.len(), "every relation is a node exactly once");
+        let mut seen = vec![false; rel_vars.len()];
+        let mut roots = 0;
+        for (i, nd) in nodes.iter().enumerate() {
+            assert!(!seen[nd.rel], "relation {} placed twice", nd.rel);
+            seen[nd.rel] = true;
+            if nd.is_root() {
+                roots += 1;
+            } else {
+                assert!(nd.parent < i, "parent {} must precede child node {}", nd.parent, i);
+            }
+        }
+        assert!(seen.iter().all(|&s| s), "all relations placed");
+        assert!(roots >= 1, "at least one root");
+    }
+
+    #[test]
+    fn chain_join_tree_is_a_single_spine() {
+        // Chain: r0(?a,?b) r1(?b,?c) r2(?c,?d) — adjacency a-b, b-c, c-d.
+        let rel_vars = vec![vec![0u32, 1], vec![1, 2], vec![2, 3]];
+        let nodes = build_join_tree(&rel_vars);
+        assert_tree_well_formed(&rel_vars, &nodes);
+        // One connected component => exactly one root.
+        assert_eq!(nodes.iter().filter(|n| n.is_root()).count(), 1);
+    }
+
+    #[test]
+    fn star_join_tree_roots_at_the_hub() {
+        // Star: hub r0(?p,?a) and spokes r1(?p,?b) r2(?p,?c) r3(?p,?d), all share ?p (=0).
+        let rel_vars = vec![vec![0u32, 1], vec![0, 2], vec![0, 3], vec![0, 4]];
+        let nodes = build_join_tree(&rel_vars);
+        assert_tree_well_formed(&rel_vars, &nodes);
+        assert_eq!(nodes.iter().filter(|n| n.is_root()).count(), 1);
+        // The root is the seed relation r0; the spokes all attach (directly or not) under it.
+        assert!(nodes[0].is_root() && nodes[0].rel == 0);
+    }
+
+    #[test]
+    fn disconnected_bgp_yields_one_root_per_component() {
+        // Two independent edges: {r0(?a,?b), r1(?b,?c)} and {r2(?x,?y)} — a cross product.
+        let rel_vars = vec![vec![0u32, 1], vec![1, 2], vec![10, 11]];
+        let nodes = build_join_tree(&rel_vars);
+        assert_tree_well_formed(&rel_vars, &nodes);
+        assert_eq!(nodes.iter().filter(|n| n.is_root()).count(), 2, "two components => two roots");
+    }
+
+    #[test]
+    fn single_relation_is_its_own_root() {
+        let rel_vars = vec![vec![0u32, 1]];
+        let nodes = build_join_tree(&rel_vars);
+        assert_tree_well_formed(&rel_vars, &nodes);
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].is_root());
+    }
+
+    #[test]
+    fn snowflake_join_tree_well_formed() {
+        // Star on ?p plus a chain ?p->?city->?country:
+        // r0(?p,?name) r1(?p,?age) r2(?p,?city) r3(?city,?country)
+        let rel_vars = vec![vec![0u32, 1], vec![0, 2], vec![0, 3], vec![3, 4]];
+        let nodes = build_join_tree(&rel_vars);
+        assert_tree_well_formed(&rel_vars, &nodes);
+        assert_eq!(nodes.iter().filter(|n| n.is_root()).count(), 1);
     }
 }
