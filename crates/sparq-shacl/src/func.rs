@@ -25,11 +25,12 @@
 //! node-expression test suite exercises: `concat`, `count`, `sum`, `min`, `max`,
 //! `distinct`, `if`/`then`/`else`, `exists`, `limit`, `offset`, `instancesOf`,
 //! `nodesMatching`, `flatMap`, `findFirst`, `matchAll`, `remove`, `orderBy`,
-//! and `var` (only the `"focusNode"` binding is defined outside a SPARQL scope;
-//! any other variable evaluates to the empty set, matching the suite's
-//! `var-unbound` entry). `sh:SPARQLFunction` custom functions are dispatched
-//! through the engine. The `shnex:var "bound"` scope-injection entry is *not*
-//! supported here (it needs a caller-supplied variable scope) and is dropped.
+//! and `var` (`"focusNode"` is the focus node; any other name resolves against a
+//! caller-supplied variable scope — the W3C suite's `sht:scope-<name>` injection —
+//! else the empty set, matching the `var-unbound` entry). `sh:SPARQLFunction`
+//! custom functions are dispatched through the engine. [OPUS-4.8] (sq-u5rxj) the
+//! `shnex:var "bound"` scope-injection entry is now supported via the threaded
+//! [`crate::rules::Scope`].
 
 use super::NodeExpr;
 use crate::model::{sh, ShapesModel};
@@ -110,8 +111,8 @@ enum Op {
         key: Box<NodeExpr>,
         desc: bool,
     },
-    /// `var "name"` — only `"focusNode"` is bound (⇒ `{ focus }`); any other
-    /// name is unbound (⇒ empty), since there is no SPARQL variable scope here.
+    /// `var "name"` — `"focusNode"` ⇒ `{ focus }`; any other name resolves against
+    /// the caller-supplied [`crate::rules::Scope`] (⇒ empty when absent).
     Var(String),
     /// A custom `sh:SPARQLFunction`: its SELECT body, parameter order, and the
     /// (already-parsed) argument node expressions to pre-bind.
@@ -375,34 +376,35 @@ impl Func {
         view: &GraphView,
         model: &ShapesModel,
         focus: &Term,
+        scope: &crate::rules::Scope,
     ) -> Vec<Term> {
         match &self.op {
             Op::Concat(members) => members
                 .iter()
-                .flat_map(|m| m.eval(graph, view, model, focus))
+                .flat_map(|m| m.eval(graph, view, model, focus, scope))
                 .collect(),
             Op::Count(arg) => {
-                let n = arg.eval(graph, view, model, focus).len();
+                let n = arg.eval(graph, view, model, focus, scope).len();
                 vec![int_literal(n as i128)]
             }
             Op::Sum(arg) => {
-                let vals = arg.eval(graph, view, model, focus);
+                let vals = arg.eval(graph, view, model, focus, scope);
                 vec![sum_literal(&vals)]
             }
             Op::MinMax { arg, max } => {
-                let vals = arg.eval(graph, view, model, focus);
+                let vals = arg.eval(graph, view, model, focus, scope);
                 min_max(&vals, *max).into_iter().collect()
             }
-            Op::Distinct(arg) => dedup(arg.eval(graph, view, model, focus)),
+            Op::Distinct(arg) => dedup(arg.eval(graph, view, model, focus, scope)),
             Op::Exists(arg) => {
-                let nonempty = !arg.eval(graph, view, model, focus).is_empty();
+                let nonempty = !arg.eval(graph, view, model, focus, scope).is_empty();
                 vec![bool_literal(nonempty)]
             }
             Op::If { cond, then, els } => {
-                if is_true_set(&cond.eval(graph, view, model, focus)) {
-                    then.eval(graph, view, model, focus)
+                if is_true_set(&cond.eval(graph, view, model, focus, scope)) {
+                    then.eval(graph, view, model, focus, scope)
                 } else if let Some(e) = els {
-                    e.eval(graph, view, model, focus)
+                    e.eval(graph, view, model, focus, scope)
                 } else {
                     Vec::new()
                 }
@@ -412,7 +414,7 @@ impl Func {
                 limit,
                 offset,
             } => {
-                let v = nodes.eval(graph, view, model, focus);
+                let v = nodes.eval(graph, view, model, focus, scope);
                 let after_offset = v.into_iter().skip(*offset);
                 match limit {
                     Some(k) => after_offset.take(*k).collect(),
@@ -429,41 +431,41 @@ impl Func {
                     .collect()
             }
             Op::FlatMap { nodes, body } => nodes
-                .eval(graph, view, model, focus)
+                .eval(graph, view, model, focus, scope)
                 .iter()
-                .flat_map(|n| body.eval(graph, view, model, n))
+                .flat_map(|n| body.eval(graph, view, model, n, scope))
                 .collect(),
             Op::FindFirst { nodes, shape } => nodes
-                .eval(graph, view, model, focus)
+                .eval(graph, view, model, focus, scope)
                 .into_iter()
                 .find(|n| crate::eval::conforms_node(graph, model, *shape, n))
                 .into_iter()
                 .collect(),
             Op::MatchAll { nodes, shape } => {
                 let all = nodes
-                    .eval(graph, view, model, focus)
+                    .eval(graph, view, model, focus, scope)
                     .iter()
                     .all(|n| crate::eval::conforms_node(graph, model, *shape, n));
                 vec![bool_literal(all)]
             }
             Op::Remove { nodes, removed } => {
                 let drop: std::collections::HashSet<Term> = removed
-                    .eval(graph, view, model, focus)
+                    .eval(graph, view, model, focus, scope)
                     .into_iter()
                     .collect();
                 nodes
-                    .eval(graph, view, model, focus)
+                    .eval(graph, view, model, focus, scope)
                     .into_iter()
                     .filter(|n| !drop.contains(n))
                     .collect()
             }
             Op::OrderBy { nodes, key, desc } => {
-                let mut v = nodes.eval(graph, view, model, focus);
+                let mut v = nodes.eval(graph, view, model, focus, scope);
                 // Sort by the least key value of each node; a node with no key
                 // sorts first (ascending) per the suite's `orderBy-height`.
                 v.sort_by(|a, b| {
-                    let ka = key.eval(graph, view, model, a);
-                    let kb = key.eval(graph, view, model, b);
+                    let ka = key.eval(graph, view, model, a, scope);
+                    let kb = key.eval(graph, view, model, b, scope);
                     let ord = cmp_key(&ka, &kb);
                     if *desc {
                         ord.reverse()
@@ -473,18 +475,21 @@ impl Func {
                 });
                 v
             }
+            // [OPUS-4.8] (sq-u5rxj) `var "name"`: `"focusNode"` is the focus node;
+            // any other name resolves against the caller-supplied `scope` (the W3C
+            // suite's `sht:scope-<name>` injection), or the empty set when absent.
             Op::Var(name) => {
                 if name == "focusNode" {
                     vec![focus.clone()]
                 } else {
-                    Vec::new()
+                    scope.get(name).cloned().unwrap_or_default()
                 }
             }
             Op::Sparql {
                 select,
                 params,
                 args,
-            } => self.eval_sparql_function(graph, view, model, focus, select, params, args),
+            } => self.eval_sparql_function(graph, view, model, focus, scope, select, params, args),
         }
     }
 
@@ -498,6 +503,7 @@ impl Func {
         view: &GraphView,
         model: &ShapesModel,
         focus: &Term,
+        scope: &crate::rules::Scope,
         select: &str,
         params: &[String],
         args: &[NodeExpr],
@@ -506,7 +512,7 @@ impl Func {
         // if any is empty/multi-valued the function call is undefined ⇒ empty set.
         let mut bound: Vec<Term> = Vec::with_capacity(params.len());
         for a in args {
-            let mut vs = a.eval(graph, view, model, focus);
+            let mut vs = a.eval(graph, view, model, focus, scope);
             if vs.len() != 1 {
                 return Vec::new();
             }

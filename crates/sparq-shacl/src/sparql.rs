@@ -43,6 +43,73 @@ use spargebra::{Query, SparqlParser};
 /// property shape) `$PATH` this way.
 pub(crate) type Binding<'a> = (&'a str, &'a Term);
 
+/// [OPUS-4.8] (sq-0mjfd) The variable a `sh:sparql` constraint query always has
+/// pre-bound: `$this` (the focus node). A SPARQL-based constraint COMPONENT
+/// validator additionally pre-binds `$value` and each parameter — see
+/// [`check_pre_binding`], which takes the pre-bound name set.
+const PRE_BOUND_THIS: &[&str] = &["this"];
+
+/// [OPUS-4.8] (sq-0mjfd) A SHACL-SPARQL **pre-binding violation**: a `sh:sparql`
+/// constraint query uses a construct for which SHACL pre-binding of `$this` is not
+/// defined (W3C SHACL §5.2.1 NOTE "pre-binding"), so a conformant processor MUST
+/// signal a *failure* rather than validate. Surfaced through
+/// [`PreparedSparql::build`] as an `Err` and threaded to a `validate_strict`
+/// failure outcome (the `mf:result sht:Failure` shacl12 entries
+/// `sparql/pre-binding/{unsupported-sparql-001..006, pre-binding-006}`).
+///
+/// The variants are exactly the disallowed constructs the suite enumerates — no
+/// more (over-rejecting would break the 17 passing `sh:sparql` entries):
+///   * [`Self::Minus`]   — a `MINUS` clause (`unsupported-sparql-001`);
+///   * [`Self::Values`]  — an author-written `VALUES` table (`unsupported-sparql-002`);
+///   * [`Self::Service`] — a `SERVICE` clause (`unsupported-sparql-003`);
+///   * [`Self::SubSelectDropsPreBound`] — a sub-`SELECT` whose projection does not
+///     keep the pre-bound variable in scope, i.e. a `SELECT *` or a projection
+///     list omitting it (`unsupported-sparql-004`, `pre-binding-006`);
+///   * [`Self::RebindsPreBound`] — a `BIND (… AS $this)` that re-binds the
+///     pre-bound variable (`unsupported-sparql-005`; the ASK form
+///     `unsupported-sparql-006` re-binds `?value` and is caught the same way).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PreBindingViolation {
+    /// A `MINUS` clause — pre-binding is not defined across `MINUS`.
+    Minus,
+    /// An author-written `VALUES` table — disallowed in a pre-bound query.
+    Values,
+    /// A `SERVICE` (federated) clause — not evaluable under pre-binding here.
+    Service,
+    /// A sub-`SELECT` that re-scopes the pre-bound variable (drops it from / does
+    /// not explicitly project it in the inner projection). Carries the variable
+    /// name re-scoped, for the diagnostic.
+    SubSelectDropsPreBound(String),
+    /// A `BIND (expr AS ?v)` that re-binds an already-pre-bound variable `?v`.
+    RebindsPreBound(String),
+}
+
+impl PreBindingViolation {
+    /// A human-readable explanation (for a `ShapeDiagnostic` / failure message).
+    pub(crate) fn message(&self) -> String {
+        match self {
+            PreBindingViolation::Minus => {
+                "SHACL-SPARQL pre-binding is not defined across a MINUS clause".to_string()
+            }
+            PreBindingViolation::Values => {
+                "an author-written VALUES table is not allowed in a pre-bound sh:sparql query"
+                    .to_string()
+            }
+            PreBindingViolation::Service => {
+                "a SERVICE clause cannot be evaluated under SHACL pre-binding".to_string()
+            }
+            // [OPUS-4.8] positional format args (rust/unused-variable CodeQL FP).
+            PreBindingViolation::SubSelectDropsPreBound(v) => format!(
+                "a sub-SELECT re-scopes the pre-bound variable ?{} (it must be explicitly projected)",
+                v
+            ),
+            PreBindingViolation::RebindsPreBound(v) => {
+                format!("a BIND re-binds the pre-bound variable ?{}", v)
+            }
+        }
+    }
+}
+
 /// A parsed-and-validated `sh:sparql` constraint, ready to run per focus node.
 /// Built once when the shapes model is parsed (so a malformed query is rejected
 /// up front, not per focus node).
@@ -53,18 +120,46 @@ pub(crate) struct PreparedSparql {
 }
 
 impl PreparedSparql {
-    /// Parses `constraint.select` (with its prefixes prepended) into algebra,
-    /// returning `None` for a non-SELECT or unparsable query (ill-formed → skip).
-    /// `SELECT *` is accepted (every in-scope variable, including `$this`, is a
-    /// result variable); only a non-SELECT query form is rejected.
-    pub(crate) fn build(constraint: &SparqlConstraint) -> Option<PreparedSparql> {
+    /// Parses `constraint.select` (with its prefixes prepended) into algebra.
+    ///
+    /// Outcome (a three-state result, distinguishing *skip* from *reject*):
+    ///   * `Ok(Some(_))` — a well-formed, pre-bindable SELECT query;
+    ///   * `Ok(None)` — a non-SELECT or unparsable query (ill-formed → skipped
+    ///     leniently, matching the crate's ill-formed-shape policy);
+    ///   * `Err(_)` — a SELECT query that VIOLATES the SHACL-SPARQL pre-binding
+    ///     rules ([`PreBindingViolation`]). A conformant processor MUST signal a
+    ///     *failure* for such a constraint (the `mf:result sht:Failure` shacl12
+    ///     entries), so this is propagated to a strict-validation failure outcome
+    ///     rather than silently skipped. [OPUS-4.8] (sq-0mjfd)
+    ///
+    /// `SELECT *` is accepted at the TOP level (every in-scope variable, including
+    /// `$this`, is a result variable); a `SELECT *` *sub-select*, by contrast,
+    /// re-scopes `$this` and is a pre-binding violation (see [`check_pre_binding`]).
+    pub(crate) fn build(
+        constraint: &SparqlConstraint,
+    ) -> Result<Option<PreparedSparql>, PreBindingViolation> {
         let text = format!("{}\n{}", constraint.prefixes, constraint.select);
-        let query = SparqlParser::new().parse_query(&text).ok()?;
+        let Ok(query) = SparqlParser::new().parse_query(&text) else {
+            return Ok(None);
+        };
         // Only SELECT is meaningful for sh:sparql; the solutions drive the result count.
-        if !matches!(query, Query::Select { .. }) {
-            return None;
-        }
-        Some(PreparedSparql { query })
+        let Query::Select { pattern, .. } = &query else {
+            return Ok(None);
+        };
+        // [OPUS-4.8] (sq-0mjfd) Reject a query whose pre-binding of `$this` is
+        // unsound (MINUS / VALUES / SERVICE / a sub-SELECT that drops `$this` /
+        // a BIND re-binding it). The check runs on the RAW author query, BEFORE
+        // any pre-binding VALUES injection, so an author-written VALUES is caught.
+        // The TOP-level projection is the result projection (a `SELECT *` is fine
+        // here — every in-scope variable, incl. `$this`, is a result), NOT a
+        // re-scoping sub-SELECT, so descend THROUGH it; the Project arm of
+        // `check_pre_binding` only fires for an INNER (author) sub-SELECT.
+        let body = match pattern {
+            GraphPattern::Project { inner, .. } => inner.as_ref(),
+            other => other,
+        };
+        check_pre_binding(body, PRE_BOUND_THIS)?;
+        Ok(Some(PreparedSparql { query }))
     }
 
     /// Runs the constraint for one `focus` node against `data`, pushing one
@@ -222,6 +317,91 @@ impl PreparedSelectExpr {
             }
         }
         out
+    }
+}
+
+/// [OPUS-4.8] (sq-0mjfd) Walks a SHACL-SPARQL constraint/validator WHERE algebra
+/// and returns `Err` for the first construct that makes pre-binding of the
+/// `pre_bound` variables unsound (W3C SHACL §5.2.1 NOTE "pre-binding"). `in_scope`
+/// holds the pre-bound names still in scope along this branch; a sub-`SELECT` that
+/// does not re-project a name drops it, so a re-bind *inside* a re-scoped
+/// sub-select no longer concerns the OUTER pre-binding.
+///
+/// For a `sh:sparql` constraint `pre_bound = ["this"]`; for a SPARQL-based
+/// constraint COMPONENT validator it is `["this", "value", <each parameter var>]`
+/// (§6.3) — e.g. the ASK `unsupported-sparql-006` re-binds `?value`.
+///
+/// Detected violations (and ONLY these — over-rejecting would break the 17
+/// passing `sh:sparql` entries / the component-validator suite):
+///   * `Minus` — pre-binding undefined across MINUS (`unsupported-sparql-001`);
+///   * `Values` — an author-written VALUES table (the pre-binding injection itself
+///     runs LATER, on a separately-built copy, so any VALUES seen here is the
+///     author's) (`unsupported-sparql-002`);
+///   * `Service` — a federated clause (`unsupported-sparql-003`);
+///   * a sub-`SELECT` `Project` that does not keep an in-scope pre-bound name in
+///     scope (a `SELECT *` — empty projection list in this algebra — or a list
+///     omitting it) (`unsupported-sparql-004`, `pre-binding-006`); the descent
+///     then continues with that name out of scope;
+///   * a `BIND (… AS ?v)` (`Extend`) re-binding an in-scope pre-bound name `?v`
+///     (`unsupported-sparql-005`, ASK `unsupported-sparql-006`). A
+///     `BIND ($this AS ?other)` binding a NEW name is fine (`pre-binding-004`).
+fn check_pre_binding(
+    pattern: &GraphPattern,
+    in_scope: &[&str],
+) -> Result<(), PreBindingViolation> {
+    match pattern {
+        GraphPattern::Minus { .. } => Err(PreBindingViolation::Minus),
+        GraphPattern::Values { .. } => Err(PreBindingViolation::Values),
+        GraphPattern::Service { .. } => Err(PreBindingViolation::Service),
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression: _,
+        } => {
+            if in_scope.contains(&variable.as_str()) {
+                return Err(PreBindingViolation::RebindsPreBound(
+                    variable.as_str().to_string(),
+                ));
+            }
+            check_pre_binding(inner, in_scope)
+        }
+        // A sub-SELECT (`Project`) re-scopes its inner: a pre-bound name survives
+        // into it ONLY if the projection explicitly lists it. A `SELECT *` (empty
+        // list in this algebra) or a list omitting it re-scopes it — a violation
+        // while it is still in scope at this point.
+        GraphPattern::Project { inner, variables } => {
+            let kept: Vec<&str> = in_scope
+                .iter()
+                .copied()
+                .filter(|n| variables.iter().any(|v| v.as_str() == *n))
+                .collect();
+            if let Some(dropped) = in_scope.iter().find(|n| !kept.contains(n)) {
+                return Err(PreBindingViolation::SubSelectDropsPreBound(
+                    (*dropped).to_string(),
+                ));
+            }
+            check_pre_binding(inner, &kept)
+        }
+        // Single-child wrappers keep the outer scope; descend.
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Group { inner, .. }
+        | GraphPattern::Graph { inner, .. } => check_pre_binding(inner, in_scope),
+        // Both children share the outer scope (a UNION branch / JOIN sibling / the
+        // optional side of an OPTIONAL each keeps the pre-bound names in scope).
+        GraphPattern::Join { left, right }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::LeftJoin { left, right, .. } => {
+            check_pre_binding(left, in_scope)?;
+            check_pre_binding(right, in_scope)
+        }
+        // Leaves carry no pre-binding-affecting construct.
+        GraphPattern::Bgp { .. } | GraphPattern::Path { .. } => Ok(()),
+        #[allow(unreachable_patterns)]
+        _ => Ok(()),
     }
 }
 
@@ -605,6 +785,33 @@ impl PreparedValidator {
             (Query::Select { .. }, false) => Some(PreparedValidator::Select(query)),
             _ => None,
         }
+    }
+}
+
+/// [OPUS-4.8] (sq-0mjfd) Checks a SPARQL-based constraint-COMPONENT validator's
+/// query text for a pre-binding violation (§6.3 pre-binds `$this`, `$value` and
+/// each parameter `pre_bound`). Returns `Ok(())` when sound or when the text does
+/// not parse / is not an ASK/SELECT (those are handled leniently elsewhere), and
+/// `Err` only for a genuine pre-binding violation — e.g. the ASK
+/// `unsupported-sparql-006` re-binds `?value`.
+pub(crate) fn check_validator_pre_binding(
+    text: &str,
+    pre_bound: &[&str],
+) -> Result<(), PreBindingViolation> {
+    let Ok(query) = SparqlParser::new().parse_query(text) else {
+        return Ok(());
+    };
+    match &query {
+        // An ASK's WHERE is wrapped in a (zero-variable) top-level `Project` — that
+        // is the ASK form itself, NOT an author sub-SELECT, so descend THROUGH it
+        // (else the empty projection would be misread as dropping every pre-bound
+        // variable). The pre-bound names stay in scope inside the ASK body.
+        Query::Ask { pattern, .. } => match pattern {
+            GraphPattern::Project { inner, .. } => check_pre_binding(inner, pre_bound),
+            other => check_pre_binding(other, pre_bound),
+        },
+        Query::Select { pattern, .. } => check_pre_binding(pattern, pre_bound),
+        _ => Ok(()),
     }
 }
 
@@ -1341,8 +1548,10 @@ mod tests {
             deactivated: false,
             prepared: None,
         };
-        assert!(PreparedSparql::build(&ask).is_none());
-        // Unparsable -> None.
+        // [OPUS-4.8] (sq-0mjfd) build now returns Result<Option<_>, _>: a non-SELECT
+        // / unparsable query is `Ok(None)` (skip), not `Err` (a pre-binding failure).
+        assert!(matches!(PreparedSparql::build(&ask), Ok(None)));
+        // Unparsable -> Ok(None).
         let bad = SparqlConstraint {
             node: Term::NamedNode(NamedNode::new("http://example.org/c").unwrap()),
             select: "SELECT ??? garbage".to_string(),
@@ -1352,8 +1561,8 @@ mod tests {
             deactivated: false,
             prepared: None,
         };
-        assert!(PreparedSparql::build(&bad).is_none());
-        // Valid SELECT -> Some.
+        assert!(matches!(PreparedSparql::build(&bad), Ok(None)));
+        // Valid SELECT -> Ok(Some).
         let ok = SparqlConstraint {
             node: Term::NamedNode(NamedNode::new("http://example.org/c").unwrap()),
             select: "SELECT ?this WHERE { ?this ?p ?o }".to_string(),
@@ -1363,7 +1572,7 @@ mod tests {
             deactivated: false,
             prepared: None,
         };
-        assert!(PreparedSparql::build(&ok).is_some());
+        assert!(matches!(PreparedSparql::build(&ok), Ok(Some(_))));
     }
 
     #[test]
@@ -1511,11 +1720,11 @@ mod tests {
     }
 
     #[test]
-    fn prepared_sparql_evaluate_fail_closed_on_runtime_query_error() {
-        // The §5.2 `sh:sparql` path: a SERVICE in the sh:select errors at runtime,
-        // so PreparedSparql::evaluate pushes no results (conforms).
-        let data = graph(DATA);
-        let focus = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
+    fn prepared_sparql_build_rejects_service_at_build_time() {
+        // [OPUS-4.8] (sq-0mjfd) The §5.2 `sh:sparql` path: a SERVICE clause is a
+        // SHACL-SPARQL pre-binding violation (pre-binding into a federated block is
+        // undefined), so `build` now REJECTS it up front (an `Err` failure outcome,
+        // shacl12 unsupported-sparql-003) rather than deferring to a runtime error.
         let constraint = SparqlConstraint {
             node: Term::NamedNode(NamedNode::new("http://example.org/c").unwrap()),
             select: "SELECT ?this WHERE { SERVICE <http://example.org/remote> { ?this ?p ?o } }"
@@ -1526,16 +1735,10 @@ mod tests {
             deactivated: false,
             prepared: None,
         };
-        let prepared = PreparedSparql::build(&constraint).expect("a SELECT with SERVICE parses");
-        let mut out = Vec::new();
-        prepared.evaluate(
-            &data,
-            &focus,
-            &constraint,
-            |_f: ResultFields| unreachable!("a runtime query error yields no solutions"),
-            &mut out,
-        );
-        assert!(out.is_empty());
+        assert!(matches!(
+            PreparedSparql::build(&constraint),
+            Err(PreBindingViolation::Service)
+        ));
     }
 
     // --- PreparedSparql::evaluate happy path: ?value / ?path / {?var} mapping --
@@ -1563,7 +1766,7 @@ mod tests {
             deactivated: false,
             prepared: None,
         };
-        let prepared = PreparedSparql::build(&constraint).unwrap();
+        let prepared = PreparedSparql::build(&constraint).unwrap().unwrap();
         let mut out = Vec::new();
         prepared.evaluate(
             &data,
@@ -1621,7 +1824,7 @@ mod tests {
             deactivated: false,
             prepared: None,
         };
-        let prepared = PreparedSparql::build(&constraint).unwrap();
+        let prepared = PreparedSparql::build(&constraint).unwrap().unwrap();
         let mut out = Vec::new();
         prepared.evaluate(
             &data,
@@ -1660,7 +1863,7 @@ mod tests {
             deactivated: false,
             prepared: None,
         };
-        let prepared = PreparedSparql::build(&constraint).unwrap();
+        let prepared = PreparedSparql::build(&constraint).unwrap().unwrap();
         let mut out = Vec::new();
         prepared.evaluate(
             &data,
@@ -1819,5 +2022,119 @@ mod tests {
         .unwrap();
         let nodes = expr.eval_target(&data);
         assert_eq!(nodes, vec![iri("http://example.org/bob")]);
+    }
+
+    // --- [OPUS-4.8] (sq-0mjfd) SHACL-SPARQL pre-binding rejection (sht:Failure) --
+
+    /// Parse a top-level SELECT and run the `$this` pre-binding check on its WHERE,
+    /// descending through the top-level result `Project` exactly as `build` does.
+    fn check_select(select: &str) -> Result<(), PreBindingViolation> {
+        match SparqlParser::new().parse_query(select).unwrap() {
+            Query::Select { pattern, .. } => {
+                let body = match &pattern {
+                    GraphPattern::Project { inner, .. } => inner.as_ref(),
+                    other => other,
+                };
+                check_pre_binding(body, PRE_BOUND_THIS)
+            }
+            other => panic!("expected SELECT, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pre_binding_rejects_minus() {
+        // unsupported-sparql-001: MINUS is undefined under pre-binding.
+        assert_eq!(
+            check_select("SELECT $this WHERE { $this ?x ?any . MINUS { $this ?x \"V\" } }"),
+            Err(PreBindingViolation::Minus)
+        );
+    }
+
+    #[test]
+    fn pre_binding_rejects_values_and_service() {
+        // unsupported-sparql-002 / 003: an author VALUES table / a SERVICE clause.
+        assert_eq!(
+            check_select("SELECT $this WHERE { VALUES ?any { true } }"),
+            Err(PreBindingViolation::Values)
+        );
+        assert_eq!(
+            check_select(
+                "SELECT $this WHERE { $this ?x ?any . SERVICE <http://e/> { ?a ?b ?c } }"
+            ),
+            Err(PreBindingViolation::Service)
+        );
+    }
+
+    #[test]
+    fn pre_binding_rejects_subselect_dropping_this() {
+        // unsupported-sparql-004: a sub-SELECT that projects ?other ?b (drops $this).
+        let q = "SELECT $this WHERE { $this ?x ?any . { SELECT ?other ?b WHERE { ?other ?b ?c } } }";
+        assert_eq!(
+            check_select(q),
+            Err(PreBindingViolation::SubSelectDropsPreBound("this".into()))
+        );
+        // pre-binding-006: a `SELECT *` sub-select also re-scopes $this.
+        let star = "SELECT $this WHERE { { SELECT * WHERE { FILTER ($this = <http://e/x>) } } }";
+        assert_eq!(
+            check_select(star),
+            Err(PreBindingViolation::SubSelectDropsPreBound("this".into()))
+        );
+    }
+
+    #[test]
+    fn pre_binding_rejects_rebind_of_this() {
+        // unsupported-sparql-005: BIND (true AS $this) re-binds the pre-bound var.
+        assert_eq!(
+            check_select("SELECT $this WHERE { BIND (true AS $this) }"),
+            Err(PreBindingViolation::RebindsPreBound("this".into()))
+        );
+    }
+
+    #[test]
+    fn pre_binding_accepts_sound_queries() {
+        // The forms the 17 passing entries use must NOT be rejected: a sub-SELECT
+        // that re-projects $this (pre-binding-007), a BIND to a NEW var
+        // (pre-binding-004), a UNION (pre-binding-002), and a plain BGP+FILTER.
+        assert_eq!(
+            check_select(
+                "SELECT $this WHERE { { SELECT $this WHERE { FILTER ($this = <http://e/x>) } } }"
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            check_select("SELECT $this WHERE { BIND ($this AS ?that) FILTER (?that = <http://e/x>) }"),
+            Ok(())
+        );
+        assert_eq!(
+            check_select(
+                "SELECT $this WHERE { { FILTER (false) } UNION { FILTER ($this = <http://e/x>) } }"
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            check_select("SELECT $this WHERE { $this <http://e/p> \"L\" }"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validator_pre_binding_rejects_value_rebind() {
+        // unsupported-sparql-006: an ASK validator that re-binds the pre-bound
+        // `?value` is a pre-binding violation in the component-validator path.
+        assert_eq!(
+            check_validator_pre_binding(
+                "ASK { BIND (true AS ?value) FILTER (isLiteral(?value)) }",
+                &["this", "value", "lang"],
+            ),
+            Err(PreBindingViolation::RebindsPreBound("value".into()))
+        );
+        // A validator that merely READS ?value is fine.
+        assert_eq!(
+            check_validator_pre_binding(
+                "ASK { FILTER (isLiteral(?value)) }",
+                &["this", "value", "lang"],
+            ),
+            Ok(())
+        );
     }
 }

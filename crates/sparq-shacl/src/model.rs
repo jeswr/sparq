@@ -117,6 +117,18 @@ pub enum Component {
     Node(usize),
     /// sh:property — a child property shape validated against the same focus.
     Property(usize),
+    /// [OPUS-4.8] (sq-0mjfd) `sh:reifierShape` (SHACL 1.2 §4.x) — for each value
+    /// node `v` of this PROPERTY shape's path `p`, the *reifiers* of the asserted
+    /// triple `(focus, p, v)` (the subjects of `?r rdf:reifies <<(focus p v)>>`,
+    /// the RDF-1.2 reified-annotation `{| … |}` form) must each conform to the
+    /// referenced shape (`shape` indexes [`ShapesModel::shapes`]). With
+    /// `required = true` (`sh:reificationRequired true`), a value that has NO
+    /// reifier is ALSO a violation. One result (on focus/path, `sh:value` = the
+    /// offending value) per value whose reifier set fails — component
+    /// `sh:ReifierShapeConstraintComponent`. Only meaningful for a single-predicate
+    /// path (the reified triple needs a predicate); a non-predicate path yields no
+    /// reifiers and (unless required) conforms vacuously.
+    ReifierShape { shape: usize, required: bool },
     Qualified {
         shape: usize,
         min: Option<u64>,
@@ -381,6 +393,34 @@ pub struct ShapesModel {
     /// enum so the (crate-private) node-expression type is not exposed.
     #[cfg(feature = "shacl-af")]
     pub(crate) expressions: Vec<crate::rules::NodeExpr>,
+    /// [OPUS-4.8] (sq-0mjfd) SHACL-SPARQL pre-binding FAILURES discovered at
+    /// parse: a `sh:sparql` constraint (or a SPARQL-based constraint-component
+    /// validator) whose query violates the pre-binding rules (MINUS / VALUES /
+    /// SERVICE / a sub-SELECT that drops a pre-bound variable / a BIND re-binding
+    /// one). A conformant processor MUST signal a *failure* for these (W3C SHACL
+    /// §3.4), surfaced through [`crate::validate_strict`]. Empty in the common
+    /// (well-formed) case; the lenient default [`crate::validate`] ignores them
+    /// (the constraint is simply skipped, as for any other ill-formed shape).
+    pub(crate) pre_binding_failures: Vec<PreBindingFailure>,
+    /// [OPUS-4.8] (sq-5q76d) An explicit `sh:conformanceDisallows` severity set
+    /// declared in the shapes graph (on any `sh:ValidationReport` node, SHACL 1.2
+    /// Core §3.9). When present it OVERRIDES the default disallowed set
+    /// ({Violation, Warning, Info}) used to compute `ValidationReport::conforms`,
+    /// so e.g. a graph that only disallows `sh:Violation` conforms despite a
+    /// `sh:Warning` result (`core/validation-reports/conformance-disallows-001`).
+    /// `None` ⇒ the default set applies.
+    pub(crate) conformance_disallows: Option<Vec<String>>,
+}
+
+/// [OPUS-4.8] (sq-0mjfd) One SHACL-SPARQL pre-binding failure recorded at parse:
+/// the offending constraint/validator node and why pre-binding is unsound. See
+/// [`ShapesModel::pre_binding_failures`].
+#[derive(Debug, Clone)]
+pub struct PreBindingFailure {
+    /// The `sh:SPARQLConstraint` / constraint-component node whose query is unsound.
+    pub node: Term,
+    /// A human-readable explanation (the violated pre-binding rule).
+    pub message: String,
 }
 
 impl ShapesModel {
@@ -397,11 +437,15 @@ impl ShapesModel {
             by_types_closures: FxHashMap::default(),
             #[cfg(feature = "shacl-af")]
             expressions: Vec::new(),
+            pre_binding_failures: Vec::new(),
+            conformance_disallows: parse_conformance_disallows(&g),
         };
 
         // [OPUS-4.8] SHACL §6: discover SPARQL-based constraint components FIRST, so
         // shape parsing can activate them against the parameter predicates a shape uses.
-        m.components = discover_components(&g);
+        // [OPUS-4.8] (sq-0mjfd) A component validator with an unsound pre-binding is
+        // recorded as a failure (surfaced by `validate_strict`).
+        m.components = discover_components(&g, &mut m.pre_binding_failures);
 
         // Top-level shape discovery: explicitly typed shapes plus anything with a target.
         // [OPUS-4.8] (sq-rnkdh) `sh:ShapeClass` (SHACL 1.2) is "a class that is also a
@@ -499,6 +543,25 @@ impl ShapesModel {
     /// a data class with no shapes-graph footprint). See [`Self::by_types_closures`].
     pub(crate) fn by_types_closure(&self, node: &Term) -> Option<&Vec<String>> {
         self.by_types_closures.get(node)
+    }
+
+    /// [OPUS-4.8] (sq-0mjfd) The SHACL-SPARQL pre-binding FAILURES discovered while
+    /// parsing this shapes graph: a `sh:sparql` constraint or constraint-component
+    /// validator whose query the pre-binding rules forbid (MINUS / VALUES /
+    /// SERVICE / a sub-SELECT dropping a pre-bound variable / a BIND re-binding
+    /// one). A conformant processor MUST signal a *failure* for these (W3C SHACL
+    /// §3.4); [`crate::validate_strict`] returns an `Err` when this is non-empty.
+    /// Empty in the common (well-formed) case.
+    pub fn pre_binding_failures(&self) -> &[PreBindingFailure] {
+        &self.pre_binding_failures
+    }
+
+    /// [OPUS-4.8] (sq-5q76d) The shapes-graph-declared `sh:conformanceDisallows`
+    /// severity set (full IRIs), or `None` when the graph declares none (the
+    /// default {Violation, Warning, Info} then applies). Used by
+    /// [`crate::validate_with_model`] to compute `ValidationReport::conforms`.
+    pub fn conformance_disallows(&self) -> Option<&[String]> {
+        self.conformance_disallows.as_deref()
     }
 
     /// [OPUS-4.8] (sq-mk9n / sq-3w6n, `shacl-af`) Parses the two SHACL-AF
@@ -943,6 +1006,21 @@ impl ShapesModel {
             shape.components.push(Component::Property(id));
             shape.property_children.push(id);
         }
+        // [OPUS-4.8] (sq-0mjfd) `sh:reifierShape` (SHACL 1.2): the reifiers of each
+        // value's asserted triple must conform to the referenced shape. Parsed/
+        // interned like `sh:node`; `sh:reificationRequired true` additionally
+        // requires a reifier to exist.
+        for o in g.objects(node, &sh("reifierShape")) {
+            let id = self.shape_id(g, &o);
+            let required = matches!(
+                g.object(node, &sh("reificationRequired")),
+                Some(Term::Literal(l)) if l.value() == "true"
+            );
+            shape.components.push(Component::ReifierShape {
+                shape: id,
+                required,
+            });
+        }
         for o in g.objects(node, &sh("qualifiedValueShape")) {
             let id = self.shape_id(g, &o);
             let num = |p: &str| -> Option<u64> {
@@ -1101,7 +1179,19 @@ impl ShapesModel {
             deactivated,
             prepared: None,
         };
-        constraint.prepared = crate::sparql::PreparedSparql::build(&constraint);
+        // [OPUS-4.8] (sq-0mjfd) A pre-binding violation is recorded as a FAILURE
+        // (surfaced by `validate_strict`) and the constraint is then dropped
+        // (`prepared = None`), so the lenient `validate` simply skips it.
+        constraint.prepared = match crate::sparql::PreparedSparql::build(&constraint) {
+            Ok(prepared) => prepared,
+            Err(violation) => {
+                self.pre_binding_failures.push(PreBindingFailure {
+                    node: node.clone(),
+                    message: violation.message(),
+                });
+                None
+            }
+        };
         let idx = self.sparql.len();
         self.sparql.push(constraint);
         Some(idx)
@@ -1274,7 +1364,10 @@ fn collect_properties(
 /// the shapes graph and compile their parameters + validators. A component is
 /// kept only if it has at least one parameter and at least one usable validator
 /// (a generic / node / property validator with a parsable `sh:ask`/`sh:select`).
-fn discover_components(g: &GraphView) -> Vec<ComponentDef> {
+fn discover_components(
+    g: &GraphView,
+    failures: &mut Vec<PreBindingFailure>,
+) -> Vec<ComponentDef> {
     let mut out = Vec::new();
     // SHACL §6.2: a component node is a SHACL instance of sh:ConstraintComponent —
     // i.e. typed sh:ConstraintComponent OR any rdfs:subClassOf-descendant of it
@@ -1288,6 +1381,15 @@ fn discover_components(g: &GraphView) -> Vec<ComponentDef> {
         // Validators parse under the component's own `sh:prefixes` (SHACL §6.3),
         // reusing the `sh:declare`/`owl:imports` chasing of the `sh:sparql` path.
         let prefixes = collect_prefixes_from(g, &g.objects(&node, &sh("prefixes")));
+        // [OPUS-4.8] (sq-0mjfd) A validator query pre-binds `$this`, `$value` and
+        // each parameter (§6.3); a pre-binding violation in any of the three
+        // validator slots is a FAILURE for this component (the ASK
+        // `unsupported-sparql-006` re-binds `?value`).
+        let mut pre_bound: Vec<&str> = vec!["this", "value"];
+        for p in &parameters {
+            pre_bound.push(p.var.as_str());
+        }
+        check_component_validators(g, &node, &prefixes, &pre_bound, failures);
         let validator = parse_validator(g, &node, &sh("validator"), &prefixes);
         let node_validator = parse_validator(g, &node, &sh("nodeValidator"), &prefixes);
         let property_validator = parse_validator(g, &node, &sh("propertyValidator"), &prefixes);
@@ -1303,6 +1405,61 @@ fn discover_components(g: &GraphView) -> Vec<ComponentDef> {
         });
     }
     out
+}
+
+/// [OPUS-4.8] (sq-5q76d) An explicit `sh:conformanceDisallows` severity set
+/// declared in the shapes graph (SHACL 1.2 Core §3.9). Collects the IRI objects
+/// of every `sh:conformanceDisallows` triple (a `sh:ValidationReport` may declare
+/// several, e.g. `sh:Violation`, `sh:Warning`). `None` when none is declared (the
+/// default disallowed set then applies). The W3C
+/// `conformance-disallows-001` entry declares it on the EXPECTED report node,
+/// which — because that test's shapes graph is the whole file — is visible here.
+fn parse_conformance_disallows(g: &GraphView) -> Option<Vec<String>> {
+    let mut set: Vec<String> = Vec::new();
+    for [_, _, o] in g.triples(None, Some(&sh("conformanceDisallows")), None) {
+        if let Term::NamedNode(n) = o {
+            let iri = n.as_str().to_string();
+            if !set.contains(&iri) {
+                set.push(iri);
+            }
+        }
+    }
+    if set.is_empty() {
+        None
+    } else {
+        Some(set)
+    }
+}
+
+/// [OPUS-4.8] (sq-0mjfd) Records a [`PreBindingFailure`] for each of a component's
+/// validator slots (`sh:validator` / `sh:nodeValidator` / `sh:propertyValidator`)
+/// whose `sh:ask` / `sh:select` query violates the SHACL-SPARQL pre-binding rules.
+fn check_component_validators(
+    g: &GraphView,
+    node: &Term,
+    prefixes: &str,
+    pre_bound: &[&str],
+    failures: &mut Vec<PreBindingFailure>,
+) {
+    for slot in ["validator", "nodeValidator", "propertyValidator"] {
+        let Some(v) = g.object(node, &sh(slot)) else {
+            continue;
+        };
+        let text = match g.object(&v, &sh("ask")) {
+            Some(Term::Literal(l)) => l.value().to_string(),
+            _ => match g.object(&v, &sh("select")) {
+                Some(Term::Literal(l)) => l.value().to_string(),
+                _ => continue,
+            },
+        };
+        let full = format!("{prefixes}\n{text}");
+        if let Err(violation) = crate::sparql::check_validator_pre_binding(&full, pre_bound) {
+            failures.push(PreBindingFailure {
+                node: node.clone(),
+                message: violation.message(),
+            });
+        }
+    }
 }
 
 /// Parses a component's `sh:parameter` list (SHACL §6.2.1). Each parameter node

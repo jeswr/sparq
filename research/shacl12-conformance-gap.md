@@ -7,6 +7,22 @@ which makes CI gate the **full** vendored SHACL-1.2 test tree (not just
 exactly what the `sparq-shacl` crate does and does not yet pass, so the
 follow-on feature waves are measurable rather than guesswork.
 
+> **[OPUS-4.8] (sq-0mjfd / sq-5q76d / sq-u5rxj) update — the "final achievable"
+> wave.** This wave closed the SHACL-SPARQL pre-binding **rejection channel** (the
+> 7 `sht:Failure` entries, via `sparq_shacl::validate_strict`), `sh:reifierShape`
+> / `sh:reificationRequired` (2 core), the `rdf:dirLangString` base-direction
+> `sh:uniqueLang` key (1 core), the shapes-graph `sh:conformanceDisallows` thread
+> (1 core), and the node-expr caller-supplied variable scope (`shnex:var`, +1
+> node-expr). New measured floors: **core 133/134**, **sparql 24 (0 gap)**,
+> **node-expr 63**. The remaining honest divergence is §6 below: the three
+> `misc/{deactivated-003,message-002,severity-003}` per-constraint reified-
+> annotation OVERRIDE entries. **Correction:** the `{| … |}` RDF-1.2 annotation
+> SYNTAX is NOT a blocker — the pinned `oxttl 0.2.3` with the `rdf-12` feature
+> (already enabled workspace-wide) parses it and `sparq-core` stores the
+> triple-term (verified in-worktree). The blocker is the SHACL-MODEL work to
+> interpret a `sh:deactivated`/`sh:message`/`sh:severity` reifier as an override
+> of a SPECIFIC constraint statement (bead `sq-pb0wm`, see §6).
+
 The vendored suite is the W3C `w3c/data-shapes` repo pinned at
 `b6e73695d6196f33d7ce3ba47094a10fbc298e65` (`crates/sparq-shacl/fetch-shacl-tests.sh`),
 under `crates/sparq-shacl/tests/shacl/data-shapes/shacl12-test-suite/tests/`.
@@ -29,9 +45,9 @@ comparison as `w3c_core.rs` — `sh:conforms` must match and the
 
 | Runner (`crates/sparq-shacl/tests/`) | Manifest tree | Entries | PASS (default / `shacl-af`) | Gap |
 | --- | --- | --- | --- | --- |
-| `w3c_core_full_shacl12.rs` | `core/manifest.ttl` (all 7 categories) | 137 | **129 / 130** | 7 FAIL (+ 1 SKIP default) |
-| `w3c_sparql_shacl12.rs` | `sparql/manifest.ttl` | 24 | **17 / 17** | 0 FAIL + 7 expected-failure (sq-mue75 closed the 3 pre-binding FAILs) |
-| `w3c_node_expr.rs` + `w3c_node_expr_constraints.rs` | `node-expr/` | 65 | **— / 62 + 1 xfail** | the xfail is the harness `sht:scope-*` var entry (sq-mue75 drives the REAL `eval_node_expression`; `shacl-af`) |
+| `w3c_core_full_shacl12.rs` | `core/manifest.ttl` (all 7 categories) | 137 | **133 / 134** | 3 FAIL (+ 1 SKIP default) — sq-0mjfd/sq-5q76d closed reifierShape×2, uniqueLang-003, conformance-disallows-001 |
+| `w3c_sparql_shacl12.rs` | `sparql/manifest.ttl` | 24 | **24 / 24** | 0 FAIL — sq-0mjfd built the `sht:Failure` rejection channel (the 7 expected-failures now PASS) |
+| `w3c_node_expr.rs` + `w3c_node_expr_constraints.rs` | `node-expr/` | 65 | **— / 63** | sq-u5rxj threaded the caller-supplied `shnex:var` scope; the previous `sht:scope-*` xfail now PASSES (`shacl-af`) |
 
 The two runners that gate `core` and `sparql` are NOT feature-gated as a whole —
 they run in both states. The `shacl-af`-only delta in `core` is one entry
@@ -88,15 +104,18 @@ entries) are `sq-0mjfd`.
 
 ---
 
-## 3. Gap clusters — SPARQL (7 FAIL + 7 expected-failure)
+## 3. Gap clusters — SPARQL (CLOSED, sq-0mjfd)
 
-The 1.2 SPARQL suite has 24 `sht:Validate` entries; 10 pass. Of the 14
-non-passing, **7 carry `mf:result sht:Failure`** — they declare a SPARQL
-constraint a conformant processor MUST **reject** (re-binding a pre-bound
-variable, or an unsupported `MINUS` / `SERVICE`). The crate has no rejection /
-failure channel — `validate` always returns a report — so the runner records
-those as a distinct **ExpectedFailure** outcome (counted in the gap, not as
-PASS) and asserts there are exactly 7 of them.
+The 1.2 SPARQL suite has 24 `sht:Validate` entries; **all 24 now pass.** The 7
+`mf:result sht:Failure` entries declare a SPARQL constraint a conformant
+processor MUST **reject** (re-binding a pre-bound variable, an unsupported
+`MINUS` / `VALUES` / `SERVICE`, or a sub-`SELECT` that drops `$this`). `sq-0mjfd`
+built that rejection channel: a build-time pre-binding validity check
+(`PreparedSparql::build` / the component-validator path) records the violation,
+and `sparq_shacl::validate_strict` returns `Err(ShaclFailure)` for it. The
+harness drives `validate_strict` for an `sht:Failure` entry and PASSES iff it
+rejects. (The lenient `validate` still skips such a constraint, preserving its
+never-fails contract.) The historical gap table is kept below for provenance.
 
 | # | Cluster | Entries | Why it fails | Bead |
 | --- | --- | --- | --- | --- |
@@ -106,19 +125,19 @@ PASS) and asserts there are exactly 7 of them.
 | 17 | Pre-binding VALUES propagation — **DONE (sq-mue75)** | `sparql/pre-binding/pre-binding-002`, `pre-binding-005`, `pre-binding-007` | the pre-binding algebra-rewrite (UNION / sibling / sub-SELECT scope) — now PASS | `sq-mue75` |
 | 18 | Pre-binding **rejection** channel (`sht:Failure`) | `sparql/pre-binding/pre-binding-006`, `unsupported-sparql-001..006` (7) | a query that re-binds a pre-bound variable, or uses unsupported `MINUS`/`SERVICE`, MUST be rejected — the crate has no failure channel | `sq-0mjfd` |
 
-### Per-category SPARQL scoreboard
+### Per-category SPARQL scoreboard (post-sq-0mjfd)
 
-| category | pass | fail | xfail | skip |
-| --- | ---: | ---: | ---: | ---: |
-| component | 3 | 0 | 0 | 0 |
-| node | 4 | 0 | 0 | 0 |
-| pre-binding | 6 | 0 | 7 | 0 |
-| property | 3 | 0 | 0 | 0 |
-| targets | 1 | 0 | 0 | 0 |
-| **TOTAL** | **17** | **0** | **7** | **0** |
+| category | pass | fail | skip |
+| --- | ---: | ---: | ---: |
+| component | 3 | 0 | 0 |
+| node | 4 | 0 | 0 |
+| pre-binding | 13 | 0 | 0 |
+| property | 3 | 0 | 0 |
+| targets | 1 | 0 | 0 |
+| **TOTAL** | **24** | **0** | **0** |
 
-(Post-sq-mue75 / sq-rnkdh: the only remaining SPARQL gap is the 7 `sht:Failure`
-expected-rejection entries — the rejection channel is unbuilt, cluster 18 / `sq-0mjfd`.)
+(The whole 1.2 SPARQL suite is green here: the 7 `sht:Failure` rejection entries
+are genuine PASSes via `validate_strict`, cluster 18 / `sq-0mjfd` CLOSED.)
 
 ---
 
@@ -135,10 +154,18 @@ grouped into four implementation beads under epic `sq-waf9o`:
   targets, SPARQL constraint result detail, and `sh:select` / `sh:sparqlExpr`.
 - **`sq-mue75`** — SHACL-SPARQL pre-binding VALUES propagation (cluster 17, 3
   entries) + node-expr harness fidelity + `sh:sourceConstraint`.
-- **`sq-0mjfd`** — the draft / hard zone (clusters 11–13, 18; 6 core + 7
-  SPARQL): RDF-1.2 reified-annotation parsing, `sh:reifierShape`,
-  `rdf:dirLangString` `uniqueLang`, and the `sht:Failure` pre-binding **rejection
-  channel**.
+- **`sq-0mjfd`** — the draft / hard zone (clusters 11, 13, 18; +5q76d/u5rxj):
+  **DONE except the per-statement annotation overrides** — `sh:reifierShape` /
+  `sh:reificationRequired` (cluster 11, 2 core), `rdf:dirLangString` `uniqueLang`
+  (cluster 13, 1 core), and the `sht:Failure` pre-binding **rejection channel**
+  (cluster 18, 7 SPARQL) all PASS now. The remaining cluster 12
+  (`misc/{deactivated-003,message-002,severity-003}`) is the honest divergence in
+  §6, moved to its own bead (the `{| |}` parser is NOT the blocker).
+- **`sq-5q76d`** — shapes-graph `sh:conformanceDisallows` → `validate()` default
+  `conforms` (cluster 8 remainder, `validation-reports/conformance-disallows-001`,
+  1 core): DONE.
+- **`sq-u5rxj`** — node-expr caller-supplied `shnex:var` scope (the `sht:scope-*`
+  entry, +1 node-expr): DONE.
 
 ### Genuinely-draft zones (do not over-invest until the spec settles)
 
@@ -164,3 +191,47 @@ either a false green or disabling real comparison; the two-sided ratchet keeps
 the gate honest *and* regression-proof. When a bead lands, its cluster's entries
 move FAIL → PASS, the per-runner floor is bumped in the same commit, and this
 table shrinks.
+
+---
+
+## 6. Honest divergence — the 3 remaining core FAILs (per-statement reified-annotation overrides)
+
+**[OPUS-4.8] (sq-0mjfd)** The only core entries this wave did NOT close are the
+three `misc/` reified-annotation OVERRIDE tests:
+
+| Entry | What it asserts | Why it still fails |
+| --- | --- | --- |
+| `misc/deactivated-003` | `sh:datatype X {\| sh:deactivated true \|}` and `sh:property S {\| sh:deactivated true \|}` deactivate **that specific constraint occurrence** | the model reads `sh:datatype` / `sh:property` as plain triples; it does not consult the triple's reifier for a per-statement `sh:deactivated` |
+| `misc/message-002` | `sh:datatype X {\| sh:message "…"@en \|}` attaches a message to **that constraint's** results | same — the per-statement reifier message is not threaded onto the result |
+| `misc/severity-003` | `sh:datatype X {\| sh:severity sh:Warning \|}` overrides **that constraint's** severity | same — the per-statement reifier severity is not applied |
+
+### oxttl / oxrdf upgrade assessment (the item-6 question)
+
+The original gap note assumed the `{| … |}` annotation syntax was unparseable
+because "oxttl 0.1.8 predates it". **That is no longer true and was not the real
+blocker.** Measured in-worktree at the pinned suite commit:
+
+- The workspace pins `oxttl = { version = "0.2", features = ["rdf-12"] }` and
+  `oxrdf = "=0.3.3"` (both with `rdf-12`); the resolved versions are `oxttl 0.2.3`
+  / `oxrdf 0.3.3`.
+- `oxttl 0.2.3` **does** implement the RDF-1.2 `annotationBlock ::= '{|'
+  predicateObjectList '|}'` rule (verified in its `terse.rs`), and
+  `sparq_shacl::load_turtle_with_base` parses `reifierShape-001.ttl` into the
+  triple-term form: `_:r rdf:reifies <<( s p o )>> ; _:r ex:q false`. `oxrdf`
+  exposes `Term::Triple(Box<Triple>)` and `Literal::direction()` for
+  `rdf:dirLangString` — both used by this wave (no version bump needed).
+- **No Cargo.toml/Cargo.lock dependency change was made in this PR** (a hard
+  constraint), and none is REQUIRED: `sh:reifierShape` and the
+  `rdf:dirLangString` `uniqueLang` key were implementable directly against the
+  already-pinned versions.
+
+So the residual work is **NOT** a parser/dependency upgrade — it is the
+SHACL-MODEL feature of interpreting a reified-annotation as a per-constraint-
+statement override. That requires, for each constraint triple `(shape, P, O)`,
+looking up its reifier `?r rdf:reifies <<( shape P O )>>` and applying any
+`sh:deactivated` / `sh:message` / `sh:severity` on `?r` to JUST that constraint
+occurrence — a threading change through `parse_shape` → `Component` → `result`
+(per-occurrence severity/message/deactivation), distinct from a shape-level one.
+This is tracked as a dedicated bead (created with this PR). It is genuinely the
+hardest remaining SHACL-1.2 surface (per-statement annotation semantics are the
+least-settled corner of the 1.2 draft), counted-not-asserted at fail-ceiling 3.

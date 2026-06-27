@@ -99,27 +99,34 @@ pub struct ValidationReport {
 impl ValidationReport {
     // [OPUS-4.8] (sq-lz99x) Test-only convenience: the report tests below build
     // reports from hand-rolled results (no diagnostics). Production code calls
-    // `with_diagnostics`, so gate this to `test` to avoid a dead-code warning in
-    // the plain lib build.
+    // `with_diagnostics_and_disallows`, so gate this to `test` to avoid a
+    // dead-code warning in the plain lib build.
     #[cfg(test)]
     pub(crate) fn new(results: Vec<ValidationResult>) -> Self {
-        Self::with_diagnostics(results, Vec::new())
+        Self::with_diagnostics_and_disallows(results, Vec::new(), None)
     }
 
-    /// [OPUS-4.8] (sq-lz99x) Build a report carrying both validation results and
-    /// skipped-constraint diagnostics (e.g. an uncompilable `sh:pattern`).
-    pub(crate) fn with_diagnostics(
+    /// [OPUS-4.8] (sq-lz99x / sq-5q76d) Build a report carrying validation results
+    /// and skipped-constraint diagnostics (e.g. an uncompilable `sh:pattern`),
+    /// computing `conforms` against an EXPLICIT `sh:conformanceDisallows` set (the
+    /// shapes-graph-declared override, SHACL 1.2 Core §3.9) — falling back to the
+    /// default set ([`DEFAULT_CONFORMANCE_DISALLOWS`]: Violation / Warning / Info)
+    /// when `disallowed` is `None`. Results at `sh:Debug` / `sh:Trace` (and any
+    /// custom severity outside the active set) are reported but do not break
+    /// conformance. (A caller can still recompute against another set via
+    /// [`conforms_with_disallowed`](Self::conforms_with_disallowed).)
+    pub(crate) fn with_diagnostics_and_disallows(
         results: Vec<ValidationResult>,
         diagnostics: Vec<ShapeDiagnostic>,
+        disallowed: Option<&[String]>,
     ) -> Self {
-        // [OPUS-4.8] (sq-sx15d) SHACL 1.2 conformance: the graph conforms iff NO
-        // result carries a severity in the DEFAULT disallowed set (sh:Violation /
-        // sh:Warning / sh:Info). Results at sh:Debug / sh:Trace (and any custom
-        // severity outside the default set) are reported but do not break
-        // conformance — so a Debug/Trace-only report conforms. (A custom
-        // disallowed set, when a caller carries `sh:conformanceDisallows`, is
-        // recomputed via `conforms_with_disallowed`.)
-        let conforms = conforms_over(&results, DEFAULT_CONFORMANCE_DISALLOWS);
+        let conforms = match disallowed {
+            Some(set) => {
+                let refs: Vec<&str> = set.iter().map(String::as_str).collect();
+                conforms_over(&results, &refs)
+            }
+            None => conforms_over(&results, DEFAULT_CONFORMANCE_DISALLOWS),
+        };
         ValidationReport {
             conforms,
             results,

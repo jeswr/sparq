@@ -80,12 +80,27 @@ pub fn validate(data: &Graph, shapes: &Graph) -> ValidationReport;
 // Validate against an ALREADY-parsed shapes model (amortise parsing across many graphs).
 pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationReport;
 
+// STRICT validation (sq-0mjfd): returns Err(ShaclFailure) for a constraint a conformant
+// processor MUST REJECT — currently an unsound SHACL-SPARQL pre-binding (MINUS / VALUES /
+// SERVICE / a sub-SELECT dropping $this / a BIND re-binding it; the W3C `sht:Failure`
+// entries). `validate` instead SKIPS such a constraint (its never-fails contract).
+pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport, ShaclFailure>;
+pub fn validate_strict_with_model(data: &Graph, model: &ShapesModel)
+    -> Result<ValidationReport, ShaclFailure>;
+
 // Load Turtle resolving relative IRIs against a base (Graph::load_str has no base param).
 pub fn load_turtle_with_base(text: &str, base: &str) -> Result<Graph, String>;
 
 // Build a Graph from already-parsed oxrdf::Triples.
 pub fn graph_from_triples<I: IntoIterator<Item = oxrdf::Triple>>(triples: I) -> Graph;
 ```
+
+`ValidationReport::conforms` honours a shapes-graph `sh:conformanceDisallows`
+declaration (SHACL 1.2 Core §3.9, sq-5q76d) — e.g. a graph that disallows only
+`sh:Violation` conforms despite a `sh:Warning` result — falling back to the default
+{Violation, Warning, Info} set. `sh:reifierShape` / `sh:reificationRequired` validate
+the RDF-1.2 reifiers of a value's asserted triple, and `sh:uniqueLang` keys on the
+`rdf:dirLangString` base direction (`@ar`, `@ar--ltr`, `@ar--rtl` are distinct keys).
 
 **SHACL Compact Syntax (SCS) parser** *(opt-in feature `scs`)* — the *parse*
 direction of the W3C SCS (`sparq_shacl::scs::…`, re-exported at the crate root):
@@ -363,11 +378,17 @@ nest.
 **Function registry (sq-mk9n):** the SHACL 1.2 built-in node-expression operators
 (`shnex:`/`sh:`) — `concat`, `count`, `sum`, `min`, `max`, `distinct`,
 `if`/`then`/`else`, `exists`, `limit`, `offset`, `instancesOf`, `nodesMatching`,
-`flatMap`, `findFirst`, `matchAll`, `remove`, `orderBy`, `var` (only `"focusNode"`
-is bound outside a SPARQL scope) — plus a custom `sh:SPARQLFunction` IRI applied to
-a `sh:list` of arguments (dispatched through the SPARQL engine with the ordered
-`sh:parameter` variables pre-bound). An unregistered function IRI is dropped
-(lenient), inferring nothing.
+`flatMap`, `findFirst`, `matchAll`, `remove`, `orderBy`, `var` (`"focusNode"` ⇒
+the focus; any other name resolves against a caller-supplied `Scope`, sq-u5rxj) —
+plus a custom `sh:SPARQLFunction` IRI applied to a `sh:list` of arguments
+(dispatched through the SPARQL engine with the ordered `sh:parameter` variables
+pre-bound). An unregistered function IRI is dropped (lenient), inferring nothing.
+
+**Caller-supplied variable scope (sq-u5rxj):** `eval_node_expression_with_scope(data,
+shapes, expr, focus, &Scope)` threads a `Scope` (`FxHashMap<String, Vec<Term>>`) of
+variable name → bound node set that a `shnex:var "<name>"` resolves against (the W3C
+suite's `sht:scope-<name>` injection); `eval_node_expression` is the empty-scope
+wrapper.
 
 **`sh:values` value rule:** a property shape with a single-predicate `sh:path` and
 an `sh:values` node expression infers `(focus, predicate, v)` for each evaluated
