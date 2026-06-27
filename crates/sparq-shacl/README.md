@@ -64,10 +64,11 @@ For many data graphs against one shapes graph, parse once with
   disjunctive-list `sh:datatype`/`sh:nodeKind`/`sh:class`, path-valued comparands for
   `sh:equals`/`sh:disjoint`/`sh:lessThan`/`sh:lessThanOrEquals`, `sh:subsetOf`/
   `sh:someValue`/`sh:singleLine`/`sh:rootClass`, and severity-threshold `conforms`
-  (default disallows {Violation,Warning,Info}) (sq-sx15d). The 1.2 harness
-  passes strictly **44/45** with `shacl-af` off — the one SKIP is `nodeByExpression-001`,
-  a `shacl-af` constraint — and **45/45** with it on; it stays SKIP-tolerant only for a
-  constraint predicate the build still lacks, never masking a regression.
+  (default disallows {Violation,Warning,Info}) (sq-sx15d). The **full** vendored
+  1.2 suite is gated by a ratchet (sq-6glcr): core, SPARQL (incl. expected-rejection
+  `sht:Failure` entries) and node-expr pass counts must not drop and the gap must not
+  grow, in both feature states. The not-yet-passing entries are the honest gap map in
+  [`research/shacl12-conformance-gap.md`](../../research/shacl12-conformance-gap.md).
 - **SHACL-SPARQL + custom §6 components** — `sh:sparql` (§5.2) and SPARQL-based
   constraint *components* (custom `sh:ConstraintComponent` with `sh:parameter` /
   `sh:validator`, §6), pinned by the W3C `sparql/*` sub-suites.
