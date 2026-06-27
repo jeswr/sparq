@@ -209,6 +209,46 @@ pub enum Component {
     NodeByExpression(usize),
 }
 
+/// [OPUS-4.8] (sq-pb0wm) Per-constraint-statement RDF-1.2 reified-annotation
+/// overrides for ONE [`Component`] occurrence (SHACL 1.2 Core, the
+/// `misc/{deactivated-003,message-002,severity-003}` entries). When a constraint
+/// triple `(shapeNode, P, O)` carries a `{| … |}` annotation — parsed as
+/// `_:r rdf:reifies <<( shapeNode P O )>> . _:r sh:deactivated|sh:message|sh:severity V`
+/// — the annotation overrides JUST that occurrence: `deactivated` suppresses only
+/// that constraint (not the whole shape), and `messages` / `severity` replace the
+/// shape-level message / severity for ONLY that constraint's results. Held in a
+/// vector PARALLEL to [`Shape::components`] (a [`Self::default`] entry — no
+/// override — for every component built from something other than a single
+/// reifiable constraint triple). Distinct from the shape-level
+/// [`Shape::deactivated`] / [`Shape::messages`] / [`Shape::severity`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ComponentMeta {
+    /// `{| sh:deactivated true |}` on this constraint statement: suppress this
+    /// occurrence only (the rest of the shape still validates).
+    pub deactivated: bool,
+    /// `{| sh:message "…" |}` on this statement: the result message(s) for this
+    /// occurrence's violations, overriding the shape's `sh:message`. Empty ⇒ no
+    /// per-statement message override (inherit the shape's).
+    pub messages: Vec<Term>,
+    /// `{| sh:severity sh:Warning |}` on this statement: the result severity for
+    /// this occurrence's violations, overriding the shape's. `None` ⇒ inherit.
+    pub severity: Option<String>,
+}
+
+impl ComponentMeta {
+    /// Whether this carries any per-statement override (cheap "is the default"
+    /// probe so eval can skip the override path for the common un-annotated case).
+    pub fn is_empty(&self) -> bool {
+        !self.deactivated && self.messages.is_empty() && self.severity.is_none()
+    }
+
+    /// Whether this constraint occurrence is per-statement deactivated
+    /// (`{| sh:deactivated true |}`) — eval skips just this occurrence.
+    pub fn is_deactivated(&self) -> bool {
+        self.deactivated
+    }
+}
+
 /// [OPUS-4.8] A declared `sh:parameter` of a SPARQL-based constraint component
 /// (SHACL §6.2): its predicate (`sh:path`), the pre-bound variable name and
 /// whether it is `sh:optional`.
@@ -340,6 +380,12 @@ pub struct Shape {
     pub path: Option<Path>,
     pub targets: Vec<Target>,
     pub components: Vec<Component>,
+    /// [OPUS-4.8] (sq-pb0wm) Per-constraint-statement RDF-1.2 reified-annotation
+    /// overrides, PARALLEL to [`Self::components`] (index `i` describes
+    /// `components[i]`). A `ComponentMeta::default` entry means "no annotation";
+    /// only components built from a single reifiable constraint triple
+    /// (`(shapeNode, P, O)`) can carry a real override. See [`ComponentMeta`].
+    pub(crate) component_meta: Vec<ComponentMeta>,
     /// Severity IRI (default sh:Violation).
     pub severity: String,
     /// sh:message literals, copied into results.
@@ -612,6 +658,13 @@ impl ShapesModel {
             } else {
                 Component::Expression(idx)
             });
+            // [OPUS-4.8] (sq-pb0wm) Keep the per-statement `component_meta` vector
+            // index-aligned: this second pass pushes components AFTER
+            // `attach_component_meta` sized the meta vector, so push a default
+            // (no-override) meta for each — expression constraints carry no
+            // reified-annotation override. (`validate_shape` is also padded
+            // defensively, so a drift here can never silently drop a component.)
+            self.shapes[sid].component_meta.push(ComponentMeta::default());
         }
     }
 
@@ -687,15 +740,88 @@ impl ShapesModel {
             path: None,
             targets: Vec::new(),
             components: Vec::new(),
+            component_meta: Vec::new(),
             severity: sh("Violation"),
             messages: Vec::new(),
             deactivated: false,
             property_children: Vec::new(),
             value_expr: None,
         });
-        let parsed = self.parse_shape(g, node);
+        let mut parsed = self.parse_shape(g, node);
+        // [OPUS-4.8] (sq-pb0wm) Resolve per-constraint-statement RDF-1.2
+        // reified-annotation overrides AFTER the components are built, so the
+        // parallel `component_meta` vector is index-aligned with `components`. A
+        // no-op (and cheap) when the shape carries no `{| … |}` annotation.
+        self.attach_component_meta(g, node, &mut parsed);
         self.shapes[id] = parsed;
         id
+    }
+
+    /// [OPUS-4.8] (sq-pb0wm) Populates `shape.component_meta` (index-aligned with
+    /// `shape.components`) from RDF-1.2 reified annotations on the constraint
+    /// statements. SHACL 1.2 Core lets a `{| … |}` annotation on ONE constraint
+    /// triple `(shapeNode, P, O)` — stored after parsing as
+    /// `_:r rdf:reifies <<( shapeNode P O )>>` plus `_:r sh:deactivated|message|severity V`
+    /// on the reifier `_:r` — override JUST that occurrence
+    /// (`misc/{deactivated-003,message-002,severity-003}`).
+    ///
+    /// Every component gets a [`ComponentMeta`] (default = no override). A real
+    /// override is attached only to components that map back to a single reifiable
+    /// constraint triple ([`component_source_triple`]); composite / list-valued /
+    /// expression components do not (the reified-annotation form annotates one
+    /// statement). The common un-annotated case short-circuits: a shape with no
+    /// reifier of any of its statements gets all-default metas with no per-triple
+    /// scan.
+    fn attach_component_meta(&self, g: &GraphView, node: &Term, shape: &mut Shape) {
+        shape.component_meta = vec![ComponentMeta::default(); shape.components.len()];
+        // Short-circuit: nothing reifies a statement of this shape ⇒ no overrides.
+        // (`rdf:reifies` objects are triple-terms; we only need the cheap presence
+        // check that SOME reifier names this shape node as the triple subject.)
+        if !shape_has_reified_statement(g, node) {
+            return;
+        }
+        for (i, comp) in shape.components.iter().enumerate() {
+            let Some((pred, obj)) = self.component_source_triple(comp) else {
+                continue;
+            };
+            let meta = reified_meta(g, node, &pred, &obj);
+            if !meta.is_empty() {
+                shape.component_meta[i] = meta;
+            }
+        }
+    }
+
+    /// [OPUS-4.8] (sq-pb0wm) The `(predicateIRI, objectTerm)` of the single
+    /// constraint statement a [`Component`] was built from, for the variants that
+    /// correspond to exactly one reifiable shapes-graph triple
+    /// `(shapeNode, P, O)`. `None` for components built from several triples (a
+    /// SHACL list / RDF-list operand), a transformed object whose original term is
+    /// not faithfully recoverable (a numeric count, a parsed [`Path`]), or a
+    /// feature-gated expression component — per-statement annotation overrides are
+    /// defined for single-statement Core constraints, which is what the W3C 1.2
+    /// suite (`misc/{deactivated-003,message-002,severity-003}`) exercises.
+    fn component_source_triple(&self, comp: &Component) -> Option<(String, Term)> {
+        let shape_node = |idx: usize| self.shapes.get(idx).map(|s| s.node.clone());
+        match comp {
+            Component::Class(t) => Some((sh("class"), t.clone())),
+            // A SINGLE-element datatype/nodeKind set is the single-IRI spelling
+            // `sh:datatype <iri>` (the SHACL-1.2 disjunctive LIST form is several
+            // triples — its operand is an RDF list — so it is not annotated here).
+            Component::Datatype(dts) if dts.len() == 1 => {
+                Some((sh("datatype"), iri(&dts[0])))
+            }
+            Component::NodeKind(kinds) if kinds.len() == 1 => {
+                Some((sh("nodeKind"), iri(&kinds[0])))
+            }
+            Component::HasValue(t) => Some((sh("hasValue"), t.clone())),
+            Component::RootClass(t) => Some((sh("rootClass"), t.clone())),
+            Component::Node(idx) => Some((sh("node"), shape_node(*idx)?)),
+            Component::Property(idx) => Some((sh("property"), shape_node(*idx)?)),
+            Component::SomeValue(idx) => Some((sh("someValue"), shape_node(*idx)?)),
+            Component::Not(idx) => Some((sh("not"), shape_node(*idx)?)),
+            Component::MemberShape(idx) => Some((sh("memberShape"), shape_node(*idx)?)),
+            _ => None,
+        }
     }
 
     fn parse_shape(&mut self, g: &GraphView, node: &Term) -> Shape {
@@ -706,6 +832,7 @@ impl ShapesModel {
                 .and_then(|p| Path::parse(g, &p).ok()),
             targets: Vec::new(),
             components: Vec::new(),
+            component_meta: Vec::new(),
             severity: match g.object(node, &sh("severity")) {
                 Some(Term::NamedNode(n)) => n.as_str().to_string(),
                 _ => sh("Violation"),
@@ -1259,6 +1386,59 @@ fn collect_prefixes_from(g: &GraphView, prefix_roots: &[Term]) -> String {
 
 fn iri(s: &str) -> Term {
     Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+}
+
+/// [OPUS-4.8] (sq-pb0wm) The RDF-1.2 reification predicate: a reifier `?r` reifies
+/// a triple-term via `?r rdf:reifies <<( s p o )>>` (the `{| … |}` annotation).
+const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+
+/// [OPUS-4.8] (sq-pb0wm) Cheap presence check: does ANY reifier in the shapes
+/// graph reify a triple whose subject is this shape node? `rdf:reifies` objects
+/// are triple-terms ([`Term::Triple`]); we scan the (few) `rdf:reifies` triples
+/// and test the embedded triple's subject. Lets [`ShapesModel::attach_component_meta`]
+/// skip the per-component triple reconstruction for the common un-annotated shape.
+fn shape_has_reified_statement(g: &GraphView, node: &Term) -> bool {
+    let want: oxrdf::NamedOrBlankNode = match node {
+        Term::NamedNode(n) => n.clone().into(),
+        Term::BlankNode(b) => b.clone().into(),
+        _ => return false,
+    };
+    g.triples(None, Some(RDF_REIFIES), None)
+        .into_iter()
+        .any(|[_, _, o]| matches!(&o, Term::Triple(t) if t.subject == want))
+}
+
+/// [OPUS-4.8] (sq-pb0wm) The per-statement [`ComponentMeta`] for the constraint
+/// triple `(shapeNode, predicate, object)`: scans the reifiers of that exact
+/// triple (the subjects of `?r rdf:reifies <<( shapeNode predicate object )>>`)
+/// and reads any `sh:deactivated` / `sh:message` / `sh:severity` they carry. The
+/// triple-term is reconstructed identically to the eval-side `reifiers_of`, so it
+/// matches the term oxttl/oxrdf stores for the `{| … |}` form. A non-IRI/blank
+/// shape node, or no reifier, yields the default (no override).
+fn reified_meta(g: &GraphView, node: &Term, predicate: &str, object: &Term) -> ComponentMeta {
+    let subj: oxrdf::NamedOrBlankNode = match node {
+        Term::NamedNode(n) => n.clone().into(),
+        Term::BlankNode(b) => b.clone().into(),
+        _ => return ComponentMeta::default(),
+    };
+    let Ok(pred) = oxrdf::NamedNode::new(predicate) else {
+        return ComponentMeta::default();
+    };
+    let triple_term = Term::Triple(Box::new(oxrdf::Triple::new(subj, pred, object.clone())));
+    let reifiers = g.subjects(RDF_REIFIES, &triple_term);
+    let mut meta = ComponentMeta::default();
+    for r in &reifiers {
+        if matches!(g.object(r, &sh("deactivated")), Some(Term::Literal(l)) if l.value() == "true") {
+            meta.deactivated = true;
+        }
+        for m in g.objects(r, &sh("message")) {
+            meta.messages.push(m);
+        }
+        if let Some(Term::NamedNode(n)) = g.object(r, &sh("severity")) {
+            meta.severity = Some(n.as_str().to_string());
+        }
+    }
+    meta
 }
 
 /// [OPUS-4.8] (sq-vg3y) The set of IRIs an object denotes when a constraint

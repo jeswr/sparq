@@ -2,7 +2,7 @@
 //! emits [`ValidationResult`]s via direct graph scans (no SPARQL round-trip).
 
 use crate::model::{
-    sh, Component, ComponentDef, PreparedComponentValidator, ShapesModel, Target,
+    sh, Component, ComponentDef, ComponentMeta, PreparedComponentValidator, ShapesModel, Target,
 };
 use crate::path::Path;
 use crate::report::{ShapeDiagnostic, ValidationResult};
@@ -37,6 +37,7 @@ pub(crate) fn validate_graph(
         regexes: FxHashMap::default(),
         uvf_targets: FxHashMap::default(),
         diagnostics: Vec::new(),
+        active_meta: None,
     };
     let mut out = Vec::new();
     for &sid in &shapes.targeted {
@@ -68,6 +69,7 @@ pub(crate) fn count_focus_nodes(data: &Graph, shapes: &ShapesModel) -> usize {
         regexes: FxHashMap::default(),
         uvf_targets: FxHashMap::default(),
         diagnostics: Vec::new(),
+        active_meta: None,
     };
     let mut all: Vec<Term> = Vec::new();
     for &sid in &shapes.targeted {
@@ -101,6 +103,7 @@ pub(crate) fn conforms_node(data: &Graph, shapes: &ShapesModel, sid: usize, node
         regexes: FxHashMap::default(),
         uvf_targets: FxHashMap::default(),
         diagnostics: Vec::new(),
+        active_meta: None,
     };
     v.conforms(node, sid)
 }
@@ -129,6 +132,12 @@ struct Validator<'a> {
     /// uncompilable `sh:pattern` regex). De-duplicated per (shape, pattern, flags)
     /// so a skip is reported once, not once per value/focus node.
     diagnostics: Vec<ShapeDiagnostic>,
+    /// [OPUS-4.8] (sq-pb0wm) The per-constraint-statement RDF-1.2 reified-annotation
+    /// override active for the component CURRENTLY being evaluated, set by
+    /// `validate_shape` around each `eval_component` call. `result()` reads it to
+    /// apply a per-occurrence `sh:message` / `sh:severity` (SHACL 1.2). `None` when
+    /// the current constraint carries no annotation (the common case).
+    active_meta: Option<ComponentMeta>,
 }
 
 impl<'a> Validator<'a> {
@@ -285,12 +294,40 @@ impl<'a> Validator<'a> {
             },
         };
         let components = shape.components.clone();
-        for comp in &components {
+        // [OPUS-4.8] (sq-pb0wm) Per-constraint-statement RDF-1.2 reified-annotation
+        // overrides, PARALLEL to `components`. A `{| sh:deactivated true |}` on a
+        // single constraint statement suppresses ONLY that occurrence (the shape
+        // keeps validating its other constraints); a `{| sh:message … |}` /
+        // `{| sh:severity … |}` overrides the message / severity for ONLY that
+        // occurrence's results. `result()` reads `self.active_meta` (set here) to
+        // apply the message/severity override; deactivation is handled by skipping
+        // the component outright.
+        let metas = shape.component_meta.clone();
+        for (i, comp) in components.iter().enumerate() {
+            // Index access with a default fallback: a component WITHOUT a parallel
+            // meta entry (should never happen — the vectors are kept index-aligned)
+            // is treated as un-annotated rather than silently skipped (a `zip` would
+            // truncate the longer vector and lose the trailing component). [OPUS-4.8] (sq-pb0wm)
+            let meta = metas.get(i);
+            if meta.is_some_and(ComponentMeta::is_deactivated) {
+                continue; // this constraint occurrence is deactivated (sq-pb0wm)
+            }
+            // Set the active per-statement override so `result()` (used by every
+            // Core component arm) can apply a per-occurrence message/severity.
+            self.active_meta = match meta {
+                Some(m) if !m.is_empty() => Some(m.clone()),
+                _ => None,
+            };
             self.eval_component(sid, focus, &values, comp, out);
+            self.active_meta = None;
         }
     }
 
-    /// A result owned by shape `sid` for `focus`.
+    /// A result owned by shape `sid` for `focus`. [OPUS-4.8] (sq-pb0wm) When a
+    /// per-constraint-statement override is active (`self.active_meta`, set by
+    /// `validate_shape` for the component being evaluated), its `sh:message` /
+    /// `sh:severity` REPLACE the shape-level message / severity for this result —
+    /// the SHACL 1.2 reified-annotation semantics applying to one occurrence only.
     fn result(
         &self,
         sid: usize,
@@ -300,6 +337,17 @@ impl<'a> Validator<'a> {
         message: String,
     ) -> ValidationResult {
         let shape = &self.shapes.shapes[sid];
+        let (severity, messages) = match &self.active_meta {
+            Some(meta) => (
+                meta.severity.clone().unwrap_or_else(|| shape.severity.clone()),
+                if meta.messages.is_empty() {
+                    shape.messages.clone()
+                } else {
+                    meta.messages.clone()
+                },
+            ),
+            None => (shape.severity.clone(), shape.messages.clone()),
+        };
         ValidationResult {
             focus_node: focus.clone(),
             path: shape.path.clone(),
@@ -308,8 +356,8 @@ impl<'a> Validator<'a> {
             // Core components have no `sh:SPARQLConstraint` node (sq-mue75).
             source_constraint: None,
             source_component: sh(component),
-            severity: shape.severity.clone(),
-            messages: shape.messages.clone(),
+            severity,
+            messages,
             default_message: message,
             details: Vec::new(),
         }

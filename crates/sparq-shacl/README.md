@@ -64,11 +64,12 @@ and call `validate_with_model`. CLI: `cargo run -p sparq-shacl --example validat
   `sh:equals`/`sh:disjoint`/`sh:lessThan`/`sh:lessThanOrEquals`, `sh:subsetOf`/
   `sh:someValue`/`sh:singleLine`/`sh:rootClass`, severity-threshold `conforms`
   (shapes-graph `sh:conformanceDisallows` overrides the default {Violation,Warning,Info},
-  sq-5q76d), `sh:reifierShape`/`sh:reificationRequired` over RDF-1.2 reifiers and the
-  `rdf:dirLangString` base-direction `sh:uniqueLang` key (sq-0mjfd). The **full** vendored
-  1.2 suite is gated by a two-sided ratchet (sq-6glcr): core / SPARQL (incl. the
-  `sht:Failure` rejection entries) / node-expr, in both feature states — gap map in
-  [`research/shacl12-conformance-gap.md`](../../research/shacl12-conformance-gap.md).
+  sq-5q76d), `sh:reifierShape`/`sh:reificationRequired` over RDF-1.2 reifiers, the
+  `rdf:dirLangString` `sh:uniqueLang` key (sq-0mjfd), and **per-constraint-statement
+  reified-annotation overrides** (`{| sh:deactivated/message/severity … |}` apply to ONLY that
+  occurrence, sq-pb0wm). The **full** vendored 1.2 suite is gated by a two-sided ratchet
+  (sq-6glcr): core / SPARQL (incl. `sht:Failure` rejection) / node-expr, in both feature
+  states — gap map in [`research/shacl12-conformance-gap.md`](../../research/shacl12-conformance-gap.md).
 - **SHACL-SPARQL + custom §6 components** — `sh:sparql` (§5.2, results carry
   `sh:sourceConstraint`; `$this`/`$value` pre-binding propagates into UNION branches,
   sibling joins and projecting sub-SELECTs, sq-mue75) and SPARQL-based constraint
@@ -107,9 +108,8 @@ and call `validate_with_model`. CLI: `cargo run -p sparq-shacl --example validat
 
 `validate_strict` returns `Err(ShaclFailure)` for an unsound SHACL-SPARQL pre-binding
 (`MINUS`/`VALUES`/`SERVICE` / a sub-`SELECT` dropping `$this` / a `BIND` re-binding it,
-sq-0mjfd); `validate` skips such a constraint. Out of scope: `$shapesGraph` and
-per-constraint reified-annotation overrides (`{| sh:deactivated/message/severity … |}`,
-bead sq-pb0wm) — see `bd list -l area:sparq-shacl`. Validation results are **not deduplicated** across
+sq-0mjfd); `validate` skips such a constraint. Out of scope: `$shapesGraph` — see
+`bd list -l area:sparq-shacl`. Validation results are **not deduplicated** across
 traversal routes (a nested shape reached through two parents reports twice, matching the
 suite), re-entrant recursion on the same focus/shape pair counts as conforming (SHACL
 leaves recursion undefined), and an **uncompilable `sh:pattern`** (e.g. a `(?!…)`
