@@ -721,6 +721,24 @@ fn focus_nodes(view: &GraphView, model: &ShapesModel, sid: usize) -> Vec<Term> {
             Target::Class(c) | Target::ImplicitClass(c) => out.extend(view.instances_of(c)),
             Target::SubjectsOf(p) => out.extend(view.subjects_of(p)),
             Target::ObjectsOf(p) => out.extend(view.objects_of(p)),
+            // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 SPARQL-valued `sh:targetNode`: the
+            // node expression SELECTs the focus nodes (no `$this` to bind).
+            Target::Sparql(idx) => out.extend(model.select_exprs[*idx].eval_target(view.graph())),
+            // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:targetWhere`: every data-graph node
+            // conforming to the inline shape. Conformance is checked through the
+            // full validator (`conforms_node`), mirroring `sh:condition` gating.
+            Target::Where(inner) => {
+                let mut seen: FxHashSet<Term> = FxHashSet::default();
+                for [s, _, o] in view.triples(None, None, None) {
+                    for n in [s, o] {
+                        if seen.insert(n.clone())
+                            && crate::eval::conforms_node(view.graph(), model, *inner, &n)
+                        {
+                            out.push(n);
+                        }
+                    }
+                }
+            }
         }
     }
     crate::view::dedup(out)

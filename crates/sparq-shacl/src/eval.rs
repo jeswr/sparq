@@ -2,7 +2,7 @@
 //! emits [`ValidationResult`]s via direct graph scans (no SPARQL round-trip).
 
 use crate::model::{
-    sh, Component, ComponentDef, PreparedComponentValidator, Shape, ShapesModel, Target,
+    sh, Component, ComponentDef, PreparedComponentValidator, ShapesModel, Target,
 };
 use crate::path::Path;
 use crate::report::{ShapeDiagnostic, ValidationResult};
@@ -37,11 +37,47 @@ pub(crate) fn validate_graph(
     };
     let mut out = Vec::new();
     for &sid in &shapes.targeted {
-        for focus in v.focus_nodes(&shapes.shapes[sid]) {
+        for focus in v.focus_nodes(sid) {
             v.validate_shape(sid, &focus, &mut out);
         }
     }
+    // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:shape` data-graph targets: a triple
+    // `?n sh:shape ?S` in the DATA graph makes `?n` a focus node of shape `?S`.
+    // Unlike the shapes-graph targets above this is discovered per-data-graph, so
+    // it is handled here rather than as a per-shape `Target`.
+    v.validate_data_shape_targets(shapes, &mut out);
     (out, v.diagnostics)
+}
+
+/// [OPUS-4.8] (sq-rnkdh) The number of DISTINCT focus nodes the model's targets
+/// select over `data` — the deterministic target-selection statistic exposed as
+/// [`crate::count_focus_nodes`]. Built on the same [`Validator::focus_nodes`]
+/// enumeration the real validation walk uses (plus the `sh:shape` data-graph
+/// targets), so it stays in lock-step with validation, including the SHACL-1.2
+/// data-dependent targets (`sh:targetWhere` / SPARQL-valued `sh:targetNode`).
+pub(crate) fn count_focus_nodes(data: &Graph, shapes: &ShapesModel) -> usize {
+    let mut v = Validator {
+        data: GraphView::new(data),
+        shapes,
+        stack: Vec::new(),
+        memo: vec![FxHashMap::default(); shapes.shapes.len()],
+        min_reentry: usize::MAX,
+        regexes: FxHashMap::default(),
+        uvf_targets: FxHashMap::default(),
+        diagnostics: Vec::new(),
+    };
+    let mut all: Vec<Term> = Vec::new();
+    for &sid in &shapes.targeted {
+        all.extend(v.focus_nodes(sid));
+    }
+    // `sh:shape` data-graph targets contribute their linked subjects as focus nodes
+    // (only when the linked shape is in the model — matching the validation walk).
+    for [focus, _, shape_node] in v.data.triples(None, Some(&sh("shape")), None) {
+        if shapes.by_node(&shape_node).is_some() {
+            all.push(focus);
+        }
+    }
+    crate::view::dedup(all).len()
 }
 
 /// [OPUS-4.8] (sq-d1dw, `shacl-af`) True iff `node` conforms to the shape `sid`
@@ -93,9 +129,16 @@ struct Validator<'a> {
 }
 
 impl<'a> Validator<'a> {
-    fn focus_nodes(&self, shape: &Shape) -> Vec<Term> {
+    /// The focus nodes selected by shape `sid`'s targets, deduplicated. Takes `sid`
+    /// (not a `&Shape`) and `&mut self` because the SHACL-1.2 `sh:targetWhere`
+    /// target evaluates conformance through the validator (which mutates the
+    /// conformance memo/stack), and the SPARQL-valued target runs a query.
+    fn focus_nodes(&mut self, sid: usize) -> Vec<Term> {
         let mut out = Vec::new();
-        for t in &shape.targets {
+        // Clone the targets so the per-target `&mut self` work (sh:targetWhere
+        // conformance, SPARQL target queries) does not alias the model borrow.
+        let targets = self.shapes.shapes[sid].targets.clone();
+        for t in &targets {
             match t {
                 Target::Node(n) => out.push(n.clone()),
                 Target::Class(c) | Target::ImplicitClass(c) => {
@@ -103,9 +146,62 @@ impl<'a> Validator<'a> {
                 }
                 Target::SubjectsOf(p) => out.extend(self.data.subjects_of(p)),
                 Target::ObjectsOf(p) => out.extend(self.data.objects_of(p)),
+                // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:targetWhere [ <shape> ]`:
+                // every data-graph node that CONFORMS to the inline (object) shape.
+                Target::Where(inner) => out.extend(self.target_where_nodes(*inner)),
+                // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:targetNode [ sh:select … ]`:
+                // the output nodes of the SPARQL node expression.
+                Target::Sparql(idx) => out.extend(self.target_sparql_nodes(*idx)),
             }
         }
         crate::view::dedup(out)
+    }
+
+    /// [OPUS-4.8] (sq-rnkdh) The `sh:targetWhere` focus nodes: every node that
+    /// appears in the data graph (as a subject OR object of any triple) and
+    /// CONFORMS to the inline shape `inner`. This mirrors the SHACL-1.2 target
+    /// definition ("all nodes from the data graph that conform to the given
+    /// shape"); a node that appears only as a predicate is not a focus candidate.
+    fn target_where_nodes(&mut self, inner: usize) -> Vec<Term> {
+        let mut candidates: Vec<Term> = Vec::new();
+        let mut seen: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
+        for [s, _, o] in self.data.triples(None, None, None) {
+            for n in [s, o] {
+                if seen.insert(n.clone()) {
+                    candidates.push(n);
+                }
+            }
+        }
+        candidates
+            .into_iter()
+            .filter(|n| self.conforms(n, inner))
+            .collect()
+    }
+
+    /// [OPUS-4.8] (sq-rnkdh) The output nodes of a SPARQL-valued target node
+    /// expression (`sh:targetNode [ sh:select … ]`): the node expression is run
+    /// with no specific `$this` (there is no focus node yet — a target query
+    /// SELECTs the focus nodes), so `$this` is left unbound and the bindings of the
+    /// first result variable are the focus nodes.
+    fn target_sparql_nodes(&self, idx: usize) -> Vec<Term> {
+        self.shapes.select_exprs[idx].eval_target(self.data.graph())
+    }
+
+    /// [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:shape` data-graph targets: for every
+    /// triple `?n sh:shape ?S` in the DATA graph, `?n` is validated against the
+    /// shape `?S` (resolved in the shapes model — a shape not present in the model
+    /// is skipped). This is the data-driven dual of `sh:targetNode`: the link lives
+    /// in the data graph, so it is discovered here (not as a per-shape `Target`).
+    fn validate_data_shape_targets(
+        &mut self,
+        shapes: &ShapesModel,
+        out: &mut Vec<ValidationResult>,
+    ) {
+        for [focus, _, shape_node] in self.data.triples(None, Some(&sh("shape")), None) {
+            if let Some(sid) = shapes.by_node(&shape_node) {
+                self.validate_shape(sid, &focus, out);
+            }
+        }
     }
 
     /// True iff `node` produces no results against `shape` (conformance
@@ -171,9 +267,19 @@ impl<'a> Validator<'a> {
         if shape.deactivated {
             return;
         }
-        let values: Vec<Term> = match &shape.path {
-            Some(path) => path.values(&self.data, focus),
-            None => vec![focus.clone()],
+        // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 SPARQL-valued value nodes: when the shape
+        // carries `sh:values [ sh:select … ]` / `[ sh:sparqlExpr … ]`, the value
+        // nodes are COMPUTED by the node expression (`$this` = focus node) instead
+        // of derived by traversing `sh:path`. The reported `sh:resultPath` is still
+        // the shape's path (set in `result`), so only the value-node SET changes.
+        let values: Vec<Term> = match shape.value_expr {
+            Some(idx) => {
+                crate::view::dedup(self.shapes.select_exprs[idx].eval(self.data.graph(), focus))
+            }
+            None => match &shape.path {
+                Some(path) => path.values(&self.data, focus),
+                None => vec![focus.clone()],
+            },
         };
         let components = shape.components.clone();
         for comp in &components {
@@ -1030,12 +1136,15 @@ impl<'a> Validator<'a> {
         };
         let component = sh("SPARQLConstraintComponent");
         let shape = &self.shapes.shapes[sid];
-        let (shape_node, shape_path, severity, shape_messages) = (
-            shape.node.clone(),
-            shape.path.clone(),
-            shape.severity.clone(),
-            shape.messages.clone(),
-        );
+        // [OPUS-4.8] (sq-rnkdh) A constraint-level `sh:severity` on the
+        // `sh:SPARQLConstraint` node OVERRIDES the shape's default severity (SHACL
+        // 1.2 `sparql/node/sparql-001`); otherwise inherit the shape's severity.
+        let severity = constraint
+            .severity
+            .clone()
+            .unwrap_or_else(|| shape.severity.clone());
+        let (shape_node, shape_path, shape_messages) =
+            (shape.node.clone(), shape.path.clone(), shape.messages.clone());
         let data = self.data.graph();
         prepared.evaluate(
             data,
@@ -1251,7 +1360,7 @@ impl<'a> Validator<'a> {
         if let Some(cached) = self.uvf_targets.get(&sid) {
             return cached.clone();
         }
-        let targets = self.focus_nodes(&self.shapes.shapes[sid]);
+        let targets = self.focus_nodes(sid);
         self.uvf_targets.insert(sid, targets.clone());
         targets
     }

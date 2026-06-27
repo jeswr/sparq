@@ -249,6 +249,21 @@ the focus/path when none do). `sh:singleLine true` flags string values containin
 line break (LF/CR/FF/VT). `sh:rootClass C` requires each value node to be `C` or a
 transitive `rdfs:subClassOf`-descendant of it.
 
+**SHACL-1.2 targets & SPARQL node expressions (always on, no feature flag, sq-rnkdh).**
+Beyond `sh:targetNode`/`Class`/`SubjectsOf`/`ObjectsOf` + implicit class targets:
+- **`sh:targetWhere [ <inline shape> ]`** — focus nodes are every data-graph node that
+  CONFORMS to the inline (object) shape (conformance is checked through the validator).
+- **`sh:shape`** — a DATA-graph triple `?n sh:shape ?S` makes `?n` a focus node of
+  shape `?S` (the data-driven dual of `sh:targetNode`).
+- **`sh:ShapeClass`** — a class that is ALSO a node shape; its instances (via the
+  subclass closure) are implicit-class-targeted, no `rdfs:Class`+`sh:NodeShape` pair.
+- **SPARQL-valued targets / value nodes** — `sh:targetNode [ sh:select "…" ]` computes
+  focus nodes from the first result variable; on a property shape `sh:values [ sh:select
+  "…" ]` / `[ sh:sparqlExpr "EXPR" ]` COMPUTES the value nodes (with `$this` = focus
+  node) instead of traversing `sh:path` (the reported `sh:resultPath` is still the path).
+- A constraint-level **`sh:severity`** on a `sh:SPARQLConstraint` overrides the shape's
+  default severity for the results it produces.
+
 **Custom SPARQL-based constraint component (`sh:ConstraintComponent`, §6).** Declare
 the component (parameters + an `sh:ask`/`sh:select` validator) IN THE SHAPES GRAPH; it
 activates on any shape that uses all its mandatory parameter predicates. Each parameter

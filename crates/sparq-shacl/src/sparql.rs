@@ -141,6 +141,90 @@ pub(crate) struct ResultFields {
     pub default_message: String,
 }
 
+/// [OPUS-4.8] (sq-rnkdh) A parsed SHACL 1.2 **SPARQL-based node expression**
+/// (`sh:select` / `sh:sparqlExpr`, SHACL 1.2 §"SPARQL-based Node Expressions"):
+/// a SELECT query that, run with `$this` pre-bound to a focus node, yields the
+/// output nodes as the bindings of its FIRST result variable. Used by the
+/// SHACL-1.2 SPARQL-valued **targets** (`sh:targetNode [ sh:select … ]`) and the
+/// SPARQL-valued **value nodes** of a property shape (`sh:values [ sh:select … ]`
+/// / `[ sh:sparqlExpr … ]`). Built once at shapes-model parse so a malformed
+/// query is rejected up front (`None`), not per focus node.
+///
+/// This deliberately reuses the always-on `sh:sparql` pre-binding machinery
+/// ([`pre_bind_select`] / `sparq_engine::query_prepared`), so it works in BOTH
+/// the default and `shacl-af` feature states (it is SHACL-1.2 core/SPARQL, not a
+/// SHACL-AF rule).
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedSelectExpr {
+    /// The parsed SELECT algebra (prefixes already resolved at build time).
+    query: Query,
+}
+
+impl PreparedSelectExpr {
+    /// Builds from a `sh:select` SELECT query (with its `sh:prefixes` prepended).
+    /// `None` for a non-SELECT / unparsable query (ill-formed → the expression is
+    /// dropped leniently, so its target/value set is empty rather than misfiring).
+    pub(crate) fn build_select(prefixes: &str, select: &str) -> Option<PreparedSelectExpr> {
+        let text = format!("{}\n{}", prefixes, select);
+        let query = SparqlParser::new().parse_query(&text).ok()?;
+        if !matches!(query, Query::Select { .. }) {
+            return None;
+        }
+        Some(PreparedSelectExpr { query })
+    }
+
+    /// Builds from a `sh:sparqlExpr` SPARQL EXPRESSION string. The SHACL-1.2
+    /// derivation wraps the expression in a single-solution projection
+    /// `SELECT ((EXPR) AS ?result) WHERE {}`; running it with `$this` pre-bound
+    /// evaluates the expression for the focus node and yields its value as the
+    /// (single) output node. `None` if the derived query does not parse.
+    pub(crate) fn build_expr(prefixes: &str, expr: &str) -> Option<PreparedSelectExpr> {
+        let select = format!("SELECT (({}) AS ?result) WHERE {{ }}", expr);
+        Self::build_select(prefixes, &select)
+    }
+
+    /// Evaluates the expression for `focus` against `data`, returning the output
+    /// nodes (the bindings of the FIRST result variable, in solution order,
+    /// duplicates preserved — the caller dedups/uses them as value nodes). An
+    /// unbound first-variable solution contributes no node. A focus node not
+    /// expressible as a VALUES ground term (a blank node) or a runtime query error
+    /// yields an empty set (lenient; never panics `validate`).
+    pub(crate) fn eval(&self, data: &sparq_core::Graph, focus: &Term) -> Vec<Term> {
+        let Some(bound) = pre_bind_select(&self.query, &[("this", focus)]) else {
+            return Vec::new();
+        };
+        Self::run(data, bound)
+    }
+
+    /// [OPUS-4.8] (sq-rnkdh) Evaluates the expression as a **target** query — with
+    /// no `$this` pre-binding (a target SELECT computes the focus nodes itself) —
+    /// returning the bindings of the FIRST result variable as the focus-node set.
+    pub(crate) fn eval_target(&self, data: &sparq_core::Graph) -> Vec<Term> {
+        Self::run(data, self.query.clone())
+    }
+
+    /// Runs a (possibly pre-bound) SELECT and collects the FIRST-result-variable
+    /// bindings, skipping unbound rows. A runtime query error yields no nodes
+    /// (lenient; never panics `validate`).
+    fn run(data: &sparq_core::Graph, query: Query) -> Vec<Term> {
+        let prepared = sparq_engine::PreparedQuery::from(query);
+        let Ok(result) = sparq_engine::query_prepared(data, &prepared) else {
+            return Vec::new();
+        };
+        // The output nodes are the bindings of the FIRST result variable. For an
+        // `eval` (pre-bound) query the injection appends `?this` to the projection
+        // only if it was absent, so the author's first projected variable stays at
+        // position 0.
+        let mut out = Vec::new();
+        for row in &result.rows {
+            if let Some(Some(t)) = row.first() {
+                out.push(t.clone());
+            }
+        }
+        out
+    }
+}
+
 /// Builds the single-row `VALUES (?n1 ?n2 …) { (v1 v2 …) }` table that pre-binds
 /// each `(name, term)` in `bindings`. Returns `None` if any value is not
 /// expressible as a SPARQL ground term (e.g. a blank node — see `term_to_ground`).
@@ -982,6 +1066,7 @@ mod tests {
             select: "ASK { ?s ?p ?o }".to_string(),
             prefixes: String::new(),
             message: None,
+            severity: None,
             deactivated: false,
             prepared: None,
         };
@@ -991,6 +1076,7 @@ mod tests {
             select: "SELECT ??? garbage".to_string(),
             prefixes: String::new(),
             message: None,
+            severity: None,
             deactivated: false,
             prepared: None,
         };
@@ -1000,6 +1086,7 @@ mod tests {
             select: "SELECT ?this WHERE { ?this ?p ?o }".to_string(),
             prefixes: String::new(),
             message: None,
+            severity: None,
             deactivated: false,
             prepared: None,
         };
@@ -1161,6 +1248,7 @@ mod tests {
                 .to_string(),
             prefixes: String::new(),
             message: None,
+            severity: None,
             deactivated: false,
             prepared: None,
         };
@@ -1196,6 +1284,7 @@ mod tests {
                 .to_string(),
             prefixes: String::new(),
             message: Some("offender {?value} via {?path}".to_string()),
+            severity: None,
             deactivated: false,
             prepared: None,
         };
@@ -1251,6 +1340,7 @@ mod tests {
                 .to_string(),
             prefixes: String::new(),
             message: None, // no constraint message -> fall through to ?message
+            severity: None,
             deactivated: false,
             prepared: None,
         };
@@ -1287,6 +1377,7 @@ mod tests {
             select: "SELECT ?this WHERE { ?this ?p ?o }".to_string(),
             prefixes: String::new(),
             message: None,
+            severity: None,
             deactivated: false,
             prepared: None,
         };
@@ -1380,5 +1471,72 @@ mod tests {
             out[0].path.is_none(),
             "a literal ?path is not a predicate path"
         );
+    }
+
+    // --- [OPUS-4.8] (sq-rnkdh) SHACL 1.2 SPARQL-based node expressions ---------
+
+    const EXPR_DATA: &str = r#"
+        @prefix ex: <http://example.org/> .
+        ex:alice ex:age 30 ; ex:firstName "Al" ; ex:lastName "Ice" .
+        ex:bob   ex:age 15 .
+    "#;
+
+    fn iri(s: &str) -> Term {
+        Term::NamedNode(NamedNode::new(s).unwrap())
+    }
+
+    #[test]
+    fn select_expr_build_rejects_non_select() {
+        // A non-SELECT (or unparsable) sh:select is ill-formed -> None.
+        assert!(PreparedSelectExpr::build_select("", "ASK { ?s ?p ?o }").is_none());
+        assert!(PreparedSelectExpr::build_select("", "SELECT ??? nope").is_none());
+        assert!(PreparedSelectExpr::build_select("", "SELECT ?x WHERE { ?x ?p ?o }").is_some());
+    }
+
+    #[test]
+    fn select_expr_eval_pre_binds_this_and_takes_first_var() {
+        // sh:values-style: per focus, project the value via $this.
+        let data = graph(EXPR_DATA);
+        let expr = PreparedSelectExpr::build_select(
+            "PREFIX ex: <http://example.org/>",
+            "SELECT ?n WHERE { $this ex:firstName ?n }",
+        )
+        .unwrap();
+        let nodes = expr.eval(&data, &iri("http://example.org/alice"));
+        assert_eq!(
+            nodes,
+            vec![Term::Literal(oxrdf::Literal::new_simple_literal("Al"))]
+        );
+        // A focus with no firstName yields no value nodes.
+        assert!(expr.eval(&data, &iri("http://example.org/bob")).is_empty());
+    }
+
+    #[test]
+    fn select_expr_build_expr_evaluates_expression() {
+        // sh:sparqlExpr: SELECT ((EXPR) AS ?result) WHERE {} with $this bound.
+        let data = graph(EXPR_DATA);
+        let expr = PreparedSelectExpr::build_expr("", "STRLEN(STR($this))").unwrap();
+        let nodes = expr.eval(&data, &iri("http://example.org/alice"));
+        // STRLEN("http://example.org/alice") = 24.
+        assert_eq!(
+            nodes,
+            vec![Term::Literal(oxrdf::Literal::new_typed_literal(
+                "24",
+                NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+            ))]
+        );
+    }
+
+    #[test]
+    fn select_expr_eval_target_runs_unbound_and_collects_first_var() {
+        // sh:targetNode [ sh:select ]: no $this, the query SELECTs the focus nodes.
+        let data = graph(EXPR_DATA);
+        let expr = PreparedSelectExpr::build_select(
+            "PREFIX ex: <http://example.org/>",
+            "SELECT ?p WHERE { ?p ex:age ?a . FILTER (?a < 18) }",
+        )
+        .unwrap();
+        let nodes = expr.eval_target(&data);
+        assert_eq!(nodes, vec![iri("http://example.org/bob")]);
     }
 }

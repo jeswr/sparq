@@ -21,12 +21,22 @@ pub enum Target {
     Node(Term),
     /// sh:targetClass — all SHACL instances of the class in the data graph.
     Class(Term),
-    /// Implicit class target: the shape is itself an rdfs:Class.
+    /// Implicit class target: the shape is itself an rdfs:Class (or, SHACL 1.2,
+    /// an `sh:ShapeClass` — a class that is also a node shape).
     ImplicitClass(Term),
     /// sh:targetSubjectsOf — all subjects of the predicate.
     SubjectsOf(String),
     /// sh:targetObjectsOf — all objects of the predicate.
     ObjectsOf(String),
+    /// [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:targetWhere [ <inline shape> ]`: the
+    /// focus nodes are every data-graph node that CONFORMS to the inline (object)
+    /// shape. The `usize` is the inline shape's id in [`ShapesModel::shapes`].
+    Where(usize),
+    /// [OPUS-4.8] (sq-rnkdh) SHACL 1.2 SPARQL-valued target
+    /// `sh:targetNode [ sh:select … ]` / `[ sh:sparqlExpr … ]`: the focus nodes are
+    /// the output nodes of the SPARQL node expression (the bindings of its first
+    /// result variable). The index is into the model's `select_exprs` table.
+    Sparql(usize),
 }
 
 /// One occurrence of a constraint component on a shape.
@@ -293,6 +303,12 @@ pub(crate) struct SparqlConstraint {
     /// The constraint's own `sh:message` template, if any (takes precedence over
     /// a `?message` binding and over the shape's `sh:message`).
     pub message: Option<String>,
+    /// [OPUS-4.8] (sq-rnkdh) The constraint node's own `sh:severity` IRI, if any.
+    /// SHACL 1.2 lets a `sh:SPARQLConstraint` declare a `sh:severity` that
+    /// OVERRIDES the enclosing shape's severity for the results it produces
+    /// (`sparql/node/sparql-001`: a `sh:Warning` constraint on an otherwise
+    /// default-`Violation` shape). `None` ⇒ inherit the shape's severity.
+    pub severity: Option<String>,
     /// `sh:deactivated true` on the constraint node.
     pub deactivated: bool,
     /// The parsed query; `None` if `select` did not parse as a SELECT — the
@@ -315,6 +331,12 @@ pub struct Shape {
     pub deactivated: bool,
     /// Child property shapes (sh:property) — also feeds sh:closed.
     pub property_children: Vec<usize>,
+    /// [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:values [ sh:select … ]` /
+    /// `[ sh:sparqlExpr … ]`: when present, the value nodes of this (property)
+    /// shape are COMPUTED by the SPARQL node expression (index into
+    /// [`ShapesModel::select_exprs`]) instead of derived by traversing `sh:path`.
+    /// The reported `sh:resultPath` is still the shape's `sh:path`.
+    pub(crate) value_expr: Option<usize>,
 }
 
 /// All shapes parsed from a shapes graph, indexed densely (cycle-safe).
@@ -325,6 +347,12 @@ pub struct ShapesModel {
     pub targeted: Vec<usize>,
     /// SPARQL-based constraints (`sh:sparql`), referenced by [`Component::Sparql`].
     pub(crate) sparql: Vec<SparqlConstraint>,
+    /// [OPUS-4.8] (sq-rnkdh) SHACL 1.2 SPARQL-based node expressions
+    /// (`sh:select` / `sh:sparqlExpr`) used by SPARQL-valued targets
+    /// ([`Target::Sparql`]) and SPARQL-valued value nodes
+    /// ([`Shape::value_expr`]). Off the public surface (the prepared type is
+    /// crate-private), like `sparql` / `path_validators`.
+    pub(crate) select_exprs: Vec<crate::sparql::PreparedSelectExpr>,
     /// [OPUS-4.8] SPARQL-based constraint COMPONENTS (`sh:ConstraintComponent`,
     /// SHACL §6) declared in the shapes graph, referenced by
     /// [`Component::CustomSparql`]. The registry is keyed (for activation) on the
@@ -359,6 +387,7 @@ impl ShapesModel {
             by_node: FxHashMap::default(),
             targeted: Vec::new(),
             sparql: Vec::new(),
+            select_exprs: Vec::new(),
             components: Vec::new(),
             path_validators: Vec::new(),
             by_types_closures: FxHashMap::default(),
@@ -371,8 +400,12 @@ impl ShapesModel {
         m.components = discover_components(&g);
 
         // Top-level shape discovery: explicitly typed shapes plus anything with a target.
+        // [OPUS-4.8] (sq-rnkdh) `sh:ShapeClass` (SHACL 1.2) is "a class that is also a
+        // node shape" — discovered as a root here so its constraints are parsed and
+        // its implicit class target registered (it carries neither `sh:NodeShape` nor
+        // an explicit `sh:target*`).
         let mut roots: Vec<Term> = Vec::new();
-        for class in ["NodeShape", "PropertyShape"] {
+        for class in ["NodeShape", "PropertyShape", "ShapeClass"] {
             for t in g.triples(None, Some(RDF_TYPE), Some(&iri(&sh(class)))) {
                 roots.push(t[0].clone());
             }
@@ -581,6 +614,7 @@ impl ShapesModel {
             messages: Vec::new(),
             deactivated: false,
             property_children: Vec::new(),
+            value_expr: None,
         });
         let parsed = self.parse_shape(g, node);
         self.shapes[id] = parsed;
@@ -605,11 +639,18 @@ impl ShapesModel {
                 Some(Term::Literal(l)) if l.value() == "true"
             ),
             property_children: Vec::new(),
+            value_expr: None,
         };
 
         // Targets.
         for t in g.objects(node, &sh("targetNode")) {
-            shape.targets.push(Target::Node(t));
+            // [OPUS-4.8] (sq-rnkdh) SHACL 1.2: a `sh:targetNode` object that is a
+            // SPARQL-based node expression (`[ sh:select … ]` / `[ sh:sparqlExpr … ]`)
+            // COMPUTES the target nodes; any other object is a literal target node.
+            match self.intern_select_expr(g, &t) {
+                Some(idx) => shape.targets.push(Target::Sparql(idx)),
+                None => shape.targets.push(Target::Node(t)),
+            }
         }
         for t in g.objects(node, &sh("targetClass")) {
             shape.targets.push(Target::Class(t));
@@ -628,9 +669,33 @@ impl ShapesModel {
                     .push(Target::ObjectsOf(n.as_str().to_string()));
             }
         }
-        // Implicit class target: the shape node is itself an rdfs:Class.
-        if matches!(node, Term::NamedNode(_)) && g.has_type(node, RDFS_CLASS) {
+        // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:targetWhere`: the focus nodes are the
+        // data-graph nodes that CONFORM to the inline (object) shape. Parse the
+        // object as a shape on demand (it may be an inline anonymous shape with no
+        // `rdf:type`/target, so it is not a top-level root) and record its id.
+        for t in g.objects(node, &sh("targetWhere")) {
+            let inner = self.shape_id(g, &t);
+            shape.targets.push(Target::Where(inner));
+        }
+        // Implicit class target: the shape node is itself an rdfs:Class, OR (SHACL
+        // 1.2) an `sh:ShapeClass` — "a class that is also a node shape", usable as
+        // `rdf:type` in place of the `rdfs:Class` + `sh:NodeShape` combination.
+        if matches!(node, Term::NamedNode(_))
+            && (g.has_type(node, RDFS_CLASS) || g.has_type(node, &sh("ShapeClass")))
+        {
             shape.targets.push(Target::ImplicitClass(node.clone()));
+        }
+
+        // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:values [ sh:select … ]` /
+        // `[ sh:sparqlExpr … ]` on a property shape: the value nodes are COMPUTED by
+        // the SPARQL node expression (`$this` = focus node) instead of derived by
+        // traversing `sh:path`. The reported `sh:resultPath` stays the shape's path.
+        // Only the SPARQL-valued `sh:values` form is handled here; the SHACL-AF
+        // node-expression value RULE form (`apply_rules`) is a separate surface.
+        if let Some(v) = g.object(node, &sh("values")) {
+            if let Some(idx) = self.intern_select_expr(g, &v) {
+                shape.value_expr = Some(idx);
+            }
         }
 
         let c = &mut shape.components;
@@ -947,6 +1012,36 @@ impl ShapesModel {
         shape
     }
 
+    /// [OPUS-4.8] (sq-rnkdh) Interns a SHACL 1.2 **SPARQL-based node expression**
+    /// (`[ sh:select "…" ]` or `[ sh:sparqlExpr "…" ]`, with optional
+    /// `sh:prefixes`) into [`Self::select_exprs`], returning its index. `None` when
+    /// `node` carries neither (so the caller falls back to the literal/term reading
+    /// — e.g. a plain `sh:targetNode` IRI), or when the derived query is ill-formed
+    /// (dropped leniently, like an ill-formed `sh:sparql`). `sh:select` takes
+    /// precedence over `sh:sparqlExpr` when both are present.
+    fn intern_select_expr(&mut self, g: &GraphView, node: &Term) -> Option<usize> {
+        // Only blank-node / IRI node-expression resources carry these predicates; a
+        // literal `sh:targetNode` is a target node, never an expression.
+        if matches!(node, Term::Literal(_)) {
+            return None;
+        }
+        let prefixes = collect_prefixes_from(g, &g.objects(node, &sh("prefixes")));
+        let prepared = match g.object(node, &sh("select")) {
+            Some(Term::Literal(l)) => {
+                crate::sparql::PreparedSelectExpr::build_select(&prefixes, l.value())
+            }
+            _ => match g.object(node, &sh("sparqlExpr")) {
+                Some(Term::Literal(l)) => {
+                    crate::sparql::PreparedSelectExpr::build_expr(&prefixes, l.value())
+                }
+                _ => return None, // not a SPARQL node expression — caller's fallback
+            },
+        }?;
+        let idx = self.select_exprs.len();
+        self.select_exprs.push(prepared);
+        Some(idx)
+    }
+
     /// Parses one `sh:sparql` constraint node into a [`SparqlConstraint`],
     /// interning it into [`Self::sparql`] and returning its index. `None` when the
     /// node has no `sh:select` literal (an ill-formed constraint — skipped).
@@ -977,10 +1072,17 @@ impl ShapesModel {
             g.object(node, &sh("deactivated")),
             Some(Term::Literal(l)) if l.value() == "true"
         );
+        // [OPUS-4.8] (sq-rnkdh) A constraint-level `sh:severity` IRI overrides the
+        // shape's default severity for this constraint's results (SHACL 1.2).
+        let severity = match g.object(node, &sh("severity")) {
+            Some(Term::NamedNode(n)) => Some(n.as_str().to_string()),
+            _ => None,
+        };
         let mut constraint = SparqlConstraint {
             select,
             prefixes,
             message,
+            severity,
             deactivated,
             prepared: None,
         };
