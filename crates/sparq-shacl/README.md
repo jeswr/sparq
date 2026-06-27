@@ -60,10 +60,11 @@ For many data graphs against one shapes graph, parse once with
   `cargo test -p sparq-shacl --test w3c_core`.
 - **SHACL 1.2 core constraints** — `sh:memberShape`, `sh:uniqueMembers`,
   `sh:{min,max}ListLength`, `sh:uniqueValuesFor`, `sh:closed sh:ByTypes`, and the
-  disjunctive-list forms of `sh:datatype`/`sh:nodeKind` (sq-vg3y). The 1.2 harness
-  passes strictly **44/45** with `shacl-af` off — the one SKIP is `nodeByExpression-001`,
-  a `shacl-af` constraint — and **45/45** with it on; it stays SKIP-tolerant only for a
-  constraint predicate the build still lacks, never masking a regression.
+  disjunctive-list forms of `sh:datatype`/`sh:nodeKind` (sq-vg3y). The **full** vendored
+  1.2 suite is gated by a ratchet (sq-6glcr): core **114/115** (of 137), SPARQL **10** (of
+  24, incl. 7 expected-rejection `sht:Failure` entries), node-expr **65/65** — pass must
+  not drop, the gap must not grow, in both feature states. The not-yet-passing entries are
+  the honest gap map in [`research/shacl12-conformance-gap.md`](../../research/shacl12-conformance-gap.md).
 - **SHACL-SPARQL + custom §6 components** — `sh:sparql` (§5.2) and SPARQL-based
   constraint *components* (custom `sh:ConstraintComponent` with `sh:parameter` /
   `sh:validator`, §6), pinned by the W3C `sparql/*` sub-suites.
