@@ -78,8 +78,12 @@ gui/
 - **Top bar** (`h-10`): a LOCAL⇄ENDPOINT target switch, the store size, a ⌘K hint, a theme toggle,
   and an engine status LED.
 - **IDE tab strip** + a full-bleed work area (default = Query).
-- **Status bar** (`h-6`): the **measured `performance.now()` latency** of the last run, the row
-  count, the target, and the persistence backend.
+- **Status bar** (`h-7`): the **measured `performance.now()` latency** of the last run, the row
+  count, the target, the persistence backend, the live store size, an unintrusive ingest meter
+  (`sq-vw3ax`, #820), and a **disk gauge**. The disk gauge shows the **OS-reported** on-disk size
+  of the app-data `workspaces/` dir in the desktop shell (a recursive native `stat()` via the
+  `disk_usage` command, `sq-cno90`) and falls back to the **snapshot-bytes estimate** on the web
+  target — always labelled which of the two it is (`disk` vs `≈disk`), never a fabricated figure.
 
 ## The direct native engine link (desktop)
 
@@ -88,7 +92,10 @@ gui/
 (`load` / `query` / `query_quads` / `update_in_place` / `explain` / `explain_analyze` / `count` /
 `ask` / `store_size`) but backed by the full native store. Its `#[cfg(test)]` tests exercise the
 engine calls directly. The foundation frontend runs the in-tab WASM engine in BOTH targets for
-**query** (the honest, working-today path).
+**query** (the honest, working-today path). `src-tauri/src/disk.rs` adds the `disk_usage` command
+(`sq-cno90`): a recursive `stat()` of `$APPLOCALDATA/workspaces` that returns its real on-disk byte
+total for the status bar's disk gauge (least-privilege — confined in Rust to that subtree, follows
+no symlink out of it; the byte-summing walk is unit-tested directly).
 
 For **ingest**, the Import drawer (`sq-ixc3.13`) calls the engine's **native loader** IPC
 (`load_path` / `load_text`) when running in the desktop shell: a disk file — including

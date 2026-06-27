@@ -6,15 +6,23 @@
 // [OPUS-4.8] sq-vw3ax (#820 "GUI: unintrusive stats") — the bold redesign adds the issue's two
 // asked-for stats, unintrusively (no modal): a slim INGEST meter (the real file label + a live
 // MEASURED elapsed while an import is in flight) and a tiny DISK gauge (the REAL on-device store
-// footprint — the byte length of the persisted whole-dataset N-Quads snapshot).
+// footprint).
+//
+// [OPUS-4.8] sq-cno90 (#820 follow-up) — the disk gauge now PREFERS the OS-reported on-disk byte
+// total (a recursive native `stat()` of the `$APPLOCALDATA/workspaces` tree via the `disk_usage`
+// command) when running in the desktop shell, and FALLS BACK to the snapshot-bytes estimate on the
+// web target (no native FS). The two are clearly distinguished in the label + tooltip — it is never
+// dressed up as OS-reported when it is the estimate.
 //
 // HONESTY. Every figure here is real:
 //   * latency  — wall-clock of the query the user JUST ran (performance.now), labelled per-run,
 //                NOT a benchmark claim (this work box / CI runner is non-canonical).
-//   * disk     — the actual size of what the workspace persists (snapshot bytes). There is no
-//                fixed capacity, so the gauge shows the live footprint; the conic ring's fill is a
-//                log-scaled visual cue only, and the tooltip states the exact bytes. A precise
-//                filesystem probe of the app-data dir is a follow-up bead (new Tauri command).
+//   * disk     — on the desktop shell, the OS-reported byte total of the workspaces dir (the
+//                precise on-disk size, incl. the workspace index JSON); on the web target, the
+//                snapshot-bytes ESTIMATE (the byte length of the persisted whole-dataset N-Quads
+//                snapshot). There is no fixed capacity, so the gauge shows the live footprint; the
+//                conic ring's fill is a log-scaled visual cue only, and the tooltip states the
+//                exact bytes AND which of the two sources it is. Never a fabricated number.
 //   * ingest   — the loaders are synchronous (no byte-level progress callback), so this is an
 //                honest indeterminate "ingesting <file>…" with a real elapsed — never a fake %/ETA.
 
@@ -88,9 +96,23 @@ function IngestMeter({ ingest }: { ingest: IngestState }) {
 }
 
 export function StatusBar() {
-  const { lastLatencyMs, lastRowCount, storeSize, storeBytes, ingest, nativeLoaderAvailable } =
-    useEngine();
+  const {
+    lastLatencyMs,
+    lastRowCount,
+    storeSize,
+    storeBytes,
+    diskBytes,
+    ingest,
+    nativeLoaderAvailable,
+  } = useEngine();
   const { backend } = useWorkspace();
+
+  // [OPUS-4.8] sq-cno90 — PREFER the OS-reported on-disk figure when the desktop probe returned one;
+  // otherwise fall back to the snapshot-bytes estimate (the web target). Labelled honestly either
+  // way: "disk" for the OS figure, "≈disk" for the estimate. Never fabricated — `diskBytes` is null
+  // unless the native probe actually reported real bytes.
+  const osReported = diskBytes !== null;
+  const displayBytes = osReported ? diskBytes : storeBytes;
   return (
     <footer className="sq-statusbar flex h-7 shrink-0 items-center gap-4 border-t px-3 font-mono text-[11px] text-muted-foreground">
       <span
@@ -124,18 +146,24 @@ export function StatusBar() {
       {/* [OPUS-4.8] sq-vw3ax (#820) — the unintrusive ingest meter (only while an import runs). */}
       {ingest && <IngestMeter ingest={ingest} />}
 
-      {/* [OPUS-4.8] sq-vw3ax (#820) — the disk gauge: the REAL persisted store footprint. */}
+      {/* [OPUS-4.8] sq-vw3ax (#820) + sq-cno90 (#820 follow-up) — the disk gauge: the OS-reported
+          on-disk footprint in the desktop shell, else the snapshot-bytes estimate (≈) on the web. */}
       <span
         className="flex items-center gap-1.5"
-        title={`Workspace store on disk: ${storeBytes.toLocaleString()} bytes (the persisted whole-dataset snapshot)`}
+        title={
+          osReported
+            ? `Workspace store on disk: ${displayBytes.toLocaleString()} bytes — OS-reported size of the app-data workspaces/ dir`
+            : `Workspace store ≈ ${displayBytes.toLocaleString()} bytes — estimate (persisted whole-dataset snapshot); the OS-reported size shows in the desktop app`
+        }
         data-status-disk
+        data-disk-source={osReported ? "os" : "estimate"}
       >
         <span
           className="sq-disk-ring"
-          style={{ ["--disk-pct" as string]: diskRingPct(storeBytes) }}
+          style={{ ["--disk-pct" as string]: diskRingPct(displayBytes) }}
           aria-hidden
         />
-        disk {formatBytes(storeBytes)}
+        {osReported ? "disk" : "≈disk"} {formatBytes(displayBytes)}
       </span>
     </footer>
   );
