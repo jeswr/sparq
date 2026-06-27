@@ -144,15 +144,24 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-The current coverage is the **ZK car-hire prover pre-warm** (`e2e/zk-prewarm.spec.ts`,
-bead sq-5q63): it loads `/showcase/zk-car-hire`, waits for the *Prover ready* pill, and
-asserts the first **Generate ZK proof** click pays no cold start — i.e. it does not
-re-pay the lazy `@noir-lang/noir_js` + `@aztec/bb.js` dynamic-import or the
-`Barretenberg.new` WASM instantiate that `prewarmProver()` already did on route mount.
-That is observed via a test-only cold-start counter the prover mirrors onto
-`window.__zkProverColdStarts` (pure observability; it changes nothing the prover proves).
-CI runs this lane on site-touching PRs (`.github/workflows/site-e2e.yml`); Playwright
-outputs (`test-results/`, `playwright-report/`, the browser cache) are git-ignored.
+Coverage spans the critical site flows. **Critical-flow smoke** (bead sq-jp7ry, issue #835):
+`home-smoke.spec.ts` asserts the home hero + primary nav boot with zero console errors;
+`try-query-smoke.spec.ts` runs the trivial `SELECT * WHERE { ?s ?p ?o }` on the bundled
+sample in the `/try` REPL and asserts a non-empty results table; `capabilities-smoke.spec.ts`
+asserts the `/capabilities` showcase renders its hero, flagship band and all five theme
+sections. **Regression guards:** `shacl-rerun-regression.spec.ts` (sq-jp7ry) drives the
+`/surface/shacl` validator three times in one session and asserts no wasm object-lifecycle
+fault (`__wbg_ptr` / "null pointer passed to rust" / "recursive use of an object") and a
+fresh report each run — guarding the issue-#835 SHACL `__wbg_ptr` class; `repl-results.spec.ts`
+and `shacl-validator.spec.ts` cover the REPL result panel and single-validate report. The
+**ZK car-hire prover pre-warm** (`zk-prewarm.spec.ts`, sq-5q63) loads `/showcase/zk-car-hire`,
+waits for the *Prover ready* pill, and asserts the first **Generate ZK proof** click pays no
+cold start (observed via a test-only `window.__zkProverColdStarts` counter — pure observability).
+The wasm-engine specs (`try-query`, `shacl-*`, `repl-results`) `test.skip` when the wasm bundle
+is absent, so the **light** CI lane (no Rust toolchain) stays green; they run in full once
+`npm run sync-wasm` has synced a `build:wasm` bundle. CI runs this lane on site-touching PRs
+(`.github/workflows/site-e2e.yml`); Playwright outputs (`test-results/`, `playwright-report/`,
+the browser cache) are git-ignored.
 
 ## Papers (the academic paper factory)
 
