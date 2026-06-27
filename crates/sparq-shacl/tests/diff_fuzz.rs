@@ -706,6 +706,7 @@ fn key_normalisation_is_consistent() {
             source_shape: oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
                 "http://example.org/S",
             )),
+            source_constraint: None,
             source_component: "http://www.w3.org/ns/shacl#DatatypeConstraintComponent".into(),
             severity: "http://www.w3.org/ns/shacl#Violation".into(),
             messages: vec![],

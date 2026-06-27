@@ -29,9 +29,9 @@ comparison as `w3c_core.rs` — `sh:conforms` must match and the
 
 | Runner (`crates/sparq-shacl/tests/`) | Manifest tree | Entries | PASS (default / `shacl-af`) | Gap |
 | --- | --- | --- | --- | --- |
-| `w3c_core_full_shacl12.rs` | `core/manifest.ttl` (all 7 categories) | 137 | **114 / 115** | 22 FAIL (+ 1 SKIP default) |
-| `w3c_sparql_shacl12.rs` | `sparql/manifest.ttl` | 24 | **10 / 10** | 7 FAIL + 7 expected-failure |
-| `w3c_node_expr.rs` + `w3c_node_expr_constraints.rs` | `node-expr/` | 65 | **— / 65** | 0 (the node-expr runners are `#[cfg(feature = "shacl-af")]`) |
+| `w3c_core_full_shacl12.rs` | `core/manifest.ttl` (all 7 categories) | 137 | **129 / 130** | 7 FAIL (+ 1 SKIP default) |
+| `w3c_sparql_shacl12.rs` | `sparql/manifest.ttl` | 24 | **17 / 17** | 0 FAIL + 7 expected-failure (sq-mue75 closed the 3 pre-binding FAILs) |
+| `w3c_node_expr.rs` + `w3c_node_expr_constraints.rs` | `node-expr/` | 65 | **— / 62 + 1 xfail** | the xfail is the harness `sht:scope-*` var entry (sq-mue75 drives the REAL `eval_node_expression`; `shacl-af`) |
 
 The two runners that gate `core` and `sparql` are NOT feature-gated as a whole —
 they run in both states. The `shacl-af`-only delta in `core` is one entry
@@ -103,7 +103,7 @@ PASS) and asserts there are exactly 7 of them.
 | 14 | SPARQL constraint result detail | `sparql/node/sparql-001`, `sparql/property/property-select-001` | `sh:select` constraint result message / count detail | `sq-rnkdh` |
 | 15 | `sh:sparqlExpr` value-expression constraint | `sparql/property/property-sparqlExpr-001` | SPARQL-expression-valued property constraint | `sq-rnkdh` |
 | 16 | SPARQL `sh:target` (targetNode-select) | `sparql/targets/targetNode-select-001` | SPARQL-based target | `sq-rnkdh` |
-| 17 | Pre-binding VALUES propagation | `sparql/pre-binding/pre-binding-002`, `pre-binding-005`, `pre-binding-007` | the full pre-binding algebra-rewrite (UNION / sibling / sub-SELECT scope) | `sq-mue75` |
+| 17 | Pre-binding VALUES propagation — **DONE (sq-mue75)** | `sparql/pre-binding/pre-binding-002`, `pre-binding-005`, `pre-binding-007` | the pre-binding algebra-rewrite (UNION / sibling / sub-SELECT scope) — now PASS | `sq-mue75` |
 | 18 | Pre-binding **rejection** channel (`sht:Failure`) | `sparql/pre-binding/pre-binding-006`, `unsupported-sparql-001..006` (7) | a query that re-binds a pre-bound variable, or uses unsupported `MINUS`/`SERVICE`, MUST be rejected — the crate has no failure channel | `sq-0mjfd` |
 
 ### Per-category SPARQL scoreboard
@@ -111,11 +111,14 @@ PASS) and asserts there are exactly 7 of them.
 | category | pass | fail | xfail | skip |
 | --- | ---: | ---: | ---: | ---: |
 | component | 3 | 0 | 0 | 0 |
-| node | 3 | 1 | 0 | 0 |
-| pre-binding | 3 | 3 | 7 | 0 |
-| property | 1 | 2 | 0 | 0 |
-| targets | 0 | 1 | 0 | 0 |
-| **TOTAL** | **10** | **7** | **7** | **0** |
+| node | 4 | 0 | 0 | 0 |
+| pre-binding | 6 | 0 | 7 | 0 |
+| property | 3 | 0 | 0 | 0 |
+| targets | 1 | 0 | 0 | 0 |
+| **TOTAL** | **17** | **0** | **7** | **0** |
+
+(Post-sq-mue75 / sq-rnkdh: the only remaining SPARQL gap is the 7 `sht:Failure`
+expected-rejection entries — the rejection channel is unbuilt, cluster 18 / `sq-0mjfd`.)
 
 ---
 

@@ -66,7 +66,14 @@ const SH: &str = "http://www.w3.org/ns/shacl#";
 /// `sh:values [ sh:select / sh:sparqlExpr ]` (`property/property-select-001`,
 /// `property/property-sparqlExpr-001`), and constraint-level `sh:severity`
 /// (`node/sparql-001`) — now PASS.
-const BASELINE_PASS: usize = 14;
+///
+/// [OPUS-4.8] (sq-mue75) Raised 14 → 17: the three remaining `pre-binding/`
+/// entries — pre-binding-002 (pre-binding into both UNION branches),
+/// pre-binding-005 (into a sibling Join block) and pre-binding-007 (through a
+/// sub-SELECT projection) — now PASS via the extended `push_values_down`
+/// propagation. (The 6 `sh:sparql`-result entries are also now verified for
+/// `sh:sourceConstraint`.)
+const BASELINE_PASS: usize = 17;
 
 /// Gap-ceiling: the count of entries this crate does NOT yet get right — the sum
 /// of strict-comparison FAILs and the `sht:Failure` ExpectedFailure entries (the
@@ -75,9 +82,13 @@ const BASELINE_PASS: usize = 14;
 /// drops it (bump down).
 ///
 /// [OPUS-4.8] (sq-rnkdh) Lowered 14 → 10: the 4 entries above moved FAIL → PASS.
-/// The remaining 10 are 3 `pre-binding/` FAILs + the 7 `sht:Failure`
+/// The remaining 10 were 3 `pre-binding/` FAILs + the 7 `sht:Failure`
 /// ExpectedFailure entries (the rejection channel is still unbuilt).
-const BASELINE_GAP: usize = 10;
+///
+/// [OPUS-4.8] (sq-mue75) Lowered 10 → 7: the 3 `pre-binding/` FAILs moved
+/// FAIL → PASS, leaving only the 7 `sht:Failure` ExpectedFailure entries (the
+/// rejection channel is still unbuilt — the gap now equals `EXPECTED_FAILURE_COUNT`).
+const BASELINE_GAP: usize = 7;
 
 /// Of [`BASELINE_GAP`], the count attributable to the unbuilt rejection channel
 /// (`mf:result sht:Failure`). Asserted exactly so the scoreboard documents the
@@ -380,6 +391,9 @@ struct Expected {
     severity: Option<String>,
     component: Option<String>,
     source_shape: Option<Term>,
+    /// [OPUS-4.8] (sq-mue75) `sh:sourceConstraint` — the `sh:SPARQLConstraint`
+    /// node the result must point at (only `sh:sparql` results carry it).
+    source_constraint: Option<Term>,
     messages: Vec<Term>,
 }
 
@@ -406,6 +420,7 @@ impl Expected {
                 _ => None,
             },
             source_shape: view.object(node, &format!("{SH}sourceShape")),
+            source_constraint: view.object(node, &format!("{SH}sourceConstraint")),
             messages: view.objects(node, &format!("{SH}resultMessage")),
         })
     }
@@ -440,6 +455,14 @@ impl Expected {
         if let Some(s) = &self.source_shape {
             if !term_matches(s, &a.source_shape) {
                 return false;
+            }
+        }
+        // [OPUS-4.8] (sq-mue75) when the expected report states an
+        // `sh:sourceConstraint`, the actual result must carry the same node.
+        if let Some(sc) = &self.source_constraint {
+            match &a.source_constraint {
+                Some(asc) if term_matches(sc, asc) => {}
+                _ => return false,
             }
         }
         let actual_messages = a.effective_messages();

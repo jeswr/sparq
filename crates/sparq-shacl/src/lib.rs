@@ -662,6 +662,79 @@ mod tests {
             .is_empty());
     }
 
+    /// [OPUS-4.8] (sq-mue75) A `sh:sparql` result carries `sh:sourceConstraint`
+    /// pointing at the `sh:SPARQLConstraint` node — distinct from `sh:sourceShape`
+    /// (the shape) — and the Turtle report emits it. A Core (non-sparql) result
+    /// carries no `sh:sourceConstraint`.
+    #[test]
+    fn sparql_result_carries_source_constraint() {
+        let shapes = Graph::load_str(
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:TestShape a sh:NodeShape ;
+              sh:targetNode ex:bad ;
+              sh:sparql ex:TestShape-sparql .
+            ex:TestShape-sparql a sh:SPARQLConstraint ;
+              sh:select "SELECT $this WHERE { $this <http://example.org/flag> true }" .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let data = Graph::load_str(
+            "@prefix ex: <http://example.org/> . ex:bad ex:flag true .",
+            "turtle",
+        )
+        .unwrap();
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "{}", r.to_text());
+        assert_eq!(r.results.len(), 1, "{}", r.to_text());
+        let res = &r.results[0];
+        // sh:sourceConstraint = the sh:SPARQLConstraint node, NOT the shape.
+        assert_eq!(
+            res.source_constraint,
+            Some(oxrdf::Term::NamedNode(
+                oxrdf::NamedNode::new("http://example.org/TestShape-sparql").unwrap()
+            )),
+            "expected sh:sourceConstraint = the constraint node"
+        );
+        assert_eq!(
+            res.source_shape,
+            oxrdf::Term::NamedNode(
+                oxrdf::NamedNode::new("http://example.org/TestShape").unwrap()
+            ),
+            "sh:sourceShape must remain the shape node"
+        );
+        assert_ne!(
+            res.source_constraint.as_ref(),
+            Some(&res.source_shape),
+            "sourceConstraint and sourceShape must be distinct here"
+        );
+        // The Turtle report emits sh:sourceConstraint.
+        let ttl = r.to_turtle();
+        assert!(
+            ttl.contains("sh:sourceConstraint"),
+            "report Turtle must emit sh:sourceConstraint:\n{ttl}"
+        );
+    }
+
+    /// [OPUS-4.8] (sq-mue75) A Core (non-`sh:sparql`) constraint result carries no
+    /// `sh:sourceConstraint` (the spec stamps it only on SPARQL-based results).
+    #[test]
+    fn core_result_has_no_source_constraint() {
+        let r = check(
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:bob a ex:Person ; ex:age -1 .
+        "#,
+        );
+        assert!(!r.conforms);
+        assert!(
+            r.results.iter().all(|res| res.source_constraint.is_none()),
+            "Core results must not carry sh:sourceConstraint"
+        );
+    }
+
     #[test]
     fn logical_and_paths() {
         let data = Graph::load_str(

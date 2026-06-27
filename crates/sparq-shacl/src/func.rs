@@ -650,8 +650,12 @@ fn int_literal(n: i128) -> Term {
 }
 
 fn decimal_literal(v: f64) -> Term {
-    // Render without an exponent so the lexical form is a valid xsd:decimal.
+    // Render without an exponent and ALWAYS with a fractional part, so the lexical
+    // form is a canonical xsd:decimal: a whole-valued decimal must read `42.0`, not
+    // `42` (the W3C node-expr `sum-totalRevenue` sums decimals to a whole number
+    // and expects `42.0`^^xsd:decimal). (sq-mue75)
     let s = format!("{v}");
+    let s = if s.contains('.') { s } else { format!("{s}.0") };
     Term::Literal(Literal::new_typed_literal(
         s,
         NamedNode::new_unchecked(format!("{XSD}decimal")),

@@ -295,6 +295,10 @@ pub(crate) struct PreparedComponentValidator {
 /// skipped, matching this crate's lenient handling of ill-formed shapes).
 #[derive(Debug, Clone)]
 pub(crate) struct SparqlConstraint {
+    /// [OPUS-4.8] (sq-mue75) The `sh:SPARQLConstraint` node (the object of
+    /// `sh:sparql`), stamped onto each result as `sh:sourceConstraint` (SHACL
+    /// §5.2.2).
+    pub node: Term,
     /// The raw `sh:select` text.
     pub select: String,
     /// PREFIX declarations assembled from `sh:prefixes` (`sh:declare` →
@@ -546,6 +550,16 @@ impl ShapesModel {
                 Component::Expression(idx)
             });
         }
+    }
+
+    /// [OPUS-4.8] (sq-mue75) Registers the inline filter/function shapes a
+    /// standalone node expression references (the public `eval_node_expression`
+    /// seam): the same on-demand inline-shape registration the `sh:expression`
+    /// constraint parse does, so a `findFirst`/`matchAll`/`nodesMatching`/
+    /// `filterShape` over an anonymous `[ … ]` shape resolves at eval time.
+    #[cfg(feature = "shacl-af")]
+    pub(crate) fn register_node_expr_shapes(&mut self, shapes_graph: &Graph, expr: &Term) {
+        self.register_expression_shapes(shapes_graph, expr, 0);
     }
 
     /// Walks an expression term registering inline `sh:filterShape` / function
@@ -1079,6 +1093,7 @@ impl ShapesModel {
             _ => None,
         };
         let mut constraint = SparqlConstraint {
+            node: node.clone(),
             select,
             prefixes,
             message,
