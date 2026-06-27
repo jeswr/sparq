@@ -104,22 +104,33 @@ fn unimplemented() -> Vec<String> {
 /// `research/shacl12-conformance-gap.md` for the per-category gap map. With
 /// `shacl-af` off the `nodeByExpression-001` node entry is a SKIP, so the floor
 /// is one below the `shacl-af`-on floor.
-const BASELINE_PASS_CORE: usize = 114;
+///
+/// [OPUS-4.8] (sq-rnkdh) Raised 114 → 129: locks in the SHACL-1.2 core value
+/// constraints (sq-sx15d / #1267) and the 1.2 TARGET features added here —
+/// `sh:targetWhere`, the `sh:shape` data-graph link, and the `sh:ShapeClass`
+/// implicit class target (`targets/` now 10/10).
+const BASELINE_PASS_CORE: usize = 129;
 
 /// Pass-floor over the FULL core tree with `shacl-af` ON: the `shacl-af`
 /// `sh:nodeByExpression` core/node entry becomes implemented and PASSes, so the
-/// floor rises by one.
-const BASELINE_PASS_AF: usize = 115;
+/// floor rises by one. [OPUS-4.8] (sq-rnkdh) Raised 115 → 130 in lock-step with
+/// [`BASELINE_PASS_CORE`].
+const BASELINE_PASS_AF: usize = 130;
 
 /// Fail-ceiling over the FULL core tree — the count of entries whose SHACL-1.2
 /// behaviour this crate does not yet implement (the gap map). A *new* mismatch (a
 /// previously-correct entry breaking) pushes the fail count above this and fails
 /// the build; closing a gap drops it (bump down). The same in both feature
 /// states: the `shacl-af`-gated entries flip SKIP↔PASS, never to/from FAIL.
-const BASELINE_FAIL_CORE: usize = 22;
+///
+/// [OPUS-4.8] (sq-rnkdh) Lowered 22 → 7: sq-sx15d (#1267) closed the value-constraint
+/// gaps and this change closes the `targets/` gaps. The remaining 7 are the live gap
+/// map (reifierShape ×2, deactivated-003, message-002, severity-003, uniqueLang-003,
+/// conformance-disallows-001) — see `research/shacl12-conformance-gap.md`.
+const BASELINE_FAIL_CORE: usize = 7;
 
 /// Fail-ceiling with `shacl-af` ON — identical to [`BASELINE_FAIL_CORE`].
-const BASELINE_FAIL_AF: usize = 22;
+const BASELINE_FAIL_AF: usize = 7;
 
 fn baseline_pass() -> usize {
     if cfg!(feature = "shacl-af") {

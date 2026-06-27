@@ -59,14 +59,25 @@ const SH: &str = "http://www.w3.org/ns/shacl#";
 /// regression below this fails the build; raising it is a deliberate bump.
 ///
 /// [OPUS-4.8] (sq-6glcr) Calibrated by running the harness in-worktree.
-const BASELINE_PASS: usize = 10;
+///
+/// [OPUS-4.8] (sq-rnkdh) Raised 10 → 14: the SHACL-1.2 SPARQL-based node
+/// expressions added here — the SPARQL-valued target `sh:targetNode [ sh:select ]`
+/// (`targets/targetNode-select-001`), the SPARQL-valued value nodes
+/// `sh:values [ sh:select / sh:sparqlExpr ]` (`property/property-select-001`,
+/// `property/property-sparqlExpr-001`), and constraint-level `sh:severity`
+/// (`node/sparql-001`) — now PASS.
+const BASELINE_PASS: usize = 14;
 
 /// Gap-ceiling: the count of entries this crate does NOT yet get right — the sum
 /// of strict-comparison FAILs and the `sht:Failure` ExpectedFailure entries (the
 /// rejection channel is unbuilt). A *new* gap (a previously-correct entry
 /// breaking) pushes this above the ceiling and fails the build; closing a gap
 /// drops it (bump down).
-const BASELINE_GAP: usize = 14;
+///
+/// [OPUS-4.8] (sq-rnkdh) Lowered 14 → 10: the 4 entries above moved FAIL → PASS.
+/// The remaining 10 are 3 `pre-binding/` FAILs + the 7 `sht:Failure`
+/// ExpectedFailure entries (the rejection channel is still unbuilt).
+const BASELINE_GAP: usize = 10;
 
 /// Of [`BASELINE_GAP`], the count attributable to the unbuilt rejection channel
 /// (`mf:result sht:Failure`). Asserted exactly so the scoreboard documents the

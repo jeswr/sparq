@@ -90,24 +90,12 @@ pub fn graph_from_triples<I: IntoIterator<Item = Triple>>(triples: I) -> Graph {
 /// the SHACL benchmark suite as a target-selection regression detector alongside
 /// the violation count.
 ///
-/// It reuses the public [`view::GraphView`] target-selection primitives
-/// (`instances_of`/`subjects_of`/`objects_of`), so it stays in lock-step with
-/// the validator without exposing internals.
+/// It delegates to the validator's own focus-node enumeration (`eval`), so it
+/// stays in lock-step with validation — including the SHACL-1.2 data-dependent
+/// targets (`sh:targetWhere`, the SPARQL-valued `sh:targetNode`, and the
+/// `sh:shape` data-graph link) that a pure shapes-graph scan cannot express.
 pub fn count_focus_nodes(data: &Graph, model: &ShapesModel) -> usize {
-    use oxrdf::Term;
-    let g = view::GraphView::new(data);
-    let mut all: Vec<Term> = Vec::new();
-    for &sid in &model.targeted {
-        for t in &model.shapes[sid].targets {
-            match t {
-                Target::Node(n) => all.push(n.clone()),
-                Target::Class(c) | Target::ImplicitClass(c) => all.extend(g.instances_of(c)),
-                Target::SubjectsOf(p) => all.extend(g.subjects_of(p)),
-                Target::ObjectsOf(p) => all.extend(g.objects_of(p)),
-            }
-        }
-    }
-    view::dedup(all).len()
+    eval::count_focus_nodes(data, model)
 }
 
 /// Loads a Turtle document into a [`Graph`], resolving relative IRIs against
@@ -245,6 +233,147 @@ mod tests {
         .unwrap();
         let model = ShapesModel::parse(&shapes);
         assert_eq!(count_focus_nodes(&data, &model), 3);
+    }
+
+    // --- [OPUS-4.8] (sq-rnkdh) SHACL 1.2 targets & SPARQL node expressions ------
+
+    /// `sh:targetWhere [ <inline shape> ]`: the focus nodes are the data-graph
+    /// nodes that CONFORM to the inline shape. Here only `ex:alice` (a Person with
+    /// age ≥ 18) is in scope; `ex:bob` (age 17) is not, so its violation of the
+    /// outer constraint is NOT reported. `count_focus_nodes` agrees.
+    #[test]
+    fn target_where_selects_conforming_nodes() {
+        const TW_SHAPES: &str = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:AdultShape a sh:NodeShape ;
+              sh:targetWhere [
+                sh:class ex:Person ;
+                sh:property [ sh:path ex:age ; sh:minInclusive 18 ] ;
+              ] ;
+              sh:property [ sh:path ex:votedFor ; sh:minCount 1 ] .
+        "#;
+        let shapes = Graph::load_str(TW_SHAPES, "turtle").unwrap();
+        let data = Graph::load_str(
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice a ex:Person ; ex:age 30 .
+            ex:bob   a ex:Person ; ex:age 17 .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let model = ShapesModel::parse(&shapes);
+        // alice is the only in-target node (≥18); bob (17) is out of target.
+        assert_eq!(count_focus_nodes(&data, &model), 1);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "{}", r.to_text());
+        assert_eq!(r.results.len(), 1, "{}", r.to_text());
+        assert_eq!(
+            r.results[0].focus_node,
+            oxrdf::Term::NamedNode(oxrdf::NamedNode::new("http://example.org/alice").unwrap())
+        );
+    }
+
+    /// `sh:shape` data-graph link: a triple `?n sh:shape ?S` in the DATA graph
+    /// makes `?n` a focus node of shape `?S`.
+    #[test]
+    fn data_graph_sh_shape_target() {
+        let shapes = Graph::load_str(
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:TestShape a sh:NodeShape ;
+              sh:property [ sh:path rdfs:label ; sh:datatype xsd:string ; sh:maxCount 0 ] .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let data = Graph::load_str(
+            r#"
+            @prefix ex: <http://example.org/> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:Invalid rdfs:label "x" ; <http://www.w3.org/ns/shacl#shape> ex:TestShape .
+            ex:Valid <http://www.w3.org/ns/shacl#shape> ex:TestShape .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "{}", r.to_text());
+        // Only ex:Invalid has a label (maxCount 0 violated); ex:Valid conforms.
+        assert_eq!(r.results.len(), 1, "{}", r.to_text());
+        assert_eq!(
+            r.results[0].focus_node,
+            oxrdf::Term::NamedNode(oxrdf::NamedNode::new("http://example.org/Invalid").unwrap())
+        );
+    }
+
+    /// `sh:ShapeClass` is a class that is ALSO a node shape (SHACL 1.2): instances
+    /// (via the subclass closure) are implicit-class-targeted by it.
+    #[test]
+    fn shape_class_is_implicit_class_target() {
+        let g = Graph::load_str(
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:Super a sh:ShapeClass ; sh:in ( ex:Good ) .
+            ex:Sub rdfs:subClassOf ex:Super .
+            ex:Good a ex:Sub .
+            ex:Bad  a ex:Sub .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let r = validate(&g, &g);
+        assert!(!r.conforms, "{}", r.to_text());
+        // ex:Bad is not in the sh:in list -> one InConstraintComponent violation.
+        assert_eq!(r.results.len(), 1, "{}", r.to_text());
+        assert!(r.results[0]
+            .source_component
+            .ends_with("InConstraintComponent"));
+    }
+
+    /// SPARQL-valued `sh:targetNode [ sh:select … ]` computes target nodes, and
+    /// `sh:values [ sh:sparqlExpr … ]` computes value nodes; a constraint-level
+    /// `sh:severity` overrides the shape default.
+    #[test]
+    fn sparql_valued_target_and_values_and_severity() {
+        let shapes = Graph::load_str(
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:S a sh:NodeShape ;
+              sh:targetNode [ sh:select "SELECT ?p WHERE { ?p <http://example.org/flag> true }" ] ;
+              sh:sparql [
+                sh:select "SELECT $this WHERE { $this <http://example.org/bad> true }" ;
+                sh:severity sh:Warning ;
+              ] .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let data = Graph::load_str(
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:x ex:flag true ; ex:bad true .
+            ex:y ex:bad true .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let model = ShapesModel::parse(&shapes);
+        // Only ex:x is selected by the SPARQL target (ex:y has no ex:flag).
+        assert_eq!(count_focus_nodes(&data, &model), 1);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "{}", r.to_text());
+        assert_eq!(r.results.len(), 1, "{}", r.to_text());
+        // The constraint-level sh:severity overrode the shape's default Violation.
+        assert!(r.results[0].severity.ends_with("Warning"), "{}", r.to_text());
     }
 
     /// The Turtle rendering must itself be valid Turtle.

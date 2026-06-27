@@ -65,9 +65,9 @@ For many data graphs against one shapes graph, parse once with
   `sh:equals`/`sh:disjoint`/`sh:lessThan`/`sh:lessThanOrEquals`, `sh:subsetOf`/
   `sh:someValue`/`sh:singleLine`/`sh:rootClass`, and severity-threshold `conforms`
   (default disallows {Violation,Warning,Info}) (sq-sx15d). The **full** vendored
-  1.2 suite is gated by a ratchet (sq-6glcr): core, SPARQL (incl. expected-rejection
-  `sht:Failure` entries) and node-expr pass counts must not drop and the gap must not
-  grow, in both feature states. The not-yet-passing entries are the honest gap map in
+  1.2 suite is gated by a ratchet (sq-6glcr): core / SPARQL (incl. expected-rejection
+  `sht:Failure` entries) / node-expr pass counts must not drop and the gap must not
+  grow, in both feature states — gap map in
   [`research/shacl12-conformance-gap.md`](../../research/shacl12-conformance-gap.md).
 - **SHACL-SPARQL + custom §6 components** — `sh:sparql` (§5.2) and SPARQL-based
   constraint *components* (custom `sh:ConstraintComponent` with `sh:parameter` /
@@ -78,13 +78,13 @@ For many data graphs against one shapes graph, parse once with
   `sh:expression` / `sh:nodeByExpression` constraints. Off ⇒ none of it compiles.
 - **Differential fuzzing** — a deterministic SplitMix64 fuzzer
   (`tests/diff_fuzz.rs`) cross-checks reports against pluggable reference engines
-  (pySHACL, Apache Jena SHACL, and the Zazuko / `rdf-validate-shacl` Node engines); it
-  is `#[ignore]`d and runs as a nightly CI lane, skipping cleanly when no reference
-  resolves.
+  (pySHACL, Apache Jena SHACL, the Zazuko / `rdf-validate-shacl` Node engines); it is
+  `#[ignore]`d, runs as a nightly CI lane, and skips cleanly when none resolves.
 - **Full path + target support** — all SHACL path forms (sequence / alternative /
   inverse / `zeroOrMore`·`oneOrMore`·`zeroOrOne`), `sh:targetNode`/`Class`/
-  `SubjectsOf`/`ObjectsOf` + implicit class targets, plus `sh:severity` / `sh:message` /
-  `sh:deactivated`.
+  `SubjectsOf`/`ObjectsOf` + implicit class targets, the SHACL-1.2 targets
+  `sh:targetWhere`/`sh:shape`/`sh:ShapeClass` + SPARQL-valued targets & value nodes
+  (`sh:select`/`sh:sparqlExpr`, sq-rnkdh), plus `sh:severity`/`sh:message`/`sh:deactivated`.
 - **SHACL Compact Syntax parser (opt-in `scs`)** — `parse_scs(text, base)` /
   `parse_scs_to_graph(text, base)` turn a [W3C SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/)
   document into the same shapes triples `validate` consumes (the *parse* direction of the
