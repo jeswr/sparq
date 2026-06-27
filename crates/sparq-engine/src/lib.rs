@@ -256,6 +256,11 @@ pub use chunk::{DataChunk, SelVec, VecCmp};
 // `exec.rs`, so no public surface is added. NON-DEFAULT `semijoin-bitmap` feature: when
 // off, zero of this code compiles and the default native + wasm builds are byte-identical
 // (no new dependencies — sparq-core + rustc-hash are already direct deps; no `unsafe`).
+//
+// [OPUS-4.8] (sq-5zf8i, survey §A4) The same module also hosts the PURE join-tree topology
+// (`build_join_tree`) of the opt-in `yannakakis` Yannakakis bottom-up full-semijoin prepass
+// for acyclic BGPs, which reuses `KeyFilter` for the exact membership test; `yannakakis`
+// implies `semijoin-bitmap`, so the module is available whenever the prepass is.
 #[cfg(feature = "semijoin-bitmap")]
 pub(crate) mod semijoin;
 

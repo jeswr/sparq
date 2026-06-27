@@ -176,6 +176,27 @@
   features: "semijoin-bitmap"
   test: true
 
+# [OPUS-4.8] sq-5zf8i (survey §A4): Yannakakis bottom-up full-semijoin PREPASS for acyclic
+# BGPs. The prepass driver (`eval_bgp_yannakakis` + `semijoin_reduce` + the `SjRelation`
+# materialised relation + the `YANNAKAKIS_MIN_REL` cost-gate in `exec.rs`) and the pure
+# join-tree builder (`semijoin::build_join_tree` + `TreeNode`, with its 5 in-src tests) plus
+# the 2 in-src `exec` engaged/cost-gate unit tests (`wcoj_tests::yannakakis_*`) are ALL
+# `#[cfg(feature = "yannakakis")]`, so the default build (and ci.yml's `--workspace
+# --all-targets` archive, which passes NO `--features`) compiled them EMPTY and ran ZERO of
+# them — the silent gap this lane closes. The end-to-end equivalence suite
+# `tests/yannakakis_differential.rs` is INTENTIONALLY NOT feature-gated (it runs in BOTH
+# states to prove on==off), but the in-src unit tests are gated and run ZERO times by
+# default. The feature IMPLIES `semijoin-bitmap` (it reuses `KeyFilter`); the off path is
+# byte-identical (no `not(feature=…)` divergence). No new dep (`yannakakis =
+# ["semijoin-bitmap"]`, only the already-direct sparq-core + rustc-hash; no `unsafe`), so a
+# single isolated leg covers it; verified `cargo test -p sparq-engine --features yannakakis`
+# runs the new unit + differential tests and `cargo clippy -p sparq-engine --all-targets
+# --features yannakakis -- -D warnings` is clean.
+- name: "sparq-engine (yannakakis)"
+  crate: "sparq-engine"
+  features: "yannakakis"
+  test: true
+
 # [OPUS-4.8] sq-townn (survey §A7): streaming Turtle / TriG serialisation. The whole
 # streaming surface (`write_turtle_streaming` / `write_trig_streaming` + the
 # `graph_to_*_streaming` wrappers, the per-subject-buffered `write_turtle_body_streaming`,
