@@ -436,7 +436,15 @@ conforms/violations).
   by resolving that import against a vendored, minimal pinned excerpt at
   `crates/sparq-shacl/tests/vendor/dash.ttl`. Full `sparql/pre-binding` semantics (rejecting
   variable re-binding, `$shapesGraph`) are out of scope — see the crate's open beads (`bd list -l area:sparq-shacl`).
-- **W3C conformance:** 98/98 of the core `sht:Validate` suite passes. Reproduce with
+- **W3C conformance:** 98/98 of the *1.0/1.1* core `sht:Validate` suite passes
+  (`--test w3c_core`). The **full vendored SHACL 1.2** tree is gated by a ratchet
+  (sq-6glcr) in BOTH feature states: full core **114/115** of 137
+  (`--test w3c_core_full_shacl12`), 1.2 SPARQL **10** of 24 incl. 7 expected-rejection
+  `sht:Failure` entries (`--test w3c_sparql_shacl12`), node-expr **65/65**
+  (`--test w3c_node_expr{,_constraints}`, `shacl-af`). Pass must not drop, the gap must
+  not grow — the not-yet-passing entries are the honest per-category gap map in
+  `research/shacl12-conformance-gap.md` (clustered into beads sq-sx15d / sq-rnkdh /
+  sq-mue75 / sq-0mjfd under epic sq-waf9o). Reproduce with
   `crates/sparq-shacl/fetch-shacl-tests.sh` then
   `cargo test -p sparq-shacl --test w3c_core` (self-skips if the gitignored suite is absent).
 - §6 SPARQL-based constraint *components* are implemented and tested
