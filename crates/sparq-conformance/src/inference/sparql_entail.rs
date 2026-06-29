@@ -477,3 +477,391 @@ fn add_rdfd2(dict: &mut Dict, ids: &mut Vec<[sparq_core::dict::Id; 3]>) {
         ids.push([p, ty, property]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-kuvu3 (epic sq-pbz04) — the EXPERIMENTAL OWL 2 QL (DL-Lite_R)
+// query-rewriting arm. Opt-in, `ql-experimental`.
+// ---------------------------------------------------------------------------
+
+/// The OWL profile IRI a test must list under `sd:EntailmentProfile` for the QL
+/// arm to attempt it.
+#[cfg(feature = "ql-experimental")]
+const PR_QL: &str = "http://www.w3.org/ns/owl-profile/QL";
+
+/// [OPUS-4.8] sq-kuvu3 — what the EXPERIMENTAL QL rewriting arm genuinely computed
+/// for one `pr:QL`-tagged entailment test. EVERY variant is reported in the
+/// `OutOfScope`/experimental bucket (never a graduated Pass/Fail that counts to a
+/// conformance rate or a ratchet floor), so a future QL regression can never
+/// silently claim OWL 2 QL conformance — yet the report still records, honestly,
+/// exactly what `sparq-reason-ql` produced.
+#[cfg(feature = "ql-experimental")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QlArmOutcome {
+    /// The rewriter ABSTAINED — the fail-closed CQ-shape gate (or a TBox/atom
+    /// mapping it cannot soundly handle) rejected the query as out of QL rewriting
+    /// scope. NEVER a guessed answer. Carries the rewriter's honest reason.
+    Abstained(String),
+    /// The query rewrote to a UCQ and its evaluation over the UNMODIFIED data was
+    /// RESULT-EQUIVALENT to the suite oracle (`disjuncts` = the minimised UCQ size).
+    /// Reported as experimental evidence, NOT a graduated conformance pass.
+    ComputedEquivalent { disjuncts: usize },
+    /// The query rewrote but its evaluation DIVERGED from the oracle (the honest
+    /// experimental gap — these are exactly the cases the deferred conformance-floor
+    /// graduation bead would have to close). Carries the observed mismatch.
+    ComputedDivergent { disjuncts: usize, detail: String },
+    /// The harness could not set the test up (e.g. a data/result parse error or a
+    /// missing result file) — distinct from an abstain, and never a pass.
+    Inconclusive(String),
+}
+
+#[cfg(feature = "ql-experimental")]
+impl QlArmOutcome {
+    /// The single-line `OutOfScope` reason this outcome is reported under. The
+    /// stable `QL experimental:` prefix lets the report group every QL row in one
+    /// experimental histogram bucket (and lets a reader see it is NOT a conformance
+    /// claim).
+    pub fn reason(&self) -> String {
+        match self {
+            QlArmOutcome::Abstained(why) => {
+                format!("QL experimental (abstain, fail-closed): {}", why)
+            }
+            QlArmOutcome::ComputedEquivalent { disjuncts } => format!(
+                "QL experimental (computed result-equivalent to oracle, UCQ {} disjunct(s); \
+                 NOT a graduated conformance pass)",
+                disjuncts
+            ),
+            QlArmOutcome::ComputedDivergent { disjuncts, detail } => format!(
+                "QL experimental (computed DIVERGENT from oracle, UCQ {} disjunct(s)): {}",
+                disjuncts, detail
+            ),
+            QlArmOutcome::Inconclusive(why) => format!("QL experimental (inconclusive): {}", why),
+        }
+    }
+}
+
+/// [OPUS-4.8] sq-kuvu3 — run the EXPERIMENTAL OWL 2 QL query-rewriting arm over the
+/// `pr:QL`-tagged tests of the `sparql11/entailment` suite and append one
+/// `OutOfScope`/experimental `TestResult` per case.
+///
+/// HONESTY CONTRACT (the load-bearing invariant this arm preserves):
+/// * NO FLOOR GRADUATION — every result lands in the `Outcome::OutOfScope`
+///   (experimental) bucket; the arm registers NO `scoreboard::SUITES` row and NO
+///   ratchet `const`, so it can never assert OWL 2 QL conformance.
+/// * FAIL-CLOSED PRESERVED — a query the rewriter cannot soundly rewrite (the
+///   fail-closed `CqError::OutOfScope` gate) is reported `Abstained`, never a
+///   guessed pass.
+/// * NO FAKED PASSES — the arm reports exactly what `sparq-reason-ql` computes:
+///   `ComputedEquivalent` only when the rewritten UCQ's evaluation over the
+///   UNMODIFIED data genuinely matches the oracle; an abstain / divergence / setup
+///   failure is reported as such, never inflated into a pass.
+///
+/// The suite key is `sparql11/entailment (QL experimental)` so these rows are
+/// visibly separate from the gating regime rows.
+#[cfg(feature = "ql-experimental")]
+pub fn run_ql_experimental_arm(
+    rdf_tests_root: &Path,
+    out: &mut Vec<TestResult>,
+) -> Result<(), String> {
+    let suites_root = rdf_tests_root
+        .join("sparql")
+        .canonicalize()
+        .map_err(|e| format!("rdf-tests sparql dir: {e}"))?;
+    let manifest_path = suites_root.join("sparql11/entailment/manifest.ttl");
+    let mut entries: Vec<TestEntry> = Vec::new();
+    manifest::collect(&manifest_path, &suites_root, &mut entries)?;
+
+    for entry in &entries {
+        if entry.kind != EntryKind::QueryEval {
+            continue;
+        }
+        // Select only the cases whose expected answers are sanctioned under OWL 2
+        // QL (`sd:EntailmentProfile` lists `pr:QL`). Everything else is left to the
+        // gating regime arms in `run_suite`.
+        if !entry.action.entailment_profiles.iter().any(|p| p == PR_QL) {
+            continue;
+        }
+        let outcome = ql_arm_one(entry);
+        out.push(TestResult {
+            suite: "sparql11/entailment (QL experimental)".into(),
+            name: entry.name.clone(),
+            // EVERY QL row is OutOfScope/experimental — never a graduated pass.
+            outcome: Outcome::OutOfScope(outcome.reason()),
+        });
+    }
+    Ok(())
+}
+
+/// Notes rendered under the QL experimental section (when the arm is wired into a
+/// report). Honest scoping: this is a query-rewriting EXPERIMENT, not a
+/// conformance-graduated regime.
+#[cfg(feature = "ql-experimental")]
+pub fn ql_experimental_notes() -> Vec<String> {
+    vec![
+        "EXPERIMENTAL OWL 2 QL (DL-Lite_R) query-rewriting arm (sq-kuvu3, opt-in \
+         `ql-experimental`). Each `sd:EntailmentProfile pr:QL` case is rewritten by \
+         `sparq_reason_ql::rewrite_production` (PerfectRef ∪ bounded tree-witness ∪ \
+         UCQ-containment minimisation) into a union of conjunctive queries that is \
+         evaluated over the UNMODIFIED data (the DL-Lite query-rewriting semantics — no \
+         materialised closure) and compared to the suite oracle. The TBox is read from \
+         the test's own data graph. EVERY row is reported in the experimental \
+         OUT-OF-SCOPE bucket: this arm is NOT a graduated conformance floor and asserts \
+         NO OWL 2 QL conformance — it records, honestly, exactly what the rewriter \
+         computes. The rewriter is sound-but-FAIL-CLOSED: a query outside the \
+         conjunctive-query fragment (OPTIONAL / FILTER / MINUS / UNION / a property path \
+         / aggregation / a variable predicate) is reported as an ABSTAIN, never a \
+         guessed pass. Computed result-equivalence is experimental evidence only; the \
+         graduation of QL to a pinned conformance floor is a separate, deferred bead \
+         (it must sequence through the contended conformance scoreboard)."
+            .to_string(),
+    ]
+}
+
+/// Run the EXPERIMENTAL QL arm for ONE `pr:QL` test and report what the rewriter
+/// genuinely computed. Pure (no global state); the watchdog mirrors the other
+/// runners so a rewriter hang/panic becomes a recorded `Inconclusive`, not a dead
+/// harness.
+#[cfg(feature = "ql-experimental")]
+fn ql_arm_one(entry: &TestEntry) -> QlArmOutcome {
+    // The QL entailment cases all use a single default-graph `qt:data` dataset
+    // (the same precondition `run_one` relies on); a named-graph dataset would
+    // need per-graph rewriting semantics, so report it inconclusive rather than
+    // silently rewrite over the wrong TBox.
+    if !entry.action.graph_data.is_empty() {
+        return QlArmOutcome::Inconclusive("named-graph QL dataset not wired".into());
+    }
+    let Some(query_path) = &entry.action.query else {
+        return QlArmOutcome::Inconclusive("manifest entry has no qt:query".into());
+    };
+    let Some(result_path) = &entry.result_file else {
+        return QlArmOutcome::Inconclusive("manifest entry has no mf:result".into());
+    };
+
+    // Load the test's data triples — these carry BOTH the ABox and the (DL-Lite_R)
+    // TBox the rewriter extracts from. Blank-node labels are irrelevant to the
+    // schema axioms, so a plain triple parse suffices.
+    let mut tbox: Vec<oxrdf::Triple> = Vec::new();
+    for d in &entry.action.data {
+        match crate::rdf::parse_file(d) {
+            Ok(triples) => tbox.extend(triples),
+            // Positional `format!` args (not inline `{e}`) per the CodeQL
+            // `rust/unused-variable` false-positive guard in the shared agent contract.
+            Err(e) => return QlArmOutcome::Inconclusive(format!("data parse error: {}", e)),
+        }
+    }
+
+    let query_text = match std::fs::read_to_string(query_path) {
+        Ok(t) => t,
+        Err(e) => return QlArmOutcome::Inconclusive(format!("read query: {}", e)),
+    };
+    let base = crate::rdf::file_iri(query_path);
+    let parser = match SparqlParser::new().with_base_iri(&base) {
+        Ok(p) => p,
+        Err(e) => return QlArmOutcome::Inconclusive(format!("bad base IRI: {}", e)),
+    };
+    let query = match parser.parse_query(&query_text) {
+        Ok(q) => q,
+        Err(e) => return QlArmOutcome::Inconclusive(format!("query parse error: {}", e)),
+    };
+
+    // Rewrite under a watchdog: a rewriter hang/panic is a recorded Inconclusive.
+    let q_for_thread = query.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(move || {
+            sparq_reason_ql::rewrite_production(&q_for_thread, &tbox)
+        });
+        let _ = tx.send(result);
+    });
+    let rewritten = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+        Ok(Ok(Ok(r))) => r,
+        // FAIL-CLOSED: the rewriter rejected a non-CQ / unsupported query — abstain,
+        // never a guessed answer.
+        Ok(Ok(Err(e))) => return QlArmOutcome::Abstained(e.to_string()),
+        Ok(Err(_)) => return QlArmOutcome::Inconclusive("rewriter panicked".into()),
+        Err(_) => return QlArmOutcome::Inconclusive("rewriter timeout (20s)".into()),
+    };
+
+    // Evaluate the rewritten UCQ over the UNMODIFIED data and compare to the
+    // oracle. The rewritten query serialises to standard SPARQL and runs through
+    // the SAME engine the gating harness uses — but we report ONLY experimentally.
+    let disjuncts = rewritten.report.disjuncts;
+    match ql_eval_matches_oracle(entry, &rewritten.query, result_path) {
+        Ok(true) => QlArmOutcome::ComputedEquivalent { disjuncts },
+        Ok(false) => QlArmOutcome::ComputedDivergent {
+            disjuncts,
+            detail: "rewritten-UCQ answers differ from the oracle".into(),
+        },
+        Err(e) => QlArmOutcome::Inconclusive(e),
+    }
+}
+
+/// Evaluate a REWRITTEN UCQ over the test's UNMODIFIED default-graph data and
+/// report whether the answers are result-equivalent to the suite oracle. SELECT
+/// and ASK only (the entailment suite is all SELECT/ASK). Runs the engine on a
+/// watchdog thread, like the sibling runners.
+#[cfg(feature = "ql-experimental")]
+fn ql_eval_matches_oracle(
+    entry: &TestEntry,
+    rewritten: &spargebra::Query,
+    result_path: &Path,
+) -> Result<bool, String> {
+    use crate::compare::Row;
+    use crate::results::Expected;
+    use std::collections::BTreeSet;
+
+    let expected = crate::results::parse_expected(result_path)?;
+
+    // Build the default-graph dataset from the UNMODIFIED data files.
+    let mut nquads = String::new();
+    for d in &entry.action.data {
+        // Positional `format!` args per the CodeQL `rust/unused-variable` guard.
+        for t in crate::rdf::parse_file(d).map_err(|e| format!("data parse: {}", e))? {
+            nquads.push_str(&format!("{} {} {} .\n", t.subject, t.predicate, t.object));
+        }
+    }
+    // The rewritten query serialises to standard SPARQL (a UNION-folded UCQ under
+    // the original projection); run it through the engine unchanged.
+    let query_str = rewritten.to_string();
+
+    let is_ask = matches!(rewritten, spargebra::Query::Ask { .. });
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| {
+            let graph = sparq_core::Graph::load_dataset(&nquads, "nquads")?;
+            if is_ask {
+                let b = sparq_engine::ask(&graph, &query_str)?;
+                Ok::<_, String>((true, b, Vec::new(), Vec::new()))
+            } else {
+                let res = sparq_engine::query(&graph, &query_str)?;
+                let vars: Vec<String> = res.vars.iter().map(|v| v.as_str().to_string()).collect();
+                Ok((false, false, vars, res.rows))
+            }
+        })();
+        let _ = tx.send(result);
+    });
+    let (was_ask, ask_bool, actual_vars, actual_rows) =
+        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(format!("engine error: {}", e)),
+            Err(_) => return Err("engine timeout/panic (20s)".into()),
+        };
+
+    if was_ask {
+        return match expected {
+            Expected::Boolean(b) => Ok(ask_bool == b),
+            Expected::Bindings { .. } => Err("expected bindings, rewritten query is ASK".into()),
+        };
+    }
+    let (exp_vars, exp_rows) = match expected {
+        Expected::Bindings { vars, rows, .. } => (vars, rows),
+        Expected::Boolean(_) => return Err("expected boolean, rewritten query is SELECT".into()),
+    };
+
+    // Align both sides on a shared variable order, then compare as multisets (the
+    // QL entailment queries are unordered).
+    let mut all_vars: BTreeSet<String> = actual_vars.iter().cloned().collect();
+    all_vars.extend(exp_vars.iter().cloned());
+    for row in &exp_rows {
+        all_vars.extend(row.iter().map(|(v, _)| v.clone()));
+    }
+    let order: Vec<String> = all_vars.into_iter().collect();
+    let exp: Vec<Row> = exp_rows
+        .iter()
+        .map(|r| {
+            order
+                .iter()
+                .map(|v| r.iter().find(|(name, _)| name == v).map(|(_, t)| t.clone()))
+                .collect()
+        })
+        .collect();
+    let act: Vec<Row> = actual_rows
+        .iter()
+        .map(|r| {
+            order
+                .iter()
+                .map(|v| {
+                    actual_vars
+                        .iter()
+                        .position(|av| av == v)
+                        .and_then(|i| r.get(i).cloned().flatten())
+                })
+                .collect()
+        })
+        .collect();
+    crate::compare::rows_equal(&exp, &act, false)
+}
+
+// [OPUS-4.8] sq-kuvu3 — DIRECT unit tests for the new public QL-arm surface (the
+// coverage-ratchet rule: one direct test per new public fn). These are hermetic
+// (no fetched fixtures) and assert the HONESTY INVARIANTS the arm must preserve.
+#[cfg(all(test, feature = "ql-experimental"))]
+mod ql_tests {
+    use super::*;
+
+    #[test]
+    fn outcome_reason_strings_never_claim_conformance() {
+        // Every QL outcome's reason must carry the experimental marker AND must
+        // never read as a graduated conformance pass.
+        let abstain = QlArmOutcome::Abstained("BIND (Extend) is not conjunctive".into());
+        assert!(abstain.reason().contains("QL experimental"));
+        assert!(abstain.reason().contains("fail-closed"));
+
+        let equiv = QlArmOutcome::ComputedEquivalent { disjuncts: 2 };
+        let r = equiv.reason();
+        assert!(r.contains("QL experimental"));
+        // The load-bearing disclaimer: equivalence is evidence, NOT a graduated pass.
+        assert!(r.contains("NOT a graduated conformance pass"));
+        assert!(r.contains("2 disjunct"));
+
+        let div = QlArmOutcome::ComputedDivergent {
+            disjuncts: 1,
+            detail: "rewritten-UCQ answers differ from the oracle".into(),
+        };
+        assert!(div.reason().contains("DIVERGENT"));
+        assert!(div.reason().contains("QL experimental"));
+
+        let inc = QlArmOutcome::Inconclusive("named-graph QL dataset not wired".into());
+        assert!(inc.reason().contains("inconclusive"));
+    }
+
+    #[test]
+    fn ql_experimental_notes_disclaim_a_conformance_floor() {
+        let notes = ql_experimental_notes();
+        assert_eq!(notes.len(), 1);
+        let n = &notes[0];
+        // The honest scoping note: experimental, fail-closed, NOT a conformance floor.
+        assert!(n.contains("EXPERIMENTAL"));
+        assert!(n.contains("NOT a graduated conformance floor"));
+        assert!(n.contains("FAIL-CLOSED"));
+        assert!(n.contains("ABSTAIN"));
+    }
+
+    #[test]
+    fn arm_reports_only_out_of_scope_rows() {
+        // The arm appends ONLY OutOfScope (experimental) rows — never a Pass / Fail /
+        // Divergence that would count toward a conformance rate or ratchet floor.
+        // (Drive it over the fixtures when present; otherwise this asserts the
+        // contract vacuously on an empty run — the floor invariant holds either way.)
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/w3c/rdf-tests");
+        if !root.join("sparql/sparql11/entailment/manifest.ttl").exists() {
+            eprintln!("SKIP: rdf-tests entailment fixtures absent");
+            return;
+        }
+        let mut out: Vec<TestResult> = Vec::new();
+        run_ql_experimental_arm(&root, &mut out).expect("QL arm runs");
+        assert!(!out.is_empty(), "the suite has pr:QL-tagged tests");
+        for r in &out {
+            assert!(
+                matches!(r.outcome, Outcome::OutOfScope(_)),
+                "QL arm emitted a non-OutOfScope row ({:?}) — that would risk a faked \
+                 conformance pass / floor graduation",
+                r.outcome
+            );
+            // Every reason carries the stable experimental marker.
+            if let Outcome::OutOfScope(reason) = &r.outcome {
+                assert!(reason.starts_with("QL experimental"), "reason: {reason}");
+            }
+        }
+    }
+}

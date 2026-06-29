@@ -71,10 +71,15 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
 
 **Scope (honest):** positive-inclusion rewriting + tree-witness folding + containment minimisation.
 **No consistency checking**, no qualified existentials. The regime stays **EXPERIMENTAL**: it is
-oracle-tested (`tests/oracle.rs`, incl. the tree-witness + minimisation cases), **not** graduated
-to a conformance floor — that graduation is a separate, deferred bead (it must sequence through the
-contended conformance scoreboard; epic `sq-pbz04`). Enable with `sparq-reason-ql = { version =
-"0.1", features = ["experimental"] }`.
+oracle-tested (`tests/oracle.rs`, incl. the tree-witness + minimisation cases). It is **wired into
+the conformance entailment-regime suite as experimental / OutOfScope** (sq-kuvu3, opt-in
+`sparq-conformance/ql-experimental`): the rewriter runs over the `sd:EntailmentProfile pr:QL`
+`sparql11/entailment` cases and the harness reports — honestly — what it computes (fail-closed
+ABSTAIN / computed-equivalent evidence / computed-DIVERGENT gap), **never a graduated conformance
+pass**. It is **not** graduated to a conformance floor: there is no scoreboard ratchet, so QL cannot
+silently claim conformance — that graduation is a separate, deferred bead (it must sequence through
+the contended conformance scoreboard; epic `sq-pbz04`). Enable the crate with `sparq-reason-ql =
+{ version = "0.1", features = ["experimental"] }`.
 
 ## 📚 Learn more
 
