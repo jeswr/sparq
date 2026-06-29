@@ -7,13 +7,14 @@ common to both the query engine and every reasoner: the id-tuple **row/key** voc
 the XSD **numeric value tower**. Placing them in a leaf crate lets both consumers reach them
 with **no dependency cycle**, while keeping `sparq-core` and the lean wasm bundle untouched.
 
-> **Scaffold status (sq-fmprw — Phase 1 of the epic).** This crate currently defines /
-> re-exports the shared **types** only; **no evaluation logic has moved yet**. The join
-> kernels (merge / hash / bind / leapfrog-trie) and the engine's `compare_values` total
-> order + `Num` arithmetic land in later beads. Nothing in the workspace depends on this
-> crate yet, so the default engine build does not even compile it. See
-> `research/shared-eval-substrate.md` for the full extraction plan and the perf-neutrality
-> proof strategy.
+> **Status (epic sq-qonbz).** The id-tuple **row/key** vocabulary (`rows`, sq-fmprw) and the
+> XSD **numeric value tower** (`numeric`, sq-ev41x — the `Num` / `Dec` types, the arithmetic /
+> rounding ops, the exact XSD lexical parsers, `as_numeric`, and `num_compare`) have MOVED here
+> from `sparq-engine::exec`; `sparq-engine` now consumes them. Each move is **behaviour-neutral**
+> (the engine computes bit-identical answers — validated by the W3C SPARQL conformance floor).
+> Still to land in later beads: the join kernels (merge / hash / bind / leapfrog-trie) and the
+> full `compare_values` total order over the engine's value type. See
+> `research/shared-eval-substrate.md` for the full extraction plan and perf-neutrality proof.
 
 ## 🚀 Quickstart
 

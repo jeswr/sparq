@@ -3668,6 +3668,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-introspect",
+ "sparq-substrate",
  "ureq",
  "uuid",
 ]

@@ -10,12 +10,13 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
-# [OPUS-4.8] sq-fmprw: a Phase-1 SCAFFOLD with zero runtime logic and nothing depending on
-# it yet — there is nothing to publish, benchmark, or expose a user-facing SKILL surface
-# for. `publish = false` marks it the intentional stub the new-crate-completeness gate (G1)
-# documents: exempt from the registered-benchmark + SKILL.md requirements until the eval
-# kernels actually move here (epic sq-qonbz Phase 2+, sq-ev41x). FLIP this to publishable —
-# and add the micro-bench + SKILL surface — in the bead that lands the first real logic.
+# [OPUS-4.8] sq-ev41x: the XSD numeric value tower (`numeric`) has now MOVED here, but the
+# crate is still consumed ONLY by `sparq-engine` internally — it is NOT yet a standalone
+# published or reasoner-shared user-facing surface (the reasoners adopt the shared JOIN kernels
+# in a later epic phase). `publish = false` keeps it the intentional internal stub the
+# new-crate-completeness gate (G1) documents: exempt from the registered-benchmark + SKILL.md
+# requirements. FLIP this to publishable — and add the micro-bench + SKILL surface — in the
+# JOIN-kernel-move bead (Phase 3), when the reasoners actually adopt it as a shared API.
 publish = false
 
 # [OPUS-4.8] Render README.md as the docs.rs front page (lib.rs uses include_str!).
@@ -26,12 +27,13 @@ all-features = true
 # unblocks the substrate move-chain (research/shared-eval-substrate.md, Option C). It
 # depends ONLY on sparq-core (NOT sparq-engine) so BOTH the engine AND the reasoners
 # (sparq-reason / sparq-reason-el, which depend only on sparq-core) can later consume it
-# with NO dependency cycle. This crate is a SCAFFOLD: it defines / re-exports the shared
-# id-tuple vocabulary and the numeric value tower, behind DEFAULT-OFF features, with NO
-# evaluation logic moved yet (the join kernels + the engine `compare_values`/`Num`
-# arithmetic land in later beads of the epic). Nothing in the workspace depends on it, so
-# the lean default / wasm build does not compile any of it and the wasm_bundle_bytes floor
-# stays byte-identical (Phase-1 acceptance, research record §7.1).
+# with NO dependency cycle. It defines / re-exports the shared id-tuple vocabulary and now
+# HOSTS the XSD numeric value tower (the `Num`/`Dec` types, arithmetic, exact XSD lexical
+# parsers, `as_numeric`, `num_compare`) MOVED from `sparq-engine::exec` (sq-ev41x), behind
+# DEFAULT-OFF features. The join kernels + the full `compare_values` total order land in later
+# beads. The lean core/wasm build never pulls this crate by default; `sparq-engine` turns the
+# `numeric` feature ON for itself, so the move is behaviour-neutral and the wasm bundle stays
+# within the perf-gate band (research record §5/§7.2).
 
 [features]
 # DEFAULT-OFF by construction: the lean core/engine/wasm build must compile NONE of this

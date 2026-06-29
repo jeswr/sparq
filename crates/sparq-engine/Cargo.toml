@@ -204,6 +204,15 @@ yannakakis = ["semijoin-bitmap"]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+# [OPUS-4.8] sq-ev41x (epic sq-qonbz, Phase 2): the shared XSD numeric value tower
+# (`Num` / `Dec` / arithmetic / `as_numeric` / `num_compare`) MOVED out of `exec.rs` into the
+# leaf substrate crate so the reasoners can later share it without depending on the engine. The
+# engine ALWAYS needs the tower, so it turns the substrate's default-OFF `numeric` feature ON for
+# itself — the substrate's own default stays empty, keeping the lean wasm/core build (which never
+# pulls sparq-substrate) byte-identical. A behaviour-neutral code move: with `lto = "fat"` the
+# tower compiles to the same code it did in-crate. `oxrdf` (which the tower's `as_numeric`
+# classifies) is already a direct engine dep, so this pulls ZERO new external crates.
+sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-features = false, features = ["numeric"] }
 oxrdf.workspace = true
 spargebra.workspace = true
 # Relative-IRI resolution for IRI()/URI() against the query's BASE (already in the
