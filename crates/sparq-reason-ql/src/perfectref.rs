@@ -1,0 +1,535 @@
+// [OPUS-4.8] sq-t5bne (epic sq-pbz04): PerfectRef — the OWL 2 QL (DL-Lite_R) query-rewriting
+// core (Calvanese, De Giacomo, Lembo, Lenzerini, Rosati, JAR 39(3) 2007).
+//
+// Given a conjunctive query q and a DL-Lite_R TBox T, PerfectRef saturates a SET of CQs (a
+// union of conjunctive queries, UCQ) to a fixpoint under two operations, so that evaluating the
+// UCQ over the UNMODIFIED data returns exactly the CERTAIN answers of q under T:
+//
+//   (a) REWRITE — apply a positive inclusion of T BACKWARD to one atom of a CQ:
+//         A1 ⊑ A2   and atom A2(x)          ⇒  A1(x)
+//         ∃R  ⊑ A   and atom A(x)           ⇒  R(x, _)
+//         ∃R⁻ ⊑ A   and atom A(x)           ⇒  R(_, x)
+//         A  ⊑ ∃R   and atom R(x, _)        ⇒  A(x)        (object MUST be unbound — see below)
+//         A  ⊑ ∃R⁻  and atom R(_, x)        ⇒  A(x)        (subject MUST be unbound)
+//         R1 ⊑ R2   and atom R2(x,y)        ⇒  R1(x,y)     (with inverse direction handling)
+//   (b) REDUCE — unify two atoms of a CQ (most-general unifier), then ANONYMISE: a variable that
+//       becomes non-shared and non-distinguished turns into `_`, which can RE-ENABLE rewrites.
+//
+// THE LOAD-BEARING APPLICABILITY CONDITION (the #1 unsoundness trap, and the reason the
+// CQ-shape gate exists): an existential-INTRODUCING inclusion (`A ⊑ ∃R`, `∃R ⊑ A`, …) may be
+// applied to an atom ONLY when the variable in the existential-bound position is `_` — i.e. an
+// UNBOUND, NON-DISTINGUISHED, NON-SHARED variable. Applying it to a bound/shared/answer variable
+// would unsoundly drop the join the variable participates in. This module enforces that
+// condition explicitly in [`applicable_to_role`] / the class-atom rewrite, and tracks unbound
+// positions precisely. Mis-gating here SILENTLY loses or invents answers, so the logic is kept
+// small, total, and oracle-tested against a hand-checked DL-Lite reference.
+
+use crate::dllite::{Basic, Role, TBox};
+use rustc_hash::FxHashSet;
+
+/// A term in a rewritten CQ atom.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Term {
+    /// A named (distinguished or shared) variable — identity is its name.
+    Var(String),
+    /// A constant IRI (a bound answer constant from the original query).
+    Const(String),
+    /// An UNBOUND `_` — a fresh existential that occurs in exactly one position of the CQ. Each
+    /// carries a unique id so two `_`s are never accidentally identified. This is the symbol the
+    /// existential applicability condition turns on.
+    Unbound(u32),
+}
+
+impl Term {
+    /// Whether this term is an unbound `_` existential (the position an existential-introducing
+    /// inclusion may consume). Used by the oracle tests to assert on rewrite output.
+    #[cfg(test)]
+    pub fn is_unbound(&self) -> bool {
+        matches!(self, Term::Unbound(_))
+    }
+}
+
+/// A rewritten atom: either a class atom `A(t)` or a role atom `R(t1, t2)`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Atom {
+    Class { class: String, arg: Term },
+    Role { role: Role, s: Term, o: Term },
+}
+
+/// A conjunctive query in the rewriter's working form: a set of body atoms plus the set of
+/// distinguished (answer) variable NAMES. Stored as a sorted Vec so two structurally-equal CQs
+/// hash/compare equal regardless of construction order (the fixpoint dedup relies on this).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Cq {
+    pub atoms: Vec<Atom>,
+    pub answer: Vec<String>,
+}
+
+impl Cq {
+    fn normalised(mut atoms: Vec<Atom>, answer: Vec<String>) -> Cq {
+        atoms.sort();
+        atoms.dedup();
+        Cq { atoms, answer }
+    }
+}
+
+/// A monotone counter handing out fresh `_` ids so every introduced existential is distinct.
+struct Fresh(u32);
+impl Fresh {
+    fn next(&mut self) -> Term {
+        let t = Term::Unbound(self.0);
+        self.0 += 1;
+        t
+    }
+}
+
+/// Whether a variable NAME is "bound" in `cq`: it is distinguished (an answer var) OR it is
+/// shared (occurs in ≥2 atom positions). The existential applicability condition forbids firing
+/// on a bound variable; an `_` (Unbound) is never bound by definition.
+fn is_bound_var(cq: &Cq, name: &str) -> bool {
+    if cq.answer.iter().any(|a| a == name) {
+        return true;
+    }
+    let mut count = 0usize;
+    for a in &cq.atoms {
+        match a {
+            Atom::Class { arg, .. } => {
+                if matches!(arg, Term::Var(v) if v == name) {
+                    count += 1;
+                }
+            }
+            Atom::Role { s, o, .. } => {
+                if matches!(s, Term::Var(v) if v == name) {
+                    count += 1;
+                }
+                if matches!(o, Term::Var(v) if v == name) {
+                    count += 1;
+                }
+            }
+        }
+        if count >= 2 {
+            return true;
+        }
+    }
+    false
+}
+
+/// A term position is "_-eligible" (may be consumed by an existential-introducing inclusion) iff
+/// it is an `Unbound`, OR a `Var` that is neither distinguished nor shared (so it is morally a
+/// `_`). Constants are never eligible.
+fn underscore_eligible(cq: &Cq, t: &Term) -> bool {
+    match t {
+        Term::Unbound(_) => true,
+        Term::Var(name) => !is_bound_var(cq, name),
+        Term::Const(_) => false,
+    }
+}
+
+/// PerfectRef: rewrite the conjunctive query `q` (given as body atoms + answer variable names)
+/// under TBox `T` into the UCQ of certain-answer-preserving CQs. Returns the set of CQs (the
+/// input query is always included). Deterministic ordering is imposed at emission, not here.
+pub fn perfect_ref(atoms: Vec<Atom>, answer: Vec<String>, tbox: &TBox) -> Vec<Cq> {
+    let mut fresh = Fresh(seed_fresh(&atoms));
+    let start = Cq::normalised(atoms, answer);
+    let mut seen: FxHashSet<Cq> = FxHashSet::default();
+    let mut worklist: Vec<Cq> = vec![start.clone()];
+    seen.insert(start);
+
+    while let Some(cq) = worklist.pop() {
+        // (a) REWRITE every atom by every applicable positive inclusion.
+        for (i, atom) in cq.atoms.iter().enumerate() {
+            for rewritten in rewrite_atom(&cq, atom, tbox, &mut fresh) {
+                let mut new_atoms = cq.atoms.clone();
+                new_atoms[i] = rewritten;
+                push_cq(Cq::normalised(new_atoms, cq.answer.clone()), &mut seen, &mut worklist);
+            }
+        }
+        // (b) REDUCE: unify each unordered pair of atoms; anonymise; re-add.
+        let n = cq.atoms.len();
+        for a in 0..n {
+            for b in (a + 1)..n {
+                if let Some(reduced) = reduce(&cq, a, b) {
+                    push_cq(reduced, &mut seen, &mut worklist);
+                }
+            }
+        }
+    }
+
+    seen.into_iter().collect()
+}
+
+fn push_cq(cq: Cq, seen: &mut FxHashSet<Cq>, worklist: &mut Vec<Cq>) {
+    if seen.insert(cq.clone()) {
+        worklist.push(cq);
+    }
+}
+
+/// Seed the fresh-id counter above any `Unbound` already present (there are none in a parsed
+/// query, but keep the API total).
+fn seed_fresh(atoms: &[Atom]) -> u32 {
+    let mut max = 0u32;
+    let mut bump = |t: &Term| {
+        if let Term::Unbound(id) = t {
+            max = max.max(id + 1);
+        }
+    };
+    for a in atoms {
+        match a {
+            Atom::Class { arg, .. } => bump(arg),
+            Atom::Role { s, o, .. } => {
+                bump(s);
+                bump(o);
+            }
+        }
+    }
+    max
+}
+
+/// All single-atom rewrites of `atom` in `cq` under every applicable positive inclusion of T.
+fn rewrite_atom(cq: &Cq, atom: &Atom, tbox: &TBox, fresh: &mut Fresh) -> Vec<Atom> {
+    let mut out = Vec::new();
+    match atom {
+        Atom::Class { class, arg } => {
+            for incl in &tbox.concept_incl {
+                if &incl.sup != class {
+                    continue;
+                }
+                // B ⊑ A, atom A(arg) ⇒ depends on the shape of B.
+                match &incl.sub {
+                    Basic::Class(b) => {
+                        // A1 ⊑ A2: always applicable (no existential introduced).
+                        out.push(Atom::Class {
+                            class: b.clone(),
+                            arg: arg.clone(),
+                        });
+                    }
+                    Basic::Exists(role) => {
+                        // ∃R ⊑ A: A(x) ⇒ R(x, _). Introduces an existential in the OBJECT
+                        // position — always sound (the `_` is brand new and unshared); the
+                        // applicability restriction is on CONSUMING an existential, not on
+                        // INTRODUCING one. (Calvanese et al.: the gr() function.)
+                        let under = fresh.next();
+                        out.push(role_atom(role, arg.clone(), under));
+                    }
+                }
+            }
+        }
+        Atom::Role { role, s, o } => {
+            // Existential-GENERATING super-inclusions: B ⊑ ∃R, atom R(x, _) ⇒ B(x) (object
+            // unbound), or via inverse B ⊑ ∃R⁻, atom R(_, x) ⇒ B(x) (subject unbound). The
+            // APPLICABILITY CONDITION lives here: the existential-bound position must be `_`.
+            for (sub_b, gen_role) in &tbox.exists_super {
+                // R(x,y) is generated by `B ⊑ ∃gen_role`. Match the atom's role against gen_role
+                // (and gen_role's inverse), and require the FILLER position to be `_`-eligible.
+                if let Some(named_arg) = applicable_exists_super(cq, role, s, o, gen_role) {
+                    out.push(class_or_role_basic(sub_b, named_arg, fresh));
+                }
+            }
+            // Role inclusions R1 ⊑ R2: atom R2(x,y) ⇒ R1(x,y), honouring inverse direction.
+            for (r1, r2) in &tbox.role_incl {
+                if let Some(sub_atom) = apply_role_inclusion(role, s, o, r1, r2) {
+                    out.push(sub_atom);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Build the body atom for `R(s, o)` accounting for the role's direction: an inverse role swaps
+/// subject/object so the underlying NAMED property is always stored forward.
+fn role_atom(role: &Role, s: Term, o: Term) -> Atom {
+    if role.inverse {
+        Atom::Role {
+            role: Role::named(role.iri.clone()),
+            s: o,
+            o: s,
+        }
+    } else {
+        Atom::Role {
+            role: role.clone(),
+            s,
+            o,
+        }
+    }
+}
+
+/// For an existential-generating inclusion `B ⊑ ∃gen_role`, decide whether the role atom
+/// `R(s,o)` (role direction in `role`) is rewritable to `B(x)`, returning the SURVIVING bound
+/// term `x` if so. Requires the FILLER (the position the existential binds) to be `_`-eligible.
+///
+/// Normalise the atom to the forward named property first: if `role` is forward, the pair is
+/// (s, o); if inverse, (o, s). Then `∃P` (gen_role forward) binds the OBJECT — so object must be
+/// `_`, surviving term is the subject; `∃P⁻` (gen_role inverse) binds the SUBJECT — subject must
+/// be `_`, surviving term is the object.
+fn applicable_exists_super(
+    cq: &Cq,
+    role: &Role,
+    s: &Term,
+    o: &Term,
+    gen_role: &Role,
+) -> Option<Term> {
+    // Same NAMED property required.
+    if role.iri != gen_role.iri {
+        return None;
+    }
+    // Forward (subj, obj) of the underlying named property P.
+    let (subj, obj) = if role.inverse { (o, s) } else { (s, o) };
+    if gen_role.inverse {
+        // ∃P⁻ binds the SUBJECT of P: subject must be `_`, surviving term is the object.
+        if underscore_eligible(cq, subj) {
+            Some(obj.clone())
+        } else {
+            None
+        }
+    } else {
+        // ∃P binds the OBJECT of P: object must be `_`, surviving term is the subject.
+        if underscore_eligible(cq, obj) {
+            Some(subj.clone())
+        } else {
+            None
+        }
+    }
+}
+
+/// Build the rewritten atom for `B ⊑ ∃R` consumed on a role atom, where `arg` is the surviving
+/// bound term: if B is a named class → `B(arg)`; if B is `∃S` → `S(arg, _)`.
+fn class_or_role_basic(b: &Basic, arg: Term, fresh: &mut Fresh) -> Atom {
+    match b {
+        Basic::Class(c) => Atom::Class {
+            class: c.clone(),
+            arg,
+        },
+        Basic::Exists(role) => role_atom(role, arg, fresh.next()),
+    }
+}
+
+/// Apply a role inclusion `r1 ⊑ r2` backward to atom `R(s,o)` (role direction in `role`):
+/// if the atom's role is `r2` (same direction), rewrite to `r1`; if it is `r2⁻`, rewrite to
+/// `r1⁻`. Inverse directions are handled by comparing the (iri, inverse) pair both ways.
+fn apply_role_inclusion(role: &Role, s: &Term, o: &Term, r1: &Role, r2: &Role) -> Option<Atom> {
+    if role == r2 {
+        // Same direction: replace role with r1, keep (s,o), then forward-normalise.
+        Some(role_atom(r1, s.clone(), o.clone()))
+    } else if role == &r2.inv() {
+        // The atom uses the inverse of r2; the inclusion then yields r1 inverted, with the
+        // atom's (s,o) preserved (the double inverse cancels at the named-property level).
+        Some(role_atom(&r1.inv(), s.clone(), o.clone()))
+    } else {
+        None
+    }
+}
+
+/// REDUCE: attempt to unify atoms `a` and `b` of `cq` (must be the same predicate/arity/role),
+/// apply the most-general unifier across the whole query, then ANONYMISE — any variable that, in
+/// the unified query, is neither distinguished nor shared becomes a fresh `_`. Returns the
+/// reduced CQ, or `None` if the two atoms do not unify.
+fn reduce(cq: &Cq, a: usize, b: usize) -> Option<Cq> {
+    let pairs = atom_unify_pairs(&cq.atoms[a], &cq.atoms[b])?;
+    // Build a substitution Var -> Term via union-find-free direct binding (DL-Lite atoms are
+    // binary so the substitution is tiny). A const-vs-different-const clash fails the unify.
+    let mut subst: Vec<(String, Term)> = Vec::new();
+    for (x, y) in pairs {
+        if !unify_terms(&x, &y, &mut subst) {
+            return None;
+        }
+    }
+    // Apply substitution to every atom, then drop atom `b` (now equal to `a` after unification).
+    let mut atoms: Vec<Atom> = cq
+        .atoms
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != b)
+        .map(|(_, at)| apply_subst_atom(at, &subst))
+        .collect();
+    let answer = cq.answer.clone();
+    // Anonymise: a Var that is non-distinguished and now occurs only once → `_`.
+    anonymise(&mut atoms, &answer);
+    Some(Cq::normalised(atoms, answer))
+}
+
+/// The position-wise term pairs that must unify for two atoms to be unifiable (same predicate /
+/// same role direction). `None` if the atoms are not the same predicate shape.
+fn atom_unify_pairs(a: &Atom, b: &Atom) -> Option<Vec<(Term, Term)>> {
+    match (a, b) {
+        (
+            Atom::Class { class: c1, arg: a1 },
+            Atom::Class { class: c2, arg: a2 },
+        ) if c1 == c2 => Some(vec![(a1.clone(), a2.clone())]),
+        (
+            Atom::Role {
+                role: r1,
+                s: s1,
+                o: o1,
+            },
+            Atom::Role {
+                role: r2,
+                s: s2,
+                o: o2,
+            },
+        ) if r1 == r2 => Some(vec![(s1.clone(), s2.clone()), (o1.clone(), o2.clone())]),
+        _ => None,
+    }
+}
+
+/// Unify two terms into `subst`, treating `Var` and `Unbound` as unifiable variables and `Const`
+/// as rigid. Returns false on a const/const clash. (A tiny, total unifier — DL-Lite has no
+/// function symbols, so no occurs-check is needed.)
+fn unify_terms(x: &Term, y: &Term, subst: &mut Vec<(String, Term)>) -> bool {
+    let xr = resolve(x, subst);
+    let yr = resolve(y, subst);
+    match (&xr, &yr) {
+        (Term::Const(c1), Term::Const(c2)) => c1 == c2,
+        (Term::Var(v), _) => {
+            if xr != yr {
+                subst.push((v.clone(), yr));
+            }
+            true
+        }
+        (_, Term::Var(v)) => {
+            if xr != yr {
+                subst.push((v.clone(), xr));
+            }
+            true
+        }
+        // Unbound unifies with Unbound/Const by binding via a synthesised var name? Unbound has
+        // no name; two distinct `_` reducing is itself anonymisation. Treat Unbound as unifiable
+        // with anything: prefer the more-specific side. Represent the Unbound binding by leaving
+        // it (the anonymise pass cleans up). Distinct Unbound/Const: bind nothing here; the
+        // surviving atom keeps the const (handled by apply_subst over the kept atom `a`/`b`).
+        (Term::Unbound(_), _) | (_, Term::Unbound(_)) => true,
+    }
+}
+
+fn resolve(t: &Term, subst: &[(String, Term)]) -> Term {
+    let mut cur = t.clone();
+    // Follow var bindings to a fixpoint (linear; chains are short).
+    loop {
+        match &cur {
+            Term::Var(v) => {
+                if let Some((_, to)) = subst.iter().rev().find(|(name, _)| name == v) {
+                    let next = to.clone();
+                    if next == cur {
+                        return cur;
+                    }
+                    cur = next;
+                } else {
+                    return cur;
+                }
+            }
+            _ => return cur,
+        }
+    }
+}
+
+fn apply_subst_atom(a: &Atom, subst: &[(String, Term)]) -> Atom {
+    match a {
+        Atom::Class { class, arg } => Atom::Class {
+            class: class.clone(),
+            arg: resolve(arg, subst),
+        },
+        Atom::Role { role, s, o } => Atom::Role {
+            role: role.clone(),
+            s: resolve(s, subst),
+            o: resolve(o, subst),
+        },
+    }
+}
+
+/// Anonymise: replace every NON-distinguished `Var` that occurs exactly once across `atoms` with
+/// a fresh `_` (Unbound). This is the τ step that can re-enable existential rewrites after a
+/// reduce. Fresh ids here are local and large to avoid colliding with the rewriter's counter.
+fn anonymise(atoms: &mut [Atom], answer: &[String]) {
+    use rustc_hash::FxHashMap;
+    let mut counts: FxHashMap<String, usize> = FxHashMap::default();
+    for a in atoms.iter() {
+        for_each_var(a, |v| *counts.entry(v.to_string()).or_default() += 1);
+    }
+    let mut next_id = 1_000_000u32; // local fresh range, distinct from the rewriter seed.
+    let mut rename: FxHashMap<String, Term> = FxHashMap::default();
+    for (v, c) in &counts {
+        if *c == 1 && !answer.iter().any(|a| a == v) {
+            rename.insert(v.clone(), Term::Unbound(next_id));
+            next_id += 1;
+        }
+    }
+    if rename.is_empty() {
+        return;
+    }
+    for a in atoms.iter_mut() {
+        map_terms(a, |t| {
+            if let Term::Var(v) = t {
+                if let Some(r) = rename.get(v) {
+                    return r.clone();
+                }
+            }
+            t.clone()
+        });
+    }
+}
+
+fn for_each_var(a: &Atom, mut f: impl FnMut(&str)) {
+    let mut go = |t: &Term| {
+        if let Term::Var(v) = t {
+            f(v);
+        }
+    };
+    match a {
+        Atom::Class { arg, .. } => go(arg),
+        Atom::Role { s, o, .. } => {
+            go(s);
+            go(o);
+        }
+    }
+}
+
+fn map_terms(a: &mut Atom, mut f: impl FnMut(&Term) -> Term) {
+    match a {
+        Atom::Class { arg, .. } => *arg = f(arg),
+        Atom::Role { s, o, .. } => {
+            *s = f(s);
+            *o = f(o);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dllite::ConceptInclusion;
+
+    fn class(c: &str, v: &str) -> Atom {
+        Atom::Class {
+            class: c.to_string(),
+            arg: Term::Var(v.to_string()),
+        }
+    }
+
+    #[test]
+    fn subclass_rewrite_adds_disjunct() {
+        // A ⊑ B ; query B(?x) ⇒ UCQ { B(?x), A(?x) }.
+        let mut tbox = TBox::default();
+        tbox.concept_incl.push(ConceptInclusion {
+            sub: Basic::Class("A".into()),
+            sup: "B".into(),
+        });
+        let ucq = perfect_ref(vec![class("B", "x")], vec!["x".into()], &tbox);
+        assert_eq!(ucq.len(), 2, "original + one rewrite");
+        assert!(ucq.iter().any(|q| q.atoms == vec![class("A", "x")]));
+    }
+
+    #[test]
+    fn domain_rewrite_introduces_role() {
+        // ∃R ⊑ A ; query A(?x) ⇒ add R(?x, _).
+        let mut tbox = TBox::default();
+        tbox.concept_incl.push(ConceptInclusion {
+            sub: Basic::Exists(Role::named("R")),
+            sup: "A".into(),
+        });
+        let ucq = perfect_ref(vec![class("A", "x")], vec!["x".into()], &tbox);
+        assert!(ucq.iter().any(|q| matches!(
+            q.atoms.as_slice(),
+            [Atom::Role { role, s: Term::Var(v), o }] if role.iri == "R" && v == "x" && o.is_unbound()
+        )));
+    }
+}

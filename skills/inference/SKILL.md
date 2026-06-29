@@ -1,6 +1,6 @@
 ---
 name: inference
-description: Use when you need RDFS, OWL 2 RL, or Notation3/EYE-rule entailment over a sparq RDF graph — materialize the deductive closure (forward-chaining), query the entailed triples, maintain the closure incrementally under inserts/deletes, get derivation proof-trees (why()), or check OWL inconsistency; backed by the sparq-reason crate. For the COMPLETE OWL 2 EL class-subsumption lattice (which RL is sound-but-incomplete for), use the separate opt-in sparq-reason-el classifier (CR1-CR5 saturation).
+description: Use when you need RDFS, OWL 2 RL, or Notation3/EYE-rule entailment over a sparq RDF graph — materialize the deductive closure (forward-chaining), query the entailed triples, maintain the closure incrementally under inserts/deletes, get derivation proof-trees (why()), or check OWL inconsistency; backed by the sparq-reason crate. For the COMPLETE OWL 2 EL class-subsumption lattice (which RL is sound-but-incomplete for), use the separate opt-in sparq-reason-el classifier (CR1-CR5 saturation). For OWL 2 QL certain-answer query rewriting (PerfectRef over DL-Lite_R, EXPERIMENTAL, fail-closed CQ-shape gate), use the separate opt-in sparq-reason-ql crate.
 ---
 
 # sparq-inference
@@ -132,6 +132,26 @@ let _ = h.unsatisfiable_classes();      // classes forced ⊑ owl:Nothing (e.g. 
 - **Deferred:** concurrent lock-free saturation → E4; nominals + concrete domains later. `classify_graph` (full closure) and `classify_hasse_graph` (reduced) are both available — pick by whether you want every derived subsumption or just the immediate-parent taxonomy.
 - **Use EL, not `--reason owl`, when you need a complete class hierarchy over an EL ontology.** RL is not an approximation you can tune up with more rules — EL needs a different algorithm.
 
+## OWL 2 QL query rewriting (`sparq-reason-ql`, EXPERIMENTAL, separate opt-in crate)
+
+OWL 2 QL (DL-Lite_R) is **FO-rewritable**: instead of materializing a closure, you **rewrite the query** into a **union of conjunctive queries** (UCQ) that, evaluated over the **unmodified data**, returns the **certain answers** under the schema (Calvanese et al., *PerfectRef*, JAR 2007). **`sparq-reason-ql`** is a query-rewriter (not a materializer): it reuses the engine's query path — it emits a rewritten `spargebra::Query` (a `Union`-folded UCQ) that the planner/executor run unchanged.
+
+```rust,ignore
+// Cargo.toml:  sparq-reason-ql = { version = "0.1", features = ["experimental"] }
+use sparq_reason_ql::{rewrite, as_conjunctive_query, CqError};
+use spargebra::SparqlParser;
+
+let q = SparqlParser::new().parse_query("SELECT ?x WHERE { ?x a <http://ex/Employee> }")?;
+// `tbox`: &[oxrdf::Triple] carrying rdfs:subClassOf/subPropertyOf/domain/range, owl:inverseOf …
+let r = rewrite(&q, &tbox)?;            // r.query is the UCQ; r.report.disjuncts / .skipped_axioms
+// The CQ-shape gate alone (no feature needed) classifies a query without rewriting:
+match as_conjunctive_query(&q) { Ok(_cq) => {}, Err(CqError::OutOfScope(why)) => { let _ = why; } }
+```
+
+- **FAIL-CLOSED CQ-shape gate (the soundness keystone).** PerfectRef is sound + complete only for **conjunctive queries**. A query with `OPTIONAL`/`FILTER`/`MINUS`/`UNION`/a property path/aggregation/a variable predicate is **rejected as `CqError::OutOfScope(reason)`**, never silently mis-answered. The applicability condition (an existential generator fires only on an UNBOUND, non-distinguished, non-shared variable) is enforced explicitly — firing it on a projected/shared variable would drop a join (unsound).
+- **Scope (Phase Q1, `experimental`):** the **positive** DL-Lite_R inclusions — `rdfs:subClassOf`/`subPropertyOf`, `rdfs:domain`/`range` (`∃R ⊑ A`, `∃R⁻ ⊑ A`), `owl:inverseOf`, and **unqualified** `∃R` `owl:someValuesFrom owl:Thing` restrictions. Non-QL axioms are counted in `RewriteReport::skipped_axioms`, never applied.
+- **EXPERIMENTAL — oracle-tested, NOT graduated to a conformance floor.** Validated against a hand-checked DL-Lite oracle (`tests/oracle.rs`), because no Rust PerfectRef reference exists to diff against. There is **no UCQ minimization** (no containment check) and **no consistency checking**. The UCQ can blow up exponentially in TBox depth (Kikot et al.) — the deferred **production path** is *tree-witness rewriting + UCQ-containment minimisation* (epic `sq-pbz04` phases Q2/Q3).
+
 ## Common recipes
 
 **1. OWL 2 RL closure + inconsistency report.** OWL includes RDFS; run the clash check on the materialized result.
@@ -234,3 +254,4 @@ let closure = reason_n3_terms_with_resolver(src, Some("http://ex/"), Some(&resol
 - `mpc-protocols` — multi-party layer over (federated) SPARQL.
 - `hdt-format`, `fused-decompress-parse`, `rust-parallel-parsing` — sibling ingest/storage skills for getting triples into the graph you then reason over.
 - `research/owl2-el-ql-reasoning-spike.md` — the EL/QL feasibility spike: why EL first, the RL-incompleteness proof (the CR4 counterexample), and the phased plan (E1–E6) `sparq-reason-el` implements.
+- `research/reasoner-suite-on-substrate.md` §2.5 — the QL track design: the PerfectRef applicability trap, the strict CQ-shape gate, and why the production path (tree-witness + UCQ-containment minimisation) is sequenced late by soundness risk (the phased plan `sparq-reason-ql` Phase Q1 implements).
