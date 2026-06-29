@@ -26,6 +26,17 @@ use sparq_substrate::numeric::{parse_xsd_f32, parse_xsd_f64, split_decimal, Arit
 // the `JoinKeys` column layout from a `Bindings` variable layout and supply the engine's
 // thread-local query budget as the generic `Budget` hook — no `Box<dyn>` on the probe loop.
 use sparq_substrate::join as sjoin;
+// [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): the SPARQL term TOTAL ORDER —
+// `compare_values` (`ORDER BY` / `<` ordering: error < blank < IRI < literal < triple,
+// numeric-aware + strict typed/temporal + string fallback + recursive triple-term order) — now
+// lives in the shared substrate as the generic `compare::compare_terms`. The engine implements
+// the substrate's `CompareTerm` trait for its `Value` (zero-cost wrappers over `value_str` /
+// `as_num` / `value_compare_strict`) and `compare_values` is now a thin call into it, so the
+// engine AND the reasoners share ONE total-order body with no `Box<dyn>` on the compare path.
+// `Value` / `LitKind` / `value_compare_strict` stay engine-private (they also drive the
+// relational operators); only the algorithm moved. Behaviour-neutral: the W3C SPARQL / ORDER BY
+// / FILTER conformance is bit-identical.
+use sparq_substrate::compare::{compare_terms, CompareTerm, TermClass};
 use rustc_hash::FxHashSet;
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression, PropertyPathExpression,
@@ -7313,61 +7324,67 @@ fn is_numeric_dt(l: &Literal) -> bool {
         || dt == xsd::FLOAT.as_str()
 }
 
+// [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): the engine implements the substrate's
+// `CompareTerm` trait for its `Value` — a set of ZERO-COST wrappers over the existing
+// `value_str` / `as_num` / `value_compare_strict` helpers — so the shared
+// `compare::compare_terms` total-order algorithm can drive the engine's `Value` with no vtable.
+// The class ranks, the within-class string / numeric / strict arms, and the recursive
+// triple-term order all live in the substrate now; this impl only surfaces the observations.
+impl CompareTerm for Value {
+    #[inline]
+    fn term_class(&self) -> TermClass {
+        match self {
+            Value::Unbound | Value::Error => TermClass::ErrorOrUnbound,
+            Value::Term(Term::BlankNode(_)) => TermClass::Blank,
+            Value::Term(Term::NamedNode(_)) => TermClass::Iri,
+            // SPARQL 1.2 total-order extension: triple terms sort AFTER literals.
+            Value::Term(Term::Triple(_)) => TermClass::Triple,
+            _ => TermClass::Literal, // literals, incl. computed numerics / booleans
+        }
+    }
+    #[inline]
+    fn value_str(&self) -> Option<String> {
+        value_str(self)
+    }
+    #[inline]
+    fn as_f64(&self) -> Option<f64> {
+        as_num(self)
+    }
+    #[inline]
+    fn strict_cmp(&self, other: &Self) -> Option<Ordering> {
+        // dateTime/date by timeline, same-tag / same-other-XSD lexically — when comparable.
+        value_compare_strict(self, other)
+    }
+    #[inline]
+    fn triple_parts(&self) -> Option<[Self; 3]> {
+        let Value::Term(Term::Triple(t)) = self else {
+            return None;
+        };
+        // The subject (named-or-blank) and predicate (always an IRI) are lifted to `Value`s so
+        // the generic recursion classifies + compares them by exactly the rules `compare_values`
+        // applied inline: the subject by blank/IRI string, the predicate by IRI string (== its
+        // `as_str().cmp(..)`), the object under the full order.
+        let subject = Value::Term(match &t.subject {
+            NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
+            NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.clone()),
+        });
+        let predicate = Value::Term(Term::NamedNode(t.predicate.clone()));
+        let object = Value::Term(t.object.clone());
+        Some([subject, predicate, object])
+    }
+}
+
 /// LENIENT total order for ORDER BY (and the MIN/MAX fallback): SPARQL orders
 /// unbound < blank nodes < IRIs < literals, then by value within each class
 /// (numerics by value; everything else by string form, which keeps the order
 /// deterministic across mixed literal types).
+///
+/// [OPUS-4.8] sq-vezew: the algorithm now lives in `sparq_substrate::compare::compare_terms`,
+/// generic over the `CompareTerm` trait the engine implements for `Value` above. This is a thin
+/// monomorphised call into the shared substrate — behaviour-identical to the pre-move inline body.
+#[inline]
 fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
-    fn class(v: &Value) -> u8 {
-        match v {
-            Value::Unbound | Value::Error => 0,
-            Value::Term(Term::BlankNode(_)) => 1,
-            Value::Term(Term::NamedNode(_)) => 2,
-            // SPARQL 1.2 total-order extension: triple terms sort AFTER literals.
-            Value::Term(Term::Triple(_)) => 4,
-            _ => 3, // literals, incl. computed numerics / booleans
-        }
-    }
-    let (ca, cb) = (class(x), class(y));
-    if ca != cb {
-        return Some(ca.cmp(&cb));
-    }
-    match ca {
-        0 => Some(Ordering::Equal),
-        1 | 2 => Some(value_str(x)?.cmp(&value_str(y)?)),
-        // Triple terms order componentwise (subject, predicate, then object under
-        // this same total order, recursing through nesting).
-        4 => {
-            let (Value::Term(Term::Triple(a)), Value::Term(Term::Triple(b))) = (x, y) else {
-                return None;
-            };
-            let nob = |n: &NamedOrBlankNode| {
-                Value::Term(match n {
-                    NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
-                    NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.clone()),
-                })
-            };
-            let s = compare_values(&nob(&a.subject), &nob(&b.subject))?;
-            if s != Ordering::Equal {
-                return Some(s);
-            }
-            let p = a.predicate.as_str().cmp(b.predicate.as_str());
-            if p != Ordering::Equal {
-                return Some(p);
-            }
-            compare_values(&Value::Term(a.object.clone()), &Value::Term(b.object.clone()))
-        }
-        _ => {
-            if let (Some(a), Some(b)) = (as_num(x), as_num(y)) {
-                return a.partial_cmp(&b);
-            }
-            // dateTime/date order by timeline when comparable.
-            if let Some(o) = value_compare_strict(x, y) {
-                return Some(o);
-            }
-            Some(value_str(x)?.cmp(&value_str(y)?))
-        }
-    }
+    compare_terms(x, y)
 }
 
 /// SPARQL built-in function calls (`STR`, `LANG`, `CONCAT`, `SUBSTR`, type tests, numeric, …).

@@ -21,12 +21,19 @@
 // probe loops with its own key projection — neither pays a vtable. The planner, `Bindings`,
 // `LocalVocab` interning and `ScanCmp` filter pushdown stay engine-private.
 //
-// Both moves are behaviour-neutral (the W3C SPARQL conformance floor + the join/scan/BGP
-// micro-benches are bit-identical / within noise). STILL PENDING in later beads of the epic:
-// the engine's `compare_values` total order (irreducibly coupled to the engine's `Value`
-// enum + the temporal subsystem, so it moves with `Value` in a follow-up — the deferred
-// sq-vezew — NOT here; the join kernels deliberately do NOT hoist `Value`, the engine
-// supplies its `Value`-based compare itself).
+// PHASE 4 (sq-vezew) has now landed `compare`: the SPARQL term TOTAL ORDER — the engine's
+// `compare_values` (`ORDER BY` / `<` term ordering: error < blank < IRI < literal < triple,
+// numeric-aware + strict typed/temporal + string fallback + recursive triple-term order) was
+// MOVED here as the generic `compare::compare_terms`, generalised over a tiny `CompareTerm`
+// trait. The engine implements `CompareTerm` for its `Value` (zero-cost wrappers over its
+// existing `value_str` / numeric / `value_compare_strict` helpers) and calls the substrate
+// algorithm; the `Value` enum, the `LitKind` literal-family classifier and `value_compare_strict`
+// stay engine-private (they ALSO drive the relational `<`/`>`/`=` operators, not just ORDER BY,
+// so a wholesale `Value` relocation would be non-neutral and sprawling — the correct seam moves
+// the ALGORITHM, leaving `Value` engine-resident; see the deferred-remainder note in the PR).
+//
+// All moves are behaviour-neutral (the W3C SPARQL conformance floor + the join/scan/BGP/sort
+// micro-benches are bit-identical / within noise).
 //
 // ZERO-OVERHEAD INTENT (the contract every phase keeps): the shareable kernels are FREE
 // FUNCTIONS / methods monomorphic over the concrete `Id = u32` and the numeric tiers —
@@ -47,3 +54,15 @@ pub mod numeric;
 // join's probe and its key comparison (research/shared-eval-substrate.md §2.3, §4).
 #[cfg(feature = "join")]
 pub mod join;
+
+// [OPUS-4.8] sq-vezew (epic sq-qonbz) — Phase 4 of the substrate move-chain. The SPARQL term
+// TOTAL ORDER (`compare_values` — the `ORDER BY` / `<` term ordering: error < blank < IRI <
+// literal < triple, numeric-aware + strict typed/temporal + string fallback + recursive
+// triple-term order) now lives here, MOVED from `sparq-engine::exec`, generalised over a tiny
+// `CompareTerm` trait the engine implements for its `Value`. The algorithm monomorphises (no
+// `Box<dyn>`/`&dyn`/vtable); the engine's `Value`/`LitKind`/`value_compare_strict` stay
+// engine-private (they also drive the relational operators) and are surfaced through the trait
+// (research/shared-eval-substrate.md §2.1, §2.3). A reasoner that orders entailed solutions can
+// reuse the same algorithm by implementing `CompareTerm` for its own term type.
+#[cfg(feature = "compare")]
+pub mod compare;
