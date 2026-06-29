@@ -274,6 +274,21 @@ since:
   unsupported — distinguish the two with `Capability::advertises_sparql_versions()`.
 - **Phase 2 source abstraction** (`sq-rsxf`) — the `Endpoint` adapter over the engine's
   transport seam behind a default-deny SSRF guard.
+  - **Port-scoped allowlist entries** (`sq-vbnyc`, follow-up to the engine's `sq-a7jw4`):
+    `source::EgressGuard`'s host allowlist now accepts a **port-scoped** entry (`127.0.0.1:8053`,
+    `[::1]:8080`, `.example.org:443`) that re-opens a private host on THAT exact port only —
+    strictly narrower than a bare host-level entry, which still re-opens every port (backward
+    compatible). The dialled port (the authority's `:port` or the scheme default) is the port
+    vetted, so a `host:port` entry never widens. The fedclient guard delegates the per-entry
+    decision to the engine's shared `sparq_engine::allowlist_entry_permits` (and
+    `allowlist_entry_host_matches` for the host-level "is this host on the list at all" query), so
+    the **fedclient guard and the engine SERVICE guard decide every host:port case identically**
+    — one source of truth, no divergent copy of the parsing (port-0/overflow/IPv6-bracket/
+    trailing-colon all fail-CLOSED). The same port-scoping flows through `EgressGuard::check_addr`
+    / `check_endpoint` and all three native ureq SSRF resolvers (`HttpTransport` /
+    `HttpFragmentTransport` / discovery `HttpFetcher`). There is no wildcard port and no global
+    bypass; default-deny stays default-deny. Use `EgressGuard::is_allowed_port(host, port)` for the
+    port-precise check.
 - **Phase 3 planner bridge + single-source interpreter** (`sq-j27p`) — the consumer of THIS
   planner's `JoinTree`. The plan speaks pattern/source **indices** only (no endpoint-URL
   mapping — the Phase-0 finding); `sparq_fedclient::SourceResolver` is the **index → adapter

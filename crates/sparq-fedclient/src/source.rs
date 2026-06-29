@@ -362,16 +362,47 @@ impl EgressGuard {
         }
     }
 
-    /// Allowlist a host (case-insensitive authority match) so its resolved addresses are
-    /// permitted even if private. Chainable.
+    /// Allowlist an entry so a matching host's resolved addresses are permitted even if private.
+    /// Chainable. An entry is either:
+    ///   * **host-level** (`"sparql.internal"`, `".example.org"` suffix wildcard, `"127.0.0.1"`,
+    ///     a bare IPv6 literal `"::1"`) — permits that host on EVERY port (the original meaning,
+    ///     preserved for backward compatibility); or
+    ///   * **port-scoped** (`"127.0.0.1:8053"`, `".example.org:443"`, bracketed IPv6 `"[::1]:8080"`)
+    ///     — permits that host ONLY on the exact `:port`, rejecting every other port on the same
+    ///     host. This is strictly narrower; there is no wildcard port and no global bypass.
+    ///
+    /// The `host:port` split + matching is the engine SERVICE guard's shared rule
+    /// ([`sparq_engine::allowlist_entry_permits`]) so the two guards agree on every edge case
+    /// (port-0/overflow/IPv6-bracket/trailing-colon all fail-CLOSED). [OPUS-4.8] sq-vbnyc.
     pub fn allow_host(mut self, host: impl Into<String>) -> Self {
         self.allow.insert(host.into().to_ascii_lowercase());
         self
     }
 
-    /// Is `host` (the bare authority, no port) on the allowlist?
+    /// Is `host` permitted on **any** port by the allowlist? Backward-compatible host-level query:
+    /// `true` when some entry permits `host` on at least one port — a host-level entry (all ports)
+    /// or a port-scoped entry (its single port). The load-bearing, port-precise check is
+    /// [`is_allowed_port`](Self::is_allowed_port); this convenience form answers "is this host on
+    /// the allowlist at all" and is used where the port is not yet known. [OPUS-4.8] sq-vbnyc.
     pub fn is_allowed(&self, host: &str) -> bool {
-        self.allow.contains(&host.to_ascii_lowercase())
+        let h = host.to_ascii_lowercase();
+        // "Allowed on SOME port" = some entry's host part names `h` (port ignored). Reuses the
+        // engine's shared host-pattern parse so bracket-stripping + suffix wildcard are not
+        // re-derived here.
+        self.allow
+            .iter()
+            .any(|entry| sparq_engine::allowlist_entry_host_matches(entry, &h))
+    }
+
+    /// Is `(host, port)` permitted by the allowlist? The load-bearing, PORT-SCOPED check: a
+    /// host-level entry permits `host` on every port; a `host:port` entry permits it ONLY on that
+    /// exact port. Delegates to the engine SERVICE guard's shared per-entry rule so the fedclient
+    /// guard and the engine guard decide every host:port case identically. [OPUS-4.8] sq-vbnyc.
+    pub fn is_allowed_port(&self, host: &str, port: u16) -> bool {
+        let h = host.to_ascii_lowercase();
+        self.allow
+            .iter()
+            .any(|entry| sparq_engine::allowlist_entry_permits(entry, &h, port))
     }
 
     /// The set of allowlisted hosts (lowercased bare authorities), so a native transport can
@@ -382,45 +413,52 @@ impl EgressGuard {
         &self.allow
     }
 
-    /// Vet one resolved address for `host`: `Ok(())` to dial it, `Err(reason)` to refuse.
-    /// An allowlisted host is always permitted; otherwise a [`is_forbidden_ip`] address is
-    /// refused. This is the per-address hook a real resolver calls on every candidate IP.
-    pub fn check_addr(&self, host: &str, ip: IpAddr) -> Result<(), String> {
-        if self.is_allowed(host) || !is_forbidden_ip(ip) {
+    /// Vet one resolved address for `host` dialled on `port`: `Ok(())` to dial it, `Err(reason)`
+    /// to refuse. The allowlist exemption fires only when the host AND port BOTH match (a
+    /// port-scoped entry re-opens a private address on its one port only); otherwise a
+    /// [`is_forbidden_ip`] address is refused. This is the per-address hook a resolver calls on
+    /// every candidate IP, now port-scoped to mirror the engine SERVICE guard. [OPUS-4.8] sq-vbnyc.
+    pub fn check_addr(&self, host: &str, port: u16, ip: IpAddr) -> Result<(), String> {
+        if self.is_allowed_port(host, port) || !is_forbidden_ip(ip) {
             Ok(())
         } else {
             Err(format!(
-                "host {host:?} resolved to private/internal address {ip} \
+                "host {host:?} resolved to private/internal address {ip} on port {port} \
                  (default-deny SSRF policy; allowlist the host to permit it)"
             ))
         }
     }
 
-    /// Vet an endpoint IRI end-to-end: parse the host authority, resolve it, and refuse if
-    /// *every* resolved address is forbidden (and the host is not allowlisted). An
-    /// allowlisted host short-circuits without a DNS lookup. Returns the bare host on
-    /// success (handy for logging / the adapter). On a non-allowlisted host this performs
-    /// a real DNS resolution and applies [`check_addr`](Self::check_addr) to each address,
-    /// mirroring the engine's resolver: refuse before any socket is opened. [OPUS-4.8].
+    /// Vet an endpoint IRI end-to-end: parse the host authority + port, resolve it, and refuse if
+    /// *every* resolved address is forbidden (and the host:port is not allowlisted). An
+    /// allowlisted host:port short-circuits without a DNS lookup. Returns the bare host on
+    /// success (handy for logging / the adapter). On a non-allowlisted host this performs a real
+    /// DNS resolution and applies [`check_addr`](Self::check_addr) to each address, mirroring the
+    /// engine's resolver: refuse before any socket is opened.
+    ///
+    /// The PORT is the authority's explicit `:port` or the scheme default (the SAME port actually
+    /// dialled), so a port-scoped allowlist entry (`host:port`) is honoured exactly as the engine
+    /// SERVICE guard honours it: it re-opens the host on that one port only. [OPUS-4.8] sq-vbnyc.
     pub fn check_endpoint(&self, endpoint: &str) -> Result<String, FedError> {
-        let host = endpoint_host(endpoint)
+        let (host, port) = endpoint_host_port(endpoint)
             .ok_or_else(|| FedError::BadEndpoint(format!("no host authority in {endpoint:?}")))?;
-        // Allowlisted host: permitted without a lookup (matches the engine's resolver,
-        // which lets an allowlisted host through even if it resolves privately).
-        if self.is_allowed(&host) {
+        // Allowlisted host:port: permitted without a lookup (matches the engine's resolver, which
+        // lets an allowlisted host through even if it resolves privately). A port-scoped entry
+        // only short-circuits for its exact dialled port.
+        if self.is_allowed_port(&host, port) {
             return Ok(host);
         }
         // An IP-literal authority is vetted directly (no DNS).
         if let Ok(ip) = host.parse::<IpAddr>() {
             return self
-                .check_addr(&host, ip)
+                .check_addr(&host, port, ip)
                 .map(|()| host.clone())
                 .map_err(FedError::EgressRefused);
         }
-        // A DNS name: resolve and require at least one permitted address. Resolution uses
-        // the host with a dummy port so the std resolver returns socket addresses.
+        // A DNS name: resolve and require at least one permitted address. Resolution uses the
+        // host with the dialled port so the std resolver returns socket addresses.
         use std::net::ToSocketAddrs;
-        let resolved: Vec<IpAddr> = (host.as_str(), 80u16)
+        let resolved: Vec<IpAddr> = (host.as_str(), port)
             .to_socket_addrs()
             .map_err(|e| {
                 FedError::EgressRefused(format!("DNS resolution of {host:?} failed: {e}"))
@@ -447,8 +485,17 @@ impl EgressGuard {
 /// A tiny tolerant parser so the egress gate has no URL-crate dependency of its own (the
 /// crate already pulls `oxrdf`/`spargebra`, not `url`, under `fedclient`). [OPUS-4.8].
 fn endpoint_host(endpoint: &str) -> Option<String> {
-    // scheme://authority/path?query — take what follows "://".
-    let after_scheme = endpoint.split_once("://").map(|(_, rest)| rest)?;
+    endpoint_host_port(endpoint).map(|(host, _port)| host)
+}
+
+/// Extract the bare host authority (lowercased, IPv6 brackets stripped) **and** the authority
+/// port from an endpoint IRI: the explicit `:port`, or the scheme default (443 for `https`,
+/// 80 otherwise — the SAME port that is actually dialled). Returns `None` when there is no host
+/// authority. The port is what makes a PORT-SCOPED allowlist entry (`host:port`) decidable, so the
+/// fedclient guard matches the engine SERVICE guard's authority handling exactly. [OPUS-4.8] sq-vbnyc.
+fn endpoint_host_port(endpoint: &str) -> Option<(String, u16)> {
+    // scheme://authority/path?query — take the scheme + what follows "://".
+    let (scheme, after_scheme) = endpoint.split_once("://")?;
     // authority ends at the first '/', '?' or '#'.
     let authority = after_scheme
         .split(['/', '?', '#'])
@@ -462,17 +509,32 @@ fn endpoint_host(endpoint: &str) -> Option<String> {
     if hostport.is_empty() {
         return None;
     }
-    // IPv6 literal: [::1]:80 — take what is inside the brackets.
+    let default_port = if scheme.eq_ignore_ascii_case("https") {
+        443
+    } else {
+        80
+    };
+    // IPv6 literal: [::1] or [::1]:80 — take what is inside the brackets; the port (if any)
+    // follows the closing bracket.
     if let Some(rest) = hostport.strip_prefix('[') {
-        let host = rest.split_once(']').map(|(h, _)| h).unwrap_or(rest);
-        return (!host.is_empty()).then(|| host.to_ascii_lowercase());
+        let (host, after) = rest.split_once(']').unwrap_or((rest, ""));
+        if host.is_empty() {
+            return None;
+        }
+        let port = after
+            .strip_prefix(':')
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(default_port);
+        return Some((host.to_ascii_lowercase(), port));
     }
-    // host or host:port — strip the port.
-    let host = hostport
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(hostport);
-    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+    // host or host:port — split off the port (only a single trailing `:digits`; a bare IPv6
+    // literal here has no brackets but `to_socket_addrs` would reject it anyway, so a multi-colon
+    // string keeps the whole thing as the host and the default port).
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) if !h.contains(':') => (h, p.parse::<u16>().unwrap_or(default_port)),
+        _ => (hostport, default_port),
+    };
+    (!host.is_empty()).then(|| (host.to_ascii_lowercase(), port))
 }
 
 // ─── Native HTTP transport that PINS the guard-vetted IP (no re-resolve TOCTOU) ──────
@@ -578,12 +640,14 @@ impl ureq::unversioned::resolver::Resolver for EgressFilterResolver {
         _config: &ureq::config::Config,
         _timeout: ureq::unversioned::transport::NextTimeout,
     ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
-        let (host_port, host) = crate::ureq_egress::uri_host_port(uri).ok_or_else(|| {
+        let (host_port, host, port) = crate::ureq_egress::uri_host_port(uri).ok_or_else(|| {
             crate::ureq_egress::egress_refused(format!(
                 "federation egress refused: request URI {uri} has no host authority to vet"
             ))
         })?;
-        let allowed = self.allow_private.contains(&host);
+        // Port-scoped allowlist: a `host:port` entry re-opens a private host only on its exact
+        // dialled port (shared host:port rule with the engine SERVICE guard; sq-vbnyc).
+        let allowed = crate::ureq_egress::allowlist_permits(&self.allow_private, &host, port);
         crate::ureq_egress::filter_resolved(&host_port, allowed, is_forbidden_ip, || {
             format!(
                 "federation egress refused: {host_port} resolves only to private/internal \
@@ -1685,6 +1749,43 @@ mod tests {
         assert_eq!(endpoint_host("http:///nohost"), None);
     }
 
+    #[test]
+    fn host_port_parsing() {
+        // Direct unit test for the port-aware authority parser (coverage ratchet, sq-vbnyc).
+        // Explicit port preserved.
+        assert_eq!(
+            endpoint_host_port("http://127.0.0.1:8053/sparql"),
+            Some(("127.0.0.1".to_string(), 8053))
+        );
+        assert_eq!(
+            endpoint_host_port("https://EXAMPLE.org:8443/q"),
+            Some(("example.org".to_string(), 8443))
+        );
+        assert_eq!(
+            endpoint_host_port("http://[2001:db8::1]:8080/sparql"),
+            Some(("2001:db8::1".to_string(), 8080))
+        );
+        // Scheme defaults when no explicit port (443 for https, 80 otherwise).
+        assert_eq!(
+            endpoint_host_port("http://dbpedia.org/sparql"),
+            Some(("dbpedia.org".to_string(), 80))
+        );
+        assert_eq!(
+            endpoint_host_port("https://dbpedia.org/sparql"),
+            Some(("dbpedia.org".to_string(), 443))
+        );
+        assert_eq!(
+            endpoint_host_port("http://[::1]/sparql"),
+            Some(("::1".to_string(), 80))
+        );
+        // Userinfo stripped; no authority → None.
+        assert_eq!(
+            endpoint_host_port("http://user:pw@host.example:9000/p"),
+            Some(("host.example".to_string(), 9000))
+        );
+        assert_eq!(endpoint_host_port("http:///nohost"), None);
+    }
+
     // ── DENY: default guard refuses a loopback / private endpoint ─────────────────
 
     #[test]
@@ -1780,6 +1881,145 @@ mod tests {
         let ep = Endpoint::new("http://8.8.8.8/sparql", Box::new(transport));
         let got = ep.execute(&SubQuery::new("ASK { ?s ?p ?o }")).unwrap();
         assert_eq!(got, body);
+    }
+
+    // ── Port-scoped allowlist entries (sq-vbnyc, mirrors engine sq-a7jw4) ─────────
+    //
+    // These adversarial cases mirror `sparq-engine`'s SERVICE-egress port-scoping tests on the
+    // fedclient guard. The fedclient guard delegates the per-entry decision to the engine's
+    // shared `allowlist_entry_permits`, so the two guards MUST agree on every host:port case.
+
+    #[test]
+    fn is_allowed_port_exact_host_port_permitted() {
+        // (a) A `host:port` entry permits ONLY that host on THAT exact port.
+        let g = EgressGuard::deny_private().allow_host("127.0.0.1:8053");
+        assert!(g.is_allowed_port("127.0.0.1", 8053)); // exact host:port
+    }
+
+    #[test]
+    fn is_allowed_port_same_host_other_port_rejected() {
+        // (b) The same host on any OTHER port is rejected — strictly narrower than host-level.
+        let g = EgressGuard::deny_private().allow_host("127.0.0.1:8053");
+        assert!(!g.is_allowed_port("127.0.0.1", 8054)); // other port
+        assert!(!g.is_allowed_port("127.0.0.1", 80)); //   default port
+    }
+
+    #[test]
+    fn is_allowed_port_different_host_rejected() {
+        // (c) A different host on the entry's port is rejected.
+        let g = EgressGuard::deny_private().allow_host("127.0.0.1:8053");
+        assert!(!g.is_allowed_port("127.0.0.2", 8053));
+    }
+
+    #[test]
+    fn host_level_entry_permits_all_ports_backward_compat() {
+        // (d) An existing host-level entry (no port) keeps its meaning: every port on that host.
+        // This is the unchanged pre-sq-vbnyc semantics.
+        let g = EgressGuard::deny_private().allow_host("127.0.0.1");
+        assert!(g.is_allowed_port("127.0.0.1", 80));
+        assert!(g.is_allowed_port("127.0.0.1", 8053));
+        assert!(g.is_allowed_port("127.0.0.1", 65535));
+        assert!(!g.is_allowed_port("127.0.0.2", 80)); // different host still rejected
+        // The host-level convenience query stays true for the bare host (any port).
+        assert!(g.is_allowed("127.0.0.1"));
+    }
+
+    #[test]
+    fn port_scoped_suffix_wildcard_is_port_constrained() {
+        // A port on a suffix-wildcard entry constrains the port too: `.example.org:443` permits
+        // any subdomain (and the apex) on 443 only.
+        let g = EgressGuard::deny_private().allow_host(".example.org:443");
+        assert!(g.is_allowed_port("sparql.example.org", 443)); // subdomain on 443
+        assert!(g.is_allowed_port("example.org", 443)); // apex on 443
+        assert!(!g.is_allowed_port("sparql.example.org", 80)); // wrong port
+        assert!(!g.is_allowed_port("notexample.org", 443)); // boundary respected
+    }
+
+    #[test]
+    fn bracketed_ipv6_port_scoped_entry() {
+        // A bracketed IPv6 `[::1]:8080` entry is port-scoped on the bare `::1` host.
+        let g = EgressGuard::deny_private().allow_host("[::1]:8080");
+        assert!(g.is_allowed_port("::1", 8080));
+        assert!(!g.is_allowed_port("::1", 80));
+    }
+
+    #[test]
+    fn bare_ipv6_entry_is_host_level_not_port_amputated() {
+        // A bare (unbracketed) IPv6 literal must NOT have its last hextet read as a port —
+        // `2001:db8::1` is a host-level entry matching every port (fail-safe, not fail-open).
+        let g = EgressGuard::deny_private().allow_host("2001:db8::1");
+        assert!(g.is_allowed_port("2001:db8::1", 443));
+        assert!(g.is_allowed_port("2001:db8::1", 80));
+    }
+
+    #[test]
+    fn malformed_port_in_entry_fails_closed() {
+        // A `:port` that does not parse as a u16 is treated as part of a never-matching host
+        // pattern, NOT as "drop the port constraint and match every port" — fail-CLOSED, never
+        // widening the allowlist. (port-0 overflow `:99999`, trailing colon `:`, non-numeric.)
+        for entry in ["127.0.0.1:99999", "127.0.0.1:", "127.0.0.1:http"] {
+            let g = EgressGuard::deny_private().allow_host(entry);
+            assert!(!g.is_allowed_port("127.0.0.1", 80), "{entry} widened port 80");
+            assert!(
+                !g.is_allowed_port("127.0.0.1", 65535),
+                "{entry} widened port 65535"
+            );
+            assert!(!g.is_allowed("127.0.0.1"), "{entry} widened host-level query");
+        }
+    }
+
+    #[test]
+    fn check_endpoint_honours_port_scoped_entry_end_to_end() {
+        // The end-to-end guard path: a private literal allowlisted ONLY on :8053 is permitted on
+        // 8053 and refused on 8080 (the scheme default would otherwise apply). This is the load-
+        // bearing invariant — the port that is dialled is the port that is vetted.
+        let g = EgressGuard::deny_private().allow_host("127.0.0.1:8053");
+        assert_eq!(
+            g.check_endpoint("http://127.0.0.1:8053/sparql").unwrap(),
+            "127.0.0.1"
+        );
+        assert!(matches!(
+            g.check_endpoint("http://127.0.0.1:8080/sparql").unwrap_err(),
+            FedError::EgressRefused(_)
+        ));
+        // The scheme default (80) is also refused — only :8053 is open.
+        assert!(matches!(
+            g.check_endpoint("http://127.0.0.1/sparql").unwrap_err(),
+            FedError::EgressRefused(_)
+        ));
+    }
+
+    #[test]
+    fn endpoint_execute_port_scoped_allow_gates_the_transport() {
+        // The full adapter path: a private host allowlisted on :7777 reaches the transport on
+        // 7777 but NOT on 9999 (PanicTransport would panic if a refused dial reached it).
+        let body = r#"{"head":{"vars":[]},"results":{"bindings":[]}}"#;
+        let guard = EgressGuard::deny_private().allow_host("127.0.0.1:7777");
+        let ep_ok = Endpoint::with_guard(
+            "http://127.0.0.1:7777/sparql",
+            Box::new(CannedTransport::new(body)),
+            guard.clone(),
+        );
+        assert_eq!(ep_ok.execute(&SubQuery::new("ASK {}")).unwrap(), body);
+
+        let ep_bad =
+            Endpoint::with_guard("http://127.0.0.1:9999/sparql", Box::new(PanicTransport), guard);
+        assert!(matches!(
+            ep_bad.execute(&SubQuery::new("ASK {}")).unwrap_err(),
+            FedError::EgressRefused(_)
+        ));
+    }
+
+    #[test]
+    fn check_addr_is_port_scoped() {
+        // The per-address hook: an allowlisted-on-:8053 private IP is dialable on 8053, refused on
+        // 8080. A public IP is always dialable regardless of port (the guard only gates private).
+        let g = EgressGuard::deny_private().allow_host("127.0.0.1:8053");
+        let lo: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(g.check_addr("127.0.0.1", 8053, lo).is_ok());
+        assert!(g.check_addr("127.0.0.1", 8080, lo).is_err());
+        let public: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(g.check_addr("8.8.8.8", 12345, public).is_ok());
     }
 
     // ── capability defaults ───────────────────────────────────────────────────────
