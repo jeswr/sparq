@@ -329,6 +329,30 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
 > `cargo test -p sparq-conformance --features http-protocol --test http_protocol_suite`; the row
 > is in the central scoreboard (`W3C SPARQL 1.1 Protocol (HTTP)`). [OPUS-4.8]
 
+<!-- [OPUS-4.8] sq-1uuxz: comment separates the two adjacent blockquotes (markdownlint MD028). -->
+
+> **Service Description + Graph Store Protocol conformance lane (sq-1uuxz, epic sq-my8wd) — what
+> is ratcheted.** The federation-descriptor + GSP write surfaces (see "Federation discovery" and
+> the Graph-Store-Protocol section below) are covered by a dedicated **SD + GSP** conformance suite
+> in `sparq-conformance` (opt-in `federation-descriptors` feature, OFF by default; it reuses the
+> in-process loopback server — `sparq_server::serve` on an ephemeral `127.0.0.1:0` port, stood up
+> with the server's `federation-descriptors` runtime flag ON — and drives RAW HTTP at the bound
+> port, so it does not touch the engine's egress allowlist). It ratchets a MEASURED PASS floor
+> over **(A) the Service Description** (`GET /sparql` with no query): the `sd:Service` advertises
+> exactly the result/input formats (SRJ/SRX/CSV/TSV + Turtle/N-Triples/RDF-XML), the query/update
+> languages, the SPARQL versions (`sd:supportedVersion` 1.0/1.1/1.2) and `sd:BasicFederatedQuery`
+> that the server GENUINELY implements — **no over-advertising** (each advertised result format is
+> cross-checked against a real SELECT request, and JSON-LD — not served in this build — must NOT
+> appear) — and **(B) the Graph Store Protocol**: a GET/PUT/POST/DELETE round-trip on a named graph
+> (indirect `?graph=<iri>` + direct `/graphs/<path>`) and the default graph (`?default`), VERIFYING
+> store state after every op (PUT→GET-back-equal; PUT replaces; POST merges; DELETE removes;
+> **200/201/204/400/404/405 (with `Allow`)/415**). **Honest boundary:** a GSP read of an ABSENT
+> named graph is **200 + empty graph, NOT 404** (GSP-permitted — sparq treats an empty graph as
+> existing); this is a DOCUMENTED DIVERGENCE, reported separately and NOT summed into the floor. Run
+> it with `cargo test -p sparq-conformance --features federation-descriptors --test sd_gsp_suite`;
+> the row is in the central scoreboard (`SPARQL 1.1 Service Description + Graph Store Protocol`).
+> [OPUS-4.8]
+
 <!-- [OPUS-4.8] sq-b3df9: comment separates the two adjacent blockquotes (markdownlint MD028). -->
 
 > **JSON-LD content negotiation (`jsonld` feature — default-on, [OPUS-4.8] sq-oy1f.4).** The

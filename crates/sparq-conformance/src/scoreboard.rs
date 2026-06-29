@@ -177,6 +177,13 @@ pub struct Suite {
 ///   exercising the SPARQL 1.1 Protocol contract — GET/POST query+update, the QUERY
 ///   method, dataset overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/415; the
 ///   406-less Accept fallback + ASK-in-CSV are documented divergences, NOT summed in).
+/// * SPARQL 1.1 Service Description + Graph Store Protocol 39 — `sparq-conformance`
+///   `tests/sd_gsp_suite.rs` `SD_GSP_FLOOR = 39` (sq-1uuxz; opt-in
+///   `federation-descriptors` feature; the `GET /sparql` (no query) Service-Description
+///   advertises exactly the formats/languages/versions/features the server genuinely
+///   implements — no over-advertising — PLUS a GET/PUT/POST/DELETE Graph-Store-Protocol
+///   round-trip over RAW HTTP verifying store state after each op; the absent-graph
+///   200-empty read is a documented divergence, NOT summed in).
 /// * text-search differential oracle 18750 — `sparq-text`
 ///   `tests/bm25_oracle.rs` `TEXT_ORACLE_FLOOR = 18750` (sq-ripcg; a sparq
 ///   EXTENSION ratchet, NOT standards conformance — no normative full-text-over-RDF
@@ -587,6 +594,43 @@ pub const SUITES: &[Suite] = &[
                dataset overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/415) over RAW \
                HTTP against the in-process loopback server; 406-less Accept fallback + \
                ASK-in-CSV are documented divergences, NOT summed into the floor",
+    },
+    // [OPUS-4.8] sq-1uuxz (epic sq-my8wd) — the SPARQL 1.1 SERVICE-DESCRIPTION + GRAPH-STORE
+    // PROTOCOL conformance ratchet. Where the sibling http-protocol row above covers the
+    // query/update Protocol contract, THIS row covers the two federation-descriptor + write
+    // surfaces the server exposes behind `federation-descriptors`: (A) the `GET /sparql` (no
+    // query) Service-Description document — asserting it advertises EXACTLY the result/input
+    // formats + query/update languages + SPARQL versions + BasicFederatedQuery the server
+    // GENUINELY implements (no over-advertising; each advertised result format is cross-checked
+    // against a real SELECT, and JSON-LD — not served in this build — must NOT appear); and (B) a
+    // full GET/PUT/POST/DELETE Graph-Store-Protocol round-trip on a named graph (indirect
+    // `?graph=` + direct `/graphs/<path>`) and the default graph (`?default`), VERIFYING store
+    // state after every op (PUT→GET-back-equal; PUT replaces; POST merges; DELETE removes;
+    // 200/201/204/400/404/405/415). The runner is crate-local here (`tests/sd_gsp_suite.rs`) but
+    // behind the OPT-IN `federation-descriptors` feature (forwards to `service-loopback` → tokio +
+    // axum via sparq-server/server, AND turns on sparq-server/federation-descriptors so the SD
+    // endpoint is live; NO new third-party dep — the raw HTTP client is the same std-only
+    // TcpStream helper) so the default + `--workspace` builds neither link the async server stack
+    // nor go red — the lean-core posture. The floor is the MEASURED PASS count; the one documented
+    // divergence (a GSP read of an absent named graph is 200+empty, not 404 — GSP-permitted) is
+    // reported separately and NOT summed into it, so a documented gap can never inflate the
+    // conformance number. Floor kept in lock-step by `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "SPARQL 1.1 Service Description + Graph Store Protocol",
+        family: "W3C SPARQL",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "sd_gsp_suite",
+            feature: "federation-descriptors",
+        },
+        ci_job: "service-federation-conformance",
+        ratchet_floor: 39,
+        floor_basis: "pass",
+        note: "the GET /sparql (no query) Service-Description advertises exactly the \
+               formats/languages/versions/features the server genuinely implements (no \
+               over-advertising), PLUS a GET/PUT/POST/DELETE Graph-Store-Protocol round-trip \
+               (named + default graph, indirect + direct identification) verifying store state \
+               after each op; absent-graph 200-empty read is a documented divergence, NOT summed in",
     },
     // [OPUS-4.8] sq-ripcg (epic sq-lk3aw) — the sparq-text DIFFERENTIAL BM25 ORACLE
     // (runner lives crate-local in `sparq-text/tests/bm25_oracle.rs`). This is
