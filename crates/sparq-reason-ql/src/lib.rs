@@ -5,21 +5,28 @@
 //!
 //! The load-bearing entry points are [`as_conjunctive_query`] (the always-present, fail-closed
 //! **CQ-shape gate**) and, behind the off-by-default `experimental` feature, `rewrite` (the
-//! PerfectRef DL-Lite_R query rewriter; intentionally a plain code span here, not an intra-doc
-//! link, since that item is absent from the default-feature doc surface). The algorithm lives in
-//! three modules: `cq` (the gate),
-//! `dllite` (TBox extraction), and `perfectref` (the rewrite/reduce saturation).
+//! baseline PerfectRef DL-Lite_R query rewriter) and `rewrite_production` (the production path:
+//! PerfectRef ∪ tree-witness folding, then UCQ-containment minimisation). Both are plain code
+//! spans here, not intra-doc links, since those items are absent from the default-feature doc
+//! surface. The algorithm lives in five modules: `cq` (the gate), `dllite` (TBox extraction),
+//! `perfectref` (the rewrite/reduce saturation), `treewitness` (bounded existential-witness
+//! folding), and `minimise` (UCQ-containment minimisation by homomorphism).
 //!
 //! EXPERIMENTAL regime: the rewriter is validated against a hand-checked DL-Lite oracle, NOT
-//! graduated to a conformance floor. The deferred production path (tree-witness rewriting + UCQ
-//! containment minimisation) is a separate bead — see the README.
+//! graduated to a conformance floor. The graduation of the QL entailment-regime arm to a pinned
+//! conformance floor is a separate, deferred bead (it must sequence through the contended
+//! conformance scoreboard) — see the README.
 
 mod cq;
 mod dllite;
 #[cfg(feature = "experimental")]
 mod emit;
 #[cfg(feature = "experimental")]
+mod minimise;
+#[cfg(feature = "experimental")]
 mod perfectref;
+#[cfg(feature = "experimental")]
+mod treewitness;
 
 pub use cq::{as_conjunctive_query, ConjunctiveQuery, CqError};
 pub use dllite::{Basic, ConceptInclusion, Role, TBox};
@@ -45,11 +52,18 @@ pub struct Rewritten {
 #[cfg(feature = "experimental")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RewriteReport {
-    /// Number of conjunctive queries in the emitted UCQ (1 = the TBox added nothing).
+    /// Number of conjunctive queries in the emitted UCQ. For [`rewrite`] this is the raw
+    /// PerfectRef UCQ size (1 = the TBox added nothing); for [`rewrite_production`] this is the
+    /// MINIMISED UCQ size (the count actually emitted into the query).
     pub disjuncts: usize,
     /// TBox axioms outside the DL-Lite_R (OWL 2 QL) fragment that were IGNORED for rewriting
     /// (never silently applied). See [`TBox::skipped`].
     pub skipped_axioms: usize,
+    /// The UCQ size BEFORE containment minimisation (PerfectRef ∪ tree-witness foldings). For
+    /// [`rewrite`] this equals `disjuncts` (no minimisation is applied); for [`rewrite_production`]
+    /// it is the pre-minimisation count, so `disjuncts_before_minimisation - disjuncts` is the
+    /// number of redundant disjuncts dropped. Never below `disjuncts` (minimisation only removes).
+    pub disjuncts_before_minimisation: usize,
 }
 
 /// Rewrite a conjunctive SPARQL query into the **union of conjunctive queries** whose evaluation
@@ -106,6 +120,86 @@ pub fn rewrite(query: &Query, tbox: &[oxrdf::Triple]) -> Result<Rewritten, CqErr
         report: RewriteReport {
             disjuncts,
             skipped_axioms: tbox_model.skipped,
+            disjuncts_before_minimisation: disjuncts,
+        },
+    })
+}
+
+/// Rewrite a conjunctive SPARQL query into the **minimised** union of conjunctive queries via the
+/// PRODUCTION path: baseline PerfectRef saturation, **augmented** with bounded **tree-witness**
+/// folding (existential witnesses captured without an unbounded chase), then **UCQ-containment
+/// minimisation** (redundant disjuncts dropped by the homomorphism containment test). EXPERIMENTAL.
+///
+/// SOUNDNESS — the certain-answer set is IDENTICAL to [`rewrite`]'s. PerfectRef is sound +
+/// complete, so the augmented pre-minimisation UCQ has at least PerfectRef's answers; tree-witness
+/// folding only adds disjuncts that are themselves PerfectRef-derivable (so it adds no NEW
+/// answers); and minimisation drops only a disjunct **contained** in a retained one (so it removes
+/// no answers). The net result returns exactly the certain answers, in a SMALLER UCQ. The
+/// containment check is NP-complete and **fail-closed**: when containment cannot be decided within
+/// the search budget the disjunct is KEPT (never dropped on uncertainty) — an over-aggressive
+/// minimisation that dropped a non-contained disjunct would be an unsoundness bug.
+///
+/// FAIL-CLOSED CQ-shape gate as in [`rewrite`]: a non-CQ query is rejected as
+/// [`CqError::OutOfScope`], never mis-answered.
+///
+/// ```
+/// # #[cfg(feature = "experimental")] {
+/// use oxrdf::Triple;
+/// use spargebra::SparqlParser;
+/// use sparq_reason_ql::rewrite_production;
+/// use std::str::FromStr;
+///
+/// // TBox: Manager rdfs:subClassOf Employee.
+/// let tbox = vec![Triple::from_str(
+///     "<http://ex/Manager> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex/Employee> ."
+/// ).unwrap()];
+/// let q = SparqlParser::new().parse_query(
+///     "SELECT ?x WHERE { ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Employee> }"
+/// ).unwrap();
+/// let r = rewrite_production(&q, &tbox).unwrap();
+/// // Employee + Manager: two incomparable disjuncts; nothing is redundant, so none is dropped.
+/// assert_eq!(r.report.disjuncts, 2);
+/// assert_eq!(r.report.disjuncts_before_minimisation, 2);
+/// # }
+/// ```
+#[cfg(feature = "experimental")]
+pub fn rewrite_production(query: &Query, tbox: &[oxrdf::Triple]) -> Result<Rewritten, CqError> {
+    // 1. FAIL-CLOSED CQ-shape gate (the soundness keystone — always first).
+    let cq = as_conjunctive_query(query)?;
+    // 2. Map the CQ body to internal DL-Lite atoms.
+    let (atoms, answer) = emit::cq_to_atoms(&cq)?;
+    // 3. Extract the DL-Lite_R TBox and run baseline PerfectRef to the fixpoint (complete).
+    let tbox_model = TBox::extract(tbox);
+    let perfect = perfectref::perfect_ref(atoms, answer.clone(), &tbox_model);
+    // 4. AUGMENT each PerfectRef disjunct with its bounded tree-witness foldings (no new answers —
+    //    every folding is PerfectRef-derivable; this only exposes the compact existential form).
+    let mut augmented: Vec<perfectref::Cq> = Vec::new();
+    for disjunct in perfect {
+        for folded in treewitness::tree_witness_ucq(disjunct, &tbox_model) {
+            augmented.push(folded);
+        }
+    }
+    let before = {
+        // De-duplicate structurally for the honest "before minimisation" tally (the union is a
+        // set). Minimisation does this too, but we want the pre-minimisation count to reflect the
+        // set, not the multiset, so the dropped-by-containment delta is meaningful.
+        let mut seen = rustc_hash::FxHashSet::default();
+        augmented.retain(|c| seen.insert(c.clone()));
+        augmented.len()
+    };
+    // 5. UCQ-CONTAINMENT MINIMISATION — drop every disjunct contained in a retained one (sound;
+    //    fail-closed on an undecidable-within-budget containment check).
+    let minimal = minimise::minimise_ucq(augmented, &answer);
+    let disjuncts = minimal.len();
+    // 6. Fold the minimised UCQ back into a spargebra body under the original projection/distinct.
+    let body = emit::ucq_to_pattern(minimal);
+    let rewritten = rewrap(query, &cq, body);
+    Ok(Rewritten {
+        query: rewritten,
+        report: RewriteReport {
+            disjuncts,
+            skipped_axioms: tbox_model.skipped,
+            disjuncts_before_minimisation: before,
         },
     })
 }

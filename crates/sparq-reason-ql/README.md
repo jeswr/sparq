@@ -49,10 +49,14 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
 
 ## ✨ Features
 
-- **PerfectRef rewriting** *(opt-in `experimental` feature)* — rewrite + reduce saturation to a
+- **`rewrite` — PerfectRef baseline** *(opt-in `experimental`)* — rewrite + reduce saturation to a
   fixpoint over the positive DL-Lite_R inclusions: `rdfs:subClassOf` / `subPropertyOf`,
   `rdfs:domain` / `range` (`∃R ⊑ A`, `∃R⁻ ⊑ A`), `owl:inverseOf`, and unqualified `∃R`
   restrictions, with the existential **applicability condition** enforced explicitly.
+- **`rewrite_production` — production path** *(opt-in `experimental`)* — PerfectRef **augmented**
+  with bounded **tree-witness** folding (existential witnesses captured with no unbounded chase),
+  then **UCQ-containment minimisation** (redundant disjuncts dropped by the homomorphism
+  containment test). Returns the **same certain answers** as `rewrite` in a **smaller UCQ**.
 - **Fail-closed CQ-shape gate** *(always present)* — `OPTIONAL`/`FILTER`/`MINUS`/`UNION`/paths/
   aggregation/variable-predicate queries are **rejected** as `OutOfScope`, not mis-answered.
 - **Query-rewriter seam** — emits a `Union`-folded UCQ as a `spargebra::Query`, run unchanged by
@@ -60,11 +64,17 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
 - **Honest fragment reporting** — TBox axioms outside DL-Lite_R are counted in
   `RewriteReport::skipped_axioms`, never silently applied.
 
-**Scope (honest):** positive-inclusion rewriting only. **No UCQ minimisation** (no containment
-check), **no consistency checking**, no qualified existentials. The UCQ can blow up
-exponentially in TBox depth (Kikot et al.) — the deferred **production path** is *tree-witness
-rewriting + UCQ-containment minimisation* (a separate bead, epic sq-pbz04 phase Q2/Q3). Enable
-with `sparq-reason-ql = { version = "0.1", features = ["experimental"] }`.
+> **Minimisation is fail-closed.** UCQ containment is **NP-complete**; the homomorphism search is
+> **bounded**, and on an **undecided-within-budget** check the disjunct is **KEPT**, never dropped.
+> Minimisation only ever removes a disjunct **proven contained** in a retained one — so it removes
+> no answers. (Dropping a non-contained disjunct would be an unsoundness bug.)
+
+**Scope (honest):** positive-inclusion rewriting + tree-witness folding + containment minimisation.
+**No consistency checking**, no qualified existentials. The regime stays **EXPERIMENTAL**: it is
+oracle-tested (`tests/oracle.rs`, incl. the tree-witness + minimisation cases), **not** graduated
+to a conformance floor — that graduation is a separate, deferred bead (it must sequence through the
+contended conformance scoreboard; epic `sq-pbz04`). Enable with `sparq-reason-ql = { version =
+"0.1", features = ["experimental"] }`.
 
 ## 📚 Learn more
 
@@ -72,7 +82,8 @@ with `sparq-reason-ql = { version = "0.1", features = ["experimental"] }`.
 - **API reference** — [docs.rs/sparq-reason-ql](https://docs.rs/sparq-reason-ql).
 - **Design** — [`research/owl2-el-ql-reasoning-spike.md`](../../research/owl2-el-ql-reasoning-spike.md)
   (the QL track) and [`research/reasoner-suite-on-substrate.md`](../../research/reasoner-suite-on-substrate.md)
-  §2.5 (the PerfectRef trap + the phased plan).
+  §2.5 (the PerfectRef trap + the phased plan; this crate now implements phases Q1–Q3, with the
+  conformance-floor graduation deferred to a follow-up scoreboard bead).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

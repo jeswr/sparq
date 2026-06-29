@@ -31,7 +31,7 @@
 
 use oxrdf::Triple;
 use spargebra::{Query, SparqlParser};
-use sparq_reason_ql::rewrite;
+use sparq_reason_ql::{rewrite, rewrite_production};
 use std::str::FromStr;
 use std::time::Instant;
 
@@ -106,6 +106,42 @@ fn run_subproperty(depth: usize) {
     );
 }
 
+/// Production-path invariant check (sq-g19x0): on the SAME linear `subclass` chain the production
+/// rewrite (PerfectRef + tree-witness + minimisation) must (a) never EMPTY the UCQ — the input
+/// CQ's answers must survive — and (b) never GROW it past the pre-minimisation count. A linear
+/// chain has no redundant disjuncts (each disjunct is an incomparable single class atom), so the
+/// minimised count equals the baseline DEPTH+1: minimisation correctly drops NOTHING. Asserting
+/// this closed form proves minimisation is not over-aggressive on the chain (it would be an
+/// unsoundness bug to collapse incomparable disjuncts) and not a no-op stub.
+fn run_production(depth: usize) {
+    let tbox = subclass_chain(depth);
+    let query = parse(&format!("SELECT ?x WHERE {{ ?x <{RDF_TYPE}> <{EX}C{depth}> }}"));
+    let t = Instant::now();
+    let r = rewrite_production(&query, &tbox).expect("subclass chain CQ is in QL scope");
+    let dt = secs(t);
+    assert!(
+        r.report.disjuncts >= 1,
+        "production UCQ must never be empty (the input CQ's answers must survive)"
+    );
+    assert!(
+        r.report.disjuncts <= r.report.disjuncts_before_minimisation,
+        "minimisation must only REMOVE disjuncts, never grow the UCQ"
+    );
+    // Linear chain ⇒ DEPTH+1 incomparable single-atom disjuncts ⇒ nothing is redundant.
+    let expected = depth + 1;
+    assert_eq!(
+        r.report.disjuncts, expected,
+        "production depth {depth}: minimised UCQ size {} != closed form {expected} (incomparable disjuncts must not be dropped)",
+        r.report.disjuncts
+    );
+    println!(
+        "production  depth {depth:>6}: rewrite {dt:9.6}s   disjuncts {} (= d+1; before-min {}, dropped {})",
+        r.report.disjuncts,
+        r.report.disjuncts_before_minimisation,
+        r.report.disjuncts_before_minimisation - r.report.disjuncts
+    );
+}
+
 fn main() {
     let depth: usize = std::env::args()
         .nth(1)
@@ -114,5 +150,6 @@ fn main() {
     println!("sparq-reason-ql ql_rewrite_bench — depth {depth} (deterministic, regenerable)");
     run_subclass(depth);
     run_subproperty(depth);
+    run_production(depth);
     println!("OK: closed-form UCQ-size assertions held (UCQ scales linearly; wall-clock above is trend-only).");
 }

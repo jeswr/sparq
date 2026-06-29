@@ -154,19 +154,23 @@ OWL 2 QL (DL-Lite_R) is **FO-rewritable**: instead of materializing a closure, y
 
 ```rust,ignore
 // Cargo.toml:  sparq-reason-ql = { version = "0.1", features = ["experimental"] }
-use sparq_reason_ql::{rewrite, as_conjunctive_query, CqError};
+use sparq_reason_ql::{rewrite, rewrite_production, as_conjunctive_query, CqError};
 use spargebra::SparqlParser;
 
 let q = SparqlParser::new().parse_query("SELECT ?x WHERE { ?x a <http://ex/Employee> }")?;
 // `tbox`: &[oxrdf::Triple] carrying rdfs:subClassOf/subPropertyOf/domain/range, owl:inverseOf …
-let r = rewrite(&q, &tbox)?;            // r.query is the UCQ; r.report.disjuncts / .skipped_axioms
+let r = rewrite(&q, &tbox)?;            // baseline PerfectRef UCQ; r.report.disjuncts / .skipped_axioms
+// Production path: PerfectRef + tree-witness folding + UCQ-containment MINIMISATION (smaller UCQ,
+// SAME certain answers). r.report.disjuncts_before_minimisation - r.report.disjuncts = dropped.
+let p = rewrite_production(&q, &tbox)?;
 // The CQ-shape gate alone (no feature needed) classifies a query without rewriting:
 match as_conjunctive_query(&q) { Ok(_cq) => {}, Err(CqError::OutOfScope(why)) => { let _ = why; } }
 ```
 
-- **FAIL-CLOSED CQ-shape gate (the soundness keystone).** PerfectRef is sound + complete only for **conjunctive queries**. A query with `OPTIONAL`/`FILTER`/`MINUS`/`UNION`/a property path/aggregation/a variable predicate is **rejected as `CqError::OutOfScope(reason)`**, never silently mis-answered. The applicability condition (an existential generator fires only on an UNBOUND, non-distinguished, non-shared variable) is enforced explicitly — firing it on a projected/shared variable would drop a join (unsound).
-- **Scope (Phase Q1, `experimental`):** the **positive** DL-Lite_R inclusions — `rdfs:subClassOf`/`subPropertyOf`, `rdfs:domain`/`range` (`∃R ⊑ A`, `∃R⁻ ⊑ A`), `owl:inverseOf`, and **unqualified** `∃R` `owl:someValuesFrom owl:Thing` restrictions. Non-QL axioms are counted in `RewriteReport::skipped_axioms`, never applied.
-- **EXPERIMENTAL — oracle-tested, NOT graduated to a conformance floor.** Validated against a hand-checked DL-Lite oracle (`tests/oracle.rs`), because no Rust PerfectRef reference exists to diff against. There is **no UCQ minimization** (no containment check) and **no consistency checking**. The UCQ can blow up exponentially in TBox depth (Kikot et al.) — the deferred **production path** is *tree-witness rewriting + UCQ-containment minimisation* (epic `sq-pbz04` phases Q2/Q3).
+- **FAIL-CLOSED CQ-shape gate (the soundness keystone).** PerfectRef is sound + complete only for **conjunctive queries**. A query with `OPTIONAL`/`FILTER`/`MINUS`/`UNION`/a property path/aggregation/a variable predicate is **rejected as `CqError::OutOfScope(reason)`**, never silently mis-answered. The applicability condition (an existential generator fires only on an UNBOUND, non-distinguished, non-shared variable) is enforced explicitly — firing it on a projected/shared variable would drop a join (unsound). The `reduce` MGU likewise treats **distinguished (answer) variables as rigid** — it never identifies two answer columns (that would answer a different, more-constrained query and drop answers).
+- **Scope (`experimental`):** the **positive** DL-Lite_R inclusions — `rdfs:subClassOf`/`subPropertyOf`, `rdfs:domain`/`range` (`∃R ⊑ A`, `∃R⁻ ⊑ A`), `owl:inverseOf`, and **unqualified** `∃R` `owl:someValuesFrom owl:Thing` restrictions. Non-QL axioms are counted in `RewriteReport::skipped_axioms`, never applied.
+- **Production path (`rewrite_production`):** baseline PerfectRef **augmented** with bounded **tree-witness** folding (existential witnesses captured with no unbounded chase) then **UCQ-containment minimisation** (drop disjuncts contained in a retained one). Same certain answers as `rewrite`, in a smaller UCQ. **Minimisation is FAIL-CLOSED:** containment is NP-complete, the homomorphism search is bounded, and an **undecided-within-budget** check **KEEPS** the disjunct — minimisation only ever removes a disjunct **proven contained**, so it removes no answers.
+- **EXPERIMENTAL — oracle-tested, NOT graduated to a conformance floor.** Validated against a hand-checked DL-Lite oracle (`tests/oracle.rs`, incl. tree-witness + minimisation cases), because no Rust PerfectRef reference exists to diff against. There is **no consistency checking**. Graduating the QL entailment-regime arm to a pinned conformance floor is a separate, deferred bead (it must sequence through the contended conformance scoreboard; epic `sq-pbz04`).
 
 ## Common recipes
 
@@ -271,4 +275,4 @@ let closure = reason_n3_terms_with_resolver(src, Some("http://ex/"), Some(&resol
 - `mpc-protocols` — multi-party layer over (federated) SPARQL.
 - `hdt-format`, `fused-decompress-parse`, `rust-parallel-parsing` — sibling ingest/storage skills for getting triples into the graph you then reason over.
 - `research/owl2-el-ql-reasoning-spike.md` — the EL/QL feasibility spike: why EL first, the RL-incompleteness proof (the CR4 counterexample), and the phased plan (E1–E6) `sparq-reason-el` implements.
-- `research/reasoner-suite-on-substrate.md` §2.5 — the QL track design: the PerfectRef applicability trap, the strict CQ-shape gate, and why the production path (tree-witness + UCQ-containment minimisation) is sequenced late by soundness risk (the phased plan `sparq-reason-ql` Phase Q1 implements).
+- `research/reasoner-suite-on-substrate.md` §2.5 — the QL track design: the PerfectRef applicability trap, the strict CQ-shape gate, and why the production path (tree-witness + UCQ-containment minimisation) is sequenced late by soundness risk (the phased plan `sparq-reason-ql` implements through phases Q1–Q3; only the conformance-floor graduation remains deferred).
