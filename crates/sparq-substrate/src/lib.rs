@@ -1,21 +1,27 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
-// [OPUS-4.8] sq-fmprw (epic sq-qonbz, umbrella sq-6tykl) — see research/shared-eval-substrate.md.
+// [OPUS-4.8] sq-ev41x (epic sq-qonbz, umbrella sq-6tykl) — see research/shared-eval-substrate.md.
 //
-// This crate is the KEYSTONE leaf of the shared-evaluation-substrate move-chain. It is a
-// SCAFFOLD: it defines / re-exports the shared id-tuple vocabulary (`rows`) and the XSD
-// numeric value tower (`numeric`), behind DEFAULT-OFF features, with NO evaluation logic
-// moved yet. The join kernels (merge / hash / bind / leapfrog-trie) and the engine's
-// `compare_values` total order + `Num` arithmetic land in LATER beads of the epic — this
-// PR moves no engine or reasoner code and changes no behaviour anywhere.
+// This crate is the KEYSTONE leaf of the shared-evaluation-substrate move-chain. It defines
+// the shared id-tuple vocabulary (`rows`) and the XSD numeric value tower (`numeric`),
+// behind DEFAULT-OFF features.
 //
-// ZERO-OVERHEAD INTENT (the contract every later phase must keep): the shareable kernels
-// will be FREE FUNCTIONS monomorphic over the concrete `Id = u32` and the `SmallVec` row
-// aliases below — NEVER `Box<dyn>` / `&dyn` / a vtable between a join's probe and its key
-// comparison (research record §2.3, §4). The compiler then emits one specialised, inlinable
-// body per call site, so the engine's hot loops keep identical codegen after the move and
-// the reasoners gain a real join. This scaffold introduces no dynamic dispatch.
+// PHASE 2 (sq-ev41x) has now landed `numeric`: the engine's id-level `Num` / `Dec` value
+// tower + `as_numeric` classification + the numeric arithmetic ops (`binop` / `neg` / `abs`
+// / rounding) and the XSD lexical helpers were MOVED here verbatim from `sparq-engine::exec`
+// and the engine now consumes `sparq_substrate::numeric::{Num, Dec, as_numeric, ...}`. The
+// move is behaviour-neutral (the W3C SPARQL conformance floor + ORDER BY / numeric / relop
+// tests are bit-identical). STILL PENDING in later beads of the epic: the join kernels
+// (merge / hash / bind / leapfrog-trie) and the engine's `compare_values` total order
+// (which is irreducibly coupled to the engine's `Value` enum + the temporal subsystem, so it
+// moves with `Value` in a follow-up, not here).
+//
+// ZERO-OVERHEAD INTENT (the contract every phase keeps): the shareable kernels are FREE
+// FUNCTIONS / methods monomorphic over the concrete `Id = u32` and the numeric tiers —
+// NEVER `Box<dyn>` / `&dyn` / a vtable on a hot path (research record §2.3, §4). Every
+// `numeric` item carries `#[inline]`, so cross-crate inlining (with the workspace LTO
+// profile) keeps the engine's FILTER / BIND / ORDER BY hot loops identical to pre-move.
 
 #[cfg(feature = "rows")]
 pub mod rows;
