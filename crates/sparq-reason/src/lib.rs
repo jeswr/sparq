@@ -14,6 +14,11 @@ pub mod explain;
 pub mod n3;
 mod owl;
 mod rdfs;
+// [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — the opt-in RIF-Core (monotone Horn) rule
+// front-end over the N3 chainer. Behind the `rif-core` feature; when off the whole
+// module is cfg'd out (the lean-core posture, like `dtype` / `explain`).
+#[cfg(feature = "rif-core")]
+pub mod rif;
 #[cfg(feature = "d-entail")]
 pub use dtype::{d_value_eq, d_value_key, materialize_d, DValue, Recognized};
 #[cfg(feature = "explain")]

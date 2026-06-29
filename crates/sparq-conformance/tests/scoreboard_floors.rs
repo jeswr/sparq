@@ -220,6 +220,19 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-rsp/tests/srbench_oracle.rs",
         "RSP_EXPRESSIVITY_FLOOR",
     ),
+    // [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — the RIF-Core EXPRESSIVITY ratchet. The
+    // floor const (`pub const RIF_CORE_FLOOR`) lives in THIS crate's
+    // `tests/rif_core_suite.rs` (behind the opt-in `rif-core` feature, inside the
+    // `gated` module — the guard reads it TEXTUALLY, so the `#[cfg]`/module nesting
+    // do not affect the match); the guard pins the central scoreboard's
+    // `ratchet_floor` to it so the two can never silently drift. It is a sparq
+    // EXTENSION-shaped ratchet over the RIF-Core (monotone Horn) subset, NOT the
+    // normative W3C SPARQL-RIF conformance suite.
+    (
+        "RIF-Core expressivity (monotone Horn subset)",
+        "crates/sparq-conformance/tests/rif_core_suite.rs",
+        "RIF_CORE_FLOOR",
+    ),
 ];
 
 #[test]
@@ -321,8 +334,12 @@ fn scoreboard_renders_all_suites() {
     // the row appears, and (now there are TWO extension rows) the total line
     // pluralises to "rows".
     assert!(md.contains("RSP expressivity / SRBench correctness"));
+    // [OPUS-4.8] sq-rh4gu — the RIF-Core expressivity ratchet, HONESTLY rendered as
+    // a sparq EXTENSION over the RIF-Core (monotone Horn) subset (the THIRD
+    // extension row — so the total line still pluralises to "rows").
+    assert!(md.contains("RIF-Core expressivity (monotone Horn subset)"));
     assert!(
-        md.contains("sparq-extension (2 rows, NOT conformance)"),
-        "two extension rows should be tallied separately and pluralised"
+        md.contains("sparq-extension (3 rows, NOT conformance)"),
+        "three extension rows should be tallied separately and pluralised"
     );
 }
