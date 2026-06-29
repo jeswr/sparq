@@ -253,3 +253,32 @@ this vendored tree once the fixes land in a released spargebra.
 > Manifest note: as in §8, `autotests = false` means the new
 > `tests/custom_aggregate_distinct.rs` target is declared explicitly in
 > `Cargo.toml`. A vendoring artifact, not an upstream change.
+
+## 10. Parse `MULTIPLICITY()` as a reserved-IRI extension builtin [OPUS-4.8]
+
+- **Context (sq-v411r, survey §B2)**: the SPARQL 1.2 algebra uses `multiplicity(μ|Ω)`
+  — replacing the informal `card[Ω](μ)` — as the multiset-cardinality device inside
+  the Set-Function definitions and §18.4 BGP matching. It is a *definition* device:
+  the W3C SPARQL 1.2 Query rec (and its editor's draft) define **no callable
+  `multiplicity()` builtin** and ship **no `multiplicity` conformance test**. sparq
+  exposes the device as an opt-in vendor extension so a query can write the
+  multiset-weighted aggregate `SUM(?x * MULTIPLICITY())` the survey calls for.
+- **Why a reserved IRI, not a new `Function` enum variant**: the shared `Function`
+  enum is matched **exhaustively (no `_` wildcard)** by downstream crates we do not
+  control — `sparopt`/`spareval` (pulled in via `oxigraph` for `sparq-bench`).
+  Adding a variant breaks their compile under `--workspace --all-features`. So the
+  parser maps the keyword `MULTIPLICITY` to `Function::Custom(<urn:sparq:fn:multiplicity>)`
+  (a zero-arg call); the enum is byte-identical and every downstream matcher hits its
+  existing `Function::Custom(_)` arm. The sparq engine recognises the reserved IRI in
+  aggregate evaluation + function dispatch.
+- **Fix**: one `BuiltInCall` alternative — `i("MULTIPLICITY") _ NIL()` (the zero-arg
+  shape of `NOW()`/`RAND()`), gated behind `sparql-12`, emitting the reserved-IRI
+  `Function::Custom`. No `Function`/`Display` change.
+- **Tests**: engine-level evaluation + the parse round-trip live in
+  `crates/sparq-engine/src/exec.rs` (`mod multiplicity_builtin`) and
+  `crates/sparq-engine/src/aggregate.rs`. Semantics: folding the **distinct** group
+  solutions weighted by each one's bag cardinality, so `SUM(?x * MULTIPLICITY())`
+  equals plain `SUM(?x)` over the bag.
+- **Not upstream**: this is a sparq extension, not a spec conformance fix — it is NOT
+  prepared as an oxigraph PR (unlike §1–§6). Drop if/when W3C standardises a callable
+  multiplicity builtin.

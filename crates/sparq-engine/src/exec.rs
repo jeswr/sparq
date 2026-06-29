@@ -534,6 +534,53 @@ pub(crate) mod aggregates {
     }
 }
 
+// ---- MULTIPLICITY() context (sq-v411r, survey §B2) -----------------------------
+//
+// [OPUS-4.8] The SPARQL 1.2 algebra's `multiplicity` device, exposed as a
+// zero-arg extension builtin. When an aggregate folds a group's member multiset,
+// the evaluator sets this thread-local to the bag cardinality of the member
+// solution currently being evaluated (how many byte-identical solution rows the
+// group collapses into that member), then clears it. `MULTIPLICITY()` reads it;
+// OUTSIDE an aggregate argument the thread-local is `None`, so the builtin is an
+// expression error (it is only meaningful within a Set Function over a multiset).
+//
+// Each rayon group-eval worker has its OWN thread-local and sets it on-thread
+// immediately before `eval_expr`, so — unlike the registries above — no
+// cross-thread snapshot/re-install is needed: the value never has to outlive the
+// single `eval_expr` call on the thread that set it. A `Cell<Option<u64>>` read
+// is the same cost class as the budget check; the common (no-aggregate) path
+// never writes it. The RAII `Guard` restores the previous value so a nested
+// aggregate or an `EXISTS`/sub-query re-entry inside an aggregate argument cannot
+// observe a stale outer multiplicity.
+pub(crate) mod multiplicity {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CURRENT: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// Sets the current group member's multiplicity for the duration of the
+    /// returned guard, restoring the previous value on drop (also on unwind).
+    pub(crate) struct Guard(Option<u64>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CURRENT.with(|c| c.set(self.0.take()));
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set(card: u64) -> Guard {
+        let prev = CURRENT.with(|c| c.replace(Some(card)));
+        Guard(prev)
+    }
+
+    /// The current member multiplicity, or `None` outside an aggregate argument.
+    #[inline]
+    pub(crate) fn current() -> Option<u64> {
+        CURRENT.with(Cell::get)
+    }
+}
+
 // ---- Spatial index (sq-mg9) ----------------------------------------------------
 //
 // The thread-local [`SpatialProvider`] installed by `with_spatial_index`. The
@@ -6130,6 +6177,83 @@ fn group_aggregate(
     Ok(Bindings::unsorted(out_vars, rows))
 }
 
+/// [OPUS-4.8] (sq-v411r, survey §B2) Reserved IRI the vendored spargebra parser emits for the
+/// zero-arg `MULTIPLICITY()` extension builtin (as a `Function::Custom`, to keep the shared
+/// `Function` enum byte-compatible with downstream exhaustive matchers). The engine recognises
+/// it in aggregate evaluation and function dispatch; it is never a user-registrable IRI.
+pub(crate) const MULTIPLICITY_FN_IRI: &str = "urn:sparq:fn:multiplicity";
+
+/// [OPUS-4.8] (sq-v411r, survey §B2) The DISTINCT solutions of a group paired with each
+/// one's bag cardinality (`multiplicity(μ|Ω)`): `(ri, card)` is a representative row index
+/// for a distinct solution mapping and how many rows in `members` are byte-identical to it,
+/// in first-seen order. Returns `None` (and does NO work) unless `expr` actually calls
+/// `MULTIPLICITY()`, so an aggregate that never references it pays nothing and folds the
+/// full bag exactly as before.
+///
+/// The collapse to distinct members is load-bearing for correctness, NOT an optimisation:
+/// the SPARQL algebra's Set Functions are defined over the multiset by iterating its
+/// DISTINCT elements weighted by `multiplicity`, so `SUM(?x * MULTIPLICITY())` must visit
+/// `?x=10` once (with multiplicity 3), not three times — otherwise a value occurring `k`
+/// times would contribute `k²·x` instead of `k·x`. With this collapse the standard identity
+/// `SUM(?x * MULTIPLICITY()) == SUM(?x)` (over the bag) holds. Solution identity is the
+/// whole row, matching `COUNT(DISTINCT *)`; BGP matching is bag semantics, so duplicate
+/// solutions are preserved as repeated rows up to this point.
+fn group_multiplicities(b: &Bindings, members: &[usize], expr: &Expression) -> Option<Vec<(usize, u64)>> {
+    if !expr_uses_multiplicity(expr) {
+        return None;
+    }
+    // Count identical rows, keeping a first-seen representative index for each distinct row.
+    let mut counts: FxHashMap<&Row, (usize, u64)> = FxHashMap::default();
+    let mut order: Vec<&Row> = Vec::new();
+    for &ri in members {
+        match counts.get_mut(&b.rows[ri]) {
+            Some(entry) => entry.1 += 1,
+            None => {
+                counts.insert(&b.rows[ri], (ri, 1));
+                order.push(&b.rows[ri]);
+            }
+        }
+    }
+    Some(order.into_iter().map(|row| counts[row]).collect())
+}
+
+/// Whether `expr` contains a `MULTIPLICITY()` call anywhere in its tree. An `Exists`
+/// sub-pattern is NOT descended into: a `MULTIPLICITY()` there belongs to that
+/// (un-aggregated) sub-query's scope, not this aggregate's member — and would
+/// correctly evaluate against the thread-local's restored (absent) context.
+fn expr_uses_multiplicity(expr: &Expression) -> bool {
+    use Expression as E;
+    match expr {
+        // `MULTIPLICITY()` is parsed as a `Function::Custom` with the reserved IRI
+        // (see `MULTIPLICITY_FN_IRI`) so the shared `Function` enum stays byte-compatible
+        // with downstream exhaustive matchers (sparopt/spareval).
+        E::FunctionCall(spargebra::algebra::Function::Custom(nn), args)
+            if args.is_empty() && nn.as_str() == MULTIPLICITY_FN_IRI =>
+        {
+            true
+        }
+        E::NamedNode(_) | E::Literal(_) | E::Variable(_) | E::Bound(_) | E::Exists(_) => false,
+        E::Or(a, c)
+        | E::And(a, c)
+        | E::Equal(a, c)
+        | E::SameTerm(a, c)
+        | E::Greater(a, c)
+        | E::GreaterOrEqual(a, c)
+        | E::Less(a, c)
+        | E::LessOrEqual(a, c)
+        | E::Add(a, c)
+        | E::Subtract(a, c)
+        | E::Multiply(a, c)
+        | E::Divide(a, c) => expr_uses_multiplicity(a) || expr_uses_multiplicity(c),
+        E::UnaryPlus(a) | E::UnaryMinus(a) | E::Not(a) => expr_uses_multiplicity(a),
+        E::If(a, c, d) => {
+            expr_uses_multiplicity(a) || expr_uses_multiplicity(c) || expr_uses_multiplicity(d)
+        }
+        E::In(a, list) => expr_uses_multiplicity(a) || list.iter().any(expr_uses_multiplicity),
+        E::Coalesce(list) | E::FunctionCall(_, list) => list.iter().any(expr_uses_multiplicity),
+    }
+}
+
 fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[usize], agg: &AggregateExpression) -> Result<Value, String> {
     match agg {
         AggregateExpression::CountSolutions { distinct } => {
@@ -6171,12 +6295,33 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
             // into a type error downstream (`as_numeric` -> None), per agg-err-01.
             let mut vals: Vec<Value> = Vec::with_capacity(members.len());
             let mut errored = false;
-            for &ri in members {
-                let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
-                match v {
-                    Value::Unbound => {}             // skip: aggregate ignores unbound rows
-                    Value::Error => errored = true,  // fatal for SUM/AVG (-> unbound aggregate)
-                    _ => vals.push(v),
+            // [OPUS-4.8] (sq-v411r, §B2) Only build the multiplicity table when the argument
+            // actually calls `MULTIPLICITY()` — the overwhelmingly common aggregate pays
+            // nothing (no table, no thread-local write) and folds the full bag below. When
+            // present, fold the DISTINCT solutions instead, each weighted by its bag
+            // cardinality via the thread-local, per the Set-Function algebra (see
+            // `group_multiplicities`).
+            match group_multiplicities(b, members, expr) {
+                None => {
+                    for &ri in members {
+                        let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
+                        match v {
+                            Value::Unbound => {}             // skip: aggregate ignores unbound rows
+                            Value::Error => errored = true,  // fatal for SUM/AVG (-> unbound aggregate)
+                            _ => vals.push(v),
+                        }
+                    }
+                }
+                Some(distinct) => {
+                    for (ri, card) in distinct {
+                        let _mg = multiplicity::set(card);
+                        let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
+                        match v {
+                            Value::Unbound => {}
+                            Value::Error => errored = true,
+                            _ => vals.push(v),
+                        }
+                    }
                 }
             }
             if *distinct {
@@ -6235,7 +6380,16 @@ fn eval_custom_aggregate(
         return Err(format!("unsupported SPARQL function: no custom aggregate registered for <{iri}>"));
     };
     let mut args: Vec<Option<Term>> = Vec::with_capacity(members.len());
-    for &ri in members {
+    // [OPUS-4.8] (sq-v411r) `MULTIPLICITY()` works inside a custom aggregate's argument too:
+    // when it appears, fold the DISTINCT solutions weighted by each one's bag cardinality
+    // (same algebra as the builtins); otherwise fold the full bag exactly as before.
+    let mults = group_multiplicities(b, members, expr);
+    let iter: Vec<(usize, Option<u64>)> = match &mults {
+        None => members.iter().map(|&ri| (ri, None)).collect(),
+        Some(distinct) => distinct.iter().map(|&(ri, card)| (ri, Some(card))).collect(),
+    };
+    for (ri, card) in iter {
+        let _mg = card.map(multiplicity::set);
         let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
         // A genuine expression error inside the argument makes the aggregate a
         // SPARQL error (→ unbound), mirroring SUM/AVG; an unbound member is a
@@ -8285,6 +8439,22 @@ fn eval_function(
         // `query_with_functions` / `with_functions` in lib.rs). An IRI that is
         // neither stays the same hard query error as before the registry existed.
         F::Custom(nn) => {
+            // [OPUS-4.8] (sq-v411r, survey §B2) MULTIPLICITY(): the SPARQL 1.2 algebra's
+            // `multiplicity` device, parsed as the reserved-IRI `Function::Custom` so the
+            // shared enum stays byte-compatible downstream. Inside an aggregate argument it
+            // is the bag cardinality (`xsd:integer`) of the current group member's solution
+            // within its group multiset, so `SUM(?x * MULTIPLICITY())` is the multiset-
+            // weighted sum. The evaluator installs the per-member value before each
+            // `eval_expr`; OUTSIDE an aggregate the context is absent and the call is an
+            // expression error (only meaningful over a multiset). Checked BEFORE the cast /
+            // registry so the reserved IRI can never be shadowed. NOT a W3C-standard
+            // callable builtin — see the README.
+            if args.is_empty() && nn.as_str() == MULTIPLICITY_FN_IRI {
+                return Ok(match multiplicity::current() {
+                    Some(card) => Value::Num(Num::Int(card as i64)),
+                    None => Value::Error,
+                });
+            }
             let mut vals = Vec::with_capacity(args.len());
             for i in 0..args.len() {
                 vals.push(ev(i)?);
@@ -11583,5 +11753,264 @@ mod group_by_unbound_var {
         assert_eq!(r.rows[0][0], None, "?kind unbound");
         // SUM over an all-unbound column is "0"^^xsd:integer (Sum({}) = 0).
         assert_eq!(r.rows[0][1], Some(int_lit(0)));
+    }
+}
+
+/// [OPUS-4.8] (sq-v411r, survey §B2) The SPARQL 1.2 algebra's `multiplicity` device exposed
+/// as a zero-argument extension builtin `MULTIPLICITY()`. These tests drive the REAL query
+/// path (`crate::query`) end-to-end — parse (vendored spargebra) → plan → aggregate eval →
+/// the `F::Multiplicity` dispatch arm reading the per-member thread-local set by
+/// `group_multiplicities` — so the new lines are covered by the coverage ratchet.
+///
+/// The multiset is built with a sub-SELECT that projects away the per-row subject, so several
+/// subjects sharing a value collapse to byte-identical solutions (bag semantics, no implicit
+/// DISTINCT). That gives a group whose distinct members carry a multiplicity > 1, which is the
+/// only configuration in which `MULTIPLICITY()` is observable.
+#[cfg(test)]
+mod multiplicity_builtin {
+    use super::*;
+
+    /// `?x` over `{10×3, 20×2}`: three subjects with value 10, two with value 20. The
+    /// sub-SELECT projects only `?x`, so the outer aggregate sees the bag {10,10,10,20,20}.
+    fn g() -> Graph {
+        Graph::load_str(
+            "@prefix ex: <http://ex/> . \
+             ex:a ex:v 10 . ex:b ex:v 10 . ex:c ex:v 10 . \
+             ex:d ex:v 20 . ex:e ex:v 20 .",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    fn run(q: &str) -> QueryResult {
+        crate::query(&g(), &format!("PREFIX ex: <http://ex/> {q}")).unwrap()
+    }
+
+    fn int_lit(n: i64) -> Term {
+        Term::Literal(oxrdf::Literal::new_typed_literal(n.to_string(), oxrdf::vocab::xsd::INTEGER))
+    }
+
+    /// The headline identity: over the DISTINCT solutions weighted by `MULTIPLICITY()`,
+    /// `SUM(?x * MULTIPLICITY())` equals plain `SUM(?x)` over the bag. 10·3 + 20·2 = 70,
+    /// and 10+10+10+20+20 = 70. This is exactly the `SUM(?x * multiplicity())` example from
+    /// the survey §B2 / `research/sparql12-engine.md` §1.4.
+    #[test]
+    fn weighted_sum_equals_bag_sum() {
+        let r = run(
+            "SELECT (SUM(?x) AS ?bag) (SUM(?x * MULTIPLICITY()) AS ?w) \
+             WHERE { SELECT ?x WHERE { ?s ex:v ?x } }",
+        );
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], Some(int_lit(70)), "plain SUM over the bag");
+        assert_eq!(r.rows[0][1], Some(int_lit(70)), "MULTIPLICITY-weighted SUM must match");
+    }
+
+    /// Bare `SUM(MULTIPLICITY())` over the distinct members sums the bag cardinalities, i.e.
+    /// recovers the total bag size: 3 + 2 = 5 = `COUNT(*)`.
+    #[test]
+    fn sum_of_multiplicities_is_bag_size() {
+        let r = run(
+            "SELECT (SUM(MULTIPLICITY()) AS ?n) (COUNT(*) AS ?c) \
+             WHERE { SELECT ?x WHERE { ?s ex:v ?x } }",
+        );
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], Some(int_lit(5)), "Σ multiplicity = bag size");
+        assert_eq!(r.rows[0][1], Some(int_lit(5)), "COUNT(*) = bag size");
+    }
+
+    /// Per-GROUP multiplicity: grouping by `?x` gives one group per distinct value, each a
+    /// single distinct member whose multiplicity is the group's bag count (3 for x=10, 2 for
+    /// x=20). `MAX(MULTIPLICITY())` surfaces that count directly per group.
+    #[test]
+    fn per_group_multiplicity_in_grouped_select() {
+        let r = run(
+            "SELECT ?x (MAX(MULTIPLICITY()) AS ?m) \
+             WHERE { SELECT ?x WHERE { ?s ex:v ?x } } GROUP BY ?x ORDER BY ?x",
+        );
+        assert_eq!(r.rows.len(), 2, "two distinct values ⇒ two groups");
+        // ORDER BY ?x: 10 then 20.
+        assert_eq!(r.rows[0], vec![Some(int_lit(10)), Some(int_lit(3))]);
+        assert_eq!(r.rows[1], vec![Some(int_lit(20)), Some(int_lit(2))]);
+    }
+
+    /// A group with NO duplicates: every distinct member has multiplicity 1, so
+    /// `SUM(?x * MULTIPLICITY())` is just `SUM(?x)` and `MULTIPLICITY()` is uniformly 1.
+    #[test]
+    fn all_unique_solutions_have_multiplicity_one() {
+        let graph = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:a ex:v 1 . ex:b ex:v 2 . ex:c ex:v 3 .",
+            "turtle",
+        )
+        .unwrap();
+        let r = crate::query(
+            &graph,
+            "PREFIX ex: <http://ex/> SELECT (SUM(?x * MULTIPLICITY()) AS ?w) (SUM(MULTIPLICITY()) AS ?n) \
+             WHERE { SELECT ?x WHERE { ?s ex:v ?x } }",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0][0], Some(int_lit(6)), "1+2+3, each ×1");
+        assert_eq!(r.rows[0][1], Some(int_lit(3)), "three distinct members, each multiplicity 1");
+    }
+
+    /// `MULTIPLICITY()` is only meaningful inside an aggregate argument. Used in a plain BIND
+    /// (no aggregate context), the thread-local context is absent, so it is an expression
+    /// error → the BIND leaves `?m` UNBOUND (SPARQL error discipline), NOT a hard failure.
+    #[test]
+    fn multiplicity_outside_aggregate_is_unbound() {
+        let r = run("SELECT ?s ?m WHERE { ?s ex:v ?x . BIND(MULTIPLICITY() AS ?m) } ORDER BY ?s");
+        assert_eq!(r.rows.len(), 5, "one row per matching subject");
+        for row in &r.rows {
+            assert!(row[0].is_some(), "?s bound");
+            assert_eq!(row[1], None, "MULTIPLICITY() outside an aggregate is an error ⇒ ?m unbound");
+        }
+    }
+
+    /// The common case — an aggregate that never mentions `MULTIPLICITY()` — is byte-for-byte
+    /// unchanged: the duplicate-collapsing path is not taken, the full bag is folded. Plain
+    /// `SUM(?x)` over {10×3,20×2} stays 70 (NOT the distinct-set 30).
+    #[test]
+    fn aggregate_without_multiplicity_folds_full_bag() {
+        let r = run("SELECT (SUM(?x) AS ?bag) (COUNT(?x) AS ?c) WHERE { SELECT ?x WHERE { ?s ex:v ?x } }");
+        assert_eq!(r.rows[0][0], Some(int_lit(70)), "full bag sum, no distinct collapse");
+        assert_eq!(r.rows[0][1], Some(int_lit(5)), "COUNT folds the full bag");
+    }
+
+    /// Direct unit coverage of the `group_multiplicities` helper: it returns `None` when the
+    /// argument never calls `MULTIPLICITY()` (so the common path pays nothing) and the
+    /// distinct-with-cardinalities table when it does.
+    #[test]
+    fn group_multiplicities_helper_gating() {
+        use spargebra::algebra::Function;
+        let b = Bindings::unsorted(
+            vec![],
+            vec![
+                std::iter::once(dict::INLINE_BASE + 10).collect::<Row>(),
+                std::iter::once(dict::INLINE_BASE + 10).collect::<Row>(),
+                std::iter::once(dict::INLINE_BASE + 20).collect::<Row>(),
+            ],
+        );
+        let members = [0usize, 1, 2];
+        // A variable-only argument: no MULTIPLICITY() ⇒ None (full-bag path).
+        let var = Expression::Variable(Variable::new_unchecked("x"));
+        assert!(group_multiplicities(&b, &members, &var).is_none());
+        // A MULTIPLICITY() call ⇒ distinct rows + cardinalities, first-seen order.
+        let mult = Expression::FunctionCall(
+            Function::Custom(oxrdf::NamedNode::new_unchecked(MULTIPLICITY_FN_IRI)),
+            vec![],
+        );
+        let table = group_multiplicities(&b, &members, &mult).expect("multiplicity present ⇒ Some");
+        let cards: Vec<u64> = table.iter().map(|&(_, c)| c).collect();
+        assert_eq!(cards, vec![2, 1], "two distinct rows: first with cardinality 2, second 1");
+    }
+
+    /// [OPUS-4.8] (sq-v411r) Direct unit coverage of `expr_uses_multiplicity` across EVERY
+    /// arm of its expression-tree walk. This boolean is load-bearing for correctness — it is
+    /// the gate that decides whether `eval_aggregate` / `eval_custom_aggregate` take the
+    /// distinct-collapsing (`group_multiplicities`-built) path, so a missed/false detection
+    /// would silently fold the wrong multiset. The query-level tests above reach only the
+    /// `Multiply`, `FunctionCall(Custom)` and `Variable` arms; this exercises the leaves
+    /// (`NamedNode`/`Literal`/`Variable`/`Bound`/`Exists`), the binary/unary recursion, the
+    /// `If`/`In`/`Coalesce`/`FunctionCall(args)` arms, and — crucially — the `Exists`
+    /// non-descent contract (a `MULTIPLICITY()` buried inside an `EXISTS` belongs to that
+    /// sub-query's scope and must NOT be reported here).
+    #[test]
+    fn expr_uses_multiplicity_walks_every_arm() {
+        use spargebra::algebra::{Function, GraphPattern};
+
+        let mult = || {
+            Expression::FunctionCall(
+                Function::Custom(oxrdf::NamedNode::new_unchecked(MULTIPLICITY_FN_IRI)),
+                vec![],
+            )
+        };
+        let var = || Expression::Variable(Variable::new_unchecked("x"));
+        let lit = || Expression::Literal(oxrdf::Literal::from(1));
+        let bx = Box::new;
+
+        // --- Leaves: never contain MULTIPLICITY() on their own. ---
+        assert!(!expr_uses_multiplicity(&var()));
+        assert!(!expr_uses_multiplicity(&lit()));
+        assert!(!expr_uses_multiplicity(&Expression::NamedNode(oxrdf::NamedNode::new_unchecked(
+            "http://ex/p"
+        ))));
+        assert!(!expr_uses_multiplicity(&Expression::Bound(Variable::new_unchecked("y"))));
+
+        // A `MULTIPLICITY()` with arguments is NOT the reserved zero-arg builtin ⇒ false
+        // (the `if args.is_empty()` guard), and a non-Custom function with no inner
+        // MULTIPLICITY() is false too.
+        let mult_with_args = Expression::FunctionCall(
+            Function::Custom(oxrdf::NamedNode::new_unchecked(MULTIPLICITY_FN_IRI)),
+            vec![var()],
+        );
+        assert!(!expr_uses_multiplicity(&mult_with_args), "zero-arg guard: args ⇒ not the builtin");
+
+        // --- The matching leaf. ---
+        assert!(expr_uses_multiplicity(&mult()), "the reserved zero-arg call IS detected");
+
+        // --- Binary recursion (left and right branch). ---
+        assert!(expr_uses_multiplicity(&Expression::Multiply(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::Add(bx(mult()), bx(var()))));
+        assert!(expr_uses_multiplicity(&Expression::Or(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::And(bx(mult()), bx(var()))));
+        assert!(expr_uses_multiplicity(&Expression::Equal(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::SameTerm(bx(mult()), bx(var()))));
+        assert!(expr_uses_multiplicity(&Expression::Greater(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::Less(bx(mult()), bx(var()))));
+        assert!(!expr_uses_multiplicity(&Expression::Subtract(bx(var()), bx(lit()))));
+
+        // --- Unary recursion. ---
+        assert!(expr_uses_multiplicity(&Expression::UnaryMinus(bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::Not(bx(mult()))));
+        assert!(!expr_uses_multiplicity(&Expression::UnaryPlus(bx(var()))));
+
+        // --- Ternary `If` (each of the three positions). ---
+        assert!(expr_uses_multiplicity(&Expression::If(bx(mult()), bx(var()), bx(lit()))));
+        assert!(expr_uses_multiplicity(&Expression::If(bx(var()), bx(mult()), bx(lit()))));
+        assert!(expr_uses_multiplicity(&Expression::If(bx(var()), bx(lit()), bx(mult()))));
+        assert!(!expr_uses_multiplicity(&Expression::If(bx(var()), bx(lit()), bx(var()))));
+
+        // --- List arms: `In` (head + list), `Coalesce`, `FunctionCall(_, args)`. ---
+        assert!(expr_uses_multiplicity(&Expression::In(bx(mult()), vec![var()])));
+        assert!(expr_uses_multiplicity(&Expression::In(bx(var()), vec![lit(), mult()])));
+        assert!(!expr_uses_multiplicity(&Expression::In(bx(var()), vec![lit()])));
+        assert!(expr_uses_multiplicity(&Expression::Coalesce(vec![var(), mult()])));
+        assert!(!expr_uses_multiplicity(&Expression::Coalesce(vec![var(), lit()])));
+        assert!(expr_uses_multiplicity(&Expression::FunctionCall(Function::Str, vec![mult()])));
+        assert!(!expr_uses_multiplicity(&Expression::FunctionCall(Function::Str, vec![var()])));
+
+        // --- The `Exists` non-descent contract: a MULTIPLICITY() inside an EXISTS belongs to
+        //     that sub-query's scope, so it must NOT be reported for THIS aggregate. ---
+        let exists_with_mult = Expression::Exists(Box::new(GraphPattern::Filter {
+            expr: mult(),
+            inner: Box::new(GraphPattern::Bgp { patterns: vec![] }),
+        }));
+        assert!(
+            !expr_uses_multiplicity(&exists_with_mult),
+            "MULTIPLICITY() inside EXISTS belongs to the sub-query scope, not descended into"
+        );
+        // ...but a MULTIPLICITY() in the OUTER branch of an expression whose other branch is an
+        // EXISTS is still detected (proves we recurse around, not into, the Exists).
+        assert!(expr_uses_multiplicity(&Expression::And(bx(exists_with_mult), bx(mult()))));
+    }
+
+    /// [OPUS-4.8] (sq-v411r) Direct unit coverage of the `multiplicity` thread-local context
+    /// and its RAII `Guard`: `current()` is `None` outside any `set`; `set(k)` makes
+    /// `current()` read `Some(k)`; a NESTED `set` shadows and the inner guard's drop RESTORES
+    /// the outer value (the re-entrancy contract that stops an `EXISTS`/sub-query inside an
+    /// aggregate argument from observing a stale multiplicity); and dropping the outer guard
+    /// clears the context back to `None`.
+    #[test]
+    fn multiplicity_context_guard_nests_and_restores() {
+        assert_eq!(multiplicity::current(), None, "no context outside an aggregate");
+        {
+            let _outer = multiplicity::set(3);
+            assert_eq!(multiplicity::current(), Some(3));
+            {
+                let _inner = multiplicity::set(7);
+                assert_eq!(multiplicity::current(), Some(7), "inner set shadows outer");
+            }
+            assert_eq!(multiplicity::current(), Some(3), "inner guard drop restores outer");
+        }
+        assert_eq!(multiplicity::current(), None, "outer guard drop clears the context");
     }
 }

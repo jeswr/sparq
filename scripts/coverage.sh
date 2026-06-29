@@ -446,6 +446,19 @@ PY
     "$([ ${#skips[@]} -gt 0 ] && echo "  skip=${skips[*]}")"
 }
 
+# [OPUS-4.8] (sq-v411r) Start from a CLEAN instrumented build so the per-crate line
+# DENOMINATOR is deterministic. cargo-llvm-cov reuses `target/llvm-cov-target` object
+# files between invocations; if a RESTORED cache (Swatinem/rust-cache) or an earlier
+# wider-feature build left a crate's object compiled with extra OPT-IN features baked
+# in, the next default-feature `--package X` REUSES that object and instruments the
+# feature-gated regions the default-feature tests never exercise — inflating `count`
+# and crashing the %. This is exactly what bit PR #1257: sparq-engine measured 65% over
+# 14184 instrumented lines on a cache-restored runner while a clean build measures 88%
+# over 10478 (the 9233 COVERED lines were identical — only the denominator was poisoned).
+# `clean` here forces every per-crate build to instrument only the regions its own
+# requested feature set compiles, matching the `measure_merged` path (which already
+# cleans). It does NOT mask a regression — it re-compiles + re-measures the SAME tests.
+cargo llvm-cov clean --workspace
 echo "==> Measuring per-crate line coverage (tier=$TIER)…"
 for c in "${CRATES[@]}"; do measure "$c"; done
 TOTAL_END=$(date +%s)

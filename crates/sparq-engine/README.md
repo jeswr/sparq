@@ -31,8 +31,8 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
 ## ✨ Features
 
 - **SPARQL query** — run [SPARQL 1.1](https://www.w3.org/TR/sparql11-query/) and
-  [1.2](https://www.w3.org/TR/sparql12-query/) over your data; conformance is tracked by the
-  CI ratchets (see the root [`README.md`](../../README.md)).
+  [1.2](https://www.w3.org/TR/sparql12-query/) over your data (conformance tracked by the CI
+  ratchets), plus the *non-standard* `MULTIPLICITY()` aggregate extension — see the SKILL.
 - **Named graphs** — query across an active dataset with `GRAPH` and `FROM` / `FROM NAMED`.
 - **RDF 1.2 triple terms** — match [triple terms](https://www.w3.org/TR/rdf12-concepts/),
   including variables inside them.
