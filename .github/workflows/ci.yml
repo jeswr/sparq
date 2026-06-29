@@ -1624,6 +1624,30 @@ jobs:
           FLOOR=5
           echo "sparql11/service evaluation pass: ${PASS:-unknown} (floor: $FLOOR)"
           [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::service evaluation regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
+      # [OPUS-4.8] sq-jaj38 (epic sq-my8wd) — the W3C SPARQL 1.1 PROTOCOL (HTTP layer) ratchet
+      # built on the SAME loopback harness (the `http-protocol` feature forwards to
+      # `service-loopback`). HERMETIC — needs NO fetched W3C data: it stands up the real
+      # `sparq_server::serve` over an in-memory fixture and drives RAW HTTP at the bound port,
+      # exercising the SPARQL Protocol request/response contract (GET/POST query+update, the
+      # QUERY method, dataset overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/415).
+      - name: Clippy the SPARQL-Protocol lane (http-protocol feature ON)
+        run: cargo clippy -p sparq-conformance --all-targets --features http-protocol -- -D warnings
+      - name: Run SPARQL 1.1 Protocol (HTTP) lane (http-protocol feature ON) + enforce floor
+        # Drives RAW HTTP at the in-process loopback server (no fetched data). The runner asserts
+        # the pinned HTTP_PROTOCOL_FLOOR in-process AND prints a `TOTAL http-protocol <pass> <fail>
+        # <div> (floor N)` line re-grepped here. `--nocapture` so the TOTAL line reaches stdout.
+        run: |
+          set -o pipefail
+          cargo test -p sparq-conformance --features http-protocol --test http_protocol_suite -- --nocapture \
+            | tee http-protocol-conformance.out
+          if ! grep -qE '^TOTAL http-protocol ' http-protocol-conformance.out; then
+            echo "::error::SPARQL-Protocol lane produced no 'TOTAL http-protocol' line — infra/build issue, not a conformance change. Re-run the job."
+            exit 1
+          fi
+          PASS=$(grep -E '^TOTAL http-protocol ' http-protocol-conformance.out | awk '{print $3}' | head -1)
+          FLOOR=20
+          echo "SPARQL 1.1 Protocol (HTTP) pass: ${PASS:-unknown} (floor: $FLOOR)"
+          [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::SPARQL-Protocol lane regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
 
   inference-conformance:
     # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL

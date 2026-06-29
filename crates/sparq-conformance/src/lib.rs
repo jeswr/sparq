@@ -41,6 +41,16 @@ pub mod service_loopback;
 // feature forwards to it); the gating runner is `tests/service_eval_suite.rs`.
 #[cfg(feature = "service-loopback")]
 pub mod service_eval;
+// [OPUS-4.8] sq-jaj38 (epic sq-my8wd) — the W3C SPARQL 1.1 **Protocol** (HTTP layer)
+// conformance lane. Drives raw HTTP requests (GET/POST query+update, the QUERY method,
+// dataset overrides, result-format content negotiation, the documented status codes)
+// DIRECTLY at the in-process loopback server's bound `127.0.0.1:0` port — exercising the
+// SPARQL Protocol request/response contract, not the federated SERVICE transport. Behind the
+// same opt-in `service-loopback` deps (the crate `http-protocol` feature forwards to it); the
+// gating runner is `tests/http_protocol_suite.rs`. Connects a plain std `TcpStream` to the
+// loopback port (no engine egress involved), so it does not widen the SSRF allowlist.
+#[cfg(feature = "service-loopback")]
+pub mod http_protocol;
 // [OPUS-4.8] (B4) W3C rdf-turtle suite run THROUGH the sparq Turtle parser
 // (`Graph::parse_to_triples`) — the rejection/acceptance oracle for the Turtle T1 spike,
 // distinct from the oxttl-differential chunked-vs-serial test and the N3-parser TurtleTests.

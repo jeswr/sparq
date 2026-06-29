@@ -310,6 +310,25 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
 >      --data 'SELECT * WHERE { ?s ?p ?o }'
 > ```
 
+<!-- [OPUS-4.8] sq-jaj38: comment separates the two adjacent blockquotes (markdownlint MD028). -->
+
+> **SPARQL 1.1 Protocol conformance lane (sq-jaj38, epic sq-my8wd) — what is ratcheted.** The
+> protocol surface above is now covered by a dedicated W3C **SPARQL 1.1 Protocol (HTTP)**
+> conformance suite in `sparq-conformance` (opt-in `http-protocol` feature, OFF by default; it
+> reuses the in-process loopback server — `sparq_server::serve` on an ephemeral `127.0.0.1:0`
+> port — and drives RAW HTTP at the bound port, NOT the federated SERVICE transport, so it does
+> not touch the engine's egress allowlist). It ratchets a MEASURED PASS floor over: query via
+> GET / POST-urlencoded / POST-direct, the `QUERY` method, update via POST, the
+> `default-graph-uri` / `named-graph-uri` overrides, SELECT/ASK negotiation (SRJ / SRX / CSV /
+> TSV), and the **200 / 400 / 405 (with `Allow`) / 415** status codes. **Honest boundary:** two
+> behaviours are DOCUMENTED DIVERGENCES (reported separately, NOT summed into the floor, so they
+> never inflate the conformance number): an **unsatisfiable `Accept` on SELECT/ASK falls back to
+> SPARQL-results JSON, NOT a 406** (a W3C-permitted default representation — the documented
+> sparq-vs-Oxigraph difference), and an **ASK with `Accept: text/csv` falls back to a JSON
+> boolean** (CSV/TSV have no boolean serialisation). Run it with
+> `cargo test -p sparq-conformance --features http-protocol --test http_protocol_suite`; the row
+> is in the central scoreboard (`W3C SPARQL 1.1 Protocol (HTTP)`). [OPUS-4.8]
+
 <!-- [OPUS-4.8] sq-b3df9: comment separates the two adjacent blockquotes (markdownlint MD028). -->
 
 > **JSON-LD content negotiation (`jsonld` feature — default-on, [OPUS-4.8] sq-oy1f.4).** The
