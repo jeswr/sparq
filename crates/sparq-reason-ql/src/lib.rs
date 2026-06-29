@@ -4,8 +4,10 @@
 //! See the crate README (rendered above) for the capability overview and the honest scope.
 //!
 //! The load-bearing entry points are [`as_conjunctive_query`] (the always-present, fail-closed
-//! **CQ-shape gate**) and, behind the off-by-default `experimental` feature, [`rewrite`] (the
-//! PerfectRef DL-Lite_R query rewriter). The algorithm lives in three modules: `cq` (the gate),
+//! **CQ-shape gate**) and, behind the off-by-default `experimental` feature, `rewrite` (the
+//! PerfectRef DL-Lite_R query rewriter; intentionally a plain code span here, not an intra-doc
+//! link, since that item is absent from the default-feature doc surface). The algorithm lives in
+//! three modules: `cq` (the gate),
 //! `dllite` (TBox extraction), and `perfectref` (the rewrite/reduce saturation).
 //!
 //! EXPERIMENTAL regime: the rewriter is validated against a hand-checked DL-Lite oracle, NOT
