@@ -280,6 +280,30 @@ records_to  = "stdout (trend-only wall time + the asserted closure sizes); struc
 featured    = false  # [OPUS-4.8] sq-evb1: capability micro-bench (MVP EL classifier), not a head-to-head competitor card — dashboard promotion deferred to a maintainer.
 status      = "ok"
 
+# [OPUS-4.8] sq-t5bne: QL-rewrite micro-bench for the opt-in (EXPERIMENTAL) sparq-reason-ql crate.
+# The QL-fragment analogue of reason-el-classify: where EL gates the consequence-based classifier,
+# this gates the PerfectRef DL-Lite_R query REWRITER. Two closed-form workloads over the SAME
+# public `rewrite` API — a DEPTH-deep rdfs:subClassOf chain and a DEPTH-deep rdfs:subPropertyOf
+# chain — each asserting the UCQ has EXACTLY DEPTH+1 disjuncts. That closed form proves the
+# rewrite/reduce saturation scales LINEARLY in the TBox size (no hidden UCQ blow-up, fixpoint
+# dedup working); a duplicate-disjunct or non-terminating-rewrite regression over-counts and
+# fails LOUDLY. SELF-ASSERTING + deterministic (the TBox+query are a pure function of DEPTH),
+# so wall-clock is trend-only. EXPERIMENTAL regime: the rewriter is oracle-tested, not graduated
+# to a conformance floor; the bench engages the off-by-default `experimental` feature.
+[[benchmark]]
+id          = "reason-ql-rewrite"
+name        = "sparq-reason-ql — OWL 2 QL PerfectRef query rewriting (subClassOf + subPropertyOf chains)"
+category    = "inference"
+measures    = "PerfectRef rewrite wall time over a DEPTH-parameterised in-process DL-Lite_R TBox, for two workloads: `subclass` (a DEPTH-deep rdfs:subClassOf chain `C0 ⊑ … ⊑ C_DEPTH` with query `?x rdf:type C_DEPTH`) and `subproperty` (a DEPTH-deep rdfs:subPropertyOf chain `P0 ⊑ … ⊑ P_DEPTH` with query `?x P_DEPTH ?y`). Each has the CLOSED-FORM UCQ size `report.disjuncts = DEPTH + 1` (the original CQ + one backward rewrite per ancestor). The example carries a SELF-ASSERTING gate: both closed forms are asserted in-process (deterministic), so a UCQ blow-up / dedup / non-termination regression — incl. a silent over-count — fails LOUDLY. The exact-linear UCQ size is the proof there is no hidden combinatorial blow-up in the rewrite/reduce fixpoint"
+invoke      = "cargo run -p sparq-reason-ql --example ql_rewrite_bench --release --features experimental [DEPTH]   # DEPTH defaults to 2000; self-contained, no dataset to fetch; requires the off-by-default `experimental` feature (the gated rewriter)"
+source      = "crates/sparq-reason-ql/examples/ql_rewrite_bench.rs (the runner + in-process TBox/query generator); crates/sparq-reason-ql/src/{lib.rs,cq.rs,dllite.rs,emit.rs,perfectref.rs} (the rewritten surface — `rewrite`, the CQ-shape gate, DL-Lite_R extraction, PerfectRef rewrite/reduce saturation, UCQ emission)"
+dataset     = "in-process: a DEPTH-deep rdfs:subClassOf chain (subclass workload) and a DEPTH-deep rdfs:subPropertyOf chain (subproperty workload), each a pure function of DEPTH (no RNG/network/toolchain, byte-deterministic). DEPTH=2000 default: each UCQ has 2001 disjuncts — sub-second total. gitignored+regenerable (nothing written to disk)"
+quiet_box_sensitive = true  # rewrite wall-clock trend-only, NOT in scripts/perf-gate.py; the closed-form UCQ-size assertions (DEPTH+1 disjuncts per workload) ARE a hard correctness gate (deterministic, load-robust; catches rewriter regressions incl. a silent UCQ blow-up / duplicate-disjunct over-count a single rewrite would miss)
+pinning     = "the in-process generator is a deterministic pure function of DEPTH (no RNG, byte-identical); the closed-form UCQ size (DEPTH+1 disjuncts per chain) is asserted in-example, VERIFIED by running (depth 5 -> 6/6; depth 2000 -> 2001/2001), not guessed"
+records_to  = "stdout (trend-only wall time + the asserted disjunct counts); structural assertions live in the example itself (ql_rewrite_bench.rs)"
+featured    = false  # [OPUS-4.8] sq-t5bne: EXPERIMENTAL capability micro-bench (oracle-tested QL rewriter), not a head-to-head competitor card — dashboard promotion deferred to a maintainer.
+status      = "ok"
+
 [[benchmark]]
 id          = "selective-bindjoin"
 name        = "Selective (index-nested-loop / bind) join"
