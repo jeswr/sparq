@@ -54,12 +54,19 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   reduces the full closure to the **direct (immediate) subsumers**, collapses **equivalence
   cliques**, and `classify_hasse_graph` emits the COMPACT taxonomy (direct `rdfs:subClassOf` +
   `owl:equivalentClass`) — O(N) Hasse edges on a deep chain instead of the O(N²) full closure.
-- **Honest fragment reporting** — class axioms outside the active fragment (unionOf /
-  cardinality / …) are counted in `Report::skipped_axioms`, never silently misapplied.
+- **Honest fragment reporting** — class axioms outside the active fragment are counted in
+  `Report::skipped_axioms`, never silently misapplied. This includes the **deliberately-deferred
+  EL fragment**: *safe nominals* (`owl:oneOf` / `owl:hasValue`, completion rule **CR6**) and
+  *concrete domains* (`owl:onDataRange` / `owl:withRestrictions` / `owl:onDatatype`, **CR7–CR9**)
+  are NOT applied — so a user sees the gap rather than a silent wrong answer.
 
 **Scope:** EL+⊥ (E1, default), EL+ role reasoning (E2, `rbox`), transitive reduction (E3, `hasse`).
-Concurrency is **E4**; nominals + concrete domains are deferred. The classifier is
-**single-threaded**. Enable with `sparq-reason-el = { version = "0.1", features = ["rbox", "hasse"] }`.
+**Deferred** (surfaced in `skipped_axioms`): safe nominals (CR6) + concrete domains (CR7–CR9);
+concurrency is **E4**. Constructs outside EL entirely (union / complement / `allValuesFrom` /
+cardinality) are also skipped. The classifier is **single-threaded**. Enable with
+`sparq-reason-el = { version = "0.1", features = ["rbox", "hasse"] }`. The `snomed_go_scale_bench`
+example (`--features rbox,hasse`) is a *relative* (dimensionless, no hard-coded ms) end-to-end
+scaling check confirming normalise + RBox + Hasse compose with no hidden quadratic.
 
 ## 📚 Learn more
 
