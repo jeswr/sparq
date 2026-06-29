@@ -67,3 +67,13 @@ rustc-hash.workspace = true
 [[example]]
 name = "hasse_bench"
 required-features = ["hasse"]
+
+# [OPUS-4.8] sq-ez1rc (epic sq-pbz04): the end-to-end SNOMED/GO-style scaling benchmark composes
+# the WHOLE pipeline — normalise + RBox (CR10/CR11) + Hasse transitive reduction — so it needs BOTH
+# `rbox` and `hasse`. `required-features` keeps the default `--all-targets` build (no features) from
+# compiling it and failing on the gated imports. It asserts a RELATIVE doubling-ratio bound (no hard-
+# coded perf), confirming the composed pipeline has no hidden quadratic; the `rbox,hasse` CI legs run
+# it via `cargo build --all-targets` under each feature set.
+[[example]]
+name = "snomed_go_scale_bench"
+required-features = ["rbox", "hasse"]

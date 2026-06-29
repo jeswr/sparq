@@ -30,17 +30,32 @@ const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
 /// The classifier is SOUND but only COMPLETE for the fragment it recognises. By default that is
 /// EL+⊥-minus-RBox (the E1 MVP); with the `rbox` feature it is EL+ (E1 + the RBox role automaton:
 /// `rdfs:subPropertyOf` role inclusions, `owl:propertyChainAxiom` chains, `owl:TransitiveProperty`
-/// — completion rules CR10/CR11). Axioms using constructs outside the active fragment —
-/// `owl:unionOf`, `owl:complementOf`, `owl:allValuesFrom`, cardinality, `owl:hasValue`, nominals
-/// (`owl:oneOf`), data properties — are NOT applied and class-axiom occurrences are counted in
-/// [`Report::skipped_axioms`]. Without `rbox`, RBox axioms are simply left unapplied (roles are
-/// compared for equality only); nominals + concrete domains are deferred further still.
+/// — completion rules CR10/CR11). Axioms using constructs outside the active fragment are NOT
+/// applied and their class-axiom occurrences are counted in [`Report::skipped_axioms`] (honest
+/// incompleteness rather than a silent wrong answer). Two kinds of skip are distinguished by the
+/// EL theory:
+/// - **Outside EL entirely** — `owl:unionOf`, `owl:complementOf`, `owl:allValuesFrom`, cardinality,
+///   `owl:hasSelf`: these need ALC / Horn-SHIQ expressivity, not a deferred EL slice.
+/// - **Deliberately-deferred EL fragment** — OWL 2 EL itself admits **safe nominals** (`owl:oneOf`
+///   / `owl:hasValue`, completion rule **CR6**) and **concrete domains** (`owl:onDataRange` /
+///   `owl:withRestrictions` / `owl:onDatatype`, **CR7–CR9**); this classifier defers both and
+///   surfaces every occurrence via `skipped_axioms` so a user sees the gap. See the crate README
+///   and `skills/inference/SKILL.md` for the deferred-fragment table.
+///
+/// Without `rbox`, RBox axioms (`rdfs:subPropertyOf` / property chains / transitivity) are also
+/// left unapplied (roles are compared for equality only) — but those are gated capability, not the
+/// permanently-deferred CR6–CR9 fragment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Report {
     /// Distinct named classes (and ⊤/⊥ if they occur) seen by the extractor.
     pub named_classes: usize,
     /// Class-axioms (`subClassOf`/`equivalentClass`/`disjointWith`) whose class expression
-    /// used a construct OUTSIDE the recognised EL+⊥ fragment, and were therefore IGNORED.
+    /// used a construct OUTSIDE the recognised EL+⊥ fragment, and were therefore IGNORED. This
+    /// includes both constructs outside EL entirely (union/complement/universal/cardinality) AND
+    /// the deliberately-deferred EL fragment — safe nominals (`owl:oneOf`/`owl:hasValue`, CR6) and
+    /// concrete domains (`owl:onDataRange`/`owl:withRestrictions`/`owl:onDatatype`, CR7–CR9). A
+    /// non-zero count is the honest signal that the input used a construct this classifier does
+    /// not reason over, so the emitted lattice may be incomplete for those axioms.
     pub skipped_axioms: usize,
     /// New `rdfs:subClassOf` triples emitted by [`classify_graph`].
     pub emitted_subsumptions: usize,
@@ -321,6 +336,55 @@ mod tests {
             h.is_subclass_of(a, d),
             "the EL part (A ⊑ D) must still classify"
         );
+    }
+
+    #[test]
+    fn deferred_nominals_are_surfaced_as_skipped() {
+        // CR6 (safe nominals) is deferred: an `owl:oneOf` enumeration and an `owl:hasValue` value
+        // restriction must each be counted in `skipped_axioms`, NOT silently mis-classified — the
+        // answer-safety invariant for the deferred EL fragment.
+        let ttl = format!(
+            "{PRE}
+             [ owl:oneOf ( :a :b ) ] rdfs:subClassOf :C .
+             :D rdfs:subClassOf [ owl:onProperty :r ; owl:hasValue :a ] .
+             :E rdfs:subClassOf :F ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let h = Classifier::classify(&dict, &triples);
+        assert!(
+            h.report().skipped_axioms >= 2,
+            "the oneOf + hasValue axioms must both be recorded as skipped (CR6 deferred), got {}",
+            h.report().skipped_axioms
+        );
+        // The plain-EL part must still classify.
+        let (e, f) = (iri(&dict, "http://ex/E"), iri(&dict, "http://ex/F"));
+        assert!(h.is_subclass_of(e, f), "the EL part (E ⊑ F) must still classify");
+    }
+
+    #[test]
+    fn deferred_concrete_domains_are_surfaced_as_skipped() {
+        // CR7–CR9 (concrete domains) are deferred: a qualified data-range / faceted-datatype
+        // restriction must be counted in `skipped_axioms` rather than treating the datatype node
+        // as an opaque named class (which would silently drop the concrete-domain semantics).
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             :Adult rdfs:subClassOf
+               [ owl:onProperty :age ;
+                 owl:someValuesFrom
+                   [ owl:onDatatype xsd:integer ;
+                     owl:withRestrictions ( [ xsd:minInclusive 18 ] ) ] ] .
+             :G rdfs:subClassOf :H ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let h = Classifier::classify(&dict, &triples);
+        assert!(
+            h.report().skipped_axioms >= 1,
+            "the concrete-domain (onDatatype/withRestrictions) axiom must be recorded as skipped (CR7–CR9 deferred), got {}",
+            h.report().skipped_axioms
+        );
+        let (g, hh) = (iri(&dict, "http://ex/G"), iri(&dict, "http://ex/H"));
+        assert!(h.is_subclass_of(g, hh), "the EL part (G ⊑ H) must still classify");
     }
 
     #[test]
