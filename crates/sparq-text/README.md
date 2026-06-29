@@ -79,7 +79,11 @@ let r = query_text(&graph, r#"
 - **BM25 ranking, exact-token semantics** — UAX #29 word segmentation + Unicode
   lowercasing; **no stemming, no stopword list, no diacritic folding** (`café` ≠ `cafe`)
   — language-neutral by design. Only plain / `xsd:string` / language-tagged literals are
-  indexed (typed literals skipped); indexes are per-graph.
+  indexed (typed literals skipped); indexes are per-graph. A **differential BM25 oracle**
+  (`tests/bm25_oracle.rs`) pins `search`/`search_any` scores + ranking bit-for-bit
+  against an independent from-scratch reference scorer, wired into the central
+  scoreboard as a `sparq extension` ratchet — **honestly NOT a standards-conformance
+  claim** (no normative full-text-over-RDF / BM25 suite exists).
 - **Opt-in phrase positions** — the cheap default (`TextIndex::build`) stores **no**
   positions (8 B per token/doc pair); `build_with_positions` enables `phrase` /
   `phrase_near`. A phrase query against a positionless index is a **hard query error**

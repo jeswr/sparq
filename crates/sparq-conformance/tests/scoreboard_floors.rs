@@ -194,6 +194,18 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/service_eval_suite.rs",
         "SERVICE_EVAL_FLOOR",
     ),
+    // [OPUS-4.8] sq-ripcg (epic sq-lk3aw) — the sparq-text DIFFERENTIAL BM25 ORACLE,
+    // a sparq EXTENSION ratchet (NOT standards conformance — no normative
+    // full-text-over-RDF / BM25 suite exists). `const TEXT_ORACLE_FLOOR` lives
+    // top-level in `sparq-text`'s `tests/bm25_oracle.rs`; the guard reads it
+    // TEXTUALLY (same hermetic mechanism — the dev-only conformance crate takes NO
+    // dependency edge on sparq-text) so the central scoreboard's `ratchet_floor`
+    // can never silently drift from what the runner asserts.
+    (
+        "text-search differential oracle",
+        "crates/sparq-text/tests/bm25_oracle.rs",
+        "TEXT_ORACLE_FLOOR",
+    ),
 ];
 
 #[test]
@@ -283,4 +295,11 @@ fn scoreboard_renders_all_suites() {
     assert!(md.contains("W3C SPARQL 1.1 D-entailment"));
     // [OPUS-4.8] sq-ddpgx — the W3C SPARQL 1.1 sparql11/service evaluation ratchet.
     assert!(md.contains("W3C SPARQL 1.1 sparql11/service evaluation"));
+    // [OPUS-4.8] sq-ripcg — the sparq-text BM25 differential oracle, HONESTLY
+    // rendered as a sparq EXTENSION (not a conformance claim): the row, its
+    // `sparq extension` family, and the explicit "NOT conformance" total-line
+    // disclaimer must all appear.
+    assert!(md.contains("text-search differential oracle"));
+    assert!(md.contains("sparq extension"));
+    assert!(md.contains("NOT a standards-conformance claim") || md.contains("NOT conformance"));
 }

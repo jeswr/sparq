@@ -171,6 +171,12 @@ pub struct Suite {
 ///   a REAL in-process loopback endpoint — the sq-ushvx harness — and driving the
 ///   federated query end-to-end through the engine's REAL ureq transport; a
 ///   variable SERVICE endpoint + a nested non-SILENT SERVICE are documented Skips).
+/// * text-search differential oracle 18750 — `sparq-text`
+///   `tests/bm25_oracle.rs` `TEXT_ORACLE_FLOOR = 18750` (sq-ripcg; a sparq
+///   EXTENSION ratchet, NOT standards conformance — no normative full-text-over-RDF
+///   / BM25 suite exists; floor = the MEASURED count of bit-exact BM25 score
+///   assertions the fixed-seed corpus battery makes against a from-scratch
+///   independent reference scorer; default-on, no opt-in feature required).
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
@@ -532,6 +538,39 @@ pub const SUITES: &[Suite] = &[
                REAL in-process loopback endpoints (the sq-ushvx harness) + the \
                engine's REAL ureq transport, compared to the .srx oracle",
     },
+    // [OPUS-4.8] sq-ripcg (epic sq-lk3aw) — the sparq-text DIFFERENTIAL BM25 ORACLE
+    // (runner lives crate-local in `sparq-text/tests/bm25_oracle.rs`). This is
+    // HONESTLY a sparq EXTENSION ratchet, NOT a standards-conformance claim: BM25 is
+    // an information-retrieval scoring function (Robertson & Spärck Jones), and there
+    // is NO normative "full-text search over RDF" recommendation or its accompanying
+    // test suite to point at — so `family = "sparq extension"` (the only family in
+    // this registry with NO standards body behind it; even the OGC GeoSPARQL
+    // query-rewrite EXTENSION row stays `family = OGC GeoSPARQL` because it extends a
+    // standard, whereas BM25-over-RDF extends nothing normative). Deliberately
+    // distinct so the row never reads as a W3C/OGC/IETF/Solid conformance claim. The
+    // runner recomputes
+    // the exact BM25 score of every `search`/`search_any` hit with a from-scratch
+    // independent reference scorer and asserts the index reproduces it bit-for-bit
+    // (`f32::to_bits`) AND in the same best-first order, over a fixed-seed corpus
+    // battery. The floor is the ACTUAL measured count of score-exact assertions the
+    // battery makes (the `assertions N (floor F)` line the runner prints) — it may
+    // only RISE, and a drop is a scoring regression. The runner stays crate-local
+    // (the dev-only conformance crate must NOT take sparq-text as a dep — same
+    // constraint as SHACL/geo/Solid/ODRL), so this row takes NO new dependency edge
+    // on sparq-text; the floor const `TEXT_ORACLE_FLOOR` is mirrored here and kept in
+    // lock-step by `tests/scoreboard_floors.rs` (read textually, no cross-crate dep).
+    Suite {
+        label: "text-search differential oracle",
+        family: "sparq extension",
+        runner: Runner::CrateTest { krate: "sparq-text", target: "bm25_oracle" },
+        ci_job: "text-oracle",
+        ratchet_floor: 18750,
+        floor_basis: "score-exact assertions (sparq EXTENSION, NOT standards conformance)",
+        note: "EXTENSION ratchet — no normative full-text-over-RDF / BM25 standard \
+               exists: sparq-text's BM25 search/ranking vs a from-scratch independent \
+               reference scorer, bit-exact per-hit scores + best-first order over a \
+               fixed corpus battery",
+    },
 ];
 
 /// Render the registry as one markdown scoreboard. This is a STATIC view of what
@@ -552,7 +591,13 @@ pub fn render_scoreboard() -> String {
          runners in the *run* column; this table is the consolidated map (sq-ncvq.16 \
          brought the SHACL + GeoSPARQL ratchets in; sq-j174 the Solid WAC + ACP \
          decision-parity ones; sq-t58w.8 the Solid WAC + ACP differential oracles — \
-         all previously lived outside this scoreboard).\n"
+         all previously lived outside this scoreboard).\n\n\
+         One row (`family = sparq extension`) is HONESTLY a sparq-extension ratchet, \
+         NOT a standards-conformance claim — there is no normative body or test suite \
+         behind it (sq-ripcg's BM25 differential oracle: no full-text-over-RDF / BM25 \
+         standard exists). Its floor is in a different UNIT (score-exact assertions, \
+         not spec pass-counts), so the consolidated total below counts ONLY the \
+         standards-conformance suites; the extension row is reported separately.\n"
     );
     let _ = writeln!(
         md,
@@ -571,13 +616,32 @@ pub fn render_scoreboard() -> String {
             s.runner.command(),
         );
     }
-    let total: usize = SUITES.iter().map(|s| s.ratchet_floor).sum();
+    // The consolidated total counts ONLY standards-conformance suites — the
+    // `sparq extension` rows (sq-ripcg) carry a different-unit floor (score-exact
+    // assertions, not spec pass-counts), so summing them in would inflate a
+    // "conformance" number with a non-conformance one. They are reported on their
+    // own line. [OPUS-4.8] sq-ripcg
+    let is_extension = |s: &&Suite| s.family == "sparq extension";
+    let conformance: Vec<&Suite> = SUITES.iter().filter(|s| !is_extension(s)).collect();
+    let extensions: Vec<&Suite> = SUITES.iter().filter(is_extension).collect();
+    let total: usize = conformance.iter().map(|s| s.ratchet_floor).sum();
     let _ = writeln!(
         md,
-        "| **total ({} suites)** | | **{}** | | | |\n",
-        SUITES.len(),
+        "| **conformance total ({} suites)** | | **{}** | | | |",
+        conformance.len(),
         total
     );
+    if !extensions.is_empty() {
+        let ext_total: usize = extensions.iter().map(|s| s.ratchet_floor).sum();
+        let _ = writeln!(
+            md,
+            "| **sparq-extension ({} row, NOT conformance)** | | {} | (assertions) | | |\n",
+            extensions.len(),
+            ext_total
+        );
+    } else {
+        let _ = writeln!(md);
+    }
     let _ = writeln!(
         md,
         "Notes:\n\n{}",
