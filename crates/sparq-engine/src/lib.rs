@@ -51,6 +51,12 @@ pub use service::with_service_egress_policy;
 // SERVICE bound-join pushdown (on-by-default, correctness-preserving). [OPUS-4.8] (sq-sjkj)
 #[cfg(feature = "service")]
 pub use service::with_service_bound_join_block_size;
+// Per-query remote-request cap for a high-cardinality `SERVICE ?ep` (endpoint var bound
+// to many distinct IRIs): an OPT-IN ceiling on the distinct endpoints one SERVICE ?ep
+// evaluation may dial, enforced PRE-HTTP (a typed refusal, not post-hoc cancellation).
+// DEFAULT is uncapped, so normal SERVICE queries are unchanged. [OPUS-4.8] (sq-b93pv)
+#[cfg(feature = "service")]
+pub use service::{with_service_remote_request_cap, SERVICE_REMOTE_CAP_MARKER};
 // [OPUS-4.8] (sq-678h) RDF serializer matrix (Turtle / TriG / N-Quads writers). NON-DEFAULT
 // `serialize-rdf` feature — when off, zero serializer code compiles and the default build's
 // dependency graph is unchanged (the writers add no new deps). The always-on N-Triples writer

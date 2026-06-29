@@ -390,6 +390,18 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   names no valid endpoint and contributes no federated answer. A **top-level** `SERVICE ?ep` with
   nothing to bind it still errors (or, under `SILENT`, yields the join identity). (No new public API —
   this is a behavioural addition on the `service` feature.)
+- **Per-query `SERVICE ?ep` remote-request cap** (`sq-b93pv`) — a `SERVICE ?ep` whose endpoint
+  variable binds to **many distinct endpoint IRIs** fans out into one remote dispatch per distinct
+  endpoint, so a hostile / high-cardinality `?ep` can amplify one client query into a burst of
+  outbound calls (the amplification the per-host egress allowlist does not bound). The **opt-in**
+  `with_service_remote_request_cap(n, || query(&g, q))` (or the `SPARQ_SERVICE_REMOTE_CAP` env var)
+  caps the number of distinct endpoints one `SERVICE ?ep` evaluation may dial; exceeding it is a
+  typed refusal **enforced PRE-HTTP** (at eval time, before any socket opens — a true pre-dispatch
+  bound, not a post-hoc cancellation) carrying the stable `sparq_engine::SERVICE_REMOTE_CAP_MARKER`
+  substring (so a server can classify it like the egress marker). It is **not** swallowed by
+  `SILENT` (a resource-policy refusal, not an unreachable endpoint — the same stance the query
+  budget takes). **Default is uncapped**, so a concrete-IRI `SERVICE <…>` and a normal-cardinality
+  `SERVICE ?ep` are unchanged.
 - **Per-query `SERVICE` timeout** (`sq-d4p`) — the SERVICE HTTP transport's socket timeout is now
   bounded by the active `QueryBudget` deadline (it caps at `min(remaining-until-deadline, default)`
   with a small non-zero floor), so a `SERVICE` fetch under a tight `deadline` no longer blocks for the

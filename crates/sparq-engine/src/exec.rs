@@ -2585,6 +2585,26 @@ fn bound_join_variable_endpoint(
         return Ok(None);
     }
 
+    // [OPUS-4.8] (sq-b93pv) PRE-DISPATCH remote-request cap. `order` is the set of
+    // DISTINCT endpoint IRIs this `SERVICE ?ep` would dial — known now, before any
+    // socket is opened — so a high-cardinality `?ep` (an endpoint var bound to many
+    // distinct IRIs) is BOUNDED HERE rather than after the requests have gone out. The
+    // refusal is a hard, typed error (the `SERVICE_REMOTE_CAP_MARKER` substring) and is
+    // NOT swallowed by SILENT: SILENT masks an endpoint being unreachable, not a
+    // deliberate resource-policy refusal (the same stance `budget::check` takes). When no
+    // cap is installed (the default) this is a single thread-local read and a no-op.
+    if let Some(cap) = crate::service::remote_request_cap() {
+        if order.len() > cap {
+            return Err(format!(
+                "{}: SERVICE ?{} would dispatch to {} distinct endpoints (cap {})",
+                crate::service::SERVICE_REMOTE_CAP_MARKER,
+                ep_var.as_str(),
+                order.len(),
+                cap,
+            ));
+        }
+    }
+
     // Resolve the endpoint IRI strings once (id -> "http://…").
     let mut acc_vars: Vec<Variable> = vec![ep_var.clone()];
     let mut acc_rows: Vec<Row> = Vec::new();
@@ -11118,6 +11138,162 @@ mod service_exec_tests {
             seen.borrow().iter().all(|(e, _)| e == "http://r1/"),
             "only the valid IRI endpoint was contacted"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Per-query remote-request cap for high-cardinality SERVICE ?ep. [OPUS-4.8]
+    // (sq-b93pv). The cap bounds the number of DISTINCT endpoints a single
+    // `SERVICE ?ep` may dial, enforced PRE-HTTP: when the cap fires, the mock
+    // transport must record ZERO requests (proof the bound is before dispatch, not
+    // a post-HTTP cancellation).
+    // ---------------------------------------------------------------------
+
+    /// `local` data binding `n` distinct persons each to a DISTINCT endpoint IRI
+    /// (`http://r0/`, `http://r1/`, …) — i.e. a high-cardinality `?ep`.
+    fn persons_with_distinct_endpoints(n: usize) -> Graph {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..n {
+            ttl.push_str(&format!("ex:p{i} ex:ep <http://r{i}/> .\n"));
+        }
+        Graph::load_str(&ttl, "turtle").unwrap()
+    }
+
+    #[test]
+    fn remote_request_cap_fires_before_dispatch() {
+        // 5 distinct endpoints, cap 3 => the query is REFUSED, and the mock records
+        // NO requests (the bound is enforced pre-HTTP, before any socket is opened).
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs: std::collections::HashMap::new(),
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
+        let p = pattern(q);
+        let err = crate::service::with_service_remote_request_cap(3, || {
+            eval_select(&persons_with_distinct_endpoints(5), &p)
+        })
+        .unwrap_err();
+        // Typed refusal: carries the stable marker the server classifies on.
+        assert!(
+            err.contains(crate::service::SERVICE_REMOTE_CAP_MARKER),
+            "cap error must carry the marker, got: {err}"
+        );
+        // PRE-DISPATCH: not one remote request was made.
+        assert!(
+            seen.borrow().is_empty(),
+            "cap must fire BEFORE any HTTP dispatch; mock saw: {:?}",
+            seen.borrow()
+        );
+    }
+
+    #[test]
+    fn remote_request_cap_not_swallowed_by_silent() {
+        // The cap is a resource-policy refusal, not a remote failure: SERVICE SILENT
+        // must NOT mask it (SILENT only masks an endpoint being unreachable).
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs: std::collections::HashMap::new(),
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE SILENT ?e { ?s ex:name ?name } }";
+        let p = pattern(q);
+        let err = crate::service::with_service_remote_request_cap(2, || {
+            eval_select(&persons_with_distinct_endpoints(5), &p)
+        })
+        .unwrap_err();
+        assert!(
+            err.contains(crate::service::SERVICE_REMOTE_CAP_MARKER),
+            "SILENT must not swallow the cap refusal, got: {err}"
+        );
+        assert!(seen.borrow().is_empty(), "cap fires before dispatch even under SILENT");
+    }
+
+    #[test]
+    fn remote_request_cap_at_or_under_limit_passes() {
+        // 2 distinct endpoints, cap 2 (the boundary: > cap fires, == cap is allowed).
+        // Each endpoint knows its own person's name; the query must succeed normally.
+        let r0 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:p0 ex:name \"P0\" .",
+            "turtle",
+        )
+        .unwrap();
+        let r1 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:p1 ex:name \"P1\" .",
+            "turtle",
+        )
+        .unwrap();
+        let mut graphs = std::collections::HashMap::new();
+        graphs.insert("http://r0/".to_string(), r0);
+        graphs.insert("http://r1/".to_string(), r1);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs,
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
+        let p = pattern(q);
+        let res = crate::service::with_service_remote_request_cap(2, || {
+            eval_select(&persons_with_distinct_endpoints(2), &p)
+        })
+        .expect("at-cap query is allowed");
+        assert_eq!(res.rows.len(), 2, "both persons resolved against their own endpoint");
+        // Exactly the two distinct endpoints were dialled.
+        let dialled: std::collections::HashSet<String> =
+            seen.borrow().iter().map(|(e, _)| e.clone()).collect();
+        assert_eq!(dialled.len(), 2, "dialled exactly the two permitted endpoints");
+    }
+
+    #[test]
+    fn remote_request_cap_default_off_is_unchanged() {
+        // DEFAULT (no cap installed): a high-cardinality SERVICE ?ep dispatches to ALL
+        // distinct endpoints exactly as before — the cap adds nothing to normal queries.
+        let mut graphs = std::collections::HashMap::new();
+        for i in 0..5 {
+            graphs.insert(
+                format!("http://r{i}/"),
+                Graph::load_str(
+                    &format!("@prefix ex: <http://ex/> . ex:p{i} ex:name \"P{i}\" ."),
+                    "turtle",
+                )
+                .unwrap(),
+            );
+        }
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteByEndpoint {
+            graphs,
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
+        // No `with_service_remote_request_cap` scope => uncapped (the default).
+        let res = eval_select(&persons_with_distinct_endpoints(5), &pattern(q)).unwrap();
+        assert_eq!(res.rows.len(), 5, "all five persons resolved (no cap by default)");
+        let dialled: std::collections::HashSet<String> =
+            seen.borrow().iter().map(|(e, _)| e.clone()).collect();
+        assert_eq!(dialled.len(), 5, "all five distinct endpoints dialled by default");
+    }
+
+    #[test]
+    fn remote_request_cap_does_not_bound_concrete_endpoint() {
+        // A concrete-IRI SERVICE is a SINGLE endpoint; even cap 0 (refuse any variable
+        // dispatch) must not touch it — the cap is scoped to the variable-endpoint
+        // fan-out, not the per-block request count of a single endpoint.
+        let g = three_persons();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteGraph {
+            remote: remote_names(),
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s a ex:Person . SERVICE <http://r/> { ?s ex:name ?name } }";
+        let res = crate::service::with_service_remote_request_cap(0, || {
+            eval_select(&g, &pattern(q))
+        })
+        .expect("concrete-IRI SERVICE is unaffected by the variable-endpoint cap");
+        assert_eq!(res.rows.len(), 2, "alice + bob matched, cap did not interfere");
     }
 
     // ---------------------------------------------------------------------
