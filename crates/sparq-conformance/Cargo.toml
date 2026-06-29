@@ -124,6 +124,28 @@ service = ["service-loopback"]
 # divergences (e.g. sparq's 406-less Accept fallback) are reported separately, NEVER summed in.
 http-protocol = ["service-loopback"]
 
+# [OPUS-4.8] sq-1uuxz (epic sq-my8wd) — the SPARQL 1.1 **Service-Description** + **Graph-Store
+# Protocol** (GSP) conformance lane (the crate-local `tests/sd_gsp_suite.rs` runner + the
+# `sd_gsp` module). OPT-IN and OFF by default: it stands up the SAME real in-process loopback
+# server (the merged sq-ushvx harness) — but with the server's `federation-descriptors` cargo
+# feature compiled in AND its runtime flag turned on, so the `GET /sparql` (no `query`) Service
+# Description endpoint is live — and drives RAW HTTP requests DIRECTLY at the bound `127.0.0.1:0`
+# port. (A) SERVICE DESCRIPTION: fetch the `sd:Service` document and assert it advertises exactly
+# the result/input formats + query/update languages + SPARQL versions the server genuinely
+# implements (no over-advertising). (B) GRAPH STORE PROTOCOL: a GET/PUT/POST/DELETE round-trip on
+# a named graph (indirect `?graph=<iri>` + direct `/graphs/<path>`) and the default graph
+# (`?default`), verifying the store state after each op (PUT then GET-back-equal; POST merges;
+# DELETE removes; 200/201/204/404). It forwards to `service-loopback` (tokio + axum via
+# sparq-server/server) AND turns on `sparq-server/federation-descriptors` (the light VoID/SD
+# generation already in-tree — no new third-party dependency; the raw HTTP client is the same
+# std-only `TcpStream` helper the http-protocol lane uses). With the feature OFF the `sd_gsp`
+# module is `#[cfg]`-stripped and the runner compiles to a single self-SKIP `#[test]`, so the bare
+# `cargo test -p sparq-conformance` (and the default `--workspace` byte/wasm ratchets) link none of
+# it — the lean opt-in posture. The pinned `SD_GSP_FLOOR` is the MEASURED PASS count; any
+# unimplemented SD/GSP feature is a DOCUMENTED divergence (e.g. GSP read of an absent graph is a
+# 200-empty, not a 404) reported separately and NEVER summed into the floor.
+federation-descriptors = ["service-loopback", "sparq-server/federation-descriptors"]
+
 [dependencies]
 # [OPUS-4.8] sq-ushvx — the embeddable in-process server (`serve` / `router` / `AppState`),
 # used ONLY by the `service-loopback` harness to stand up a real loopback SERVICE endpoint.

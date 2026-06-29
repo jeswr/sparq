@@ -67,6 +67,19 @@ impl LoopbackEndpoint {
     /// (which on a healthy host it does not — `127.0.0.1:0` always has a free port), so the
     /// fixture stays ergonomic in `#[test]` code.
     pub fn serve(graph: Graph) -> Self {
+        // The default loopback server uses the stock `AppState` (no descriptor / opt-in
+        // surfaces). [OPUS-4.8] sq-1uuxz: the SD/GSP lane needs the `federation-descriptors`
+        // runtime flag turned on, so it builds its own `AppState` via `serve_with`.
+        Self::serve_with(move || AppState::new(graph))
+    }
+
+    /// [OPUS-4.8] sq-1uuxz: stand up the loopback server over a CALLER-BUILT [`AppState`], so a
+    /// lane can opt into a server config the stock [`serve`](Self::serve) does not (e.g. the
+    /// `federation-descriptors` runtime flag the Service-Description lane requires). `make_app`
+    /// is run ON the server thread (it constructs the `AppState` — which holds the `Graph` — there,
+    /// so the closure need only be `Send`). All bind / teardown / SSRF scoping is identical to
+    /// [`serve`](Self::serve); this is the shared seam both constructors route through.
+    pub fn serve_with(make_app: impl FnOnce() -> AppState + Send + 'static) -> Self {
         let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -88,7 +101,7 @@ impl LoopbackEndpoint {
                     // Hand the bound address back to the constructor BEFORE entering the
                     // accept loop, so `serve` returns only once the URL is known.
                     addr_tx.send(addr).expect("report bound loopback addr");
-                    let app = router(AppState::new(graph));
+                    let app = router(make_app());
                     // The shutdown future resolves when the `LoopbackEndpoint` is dropped
                     // (the paired `Sender` is dropped, which makes the receiver resolve).
                     // `serve` then stops accepting and drains in-flight connections.

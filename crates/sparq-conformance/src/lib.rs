@@ -51,6 +51,19 @@ pub mod service_eval;
 // loopback port (no engine egress involved), so it does not widen the SSRF allowlist.
 #[cfg(feature = "service-loopback")]
 pub mod http_protocol;
+// [OPUS-4.8] sq-1uuxz (epic sq-my8wd) — the SPARQL 1.1 **Service-Description** (SD) +
+// **Graph-Store Protocol** (GSP) conformance lane. Drives raw HTTP requests DIRECTLY at the
+// in-process loopback server's bound `127.0.0.1:0` port — (A) fetching the `GET /sparql` (no
+// query) Service-Description document and asserting it advertises exactly the formats / languages
+// / versions / features the server genuinely implements (no over-advertising), and (B) a full
+// GET/PUT/POST/DELETE Graph-Store-Protocol round-trip on a named graph (indirect `?graph=` + direct
+// `/graphs/<path>`) and the default graph (`?default`), verifying store state after each op. Behind
+// the opt-in `federation-descriptors` feature (forwards to `service-loopback` for the loopback
+// harness/HTTP client AND turns on `sparq-server/federation-descriptors` so the SD endpoint is
+// live); the gating runner is `tests/sd_gsp_suite.rs`. Connects a plain std `TcpStream` to the
+// loopback port (no engine egress involved), so it does not widen the SSRF allowlist.
+#[cfg(feature = "federation-descriptors")]
+pub mod sd_gsp;
 // [OPUS-4.8] (B4) W3C rdf-turtle suite run THROUGH the sparq Turtle parser
 // (`Graph::parse_to_triples`) — the rejection/acceptance oracle for the Turtle T1 spike,
 // distinct from the oxttl-differential chunked-vs-serial test and the N3-parser TurtleTests.

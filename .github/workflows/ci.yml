@@ -1648,6 +1648,32 @@ jobs:
           FLOOR=20
           echo "SPARQL 1.1 Protocol (HTTP) pass: ${PASS:-unknown} (floor: $FLOOR)"
           [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::SPARQL-Protocol lane regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
+      # [OPUS-4.8] sq-1uuxz (epic sq-my8wd) — the SPARQL 1.1 SERVICE-DESCRIPTION + GRAPH-STORE
+      # PROTOCOL ratchet built on the SAME loopback harness (the `federation-descriptors` feature
+      # forwards to `service-loopback` AND turns on `sparq-server/federation-descriptors`).
+      # HERMETIC — needs NO fetched W3C data: it stands up the real `sparq_server::serve` (with the
+      # federation-descriptors flag ON) over an in-memory fixture and drives RAW HTTP at the bound
+      # port, asserting (A) the GET /sparql (no query) Service Description advertises exactly what
+      # the server genuinely implements (no over-advertising) and (B) a GET/PUT/POST/DELETE Graph
+      # Store Protocol round-trip verifying store state after each op.
+      - name: Clippy the SD/GSP lane (federation-descriptors feature ON)
+        run: cargo clippy -p sparq-conformance --all-targets --features federation-descriptors -- -D warnings
+      - name: Run SD + Graph Store Protocol lane (federation-descriptors feature ON) + enforce floor
+        # Drives RAW HTTP at the in-process loopback server (no fetched data). The runner asserts the
+        # pinned SD_GSP_FLOOR in-process AND prints a `TOTAL sd-gsp <pass> <fail> <div> (floor N)`
+        # line re-grepped here. `--nocapture` so the TOTAL line reaches stdout.
+        run: |
+          set -o pipefail
+          cargo test -p sparq-conformance --features federation-descriptors --test sd_gsp_suite -- --nocapture \
+            | tee sd-gsp-conformance.out
+          if ! grep -qE '^TOTAL sd-gsp ' sd-gsp-conformance.out; then
+            echo "::error::SD/GSP lane produced no 'TOTAL sd-gsp' line — infra/build issue, not a conformance change. Re-run the job."
+            exit 1
+          fi
+          PASS=$(grep -E '^TOTAL sd-gsp ' sd-gsp-conformance.out | awk '{print $3}' | head -1)
+          FLOOR=39
+          echo "SD + Graph Store Protocol pass: ${PASS:-unknown} (floor: $FLOOR)"
+          [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::SD/GSP lane regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
 
   inference-conformance:
     # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL
