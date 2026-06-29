@@ -4,18 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Opt-in shared zero-overhead evaluation substrate for the sparq SPARQL engine and the reasoners: the id-tuple row/key/posting vocabulary and the XSD numeric value tower, monomorphic over Id=u32 with no dynamic dispatch on the hot path. SCAFFOLD: types/re-exports only, no eval logic yet."
+description = "Opt-in shared zero-overhead evaluation substrate for the sparq SPARQL engine and the reasoners: the id-tuple row/key/posting vocabulary and the XSD numeric value tower (Num/Dec/as_numeric + arithmetic), monomorphic over Id=u32 with no dynamic dispatch on the hot path. The join kernels (Phase 3) move here next."
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
-# [OPUS-4.8] sq-fmprw: a Phase-1 SCAFFOLD with zero runtime logic and nothing depending on
-# it yet — there is nothing to publish, benchmark, or expose a user-facing SKILL surface
-# for. `publish = false` marks it the intentional stub the new-crate-completeness gate (G1)
-# documents: exempt from the registered-benchmark + SKILL.md requirements until the eval
-# kernels actually move here (epic sq-qonbz Phase 2+, sq-ev41x). FLIP this to publishable —
-# and add the micro-bench + SKILL surface — in the bead that lands the first real logic.
+# [OPUS-4.8] sq-ev41x (epic sq-qonbz): the numeric value tower (`numeric::{Num, Dec,
+# as_numeric, ...}`) has now MOVED here from sparq-engine and is consumed by the engine via
+# the in-workspace `path` dep (which works regardless of `publish`). The crate stays an
+# intentional `publish = false` stub for now — it is NOT yet a standalone publishable public
+# surface because the JOIN KERNELS (Phase 3) and reasoner adoption (Phase 5) are still
+# pending, so there is no user-facing API to register a SKILL.md / micro-bench against yet.
+# `publish = false` keeps it exempt from the new-crate-completeness gate (G1)
+# bench/SKILL requirements until those phases land. FLIP this to publishable — and add the
+# micro-bench + SKILL surface — when the join kernels arrive (tracked: sq-ev41x follow-up).
 publish = false
 
 # [OPUS-4.8] Render README.md as the docs.rs front page (lib.rs uses include_str!).

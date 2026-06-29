@@ -7,11 +7,12 @@ common to both the query engine and every reasoner: the id-tuple **row/key** voc
 the XSD **numeric value tower**. Placing them in a leaf crate lets both consumers reach them
 with **no dependency cycle**, while keeping `sparq-core` and the lean wasm bundle untouched.
 
-> **Scaffold status (sq-fmprw — Phase 1 of the epic).** This crate currently defines /
-> re-exports the shared **types** only; **no evaluation logic has moved yet**. The join
-> kernels (merge / hash / bind / leapfrog-trie) and the engine's `compare_values` total
-> order + `Num` arithmetic land in later beads. Nothing in the workspace depends on this
-> crate yet, so the default engine build does not even compile it. See
+> **Status (sq-ev41x — Phase 2 of the epic).** The XSD **numeric value tower** (`Num` /
+> `Dec` / `as_numeric` + the arithmetic ops) has now **moved here** from `sparq-engine` and
+> the engine consumes it — a behaviour-neutral code-move (the W3C SPARQL conformance floor +
+> ORDER BY / numeric / relop tests are bit-identical). Still pending in later beads: the join
+> kernels (merge / hash / bind / leapfrog-trie) and the engine's `compare_values` total order
+> (which moves with the engine's `Value` enum, not here). See
 > `research/shared-eval-substrate.md` for the full extraction plan and the perf-neutrality
 > proof strategy.
 
@@ -46,19 +47,21 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   engine's private `exec` aliases byte for byte so the eventual join-kernel move is a pure
   code-move. The aliases are concrete monomorphic types, **not** generic over a `dyn` trait.
 - **`numeric`** — the XSD numeric value tower: `Num` (`Int` / `Dec` / `Float` / `Double`,
-  the XPath promotion ranks) and `as_numeric`, which classifies an `oxrdf::Literal` into the
-  tower while keeping the **exact** integer / fixed-point `Dec` representation (a
-  high-precision decimal is not silently flattened to `f64`).
+  the XPath promotion ranks), `as_numeric` (classifies an `oxrdf::Literal` into the tower
+  while keeping the **exact** integer / fixed-point `Dec` representation — a high-precision
+  decimal is not silently flattened to `f64`), the arithmetic ops (`binop` / `neg` / `abs` /
+  `ceil` / `floor` / `round`), the XSD-canonical `lexical` / `canonical_lexical`, and the
+  shared lexical helpers (`split_decimal`, `parse_xsd_f32` / `parse_xsd_f64`, `fmt_xsd_double`).
 
 Both features are **off by default**. The crate is `forbid(unsafe_code)`.
 
 ### Zero-overhead intent
 
-The shared kernels (arriving in later beads) are designed as **free functions monomorphic
-over `Id = u32`** and the `SmallVec` row aliases — **never** `Box<dyn>` / `&dyn` / a vtable
-between a join's probe and its key comparison. The compiler then emits one specialised,
-inlinable body per call site, so the engine's hot loops keep identical codegen after the
-move. This scaffold introduces no dynamic dispatch.
+Every item is monomorphic over `Id = u32` and the concrete numeric tiers — **never**
+`Box<dyn>` / `&dyn` / a vtable on a hot path. Each `numeric` item carries `#[inline]`, so
+cross-crate inlining (with the workspace LTO profile) keeps the engine's FILTER / BIND /
+ORDER BY hot loops identical to pre-move codegen. The join kernels arriving in later beads
+keep the same contract. This crate introduces no dynamic dispatch.
 
 ## 📚 Learn more
 
