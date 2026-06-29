@@ -234,24 +234,62 @@ pub(crate) fn emit_consequences(
         // declaration: build_prop_expand's all_props never collects those, so an early
         // `px.map.get(&p) → None` return used to silently drop their rdfs2/rdfs3 typing while
         // the full fixpoint path emitted it.
-        // rdfs7: (s p o), (p sp* q) ⊢ (s q o)
-        if let Some(qs) = sp_closure.get(&p) {
-            out.extend(qs.iter().map(|&q| [s, q, o]));
-        }
-        // rdfs2 + rdfs9: domain typing through all super-properties, closed up subclass
-        if let Some(cs) = dom_full.get(&p) {
-            out.extend(cs.iter().map(|&c| [s, v.ty, c]));
-        }
-        // rdfs3 + rdfs9: range typing
-        if let Some(cs) = rng_full.get(&p) {
-            out.extend(cs.iter().map(|&c| [o, v.ty, c]));
-        }
+        //
+        // [OPUS-4.8] sq-yk6or: with the `substrate-join` feature this plain rdfs2/3/7 branch is
+        // computed in a BATCH by the shared substrate join kernels (see `sweep`), so it is
+        // suppressed here to avoid double emission. The `is_plain_branch` partition routes
+        // exactly these triples to `sweep_predicate_join` — same emitted set, different machinery.
+        #[cfg(not(feature = "substrate-join"))]
+        emit_plain_rdfs([s, p, o], v, sp_closure, dom_full, rng_full, out);
+        // Under `substrate-join` the plain branch is computed in a batch by the substrate sweep,
+        // so this arm is empty and `sp_closure` (used ONLY by the plain branch) is unused here.
+        #[cfg(feature = "substrate-join")]
+        let _ = sp_closure;
     }
+}
+
+/// The plain-RDFS predicate join for one asserted `(s, p, o)`: rdfs7 (subPropertyOf rewrite),
+/// rdfs2 (domain typing) and rdfs3 (range typing), keyed on the predicate `p`. Factored out of
+/// [`emit_consequences`] so the substrate-join path (`sweep` under the `substrate-join` feature)
+/// can compute the SAME emission in a batch through the shared [`sparq_substrate::join`] kernels
+/// ([OPUS-4.8] sq-yk6or). The two paths emit the identical multiset (asserted by a test).
+#[cfg(any(not(feature = "substrate-join"), test))]
+#[inline]
+fn emit_plain_rdfs(
+    [s, p, o]: [Id; 3],
+    v: &Vocab,
+    sp_closure: &FxHashMap<Id, Vec<Id>>,
+    dom_full: &FxHashMap<Id, Vec<Id>>,
+    rng_full: &FxHashMap<Id, Vec<Id>>,
+    out: &mut Vec<[Id; 3]>,
+) {
+    // rdfs7: (s p o), (p sp* q) ⊢ (s q o)
+    if let Some(qs) = sp_closure.get(&p) {
+        out.extend(qs.iter().map(|&q| [s, q, o]));
+    }
+    // rdfs2 + rdfs9: domain typing through all super-properties, closed up subclass
+    if let Some(cs) = dom_full.get(&p) {
+        out.extend(cs.iter().map(|&c| [s, v.ty, c]));
+    }
+    // rdfs3 + rdfs9: range typing
+    if let Some(cs) = rng_full.get(&p) {
+        out.extend(cs.iter().map(|&c| [o, v.ty, c]));
+    }
+}
+
+/// Whether `(s, p, o)` is routed to the plain-RDFS branch of [`emit_consequences`] (NOT the
+/// `rdf:type`/rdfs9 branch and NOT the active-`PropExpand` predicate-rewrite branch) — i.e.
+/// the branch the substrate-join path computes in a batch. Mirrors `emit_consequences`'s
+/// branch selection exactly so routing is partition-preserving. [OPUS-4.8] sq-yk6or.
+#[cfg(feature = "substrate-join")]
+#[inline]
+fn is_plain_branch([_s, p, _o]: [Id; 3], v: &Vocab, px: Option<&PropExpand>) -> bool {
+    p != v.ty && !px.is_some_and(|px| px.map.contains_key(&p))
 }
 
 /// Run [`emit_consequences`] over every asserted triple. With the `parallel` feature the sweep
 /// fans out over rayon (read-only on the schema closures) into per-thread buffers.
-#[cfg(feature = "parallel")]
+#[cfg(all(feature = "parallel", not(feature = "substrate-join")))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sweep(
     triples: &[[Id; 3]],
@@ -281,7 +319,7 @@ pub(crate) fn sweep(
             a
         })
 }
-#[cfg(not(feature = "parallel"))]
+#[cfg(all(not(feature = "parallel"), not(feature = "substrate-join")))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sweep(
     triples: &[[Id; 3]],
@@ -293,6 +331,43 @@ pub(crate) fn sweep(
     px: Option<&PropExpand>,
 ) -> Vec<[Id; 3]> {
     let mut out = Vec::new();
+    for &t in triples {
+        emit_consequences(t, v, sc, sp, dom, rng, px, &mut out);
+    }
+    out
+}
+
+/// [OPUS-4.8] sq-yk6or (epic sq-pbz04, THE SUBSTRATE PAYOFF): the ABox sweep driving the SHARED
+/// [`sparq_substrate::join`] hash-join kernels for the plain rdfs2/3/7 predicate join — the same
+/// `build_table` + `probe_emit` body the SPARQL engine drives, with the reasoner supplying its
+/// OWN `JoinKeys` + `Budget` monomorphically (NO `Box<dyn>`). The `rdf:type`/rdfs9 branch and the
+/// active-`PropExpand` predicate-rewrite branch are NOT a uniform predicate-keyed combine, so they
+/// stay on the hand-rolled adjacency path (via [`emit_non_plain`]); the substrate join is the
+/// clean, isolated win. The EMITTED SET is identical to the hand-rolled `sweep` (the downstream
+/// `dedup_derived` sorts + dedups, so per-triple order is irrelevant — only the multiset matters).
+/// Asserted byte-for-byte by `tests::substrate_join_emits_identical_closure`.
+#[cfg(feature = "substrate-join")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sweep(
+    triples: &[[Id; 3]],
+    v: &Vocab,
+    sc: &FxHashMap<Id, Vec<Id>>,
+    sp: &FxHashMap<Id, Vec<Id>>,
+    dom: &FxHashMap<Id, Vec<Id>>,
+    rng: &FxHashMap<Id, Vec<Id>>,
+    px: Option<&PropExpand>,
+) -> Vec<[Id; 3]> {
+    let mut out = Vec::new();
+    // The plain rdfs2/3/7 branch, computed in a batch through the shared substrate join kernels.
+    // The plain-branch partition is exactly the triples `emit_consequences` would route to its
+    // `else` arm (see `is_plain_branch`), so build/probe over them reproduces that arm's emission.
+    let plain: Vec<[Id; 3]> =
+        triples.iter().copied().filter(|&t| is_plain_branch(t, v, px)).collect();
+    crate::substrate_join::sweep_predicate_join(&plain, v.ty, sp, dom, rng, &mut out);
+    // The non-plain branches (rdfs9 type-propagation + the PropExpand predicate rewrite) stay on
+    // the direct adjacency path: `emit_consequences` suppresses its plain `else` arm under the
+    // `substrate-join` feature, so this emits ONLY the rdfs9 / PropExpand consequences — no double
+    // emission of the plain branch the substrate sweep above already covered.
     for &t in triples {
         emit_consequences(t, v, sc, sp, dom, rng, px, &mut out);
     }
@@ -839,5 +914,104 @@ mod tests {
         // The output is deduplicated: the duplicate input appears exactly once.
         let dupes = triples.iter().filter(|&&t| t == [rex, ty, dog]).count();
         assert_eq!(dupes, 1, "duplicate input collapsed in the rebuilt output");
+    }
+
+    // ---- [OPUS-4.8] sq-yk6or: the shared-substrate-join adoption is BEHAVIOUR-NEUTRAL ----
+
+    /// The LOAD-BEARING invariant of sq-yk6or: driving the shared `sparq-substrate::join` kernels
+    /// for the plain rdfs2/3/7 predicate join emits the BYTE-IDENTICAL multiset as the hand-rolled
+    /// `emit_plain_rdfs` adjacency path. Runs both over the SAME (already-saturated) schema and a
+    /// rich ABox, sorts each emission, and asserts equality. (Only the substrate path is compiled
+    /// under the feature; this test pins the equivalence the conformance ratchet relies on.)
+    #[cfg(feature = "substrate-join")]
+    #[test]
+    fn substrate_join_emits_identical_plain_branch() {
+        let mut dict = Dict::new();
+        let v = Vocab::intern(&mut dict);
+        let (p, q, r, c, d, s1, o1, s2, o2) = (
+            ex(&mut dict, "p"),
+            ex(&mut dict, "q"),
+            ex(&mut dict, "r"),
+            ex(&mut dict, "C"),
+            ex(&mut dict, "D"),
+            ex(&mut dict, "s1"),
+            ex(&mut dict, "o1"),
+            ex(&mut dict, "s2"),
+            ex(&mut dict, "o2"),
+        );
+        // Saturated schema closures (as `rdfs_closure` builds them): p sp* {q, r}; p domain {C};
+        // p range {D}; q domain {C} too, so a triple on q types via domain as well.
+        let sp: FxHashMap<Id, Vec<Id>> = [(p, vec![q, r])].into_iter().collect();
+        let dom: FxHashMap<Id, Vec<Id>> = [(p, vec![c]), (q, vec![c])].into_iter().collect();
+        let rng: FxHashMap<Id, Vec<Id>> = [(p, vec![d])].into_iter().collect();
+        // A plain-branch ABox: two assertions on p (rewrite + domain + range), one on q (domain
+        // only), and one on an unmentioned predicate (emits nothing) — the partition the substrate
+        // sweep handles.
+        let unknown = ex(&mut dict, "z");
+        let abox = vec![[s1, p, o1], [s2, p, o2], [s1, q, o1], [s2, unknown, o2]];
+
+        // Hand-rolled reference emission (the path the default build runs).
+        let mut hand = Vec::new();
+        for &t in &abox {
+            emit_plain_rdfs(t, &v, &sp, &dom, &rng, &mut hand);
+        }
+        hand.sort_unstable();
+
+        // Shared substrate-join emission.
+        let mut shared = Vec::new();
+        crate::substrate_join::sweep_predicate_join(&abox, v.ty, &sp, &dom, &rng, &mut shared);
+        shared.sort_unstable();
+
+        assert_eq!(
+            shared, hand,
+            "the shared substrate join must emit the byte-identical plain-RDFS multiset"
+        );
+        assert!(!hand.is_empty(), "the fixture must actually exercise the join (non-empty emission)");
+    }
+
+    /// End-to-end: `materialize_rdfs` under the `substrate-join` feature produces the SAME closure
+    /// the hand-rolled path documents in the other rdfs.rs tests — the full pipeline (schema
+    /// saturation + substrate sweep + dedup) is behaviour-neutral. Re-checks the canonical
+    /// rdfs2/3/7/9/11 derivations on the shared-join path.
+    #[cfg(feature = "substrate-join")]
+    #[test]
+    fn materialize_rdfs_substrate_path_matches_documented_closure() {
+        let mut dict = Dict::new();
+        let (hp, rel, person, a, b, dog, mammal, animal, rex) = (
+            ex(&mut dict, "hasParent"),
+            ex(&mut dict, "relatedTo"),
+            ex(&mut dict, "Person"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+            ex(&mut dict, "Dog"),
+            ex(&mut dict, "Mammal"),
+            ex(&mut dict, "Animal"),
+            ex(&mut dict, "rex"),
+        );
+        let (sp, dom, rng, sc, ty) = (
+            iri(&mut dict, rdfs::SUB_PROPERTY_OF.as_str()),
+            iri(&mut dict, rdfs::DOMAIN.as_str()),
+            iri(&mut dict, rdfs::RANGE.as_str()),
+            iri(&mut dict, rdfs::SUB_CLASS_OF.as_str()),
+            iri(&mut dict, rdf::TYPE.as_str()),
+        );
+        let mut triples = vec![
+            [hp, sp, rel],
+            [hp, dom, person],
+            [hp, rng, person],
+            [a, hp, b],
+            [dog, sc, mammal],
+            [mammal, sc, animal],
+            [rex, ty, dog],
+        ];
+        materialize_rdfs(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        // rdfs7 (substrate plain branch), rdfs2/3 (substrate plain branch), rdfs9/11 (hand-rolled).
+        assert!(set.contains(&[a, rel, b]), "rdfs7 via shared join");
+        assert!(set.contains(&[a, ty, person]), "rdfs2 domain via shared join");
+        assert!(set.contains(&[b, ty, person]), "rdfs3 range via shared join");
+        assert!(set.contains(&[rex, ty, mammal]), "rdfs9 one hop");
+        assert!(set.contains(&[rex, ty, animal]), "rdfs9 transitive");
+        assert!(set.contains(&[dog, sc, animal]), "rdfs11 subclass transitivity");
     }
 }

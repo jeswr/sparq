@@ -44,6 +44,10 @@ let g = Graph::from_parts(dict, triples);
   inserts/deletes by exact derivation counting; cost scales with the change, not a re-run.
 - **Proof trees** (`explain` feature) — `why(triple)` returns which rule fired from which
   premises, recursively down to asserted facts (a flat, ZK-witness-friendly shape).
+- **Shared join kernels** (opt-in `substrate-join`) — the RDFS predicate join (rdfs2/3/7)
+  drives the *same* `sparq-substrate::join` hash-join body the SPARQL engine drives, supplying
+  the reasoner's own key projection + budget monomorphically. Behaviour-neutral: the same
+  closure, only the join machinery is shared. Off by default; byte/bundle ratchets unchanged.
 
 ## 📚 Learn more
 
