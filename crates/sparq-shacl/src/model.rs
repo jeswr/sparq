@@ -21,18 +21,34 @@ pub enum Target {
     Node(Term),
     /// sh:targetClass — all SHACL instances of the class in the data graph.
     Class(Term),
-    /// Implicit class target: the shape is itself an rdfs:Class.
+    /// Implicit class target: the shape is itself an rdfs:Class (or, SHACL 1.2,
+    /// an `sh:ShapeClass` — a class that is also a node shape).
     ImplicitClass(Term),
     /// sh:targetSubjectsOf — all subjects of the predicate.
     SubjectsOf(String),
     /// sh:targetObjectsOf — all objects of the predicate.
     ObjectsOf(String),
+    /// [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:targetWhere [ <inline shape> ]`: the
+    /// focus nodes are every data-graph node that CONFORMS to the inline (object)
+    /// shape. The `usize` is the inline shape's id in [`ShapesModel::shapes`].
+    Where(usize),
+    /// [OPUS-4.8] (sq-rnkdh) SHACL 1.2 SPARQL-valued target
+    /// `sh:targetNode [ sh:select … ]` / `[ sh:sparqlExpr … ]`: the focus nodes are
+    /// the output nodes of the SPARQL node expression (the bindings of its first
+    /// result variable). The index is into the model's `select_exprs` table.
+    Sparql(usize),
 }
 
 /// One occurrence of a constraint component on a shape.
 #[derive(Debug, Clone)]
 pub enum Component {
     Class(Term),
+    /// [OPUS-4.8] (sq-sx15d) `sh:class` with a SHACL-list object
+    /// (`sh:class ( ex:A ex:B )`, SHACL 1.2): a value node conforms iff it is a
+    /// SHACL instance of ANY listed class (`sh:ClassConstraintComponent`).
+    /// Mirrors the disjunctive `sh:datatype` / `sh:nodeKind` list spelling; a
+    /// single IRI object stays [`Component::Class`].
+    ClassIn(Vec<Term>),
     /// `sh:datatype` — the allowed-datatype set (SHACL §4.5.2). A single IRI
     /// object is a singleton set; the SHACL-1.2 disjunctive list form
     /// `sh:datatype ( xsd:string rdf:langString )` is the multi-element set. A
@@ -58,10 +74,42 @@ pub enum Component {
     },
     LanguageIn(Vec<String>),
     UniqueLang,
-    Equals(String),
-    Disjoint(String),
-    LessThan(String),
-    LessThanOrEquals(String),
+    /// [OPUS-4.8] (sq-sx15d) `sh:equals` — the value set of the shape's path must
+    /// equal the value set of the comparand. SHACL 1.2 lets the comparand be a
+    /// full property [`Path`] (often an RDF-list sequence), not just a predicate
+    /// IRI; a bare IRI parses to a trivial [`Path::Predicate`], so the SHACL 1.0
+    /// `-001` predicate form stays backward-compatible.
+    Equals(Path),
+    /// [OPUS-4.8] (sq-sx15d) `sh:disjoint` — the value set of the shape's path
+    /// must be disjoint from the comparand's. The comparand is a [`Path`] (SHACL
+    /// 1.2 list/path form; a bare IRI is a trivial path).
+    Disjoint(Path),
+    /// [OPUS-4.8] (sq-sx15d) `sh:lessThan` — every path value must be `<` every
+    /// comparand value. The comparand is a [`Path`] (SHACL 1.2).
+    LessThan(Path),
+    /// [OPUS-4.8] (sq-sx15d) `sh:lessThanOrEquals` — every path value must be
+    /// `<=` every comparand value. The comparand is a [`Path`] (SHACL 1.2).
+    LessThanOrEquals(Path),
+    /// [OPUS-4.8] (sq-sx15d) `sh:subsetOf` (SHACL 1.2) — the value set of the
+    /// shape's path must be a SUBSET of the comparand path's value set
+    /// (`sh:SubsetOfConstraintComponent`). One result per path value absent from
+    /// the comparand set. The comparand is a [`Path`].
+    SubsetOf(Path),
+    /// [OPUS-4.8] (sq-sx15d) `sh:someValue` (SHACL 1.2) — EXISTENTIAL: at least
+    /// one value node must conform to the nested shape
+    /// (`sh:SomeValueConstraintComponent`). The index is into
+    /// [`ShapesModel::shapes`]. One result on the focus/path when NONE conform.
+    SomeValue(usize),
+    /// [OPUS-4.8] (sq-sx15d) `sh:singleLine true` (SHACL 1.2) — each string value
+    /// must contain no line-break characters (LF/CR/FF/VT)
+    /// (`sh:SingleLineConstraintComponent`). `sh:singleLine false` imposes no
+    /// constraint (not parsed into a component).
+    SingleLine,
+    /// [OPUS-4.8] (sq-sx15d) `sh:rootClass` (SHACL 1.2) — each value node must be
+    /// the named class or a transitive `rdfs:subClassOf`-descendant of it
+    /// (`sh:RootClassConstraintComponent`). Reuses the `sh:class` subclass
+    /// closure.
+    RootClass(Term),
     Not(usize),
     And(Vec<usize>),
     Or(Vec<usize>),
@@ -69,6 +117,18 @@ pub enum Component {
     Node(usize),
     /// sh:property — a child property shape validated against the same focus.
     Property(usize),
+    /// [OPUS-4.8] (sq-0mjfd) `sh:reifierShape` (SHACL 1.2 §4.x) — for each value
+    /// node `v` of this PROPERTY shape's path `p`, the *reifiers* of the asserted
+    /// triple `(focus, p, v)` (the subjects of `?r rdf:reifies <<(focus p v)>>`,
+    /// the RDF-1.2 reified-annotation `{| … |}` form) must each conform to the
+    /// referenced shape (`shape` indexes [`ShapesModel::shapes`]). With
+    /// `required = true` (`sh:reificationRequired true`), a value that has NO
+    /// reifier is ALSO a violation. One result (on focus/path, `sh:value` = the
+    /// offending value) per value whose reifier set fails — component
+    /// `sh:ReifierShapeConstraintComponent`. Only meaningful for a single-predicate
+    /// path (the reified triple needs a predicate); a non-predicate path yields no
+    /// reifiers and (unless required) conforms vacuously.
+    ReifierShape { shape: usize, required: bool },
     Qualified {
         shape: usize,
         min: Option<u64>,
@@ -147,6 +207,46 @@ pub enum Component {
     /// `ShapesModel::expressions` (shared store with `sh:expression`).
     #[cfg(feature = "shacl-af")]
     NodeByExpression(usize),
+}
+
+/// [OPUS-4.8] (sq-pb0wm) Per-constraint-statement RDF-1.2 reified-annotation
+/// overrides for ONE [`Component`] occurrence (SHACL 1.2 Core, the
+/// `misc/{deactivated-003,message-002,severity-003}` entries). When a constraint
+/// triple `(shapeNode, P, O)` carries a `{| … |}` annotation — parsed as
+/// `_:r rdf:reifies <<( shapeNode P O )>> . _:r sh:deactivated|sh:message|sh:severity V`
+/// — the annotation overrides JUST that occurrence: `deactivated` suppresses only
+/// that constraint (not the whole shape), and `messages` / `severity` replace the
+/// shape-level message / severity for ONLY that constraint's results. Held in a
+/// vector PARALLEL to [`Shape::components`] (a [`Self::default`] entry — no
+/// override — for every component built from something other than a single
+/// reifiable constraint triple). Distinct from the shape-level
+/// [`Shape::deactivated`] / [`Shape::messages`] / [`Shape::severity`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ComponentMeta {
+    /// `{| sh:deactivated true |}` on this constraint statement: suppress this
+    /// occurrence only (the rest of the shape still validates).
+    pub deactivated: bool,
+    /// `{| sh:message "…" |}` on this statement: the result message(s) for this
+    /// occurrence's violations, overriding the shape's `sh:message`. Empty ⇒ no
+    /// per-statement message override (inherit the shape's).
+    pub messages: Vec<Term>,
+    /// `{| sh:severity sh:Warning |}` on this statement: the result severity for
+    /// this occurrence's violations, overriding the shape's. `None` ⇒ inherit.
+    pub severity: Option<String>,
+}
+
+impl ComponentMeta {
+    /// Whether this carries any per-statement override (cheap "is the default"
+    /// probe so eval can skip the override path for the common un-annotated case).
+    pub fn is_empty(&self) -> bool {
+        !self.deactivated && self.messages.is_empty() && self.severity.is_none()
+    }
+
+    /// Whether this constraint occurrence is per-statement deactivated
+    /// (`{| sh:deactivated true |}`) — eval skips just this occurrence.
+    pub fn is_deactivated(&self) -> bool {
+        self.deactivated
+    }
 }
 
 /// [OPUS-4.8] A declared `sh:parameter` of a SPARQL-based constraint component
@@ -247,6 +347,10 @@ pub(crate) struct PreparedComponentValidator {
 /// skipped, matching this crate's lenient handling of ill-formed shapes).
 #[derive(Debug, Clone)]
 pub(crate) struct SparqlConstraint {
+    /// [OPUS-4.8] (sq-mue75) The `sh:SPARQLConstraint` node (the object of
+    /// `sh:sparql`), stamped onto each result as `sh:sourceConstraint` (SHACL
+    /// §5.2.2).
+    pub node: Term,
     /// The raw `sh:select` text.
     pub select: String,
     /// PREFIX declarations assembled from `sh:prefixes` (`sh:declare` →
@@ -255,6 +359,12 @@ pub(crate) struct SparqlConstraint {
     /// The constraint's own `sh:message` template, if any (takes precedence over
     /// a `?message` binding and over the shape's `sh:message`).
     pub message: Option<String>,
+    /// [OPUS-4.8] (sq-rnkdh) The constraint node's own `sh:severity` IRI, if any.
+    /// SHACL 1.2 lets a `sh:SPARQLConstraint` declare a `sh:severity` that
+    /// OVERRIDES the enclosing shape's severity for the results it produces
+    /// (`sparql/node/sparql-001`: a `sh:Warning` constraint on an otherwise
+    /// default-`Violation` shape). `None` ⇒ inherit the shape's severity.
+    pub severity: Option<String>,
     /// `sh:deactivated true` on the constraint node.
     pub deactivated: bool,
     /// The parsed query; `None` if `select` did not parse as a SELECT — the
@@ -270,6 +380,12 @@ pub struct Shape {
     pub path: Option<Path>,
     pub targets: Vec<Target>,
     pub components: Vec<Component>,
+    /// [OPUS-4.8] (sq-pb0wm) Per-constraint-statement RDF-1.2 reified-annotation
+    /// overrides, PARALLEL to [`Self::components`] (index `i` describes
+    /// `components[i]`). A `ComponentMeta::default` entry means "no annotation";
+    /// only components built from a single reifiable constraint triple
+    /// (`(shapeNode, P, O)`) can carry a real override. See [`ComponentMeta`].
+    pub(crate) component_meta: Vec<ComponentMeta>,
     /// Severity IRI (default sh:Violation).
     pub severity: String,
     /// sh:message literals, copied into results.
@@ -277,6 +393,12 @@ pub struct Shape {
     pub deactivated: bool,
     /// Child property shapes (sh:property) — also feeds sh:closed.
     pub property_children: Vec<usize>,
+    /// [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:values [ sh:select … ]` /
+    /// `[ sh:sparqlExpr … ]`: when present, the value nodes of this (property)
+    /// shape are COMPUTED by the SPARQL node expression (index into
+    /// [`ShapesModel::select_exprs`]) instead of derived by traversing `sh:path`.
+    /// The reported `sh:resultPath` is still the shape's `sh:path`.
+    pub(crate) value_expr: Option<usize>,
 }
 
 /// All shapes parsed from a shapes graph, indexed densely (cycle-safe).
@@ -287,6 +409,12 @@ pub struct ShapesModel {
     pub targeted: Vec<usize>,
     /// SPARQL-based constraints (`sh:sparql`), referenced by [`Component::Sparql`].
     pub(crate) sparql: Vec<SparqlConstraint>,
+    /// [OPUS-4.8] (sq-rnkdh) SHACL 1.2 SPARQL-based node expressions
+    /// (`sh:select` / `sh:sparqlExpr`) used by SPARQL-valued targets
+    /// ([`Target::Sparql`]) and SPARQL-valued value nodes
+    /// ([`Shape::value_expr`]). Off the public surface (the prepared type is
+    /// crate-private), like `sparql` / `path_validators`.
+    pub(crate) select_exprs: Vec<crate::sparql::PreparedSelectExpr>,
     /// [OPUS-4.8] SPARQL-based constraint COMPONENTS (`sh:ConstraintComponent`,
     /// SHACL §6) declared in the shapes graph, referenced by
     /// [`Component::CustomSparql`]. The registry is keyed (for activation) on the
@@ -311,6 +439,34 @@ pub struct ShapesModel {
     /// enum so the (crate-private) node-expression type is not exposed.
     #[cfg(feature = "shacl-af")]
     pub(crate) expressions: Vec<crate::rules::NodeExpr>,
+    /// [OPUS-4.8] (sq-0mjfd) SHACL-SPARQL pre-binding FAILURES discovered at
+    /// parse: a `sh:sparql` constraint (or a SPARQL-based constraint-component
+    /// validator) whose query violates the pre-binding rules (MINUS / VALUES /
+    /// SERVICE / a sub-SELECT that drops a pre-bound variable / a BIND re-binding
+    /// one). A conformant processor MUST signal a *failure* for these (W3C SHACL
+    /// §3.4), surfaced through [`crate::validate_strict`]. Empty in the common
+    /// (well-formed) case; the lenient default [`crate::validate`] ignores them
+    /// (the constraint is simply skipped, as for any other ill-formed shape).
+    pub(crate) pre_binding_failures: Vec<PreBindingFailure>,
+    /// [OPUS-4.8] (sq-5q76d) An explicit `sh:conformanceDisallows` severity set
+    /// declared in the shapes graph (on any `sh:ValidationReport` node, SHACL 1.2
+    /// Core §3.9). When present it OVERRIDES the default disallowed set
+    /// ({Violation, Warning, Info}) used to compute `ValidationReport::conforms`,
+    /// so e.g. a graph that only disallows `sh:Violation` conforms despite a
+    /// `sh:Warning` result (`core/validation-reports/conformance-disallows-001`).
+    /// `None` ⇒ the default set applies.
+    pub(crate) conformance_disallows: Option<Vec<String>>,
+}
+
+/// [OPUS-4.8] (sq-0mjfd) One SHACL-SPARQL pre-binding failure recorded at parse:
+/// the offending constraint/validator node and why pre-binding is unsound. See
+/// [`ShapesModel::pre_binding_failures`].
+#[derive(Debug, Clone)]
+pub struct PreBindingFailure {
+    /// The `sh:SPARQLConstraint` / constraint-component node whose query is unsound.
+    pub node: Term,
+    /// A human-readable explanation (the violated pre-binding rule).
+    pub message: String,
 }
 
 impl ShapesModel {
@@ -321,20 +477,29 @@ impl ShapesModel {
             by_node: FxHashMap::default(),
             targeted: Vec::new(),
             sparql: Vec::new(),
+            select_exprs: Vec::new(),
             components: Vec::new(),
             path_validators: Vec::new(),
             by_types_closures: FxHashMap::default(),
             #[cfg(feature = "shacl-af")]
             expressions: Vec::new(),
+            pre_binding_failures: Vec::new(),
+            conformance_disallows: parse_conformance_disallows(&g),
         };
 
         // [OPUS-4.8] SHACL §6: discover SPARQL-based constraint components FIRST, so
         // shape parsing can activate them against the parameter predicates a shape uses.
-        m.components = discover_components(&g);
+        // [OPUS-4.8] (sq-0mjfd) A component validator with an unsound pre-binding is
+        // recorded as a failure (surfaced by `validate_strict`).
+        m.components = discover_components(&g, &mut m.pre_binding_failures);
 
         // Top-level shape discovery: explicitly typed shapes plus anything with a target.
+        // [OPUS-4.8] (sq-rnkdh) `sh:ShapeClass` (SHACL 1.2) is "a class that is also a
+        // node shape" — discovered as a root here so its constraints are parsed and
+        // its implicit class target registered (it carries neither `sh:NodeShape` nor
+        // an explicit `sh:target*`).
         let mut roots: Vec<Term> = Vec::new();
-        for class in ["NodeShape", "PropertyShape"] {
+        for class in ["NodeShape", "PropertyShape", "ShapeClass"] {
             for t in g.triples(None, Some(RDF_TYPE), Some(&iri(&sh(class)))) {
                 roots.push(t[0].clone());
             }
@@ -426,6 +591,25 @@ impl ShapesModel {
         self.by_types_closures.get(node)
     }
 
+    /// [OPUS-4.8] (sq-0mjfd) The SHACL-SPARQL pre-binding FAILURES discovered while
+    /// parsing this shapes graph: a `sh:sparql` constraint or constraint-component
+    /// validator whose query the pre-binding rules forbid (MINUS / VALUES /
+    /// SERVICE / a sub-SELECT dropping a pre-bound variable / a BIND re-binding
+    /// one). A conformant processor MUST signal a *failure* for these (W3C SHACL
+    /// §3.4); [`crate::validate_strict`] returns an `Err` when this is non-empty.
+    /// Empty in the common (well-formed) case.
+    pub fn pre_binding_failures(&self) -> &[PreBindingFailure] {
+        &self.pre_binding_failures
+    }
+
+    /// [OPUS-4.8] (sq-5q76d) The shapes-graph-declared `sh:conformanceDisallows`
+    /// severity set (full IRIs), or `None` when the graph declares none (the
+    /// default {Violation, Warning, Info} then applies). Used by
+    /// [`crate::validate_with_model`] to compute `ValidationReport::conforms`.
+    pub fn conformance_disallows(&self) -> Option<&[String]> {
+        self.conformance_disallows.as_deref()
+    }
+
     /// [OPUS-4.8] (sq-mk9n / sq-3w6n, `shacl-af`) Parses the two SHACL-AF
     /// node-expression constraints — `sh:expression`
     /// (→ [`Component::Expression`]) and `sh:nodeByExpression`
@@ -474,7 +658,24 @@ impl ShapesModel {
             } else {
                 Component::Expression(idx)
             });
+            // [OPUS-4.8] (sq-pb0wm) Keep the per-statement `component_meta` vector
+            // index-aligned: this second pass pushes components AFTER
+            // `attach_component_meta` sized the meta vector, so push a default
+            // (no-override) meta for each — expression constraints carry no
+            // reified-annotation override. (`validate_shape` is also padded
+            // defensively, so a drift here can never silently drop a component.)
+            self.shapes[sid].component_meta.push(ComponentMeta::default());
         }
+    }
+
+    /// [OPUS-4.8] (sq-mue75) Registers the inline filter/function shapes a
+    /// standalone node expression references (the public `eval_node_expression`
+    /// seam): the same on-demand inline-shape registration the `sh:expression`
+    /// constraint parse does, so a `findFirst`/`matchAll`/`nodesMatching`/
+    /// `filterShape` over an anonymous `[ … ]` shape resolves at eval time.
+    #[cfg(feature = "shacl-af")]
+    pub(crate) fn register_node_expr_shapes(&mut self, shapes_graph: &Graph, expr: &Term) {
+        self.register_expression_shapes(shapes_graph, expr, 0);
     }
 
     /// Walks an expression term registering inline `sh:filterShape` / function
@@ -539,14 +740,88 @@ impl ShapesModel {
             path: None,
             targets: Vec::new(),
             components: Vec::new(),
+            component_meta: Vec::new(),
             severity: sh("Violation"),
             messages: Vec::new(),
             deactivated: false,
             property_children: Vec::new(),
+            value_expr: None,
         });
-        let parsed = self.parse_shape(g, node);
+        let mut parsed = self.parse_shape(g, node);
+        // [OPUS-4.8] (sq-pb0wm) Resolve per-constraint-statement RDF-1.2
+        // reified-annotation overrides AFTER the components are built, so the
+        // parallel `component_meta` vector is index-aligned with `components`. A
+        // no-op (and cheap) when the shape carries no `{| … |}` annotation.
+        self.attach_component_meta(g, node, &mut parsed);
         self.shapes[id] = parsed;
         id
+    }
+
+    /// [OPUS-4.8] (sq-pb0wm) Populates `shape.component_meta` (index-aligned with
+    /// `shape.components`) from RDF-1.2 reified annotations on the constraint
+    /// statements. SHACL 1.2 Core lets a `{| … |}` annotation on ONE constraint
+    /// triple `(shapeNode, P, O)` — stored after parsing as
+    /// `_:r rdf:reifies <<( shapeNode P O )>>` plus `_:r sh:deactivated|message|severity V`
+    /// on the reifier `_:r` — override JUST that occurrence
+    /// (`misc/{deactivated-003,message-002,severity-003}`).
+    ///
+    /// Every component gets a [`ComponentMeta`] (default = no override). A real
+    /// override is attached only to components that map back to a single reifiable
+    /// constraint triple ([`component_source_triple`]); composite / list-valued /
+    /// expression components do not (the reified-annotation form annotates one
+    /// statement). The common un-annotated case short-circuits: a shape with no
+    /// reifier of any of its statements gets all-default metas with no per-triple
+    /// scan.
+    fn attach_component_meta(&self, g: &GraphView, node: &Term, shape: &mut Shape) {
+        shape.component_meta = vec![ComponentMeta::default(); shape.components.len()];
+        // Short-circuit: nothing reifies a statement of this shape ⇒ no overrides.
+        // (`rdf:reifies` objects are triple-terms; we only need the cheap presence
+        // check that SOME reifier names this shape node as the triple subject.)
+        if !shape_has_reified_statement(g, node) {
+            return;
+        }
+        for (i, comp) in shape.components.iter().enumerate() {
+            let Some((pred, obj)) = self.component_source_triple(comp) else {
+                continue;
+            };
+            let meta = reified_meta(g, node, &pred, &obj);
+            if !meta.is_empty() {
+                shape.component_meta[i] = meta;
+            }
+        }
+    }
+
+    /// [OPUS-4.8] (sq-pb0wm) The `(predicateIRI, objectTerm)` of the single
+    /// constraint statement a [`Component`] was built from, for the variants that
+    /// correspond to exactly one reifiable shapes-graph triple
+    /// `(shapeNode, P, O)`. `None` for components built from several triples (a
+    /// SHACL list / RDF-list operand), a transformed object whose original term is
+    /// not faithfully recoverable (a numeric count, a parsed [`Path`]), or a
+    /// feature-gated expression component — per-statement annotation overrides are
+    /// defined for single-statement Core constraints, which is what the W3C 1.2
+    /// suite (`misc/{deactivated-003,message-002,severity-003}`) exercises.
+    fn component_source_triple(&self, comp: &Component) -> Option<(String, Term)> {
+        let shape_node = |idx: usize| self.shapes.get(idx).map(|s| s.node.clone());
+        match comp {
+            Component::Class(t) => Some((sh("class"), t.clone())),
+            // A SINGLE-element datatype/nodeKind set is the single-IRI spelling
+            // `sh:datatype <iri>` (the SHACL-1.2 disjunctive LIST form is several
+            // triples — its operand is an RDF list — so it is not annotated here).
+            Component::Datatype(dts) if dts.len() == 1 => {
+                Some((sh("datatype"), iri(&dts[0])))
+            }
+            Component::NodeKind(kinds) if kinds.len() == 1 => {
+                Some((sh("nodeKind"), iri(&kinds[0])))
+            }
+            Component::HasValue(t) => Some((sh("hasValue"), t.clone())),
+            Component::RootClass(t) => Some((sh("rootClass"), t.clone())),
+            Component::Node(idx) => Some((sh("node"), shape_node(*idx)?)),
+            Component::Property(idx) => Some((sh("property"), shape_node(*idx)?)),
+            Component::SomeValue(idx) => Some((sh("someValue"), shape_node(*idx)?)),
+            Component::Not(idx) => Some((sh("not"), shape_node(*idx)?)),
+            Component::MemberShape(idx) => Some((sh("memberShape"), shape_node(*idx)?)),
+            _ => None,
+        }
     }
 
     fn parse_shape(&mut self, g: &GraphView, node: &Term) -> Shape {
@@ -557,6 +832,7 @@ impl ShapesModel {
                 .and_then(|p| Path::parse(g, &p).ok()),
             targets: Vec::new(),
             components: Vec::new(),
+            component_meta: Vec::new(),
             severity: match g.object(node, &sh("severity")) {
                 Some(Term::NamedNode(n)) => n.as_str().to_string(),
                 _ => sh("Violation"),
@@ -567,11 +843,18 @@ impl ShapesModel {
                 Some(Term::Literal(l)) if l.value() == "true"
             ),
             property_children: Vec::new(),
+            value_expr: None,
         };
 
         // Targets.
         for t in g.objects(node, &sh("targetNode")) {
-            shape.targets.push(Target::Node(t));
+            // [OPUS-4.8] (sq-rnkdh) SHACL 1.2: a `sh:targetNode` object that is a
+            // SPARQL-based node expression (`[ sh:select … ]` / `[ sh:sparqlExpr … ]`)
+            // COMPUTES the target nodes; any other object is a literal target node.
+            match self.intern_select_expr(g, &t) {
+                Some(idx) => shape.targets.push(Target::Sparql(idx)),
+                None => shape.targets.push(Target::Node(t)),
+            }
         }
         for t in g.objects(node, &sh("targetClass")) {
             shape.targets.push(Target::Class(t));
@@ -590,14 +873,54 @@ impl ShapesModel {
                     .push(Target::ObjectsOf(n.as_str().to_string()));
             }
         }
-        // Implicit class target: the shape node is itself an rdfs:Class.
-        if matches!(node, Term::NamedNode(_)) && g.has_type(node, RDFS_CLASS) {
+        // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:targetWhere`: the focus nodes are the
+        // data-graph nodes that CONFORM to the inline (object) shape. Parse the
+        // object as a shape on demand (it may be an inline anonymous shape with no
+        // `rdf:type`/target, so it is not a top-level root) and record its id.
+        for t in g.objects(node, &sh("targetWhere")) {
+            let inner = self.shape_id(g, &t);
+            shape.targets.push(Target::Where(inner));
+        }
+        // Implicit class target: the shape node is itself an rdfs:Class, OR (SHACL
+        // 1.2) an `sh:ShapeClass` — "a class that is also a node shape", usable as
+        // `rdf:type` in place of the `rdfs:Class` + `sh:NodeShape` combination.
+        if matches!(node, Term::NamedNode(_))
+            && (g.has_type(node, RDFS_CLASS) || g.has_type(node, &sh("ShapeClass")))
+        {
             shape.targets.push(Target::ImplicitClass(node.clone()));
         }
 
+        // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:values [ sh:select … ]` /
+        // `[ sh:sparqlExpr … ]` on a property shape: the value nodes are COMPUTED by
+        // the SPARQL node expression (`$this` = focus node) instead of derived by
+        // traversing `sh:path`. The reported `sh:resultPath` stays the shape's path.
+        // Only the SPARQL-valued `sh:values` form is handled here; the SHACL-AF
+        // node-expression value RULE form (`apply_rules`) is a separate surface.
+        if let Some(v) = g.object(node, &sh("values")) {
+            if let Some(idx) = self.intern_select_expr(g, &v) {
+                shape.value_expr = Some(idx);
+            }
+        }
+
         let c = &mut shape.components;
+        // [OPUS-4.8] (sq-sx15d) `sh:class` accepts a single class IRI/blank node or
+        // the SHACL-1.2 disjunctive SHACL-list form `( ex:A ex:B )` — a value node
+        // conforms iff it is an instance of ANY listed class. A blank-node object
+        // that is a well-formed SHACL list (≥1 member) is the disjunctive form;
+        // any other object is a single class. Mirrors the `sh:datatype` /
+        // `sh:nodeKind` disjunctive handling above.
         for o in g.objects(node, &sh("class")) {
-            c.push(Component::Class(o));
+            match &o {
+                Term::BlankNode(_) => {
+                    let members = g.list(&o);
+                    if members.is_empty() {
+                        c.push(Component::Class(o));
+                    } else {
+                        c.push(Component::ClassIn(members));
+                    }
+                }
+                _ => c.push(Component::Class(o)),
+            }
         }
         // [OPUS-4.8] (sq-vg3y) `sh:datatype` / `sh:nodeKind` accept either a single
         // IRI or the SHACL-1.2 disjunctive SHACL-list form (`( a b )`). `iri_set`
@@ -675,20 +998,40 @@ impl ShapesModel {
         {
             c.push(Component::UniqueLang);
         }
+        // [OPUS-4.8] (sq-sx15d) `sh:equals` / `sh:disjoint` / `sh:lessThan` /
+        // `sh:lessThanOrEquals` / `sh:subsetOf` carry a comparand SHACL property
+        // PATH in SHACL 1.2 (often an RDF-list sequence), not just a predicate
+        // IRI. Parse the comparand with the same `Path` parser used for `sh:path`
+        // (a bare NamedNode → `Path::Predicate`, so the SHACL-1.0 predicate forms
+        // stay backward-compatible); an ill-formed comparand is dropped (lenient).
         for (pred, ctor) in [
-            ("equals", Component::Equals as fn(String) -> Component),
-            ("disjoint", Component::Disjoint as fn(String) -> Component),
-            ("lessThan", Component::LessThan as fn(String) -> Component),
+            ("equals", Component::Equals as fn(Path) -> Component),
+            ("disjoint", Component::Disjoint as fn(Path) -> Component),
+            ("lessThan", Component::LessThan as fn(Path) -> Component),
             (
                 "lessThanOrEquals",
-                Component::LessThanOrEquals as fn(String) -> Component,
+                Component::LessThanOrEquals as fn(Path) -> Component,
             ),
+            ("subsetOf", Component::SubsetOf as fn(Path) -> Component),
         ] {
             for o in g.objects(node, &sh(pred)) {
-                if let Term::NamedNode(n) = o {
-                    c.push(ctor(n.as_str().to_string()));
+                if let Ok(path) = Path::parse(g, &o) {
+                    c.push(ctor(path));
                 }
             }
+        }
+        // [OPUS-4.8] (sq-sx15d) `sh:rootClass` (SHACL 1.2): each value node must be
+        // the named class or a transitive `rdfs:subClassOf`-descendant of it. The
+        // object is a single class term.
+        for o in g.objects(node, &sh("rootClass")) {
+            c.push(Component::RootClass(o));
+        }
+        // [OPUS-4.8] (sq-sx15d) `sh:singleLine true` (SHACL 1.2): string values must
+        // contain no line-break characters. `sh:singleLine false` (or any non-true
+        // object) imposes no constraint.
+        if matches!(g.object(node, &sh("singleLine")), Some(Term::Literal(l)) if l.value() == "true")
+        {
+            c.push(Component::SingleLine);
         }
         for o in g.objects(node, &sh("hasValue")) {
             c.push(Component::HasValue(o));
@@ -777,10 +1120,33 @@ impl ShapesModel {
             let id = self.shape_id(g, &o);
             shape.components.push(Component::Node(id));
         }
+        // [OPUS-4.8] (sq-sx15d) `sh:someValue` (SHACL 1.2): EXISTENTIAL — at least
+        // one value node must conform to the referenced (nested) shape. Parsed/
+        // interned recursively like `sh:node`; the quantifier is inverted at eval
+        // time (a violation iff NO value conforms).
+        for o in g.objects(node, &sh("someValue")) {
+            let id = self.shape_id(g, &o);
+            shape.components.push(Component::SomeValue(id));
+        }
         for o in g.objects(node, &sh("property")) {
             let id = self.shape_id(g, &o);
             shape.components.push(Component::Property(id));
             shape.property_children.push(id);
+        }
+        // [OPUS-4.8] (sq-0mjfd) `sh:reifierShape` (SHACL 1.2): the reifiers of each
+        // value's asserted triple must conform to the referenced shape. Parsed/
+        // interned like `sh:node`; `sh:reificationRequired true` additionally
+        // requires a reifier to exist.
+        for o in g.objects(node, &sh("reifierShape")) {
+            let id = self.shape_id(g, &o);
+            let required = matches!(
+                g.object(node, &sh("reificationRequired")),
+                Some(Term::Literal(l)) if l.value() == "true"
+            );
+            shape.components.push(Component::ReifierShape {
+                shape: id,
+                required,
+            });
         }
         for o in g.objects(node, &sh("qualifiedValueShape")) {
             let id = self.shape_id(g, &o);
@@ -865,6 +1231,36 @@ impl ShapesModel {
         shape
     }
 
+    /// [OPUS-4.8] (sq-rnkdh) Interns a SHACL 1.2 **SPARQL-based node expression**
+    /// (`[ sh:select "…" ]` or `[ sh:sparqlExpr "…" ]`, with optional
+    /// `sh:prefixes`) into [`Self::select_exprs`], returning its index. `None` when
+    /// `node` carries neither (so the caller falls back to the literal/term reading
+    /// — e.g. a plain `sh:targetNode` IRI), or when the derived query is ill-formed
+    /// (dropped leniently, like an ill-formed `sh:sparql`). `sh:select` takes
+    /// precedence over `sh:sparqlExpr` when both are present.
+    fn intern_select_expr(&mut self, g: &GraphView, node: &Term) -> Option<usize> {
+        // Only blank-node / IRI node-expression resources carry these predicates; a
+        // literal `sh:targetNode` is a target node, never an expression.
+        if matches!(node, Term::Literal(_)) {
+            return None;
+        }
+        let prefixes = collect_prefixes_from(g, &g.objects(node, &sh("prefixes")));
+        let prepared = match g.object(node, &sh("select")) {
+            Some(Term::Literal(l)) => {
+                crate::sparql::PreparedSelectExpr::build_select(&prefixes, l.value())
+            }
+            _ => match g.object(node, &sh("sparqlExpr")) {
+                Some(Term::Literal(l)) => {
+                    crate::sparql::PreparedSelectExpr::build_expr(&prefixes, l.value())
+                }
+                _ => return None, // not a SPARQL node expression — caller's fallback
+            },
+        }?;
+        let idx = self.select_exprs.len();
+        self.select_exprs.push(prepared);
+        Some(idx)
+    }
+
     /// Parses one `sh:sparql` constraint node into a [`SparqlConstraint`],
     /// interning it into [`Self::sparql`] and returning its index. `None` when the
     /// node has no `sh:select` literal (an ill-formed constraint — skipped).
@@ -895,14 +1291,34 @@ impl ShapesModel {
             g.object(node, &sh("deactivated")),
             Some(Term::Literal(l)) if l.value() == "true"
         );
+        // [OPUS-4.8] (sq-rnkdh) A constraint-level `sh:severity` IRI overrides the
+        // shape's default severity for this constraint's results (SHACL 1.2).
+        let severity = match g.object(node, &sh("severity")) {
+            Some(Term::NamedNode(n)) => Some(n.as_str().to_string()),
+            _ => None,
+        };
         let mut constraint = SparqlConstraint {
+            node: node.clone(),
             select,
             prefixes,
             message,
+            severity,
             deactivated,
             prepared: None,
         };
-        constraint.prepared = crate::sparql::PreparedSparql::build(&constraint);
+        // [OPUS-4.8] (sq-0mjfd) A pre-binding violation is recorded as a FAILURE
+        // (surfaced by `validate_strict`) and the constraint is then dropped
+        // (`prepared = None`), so the lenient `validate` simply skips it.
+        constraint.prepared = match crate::sparql::PreparedSparql::build(&constraint) {
+            Ok(prepared) => prepared,
+            Err(violation) => {
+                self.pre_binding_failures.push(PreBindingFailure {
+                    node: node.clone(),
+                    message: violation.message(),
+                });
+                None
+            }
+        };
         let idx = self.sparql.len();
         self.sparql.push(constraint);
         Some(idx)
@@ -970,6 +1386,59 @@ fn collect_prefixes_from(g: &GraphView, prefix_roots: &[Term]) -> String {
 
 fn iri(s: &str) -> Term {
     Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+}
+
+/// [OPUS-4.8] (sq-pb0wm) The RDF-1.2 reification predicate: a reifier `?r` reifies
+/// a triple-term via `?r rdf:reifies <<( s p o )>>` (the `{| … |}` annotation).
+const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+
+/// [OPUS-4.8] (sq-pb0wm) Cheap presence check: does ANY reifier in the shapes
+/// graph reify a triple whose subject is this shape node? `rdf:reifies` objects
+/// are triple-terms ([`Term::Triple`]); we scan the (few) `rdf:reifies` triples
+/// and test the embedded triple's subject. Lets [`ShapesModel::attach_component_meta`]
+/// skip the per-component triple reconstruction for the common un-annotated shape.
+fn shape_has_reified_statement(g: &GraphView, node: &Term) -> bool {
+    let want: oxrdf::NamedOrBlankNode = match node {
+        Term::NamedNode(n) => n.clone().into(),
+        Term::BlankNode(b) => b.clone().into(),
+        _ => return false,
+    };
+    g.triples(None, Some(RDF_REIFIES), None)
+        .into_iter()
+        .any(|[_, _, o]| matches!(&o, Term::Triple(t) if t.subject == want))
+}
+
+/// [OPUS-4.8] (sq-pb0wm) The per-statement [`ComponentMeta`] for the constraint
+/// triple `(shapeNode, predicate, object)`: scans the reifiers of that exact
+/// triple (the subjects of `?r rdf:reifies <<( shapeNode predicate object )>>`)
+/// and reads any `sh:deactivated` / `sh:message` / `sh:severity` they carry. The
+/// triple-term is reconstructed identically to the eval-side `reifiers_of`, so it
+/// matches the term oxttl/oxrdf stores for the `{| … |}` form. A non-IRI/blank
+/// shape node, or no reifier, yields the default (no override).
+fn reified_meta(g: &GraphView, node: &Term, predicate: &str, object: &Term) -> ComponentMeta {
+    let subj: oxrdf::NamedOrBlankNode = match node {
+        Term::NamedNode(n) => n.clone().into(),
+        Term::BlankNode(b) => b.clone().into(),
+        _ => return ComponentMeta::default(),
+    };
+    let Ok(pred) = oxrdf::NamedNode::new(predicate) else {
+        return ComponentMeta::default();
+    };
+    let triple_term = Term::Triple(Box::new(oxrdf::Triple::new(subj, pred, object.clone())));
+    let reifiers = g.subjects(RDF_REIFIES, &triple_term);
+    let mut meta = ComponentMeta::default();
+    for r in &reifiers {
+        if matches!(g.object(r, &sh("deactivated")), Some(Term::Literal(l)) if l.value() == "true") {
+            meta.deactivated = true;
+        }
+        for m in g.objects(r, &sh("message")) {
+            meta.messages.push(m);
+        }
+        if let Some(Term::NamedNode(n)) = g.object(r, &sh("severity")) {
+            meta.severity = Some(n.as_str().to_string());
+        }
+    }
+    meta
 }
 
 /// [OPUS-4.8] (sq-vg3y) The set of IRIs an object denotes when a constraint
@@ -1075,7 +1544,10 @@ fn collect_properties(
 /// the shapes graph and compile their parameters + validators. A component is
 /// kept only if it has at least one parameter and at least one usable validator
 /// (a generic / node / property validator with a parsable `sh:ask`/`sh:select`).
-fn discover_components(g: &GraphView) -> Vec<ComponentDef> {
+fn discover_components(
+    g: &GraphView,
+    failures: &mut Vec<PreBindingFailure>,
+) -> Vec<ComponentDef> {
     let mut out = Vec::new();
     // SHACL §6.2: a component node is a SHACL instance of sh:ConstraintComponent —
     // i.e. typed sh:ConstraintComponent OR any rdfs:subClassOf-descendant of it
@@ -1089,6 +1561,15 @@ fn discover_components(g: &GraphView) -> Vec<ComponentDef> {
         // Validators parse under the component's own `sh:prefixes` (SHACL §6.3),
         // reusing the `sh:declare`/`owl:imports` chasing of the `sh:sparql` path.
         let prefixes = collect_prefixes_from(g, &g.objects(&node, &sh("prefixes")));
+        // [OPUS-4.8] (sq-0mjfd) A validator query pre-binds `$this`, `$value` and
+        // each parameter (§6.3); a pre-binding violation in any of the three
+        // validator slots is a FAILURE for this component (the ASK
+        // `unsupported-sparql-006` re-binds `?value`).
+        let mut pre_bound: Vec<&str> = vec!["this", "value"];
+        for p in &parameters {
+            pre_bound.push(p.var.as_str());
+        }
+        check_component_validators(g, &node, &prefixes, &pre_bound, failures);
         let validator = parse_validator(g, &node, &sh("validator"), &prefixes);
         let node_validator = parse_validator(g, &node, &sh("nodeValidator"), &prefixes);
         let property_validator = parse_validator(g, &node, &sh("propertyValidator"), &prefixes);
@@ -1104,6 +1585,61 @@ fn discover_components(g: &GraphView) -> Vec<ComponentDef> {
         });
     }
     out
+}
+
+/// [OPUS-4.8] (sq-5q76d) An explicit `sh:conformanceDisallows` severity set
+/// declared in the shapes graph (SHACL 1.2 Core §3.9). Collects the IRI objects
+/// of every `sh:conformanceDisallows` triple (a `sh:ValidationReport` may declare
+/// several, e.g. `sh:Violation`, `sh:Warning`). `None` when none is declared (the
+/// default disallowed set then applies). The W3C
+/// `conformance-disallows-001` entry declares it on the EXPECTED report node,
+/// which — because that test's shapes graph is the whole file — is visible here.
+fn parse_conformance_disallows(g: &GraphView) -> Option<Vec<String>> {
+    let mut set: Vec<String> = Vec::new();
+    for [_, _, o] in g.triples(None, Some(&sh("conformanceDisallows")), None) {
+        if let Term::NamedNode(n) = o {
+            let iri = n.as_str().to_string();
+            if !set.contains(&iri) {
+                set.push(iri);
+            }
+        }
+    }
+    if set.is_empty() {
+        None
+    } else {
+        Some(set)
+    }
+}
+
+/// [OPUS-4.8] (sq-0mjfd) Records a [`PreBindingFailure`] for each of a component's
+/// validator slots (`sh:validator` / `sh:nodeValidator` / `sh:propertyValidator`)
+/// whose `sh:ask` / `sh:select` query violates the SHACL-SPARQL pre-binding rules.
+fn check_component_validators(
+    g: &GraphView,
+    node: &Term,
+    prefixes: &str,
+    pre_bound: &[&str],
+    failures: &mut Vec<PreBindingFailure>,
+) {
+    for slot in ["validator", "nodeValidator", "propertyValidator"] {
+        let Some(v) = g.object(node, &sh(slot)) else {
+            continue;
+        };
+        let text = match g.object(&v, &sh("ask")) {
+            Some(Term::Literal(l)) => l.value().to_string(),
+            _ => match g.object(&v, &sh("select")) {
+                Some(Term::Literal(l)) => l.value().to_string(),
+                _ => continue,
+            },
+        };
+        let full = format!("{prefixes}\n{text}");
+        if let Err(violation) = crate::sparql::check_validator_pre_binding(&full, pre_bound) {
+            failures.push(PreBindingFailure {
+                node: node.clone(),
+                message: violation.message(),
+            });
+        }
+    }
 }
 
 /// Parses a component's `sh:parameter` list (SHACL §6.2.1). Each parameter node

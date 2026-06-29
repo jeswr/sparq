@@ -54,6 +54,27 @@
   --sidebar-accent-foreground: oklch(0.24 0.05 215);
   --sidebar-border: oklch(0.91 0.012 220);
   --sidebar-ring: oklch(0.52 0.094 205);
+
+  /* [OPUS-4.8] sq-vw3ax (bold redesign foundation) — derived BOLD-direction tokens.
+     All are mixed/derived from the existing OKLCH teal palette above; NO new hue is
+     invented. They power the atmospheric glow, the hero gradient, hairline rules, and
+     the elevation scale that the home/try/capabilities redesigns build on. Light values
+     here; the .dark strip below carries the lead (dark-first) values. */
+  --teal-glow: oklch(0.52 0.094 205 / 0.25);
+  --teal-soft: color-mix(in oklch, var(--primary) 10%, transparent);
+  --hairline: oklch(0 0 0 / 7%);
+  --hero-grad: linear-gradient(
+    105deg,
+    var(--primary) 10%,
+    var(--chart-2) 70%,
+    var(--chart-5) 130%
+  );
+
+  /* elevation / shadow scale — soft, teal-tinted depth (subtle in light) */
+  --elevation-1: 0 1px 2px 0 oklch(0.21 0.022 235 / 0.06);
+  --elevation-2: 0 8px 24px -16px oklch(0.21 0.022 235 / 0.18);
+  --elevation-3: 0 18px 40px -28px oklch(0.21 0.022 235 / 0.22);
+  --elevation-glow: 0 24px 50px -34px var(--teal-glow);
 }
 
 .dark {
@@ -101,6 +122,20 @@
   --sidebar-accent-foreground: oklch(0.96 0.006 210);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.7 0.1 200);
+
+  /* [OPUS-4.8] sq-vw3ax — dark-first LEAD values for the bold-direction tokens. The
+     glow is more present and the hairline brighter against the deep teal-charcoal
+     ground, matching the approved mockups (proposals/web-{home,try,capabilities}.html).
+     Still strictly inside the existing OKLCH teal palette — no new hue. */
+  --teal-glow: oklch(0.7 0.1 200 / 0.45);
+  --teal-soft: color-mix(in oklch, var(--primary) 14%, transparent);
+  --hairline: oklch(1 0 0 / 8%);
+
+  /* elevation scale — deeper, teal-tinted shadows read on the dark ground */
+  --elevation-1: 0 1px 0 0 var(--hairline) inset;
+  --elevation-2: 0 18px 40px -34px var(--teal-glow);
+  --elevation-3: 0 30px 80px -40px var(--teal-glow);
+  --elevation-glow: 0 24px 50px -34px var(--teal-glow);
 }
 
 @theme inline {
@@ -139,6 +174,16 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
+  /* [OPUS-4.8] sq-vw3ax — expose the bold-direction derived tokens to Tailwind so the
+     redesign layouts can use `border-hairline`, `bg-teal-soft`, `shadow-elevation-2`,
+     etc. These are colour/shadow aliases of the OKLCH teal tokens — no new hue. */
+  --color-hairline: var(--hairline);
+  --color-teal-soft: var(--teal-soft);
+  --shadow-elevation-1: var(--elevation-1);
+  --shadow-elevation-2: var(--elevation-2);
+  --shadow-elevation-3: var(--elevation-3);
+  --shadow-elevation-glow: var(--elevation-glow);
+
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-heading: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", "Menlo", monospace;
@@ -175,6 +220,97 @@
 
 @utility measure {
   max-width: 65ch;
+}
+
+/* [OPUS-4.8] sq-vw3ax — BOLD DARK-FIRST FOUNDATION utilities.
+   The shared visual language extracted VERBATIM from the approved mockups
+   (sparq-design-system/proposals/web-{home,try,capabilities}.html). These are the base
+   the home/try/capabilities surface redesigns build on; they are OPT-IN (a page must add
+   the class), so un-redesigned routes are unaffected. All effects are pure CSS — no
+   runtime, no new dependency — and read in BOTH themes via the design tokens above.
+   ──────────────────────────────────────────────────────────────────────────────── */
+@layer components {
+  /* Atmospheric ground: a fixed, layered radial teal/cyan glow. Sits behind content
+     (z-index:-1), inert to pointer events. Reads as a deliberate brand statement on the
+     dark ground and a soft tint in light. Mount once near the top of a redesigned page. */
+  .bg-atmos {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(
+        70rem 40rem at 72% -8%,
+        color-mix(in oklch, var(--primary) 22%, transparent),
+        transparent 60%
+      ),
+      radial-gradient(
+        55rem 38rem at 4% 8%,
+        color-mix(in oklch, var(--chart-2) 14%, transparent),
+        transparent 55%
+      );
+  }
+
+  /* Faint masked grid for depth — fades out radially so it never competes with content. */
+  .bg-grid {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: 0.5;
+    background-image:
+      linear-gradient(to right, var(--hairline) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--hairline) 1px, transparent 1px);
+    background-size: 56px 56px;
+    -webkit-mask-image: radial-gradient(
+      60rem 50rem at 60% 0%,
+      #000 30%,
+      transparent 75%
+    );
+    mask-image: radial-gradient(60rem 50rem at 60% 0%, #000 30%, transparent 75%);
+  }
+
+  /* Hero gradient text — clips the --hero-grad (primary → chart-2 → chart-5) to glyphs. */
+  .text-gradient {
+    background: var(--hero-grad);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Display headline scale — the clamp() responsive display type the redesign hero uses. */
+  .display-1 {
+    font-size: clamp(2.6rem, 6.2vw, 4.5rem);
+    line-height: 1.02;
+    letter-spacing: -0.035em;
+    text-wrap: balance;
+  }
+  .display-2 {
+    font-size: clamp(2rem, 4.4vw, 3rem);
+    line-height: 1.05;
+    letter-spacing: -0.03em;
+    text-wrap: balance;
+  }
+
+  /* Mono section kicker — the small uppercase teal label above each section title. */
+  .kicker {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--primary);
+  }
+}
+
+/* Elevation helpers usable as plain classes (in addition to the Tailwind shadow-* aliases). */
+@utility elevation-2 {
+  box-shadow: var(--elevation-2);
+}
+@utility elevation-3 {
+  box-shadow: var(--elevation-3);
+}
+@utility elevation-glow {
+  box-shadow: var(--elevation-glow);
 }
 
 /* [OPUS-4.8] sq-gum8 — scoped styling for the build-time Typst HTML export rendered on a

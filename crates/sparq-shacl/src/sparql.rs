@@ -43,6 +43,73 @@ use spargebra::{Query, SparqlParser};
 /// property shape) `$PATH` this way.
 pub(crate) type Binding<'a> = (&'a str, &'a Term);
 
+/// [OPUS-4.8] (sq-0mjfd) The variable a `sh:sparql` constraint query always has
+/// pre-bound: `$this` (the focus node). A SPARQL-based constraint COMPONENT
+/// validator additionally pre-binds `$value` and each parameter — see
+/// [`check_pre_binding`], which takes the pre-bound name set.
+const PRE_BOUND_THIS: &[&str] = &["this"];
+
+/// [OPUS-4.8] (sq-0mjfd) A SHACL-SPARQL **pre-binding violation**: a `sh:sparql`
+/// constraint query uses a construct for which SHACL pre-binding of `$this` is not
+/// defined (W3C SHACL §5.2.1 NOTE "pre-binding"), so a conformant processor MUST
+/// signal a *failure* rather than validate. Surfaced through
+/// [`PreparedSparql::build`] as an `Err` and threaded to a `validate_strict`
+/// failure outcome (the `mf:result sht:Failure` shacl12 entries
+/// `sparql/pre-binding/{unsupported-sparql-001..006, pre-binding-006}`).
+///
+/// The variants are exactly the disallowed constructs the suite enumerates — no
+/// more (over-rejecting would break the 17 passing `sh:sparql` entries):
+///   * [`Self::Minus`]   — a `MINUS` clause (`unsupported-sparql-001`);
+///   * [`Self::Values`]  — an author-written `VALUES` table (`unsupported-sparql-002`);
+///   * [`Self::Service`] — a `SERVICE` clause (`unsupported-sparql-003`);
+///   * [`Self::SubSelectDropsPreBound`] — a sub-`SELECT` whose projection does not
+///     keep the pre-bound variable in scope, i.e. a `SELECT *` or a projection
+///     list omitting it (`unsupported-sparql-004`, `pre-binding-006`);
+///   * [`Self::RebindsPreBound`] — a `BIND (… AS $this)` that re-binds the
+///     pre-bound variable (`unsupported-sparql-005`; the ASK form
+///     `unsupported-sparql-006` re-binds `?value` and is caught the same way).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PreBindingViolation {
+    /// A `MINUS` clause — pre-binding is not defined across `MINUS`.
+    Minus,
+    /// An author-written `VALUES` table — disallowed in a pre-bound query.
+    Values,
+    /// A `SERVICE` (federated) clause — not evaluable under pre-binding here.
+    Service,
+    /// A sub-`SELECT` that re-scopes the pre-bound variable (drops it from / does
+    /// not explicitly project it in the inner projection). Carries the variable
+    /// name re-scoped, for the diagnostic.
+    SubSelectDropsPreBound(String),
+    /// A `BIND (expr AS ?v)` that re-binds an already-pre-bound variable `?v`.
+    RebindsPreBound(String),
+}
+
+impl PreBindingViolation {
+    /// A human-readable explanation (for a `ShapeDiagnostic` / failure message).
+    pub(crate) fn message(&self) -> String {
+        match self {
+            PreBindingViolation::Minus => {
+                "SHACL-SPARQL pre-binding is not defined across a MINUS clause".to_string()
+            }
+            PreBindingViolation::Values => {
+                "an author-written VALUES table is not allowed in a pre-bound sh:sparql query"
+                    .to_string()
+            }
+            PreBindingViolation::Service => {
+                "a SERVICE clause cannot be evaluated under SHACL pre-binding".to_string()
+            }
+            // [OPUS-4.8] positional format args (rust/unused-variable CodeQL FP).
+            PreBindingViolation::SubSelectDropsPreBound(v) => format!(
+                "a sub-SELECT re-scopes the pre-bound variable ?{} (it must be explicitly projected)",
+                v
+            ),
+            PreBindingViolation::RebindsPreBound(v) => {
+                format!("a BIND re-binds the pre-bound variable ?{}", v)
+            }
+        }
+    }
+}
+
 /// A parsed-and-validated `sh:sparql` constraint, ready to run per focus node.
 /// Built once when the shapes model is parsed (so a malformed query is rejected
 /// up front, not per focus node).
@@ -53,18 +120,46 @@ pub(crate) struct PreparedSparql {
 }
 
 impl PreparedSparql {
-    /// Parses `constraint.select` (with its prefixes prepended) into algebra,
-    /// returning `None` for a non-SELECT or unparsable query (ill-formed → skip).
-    /// `SELECT *` is accepted (every in-scope variable, including `$this`, is a
-    /// result variable); only a non-SELECT query form is rejected.
-    pub(crate) fn build(constraint: &SparqlConstraint) -> Option<PreparedSparql> {
+    /// Parses `constraint.select` (with its prefixes prepended) into algebra.
+    ///
+    /// Outcome (a three-state result, distinguishing *skip* from *reject*):
+    ///   * `Ok(Some(_))` — a well-formed, pre-bindable SELECT query;
+    ///   * `Ok(None)` — a non-SELECT or unparsable query (ill-formed → skipped
+    ///     leniently, matching the crate's ill-formed-shape policy);
+    ///   * `Err(_)` — a SELECT query that VIOLATES the SHACL-SPARQL pre-binding
+    ///     rules ([`PreBindingViolation`]). A conformant processor MUST signal a
+    ///     *failure* for such a constraint (the `mf:result sht:Failure` shacl12
+    ///     entries), so this is propagated to a strict-validation failure outcome
+    ///     rather than silently skipped. [OPUS-4.8] (sq-0mjfd)
+    ///
+    /// `SELECT *` is accepted at the TOP level (every in-scope variable, including
+    /// `$this`, is a result variable); a `SELECT *` *sub-select*, by contrast,
+    /// re-scopes `$this` and is a pre-binding violation (see [`check_pre_binding`]).
+    pub(crate) fn build(
+        constraint: &SparqlConstraint,
+    ) -> Result<Option<PreparedSparql>, PreBindingViolation> {
         let text = format!("{}\n{}", constraint.prefixes, constraint.select);
-        let query = SparqlParser::new().parse_query(&text).ok()?;
+        let Ok(query) = SparqlParser::new().parse_query(&text) else {
+            return Ok(None);
+        };
         // Only SELECT is meaningful for sh:sparql; the solutions drive the result count.
-        if !matches!(query, Query::Select { .. }) {
-            return None;
-        }
-        Some(PreparedSparql { query })
+        let Query::Select { pattern, .. } = &query else {
+            return Ok(None);
+        };
+        // [OPUS-4.8] (sq-0mjfd) Reject a query whose pre-binding of `$this` is
+        // unsound (MINUS / VALUES / SERVICE / a sub-SELECT that drops `$this` /
+        // a BIND re-binding it). The check runs on the RAW author query, BEFORE
+        // any pre-binding VALUES injection, so an author-written VALUES is caught.
+        // The TOP-level projection is the result projection (a `SELECT *` is fine
+        // here — every in-scope variable, incl. `$this`, is a result), NOT a
+        // re-scoping sub-SELECT, so descend THROUGH it; the Project arm of
+        // `check_pre_binding` only fires for an INNER (author) sub-SELECT.
+        let body = match pattern {
+            GraphPattern::Project { inner, .. } => inner.as_ref(),
+            other => other,
+        };
+        check_pre_binding(body, PRE_BOUND_THIS)?;
+        Ok(Some(PreparedSparql { query }))
     }
 
     /// Runs the constraint for one `focus` node against `data`, pushing one
@@ -141,6 +236,175 @@ pub(crate) struct ResultFields {
     pub default_message: String,
 }
 
+/// [OPUS-4.8] (sq-rnkdh) A parsed SHACL 1.2 **SPARQL-based node expression**
+/// (`sh:select` / `sh:sparqlExpr`, SHACL 1.2 §"SPARQL-based Node Expressions"):
+/// a SELECT query that, run with `$this` pre-bound to a focus node, yields the
+/// output nodes as the bindings of its FIRST result variable. Used by the
+/// SHACL-1.2 SPARQL-valued **targets** (`sh:targetNode [ sh:select … ]`) and the
+/// SPARQL-valued **value nodes** of a property shape (`sh:values [ sh:select … ]`
+/// / `[ sh:sparqlExpr … ]`). Built once at shapes-model parse so a malformed
+/// query is rejected up front (`None`), not per focus node.
+///
+/// This deliberately reuses the always-on `sh:sparql` pre-binding machinery
+/// ([`pre_bind_select`] / `sparq_engine::query_prepared`), so it works in BOTH
+/// the default and `shacl-af` feature states (it is SHACL-1.2 core/SPARQL, not a
+/// SHACL-AF rule).
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedSelectExpr {
+    /// The parsed SELECT algebra (prefixes already resolved at build time).
+    query: Query,
+}
+
+impl PreparedSelectExpr {
+    /// Builds from a `sh:select` SELECT query (with its `sh:prefixes` prepended).
+    /// `None` for a non-SELECT / unparsable query (ill-formed → the expression is
+    /// dropped leniently, so its target/value set is empty rather than misfiring).
+    pub(crate) fn build_select(prefixes: &str, select: &str) -> Option<PreparedSelectExpr> {
+        let text = format!("{}\n{}", prefixes, select);
+        let query = SparqlParser::new().parse_query(&text).ok()?;
+        if !matches!(query, Query::Select { .. }) {
+            return None;
+        }
+        Some(PreparedSelectExpr { query })
+    }
+
+    /// Builds from a `sh:sparqlExpr` SPARQL EXPRESSION string. The SHACL-1.2
+    /// derivation wraps the expression in a single-solution projection
+    /// `SELECT ((EXPR) AS ?result) WHERE {}`; running it with `$this` pre-bound
+    /// evaluates the expression for the focus node and yields its value as the
+    /// (single) output node. `None` if the derived query does not parse.
+    pub(crate) fn build_expr(prefixes: &str, expr: &str) -> Option<PreparedSelectExpr> {
+        let select = format!("SELECT (({}) AS ?result) WHERE {{ }}", expr);
+        Self::build_select(prefixes, &select)
+    }
+
+    /// Evaluates the expression for `focus` against `data`, returning the output
+    /// nodes (the bindings of the FIRST result variable, in solution order,
+    /// duplicates preserved — the caller dedups/uses them as value nodes). An
+    /// unbound first-variable solution contributes no node. A focus node not
+    /// expressible as a VALUES ground term (a blank node) or a runtime query error
+    /// yields an empty set (lenient; never panics `validate`).
+    pub(crate) fn eval(&self, data: &sparq_core::Graph, focus: &Term) -> Vec<Term> {
+        let Some(bound) = pre_bind_select(&self.query, &[("this", focus)]) else {
+            return Vec::new();
+        };
+        Self::run(data, bound)
+    }
+
+    /// [OPUS-4.8] (sq-rnkdh) Evaluates the expression as a **target** query — with
+    /// no `$this` pre-binding (a target SELECT computes the focus nodes itself) —
+    /// returning the bindings of the FIRST result variable as the focus-node set.
+    pub(crate) fn eval_target(&self, data: &sparq_core::Graph) -> Vec<Term> {
+        Self::run(data, self.query.clone())
+    }
+
+    /// Runs a (possibly pre-bound) SELECT and collects the FIRST-result-variable
+    /// bindings, skipping unbound rows. A runtime query error yields no nodes
+    /// (lenient; never panics `validate`).
+    fn run(data: &sparq_core::Graph, query: Query) -> Vec<Term> {
+        let prepared = sparq_engine::PreparedQuery::from(query);
+        let Ok(result) = sparq_engine::query_prepared(data, &prepared) else {
+            return Vec::new();
+        };
+        // The output nodes are the bindings of the FIRST result variable. For an
+        // `eval` (pre-bound) query the injection appends `?this` to the projection
+        // only if it was absent, so the author's first projected variable stays at
+        // position 0.
+        let mut out = Vec::new();
+        for row in &result.rows {
+            if let Some(Some(t)) = row.first() {
+                out.push(t.clone());
+            }
+        }
+        out
+    }
+}
+
+/// [OPUS-4.8] (sq-0mjfd) Walks a SHACL-SPARQL constraint/validator WHERE algebra
+/// and returns `Err` for the first construct that makes pre-binding of the
+/// `pre_bound` variables unsound (W3C SHACL §5.2.1 NOTE "pre-binding"). `in_scope`
+/// holds the pre-bound names still in scope along this branch; a sub-`SELECT` that
+/// does not re-project a name drops it, so a re-bind *inside* a re-scoped
+/// sub-select no longer concerns the OUTER pre-binding.
+///
+/// For a `sh:sparql` constraint `pre_bound = ["this"]`; for a SPARQL-based
+/// constraint COMPONENT validator it is `["this", "value", <each parameter var>]`
+/// (§6.3) — e.g. the ASK `unsupported-sparql-006` re-binds `?value`.
+///
+/// Detected violations (and ONLY these — over-rejecting would break the 17
+/// passing `sh:sparql` entries / the component-validator suite):
+///   * `Minus` — pre-binding undefined across MINUS (`unsupported-sparql-001`);
+///   * `Values` — an author-written VALUES table (the pre-binding injection itself
+///     runs LATER, on a separately-built copy, so any VALUES seen here is the
+///     author's) (`unsupported-sparql-002`);
+///   * `Service` — a federated clause (`unsupported-sparql-003`);
+///   * a sub-`SELECT` `Project` that does not keep an in-scope pre-bound name in
+///     scope (a `SELECT *` — empty projection list in this algebra — or a list
+///     omitting it) (`unsupported-sparql-004`, `pre-binding-006`); the descent
+///     then continues with that name out of scope;
+///   * a `BIND (… AS ?v)` (`Extend`) re-binding an in-scope pre-bound name `?v`
+///     (`unsupported-sparql-005`, ASK `unsupported-sparql-006`). A
+///     `BIND ($this AS ?other)` binding a NEW name is fine (`pre-binding-004`).
+fn check_pre_binding(
+    pattern: &GraphPattern,
+    in_scope: &[&str],
+) -> Result<(), PreBindingViolation> {
+    match pattern {
+        GraphPattern::Minus { .. } => Err(PreBindingViolation::Minus),
+        GraphPattern::Values { .. } => Err(PreBindingViolation::Values),
+        GraphPattern::Service { .. } => Err(PreBindingViolation::Service),
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression: _,
+        } => {
+            if in_scope.contains(&variable.as_str()) {
+                return Err(PreBindingViolation::RebindsPreBound(
+                    variable.as_str().to_string(),
+                ));
+            }
+            check_pre_binding(inner, in_scope)
+        }
+        // A sub-SELECT (`Project`) re-scopes its inner: a pre-bound name survives
+        // into it ONLY if the projection explicitly lists it. A `SELECT *` (empty
+        // list in this algebra) or a list omitting it re-scopes it — a violation
+        // while it is still in scope at this point.
+        GraphPattern::Project { inner, variables } => {
+            let kept: Vec<&str> = in_scope
+                .iter()
+                .copied()
+                .filter(|n| variables.iter().any(|v| v.as_str() == *n))
+                .collect();
+            if let Some(dropped) = in_scope.iter().find(|n| !kept.contains(n)) {
+                return Err(PreBindingViolation::SubSelectDropsPreBound(
+                    (*dropped).to_string(),
+                ));
+            }
+            check_pre_binding(inner, &kept)
+        }
+        // Single-child wrappers keep the outer scope; descend.
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Group { inner, .. }
+        | GraphPattern::Graph { inner, .. } => check_pre_binding(inner, in_scope),
+        // Both children share the outer scope (a UNION branch / JOIN sibling / the
+        // optional side of an OPTIONAL each keeps the pre-bound names in scope).
+        GraphPattern::Join { left, right }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::LeftJoin { left, right, .. } => {
+            check_pre_binding(left, in_scope)?;
+            check_pre_binding(right, in_scope)
+        }
+        // Leaves carry no pre-binding-affecting construct.
+        GraphPattern::Bgp { .. } | GraphPattern::Path { .. } => Ok(()),
+        #[allow(unreachable_patterns)]
+        _ => Ok(()),
+    }
+}
+
 /// Builds the single-row `VALUES (?n1 ?n2 …) { (v1 v2 …) }` table that pre-binds
 /// each `(name, term)` in `bindings`. Returns `None` if any value is not
 /// expressible as a SPARQL ground term (e.g. a blank node — see `term_to_ground`).
@@ -210,16 +474,48 @@ fn pre_bind_ask(query: &Query, bindings: &[Binding]) -> Option<Query> {
     })
 }
 
-/// Pushes the pre-binding `values` table *down* through single-child algebra
-/// wrappers (`Filter` / `Extend` / `OrderBy` / `Group` / `Distinct` / `Reduced` /
-/// `Slice` / `Minus`-left / `LeftJoin`-left), joining it at the deepest pattern
-/// node. This is load-bearing for FILTER-only patterns like `ASK { FILTER(?value
-/// = $param) }`: a VALUES table joined ABOVE the `Filter` leaves `?value`/`$param`
-/// UNBOUND inside the filter (the filter scopes only its own inner), so the
-/// filter evaluates over empty bindings and the constraint never holds. Joining
-/// the VALUES table BELOW the filter puts the pre-bound terms in scope. Robust to
-/// however the validator query is laid out (no textual prepend). SHACL §6.3
-/// pre-binding semantics (substitute the variable's value everywhere it occurs).
+/// The variable names a pre-binding `values` table binds (each pushed-down
+/// VALUES table is the single-row one built by [`pre_bind_values`]). Used to
+/// decide whether a sub-SELECT keeps a pre-bound variable in scope (it must be
+/// projected) — Union/Join siblings are descended unconditionally because the
+/// single-row VALUES join is idempotent for a branch that does not mention it.
+fn values_var_names(values: &GraphPattern) -> Vec<&str> {
+    match values {
+        GraphPattern::Values { variables, .. } => variables.iter().map(|v| v.as_str()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Pushes the pre-binding `values` table *down* through algebra wrappers, joining
+/// it at every leaf where the pre-bound variables are in scope. This is
+/// load-bearing for FILTER-only patterns like `ASK { FILTER(?value = $param) }`: a
+/// VALUES table joined ABOVE the `Filter` leaves `?value`/`$param` UNBOUND inside
+/// the filter (the filter scopes only its own inner), so the filter evaluates over
+/// empty bindings and the constraint never holds. Joining the VALUES table BELOW
+/// the filter puts the pre-bound terms in scope. Robust to however the validator
+/// query is laid out (no textual prepend). SHACL §6.3 pre-binding semantics
+/// (substitute the variable's value everywhere it occurs).
+///
+/// [OPUS-4.8] (sq-mue75) The descent now follows EVERY scope a pre-bound variable
+/// can reach, not just one chain, so the binding constrains the whole pattern
+/// (the shacl12 `sparql/pre-binding` 002/005/007 entries):
+///   * single-child wrappers (`Filter` / `Extend` / `OrderBy` / `Group` /
+///     `Distinct` / `Reduced` / `Slice` / `Graph`) — descend into the inner;
+///   * `Minus`-left / `LeftJoin`-left — bind the REQUIRED left only (the
+///     excluded / optional right keeps SHACL substitution semantics);
+///   * `Union` — push into BOTH branches independently, so a pre-bound variable
+///     used only inside one branch's FILTER is in scope there (pre-binding-002);
+///   * `Join` — push into BOTH siblings, so a sibling sub-block that wraps a
+///     FILTER over an empty inner (`{ FILTER(bound($this)) }`) sees the binding
+///     (pre-binding-005); the single-row VALUES join is idempotent for a sibling
+///     that does not mention the variable;
+///   * sub-`SELECT` `Project` — descend through the projection ONLY when every
+///     pre-bound variable is explicitly projected (so it stays in scope inside the
+///     sub-select, pre-binding-007); a `SELECT *` (an empty projection list in this
+///     algebra) or a projection that drops a pre-bound variable re-scopes it, so
+///     the table is joined ABOVE the sub-select instead (the variable is then
+///     out of scope inside — consistent with the spec rejecting that re-binding,
+///     e.g. the `sht:Failure` pre-binding-006).
 fn push_values_down(pattern: &GraphPattern, values: &GraphPattern) -> GraphPattern {
     match pattern {
         GraphPattern::Filter { expr, inner } => GraphPattern::Filter {
@@ -263,6 +559,11 @@ fn push_values_down(pattern: &GraphPattern, values: &GraphPattern) -> GraphPatte
             variables: variables.clone(),
             aggregates: aggregates.clone(),
         },
+        // A GRAPH block keeps the outer pre-bound variables in scope; descend.
+        GraphPattern::Graph { name, inner } => GraphPattern::Graph {
+            name: name.clone(),
+            inner: Box::new(push_values_down(inner, values)),
+        },
         // For a left-join / minus, bind on the (required) left side only.
         GraphPattern::LeftJoin {
             left,
@@ -277,13 +578,66 @@ fn push_values_down(pattern: &GraphPattern, values: &GraphPattern) -> GraphPatte
             left: Box::new(push_values_down(left, values)),
             right: right.clone(),
         },
-        // A leaf (BGP / Path / Join / Union / Values / sub-SELECT Project / …):
-        // join the VALUES table here so its bindings flow up into every parent.
+        // [OPUS-4.8] (sq-mue75) UNION: each branch is an independent scope; push
+        // the pre-binding into BOTH so a variable used only inside one branch's
+        // FILTER is bound there (shacl12 sparql/pre-binding-002).
+        GraphPattern::Union { left, right } => GraphPattern::Union {
+            left: Box::new(push_values_down(left, values)),
+            right: Box::new(push_values_down(right, values)),
+        },
+        // [OPUS-4.8] (sq-mue75) JOIN: push into BOTH siblings so a sibling block
+        // that wraps a FILTER over an empty inner still sees the binding (shacl12
+        // sparql/pre-binding-005). Joining the single-row VALUES into a sibling
+        // that does not mention the variable is idempotent (a cross product with
+        // one deterministic row).
+        GraphPattern::Join { left, right } => GraphPattern::Join {
+            left: Box::new(push_values_down(left, values)),
+            right: Box::new(push_values_down(right, values)),
+        },
+        // [OPUS-4.8] (sq-mue75) sub-SELECT projection: a pre-bound variable stays
+        // in scope inside the sub-select ONLY if it is explicitly projected, so
+        // descend through the Project (and keep it projected) in that case; else
+        // join the VALUES ABOVE the sub-select (fall through to the leaf arm).
+        GraphPattern::Project { inner, variables }
+            if projects_all(variables, &values_var_names(values)) =>
+        {
+            let mut projected = variables.clone();
+            for name in values_var_names(values) {
+                if !projected.iter().any(|v| v.as_str() == name) {
+                    projected.push(Variable::new_unchecked(name));
+                }
+            }
+            GraphPattern::Project {
+                inner: Box::new(push_values_down(inner, values)),
+                variables: projected,
+            }
+        }
+        // A leaf (BGP / Path / Values / a sub-SELECT that re-scopes a pre-bound
+        // variable / …): join the VALUES table here so its bindings flow up into
+        // every parent.
         other => GraphPattern::Join {
             left: Box::new(values.clone()),
             right: Box::new(other.clone()),
         },
     }
+}
+
+/// `true` iff `projected` explicitly lists EVERY name in `names` (so a sub-SELECT
+/// keeps those pre-bound variables in scope inside it). An empty `projected` is a
+/// `SELECT *` in this algebra — treated as NOT explicitly projecting (so a
+/// pre-bound variable is re-scoped, the spec-rejection case, e.g. the
+/// `sht:Failure` pre-binding-006); an empty `names` (nothing pre-bound) trivially
+/// holds but never reaches a Project leaf in practice.
+fn projects_all(projected: &[Variable], names: &[&str]) -> bool {
+    if names.is_empty() {
+        return true;
+    }
+    if projected.is_empty() {
+        return false; // SELECT * — not an explicit projection of the pre-bound var
+    }
+    names
+        .iter()
+        .all(|n| projected.iter().any(|v| v.as_str() == *n))
 }
 
 /// Joins `values` into a SELECT pattern at the right depth: it descends through
@@ -431,6 +785,33 @@ impl PreparedValidator {
             (Query::Select { .. }, false) => Some(PreparedValidator::Select(query)),
             _ => None,
         }
+    }
+}
+
+/// [OPUS-4.8] (sq-0mjfd) Checks a SPARQL-based constraint-COMPONENT validator's
+/// query text for a pre-binding violation (§6.3 pre-binds `$this`, `$value` and
+/// each parameter `pre_bound`). Returns `Ok(())` when sound or when the text does
+/// not parse / is not an ASK/SELECT (those are handled leniently elsewhere), and
+/// `Err` only for a genuine pre-binding violation — e.g. the ASK
+/// `unsupported-sparql-006` re-binds `?value`.
+pub(crate) fn check_validator_pre_binding(
+    text: &str,
+    pre_bound: &[&str],
+) -> Result<(), PreBindingViolation> {
+    let Ok(query) = SparqlParser::new().parse_query(text) else {
+        return Ok(());
+    };
+    match &query {
+        // An ASK's WHERE is wrapped in a (zero-variable) top-level `Project` — that
+        // is the ASK form itself, NOT an author sub-SELECT, so descend THROUGH it
+        // (else the empty projection would be misread as dropping every pre-bound
+        // variable). The pre-bound names stay in scope inside the ASK body.
+        Query::Ask { pattern, .. } => match pattern {
+            GraphPattern::Project { inner, .. } => check_pre_binding(inner, pre_bound),
+            other => check_pre_binding(other, pre_bound),
+        },
+        Query::Select { pattern, .. } => check_pre_binding(pattern, pre_bound),
+        _ => Ok(()),
     }
 }
 
@@ -780,6 +1161,185 @@ mod tests {
         }
     }
 
+    // --- [OPUS-4.8] (sq-mue75) push_values_down: the new multi-scope arms --------
+    //
+    // UNION / sibling-JOIN / sub-SELECT projection. Each pre-bound variable must
+    // reach EVERY scope it can appear in (shacl12 sparql/pre-binding-002/005/007),
+    // not just one descent chain. Structural assertions over the real recursion.
+
+    /// Is there a `Join { Values, … }` directly under `p` (the pre-binding join)?
+    fn values_join_here(p: &GraphPattern) -> bool {
+        matches!(p, GraphPattern::Join { left, .. } if matches!(**left, GraphPattern::Values { .. }))
+    }
+
+    /// Does some node in `p`'s subtree wrap the FILTER over a `Join { Values, … }`
+    /// (i.e. the pre-binding is in scope INSIDE the filter)?
+    fn filter_over_values_join(p: &GraphPattern) -> bool {
+        match p {
+            GraphPattern::Filter { inner, .. } => {
+                values_join_here(inner) || filter_over_values_join(inner)
+            }
+            GraphPattern::Join { left, right }
+            | GraphPattern::Union { left, right }
+            | GraphPattern::Minus { left, right }
+            | GraphPattern::LeftJoin { left, right, .. } => {
+                filter_over_values_join(left) || filter_over_values_join(right)
+            }
+            GraphPattern::Project { inner, .. }
+            | GraphPattern::Distinct { inner }
+            | GraphPattern::Reduced { inner }
+            | GraphPattern::Slice { inner, .. }
+            | GraphPattern::OrderBy { inner, .. }
+            | GraphPattern::Group { inner, .. }
+            | GraphPattern::Extend { inner, .. } => filter_over_values_join(inner),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn push_values_down_into_both_union_branches() {
+        // pre-binding-002: `{ FILTER(false) } UNION { FILTER($this = <x>) }`.
+        // The VALUES must be joined under BOTH branches' FILTER so $this is in
+        // scope inside each (joining ABOVE the Union leaves it unbound there).
+        let inner = match select_pattern(
+            "SELECT $this WHERE { { FILTER(false) } UNION { FILTER(?this = <http://x/n>) } }",
+        ) {
+            GraphPattern::Project { inner, .. } => *inner,
+            other => other,
+        };
+        assert!(matches!(inner, GraphPattern::Union { .. }), "{:?}", inner);
+        let out = push_values_down(&inner, &values_this());
+        match &out {
+            GraphPattern::Union { left, right } => {
+                // Each branch is `Filter { Join { Values, Bgp } }`.
+                assert!(
+                    matches!(&**left, GraphPattern::Filter { inner, .. } if values_join_here(inner)),
+                    "UNION left branch missing pre-binding: {:?}",
+                    left
+                );
+                assert!(
+                    matches!(&**right, GraphPattern::Filter { inner, .. } if values_join_here(inner)),
+                    "UNION right branch missing pre-binding: {:?}",
+                    right
+                );
+            }
+            other => panic!("expected Union, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn push_values_down_into_join_siblings() {
+        // pre-binding-005: `{ FILTER(bound($this)) } ?this :p "L" . FILTER(bound($this))`.
+        // The inner `{ FILTER(bound($this)) }` sibling-block wraps a FILTER over an
+        // EMPTY inner; the pre-binding must reach inside it (not just the first
+        // descent), so $this is bound in that filter too.
+        let inner = match select_pattern(
+            "SELECT $this WHERE { { FILTER(bound(?this)) } ?this <http://x/p> \"L\" }",
+        ) {
+            GraphPattern::Project { inner, .. } => *inner,
+            other => other,
+        };
+        assert!(matches!(inner, GraphPattern::Join { .. }), "{:?}", inner);
+        let out = push_values_down(&inner, &values_this());
+        match &out {
+            GraphPattern::Join { left, right } => {
+                // The FILTER sibling now wraps a Values-join (its empty inner is
+                // bound); the BGP sibling is joined with Values directly.
+                assert!(
+                    filter_over_values_join(left),
+                    "JOIN sibling FILTER block not pre-bound: {:?}",
+                    left
+                );
+                assert!(
+                    values_join_here(right) || filter_over_values_join(right),
+                    "JOIN BGP sibling not pre-bound: {:?}",
+                    right
+                );
+            }
+            other => panic!("expected Join, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn push_values_down_through_projecting_subselect() {
+        // pre-binding-007: `{ SELECT $this WHERE { FILTER($this = <x>) } }`. The
+        // inner sub-SELECT explicitly projects ?this, so it stays in scope inside;
+        // the pre-binding must descend THROUGH the Project to the FILTER.
+        let inner = match select_pattern(
+            "SELECT $this WHERE { { SELECT $this WHERE { FILTER(?this = <http://x/n>) } } }",
+        ) {
+            GraphPattern::Project { inner, .. } => *inner,
+            other => other,
+        };
+        assert!(matches!(inner, GraphPattern::Project { .. }), "{:?}", inner);
+        let out = push_values_down(&inner, &values_this());
+        match &out {
+            GraphPattern::Project { inner, variables } => {
+                assert!(
+                    variables.iter().any(|v| v.as_str() == "this"),
+                    "sub-SELECT must keep ?this projected: {:?}",
+                    variables
+                );
+                assert!(
+                    filter_over_values_join(inner),
+                    "sub-SELECT FILTER not pre-bound: {:?}",
+                    inner
+                );
+            }
+            other => panic!("expected Project, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn push_values_down_above_select_star_subselect() {
+        // A `SELECT *` sub-select (an EMPTY projection list in this algebra) does
+        // NOT explicitly project the pre-bound variable, so the spec re-scopes it
+        // (the `sht:Failure` pre-binding-006). The pre-binding is joined ABOVE the
+        // sub-select (the leaf arm), not descended into it.
+        let inner = match select_pattern(
+            "SELECT $this WHERE { { SELECT * WHERE { FILTER(?this = <http://x/n>) } } }",
+        ) {
+            GraphPattern::Project { inner, .. } => *inner,
+            other => other,
+        };
+        // The inner sub-select is `Project { …, variables: [] }` (SELECT *).
+        assert!(
+            matches!(&inner, GraphPattern::Project { variables, .. } if variables.is_empty()),
+            "{:?}",
+            inner
+        );
+        let out = push_values_down(&inner, &values_this());
+        // Joined ABOVE: `Join { Values, Project{…} }`, NOT descended into the inner.
+        assert!(
+            matches!(&out, GraphPattern::Join { left, right }
+                if matches!(**left, GraphPattern::Values { .. })
+                    && matches!(**right, GraphPattern::Project { .. })),
+            "SELECT * sub-select must be bound ABOVE, got {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn push_values_down_through_graph_block() {
+        // [OPUS-4.8] (sq-mue75) A GRAPH block keeps the outer pre-bound variable in
+        // scope; the pre-binding descends into its inner.
+        let inner = GraphPattern::Graph {
+            name: spargebra::term::NamedNodePattern::NamedNode(
+                NamedNode::new("http://g/named").unwrap(),
+            ),
+            inner: Box::new(filter_bgp()),
+        };
+        let out = push_values_down(&inner, &values_this());
+        match &out {
+            GraphPattern::Graph { inner, .. } => assert!(
+                filter_over_values_join(inner),
+                "GRAPH inner not pre-bound: {:?}",
+                inner
+            ),
+            other => panic!("expected Graph, got {:?}", other),
+        }
+    }
+
     // --- inject_values: solution-modifier descent (Reduced/Slice/OrderBy) -----
 
     #[test]
@@ -885,6 +1445,7 @@ mod tests {
                 path: f.path,
                 value: f.value,
                 source_shape: Term::NamedNode(NamedNode::new("http://example.org/S").unwrap()),
+                source_constraint: None,
                 source_component: "http://www.w3.org/ns/shacl#SPARQLConstraintComponent"
                     .to_string(),
                 severity: "http://www.w3.org/ns/shacl#Violation".to_string(),
@@ -979,31 +1540,39 @@ mod tests {
     fn prepared_sparql_build_rejects_non_select() {
         // A non-SELECT sh:select is ill-formed -> None.
         let ask = SparqlConstraint {
+            node: Term::NamedNode(NamedNode::new("http://example.org/c").unwrap()),
             select: "ASK { ?s ?p ?o }".to_string(),
             prefixes: String::new(),
             message: None,
+            severity: None,
             deactivated: false,
             prepared: None,
         };
-        assert!(PreparedSparql::build(&ask).is_none());
-        // Unparsable -> None.
+        // [OPUS-4.8] (sq-0mjfd) build now returns Result<Option<_>, _>: a non-SELECT
+        // / unparsable query is `Ok(None)` (skip), not `Err` (a pre-binding failure).
+        assert!(matches!(PreparedSparql::build(&ask), Ok(None)));
+        // Unparsable -> Ok(None).
         let bad = SparqlConstraint {
+            node: Term::NamedNode(NamedNode::new("http://example.org/c").unwrap()),
             select: "SELECT ??? garbage".to_string(),
             prefixes: String::new(),
             message: None,
+            severity: None,
             deactivated: false,
             prepared: None,
         };
-        assert!(PreparedSparql::build(&bad).is_none());
-        // Valid SELECT -> Some.
+        assert!(matches!(PreparedSparql::build(&bad), Ok(None)));
+        // Valid SELECT -> Ok(Some).
         let ok = SparqlConstraint {
+            node: Term::NamedNode(NamedNode::new("http://example.org/c").unwrap()),
             select: "SELECT ?this WHERE { ?this ?p ?o }".to_string(),
             prefixes: String::new(),
             message: None,
+            severity: None,
             deactivated: false,
             prepared: None,
         };
-        assert!(PreparedSparql::build(&ok).is_some());
+        assert!(matches!(PreparedSparql::build(&ok), Ok(Some(_))));
     }
 
     #[test]
@@ -1151,29 +1720,25 @@ mod tests {
     }
 
     #[test]
-    fn prepared_sparql_evaluate_fail_closed_on_runtime_query_error() {
-        // The §5.2 `sh:sparql` path: a SERVICE in the sh:select errors at runtime,
-        // so PreparedSparql::evaluate pushes no results (conforms).
-        let data = graph(DATA);
-        let focus = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
+    fn prepared_sparql_build_rejects_service_at_build_time() {
+        // [OPUS-4.8] (sq-0mjfd) The §5.2 `sh:sparql` path: a SERVICE clause is a
+        // SHACL-SPARQL pre-binding violation (pre-binding into a federated block is
+        // undefined), so `build` now REJECTS it up front (an `Err` failure outcome,
+        // shacl12 unsupported-sparql-003) rather than deferring to a runtime error.
         let constraint = SparqlConstraint {
+            node: Term::NamedNode(NamedNode::new("http://example.org/c").unwrap()),
             select: "SELECT ?this WHERE { SERVICE <http://example.org/remote> { ?this ?p ?o } }"
                 .to_string(),
             prefixes: String::new(),
             message: None,
+            severity: None,
             deactivated: false,
             prepared: None,
         };
-        let prepared = PreparedSparql::build(&constraint).expect("a SELECT with SERVICE parses");
-        let mut out = Vec::new();
-        prepared.evaluate(
-            &data,
-            &focus,
-            &constraint,
-            |_f: ResultFields| unreachable!("a runtime query error yields no solutions"),
-            &mut out,
-        );
-        assert!(out.is_empty());
+        assert!(matches!(
+            PreparedSparql::build(&constraint),
+            Err(PreBindingViolation::Service)
+        ));
     }
 
     // --- PreparedSparql::evaluate happy path: ?value / ?path / {?var} mapping --
@@ -1189,6 +1754,7 @@ mod tests {
         let focus = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
         // Project ?value and ?path; the constraint message references {?value}.
         let constraint = SparqlConstraint {
+            node: Term::NamedNode(NamedNode::new("http://example.org/c").unwrap()),
             select: "SELECT ?this ?value ?path WHERE { \
                        BIND(<http://example.org/bob> AS ?value) \
                        BIND(<http://example.org/knows> AS ?path) \
@@ -1196,10 +1762,11 @@ mod tests {
                 .to_string(),
             prefixes: String::new(),
             message: Some("offender {?value} via {?path}".to_string()),
+            severity: None,
             deactivated: false,
             prepared: None,
         };
-        let prepared = PreparedSparql::build(&constraint).unwrap();
+        let prepared = PreparedSparql::build(&constraint).unwrap().unwrap();
         let mut out = Vec::new();
         prepared.evaluate(
             &data,
@@ -1210,6 +1777,7 @@ mod tests {
                 path: f.path,
                 value: f.value,
                 source_shape: focus.clone(),
+                source_constraint: None,
                 source_component: "x".to_string(),
                 severity: "x".to_string(),
                 messages: vec![],
@@ -1246,15 +1814,17 @@ mod tests {
         let data = graph("@prefix ex: <http://example.org/> . ex:alice ex:age 30 .");
         let focus = Term::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
         let constraint = SparqlConstraint {
+            node: Term::NamedNode(NamedNode::new("http://example.org/c").unwrap()),
             select: "SELECT ?this ?message WHERE { ?this <http://example.org/age> ?v . \
                        BIND(\"row-level reason\" AS ?message) }"
                 .to_string(),
             prefixes: String::new(),
             message: None, // no constraint message -> fall through to ?message
+            severity: None,
             deactivated: false,
             prepared: None,
         };
-        let prepared = PreparedSparql::build(&constraint).unwrap();
+        let prepared = PreparedSparql::build(&constraint).unwrap().unwrap();
         let mut out = Vec::new();
         prepared.evaluate(
             &data,
@@ -1265,6 +1835,7 @@ mod tests {
                 path: f.path,
                 value: f.value,
                 source_shape: focus.clone(),
+                source_constraint: None,
                 source_component: "x".to_string(),
                 severity: "x".to_string(),
                 messages: vec![],
@@ -1284,13 +1855,15 @@ mod tests {
         let data = graph("@prefix ex: <http://example.org/> . ex:alice ex:age 30 .");
         let bnode = Term::BlankNode(oxrdf::BlankNode::new("focus0").unwrap());
         let constraint = SparqlConstraint {
+            node: Term::NamedNode(NamedNode::new("http://example.org/c").unwrap()),
             select: "SELECT ?this WHERE { ?this ?p ?o }".to_string(),
             prefixes: String::new(),
             message: None,
+            severity: None,
             deactivated: false,
             prepared: None,
         };
-        let prepared = PreparedSparql::build(&constraint).unwrap();
+        let prepared = PreparedSparql::build(&constraint).unwrap().unwrap();
         let mut out = Vec::new();
         prepared.evaluate(
             &data,
@@ -1326,6 +1899,7 @@ mod tests {
                 path: f.path,
                 value: f.value,
                 source_shape: focus.clone(),
+                source_constraint: None,
                 source_component: "x".to_string(),
                 severity: "x".to_string(),
                 messages: vec![],
@@ -1367,6 +1941,7 @@ mod tests {
                 path: f.path,
                 value: f.value,
                 source_shape: focus.clone(),
+                source_constraint: None,
                 source_component: "x".to_string(),
                 severity: "x".to_string(),
                 messages: vec![],
@@ -1379,6 +1954,187 @@ mod tests {
         assert!(
             out[0].path.is_none(),
             "a literal ?path is not a predicate path"
+        );
+    }
+
+    // --- [OPUS-4.8] (sq-rnkdh) SHACL 1.2 SPARQL-based node expressions ---------
+
+    const EXPR_DATA: &str = r#"
+        @prefix ex: <http://example.org/> .
+        ex:alice ex:age 30 ; ex:firstName "Al" ; ex:lastName "Ice" .
+        ex:bob   ex:age 15 .
+    "#;
+
+    fn iri(s: &str) -> Term {
+        Term::NamedNode(NamedNode::new(s).unwrap())
+    }
+
+    #[test]
+    fn select_expr_build_rejects_non_select() {
+        // A non-SELECT (or unparsable) sh:select is ill-formed -> None.
+        assert!(PreparedSelectExpr::build_select("", "ASK { ?s ?p ?o }").is_none());
+        assert!(PreparedSelectExpr::build_select("", "SELECT ??? nope").is_none());
+        assert!(PreparedSelectExpr::build_select("", "SELECT ?x WHERE { ?x ?p ?o }").is_some());
+    }
+
+    #[test]
+    fn select_expr_eval_pre_binds_this_and_takes_first_var() {
+        // sh:values-style: per focus, project the value via $this.
+        let data = graph(EXPR_DATA);
+        let expr = PreparedSelectExpr::build_select(
+            "PREFIX ex: <http://example.org/>",
+            "SELECT ?n WHERE { $this ex:firstName ?n }",
+        )
+        .unwrap();
+        let nodes = expr.eval(&data, &iri("http://example.org/alice"));
+        assert_eq!(
+            nodes,
+            vec![Term::Literal(oxrdf::Literal::new_simple_literal("Al"))]
+        );
+        // A focus with no firstName yields no value nodes.
+        assert!(expr.eval(&data, &iri("http://example.org/bob")).is_empty());
+    }
+
+    #[test]
+    fn select_expr_build_expr_evaluates_expression() {
+        // sh:sparqlExpr: SELECT ((EXPR) AS ?result) WHERE {} with $this bound.
+        let data = graph(EXPR_DATA);
+        let expr = PreparedSelectExpr::build_expr("", "STRLEN(STR($this))").unwrap();
+        let nodes = expr.eval(&data, &iri("http://example.org/alice"));
+        // STRLEN("http://example.org/alice") = 24.
+        assert_eq!(
+            nodes,
+            vec![Term::Literal(oxrdf::Literal::new_typed_literal(
+                "24",
+                NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+            ))]
+        );
+    }
+
+    #[test]
+    fn select_expr_eval_target_runs_unbound_and_collects_first_var() {
+        // sh:targetNode [ sh:select ]: no $this, the query SELECTs the focus nodes.
+        let data = graph(EXPR_DATA);
+        let expr = PreparedSelectExpr::build_select(
+            "PREFIX ex: <http://example.org/>",
+            "SELECT ?p WHERE { ?p ex:age ?a . FILTER (?a < 18) }",
+        )
+        .unwrap();
+        let nodes = expr.eval_target(&data);
+        assert_eq!(nodes, vec![iri("http://example.org/bob")]);
+    }
+
+    // --- [OPUS-4.8] (sq-0mjfd) SHACL-SPARQL pre-binding rejection (sht:Failure) --
+
+    /// Parse a top-level SELECT and run the `$this` pre-binding check on its WHERE,
+    /// descending through the top-level result `Project` exactly as `build` does.
+    fn check_select(select: &str) -> Result<(), PreBindingViolation> {
+        match SparqlParser::new().parse_query(select).unwrap() {
+            Query::Select { pattern, .. } => {
+                let body = match &pattern {
+                    GraphPattern::Project { inner, .. } => inner.as_ref(),
+                    other => other,
+                };
+                check_pre_binding(body, PRE_BOUND_THIS)
+            }
+            other => panic!("expected SELECT, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pre_binding_rejects_minus() {
+        // unsupported-sparql-001: MINUS is undefined under pre-binding.
+        assert_eq!(
+            check_select("SELECT $this WHERE { $this ?x ?any . MINUS { $this ?x \"V\" } }"),
+            Err(PreBindingViolation::Minus)
+        );
+    }
+
+    #[test]
+    fn pre_binding_rejects_values_and_service() {
+        // unsupported-sparql-002 / 003: an author VALUES table / a SERVICE clause.
+        assert_eq!(
+            check_select("SELECT $this WHERE { VALUES ?any { true } }"),
+            Err(PreBindingViolation::Values)
+        );
+        assert_eq!(
+            check_select(
+                "SELECT $this WHERE { $this ?x ?any . SERVICE <http://e/> { ?a ?b ?c } }"
+            ),
+            Err(PreBindingViolation::Service)
+        );
+    }
+
+    #[test]
+    fn pre_binding_rejects_subselect_dropping_this() {
+        // unsupported-sparql-004: a sub-SELECT that projects ?other ?b (drops $this).
+        let q = "SELECT $this WHERE { $this ?x ?any . { SELECT ?other ?b WHERE { ?other ?b ?c } } }";
+        assert_eq!(
+            check_select(q),
+            Err(PreBindingViolation::SubSelectDropsPreBound("this".into()))
+        );
+        // pre-binding-006: a `SELECT *` sub-select also re-scopes $this.
+        let star = "SELECT $this WHERE { { SELECT * WHERE { FILTER ($this = <http://e/x>) } } }";
+        assert_eq!(
+            check_select(star),
+            Err(PreBindingViolation::SubSelectDropsPreBound("this".into()))
+        );
+    }
+
+    #[test]
+    fn pre_binding_rejects_rebind_of_this() {
+        // unsupported-sparql-005: BIND (true AS $this) re-binds the pre-bound var.
+        assert_eq!(
+            check_select("SELECT $this WHERE { BIND (true AS $this) }"),
+            Err(PreBindingViolation::RebindsPreBound("this".into()))
+        );
+    }
+
+    #[test]
+    fn pre_binding_accepts_sound_queries() {
+        // The forms the 17 passing entries use must NOT be rejected: a sub-SELECT
+        // that re-projects $this (pre-binding-007), a BIND to a NEW var
+        // (pre-binding-004), a UNION (pre-binding-002), and a plain BGP+FILTER.
+        assert_eq!(
+            check_select(
+                "SELECT $this WHERE { { SELECT $this WHERE { FILTER ($this = <http://e/x>) } } }"
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            check_select("SELECT $this WHERE { BIND ($this AS ?that) FILTER (?that = <http://e/x>) }"),
+            Ok(())
+        );
+        assert_eq!(
+            check_select(
+                "SELECT $this WHERE { { FILTER (false) } UNION { FILTER ($this = <http://e/x>) } }"
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            check_select("SELECT $this WHERE { $this <http://e/p> \"L\" }"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validator_pre_binding_rejects_value_rebind() {
+        // unsupported-sparql-006: an ASK validator that re-binds the pre-bound
+        // `?value` is a pre-binding violation in the component-validator path.
+        assert_eq!(
+            check_validator_pre_binding(
+                "ASK { BIND (true AS ?value) FILTER (isLiteral(?value)) }",
+                &["this", "value", "lang"],
+            ),
+            Err(PreBindingViolation::RebindsPreBound("value".into()))
+        );
+        // A validator that merely READS ?value is fine.
+        assert_eq!(
+            check_validator_pre_binding(
+                "ASK { FILTER (isLiteral(?value)) }",
+                &["this", "value", "lang"],
+            ),
+            Ok(())
         );
     }
 }

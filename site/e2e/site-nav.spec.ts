@@ -99,7 +99,14 @@ test("the Try destination (/try) is the lightweight live REPL playground", async
   // click mechanism itself is already covered by the App + Download click tests on the same bar.
   await gotoSettled(page, "try/");
   expect(new URL(page.url()).pathname).toContain("/try");
-  await expect(page.getByRole("heading", { name: "Live SPARQL REPL" })).toBeVisible();
+  // [OPUS-4.8] sq-vw3ax — the /try redesign moved the page-identity heading out of the heavy,
+  // lazily-loaded REPL card (the old `<h2>Live SPARQL REPL</h2>`) into a server-rendered hero
+  // `<h1>` that paints with the route shell. Assert that hero heading (matched by a stable
+  // substring) — it confirms /try IS the SPARQL playground destination without waiting on the
+  // wasm REPL chunk to stream in.
+  await expect(
+    page.getByRole("heading", { name: /SPARQL playground/i }),
+  ).toBeVisible();
 });
 
 test("App navigates to the live operational GUI destination", async ({ page }) => {

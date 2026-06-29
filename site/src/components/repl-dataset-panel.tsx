@@ -18,7 +18,7 @@
 // (its native engine answers `query` identically — see gui/src-tauri/src/engine.rs).
 
 import * as React from "react";
-import { Layers, Globe, FileBox, Loader2 } from "lucide-react";
+import { Globe, FileBox, Loader2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -77,24 +77,18 @@ export function DatasetPanel({ store, refreshKey, hidden }: DatasetPanelProps) {
     state.kind === "ready" ? state.stats.filter((s) => !s.isDefault).length : 0;
 
   return (
-    <section
-      aria-label="Dataset graphs"
-      data-testid="dataset-panel"
-      className="rounded-lg border bg-muted/30 p-2"
-    >
-      <div className="flex items-center gap-1.5 px-1 pb-1.5 text-xs font-medium text-muted-foreground">
-        <Layers className="size-3.5" aria-hidden="true" />
-        Graphs
-        {state.kind === "ready" && (
-          <span className="text-[11px] font-normal">
-            {/* The default graph is always present; show how many NAMED graphs alongside. */}
-            ({namedCount === 0
-              ? "default graph only"
-              : `${namedCount} named ${namedCount === 1 ? "graph" : "graphs"} + default`}
-            )
-          </span>
-        )}
-      </div>
+    // [OPUS-4.8] sq-vw3ax — the panel chrome (header label + border) is now owned by the
+    // enclosing rail ReplPanel; this renders just the per-graph meta + rows. The
+    // `data-testid` anchor is preserved.
+    <section aria-label="Dataset graphs" data-testid="dataset-panel" className="space-y-1.5">
+      {state.kind === "ready" && (
+        <p className="text-[11px] text-muted-foreground">
+          {/* The default graph is always present; show how many NAMED graphs alongside. */}
+          {namedCount === 0
+            ? "Default graph only"
+            : `${namedCount} named ${namedCount === 1 ? "graph" : "graphs"} + default`}
+        </p>
+      )}
 
       {state.kind === "loading" ? (
         <p className="flex items-center gap-1.5 px-1 py-1 text-xs text-muted-foreground">

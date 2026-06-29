@@ -1,0 +1,85 @@
+// [OPUS-4.8] sq-jp7ry (issue #835) — CRITICAL-FLOW smoke test for the /capabilities SHOWCASE.
+//
+// WHAT IT GUARDS. /capabilities (src/app/capabilities/page.tsx) is the consolidated, bold
+// showcase of the full feature set — a hero, a flagship "start here" band, and five capability
+// THEME lanes (Query & data / Reason & validate / Search & GenAI / Privacy (ZK / MPC) / Serve &
+// embed), all derived from the single data/surfaces.ts source. This spec asserts the page renders
+// ALL of those structural sections on a DIRECT load AND produces ZERO console errors. It is the
+// SECTIONS-RENDER smoke (complementing capabilities-lazy.spec.ts, which guards the lazy-mount /
+// code-split invariant, and site-nav.spec.ts, which reaches the themes via a nav click): here we
+// confirm the showcase itself boots clean with every theme present — the regression net issue
+// #835 asks for ("unexpected bugs get introduced").
+//
+// NO WASM NEEDED. The hero + flagship band + theme-lane HEADINGS are server-rendered shell that
+// paint without the wasm engine (a demo's heavy body mounts only on expand — that is the
+// lazy-mount spec's concern), so this spec runs on EVERY lane, including the light site-e2e CI
+// lane that builds no wasm bundle.
+//
+// It is a CORRECTNESS smoke test, not a benchmark: it asserts the DOM + console, never a
+// wall-clock threshold (timings on a work-box / CI runner are non-canonical).
+import { test, expect, type Page, type ConsoleMessage } from "@playwright/test";
+
+// Relative (no leading slash) so it resolves UNDER the baseURL's `/sparq/` basePath.
+const ROUTE = "capabilities/";
+
+// The five capability themes (data/surfaces.ts GROUPS labels). Kept here as the expected set so
+// a dropped/renamed lane fails this smoke loudly.
+const THEMES = [
+  "Query & data",
+  "Reason & validate",
+  "Search & GenAI",
+  "Privacy (ZK / MPC)",
+  "Serve & embed",
+];
+
+/** Collect every `console.error` the page emits, so the test can assert there were none. */
+function trackConsoleErrors(page: Page): string[] {
+  const errors: string[] = [];
+  page.on("console", (msg: ConsoleMessage) => {
+    if (msg.type() === "error") errors.push(msg.text());
+  });
+  page.on("pageerror", (err) => errors.push(String(err)));
+  return errors;
+}
+
+async function gotoSettled(page: Page, route: string): Promise<void> {
+  await page.goto(route, { waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("networkidle").catch(() => {});
+  await page
+    .waitForFunction(() => navigator.serviceWorker?.controller != null, undefined, {
+      timeout: 10_000,
+    })
+    .catch(() => {});
+}
+
+test("the showcase renders its hero, flagship band and all five theme sections with no console errors", async ({
+  page,
+}) => {
+  const consoleErrors = trackConsoleErrors(page);
+  await gotoSettled(page, ROUTE);
+
+  // The hero <h1> (server-rendered display headline). Matched on a stable copy substring.
+  await expect(
+    page.getByRole("heading", { name: /one Rust engine/i, level: 1 }),
+  ).toBeVisible();
+
+  // The flagship "start here" band heading (the <section aria-labelledby="flagships-heading">
+  // names its region by this <h2>). Asserting the heading proves the band rendered.
+  await expect(
+    page.getByRole("heading", { name: /the breadth is real/i, level: 2 }),
+  ).toBeVisible();
+
+  // Every one of the five capability-theme lanes renders its heading. A dropped or renamed
+  // theme fails this loudly — the showcase's load-bearing structural invariant.
+  for (const theme of THEMES) {
+    await expect(page.getByRole("heading", { name: theme })).toBeVisible();
+  }
+
+  // No demo BODY is eagerly mounted on entry (the lazy-mount invariant is fully owned by
+  // capabilities-lazy.spec.ts; asserted here only to keep this smoke honest about what "renders
+  // its sections" means — the headings, not the heavy demo bodies).
+  await expect(page.locator("[data-demo-body]")).toHaveCount(0);
+
+  // The whole render produced zero console errors (the regression net for issue #835).
+  expect(consoleErrors, `console errors: ${consoleErrors.join("\n")}`).toEqual([]);
+});

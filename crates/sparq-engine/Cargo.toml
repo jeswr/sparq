@@ -180,6 +180,25 @@ explain-json = []
 # star/snowflake workloads) is a measurable HYPOTHESIS to confirm on the canonical perf
 # host (sq-0g6g), NOT a baked-in number.
 semijoin-bitmap = []
+# [OPUS-4.8] (sq-5zf8i, survey §A4) Yannakakis bottom-up FULL-semijoin PREPASS for acyclic
+# BGPs (research/codebase-improvement-opportunities-2026-06-23.md §A4 +
+# research/optimization-techniques.md §1.1/§2(a2)). BEFORE the main binary join, the
+# executor reduces every relation against its neighbours in the acyclic join tree — a
+# bottom-up (leaf->root) then top-down (root->leaf) semijoin sweep — so no "dangling" tuple
+# (one that joins with nothing downstream) is ever materialised by the join. This attacks
+# the materialising evaluator's #1 cost (intermediate-result blow-up). It REUSES the A3
+# membership machinery (`semijoin::KeyFilter` — exact bitmap on dense ids / hash set on
+# sparse+huge keys), hence IMPLIES `semijoin-bitmap`; it routes via the same GYO acyclicity
+# test (`bgp_is_cyclic` / `bgp_uses_binary`) the executor already has — acyclic => semijoin-
+# reduce then join; cyclic => existing LFTJ, unchanged. A semijoin is a pure FILTER (removes
+# only rows the final join would itself drop), so the RESULT is IDENTICAL to the feature-off
+# binary plan; the prepass is cost-gated so it is skipped when the intermediates are already
+# tiny (pure-overhead guard). OPT-IN and OFF by default: when off, zero prepass code compiles
+# and the default native + wasm builds are byte-identical. Pulls in ZERO new dependencies and
+# contains no `unsafe`. The payoff (intermediate-row-count + end-to-end reduction on chain/
+# snowflake workloads) is a measurable HYPOTHESIS for the canonical perf host (sq-0g6g), NOT a
+# baked-in number.
+yannakakis = ["semijoin-bitmap"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

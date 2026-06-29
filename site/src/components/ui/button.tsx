@@ -6,12 +6,20 @@ import { cn } from "@/lib/utils";
 
 // Compact sizing + tinted (not solid) destructive + active nudge — copied from
 // solid-pod-manager's Button conventions.
+//
+// [OPUS-4.8] sq-vw3ax — bolder spec from the synced design-system card
+// (sparq-design-system/components/button.html) + the mockup .btn-primary glow. Additive
+// only, NO API break: the focus ring gains a 2px background offset (crisper halo, matches
+// the card), and the `default` (primary) variant carries a soft teal elevation glow that
+// lifts on hover — the brand statement the bold direction asks for. All other variants and
+// every existing call site are unchanged.
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium transition-all outline-none focus-visible:ring-3 focus-visible:ring-ring/50 active:translate-y-px disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium transition-all outline-none focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-px disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0",
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        default:
+          "bg-primary text-primary-foreground hover:bg-primary/90 shadow-[var(--elevation-glow)] hover:shadow-[0_14px_38px_-8px_var(--teal-glow)]",
         destructive:
           "bg-destructive/10 text-destructive hover:bg-destructive/20",
         outline:

@@ -68,22 +68,26 @@ export function TopBar() {
   // [OPUS-4.8] sq-ixc3.13 — the top-bar "+ Import" affordance (opens the Import drawer).
   const { setOpen: setImportOpen } = useImportDrawer();
   return (
-    <header className="flex h-10 shrink-0 items-center gap-3 border-b bg-card px-3">
-      <span className="font-mono text-sm font-semibold tracking-tight">sparq</span>
-      <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+    // [OPUS-4.8] sq-vw3ax (#820 redesign) — the teal-forward TOP BAR (the hero gradient makes the
+    // brand the lead, not a faint sprinkle). Same controls, bolder identity.
+    <header className="sq-topbar flex h-11 shrink-0 items-center gap-3 border-b px-3">
+      <span className="font-mono text-[15px] font-bold tracking-tight">
+        sparq<span className="sq-brand-dot">.</span>
+      </span>
+      <span className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
         workbench
       </span>
 
       {/* LOCAL⇄ENDPOINT target switch — stub (the Server/endpoint tool is a later phase). */}
-      <div className="ml-2 flex items-center rounded-md border bg-background text-xs">
+      <div className="ml-2 flex items-center overflow-hidden rounded-md border bg-background text-[11.5px] font-semibold">
         <button
-          className="rounded-l-md bg-primary px-2 py-1 font-medium text-primary-foreground"
+          className="bg-primary px-2.5 py-1 text-primary-foreground shadow-[0_0_18px_-4px_var(--teal-glow)]"
           title="Run queries against the in-tab engine (this build)"
         >
           LOCAL
         </button>
         <button
-          className="cursor-not-allowed rounded-r-md px-2 py-1 text-muted-foreground"
+          className="cursor-not-allowed px-2.5 py-1 text-muted-foreground/70"
           title="Endpoint mode (connect to a running sparq-server) — coming in a later phase"
           disabled
         >
@@ -91,15 +95,15 @@ export function TopBar() {
         </button>
       </div>
 
-      <span className="tabular text-xs text-muted-foreground">
+      <span className="tabular font-mono text-xs text-muted-foreground">
         {storeSize.toLocaleString()} quads
       </span>
 
-      {/* [OPUS-4.8] sq-ixc3.13 — "+ Import": real disk/URL/paste ingest via the native loader. */}
+      {/* [OPUS-4.8] sq-ixc3.13 — "+ Import": real disk/URL/paste ingest via the native loader.
+          [OPUS-4.8] sq-vw3ax — promoted to the lit primary action in the bold chrome. */}
       <Button
-        variant="outline"
         size="sm"
-        className="ml-1"
+        className="sq-glow-btn ml-1 border-transparent"
         onClick={() => setImportOpen(true)}
         title="Import RDF from a disk file (compressed / HDT), a URL, or pasted text"
         data-import-trigger="topbar"

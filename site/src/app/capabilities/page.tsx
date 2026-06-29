@@ -1,76 +1,60 @@
 import type { Metadata } from "next";
-import Link from "next/link";
-import { PlayCircle } from "lucide-react";
 
-// [OPUS-4.8] sq-vw3ax.3 — /capabilities: ONE compact gallery that replaces the 14 dense
-// /surface/* pages. Five theme sections, each a list of ~64px rows derived from the single
-// GROUPS source (data/surfaces.ts). Each row is one of:
-//   * "Open →"  — a retained live deep page (sparql/data-formats/javascript-wasm/shacl/inference)
-//   * "Demo ▸"  — a removed walkthrough whose existing component LAZILY mounts in-place; the
-//                 demo chunk is fetched only on first expand (components/capabilities/lazy-demo.tsx),
-//                 so this gallery is NOT heavier than the 14 pages it replaces — the #1 review risk.
-//   * "Source"  — a not-yet-built surface (cli/python).
-// The removed /surface/* routes ship client redirect stubs to /capabilities#<theme>.
+// [OPUS-4.8] sq-vw3ax — /capabilities: the BOLD redesign on the merged dark-first foundation,
+// faithful to the approved mockup (sparq-design-system/proposals/web-capabilities.html).
+//
+// The page is an opinionated, scannable showcase of the full surface set, built entirely from
+// the single GROUPS / FLAGSHIPS source (data/surfaces.ts) — every name, blurb, tier badge, and
+// route is REAL; every hero figure is DERIVED from that data (hero-stats.ts), never hardcoded.
+// Structure (mockup order):
+//   1. HERO — display heading + brand gradient + derived stat strip + theme jump-rail + the
+//      REAL prefilled REPL query (→ run it live in /try).
+//   2. FLAGSHIP band — the three flagships promoted to "start here" depth cards.
+//   3. LEGEND — the tier honesty contract, first-class.
+//   4. five LANES — each a sticky numbered spine + a per-theme accent + a tile grid; the
+//      tiles reuse the lazy-mount machinery (the #1 risk, unchanged); the privacy lane carries
+//      the explicit research-grade caveat strip.
+// The atmospheric .bg-atmos/.bg-grid foundation utilities are mounted once (OPT-IN, pure CSS).
 import { capabilityThemes } from "@/data/capabilities";
-import { CapabilityRowItem } from "@/components/capabilities/capability-row";
+import { CapabilityHero } from "@/components/capabilities/capability-hero";
+import { FlagshipBand } from "@/components/capabilities/flagship-band";
+import { TierLegend } from "@/components/capabilities/tier-legend";
+import { CapabilityLane } from "@/components/capabilities/capability-lane";
 
 export const metadata: Metadata = {
   title: "Capabilities",
   description:
-    "Every sparq capability in one compact gallery — grouped into five themes. Open a live deep page or expand a demo in place. Each surface is honestly tier-labelled by how it runs.",
+    "Every sparq capability in one bold, scannable showcase — grouped into five themes. Open a live deep page, expand a demo in place, or open a flagship end-to-end. Each surface runs the real engine and is honestly tier-labelled by how it runs.",
 };
 
 export default function CapabilitiesPage() {
   const themes = capabilityThemes();
+
   return (
-    <div className="space-y-10">
-      <header className="space-y-3">
-        <h1 className="text-3xl font-semibold tracking-tight">Capabilities</h1>
-        <p className="measure text-muted-foreground">
-          The full sparq feature set, grouped into five themes. Open a live deep
-          page, or expand a demo in place — each one runs the real engine and is
-          labelled by how it runs. For depth, every demo links its crate README and{" "}
-          <code className="font-mono">SKILL.md</code>.
-        </p>
-      </header>
+    <>
+      {/* Atmospheric backdrop — fixed, inert, pure CSS (foundation utilities). */}
+      <div className="bg-atmos" aria-hidden />
+      <div className="bg-grid" aria-hidden />
 
-      {themes.map(({ group, rows }) => (
-        <section
-          key={group.id}
-          id={group.id}
-          // scroll-mt clears the sticky h-16 header when an in-page #anchor is targeted.
-          className="scroll-mt-20 space-y-3"
-        >
-          <div className="space-y-1">
-            <h2 className="text-xl font-semibold">{group.label}</h2>
-            <p className="measure text-sm text-muted-foreground">
-              {group.description}
-            </p>
-          </div>
+      <div className="space-y-16">
+        <CapabilityHero />
 
-          <div className="divide-y rounded-2xl border bg-card">
-            {rows.map(({ surface, kind }) => (
-              <CapabilityRowItem
-                key={surface.slug}
-                slug={surface.slug}
-                kind={kind}
+        <FlagshipBand />
+
+        <div className="space-y-2">
+          <TierLegend />
+          <div className="mt-2">
+            {themes.map((theme, i) => (
+              <CapabilityLane
+                key={theme.group.id}
+                theme={theme}
+                index={i}
+                total={themes.length}
               />
             ))}
           </div>
-
-          {group.id === "query-data" && (
-            <p className="text-sm">
-              <Link
-                href="/try"
-                className="inline-flex items-center gap-1.5 font-medium text-primary underline-offset-4 hover:underline"
-              >
-                <PlayCircle className="size-4" aria-hidden />
-                Open the full live SPARQL REPL
-              </Link>
-            </p>
-          )}
-        </section>
-      ))}
-    </div>
+        </div>
+      </div>
+    </>
   );
 }

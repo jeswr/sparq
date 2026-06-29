@@ -174,7 +174,7 @@ jobs:
       # side) lets a residual transient binary race self-heal. SHA-pinned install
       # action (a pin already vetted elsewhere in this workflow).
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
         with:
           tool: nextest
       # [OPUS-4.8] Build + ARCHIVE the whole workspace test set once. `--all-targets`
@@ -327,7 +327,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
         with:
           tool: nextest
       - name: Download nextest archive
@@ -839,7 +839,7 @@ jobs:
           path: conformance-report.md
 
   shacl-conformance:
-    # [OPUS-4.8] W3C SHACL conformance RATCHET (sq-qap0). The data-shapes
+    # [OPUS-4.8] W3C SHACL conformance RATCHET (sq-qap0, sq-6glcr). The data-shapes
     # sht:Validate suites run as `cargo test` (the runners live in
     # crates/sparq-shacl/tests/w3c_core.rs + w3c_sparql.rs, each carrying its own
     # pinned pass-count floor); the normal `cargo test --workspace` job runs
@@ -850,7 +850,16 @@ jobs:
     # `assert!(pass >= BASELINE_PASS)` is the primary gate; the grep below is the
     # same `>= N` belt-and-braces check the conformance jobs use. Never lower the
     # ratchet (raise BASELINE_PASS / SHACL_SPARQL_FLOOR as coverage grows).
-    name: W3C SHACL conformance (ratchet — core >= 98, sparql >= 5)
+    #
+    # [OPUS-4.8] sq-6glcr: this job ALSO gates the FULL vendored SHACL **1.2**
+    # suite (shacl12-test-suite/tests), not just the 1.0/1.1 data-shapes core/node
+    # slice. The full core manifest tree (w3c_core_full_shacl12 — complex / misc /
+    # node / path / property / targets / validation-reports), the 1.2 SPARQL suite
+    # (w3c_sparql_shacl12, including the 7 `mf:result sht:Failure` rejection
+    # entries), and the node-expr suites (w3c_node_expr{,_constraints}) each carry
+    # their own ratchet floor and run in BOTH feature states (default + shacl-af).
+    # See research/shacl12-conformance-gap.md for the per-category gap map.
+    name: W3C SHACL conformance (ratchet — core >= 98, sparql >= 5; full 1.2 ratchets in-runner)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
@@ -899,6 +908,35 @@ jobs:
             echo "::warning::SHACL conformance attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before any test ran)."
             attempt=$((attempt + 1))
           done
+      - name: Run FULL W3C SHACL 1.2 suites (core / sparql / node-expr, both feature states)
+        # [OPUS-4.8] sq-6glcr: gate the FULL vendored SHACL 1.2 tree. Each runner
+        # carries its own pinned ratchet floor (pass must not drop, gap must not
+        # grow) and self-SKIPs when the fixtures are absent, so this step is the
+        # primary gate for the 1.2 surface; the scoreboards are captured for the
+        # artifact. Run in BOTH feature states — default (SHACL Core + SHACL-SPARQL)
+        # and shacl-af (sh:rule / sh:expression / sh:nodeByExpression) — so the
+        # feature-gated entries (e.g. nodeByExpression-001, the node-expr suites)
+        # are gated too. A genuine regression trips a runner's own
+        # `assert!(pass >= floor)` / `assert!(gap <= ceiling)`. The w3c_node_expr*
+        # runners are themselves `#[cfg(feature = "shacl-af")]`, so they only
+        # produce a scoreboard in the shacl-af pass (compiled out by default).
+        run: |
+          set -uo pipefail
+          SHACL12_TESTS="--test w3c_core_full_shacl12 --test w3c_sparql_shacl12 --test w3c_node_expr --test w3c_node_expr_constraints"
+          echo "::group::SHACL 1.2 — default features"
+          cargo test -p sparq-shacl $SHACL12_TESTS -- --nocapture \
+            | tee -a shacl-conformance.out
+          rc_default=${PIPESTATUS[0]}
+          echo "::endgroup::"
+          echo "::group::SHACL 1.2 — shacl-af feature"
+          cargo test -p sparq-shacl --features shacl-af $SHACL12_TESTS -- --nocapture \
+            | tee -a shacl-conformance.out
+          rc_af=${PIPESTATUS[0]}
+          echo "::endgroup::"
+          if [ "$rc_default" -ne 0 ] || [ "$rc_af" -ne 0 ]; then
+            echo "::error::FULL SHACL 1.2 suite regressed (default rc=$rc_default, shacl-af rc=$rc_af) — a runner's pinned ratchet floor/ceiling tripped. Inspect the per-category scoreboard above; see research/shacl12-conformance-gap.md. The floors are never weakened — closing a gap moves a FAIL to PASS and bumps the floor in the same commit."
+            exit 1
+          fi
       - name: Enforce ratchet (pass counts must not regress)
         run: |
           CORE_FLOOR=98
@@ -1442,7 +1480,7 @@ jobs:
         # [OPUS-4.8] sq-tool-pin: taiki-e/install-action picks the tool from its @<tool> ref;
         # SHA-pinning (our code-scanning=0 policy) drops that ref, so an explicit `with: tool:`
         # is MANDATORY — without it install-action installs NOTHING and `cargo llvm-cov` ENOENTs.
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # cargo-llvm-cov
+        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov
       - name: Test-presence gate (fast, no compile)
@@ -1560,7 +1598,7 @@ jobs:
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action — the @<tool> ref is dropped by the SHA pin, so without this the
         # tool is silently NOT installed and `cargo llvm-cov` ENOENTs (see per-commit job).
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # cargo-llvm-cov
+        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov
       - name: Test-presence gate
@@ -1629,7 +1667,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # cargo-mutants
+        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # cargo-mutants
         with:
           tool: cargo-mutants@25.3.1
       - name: Run cargo-mutants per crate + ratchet against the baseline
@@ -1729,7 +1767,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-geiger
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
         with:
           tool: cargo-geiger
         continue-on-error: true

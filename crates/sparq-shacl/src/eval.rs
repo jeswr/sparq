@@ -2,7 +2,7 @@
 //! emits [`ValidationResult`]s via direct graph scans (no SPARQL round-trip).
 
 use crate::model::{
-    sh, Component, ComponentDef, PreparedComponentValidator, Shape, ShapesModel, Target,
+    sh, Component, ComponentDef, ComponentMeta, PreparedComponentValidator, ShapesModel, Target,
 };
 use crate::path::Path;
 use crate::report::{ShapeDiagnostic, ValidationResult};
@@ -15,6 +15,9 @@ use std::cmp::Ordering;
 
 const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+/// [OPUS-4.8] (sq-0mjfd) The RDF-1.2 reification predicate: a reifier `?r` reifies
+/// a triple-term via `?r rdf:reifies <<( s p o )>>`. Used by `sh:reifierShape`.
+const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
 
 /// Runs every targeted shape over its focus nodes. Results are deliberately NOT
 /// deduplicated: the SHACL test suite expects one result per constraint-component
@@ -34,14 +37,52 @@ pub(crate) fn validate_graph(
         regexes: FxHashMap::default(),
         uvf_targets: FxHashMap::default(),
         diagnostics: Vec::new(),
+        active_meta: None,
     };
     let mut out = Vec::new();
     for &sid in &shapes.targeted {
-        for focus in v.focus_nodes(&shapes.shapes[sid]) {
+        for focus in v.focus_nodes(sid) {
             v.validate_shape(sid, &focus, &mut out);
         }
     }
+    // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:shape` data-graph targets: a triple
+    // `?n sh:shape ?S` in the DATA graph makes `?n` a focus node of shape `?S`.
+    // Unlike the shapes-graph targets above this is discovered per-data-graph, so
+    // it is handled here rather than as a per-shape `Target`.
+    v.validate_data_shape_targets(shapes, &mut out);
     (out, v.diagnostics)
+}
+
+/// [OPUS-4.8] (sq-rnkdh) The number of DISTINCT focus nodes the model's targets
+/// select over `data` — the deterministic target-selection statistic exposed as
+/// [`crate::count_focus_nodes`]. Built on the same [`Validator::focus_nodes`]
+/// enumeration the real validation walk uses (plus the `sh:shape` data-graph
+/// targets), so it stays in lock-step with validation, including the SHACL-1.2
+/// data-dependent targets (`sh:targetWhere` / SPARQL-valued `sh:targetNode`).
+pub(crate) fn count_focus_nodes(data: &Graph, shapes: &ShapesModel) -> usize {
+    let mut v = Validator {
+        data: GraphView::new(data),
+        shapes,
+        stack: Vec::new(),
+        memo: vec![FxHashMap::default(); shapes.shapes.len()],
+        min_reentry: usize::MAX,
+        regexes: FxHashMap::default(),
+        uvf_targets: FxHashMap::default(),
+        diagnostics: Vec::new(),
+        active_meta: None,
+    };
+    let mut all: Vec<Term> = Vec::new();
+    for &sid in &shapes.targeted {
+        all.extend(v.focus_nodes(sid));
+    }
+    // `sh:shape` data-graph targets contribute their linked subjects as focus nodes
+    // (only when the linked shape is in the model — matching the validation walk).
+    for [focus, _, shape_node] in v.data.triples(None, Some(&sh("shape")), None) {
+        if shapes.by_node(&shape_node).is_some() {
+            all.push(focus);
+        }
+    }
+    crate::view::dedup(all).len()
 }
 
 /// [OPUS-4.8] (sq-d1dw, `shacl-af`) True iff `node` conforms to the shape `sid`
@@ -62,6 +103,7 @@ pub(crate) fn conforms_node(data: &Graph, shapes: &ShapesModel, sid: usize, node
         regexes: FxHashMap::default(),
         uvf_targets: FxHashMap::default(),
         diagnostics: Vec::new(),
+        active_meta: None,
     };
     v.conforms(node, sid)
 }
@@ -90,12 +132,25 @@ struct Validator<'a> {
     /// uncompilable `sh:pattern` regex). De-duplicated per (shape, pattern, flags)
     /// so a skip is reported once, not once per value/focus node.
     diagnostics: Vec<ShapeDiagnostic>,
+    /// [OPUS-4.8] (sq-pb0wm) The per-constraint-statement RDF-1.2 reified-annotation
+    /// override active for the component CURRENTLY being evaluated, set by
+    /// `validate_shape` around each `eval_component` call. `result()` reads it to
+    /// apply a per-occurrence `sh:message` / `sh:severity` (SHACL 1.2). `None` when
+    /// the current constraint carries no annotation (the common case).
+    active_meta: Option<ComponentMeta>,
 }
 
 impl<'a> Validator<'a> {
-    fn focus_nodes(&self, shape: &Shape) -> Vec<Term> {
+    /// The focus nodes selected by shape `sid`'s targets, deduplicated. Takes `sid`
+    /// (not a `&Shape`) and `&mut self` because the SHACL-1.2 `sh:targetWhere`
+    /// target evaluates conformance through the validator (which mutates the
+    /// conformance memo/stack), and the SPARQL-valued target runs a query.
+    fn focus_nodes(&mut self, sid: usize) -> Vec<Term> {
         let mut out = Vec::new();
-        for t in &shape.targets {
+        // Clone the targets so the per-target `&mut self` work (sh:targetWhere
+        // conformance, SPARQL target queries) does not alias the model borrow.
+        let targets = self.shapes.shapes[sid].targets.clone();
+        for t in &targets {
             match t {
                 Target::Node(n) => out.push(n.clone()),
                 Target::Class(c) | Target::ImplicitClass(c) => {
@@ -103,9 +158,62 @@ impl<'a> Validator<'a> {
                 }
                 Target::SubjectsOf(p) => out.extend(self.data.subjects_of(p)),
                 Target::ObjectsOf(p) => out.extend(self.data.objects_of(p)),
+                // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:targetWhere [ <shape> ]`:
+                // every data-graph node that CONFORMS to the inline (object) shape.
+                Target::Where(inner) => out.extend(self.target_where_nodes(*inner)),
+                // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:targetNode [ sh:select … ]`:
+                // the output nodes of the SPARQL node expression.
+                Target::Sparql(idx) => out.extend(self.target_sparql_nodes(*idx)),
             }
         }
         crate::view::dedup(out)
+    }
+
+    /// [OPUS-4.8] (sq-rnkdh) The `sh:targetWhere` focus nodes: every node that
+    /// appears in the data graph (as a subject OR object of any triple) and
+    /// CONFORMS to the inline shape `inner`. This mirrors the SHACL-1.2 target
+    /// definition ("all nodes from the data graph that conform to the given
+    /// shape"); a node that appears only as a predicate is not a focus candidate.
+    fn target_where_nodes(&mut self, inner: usize) -> Vec<Term> {
+        let mut candidates: Vec<Term> = Vec::new();
+        let mut seen: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
+        for [s, _, o] in self.data.triples(None, None, None) {
+            for n in [s, o] {
+                if seen.insert(n.clone()) {
+                    candidates.push(n);
+                }
+            }
+        }
+        candidates
+            .into_iter()
+            .filter(|n| self.conforms(n, inner))
+            .collect()
+    }
+
+    /// [OPUS-4.8] (sq-rnkdh) The output nodes of a SPARQL-valued target node
+    /// expression (`sh:targetNode [ sh:select … ]`): the node expression is run
+    /// with no specific `$this` (there is no focus node yet — a target query
+    /// SELECTs the focus nodes), so `$this` is left unbound and the bindings of the
+    /// first result variable are the focus nodes.
+    fn target_sparql_nodes(&self, idx: usize) -> Vec<Term> {
+        self.shapes.select_exprs[idx].eval_target(self.data.graph())
+    }
+
+    /// [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:shape` data-graph targets: for every
+    /// triple `?n sh:shape ?S` in the DATA graph, `?n` is validated against the
+    /// shape `?S` (resolved in the shapes model — a shape not present in the model
+    /// is skipped). This is the data-driven dual of `sh:targetNode`: the link lives
+    /// in the data graph, so it is discovered here (not as a per-shape `Target`).
+    fn validate_data_shape_targets(
+        &mut self,
+        shapes: &ShapesModel,
+        out: &mut Vec<ValidationResult>,
+    ) {
+        for [focus, _, shape_node] in self.data.triples(None, Some(&sh("shape")), None) {
+            if let Some(sid) = shapes.by_node(&shape_node) {
+                self.validate_shape(sid, &focus, out);
+            }
+        }
     }
 
     /// True iff `node` produces no results against `shape` (conformance
@@ -171,17 +279,55 @@ impl<'a> Validator<'a> {
         if shape.deactivated {
             return;
         }
-        let values: Vec<Term> = match &shape.path {
-            Some(path) => path.values(&self.data, focus),
-            None => vec![focus.clone()],
+        // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 SPARQL-valued value nodes: when the shape
+        // carries `sh:values [ sh:select … ]` / `[ sh:sparqlExpr … ]`, the value
+        // nodes are COMPUTED by the node expression (`$this` = focus node) instead
+        // of derived by traversing `sh:path`. The reported `sh:resultPath` is still
+        // the shape's path (set in `result`), so only the value-node SET changes.
+        let values: Vec<Term> = match shape.value_expr {
+            Some(idx) => {
+                crate::view::dedup(self.shapes.select_exprs[idx].eval(self.data.graph(), focus))
+            }
+            None => match &shape.path {
+                Some(path) => path.values(&self.data, focus),
+                None => vec![focus.clone()],
+            },
         };
         let components = shape.components.clone();
-        for comp in &components {
+        // [OPUS-4.8] (sq-pb0wm) Per-constraint-statement RDF-1.2 reified-annotation
+        // overrides, PARALLEL to `components`. A `{| sh:deactivated true |}` on a
+        // single constraint statement suppresses ONLY that occurrence (the shape
+        // keeps validating its other constraints); a `{| sh:message … |}` /
+        // `{| sh:severity … |}` overrides the message / severity for ONLY that
+        // occurrence's results. `result()` reads `self.active_meta` (set here) to
+        // apply the message/severity override; deactivation is handled by skipping
+        // the component outright.
+        let metas = shape.component_meta.clone();
+        for (i, comp) in components.iter().enumerate() {
+            // Index access with a default fallback: a component WITHOUT a parallel
+            // meta entry (should never happen — the vectors are kept index-aligned)
+            // is treated as un-annotated rather than silently skipped (a `zip` would
+            // truncate the longer vector and lose the trailing component). [OPUS-4.8] (sq-pb0wm)
+            let meta = metas.get(i);
+            if meta.is_some_and(ComponentMeta::is_deactivated) {
+                continue; // this constraint occurrence is deactivated (sq-pb0wm)
+            }
+            // Set the active per-statement override so `result()` (used by every
+            // Core component arm) can apply a per-occurrence message/severity.
+            self.active_meta = match meta {
+                Some(m) if !m.is_empty() => Some(m.clone()),
+                _ => None,
+            };
             self.eval_component(sid, focus, &values, comp, out);
+            self.active_meta = None;
         }
     }
 
-    /// A result owned by shape `sid` for `focus`.
+    /// A result owned by shape `sid` for `focus`. [OPUS-4.8] (sq-pb0wm) When a
+    /// per-constraint-statement override is active (`self.active_meta`, set by
+    /// `validate_shape` for the component being evaluated), its `sh:message` /
+    /// `sh:severity` REPLACE the shape-level message / severity for this result —
+    /// the SHACL 1.2 reified-annotation semantics applying to one occurrence only.
     fn result(
         &self,
         sid: usize,
@@ -191,17 +337,56 @@ impl<'a> Validator<'a> {
         message: String,
     ) -> ValidationResult {
         let shape = &self.shapes.shapes[sid];
+        let (severity, messages) = match &self.active_meta {
+            Some(meta) => (
+                meta.severity.clone().unwrap_or_else(|| shape.severity.clone()),
+                if meta.messages.is_empty() {
+                    shape.messages.clone()
+                } else {
+                    meta.messages.clone()
+                },
+            ),
+            None => (shape.severity.clone(), shape.messages.clone()),
+        };
         ValidationResult {
             focus_node: focus.clone(),
             path: shape.path.clone(),
             value,
             source_shape: shape.node.clone(),
+            // Core components have no `sh:SPARQLConstraint` node (sq-mue75).
+            source_constraint: None,
             source_component: sh(component),
-            severity: shape.severity.clone(),
-            messages: shape.messages.clone(),
+            severity,
+            messages,
             default_message: message,
             details: Vec::new(),
         }
+    }
+
+    /// [OPUS-4.8] (sq-0mjfd) The reifiers of the asserted triple
+    /// `(subject, predicate, object)` — the subjects of
+    /// `?r rdf:reifies <<(subject predicate object)>>` (the RDF-1.2
+    /// reified-annotation `{| … |}` form; the parser stores the triple-term as a
+    /// regular `rdf:reifies` object). Returns the reifier nodes (each an
+    /// IRI/blank node validated against `sh:reifierShape`). Empty when `subject`
+    /// is not an IRI/blank node, or no reifier exists.
+    fn reifiers_of(&self, subject: &Term, predicate: &str, object: &Term) -> Vec<Term> {
+        use oxrdf::{NamedNode, NamedOrBlankNode, Triple};
+        let subj: NamedOrBlankNode = match subject {
+            Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n.clone()),
+            Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b.clone()),
+            _ => return Vec::new(),
+        };
+        let triple_term = Term::Triple(Box::new(Triple::new(
+            subj,
+            NamedNode::new_unchecked(predicate),
+            object.clone(),
+        )));
+        self.data
+            .triples(None, Some(RDF_REIFIES), Some(&triple_term))
+            .into_iter()
+            .map(|[s, _, _]| s)
+            .collect()
     }
 
     #[allow(clippy::too_many_lines)]
@@ -223,6 +408,27 @@ impl<'a> Validator<'a> {
                             Some(v.clone()),
                             "ClassConstraintComponent",
                             format!("Value does not have class {cls}"),
+                        ));
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-sx15d) `sh:class ( ex:A ex:B )` (SHACL 1.2): a value
+            // conforms iff it is a SHACL instance of ANY listed class (the
+            // subclass-aware `is_instance_of` is reused per listed class).
+            Component::ClassIn(classes) => {
+                for v in values {
+                    if !classes.iter().any(|cls| self.data.is_instance_of(v, cls)) {
+                        let joined = classes
+                            .iter()
+                            .map(|c| c.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "ClassConstraintComponent",
+                            format!("Value does not have any of the allowed classes {joined}"),
                         ));
                     }
                 }
@@ -404,12 +610,22 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+            // [OPUS-4.8] (sq-0mjfd) `sh:uniqueLang true` — no language may repeat
+            // across the value set. The key includes the BASE DIRECTION (RDF-1.2
+            // `rdf:dirLangString`, `@ar--ltr`): `"X"@ar`, `"Y"@ar--ltr` and
+            // `"Z"@ar--rtl` are THREE distinct keys, so a value set with one of each
+            // conforms, while two `@ar--ltr` values collide (uniqueLang-003).
             Component::UniqueLang => {
                 let mut counts: FxHashMap<String, usize> = FxHashMap::default();
                 for v in values {
                     if let Term::Literal(l) = v {
                         if let Some(lang) = l.language() {
-                            *counts.entry(lang.to_lowercase()).or_insert(0) += 1;
+                            // [OPUS-4.8] positional format args (rust/unused-variable CodeQL FP).
+                            let key = match l.direction() {
+                                Some(dir) => format!("{}--{}", lang.to_lowercase(), dir),
+                                None => lang.to_lowercase(),
+                            };
+                            *counts.entry(key).or_insert(0) += 1;
                         }
                     }
                 }
@@ -425,12 +641,16 @@ impl<'a> Validator<'a> {
                         focus,
                         None,
                         "UniqueLangConstraintComponent",
-                        format!("Language \"{lang}\" is used more than once"),
+                        format!("Language \"{}\" is used more than once", lang),
                     ));
                 }
             }
+            // [OPUS-4.8] (sq-sx15d) `sh:equals` — the comparand is a SHACL property
+            // PATH (SHACL 1.2; a bare predicate IRI is a trivial path). The value
+            // sets must be equal: one result per path value absent from the
+            // comparand set, and one per comparand value absent from the path set.
             Component::Equals(p) => {
-                let others = self.data.objects(focus, p);
+                let others = p.values(&self.data, focus);
                 for v in values {
                     if !others.contains(v) {
                         out.push(self.result(
@@ -438,7 +658,7 @@ impl<'a> Validator<'a> {
                             focus,
                             Some(v.clone()),
                             "EqualsConstraintComponent",
-                            format!("Value missing from <{p}>"),
+                            format!("Value missing from {}", p.to_turtle()),
                         ));
                     }
                 }
@@ -449,28 +669,32 @@ impl<'a> Validator<'a> {
                             focus,
                             Some(o.clone()),
                             "EqualsConstraintComponent",
-                            format!("Value of <{p}> missing from the path values"),
+                            format!("Value of {} missing from the path values", p.to_turtle()),
                         ));
                     }
                 }
             }
+            // [OPUS-4.8] (sq-sx15d) `sh:disjoint` — the comparand is a PATH (SHACL
+            // 1.2). A path value shared with the comparand value set is a result.
             Component::Disjoint(p) => {
+                let others = p.values(&self.data, focus);
                 for v in values {
-                    if self.data.contains(focus, p, v) {
+                    if others.contains(v) {
                         out.push(self.result(
                             sid,
                             focus,
                             Some(v.clone()),
                             "DisjointConstraintComponent",
-                            format!("Value shared with <{p}>"),
+                            format!("Value shared with {}", p.to_turtle()),
                         ));
                     }
                 }
             }
             // One result per FAILING PAIR (value, other) — the suite expects e.g.
             // `1 < "a"` and `1 < "b"` to report `sh:value 1` twice.
+            // [OPUS-4.8] (sq-sx15d) the comparand is a PATH (SHACL 1.2).
             Component::LessThan(p) => {
-                let others = self.data.objects(focus, p);
+                let others = p.values(&self.data, focus);
                 for v in values {
                     for o in &others {
                         if !matches!(cmp_terms(v, o), Some(Ordering::Less)) {
@@ -479,14 +703,14 @@ impl<'a> Validator<'a> {
                                 focus,
                                 Some(v.clone()),
                                 "LessThanConstraintComponent",
-                                format!("Value is not less than {o} (via <{p}>)"),
+                                format!("Value is not less than {o} (via {})", p.to_turtle()),
                             ));
                         }
                     }
                 }
             }
             Component::LessThanOrEquals(p) => {
-                let others = self.data.objects(focus, p);
+                let others = p.values(&self.data, focus);
                 for v in values {
                     for o in &others {
                         if !matches!(cmp_terms(v, o), Some(Ordering::Less | Ordering::Equal)) {
@@ -495,9 +719,80 @@ impl<'a> Validator<'a> {
                                 focus,
                                 Some(v.clone()),
                                 "LessThanOrEqualsConstraintComponent",
-                                format!("Value is not less than or equal to {o} (via <{p}>)"),
+                                format!(
+                                    "Value is not less than or equal to {o} (via {})",
+                                    p.to_turtle()
+                                ),
                             ));
                         }
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-sx15d) `sh:subsetOf` (SHACL 1.2) — the value set of the
+            // shape's path must be a SUBSET of the comparand path's value set. One
+            // result per path value absent from the comparand set.
+            Component::SubsetOf(p) => {
+                let others = p.values(&self.data, focus);
+                for v in values {
+                    if !others.contains(v) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "SubsetOfConstraintComponent",
+                            format!("Value not in the value set of {}", p.to_turtle()),
+                        ));
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-sx15d) `sh:someValue` (SHACL 1.2) — EXISTENTIAL: at
+            // least one value node must conform to the nested shape. One result on
+            // the focus/path (NO sh:value) when NONE conform. An empty value set
+            // also fails (no value can satisfy the existential).
+            Component::SomeValue(inner) => {
+                if !values.iter().any(|v| self.conforms(v, *inner)) {
+                    out.push(self.result(
+                        sid,
+                        focus,
+                        None,
+                        "SomeValueConstraintComponent",
+                        "No value node conforms to the sh:someValue shape".into(),
+                    ));
+                }
+            }
+            // [OPUS-4.8] (sq-sx15d) `sh:singleLine true` (SHACL 1.2) — each string
+            // value must contain no line-break character (LF / CR / FF / VT). A
+            // non-string value contributes its lexical form; a blank node has none
+            // and conforms vacuously (no string to break).
+            Component::SingleLine => {
+                for v in values {
+                    if let Some(s) = string_repr(v) {
+                        if s.chars().any(is_line_break) {
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                Some(v.clone()),
+                                "SingleLineConstraintComponent",
+                                "Value contains a line break".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-sx15d) `sh:rootClass` (SHACL 1.2) — each value node must
+            // be the named class or a transitive `rdfs:subClassOf`-descendant of it
+            // (reuses the `sh:class` subclass closure).
+            Component::RootClass(cls) => {
+                let closure = self.data.subclass_closure(cls);
+                for v in values {
+                    if !closure.contains(v) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "RootClassConstraintComponent",
+                            format!("Value is not {cls} or a subclass of it"),
+                        ));
                     }
                 }
             }
@@ -563,6 +858,42 @@ impl<'a> Validator<'a> {
                             Some(v.clone()),
                             "NodeConstraintComponent",
                             "Value does not conform to the node shape".into(),
+                        ));
+                    }
+                }
+            }
+            // [OPUS-4.8] (sq-0mjfd) `sh:reifierShape` (SHACL 1.2): for each value
+            // `v`, the reifiers of the asserted triple `(focus, predicate, v)` must
+            // conform to the referenced shape; `required` additionally demands a
+            // reifier exist. The predicate is the shape's path when it is a single
+            // predicate (the only path form for which a reified triple is defined).
+            Component::ReifierShape {
+                shape: inner,
+                required,
+            } => {
+                let predicate = match &self.shapes.shapes[sid].path {
+                    Some(Path::Predicate(p)) => Some(p.clone()),
+                    _ => None,
+                };
+                for v in values {
+                    let reifiers = match &predicate {
+                        Some(p) => self.reifiers_of(focus, p, v),
+                        None => Vec::new(),
+                    };
+                    let conforms = if reifiers.is_empty() {
+                        // No reifier: conforms unless reification is required.
+                        !*required
+                    } else {
+                        reifiers.iter().all(|r| self.conforms(r, *inner))
+                    };
+                    if !conforms {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "ReifierShapeConstraintComponent",
+                            "A reifier of the value's triple does not conform to sh:reifierShape"
+                                .into(),
                         ));
                     }
                 }
@@ -930,12 +1261,18 @@ impl<'a> Validator<'a> {
         };
         let component = sh("SPARQLConstraintComponent");
         let shape = &self.shapes.shapes[sid];
-        let (shape_node, shape_path, severity, shape_messages) = (
-            shape.node.clone(),
-            shape.path.clone(),
-            shape.severity.clone(),
-            shape.messages.clone(),
-        );
+        // [OPUS-4.8] (sq-rnkdh) A constraint-level `sh:severity` on the
+        // `sh:SPARQLConstraint` node OVERRIDES the shape's default severity (SHACL
+        // 1.2 `sparql/node/sparql-001`); otherwise inherit the shape's severity.
+        let severity = constraint
+            .severity
+            .clone()
+            .unwrap_or_else(|| shape.severity.clone());
+        let (shape_node, shape_path, shape_messages) =
+            (shape.node.clone(), shape.path.clone(), shape.messages.clone());
+        // [OPUS-4.8] (sq-mue75) stamp the originating `sh:SPARQLConstraint` node
+        // onto each result as `sh:sourceConstraint` (SHACL §5.2.2).
+        let constraint_node = constraint.node.clone();
         let data = self.data.graph();
         prepared.evaluate(
             data,
@@ -948,6 +1285,7 @@ impl<'a> Validator<'a> {
                 path: fields.path.or_else(|| shape_path.clone()),
                 value: fields.value,
                 source_shape: shape_node.clone(),
+                source_constraint: Some(constraint_node.clone()),
                 source_component: component.clone(),
                 severity: severity.clone(),
                 messages: shape_messages.clone(),
@@ -1039,6 +1377,9 @@ impl<'a> Validator<'a> {
                             path: shape_path.clone(),
                             value: Some(v.clone()),
                             source_shape: shape_node.clone(),
+                            // A SPARQL-based constraint COMPONENT has no single
+                            // `sh:SPARQLConstraint` node (sq-mue75).
+                            source_constraint: None,
                             source_component: component_iri.clone(),
                             severity: severity.clone(),
                             messages: shape_messages.clone(),
@@ -1065,6 +1406,9 @@ impl<'a> Validator<'a> {
                         path: fields.path.or_else(|| shape_path.clone()),
                         value: fields.value,
                         source_shape: shape_node.clone(),
+                        // A SPARQL-based constraint COMPONENT has no single
+                        // `sh:SPARQLConstraint` node (sq-mue75).
+                        source_constraint: None,
                         source_component: component_iri.clone(),
                         severity: severity.clone(),
                         messages: shape_messages.clone(),
@@ -1151,7 +1495,7 @@ impl<'a> Validator<'a> {
         if let Some(cached) = self.uvf_targets.get(&sid) {
             return cached.clone();
         }
-        let targets = self.focus_nodes(&self.shapes.shapes[sid]);
+        let targets = self.focus_nodes(sid);
         self.uvf_targets.insert(sid, targets.clone());
         targets
     }
@@ -1322,6 +1666,13 @@ fn value_signature(data: &GraphView, node: &Term, props: &[String]) -> Vec<Vec<S
             vs
         })
         .collect()
+}
+
+/// [OPUS-4.8] (sq-sx15d) A line-break character for `sh:singleLine`: line feed
+/// (U+000A), carriage return (U+000D), form feed (U+000C) or vertical tab
+/// (U+000B). The W3C `singleLine-001` test exercises all four.
+fn is_line_break(c: char) -> bool {
+    matches!(c, '\u{000A}' | '\u{000D}' | '\u{000C}' | '\u{000B}')
 }
 
 /// The string a value node contributes to sh:minLength/maxLength/pattern:

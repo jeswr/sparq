@@ -213,7 +213,7 @@ jobs:
       # Same SHA-pinned attest action + version as release.yml — one signed SLSA provenance
       # predicate per .crate, binding its digest to this workflow run.
       - name: Attest crate-package provenance
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: crate-pkgs/*.crate
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

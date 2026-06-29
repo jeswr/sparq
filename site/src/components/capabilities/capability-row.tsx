@@ -1,6 +1,6 @@
 "use client";
 
-// [OPUS-4.8] sq-vw3ax.3 — one ~64px gallery row in /capabilities.
+// [OPUS-4.8] sq-vw3ax.3 / sq-vw3ax — one capability affordance in /capabilities.
 //
 // Three shapes (data/capabilities.ts `classify`):
 //   * deep  → a plain link "Open →" to the surface's retained /surface/<slug> deep page.
@@ -9,9 +9,13 @@
 //             <details> holding ONE caveat sentence + README + SKILL links.
 //   * soon  → a non-interactive "Coming soon" row that links out to GitHub.
 //
-// The lazy-mount is the load-bearing requirement: `mounted` flips true on first expand and the
-// demo chunk is fetched only then (see lazy-demo.tsx). Collapsing keeps `mounted` true so a
-// re-expand never re-fetches; we hide the body with CSS rather than unmounting.
+// [OPUS-4.8] sq-vw3ax — BOLD redesign: each affordance now renders as a depth TILE (the
+// approved web-capabilities.html lane layout) instead of a flat 64px row, with a per-theme
+// accent line that reveals on hover. The lazy-mount machinery is UNCHANGED — it is the
+// load-bearing #1 risk (research/website-redesign.md §3 COLLAPSE): `mounted` flips true on
+// first expand and the demo chunk is fetched only then (see lazy-demo.tsx). Collapsing keeps
+// `mounted` true so a re-expand never re-fetches; we hide the body with CSS rather than
+// unmounting. The heavy bb.js / noir_js graph stays isolated to the ZK chunk alone.
 
 import * as React from "react";
 import Link from "next/link";
@@ -102,42 +106,69 @@ function TierBadge({ surface }: { surface: Surface }) {
   );
 }
 
-function RowShell({
+/** The shared tile body: accent line + icon + title/blurb + tier badge + a trailing CTA.
+ *  `interactive` toggles the hover lift (a button/link wrapper supplies the actual semantics). */
+function TileShell({
   surface,
-  trailing,
+  accent,
+  cta,
+  interactive = true,
 }: {
   surface: Surface;
-  trailing: React.ReactNode;
+  accent: string;
+  cta: React.ReactNode;
+  interactive?: boolean;
 }) {
   const Icon = surface.icon;
   return (
-    <div className="flex items-center gap-3 px-3 py-3">
-      <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-        <Icon className="size-4.5" aria-hidden />
+    <div
+      className={cn(
+        "relative flex items-start gap-3 overflow-hidden rounded-[var(--radius-lg)] border bg-card px-4 py-3.5 transition-all duration-150",
+        interactive &&
+          "hover:-translate-y-0.5 hover:border-primary/45 hover:shadow-elevation-2 [&:hover>[data-accent]]:opacity-90",
+      )}
+    >
+      {/* The per-theme accent spine — revealed on hover. */}
+      <span
+        data-accent
+        aria-hidden
+        className="absolute inset-y-0 left-0 w-[3px] opacity-0 transition-opacity duration-150"
+        style={{ background: accent }}
+      />
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-primary/10 text-primary">
+        <Icon className="size-[18px]" aria-hidden />
       </span>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <span className="truncate text-sm font-medium">{surface.title}</span>
-        <span className="truncate text-sm text-muted-foreground">{surface.blurb}</span>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-semibold tracking-tight">{surface.title}</div>
+        <div className="mt-1 text-[12.7px] leading-snug text-muted-foreground">
+          {surface.blurb}
+        </div>
       </div>
-      <TierBadge surface={surface} />
-      {trailing}
+      <div className="flex shrink-0 flex-col items-end gap-2">
+        <TierBadge surface={surface} />
+        {cta}
+      </div>
     </div>
   );
 }
 
-/** "Open →" deep-page row — a plain link to the surface's retained deep page. */
-function DeepRow({ surface }: { surface: Surface }) {
+const CTA_CLASS =
+  "inline-flex items-center gap-1 text-[12px] font-semibold text-primary";
+
+/** "Open →" deep-page tile — a plain link to the surface's retained deep page. */
+function DeepTile({ surface, accent }: { surface: Surface; accent: string }) {
   return (
     <Link
       href={surface.href}
-      className="group block rounded-xl transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+      className="group block rounded-[var(--radius-lg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
     >
-      <RowShell
+      <TileShell
         surface={surface}
-        trailing={
-          <span className="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-primary">
+        accent={accent}
+        cta={
+          <span className={CTA_CLASS}>
             Open
-            <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
+            <ArrowRight className="size-3 transition-transform group-hover:translate-x-0.5" />
           </span>
         }
       />
@@ -145,21 +176,22 @@ function DeepRow({ surface }: { surface: Surface }) {
   );
 }
 
-/** "Coming soon" row — no demo yet; links out to source. */
-function SoonRow({ surface }: { surface: Surface }) {
+/** "Coming soon" tile — no demo yet; links out to source. */
+function SoonTile({ surface, accent }: { surface: Surface; accent: string }) {
   return (
     <a
       href={REPO_URL}
       target="_blank"
       rel="noopener noreferrer"
-      className="group block rounded-xl transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+      className="group block rounded-[var(--radius-lg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
     >
-      <RowShell
+      <TileShell
         surface={surface}
-        trailing={
-          <span className="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-muted-foreground">
+        accent={accent}
+        cta={
+          <span className="inline-flex items-center gap-1 text-[12px] font-medium text-muted-foreground">
             Source
-            <ExternalLink className="size-3.5" />
+            <ExternalLink className="size-3" />
           </span>
         }
       />
@@ -167,8 +199,16 @@ function SoonRow({ surface }: { surface: Surface }) {
   );
 }
 
-/** "Demo ▸" expand-in-place row — lazily mounts the demo on first expand. */
-function DemoRow({ surface, slug }: { surface: Surface; slug: LazyDemoSlug }) {
+/** "Demo ▸" expand-in-place tile — lazily mounts the demo on first expand. */
+function DemoTile({
+  surface,
+  slug,
+  accent,
+}: {
+  surface: Surface;
+  slug: LazyDemoSlug;
+  accent: string;
+}) {
   const [open, setOpen] = React.useState(false);
   // Once mounted, stay mounted across collapse/re-expand so the chunk is fetched at most once.
   const [mounted, setMounted] = React.useState(false);
@@ -183,21 +223,22 @@ function DemoRow({ surface, slug }: { surface: Surface; slug: LazyDemoSlug }) {
   };
 
   return (
-    <div className="rounded-xl">
+    <div>
       <button
         type="button"
         onClick={toggle}
         aria-expanded={open}
-        className="group flex w-full items-center rounded-xl text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        className="group block w-full rounded-[var(--radius-lg)] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       >
-        <RowShell
+        <TileShell
           surface={surface}
-          trailing={
-            <span className="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-primary">
+          accent={accent}
+          cta={
+            <span className={CTA_CLASS}>
               Demo
               <ChevronRight
                 className={cn(
-                  "size-3.5 transition-transform",
+                  "size-3 transition-transform",
                   open && "rotate-90",
                 )}
                 aria-hidden
@@ -210,12 +251,12 @@ function DemoRow({ surface, slug }: { surface: Surface; slug: LazyDemoSlug }) {
       {/* The body is only present in the DOM once first expanded; CSS hides it on collapse so a
           re-expand does not re-fetch the chunk (mounted stays true). */}
       {mounted && (
-        <div className={cn("px-3 pb-4", !open && "hidden")} data-demo-body={slug}>
-          <div className="rounded-lg border bg-muted/20 p-3">
+        <div className={cn("px-1 pt-3", !open && "hidden")} data-demo-body={slug}>
+          <div className="rounded-[var(--radius-lg)] border bg-muted/20 p-3">
             <LazyDemo slug={slug} mounted={mounted} />
           </div>
 
-          <details className="mt-3 rounded-lg border bg-card px-3 py-2 text-sm">
+          <details className="mt-3 rounded-[var(--radius-lg)] border bg-card px-3 py-2 text-sm">
             <summary className="cursor-pointer select-none font-medium text-foreground/90">
               Details &amp; caveats
             </summary>
@@ -247,24 +288,26 @@ function DemoRow({ surface, slug }: { surface: Surface; slug: LazyDemoSlug }) {
   );
 }
 
-// [OPUS-4.8] sq-vw3ax.3 — the boundary is `slug` (a string) + `kind`, NOT the Surface object:
-// a Surface carries a lucide `icon` function, which cannot cross the server→client RSC boundary
-// (it is not serializable). The server /capabilities page passes the serializable slug; this
-// client component resolves the full surface (icon included) from the GROUPS source by slug.
+// [OPUS-4.8] sq-vw3ax.3 — the boundary is `slug` (a string) + `kind` + `accent`, NOT the Surface
+// object: a Surface carries a lucide `icon` function, which cannot cross the server→client RSC
+// boundary (it is not serializable). The server /capabilities page passes the serializable slug
+// + the theme accent; this client component resolves the full surface (icon included) by slug.
 export function CapabilityRowItem({
   slug,
   kind,
+  accent = "var(--primary)",
 }: {
   slug: string;
   kind: "deep" | "demo" | "soon";
+  accent?: string;
 }) {
   const surface = surfaceBySlug(slug);
   if (!surface) return null; // data drift — a row for an unknown surface; render nothing.
-  if (kind === "deep") return <DeepRow surface={surface} />;
-  if (kind === "soon") return <SoonRow surface={surface} />;
+  if (kind === "deep") return <DeepTile surface={surface} accent={accent} />;
+  if (kind === "soon") return <SoonTile surface={surface} accent={accent} />;
   // demo — guard against a data drift where a "demo" surface lacks a registered demo.
   if (hasLazyDemo(surface.slug)) {
-    return <DemoRow surface={surface} slug={surface.slug} />;
+    return <DemoTile surface={surface} slug={surface.slug} accent={accent} />;
   }
-  return <SoonRow surface={surface} />;
+  return <SoonTile surface={surface} accent={accent} />;
 }

@@ -183,6 +183,59 @@ fn same_scope_collapses_regardless_of_order() {
     assert_ne!(ScopeKey::unrestricted(), ScopeKey::empty());
 }
 
+/// [OPUS-4.8] (sq-bif) The `from_raw`/`as_u64` round-trip a consumer that maintains its
+/// OWN stable scope id relies on (the documented `from_raw` contract: equal scopes ⇒ equal
+/// value), AND that the cache enforces scope isolation when keyed on those raw scopes — the
+/// access-control boundary must hold no matter how the scope key was derived. A regression
+/// that, say, salted `from_raw` would silently let one consumer-derived scope read another's
+/// bytes; this asserts it does not.
+#[test]
+fn from_raw_round_trips_and_isolates() {
+    // Round-trip: a derived scope id survives as_u64 -> from_raw unchanged.
+    let derived = ScopeKey::of_graphs(["urn:pod:alice/private"]);
+    assert_eq!(
+        ScopeKey::from_raw(derived.as_u64()),
+        derived,
+        "from_raw(as_u64(s)) must equal s"
+    );
+    // Two consumer-supplied raw scope ids: equal raw ⇒ same key (hit), distinct raw ⇒
+    // different key (miss). The cache cannot cross the access-control boundary.
+    let cache = ResultCache::new();
+    let epochs = PodEpochs::default();
+    let q = "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }";
+    let scope_x = ScopeKey::from_raw(0xA11CE);
+    let scope_y = ScopeKey::from_raw(0xB0B);
+    assert_ne!(scope_x, scope_y, "distinct raw scope ids ⇒ distinct keys");
+
+    if let LeaseOutcome::Lead(g) =
+        cache.lease(q, scope_x, FMT, ReadFootprint::Unbounded, &epochs, 0)
+    {
+        g.fulfill(b("X_ROWS"), &epochs, 0);
+    } else {
+        panic!("expected Lead under scope_x");
+    }
+    // The SAME raw scope id hits its own bytes (round-trip is faithful through the cache).
+    assert_eq!(
+        &*cache
+            .get(q, ScopeKey::from_raw(0xA11CE), FMT, &epochs, 0)
+            .expect("same raw scope id must hit"),
+        b"X_ROWS"
+    );
+    // A DIFFERENT raw scope id must NOT see scope_x's bytes (fail-closed isolation).
+    assert!(
+        cache.get(q, scope_y, FMT, &epochs, 0).is_none(),
+        "a different consumer-derived scope must miss — no cross-scope leak"
+    );
+    match cache.lease(q, scope_y, FMT, ReadFootprint::Unbounded, &epochs, 0) {
+        LeaseOutcome::Lead(_) => { /* correct: scope_y leads its own, sees nothing of X */ }
+        LeaseOutcome::Hit(bytes) => panic!(
+            "ACCESS-CONTROL LEAK: scope_y received scope_x's bytes: {:?}",
+            String::from_utf8_lossy(&bytes)
+        ),
+        LeaseOutcome::Wait(_) => panic!("unexpected concurrent lease"),
+    }
+}
+
 /// Per-pod epoch-bump invalidation: a write to a graph the query touched bumps that
 /// pod's epoch, so the recorded entry goes stale and a re-read misses; a write to an
 /// UNRELATED pod leaves the entry fresh (no churn — the whole point of per-pod

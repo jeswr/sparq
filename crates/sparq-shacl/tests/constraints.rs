@@ -8,6 +8,7 @@
 //! reported `sh:value` and the result count — the per-pair / per-occurrence
 //! reporting policy `eval.rs` documents.
 
+use oxrdf::Term;
 use sparq_core::Graph;
 use sparq_shacl::ValidationReport;
 
@@ -1100,5 +1101,184 @@ fn pattern_skip_diagnostic_is_deduplicated() {
         1,
         "the skip is reported once, not per focus/value: {}",
         r.to_text()
+    );
+}
+
+// ----------------------------------------------------------------------------
+// [OPUS-4.8] (sq-pb0wm, epic sq-waf9o) Per-constraint-statement RDF-1.2
+// reified-annotation overrides (SHACL 1.2 Core). A `{| … |}` annotation on ONE
+// constraint statement `(<shape> P O)` overrides JUST that occurrence:
+//   * `{| sh:deactivated true |}` suppresses only that constraint (the shape's
+//     OTHER constraints still validate) — distinct from shape-level
+//     `sh:deactivated`, which suppresses the whole shape.
+//   * `{| sh:message "…" |}` sets the result message for only that constraint.
+//   * `{| sh:severity sh:Warning |}` sets the result severity for only that
+//     constraint's violations.
+// These drive the FINAL SHACL-1.2 core gap (`misc/{deactivated-003,message-002,
+// severity-003}`); the assertions below go through the REAL `validate()`. The
+// `{| |}` form is parsed by oxttl's rdf-12 Turtle support (no extra wiring).
+// ----------------------------------------------------------------------------
+
+const SH_WARNING: &str = "http://www.w3.org/ns/shacl#Warning";
+const SH_VIOLATION: &str = "http://www.w3.org/ns/shacl#Violation";
+
+/// `{| sh:deactivated true |}` on a single `sh:datatype` statement suppresses
+/// ONLY that constraint occurrence — mirrors `misc/deactivated-003`'s datatype
+/// half: the shape conforms despite the value violating the (now-deactivated)
+/// datatype constraint.
+#[test]
+fn per_statement_deactivate_suppresses_only_that_constraint() {
+    // The focus is a string literal target node that is NOT an xsd:boolean, so
+    // the datatype constraint WOULD fire — but the per-statement annotation
+    // deactivates this occurrence, so the shape conforms.
+    let data = r#" ex:x ex:dummy "irrelevant" . "#;
+    let annotated = r#"
+        ex:S a sh:NodeShape ; sh:targetNode "hello" ;
+          sh:datatype xsd:boolean {| sh:deactivated true |} .
+    "#;
+    let r = run(data, annotated);
+    assert!(
+        r.conforms,
+        "per-statement-deactivated datatype must produce NO result: {}",
+        r.to_text()
+    );
+    // Control: WITHOUT the `{| … |}` annotation the SAME constraint fires.
+    let live = r#"
+        ex:S a sh:NodeShape ; sh:targetNode "hello" ;
+          sh:datatype xsd:boolean .
+    "#;
+    let r2 = run(data, live);
+    assert!(
+        !r2.conforms,
+        "control (no annotation) must violate: {}",
+        r2.to_text()
+    );
+    assert_eq!(count_component(&r2, "DatatypeConstraintComponent"), 1);
+}
+
+/// A per-statement `{| sh:deactivated true |}` on ONE constraint must NOT
+/// suppress the shape's OTHER constraints (the occurrence-scoped semantics — not
+/// shape-level deactivation). The deactivated `sh:datatype` is silent while the
+/// live `sh:minLength` still fires.
+#[test]
+fn per_statement_deactivate_leaves_sibling_constraints_live() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode "hi" ;
+          sh:datatype xsd:boolean {| sh:deactivated true |} ;
+          sh:minLength 5 .
+    "#;
+    let r = run("ex:x ex:p ex:o .", shapes);
+    assert!(!r.conforms, "the live sh:minLength must still fire: {}", r.to_text());
+    assert_eq!(
+        count_component(&r, "DatatypeConstraintComponent"),
+        0,
+        "the per-statement-deactivated datatype must be silent: {}",
+        r.to_text()
+    );
+    assert_eq!(
+        count_component(&r, "MinLengthConstraintComponent"),
+        1,
+        "the un-annotated sibling constraint must still report: {}",
+        r.to_text()
+    );
+}
+
+/// `{| sh:deactivated true |}` on a single `sh:property` statement suppresses
+/// only that property-constraint occurrence (the nested shape is not validated) —
+/// the `sh:property` half of `misc/deactivated-003`.
+#[test]
+fn per_statement_deactivate_on_property_constraint() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property ex:P {| sh:deactivated true |} .
+        ex:P a sh:PropertyShape ; sh:path ex:q ; sh:minCount 1 .
+    "#;
+    // ex:n has NO ex:q value, so the (live) minCount would fire — but the
+    // property statement is deactivated, so the shape conforms.
+    let r = run("ex:n ex:other ex:o .", shapes);
+    assert!(
+        r.conforms,
+        "deactivated sh:property must not validate the nested shape: {}",
+        r.to_text()
+    );
+    // Control: without the annotation the nested minCount fires.
+    let live = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property ex:P .
+        ex:P a sh:PropertyShape ; sh:path ex:q ; sh:minCount 1 .
+    "#;
+    let r2 = run("ex:n ex:other ex:o .", live);
+    assert!(!r2.conforms, "control must violate minCount: {}", r2.to_text());
+}
+
+/// `{| sh:message "…"@en |}` on a single constraint statement sets the result
+/// message for ONLY that occurrence's violations (overriding the absence of a
+/// shape-level message) — mirrors `misc/message-002`.
+#[test]
+fn per_statement_message_override_applies_to_that_constraint() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:InvalidNode ;
+          sh:datatype xsd:integer {| sh:message "Test message"@en |} .
+    "#;
+    let r = run("ex:InvalidNode ex:p ex:o .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(r.results.len(), 1, "{}", r.to_text());
+    let msgs = r.results[0].effective_messages();
+    let want = Term::Literal(oxrdf::Literal::new_language_tagged_literal_unchecked(
+        "Test message",
+        "en",
+    ));
+    assert!(
+        msgs.contains(&want),
+        "result message must be the per-statement override, got {msgs:?}"
+    );
+}
+
+/// `{| sh:severity sh:Warning |}` on a single constraint statement sets the
+/// result severity for ONLY that occurrence's violations (the default is
+/// sh:Violation) — mirrors `misc/severity-003`.
+#[test]
+fn per_statement_severity_override_applies_to_that_constraint() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode "Hello" ;
+          sh:datatype xsd:integer {| sh:severity sh:Warning |} .
+    "#;
+    let r = run("ex:x ex:p ex:o .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(r.results.len(), 1, "{}", r.to_text());
+    assert_eq!(
+        r.results[0].severity, SH_WARNING,
+        "the per-statement severity override must apply: {}",
+        r.to_text()
+    );
+}
+
+/// A per-statement override applies to ONLY the annotated occurrence: with two
+/// constraints on one shape, only the one annotated with `sh:severity sh:Warning`
+/// gets the Warning severity; the other keeps the default sh:Violation.
+#[test]
+fn per_statement_severity_is_occurrence_scoped() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode "Hello" ;
+          sh:datatype xsd:integer {| sh:severity sh:Warning |} ;
+          sh:minLength 99 .
+    "#;
+    let r = run("ex:x ex:p ex:o .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(r.results.len(), 2, "{}", r.to_text());
+    let dt = r
+        .results
+        .iter()
+        .find(|x| x.source_component.ends_with("DatatypeConstraintComponent"))
+        .expect("datatype result");
+    let ml = r
+        .results
+        .iter()
+        .find(|x| x.source_component.ends_with("MinLengthConstraintComponent"))
+        .expect("minLength result");
+    assert_eq!(dt.severity, SH_WARNING, "annotated occurrence → Warning");
+    assert_eq!(
+        ml.severity, SH_VIOLATION,
+        "un-annotated occurrence keeps the default Violation"
     );
 }

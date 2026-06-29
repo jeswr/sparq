@@ -19,9 +19,11 @@ interface TabStripProps {
 
 export function TabStrip({ tabs, activeId, onSelect, onClose }: TabStripProps) {
   return (
+    // [OPUS-4.8] sq-vw3ax (#820 redesign) — IDE tab strip with a subtle card gradient + a
+    // teal-glow underline on the active tab (the proposal's accent-lit spine).
     <div
       role="tablist"
-      className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b bg-card"
+      className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b bg-gradient-to-b from-card to-[color-mix(in_oklch,var(--card)_70%,var(--background))]"
     >
       {tabs.map((tab) => {
         const tool = toolById(tab.id);
@@ -34,9 +36,9 @@ export function TabStrip({ tabs, activeId, onSelect, onClose }: TabStripProps) {
             role="tab"
             aria-selected={isActive}
             className={cn(
-              "group flex cursor-pointer items-center gap-1.5 border-r px-3 text-xs",
+              "group relative flex cursor-pointer items-center gap-1.5 border-r px-3 text-xs",
               isActive
-                ? "border-b-2 border-b-primary bg-background font-medium"
+                ? "bg-background font-medium text-foreground after:absolute after:inset-x-2.5 after:-bottom-px after:h-0.5 after:rounded-full after:bg-gradient-to-r after:from-primary after:to-transparent after:shadow-[0_0_8px_var(--primary)]"
                 : "text-muted-foreground hover:bg-accent/40",
             )}
             onClick={() => onSelect(tab.id)}

@@ -1122,4 +1122,258 @@ mod tests {
         assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    // -----------------------------------------------------------------------
+    // [OPUS-4.8] (sq-bif) Additional correctness coverage: the fail-closed decoder
+    // validation arms (reachable only with a digest-VALID but structurally-corrupt
+    // record body — so a regression that dropped one of these checks would let a
+    // corrupt CDC record replay silently), the malformed-segment-filename fail-closed
+    // path, the poll-past-end resume edge, and the documented concurrent-poll-through-
+    // a-separate-handle invariant. Each asserts a specific behaviour, not "no panic".
+    // -----------------------------------------------------------------------
+
+    /// Builds a single valid on-disk frame around an ARBITRARY body string, with the
+    /// real FNV-1a body digest the reader recomputes — so the framing/digest layer
+    /// passes and recovery reaches `decode_record_body`, which is the layer under test.
+    fn frame_for(body: &str) -> Vec<u8> {
+        let body_bytes = body.as_bytes();
+        let digest = body_digest(body_bytes);
+        let mut out = format!("record {} {:016x}\n", body_bytes.len(), digest).into_bytes();
+        out.extend_from_slice(body_bytes);
+        out.push(b'\n');
+        out
+    }
+
+    /// Writes a fresh segment (magic+version header) carrying exactly one record with
+    /// the given digest-valid body, at the given dir. Returns nothing — the caller then
+    /// opens the dir and asserts the decoder's verdict.
+    fn write_segment_with_body(dir: &Path, body: &str) {
+        fs::create_dir_all(dir).expect("mkdir");
+        let seg = segment_path(dir, 0);
+        let mut bytes = format!("{} {}\n", SEGMENT_MAGIC, SEGMENT_FORMAT_VERSION).into_bytes();
+        bytes.extend_from_slice(&frame_for(body));
+        fs::write(&seg, &bytes).expect("write seg");
+    }
+
+    /// A record body with an UNKNOWN header key (digest valid, structure corrupt) is
+    /// rejected fail-closed on recovery — NOT mistaken for a torn tail. Guards the
+    /// `decode_record_body` unknown-key arm: a regression that ignored unknown keys
+    /// would let a forward-incompatible/garbled record decode silently.
+    #[test]
+    fn decode_rejects_unknown_header_key() {
+        let tmp = scratch("badkey");
+        let _ = fs::remove_dir_all(&tmp);
+        // `bogus` is not one of seq/generation/timestamp/inserts/deletes.
+        write_segment_with_body(
+            &tmp,
+            "seq 0\ngeneration 1\ntimestamp 5\nbogus 9\ninserts 0\ndeletes 0\n",
+        );
+        let err = err_of(ChangeLog::open(&tmp));
+        assert!(matches!(err, BackupError::Corrupt(_)), "{:?}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A required header field MISSING (here `generation`) is rejected fail-closed —
+    /// guards the `decode_record_body` missing-field arm.
+    #[test]
+    fn decode_rejects_missing_required_field() {
+        let tmp = scratch("missing");
+        let _ = fs::remove_dir_all(&tmp);
+        // No `generation` line; `deletes` (last header) terminates the header block.
+        write_segment_with_body(&tmp, "seq 0\ntimestamp 5\ninserts 0\ndeletes 0\n");
+        let err = err_of(ChangeLog::open(&tmp));
+        assert!(matches!(err, BackupError::Corrupt(_)), "{:?}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A declared insert/delete count that disagrees with the actual change lines is
+    /// rejected fail-closed — guards the count-mismatch arm. A regression dropping this
+    /// check would let a record claim N changes while carrying a different set.
+    #[test]
+    fn decode_rejects_count_mismatch() {
+        let tmp = scratch("count");
+        let _ = fs::remove_dir_all(&tmp);
+        // Declares 2 inserts but supplies only 1 change line.
+        write_segment_with_body(
+            &tmp,
+            "seq 0\ngeneration 1\ntimestamp 5\ninserts 2\ndeletes 0\n\
+             + <http://ex/s> <http://ex/p> <http://ex/o> .\n",
+        );
+        let err = err_of(ChangeLog::open(&tmp));
+        assert!(matches!(err, BackupError::Corrupt(_)), "{:?}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A change line whose tag is neither `+` nor `-` is rejected fail-closed — guards
+    /// the invalid-tag arm of `decode_record_body`.
+    #[test]
+    fn decode_rejects_invalid_change_tag() {
+        let tmp = scratch("tag");
+        let _ = fs::remove_dir_all(&tmp);
+        // `*` is not a valid op tag; declared counts are zero so only the tag is wrong.
+        write_segment_with_body(
+            &tmp,
+            "seq 0\ngeneration 1\ntimestamp 5\ninserts 0\ndeletes 0\n\
+             * <http://ex/s> <http://ex/p> <http://ex/o> .\n",
+        );
+        let err = err_of(ChangeLog::open(&tmp));
+        assert!(matches!(err, BackupError::Corrupt(_)), "{:?}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A well-formed body actually DECODES — proving the four reject tests above fail for
+    /// the right reason (the corruption), not because every body of this shape is rejected.
+    /// This is the positive control: `encode_record_body` → `decode_record_body` round-trips.
+    #[test]
+    fn decode_accepts_well_formed_body() {
+        let rec = ChangeRecord {
+            seq: 0,
+            generation: 1,
+            timestamp_unix_nanos: 5,
+            changes: vec![
+                Change {
+                    op: ChangeOp::Insert,
+                    quad: "<http://ex/s> <http://ex/p> <http://ex/o> .".to_string(),
+                },
+                Change {
+                    op: ChangeOp::Delete,
+                    quad: "<http://ex/x> <http://ex/y> <http://ex/z> .".to_string(),
+                },
+            ],
+        };
+        let tmp = scratch("wellformed");
+        let _ = fs::remove_dir_all(&tmp);
+        write_segment_with_body(&tmp, &encode_record_body(&rec));
+        let reopened = ChangeLog::open(&tmp).expect("a well-formed record must decode");
+        let all = reopened.poll(0).expect("poll");
+        assert_eq!(all, vec![rec], "round-tripped record is identical");
+        assert_eq!(all[0].insert_count(), 1);
+        assert_eq!(all[0].delete_count(), 1);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A foreign file matching the segment naming scheme but with a non-numeric seq key
+    /// (`changestream-NOTANUM.cdc`) is a fail-closed `Format` error — a misconfiguration
+    /// must never be silently ignored. Guards the `.parse()` arm of `segment_files`,
+    /// which both `open` and `poll` route through.
+    #[test]
+    fn segment_files_rejects_malformed_filename() {
+        let tmp = scratch("badname");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("mkdir");
+        let bogus = tmp.join(format!("{}NOTANUM.{}", SEGMENT_PREFIX, SEGMENT_EXT));
+        fs::write(&bogus, b"").expect("write bogus seg");
+        let err = err_of(ChangeLog::open(&tmp));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A file that does NOT match the segment naming scheme is IGNORED (not an error):
+    /// `segment_files` only fails on the on-scheme-but-unparseable case above. A README
+    /// or lockfile dropped in the log directory must not break recovery.
+    #[test]
+    fn unrelated_file_in_log_dir_is_ignored() {
+        let tmp = scratch("foreign");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        {
+            let mut log = ChangeLog::open(&tmp).expect("open");
+            log.record_commit(&g0, &g1).expect("0->1");
+        }
+        // Drop unrelated files in the directory; neither matches the segment scheme.
+        fs::write(tmp.join("README.txt"), b"notes").expect("write readme");
+        fs::write(tmp.join("changestream-0.lock"), b"").expect("wrong ext");
+        let reopened = ChangeLog::open(&tmp).expect("recovery ignores foreign files");
+        assert_eq!(
+            reopened.next_seq(),
+            1,
+            "the one real record still recovered"
+        );
+        assert_eq!(reopened.poll(0).expect("poll").len(), 1);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Polling from an offset PAST the end of the durable stream returns an empty vec
+    /// (not an error) — the steady-state of a caught-up consumer that calls
+    /// `poll(last_seen + 1)` and there is nothing new yet. A regression that errored or
+    /// panicked here would break the resume loop's idle path.
+    #[test]
+    fn poll_past_end_returns_empty() {
+        let tmp = scratch("pastend");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with(
+                "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
+                 <http://ex/c> <http://ex/p> <http://ex/d> .\n",
+            ),
+            [],
+        );
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        log.record_commit(&g0, &g1).expect("0->1");
+        log.record_commit(&g1, &g2).expect("1->2");
+        assert_eq!(log.next_seq(), 2);
+        // Exactly at the next-seq boundary: nothing yet.
+        assert!(log.poll(2).expect("poll at boundary").is_empty());
+        // Far past the end: still empty, still Ok.
+        assert!(log.poll(1_000).expect("poll far past end").is_empty());
+        // And the last existing record is still pollable (boundary is off-by-one safe).
+        assert_eq!(log.poll(1).expect("poll last").len(), 1);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// The documented concurrent-poll invariant: a SEPARATE reader handle
+    /// (`ChangeLog::open` of the same dir) observes everything a writer handle has
+    /// durably appended, and never a half-written trailing record. Here we drive it
+    /// deterministically — append through the writer handle, then poll through a second
+    /// handle opened over the same directory — which is the cross-service-feed shape the
+    /// module docs promise (a reader is a separate `open` of the same log).
+    #[test]
+    fn separate_reader_handle_observes_writer_appends() {
+        let tmp = scratch("twohandle");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let mut prev = ring.current();
+        let mut writer = ChangeLog::open(&tmp).expect("writer handle");
+        // A reader handle opened up-front over the same directory.
+        let reader = ChangeLog::open(&tmp).expect("reader handle");
+        assert!(reader.poll(0).expect("empty so far").is_empty());
+
+        for i in 0..3u64 {
+            let next = ring.publish(
+                graph_with(&format!(
+                    "<http://ex/s{}> <http://ex/p> <http://ex/o{}> .\n",
+                    i, i
+                )),
+                [],
+            );
+            writer.record_commit(&prev, &next).expect("append");
+            prev = next;
+            // The SEPARATE reader handle sees each durably-appended record immediately
+            // (poll re-reads the segments from disk — it does not share in-memory state).
+            let seen = reader.poll(0).expect("reader poll");
+            assert_eq!(
+                seen.len(),
+                (i + 1) as usize,
+                "reader handle must see every durable append"
+            );
+            assert_eq!(seen[i as usize].seq, i);
+            assert_eq!(seen[i as usize].generation, i + 1);
+        }
+        // Resume semantics on the reader handle: poll from a mid-offset yields the tail.
+        let tail = reader.poll(1).expect("reader resume");
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].seq, 1);
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

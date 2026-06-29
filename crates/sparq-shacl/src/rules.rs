@@ -70,8 +70,26 @@ use crate::model::{sh, ShapesModel};
 use crate::path::Path;
 use crate::view::GraphView;
 use oxrdf::{NamedNode, NamedOrBlankNode, Term, Triple};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::Graph;
+
+/// [OPUS-4.8] (sq-mue75) The SHACL 1.2 node-expression namespace. The SHACL-AF
+/// public API the crate's parser was originally written against spells the
+/// node-expression operators in the `sh:` namespace, but the W3C SHACL 1.2
+/// node-expression vocabulary (and its conformance suite) uses `shnex:`. The
+/// blank-node parser below accepts BOTH spellings of the shared algebra so the
+/// real evaluation path drives the conformance suite directly (no harness-side
+/// re-implementation). The function-operator registry (`func.rs`) already does
+/// this via its own `op_object`.
+const SHNEX: &str = "http://www.w3.org/ns/shacl-node-expr#";
+
+/// The single object of `subject <ns#local>`, trying the SHACL 1.2 `shnex:`
+/// spelling first then the SHACL-AF `sh:` spelling (the two share local names for
+/// the shared node-expression algebra).
+fn ne_object(g: &GraphView, subject: &Term, local: &str) -> Option<Term> {
+    g.object(subject, &format!("{SHNEX}{local}"))
+        .or_else(|| g.object(subject, &sh(local)))
+}
 
 // [OPUS-4.8] (sq-mk9n) The SHACL-function registry + the function-expression form
 // ([`NodeExpr::Func`]). A child module so its (sizeable) operator table stays out
@@ -155,27 +173,36 @@ pub(crate) enum NodeExpr {
     List(Vec<NodeExpr>),
 }
 
+/// [OPUS-4.8] (sq-u5rxj) A caller-supplied node-expression VARIABLE SCOPE: a map
+/// of variable name → bound node set, consulted by `shnex:var "<name>"`
+/// (`func::Op::Var`). `"focusNode"` is always the focus node and need not appear
+/// here; any other name resolves against this scope (empty when absent). The W3C
+/// node-expr suite injects `sht:scope-<name>` bindings the harness threads in.
+pub type Scope = FxHashMap<String, Vec<Term>>;
+
 impl NodeExpr {
     /// The node-set this expression evaluates to for `focus` over `data`. Filter
     /// shape expressions need the parsed `model` (to run the constraint validator
     /// for conformance) and the owning `Graph` (the validator is graph-, not
-    /// view-, oriented) — both threaded through.
+    /// view-, oriented) — both threaded through. `scope` carries any
+    /// caller-supplied `shnex:var` bindings (besides `"focusNode"`).
     pub(crate) fn eval(
         &self,
         graph: &Graph,
         view: &GraphView,
         model: &ShapesModel,
         focus: &Term,
+        scope: &Scope,
     ) -> Vec<Term> {
         match self {
             NodeExpr::This => vec![focus.clone()],
             NodeExpr::Constant(t) => vec![t.clone()],
             NodeExpr::Path { nodes, path } => {
-                let starts = nodes.eval(graph, view, model, focus);
+                let starts = nodes.eval(graph, view, model, focus, scope);
                 crate::view::dedup(starts.iter().flat_map(|s| path.values(view, s)))
             }
             NodeExpr::FilterShape { nodes, shape } => nodes
-                .eval(graph, view, model, focus)
+                .eval(graph, view, model, focus, scope)
                 .into_iter()
                 .filter(|n| crate::eval::conforms_node(graph, model, *shape, n))
                 .collect(),
@@ -186,10 +213,12 @@ impl NodeExpr {
                 let Some(first) = iter.next() else {
                     return Vec::new();
                 };
-                let mut acc = crate::view::dedup(first.eval(graph, view, model, focus));
+                let mut acc = crate::view::dedup(first.eval(graph, view, model, focus, scope));
                 for m in iter {
-                    let other: FxHashSet<Term> =
-                        m.eval(graph, view, model, focus).into_iter().collect();
+                    let other: FxHashSet<Term> = m
+                        .eval(graph, view, model, focus, scope)
+                        .into_iter()
+                        .collect();
                     acc.retain(|t| other.contains(t));
                     if acc.is_empty() {
                         break;
@@ -200,12 +229,12 @@ impl NodeExpr {
             NodeExpr::Union(members) => crate::view::dedup(
                 members
                     .iter()
-                    .flat_map(|m| m.eval(graph, view, model, focus)),
+                    .flat_map(|m| m.eval(graph, view, model, focus, scope)),
             ),
-            NodeExpr::Func(f) => f.eval(graph, view, model, focus),
+            NodeExpr::Func(f) => f.eval(graph, view, model, focus, scope),
             NodeExpr::List(members) => members
                 .iter()
-                .flat_map(|m| m.eval(graph, view, model, focus))
+                .flat_map(|m| m.eval(graph, view, model, focus, scope))
                 .collect(),
         }
     }
@@ -376,9 +405,10 @@ fn parse_blank_node_expr(g: &GraphView, model: &ShapesModel, node: &Term) -> Opt
     if g.predicate_objects(node).is_empty() {
         return Some(NodeExpr::List(Vec::new()));
     }
-    // Intersection / union: a SHACL list of member node expressions.
+    // Intersection / union: a SHACL list of member node expressions
+    // (`shnex:`/`sh:` spelling, sq-mue75).
     for (pred, is_union) in [("intersection", false), ("union", true)] {
-        if let Some(list_head) = g.object(node, &sh(pred)) {
+        if let Some(list_head) = ne_object(g, node, pred) {
             let members: Vec<NodeExpr> = g
                 .list(&list_head)
                 .iter()
@@ -394,9 +424,10 @@ fn parse_blank_node_expr(g: &GraphView, model: &ShapesModel, node: &Term) -> Opt
             });
         }
     }
-    // Filter shape: [ sh:filterShape S ; sh:nodes N ]. The shape must be parsed
-    // into the model (typed sh:NodeShape / referenced) — exactly as sh:condition.
-    if let Some(shape_term) = g.object(node, &sh("filterShape")) {
+    // Filter shape: [ shnex:filterShape S ; shnex:nodes N ] (or `sh:` spelling).
+    // The shape must be parsed into the model (typed sh:NodeShape / referenced) —
+    // exactly as sh:condition.
+    if let Some(shape_term) = ne_object(g, node, "filterShape") {
         let shape = model.by_node(&shape_term)?;
         let nodes = parse_nodes_input(g, model, node)?;
         return Some(NodeExpr::FilterShape {
@@ -404,8 +435,10 @@ fn parse_blank_node_expr(g: &GraphView, model: &ShapesModel, node: &Term) -> Opt
             shape,
         });
     }
-    // Path: [ sh:path P ; sh:nodes N? ] (sh:nodes defaults to sh:this).
-    if let Some(p) = g.object(node, &sh("path")) {
+    // Path-values: the SHACL 1.2 `[ shnex:pathValues P ; shnex:focusNode N? ]` and
+    // the SHACL-AF `[ sh:path P ; sh:nodes N? ]` both evaluate a property path P
+    // from a start-node expression (defaulting to `sh:this`) (sq-mue75).
+    if let Some(p) = ne_object(g, node, "pathValues").or_else(|| g.object(node, &sh("path"))) {
         let path = Path::parse(g, &p).ok()?;
         let nodes = parse_nodes_input(g, model, node)?;
         return Some(NodeExpr::Path {
@@ -419,10 +452,12 @@ fn parse_blank_node_expr(g: &GraphView, model: &ShapesModel, node: &Term) -> Opt
     func::parse(g, model, node).map(|f| NodeExpr::Func(Box::new(f)))
 }
 
-/// The `sh:nodes` input node expression of a path / filter expression, defaulting
-/// to the focus-node expression (`sh:this`) when `sh:nodes` is absent.
+/// The input/start node expression of a path / filter expression, defaulting to
+/// the focus-node expression (`sh:this`) when absent. Accepts the SHACL 1.2
+/// `shnex:nodes` (filter input) / `shnex:focusNode` (path start) and the SHACL-AF
+/// `sh:nodes` spellings (sq-mue75).
 fn parse_nodes_input(g: &GraphView, model: &ShapesModel, node: &Term) -> Option<NodeExpr> {
-    match g.object(node, &sh("nodes")) {
+    match ne_object(g, node, "nodes").or_else(|| ne_object(g, node, "focusNode")) {
         Some(n) => parse_node_expr(g, model, &n),
         None => Some(NodeExpr::This),
     }
@@ -534,27 +569,51 @@ pub fn expand(data: &Graph, shapes: &Graph) -> Graph {
 /// not declared in the shapes graph) — the caller can treat that as "skip".
 ///
 /// This is the production public seam onto the implemented algebra
-/// (focus / constant / path-with-`sh:nodes` / `sh:filterShape` /
-/// `sh:intersection` / `sh:union`): it is the same `parse_node_expr` →
-/// `NodeExpr::eval` machinery that backs `apply_rules`' `sh:values` rules, and is
-/// exercised by this crate's `#[cfg(test)]` unit tests (via `apply_rules` for the
-/// production `sh:values` rule path, and directly by the `eval_node_expression_seam`
-/// test). The W3C conformance harness (`tests/w3c_node_expr.rs`) does **not** call
-/// this function: it validates a *parallel re-implementation* of the same algebra
-/// in its own `Evaluator`, and touches the crate only through `conforms` / `Path`.
-/// `shapes` is parsed fresh; for repeated evaluation parse a model once and use the
-/// engine entry points.
+/// (focus / constant / path-with-`sh:nodes` / filter-shape / intersection /
+/// union / the function operators): it is the same `parse_node_expr` →
+/// `NodeExpr::eval` machinery that backs `apply_rules`' `sh:values` rules and the
+/// `sh:expression` / `sh:nodeByExpression` constraints. Both the SHACL 1.2
+/// `shnex:` and the SHACL-AF `sh:` spellings of the shared algebra are accepted.
+///
+/// [OPUS-4.8] (sq-mue75) The W3C conformance harness (`tests/w3c_node_expr.rs`)
+/// now drives THIS function for real (it previously re-implemented the algebra
+/// in-harness — a fidelity gap). Inline anonymous filter shapes the expression
+/// references (`sh:filterShape` / `shnex:findFirst`/`matchAll`/`nodesMatching`
+/// `[ … ]`) are registered into the model before parsing so they resolve at eval
+/// time even when they are not target-bearing roots. `shapes` is parsed fresh;
+/// for repeated evaluation parse a model once and use the engine entry points.
 pub fn eval_node_expression(
     data: &Graph,
     shapes: &Graph,
     expr: &Term,
     focus: &Term,
 ) -> Option<Vec<Term>> {
-    let model = ShapesModel::parse(shapes);
+    eval_node_expression_with_scope(data, shapes, expr, focus, &Scope::default())
+}
+
+/// [OPUS-4.8] (sq-u5rxj) [`eval_node_expression`] with a caller-supplied node
+/// expression VARIABLE SCOPE: `scope` maps variable names to bound node sets that
+/// a `shnex:var "<name>"` (other than `"focusNode"`) resolves against. The W3C
+/// node-expr suite supplies these via its `sht:scope-<name>` action bindings; the
+/// conformance harness builds a [`Scope`] from them and calls this. With an empty
+/// scope this is identical to [`eval_node_expression`] (so the plain seam is a
+/// thin wrapper).
+pub fn eval_node_expression_with_scope(
+    data: &Graph,
+    shapes: &Graph,
+    expr: &Term,
+    focus: &Term,
+    scope: &Scope,
+) -> Option<Vec<Term>> {
+    let mut model = ShapesModel::parse(shapes);
+    // Register inline filter/function shapes the expression references so a
+    // `findFirst`/`matchAll`/`nodesMatching`/`filterShape` over an anonymous
+    // `[ … ]` shape resolves (mirrors the `sh:expression` constraint parse path).
+    model.register_node_expr_shapes(shapes, expr);
     let g = GraphView::new(shapes);
     let parsed = parse_node_expr(&g, &model, expr)?;
     let view = GraphView::new(data);
-    Some(parsed.eval(data, &view, &model, focus))
+    Some(parsed.eval(data, &view, &model, focus, scope))
 }
 
 /// [OPUS-4.8] (sq-mk9n) Evaluates a parsed node expression `expr` against a value
@@ -568,7 +627,7 @@ pub(crate) fn eval_parsed_expr(
     value: &Term,
 ) -> Vec<Term> {
     let view = GraphView::new(graph);
-    expr.eval(graph, &view, model, value)
+    expr.eval(graph, &view, model, value, &Scope::default())
 }
 
 /// True iff a node-expression result set is exactly `{ xsd:boolean "true" }` — the
@@ -628,9 +687,10 @@ fn fire_rule(
             predicate,
             object,
         } => {
-            let subjects = subject.eval(augmented, view, model, focus);
-            let predicates = predicate.eval(augmented, view, model, focus);
-            let objects = object.eval(augmented, view, model, focus);
+            let scope = Scope::default();
+            let subjects = subject.eval(augmented, view, model, focus, &scope);
+            let predicates = predicate.eval(augmented, view, model, focus, &scope);
+            let objects = object.eval(augmented, view, model, focus, &scope);
             let mut out = Vec::new();
             // The cartesian product S × P × O; only well-typed RDF triples are
             // emitted (subject IRI/blank, predicate IRI), the rest are dropped.
@@ -664,7 +724,7 @@ fn fire_rule(
                 return Vec::new();
             };
             values
-                .eval(augmented, view, model, focus)
+                .eval(augmented, view, model, focus, &Scope::default())
                 .into_iter()
                 .map(|o| Triple {
                     subject: subj.clone(),
@@ -721,6 +781,24 @@ fn focus_nodes(view: &GraphView, model: &ShapesModel, sid: usize) -> Vec<Term> {
             Target::Class(c) | Target::ImplicitClass(c) => out.extend(view.instances_of(c)),
             Target::SubjectsOf(p) => out.extend(view.subjects_of(p)),
             Target::ObjectsOf(p) => out.extend(view.objects_of(p)),
+            // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 SPARQL-valued `sh:targetNode`: the
+            // node expression SELECTs the focus nodes (no `$this` to bind).
+            Target::Sparql(idx) => out.extend(model.select_exprs[*idx].eval_target(view.graph())),
+            // [OPUS-4.8] (sq-rnkdh) SHACL 1.2 `sh:targetWhere`: every data-graph node
+            // conforming to the inline shape. Conformance is checked through the
+            // full validator (`conforms_node`), mirroring `sh:condition` gating.
+            Target::Where(inner) => {
+                let mut seen: FxHashSet<Term> = FxHashSet::default();
+                for [s, _, o] in view.triples(None, None, None) {
+                    for n in [s, o] {
+                        if seen.insert(n.clone())
+                            && crate::eval::conforms_node(view.graph(), model, *inner, &n)
+                        {
+                            out.push(n);
+                        }
+                    }
+                }
+            }
         }
     }
     crate::view::dedup(out)
@@ -1527,5 +1605,34 @@ mod tests {
             eval_node_expression(&data, &shapes, &fn_expr, &focus).is_none(),
             "a function expression is not a supported node-expression form"
         );
+    }
+
+    /// [OPUS-4.8] (sq-u5rxj) A `shnex:var "<name>"` resolves a caller-supplied
+    /// scope binding (other than `"focusNode"`); an absent name is the empty set.
+    #[test]
+    fn node_expr_var_resolves_caller_scope() {
+        use crate::view::GraphView;
+        let data = g("");
+        let shapes = g(r#"
+            ex:Decl ex:e [ <http://www.w3.org/ns/shacl-node-expr#var> "bound" ] ;
+                    ex:u [ <http://www.w3.org/ns/shacl-node-expr#var> "missing" ] .
+        "#);
+        let view = GraphView::new(&shapes);
+        let decl = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://example.org/Decl"));
+        let bound_expr = view.object(&decl, "http://example.org/e").unwrap();
+        let unbound_expr = view.object(&decl, "http://example.org/u").unwrap();
+        let focus = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://example.org/x"));
+
+        let mut scope = Scope::default();
+        let val = Term::Literal(oxrdf::Literal::new_simple_literal("hit"));
+        scope.insert("bound".to_string(), vec![val.clone()]);
+
+        // The bound var resolves to the scope value; the unbound var is empty.
+        let got = eval_node_expression_with_scope(&data, &shapes, &bound_expr, &focus, &scope)
+            .expect("var expression parses");
+        assert_eq!(got, vec![val]);
+        let none = eval_node_expression_with_scope(&data, &shapes, &unbound_expr, &focus, &scope)
+            .expect("var expression parses");
+        assert!(none.is_empty(), "an unbound var resolves to the empty set");
     }
 }

@@ -11,6 +11,7 @@
 // libraries (webkit2gtk / WebView2 / WKWebView) and is validated in CI (gui.yml), not
 // necessarily locally. The engine command layer itself is unit-tested natively (engine.rs).
 
+mod disk;
 mod engine;
 
 use engine::EngineState;
@@ -48,6 +49,10 @@ pub fn run() {
             engine::count,
             engine::ask,
             engine::store_size,
+            // [OPUS-4.8] sq-cno90 (#820 follow-up) — the precise native disk-usage probe: stat()s
+            // the resolved $APPLOCALDATA/workspaces tree and returns its REAL byte total, so the
+            // status bar can show the OS-reported store footprint instead of the snapshot estimate.
+            disk::disk_usage,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the sparq Tauri application");
