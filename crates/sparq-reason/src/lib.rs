@@ -5,6 +5,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
 mod incremental;
+#[cfg(feature = "substrate-join")]
+pub(crate) mod substrate_join;
 #[cfg(feature = "d-entail")]
 pub mod dtype;
 #[cfg(feature = "explain")]

@@ -3874,7 +3874,9 @@ dependencies = [
  "rayon",
  "regex",
  "rustc-hash 2.1.2",
+ "smallvec",
  "sparq-core",
+ "sparq-substrate",
 ]
 
 [[package]]
