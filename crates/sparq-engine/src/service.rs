@@ -219,6 +219,126 @@ pub fn with_service_bound_join_block_size<R>(n: usize, f: impl FnOnce() -> R) ->
     f()
 }
 
+// ---------------------------------------------------------------------------
+// Per-query remote-request cap for high-cardinality `SERVICE ?ep` [OPUS-4.8] (sq-b93pv)
+// ---------------------------------------------------------------------------
+//
+// A `SERVICE ?ep { P }` whose endpoint variable binds to MANY distinct endpoint IRIs
+// fans out into one remote dispatch per distinct endpoint (see
+// `exec::bound_join_variable_endpoint`). With nothing bounding that fan-out, an
+// attacker-shaped query — or simply a large left relation whose `?ep` column is highly
+// distinct — turns a single client request into an unbounded burst of outbound HTTP
+// calls from the engine host (threat-model B4, the SSRF/egress family). This is the
+// amplification dimension the per-request egress allowlist does NOT cover: every dialled
+// host may be individually permitted yet the COUNT still runaway.
+//
+// The cap is an OPT-IN ceiling on the number of distinct remote endpoints a single
+// `SERVICE ?ep` evaluation may dispatch to. It is enforced PRE-HTTP — at plan/eval
+// time, once the distinct-endpoint set is known and BEFORE the first socket is opened —
+// so it BOUNDS the runaway rather than cancelling it after the requests have already
+// gone out. Exceeding it is a hard, typed refusal (the [`SERVICE_REMOTE_CAP_MARKER`]
+// substring), fail-closed: it is NOT swallowed by `SILENT`, because `SILENT` means "a
+// remote endpoint being unreachable/broken must not fail the query", not "my own
+// resource policy refusing the query may be masked as success". This mirrors the
+// `"query budget exceeded"` guard, which `SILENT` likewise does not swallow.
+//
+// DEFAULT is OFF (no cap): a normal `SERVICE` query — concrete endpoint, or a variable
+// endpoint with a handful of distinct values — is entirely unchanged. The cap only
+// exists once an embedder/server opts in via [`with_service_remote_request_cap`] or the
+// `SPARQ_SERVICE_REMOTE_CAP` env var.
+
+/// Stable marker substring embedded in the engine error string when a `SERVICE ?ep`
+/// query is refused for exceeding the per-query remote-request cap. [OPUS-4.8] (sq-b93pv)
+///
+/// Mirrors [`SERVICE_EGRESS_REFUSED_MARKER`]: a network-exposed host (`sparq-server`)
+/// can `contains()`-classify the refusal as a deliberate resource-policy decision (an
+/// honest `429`/`403`-style status) rather than a server fault, and it is deliberately
+/// generic (it names no endpoint) so it is safe to surface to the client.
+pub const SERVICE_REMOTE_CAP_MARKER: &str = "SERVICE remote-request cap exceeded";
+
+#[cfg(feature = "service")]
+mod remote_cap {
+    use std::cell::Cell;
+
+    thread_local! {
+        // `None` => no scope override; consult the env var, else the built-in (OFF).
+        static OVERRIDE: Cell<Option<Option<usize>>> = const { Cell::new(None) };
+    }
+
+    /// RAII override of the remote-request cap for the current scope.
+    pub(crate) struct Guard(Option<Option<usize>>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OVERRIDE.with(|o| o.set(self.0.take()));
+        }
+    }
+
+    /// Installs `cap` (`Some(n)` = cap at `n`; `None` = explicitly UNCAPPED for this
+    /// scope, overriding any env var) and returns a guard that restores the previous
+    /// override on drop/unwind.
+    pub(crate) fn install(cap: Option<usize>) -> Guard {
+        Guard(OVERRIDE.with(|o| o.replace(Some(cap))))
+    }
+
+    /// The active cap: an installed scope override wins (including an explicit `None`
+    /// "uncapped"); otherwise the `SPARQ_SERVICE_REMOTE_CAP` env var; otherwise OFF
+    /// (`None` = no cap). Off the hot path — called once per `SERVICE ?ep` evaluation.
+    pub(crate) fn current() -> Option<usize> {
+        if let Some(scope) = OVERRIDE.with(|o| o.get()) {
+            return scope;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(s) = std::env::var("SPARQ_SERVICE_REMOTE_CAP") {
+            if let Ok(n) = s.trim().parse::<usize>() {
+                return Some(n);
+            }
+        }
+        None
+    }
+}
+
+/// The per-query SERVICE remote-request cap in force for the current scope, or `None`
+/// when no cap is active (the default). [OPUS-4.8] (sq-b93pv)
+#[cfg(feature = "service")]
+pub(crate) fn remote_request_cap() -> Option<usize> {
+    remote_cap::current()
+}
+
+/// Runs `f` with a ceiling of `n` distinct remote endpoints per `SERVICE ?ep`
+/// evaluation. [OPUS-4.8] (sq-b93pv)
+///
+/// A `SERVICE ?ep { P }` whose endpoint variable binds to MANY distinct endpoint IRIs
+/// dispatches one remote bind-join per distinct endpoint. This OPT-IN cap bounds that
+/// fan-out: if the number of distinct endpoints the query would dial exceeds `n`, the
+/// query is REJECTED with a typed error (carrying [`SERVICE_REMOTE_CAP_MARKER`]) BEFORE
+/// any HTTP request is sent — a true pre-dispatch bound, not a post-hoc cancellation.
+///
+/// The cap is **not** swallowed by `SERVICE SILENT`: `SILENT` masks an endpoint being
+/// unreachable, not a deliberate resource-policy refusal (the same stance the query
+/// budget takes). It is also a no-op for a concrete-IRI `SERVICE <…>` (a single
+/// endpoint) and for a variable endpoint that binds to at most `n` distinct IRIs, so a
+/// normal federated query is unaffected.
+///
+/// The default (no enclosing scope and no `SPARQ_SERVICE_REMOTE_CAP` env var) is
+/// UNCAPPED — the behaviour every existing `SERVICE` query already had. Passing `n = 0`
+/// caps at zero, which refuses any `SERVICE ?ep` that resolves to one or more
+/// endpoints. The override is thread-local and restored on return/unwind, mirroring
+/// [`with_service_egress_allow`].
+///
+/// ```no_run
+/// # #[cfg(feature = "service")] {
+/// // Allow a high-cardinality SERVICE ?ep to dial at most 8 distinct endpoints.
+/// sparq_engine::with_service_remote_request_cap(8, || {
+///     // ... run a federated query containing `SERVICE ?ep { ... }`
+/// });
+/// # }
+/// ```
+#[cfg(feature = "service")]
+pub fn with_service_remote_request_cap<R>(n: usize, f: impl FnOnce() -> R) -> R {
+    let _guard = remote_cap::install(Some(n));
+    f()
+}
+
 /// Renders a `VALUES` block that binds `vars` to each tuple in `tuples`, in the
 /// SPARQL 1.1 syntax accepted inside a group graph pattern. [OPUS-4.8] (sq-sjkj)
 ///
