@@ -4021,6 +4021,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-substrate"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "smallvec",
+ "sparq-core",
+]
+
+[[package]]
 name = "sparq-terse"
 version = "0.1.0"
 dependencies = [

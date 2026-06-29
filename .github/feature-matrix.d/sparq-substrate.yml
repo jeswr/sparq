@@ -1,0 +1,23 @@
+# Feature-matrix fragment for `sparq-substrate`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py.
+# Adding a leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs
+# for DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+
+# [OPUS-4.8] sq-fmprw (epic sq-qonbz): the shared-eval-substrate KEYSTONE crate. Its
+# entire surface (the `rows` id-tuple vocabulary + the `numeric` XSD value tower) lives
+# behind DEFAULT-OFF features, so the workspace `cargo {build,test,clippy} --workspace`
+# lane (which passes NO `--features`) compiles NONE of it and the feature-ON state would
+# otherwise be UNgated. This single leg builds + tests + `clippy --all-targets -D warnings`
+# the MAXIMAL feature set (`rows,numeric` — the modules' unit tests, exercising the real
+# row-inline-width + literal→tower classification paths). The DEFAULT (feature-OFF) build
+# is covered by the workspace lane.
+- name: "sparq-substrate (rows, numeric — shared id-tuple + numeric-tower scaffold)"
+  crate: "sparq-substrate"
+  features: "rows,numeric"
+  test: true
