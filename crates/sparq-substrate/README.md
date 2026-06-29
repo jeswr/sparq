@@ -4,20 +4,22 @@
 reasoners — an **opt-in**, **leaf** crate (epic sq-qonbz) that depends **only** on
 `sparq-core`, never on `sparq-engine`. It hosts the parts of evaluation that are genuinely
 common to both the query engine and every reasoner: the id-tuple **row/key** vocabulary, the
-XSD **numeric value tower**, and the four **join kernels**. Placing them in a leaf crate lets
-both consumers reach them with **no dependency cycle**, while keeping `sparq-core` and the
-lean wasm bundle untouched.
+XSD **numeric value tower**, the four **join kernels**, and the SPARQL **term total order**.
+Placing them in a leaf crate lets both consumers reach them with **no dependency cycle**, while
+keeping `sparq-core` and the lean wasm bundle untouched.
 
-> **Status (sq-hknqs — Phase 3 of the epic).** The four id-tuple **join kernels** — sorted
-> merge-join, radix-partitioned hash-join, index-nested-loop bind-join and leapfrog trie-join
-> (WCOJ) — have now **moved here** from `sparq-engine`, behind a generic `JoinKeys` descriptor
-> + a generic `Budget` cooperative-cancel hook so the engine AND a future reasoner drive the
-> same probe loop each supplying their own key projection **monomorphically** — no `Box<dyn>`.
-> Phase 2 (sq-ev41x) moved the **numeric value tower** the same way. Both are behaviour-neutral
-> code-moves (the W3C SPARQL conformance floor is bit-identical; the join/scan/BGP micro-benches
-> are within noise). Still pending: the engine's `compare_values` total order, which moves with
-> the engine's `Value` enum (not here). See `research/shared-eval-substrate.md` for the full
-> extraction plan and the perf-neutrality proof.
+> **Status (sq-vezew — Phase 4 of the epic).** The SPARQL **term total order** —
+> `compare::compare_terms` (the engine's `compare_values`: error/unbound < blank < IRI <
+> literal < triple, numeric-aware + strict typed/temporal + string fallback + recursive
+> triple-term order) — has now **moved here** from `sparq-engine`, generalised over a tiny
+> `CompareTerm` trait the consumer implements for its term type, so the engine AND a future
+> reasoner share one ordering body **monomorphically** — no `Box<dyn>`. Phase 3 (sq-hknqs)
+> moved the four **join kernels** (behind a generic `JoinKeys` descriptor + a `Budget` hook)
+> and Phase 2 (sq-ev41x) the **numeric value tower** the same way. All are behaviour-neutral
+> code-moves (the W3C SPARQL conformance floor is bit-identical; the join/scan/BGP/sort
+> micro-benches are within noise). The engine's `Value` enum stays engine-resident — it also
+> drives the relational operators — and is surfaced to the ordering algorithm through the
+> trait. See `research/shared-eval-substrate.md` for the extraction plan and perf-neutrality proof.
 
 ## 🚀 Quickstart
 
@@ -25,7 +27,7 @@ Everything is behind **default-off** features — opt into exactly the slice you
 
 ```toml
 [dependencies]
-sparq-substrate = { version = "0.1.0", features = ["rows", "numeric", "join"] }
+sparq-substrate = { version = "0.1.0", features = ["rows", "numeric", "join", "compare"] }
 ```
 
 ```rust,ignore
@@ -62,6 +64,12 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   `any_unbound` solution-compatibility helpers. Each is generic over a `JoinKeys` column
   descriptor and a `Budget` cooperative-cancel hook (both monomorphised, never a trait object).
   Pulls only `rustc-hash` (the hash join's `FxHashMap`) when enabled; implies `rows`.
+- **`compare`** — the SPARQL **term total order** `compare_terms` (the engine's `compare_values`):
+  the class precedence error/unbound < blank < IRI < literal < triple, the numeric-aware /
+  strict typed-temporal / lexical-string arms within the literal class, and the recursive
+  component-wise triple-term order. Generic over a tiny `CompareTerm` trait (`term_class` /
+  `value_str` / `as_f64` / `strict_cmp` / `triple_parts`) the consumer implements for its own
+  term type — a **monomorphisation seam**, never a `dyn` object. Pure-`std`: links nothing new.
 
 All features are **off by default**. The crate is `forbid(unsafe_code)`.
 

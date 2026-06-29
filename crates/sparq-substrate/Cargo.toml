@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Opt-in shared zero-overhead evaluation substrate for the sparq SPARQL engine and the reasoners: the id-tuple row/key/posting vocabulary and the XSD numeric value tower (Num/Dec/as_numeric + arithmetic), monomorphic over Id=u32 with no dynamic dispatch on the hot path. The join kernels (Phase 3) move here next."
+description = "Opt-in shared zero-overhead evaluation substrate for the sparq SPARQL engine and the reasoners: the id-tuple row/key/posting vocabulary, the XSD numeric value tower (Num/Dec/as_numeric + arithmetic), the four id-tuple join kernels (behind a generic JoinKeys descriptor) and the SPARQL term total order (compare_terms, behind a generic CompareTerm trait), monomorphic over Id=u32 with no dynamic dispatch on the hot path."
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -60,6 +60,17 @@ numeric = ["dep:oxrdf"]
 # aliases) and pulls `rustc-hash` (the FxHashMap the hash join builds) ONLY when enabled — the
 # lean default build links neither.
 join = ["rows", "dep:rustc-hash"]
+# [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): the SPARQL term TOTAL ORDER —
+# `compare::compare_terms` (the engine's `compare_values`: error < blank < IRI < literal <
+# triple, numeric-aware + strict typed/temporal + string fallback + recursive triple-term
+# order) — moved here from `sparq-engine::exec`, generalised over a tiny `CompareTerm` trait the
+# engine implements for its `Value` (research record §2.1, §2.3). The ALGORITHM is generic (no
+# `Box<dyn>` / `&dyn` on the compare path); the engine's `Value` / `LitKind` /
+# `value_compare_strict` stay engine-private (they also drive the relational operators) and are
+# surfaced through the trait. Pure-`std` (it touches NO `oxrdf`/temporal type directly — those
+# stay behind the trait the consumer implements), so this feature links NOTHING new; the lean
+# default build compiles none of it.
+compare = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

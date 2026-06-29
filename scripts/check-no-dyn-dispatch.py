@@ -53,6 +53,11 @@ SUBSTRATE_HOT_PATHS = [
     "crates/sparq-substrate/src/join.rs",
     "crates/sparq-substrate/src/numeric.rs",
     "crates/sparq-substrate/src/rows.rs",
+    # [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): the SPARQL term total order
+    # (`compare::compare_terms`, generic over the `CompareTerm` trait) — an ORDER BY / sort /
+    # range-filter hot path, so it joins the guarded set: the algorithm must stay monomorphic
+    # (a `dyn CompareTerm` on the per-comparison loop would defeat the zero-overhead seam).
+    "crates/sparq-substrate/src/compare.rs",
     "crates/sparq-substrate/src/lib.rs",
 ]
 
