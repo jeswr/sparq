@@ -59,7 +59,16 @@ use sparq_geo::GeoError;
 /// (sq-9h1r). A ratchet: it may only RISE. Set to the number of assertions in
 /// [`FIXTURES`] (expanded across both operand orders) at commit time; raising it
 /// is a deliberate act when fixtures are added.
-const OGC_RATCHET_FLOOR: usize = 119;
+///
+/// [OPUS-4.8] sq-cbe4t — raised 119 -> 158: 39 net-new, hand-derived DE-9IM
+/// assertions deepen the under-covered axes (order-sensitive relations in their
+/// REVERSE direction so the spec's symmetry/asymmetry is pinned, MULTI* operands,
+/// and the contains-view of the point/line/polygon inclusion rows). Each new
+/// fixture's expected boolean is the OGC matrix truth value AND the value the
+/// engine GENUINELY returns — none is a faked pass. The mirrored central
+/// scoreboard floor (`crates/sparq-conformance/src/scoreboard.rs`) and the
+/// floor-sync guard move in the same commit.
+const OGC_RATCHET_FLOOR: usize = 158;
 
 /// One topology relation under test, named by its `geof:` local name and bound
 /// to its lexical-level implementation.
@@ -261,7 +270,89 @@ const FIXTURES: &[Fixture] = &[
     fx(CORNER_TANGENT, BIG, "rcc8tppi", false),
     fx(BIG, CORNER_TANGENT, "rcc8tppi", true),
     fx(BIG, CORNER_TANGENT, "rcc8tpp", false),
+    // ========================================================================
+    // [OPUS-4.8] sq-cbe4t — fuller R4-R6/R21-R24 coverage. Each entry's expected
+    // boolean is hand-derived from the relation's DE-9IM matrix per the OGC
+    // GeoSPARQL specification, and is net-new (a distinct operand pair / order /
+    // geometry shape) over the rows above. The additions deepen three under-
+    // covered axes: (1) the ORDER-SENSITIVE relations in their reverse direction
+    // (sf/eh/rcc8 are tested symmetrically here so the spec's symmetry/asymmetry
+    // is pinned), (2) MULTI* operands (MultiPoint/MultiPolygon, exercising the
+    // collection topology the metadata sf profile defines), and (3) the
+    // symmetric relations from the opposite operand.
+    // ---- sf: reverse direction of the existing polygon pairs ----------------
+    // Inclusion is asymmetric: BIG ⊇ SMALL is contains, so SMALL ⊉ BIG; the
+    // remaining sf predicates are the same as the forward row (lines 141-150).
+    fx(BIG, SMALL_INSIDE, "sfIntersects", true),
+    fx(BIG, SMALL_INSIDE, "sfDisjoint", false),
+    fx(BIG, SMALL_INSIDE, "sfEquals", false),
+    fx(BIG, SMALL_INSIDE, "sfTouches", false),
+    fx(BIG, SMALL_INSIDE, "sfOverlaps", false),
+    // sfDisjoint / sfTouches / sfOverlaps are SYMMETRIC — pin the reverse order.
+    fx(FAR, BIG, "sfDisjoint", true),
+    fx(EDGE_ADJACENT, BIG, "sfTouches", true),
+    fx(OVERLAP, BIG, "sfOverlaps", true),
+    fx(OVERLAP, BIG, "sfIntersects", true),
+    // sfCrosses is symmetric — polygon-vs-line crossing, reverse order.
+    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "LINESTRING(-1 1, 3 1)", "sfCrosses", true),
+    // Distinct points are disjoint either way (sfDisjoint symmetric).
+    fx("POINT(3 5)", "POINT(3 4)", "sfDisjoint", true),
+    // ---- sf: point / line / polygon, the CONTAINS (reverse-of-within) view --
+    // A boundary point: polygon touches it but does not contain it (interior rule).
+    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "POINT(0 1)", "sfTouches", true),
+    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "POINT(0 1)", "sfContains", false),
+    // An interior point: the polygon contains it (reverse of point sfWithin polygon).
+    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "POINT(1 1)", "sfContains", true),
+    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "POINT(1 1)", "sfWithin", false),
+    // A line strictly interior: the polygon contains it.
+    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "LINESTRING(0.5 0.5, 1.5 1.5)", "sfContains", true),
+    // Two identical points: equal => within AND contains (degenerate inclusion).
+    fx("POINT(5 5)", "POINT(5 5)", "sfWithin", true),
+    fx("POINT(5 5)", "POINT(5 5)", "sfContains", true),
+    // ---- sf: MULTI* operands (collection topology) --------------------------
+    // Both members of the MultiPoint lie strictly inside the polygon: within.
+    fx("MULTIPOINT((1 1),(0.5 0.5))", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfWithin", true),
+    fx("MULTIPOINT((1 1),(0.5 0.5))", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfIntersects", true),
+    // A MultiPolygon contains a point in its first part / is disjoint from a
+    // point in neither part.
+    fx(MULTI_TWO_SQUARES, "POINT(1 1)", "sfContains", true),
+    fx(MULTI_TWO_SQUARES, "POINT(5 5)", "sfDisjoint", true),
+    // Collinear partially-overlapping lines: overlap is symmetric.
+    fx("LINESTRING(1 0, 3 0)", "LINESTRING(0 0, 2 0)", "sfOverlaps", true),
+    // ---- eh: reverse direction / more region pairs (Req 25) -----------------
+    // ehDisjoint / ehMeet / ehOverlap are SYMMETRIC — pin the reverse order.
+    fx(FAR, BIG, "ehDisjoint", true),
+    fx(EDGE_ADJACENT, BIG, "ehMeet", true),
+    fx(OVERLAP, BIG, "ehOverlap", true),
+    // The strict-inside pair: SMALL does NOT cover BIG, BIG is NOT covered-by SMALL.
+    fx(SMALL_INSIDE, BIG, "ehCovers", false),
+    fx(BIG, SMALL_INSIDE, "ehCoveredBy", false),
+    // A boundary-tangent region is covered-by, NOT containing, the big region.
+    fx(CORNER_TANGENT, BIG, "ehContains", false),
+    // Equal regions: ehEquals holds, so ehInside does NOT.
+    fx(BIG, BIG, "ehInside", false),
+    // ---- rcc8: reverse direction / more region pairs (Req 26) ---------------
+    // rcc8dc / rcc8ec / rcc8po are SYMMETRIC — pin the reverse order.
+    fx(FAR, BIG, "rcc8dc", true),
+    fx(EDGE_ADJACENT, BIG, "rcc8ec", true),
+    fx(OVERLAP, BIG, "rcc8po", true),
+    // Equal regions are rcc8eq, so neither proper-part relation holds.
+    fx(BIG, BIG, "rcc8ntpp", false),
+    fx(BIG, BIG, "rcc8tpp", false),
+    // A strictly-inside region is NOT equal to its container.
+    fx(SMALL_INSIDE, BIG, "rcc8eq", false),
+    // A boundary-tangent proper part is tangential (tpp), not ec / po.
+    fx(CORNER_TANGENT, BIG, "rcc8ec", false),
+    fx(CORNER_TANGENT, BIG, "rcc8po", false),
+    // …and BIG is the tangential proper-part-INVERSE (tppi), not the non-tangential one.
+    fx(BIG, CORNER_TANGENT, "rcc8ntppi", false),
 ];
+
+/// A MultiPolygon of two disjoint unit-ish squares — exercises MULTI* operand
+/// topology (a point inside the first part is contained; one in neither part is
+/// disjoint). [OPUS-4.8] sq-cbe4t
+const MULTI_TWO_SQUARES: &str =
+    "MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0)),((6 6,8 6,8 8,6 8,6 6)))";
 
 fn run_fixtures(fixtures: &[Fixture]) -> (usize, usize, Vec<String>) {
     let relations = all_relations();
