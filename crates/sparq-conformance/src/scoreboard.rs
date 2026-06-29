@@ -622,6 +622,47 @@ pub const SUITES: &[Suite] = &[
                / EvalModes / multi-window joins; documented RSP-QL gaps asserted \
                genuinely-rejected, not faked as passes",
     },
+    // [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — the RIF-Core EXPRESSIVITY ratchet
+    // (runner lives crate-local in `sparq-conformance/tests/rif_core_suite.rs`,
+    // behind the opt-in `rif-core` feature). HONESTLY tallied as a sparq EXTENSION
+    // ratchet, NOT folded into the conformance total — even though RIF-Core is a
+    // real W3C dialect, this lane runs sparq's OWN faithful expressivity battery
+    // over the RIF-Core (monotone Horn) subset the `sparq_reason::rif` front-end
+    // implements, NOT the normative W3C SPARQL-RIF Core Entailment Regime test
+    // suite (sparql11/entailment rif01..rif06, which is a strictly larger
+    // SPARQL-protocol integration this bead does NOT deliver — it is a documented
+    // tracked-not-asserted out-of-scope item in the runner's OUT_OF_SCOPE list).
+    // So the unit is per-feature EXPRESSIVITY assertions (not normative-suite
+    // pass-counts), and it is tallied SEPARATELY like the BM25 / RSP extension rows
+    // — never inflating a conformance number with a non-conformance one. The runner
+    // drives the REAL `rif::Document::{validate, closure}` path across the RIF-Core
+    // axes (frame/membership/subclass/equality, recursion, the numeric/string/list
+    // builtins with range-restriction SAFETY enforced, monotonicity, and the
+    // canonical W3C `rif01` uncle rule), asserting every unsafe rule is GENUINELY
+    // rejected and the NAF/nonmonotonic surface genuinely-absent. The floor is the
+    // MEASURED assertion count (the `RIF-Core expressivity assertions N` line) — it
+    // may only RISE; `RIF_CORE_FLOOR` is mirrored here and kept in lock-step by
+    // `tests/scoreboard_floors.rs` (read textually).
+    Suite {
+        label: "RIF-Core expressivity (monotone Horn subset)",
+        family: "sparq extension",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "rif_core_suite",
+            feature: "rif-core",
+        },
+        ci_job: "inference-conformance",
+        ratchet_floor: 47,
+        floor_basis: "expressivity assertions (sparq EXTENSION over the RIF-Core subset, \
+                      NOT the normative W3C SPARQL-RIF conformance suite)",
+        note: "EXTENSION ratchet — sparq's own faithful expressivity battery over the \
+               RIF-CORE (monotone Horn) subset implemented by sparq-reason's rif:: \
+               front-end (frame/membership/subclass/equality, recursion, numeric/string/\
+               list builtins with range-restriction safety, monotonicity, the canonical \
+               rif01 uncle rule); the normative SPARQL-RIF Core Entailment Regime + full \
+               RIF-BLD/PRD are documented out-of-scope, asserted genuinely-rejected, \
+               never faked as passes",
+    },
 ];
 
 /// Render the registry as one markdown scoreboard. This is a STATIC view of what

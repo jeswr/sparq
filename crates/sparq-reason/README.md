@@ -43,6 +43,12 @@ let g = Graph::from_parts(dict, triples);
   a recognized datatype map, with **correct typed value-space equality**
   (`"1"^^xsd:integer` is the same value as `"1.0"^^xsd:decimal`, never an f64 fast path).
 - **Notation3** — `{ … } => { … }` rules with EYE-validated builtins (a separate subsystem).
+- **RIF-Core** (opt-in `rif-core`) — the W3C RIF **Core** dialect (the **monotone Horn**
+  common subset of RIF-BLD/PRD) as a `rif::Document` rule front-end over the N3 chainer:
+  frame/membership/subclass/equality atoms + numeric/string/list builtins with
+  **range-restriction safety** enforced (unsafe rules are rejected, never looped). **Monotone,
+  NAF excluded by design.** Full RIF-BLD/PRD + the SPARQL-RIF entailment regime are documented
+  out-of-scope (`rif::UNIMPLEMENTED`), not faked.
 - **Incremental maintenance** — `MaterializedGraph` keeps the closure current under
   inserts/deletes by exact derivation counting; cost scales with the change, not a re-run.
 - **Proof trees** (`explain` feature) — `why(triple)` returns which rule fired from which

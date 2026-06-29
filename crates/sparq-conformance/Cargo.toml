@@ -54,6 +54,18 @@ jsonld-suite = ["sparq-core/jsonld", "sparq-engine/serialize-rdf", "dep:oxjsonld
 # floor. Pure-Rust, no new third-party deps.
 d-entail = ["sparq-reason/d-entail"]
 
+# [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — the RIF-Core EXPRESSIVITY ratchet (the
+# crate-local `tests/rif_core_suite.rs` runner). OPT-IN and OFF by default so the
+# default `cargo test -p sparq-conformance` and the `--workspace` shards neither
+# link the RIF front-end nor go red on a fresh checkout (the lean-core posture).
+# Forwards to sparq-reason's opt-in `rif-core` feature (the `rif::Document` monotone
+# Horn front-end). When OFF the lane compiles to a single self-SKIP `#[test]`; when
+# ON it drives the RIF-Core feature axes through the REAL `rif::Document::closure`
+# path and asserts the pinned floor. Pure-Rust, no new third-party deps. HONESTLY a
+# sparq EXTENSION-shaped expressivity ratchet over the RIF-CORE (monotone Horn)
+# subset — NOT a full RIF-BLD/PRD or SPARQL-RIF-entailment-regime conformance claim.
+rif-core = ["sparq-reason/rif-core"]
+
 # [OPUS-4.8] sq-ushvx (epic sq-my8wd) — the in-process SERVICE-federation test harness.
 # OPT-IN and OFF by default: it stands up a REAL `sparq_server::serve` endpoint on an
 # ephemeral `127.0.0.1:0` loopback port and drives a federated SERVICE query through the

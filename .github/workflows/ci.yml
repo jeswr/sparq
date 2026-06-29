@@ -1726,6 +1726,30 @@ jobs:
           PASS=$(grep -E '^TOTAL d-entail ' d-entail-conformance.out | awk '{print $3}' | head -1)
           echo "D-entailment pass: ${PASS:-unknown} (floor: $FLOOR)"
           [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::D-entailment regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
+      - name: Run RIF-Core expressivity lane (rif-core feature ON) + enforce floor
+        # [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — the OPT-IN RIF-Core (monotone Horn)
+        # expressivity ratchet. SEPARATE from the binary ratchet above so the default
+        # inference binary stays byte-for-byte unchanged. This crate-test drives the
+        # RIF-Core feature axes through the real `sparq_reason::rif::Document::closure`
+        # / `validate` path and prints a `RIF-Core expressivity assertions N` line; the
+        # floor (RIF_CORE_FLOOR, mirrored in scoreboard::SUITES) is asserted in-runner
+        # AND re-grepped here. HONESTLY a sparq-EXTENSION ratchet over the RIF-Core
+        # subset — NOT the normative W3C SPARQL-RIF conformance suite. `--nocapture` so
+        # the assertions line reaches stdout. No fetched fixtures (self-asserting).
+        run: |
+          set -uo pipefail
+          cargo test -p sparq-conformance --features rif-core --test rif_core_suite -- --nocapture \
+            | tee rif-core-conformance.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::RIF-Core lane test failed (exit $rc)"; exit "$rc"; }
+          if ! grep -qE '^RIF-Core expressivity assertions ' rif-core-conformance.out; then
+            echo "::error::RIF-Core lane produced no 'RIF-Core expressivity assertions' line — infra/build issue, not a conformance change. Re-run the job."
+            exit 1
+          fi
+          FLOOR=47
+          ASSERTS=$(grep -E '^RIF-Core expressivity assertions ' rif-core-conformance.out | awk '{print $4}' | head -1)
+          echo "RIF-Core expressivity assertions: ${ASSERTS:-unknown} (floor: $FLOOR)"
+          [ -n "$ASSERTS" ] && [ "$ASSERTS" -ge "$FLOOR" ] || { echo "::error::RIF-Core expressivity regressed below the ratchet ($ASSERTS < $FLOOR)"; exit 1; }
       - name: Upload report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
