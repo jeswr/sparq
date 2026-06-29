@@ -1306,8 +1306,8 @@ jobs:
           # never produced" (an infra/compile flake left the .out with no TOTAL line)
           # from a GENUINE regression, so an empty scoreboard is never mis-reported as
           # "regressed below the ratchet".
-          if ! grep -qE '^TOTAL (toRdf|fromRdf|compact|frame) ' jsonld-conformance.out; then
-            echo "::error::JSON-LD conformance scoreboard is missing/empty — the test step produced no 'TOTAL toRdf|fromRdf|compact|frame' line. This is an INFRA/build failure (e.g. a transient crates.io download), NOT a conformance regression. Re-run the job; inspect the 'Run JSON-LD ... suites' step output above."
+          if ! grep -qE '^TOTAL (toRdf|fromRdf|compact|frame|expand|flatten) ' jsonld-conformance.out; then
+            echo "::error::JSON-LD conformance scoreboard is missing/empty — the test step produced no 'TOTAL toRdf|fromRdf|compact|frame|expand|flatten' line. This is an INFRA/build failure (e.g. a transient crates.io download), NOT a conformance regression. Re-run the job; inspect the 'Run JSON-LD ... suites' step output above."
             exit 1
           fi
           # [OPUS-4.8] sq-oy1f.16 — RAISED 163 → 186 after #978's compaction
@@ -1317,16 +1317,25 @@ jobs:
           # [OPUS-4.8] sq-oy1f.19 — the frame ratchet (RDF → framed JSON-LD over the
           # w3c/json-ld-framing suite; normative-answer-equivalence). Same grep shape.
           FRAME_FLOOR=61
+          # [OPUS-4.8] sq-oy1f — the expand + flatten ratchets (RDF → expanded/flattened
+          # JSON-LD via the shipping graph_to_jsonld writer; normative-answer-equivalence).
+          # Same grep shape. MEASURED pass counts at the pinned revision.
+          EXPAND_FLOOR=247
+          FLATTEN_FLOOR=50
           # runner prints: "TOTAL toRdf <pass> <fail> <skip> (floor F)"
           TORDF_PASS=$(grep -E '^TOTAL toRdf ' jsonld-conformance.out | awk '{print $3}' | head -1)
           FROMRDF_PASS=$(grep -E '^TOTAL fromRdf ' jsonld-conformance.out | awk '{print $3}' | head -1)
           COMPACT_PASS=$(grep -E '^TOTAL compact ' jsonld-conformance.out | awk '{print $3}' | head -1)
           FRAME_PASS=$(grep -E '^TOTAL frame ' jsonld-conformance.out | awk '{print $3}' | head -1)
-          echo "JSON-LD toRdf pass: ${TORDF_PASS:-unknown} (floor $TORDF_FLOOR); fromRdf pass: ${FROMRDF_PASS:-unknown} (floor $FROMRDF_FLOOR); compact pass: ${COMPACT_PASS:-unknown} (floor $COMPACT_FLOOR); frame pass: ${FRAME_PASS:-unknown} (floor $FRAME_FLOOR)"
+          EXPAND_PASS=$(grep -E '^TOTAL expand ' jsonld-conformance.out | awk '{print $3}' | head -1)
+          FLATTEN_PASS=$(grep -E '^TOTAL flatten ' jsonld-conformance.out | awk '{print $3}' | head -1)
+          echo "JSON-LD toRdf pass: ${TORDF_PASS:-unknown} (floor $TORDF_FLOOR); fromRdf pass: ${FROMRDF_PASS:-unknown} (floor $FROMRDF_FLOOR); compact pass: ${COMPACT_PASS:-unknown} (floor $COMPACT_FLOOR); frame pass: ${FRAME_PASS:-unknown} (floor $FRAME_FLOOR); expand pass: ${EXPAND_PASS:-unknown} (floor $EXPAND_FLOOR); flatten pass: ${FLATTEN_PASS:-unknown} (floor $FLATTEN_FLOOR)"
           [ -n "$TORDF_PASS" ] && [ "$TORDF_PASS" -ge "$TORDF_FLOOR" ] || { echo "::error::JSON-LD toRdf regressed below the ratchet (${TORDF_PASS:-?} < $TORDF_FLOOR)"; exit 1; }
           [ -n "$FROMRDF_PASS" ] && [ "$FROMRDF_PASS" -ge "$FROMRDF_FLOOR" ] || { echo "::error::JSON-LD fromRdf regressed below the ratchet (${FROMRDF_PASS:-?} < $FROMRDF_FLOOR)"; exit 1; }
           [ -n "$COMPACT_PASS" ] && [ "$COMPACT_PASS" -ge "$COMPACT_FLOOR" ] || { echo "::error::JSON-LD compact regressed below the ratchet (${COMPACT_PASS:-?} < $COMPACT_FLOOR)"; exit 1; }
           [ -n "$FRAME_PASS" ] && [ "$FRAME_PASS" -ge "$FRAME_FLOOR" ] || { echo "::error::JSON-LD frame regressed below the ratchet (${FRAME_PASS:-?} < $FRAME_FLOOR)"; exit 1; }
+          [ -n "$EXPAND_PASS" ] && [ "$EXPAND_PASS" -ge "$EXPAND_FLOOR" ] || { echo "::error::JSON-LD expand regressed below the ratchet (${EXPAND_PASS:-?} < $EXPAND_FLOOR)"; exit 1; }
+          [ -n "$FLATTEN_PASS" ] && [ "$FLATTEN_PASS" -ge "$FLATTEN_FLOOR" ] || { echo "::error::JSON-LD flatten regressed below the ratchet (${FLATTEN_PASS:-?} < $FLATTEN_FLOOR)"; exit 1; }
       - name: Emit consolidated conformance scoreboard
         # Render the ONE central scoreboard index (all suites + floors across crates)
         # into this job's step summary, so the JSON-LD job surfaces where it sits in

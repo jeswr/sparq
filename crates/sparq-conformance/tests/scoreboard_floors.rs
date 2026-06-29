@@ -136,6 +136,21 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/jsonld_suite.rs",
         "FRAME_FLOOR",
     ),
+    // [OPUS-4.8] sq-oy1f — the W3C JSON-LD 1.1 `expand` + `flatten` ratchets driving
+    // the shipping `graph_to_jsonld(JsonLdForm::Expanded|Flattened)` writer.
+    // `pub const EXPAND_FLOOR` / `FLATTEN_FLOOR` live in the same
+    // `tests/jsonld_suite.rs`; the guard reads them textually so the central
+    // scoreboard's `ratchet_floor` can never drift from what the runner asserts.
+    (
+        "W3C JSON-LD 1.1 expand",
+        "crates/sparq-conformance/tests/jsonld_suite.rs",
+        "EXPAND_FLOOR",
+    ),
+    (
+        "W3C JSON-LD 1.1 flatten",
+        "crates/sparq-conformance/tests/jsonld_suite.rs",
+        "FLATTEN_FLOOR",
+    ),
     // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite decision-parity ratchet.
     // The floor const (`pub const ODRL_SUITE_FLOOR`) lives top-level in
     // `sparq-policy`'s `tests/odrl_test_suite.rs`; the guard reads it textually
@@ -224,6 +239,9 @@ fn scoreboard_renders_all_suites() {
     assert!(md.contains("W3C JSON-LD 1.1 fromRdf"));
     // [OPUS-4.8] sq-3uos5 — the W3C JSON-LD 1.1 compact ratchet.
     assert!(md.contains("W3C JSON-LD 1.1 compact"));
+    // [OPUS-4.8] sq-oy1f — the W3C JSON-LD 1.1 expand + flatten ratchets.
+    assert!(md.contains("W3C JSON-LD 1.1 expand"));
+    assert!(md.contains("W3C JSON-LD 1.1 flatten"));
     // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite decision-parity ratchet.
     assert!(md.contains("SolidLab ODRL Test Suite"));
 }

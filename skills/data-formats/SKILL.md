@@ -527,16 +527,18 @@ cargo build -p sparq-cli --features serialize-rdf
   with it off, and a memory-mapped perm carries no filter. Whether the hypothesised block-skip
   win materialises is to be confirmed on the canonical perf host (no number is asserted here).
 - **JSON-LD W3C conformance is RATCHETED (honest baseline, not 100%).** A ratcheted W3C
-  JSON-LD 1.1 conformance gate (sq-oy1f.2 + sq-3uos5 + sq-oy1f.19) drives the official
+  JSON-LD 1.1 conformance gate (sq-oy1f.2 + sq-3uos5 + sq-oy1f.19 + sq-oy1f) drives the official
   `w3c/json-ld-api` suite AND the SEPARATE `w3c/json-ld-framing` suite through the real paths:
   **toRdf** through the `jsonld` parser (oxjsonld), **fromRdf** through the `serialize-rdf`
-  writer, **compact** through the native Compaction Algorithm (`graph_to_jsonld_compact`), and
-  **frame** through the native Framing Algorithm (`graph_to_jsonld_framed`). toRdf/fromRdf/compact
+  writer, **compact** through the native Compaction Algorithm (`graph_to_jsonld_compact`),
+  **expand** + **flatten** through the shipping writer (`graph_to_jsonld(Expanded|Flattened)`),
+  and **frame** through the native Framing Algorithm (`graph_to_jsonld_framed`). toRdf/fromRdf/compact
   are compared by a re-parse RDF-dataset round-trip against the INPUT (`reparse(out) ≡ in`, the
-  oxjsonld self-reparse oracle); **frame** is compared by re-parse RDF-equivalence against the
-  suite's NORMATIVE expected output (`reparse(frame(D,F)) ≡ reparse(expected)`) — framing is a
-  SELECT+RESHAPE (it prunes/fills/drops), so the oracle anchors on the expected document, not the
-  input. The floors only RISE; they reflect ACTUAL current pass counts, not full conformance — the
+  oxjsonld self-reparse oracle); **expand/flatten/frame** are compared by re-parse RDF-equivalence
+  against the suite's NORMATIVE expected output (`reparse(write(D)) ≡ reparse(expected)`) — these
+  are JSON-LD normal forms / a SELECT+RESHAPE (they drop/merge/prune/fill), so the oracle anchors on
+  the expected document, not the input. The floors only RISE; they reflect ACTUAL current pass
+  counts, not full conformance — the
   remaining toRdf divergences are documented oxjsonld limits (remote/`@import` `@context` needs a
   `LoadDocumentCallback`; `expandContext`/`rdfDirection` options not applied; a few
   base-normalization edge cases + leniently-accepted negative tests), and fromRdf misses
@@ -555,8 +557,14 @@ cargo build -p sparq-cli --features serialize-rdf
   frame-validation errors, so it cannot honestly "pass" by rejecting). The compact/frame oracle
   is oxjsonld self-reparse, so the `@reverse` double-inversion / non-string-language interop gap
   documented above (the compaction interop caveat) is NOT caught by it and is tracked separately.
-  **expand/flatten output-document comparison remain NOT-IMPLEMENTED buckets** the runner reports
-  separately and never fails on (they grow the ratchet as those land). The lane is the opt-in
+  The **expand** + **flatten** lanes (sq-oy1f) GRADUATED out of the NOT-IMPLEMENTED bucket: each
+  `jld:ExpandTest`/`jld:FlattenTest` input is parsed to RDF and projected through the shipping
+  writer, then compared by RDF-equivalence to the normative expected document; below-floor cases
+  are honest writer divergences (`@direction`/i18n-datatype, list/coercion shapes) and the SKIP
+  buckets are the documented ones (negatives sparq's TOTAL writer does not raise, JSON-LD-1.0-only,
+  empty-RDF inputs). Only **html** (script extraction) + **remote-doc** (a `LoadDocumentCallback`)
+  remain NOT-IMPLEMENTED buckets the runner reports separately and never fails on (they grow the
+  ratchet as those land). The lane is the opt-in
   `jsonld-suite` feature on `sparq-conformance` (forwards to `sparq-core/jsonld` +
   `sparq-engine/serialize-rdf`); OFF it compiles to a self-skip. Reproduce with
   `scripts/fetch-jsonld-tests.sh` + `scripts/fetch-jsonld-framing-tests.sh` then
