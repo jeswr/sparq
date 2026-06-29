@@ -109,6 +109,17 @@ fn result(entry: &TestEntry, outcome: Outcome) -> TestResult {
 }
 
 fn run_one(entry: &TestEntry, profile: Profile, direct_sanctioned: bool) -> Outcome {
+    // [OPUS-4.8] sq-oy1f — the `sparql11/entailment` manifest at the pinned
+    // rdf-tests revision contains NO `qt:graphData` entries (every entailment test
+    // uses a single default-graph `qt:data` dataset), so this guard is currently
+    // unreachable: there are zero named-graph entailment cases to graduate. It is
+    // RETAINED as a fail-closed safeguard — should a future suite bump add a
+    // named-graph entailment test, it would be reported OutOfScope (honest) rather
+    // than silently materialized through the default-graph-only path below, which
+    // would give a WRONG closure (the named-graph dataset would need per-graph
+    // entailment semantics in sparq-reason, not just harness wiring). Wiring that
+    // properly is tracked as a deferred bead; do NOT drop the guard to "make it run"
+    // until the reasoner models named-graph materialization.
     if !entry.action.graph_data.is_empty() {
         return Outcome::OutOfScope("named-graph entailment dataset not wired".into());
     }
