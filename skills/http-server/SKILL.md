@@ -912,7 +912,7 @@ env overrides the default.
 | `--auth-token TOKEN` | `SPARQ_AUTH_TOKEN` | off (no auth) | require `Authorization: Bearer TOKEN` on every WRITE (SPARQL Update + GSP PUT/POST/DELETE) → `401` + `WWW-Authenticate: Bearer` otherwise; constant-time compared (QLever's `-a`) |
 | `--auth-token-read` | `SPARQ_AUTH_TOKEN_READ` | off | ALSO gate reads with the same token (only meaningful with a token set) |
 | `--allow-remote` | `SPARQ_ALLOW_REMOTE` | off | opt in to a non-loopback bind; without it a non-loopback `--addr` is **refused** unless the surface is fully authenticated (`--auth-token` AND `--auth-token-read`), with it it warns and proceeds |
-| `--service-allow HOST\|*.SUFFIX` (repeatable) | `SPARQ_SERVICE_ALLOW` (comma/ws-sep) | empty = **deny ALL SERVICE** | (feature `service`) allowlist a SERVICE egress host (exact or `*.suffix` wildcard); CLI + file + env are all merged (combined additively) |
+| `--service-allow HOST[:PORT]\|*.SUFFIX[:PORT]` (repeatable) | `SPARQ_SERVICE_ALLOW` (comma/ws-sep) | empty = **deny ALL SERVICE** | (feature `service`) allowlist a SERVICE egress host (exact or `*.suffix` wildcard); a `:PORT` makes it **port-scoped** — that host on THAT port only (else every port) (`sq-a7jw4`); CLI + file + env are all merged (combined additively) |
 | `--service-allow-file PATH` | — | — | (feature `service`) load allowlist entries, one per line (`#` comments + blanks ignored) |
 | `--cors-allow-origin ORIGIN` (repeatable) | `SPARQ_CORS_ALLOW_ORIGIN` (comma/ws-sep) | empty = **no CORS headers** | allowlist a first-party browser origin (`scheme://host[:port]`); a listed `Origin` is reflected into `Access-Control-Allow-Origin` (never `*`, never credentials) + `Vary: Origin`, preflight `OPTIONS` answered; CLI + file + env merged additively — see "CORS" |
 | `--cors-allow-origin-file PATH` | — | — | load CORS origins, one per line (`#` comments + blanks ignored) |
@@ -1008,7 +1008,8 @@ quota:
    SSRF; worst case the `169.254.169.254` cloud-metadata IP), so it reaches **nothing**
    unless its host is allowlisted, enforced on the *resolved* IP before any socket opens
    (DNS-rebinding-safe), uniformly across queries / ASK / CONSTRUCT/DESCRIBE / subscriptions
-   / federated `INSERT … WHERE`.
+   / federated `INSERT … WHERE`. An entry may be **port-scoped** (`host:port`) to permit a
+   host on exactly one port — strictly narrower than the bare host (`sq-a7jw4`).
 
 Library callers set these on `ServerConfig` (`query_timeout`, `max_query_rows`,
 `max_query_bytes`, `max_decompress_ratio`, `service_allow`). Embedders driving the engine
@@ -1199,7 +1200,14 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   host (textbook SSRF; worst case the `169.254.169.254` cloud-metadata IP), so the
   network-exposed surface must opt in to every reachable host. Matching is
   case-insensitive against the SERVICE IRI authority; a `*.example.org` entry matches the
-  apex `example.org` and any subdomain. Unlike the engine's standalone default (which lets
+  apex `example.org` and any subdomain. An entry may be **host-level** (`192.0.2.10` — every
+  port) or **port-scoped** (`192.0.2.10:8080`, `[::1]:8053`, `sparql.example.org:8443`,
+  `*.example.org:443` — that host on THAT port ONLY, rejecting every other port) (`sq-a7jw4`):
+  a port-scoped entry is strictly NARROWER — the way to permit exactly one ephemeral loopback
+  endpoint for in-process SERVICE federation without re-opening the whole host. (This TIGHTENS
+  earlier behaviour: a `host:port` entry used to have its port stripped and widen to every
+  port; it now means EXACTLY that port. A port-LESS entry is unchanged — still every port.)
+  Unlike the engine's standalone default (which lets
   public IPs through and only blocks private ones), the server is **strict**: even a public
   host must be on the allowlist. The allowlist applies uniformly to queries, ASK,
   CONSTRUCT/DESCRIBE, subscriptions and federated `INSERT … WHERE` updates, and is enforced

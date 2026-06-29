@@ -391,7 +391,14 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   cloud-metadata IP) / unique-local / unspecified address is refused (checked on the *resolved* IP,
   so DNS rebinding can't bypass it). To federate to a trusted internal endpoint, allowlist its host
   for the scope: `with_service_egress_allow([host.to_string()], || query(&g, q))`. Public endpoints
-  need no opt-in. Every egress-refusal error string carries the stable
+  need no opt-in. An allowlist entry may be **host-level** (`127.0.0.1` — every port) or
+  **port-scoped** (`127.0.0.1:8053`, `[::1]:8053`, `.example.org:443` — that host on THAT port ONLY,
+  rejecting every other port) (`sq-a7jw4`): a port-scoped entry is strictly NARROWER, so an
+  in-process loopback harness can permit exactly `127.0.0.1:<ephemeral>` without re-opening the whole
+  loopback host. The port checked is the authority's port (its explicit `:port` or the scheme default),
+  which is exactly the dialled port — so port-scoping applies to the connect target and the resolved
+  IP is still re-vetted (no wildcard port; tightens, never loosens). Every egress-refusal error string
+  carries the stable
   `sparq_engine::SERVICE_EGRESS_REFUSED_MARKER` substring (`sq-iu0c`), so a network-exposed host can
   `contains()`-classify a blocked `SERVICE` as an authorization-policy refusal (e.g. HTTP `403`)
   rather than a server fault — `sparq-server` does exactly this.
