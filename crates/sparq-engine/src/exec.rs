@@ -11726,4 +11726,115 @@ mod multiplicity_builtin {
         let cards: Vec<u64> = table.iter().map(|&(_, c)| c).collect();
         assert_eq!(cards, vec![2, 1], "two distinct rows: first with cardinality 2, second 1");
     }
+
+    /// [OPUS-4.8] (sq-v411r) Direct unit coverage of `expr_uses_multiplicity` across EVERY
+    /// arm of its expression-tree walk. This boolean is load-bearing for correctness — it is
+    /// the gate that decides whether `eval_aggregate` / `eval_custom_aggregate` take the
+    /// distinct-collapsing (`group_multiplicities`-built) path, so a missed/false detection
+    /// would silently fold the wrong multiset. The query-level tests above reach only the
+    /// `Multiply`, `FunctionCall(Custom)` and `Variable` arms; this exercises the leaves
+    /// (`NamedNode`/`Literal`/`Variable`/`Bound`/`Exists`), the binary/unary recursion, the
+    /// `If`/`In`/`Coalesce`/`FunctionCall(args)` arms, and — crucially — the `Exists`
+    /// non-descent contract (a `MULTIPLICITY()` buried inside an `EXISTS` belongs to that
+    /// sub-query's scope and must NOT be reported here).
+    #[test]
+    fn expr_uses_multiplicity_walks_every_arm() {
+        use spargebra::algebra::{Function, GraphPattern};
+
+        let mult = || {
+            Expression::FunctionCall(
+                Function::Custom(oxrdf::NamedNode::new_unchecked(MULTIPLICITY_FN_IRI)),
+                vec![],
+            )
+        };
+        let var = || Expression::Variable(Variable::new_unchecked("x"));
+        let lit = || Expression::Literal(oxrdf::Literal::from(1));
+        let bx = Box::new;
+
+        // --- Leaves: never contain MULTIPLICITY() on their own. ---
+        assert!(!expr_uses_multiplicity(&var()));
+        assert!(!expr_uses_multiplicity(&lit()));
+        assert!(!expr_uses_multiplicity(&Expression::NamedNode(oxrdf::NamedNode::new_unchecked(
+            "http://ex/p"
+        ))));
+        assert!(!expr_uses_multiplicity(&Expression::Bound(Variable::new_unchecked("y"))));
+
+        // A `MULTIPLICITY()` with arguments is NOT the reserved zero-arg builtin ⇒ false
+        // (the `if args.is_empty()` guard), and a non-Custom function with no inner
+        // MULTIPLICITY() is false too.
+        let mult_with_args = Expression::FunctionCall(
+            Function::Custom(oxrdf::NamedNode::new_unchecked(MULTIPLICITY_FN_IRI)),
+            vec![var()],
+        );
+        assert!(!expr_uses_multiplicity(&mult_with_args), "zero-arg guard: args ⇒ not the builtin");
+
+        // --- The matching leaf. ---
+        assert!(expr_uses_multiplicity(&mult()), "the reserved zero-arg call IS detected");
+
+        // --- Binary recursion (left and right branch). ---
+        assert!(expr_uses_multiplicity(&Expression::Multiply(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::Add(bx(mult()), bx(var()))));
+        assert!(expr_uses_multiplicity(&Expression::Or(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::And(bx(mult()), bx(var()))));
+        assert!(expr_uses_multiplicity(&Expression::Equal(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::SameTerm(bx(mult()), bx(var()))));
+        assert!(expr_uses_multiplicity(&Expression::Greater(bx(var()), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::Less(bx(mult()), bx(var()))));
+        assert!(!expr_uses_multiplicity(&Expression::Subtract(bx(var()), bx(lit()))));
+
+        // --- Unary recursion. ---
+        assert!(expr_uses_multiplicity(&Expression::UnaryMinus(bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::Not(bx(mult()))));
+        assert!(!expr_uses_multiplicity(&Expression::UnaryPlus(bx(var()))));
+
+        // --- Ternary `If` (each of the three positions). ---
+        assert!(expr_uses_multiplicity(&Expression::If(bx(mult()), bx(var()), bx(lit()))));
+        assert!(expr_uses_multiplicity(&Expression::If(bx(var()), bx(mult()), bx(lit()))));
+        assert!(expr_uses_multiplicity(&Expression::If(bx(var()), bx(lit()), bx(mult()))));
+        assert!(!expr_uses_multiplicity(&Expression::If(bx(var()), bx(lit()), bx(var()))));
+
+        // --- List arms: `In` (head + list), `Coalesce`, `FunctionCall(_, args)`. ---
+        assert!(expr_uses_multiplicity(&Expression::In(bx(mult()), vec![var()])));
+        assert!(expr_uses_multiplicity(&Expression::In(bx(var()), vec![lit(), mult()])));
+        assert!(!expr_uses_multiplicity(&Expression::In(bx(var()), vec![lit()])));
+        assert!(expr_uses_multiplicity(&Expression::Coalesce(vec![var(), mult()])));
+        assert!(!expr_uses_multiplicity(&Expression::Coalesce(vec![var(), lit()])));
+        assert!(expr_uses_multiplicity(&Expression::FunctionCall(Function::Str, vec![mult()])));
+        assert!(!expr_uses_multiplicity(&Expression::FunctionCall(Function::Str, vec![var()])));
+
+        // --- The `Exists` non-descent contract: a MULTIPLICITY() inside an EXISTS belongs to
+        //     that sub-query's scope, so it must NOT be reported for THIS aggregate. ---
+        let exists_with_mult = Expression::Exists(Box::new(GraphPattern::Filter {
+            expr: mult(),
+            inner: Box::new(GraphPattern::Bgp { patterns: vec![] }),
+        }));
+        assert!(
+            !expr_uses_multiplicity(&exists_with_mult),
+            "MULTIPLICITY() inside EXISTS belongs to the sub-query scope, not descended into"
+        );
+        // ...but a MULTIPLICITY() in the OUTER branch of an expression whose other branch is an
+        // EXISTS is still detected (proves we recurse around, not into, the Exists).
+        assert!(expr_uses_multiplicity(&Expression::And(bx(exists_with_mult), bx(mult()))));
+    }
+
+    /// [OPUS-4.8] (sq-v411r) Direct unit coverage of the `multiplicity` thread-local context
+    /// and its RAII `Guard`: `current()` is `None` outside any `set`; `set(k)` makes
+    /// `current()` read `Some(k)`; a NESTED `set` shadows and the inner guard's drop RESTORES
+    /// the outer value (the re-entrancy contract that stops an `EXISTS`/sub-query inside an
+    /// aggregate argument from observing a stale multiplicity); and dropping the outer guard
+    /// clears the context back to `None`.
+    #[test]
+    fn multiplicity_context_guard_nests_and_restores() {
+        assert_eq!(multiplicity::current(), None, "no context outside an aggregate");
+        {
+            let _outer = multiplicity::set(3);
+            assert_eq!(multiplicity::current(), Some(3));
+            {
+                let _inner = multiplicity::set(7);
+                assert_eq!(multiplicity::current(), Some(7), "inner set shadows outer");
+            }
+            assert_eq!(multiplicity::current(), Some(3), "inner guard drop restores outer");
+        }
+        assert_eq!(multiplicity::current(), None, "outer guard drop clears the context");
+    }
 }
