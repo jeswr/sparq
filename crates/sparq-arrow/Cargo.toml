@@ -54,7 +54,7 @@ arrow-array = { version = "55", optional = true }
 arrow-schema = { version = "55", optional = true }
 # `NullBuffer` for the per-row struct validity (unbound cells). It is `arrow-array`'s
 # own dependency; named directly because the code references `arrow_buffer::NullBuffer`.
-arrow-buffer = { version = "55", optional = true }
+arrow-buffer = { version = "59", optional = true }
 
 [dev-dependencies]
 # The integration tests (tests/record_batch.rs, `#![cfg(feature = "arrow")]`) drive the

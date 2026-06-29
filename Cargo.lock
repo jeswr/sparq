@@ -221,7 +221,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70732f04d285d49054a48b72c54f791bb3424abae92d27aafdf776c98af161c8"
 dependencies = [
  "ahash",
- "arrow-buffer",
+ "arrow-buffer 55.2.0",
  "arrow-data",
  "arrow-schema",
  "chrono",
@@ -242,12 +242,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-buffer"
+version = "59.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6026f638c400e9878c1b1cc05c3cfd46fbf381285916ab408678701c1df46c1a"
+dependencies = [
+ "bytes",
+ "half",
+ "num-bigint",
+ "num-traits",
+]
+
+[[package]]
 name = "arrow-data"
 version = "55.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8de1ce212d803199684b658fc4ba55fb2d7e87b213de5af415308d2fee3619c2"
 dependencies = [
- "arrow-buffer",
+ "arrow-buffer 55.2.0",
  "arrow-schema",
  "half",
  "num",
@@ -3559,7 +3571,7 @@ name = "sparq-arrow"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
- "arrow-buffer",
+ "arrow-buffer 59.0.0",
  "arrow-schema",
  "oxrdf 0.3.3",
  "sparq-core",
