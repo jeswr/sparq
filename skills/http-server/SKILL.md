@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST (plus the query-only HTTP QUERY method, w3c/sparql-protocol#40, for Oxigraph interop), content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -96,6 +96,14 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
 # POST direct: body IS the query
 curl http://127.0.0.1:3030/sparql -H 'Content-Type: application/sparql-query' \
      --data 'ASK { ?s ?p ?o }'
+
+# HTTP QUERY method (sq-b3df9, w3c/sparql-protocol#40) — query-only, interoperates with
+# Oxigraph: body IS the query under Content-Type application/sparql-query; graph params
+# (default-graph-uri / named-graph-uri) ride the URL query string. Same downstream query
+# execution + Accept negotiation as POST; an update= form or application/sparql-update body
+# is rejected (400 / 415).
+curl -X QUERY http://127.0.0.1:3030/sparql -H 'Content-Type: application/sparql-query' \
+     -H 'Accept: application/sparql-results+json' --data 'SELECT * WHERE { ?s ?p ?o } LIMIT 5'
 
 # POST url-encoded form, negotiate CSV
 curl http://127.0.0.1:3030/sparql -H 'Accept: text/csv' \
@@ -279,6 +287,30 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/rdf+xml' \
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
      --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
 ```
+
+> **HTTP `QUERY` method (sq-b3df9, w3c/sparql-protocol#40, epic sq-my8wd) — query-only,
+> Oxigraph-interop.** `/sparql` accepts the registered HTTP `QUERY` verb in addition to
+> GET/POST. It is a new INPUT path that feeds the SAME query execution + Accept negotiation as
+> POST, so all the result-media rows above apply unchanged. Mirroring Oxigraph
+> (`("/sparql", "POST" | "QUERY")`, `let is_query = method == "QUERY"`):
+> - **Send the query** as the raw `application/sparql-query` body (preferred), OR as the
+>   `query=` value of an `application/x-www-form-urlencoded` body. No other Content-Type is
+>   accepted (else **415**); missing Content-Type is **415**.
+> - **Dataset graphs** (`default-graph-uri` / `named-graph-uri` / `union-default-graph`) ride
+>   the **URL query string**, never the body — even when the query is the raw body.
+> - **Query-only:** an `update=` form field is a **400** and an `application/sparql-update`
+>   body is a **415** (it is not a valid operation under QUERY). Use POST for an update.
+> - It enforces the SAME auth / egress gates as GET/POST (a QUERY is a read — gated by
+>   `--auth-token-read`). It does **not** emit `Cache-Control` / `Content-Location` headers
+>   (Oxigraph does not either). [OPUS-4.8]
+> ```sh
+> curl -X QUERY 'http://127.0.0.1:3030/sparql?default-graph-uri=http://ex/g1' \
+>      -H 'Content-Type: application/sparql-query' \
+>      -H 'Accept: text/csv' \
+>      --data 'SELECT * WHERE { ?s ?p ?o }'
+> ```
+
+<!-- [OPUS-4.8] sq-b3df9: comment separates the two adjacent blockquotes (markdownlint MD028). -->
 
 > **JSON-LD content negotiation (`jsonld` feature — default-on, [OPUS-4.8] sq-oy1f.4).** The
 > server speaks `application/ld+json` out of the box (the `jsonld` feature is in the default set —

@@ -1,7 +1,9 @@
 //! The axum HTTP surface: routing, extraction, status/error semantics.
 //!
 //! Two route groups:
-//!   * `/sparql` — the SPARQL 1.1 Protocol `query` operation (GET + the two POST forms).
+//!   * `/sparql` — the SPARQL 1.1 Protocol `query` operation (GET + the two POST forms, plus
+//!     the query-only HTTP `QUERY` method — w3c/sparql-protocol#40, sq-b3df9, for Oxigraph
+//!     interop) and the `update` operation (POST).
 //!   * Graph Store HTTP Protocol — `GET`/`HEAD` (read) and, since sq-gxsj, `PUT`/`POST`/
 //!     `DELETE` (write) on `/graphs/*path` (direct) and on `/sparql/graph` via
 //!     `?graph=<uri>` / `?default` (indirect). [OPUS-4.8] The write verbs translate into a
@@ -4221,6 +4223,29 @@ async fn sparql_endpoint(
                 &url_params,
                 &url_dataset,
                 &url_using,
+                false,
+            )
+            .await
+        }
+        // [OPUS-4.8] sq-b3df9 (epic sq-my8wd, w3c/sparql-protocol#40): the HTTP `QUERY` method.
+        // Oxigraph's CLI server already serves this verb (route arm
+        // `("/sparql", "POST" | "QUERY")` with `let is_query = method == "QUERY"`). It behaves
+        // EXACTLY like a POST query EXCEPT it is query-ONLY: an `application/sparql-update` body
+        // falls through to 415, and an `update=` form field is an explicit 400. `QUERY` is not a
+        // const in `http::Method`, so it arrives via `Method::from_bytes(b"QUERY")` and is matched
+        // on its literal token (the same passthrough oxhttp gives Oxigraph). The query input path
+        // (raw body / merged `query` form param) and the URL-query-string dataset overrides feed
+        // the SAME `handle_post` downstream — query execution, Accept negotiation and the auth /
+        // egress gates are shared, so QUERY cannot bypass them.
+        ref m if m.as_str() == "QUERY" => {
+            handle_post(
+                &state,
+                &headers,
+                &body,
+                &url_params,
+                &url_dataset,
+                &url_using,
+                true,
             )
             .await
         }
@@ -4241,6 +4266,13 @@ async fn handle_post(
     // string (applies to the direct `application/sparql-update` POST; the form-POST `update=` path
     // reads it from the form BODY).
     url_using: &UsingOverride,
+    // [OPUS-4.8] sq-b3df9 (epic sq-my8wd, w3c/sparql-protocol#40): `true` when this is the HTTP
+    // `QUERY` method, which is QUERY-ONLY. It mirrors Oxigraph's `is_query` flag: an
+    // `application/sparql-update` body is NOT accepted (it falls through to 415) and a `update=`
+    // form field is rejected with an explicit 400 — a `POST` (`is_query == false`) accepts both.
+    // Per the protocol, the `default-graph-uri` / `named-graph-uri` dataset override for a `QUERY`
+    // always comes from the URL query string (`url_dataset`), even for the url-encoded form body.
+    is_query: bool,
 ) -> Response {
     let ct = content_type(headers);
     if ct.starts_with(SPARQL_QUERY_CT) {
@@ -4318,6 +4350,16 @@ async fn handle_post(
             Err(_) => return bad_request("request body is not valid UTF-8"),
         };
         let params = parse_form(s);
+        // [OPUS-4.8] sq-b3df9 (w3c/sparql-protocol#40): the HTTP `QUERY` method is query-ONLY, so
+        // an `update=` form field is rejected with an explicit 400 BEFORE any auth/work (matching
+        // Oxigraph's "SPARQL updates are not compatible with the QUERY HTTP method"). A normal
+        // `POST` (`is_query == false`) keeps accepting `update=` as a write below.
+        if is_query && params.contains_key("update") {
+            return bad_request(
+                "SPARQL updates are not compatible with the QUERY HTTP method; use POST for an \
+                 'update=' form field",
+            );
+        }
         // [OPUS-4.8] sq-zcby (Copilot PR#71 SECURITY fix): the `update=` form field IS an
         // update operation BY DEFINITION (SPARQL 1.1 Protocol §2.2), so it is a WRITE
         // UNCONDITIONALLY — regardless of whether its value happens to parse as a read-only
@@ -4416,19 +4458,19 @@ async fn handle_post(
                     }
                 };
                 let explain = explain_mode(url_params, Some(&params), headers);
-                // [OPUS-4.8] sq-z33x: per the SPARQL 1.1 Protocol url-encoded encoding, the dataset
-                // override (`default-graph-uri` / `named-graph-uri`) is carried in the FORM BODY for
-                // this content type, not the URL query string.
-                run_query(
-                    state,
-                    q,
-                    headers,
-                    false,
-                    explain,
-                    pin,
-                    &query_dataset_override(s),
-                )
-                .await
+                // [OPUS-4.8] sq-z33x: per the SPARQL 1.1 Protocol url-encoded encoding, a `POST`
+                // form carries the dataset override (`default-graph-uri` / `named-graph-uri`) in the
+                // FORM BODY. [OPUS-4.8] sq-b3df9 (w3c/sparql-protocol#40): the HTTP `QUERY` method
+                // instead always reads the dataset override from the URL query string (Oxigraph's
+                // `url_query_parameters(request)` — body graph params are not consulted on QUERY).
+                let form_dataset;
+                let dataset = if is_query {
+                    url_dataset
+                } else {
+                    form_dataset = query_dataset_override(s);
+                    &form_dataset
+                };
+                run_query(state, q, headers, false, explain, pin, dataset).await
             }
             None => bad_request("missing 'query' or 'update' parameter in url-encoded body"),
         };
@@ -4439,8 +4481,12 @@ async fn handle_post(
         #[cfg(feature = "access-audit")]
         audit_access_finish(state, aa, &resp);
         resp
-    } else if ct.starts_with("application/sparql-update") {
+    } else if ct.starts_with("application/sparql-update") && !is_query {
         // SPARQL 1.1 Protocol — update operation (T11b). Body IS the update; success → 204.
+        // [OPUS-4.8] sq-b3df9 (w3c/sparql-protocol#40): the `&& !is_query` guard mirrors Oxigraph
+        // — under the HTTP `QUERY` method an `application/sparql-update` body is NOT a valid update
+        // operation, so it falls through to the 415 branch below (NOT a 400/403); only a `POST`
+        // reaches this update path.
         // [OPUS-4.8] sq-zcby: an UPDATE is always a write — gate it before doing any work.
         // [OPUS-4.8] sq-0bxp: audit the update (fingerprint the body if it is valid UTF-8).
         #[cfg(feature = "audit-log")]
@@ -4505,10 +4551,20 @@ async fn handle_post(
         audit_access_finish(state, aa, &resp);
         resp
     } else {
-        // Unsupported media type for the POST query operation.
+        // Unsupported media type for the query/update operation. [OPUS-4.8] sq-b3df9
+        // (w3c/sparql-protocol#40): under the HTTP `QUERY` method `application/sparql-update`
+        // is NOT accepted (the `&& !is_query` guard above sent it here) — Oxigraph parity is a
+        // 415, not a 400/403, since QUERY is query-only.
         json_error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "POST requires Content-Type 'application/sparql-query' or 'application/x-www-form-urlencoded'",
+            if is_query {
+                "the QUERY method requires Content-Type 'application/sparql-query' or \
+                 'application/x-www-form-urlencoded' (it is query-only; \
+                 'application/sparql-update' is not accepted — use POST)"
+            } else {
+                "POST requires Content-Type 'application/sparql-query' or \
+                 'application/x-www-form-urlencoded'"
+            },
         )
     }
 }
@@ -6545,9 +6601,11 @@ async fn security_headers(mut resp: Response) -> Response {
 
 /// The methods advertised in a CORS preflight response. The HTTP surface accepts GET /
 /// HEAD / POST (SPARQL query + the GSP read/write verbs) plus OPTIONS itself; PUT /
-/// DELETE are the GSP write verbs. A browser's actual request is still subject to every
-/// other guard (auth, body limit, …) — advertising a method here does not bypass them.
-const CORS_ALLOW_METHODS: &str = "GET, HEAD, POST, PUT, DELETE, OPTIONS";
+/// DELETE are the GSP write verbs; QUERY is the SPARQL Protocol query verb
+/// (w3c/sparql-protocol#40, sq-b3df9) so a browser can preflight a `fetch(…, {method:
+/// 'QUERY'})`. A browser's actual request is still subject to every other guard (auth,
+/// body limit, …) — advertising a method here does not bypass them. [OPUS-4.8]
+const CORS_ALLOW_METHODS: &str = "GET, HEAD, POST, PUT, DELETE, QUERY, OPTIONS";
 
 /// The request headers advertised as allowed in a preflight when the browser does not
 /// send its own `Access-Control-Request-Headers` (we otherwise reflect that list). Covers
