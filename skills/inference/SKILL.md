@@ -49,14 +49,25 @@ cargo run --release -p sparq-cli -- query data.ttl 'SELECT ...' --reason rdfs  #
 Re-exported from the crate root (`sparq_reason::…`):
 
 ```rust
-// Which regime to materialize. OwlRl includes RDFS.
-pub enum Profile { Rdfs, OwlRl }
-impl Profile { pub fn parse(s: &str) -> Option<Profile>; } // "rdfs" | "owl" | "owl-rl"
+// Which regime to materialize. OwlRl includes RDFS. `D` is opt-in (`d-entail` feature).
+pub enum Profile { Rdfs, OwlRl, /* #[cfg(d-entail)] */ D }
+impl Profile { pub fn parse(s: &str) -> Option<Profile>; } // "rdfs" | "owl" | "owl-rl" | "d"
 
 // Batch materialization (expand in place; returns NEW triples; idempotent).
 pub fn materialize(profile: Profile, dict: &mut Dict, triples: &mut Vec<[Id;3]>) -> usize;
 pub fn materialize_rdfs (dict: &mut Dict, triples: &mut Vec<[Id;3]>) -> usize;
 pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id;3]>) -> usize;
+
+// D-entailment (datatype / value-space) — opt-in `d-entail` feature, `sparq_reason::dtype`.
+// rdfD1 datatype-typing under a recognized datatype map; CORRECT TYPED value equality
+// ("1"^^xsd:integer ≡ "1.0"^^xsd:decimal — canonical decimal, NOT an f64 fast path).
+// `materialize(Profile::D, …)` uses the STANDARD map; pass a custom map via:
+#[cfg(feature = "d-entail")]
+pub fn materialize_d(d: &Recognized, dict: &mut Dict, triples: &mut Vec<[Id;3]>) -> usize;
+#[cfg(feature = "d-entail")]
+pub fn d_value_eq(lex_a: &str, dt_a: &str, lex_b: &str, dt_b: &str) -> bool; // value-space eq
+#[cfg(feature = "d-entail")]
+pub struct Recognized; // Recognized::standard() / ::new(iris) / ::default() (string+langString)
 
 // OWL inconsistency check (cax-dw / cls-com / eq-diff / cls-nothing clashes) — run AFTER OWL closure.
 pub fn inconsistencies(dict: &Dict, triples: &[[Id;3]]) -> Vec<String>;
@@ -243,10 +254,11 @@ let closure = reason_n3_terms_with_resolver(src, Some("http://ex/"), Some(&resol
 ## Gotchas / feature flags / prerequisites
 
 - **Not in the *lean* wasm bundle, but wasm-portable.** `sparq-reason` pulls `regex` and (by default) `rayon`; it is never in the **lean** `sparq-wasm` triplestore bundle. For wasm or single-threaded builds use `default-features = false` (disables the `parallel`/rayon feature). The crate itself compiles to `wasm32-unknown-unknown` — `regex` (the N3 `string:matches` builtin) is pure-Rust and wasm-portable — and ships as the **tier-b `sparq-reason-wasm` ("W-reason") bundle** ([OPUS-4.8] sq-6qw3): a `Reasoner` exposing `materialize` / `entailed` / `materializeStats` / `reasonN3` (and, behind the bundle's opt-in `explain` feature, `why()` proof trees) for in-tab live inference, lazy-loaded on the showcase site's `/surface/inference` page. There is no Noir/ZK toolchain requirement here — proofs are plain Rust structs.
-- **Features:** `parallel` (default, rayon-parallel fixpoint), `explain` (NON-default — enables `why()`/`why_with()` and the `explain` module; zero hot-path cost when off, and `why` methods don't exist without it).
+- **Features:** `parallel` (default, rayon-parallel fixpoint), `explain` (NON-default — enables `why()`/`why_with()` and the `explain` module; zero hot-path cost when off, and `why` methods don't exist without it), `d-entail` (NON-default — enables `Profile::D` + the `dtype` module; zero code when off — the lean default/wasm build is byte-identical, `sq-e5atd`).
 - **Two value levels.** RDFS/OWL APIs work on dictionary `Id`s (`materialize*`, `Materialized(Owl)Graph`); N3 batch APIs intern into a `Dict` (`reason_n3`), while term-level N3 (`reason_n3_terms`, `MaterializedN3Graph`) works on `n3::Term` and is **not interned** (formula `{ … }` terms have no dictionary id). Don't mix the two.
 - **The materialize → from_parts seam.** `materialize` mutates `(Dict, Vec<[Id;3]>)` *before* indexes are built. Use `Graph::parse_to_triples` (not `Graph::load_str`) so reasoning runs between parse and index build; then `Graph::from_parts`. It interns any vocabulary terms it needs and is idempotent (a second call adds nothing).
 - **RDFS scope is deliberate:** the non-explosive subset (rdfs2,3,5,7,9,11 — subClass/subProperty/domain/range). No axiomatic or reflexive `rdfs:subClassOf`/`type` triples (they add no useful inferences and explode the store).
+- **D-entailment (`Profile::D`, opt-in `d-entail`) scope + caveats:** materializes the rdfD1 datatype-typing rule — a well-formed literal `"l"^^d` of a *recognized* datatype `d` (the `Recognized` map; `xsd:string`/`rdf:langString` always, `Recognized::standard()` adds the numeric/boolean/temporal core) entails `"l"^^d rdf:type d`. The emitted typing triples are **generalized** (literal in subject position) — feed the closure to a query only after dropping literal-subject rows (they can never be a SPARQL answer; this is also why the W3C `d-ent-01` test correctly returns NO rows). The load-bearing invariant is **value-space equality** via `d_value_eq`: `"1"^^xsd:integer` ≡ `"1.0"^^xsd:decimal` (the integer/decimal value spaces coincide), compared as a CANONICAL DECIMAL STRING — **never an f64 fast path** (f64 silently aliases integers past 2^53 and loses decimal precision). `float`/`double` are a DISJOINT IEEE-754 value space; `date` and `dateTime` are disjoint temporal families. NOTE: the typed numeric comparator will migrate to `sparq-substrate::compare` once the shared eval-substrate move lands (`sq-6tykl`); D-inconsistency (ill-typed-literal / value-space clashes) and cross-type value-space *subset* reasoning are tracked-not-yet-shipped here (epic `sq-pbz04`).
 - **OWL 2 RL is sound but INCOMPLETE for class classification.** Running `Profile::OwlRl` / `--reason owl` over an EL ontology returns a `rdfs:subClassOf` hierarchy that silently omits existential-reasoning subsumptions (the calculus has no rule reasoning through an `∃r` successor). For the **complete** class hierarchy use `sparq-reason-el` (above), not more RL rules.
 - **OWL incremental fallback is silent.** `MaterializedOwlGraph` drops to `OwlMode::Fallback` (re-materializes via `materialize_owl_rl` every mutation, still correct) when the base uses `owl:sameAs`, Functional/InverseFunctional, property chains, restrictions, cardinality, hasKey, oneOf, intersection/union — and on any TBox mutation. Check `.mode()` / `.full_rebuilds()` if incremental cost matters. These usually live in a static TBox, so the mode is decided once at load.
 - **N3 incremental qualification is narrow.** `MaterializedN3Graph` only runs `N3Mode::Counting` (truly incremental) for a monotone, input-stratified rule fragment: forward rules with ground-IRI predicates, no conclusion blank nodes, builtins limited to the parity whitelist (`log:uri`, `log:equalTo`/`notEqualTo`, `string:concatenation`/`scrape`/`encodeForUri`), and negation only via the store-scoped `?x log:notIncludes { … }` idiom over input-only predicates. Anything else → `N3Mode::Fallback`; always consult `.fallback_reason()` (`None` ⇔ counting active). The full *batch* N3 engine (`reason_n3`) supports the much larger `math:`/`string:`/`list:`/`time:`/`log:` builtin set and goal-directed `<=` rules.

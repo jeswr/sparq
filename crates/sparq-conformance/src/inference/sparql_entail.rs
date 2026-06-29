@@ -75,6 +75,13 @@ pub fn run_suite(rdf_tests_root: &Path, out: &mut Vec<TestResult>) -> Result<(),
             Profile::Rdf
         } else if regimes.contains("OWL-RDF-Based") {
             Profile::OwlRl
+        } else if d_regime_profile(&regimes).is_some() {
+            // [OPUS-4.8] sq-e5atd — a D-only (datatype / value-space) test: route
+            // it through the opt-in `Profile::D` materializer when the `d-entail`
+            // feature is ON. When OFF, `d_regime_profile` returns None and the test
+            // stays OutOfScope (below), so the default inference binary's ratchet is
+            // unchanged — the lean opt-in posture.
+            d_regime_profile(&regimes).unwrap()
         } else {
             let mut rs: Vec<&str> = regimes.iter().copied().collect();
             rs.sort_unstable();
@@ -93,11 +100,71 @@ pub fn run_suite(rdf_tests_root: &Path, out: &mut Vec<TestResult>) -> Result<(),
     Ok(())
 }
 
+/// [OPUS-4.8] sq-e5atd — run ONLY the genuinely D-only (`sd:entailmentRegime
+/// ent:D` WITHOUT any stronger RDFS/RDF/OWL-RDF-Based regime) tests of the
+/// `sparql11/entailment` suite, through the real `Profile::D` materializer. This
+/// is the DEDICATED D-regime lane the `tests/d_entail_suite.rs` ratchet asserts a
+/// floor over; it is deliberately a SUBSET of `run_suite` (the stronger-regime
+/// tests are exercised under their own regime there). Opt-in, `d-entail`.
+#[cfg(feature = "d-entail")]
+pub fn run_d_regime_suite(rdf_tests_root: &Path, out: &mut Vec<TestResult>) -> Result<(), String> {
+    let suites_root = rdf_tests_root
+        .join("sparql")
+        .canonicalize()
+        .map_err(|e| format!("rdf-tests sparql dir: {e}"))?;
+    let manifest_path = suites_root.join("sparql11/entailment/manifest.ttl");
+    let mut entries: Vec<TestEntry> = Vec::new();
+    manifest::collect(&manifest_path, &suites_root, &mut entries)?;
+    for entry in &entries {
+        if entry.kind != EntryKind::QueryEval {
+            continue;
+        }
+        let regimes: FxHashSet<&str> = entry
+            .action
+            .entailment_regimes
+            .iter()
+            .filter_map(|r| r.rsplit('/').next())
+            .collect();
+        // A test is D-ONLY when its only materializable regime is D — none of the
+        // stronger regimes (which `run_suite` picks first) apply.
+        let stronger = regimes.contains("RDFS")
+            || regimes.contains("RDF")
+            || regimes.contains("OWL-RDF-Based");
+        if stronger || !regimes.contains("D") {
+            continue;
+        }
+        let direct_sanctioned = regimes.contains("OWL-Direct");
+        out.push(result(entry, run_one(entry, Profile::D, direct_sanctioned)));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Profile {
     Rdf,
     Rdfs,
     OwlRl,
+    /// [OPUS-4.8] sq-e5atd — D-entailment (datatype / value-space). Opt-in,
+    /// `d-entail`. Only reached for a test whose regime set is D WITHOUT any of
+    /// RDFS/RDF/OWL-RDF-Based (those stronger regimes subsume D and are picked
+    /// first), so this arm graduates the genuinely D-only tests.
+    #[cfg(feature = "d-entail")]
+    D,
+}
+
+/// The `Profile::D` for a regime set IFF the `d-entail` feature is ON and the set
+/// contains the D regime; `None` otherwise (so the caller keeps the test
+/// OutOfScope when the feature is off — the default binary is unchanged).
+#[cfg(feature = "d-entail")]
+fn d_regime_profile(regimes: &FxHashSet<&str>) -> Option<Profile> {
+    regimes.contains("D").then_some(Profile::D)
+}
+
+/// Feature-OFF stub: D is never a supported profile, so a D-only test stays
+/// OutOfScope. (Kept as a function so the call site is identical in both states.)
+#[cfg(not(feature = "d-entail"))]
+fn d_regime_profile(_regimes: &FxHashSet<&str>) -> Option<Profile> {
+    None
 }
 
 fn result(entry: &TestEntry, outcome: Outcome) -> TestResult {
@@ -161,6 +228,18 @@ fn run_one(entry: &TestEntry, profile: Profile, direct_sanctioned: bool) -> Outc
             add_declared_reflexives(&mut dict, &mut ids, true);
             sparq_reason::materialize(sparq_reason::Profile::OwlRl, &mut dict, &mut ids);
             add_eq_ref(&mut dict, &mut ids);
+        }
+        // [OPUS-4.8] sq-e5atd — D-entailment: the rdfD1 datatype-typing closure
+        // under the STANDARD recognized datatype map (this suite's D tests do not
+        // restrict D via a per-test set). The emitted typing triples are
+        // GENERALIZED (literal subject `"l"^^d rdf:type d`); the N-Triples
+        // serialization below DROPS literal-subject rows (they can never be a
+        // SPARQL answer — the regime answer restriction, also why `d-ent-01`
+        // correctly returns NO rows), so D-entailment adds no bindable triple but
+        // is computed through the real `Profile::D` materializer.
+        #[cfg(feature = "d-entail")]
+        Profile::D => {
+            sparq_reason::materialize(sparq_reason::Profile::D, &mut dict, &mut ids);
         }
     }
 

@@ -161,6 +161,17 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-policy/tests/odrl_test_suite.rs",
         "ODRL_SUITE_FLOOR",
     ),
+    // [OPUS-4.8] sq-e5atd (epic sq-pbz04) — the W3C SPARQL 1.1 D-entailment ratchet.
+    // `pub const D_ENTAIL_FLOOR` lives in this crate's `tests/d_entail_suite.rs`
+    // (behind the opt-in `d-entail` feature, inside the `gated` module — the guard
+    // reads it TEXTUALLY, so the `#[cfg]`/module nesting do not affect the match);
+    // the guard pins the central scoreboard's `ratchet_floor` to it so the two can
+    // never silently drift.
+    (
+        "W3C SPARQL 1.1 D-entailment",
+        "crates/sparq-conformance/tests/d_entail_suite.rs",
+        "D_ENTAIL_FLOOR",
+    ),
 ];
 
 #[test]
@@ -244,4 +255,6 @@ fn scoreboard_renders_all_suites() {
     assert!(md.contains("W3C JSON-LD 1.1 flatten"));
     // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite decision-parity ratchet.
     assert!(md.contains("SolidLab ODRL Test Suite"));
+    // [OPUS-4.8] sq-e5atd — the W3C SPARQL 1.1 D-entailment ratchet.
+    assert!(md.contains("W3C SPARQL 1.1 D-entailment"));
 }

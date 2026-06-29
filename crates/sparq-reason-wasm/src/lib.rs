@@ -33,12 +33,18 @@ mod explain;
 /// N-Triples via the engine's tested CONSTRUCT path (no hand-rolled term serialiser here).
 const ECHO_CONSTRUCT: &str = "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }";
 
-/// Parses `profile` (`"rdfs"` | `"owl"` / `"owl-rl"`) or returns a JS error naming the
-/// accepted values — the single place the JS-facing profile string is validated.
+/// Parses `profile` (`"rdfs"` | `"owl"` / `"owl-rl"`; with the `d-entail` feature also `"d"`)
+/// or returns a JS error naming the accepted values — the single place the JS-facing profile
+/// string is validated.
 fn parse_profile(profile: &str) -> Result<Profile, JsError> {
     Profile::parse(profile).ok_or_else(|| {
+        // The accepted set widens to include "d" when the bundle is built with `d-entail`.
+        #[cfg(feature = "d-entail")]
+        let expected = "\"rdfs\", \"owl-rl\" or \"d\"";
+        #[cfg(not(feature = "d-entail"))]
+        let expected = "\"rdfs\" or \"owl-rl\"";
         JsError::new(&format!(
-            "unknown reasoning profile {profile:?}; expected \"rdfs\" or \"owl-rl\""
+            "unknown reasoning profile {profile:?}; expected {expected}"
         ))
     })
 }

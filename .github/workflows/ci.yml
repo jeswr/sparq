@@ -1461,6 +1461,28 @@ jobs:
           TOTAL=$(( ${PASS:-0} + ${DIV:-0} ))
           echo "pass: ${PASS:-unknown} + documented divergences: ${DIV:-0} = $TOTAL (ratchet: $RATCHET)"
           [ -n "$PASS" ] && [ "$TOTAL" -ge "$RATCHET" ] || { echo "::error::inference conformance regressed below the ratchet ($TOTAL < $RATCHET)"; exit 1; }
+      - name: Run D-entailment lane (d-entail feature ON) + enforce floor
+        # [OPUS-4.8] sq-e5atd (epic sq-pbz04) — the OPT-IN D-entailment (datatype /
+        # value-space) ratchet. SEPARATE from the binary ratchet above so the default
+        # inference binary stays byte-for-byte unchanged (the D-only sparql11/entailment
+        # tests remain OutOfScope there). This crate-test runs those tests through the
+        # real `sparq_reason::Profile::D` materializer and prints a `TOTAL d-entail`
+        # line; the floor (D_ENTAIL_FLOOR, mirrored in scoreboard::SUITES) is asserted
+        # in-runner AND re-grepped here. `--nocapture` so the TOTAL line reaches stdout.
+        run: |
+          set -uo pipefail
+          cargo test -p sparq-conformance --features d-entail --test d_entail_suite -- --nocapture \
+            | tee d-entail-conformance.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::D-entailment lane test failed (exit $rc)"; exit "$rc"; }
+          if ! grep -qE '^TOTAL d-entail ' d-entail-conformance.out; then
+            echo "::error::D-entailment lane produced no 'TOTAL d-entail' line — infra/build issue, not a conformance change. Re-run the job."
+            exit 1
+          fi
+          FLOOR=1
+          PASS=$(grep -E '^TOTAL d-entail ' d-entail-conformance.out | awk '{print $3}' | head -1)
+          echo "D-entailment pass: ${PASS:-unknown} (floor: $FLOOR)"
+          [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::D-entailment regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
       - name: Upload report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()

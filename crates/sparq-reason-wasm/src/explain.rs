@@ -95,6 +95,21 @@ impl Reasoner {
                 let g = MaterializedOwlGraph::new(&mut dict, &base);
                 g.why_with(&dict, triple, opts)
             }
+            // [OPUS-4.8] sq-e5atd: D-entailment is a value-space materialiser (the rdfD1
+            // datatype-typing closure with typed literal equality), not a rule-based
+            // forward-chainer that records a premises-before-conclusion derivation DAG, so
+            // there is no `why` proof tree for it. `Profile::D` only exists when the bundle is
+            // built with the `d-entail` feature; gate the arm on the same cfg so the match is
+            // exhaustive in BOTH feature states.
+            #[cfg(feature = "d-entail")]
+            sparq_reason::Profile::D => {
+                return Err(JsError::new(
+                    "why() is not available for the \"d\" (D-entailment) profile: D-entailment \
+                     is a value-space datatype materialiser, not a rule-based derivation, so it \
+                     has no proof tree. Use materialize/entailed for the D closure, or why() \
+                     with the \"rdfs\"/\"owl-rl\" profile.",
+                ));
+            }
         };
         Ok(proof_to_json(proof))
     }

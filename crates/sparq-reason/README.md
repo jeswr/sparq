@@ -36,6 +36,9 @@ let g = Graph::from_parts(dict, triples);
 - **RDFS entailment** — the non-explosive subset (rdfs2/3/5/7/9/11), materialized in one pass.
 - **OWL 2 RL** — property/class axioms (`sameAs`, `inverseOf`, Transitive / Symmetric,
   `equivalentClass` / `equivalentProperty`, …) over the same fixpoint engine.
+- **D-entailment** (opt-in `d-entail`) — `Profile::D`: the rdfD1 datatype-typing rule under
+  a recognized datatype map, with **correct typed value-space equality**
+  (`"1"^^xsd:integer` is the same value as `"1.0"^^xsd:decimal`, never an f64 fast path).
 - **Notation3** — `{ … } => { … }` rules with EYE-validated builtins (a separate subsystem).
 - **Incremental maintenance** — `MaterializedGraph` keeps the closure current under
   inserts/deletes by exact derivation counting; cost scales with the change, not a re-run.

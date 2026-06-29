@@ -157,6 +157,10 @@ pub struct Suite {
 ///   `ODRL_SUITE_FLOOR = 67` (sq-tmsd6 wired it at 59; the constraint-matching batch
 ///   sq-euhr3/sq-k7itg/sq-a0zef raised it to 67 of 68 cases pass, 1 in a documented
 ///   not-implemented bucket).
+/// * D-entailment 1 — `sparq-conformance` `tests/d_entail_suite.rs`
+///   `D_ENTAIL_FLOOR = 1` (sq-e5atd; opt-in `d-entail` feature; the D-only
+///   `sparql11/entailment` tests graduated from OutOfScope to Pass through
+///   sparq-reason's `Profile::D` — rdfD1 typing + typed value-space equality).
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
@@ -427,6 +431,37 @@ pub const SUITES: &[Suite] = &[
         floor_basis: "scenario",
         note: "library-level allow/deny parity over the SolidLab self-describing ODRL \
                cases through sparq-policy's real evaluate() path",
+    },
+    // [OPUS-4.8] sq-e5atd (epic sq-pbz04) — the W3C SPARQL 1.1 D-entailment
+    // (datatype / value-space) ratchet. The runner is crate-local here
+    // (`tests/d_entail_suite.rs`) but behind the OPT-IN `d-entail` feature (forwards
+    // to sparq-reason/d-entail) so the default + `--workspace` builds neither link
+    // the `Profile::D` materializer nor go red — the lean-core posture, and the
+    // inference BINARY keeps these tests OutOfScope when the feature is off so its
+    // own ratchet floor is byte-for-byte unchanged. The genuinely D-only
+    // `sparql11/entailment` tests (regime `ent:D` without a stronger RDFS/RDF/
+    // OWL-RDF-Based regime) GRADUATE from that OutOfScope bucket to Pass here:
+    // premise → `sparq_reason::Profile::D` (rdfD1 typing + the typed value-space
+    // comparator — "1"^^xsd:integer ≡ "1.0"^^xsd:decimal, NOT an f64 fast path) →
+    // query over the closure through the same evaluation path as the SPARQL harness,
+    // with the entailment-regime answer restriction applied. The floor is the
+    // MEASURED D-only pass count at the pinned revision (NOT 100%; the broader
+    // D-inconsistency / value-space-subset surface is tracked-not-asserted — a child
+    // of sq-pbz04). Floor kept in lock-step by `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "W3C SPARQL 1.1 D-entailment",
+        family: "W3C RDF Semantics",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "d_entail_suite",
+            feature: "d-entail",
+        },
+        ci_job: "inference-conformance",
+        ratchet_floor: 1,
+        floor_basis: "pass",
+        note: "D-only sparql11/entailment tests graduated from OutOfScope to Pass \
+               through sparq-reason's opt-in Profile::D (rdfD1 typing + typed \
+               value-space equality)",
     },
 ];
 
