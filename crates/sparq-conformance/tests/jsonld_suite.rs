@@ -202,6 +202,68 @@ mod gated {
     /// never used to hide a divergence.
     pub const FRAME_FLOOR: usize = 61;
 
+    /// [OPUS-4.8] sq-oy1f — `expand` (RDF → expanded JSON-LD via the
+    /// ALREADY-SHIPPING writer `graph_to_jsonld(JsonLdForm::Expanded)`, the
+    /// `serialize-rdf` feature) pass floor over the `expand` category of
+    /// `w3c/json-ld-api`. RATCHET: may only RISE. This is the MEASURED pass count
+    /// at the pinned suite revision — the number of `jld:ExpandTest` cases for
+    /// which expanding the input's RDF and re-parsing the produced expanded
+    /// document reconstructs the SAME RDF dataset as re-parsing the suite's
+    /// NORMATIVE expected expanded document (`reparse(expand(D)) ≡ reparse(expected)`).
+    ///
+    /// ## Why compare against `expect`, not the input
+    ///
+    /// Expansion is the algorithmic NORMAL FORM, not a lossless round-trip of the
+    /// input JSON layout: it drops free-floating nodes, resolves `@context`, and
+    /// canonicalises value/node objects. Comparing `reparse(expand(D)) ≡ D` would
+    /// over-pass on cases whose input has structure the RDF projection legitimately
+    /// drops. The normative answer is the suite's `*-out.jsonld`; sparq's expanded
+    /// output must encode the SAME RDF as that expected document. Comparing the two
+    /// as canonical RDF datasets is value-faithful while NOT requiring sparq's JSON
+    /// layout to match byte-for-byte (the same oxjsonld self-reparse oracle the
+    /// frame lane uses).
+    ///
+    /// ## Honest SKIP buckets (recorded, not passed, not failed)
+    ///
+    /// * `requires` optional-feature cases — out of the gated surface.
+    /// * NegativeEvaluationTests — sparq's writer is TOTAL and never raises the
+    ///   spec's expansion errors (`invalid @context`, keyword redefinition,
+    ///   collision errors, …); a 1.1 writer that does not model those errors cannot
+    ///   honestly "pass" by rejecting, so these are SKIPPED (the compact/frame-lane
+    ///   posture), never a counted pass.
+    /// * JSON-LD-1.0-only positives (`specVersion`/`processingMode` =
+    ///   `json-ld-1.0`) — a 1.1 writer is not obliged to reproduce 1.0 shape — SKIP.
+    /// * A positive case whose input → RDF is EMPTY (free-floating-node drops, pure
+    ///   `@context` with no triples): nothing to expand, the round-trip is vacuous
+    ///   and tells us nothing about the algorithm — SKIP.
+    ///
+    /// MEASURED 247/385 at the pinned revision: expand 247 pass / 10 fail / 128
+    /// skip. The 10 FAILs are honest writer divergences below the floor (to RISE):
+    /// `@direction`/i18n-datatype shapes (`tdi*`), `@list`/coercion cases whose RDF
+    /// projection differs from the expected expanded document, and one case whose
+    /// expected `*-out.jsonld` oxjsonld itself cannot re-parse (`@id` non-string).
+    /// The 128 SKIP are the documented buckets (NegativeEvaluationTests sparq's
+    /// TOTAL writer does not raise, JSON-LD-1.0-only positives, and positives whose
+    /// input → RDF is empty so the projection is vacuous). The rest stay
+    /// tracked-not-asserted.
+    pub const EXPAND_FLOOR: usize = 247;
+
+    /// [OPUS-4.8] sq-oy1f — `flatten` (RDF → flattened JSON-LD via the
+    /// ALREADY-SHIPPING writer `graph_to_jsonld(JsonLdForm::Flattened)`, the
+    /// `serialize-rdf` feature) pass floor over the `flatten` category of
+    /// `w3c/json-ld-api`. RATCHET: may only RISE. This is the MEASURED pass count
+    /// at the pinned suite revision — the number of `jld:FlattenTest` cases for
+    /// which flattening the input's RDF and re-parsing the produced flattened
+    /// document reconstructs the SAME RDF dataset as re-parsing the suite's
+    /// NORMATIVE expected flattened document (`reparse(flatten(D)) ≡ reparse(expected)`).
+    /// Same oracle, SKIP buckets, and caveat as `EXPAND_FLOOR` (flattening is the
+    /// node-merged normal form; the oracle anchors on the expected document, not the
+    /// input). MEASURED 50/58 at the pinned revision: flatten 50 pass / 0 fail / 8
+    /// skip — every flatten case the writer drives round-trips to the normative
+    /// expected document; the 8 SKIP are the documented buckets (1
+    /// NegativeEvaluationTest, JSON-LD-1.0-only positives, and empty-RDF inputs).
+    pub const FLATTEN_FLOOR: usize = 50;
+
     /// [OPUS-4.8] sq-oy1f.19 — the framing suite's declared base (its
     /// `baseIri`), used to resolve each frame test's input path into the document
     /// IRI. Distinct from `SUITE_BASE` (the json-ld-api base) — framing is a
@@ -955,6 +1017,154 @@ mod gated {
         s
     }
 
+    /// [OPUS-4.8] sq-oy1f — run a W3C JSON-LD `expand` / `flatten` category against
+    /// the ALREADY-SHIPPING native writer (`graph_to_jsonld(graph, form)`, the
+    /// `serialize-rdf` feature), with `form` = [`JsonLdForm::Expanded`] for `expand`
+    /// and [`JsonLdForm::Flattened`] for `flatten`.
+    ///
+    /// ## Pipeline (the REAL writer path)
+    ///
+    /// 1. Parse the case `input` (`.jsonld`) → RDF via the real oxjsonld ingest path
+    ///    (`parse_jsonld_dataset`).
+    /// 2. Re-emit that dataset as N-Quads and load it into a sparq [`Graph`]
+    ///    (preserving named graphs) — the writer takes a `Graph`, not a JSON-LD doc,
+    ///    because sparq's expand/flatten OUTPUT is a projection of RDF (exactly the
+    ///    bridge `run_compact` / `run_frame` use).
+    /// 3. Run `graph_to_jsonld(&graph, form)` — the shipping writer, NOT a stub.
+    /// 4. **Invariant (normative answer-equivalence):** re-parse BOTH sparq's output
+    ///    AND the suite's NORMATIVE expected document (`*-out.jsonld`) to canonical
+    ///    [`Dataset`]s and require they are equal:
+    ///    `reparse(write(D, form)) ≡ reparse(expected)`. Expansion/flattening are the
+    ///    JSON-LD normal forms (they drop free-floating nodes / merge nodes), so the
+    ///    oracle anchors on the W3C-expected document, NOT the input — the same
+    ///    posture as the frame lane. This is envelope-insensitive and value-faithful
+    ///    while NOT requiring sparq's JSON layout to match byte-for-byte.
+    ///
+    /// ## Honest SKIP buckets (recorded, not passed, not failed) — see `EXPAND_FLOOR`
+    fn run_expand_or_flatten(
+        root: &Path,
+        cat: &str,
+        form: sparq_engine::serialize::JsonLdForm,
+    ) -> Score {
+        use sparq_engine::serialize::graph_to_jsonld;
+        let mut s = Score::default();
+        let entries = match read_manifest(root, cat) {
+            Ok(e) => e,
+            Err(why) => {
+                s.fail(&format!("{cat}-manifest"), why);
+                return s;
+            }
+        };
+        for e in &entries {
+            if e.requires.is_some() {
+                s.skip();
+                continue;
+            }
+            // NegativeEvaluationTest: sparq's writer is TOTAL and does not raise the
+            // spec's expansion/flattening errors, so a faithful 1.1 writer cannot
+            // "pass" by rejecting — SKIP (honest), never a counted pass.
+            if e.is_negative {
+                s.skip();
+                continue;
+            }
+            // JSON-LD-1.0-only positives (processing-mode shape differences a 1.1
+            // writer is not obliged to reproduce): SKIP.
+            if e.spec_version.as_deref() == Some("json-ld-1.0")
+                || e.processing_mode.as_deref() == Some("json-ld-1.0")
+            {
+                s.skip();
+                continue;
+            }
+            let Some(expect_rel) = &e.expect else {
+                s.skip();
+                continue;
+            };
+            // Remote input (no network) — guard (the toRdf lane already gates ingest).
+            if e.input.starts_with("http://") || e.input.starts_with("https://") {
+                s.skip();
+                continue;
+            }
+
+            // 1. Parse the input JSON-LD → RDF (the source dataset). An input the
+            //    real oxjsonld path rejects, or `option`-driven cases the writer does
+            //    not apply (e.g. `expandContext`), produce RDF that legitimately
+            //    differs from `expected`; those that fail to parse are SKIPPED (out of
+            //    the gated surface), those that parse but diverge are honest FAILs.
+            let input_path = root.join(&e.input);
+            let in_text = match std::fs::read_to_string(&input_path) {
+                Ok(t) => t,
+                Err(why) => {
+                    s.fail(&e.id, format!("read input: {why}"));
+                    continue;
+                }
+            };
+            let base = doc_base(e);
+            let input_ds = match parse_jsonld_dataset(&in_text, &base) {
+                Ok(ds) => ds,
+                Err(_) => {
+                    s.skip();
+                    continue;
+                }
+            };
+            // No triples → nothing to project; the round-trip is vacuous. SKIP.
+            if input_ds.is_empty() {
+                s.skip();
+                continue;
+            }
+
+            // 2. Load the input RDF into a sparq Graph (named graphs preserved) and
+            //    run the REAL shipping writer in the requested form.
+            let nq = dataset_to_nquads(&input_ds);
+            let graph = match Graph::load_dataset(&nq, "nquads") {
+                Ok(g) => g,
+                Err(why) => {
+                    s.fail(&e.id, format!("load input rdf into graph: {why}"));
+                    continue;
+                }
+            };
+            let out_doc = graph_to_jsonld(&graph, form);
+
+            // 3. Re-parse sparq's output and the suite's NORMATIVE expected document,
+            //    require RDF-dataset equivalence (the normative answer-equivalence
+            //    invariant).
+            let got = match jsonld_to_canonical_dataset(&out_doc, &base) {
+                Ok(ds) => ds,
+                Err(why) => {
+                    s.fail(&e.id, format!("re-parse {cat} output: {why}"));
+                    continue;
+                }
+            };
+            let expect_path = root.join(expect_rel);
+            let exp_text = match std::fs::read_to_string(&expect_path) {
+                Ok(t) => t,
+                Err(why) => {
+                    s.fail(&e.id, format!("read expect: {why}"));
+                    continue;
+                }
+            };
+            let want = match jsonld_to_canonical_dataset(&exp_text, &base) {
+                Ok(ds) => ds,
+                Err(why) => {
+                    s.fail(&e.id, format!("re-parse expected output: {why}"));
+                    continue;
+                }
+            };
+            if got == want {
+                s.pass();
+            } else {
+                s.fail(
+                    &e.id,
+                    format!(
+                        "{cat} RDF != expected RDF ({} vs {} quads)",
+                        got.len(),
+                        want.len()
+                    ),
+                );
+            }
+        }
+        s
+    }
+
     /// The known-gap categories: present in the W3C suite but NOT a sparq-shipped
     /// gateable surface yet. Reported as not-implemented (never failed). The size
     /// is read from each manifest so the scoreboard shows the real backlog and
@@ -962,11 +1172,12 @@ mod gated {
     ///
     /// [OPUS-4.8] sq-3uos5 — `compact` GRADUATED out of this bucket: it is now a
     /// gated category (`run_compact`, `COMPACT_FLOOR`). [OPUS-4.8] sq-oy1f.19 —
-    /// `frame` likewise GRADUATED: it is now a gated category (`run_frame`,
-    /// `FRAME_FLOOR`) over the separate `w3c/json-ld-framing` suite.
+    /// `frame` likewise GRADUATED. [OPUS-4.8] sq-oy1f — `expand` + `flatten` now
+    /// GRADUATED too: each is a gated category (`run_expand_or_flatten`,
+    /// `EXPAND_FLOOR` / `FLATTEN_FLOOR`) driving the shipping
+    /// `graph_to_jsonld(JsonLdForm::Expanded|Flattened)` writer, compared by
+    /// re-parse RDF-equivalence to the suite's normative expected document.
     const NOT_IMPLEMENTED_CATS: &[(&str, &str)] = &[
-        ("expand", "Expansion — output-vs-W3C-document comparison not wired (sq-oy1f)"),
-        ("flatten", "Flattening — output-vs-W3C-document comparison not wired (sq-oy1f)"),
         ("html", "HTML script extraction not implemented"),
         ("remote-doc", "remote @context loader not wired (oxjsonld needs a LoadDocumentCallback)"),
     ];
@@ -991,9 +1202,13 @@ mod gated {
             return;
         }
 
+        use sparq_engine::serialize::JsonLdForm;
         let tordf = run_tordf(&root);
         let fromrdf = run_fromrdf(&root);
         let compact = run_compact(&root);
+        // [OPUS-4.8] sq-oy1f — expand + flatten now drive the shipping writer.
+        let expand = run_expand_or_flatten(&root, "expand", JsonLdForm::Expanded);
+        let flatten = run_expand_or_flatten(&root, "flatten", JsonLdForm::Flattened);
         let not_impl = not_implemented_counts(&root);
 
         // [OPUS-4.8] sq-oy1f.19 — framing lives in the SEPARATE w3c/json-ld-framing
@@ -1021,6 +1236,17 @@ mod gated {
         println!(
             "TOTAL compact {} {} {} (floor {})",
             compact.pass, compact.fail, compact.skip, COMPACT_FLOOR
+        );
+        // [OPUS-4.8] sq-oy1f — the expand + flatten ratchets. The CI grep depends on
+        // these exact `^TOTAL expand `/`^TOTAL flatten ` prefixes with the pass count
+        // in field $3 (same shape as the other lanes).
+        println!(
+            "TOTAL expand {} {} {} (floor {})",
+            expand.pass, expand.fail, expand.skip, EXPAND_FLOOR
+        );
+        println!(
+            "TOTAL flatten {} {} {} (floor {})",
+            flatten.pass, flatten.fail, flatten.skip, FLATTEN_FLOOR
         );
         // [OPUS-4.8] sq-oy1f.19 — the frame ratchet. The CI grep depends on this
         // exact `^TOTAL frame ` prefix with the pass count in field $3 (same shape
@@ -1059,6 +1285,18 @@ mod gated {
                 println!("  {}: {}", id, why);
             }
         }
+        if !expand.failures.is_empty() {
+            println!("\nexpand failures (first 40):");
+            for (id, why) in expand.failures.iter().take(40) {
+                println!("  {}: {}", id, why);
+            }
+        }
+        if !flatten.failures.is_empty() {
+            println!("\nflatten failures (first 40):");
+            for (id, why) in flatten.failures.iter().take(40) {
+                println!("  {}: {}", id, why);
+            }
+        }
         if let Some(frame) = &frame {
             if !frame.failures.is_empty() {
                 println!("\nframe failures (first 40):");
@@ -1088,6 +1326,20 @@ mod gated {
             "JSON-LD compact pass count regressed: {} < floor {} — see failures above",
             compact.pass,
             COMPACT_FLOOR
+        );
+        // [OPUS-4.8] sq-oy1f — the expand + flatten ratchets (normative
+        // answer-equivalence floors over the shipping writer).
+        assert!(
+            expand.pass >= EXPAND_FLOOR,
+            "JSON-LD expand pass count regressed: {} < floor {} — see failures above",
+            expand.pass,
+            EXPAND_FLOOR
+        );
+        assert!(
+            flatten.pass >= FLATTEN_FLOOR,
+            "JSON-LD flatten pass count regressed: {} < floor {} — see failures above",
+            flatten.pass,
+            FLATTEN_FLOOR
         );
         // [OPUS-4.8] sq-oy1f.19 — the frame ratchet (normative answer-equivalence
         // floor), asserted only when the separate framing suite is present.
