@@ -28,9 +28,12 @@ use std::net::ToSocketAddrs;
 const RESOLVED_ADDRS_CAP: usize = 16;
 
 /// `host:port` (for resolution) + the bare host (the allowlist key — IPv6 brackets stripped,
-/// lowercased) from a ureq-3 request [`Uri`](ureq::http::Uri). `port` falls back to the scheme
-/// default (443 for https, 80 otherwise). `None` when the URI carries no host authority.
-pub(crate) fn uri_host_port(uri: &ureq::http::Uri) -> Option<(String, String)> {
+/// lowercased) + the numeric `port` from a ureq-3 request [`Uri`](ureq::http::Uri). `port` falls
+/// back to the scheme default (443 for https, 80 otherwise). `None` when the URI carries no host
+/// authority. The numeric port lets the SSRF resolver apply a PORT-SCOPED allowlist entry (a
+/// `host:port` allowlist entry permits only that exact dialled port), consistent with the engine's
+/// SERVICE egress guard. [OPUS-4.8] sq-vbnyc.
+pub(crate) fn uri_host_port(uri: &ureq::http::Uri) -> Option<(String, String, u16)> {
     let authority = uri.authority()?;
     let host = authority.host();
     if host.is_empty() {
@@ -43,7 +46,23 @@ pub(crate) fn uri_host_port(uri: &ureq::http::Uri) -> Option<(String, String)> {
     // The authority host keeps IPv6 brackets (`[::1]`); strip them for the allowlist key and for
     // `to_socket_addrs` (which wants the bare host + a separate port).
     let bare = host.trim_start_matches('[').trim_end_matches(']');
-    Some((format!("{bare}:{port}"), bare.to_ascii_lowercase()))
+    Some((format!("{bare}:{port}"), bare.to_ascii_lowercase(), port))
+}
+
+/// True iff any allowlist `entry` permits dialling `host` on `port`, using the engine's shared
+/// SERVICE-egress per-entry rule ([`sparq_engine::allowlist_entry_permits`]). The federation
+/// SSRF resolvers call this instead of a bare `allow.contains(host)`, so a PORT-SCOPED allowlist
+/// entry (`host:port`) re-opens a private host ONLY on its exact dialled port — byte-for-byte the
+/// same host:port matching the engine guard applies (one source of truth, bead sq-vbnyc). A
+/// host-level entry (no `:port`) still re-opens every port (backward compatible). [OPUS-4.8].
+pub(crate) fn allowlist_permits(
+    allow: &std::collections::HashSet<String>,
+    host: &str,
+    port: u16,
+) -> bool {
+    allow
+        .iter()
+        .any(|entry| sparq_engine::allowlist_entry_permits(entry, host, port))
 }
 
 /// Wrap a refusal `reason` as a `PermissionDenied` [`ureq::Error::Io`], preserving the kind (the

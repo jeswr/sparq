@@ -1058,17 +1058,79 @@ pub(crate) mod egress_policy {
     pub(crate) fn is_allowed(host: &str, port: u16) -> bool {
         let h = host.to_ascii_lowercase();
         POLICY.with(|p| {
-            p.borrow().allow.iter().any(|e| {
-                let (host_pattern, entry_port) = split_entry(e);
-                host_matches(host_pattern, &h) && entry_port.is_none_or(|ep| ep == port)
-            })
+            p.borrow()
+                .allow
+                .iter()
+                .any(|e| entry_permits(e, &h, port))
         })
+    }
+
+    /// True iff the single allowlist `entry` permits the lower-cased connect host `h` on
+    /// `port` — the pure per-entry predicate `is_allowed`'s `.any(…)` closure applies to
+    /// every stored entry. [OPUS-4.8] (sq-a7jw4)
+    ///
+    /// Factored out so the host:port parsing + matching semantics (port-0/overflow/
+    /// IPv6-bracket/trailing-colon all handled by [`split_entry`]) live in ONE place and can
+    /// be shared verbatim by the `sparq-fedclient` egress guard via
+    /// [`super::allowlist_entry_permits`] — there is no second, divergent copy of the
+    /// host:port rules (bead sq-vbnyc). `h` is expected pre-lower-cased; the public wrapper
+    /// lower-cases for callers that hold a raw host.
+    pub(crate) fn entry_permits(entry: &str, h: &str, port: u16) -> bool {
+        let (host_pattern, entry_port) = split_entry(entry);
+        host_matches(host_pattern, h) && entry_port.is_none_or(|ep| ep == port)
+    }
+
+    /// True iff the allowlist `entry`'s HOST part matches the lower-cased connect host `h`,
+    /// IGNORING any port constraint — i.e. "is `h` named by this entry on *some* port". [OPUS-4.8]
+    /// (sq-vbnyc). The fedclient guard's backward-compatible "is this host allowlisted at all"
+    /// query reuses this so the host-pattern parsing (bracket-stripping, suffix wildcard) lives in
+    /// ONE place rather than being re-derived client-side.
+    pub(crate) fn entry_host_matches(entry: &str, h: &str) -> bool {
+        let (host_pattern, _entry_port) = split_entry(entry);
+        host_matches(host_pattern, h)
     }
 
     /// The active policy mode.
     pub(crate) fn mode() -> Mode {
         POLICY.with(|p| p.borrow().mode)
     }
+}
+
+/// True iff a single SSRF-allowlist `entry` permits connecting to `host` on `port`. [OPUS-4.8] (sq-vbnyc)
+///
+/// This is the engine's SERVICE-egress per-entry matching rule, exposed so the
+/// **`sparq-fedclient`** crate's independent host-level egress guard can adopt the SAME
+/// port-scoping semantics rather than re-implementing the host:port parsing/matching (one
+/// source of truth — bead sq-vbnyc, follow-up to the engine's port-scoped allowlist sq-a7jw4).
+/// The fedclient guard owns its own per-instance allowlist storage but delegates the
+/// per-entry decision here, so the two guards agree byte-for-byte on every edge case:
+///
+/// * a **host-level** entry (no `:port`, e.g. `"sparql.internal"` or `".example.org"`)
+///   permits the host on EVERY port — the original, backward-compatible meaning;
+/// * a **port-scoped** entry (`host:port`, e.g. `"127.0.0.1:8053"` / `"[::1]:8080"` /
+///   `".example.org:443"`) permits the host ONLY on that exact port and rejects every other
+///   port on the same host — strictly narrower;
+/// * a malformed `:port` (out-of-range `:99999`, empty `:` trailing colon, non-numeric) is
+///   treated as part of a never-matching host pattern — fail-CLOSED, never widened;
+/// * a bare (unbracketed) IPv6 literal (`"2001:db8::1"`) is NOT amputated — host-level.
+///
+/// `host` is matched case-insensitively; matching is exact or a leading-dot suffix wildcard.
+/// There is NO wildcard port and no global bypass — a port-scoped entry can only tighten.
+#[cfg(feature = "service")]
+pub fn allowlist_entry_permits(entry: &str, host: &str, port: u16) -> bool {
+    egress_policy::entry_permits(entry, &host.to_ascii_lowercase(), port)
+}
+
+/// True iff a single SSRF-allowlist `entry`'s HOST part names `host`, IGNORING any port
+/// constraint — "is `host` reachable through this entry on *some* port". [OPUS-4.8] (sq-vbnyc)
+///
+/// Companion to [`allowlist_entry_permits`] for the `sparq-fedclient` guard's backward-compatible
+/// "is this host allowlisted at all" query (where the dialled port is not yet known), so the
+/// host-pattern parsing (IPv6-bracket stripping + `.suffix` wildcard) is NOT re-implemented
+/// client-side. Matching is case-insensitive, exact or leading-dot suffix wildcard.
+#[cfg(feature = "service")]
+pub fn allowlist_entry_host_matches(entry: &str, host: &str) -> bool {
+    egress_policy::entry_host_matches(entry, &host.to_ascii_lowercase())
 }
 
 /// Runs `f` with `hosts` allowlisted for SERVICE federation: each host's resolved
@@ -1920,6 +1982,32 @@ mod tests {
         assert_eq!(split_entry("127.0.0.1:99999"), ("127.0.0.1:99999", None));
         assert_eq!(split_entry("127.0.0.1:"), ("127.0.0.1:", None));
         assert_eq!(split_entry("127.0.0.1:http"), ("127.0.0.1:http", None));
+    }
+
+    #[test]
+    fn allowlist_entry_permits_is_the_shared_per_entry_rule() {
+        // Direct unit test for the PUBLIC per-entry predicate that `sparq-fedclient` reuses
+        // (coverage ratchet + the one-source-of-truth contract for bead sq-vbnyc). It is the
+        // pure, stateless form of `egress_policy::is_allowed`'s `.any(…)` closure — no policy
+        // install required.
+        use super::allowlist_entry_permits as permits;
+        // Host-level entry: all ports, case-insensitive host, suffix wildcard.
+        assert!(permits("sparql.internal", "sparql.internal", 80));
+        assert!(permits("sparql.internal", "SPARQL.INTERNAL", 8443)); // host case-insensitive
+        assert!(permits(".example.org", "a.example.org", 443));
+        assert!(permits(".example.org", "example.org", 80)); // apex included
+        assert!(!permits(".example.org", "notexample.org", 80)); // boundary respected
+        // Port-scoped entry: exact port only.
+        assert!(permits("127.0.0.1:8053", "127.0.0.1", 8053));
+        assert!(!permits("127.0.0.1:8053", "127.0.0.1", 8054)); // other port rejected
+        assert!(!permits("127.0.0.1:8053", "127.0.0.2", 8053)); // other host rejected
+        // Bracketed IPv6 + port; bare IPv6 host-level.
+        assert!(permits("[::1]:8080", "::1", 8080));
+        assert!(!permits("[::1]:8080", "::1", 80));
+        assert!(permits("2001:db8::1", "2001:db8::1", 443)); // bare IPv6 = all ports
+        // Malformed port → never-matching host pattern (fail-closed, never widened).
+        assert!(!permits("127.0.0.1:99999", "127.0.0.1", 80));
+        assert!(!permits("127.0.0.1:", "127.0.0.1", 80));
     }
 
     #[test]

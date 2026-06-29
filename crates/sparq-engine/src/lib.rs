@@ -47,6 +47,12 @@ pub use service::SERVICE_EGRESS_REFUSED_MARKER;
 // so federation is restricted to operator-configured endpoints. [OPUS-4.8] (sq-4w18)
 #[cfg(feature = "service")]
 pub use service::with_service_egress_policy;
+// [OPUS-4.8] (sq-vbnyc) The SERVICE-egress per-entry host:port matching rule, exposed as a
+// pure function so `sparq-fedclient`'s independent egress guard adopts the SAME port-scoping
+// semantics (port-0/overflow/IPv6-bracket/trailing-colon all handled identically) instead of
+// keeping a second, divergent copy of the allowlist-matching logic — one source of truth.
+#[cfg(feature = "service")]
+pub use service::{allowlist_entry_host_matches, allowlist_entry_permits};
 // Bind-join (VALUES pushdown) block-size knob — the only OPT-IN tunable for the
 // SERVICE bound-join pushdown (on-by-default, correctness-preserving). [OPUS-4.8] (sq-sjkj)
 #[cfg(feature = "service")]
