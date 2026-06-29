@@ -1357,6 +1357,97 @@ jobs:
             text-oracle.out
             conformance-scoreboard.md
 
+  rsp-oracle:
+    # [OPUS-4.8] sq-mcb3q (epic sq-2n1q3) — the sparq-rsp RSP EXPRESSIVITY /
+    # SRBench CORRECTNESS oracle ratchet, a DEDICATED job so it is SURFACED in the
+    # central conformance scoreboard alongside the standards suites — but HONESTLY
+    # labelled a sparq EXTENSION (family = "sparq extension"), NOT a
+    # standards-conformance claim: there is NO W3C/OGC/IETF Recommendation for RDF
+    # Stream Processing and no normative RSP conformance test suite (RSP-QL is a
+    # W3C-community spec; SRBench a benchmark). The runner is the in-source battery
+    # in crates/sparq-rsp/tests/srbench_oracle.rs (NOT fixture-gated — no fetch
+    # needed, default-on, no opt-in feature): it drives the REAL ContinuousQuery /
+    # ContinuousMultiQuery pipeline across the SRBench expressivity axes (window
+    # types / R2S operators / EvalModes / multi-window joins) and asserts every
+    # closed window against an INDEPENDENT batch-rebuild + closed-form oracle, then
+    # asserts the count of per-window correctness assertions is
+    # >= RSP_EXPRESSIVITY_FLOOR (may only RISE). This job runs that runner with
+    # --nocapture and re-checks the printed `RSP expressivity / SRBench correctness
+    # assertions N (floor F)` line as the same belt-and-braces `>= floor` gate the
+    # other ratchet jobs use. Never lower the floor (raise RSP_EXPRESSIVITY_FLOOR as
+    # the battery grows).
+    name: sparq-rsp RSP expressivity / SRBench correctness (extension ratchet — assertions >= 149)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Run sparq-rsp RSP expressivity / SRBench correctness oracle
+        # The runner asserts its own floor (RSP_EXPRESSIVITY_FLOOR) + every
+        # per-window correctness equality; capture the output so the grep gate below
+        # re-checks the count. [OPUS-4.8] sq-shacl-flake (generalized from #1236):
+        # STEP-LEVEL transient self-heal. A transient crates.io download hiccup
+        # aborts `cargo test` BEFORE any test runs, leaving rsp-oracle.out empty; a
+        # single-shot invocation then lets the ratchet step below mis-report that
+        # empty output as a phantom "regressed below the floor". Re-running lets such
+        # a transient self-heal. A GENUINE regression fails the runner's own assert
+        # on every attempt and still reds the job — the floor is never weakened. `rc`
+        # is captured from PIPESTATUS[0] (cargo, not tee).
+        run: |
+          set -uo pipefail
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::sparq-rsp RSP/SRBench oracle — attempt $attempt/$MAX_ATTEMPTS"
+            rc=0
+            cargo test -p sparq-rsp --test srbench_oracle -- --nocapture \
+              | tee rsp-oracle.out
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "sparq-rsp RSP/SRBench oracle passed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::sparq-rsp RSP/SRBench oracle failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient. A real correctness regression trips the runner's own assert!(assertions >= floor) or a per-window result mismatch; a 'curl failed'/download error is an infra flake, not a correctness change."
+              exit "$rc"
+            fi
+            echo "::warning::sparq-rsp RSP/SRBench oracle attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before any test ran)."
+            attempt=$((attempt + 1))
+          done
+      - name: Enforce ratchet (per-window correctness assertion count must not regress)
+        run: |
+          RSP_EXPRESSIVITY_FLOOR=149
+          # [OPUS-4.8] sq-shacl-flake: distinguish "output never produced" (an
+          # infra/compile flake left the .out with no assertions line) from a GENUINE
+          # regression, so an empty output is never mis-reported as "regressed below
+          # the floor".
+          if ! grep -qE 'RSP expressivity / SRBench correctness assertions [0-9]+ \(floor [0-9]+\)' rsp-oracle.out; then
+            echo "::error::sparq-rsp RSP/SRBench oracle output is missing/empty — the test step produced no 'RSP expressivity / SRBench correctness assertions N (floor F)' line. This is an INFRA/build failure (e.g. a transient crates.io download), NOT a correctness regression. Re-run the job; inspect the 'Run sparq-rsp RSP expressivity / SRBench correctness oracle' step output above."
+            exit 1
+          fi
+          # runner prints: "RSP expressivity / SRBench correctness assertions <n> (floor <f>)"
+          RSP_ASSERTIONS=$(grep -oE 'RSP expressivity / SRBench correctness assertions [0-9]+' rsp-oracle.out | grep -oE '[0-9]+' | head -1)
+          echo "sparq-rsp RSP/SRBench oracle assertions: ${RSP_ASSERTIONS:-unknown} (floor $RSP_EXPRESSIVITY_FLOOR)"
+          [ -n "$RSP_ASSERTIONS" ] && [ "$RSP_ASSERTIONS" -ge "$RSP_EXPRESSIVITY_FLOOR" ] || { echo "::error::sparq-rsp RSP/SRBench oracle regressed below the floor (${RSP_ASSERTIONS:-?} < $RSP_EXPRESSIVITY_FLOOR)"; exit 1; }
+      - name: Emit consolidated conformance scoreboard
+        # Render the ONE central scoreboard index (all suites + floors across crates,
+        # including this EXTENSION row) into this job's step summary, so it surfaces
+        # where the RSP oracle sits in the whole picture.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: rsp-oracle
+          path: |
+            rsp-oracle.out
+            conformance-scoreboard.md
+
   jsonld-conformance:
     # [OPUS-4.8] sq-oy1f.2 / sq-3uos5 / sq-oy1f.19 — W3C JSON-LD 1.1 conformance
     # RATCHET (toRdf + fromRdf + compact + frame), a DEDICATED gating job alongside
