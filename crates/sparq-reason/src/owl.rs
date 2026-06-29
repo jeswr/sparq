@@ -2813,6 +2813,206 @@ mod tests {
         );
     }
 
+    // [OPUS-4.8] sq-350ms (epic sq-pbz04) — OWL 2 RL COMPLETENESS HARDENING.
+    //
+    // The single-rule unit tests above each fire ONE rule on an already-asserted
+    // premise. The four guards below pin the harder MULTI-ROUND interactions
+    // where a real completeness bug would hide: a rule whose premise only becomes
+    // true AFTER an earlier round derived it. They are the load-bearing
+    // "the closure is COMPLETE for the assertion-style RL/RDF rules" assertions —
+    // the conformance OWL-RL row (78 pass + 13 documented divergences, all
+    // PROVABLY outside the RL profile — see `DOCUMENTED_DIVERGENCES` + the
+    // research/inference-completeness-audit.md §2 table) sits at the genuine RL
+    // ceiling, so the suite cannot catch a regression in these compositions; these
+    // hand-computed-closure tests do. Each is a TRUE OWL 2 RL/RDF entailment
+    // (W3C OWL 2 Profiles §4.3 Tables 5/6/9), derived by the production
+    // `materialize_owl_rl` path — no special-casing.
+
+    #[test]
+    fn cls_svf1_fires_on_a_subclass_derived_type() {
+        // cls-svf1 (Table 6) is COMPLETE only if it fires on a value whose
+        // someValuesFrom-class membership was DERIVED, not asserted:
+        //   :R owl:someValuesFrom :C ; :R owl:onProperty :p ;
+        //   :x :p :u ; :u a :D ; :D rdfs:subClassOf :C
+        // round 1 (rdfs9): :u a :C ; round 2 (cls-svf1): :x a :R.
+        // A materializer that only indexed ASSERTED types would miss :x a :R.
+        let mut dict = Dict::new();
+        let (r, p, c, d, x, u) = (
+            ex(&mut dict, "R"),
+            ex(&mut dict, "p"),
+            ex(&mut dict, "C"),
+            ex(&mut dict, "D"),
+            ex(&mut dict, "x"),
+            ex(&mut dict, "u"),
+        );
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let svf = owl(&mut dict, "someValuesFrom");
+        let onp = owl(&mut dict, "onProperty");
+        let sc = dict.intern_iri(oxrdf::vocab::rdfs::SUB_CLASS_OF.as_str());
+        let mut triples = vec![[r, svf, c], [r, onp, p], [x, p, u], [u, ty, d], [d, sc, c]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[x, ty, r]), "cls-svf1 over a DERIVED filler type");
+    }
+
+    #[test]
+    fn subproperty_of_a_transitive_property_closes_transitively() {
+        // prp-spo1 (rdfs7) feeding prp-trp (Table 5): a property declared a
+        // subPropertyOf a TRANSITIVE property must have its super-property edges
+        // transitively closed.
+        //   :p a owl:TransitiveProperty ; :q rdfs:subPropertyOf :p ;
+        //   :a :q :b ; :b :q :c   ⊢   :a :p :c
+        // (round 1: :a :p :b, :b :p :c via spo1; round 2: :a :p :c via prp-trp).
+        let mut dict = Dict::new();
+        let (p, q, a, b, c) = (
+            ex(&mut dict, "p"),
+            ex(&mut dict, "q"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+            ex(&mut dict, "c"),
+        );
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let trans = owl(&mut dict, "TransitiveProperty");
+        let sp = dict.intern_iri(oxrdf::vocab::rdfs::SUB_PROPERTY_OF.as_str());
+        let mut triples = vec![[p, ty, trans], [q, sp, p], [a, q, b], [b, q, c]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[a, p, c]), "spo1 ⊕ prp-trp (transitive super-property)");
+    }
+
+    #[test]
+    fn intersection_membership_propagates_through_equivalent_class() {
+        // cls-int1 (Table 6) feeding cax-eqc1 (Table 6): the intersection-class
+        // membership derived in round 1 must propagate through an equivalentClass
+        // axiom in round 2.
+        //   :C owl:intersectionOf ( :A :B ) ; :C owl:equivalentClass :E ;
+        //   :x a :A ; :x a :B   ⊢   :x a :C (int1)   ⊢   :x a :E (cax-eqc1).
+        let mut dict = Dict::new();
+        let (cc, a, b, e, x) = (
+            ex(&mut dict, "C"),
+            ex(&mut dict, "A"),
+            ex(&mut dict, "B"),
+            ex(&mut dict, "E"),
+            ex(&mut dict, "x"),
+        );
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let io = owl(&mut dict, "intersectionOf");
+        let eqc = owl(&mut dict, "equivalentClass");
+        let mut triples = vec![[x, ty, a], [x, ty, b], [cc, eqc, e]];
+        let l = list(&mut dict, &mut triples, &[a, b]);
+        triples.push([cc, io, l]);
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[x, ty, cc]), "cls-int1 membership");
+        assert!(set.contains(&[x, ty, e]), "cax-eqc1 over the DERIVED int1 membership");
+    }
+
+    #[test]
+    fn equivalent_property_chain_closes_transitively() {
+        // prp-eqp1/2 (Table 5) is a join over the BOTH-DIRECTIONS equivalence
+        // relation, so a CHAIN of equivalences must transport an assertion across
+        // every link:
+        //   :p1 owl:equivalentProperty :p2 ; :p2 owl:equivalentProperty :p3 ;
+        //   :a :p1 :b   ⊢   :a :p3 :b
+        // (round 1: :a :p2 :b; round 2: :a :p3 :b). An equivalence map that was
+        // not transitively re-joined each round would stop at :p2.
+        let mut dict = Dict::new();
+        let (p1, p2, p3, a, b) = (
+            ex(&mut dict, "p1"),
+            ex(&mut dict, "p2"),
+            ex(&mut dict, "p3"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+        );
+        let eqp = owl(&mut dict, "equivalentProperty");
+        let mut triples = vec![[p1, eqp, p2], [p2, eqp, p3], [a, p1, b]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[a, p3, b]), "prp-eqp across a 2-link equivalence chain");
+    }
+
+    // [OPUS-4.8] sq-350ms — SOUNDNESS guard (the other half of "completeness
+    // hardening": adding coverage must never tip the closure into OVER-inference).
+    // The four conclusions below are the documented NON-RL divergences whose shape
+    // is closest to something a careless extra rule might wrongly derive — a
+    // differentFrom of disjoint-property fillers (the prp-pdw contrapositive) and
+    // a sameAs that no functional/IFP premise licenses. RL has NO rule producing
+    // owl:differentFrom, and prp-fp needs the SAME subject; the materializer must
+    // derive NEITHER. (These are exactly the conformance OWL-RL divergences
+    // New-Feature-DisjointObjectProperties-001 and owl2-rl-rules-fp-differentFrom,
+    // pinned here as in-crate soundness guards so the divergence rationale and the
+    // code can never silently disagree.)
+    #[test]
+    fn disjoint_property_fillers_do_not_get_a_differentfrom() {
+        // :hasFather owl:propertyDisjointWith :hasMother ;
+        // :Stewie :hasFather :Peter ; :Stewie :hasMother :Lois
+        // Full OWL entails :Peter owl:differentFrom :Lois (the prp-pdw
+        // CONTRAPOSITIVE), but NO OWL 2 RL/RDF rule derives differentFrom — the
+        // RL profile is deliberately incomplete here. The closure must not contain
+        // it (and the premise is consistent — different objects, so prp-pdw, which
+        // needs the SAME (subject,object) pair, does not clash either).
+        let mut dict = Dict::new();
+        let (pdw, hf, hm, stewie, peter, lois) = (
+            owl(&mut dict, "propertyDisjointWith"),
+            ex(&mut dict, "hasFather"),
+            ex(&mut dict, "hasMother"),
+            ex(&mut dict, "Stewie"),
+            ex(&mut dict, "Peter"),
+            ex(&mut dict, "Lois"),
+        );
+        let different_from = owl(&mut dict, "differentFrom");
+        let mut triples = vec![[hf, pdw, hm], [stewie, hf, peter], [stewie, hm, lois]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(
+            !set.contains(&[peter, different_from, lois])
+                && !set.contains(&[lois, different_from, peter]),
+            "OWL 2 RL must NOT derive the prp-pdw contrapositive (differentFrom of the fillers)"
+        );
+        assert!(
+            inconsistencies(&dict, &triples).is_empty(),
+            "disjoint properties on DIFFERENT objects are consistent (prp-pdw needs the same pair)"
+        );
+    }
+
+    #[test]
+    fn functional_property_does_not_difference_distinct_subjects() {
+        // :fp a owl:FunctionalProperty ; :Y2 :fp :X2 ; :Y1 :fp :X1 ;
+        // :X1 owl:differentFrom :X2
+        // Full OWL entails :Y1 owl:differentFrom :Y2 (the prp-fp CONTRAPOSITIVE),
+        // but RL has no differentFrom-producing rule and prp-fp needs the SAME
+        // subject (here Y1 ≠ Y2). The closure must derive neither a differentFrom
+        // nor a (wrong) sameAs.
+        let mut dict = Dict::new();
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let func = owl(&mut dict, "FunctionalProperty");
+        let (fp, y1, y2, x1, x2) = (
+            ex(&mut dict, "fp"),
+            ex(&mut dict, "Y1"),
+            ex(&mut dict, "Y2"),
+            ex(&mut dict, "X1"),
+            ex(&mut dict, "X2"),
+        );
+        let different_from = owl(&mut dict, "differentFrom");
+        let same_as = owl(&mut dict, "sameAs");
+        let mut triples = vec![
+            [fp, ty, func],
+            [y2, fp, x2],
+            [y1, fp, x1],
+            [x1, different_from, x2],
+        ];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(
+            !set.contains(&[y1, different_from, y2]) && !set.contains(&[y2, different_from, y1]),
+            "OWL 2 RL must NOT derive the prp-fp contrapositive (differentFrom of the subjects)"
+        );
+        assert!(
+            !set.contains(&[y1, same_as, y2]) && !set.contains(&[y2, same_as, y1]),
+            "prp-fp must NOT fire across DISTINCT subjects"
+        );
+    }
+
     // [OPUS-4.8] Regression for review 1402: an OWL feature predicate introduced via RDFS
     // subPropertyOf entailment (rdfs7) must NOT take the no-feature fast path — the derived
     // owl:sameAs must drive eq-rep substitution, not be emitted as an ordinary triple.
