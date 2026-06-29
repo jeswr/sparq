@@ -106,7 +106,7 @@ jobs:
       # through to the download+verify step below.
       - name: Cache Apache Jena
         id: jena-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/apache-jena
           key: apache-jena-${{ env.JENA_VERSION }}
@@ -130,7 +130,7 @@ jobs:
       # every day. A cache miss falls through to the `npm ci` step.
       - name: Cache Node reference adapter node_modules
         id: node-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: crates/sparq-shacl/tests/diff_fuzz/node_modules
           key: shacl-node-adapter-${{ hashFiles('crates/sparq-shacl/tests/diff_fuzz/package-lock.json') }}
