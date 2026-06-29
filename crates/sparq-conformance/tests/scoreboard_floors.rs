@@ -206,6 +206,20 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-text/tests/bm25_oracle.rs",
         "TEXT_ORACLE_FLOOR",
     ),
+    // [OPUS-4.8] sq-mcb3q (epic sq-2n1q3) — the sparq-rsp RSP EXPRESSIVITY /
+    // SRBench CORRECTNESS oracle, a sparq EXTENSION ratchet (NOT standards
+    // conformance — no normative RDF-Stream-Processing / RSP conformance suite
+    // exists; RSP-QL is a W3C-community spec and SRBench a benchmark). `const
+    // RSP_EXPRESSIVITY_FLOOR` lives top-level in `sparq-rsp`'s
+    // `tests/srbench_oracle.rs`; the guard reads it TEXTUALLY (same hermetic
+    // mechanism — the dev-only conformance crate takes NO dependency edge on
+    // sparq-rsp) so the central scoreboard's `ratchet_floor` can never silently
+    // drift from what the runner asserts.
+    (
+        "RSP expressivity / SRBench correctness",
+        "crates/sparq-rsp/tests/srbench_oracle.rs",
+        "RSP_EXPRESSIVITY_FLOOR",
+    ),
 ];
 
 #[test]
@@ -302,4 +316,13 @@ fn scoreboard_renders_all_suites() {
     assert!(md.contains("text-search differential oracle"));
     assert!(md.contains("sparq extension"));
     assert!(md.contains("NOT a standards-conformance claim") || md.contains("NOT conformance"));
+    // [OPUS-4.8] sq-mcb3q — the sparq-rsp RSP expressivity / SRBench correctness
+    // oracle, HONESTLY rendered as a sparq EXTENSION (not a conformance claim):
+    // the row appears, and (now there are TWO extension rows) the total line
+    // pluralises to "rows".
+    assert!(md.contains("RSP expressivity / SRBench correctness"));
+    assert!(
+        md.contains("sparq-extension (2 rows, NOT conformance)"),
+        "two extension rows should be tallied separately and pluralised"
+    );
 }

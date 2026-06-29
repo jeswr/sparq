@@ -177,6 +177,15 @@ pub struct Suite {
 ///   / BM25 suite exists; floor = the MEASURED count of bit-exact BM25 score
 ///   assertions the fixed-seed corpus battery makes against a from-scratch
 ///   independent reference scorer; default-on, no opt-in feature required).
+/// * RSP expressivity / SRBench correctness 149 — `sparq-rsp`
+///   `tests/srbench_oracle.rs` `RSP_EXPRESSIVITY_FLOOR = 149` (sq-mcb3q; a sparq
+///   EXTENSION ratchet, NOT standards conformance — RSP-QL is a W3C-COMMUNITY spec
+///   and SRBench is a benchmark, so there is NO normative RDF-Stream-Processing
+///   Recommendation or its conformance suite; floor = the MEASURED count of
+///   deterministic per-window correctness assertions the fixed SRBench-shaped
+///   battery makes across window types / R2S operators / EvalModes / multi-window
+///   joins against an INDEPENDENT batch-rebuild + closed-form oracle; default-on,
+///   no opt-in feature required).
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
@@ -571,6 +580,48 @@ pub const SUITES: &[Suite] = &[
                reference scorer, bit-exact per-hit scores + best-first order over a \
                fixed corpus battery",
     },
+    // [OPUS-4.8] sq-mcb3q (epic sq-2n1q3) — the sparq-rsp RSP EXPRESSIVITY /
+    // SRBench CORRECTNESS oracle (runner lives crate-local in
+    // `sparq-rsp/tests/srbench_oracle.rs`). HONESTLY a sparq EXTENSION ratchet,
+    // NOT a standards-conformance claim: SRBench (Zhang/Della Valle/Calbimonte et
+    // al., ISWC 2012) is the canonical RSP correctness/expressivity BENCHMARK and
+    // RSP-QL is a W3C-COMMUNITY spec — there is NO W3C/OGC/IETF Recommendation for
+    // RDF Stream Processing and no normative RSP conformance test suite to point
+    // at (unlike SPARQL/SHACL/GeoSPARQL/JSON-LD, the real-conformance rows above).
+    // So `family = "sparq extension"` (the same NOT-a-standards-body marker the
+    // BM25 row carries). The runner drives the crate's REAL public pipeline
+    // (ContinuousQuery / ContinuousMultiQuery over WindowSpec windows,
+    // EvalMode-materialised, R2S-filtered) across the SRBench expressivity axes —
+    // window TYPES (tumbling + sliding time + CQL count windows), stream OPERATORS
+    // (RSTREAM/ISTREAM/DSTREAM), all four EvalModes (pinned identical), and
+    // multi-window JOINS (observations ⋈ station-metadata) with
+    // aggregate-after-join — and asserts every closed window against an INDEPENDENT
+    // oracle (a batch-rebuild via `sparq_engine::query` plus closed-form
+    // hand-derived row multisets) that shares no code with the streaming closure /
+    // materialisation path. Documented RSP-QL gaps (window VARIABLES, textual ROWS
+    // windows, relative NOW bounds, I/DSTREAM over a join) are NOT inflated into
+    // passes — they are asserted genuinely-rejected. The floor is the ACTUAL
+    // measured count of those per-window correctness assertions (the
+    // `assertions N (floor F)` line the runner prints) — it may only RISE, and a
+    // drop is an S2R/R2R/EvalMode/join/R2S-diff regression. The runner stays
+    // crate-local (the dev-only conformance crate must NOT take sparq-rsp as a dep
+    // — same constraint as SHACL/geo/Solid/ODRL/text), so this row takes NO new
+    // dependency edge on sparq-rsp; `RSP_EXPRESSIVITY_FLOOR` is mirrored here and
+    // kept in lock-step by `tests/scoreboard_floors.rs` (read textually).
+    Suite {
+        label: "RSP expressivity / SRBench correctness",
+        family: "sparq extension",
+        runner: Runner::CrateTest { krate: "sparq-rsp", target: "srbench_oracle" },
+        ci_job: "rsp-oracle",
+        ratchet_floor: 149,
+        floor_basis: "per-window correctness assertions (sparq EXTENSION, NOT standards conformance)",
+        note: "EXTENSION ratchet — no normative RDF-Stream-Processing standard / RSP \
+               conformance suite exists (RSP-QL is a W3C-community spec; SRBench a \
+               benchmark): sparq-rsp's windowed continuous queries vs an INDEPENDENT \
+               batch-rebuild + closed-form oracle across window types / R2S operators \
+               / EvalModes / multi-window joins; documented RSP-QL gaps asserted \
+               genuinely-rejected, not faked as passes",
+    },
 ];
 
 /// Render the registry as one markdown scoreboard. This is a STATIC view of what
@@ -592,12 +643,15 @@ pub fn render_scoreboard() -> String {
          brought the SHACL + GeoSPARQL ratchets in; sq-j174 the Solid WAC + ACP \
          decision-parity ones; sq-t58w.8 the Solid WAC + ACP differential oracles — \
          all previously lived outside this scoreboard).\n\n\
-         One row (`family = sparq extension`) is HONESTLY a sparq-extension ratchet, \
-         NOT a standards-conformance claim — there is no normative body or test suite \
-         behind it (sq-ripcg's BM25 differential oracle: no full-text-over-RDF / BM25 \
-         standard exists). Its floor is in a different UNIT (score-exact assertions, \
-         not spec pass-counts), so the consolidated total below counts ONLY the \
-         standards-conformance suites; the extension row is reported separately.\n"
+         The `family = sparq extension` rows are HONESTLY sparq-extension ratchets, \
+         NOT standards-conformance claims — there is no normative body or test suite \
+         behind them (sq-ripcg's BM25 differential oracle: no full-text-over-RDF / BM25 \
+         standard exists; sq-mcb3q's RSP expressivity / SRBench correctness oracle: no \
+         normative RDF-Stream-Processing standard exists — RSP-QL is a W3C-community \
+         spec and SRBench a benchmark). Their floors are in a different UNIT \
+         (per-window / per-hit correctness assertions, not spec pass-counts), so the \
+         consolidated total below counts ONLY the standards-conformance suites; the \
+         extension rows are reported separately.\n"
     );
     let _ = writeln!(
         md,
@@ -633,10 +687,13 @@ pub fn render_scoreboard() -> String {
     );
     if !extensions.is_empty() {
         let ext_total: usize = extensions.iter().map(|s| s.ratchet_floor).sum();
+        // [OPUS-4.8] sq-mcb3q: pluralise now there is more than one extension row.
+        let row_word = if extensions.len() == 1 { "row" } else { "rows" };
         let _ = writeln!(
             md,
-            "| **sparq-extension ({} row, NOT conformance)** | | {} | (assertions) | | |\n",
+            "| **sparq-extension ({} {}, NOT conformance)** | | {} | (assertions) | | |\n",
             extensions.len(),
+            row_word,
             ext_total
         );
     } else {
