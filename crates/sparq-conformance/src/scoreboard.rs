@@ -125,6 +125,9 @@ pub struct Suite {
 /// * SHACL-SPARQL 5 — `sparq-shacl` `w3c_sparql.rs` `SHACL_SPARQL_FLOOR = 5`.
 /// * OGC GeoSPARQL 119 — `sparq-geo` `ogc_compliance_ratchet.rs`
 ///   `OGC_RATCHET_FLOOR = 119`.
+/// * OGC GeoSPARQL query-rewrite 38 — `sparq-geo` `ogc_query_rewrite_ratchet.rs`
+///   `OGC_QUERY_REWRITE_FLOOR = 38` (sq-wf9qg; opt-in `geosparql_rewrite` feature;
+///   topology PROPERTY forms answered via the rewrite, MEASURED pass count).
 /// * Solid WAC 12 — `sparq-solid` `tests/common/mod.rs` `WAC_SCENARIO_FLOOR = 12`
 ///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
 /// * Solid ACP 12 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 12`
@@ -213,6 +216,32 @@ pub const SUITES: &[Suite] = &[
         ratchet_floor: 119,
         floor_basis: "pass",
         note: "hand-curated sf/eh/rcc8 topology + WKT/GML equivalence assertions",
+    },
+    // [OPUS-4.8] sq-wf9qg — the OGC GeoSPARQL QUERY-REWRITE extension
+    // (`/conf/query-rewrite-extension`) ratchet, graduated alongside the topology
+    // FILTER-function ratchet above. The runner is crate-local in sparq-geo
+    // (`tests/ogc_query_rewrite_ratchet.rs`) but behind the OPT-IN
+    // `geosparql_rewrite` feature (OFF by default) so the default + `--workspace`
+    // builds never compile the rewrite surface and the STANDARD SPARQL behaviour
+    // stays untouched — the lean opt-in posture. Each case drives a topology
+    // PROPERTY pattern (`?f geo:sfWithin ?g`) end-to-end through the real rewrite
+    // + engine, asserting result-equivalence to the lexical `geof:` oracle AND
+    // that the standard entry point binds zero rows (no asserted topology triple).
+    // The floor is the MEASURED pass count; kept in lock-step by
+    // `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "OGC GeoSPARQL query-rewrite extension",
+        family: "OGC GeoSPARQL",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-geo",
+            target: "ogc_query_rewrite_ratchet",
+            feature: "geosparql_rewrite",
+        },
+        ci_job: "geo-conformance",
+        ratchet_floor: 38,
+        floor_basis: "pass",
+        note: "topology PROPERTY forms (geo:sf*/eh*/rcc8*) answered end-to-end via the \
+               opt-in query-rewrite extension, result-equivalent to the geof: oracle",
     },
     // [OPUS-4.8] sq-j174 — the Solid WAC + ACP library-level decision-parity suites
     // (harness landed under sq-3jtd.8). The runners stay crate-local in sparq-solid

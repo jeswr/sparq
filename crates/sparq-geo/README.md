@@ -71,9 +71,14 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   carried verbatim (relations valid within one CRS); opt-in CRS84 reprojection for a
   curated EPSG set via the `reproject` feature (pure-Rust proj4rs).
 - **RDFS/OWL entailment + query rewrite** — GeoSPARQL ontology entailment runs through
-  the GENERIC `sparq-reason` closure (no geo-specific reasoner); a dedicated
-  [`geosparql_rewrite`](src/rewrite.rs) entry point expands topology property forms
-  (the standard entry points stay W3C-conformant, untouched).
+  the GENERIC `sparq-reason` closure (no geo-specific reasoner). The OGC query-rewrite
+  extension (`/conf/query-rewrite-extension`) — topology PROPERTY forms like
+  `?f geo:sfWithin ?region` — is the **opt-in `geosparql_rewrite` feature** (OFF by
+  default): a dedicated [`geosparql_rewrite`](src/rewrite.rs) entry point expands them to
+  a default-geometry resolution + matching `geof:` FILTER. The standard `sparq_engine`
+  entry points stay W3C-conformant and untouched (a `geo:sfWithin` triple matches only
+  asserted triples there), so default SPARQL semantics never change. A conformance
+  ratchet pins the measured property-form pass count (`ogc_query_rewrite_ratchet`).
 - **R-tree `GeoIndex`** — packed-STR `rstar` build over the default and every named
   graph, with antimeridian-safe windows and incremental `apply_delta` upkeep.
 
