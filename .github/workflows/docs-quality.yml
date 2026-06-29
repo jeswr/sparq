@@ -31,6 +31,15 @@
 #                       from advisory to HARD by sq-8ic6 once the backlog cleared (the last
 #                       stray, skills/cli/SKILL.md's inline ratio, was reworded to cite the
 #                       canonical measured source). Deterministic, grep-only, no network.
+#     • no-dyn-dispatch — perf-NEUTRALITY structural gate over the sparq-substrate hot loops
+#                       (the shared zero-overhead eval substrate, epic sq-6tykl/sq-qonbz):
+#                       FAILS if `dyn`/`Box<dyn>`/`&dyn` trait-object dispatch appears in the
+#                       leaf crate's hot paths (src/{join,numeric,rows,lib}.rs), which must stay
+#                       MONOMORPHISED so the substrate is free for sparq-engine AND the reasoners
+#                       (research/shared-eval-substrate.md §2.3/§4). Comment-aware (the source
+#                       documents the invariant in prose) + a narrow `// perf-neutrality-allow:
+#                       <reason>` per-line opt-out for a cold path. scripts/check-no-dyn-dispatch.py;
+#                       bead sq-0ja86. Deterministic, grep-only, no network, no build.
 #     • readme-template — crate-README length cap + 🚀/✨/📚 sections + License
 #                       (scripts/check-readme-template.py --enforce). PROMOTED from advisory
 #                       to HARD by sq-8ic6's deferred half once the sq-9jw5 README-overhaul
@@ -573,6 +582,36 @@ jobs:
           python-version: "3.12"
       - name: No hard-coded performance numbers in user-facing docs — GATING
         run: python3 scripts/check-no-perf-numbers.py --enforce
+
+  # [OPUS-4.8] sq-0ja86 (epic sq-6tykl / sq-qonbz — the shared zero-overhead eval substrate):
+  # a perf-NEUTRALITY structural gate. crates/sparq-substrate is a leaf crate (depends only on
+  # sparq-core) holding the shared evaluation substrate consumed by BOTH sparq-engine AND the
+  # reasoners; the maintainer invariant (research/shared-eval-substrate.md §2.3/§4) is that its
+  # hot loops — the four join kernels behind the generic JoinKeys descriptor + generic Budget
+  # cancel hook (src/join.rs) and the XSD numeric value tower (src/numeric.rs) — stay
+  # MONOMORPHISED: NO `dyn`/`Box<dyn>`/`&dyn` trait-object dispatch on a per-row / per-key-group
+  # hot loop, so the substrate is zero-overhead for both consumers and the deterministic byte
+  # ratchets (wasm_bundle_bytes, store/dict bytes) do not regress. A generic `<B: Budget>` bound
+  # is FINE (it monomorphises); a trait OBJECT is not. The check (scripts/check-no-dyn-dispatch.py)
+  # is COMMENT-AWARE (the source legitimately documents "NO Box<dyn>…" in prose) and supports a
+  # narrow `// perf-neutrality-allow: <reason>` per-line opt-out for a genuinely-cold path. It
+  # mirrors no-perf-numbers exactly: deterministic, grep-only, no network, no build, same
+  # setup-python + `python3 scripts/check-*.py` invocation. The job NAME carries no
+  # "advisory"/"informational" token, so the ci-summary aggregator gates on it — it lives on the
+  # SAME docs-quality structural-gate surface as no-perf-numbers / terminology / readme-template,
+  # not a new branch-protection required check (the only required check stays ci-summary / gate).
+  no-dyn-dispatch:
+    name: no-dyn-dispatch (substrate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: No dynamic dispatch in the sparq-substrate hot loops (perf-neutrality) — GATING
+        run: python3 scripts/check-no-dyn-dispatch.py
 
   # [OPUS-4.8] sq-8ic6 (deferred half): PROMOTED to a HARD gate. The README-overhaul epic
   # (sq-9jw5) cleared the backlog — sq-inzv (#751) brought 20 publish=true crate READMEs to

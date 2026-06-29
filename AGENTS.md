@@ -40,6 +40,18 @@ If your agent runtime supports the Agent Skills standard, these load via progres
 - Conformance: the W3C SPARQL, inference, W3C SHACL (core + SPARQL), OGC GeoSPARQL and Solid WAC + ACP suites must stay green and are each **ratcheted** (the committed floor only goes up). All of them are indexed in ONE central scoreboard — `cargo run -p sparq-conformance --bin sparq-conformance-scoreboard` (registry: `crates/sparq-conformance/src/scoreboard.rs`) — so a single artifact reports every suite + its floor + the CI job that gates it. The per-suite detail reports are **generated** by that crate, not committed: the SPARQL report `conformance-report.md` is git-ignored and regenerated locally by `cargo run -p sparq-conformance` (the CI job re-runs it and publishes it as a build artifact); the inference report is committed at [`inference-conformance-report.md`](inference-conformance-report.md), and the SHACL/geo/Solid job scoreboards are emitted the same way. Performance is gated the same way against a best-ever floor (`bench/perf-baseline.json`).
 - **Merge discipline:** the gate for landing any change is *full-workspace clippy + `cargo test` + the conformance/perf ratchets*, all green. When work is done in parallel git worktrees, gate and merge **one branch at a time** with a full re-gate between merges; never edit `.beads/` files inside a worktree (it conflicts at merge — `bd export` regenerates the JSONL).
 
+### sparq-substrate (shared eval substrate)
+
+`sparq-substrate` is a **leaf crate** (depends only on `sparq-core`) holding the shared evaluation substrate consumed by **BOTH `sparq-engine` AND the reasoners**, so neither consumer depends on the other and they share one eval body (epic [sq-6tykl]/[sq-qonbz]; design `research/shared-eval-substrate.md`). It holds, behind **default-OFF features**:
+
+- `numeric` — the XSD numeric value tower (`Num`/`Dec` + `as_numeric` classification + the arithmetic ops and XSD lexical helpers), driving the engine's FILTER/BIND/ORDER BY.
+- `join` — the **four id-tuple join kernels** (sorted merge-join, radix-partitioned hash-join, index-nested-loop bind-join, leapfrog trie-join/WCOJ) behind a **generic `JoinKeys` descriptor** (the row→key projection + combine layout) and a **generic `Budget`** cooperative-cancel hook.
+- `rows` — the shared `Row`/`Key`/`Posting` id-tuple vocabulary both kernels operate on.
+
+**INVARIANT (perf-neutrality — enforced):** the hot loops are **MONOMORPHISED** — **NO `Box<dyn>`/`&dyn`/`dyn` trait-object dispatch** on any per-row / per-key-group / per-distinct-value hot loop. Generic type parameters bounded by a trait (`fn merge_join<B: Budget>(…)`) are fine (they monomorphise + inline); a trait *object* inserts a vtable the optimiser cannot inline, which would make the substrate non-zero-overhead for its two consumers and risk regressing the deterministic byte ratchets (`wasm_bundle_bytes`, store/dict bytes). This is enforced structurally by **`scripts/check-no-dyn-dispatch.py`** (the `no-dyn-dispatch (substrate)` gate in `docs-quality.yml` — comment-aware, with a narrow `// perf-neutrality-allow: <reason>` per-line opt-out for a genuinely-cold path). A new hot-path module in the crate must be added to that script's scanned set.
+
+The engine's `compare_values` total order (coupled to the engine's `Value` enum + the temporal subsystem) is the **still-engine-private deferred hoist** — it moves with `Value` in a follow-up (bead [sq-vezew]), NOT here; the join kernels deliberately do not hoist `Value` (the engine supplies its own `Value`-based compare).
+
 ## MAINTENANCE RULE (REQUIRED — read before changing any public surface)
 
 **When you change a public API, update the matching skill in the SAME change (same commit/PR).** A "public API" means any of:
