@@ -326,9 +326,11 @@ fn apply_role_inclusion(role: &Role, s: &Term, o: &Term, r1: &Role, r2: &Role) -
 /// reduced CQ, or `None` if the two atoms do not unify.
 fn reduce(cq: &Cq, a: usize, b: usize) -> Option<Cq> {
     let pairs = atom_unify_pairs(&cq.atoms[a], &cq.atoms[b])?;
-    // Build a substitution Var -> Term via union-find-free direct binding (DL-Lite atoms are
+    // Build a substitution Key -> Term via union-find-free direct binding (DL-Lite atoms are
     // binary so the substitution is tiny). A const-vs-different-const clash fails the unify.
-    let mut subst: Vec<(String, Term)> = Vec::new();
+    // Keying on BOTH Var names and Unbound ids keeps the unifier sound when an `_` meets a
+    // constant (the `_` binds to the constant — the more-specific term wins).
+    let mut subst: Subst = Subst::default();
     for (x, y) in pairs {
         if !unify_terms(&x, &y, &mut subst) {
             return None;
@@ -372,57 +374,87 @@ fn atom_unify_pairs(a: &Atom, b: &Atom) -> Option<Vec<(Term, Term)>> {
     }
 }
 
+/// A substitution key: a named variable or an unbound `_` (by id). Keying on both keeps the
+/// unifier sound when an `_` is unified against a constant or another variable.
+#[derive(Clone, PartialEq, Eq)]
+enum Key {
+    Var(String),
+    Unbound(u32),
+}
+
+/// A most-general-unifier substitution: an ordered list of `Key -> Term` bindings, resolved to a
+/// fixpoint. Ordered (not a map) so later bindings shadow earlier ones during resolution.
+#[derive(Default)]
+struct Subst(Vec<(Key, Term)>);
+
+impl Subst {
+    fn bind(&mut self, k: Key, t: Term) {
+        self.0.push((k, t));
+    }
+}
+
+/// The key a (possibly bindable) term occupies, or `None` for a rigid constant.
+fn key_of(t: &Term) -> Option<Key> {
+    match t {
+        Term::Var(v) => Some(Key::Var(v.clone())),
+        Term::Unbound(id) => Some(Key::Unbound(*id)),
+        Term::Const(_) => None,
+    }
+}
+
 /// Unify two terms into `subst`, treating `Var` and `Unbound` as unifiable variables and `Const`
 /// as rigid. Returns false on a const/const clash. (A tiny, total unifier — DL-Lite has no
-/// function symbols, so no occurs-check is needed.)
-fn unify_terms(x: &Term, y: &Term, subst: &mut Vec<(String, Term)>) -> bool {
+/// function symbols, so no occurs-check is needed.) When a variable/`_` meets a more-specific
+/// term, it binds to it (so `_` ↦ const is recorded, never silently dropped).
+fn unify_terms(x: &Term, y: &Term, subst: &mut Subst) -> bool {
     let xr = resolve(x, subst);
     let yr = resolve(y, subst);
+    if xr == yr {
+        return true;
+    }
     match (&xr, &yr) {
         (Term::Const(c1), Term::Const(c2)) => c1 == c2,
-        (Term::Var(v), _) => {
-            if xr != yr {
-                subst.push((v.clone(), yr));
-            }
+        // A bindable left term (Var or Unbound) binds to the right term.
+        (lhs, _) if key_of(lhs).is_some() => {
+            subst.bind(key_of(lhs).unwrap(), yr);
             true
         }
-        (_, Term::Var(v)) => {
-            if xr != yr {
-                subst.push((v.clone(), xr));
+        // Otherwise the left is a Const and the right must be bindable (else the equal-check
+        // above or the const/const arm would have handled it): bind the right to the left.
+        (_, rhs) => {
+            // `rhs` is bindable here (the only remaining case: Const vs Var/Unbound).
+            match key_of(rhs) {
+                Some(k) => {
+                    subst.bind(k, xr);
+                    true
+                }
+                None => false, // unreachable: Const/Const handled above.
             }
-            true
         }
-        // Unbound unifies with Unbound/Const by binding via a synthesised var name? Unbound has
-        // no name; two distinct `_` reducing is itself anonymisation. Treat Unbound as unifiable
-        // with anything: prefer the more-specific side. Represent the Unbound binding by leaving
-        // it (the anonymise pass cleans up). Distinct Unbound/Const: bind nothing here; the
-        // surviving atom keeps the const (handled by apply_subst over the kept atom `a`/`b`).
-        (Term::Unbound(_), _) | (_, Term::Unbound(_)) => true,
     }
 }
 
-fn resolve(t: &Term, subst: &[(String, Term)]) -> Term {
+fn resolve(t: &Term, subst: &Subst) -> Term {
     let mut cur = t.clone();
-    // Follow var bindings to a fixpoint (linear; chains are short).
+    // Follow key bindings to a fixpoint (linear; chains are short, no cycles without occurs).
     loop {
-        match &cur {
-            Term::Var(v) => {
-                if let Some((_, to)) = subst.iter().rev().find(|(name, _)| name == v) {
-                    let next = to.clone();
-                    if next == cur {
-                        return cur;
-                    }
-                    cur = next;
-                } else {
+        let Some(k) = key_of(&cur) else {
+            return cur; // a constant resolves to itself.
+        };
+        match subst.0.iter().rev().find(|(key, _)| *key == k) {
+            Some((_, to)) => {
+                let next = to.clone();
+                if next == cur {
                     return cur;
                 }
+                cur = next;
             }
-            _ => return cur,
+            None => return cur,
         }
     }
 }
 
-fn apply_subst_atom(a: &Atom, subst: &[(String, Term)]) -> Atom {
+fn apply_subst_atom(a: &Atom, subst: &Subst) -> Atom {
     match a {
         Atom::Class { class, arg } => Atom::Class {
             class: class.clone(),
@@ -531,5 +563,58 @@ mod tests {
             q.atoms.as_slice(),
             [Atom::Role { role, s: Term::Var(v), o }] if role.iri == "R" && v == "x" && o.is_unbound()
         )));
+    }
+
+    fn role(r: &str, s: Term, o: Term) -> Atom {
+        Atom::Role {
+            role: Role::named(r),
+            s,
+            o,
+        }
+    }
+
+    #[test]
+    fn unify_unbound_with_const_binds_to_const() {
+        // The hardened-unifier soundness case: `_` unified against a constant must bind to the
+        // constant (not silently drop the constraint). Reduce two role atoms R(?x, _) and
+        // R(?x, :c) — unifying the objects (_ vs :c) ⇒ the surviving atom is R(?x, :c).
+        let cq = Cq::normalised(
+            vec![
+                role("R", Term::Var("x".into()), Term::Unbound(0)),
+                role("R", Term::Var("x".into()), Term::Const("c".into())),
+            ],
+            vec!["x".into()],
+        );
+        let reduced = reduce(&cq, 0, 1).expect("the two R atoms unify");
+        // After reduce the single surviving atom must keep the constant object :c.
+        assert!(
+            reduced.atoms.iter().any(|a| matches!(
+                a,
+                Atom::Role { role, s: Term::Var(v), o: Term::Const(c) }
+                    if role.iri == "R" && v == "x" && c == "c"
+            )),
+            "reduce must preserve the constant object; got {:?}",
+            reduced.atoms
+        );
+    }
+
+    #[test]
+    fn reduce_const_clash_fails() {
+        // Two atoms with DIFFERENT constants in the same position do NOT unify (reduce = None).
+        let cq = Cq::normalised(
+            vec![
+                class_const("A", "c1"),
+                class_const("A", "c2"),
+            ],
+            vec![],
+        );
+        assert!(reduce(&cq, 0, 1).is_none(), "distinct constants must not unify");
+    }
+
+    fn class_const(c: &str, k: &str) -> Atom {
+        Atom::Class {
+            class: c.to_string(),
+            arg: Term::Const(k.to_string()),
+        }
     }
 }
