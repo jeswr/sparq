@@ -39,15 +39,26 @@ const OWL: &str = "http://www.w3.org/2002/07/owl#";
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
 
-/// OWL class-expression / restriction predicates that lie OUTSIDE the EL+⊥-MVP fragment. A
-/// class node carrying any of these is non-EL: [`decode`] returns `None` so the enclosing
-/// axiom is recorded as a skip rather than the node being mistaken for an opaque named class.
+/// OWL class-expression / restriction predicates that lie OUTSIDE the EL+⊥ fragment this
+/// classifier implements. A class node carrying any of these is non-EL: [`decode`] returns
+/// `None` so the enclosing axiom is recorded as a skip rather than the node being mistaken for
+/// an opaque named class.
+///
+/// Two of these mark the DELIBERATELY-DEFERRED EL fragment (spike §"Hard parts" / the EL track
+/// of `research/owl2-el-ql-reasoning-spike.md`; reasoner-suite design §2.2): OWL 2 EL itself
+/// admits **safe nominals** (the completion rule CR6) and **concrete domains** (CR7–CR9), which
+/// this classifier does NOT yet apply. Rather than silently treat them as opaque classes (which
+/// would drop their real semantics and risk a wrong answer), we route them to `skipped_axioms`:
+///   * `oneOf` / `hasValue` — NOMINALS (`{a}`, `∃r.{a}`); the deferred CR6 surface.
+///   * `onDataRange` / `withRestrictions` / `onDatatype` / `datatypeComplementOf` — CONCRETE
+///     DOMAINS (datatype restrictions / faceted ranges); the deferred CR7–CR9 surface.
+///
+/// The remainder (`unionOf`/`complementOf`/`allValuesFrom`/cardinality/`hasSelf`) are outside
+/// EL entirely (they need ALC / Horn-SHIQ expressivity), not a deferred EL slice.
 const NON_EL_MARKERS: &[&str] = &[
-    "unionOf",       // disjunction
-    "complementOf",  // negation
-    "allValuesFrom", // universal restriction
-    "hasValue",      // value restriction (nominal-flavoured)
-    "oneOf",         // nominals / enumeration
+    "unionOf",       // disjunction — outside EL
+    "complementOf",  // negation — outside EL
+    "allValuesFrom", // universal restriction — outside EL
     "minCardinality",
     "maxCardinality",
     "cardinality",
@@ -55,6 +66,14 @@ const NON_EL_MARKERS: &[&str] = &[
     "maxQualifiedCardinality",
     "qualifiedCardinality",
     "hasSelf",
+    // --- Deferred EL fragment: nominals (CR6) ---------------------------------------------
+    "hasValue", // value restriction ∃r.{a} — nominal-flavoured (CR6)
+    "oneOf",    // nominals / enumeration {a, …} (CR6)
+    // --- Deferred EL fragment: concrete domains (CR7–CR9) ---------------------------------
+    "onDataRange",          // qualified data-range restriction (concrete domain)
+    "withRestrictions",     // faceted datatype restriction (concrete domain)
+    "onDatatype",           // datatype-restriction base datatype (concrete domain)
+    "datatypeComplementOf", // datatype negation (concrete domain)
 ];
 
 /// The dict ids of the vocabulary terms the extractor matches on. A term absent from the
