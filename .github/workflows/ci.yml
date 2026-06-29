@@ -1343,6 +1343,36 @@ jobs:
             jsonld-conformance.out
             conformance-scoreboard.md
 
+  service-federation-conformance:
+    # [OPUS-4.8] sq-ushvx (epic sq-my8wd) — the SERVICE-federation HARNESS smoke lane.
+    # The in-process loopback harness (crates/sparq-conformance/src/service_loopback.rs +
+    # tests/service_loopback.rs) is behind the OPT-IN `service-loopback` feature (pulls
+    # tokio + axum via sparq-server/server AND ureq via sparq-engine/service), so the
+    # generic `cargo test --workspace` shards build it feature-OFF (a single self-SKIP
+    # test, zero tokio/axum/ureq linked here: the lean-default posture). This dedicated
+    # job runs it feature-ON. HERMETIC — needs NO fetched W3C data: it stands up a real
+    # `sparq_server::serve` over an in-memory fixture on an ephemeral 127.0.0.1:0 port and
+    # drives a federated SERVICE query through the engine's REAL ureq transport end-to-end.
+    # This is the federation keystone (sq-my8wd); the W3C sparql11/service + HTTP-protocol
+    # suites wire onto it in later beads. NO conformance floor is graduated yet — this lane
+    # proves the harness + the end-to-end path + the fail-closed SSRF egress scoping.
+    name: SERVICE-federation harness (in-process loopback smoke + egress scoping)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Clippy the gated harness surface (service-loopback feature ON)
+        # The REAL gate for the feature-gated code: -D warnings over all targets with the
+        # feature ON (the default `cargo clippy` never compiles this module/test).
+        run: cargo clippy -p sparq-conformance --all-targets --features service-loopback -- -D warnings
+      - name: Run the in-process SERVICE-federation smoke test (feature ON)
+        # Drives the REAL end-to-end federated path (loopback sparq-server <- engine ureq
+        # transport) + asserts the fail-closed SSRF egress scoping. Hermetic; no test data.
+        run: cargo test -p sparq-conformance --features service-loopback --test service_loopback -- --nocapture
+
   inference-conformance:
     # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL
     # (W3C OWL WG test cases), the w3c/N3 community-group suite, and

@@ -10,15 +10,15 @@ result-comparison machinery: `sparq-conformance` (W3C SPARQL query/update/syntax
 ratchet — SPARQL, inference, W3C SHACL, OGC GeoSPARQL, Solid WAC + ACP, **W3C
 JSON-LD 1.1 toRdf + fromRdf + compact + frame**, **SolidLab ODRL Test Suite**).
 
-A crate-local `cargo test` ratchet behind the **opt-in `jsonld-suite`** feature
-drives the `w3c/json-ld-api` suite (toRdf + fromRdf + **compact**, lossless
-self-reparse `reparse(compact(D,ctx)) ≡ D`; floor raised 163→186 by sq-oy1f.16) and
-the SEPARATE `w3c/json-ld-framing` suite (**frame**, sq-oy1f.19): each `jld:FrameTest`
-EXPANDED input is framed via the native Framing Algorithm and compared by
-RDF-equivalence to the suite's NORMATIVE expected output (framing is a SELECT+RESHAPE,
-so the oracle anchors on `expected`, not the input). Honest divergences are reported,
-never inflated. The ODRL ratchet (sq-tmsd6) lives in `sparq-policy`; only its FLOOR is
-mirrored here.
+Crate-local `cargo test` lanes behind **opt-in features** (each OFF by default, so the
+lean `cargo test` never links their heavy deps): **`jsonld-suite`** drives the W3C
+JSON-LD 1.1 toRdf/fromRdf/compact/frame ratchets; **`service-loopback`** (sq-ushvx) is
+the SERVICE-federation keystone — a reusable `service_loopback::LoopbackEndpoint` fixture
+stands up a REAL `sparq_server::serve` on an ephemeral `127.0.0.1:0` port and drives a
+federated SERVICE query through the engine's REAL `ureq` transport end-to-end. Its egress
+allowlist is scoped to the bound loopback host (NOT a global disable; DNS-rebinding
+invariant preserved); the boundary (host- not port-keyed) is documented in rustdoc. No
+conformance floor is graduated yet. The ODRL ratchet (sq-tmsd6) lives in `sparq-policy`.
 
 > **Internal dev-only harness — not published** (`publish = false`). Test data is
 > fetched by `scripts/fetch-conformance.sh`, `fetch-jsonld-tests.sh`,
