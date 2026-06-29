@@ -27,8 +27,8 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
 
 ## ✨ Features
 
-- **SPARQL 1.1 Protocol** — `query` (GET / POST direct / POST url-encoded / HEAD) and `update`
-  (`application/sparql-update` → `204`, atomic), including the protocol dataset-override params.
+- **SPARQL 1.1 Protocol** — `query` (GET / POST / HEAD / the query-only HTTP `QUERY` method, for
+  Oxigraph interop) and `update` (`application/sparql-update` → `204`, atomic) + dataset overrides.
 - **Named graphs + Graph Store Protocol** — a full RDF dataset (`GRAPH` patterns, cross-graph
   joins, `FROM`/`FROM NAMED`, graph-scoped updates through the same writer) plus GSP `GET`/`HEAD`
   read and `PUT`/`POST`/`DELETE`/`PATCH` write (indirect `?graph=`/`?default` or direct request-URI).
