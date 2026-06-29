@@ -42,6 +42,17 @@ path = "src/bin/scoreboard.rs"
 # features and links `oxjsonld` directly (to re-parse the writer's JSON-LD output
 # back to RDF for the fromRdf semantic-equivalence comparison).
 jsonld-suite = ["sparq-core/jsonld", "sparq-engine/serialize-rdf", "dep:oxjsonld"]
+# [OPUS-4.8] sq-e5atd (epic sq-pbz04) — the D-entailment (datatype / value-space)
+# conformance lane (the crate-local `tests/d_entail_suite.rs` runner + the `Regime::D`
+# arm in `inference::entail`). OPT-IN and OFF by default so the default
+# `cargo test -p sparq-conformance` and the inference BINARY are byte-for-byte
+# unchanged (the binary keeps the D-only SPARQL entailment test OutOfScope when the
+# feature is off, so its ratchet floor is untouched). Forwards to sparq-reason's
+# opt-in `d-entail` feature (`Profile::D` + the typed value-space comparator). When
+# OFF the lane compiles to a single self-SKIP `#[test]`; when ON it drives the
+# D-regime tests through the REAL `Profile::D` materializer and asserts the pinned
+# floor. Pure-Rust, no new third-party deps.
+d-entail = ["sparq-reason/d-entail"]
 
 [dependencies]
 sparq-core = { path = "../sparq-core" }
