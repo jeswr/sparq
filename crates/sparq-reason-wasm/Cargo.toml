@@ -44,6 +44,12 @@ default = []
 # the headless wasm tests run with it on. Maps directly to the `why()` proof tree the
 # /surface/inference page renders.
 explain = ["sparq-reason/explain"]
+# [OPUS-4.8] sq-e5atd: expose `Profile::D` (opt-in D-entailment / datatype value-space
+# materialiser) to the bundle's `materialize`/`entailed`/`materializeStats` methods by
+# turning on `sparq-reason`'s non-default `d-entail` feature. OFF by default. The `why()`
+# proof tree is NOT available for D (it is a value-space materialiser, not a rule-based
+# forward-chainer with a derivation DAG), so `why("d", …)` returns an explanatory error.
+d-entail = ["sparq-reason/d-entail"]
 
 [dev-dependencies]
 # [OPUS-4.8] sq-6qw3 — headless wasm test harness, mirroring sparq-wasm: exercises the
