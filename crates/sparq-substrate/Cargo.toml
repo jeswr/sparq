@@ -51,6 +51,15 @@ rows = []
 # Pulls `oxrdf` (the literal type `as_numeric` classifies) ONLY when enabled — the lean
 # default build links nothing.
 numeric = ["dep:oxrdf"]
+# [OPUS-4.8] sq-hknqs (epic sq-qonbz, Phase 3): the FOUR id-tuple join kernels —
+# merge / hash / bind / leapfrog-trie (WCOJ) — moved here from `sparq-engine::exec` behind a
+# generic `JoinKeys` descriptor + a generic `Budget` cooperative-cancel hook (research record
+# §2.1, §2.3). Monomorphic over `Id=u32` + the SmallVec Row/Key aliases with NO `Box<dyn>` /
+# `&dyn` on the probe loop, so the engine AND a future reasoner drive the same join body each
+# supplying their own key projection MONOMORPHICALLY. Requires `rows` (the Row/Key/Posting
+# aliases) and pulls `rustc-hash` (the FxHashMap the hash join builds) ONLY when enabled — the
+# lean default build links neither.
+join = ["rows", "dep:rustc-hash"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -60,6 +69,10 @@ sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = fal
 # Inline small rows (avoid a heap allocation per solution row / join key). Same crate the
 # engine already uses for its `Row`/`Key` aliases, so the representation is byte-identical.
 smallvec.workspace = true
+# The hash join builds an `FxHashMap<Key, Posting>`. OPTIONAL: linked ONLY by the `join`
+# feature (`dep:rustc-hash`), so the default / `rows`-only / `numeric`-only build never pulls
+# it. Same hasher the engine uses, so the build/probe key hash is byte-identical.
+rustc-hash = { workspace = true, optional = true }
 # The numeric scaffold's `as_numeric` classifies an `oxrdf::Literal`. OPTIONAL: linked ONLY
 # by the `numeric` feature (`dep:oxrdf`), so the default / `rows`-only build never pulls it.
 # `oxrdf` is already in the workspace dep tree (via sparq-core), so this adds no new crate.

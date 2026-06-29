@@ -3,18 +3,21 @@
 **Shared zero-overhead evaluation substrate** for the sparq SPARQL engine and the
 reasoners — an **opt-in**, **leaf** crate (epic sq-qonbz) that depends **only** on
 `sparq-core`, never on `sparq-engine`. It hosts the parts of evaluation that are genuinely
-common to both the query engine and every reasoner: the id-tuple **row/key** vocabulary and
-the XSD **numeric value tower**. Placing them in a leaf crate lets both consumers reach them
-with **no dependency cycle**, while keeping `sparq-core` and the lean wasm bundle untouched.
+common to both the query engine and every reasoner: the id-tuple **row/key** vocabulary, the
+XSD **numeric value tower**, and the four **join kernels**. Placing them in a leaf crate lets
+both consumers reach them with **no dependency cycle**, while keeping `sparq-core` and the
+lean wasm bundle untouched.
 
-> **Status (sq-ev41x — Phase 2 of the epic).** The XSD **numeric value tower** (`Num` /
-> `Dec` / `as_numeric` + the arithmetic ops) has now **moved here** from `sparq-engine` and
-> the engine consumes it — a behaviour-neutral code-move (the W3C SPARQL conformance floor +
-> ORDER BY / numeric / relop tests are bit-identical). Still pending in later beads: the join
-> kernels (merge / hash / bind / leapfrog-trie) and the engine's `compare_values` total order
-> (which moves with the engine's `Value` enum, not here). See
-> `research/shared-eval-substrate.md` for the full extraction plan and the perf-neutrality
-> proof strategy.
+> **Status (sq-hknqs — Phase 3 of the epic).** The four id-tuple **join kernels** — sorted
+> merge-join, radix-partitioned hash-join, index-nested-loop bind-join and leapfrog trie-join
+> (WCOJ) — have now **moved here** from `sparq-engine`, behind a generic `JoinKeys` descriptor
+> + a generic `Budget` cooperative-cancel hook so the engine AND a future reasoner drive the
+> same probe loop each supplying their own key projection **monomorphically** — no `Box<dyn>`.
+> Phase 2 (sq-ev41x) moved the **numeric value tower** the same way. Both are behaviour-neutral
+> code-moves (the W3C SPARQL conformance floor is bit-identical; the join/scan/BGP micro-benches
+> are within noise). Still pending: the engine's `compare_values` total order, which moves with
+> the engine's `Value` enum (not here). See `research/shared-eval-substrate.md` for the full
+> extraction plan and the perf-neutrality proof.
 
 ## 🚀 Quickstart
 
@@ -22,7 +25,7 @@ Everything is behind **default-off** features — opt into exactly the slice you
 
 ```toml
 [dependencies]
-sparq-substrate = { version = "0.1.0", features = ["rows", "numeric"] }
+sparq-substrate = { version = "0.1.0", features = ["rows", "numeric", "join"] }
 ```
 
 ```rust,ignore
@@ -52,24 +55,32 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   decimal is not silently flattened to `f64`), the arithmetic ops (`binop` / `neg` / `abs` /
   `ceil` / `floor` / `round`), the XSD-canonical `lexical` / `canonical_lexical`, and the
   shared lexical helpers (`split_decimal`, `parse_xsd_f32` / `parse_xsd_f64`, `fmt_xsd_double`).
+- **`join`** — the four id-tuple join kernels over `&[Row]` slices: `merge_join` (sorted),
+  `hash_probe_serial` / `build_table` / `build_partitioned` / `probe_emit` (hash, with a
+  radix-partitioned parallel build), `bind_combine` (index-nested-loop), and `lftj_recurse`
+  over `Trie` / `TrieIter` (leapfrog trie-join / WCOJ), plus the `compatible` / `merge_rows` /
+  `any_unbound` solution-compatibility helpers. Each is generic over a `JoinKeys` column
+  descriptor and a `Budget` cooperative-cancel hook (both monomorphised, never a trait object).
+  Pulls only `rustc-hash` (the hash join's `FxHashMap`) when enabled; implies `rows`.
 
-Both features are **off by default**. The crate is `forbid(unsafe_code)`.
+All features are **off by default**. The crate is `forbid(unsafe_code)`.
 
 ### Zero-overhead intent
 
 Every item is monomorphic over `Id = u32` and the concrete numeric tiers — **never**
-`Box<dyn>` / `&dyn` / a vtable on a hot path. Each `numeric` item carries `#[inline]`, so
-cross-crate inlining (with the workspace LTO profile) keeps the engine's FILTER / BIND /
-ORDER BY hot loops identical to pre-move codegen. The join kernels arriving in later beads
-keep the same contract. This crate introduces no dynamic dispatch.
+`Box<dyn>` / `&dyn` / a vtable on a hot path — including between a join's probe loop and its
+key projection or its cooperative-cancel poll (the `JoinKeys` / `Budget` parameters are
+monomorphised, not trait objects). Each item carries `#[inline]`, so cross-crate inlining
+(with the workspace LTO profile) keeps the engine's FILTER / BIND / ORDER BY arithmetic and
+its join hot loops identical to pre-move codegen. This crate introduces no dynamic dispatch.
 
 ## 📚 Learn more
 
 - `research/shared-eval-substrate.md` — the design record: what is shareable vs
   engine-private, the options considered, and the layered perf-neutrality proof.
 - `crates/sparq-core` — the storage substrate this crate's `Id` / dictionary types come from.
-- `crates/sparq-engine` — the consumer that keeps its planner and will call the shared
-  kernels through a thin adapter once they move.
+- `crates/sparq-engine` — the consumer that keeps its planner private and calls the shared
+  numeric + join kernels through a thin `Bindings`-side adapter.
 
 ## License
 
