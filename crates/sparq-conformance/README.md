@@ -9,6 +9,10 @@ result-comparison machinery: `sparq-conformance` (W3C SPARQL query/update/syntax
 `sparq-reason`), and `sparq-conformance-scoreboard` (consolidated index of every
 ratchet — SPARQL, inference, W3C SHACL, OGC GeoSPARQL, Solid WAC + ACP, **W3C
 JSON-LD 1.1 toRdf + fromRdf + compact + expand + flatten + frame**, **SolidLab ODRL**).
+The scoreboard also surfaces ONE **`sparq extension`** row, HONESTLY labelled NOT a
+standards claim and tallied separately: the `sparq-text` BM25 differential oracle
+(sq-ripcg; no normative full-text-over-RDF / BM25 suite exists; the runner lives
+crate-local in `sparq-text`, no dep edge here, its floor mirrored + guarded textually).
 
 Crate-local `cargo test` lanes also sit behind **opt-in features** (OFF by default, so the lean `cargo test` never links their heavy deps). **`jsonld-suite`** ratchets the W3C `json-ld-api` (toRdf/fromRdf/**compact**/**expand**/**flatten**, sq-oy1f) + `json-ld-framing` (**frame**, sq-oy1f.19) suites against the NORMATIVE expected docs (MEASURED floors, divergences reported not inflated). **`service-loopback`** (sq-ushvx) is the SERVICE-federation keystone — `service_loopback::LoopbackEndpoint` stands up a REAL `sparq_server::serve` on an ephemeral `127.0.0.1:0` port and drives a federated SERVICE query through the engine's REAL `ureq` transport end-to-end; its egress allowlist is scoped to the bound loopback host (NOT a global disable; host- not port-keyed, see rustdoc). **`service`** (sq-ddpgx) builds on it to ratchet the W3C `sparql11/service` EVALUATION suite: each `qt:serviceData` block is served by a loopback endpoint, endpoint IRIs are rewritten to the bound URLs, and the federated query runs end-to-end vs the `.srx` oracle (MEASURED floor; `SILENT`-swallow vs non-`SILENT`-propagate tested against a closed port; a variable `SERVICE ?ep` + a nested non-`SILENT` `SERVICE` are documented Skips). The ODRL ratchet (sq-tmsd6) lives in `sparq-policy`.
 

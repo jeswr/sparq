@@ -1270,6 +1270,93 @@ jobs:
             odrl-conformance.out
             conformance-scoreboard.md
 
+  text-oracle:
+    # [OPUS-4.8] sq-ripcg (epic sq-lk3aw) — the sparq-text DIFFERENTIAL BM25 ORACLE
+    # ratchet, a DEDICATED job so it is SURFACED in the central conformance
+    # scoreboard alongside the standards suites — but HONESTLY labelled a sparq
+    # EXTENSION (family = "sparq extension"), NOT a standards-conformance claim:
+    # BM25-over-RDF has NO normative recommendation or test suite. The runner is the
+    # in-source corpus battery in crates/sparq-text/tests/bm25_oracle.rs (NOT
+    # fixture-gated — no fetch needed, default-on, no opt-in feature): a from-scratch
+    # independent reference scorer recomputes the exact BM25 score of every hit and
+    # the runner asserts the index reproduces it bit-for-bit + in best-first order,
+    # then asserts the count of score-exact assertions is >= TEXT_ORACLE_FLOOR (may
+    # only RISE). This job runs that runner with --nocapture and re-checks the printed
+    # `text-search differential oracle assertions N (floor F)` line as the same
+    # belt-and-braces `>= floor` gate the other ratchet jobs use. Never lower the
+    # floor (raise TEXT_ORACLE_FLOOR as the battery grows).
+    name: sparq-text BM25 differential oracle (extension ratchet — assertions >= 18750)
+    needs: changes
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Run sparq-text BM25 differential oracle
+        # The runner asserts its own floor (TEXT_ORACLE_FLOOR) + per-hit score
+        # equality; capture the output so the grep gate below re-checks the count.
+        # [OPUS-4.8] sq-shacl-flake (generalized from #1236): STEP-LEVEL transient
+        # self-heal. A transient crates.io download hiccup aborts `cargo test` BEFORE
+        # any test runs, leaving text-oracle.out empty; a single-shot invocation then
+        # let the ratchet step below mis-report that empty output as a phantom
+        # "regressed below the floor". Re-running lets such a transient self-heal. A
+        # GENUINE regression fails the runner's own assert on every attempt and still
+        # reds the job — the floor is never weakened. `rc` is captured from
+        # PIPESTATUS[0] (cargo, not tee).
+        run: |
+          set -uo pipefail
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::sparq-text BM25 differential oracle — attempt $attempt/$MAX_ATTEMPTS"
+            rc=0
+            cargo test -p sparq-text --test bm25_oracle -- --nocapture \
+              | tee text-oracle.out
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "sparq-text BM25 differential oracle passed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::sparq-text BM25 differential oracle failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient. A real scoring regression trips the runner's own assert!(assertions >= floor) or a per-hit bit-exact score mismatch; a 'curl failed'/download error is an infra flake, not a scoring change."
+              exit "$rc"
+            fi
+            echo "::warning::sparq-text BM25 differential oracle attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal: most often a transient crates.io download hiccup before any test ran)."
+            attempt=$((attempt + 1))
+          done
+      - name: Enforce ratchet (score-exact assertion count must not regress)
+        run: |
+          TEXT_ORACLE_FLOOR=18750
+          # [OPUS-4.8] sq-shacl-flake: distinguish "output never produced" (an
+          # infra/compile flake left the .out with no assertions line) from a GENUINE
+          # regression, so an empty output is never mis-reported as "regressed below
+          # the floor".
+          if ! grep -qE 'text-search differential oracle assertions [0-9]+ \(floor [0-9]+\)' text-oracle.out; then
+            echo "::error::sparq-text BM25 oracle output is missing/empty — the test step produced no 'text-search differential oracle assertions N (floor F)' line. This is an INFRA/build failure (e.g. a transient crates.io download), NOT a scoring regression. Re-run the job; inspect the 'Run sparq-text BM25 differential oracle' step output above."
+            exit 1
+          fi
+          # runner prints: "text-search differential oracle assertions <n> (floor <f>)"
+          TEXT_ASSERTIONS=$(grep -oE 'text-search differential oracle assertions [0-9]+' text-oracle.out | grep -oE '[0-9]+' | head -1)
+          echo "sparq-text BM25 differential oracle assertions: ${TEXT_ASSERTIONS:-unknown} (floor $TEXT_ORACLE_FLOOR)"
+          [ -n "$TEXT_ASSERTIONS" ] && [ "$TEXT_ASSERTIONS" -ge "$TEXT_ORACLE_FLOOR" ] || { echo "::error::sparq-text BM25 differential oracle regressed below the floor (${TEXT_ASSERTIONS:-?} < $TEXT_ORACLE_FLOOR)"; exit 1; }
+      - name: Emit consolidated conformance scoreboard
+        # Render the ONE central scoreboard index (all suites + floors across crates,
+        # including this EXTENSION row) into this job's step summary, so it surfaces
+        # where the text oracle sits in the whole picture.
+        run: |
+          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: text-oracle
+          path: |
+            text-oracle.out
+            conformance-scoreboard.md
+
   jsonld-conformance:
     # [OPUS-4.8] sq-oy1f.2 / sq-3uos5 / sq-oy1f.19 — W3C JSON-LD 1.1 conformance
     # RATCHET (toRdf + fromRdf + compact + frame), a DEDICATED gating job alongside
