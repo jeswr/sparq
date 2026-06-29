@@ -56,7 +56,11 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   per OGC requirement ([`tests/ogc_geosparql_requirements.rs`](tests/ogc_geosparql_requirements.rs))
   scores **30 / 30** of the standard's R1–R30 taxonomy — OGC never shipped an executable
   ETS, and the GPL academic compliance benchmark cannot be vendored into this MIT tree,
-  so this is sparq's own probe, not a TEAM-Engine run.
+  so this is sparq's own probe, not a TEAM-Engine run. A sibling hand-curated DE-9IM
+  topology ratchet ([`tests/ogc_compliance_ratchet.rs`](tests/ogc_compliance_ratchet.rs))
+  pins the exact truth value of every `sf*`/`eh*`/`rcc8*` relation over point/line/
+  polygon/MULTI\* operands in both orders; its floor only rises with genuinely-passing,
+  hand-derived assertions.
 - **WKT + GML, two serializations** — `geo:wktLiteral` and the GML Simple-Features
   profile of `geo:gmlLiteral` parse to the same `geo_types` + CRS and interoperate in
   one `geof:` call. Beyond the GML-SF profile, a few real-world (non-SF) forms are

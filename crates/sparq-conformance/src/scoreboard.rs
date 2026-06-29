@@ -123,8 +123,8 @@ pub struct Suite {
 /// * inference 1967 — `ci.yml` job `inference-conformance` (`RATCHET=1967`).
 /// * SHACL core 98 — `sparq-shacl` `w3c_core.rs` `BASELINE_PASS = 98`.
 /// * SHACL-SPARQL 5 — `sparq-shacl` `w3c_sparql.rs` `SHACL_SPARQL_FLOOR = 5`.
-/// * OGC GeoSPARQL 119 — `sparq-geo` `ogc_compliance_ratchet.rs`
-///   `OGC_RATCHET_FLOOR = 119`.
+/// * OGC GeoSPARQL 158 — `sparq-geo` `ogc_compliance_ratchet.rs`
+///   `OGC_RATCHET_FLOOR = 158` (sq-cbe4t raised it 119 -> 158).
 /// * OGC GeoSPARQL query-rewrite 38 — `sparq-geo` `ogc_query_rewrite_ratchet.rs`
 ///   `OGC_QUERY_REWRITE_FLOOR = 38` (sq-wf9qg; opt-in `geosparql_rewrite` feature;
 ///   topology PROPERTY forms answered via the rewrite, MEASURED pass count).
@@ -241,9 +241,23 @@ pub const SUITES: &[Suite] = &[
         family: "OGC GeoSPARQL",
         runner: Runner::CrateTest { krate: "sparq-geo", target: "ogc_compliance_ratchet" },
         ci_job: "geo-conformance",
-        ratchet_floor: 119,
+        // [OPUS-4.8] sq-cbe4t — raised 119 -> 158: 39 net-new hand-derived DE-9IM
+        // assertions (reverse-order/symmetry coverage + MULTI* operands). The
+        // crate-local `OGC_RATCHET_FLOOR` const moved in lock-step; the floor-sync
+        // guard (`tests/scoreboard_floors.rs`) pins the two together.
+        ratchet_floor: 158,
         floor_basis: "pass",
-        note: "hand-curated sf/eh/rcc8 topology + WKT/GML equivalence assertions",
+        // [OPUS-4.8] sq-cbe4t — DISTANCE-APPROXIMATION HONESTY NOTE. This topology
+        // ratchet is exact DE-9IM (no approximation). The `geof:distance` METRIC
+        // path (a separate, non-topological surface, scored under the R1-R30
+        // requirements probe) is exact HAVERSINE only for point↔point /
+        // point↔geometry; between two EXTENDED geometries it uses a LOCAL
+        // EQUIRECTANGULAR approximation about mean latitude (accurate locally,
+        // degrading at continental scale / near the poles). See the sparq-geo
+        // README "Distance accuracy caveat" — no exactness is claimed there.
+        note: "hand-curated sf/eh/rcc8 topology + WKT/GML equivalence assertions \
+               (exact DE-9IM); geof:distance is exact haversine point↔point, local \
+               equirectangular approximation extended↔extended (see sparq-geo README)",
     },
     // [OPUS-4.8] sq-wf9qg — the OGC GeoSPARQL QUERY-REWRITE extension
     // (`/conf/query-rewrite-extension`) ratchet, graduated alongside the topology
