@@ -43,7 +43,29 @@ path = "src/bin/scoreboard.rs"
 # back to RDF for the fromRdf semantic-equivalence comparison).
 jsonld-suite = ["sparq-core/jsonld", "sparq-engine/serialize-rdf", "dep:oxjsonld"]
 
+# [OPUS-4.8] sq-ushvx (epic sq-my8wd) — the in-process SERVICE-federation test harness.
+# OPT-IN and OFF by default: it stands up a REAL `sparq_server::serve` endpoint on an
+# ephemeral `127.0.0.1:0` loopback port and drives a federated SERVICE query through the
+# engine's REAL `ureq` HTTP transport, so it pulls the whole async server stack (tokio +
+# axum via `sparq-server/server`) AND the engine's blocking `service` (ureq) deps — both
+# heavy and both already off the lean default. With the feature OFF the `service_loopback`
+# module is `#[cfg]`-stripped and the crate-local `tests/service_loopback.rs` runner
+# compiles to a single self-SKIP `#[test]`, so the bare `cargo test -p sparq-conformance`
+# (and the default `--workspace` shards) never link tokio/axum/ureq here. The federation
+# keystone the later `sparql11/service` + HTTP-protocol conformance lanes (sq-my8wd) wire
+# onto. `sparq-server/service` transitively enables `sparq-engine/service`.
+service-loopback = ["dep:sparq-server", "sparq-server/service", "dep:tokio"]
+
 [dependencies]
+# [OPUS-4.8] sq-ushvx — the embeddable in-process server (`serve` / `router` / `AppState`),
+# used ONLY by the `service-loopback` harness to stand up a real loopback SERVICE endpoint.
+# OFF by default (optional, behind `service-loopback`) so the default harness build never
+# links the async server stack.
+sparq-server = { path = "../sparq-server", optional = true }
+# [OPUS-4.8] sq-ushvx — async runtime for the loopback server's accept loop. Same minimal
+# feature set the server tests use (rt-multi-thread + net + time + sync for the shutdown
+# signal). OFF by default (optional, behind `service-loopback`).
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"], optional = true }
 sparq-core = { path = "../sparq-core" }
 sparq-engine = { path = "../sparq-engine" }
 sparq-reason = { path = "../sparq-reason" }

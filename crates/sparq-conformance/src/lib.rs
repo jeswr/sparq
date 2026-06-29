@@ -24,6 +24,14 @@ pub mod run;
 // `sparq-conformance-scoreboard` binary renders it; a guard test keeps the
 // crate-local SHACL/geo floors in sync.
 pub mod scoreboard;
+// [OPUS-4.8] sq-ushvx (epic sq-my8wd) — the in-process SERVICE-federation test harness.
+// A reusable fixture that stands up a REAL `sparq_server::serve` endpoint on an ephemeral
+// `127.0.0.1:0` loopback port and drives a federated SERVICE query through the engine's
+// REAL `ureq` transport. Behind the OPT-IN `service-loopback` feature (tokio + axum +
+// ureq), `#[cfg]`-stripped from the default build. The federation keystone the later
+// `sparql11/service` + HTTP-protocol conformance lanes (sq-my8wd) wire onto.
+#[cfg(feature = "service-loopback")]
+pub mod service_loopback;
 // [OPUS-4.8] (B4) W3C rdf-turtle suite run THROUGH the sparq Turtle parser
 // (`Graph::parse_to_triples`) — the rejection/acceptance oracle for the Turtle T1 spike,
 // distinct from the oxttl-differential chunked-vs-serial test and the N3-parser TurtleTests.

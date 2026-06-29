@@ -3630,6 +3630,8 @@ dependencies = [
  "sparq-core",
  "sparq-engine",
  "sparq-reason",
+ "sparq-server",
+ "tokio",
 ]
 
 [[package]]
