@@ -19,9 +19,13 @@ feature** — the core engine and the wasm build carry zero QL code, deps, or co
 > **Soundness boundary (read this).** PerfectRef is sound + complete only for **conjunctive
 > queries**. Firing it on anything else silently mis-answers. So this crate is **FAIL-CLOSED**:
 > a query with `OPTIONAL` / `FILTER` / `MINUS` / `UNION` / a property path / aggregation / a
-> variable predicate is **rejected as out-of-scope**, never rewritten. The regime is
-> EXPERIMENTAL: it is validated against a **hand-checked DL-Lite oracle**, not graduated to a
-> conformance floor.
+> variable predicate is **rejected as out-of-scope**, never rewritten. The rewriter is validated
+> against a **hand-checked DL-Lite_R oracle**. On the **formal DL-Lite_R suite** (the hand-derived
+> certain-answer oracle from `sq-g19x0`) the rewrite is **sound AND complete case by case** — that
+> is now a **pinned floor** (`sparq-conformance`'s `ql_dllite_suite`, a *sparq-extension* ratchet,
+> **not** a full-OWL-2-QL-conformance claim — see Scope). The broader `pr:QL`
+> `sparql11/entailment` set stays **EXPERIMENTAL / OutOfScope** (it mixes intensional cases outside
+> sound rewriting).
 
 ## 🚀 Quickstart
 
@@ -70,16 +74,29 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
 > no answers. (Dropping a non-contained disjunct would be an unsoundness bug.)
 
 **Scope (honest):** positive-inclusion rewriting + tree-witness folding + containment minimisation.
-**No consistency checking**, no qualified existentials. The regime stays **EXPERIMENTAL**: it is
-oracle-tested (`tests/oracle.rs`, incl. the tree-witness + minimisation cases). It is **wired into
-the conformance entailment-regime suite as experimental / OutOfScope** (sq-kuvu3, opt-in
-`sparq-conformance/ql-experimental`): the rewriter runs over the `sd:EntailmentProfile pr:QL`
-`sparql11/entailment` cases and the harness reports — honestly — what it computes (fail-closed
-ABSTAIN / computed-equivalent evidence / computed-DIVERGENT gap), **never a graduated conformance
-pass**. It is **not** graduated to a conformance floor: there is no scoreboard ratchet, so QL cannot
-silently claim conformance — that graduation is a separate, deferred bead (it must sequence through
-the contended conformance scoreboard; epic `sq-pbz04`). Enable the crate with `sparq-reason-ql =
-{ version = "0.1", features = ["experimental"] }`.
+**No consistency checking**, no qualified existentials. The rewriter is oracle-tested
+(`tests/oracle.rs`, incl. the tree-witness + minimisation cases).
+
+**Two conformance arms, two honesty stances (sq-qo1a9):**
+
+- **GRADUATED — the formal DL-Lite_R certain-answer oracle.** On the hand-derived DL-Lite_R suite
+  from `sq-g19x0` — every case a conjunctive query within sound rewriting — the rewrite is **sound
+  AND complete case by case**: `rewrite_production`'s UCQ, evaluated over the **unmodified ABox**,
+  returns **exactly** the hand-derived certain answers. This is pinned as a floor in
+  `sparq-conformance`'s `ql_dllite_suite` (opt-in `ql-experimental`; `QL_DLLITE_FLOOR`). It is a
+  **`sparq extension` row** in the central scoreboard, tallied **separately** and **never folded into
+  the standards-conformance total** — there is no runnable normative W3C OWL 2 QL certain-answer
+  suite, so this is honestly a faithful DL-Lite_R oracle floor, **not a full-OWL-2-QL-conformance
+  claim**.
+- **STILL EXPERIMENTAL — the broad `pr:QL` `sparql11/entailment` arm.** That set is **not** the
+  formal DL-Lite_R suite: it mixes intensional / non-DL-Lite certain-answer cases the sound
+  rewriting fragment cannot answer. So it stays experimental / OutOfScope (sq-kuvu3, opt-in
+  `sparq-conformance/ql-experimental`, `tests/ql_experimental_arm.rs`): the harness reports —
+  honestly — what it computes (fail-closed ABSTAIN / computed-equivalent evidence /
+  computed-DIVERGENT gap), **never a graduated conformance pass**, and its rows are **never summed
+  into any floor**.
+
+Enable the crate with `sparq-reason-ql = { version = "0.1", features = ["experimental"] }`.
 
 ## 📚 Learn more
 
@@ -87,8 +104,8 @@ the contended conformance scoreboard; epic `sq-pbz04`). Enable the crate with `s
 - **API reference** — [docs.rs/sparq-reason-ql](https://docs.rs/sparq-reason-ql).
 - **Design** — [`research/owl2-el-ql-reasoning-spike.md`](../../research/owl2-el-ql-reasoning-spike.md)
   (the QL track) and [`research/reasoner-suite-on-substrate.md`](../../research/reasoner-suite-on-substrate.md)
-  §2.5 (the PerfectRef trap + the phased plan; this crate now implements phases Q1–Q3, with the
-  conformance-floor graduation deferred to a follow-up scoreboard bead).
+  §2.5 (the PerfectRef trap + the phased plan; this crate implements phases Q1–Q3, and the formal
+  DL-Lite_R certain-answer oracle has now graduated to a pinned `sparq extension` floor — sq-qo1a9).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License
