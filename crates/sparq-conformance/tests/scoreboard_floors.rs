@@ -172,6 +172,17 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/d_entail_suite.rs",
         "D_ENTAIL_FLOOR",
     ),
+    // [OPUS-4.8] sq-ddpgx (epic sq-my8wd) — the W3C SPARQL 1.1 sparql11/service
+    // EVALUATION ratchet. `pub const SERVICE_EVAL_FLOOR` lives in this crate's
+    // `tests/service_eval_suite.rs` (behind the opt-in `service` feature, inside the
+    // `gated` module — the guard reads it TEXTUALLY, so the `#[cfg]`/module nesting
+    // do not affect the match); the guard pins the central scoreboard's
+    // `ratchet_floor` to it so the two can never silently drift.
+    (
+        "W3C SPARQL 1.1 sparql11/service evaluation",
+        "crates/sparq-conformance/tests/service_eval_suite.rs",
+        "SERVICE_EVAL_FLOOR",
+    ),
 ];
 
 #[test]
@@ -257,4 +268,6 @@ fn scoreboard_renders_all_suites() {
     assert!(md.contains("SolidLab ODRL Test Suite"));
     // [OPUS-4.8] sq-e5atd — the W3C SPARQL 1.1 D-entailment ratchet.
     assert!(md.contains("W3C SPARQL 1.1 D-entailment"));
+    // [OPUS-4.8] sq-ddpgx — the W3C SPARQL 1.1 sparql11/service evaluation ratchet.
+    assert!(md.contains("W3C SPARQL 1.1 sparql11/service evaluation"));
 }

@@ -431,6 +431,16 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   bounded by the active `QueryBudget` deadline (it caps at `min(remaining-until-deadline, default)`
   with a small non-zero floor), so a `SERVICE` fetch under a tight `deadline` no longer blocks for the
   full default on an unresponsive endpoint.
+- **`SERVICE` evaluation is W3C-conformance-tested end-to-end** (`sq-ddpgx`, epic sq-my8wd) — the
+  W3C SPARQL 1.1 `sparql11/service` evaluation suite runs against the engine's REAL `ureq` transport
+  through an in-process **loopback** harness: each `qt:serviceData` block is served by a real
+  `sparq_server::serve` endpoint on an ephemeral `127.0.0.1:0` port (the well-known endpoint IRIs are
+  rewritten to the bound URLs), so the whole federated path — HTTP, content negotiation,
+  SPARQL-Results parsing, the bind-join over the wire — is exercised, not a mock. It is the
+  `sparq-conformance` crate's opt-in **`service`** feature (a ratcheted floor in the central scoreboard;
+  `SILENT`-swallow vs non-`SILENT`-propagate against a closed port is pinned directly). Honest scope: a
+  variable `SERVICE ?ep` and a nested non-`SILENT` `SERVICE` are documented divergences (the loopback
+  fixture serves a plain graph with onward federation disabled), tracked-not-asserted under sq-my8wd.
 - **Window functions + custom aggregate registry** are the non-default `window-functions` cargo
   feature. **Window functions are a NON-STANDARD extension** — there is no W3C-REC SPARQL `OVER`
   syntax. sparq exposes them as a programmatic pass over a `QueryResult` (the SQL:2003 model

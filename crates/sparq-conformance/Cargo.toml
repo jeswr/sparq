@@ -67,6 +67,18 @@ d-entail = ["sparq-reason/d-entail"]
 # onto. `sparq-server/service` transitively enables `sparq-engine/service`.
 service-loopback = ["dep:sparq-server", "sparq-server/service", "dep:tokio"]
 
+# [OPUS-4.8] sq-ddpgx (epic sq-my8wd) — the W3C SPARQL 1.1 `sparql11/service`
+# EVALUATION conformance lane (the crate-local `tests/service_eval_suite.rs` runner +
+# the `service_eval` module). OPT-IN and OFF by default: it GRADUATES the deferred
+# SERVICE/federation tests by standing up REAL in-process loopback endpoints (the
+# merged sq-ushvx harness) and driving each federated SERVICE query end-to-end through
+# the engine's REAL `ureq` transport, comparing to the suite's `.srx` oracle. It simply
+# forwards to `service-loopback` (no new third-party deps), so the heavy tokio/axum/ureq
+# stack is declared ONCE; with the feature OFF the lane compiles to a single self-SKIP
+# `#[test]` and the default + `--workspace` builds link none of it — the lean-core
+# opt-in posture. The pinned `SERVICE_EVAL_FLOOR` is the MEASURED pass count.
+service = ["service-loopback"]
+
 [dependencies]
 # [OPUS-4.8] sq-ushvx — the embeddable in-process server (`serve` / `router` / `AppState`),
 # used ONLY by the `service-loopback` harness to stand up a real loopback SERVICE endpoint.

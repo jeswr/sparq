@@ -1381,6 +1381,31 @@ jobs:
         # Drives the REAL end-to-end federated path (loopback sparq-server <- engine ureq
         # transport) + asserts the fail-closed SSRF egress scoping. Hermetic; no test data.
         run: cargo test -p sparq-conformance --features service-loopback --test service_loopback -- --nocapture
+      # [OPUS-4.8] sq-ddpgx (epic sq-my8wd) — the W3C sparql11/service EVALUATION ratchet
+      # built on the harness above (the `service` feature forwards to `service-loopback`).
+      # Needs the pinned W3C rdf-tests data; clippy the lane, then run it + enforce the floor.
+      - name: Clippy the service-evaluation lane (service feature ON)
+        run: cargo clippy -p sparq-conformance --all-targets --features service -- -D warnings
+      - name: Fetch W3C SPARQL test suites (pinned)
+        run: ./scripts/fetch-conformance.sh
+      - name: Run sparql11/service evaluation lane (service feature ON) + enforce floor
+        # Stands up REAL in-process loopback endpoints per qt:serviceData block and drives each
+        # federated SERVICE query end-to-end through the engine's REAL ureq transport, comparing
+        # to the .srx oracle. The runner asserts the pinned SERVICE_EVAL_FLOOR in-process AND
+        # prints a `TOTAL service <pass> <fail> <skip> (floor N)` line re-grepped here.
+        # `--nocapture` so the TOTAL line reaches stdout. Positional grep fields.
+        run: |
+          set -o pipefail
+          cargo test -p sparq-conformance --features service --test service_eval_suite -- --nocapture \
+            | tee service-eval-conformance.out
+          if ! grep -qE '^TOTAL service ' service-eval-conformance.out; then
+            echo "::error::sparql11/service lane produced no 'TOTAL service' line — infra/build issue, not a conformance change. Re-run the job."
+            exit 1
+          fi
+          PASS=$(grep -E '^TOTAL service ' service-eval-conformance.out | awk '{print $3}' | head -1)
+          FLOOR=5
+          echo "sparql11/service evaluation pass: ${PASS:-unknown} (floor: $FLOOR)"
+          [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::service evaluation regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
 
   inference-conformance:
     # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL
