@@ -1,2182 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782746429818,
+  "lastUpdate": 1782748020814,
   "repoUrl": "https://github.com/jeswr/sparq",
   "entries": {
     "sparq engine": [
-      {
-        "commit": {
-          "author": {
-            "email": "63333554+jeswr@users.noreply.github.com",
-            "name": "Jesse Wright",
-            "username": "jeswr"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "584554d1a052ae2bc4579af9e476aa5306ac1c5d",
-          "message": "feat(shacl): SHACL 1.2 core value constraints + severity-threshold conforms (sq-sx15d) [OPUS-4.8] (#1267)\n\nImplement the SHACL 1.2 CORE value constraints in sparq-shacl, making the\nvendored shacl12-test-suite core entries pass through the real validate():\n\nA. Path-valued comparands — sh:equals/sh:disjoint/sh:lessThan/sh:lessThanOrEquals\n   now carry a SHACL property Path (parsed by the existing Path parser; a bare\n   IRI is a trivial Path → backward-compatible) and eval via Path::values, so a\n   sequence-path comparand is no longer silently dropped (equals-002,\n   disjoint-002, lessThan-003, lessThanOrEquals-002).\nB. Disjunctive sh:class — sh:class ( ex:A ex:B ) → Component::ClassIn, any-of\n   subclass-aware instance check (class-002).\nC. Four new components — sh:subsetOf (path value set ⊆ comparand set), sh:someValue\n   (existential nested-shape conformance, one result on focus/path when none\n   conform), sh:singleLine true (no LF/CR/FF/VT), sh:rootClass (value is the class\n   or a transitive rdfs:subClassOf-descendant), each with its\n   ...ConstraintComponent IRI (subsetOf-001, someValue-001, singleLine-001,\n   rootClass-001).\nD. Severity-threshold conforms — ValidationReport.conforms now follows the SHACL\n   1.2 default disallowed set {Violation,Warning,Info}: a Debug/Trace-only report\n   conforms. Adds conforms_with_disallowed() + DEFAULT_CONFORMANCE_DISALLOWS for a\n   custom sh:conformanceDisallows set (severity-004, severity-005,\n   conformance-disallows-001).\n\nDirect, fixture-free tests for all 12 target entries (the fetched suite tree is\ngitignored) plus per-component unit coverage; report.rs/lib.rs severity tests\nupdated for the new default. README + skills/shacl-validation/SKILL.md updated.\nGates green default AND --features shacl-af; MSRV 1.88 ok; rustdoc all-features\nclean; readme-template 0 deviations. Does not touch w3c_core_shacl12.rs or ci.yml\n(a parallel PR owns the harness extension).\n\nCo-authored-by: Jesse Wright <jmwright.045@gmail.com>\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
-          "timestamp": "2026-06-27T16:56:32Z",
-          "tree_id": "e4ced75048495dc4aa087447f2769dd84539934c",
-          "url": "https://github.com/jeswr/sparq/commit/584554d1a052ae2bc4579af9e476aa5306ac1c5d"
-        },
-        "date": 1782580661682,
-        "tool": "customSmallerIsBetter",
-        "benches": [
-          {
-            "name": "load_s",
-            "value": 0.544,
-            "unit": "s"
-          },
-          {
-            "name": "store_bytes_per_triple",
-            "value": 92,
-            "unit": "bytes"
-          },
-          {
-            "name": "dict_bytes_per_term",
-            "value": 53,
-            "unit": "bytes"
-          },
-          {
-            "name": "parse_ns_per_byte",
-            "value": 5.0106,
-            "unit": "ns/byte"
-          },
-          {
-            "name": "store_bytes_per_triple_small",
-            "value": 88,
-            "unit": "bytes"
-          },
-          {
-            "name": "q02_type_person_count_us",
-            "value": 3.6,
-            "unit": "us"
-          },
-          {
-            "name": "q03_star3_count_us",
-            "value": 3134.3,
-            "unit": "us"
-          },
-          {
-            "name": "q04_follows_name_count_us",
-            "value": 4479.9,
-            "unit": "us"
-          },
-          {
-            "name": "q06_filter_age_count_us",
-            "value": 5.6,
-            "unit": "us"
-          },
-          {
-            "name": "q09_count_edges_count_us",
-            "value": 4.9,
-            "unit": "us"
-          },
-          {
-            "name": "q10_optional_age_count_us",
-            "value": 701.7,
-            "unit": "us"
-          },
-          {
-            "name": "q02_type_person_materialize_us",
-            "value": 12945.5,
-            "unit": "us"
-          },
-          {
-            "name": "q03_star3_materialize_us",
-            "value": 57507.5,
-            "unit": "us"
-          },
-          {
-            "name": "q04_follows_name_materialize_us",
-            "value": 152397.7,
-            "unit": "us"
-          },
-          {
-            "name": "q06_filter_age_materialize_us",
-            "value": 2476,
-            "unit": "us"
-          },
-          {
-            "name": "q09_count_edges_materialize_us",
-            "value": 4.7,
-            "unit": "us"
-          },
-          {
-            "name": "q10_optional_age_materialize_us",
-            "value": 41040.8,
-            "unit": "us"
-          },
-          {
-            "name": "q02_type_person_json_us",
-            "value": 8870.6,
-            "unit": "us"
-          },
-          {
-            "name": "q03_star3_json_us",
-            "value": 59578.4,
-            "unit": "us"
-          },
-          {
-            "name": "q04_follows_name_json_us",
-            "value": 154641.8,
-            "unit": "us"
-          },
-          {
-            "name": "q06_filter_age_json_us",
-            "value": 2474.5,
-            "unit": "us"
-          },
-          {
-            "name": "q09_count_edges_json_us",
-            "value": 5.2,
-            "unit": "us"
-          },
-          {
-            "name": "q10_optional_age_json_us",
-            "value": 40910.6,
-            "unit": "us"
-          },
-          {
-            "name": "op_q01_bgp_count_us",
-            "value": 3.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q02_star3_count_us",
-            "value": 29323.2,
-            "unit": "us"
-          },
-          {
-            "name": "op_q03_chain_count_us",
-            "value": 15.8,
-            "unit": "us"
-          },
-          {
-            "name": "op_q04_triangle_count_us",
-            "value": 1520950.6,
-            "unit": "us"
-          },
-          {
-            "name": "op_q05_union_count_us",
-            "value": 8.5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q06_optional_count_us",
-            "value": 7774.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q07_optional_notbound_count_us",
-            "value": 4614.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q08_minus_count_us",
-            "value": 4255.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q09_filter_numeric_count_us",
-            "value": 9994.5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q10_filter_string_count_us",
-            "value": 511740.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q11_filter_in_count_us",
-            "value": 12162.8,
-            "unit": "us"
-          },
-          {
-            "name": "op_q12_filter_exists_count_us",
-            "value": 32087.6,
-            "unit": "us"
-          },
-          {
-            "name": "op_q13_bind_count_us",
-            "value": 52788.1,
-            "unit": "us"
-          },
-          {
-            "name": "op_q14_values_count_us",
-            "value": 3823.4,
-            "unit": "us"
-          },
-          {
-            "name": "op_q15_agg_group_having_count_us",
-            "value": 21777.2,
-            "unit": "us"
-          },
-          {
-            "name": "op_q16_distinct_count_us",
-            "value": 11.8,
-            "unit": "us"
-          },
-          {
-            "name": "op_q17_orderby_limit_offset_count_us",
-            "value": 131487.9,
-            "unit": "us"
-          },
-          {
-            "name": "op_q18_path_plus_count_us",
-            "value": 91258,
-            "unit": "us"
-          },
-          {
-            "name": "op_q19_path_star_count_us",
-            "value": 160597.5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q20_path_opt_count_us",
-            "value": 9.3,
-            "unit": "us"
-          },
-          {
-            "name": "op_q21_path_seq_count_us",
-            "value": 11.3,
-            "unit": "us"
-          },
-          {
-            "name": "op_q22_path_alt_count_us",
-            "value": 7.1,
-            "unit": "us"
-          },
-          {
-            "name": "op_q23_path_inverse_count_us",
-            "value": 8.6,
-            "unit": "us"
-          },
-          {
-            "name": "op_q24_path_negated_pset_count_us",
-            "value": 7.3,
-            "unit": "us"
-          },
-          {
-            "name": "op_q25_subquery_count_us",
-            "value": 34485.4,
-            "unit": "us"
-          },
-          {
-            "name": "op_q26_ask_count_us",
-            "value": 6450.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q27_construct_count_us",
-            "value": 13068.2,
-            "unit": "us"
-          },
-          {
-            "name": "op_q28_describe_count_us",
-            "value": 9.1,
-            "unit": "us"
-          },
-          {
-            "name": "op_q01_bgp_materialize_us",
-            "value": 5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q02_star3_materialize_us",
-            "value": 29677.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q03_chain_materialize_us",
-            "value": 17,
-            "unit": "us"
-          },
-          {
-            "name": "op_q04_triangle_materialize_us",
-            "value": 1372206.3,
-            "unit": "us"
-          },
-          {
-            "name": "op_q05_union_materialize_us",
-            "value": 9.1,
-            "unit": "us"
-          },
-          {
-            "name": "op_q06_optional_materialize_us",
-            "value": 6049.2,
-            "unit": "us"
-          },
-          {
-            "name": "op_q07_optional_notbound_materialize_us",
-            "value": 3647.6,
-            "unit": "us"
-          },
-          {
-            "name": "op_q08_minus_materialize_us",
-            "value": 3346.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q09_filter_numeric_materialize_us",
-            "value": 8867.5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q10_filter_string_materialize_us",
-            "value": 516343.8,
-            "unit": "us"
-          },
-          {
-            "name": "op_q11_filter_in_materialize_us",
-            "value": 12632.5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q12_filter_exists_materialize_us",
-            "value": 31627.1,
-            "unit": "us"
-          },
-          {
-            "name": "op_q13_bind_materialize_us",
-            "value": 53439.5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q14_values_materialize_us",
-            "value": 3691.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q15_agg_group_having_materialize_us",
-            "value": 21696.8,
-            "unit": "us"
-          },
-          {
-            "name": "op_q16_distinct_materialize_us",
-            "value": 12.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q17_orderby_limit_offset_materialize_us",
-            "value": 125013.6,
-            "unit": "us"
-          },
-          {
-            "name": "op_q18_path_plus_materialize_us",
-            "value": 93274.4,
-            "unit": "us"
-          },
-          {
-            "name": "op_q19_path_star_materialize_us",
-            "value": 155792.9,
-            "unit": "us"
-          },
-          {
-            "name": "op_q20_path_opt_materialize_us",
-            "value": 9.8,
-            "unit": "us"
-          },
-          {
-            "name": "op_q21_path_seq_materialize_us",
-            "value": 11.3,
-            "unit": "us"
-          },
-          {
-            "name": "op_q22_path_alt_materialize_us",
-            "value": 7.9,
-            "unit": "us"
-          },
-          {
-            "name": "op_q23_path_inverse_materialize_us",
-            "value": 8.6,
-            "unit": "us"
-          },
-          {
-            "name": "op_q24_path_negated_pset_materialize_us",
-            "value": 7.9,
-            "unit": "us"
-          },
-          {
-            "name": "op_q25_subquery_materialize_us",
-            "value": 34794.1,
-            "unit": "us"
-          },
-          {
-            "name": "op_q26_ask_materialize_us",
-            "value": 6772.8,
-            "unit": "us"
-          },
-          {
-            "name": "op_q27_construct_materialize_us",
-            "value": 13083.6,
-            "unit": "us"
-          },
-          {
-            "name": "op_q28_describe_materialize_us",
-            "value": 9.4,
-            "unit": "us"
-          },
-          {
-            "name": "op_q01_bgp_json_us",
-            "value": 4.1,
-            "unit": "us"
-          },
-          {
-            "name": "op_q02_star3_json_us",
-            "value": 28738.2,
-            "unit": "us"
-          },
-          {
-            "name": "op_q03_chain_json_us",
-            "value": 18.5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q04_triangle_json_us",
-            "value": 1433491.9,
-            "unit": "us"
-          },
-          {
-            "name": "op_q05_union_json_us",
-            "value": 8.5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q06_optional_json_us",
-            "value": 6209.4,
-            "unit": "us"
-          },
-          {
-            "name": "op_q07_optional_notbound_json_us",
-            "value": 3641.5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q08_minus_json_us",
-            "value": 3665,
-            "unit": "us"
-          },
-          {
-            "name": "op_q09_filter_numeric_json_us",
-            "value": 9217.1,
-            "unit": "us"
-          },
-          {
-            "name": "op_q10_filter_string_json_us",
-            "value": 522788.1,
-            "unit": "us"
-          },
-          {
-            "name": "op_q11_filter_in_json_us",
-            "value": 12383.9,
-            "unit": "us"
-          },
-          {
-            "name": "op_q12_filter_exists_json_us",
-            "value": 32116.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q13_bind_json_us",
-            "value": 53357.2,
-            "unit": "us"
-          },
-          {
-            "name": "op_q14_values_json_us",
-            "value": 3789.2,
-            "unit": "us"
-          },
-          {
-            "name": "op_q15_agg_group_having_json_us",
-            "value": 22152.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q16_distinct_json_us",
-            "value": 13.2,
-            "unit": "us"
-          },
-          {
-            "name": "op_q17_orderby_limit_offset_json_us",
-            "value": 129700.5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q18_path_plus_json_us",
-            "value": 92419.9,
-            "unit": "us"
-          },
-          {
-            "name": "op_q19_path_star_json_us",
-            "value": 159066.1,
-            "unit": "us"
-          },
-          {
-            "name": "op_q20_path_opt_json_us",
-            "value": 10.6,
-            "unit": "us"
-          },
-          {
-            "name": "op_q21_path_seq_json_us",
-            "value": 11.8,
-            "unit": "us"
-          },
-          {
-            "name": "op_q22_path_alt_json_us",
-            "value": 7.2,
-            "unit": "us"
-          },
-          {
-            "name": "op_q23_path_inverse_json_us",
-            "value": 8.7,
-            "unit": "us"
-          },
-          {
-            "name": "op_q24_path_negated_pset_json_us",
-            "value": 8.4,
-            "unit": "us"
-          },
-          {
-            "name": "op_q25_subquery_json_us",
-            "value": 34792.5,
-            "unit": "us"
-          },
-          {
-            "name": "op_q26_ask_json_us",
-            "value": 6601.2,
-            "unit": "us"
-          },
-          {
-            "name": "op_q27_construct_json_us",
-            "value": 13204.1,
-            "unit": "us"
-          },
-          {
-            "name": "op_q28_describe_json_us",
-            "value": 9.5,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q01_count_us",
-            "value": 16.8,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q02_count_us",
-            "value": 6618.3,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q03a_count_us",
-            "value": 15289.3,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q03b_count_us",
-            "value": 15136.1,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q03c_count_us",
-            "value": 14917.4,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q04_count_us",
-            "value": 442886.7,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q05b_count_us",
-            "value": 15742.9,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q07_count_us",
-            "value": 22564.7,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q08_count_us",
-            "value": 296343.9,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q09_count_us",
-            "value": 20703.5,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q10_count_us",
-            "value": 4.6,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q11_count_us",
-            "value": 24534,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q12b_count_us",
-            "value": 298161.4,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q12c_count_us",
-            "value": 5.7,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q01_materialize_us",
-            "value": 13.5,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q02_materialize_us",
-            "value": 9890.4,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q03a_materialize_us",
-            "value": 17469.3,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q03b_materialize_us",
-            "value": 15100,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q03c_materialize_us",
-            "value": 14930.6,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q04_materialize_us",
-            "value": 482642.7,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q05b_materialize_us",
-            "value": 18035.9,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q07_materialize_us",
-            "value": 23618.7,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q08_materialize_us",
-            "value": 296209.7,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q09_materialize_us",
-            "value": 22055,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q10_materialize_us",
-            "value": 66.5,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q11_materialize_us",
-            "value": 23546.3,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q12b_materialize_us",
-            "value": 292515.2,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q12c_materialize_us",
-            "value": 6,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q01_json_us",
-            "value": 14.2,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q02_json_us",
-            "value": 15601.6,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q03a_json_us",
-            "value": 19419.9,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q03b_json_us",
-            "value": 15088.8,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q03c_json_us",
-            "value": 14786.8,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q04_json_us",
-            "value": 487028.9,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q05b_json_us",
-            "value": 18536.3,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q07_json_us",
-            "value": 22635.7,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q08_json_us",
-            "value": 294042.9,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q09_json_us",
-            "value": 20870.8,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q10_json_us",
-            "value": 134.7,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q11_json_us",
-            "value": 22535.6,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q12b_json_us",
-            "value": 292183.2,
-            "unit": "us"
-          },
-          {
-            "name": "sp2b_q12c_json_us",
-            "value": 6.4,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_C3_count_us",
-            "value": 60.6,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_F2_count_us",
-            "value": 33.3,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_F3_count_us",
-            "value": 28.6,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_F5_count_us",
-            "value": 104.5,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L1_count_us",
-            "value": 17.8,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L2_count_us",
-            "value": 17.2,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L3_count_us",
-            "value": 7.7,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L4_count_us",
-            "value": 6.3,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L5_count_us",
-            "value": 11.9,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S1_count_us",
-            "value": 38.9,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S2_count_us",
-            "value": 14.4,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S3_count_us",
-            "value": 12.7,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S4_count_us",
-            "value": 12.6,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S5_count_us",
-            "value": 12.5,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S6_count_us",
-            "value": 11.5,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S7_count_us",
-            "value": 10.5,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_C3_materialize_us",
-            "value": 860.9,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_F2_materialize_us",
-            "value": 27.3,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_F3_materialize_us",
-            "value": 27.6,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_F5_materialize_us",
-            "value": 107.1,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L1_materialize_us",
-            "value": 17.9,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L2_materialize_us",
-            "value": 16.2,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L3_materialize_us",
-            "value": 14.3,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L4_materialize_us",
-            "value": 8.9,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L5_materialize_us",
-            "value": 11.7,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S1_materialize_us",
-            "value": 122.7,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S2_materialize_us",
-            "value": 31,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S3_materialize_us",
-            "value": 17.7,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S4_materialize_us",
-            "value": 15.5,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S5_materialize_us",
-            "value": 23.2,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S6_materialize_us",
-            "value": 11.4,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S7_materialize_us",
-            "value": 11.1,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_C3_json_us",
-            "value": 1512.6,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_F2_json_us",
-            "value": 28.7,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_F3_json_us",
-            "value": 28.5,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_F5_json_us",
-            "value": 126.1,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L1_json_us",
-            "value": 23.4,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L2_json_us",
-            "value": 17.6,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L3_json_us",
-            "value": 21.5,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L4_json_us",
-            "value": 9.4,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_L5_json_us",
-            "value": 11.2,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S1_json_us",
-            "value": 127.6,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S2_json_us",
-            "value": 32.8,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S3_json_us",
-            "value": 22.3,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S4_json_us",
-            "value": 16.9,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S5_json_us",
-            "value": 28.5,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S6_json_us",
-            "value": 12.5,
-            "unit": "us"
-          },
-          {
-            "name": "watdiv_sf1_S7_json_us",
-            "value": 12.3,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query01_count_us",
-            "value": 60.1,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query02_count_us",
-            "value": 69,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query03_count_us",
-            "value": 77.9,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query04_count_us",
-            "value": 110.9,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query05_count_us",
-            "value": 464.8,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query07_count_us",
-            "value": 164.8,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query08_count_us",
-            "value": 264.8,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query09_count_us",
-            "value": 7.3,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query10_count_us",
-            "value": 542.2,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query11_count_us",
-            "value": 8.9,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query12_count_us",
-            "value": 48.2,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query01_materialize_us",
-            "value": 56.4,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query02_materialize_us",
-            "value": 84.8,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query03_materialize_us",
-            "value": 79.2,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query04_materialize_us",
-            "value": 113.6,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query05_materialize_us",
-            "value": 467.8,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query07_materialize_us",
-            "value": 173.9,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query08_materialize_us",
-            "value": 270.1,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query09_materialize_us",
-            "value": 7.6,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query10_materialize_us",
-            "value": 540.8,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query11_materialize_us",
-            "value": 10.3,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query12_materialize_us",
-            "value": 48.8,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query01_json_us",
-            "value": 61.5,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query02_json_us",
-            "value": 177.4,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query03_json_us",
-            "value": 81.2,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query04_json_us",
-            "value": 110.8,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query05_json_us",
-            "value": 467.9,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query07_json_us",
-            "value": 196.8,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query08_json_us",
-            "value": 312,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query09_json_us",
-            "value": 7,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query10_json_us",
-            "value": 561.9,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query11_json_us",
-            "value": 12.9,
-            "unit": "us"
-          },
-          {
-            "name": "bsbm_query12_json_us",
-            "value": 47.6,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q01_count_us",
-            "value": 10.4,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q02_count_us",
-            "value": 592.2,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q03_count_us",
-            "value": 14.3,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q14_count_us",
-            "value": 4.9,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q04_count_us",
-            "value": 63.1,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q05_count_us",
-            "value": 28.5,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q06_count_us",
-            "value": 6.7,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q07_count_us",
-            "value": 29.4,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q08_count_us",
-            "value": 2705.7,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q09_count_us",
-            "value": 3848.8,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q10_count_us",
-            "value": 17,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q11_count_us",
-            "value": 10.2,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q12_count_us",
-            "value": 22.3,
-            "unit": "us"
-          },
-          {
-            "name": "lubm_q13_count_us",
-            "value": 17.2,
-            "unit": "us"
-          },
-          {
-            "name": "deeptax_d1000_closure_s",
-            "value": 0.006,
-            "unit": "s"
-          },
-          {
-            "name": "deeptax_d1000_query_us",
-            "value": 4.4,
-            "unit": "us"
-          },
-          {
-            "name": "deeptax_d1000_closure_triples",
-            "value": 2001,
-            "unit": "triples"
-          },
-          {
-            "name": "deeptax_d10000_closure_s",
-            "value": 0.064,
-            "unit": "s"
-          },
-          {
-            "name": "deeptax_d10000_query_us",
-            "value": 4.8,
-            "unit": "us"
-          },
-          {
-            "name": "deeptax_d10000_closure_triples",
-            "value": 20001,
-            "unit": "triples"
-          },
-          {
-            "name": "sameas_size8_closure_s",
-            "value": 0,
-            "unit": "s"
-          },
-          {
-            "name": "sameas_size8_query_us",
-            "value": 3.3,
-            "unit": "us"
-          },
-          {
-            "name": "sameas_size8_closure_triples",
-            "value": 352,
-            "unit": "triples"
-          },
-          {
-            "name": "sameas_size32_closure_s",
-            "value": 0.001,
-            "unit": "s"
-          },
-          {
-            "name": "sameas_size32_query_us",
-            "value": 3.6,
-            "unit": "us"
-          },
-          {
-            "name": "sameas_size32_closure_triples",
-            "value": 4480,
-            "unit": "triples"
-          },
-          {
-            "name": "shacl_cardinality_validate_us",
-            "value": 347.5,
-            "unit": "us"
-          },
-          {
-            "name": "shacl_class_nodekind_validate_us",
-            "value": 321.7,
-            "unit": "us"
-          },
-          {
-            "name": "shacl_datatype_range_validate_us",
-            "value": 13527.9,
-            "unit": "us"
-          },
-          {
-            "name": "shacl_node_paths_validate_us",
-            "value": 6446.1,
-            "unit": "us"
-          },
-          {
-            "name": "shacl_sparql_constraint_validate_us",
-            "value": 765717,
-            "unit": "us"
-          },
-          {
-            "name": "geo_within10km_us",
-            "value": 7.1,
-            "unit": "us"
-          },
-          {
-            "name": "geo_within50km_us",
-            "value": 147.5,
-            "unit": "us"
-          },
-          {
-            "name": "geo_nearest_k10_us",
-            "value": 7,
-            "unit": "us"
-          },
-          {
-            "name": "geo_nearest_k100_us",
-            "value": 90,
-            "unit": "us"
-          },
-          {
-            "name": "geo_geof_within_us",
-            "value": 102857.2,
-            "unit": "us"
-          },
-          {
-            "name": "geo_geo_compliance_pass_us",
-            "value": 93.3,
-            "unit": "us"
-          },
-          {
-            "name": "geo_compliance_deficit",
-            "value": 0,
-            "unit": "fixtures"
-          },
-          {
-            "name": "text_and_terms_us",
-            "value": 13.9,
-            "unit": "us"
-          },
-          {
-            "name": "text_near_slop2_us",
-            "value": 1.5,
-            "unit": "us"
-          },
-          {
-            "name": "text_or_terms_us",
-            "value": 22.6,
-            "unit": "us"
-          },
-          {
-            "name": "text_phrase_us",
-            "value": 1.4,
-            "unit": "us"
-          },
-          {
-            "name": "text_prefix4_us",
-            "value": 3721.1,
-            "unit": "us"
-          },
-          {
-            "name": "fts_bytes_per_doc",
-            "value": 371,
-            "unit": "bytes"
-          },
-          {
-            "name": "text_build_s",
-            "value": 0.472638,
-            "unit": "s"
-          },
-          {
-            "name": "vectors_diskann_recall_at10",
-            "value": 34,
-            "unit": "milli"
-          },
-          {
-            "name": "vectors_diskann_query_us",
-            "value": 339.7,
-            "unit": "us"
-          },
-          {
-            "name": "vectors_hnsw_recall_at10",
-            "value": 1,
-            "unit": "milli"
-          },
-          {
-            "name": "vectors_hnsw_query_us",
-            "value": 405.6,
-            "unit": "us"
-          },
-          {
-            "name": "vectors_pq_recall_at10",
-            "value": 22,
-            "unit": "milli"
-          },
-          {
-            "name": "vectors_pq_query_us",
-            "value": 397.1,
-            "unit": "us"
-          },
-          {
-            "name": "vectors_build_s",
-            "value": 42.157563,
-            "unit": "s"
-          },
-          {
-            "name": "rsp_tumbling_avg_rebuild_w0_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_rebuild_w1_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_rebuild_w2_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_rebuild_w3_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_rebuild_w4_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_pdict_w0_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_pdict_w1_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_pdict_w2_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_pdict_w3_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_pdict_w4_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_delta_w0_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_delta_w1_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_delta_w2_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_delta_w3_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_avg_delta_w4_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_rebuild_w0_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_rebuild_w1_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_rebuild_w2_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_rebuild_w3_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_rebuild_w4_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_pdict_w0_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_pdict_w1_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_pdict_w2_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_pdict_w3_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_pdict_w4_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_delta_w0_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_delta_w1_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_delta_w2_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_delta_w3_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_sliding_sum_delta_w4_rows",
-            "value": 1,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_groupby_join_rebuild_w0_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_groupby_join_rebuild_w1_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_groupby_join_rebuild_w2_rows",
-            "value": 0,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_groupby_join_pdict_w0_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_groupby_join_pdict_w1_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_groupby_join_pdict_w2_rows",
-            "value": 0,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_groupby_join_delta_w0_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_groupby_join_delta_w1_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_tumbling_groupby_join_delta_w2_rows",
-            "value": 0,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_srbench_join_w0_rows",
-            "value": 3,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_srbench_join_w1_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_srbench_join_w2_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_srbench_join_w3_rows",
-            "value": 0,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_srbench_groupby_state_w0_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_srbench_groupby_state_w1_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_srbench_groupby_state_w2_rows",
-            "value": 2,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_srbench_groupby_state_w3_rows",
-            "value": 0,
-            "unit": "rows"
-          },
-          {
-            "name": "rsp_persistentdict_triples_per_s",
-            "value": 2592975,
-            "unit": "triples_per_s"
-          },
-          {
-            "name": "snikmeta_triples",
-            "value": 328,
-            "unit": "count"
-          },
-          {
-            "name": "snikmeta_terms",
-            "value": 205,
-            "unit": "count"
-          },
-          {
-            "name": "snikmeta_distinct_predicates",
-            "value": 23,
-            "unit": "count"
-          },
-          {
-            "name": "snikmeta_rdf_type_triples",
-            "value": 49,
-            "unit": "count"
-          },
-          {
-            "name": "snikmeta_direct_eq_upstream",
-            "value": 1,
-            "unit": "count"
-          },
-          {
-            "name": "hdt_load_s",
-            "value": 0.041678,
-            "unit": "s"
-          },
-          {
-            "name": "hdt_vs_ntgz_load_s",
-            "value": 3.4451,
-            "unit": "ratio"
-          },
-          {
-            "name": "zk_compose_filter_decimal_i3_f2_gates",
-            "value": 17416,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_f64_gates",
-            "value": 3113,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_f64_d1_gates",
-            "value": 17416,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_f64_d2_gates",
-            "value": 17416,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_f64_d3_gates",
-            "value": 17416,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_f64_d4_gates",
-            "value": 17416,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_int_d1_gates",
-            "value": 17416,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_int_d2_gates",
-            "value": 17416,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_int_d3_gates",
-            "value": 17416,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_int_d4_gates",
-            "value": 17416,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_signed_int_d2_gates",
-            "value": 17416,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_signed_int_d4_gates",
-            "value": 17416,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_value_dl_decimal_gates",
-            "value": 3070,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_value_dl_f64_gates",
-            "value": 4157,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_filter_value_dl_int_gates",
-            "value": 3033,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_hidden_issuer_d4_gates",
-            "value": 16946,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_holder_pok_gates",
-            "value": 10334,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_holder_set_d4_gates",
-            "value": 10650,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_join_eq_na16_nb16_gates",
-            "value": 7025,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_join_eq_na16_nb64_gates",
-            "value": 12885,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_join_eq_na64_nb16_gates",
-            "value": 12885,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_join_eq_na64_nb64_gates",
-            "value": 18681,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_revoke_unset_d10_gates",
-            "value": 899,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_scan_k1_n16_r4_gates",
-            "value": 5991,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_scan_k1_n16_r8_gates",
-            "value": 7038,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_scan_k1_n64_r4_gates",
-            "value": 14923,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_scan_k1_n64_r8_gates",
-            "value": 18850,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_scan_k2_n16_r4_gates",
-            "value": 9254,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_scan_k2_n16_r8_gates",
-            "value": 11261,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_scan_k2_n64_r4_gates",
-            "value": 27054,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_compose_scan_k2_n64_r8_gates",
-            "value": 34821,
-            "unit": "gates"
-          },
-          {
-            "name": "zk_canon_bnode_1024_us",
-            "value": 5858.696,
-            "unit": "us"
-          },
-          {
-            "name": "zk_canon_bnode_256_us",
-            "value": 1413.661,
-            "unit": "us"
-          },
-          {
-            "name": "zk_canon_bnode_64_us",
-            "value": 340.978,
-            "unit": "us"
-          },
-          {
-            "name": "zk_canon_iri_1024_us",
-            "value": 4291.528,
-            "unit": "us"
-          },
-          {
-            "name": "zk_canon_iri_256_us",
-            "value": 1007.523,
-            "unit": "us"
-          },
-          {
-            "name": "zk_canon_iri_64_us",
-            "value": 241.622,
-            "unit": "us"
-          },
-          {
-            "name": "zk_commit_bnode_1024_us",
-            "value": 96009.587,
-            "unit": "us"
-          },
-          {
-            "name": "zk_commit_bnode_256_us",
-            "value": 23990.656,
-            "unit": "us"
-          },
-          {
-            "name": "zk_commit_bnode_64_us",
-            "value": 5995.04,
-            "unit": "us"
-          },
-          {
-            "name": "zk_commit_iri_1024_us",
-            "value": 72594.524,
-            "unit": "us"
-          },
-          {
-            "name": "zk_commit_iri_256_us",
-            "value": 18151.096,
-            "unit": "us"
-          },
-          {
-            "name": "zk_commit_iri_64_us",
-            "value": 4525.736,
-            "unit": "us"
-          },
-          {
-            "name": "zk_commit_leaves_fold_1024_us",
-            "value": 68320.09,
-            "unit": "us"
-          },
-          {
-            "name": "zk_commit_leaves_fold_256_us",
-            "value": 17080.646,
-            "unit": "us"
-          },
-          {
-            "name": "zk_commit_leaves_fold_64_us",
-            "value": 4347.306,
-            "unit": "us"
-          },
-          {
-            "name": "zk_poseidon2_hash40_us",
-            "value": 185.765,
-            "unit": "us"
-          },
-          {
-            "name": "zk_poseidon2_permutation_us",
-            "value": 13.068,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_bgp_chain_traced_1000_us",
-            "value": 4855.669,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_bgp_chain_untraced_1000_us",
-            "value": 1107.852,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_bgp_star_traced_1000_us",
-            "value": 1699.449,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_bgp_star_untraced_1000_us",
-            "value": 422.764,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_bgp_triangle_traced_1000_us",
-            "value": 8084.257,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_bgp_triangle_untraced_1000_us",
-            "value": 2435.456,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_count_traced_1000_us",
-            "value": 577.285,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_count_untraced_1000_us",
-            "value": 111.396,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_distinct_traced_1000_us",
-            "value": 484.757,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_distinct_untraced_1000_us",
-            "value": 74.502,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_filter_traced_1000_us",
-            "value": 1389.043,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_filter_untraced_1000_us",
-            "value": 265.591,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_optional_traced_1000_us",
-            "value": 3065.896,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_optional_untraced_1000_us",
-            "value": 1053.613,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_union_traced_1000_us",
-            "value": 1327.74,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_1000entities_union_untraced_1000_us",
-            "value": 433.797,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_bgp_chain_traced_100_us",
-            "value": 321.439,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_bgp_chain_untraced_100_us",
-            "value": 111.647,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_bgp_star_traced_100_us",
-            "value": 184.053,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_bgp_star_untraced_100_us",
-            "value": 51.358,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_bgp_triangle_traced_100_us",
-            "value": 632.243,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_bgp_triangle_untraced_100_us",
-            "value": 165.12,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_count_traced_100_us",
-            "value": 66.865,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_count_untraced_100_us",
-            "value": 16.068,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_distinct_traced_100_us",
-            "value": 52.319,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_distinct_untraced_100_us",
-            "value": 10.601,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_filter_traced_100_us",
-            "value": 164.307,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_filter_untraced_100_us",
-            "value": 30.312,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_optional_traced_100_us",
-            "value": 326.918,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_optional_untraced_100_us",
-            "value": 112.008,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_union_traced_100_us",
-            "value": 146.141,
-            "unit": "us"
-          },
-          {
-            "name": "zk_trace_100entities_union_untraced_100_us",
-            "value": 53.433,
-            "unit": "us"
-          },
-          {
-            "name": "solid_wac_named_graphs",
-            "value": 1148,
-            "unit": "count"
-          },
-          {
-            "name": "solid_wac_quads",
-            "value": 3060,
-            "unit": "count"
-          },
-          {
-            "name": "solid_wac_auth_triples",
-            "value": 3783,
-            "unit": "count"
-          },
-          {
-            "name": "solid_acp_auth_triples",
-            "value": 6355,
-            "unit": "count"
-          },
-          {
-            "name": "solid_alice_readable_graphs",
-            "value": 800,
-            "unit": "count"
-          },
-          {
-            "name": "solid_full_dataset_rows",
-            "value": 864,
-            "unit": "count"
-          },
-          {
-            "name": "solid_authorized_rows",
-            "value": 599,
-            "unit": "count"
-          },
-          {
-            "name": "nlq_synth_triples",
-            "value": 6000,
-            "unit": "count"
-          },
-          {
-            "name": "nlq_prompt_chars",
-            "value": 1973,
-            "unit": "chars"
-          },
-          {
-            "name": "nlq_ask_repairs",
-            "value": 0,
-            "unit": "count"
-          },
-          {
-            "name": "nlq_ask_result_rows",
-            "value": 2,
-            "unit": "count"
-          },
-          {
-            "name": "rdfs_infer_s",
-            "value": 0.141,
-            "unit": "s"
-          },
-          {
-            "name": "wasm_bundle_bytes",
-            "value": 1686911,
-            "unit": "bytes"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -43414,6 +41240,2180 @@ window.BENCHMARK_DATA = {
           {
             "name": "zk_trace_100entities_union_untraced_100_us",
             "value": 52.537,
+            "unit": "us"
+          },
+          {
+            "name": "solid_wac_named_graphs",
+            "value": 1148,
+            "unit": "count"
+          },
+          {
+            "name": "solid_wac_quads",
+            "value": 3060,
+            "unit": "count"
+          },
+          {
+            "name": "solid_wac_auth_triples",
+            "value": 3783,
+            "unit": "count"
+          },
+          {
+            "name": "solid_acp_auth_triples",
+            "value": 6355,
+            "unit": "count"
+          },
+          {
+            "name": "solid_alice_readable_graphs",
+            "value": 800,
+            "unit": "count"
+          },
+          {
+            "name": "solid_full_dataset_rows",
+            "value": 864,
+            "unit": "count"
+          },
+          {
+            "name": "solid_authorized_rows",
+            "value": 599,
+            "unit": "count"
+          },
+          {
+            "name": "nlq_synth_triples",
+            "value": 6000,
+            "unit": "count"
+          },
+          {
+            "name": "nlq_prompt_chars",
+            "value": 1973,
+            "unit": "chars"
+          },
+          {
+            "name": "nlq_ask_repairs",
+            "value": 0,
+            "unit": "count"
+          },
+          {
+            "name": "nlq_ask_result_rows",
+            "value": 2,
+            "unit": "count"
+          },
+          {
+            "name": "rdfs_infer_s",
+            "value": 0.147,
+            "unit": "s"
+          },
+          {
+            "name": "wasm_bundle_bytes",
+            "value": 1695548,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "63333554+jeswr@users.noreply.github.com",
+            "name": "Jesse Wright",
+            "username": "jeswr"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3201324f7ed56e87904152cbb9849bdf058efb7d",
+          "message": "feat(conformance): wire W3C sparql11/service evaluation suite onto the loopback harness (sq-ddpgx) [OPUS-4.8] (#1298)\n\nGraduates the deferred SERVICE/federation tests of the W3C SPARQL 1.1\n`sparql11/service` evaluation suite by driving them end-to-end through the\nmerged in-process loopback harness (sq-ushvx, #1291) — maintainer-approved\nin-process mock endpoints, not a canned seam.\n\nFor each manifest test the new `service_eval` runner stands up one REAL\n`sparq_server::serve` endpoint per `qt:serviceData` block on an ephemeral\n127.0.0.1:0 loopback port (serving that block's RDF), rewrites the well-known\nendpoint IRIs (and the `void:sparqlEndpoint` triples that service5 resolves\n`SERVICE ?ep` from) to the bound loopback URLs, runs the federated query through\nthe engine's REAL ureq transport with the egress allowlist scoped to exactly the\nstood-up loopback hosts, and compares to the `.srx` oracle under the same\nbag/bnode-bijection machinery the SPARQL ratchet uses.\n\nSILENT vs non-SILENT semantics are tested against a CLOSED/refused port:\nservice7's manifest oracle requires SILENT to swallow the failed call (local\nrows survive, ?o2 unbound), and a dedicated unit test pins the complementary\nnon-SILENT-propagates direction plus a live-endpoint control (so SILENT is\ngenuinely masking a real failure, not a no-op).\n\nOpt-in behind the new `service` feature (forwards to `service-loopback` — no new\nthird-party deps; the heavy tokio/axum/ureq stack is declared once). With the\nfeature OFF the lane compiles to a single self-SKIP test and the default +\n`--workspace` builds link none of it — the lean-core posture.\n\nHonest floor: SERVICE_EVAL_FLOOR = 5 (the MEASURED pass count). A variable\nSERVICE endpoint (engine does not resolve a bound endpoint) and a nested\nnon-SILENT SERVICE (the plain-Graph loopback fixture cannot federate onward) are\ndocumented Skips — tracked-not-asserted under sq-my8wd, never skip-laundered.\nRegistered in scoreboard::SUITES + the scoreboard_floors.rs floor-sync guard;\nCI's service-federation-conformance job gains a `service`-feature clippy + run +\nfloor-enforcement step. dev-only crate, perf-neutral.\n\nCo-authored-by: Jesse Wright <jmwright.045@gmail.com>\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-29T15:30:47Z",
+          "tree_id": "b7e9eba45ad50001456dbd0930d451432d5648c5",
+          "url": "https://github.com/jeswr/sparq/commit/3201324f7ed56e87904152cbb9849bdf058efb7d"
+        },
+        "date": 1782748019972,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "load_s",
+            "value": 0.545,
+            "unit": "s"
+          },
+          {
+            "name": "store_bytes_per_triple",
+            "value": 92,
+            "unit": "bytes"
+          },
+          {
+            "name": "dict_bytes_per_term",
+            "value": 53,
+            "unit": "bytes"
+          },
+          {
+            "name": "parse_ns_per_byte",
+            "value": 4.9336,
+            "unit": "ns/byte"
+          },
+          {
+            "name": "store_bytes_per_triple_small",
+            "value": 88,
+            "unit": "bytes"
+          },
+          {
+            "name": "q02_type_person_count_us",
+            "value": 3.3,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_count_us",
+            "value": 3084.6,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_count_us",
+            "value": 4361.7,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_count_us",
+            "value": 6,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_count_us",
+            "value": 5.2,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_count_us",
+            "value": 688.1,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_materialize_us",
+            "value": 13127.3,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_materialize_us",
+            "value": 58884.7,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_materialize_us",
+            "value": 157008,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_materialize_us",
+            "value": 4488.7,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_materialize_us",
+            "value": 5.1,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_materialize_us",
+            "value": 41669.4,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_json_us",
+            "value": 8766.7,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_json_us",
+            "value": 59514.6,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_json_us",
+            "value": 162920.6,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_json_us",
+            "value": 3594.3,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_json_us",
+            "value": 5.6,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_json_us",
+            "value": 40137.2,
+            "unit": "us"
+          },
+          {
+            "name": "op_q01_bgp_count_us",
+            "value": 3.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q02_star3_count_us",
+            "value": 29720.2,
+            "unit": "us"
+          },
+          {
+            "name": "op_q03_chain_count_us",
+            "value": 14.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q04_triangle_count_us",
+            "value": 2150727.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q05_union_count_us",
+            "value": 8.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q06_optional_count_us",
+            "value": 6264.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q07_optional_notbound_count_us",
+            "value": 3683.2,
+            "unit": "us"
+          },
+          {
+            "name": "op_q08_minus_count_us",
+            "value": 3463.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q09_filter_numeric_count_us",
+            "value": 7265.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q10_filter_string_count_us",
+            "value": 521732.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q11_filter_in_count_us",
+            "value": 12508.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q12_filter_exists_count_us",
+            "value": 33945.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q13_bind_count_us",
+            "value": 54064.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q14_values_count_us",
+            "value": 3710.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q15_agg_group_having_count_us",
+            "value": 22170.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q16_distinct_count_us",
+            "value": 13.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q17_orderby_limit_offset_count_us",
+            "value": 141229.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q18_path_plus_count_us",
+            "value": 103241.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q19_path_star_count_us",
+            "value": 179330.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q20_path_opt_count_us",
+            "value": 9.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q21_path_seq_count_us",
+            "value": 10.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q22_path_alt_count_us",
+            "value": 7.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q23_path_inverse_count_us",
+            "value": 8.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q24_path_negated_pset_count_us",
+            "value": 7.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q25_subquery_count_us",
+            "value": 35986.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q26_ask_count_us",
+            "value": 6528.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q27_construct_count_us",
+            "value": 13201.2,
+            "unit": "us"
+          },
+          {
+            "name": "op_q28_describe_count_us",
+            "value": 8.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q01_bgp_materialize_us",
+            "value": 4.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q02_star3_materialize_us",
+            "value": 29908.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q03_chain_materialize_us",
+            "value": 16.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q04_triangle_materialize_us",
+            "value": 1895629,
+            "unit": "us"
+          },
+          {
+            "name": "op_q05_union_materialize_us",
+            "value": 8.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q06_optional_materialize_us",
+            "value": 6260.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q07_optional_notbound_materialize_us",
+            "value": 3709.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q08_minus_materialize_us",
+            "value": 3323.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q09_filter_numeric_materialize_us",
+            "value": 8998,
+            "unit": "us"
+          },
+          {
+            "name": "op_q10_filter_string_materialize_us",
+            "value": 501085,
+            "unit": "us"
+          },
+          {
+            "name": "op_q11_filter_in_materialize_us",
+            "value": 12466.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q12_filter_exists_materialize_us",
+            "value": 31822.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q13_bind_materialize_us",
+            "value": 53643.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q14_values_materialize_us",
+            "value": 3710.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q15_agg_group_having_materialize_us",
+            "value": 22025.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q16_distinct_materialize_us",
+            "value": 12.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q17_orderby_limit_offset_materialize_us",
+            "value": 136556.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q18_path_plus_materialize_us",
+            "value": 95641.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q19_path_star_materialize_us",
+            "value": 171352.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q20_path_opt_materialize_us",
+            "value": 9.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q21_path_seq_materialize_us",
+            "value": 12,
+            "unit": "us"
+          },
+          {
+            "name": "op_q22_path_alt_materialize_us",
+            "value": 7.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q23_path_inverse_materialize_us",
+            "value": 8.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q24_path_negated_pset_materialize_us",
+            "value": 8.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q25_subquery_materialize_us",
+            "value": 38261.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q26_ask_materialize_us",
+            "value": 6496.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q27_construct_materialize_us",
+            "value": 13088.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q28_describe_materialize_us",
+            "value": 8.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q01_bgp_json_us",
+            "value": 4.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q02_star3_json_us",
+            "value": 29480.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q03_chain_json_us",
+            "value": 17.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q04_triangle_json_us",
+            "value": 2074185.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q05_union_json_us",
+            "value": 8.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q06_optional_json_us",
+            "value": 6462.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q07_optional_notbound_json_us",
+            "value": 3679.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q08_minus_json_us",
+            "value": 3459.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q09_filter_numeric_json_us",
+            "value": 9678,
+            "unit": "us"
+          },
+          {
+            "name": "op_q10_filter_string_json_us",
+            "value": 504567.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q11_filter_in_json_us",
+            "value": 12531,
+            "unit": "us"
+          },
+          {
+            "name": "op_q12_filter_exists_json_us",
+            "value": 31488.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q13_bind_json_us",
+            "value": 53943.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q14_values_json_us",
+            "value": 3870,
+            "unit": "us"
+          },
+          {
+            "name": "op_q15_agg_group_having_json_us",
+            "value": 23069.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q16_distinct_json_us",
+            "value": 12.8,
+            "unit": "us"
+          },
+          {
+            "name": "op_q17_orderby_limit_offset_json_us",
+            "value": 138865.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q18_path_plus_json_us",
+            "value": 96128.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q19_path_star_json_us",
+            "value": 161406.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q20_path_opt_json_us",
+            "value": 11.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q21_path_seq_json_us",
+            "value": 12.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q22_path_alt_json_us",
+            "value": 7.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q23_path_inverse_json_us",
+            "value": 8.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q24_path_negated_pset_json_us",
+            "value": 8.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q25_subquery_json_us",
+            "value": 35446.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q26_ask_json_us",
+            "value": 6824.8,
+            "unit": "us"
+          },
+          {
+            "name": "op_q27_construct_json_us",
+            "value": 12857.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q28_describe_json_us",
+            "value": 9.3,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q01_count_us",
+            "value": 17.1,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q02_count_us",
+            "value": 6776.5,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03a_count_us",
+            "value": 15839.7,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03b_count_us",
+            "value": 15436,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03c_count_us",
+            "value": 14962,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q04_count_us",
+            "value": 422024.4,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q05b_count_us",
+            "value": 16630.2,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q07_count_us",
+            "value": 24173.9,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q08_count_us",
+            "value": 287162.7,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q09_count_us",
+            "value": 21302.1,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q10_count_us",
+            "value": 4.4,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q11_count_us",
+            "value": 22812.3,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12b_count_us",
+            "value": 290215.3,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12c_count_us",
+            "value": 6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q01_materialize_us",
+            "value": 12.7,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q02_materialize_us",
+            "value": 10300.6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03a_materialize_us",
+            "value": 18097.2,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03b_materialize_us",
+            "value": 15077.5,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03c_materialize_us",
+            "value": 15298.3,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q04_materialize_us",
+            "value": 469090.4,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q05b_materialize_us",
+            "value": 18106.2,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q07_materialize_us",
+            "value": 23630.6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q08_materialize_us",
+            "value": 292023.3,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q09_materialize_us",
+            "value": 21813.8,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q10_materialize_us",
+            "value": 59.2,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q11_materialize_us",
+            "value": 24590.5,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12b_materialize_us",
+            "value": 290186.6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12c_materialize_us",
+            "value": 6.5,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q01_json_us",
+            "value": 14.5,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q02_json_us",
+            "value": 15492.5,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03a_json_us",
+            "value": 20992.6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03b_json_us",
+            "value": 16719.4,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03c_json_us",
+            "value": 16045,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q04_json_us",
+            "value": 489386.2,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q05b_json_us",
+            "value": 18671.1,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q07_json_us",
+            "value": 24455.7,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q08_json_us",
+            "value": 288940.8,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q09_json_us",
+            "value": 21886.6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q10_json_us",
+            "value": 137,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q11_json_us",
+            "value": 23993.6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12b_json_us",
+            "value": 288751.6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12c_json_us",
+            "value": 5.9,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_C3_count_us",
+            "value": 61.7,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_F2_count_us",
+            "value": 34.8,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_F3_count_us",
+            "value": 30.1,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_F5_count_us",
+            "value": 101.7,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L1_count_us",
+            "value": 17.7,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L2_count_us",
+            "value": 16.9,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L3_count_us",
+            "value": 7.5,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L4_count_us",
+            "value": 6.3,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L5_count_us",
+            "value": 11.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S1_count_us",
+            "value": 38.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S2_count_us",
+            "value": 14.7,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S3_count_us",
+            "value": 12.7,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S4_count_us",
+            "value": 12.5,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S5_count_us",
+            "value": 12.7,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S6_count_us",
+            "value": 11.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S7_count_us",
+            "value": 10.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_C3_materialize_us",
+            "value": 866.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_F2_materialize_us",
+            "value": 26.2,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_F3_materialize_us",
+            "value": 27.9,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_F5_materialize_us",
+            "value": 107.1,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L1_materialize_us",
+            "value": 17.3,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L2_materialize_us",
+            "value": 15.8,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L3_materialize_us",
+            "value": 13.9,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L4_materialize_us",
+            "value": 8.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L5_materialize_us",
+            "value": 10.8,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S1_materialize_us",
+            "value": 131.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S2_materialize_us",
+            "value": 30.5,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S3_materialize_us",
+            "value": 17.7,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S4_materialize_us",
+            "value": 15.1,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S5_materialize_us",
+            "value": 22.9,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S6_materialize_us",
+            "value": 11.2,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S7_materialize_us",
+            "value": 11,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_C3_json_us",
+            "value": 1523.9,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_F2_json_us",
+            "value": 27.8,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_F3_json_us",
+            "value": 29,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_F5_json_us",
+            "value": 128.1,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L1_json_us",
+            "value": 20.2,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L2_json_us",
+            "value": 17,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L3_json_us",
+            "value": 21.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L4_json_us",
+            "value": 9.2,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_L5_json_us",
+            "value": 11,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S1_json_us",
+            "value": 124.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S2_json_us",
+            "value": 32.9,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S3_json_us",
+            "value": 22.1,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S4_json_us",
+            "value": 16.9,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S5_json_us",
+            "value": 28.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S6_json_us",
+            "value": 12.1,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_sf1_S7_json_us",
+            "value": 12.3,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query01_count_us",
+            "value": 56.5,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query02_count_us",
+            "value": 66.3,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query03_count_us",
+            "value": 78.2,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query04_count_us",
+            "value": 102.8,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query05_count_us",
+            "value": 458.6,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query07_count_us",
+            "value": 163,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query08_count_us",
+            "value": 270.9,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query09_count_us",
+            "value": 7,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query10_count_us",
+            "value": 562,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query11_count_us",
+            "value": 8.7,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query12_count_us",
+            "value": 47.2,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query01_materialize_us",
+            "value": 55.7,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query02_materialize_us",
+            "value": 95,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query03_materialize_us",
+            "value": 78.3,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query04_materialize_us",
+            "value": 104.9,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query05_materialize_us",
+            "value": 471.5,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query07_materialize_us",
+            "value": 181.4,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query08_materialize_us",
+            "value": 281.2,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query09_materialize_us",
+            "value": 7.3,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query10_materialize_us",
+            "value": 546.4,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query11_materialize_us",
+            "value": 10.2,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query12_materialize_us",
+            "value": 47.4,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query01_json_us",
+            "value": 58.5,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query02_json_us",
+            "value": 172.2,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query03_json_us",
+            "value": 82.6,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query04_json_us",
+            "value": 118.4,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query05_json_us",
+            "value": 470,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query07_json_us",
+            "value": 189.9,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query08_json_us",
+            "value": 307.5,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query09_json_us",
+            "value": 7.1,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query10_json_us",
+            "value": 554.2,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query11_json_us",
+            "value": 12.8,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query12_json_us",
+            "value": 46.4,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q01_count_us",
+            "value": 10.9,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q02_count_us",
+            "value": 622.8,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q03_count_us",
+            "value": 14,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q14_count_us",
+            "value": 4.9,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q04_count_us",
+            "value": 61.4,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q05_count_us",
+            "value": 27.5,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q06_count_us",
+            "value": 6.8,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q07_count_us",
+            "value": 29.1,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q08_count_us",
+            "value": 2685.6,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q09_count_us",
+            "value": 3906,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q10_count_us",
+            "value": 16.8,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q11_count_us",
+            "value": 9.5,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q12_count_us",
+            "value": 22.8,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q13_count_us",
+            "value": 16.9,
+            "unit": "us"
+          },
+          {
+            "name": "deeptax_d1000_closure_s",
+            "value": 0.006,
+            "unit": "s"
+          },
+          {
+            "name": "deeptax_d1000_query_us",
+            "value": 4.9,
+            "unit": "us"
+          },
+          {
+            "name": "deeptax_d1000_closure_triples",
+            "value": 2001,
+            "unit": "triples"
+          },
+          {
+            "name": "deeptax_d10000_closure_s",
+            "value": 0.065,
+            "unit": "s"
+          },
+          {
+            "name": "deeptax_d10000_query_us",
+            "value": 4.8,
+            "unit": "us"
+          },
+          {
+            "name": "deeptax_d10000_closure_triples",
+            "value": 20001,
+            "unit": "triples"
+          },
+          {
+            "name": "sameas_size8_closure_s",
+            "value": 0,
+            "unit": "s"
+          },
+          {
+            "name": "sameas_size8_query_us",
+            "value": 3.3,
+            "unit": "us"
+          },
+          {
+            "name": "sameas_size8_closure_triples",
+            "value": 352,
+            "unit": "triples"
+          },
+          {
+            "name": "sameas_size32_closure_s",
+            "value": 0.001,
+            "unit": "s"
+          },
+          {
+            "name": "sameas_size32_query_us",
+            "value": 3.3,
+            "unit": "us"
+          },
+          {
+            "name": "sameas_size32_closure_triples",
+            "value": 4480,
+            "unit": "triples"
+          },
+          {
+            "name": "shacl_cardinality_validate_us",
+            "value": 360.8,
+            "unit": "us"
+          },
+          {
+            "name": "shacl_class_nodekind_validate_us",
+            "value": 332.6,
+            "unit": "us"
+          },
+          {
+            "name": "shacl_datatype_range_validate_us",
+            "value": 13863.4,
+            "unit": "us"
+          },
+          {
+            "name": "shacl_node_paths_validate_us",
+            "value": 7175.9,
+            "unit": "us"
+          },
+          {
+            "name": "shacl_sparql_constraint_validate_us",
+            "value": 782514.4,
+            "unit": "us"
+          },
+          {
+            "name": "geo_within10km_us",
+            "value": 7.7,
+            "unit": "us"
+          },
+          {
+            "name": "geo_within50km_us",
+            "value": 163.8,
+            "unit": "us"
+          },
+          {
+            "name": "geo_nearest_k10_us",
+            "value": 7.2,
+            "unit": "us"
+          },
+          {
+            "name": "geo_nearest_k100_us",
+            "value": 86.2,
+            "unit": "us"
+          },
+          {
+            "name": "geo_geof_within_us",
+            "value": 103790.2,
+            "unit": "us"
+          },
+          {
+            "name": "geo_geo_compliance_pass_us",
+            "value": 93.1,
+            "unit": "us"
+          },
+          {
+            "name": "geo_compliance_deficit",
+            "value": 0,
+            "unit": "fixtures"
+          },
+          {
+            "name": "text_and_terms_us",
+            "value": 14.4,
+            "unit": "us"
+          },
+          {
+            "name": "text_near_slop2_us",
+            "value": 1.5,
+            "unit": "us"
+          },
+          {
+            "name": "text_or_terms_us",
+            "value": 23.5,
+            "unit": "us"
+          },
+          {
+            "name": "text_phrase_us",
+            "value": 1.4,
+            "unit": "us"
+          },
+          {
+            "name": "text_prefix4_us",
+            "value": 3776,
+            "unit": "us"
+          },
+          {
+            "name": "fts_bytes_per_doc",
+            "value": 371,
+            "unit": "bytes"
+          },
+          {
+            "name": "text_build_s",
+            "value": 0.538523,
+            "unit": "s"
+          },
+          {
+            "name": "vectors_diskann_recall_at10",
+            "value": 34,
+            "unit": "milli"
+          },
+          {
+            "name": "vectors_diskann_query_us",
+            "value": 375.9,
+            "unit": "us"
+          },
+          {
+            "name": "vectors_hnsw_recall_at10",
+            "value": 1,
+            "unit": "milli"
+          },
+          {
+            "name": "vectors_hnsw_query_us",
+            "value": 467.8,
+            "unit": "us"
+          },
+          {
+            "name": "vectors_pq_recall_at10",
+            "value": 22,
+            "unit": "milli"
+          },
+          {
+            "name": "vectors_pq_query_us",
+            "value": 405.7,
+            "unit": "us"
+          },
+          {
+            "name": "vectors_build_s",
+            "value": 42.729406,
+            "unit": "s"
+          },
+          {
+            "name": "rsp_tumbling_avg_rebuild_w0_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_rebuild_w1_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_rebuild_w2_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_rebuild_w3_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_rebuild_w4_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_pdict_w0_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_pdict_w1_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_pdict_w2_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_pdict_w3_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_pdict_w4_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_delta_w0_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_delta_w1_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_delta_w2_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_delta_w3_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_avg_delta_w4_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_rebuild_w0_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_rebuild_w1_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_rebuild_w2_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_rebuild_w3_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_rebuild_w4_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_pdict_w0_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_pdict_w1_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_pdict_w2_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_pdict_w3_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_pdict_w4_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_delta_w0_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_delta_w1_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_delta_w2_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_delta_w3_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_sliding_sum_delta_w4_rows",
+            "value": 1,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_groupby_join_rebuild_w0_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_groupby_join_rebuild_w1_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_groupby_join_rebuild_w2_rows",
+            "value": 0,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_groupby_join_pdict_w0_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_groupby_join_pdict_w1_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_groupby_join_pdict_w2_rows",
+            "value": 0,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_groupby_join_delta_w0_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_groupby_join_delta_w1_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_tumbling_groupby_join_delta_w2_rows",
+            "value": 0,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_srbench_join_w0_rows",
+            "value": 3,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_srbench_join_w1_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_srbench_join_w2_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_srbench_join_w3_rows",
+            "value": 0,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_srbench_groupby_state_w0_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_srbench_groupby_state_w1_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_srbench_groupby_state_w2_rows",
+            "value": 2,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_srbench_groupby_state_w3_rows",
+            "value": 0,
+            "unit": "rows"
+          },
+          {
+            "name": "rsp_persistentdict_triples_per_s",
+            "value": 2544023,
+            "unit": "triples_per_s"
+          },
+          {
+            "name": "snikmeta_triples",
+            "value": 328,
+            "unit": "count"
+          },
+          {
+            "name": "snikmeta_terms",
+            "value": 205,
+            "unit": "count"
+          },
+          {
+            "name": "snikmeta_distinct_predicates",
+            "value": 23,
+            "unit": "count"
+          },
+          {
+            "name": "snikmeta_rdf_type_triples",
+            "value": 49,
+            "unit": "count"
+          },
+          {
+            "name": "snikmeta_direct_eq_upstream",
+            "value": 1,
+            "unit": "count"
+          },
+          {
+            "name": "hdt_load_s",
+            "value": 0.042293,
+            "unit": "s"
+          },
+          {
+            "name": "hdt_vs_ntgz_load_s",
+            "value": 3.7383,
+            "unit": "ratio"
+          },
+          {
+            "name": "zk_compose_filter_decimal_i3_f2_gates",
+            "value": 17416,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_f64_gates",
+            "value": 3113,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_f64_d1_gates",
+            "value": 17416,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_f64_d2_gates",
+            "value": 17416,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_f64_d3_gates",
+            "value": 17416,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_f64_d4_gates",
+            "value": 17416,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_int_d1_gates",
+            "value": 17416,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_int_d2_gates",
+            "value": 17416,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_int_d3_gates",
+            "value": 17416,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_int_d4_gates",
+            "value": 17416,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_signed_int_d2_gates",
+            "value": 17416,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_signed_int_d4_gates",
+            "value": 17416,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_value_dl_decimal_gates",
+            "value": 3070,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_value_dl_f64_gates",
+            "value": 4157,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_filter_value_dl_int_gates",
+            "value": 3033,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_hidden_issuer_d4_gates",
+            "value": 16946,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_holder_pok_gates",
+            "value": 10334,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_holder_set_d4_gates",
+            "value": 10650,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_join_eq_na16_nb16_gates",
+            "value": 7025,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_join_eq_na16_nb64_gates",
+            "value": 12885,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_join_eq_na64_nb16_gates",
+            "value": 12885,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_join_eq_na64_nb64_gates",
+            "value": 18681,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_revoke_unset_d10_gates",
+            "value": 899,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_scan_k1_n16_r4_gates",
+            "value": 5991,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_scan_k1_n16_r8_gates",
+            "value": 7038,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_scan_k1_n64_r4_gates",
+            "value": 14923,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_scan_k1_n64_r8_gates",
+            "value": 18850,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_scan_k2_n16_r4_gates",
+            "value": 9254,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_scan_k2_n16_r8_gates",
+            "value": 11261,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_scan_k2_n64_r4_gates",
+            "value": 27054,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_compose_scan_k2_n64_r8_gates",
+            "value": 34821,
+            "unit": "gates"
+          },
+          {
+            "name": "zk_canon_bnode_1024_us",
+            "value": 5957.638,
+            "unit": "us"
+          },
+          {
+            "name": "zk_canon_bnode_256_us",
+            "value": 1402.604,
+            "unit": "us"
+          },
+          {
+            "name": "zk_canon_bnode_64_us",
+            "value": 337.877,
+            "unit": "us"
+          },
+          {
+            "name": "zk_canon_iri_1024_us",
+            "value": 4285.679,
+            "unit": "us"
+          },
+          {
+            "name": "zk_canon_iri_256_us",
+            "value": 1002.406,
+            "unit": "us"
+          },
+          {
+            "name": "zk_canon_iri_64_us",
+            "value": 240.564,
+            "unit": "us"
+          },
+          {
+            "name": "zk_commit_bnode_1024_us",
+            "value": 95361.929,
+            "unit": "us"
+          },
+          {
+            "name": "zk_commit_bnode_256_us",
+            "value": 23845.452,
+            "unit": "us"
+          },
+          {
+            "name": "zk_commit_bnode_64_us",
+            "value": 5934.662,
+            "unit": "us"
+          },
+          {
+            "name": "zk_commit_iri_1024_us",
+            "value": 72296.038,
+            "unit": "us"
+          },
+          {
+            "name": "zk_commit_iri_256_us",
+            "value": 18056.268,
+            "unit": "us"
+          },
+          {
+            "name": "zk_commit_iri_64_us",
+            "value": 4500.918,
+            "unit": "us"
+          },
+          {
+            "name": "zk_commit_leaves_fold_1024_us",
+            "value": 67695.38,
+            "unit": "us"
+          },
+          {
+            "name": "zk_commit_leaves_fold_256_us",
+            "value": 17015.571,
+            "unit": "us"
+          },
+          {
+            "name": "zk_commit_leaves_fold_64_us",
+            "value": 4218.029,
+            "unit": "us"
+          },
+          {
+            "name": "zk_poseidon2_hash40_us",
+            "value": 184.565,
+            "unit": "us"
+          },
+          {
+            "name": "zk_poseidon2_permutation_us",
+            "value": 13.094,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_bgp_chain_traced_1000_us",
+            "value": 4885.919,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_bgp_chain_untraced_1000_us",
+            "value": 1195.932,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_bgp_star_traced_1000_us",
+            "value": 1722.158,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_bgp_star_untraced_1000_us",
+            "value": 415.563,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_bgp_triangle_traced_1000_us",
+            "value": 8086.155,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_bgp_triangle_untraced_1000_us",
+            "value": 2420.756,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_count_traced_1000_us",
+            "value": 578.769,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_count_untraced_1000_us",
+            "value": 112.965,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_distinct_traced_1000_us",
+            "value": 493.248,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_distinct_untraced_1000_us",
+            "value": 87.31,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_filter_traced_1000_us",
+            "value": 1401.07,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_filter_untraced_1000_us",
+            "value": 263.497,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_optional_traced_1000_us",
+            "value": 3106.254,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_optional_untraced_1000_us",
+            "value": 1129.197,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_union_traced_1000_us",
+            "value": 1335.751,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_1000entities_union_untraced_1000_us",
+            "value": 428.018,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_bgp_chain_traced_100_us",
+            "value": 332.377,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_bgp_chain_untraced_100_us",
+            "value": 112.923,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_bgp_star_traced_100_us",
+            "value": 182.253,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_bgp_star_untraced_100_us",
+            "value": 51.222,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_bgp_triangle_traced_100_us",
+            "value": 638.876,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_bgp_triangle_untraced_100_us",
+            "value": 165.393,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_count_traced_100_us",
+            "value": 67.27,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_count_untraced_100_us",
+            "value": 16.257,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_distinct_traced_100_us",
+            "value": 53.61,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_distinct_untraced_100_us",
+            "value": 11.662,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_filter_traced_100_us",
+            "value": 163.496,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_filter_untraced_100_us",
+            "value": 29.647,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_optional_traced_100_us",
+            "value": 323.99,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_optional_untraced_100_us",
+            "value": 110.888,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_union_traced_100_us",
+            "value": 145.935,
+            "unit": "us"
+          },
+          {
+            "name": "zk_trace_100entities_union_untraced_100_us",
+            "value": 51.382,
             "unit": "us"
           },
           {
