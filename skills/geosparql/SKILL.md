@@ -70,12 +70,16 @@ pub fn geof_registry() -> sparq_engine::FunctionRegistry;
 // drive with:  sparq_engine::query_with_functions(&graph, sparql, &reg) -> Result<QueryResult, String>
 //   or scope another entry point: sparq_engine::with_functions(&reg, || sparq_engine::ask(&g, q))
 
-// --- GeoSPARQL query-rewrite extension: topology PROPERTY forms (`engine` feature) ---
-// Expands `?a geo:sfWithin ?b` (sf*/eh*/rcc8*) triple patterns into
+// --- GeoSPARQL query-rewrite extension: topology PROPERTY forms ---
+// OPT-IN `geosparql_rewrite` feature (OFF by default; implies `engine`). The whole
+// surface below compiles out of a default build, so default SPARQL behaviour is
+// unchanged. Expands `?a geo:sfWithin ?b` (sf*/eh*/rcc8*) triple patterns into
 // `(geo:hasDefaultGeometry|geo:hasGeometry)/geo:asWKT` geometry-resolution joins +
 // the matching `geof:` FILTER. Run the returned PreparedQuery UNDER geof_registry().
 // Opt-in entry point only — the standard sparq_engine entry points still match a
 // geo:sfWithin predicate as an ordinary asserted triple (W3C conformance unaffected).
+// Conformance: tests/ogc_query_rewrite_ratchet.rs pins the measured property-form
+// pass count (the OGC `/conf/query-rewrite-extension` class) in the central scoreboard.
 pub fn geosparql_rewrite(sparql: &str) -> Result<sparq_engine::PreparedQuery, String>;
 pub fn rewrite_query(q: spargebra::Query) -> spargebra::Query;   // algebra-level form
 pub fn is_topology_property(iri: &str) -> bool;                  // recognises the geo: topology IRIs
@@ -113,7 +117,7 @@ let r = query_with_functions(&g,
      FILTER(geof:sfWithin(?pt, ?poly)) }", &geof_registry()).unwrap();
 ```
 
-**Topology PROPERTY form via the query-rewrite extension** — write the relation as a triple, not a FILTER; the rewrite resolves each feature's default geometry and applies the matching `geof:`:
+**Topology PROPERTY form via the query-rewrite extension** (opt-in `geosparql_rewrite` feature) — write the relation as a triple, not a FILTER; the rewrite resolves each feature's default geometry and applies the matching `geof:`:
 ```rust
 let prepared = sparq_geo::geosparql_rewrite(
   "PREFIX geo: <http://www.opengis.net/ont/geosparql#>

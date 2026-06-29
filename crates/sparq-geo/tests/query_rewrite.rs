@@ -1,4 +1,4 @@
-#![cfg(feature = "engine")]
+#![cfg(feature = "geosparql_rewrite")] // [OPUS-4.8] sq-wf9qg: rewrite is now opt-in
 //! [OPUS-4.8] sq-9g58 — the GeoSPARQL query-rewrite extension end-to-end.
 //!
 //! A topology relation PROPERTY pattern (`?f geo:sfWithin ?region`, etc.) is

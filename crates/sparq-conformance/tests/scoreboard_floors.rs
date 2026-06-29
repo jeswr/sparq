@@ -70,6 +70,17 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-geo/tests/ogc_compliance_ratchet.rs",
         "OGC_RATCHET_FLOOR",
     ),
+    // [OPUS-4.8] sq-wf9qg — the OGC GeoSPARQL QUERY-REWRITE extension ratchet. The
+    // floor const (`const OGC_QUERY_REWRITE_FLOOR: usize = 38;`) lives in
+    // `sparq-geo`'s `tests/ogc_query_rewrite_ratchet.rs` (behind the opt-in
+    // `geosparql_rewrite` feature); the guard reads it textually — exactly like the
+    // sibling OGC topology floor — so the central scoreboard's `ratchet_floor` can
+    // never drift from what the runner asserts.
+    (
+        "OGC GeoSPARQL query-rewrite extension",
+        "crates/sparq-geo/tests/ogc_query_rewrite_ratchet.rs",
+        "OGC_QUERY_REWRITE_FLOOR",
+    ),
     // [OPUS-4.8] sq-j174 — the Solid WAC + ACP decision-parity ratchets.
     // [OPUS-4.8] sq-t58w.6 — the floor consts moved from `conformance_{wac,acp}.rs`
     // into the shared `tests/common/mod.rs` parity-corpus module (so both the
@@ -251,7 +262,9 @@ fn scoreboard_renders_all_suites() {
     // decision parity (sq-j174), and the Solid WAC/ACP differential oracles
     // (sq-t58w.8) now all appear in this central report.
     assert!(md.contains("W3C SHACL core"));
-    assert!(md.contains("OGC GeoSPARQL"));
+    assert!(md.contains("OGC GeoSPARQL topology compliance"));
+    // [OPUS-4.8] sq-wf9qg — the OGC GeoSPARQL query-rewrite extension ratchet.
+    assert!(md.contains("OGC GeoSPARQL query-rewrite extension"));
     assert!(md.contains("Solid WAC decision parity"));
     assert!(md.contains("Solid ACP decision parity"));
     assert!(md.contains("Solid WAC differential oracle"));

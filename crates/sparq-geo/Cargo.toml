@@ -40,8 +40,18 @@ rustdoc-args = ["--cfg", "docsrs"]
 # into CRS84, so projected literals can join the geographic machinery
 # (GeoIndex, metric distance). Off by default: most deployments never see
 # projected literals.
+# `geosparql_rewrite` (opt-in, OFF by default): the [`rewrite`] module — the OGC
+# GeoSPARQL query-rewrite extension (`/conf/query-rewrite-extension`). It expands a
+# topology-relation PROPERTY pattern (`?f geo:sfWithin ?region`) into a
+# default-geometry resolution + matching `geof:` FILTER, on a DEDICATED
+# `geosparql_rewrite` entry point. OFF by default so the STANDARD `sparq_engine`
+# entry points keep their exact W3C-conformant behaviour (a `geo:sfWithin` triple
+# matches only ASSERTED triples there) — the rewrite is a strict opt-in superset,
+# never a change to default SPARQL semantics. Implies `engine` (the rewrite hands a
+# rewritten `spargebra::Query` to the engine). [OPUS-4.8] sq-wf9qg
 default = ["engine"]
 engine = ["dep:sparq-engine", "dep:spargebra"]
+geosparql_rewrite = ["engine"]
 reproject = ["dep:proj4rs"]
 
 [dependencies]

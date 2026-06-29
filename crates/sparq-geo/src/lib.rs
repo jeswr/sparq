@@ -12,8 +12,13 @@ pub mod provider;
 pub mod registry;
 #[cfg(feature = "reproject")]
 pub mod reproject;
-#[cfg(feature = "engine")]
-pub mod rewrite; // [OPUS-4.8] sq-9g58: GeoSPARQL query-rewrite extension (topology property forms)
+// [OPUS-4.8] sq-9g58: GeoSPARQL query-rewrite extension (topology property forms).
+// [OPUS-4.8] sq-wf9qg: behind the OPT-IN `geosparql_rewrite` feature (OFF by default),
+// NOT the default-on `engine` feature — a default build never exposes the rewrite entry
+// point, so the STANDARD SPARQL behaviour stays untouched. The feature implies `engine`,
+// so the rewrite's `sparq_engine` dependency is always satisfied here.
+#[cfg(feature = "geosparql_rewrite")]
+pub mod rewrite;
 
 pub use geof::Unit;
 pub use gml::parse_gml_literal; // [OPUS-4.8]
@@ -26,7 +31,10 @@ pub use metadata::GeometryMetadata; // [OPUS-4.8] sq-mzmh
 pub use provider::GeoIndexProvider;
 #[cfg(feature = "engine")]
 pub use registry::geof_registry;
-#[cfg(feature = "engine")]
+// [OPUS-4.8] sq-wf9qg: the rewrite surface is exported only under the opt-in
+// `geosparql_rewrite` feature, so a default (engine-only) build neither compiles nor
+// re-exports it — the rewrite is a strict opt-in superset over standard SPARQL.
+#[cfg(feature = "geosparql_rewrite")]
 pub use rewrite::{geosparql_rewrite, is_topology_property, rewrite_query}; // [OPUS-4.8] sq-9g58
 
 /// The GeoSPARQL vocabulary IRIs this crate touches.

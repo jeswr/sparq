@@ -61,18 +61,19 @@ use sparq_geo::{parse_gml_literal, parse_wkt_literal, vocab};
 /// Whether `iri` is a GeoSPARQL topology RELATION property IRI the query-rewrite
 /// extension expands.
 ///
-/// With the `engine` feature this delegates to the crate's own
+/// With the OPT-IN `geosparql_rewrite` feature this delegates to the crate's own
 /// [`sparq_geo::is_topology_property`] — the exact predicate the rewrite
-/// (sq-9g58) gates on. Without `engine` the rewrite module is not compiled
-/// (it needs `sparq_engine::Query`), so we recognise the same topology-relation
-/// local names directly over the `geo:` namespace; this keeps R4-R6/R28-R30
-/// probes meaningful in BOTH feature states.
+/// (sq-9g58) gates on. Without it the rewrite module is not compiled (it is
+/// gated behind that opt-in feature, sq-wf9qg), so we recognise the same
+/// topology-relation local names directly over the `geo:` namespace; this keeps
+/// R4-R6/R28-R30 probes meaningful in ALL feature states (default `engine`-only,
+/// `geosparql_rewrite`, and no-default).
 fn recognizes_topology_property(iri: &str) -> bool {
-    #[cfg(feature = "engine")]
+    #[cfg(feature = "geosparql_rewrite")]
     {
         sparq_geo::is_topology_property(iri)
     }
-    #[cfg(not(feature = "engine"))]
+    #[cfg(not(feature = "geosparql_rewrite"))]
     {
         const TOPOLOGY_LOCALS: &[&str] = &[
             "sfEquals",

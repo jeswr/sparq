@@ -978,7 +978,7 @@ jobs:
     # --nocapture and re-checks the printed `pass N / fail M (floor F)` line as the
     # same belt-and-braces `>= floor` gate the SHACL/SPARQL jobs use. Never lower
     # the floor (raise OGC_RATCHET_FLOOR as the corpus grows).
-    name: W3C/OGC GeoSPARQL conformance (ratchet — topology pass >= 119)
+    name: W3C/OGC GeoSPARQL conformance (ratchet — topology >= 119, query-rewrite >= 38)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
@@ -1037,6 +1037,45 @@ jobs:
           GEO_PASS=$(grep -oE 'pass [0-9]+ / fail' geo-conformance.out | grep -oE '[0-9]+' | head -1)
           echo "OGC GeoSPARQL topology pass: ${GEO_PASS:-unknown} (floor $GEO_FLOOR)"
           [ -n "$GEO_PASS" ] && [ "$GEO_PASS" -ge "$GEO_FLOOR" ] || { echo "::error::OGC GeoSPARQL regressed below the ratchet (${GEO_PASS:-?} < $GEO_FLOOR)"; exit 1; }
+      - name: Run OGC GeoSPARQL query-rewrite extension ratchet
+        # [OPUS-4.8] sq-wf9qg — the OPT-IN `geosparql_rewrite` query-rewrite ratchet
+        # (crates/sparq-geo/tests/ogc_query_rewrite_ratchet.rs). Needs `--features
+        # geosparql_rewrite` (OFF by default — the rewrite surface compiles out of the
+        # default build, so the default `--workspace` shards never see it). Same
+        # transient self-heal as the topology step above; the runner asserts its own
+        # OGC_QUERY_REWRITE_FLOOR + fail==0 and the grep gate re-checks the pass line.
+        run: |
+          set -uo pipefail
+          MAX_ATTEMPTS=2
+          attempt=1
+          while true; do
+            echo "::group::OGC GeoSPARQL query-rewrite conformance — attempt $attempt/$MAX_ATTEMPTS"
+            rc=0
+            cargo test -p sparq-geo --features geosparql_rewrite --test ogc_query_rewrite_ratchet -- --nocapture \
+              | tee geo-query-rewrite.out
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              echo "OGC GeoSPARQL query-rewrite suite passed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::OGC GeoSPARQL query-rewrite run failed after $attempt attempt(s) (exit $rc) — genuine failure, not a single transient. A real regression trips the runner's own assert!(pass >= floor)/fail==0."
+              exit "$rc"
+            fi
+            echo "::warning::OGC GeoSPARQL query-rewrite attempt $attempt failed (exit $rc) — retrying once (sq-shacl-flake transient self-heal)."
+            attempt=$((attempt + 1))
+          done
+      - name: Enforce ratchet (query-rewrite pass count must not regress)
+        run: |
+          GEO_QR_FLOOR=38
+          if ! grep -qE 'pass [0-9]+ / fail' geo-query-rewrite.out; then
+            echo "::error::OGC GeoSPARQL query-rewrite scoreboard is missing/empty — the test step produced no 'pass N / fail M' line. This is an INFRA/build failure, NOT a conformance regression. Re-run the job."
+            exit 1
+          fi
+          GEO_QR_PASS=$(grep -oE 'pass [0-9]+ / fail' geo-query-rewrite.out | grep -oE '[0-9]+' | head -1)
+          echo "OGC GeoSPARQL query-rewrite pass: ${GEO_QR_PASS:-unknown} (floor $GEO_QR_FLOOR)"
+          [ -n "$GEO_QR_PASS" ] && [ "$GEO_QR_PASS" -ge "$GEO_QR_FLOOR" ] || { echo "::error::OGC GeoSPARQL query-rewrite regressed below the ratchet (${GEO_QR_PASS:-?} < $GEO_QR_FLOOR)"; exit 1; }
       - name: Emit consolidated conformance scoreboard
         # [OPUS-4.8] sq-ncvq.16: render the ONE central scoreboard index (all suites
         # + floors across crates) into this job's step summary, so the GeoSPARQL job
@@ -1051,6 +1090,7 @@ jobs:
           name: geo-conformance
           path: |
             geo-conformance.out
+            geo-query-rewrite.out
             conformance-scoreboard.md
 
   solid-conformance:
