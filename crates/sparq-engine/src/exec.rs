@@ -20,6 +20,12 @@ use sparq_core::Graph;
 // code-move: the engine re-imports the same items here under the same names, so every call
 // site below is unchanged and the W3C conformance / ORDER BY / numeric tests are bit-identical.
 use sparq_substrate::numeric::{parse_xsd_f32, parse_xsd_f64, split_decimal, ArithOp, Dec, Num};
+// [OPUS-4.8] sq-hknqs (epic sq-qonbz, Phase 3): the four id-tuple join kernels live in the
+// shared substrate now (merge / hash / bind / leapfrog-trie). The engine's planner, `Bindings`,
+// `LocalVocab` interning and `ScanCmp` pushdown stay private here; the thin adapters below build
+// the `JoinKeys` column layout from a `Bindings` variable layout and supply the engine's
+// thread-local query budget as the generic `Budget` hook — no `Box<dyn>` on the probe loop.
+use sparq_substrate::join as sjoin;
 use rustc_hash::FxHashSet;
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression, PropertyPathExpression,
@@ -789,6 +795,38 @@ type Key = SmallVec<[Id; 2]>;
 /// join keys (and almost all OPTIONAL keys) match only one or two rows — so the
 /// build allocates nothing per bucket in the common case.
 type Posting = SmallVec<[usize; 2]>;
+
+/// [OPUS-4.8] sq-hknqs (epic sq-qonbz, Phase 3): the engine's cooperative-cancel hook for the
+/// shared substrate join kernels. A zero-sized type whose [`exhausted`](sjoin::Budget::exhausted)
+/// reads the engine's thread-local [`budget`] (the per-WHERE-solution `QueryBudget`), so a
+/// capped/timed-out query truncates a join cleanly at a key-group / probe-row boundary — exactly
+/// the engine's pre-move per-group `budget::exhausted(...)` check. Generic, not a trait object,
+/// so the substrate kernel monomorphises the call into the same direct check it was before the
+/// move (no vtable on the probe loop).
+struct EngineBudget;
+
+impl sjoin::Budget for EngineBudget {
+    #[inline]
+    fn exhausted(&self, rows: usize) -> bool {
+        budget::exhausted(rows)
+    }
+}
+
+/// [OPUS-4.8] sq-hknqs: the parallel hash-join's per-worker exhaustion snapshot. Wraps the
+/// flattened [`budget::Limits`] (the installing thread's sticky flag is invisible to rayon
+/// workers) so a worker that hits the limits stops adding to its accumulator; the caller's next
+/// on-thread check raises the actual error. Generic ([`sjoin::BudgetSnapshot`]), so the rayon
+/// fold carries no vtable.
+#[cfg(feature = "parallel")]
+struct EngineSnapshot(budget::Limits);
+
+#[cfg(feature = "parallel")]
+impl sjoin::BudgetSnapshot for EngineSnapshot {
+    #[inline]
+    fn hit(&self, rows: usize) -> bool {
+        self.0.hit(rows)
+    }
+}
 
 /// Ids at or above this base index into the per-query [`LocalVocab`] instead of the graph
 /// dictionary. It sits ABOVE the dictionary range `[1, INLINE_BASE)` and the inline-integer
@@ -4787,181 +4825,13 @@ pub(crate) fn collect_vars(patterns: &[TriplePattern]) -> Vec<Variable> {
 // queries it cannot produce the asymptotically-large intermediates a binary plan
 // would. See research/ARCHITECTURE.md §4.
 
-/// A pattern's relation projected onto its variables (in global order) as sorted,
-/// deduplicated tuples — the trie that LFTJ navigates level by level.
-struct Trie {
-    tuples: Vec<Vec<Id>>,
-}
-
-/// One open level of a [`TrieIter`]: `hi` bounds the current key's subtree (rows
-/// sharing all already-fixed columns), `cur` is the cursor within it.
-struct Frame {
-    hi: usize,
-    cur: usize,
-}
-
-/// A cursor over a [`Trie`], using Veldhuizen's open-on-entry semantics: it starts
-/// *above* the root, and `open()` descends one column, resetting the cursor to the
-/// start of that subtree. This reset is what makes non-contiguous variable
-/// participation correct — re-entering a level re-opens (rewinds) the iterator.
-struct TrieIter<'a> {
-    trie: &'a Trie,
-    frames: Vec<Frame>,
-}
-
-impl<'a> TrieIter<'a> {
-    fn new(trie: &'a Trie) -> Self {
-        TrieIter { trie, frames: Vec::new() }
-    }
-    /// The column currently being iterated (valid once at least one `open`).
-    #[inline]
-    fn col(&self) -> usize {
-        self.frames.len() - 1
-    }
-    #[inline]
-    fn at_end(&self) -> bool {
-        let f = self.frames.last().unwrap();
-        f.cur >= f.hi
-    }
-    #[inline]
-    fn key(&self) -> Id {
-        let col = self.col();
-        let f = self.frames.last().unwrap();
-        self.trie.tuples[f.cur][col]
-    }
-    /// End (exclusive) of the run of rows in `[start, hi)` whose `col` equals the
-    /// value at `start`. The slice is sorted, so this is a binary search — O(log n)
-    /// rather than a linear scan of the (possibly large) run.
-    #[inline]
-    fn run_end(&self, col: usize, start: usize, hi: usize, val: Id) -> usize {
-        start + self.trie.tuples[start..hi].partition_point(|row| row[col] <= val)
-    }
-    /// Advances to the next distinct value in the current column.
-    fn next(&mut self) {
-        let col = self.col();
-        let (cur, hi) = {
-            let f = self.frames.last().unwrap();
-            (f.cur, f.hi)
-        };
-        let val = self.trie.tuples[cur][col];
-        self.frames.last_mut().unwrap().cur = self.run_end(col, cur, hi, val);
-    }
-    /// Galloping seek: first value `>= x` in the current column.
-    fn seek(&mut self, x: Id) {
-        let col = self.col();
-        let f = self.frames.last_mut().unwrap();
-        let (mut a, mut b) = (f.cur, f.hi);
-        while a < b {
-            let m = a + (b - a) / 2;
-            if self.trie.tuples[m][col] < x {
-                a = m + 1;
-            } else {
-                b = m;
-            }
-        }
-        f.cur = a;
-    }
-    /// Descends one column: into the subtree of the parent's current key (or, at
-    /// the root, the whole relation), with the cursor reset to its start.
-    fn open(&mut self) {
-        match self.frames.last() {
-            None => {
-                self.frames.push(Frame { hi: self.trie.tuples.len(), cur: 0 });
-            }
-            Some(&Frame { cur: plo, hi: phi }) => {
-                let pcol = self.frames.len() - 1;
-                let val = self.trie.tuples[plo][pcol];
-                let end = self.run_end(pcol, plo, phi, val);
-                self.frames.push(Frame { hi: end, cur: plo });
-            }
-        }
-    }
-    fn up(&mut self) {
-        self.frames.pop();
-    }
-}
-
-/// Leapfrog intersection of the participating iterators at one level.
-struct Leapfrog {
-    order: Vec<usize>, // participant indices, kept in cyclic key order
-    p: usize,
-    ended: bool,
-    key: Id,
-}
-
-impl Leapfrog {
-    fn init(iters: &mut [TrieIter], parts: &[usize]) -> Self {
-        let mut lf = Leapfrog { order: parts.to_vec(), p: 0, ended: false, key: 0 };
-        if parts.iter().any(|&i| iters[i].at_end()) {
-            lf.ended = true;
-            return lf;
-        }
-        lf.order.sort_by_key(|&i| iters[i].key());
-        lf.search(iters);
-        lf
-    }
-    fn search(&mut self, iters: &mut [TrieIter]) {
-        let k = self.order.len();
-        loop {
-            let max = iters[self.order[(self.p + k - 1) % k]].key();
-            let min = iters[self.order[self.p]].key();
-            if min == max {
-                self.key = min;
-                return;
-            }
-            iters[self.order[self.p]].seek(max);
-            if iters[self.order[self.p]].at_end() {
-                self.ended = true;
-                return;
-            }
-            self.p = (self.p + 1) % k;
-        }
-    }
-    fn next(&mut self, iters: &mut [TrieIter]) {
-        let k = self.order.len();
-        iters[self.order[self.p]].next();
-        if iters[self.order[self.p]].at_end() {
-            self.ended = true;
-            return;
-        }
-        self.p = (self.p + 1) % k;
-        self.search(iters);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lftj_recurse(
-    iters: &mut [TrieIter],
-    parts_at_level: &[Vec<usize>],
-    level: usize,
-    n_levels: usize,
-    current: &mut [Id],
-    out: &mut Vec<Row>,
-) {
-    if level == n_levels {
-        out.push(Row::from_slice(current));
-        return;
-    }
-    let parts = &parts_at_level[level];
-    // Open-on-entry: descend each relevant iterator into this level (rewinding it).
-    for &i in parts {
-        iters[i].open();
-    }
-    let mut lf = Leapfrog::init(iters, parts);
-    while !lf.ended {
-        // Coarse budget check once per leapfrog key (sticky, so it also unwinds
-        // the enclosing recursion levels).
-        if budget::exhausted(out.len()) {
-            break;
-        }
-        current[level] = lf.key;
-        lftj_recurse(iters, parts_at_level, level + 1, n_levels, current, out);
-        lf.next(iters);
-    }
-    for &i in parts {
-        iters[i].up();
-    }
-}
+// [OPUS-4.8] sq-hknqs (epic sq-qonbz, Phase 3): the LFTJ NAVIGATION — the `Trie`/`TrieIter`
+// cursor (open-on-entry, galloping `seek`, binary-search `run_end`), the `Leapfrog`
+// intersection and `lftj_recurse` — now lives in the shared substrate
+// (`sparq_substrate::join::{Trie, TrieIter, lftj_recurse}`). The engine keeps only
+// `build_trie` below (which OWNS the store scan + the zk-trace hook + the global-order
+// projection) and `eval_bgp_wcoj`, which drives the substrate cursor with the engine's
+// budget. The probe loop is monomorphic over `Id`/`Row` with no `Box<dyn>`.
 
 /// Builds a pattern's trie of projected variable tuples, plus the global levels
 /// of those variables (sorted ascending). Repeated-variable patterns keep only
@@ -4971,7 +4841,7 @@ fn build_trie(
     id_pat: &IdPattern,
     pos_vars: &[Option<Variable>; 3],
     var_levels: &FxHashMap<Variable, usize>,
-) -> (Trie, Vec<usize>) {
+) -> (sjoin::Trie, Vec<usize>) {
     let mut var_positions: Vec<(Variable, Vec<usize>)> = Vec::new();
     for (pos, ov) in pos_vars.iter().enumerate() {
         if let Some(v) = ov {
@@ -5017,7 +4887,7 @@ fn build_trie(
     }
     tuples.sort_unstable();
     tuples.dedup();
-    (Trie { tuples }, levels)
+    (sjoin::Trie { tuples }, levels)
 }
 
 fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
@@ -5048,7 +4918,7 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
 
     // Build a trie per pattern that has variables; check constant-only patterns
     // for existence (empty range => empty BGP).
-    let mut tries: Vec<Trie> = Vec::new();
+    let mut tries: Vec<sjoin::Trie> = Vec::new();
     let mut trie_levels: Vec<Vec<usize>> = Vec::new();
     for (id_pat, pos_vars) in &prepared {
         if pos_vars.iter().all(|v| v.is_none()) {
@@ -5078,10 +4948,13 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
         }
     }
 
-    let mut iters: Vec<TrieIter> = tries.iter().map(TrieIter::new).collect();
+    // The LFTJ navigation (cursor + leapfrog intersection + recursion) is the shared substrate's
+    // (sq-hknqs); the engine supplies the built tries, the per-level participation, and its
+    // thread-local budget as the generic cooperative-cancel hook.
+    let mut iters: Vec<sjoin::TrieIter> = tries.iter().map(sjoin::TrieIter::new).collect();
     let mut out: Vec<Row> = Vec::new();
     let mut current = vec![NO_ID; n_levels];
-    lftj_recurse(&mut iters, &parts_at_level, 0, n_levels, &mut current, &mut out);
+    sjoin::lftj_recurse(&mut iters, &parts_at_level, 0, n_levels, &mut current, &EngineBudget, &mut out);
 
     // Output rows are produced in global-order lexicographic order.
     let sorted_by = order_vars.first().cloned();
@@ -5360,43 +5233,10 @@ fn merge_join(left: Bindings, right: Bindings, jv: &Variable) -> Bindings {
             }
         }
     }
-    let (l, r) = (&left.rows, &right.rows);
+    // The sorted-merge probe loop lives in the shared substrate (sq-hknqs); the engine supplies
+    // the `Bindings`-derived key columns + its thread-local query budget, monomorphically.
     let mut rows = Vec::new();
-    let (mut i, mut j) = (0, 0);
-    while i < l.len() && j < r.len() {
-        // Coarse budget check once per key group.
-        if budget::exhausted(rows.len()) {
-            break;
-        }
-        let (lv, rv) = (l[i][lk], r[j][rk]);
-        match lv.cmp(&rv) {
-            Ordering::Less => i += 1,
-            Ordering::Greater => j += 1,
-            Ordering::Equal => {
-                let mut i2 = i;
-                while i2 < l.len() && l[i2][lk] == lv {
-                    i2 += 1;
-                }
-                let mut j2 = j;
-                while j2 < r.len() && r[j2][rk] == rv {
-                    j2 += 1;
-                }
-                for lrow in l.iter().take(i2).skip(i) {
-                    for rrow in r.iter().take(j2).skip(j) {
-                        if extra_shared.iter().all(|&(lc, rc)| lrow[lc] == rrow[rc]) {
-                            let mut row = lrow.clone();
-                            for &rc in &right_only {
-                                row.push(rrow[rc]);
-                            }
-                            rows.push(row);
-                        }
-                    }
-                }
-                i = i2;
-                j = j2;
-            }
-        }
-    }
+    sjoin::merge_join(&left.rows, lk, &right.rows, rk, &extra_shared, &right_only, &EngineBudget, &mut rows);
     Bindings { vars: out_vars, rows, sorted_by: Some(jv.clone()) }
 }
 
@@ -5418,46 +5258,16 @@ fn join_layout(left: &Bindings, right: &Bindings) -> (Vec<Variable>, Vec<(usize,
     (out_vars, shared, right_only)
 }
 
-/// SPARQL solution compatibility on the shared columns: an unbound (`NO_ID`)
-/// value never conflicts; two bound values must be equal.
-fn compatible(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)]) -> bool {
-    shared.iter().all(|&(lc, rc)| {
-        let (a, b) = (lrow[lc], rrow[rc]);
-        a == NO_ID || b == NO_ID || a == b
-    })
-}
-
-/// Combines two compatible rows: left's row extended with the right-only columns,
-/// filling any shared column that was unbound on the left from the right side.
-fn merge_rows(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)], right_only: &[usize]) -> Row {
-    let mut row = Row::from_slice(lrow);
-    for &(lc, rc) in shared {
-        if row[lc] == NO_ID {
-            row[lc] = rrow[rc];
-        }
-    }
-    for &rc in right_only {
-        row.push(rrow[rc]);
-    }
-    row
-}
-
-/// Whether any row leaves any of the given columns unbound.
-fn any_unbound(rows: &[Row], cols: &[usize]) -> bool {
-    rows.iter().any(|r| cols.iter().any(|&c| r[c] == NO_ID))
-}
-
-/// Number of radix partitions for the parallel hash-join build. 64 spreads well at high thread
-/// counts while keeping the per-partition tag-scan cheap.
-const JOIN_PARTS: usize = 64;
-
-/// The partition/lookup hash for a join key — build and probe must agree on it.
-fn key_hash(key: &Key) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = rustc_hash::FxHasher::default();
-    key.hash(&mut h);
-    h.finish()
-}
+// [OPUS-4.8] sq-hknqs (epic sq-qonbz, Phase 3): the id-tuple combine/compatibility helpers
+// (`compatible` / `merge_rows` / `any_unbound`) now live in the shared substrate
+// (`sparq_substrate::join`). The engine's OPTIONAL / UNION / MINUS / VALUES-UNDEF nested-loop
+// fallbacks and the hash-join build/probe call them under these private aliases, so every
+// existing `Bindings`-side call site is unchanged.
+use sjoin::{any_unbound, compatible, merge_rows};
+// The join hash (`key_hash` / `JOIN_PARTS`) is only reached by the radix-partitioned PARALLEL
+// hash-join build (native only); the wasm / serial build computes the table without them.
+#[cfg(feature = "parallel")]
+use sjoin::{key_hash, JOIN_PARTS};
 
 fn hash_join(left: Bindings, right: Bindings) -> Bindings {
     // Build the hash table on the smaller side.
@@ -5484,63 +5294,30 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
             i
         })
         .collect();
+    // The join column layout for the shared substrate kernel: `key_cols` are the (build, probe)
+    // shared-variable index pairs (the equi-join key); the probe-only columns are appended after
+    // the build row. The build/probe phases below are the substrate's `build_*` / `probe_emit`
+    // (sq-hknqs) — the engine only supplies this `Bindings`-derived layout and its budget.
+    let keys = sjoin::JoinKeys { key_cols: shared.clone(), right_only: Vec::new() };
     // Build phase. Above PAR_THRESHOLD the build is radix-partitioned (Tier-1 #5 of
     // research/parallelism-scaling.md): rows are tagged with their key-hash partition in
     // parallel, then each partition builds its private map lock-free. Within a partition rows
     // are scanned in ascending index, so each posting list stays in ascending build-row order —
     // exactly the serial build — and the probe output is byte-identical.
-    let build_key = |row: &Row| -> Key { shared.iter().map(|&(bi, _)| row[bi]).collect() };
     #[cfg(feature = "parallel")]
     let tables: Vec<FxHashMap<Key, Posting>> = if build.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
         let parts: Vec<u8> = build
             .rows
             .par_iter()
-            .map(|row| (key_hash(&build_key(row)) % JOIN_PARTS as u64) as u8)
+            .map(|row| (key_hash(&keys.left_key(row)) % JOIN_PARTS as u64) as u8)
             .collect();
-        (0..JOIN_PARTS)
-            .into_par_iter()
-            .map(|p| {
-                let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
-                for (ri, row) in build.rows.iter().enumerate() {
-                    if parts[ri] as usize == p {
-                        t.entry(build_key(row)).or_default().push(ri);
-                    }
-                }
-                t
-            })
-            .collect()
+        sjoin::build_partitioned(&build.rows, &keys, &parts)
     } else {
-        let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
-        for (ri, row) in build.rows.iter().enumerate() {
-            t.entry(build_key(row)).or_default().push(ri);
-        }
-        vec![t]
+        vec![sjoin::build_table(&build.rows, &keys)]
     };
     #[cfg(not(feature = "parallel"))]
-    let tables: Vec<FxHashMap<Key, Posting>> = {
-        let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
-        for (ri, row) in build.rows.iter().enumerate() {
-            t.entry(build_key(row)).or_default().push(ri);
-        }
-        vec![t]
-    };
-    // Emit the output rows for one probe row (its matches, each combined with the
-    // probe-only columns).
-    let emit = |prow: &Row, out: &mut Vec<Row>| {
-        let key: Key = shared.iter().map(|&(_, pi)| prow[pi]).collect();
-        let table =
-            if tables.len() == 1 { &tables[0] } else { &tables[(key_hash(&key) % JOIN_PARTS as u64) as usize] };
-        if let Some(matches) = table.get(&key) {
-            for &bi in matches {
-                let mut combined = build.rows[bi].clone();
-                for &pi in &probe_only {
-                    combined.push(prow[pi]);
-                }
-                out.push(combined);
-            }
-        }
-    };
+    let tables: Vec<FxHashMap<Key, Posting>> = vec![sjoin::build_table(&build.rows, &keys)];
     // The probe is read-only over the (partitioned) table, so for a large probe side build the
     // output in parallel on native.
     #[cfg(feature = "parallel")]
@@ -5549,13 +5326,13 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
         // Budget snapshot for the workers (the installing thread's thread-local is
         // invisible to them): a worker that hits the limits stops adding to its own
         // accumulator; the caller's next on-thread check raises the actual error.
-        let limits = budget::snapshot();
+        let snap = EngineSnapshot(budget::snapshot());
         let rows: Vec<Row> = probe
             .rows
             .par_iter()
             .fold(Vec::new, |mut acc, prow| {
-                if !limits.hit(acc.len()) {
-                    emit(prow, &mut acc);
+                if !sjoin::BudgetSnapshot::hit(&snap, acc.len()) {
+                    sjoin::probe_emit(prow, &keys, &build.rows, &tables, &probe_only, &mut acc);
                 }
                 acc
             })
@@ -5567,13 +5344,7 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
         return Bindings::unsorted(out_vars, rows);
     }
     let mut rows = Vec::new();
-    for prow in &probe.rows {
-        // Coarse budget check once per probe row.
-        if budget::exhausted(rows.len()) {
-            break;
-        }
-        emit(prow, &mut rows);
-    }
+    sjoin::hash_probe_serial(&probe.rows, &keys, &build.rows, &tables, &probe_only, &EngineBudget, &mut rows);
     Bindings::unsorted(out_vars, rows)
 }
 
@@ -5631,11 +5402,10 @@ fn bind_join(
                 zk_matched.push(pspo);
             }
             let new_vals: SmallVec<[Id; 4]> = new_positions.iter().map(|&p| pspo[p]).collect();
-            for &ri in &ris {
-                let mut combined = result.rows[ri].clone();
-                combined.extend(new_vals.iter().copied());
-                out_rows.push(combined);
-            }
+            // The per-(result-row, match) combine is the shared substrate's `bind_combine`
+            // (sq-hknqs): the scan + filter pushdown above stay engine-private (they own the
+            // store + `ScanCmp`); only the id-tuple combine is shared.
+            sjoin::bind_combine(&result.rows, &ris, &new_vals, &mut out_rows);
         }
     }
     #[cfg(feature = "zk")]

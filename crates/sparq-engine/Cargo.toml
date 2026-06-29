@@ -204,14 +204,17 @@ yannakakis = ["semijoin-bitmap"]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
-# [OPUS-4.8] sq-ev41x (epic sq-qonbz): the shared id-level numeric value tower — `Num` /
-# `Dec` / `as_numeric` and the XSD lexical helpers — moved out of `exec.rs` into the
-# `sparq-substrate` leaf crate so the engine AND the reasoners can share one definition with
-# NO `Box<dyn>` on the hot path (research/shared-eval-substrate.md, Option C, Phase 2). The
-# engine uses these unconditionally (FILTER / BIND / ORDER BY arithmetic), so the `numeric`
-# feature is enabled here, not optionally — `oxrdf` (which `numeric` classifies) is already
-# in the engine's dep tree, so this pulls no new crate and the lean wasm bundle is unchanged.
-sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-features = false, features = ["numeric"] }
+# [OPUS-4.8] sq-ev41x + sq-hknqs (epic sq-qonbz): the shared id-level evaluation substrate —
+# the numeric value tower (`Num` / `Dec` / `as_numeric` + XSD lexical helpers, Phase 2) AND
+# the four id-tuple join kernels (merge / hash / bind / leapfrog-trie behind the `JoinKeys`
+# descriptor, Phase 3) — moved out of `exec.rs` into the `sparq-substrate` leaf crate so the
+# engine AND the reasoners can share one definition with NO `Box<dyn>` on the hot path
+# (research/shared-eval-substrate.md, Option C). The engine uses both unconditionally (FILTER
+# / BIND / ORDER BY arithmetic; every BGP/Join), so `numeric` + `join` (which also enables
+# `rows`) are enabled here, not optionally — `oxrdf` and `rustc-hash` (which `numeric`/`join`
+# pull) are already in the engine's dep tree, so this pulls no new crate and the lean wasm
+# bundle delta is only the moved join code itself.
+sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-features = false, features = ["numeric", "join"] }
 oxrdf.workspace = true
 spargebra.workspace = true
 # Relative-IRI resolution for IRI()/URI() against the query's BASE (already in the
