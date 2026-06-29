@@ -32,6 +32,15 @@ pub mod scoreboard;
 // `sparql11/service` + HTTP-protocol conformance lanes (sq-my8wd) wire onto.
 #[cfg(feature = "service-loopback")]
 pub mod service_loopback;
+// [OPUS-4.8] sq-ddpgx (epic sq-my8wd) — the W3C `sparql11/service` EVALUATION
+// conformance lane, driven through the loopback harness above. For each manifest
+// test it stands up a REAL loopback endpoint per `qt:serviceData` block, rewrites
+// the well-known endpoint IRIs to the bound loopback URLs, runs the federated
+// query through the engine's REAL `ureq` transport, and compares to the `.srx`
+// oracle. Behind the same opt-in `service-loopback` deps (the crate `service`
+// feature forwards to it); the gating runner is `tests/service_eval_suite.rs`.
+#[cfg(feature = "service-loopback")]
+pub mod service_eval;
 // [OPUS-4.8] (B4) W3C rdf-turtle suite run THROUGH the sparq Turtle parser
 // (`Graph::parse_to_triples`) — the rejection/acceptance oracle for the Turtle T1 spike,
 // distinct from the oxttl-differential chunked-vs-serial test and the N3-parser TurtleTests.

@@ -161,6 +161,13 @@ pub struct Suite {
 ///   `D_ENTAIL_FLOOR = 1` (sq-e5atd; opt-in `d-entail` feature; the D-only
 ///   `sparql11/entailment` tests graduated from OutOfScope to Pass through
 ///   sparq-reason's `Profile::D` — rdfD1 typing + typed value-space equality).
+/// * sparql11/service evaluation 5 — `sparq-conformance`
+///   `tests/service_eval_suite.rs` `SERVICE_EVAL_FLOOR = 5` (sq-ddpgx; opt-in
+///   `service` feature; the deferred SERVICE/federation tests graduated from the
+///   SPARQL binary's skip bucket to Pass by serving each `qt:serviceData` block on
+///   a REAL in-process loopback endpoint — the sq-ushvx harness — and driving the
+///   federated query end-to-end through the engine's REAL ureq transport; a
+///   variable SERVICE endpoint + a nested non-SILENT SERVICE are documented Skips).
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
@@ -462,6 +469,39 @@ pub const SUITES: &[Suite] = &[
         note: "D-only sparql11/entailment tests graduated from OutOfScope to Pass \
                through sparq-reason's opt-in Profile::D (rdfD1 typing + typed \
                value-space equality)",
+    },
+    // [OPUS-4.8] sq-ddpgx (epic sq-my8wd) — the W3C SPARQL 1.1 `sparql11/service`
+    // EVALUATION ratchet. The runner is crate-local here
+    // (`tests/service_eval_suite.rs`) but behind the OPT-IN `service` feature
+    // (forwards to `service-loopback` → tokio + axum via sparq-server/service AND
+    // ureq via sparq-engine/service) so the default + `--workspace` builds neither
+    // link the async server stack nor go red — the lean-core posture; the SPARQL
+    // BINARY keeps these tests skipped (`unsupported_feature = "SERVICE /
+    // federation"`) so its ratchet floor is byte-for-byte unchanged. These tests
+    // GRADUATE from that skip bucket to Pass here: each `qt:serviceData` block is
+    // served by a REAL in-process `sparq_server::serve` loopback endpoint (the
+    // merged sq-ushvx #1291 harness) on an ephemeral 127.0.0.1:0 port, the
+    // well-known endpoint IRIs are rewritten to the bound loopback URLs, and the
+    // federated SERVICE query runs end-to-end through the engine's REAL ureq
+    // transport, compared to the `.srx` oracle. The floor is the MEASURED pass
+    // count at the pinned rdf-tests revision (NOT 100%: a variable SERVICE endpoint
+    // and a nested non-SILENT SERVICE are honest tracked-not-asserted divergences —
+    // documented Skips, never skip-laundered into the count). Floor kept in
+    // lock-step by `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "W3C SPARQL 1.1 sparql11/service evaluation",
+        family: "W3C SPARQL",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "service_eval_suite",
+            feature: "service",
+        },
+        ci_job: "service-federation-conformance",
+        ratchet_floor: 5,
+        floor_basis: "pass",
+        note: "sparql11/service federated SERVICE queries run end-to-end through \
+               REAL in-process loopback endpoints (the sq-ushvx harness) + the \
+               engine's REAL ureq transport, compared to the .srx oracle",
     },
 ];
 
