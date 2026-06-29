@@ -66,7 +66,11 @@ pub struct Cq {
 }
 
 impl Cq {
-    fn normalised(mut atoms: Vec<Atom>, answer: Vec<String>) -> Cq {
+    /// Canonicalise a CQ: sort + dedup the atoms so two structurally-equal CQs (built in any
+    /// order) hash/compare equal — the fixpoint dedup and the tree-witness folding both rely on
+    /// this. `pub(crate)` so [`crate::treewitness`] can build canonical folded disjuncts without
+    /// duplicating the normalisation logic (which would risk drift).
+    pub(crate) fn normalised(mut atoms: Vec<Atom>, answer: Vec<String>) -> Cq {
         atoms.sort();
         atoms.dedup();
         Cq { atoms, answer }
@@ -330,9 +334,19 @@ fn reduce(cq: &Cq, a: usize, b: usize) -> Option<Cq> {
     // binary so the substitution is tiny). A const-vs-different-const clash fails the unify.
     // Keying on BOTH Var names and Unbound ids keeps the unifier sound when an `_` meets a
     // constant (the `_` binds to the constant — the more-specific term wins).
+    //
+    // SOUNDNESS (sq-g19x0 fix): DISTINGUISHED (answer) variables are RIGID in the MGU — reduce
+    // may NOT identify two distinct answer variables, nor bind an answer variable to a constant.
+    // Doing so would change the projection's meaning (it answers a *different*, more-constrained
+    // query: `?x = ?y`), so the merged CQ would unsoundly drop the original two-distinct-column
+    // answers. Standard PerfectRef reduce exists only to collapse NON-distinguished shared
+    // variables and thereby re-enable existential rewrites; we enforce that by freezing the answer
+    // vars. (Bug caught by oracle case 16: `SELECT ?x ?y { ?x a B . ?y a B }` must keep the 2×2
+    // product, not collapse `?x`,`?y`.)
+    let answer: FxHashSet<&str> = cq.answer.iter().map(|s| s.as_str()).collect();
     let mut subst: Subst = Subst::default();
     for (x, y) in pairs {
-        if !unify_terms(&x, &y, &mut subst) {
+        if !unify_terms(&x, &y, &mut subst, &answer) {
             return None;
         }
     }
@@ -406,31 +420,50 @@ fn key_of(t: &Term) -> Option<Key> {
 /// as rigid. Returns false on a const/const clash. (A tiny, total unifier — DL-Lite has no
 /// function symbols, so no occurs-check is needed.) When a variable/`_` meets a more-specific
 /// term, it binds to it (so `_` ↦ const is recorded, never silently dropped).
-fn unify_terms(x: &Term, y: &Term, subst: &mut Subst) -> bool {
+///
+/// DISTINGUISHED (answer) variables in `answer` are RIGID (like constants): a distinguished var
+/// unifies only with itself or with a bindable NON-distinguished term that then binds TO the
+/// distinguished var. Two distinct distinguished vars — or a distinguished var vs a constant — do
+/// NOT unify (returns false), because identifying answer columns changes the query's meaning and
+/// would unsoundly drop answers (sq-g19x0).
+fn unify_terms(x: &Term, y: &Term, subst: &mut Subst, answer: &FxHashSet<&str>) -> bool {
     let xr = resolve(x, subst);
     let yr = resolve(y, subst);
     if xr == yr {
         return true;
     }
-    match (&xr, &yr) {
-        (Term::Const(c1), Term::Const(c2)) => c1 == c2,
-        // A bindable left term (Var or Unbound) binds to the right term.
-        (lhs, _) if key_of(lhs).is_some() => {
-            subst.bind(key_of(lhs).unwrap(), yr);
+    let x_rigid = is_rigid(&xr, answer);
+    let y_rigid = is_rigid(&yr, answer);
+    match (x_rigid, y_rigid) {
+        // Two rigid terms that are not equal (the `xr == yr` early-return failed) cannot unify:
+        // const≠const, distinguished≠distinguished, or distinguished≠const.
+        (true, true) => false,
+        // A rigid left term (const or distinguished var): bind the bindable right term TO it.
+        (true, false) => {
+            // `yr` is bindable (non-rigid Var or Unbound).
+            subst.bind(key_of(&yr).expect("non-rigid term is bindable"), xr);
             true
         }
-        // Otherwise the left is a Const and the right must be bindable (else the equal-check
-        // above or the const/const arm would have handled it): bind the right to the left.
-        (_, rhs) => {
-            // `rhs` is bindable here (the only remaining case: Const vs Var/Unbound).
-            match key_of(rhs) {
-                Some(k) => {
-                    subst.bind(k, xr);
-                    true
-                }
-                None => false, // unreachable: Const/Const handled above.
-            }
+        // A rigid right term: bind the bindable left term TO it.
+        (false, true) => {
+            subst.bind(key_of(&xr).expect("non-rigid term is bindable"), yr);
+            true
         }
+        // Both bindable (non-distinguished Var/Unbound on each side): bind left to right.
+        (false, false) => {
+            subst.bind(key_of(&xr).expect("non-rigid term is bindable"), yr);
+            true
+        }
+    }
+}
+
+/// A term is RIGID under the MGU iff it is a constant OR a distinguished (answer) variable. Rigid
+/// terms may not be rebound; two distinct rigid terms do not unify.
+fn is_rigid(t: &Term, answer: &FxHashSet<&str>) -> bool {
+    match t {
+        Term::Const(_) => true,
+        Term::Var(v) => answer.contains(v.as_str()),
+        Term::Unbound(_) => false,
     }
 }
 
@@ -609,6 +642,59 @@ mod tests {
             vec![],
         );
         assert!(reduce(&cq, 0, 1).is_none(), "distinct constants must not unify");
+    }
+
+    #[test]
+    fn reduce_must_not_identify_two_distinguished_vars() {
+        // SOUNDNESS (sq-g19x0): reduce must NOT unify two atoms when that would identify two
+        // DISTINCT distinguished (answer) variables — doing so answers a different query (?x=?y)
+        // and unsoundly drops the two-distinct-column answers. `B(?x)` and `B(?y)` with BOTH ?x
+        // and ?y distinguished must NOT reduce.
+        let cq = Cq::normalised(
+            vec![class("B", "x"), class("B", "y")],
+            vec!["x".into(), "y".into()],
+        );
+        assert!(
+            reduce(&cq, 0, 1).is_none(),
+            "reduce must not identify two distinct distinguished variables"
+        );
+    }
+
+    #[test]
+    fn reduce_still_collapses_nondistinguished_shared_var() {
+        // The LEGITIMATE reduce: `R(?x,?y)` and `R(?x,?z)` with ONLY ?x distinguished — unifying
+        // the objects ?y,?z (both non-distinguished) is sound and re-enables existential rewrites.
+        let cq = Cq::normalised(
+            vec![
+                role("R", Term::Var("x".into()), Term::Var("y".into())),
+                role("R", Term::Var("x".into()), Term::Var("z".into())),
+            ],
+            vec!["x".into()],
+        );
+        let reduced = reduce(&cq, 0, 1).expect("non-distinguished objects must unify");
+        // One surviving R atom; the merged object is non-distinguished+single → anonymised to `_`.
+        assert_eq!(reduced.atoms.len(), 1, "the two R atoms collapse to one");
+        assert!(matches!(
+            reduced.atoms[0],
+            Atom::Role { s: Term::Var(ref v), o: Term::Unbound(_), .. } if v == "x"
+        ));
+    }
+
+    #[test]
+    fn reduce_must_not_bind_distinguished_var_to_const() {
+        // A distinguished var is rigid vs a constant too: `A(?x)` and `A(:c)` with ?x distinguished
+        // must NOT reduce (it would force ?x = :c, answering a different query).
+        let cq = Cq::normalised(
+            vec![
+                class("A", "x"),
+                class_const("A", "c"),
+            ],
+            vec!["x".into()],
+        );
+        assert!(
+            reduce(&cq, 0, 1).is_none(),
+            "a distinguished var must not be bound to a constant by reduce"
+        );
     }
 
     fn class_const(c: &str, k: &str) -> Atom {
