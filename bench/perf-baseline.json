@@ -40,7 +40,16 @@
     "EXPLAIN / EXPLAIN ANALYZE plan-formatting + analyze-trace code paths (sparq_engine::explain /",
     "explain_analyze) that the prior bundle never reached. 1656470 is the exact CI-measured wasm-pack",
     "release bundle size on this branch (run 27592086692, the 'run + track benchmarks' lane), not a guess.",
-    "Bundle-growth beyond +2% of THIS new floor must again be an explicit raise."
+    "Bundle-growth beyond +2% of THIS new floor must again be an explicit raise.",
+    "[OPUS-4.8] (#1135 🟡#6) 2026-06-29: wasm_bundle_bytes floor RE-BASELINED 1656470 -> 1686907 (+1.84%) to",
+    "current main per MAINTAINER APPROVAL ('you have permission to re-bundle the WASM baseline' — RAISE path #1,",
+    "reviewed-PR). NOT a single new feature: legitimate cumulative merged-feature drift had crept main to +1.84%",
+    "over the stale floor, so any always-on PR's small addition (e.g. #1257 multiplicity() at +0.36%, the",
+    "lexical-form-class always-on changes) topped the +2% gate. Floor set to current-main EXACTLY (the byte-",
+    "deterministic CI-measured value 1686907 — runs 28351377270 & 28349508714 and the benchmark-data series both",
+    "publish 1686907 on the x86_64 runner; a cross-arch local aarch64 build reads 1687481, +0.034%, host-arch",
+    "non-reproducibility, so the CI value is authoritative). NOT set above current so the push-to-main auto-",
+    "ratchet-down stays stable. threshold 0.02 + mode auto UNCHANGED — the +2% guard is RETAINED, not widened."
   ],
   "metrics": {
     "store_bytes_per_triple": {
@@ -59,7 +68,7 @@
       "mode": "auto"
     },
     "wasm_bundle_bytes": {
-      "floor": 1656470,
+      "floor": 1686907,
       "threshold": 0.02,
       "mode": "auto"
     },
