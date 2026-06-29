@@ -10,7 +10,9 @@
 //!   * with the loopback host on the allowlist, the SAME query reaches the endpoint and
 //!     joins the remote solution;
 //!   * `SERVICE SILENT` under the deny posture yields the join identity (the query
-//!     succeeds with the surrounding bindings intact, no network call).
+//!     succeeds with the surrounding bindings intact, no network call);
+//!   * [OPUS-4.8] sq-a7jw4 — a PORT-SCOPED entry (`127.0.0.1:<ephemeral>`) permits exactly
+//!     that endpoint, and REJECTS the same loopback host on a different port (403, no dial).
 #![cfg(feature = "service")]
 
 use std::io::{Read, Write};
@@ -160,6 +162,81 @@ async fn allowlisted_loopback_host_reaches_the_endpoint() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("Alice"), "expected the remote name joined in: {body}");
     assert!(body.contains("Bob"), "expected the remote name joined in: {body}");
+}
+
+#[tokio::test]
+async fn port_scoped_allowlist_permits_exact_endpoint() {
+    // [OPUS-4.8] sq-a7jw4: the in-process loopback SERVICE federation use case — permit
+    // EXACTLY `127.0.0.1:<ephemeral>` (the mock endpoint's bound port), and it is reached.
+    let (remote, _accepts) = serve(remote_body(), 1);
+    let host = remote.trim_start_matches("http://").trim_end_matches('/'); // 127.0.0.1:<port>
+    // Allowlist the FULL host:port (port-scoped) — exactly the mock endpoint, nothing wider.
+    let mut config = ServerConfig::default();
+    let mut allow = ServiceAllowlist::default();
+    allow.add(host).unwrap(); // e.g. "127.0.0.1:54321"
+    config.service_allow = allow;
+    let base = spawn_with(config).await;
+    let q = format!(
+        "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE {{ ?s a ex:Person . SERVICE <http://{host}/> {{ ?s ex:name ?name }} }}"
+    );
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", q)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "exact port-scoped SERVICE must succeed");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Alice") && body.contains("Bob"), "expected the remote joined in: {body}");
+}
+
+#[tokio::test]
+async fn port_scoped_allowlist_rejects_same_host_other_port() {
+    // [OPUS-4.8] sq-a7jw4: the security property — a `127.0.0.1:<portA>` entry must REJECT
+    // the SAME loopback host on a DIFFERENT port. We allowlist one ephemeral port but the
+    // SERVICE IRI targets a *second*, live loopback endpoint on another port; the server must
+    // refuse it (403) BEFORE dialling, proven by the live listener accepting nothing.
+    let allowed_listener = StdListener::bind("127.0.0.1:0").expect("bind loopback");
+    let allowed_addr = allowed_listener.local_addr().unwrap(); // the permitted host:port
+    drop(allowed_listener); // we only need its host:port string for the allowlist entry
+
+    // A SECOND live endpoint on a DIFFERENT port — the off-allowlist target.
+    let (other_remote, other_accepts) = serve(remote_body(), 1);
+    let other_host = other_remote.trim_start_matches("http://").trim_end_matches('/');
+    assert_ne!(
+        allowed_addr.port(),
+        other_host.rsplit(':').next().unwrap().parse::<u16>().unwrap(),
+        "the two endpoints must be on different ports for this test to be meaningful",
+    );
+
+    let mut config = ServerConfig {
+        query_timeout: Some(std::time::Duration::from_secs(2)),
+        ..ServerConfig::default()
+    };
+    let mut allow = ServiceAllowlist::default();
+    allow.add(&allowed_addr.to_string()).unwrap(); // port-scoped: ONLY 127.0.0.1:<portA>
+    config.service_allow = allow;
+    let base = spawn_with(config).await;
+    let q = format!(
+        "PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <http://{other_host}/> {{ ?s ex:name ?name }} }}"
+    );
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", q)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "same host on a non-allowlisted port must be a 403 policy refusal, got {}",
+        resp.status(),
+    );
+    // And the off-allowlist endpoint must never have been dialled.
+    assert!(
+        other_accepts.recv_timeout(std::time::Duration::from_millis(250)).is_err(),
+        "a port off the scoped allowlist must be refused BEFORE any socket is opened",
+    );
 }
 
 #[tokio::test]

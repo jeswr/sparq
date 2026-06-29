@@ -901,6 +901,25 @@ pub(crate) fn is_forbidden_ip(ip: std::net::IpAddr) -> bool {
 /// as written in the SERVICE IRI authority) on this list is exempt from
 /// [`is_forbidden_ip`] — its resolved addresses are permitted even when private.
 ///
+/// ## Port scoping ([OPUS-4.8] sq-a7jw4)
+///
+/// An allowlist entry may be **host-level** (`sparql.internal`, `127.0.0.1`,
+/// `.example.org`) or **port-scoped** (`127.0.0.1:8053`, `sparql.internal:8443`,
+/// `.example.org:443`). A host-level entry keeps its original meaning — it permits the
+/// host on *every* port. A port-scoped entry is strictly NARROWER: it permits the host
+/// ONLY on that exact port and rejects every other port on the same host. This lets a
+/// deployer (or the in-process loopback SERVICE federation harness) re-open exactly
+/// `127.0.0.1:<ephemeral>` without re-opening the whole loopback host. There is no
+/// wildcard port — a port-scoped entry tightens, never loosens; default-deny stays
+/// default-deny.
+///
+/// The port checked is the SERVICE IRI authority's port (its explicit `:port`, or the
+/// scheme default 443/80), which is exactly the port `to_socket_addrs(host:port)` dials
+/// for *every* resolved address — so port-scoping applies to the post-resolution connect
+/// target and cannot be bypassed by DNS rebinding (the resolved IP is still re-vetted by
+/// [`is_forbidden_ip`] at connect time; the allowlist exemption only fires when BOTH the
+/// host pattern AND the port constraint match).
+///
 /// Two modes (the [`Mode`] flag), both default-deny but at different strictnesses:
 ///
 /// * **`Mode::DenyPrivate`** (the engine's standalone default, installed by
@@ -967,28 +986,81 @@ pub(crate) mod egress_policy {
         POLICY.with(|p| Guard(Some(std::mem::replace(&mut *p.borrow_mut(), next))))
     }
 
-    /// True if `host` (case-insensitive) is on the active allowlist. An entry is
-    /// matched two ways: [OPUS-4.8] (sq-4w18)
-    ///   * **exact** — the entry equals the host (`"sparql.example.org"`).
-    ///   * **suffix wildcard** — an entry beginning with a dot (`".example.org"`)
+    /// Split one allowlist entry into its `(host_pattern, port_constraint)`. [OPUS-4.8] (sq-a7jw4)
+    ///
+    /// An entry is **port-scoped** (`Some(port)`) only when it carries an *unambiguous*
+    /// trailing `:port`; otherwise it is **host-level** (`None` = every port). The split is
+    /// conservative so a bare IPv6 literal is never amputated:
+    ///   * `[::1]:8053` / `[2001:db8::1]:443` — bracketed IPv6 + port → `("::1", Some(8053))`
+    ///     (brackets are stripped from the host pattern, mirroring `is_allowed`'s bare-host key).
+    ///   * `127.0.0.1:8053` / `sparql.internal:8443` / `.example.org:443` — a single-colon
+    ///     `host:digits` (the suffix dot is part of the host pattern) → `Some(port)`.
+    ///   * `::1` / `2001:db8::1` — a bare (unbracketed) multi-colon IPv6 literal → `None`
+    ///     (the trailing hextet is NOT read as a port).
+    ///   * `sparql.internal` / `.example.org` / `127.0.0.1` — no colon → `None`.
+    ///
+    /// A `:port` whose digits do not parse as a `u16` (or is empty) is treated as part of
+    /// the host pattern (it will simply never match a real authority) rather than silently
+    /// dropping the port constraint — fail-closed, never fail-open.
+    pub(crate) fn split_entry(entry: &str) -> (&str, Option<u16>) {
+        // Bracketed IPv6 authority: `[addr]` or `[addr]:port`.
+        if let Some(rest) = entry.strip_prefix('[') {
+            if let Some((inner, after)) = rest.split_once(']') {
+                let port = after
+                    .strip_prefix(':')
+                    .and_then(|p| p.parse::<u16>().ok());
+                return (inner, port);
+            }
+            return (entry, None); // malformed (no closing bracket) — host pattern as-is
+        }
+        // Unbracketed. Only a single-colon `host:port` is a port-bearing authority; a
+        // multi-colon string is a bare IPv6 literal whose last hextet must NOT be read as
+        // a port (e.g. `2001:db8::1`).
+        if let Some((host, port)) = entry.split_once(':') {
+            if !host.contains(':') && !port.contains(':') {
+                if let Ok(p) = port.parse::<u16>() {
+                    return (host, Some(p));
+                }
+            }
+        }
+        (entry, None)
+    }
+
+    /// True iff `host_pattern` (an entry's host part, already lower-cased) matches the
+    /// lower-cased connect host `h`: exact, or a leading-dot suffix wildcard. [OPUS-4.8]
+    ///   * **exact** — the pattern equals the host (`"sparql.example.org"`).
+    ///   * **suffix wildcard** — a pattern beginning with a dot (`".example.org"`)
     ///     matches any host ending in that suffix INCLUDING the bare apex
-    ///     (`example.org`, `a.example.org`, `a.b.example.org`). This is the engine
-    ///     representation of the server's `*.example.org` pattern. The leading-dot
+    ///     (`example.org`, `a.example.org`, `a.b.example.org`). The leading-dot
     ///     boundary means `.example.org` does NOT match `notexample.org`.
-    pub(crate) fn is_allowed(host: &str) -> bool {
+    fn host_matches(host_pattern: &str, h: &str) -> bool {
+        if let Some(suffix) = host_pattern.strip_prefix('.') {
+            h == suffix || h.ends_with(host_pattern)
+        } else {
+            host_pattern == h
+        }
+    }
+
+    /// True if `(host, port)` is permitted by the active allowlist. [OPUS-4.8] (sq-a7jw4)
+    ///
+    /// `host` is the SERVICE IRI authority host (case-insensitive); `port` is the
+    /// authority's port (its explicit `:port` or the scheme default — the SAME port that is
+    /// actually dialled for every resolved address). An entry matches when its host pattern
+    /// matches (exact or `.suffix` wildcard, per [`host_matches`]) AND its port constraint
+    /// is satisfied:
+    ///   * a **host-level** entry (no `:port`) permits the host on EVERY port — the original
+    ///     `sq-4w18` semantics, preserved exactly for backward compatibility;
+    ///   * a **port-scoped** entry (`host:port`) permits the host ONLY on that exact port
+    ///     and rejects every other port on the same host — strictly narrower (`sq-a7jw4`).
+    ///
+    /// There is NO wildcard port: a port-scoped entry can only tighten, never widen, so
+    /// default-deny stays default-deny.
+    pub(crate) fn is_allowed(host: &str, port: u16) -> bool {
         let h = host.to_ascii_lowercase();
         POLICY.with(|p| {
-            let allow = &p.borrow().allow;
-            if allow.contains(&h) {
-                return true;
-            }
-            // Suffix-wildcard entries (".suffix"): match the apex and any subdomain.
-            allow.iter().any(|e| {
-                if let Some(suffix) = e.strip_prefix('.') {
-                    h == suffix || h.ends_with(e.as_str())
-                } else {
-                    false
-                }
+            p.borrow().allow.iter().any(|e| {
+                let (host_pattern, entry_port) = split_entry(e);
+                host_matches(host_pattern, &h) && entry_port.is_none_or(|ep| ep == port)
             })
         })
     }
@@ -1149,10 +1221,15 @@ struct EgressFilterResolver;
 // an empty address set), so ureq cannot fall through to an unguarded dial.
 
 /// `host:port` (for resolution) + bare host (for the allowlist key, IPv6 brackets stripped,
-/// lowercased) from a ureq-3 request [`Uri`](ureq::http::Uri). `port` falls back to the scheme
-/// default (443 for https, 80 otherwise). [OPUS-4.8] sq-g2xs.
+/// lowercased) + the numeric `port` (for the port-scoped allowlist check, sq-a7jw4) from a
+/// ureq-3 request [`Uri`](ureq::http::Uri). `port` falls back to the scheme default (443 for
+/// https, 80 otherwise). [OPUS-4.8] sq-g2xs / sq-a7jw4.
+///
+/// The returned `port` is exactly the port `to_socket_addrs(host:port)` dials for EVERY
+/// resolved address, so a port-scoped allowlist entry is checked against the port actually
+/// connected to — no resolve-then-reconnect port TOCTOU.
 #[cfg(all(feature = "service", not(target_arch = "wasm32")))]
-fn uri_host_port(uri: &ureq::http::Uri) -> Option<(String, String)> {
+fn uri_host_port(uri: &ureq::http::Uri) -> Option<(String, String, u16)> {
     let authority = uri.authority()?;
     let host = authority.host();
     if host.is_empty() {
@@ -1167,7 +1244,7 @@ fn uri_host_port(uri: &ureq::http::Uri) -> Option<(String, String)> {
     // The authority host keeps IPv6 brackets (`[::1]`); strip them for the allowlist key and
     // for `to_socket_addrs` (which wants the bare host + a separate port).
     let bare = host.trim_start_matches('[').trim_end_matches(']');
-    Some((format!("{bare}:{port}"), bare.to_ascii_lowercase()))
+    Some((format!("{bare}:{port}"), bare.to_ascii_lowercase(), port))
 }
 
 /// Wrap a refusal reason as a `PermissionDenied` [`ureq::Error::Io`], preserving both the kind
@@ -1189,12 +1266,15 @@ impl ureq::unversioned::resolver::Resolver for EgressFilterResolver {
         _timeout: ureq::unversioned::transport::NextTimeout,
     ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
         use std::net::ToSocketAddrs;
-        let (host_port, host) = uri_host_port(uri).ok_or_else(|| {
+        let (host_port, host, port) = uri_host_port(uri).ok_or_else(|| {
             egress_refused(format!(
                 "{SERVICE_EGRESS_REFUSED_MARKER}: request URI {uri} has no host authority to vet"
             ))
         })?;
-        let allowed = egress_policy::is_allowed(&host);
+        // [OPUS-4.8] (sq-a7jw4) The allowlist check is port-scoped: a `host:port` entry permits
+        // only that host on that exact port; a bare-host entry still permits every port. `port`
+        // is the authority port that is actually dialled for every resolved address.
+        let allowed = egress_policy::is_allowed(&host, port);
         // [OPUS-4.8] (sq-4w18) STRICT (AllowlistOnly) mode — the server's policy — refuses any
         // host not on the allowlist BEFORE resolving DNS, so a host that is not explicitly
         // permitted never triggers even a lookup. An empty allowlist here = deny ALL SERVICE.
@@ -1658,6 +1738,13 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
     }
 
+    /// [OPUS-4.8] (sq-a7jw4) Host-level `is_allowed` check at a representative port. A
+    /// host-level (no-`:port`) entry matches EVERY port, so any port reads the same — these
+    /// host-level tests use 80. Port-scoping tests call `is_allowed(host, port)` directly.
+    fn allowed(host: &str) -> bool {
+        egress_policy::is_allowed(host, 80)
+    }
+
     #[test]
     fn loopback_is_forbidden() {
         assert!(is_forbidden_ip(v4(127, 0, 0, 1)));
@@ -1728,30 +1815,30 @@ mod tests {
     #[test]
     fn allowlist_plumbing_install_and_restore() {
         // Default: nothing is allowlisted.
-        assert!(!egress_policy::is_allowed("localhost"));
+        assert!(!allowed("localhost"));
         {
             let _g = egress_policy::install(
                 ["localhost".to_string(), "10.0.0.5".to_string()],
                 egress_policy::Mode::DenyPrivate,
             );
-            assert!(egress_policy::is_allowed("localhost"));
-            assert!(egress_policy::is_allowed("LOCALHOST")); // case-insensitive
-            assert!(egress_policy::is_allowed("10.0.0.5"));
-            assert!(!egress_policy::is_allowed("other.host"));
+            assert!(allowed("localhost"));
+            assert!(allowed("LOCALHOST")); // case-insensitive
+            assert!(allowed("10.0.0.5"));
+            assert!(!allowed("other.host"));
         }
         // Restored to empty on guard drop.
-        assert!(!egress_policy::is_allowed("localhost"));
+        assert!(!allowed("localhost"));
     }
 
     #[test]
     fn with_service_egress_allow_scopes_the_allowlist() {
-        assert!(!egress_policy::is_allowed("sparql.internal"));
+        assert!(!allowed("sparql.internal"));
         let seen = with_service_egress_allow(["sparql.internal".to_string()], || {
-            egress_policy::is_allowed("sparql.internal")
+            allowed("sparql.internal")
         });
         assert!(seen);
         // Allowlist is gone after the scope returns.
-        assert!(!egress_policy::is_allowed("sparql.internal"));
+        assert!(!allowed("sparql.internal"));
     }
 
     #[test]
@@ -1759,15 +1846,15 @@ mod tests {
         // [OPUS-4.8] (sq-4w18) Strict mode: only listed hosts are allowed; the mode
         // and allowlist both restore on scope exit.
         assert_eq!(egress_policy::mode(), egress_policy::Mode::DenyPrivate);
-        assert!(!egress_policy::is_allowed("a.example"));
+        assert!(!allowed("a.example"));
         with_service_egress_policy(true, ["a.example".to_string()], || {
             assert_eq!(egress_policy::mode(), egress_policy::Mode::AllowlistOnly);
-            assert!(egress_policy::is_allowed("a.example"));
-            assert!(egress_policy::is_allowed("A.EXAMPLE")); // case-insensitive
-            assert!(!egress_policy::is_allowed("b.example"));
+            assert!(allowed("a.example"));
+            assert!(allowed("A.EXAMPLE")); // case-insensitive
+            assert!(!allowed("b.example"));
         });
         assert_eq!(egress_policy::mode(), egress_policy::Mode::DenyPrivate);
-        assert!(!egress_policy::is_allowed("a.example"));
+        assert!(!allowed("a.example"));
     }
 
     #[test]
@@ -1775,12 +1862,12 @@ mod tests {
         // [OPUS-4.8] (sq-4w18) A ".example.org" entry matches the apex and any
         // subdomain, but not a host that merely ends in the same letters.
         with_service_egress_policy(true, [".example.org".to_string()], || {
-            assert!(egress_policy::is_allowed("example.org")); // apex
-            assert!(egress_policy::is_allowed("sparql.example.org")); // subdomain
-            assert!(egress_policy::is_allowed("a.b.example.org")); // deep subdomain
-            assert!(egress_policy::is_allowed("SPARQL.EXAMPLE.ORG")); // case-insensitive
-            assert!(!egress_policy::is_allowed("notexample.org")); // boundary respected
-            assert!(!egress_policy::is_allowed("example.org.evil.com")); // suffix only
+            assert!(allowed("example.org")); // apex
+            assert!(allowed("sparql.example.org")); // subdomain
+            assert!(allowed("a.b.example.org")); // deep subdomain
+            assert!(allowed("SPARQL.EXAMPLE.ORG")); // case-insensitive
+            assert!(!allowed("notexample.org")); // boundary respected
+            assert!(!allowed("example.org.evil.com")); // suffix only
         });
     }
 
@@ -1789,7 +1876,7 @@ mod tests {
         // strict=false behaves exactly like with_service_egress_allow (DenyPrivate).
         with_service_egress_policy(false, ["c.example".to_string()], || {
             assert_eq!(egress_policy::mode(), egress_policy::Mode::DenyPrivate);
-            assert!(egress_policy::is_allowed("c.example"));
+            assert!(allowed("c.example"));
         });
     }
 
@@ -1799,11 +1886,122 @@ mod tests {
         // a relaxed allowlist must never leak past the scope on unwind.
         let _ = std::panic::catch_unwind(|| {
             with_service_egress_allow(["leaky.host".to_string()], || {
-                assert!(egress_policy::is_allowed("leaky.host"));
+                assert!(allowed("leaky.host"));
                 panic!("boom");
             });
         });
-        assert!(!egress_policy::is_allowed("leaky.host"));
+        assert!(!allowed("leaky.host"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Port-scoped allowlist entries [OPUS-4.8] (bead sq-a7jw4)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn split_entry_parses_host_and_optional_port() {
+        // Direct unit test for the entry parser (coverage ratchet).
+        use egress_policy::split_entry;
+        // Host-level (no port constraint).
+        assert_eq!(split_entry("sparql.internal"), ("sparql.internal", None));
+        assert_eq!(split_entry("127.0.0.1"), ("127.0.0.1", None));
+        assert_eq!(split_entry(".example.org"), (".example.org", None));
+        // Port-scoped.
+        assert_eq!(split_entry("127.0.0.1:8053"), ("127.0.0.1", Some(8053)));
+        assert_eq!(split_entry("sparql.internal:8443"), ("sparql.internal", Some(8443)));
+        assert_eq!(split_entry(".example.org:443"), (".example.org", Some(443)));
+        // Bracketed IPv6 — brackets stripped from the host pattern.
+        assert_eq!(split_entry("[::1]:8080"), ("::1", Some(8080)));
+        assert_eq!(split_entry("[2001:db8::1]:443"), ("2001:db8::1", Some(443)));
+        assert_eq!(split_entry("[::1]"), ("::1", None));
+        // Bare (unbracketed) IPv6 — NOT amputated; host-level.
+        assert_eq!(split_entry("::1"), ("::1", None));
+        assert_eq!(split_entry("2001:db8::1"), ("2001:db8::1", None));
+        // Out-of-range / empty / non-numeric port: kept as host pattern (fail-closed).
+        assert_eq!(split_entry("127.0.0.1:99999"), ("127.0.0.1:99999", None));
+        assert_eq!(split_entry("127.0.0.1:"), ("127.0.0.1:", None));
+        assert_eq!(split_entry("127.0.0.1:http"), ("127.0.0.1:http", None));
+    }
+
+    #[test]
+    fn port_scoped_entry_permits_exact_port_only() {
+        // A `host:port` entry permits ONLY that host on THAT port, and rejects the
+        // same host on any OTHER port — strictly narrower than a host-level entry.
+        with_service_egress_policy(true, ["127.0.0.1:8053".to_string()], || {
+            assert!(egress_policy::is_allowed("127.0.0.1", 8053)); // (a) exact host:port
+            assert!(!egress_policy::is_allowed("127.0.0.1", 8054)); // (b) other port rejected
+            assert!(!egress_policy::is_allowed("127.0.0.1", 80)); //   (b) default port rejected
+            assert!(!egress_policy::is_allowed("127.0.0.2", 8053)); // (c) different host rejected
+        });
+    }
+
+    #[test]
+    fn host_level_entry_permits_all_ports_backward_compat() {
+        // (d) An existing host-level entry (no port) keeps its meaning: every port on
+        // that host. This is the unchanged sq-4w18 semantics.
+        with_service_egress_policy(true, ["127.0.0.1".to_string()], || {
+            assert!(egress_policy::is_allowed("127.0.0.1", 80));
+            assert!(egress_policy::is_allowed("127.0.0.1", 8053));
+            assert!(egress_policy::is_allowed("127.0.0.1", 65535));
+            assert!(!egress_policy::is_allowed("127.0.0.2", 80)); // different host still rejected
+        });
+    }
+
+    #[test]
+    fn port_scoped_suffix_wildcard_is_port_constrained() {
+        // A port on a suffix-wildcard entry constrains the port too: `.example.org:443`
+        // permits any subdomain on 443 only.
+        with_service_egress_policy(true, [".example.org:443".to_string()], || {
+            assert!(egress_policy::is_allowed("sparql.example.org", 443)); // subdomain on 443
+            assert!(egress_policy::is_allowed("example.org", 443)); // apex on 443
+            assert!(!egress_policy::is_allowed("sparql.example.org", 80)); // wrong port
+            assert!(!egress_policy::is_allowed("notexample.org", 443)); // boundary respected
+        });
+    }
+
+    #[test]
+    fn bracketed_ipv6_port_scoped_entry() {
+        // A bracketed IPv6 `[::1]:8080` entry is port-scoped on the bare `::1` host.
+        with_service_egress_policy(true, ["[::1]:8080".to_string()], || {
+            assert!(egress_policy::is_allowed("::1", 8080));
+            assert!(!egress_policy::is_allowed("::1", 80));
+        });
+    }
+
+    #[test]
+    fn bare_ipv6_entry_is_host_level_not_port_amputated() {
+        // A bare (unbracketed) IPv6 literal must NOT have its last hextet read as a
+        // port — `2001:db8::1` is a host-level entry matching every port.
+        with_service_egress_policy(true, ["2001:db8::1".to_string()], || {
+            assert!(egress_policy::is_allowed("2001:db8::1", 443));
+            assert!(egress_policy::is_allowed("2001:db8::1", 80));
+        });
+    }
+
+    #[test]
+    fn mixed_host_and_port_scoped_entries_for_same_host() {
+        // Two entries for the same loopback host: a host-level `127.0.0.1` (all ports)
+        // and a redundant port-scoped one. The host-level entry wins for any port —
+        // additive allowlists only ever widen, never remove a granted port.
+        with_service_egress_policy(
+            true,
+            ["127.0.0.1".to_string(), "10.0.0.5:9000".to_string()],
+            || {
+                assert!(egress_policy::is_allowed("127.0.0.1", 1234)); // host-level: any port
+                assert!(egress_policy::is_allowed("10.0.0.5", 9000)); // port-scoped: exact
+                assert!(!egress_policy::is_allowed("10.0.0.5", 9001)); // port-scoped: other port
+            },
+        );
+    }
+
+    #[test]
+    fn malformed_port_in_entry_fails_closed() {
+        // A `:port` that does not parse as a u16 is treated as part of the (never-matching)
+        // host pattern, NOT as "drop the port constraint and match every port" — fail-closed.
+        with_service_egress_policy(true, ["127.0.0.1:99999".to_string()], || {
+            // 99999 > u16::MAX: the entry matches no real authority at all.
+            assert!(!egress_policy::is_allowed("127.0.0.1", 80));
+            assert!(!egress_policy::is_allowed("127.0.0.1", 65535));
+        });
     }
 
     // The resolver path is native-only (it wraps ureq's Resolver).
@@ -1918,6 +2116,90 @@ mod tests {
             })
             .unwrap();
             assert_eq!(addrs.len(), 1);
+        }
+
+        // [OPUS-4.8] (sq-a7jw4) Port-scoped allowlist entries at the resolver — the real
+        // egress path, not just the `is_allowed` predicate.
+
+        #[test]
+        fn resolver_port_scoped_permits_exact_port_rejects_others() {
+            // A `127.0.0.1:8053` entry lets the loopback endpoint be dialled on 8053 only;
+            // the SAME loopback host on any other port is refused (the private-IP default-deny
+            // re-applies because the allowlist exemption does not match the port).
+            let addrs = with_service_egress_policy(true, ["127.0.0.1:8053".to_string()], || {
+                resolve_netloc("127.0.0.1:8053")
+            })
+            .unwrap();
+            assert_eq!(addrs.len(), 1);
+            assert!(addrs[0].ip().is_loopback());
+            assert_eq!(addrs[0].port(), 8053);
+
+            let err = with_service_egress_policy(true, ["127.0.0.1:8053".to_string()], || {
+                resolve_netloc("127.0.0.1:9999")
+            })
+            .unwrap_err();
+            assert!(is_permission_denied(&err), "other port must be refused, got {err:?}");
+        }
+
+        #[test]
+        fn resolver_in_process_loopback_service_use_case() {
+            // The bead's load-bearing use case: an in-process mock SERVICE endpoint bound to
+            // an EPHEMERAL loopback port. Permit EXACTLY 127.0.0.1:<ephemeral>; the same host
+            // on a different port (a co-resident service, or an attacker probing) is refused.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let ephemeral = listener.local_addr().unwrap().port();
+            let other = ephemeral.wrapping_add(1).max(1);
+            let entry = format!("127.0.0.1:{ephemeral}");
+
+            let permitted = with_service_egress_policy(true, [entry.clone()], || {
+                resolve_netloc(&format!("127.0.0.1:{ephemeral}"))
+            });
+            let addrs = permitted.expect("the exact ephemeral loopback endpoint must be dial-able");
+            assert_eq!(addrs.len(), 1);
+            assert!(addrs[0].ip().is_loopback());
+            assert_eq!(addrs[0].port(), ephemeral);
+
+            if other != ephemeral {
+                let err = with_service_egress_policy(true, [entry], || {
+                    resolve_netloc(&format!("127.0.0.1:{other}"))
+                })
+                .unwrap_err();
+                assert!(
+                    is_permission_denied(&err),
+                    "127.0.0.1:{other} (a different port) must be refused, got {err:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn resolver_port_scoped_does_not_weaken_dns_rebind_revet() {
+            // The port-scoping must NOT bypass the resolved-IP re-vet. A `127.0.0.1:8053`
+            // allowlist entry permits the loopback host on 8053; but if the SAME port were
+            // dialled toward a DIFFERENT private host that is NOT the allowlisted one
+            // (here 169.254.169.254, the cloud-metadata IP), the per-IP `is_forbidden_ip`
+            // check still rejects it — the allowlist exemption is keyed to the host pattern,
+            // so a rebind to an off-allowlist IP on the very same port is still refused.
+            let err = with_service_egress_policy(true, ["127.0.0.1:8053".to_string()], || {
+                resolve_netloc("169.254.169.254:8053")
+            })
+            .unwrap_err();
+            assert!(
+                is_permission_denied(&err),
+                "an off-allowlist private IP on the scoped port must still be re-vetted, got {err:?}"
+            );
+        }
+
+        #[test]
+        fn resolver_host_level_entry_permits_all_ports() {
+            // Backward compat at the resolver: a bare `127.0.0.1` entry dials on any port.
+            for port in [80u16, 8053, 65535] {
+                let addrs = with_service_egress_policy(true, ["127.0.0.1".to_string()], || {
+                    resolve_netloc(&format!("127.0.0.1:{port}"))
+                })
+                .unwrap();
+                assert_eq!(addrs.len(), 1);
+                assert_eq!(addrs[0].port(), port);
+            }
         }
     }
 }
