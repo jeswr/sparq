@@ -107,6 +107,23 @@ service-loopback = ["dep:sparq-server", "sparq-server/service", "dep:tokio"]
 # opt-in posture. The pinned `SERVICE_EVAL_FLOOR` is the MEASURED pass count.
 service = ["service-loopback"]
 
+# [OPUS-4.8] sq-jaj38 (epic sq-my8wd) — the W3C SPARQL 1.1 **Protocol** (HTTP layer)
+# conformance lane (the crate-local `tests/http_protocol_suite.rs` runner + the `http_protocol`
+# module). OPT-IN and OFF by default: it stands up the SAME real in-process loopback server (the
+# merged sq-ushvx harness) and drives RAW HTTP requests DIRECTLY at the bound `127.0.0.1:0` port
+# — query via GET / POST-urlencoded / POST-direct, the HTTP QUERY method (#1304), update via POST,
+# the `default-graph-uri` / `named-graph-uri` dataset overrides, result-format content negotiation
+# (SRJ / SRX / CSV / TSV) and the documented 200/400/405/415 status codes — exercising the SPARQL
+# Protocol request/response contract rather than the federated SERVICE transport. It simply
+# forwards to `service-loopback` (tokio + axum via sparq-server/server), so the heavy async stack
+# is declared ONCE and NO new third-party dependency is added (the raw HTTP client is a tiny
+# std-only `TcpStream` helper). With the feature OFF the `http_protocol` module is `#[cfg]`-stripped
+# and the runner compiles to a single self-SKIP `#[test]`, so the bare `cargo test -p
+# sparq-conformance` (and the default `--workspace` shards) link none of it — the lean opt-in
+# posture. The pinned `HTTP_PROTOCOL_FLOOR` is the MEASURED PASS count; documented protocol
+# divergences (e.g. sparq's 406-less Accept fallback) are reported separately, NEVER summed in.
+http-protocol = ["service-loopback"]
+
 [dependencies]
 # [OPUS-4.8] sq-ushvx — the embeddable in-process server (`serve` / `router` / `AppState`),
 # used ONLY by the `service-loopback` harness to stand up a real loopback SERVICE endpoint.

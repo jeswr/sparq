@@ -194,6 +194,16 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/service_eval_suite.rs",
         "SERVICE_EVAL_FLOOR",
     ),
+    // [OPUS-4.8] sq-jaj38 (epic sq-my8wd) — the W3C SPARQL 1.1 PROTOCOL (HTTP layer) ratchet.
+    // `pub const HTTP_PROTOCOL_FLOOR` lives in this crate's `tests/http_protocol_suite.rs`
+    // (behind the opt-in `http-protocol` feature, inside the `gated` module — the guard reads
+    // it TEXTUALLY, so the `#[cfg]`/module nesting do not affect the match); the guard pins the
+    // central scoreboard's `ratchet_floor` to it so the two can never silently drift.
+    (
+        "W3C SPARQL 1.1 Protocol (HTTP)",
+        "crates/sparq-conformance/tests/http_protocol_suite.rs",
+        "HTTP_PROTOCOL_FLOOR",
+    ),
     // [OPUS-4.8] sq-ripcg (epic sq-lk3aw) — the sparq-text DIFFERENTIAL BM25 ORACLE,
     // a sparq EXTENSION ratchet (NOT standards conformance — no normative
     // full-text-over-RDF / BM25 suite exists). `const TEXT_ORACLE_FLOOR` lives
@@ -322,6 +332,8 @@ fn scoreboard_renders_all_suites() {
     assert!(md.contains("W3C SPARQL 1.1 D-entailment"));
     // [OPUS-4.8] sq-ddpgx — the W3C SPARQL 1.1 sparql11/service evaluation ratchet.
     assert!(md.contains("W3C SPARQL 1.1 sparql11/service evaluation"));
+    // [OPUS-4.8] sq-jaj38 — the W3C SPARQL 1.1 Protocol (HTTP layer) ratchet.
+    assert!(md.contains("W3C SPARQL 1.1 Protocol (HTTP)"));
     // [OPUS-4.8] sq-ripcg — the sparq-text BM25 differential oracle, HONESTLY
     // rendered as a sparq EXTENSION (not a conformance claim): the row, its
     // `sparq extension` family, and the explicit "NOT conformance" total-line

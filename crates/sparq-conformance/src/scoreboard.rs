@@ -171,6 +171,12 @@ pub struct Suite {
 ///   a REAL in-process loopback endpoint — the sq-ushvx harness — and driving the
 ///   federated query end-to-end through the engine's REAL ureq transport; a
 ///   variable SERVICE endpoint + a nested non-SILENT SERVICE are documented Skips).
+/// * SPARQL 1.1 Protocol (HTTP) 20 — `sparq-conformance`
+///   `tests/http_protocol_suite.rs` `HTTP_PROTOCOL_FLOOR = 20` (sq-jaj38; opt-in
+///   `http-protocol` feature; RAW HTTP requests at the in-process loopback server
+///   exercising the SPARQL 1.1 Protocol contract — GET/POST query+update, the QUERY
+///   method, dataset overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/415; the
+///   406-less Accept fallback + ASK-in-CSV are documented divergences, NOT summed in).
 /// * text-search differential oracle 18750 — `sparq-text`
 ///   `tests/bm25_oracle.rs` `TEXT_ORACLE_FLOOR = 18750` (sq-ripcg; a sparq
 ///   EXTENSION ratchet, NOT standards conformance — no normative full-text-over-RDF
@@ -546,6 +552,41 @@ pub const SUITES: &[Suite] = &[
         note: "sparql11/service federated SERVICE queries run end-to-end through \
                REAL in-process loopback endpoints (the sq-ushvx harness) + the \
                engine's REAL ureq transport, compared to the .srx oracle",
+    },
+    // [OPUS-4.8] sq-jaj38 (epic sq-my8wd) — the W3C SPARQL 1.1 PROTOCOL (HTTP layer)
+    // conformance ratchet. Where the sibling sparql11/service row above graduates the
+    // federated SERVICE EVALUATION tests, THIS row covers the HTTP PROTOCOL itself: the
+    // request/response contract a SPARQL endpoint MUST honour. The runner is crate-local here
+    // (`tests/http_protocol_suite.rs`) but behind the OPT-IN `http-protocol` feature (forwards
+    // to `service-loopback` → tokio + axum via sparq-server/server; NO new third-party dep —
+    // the raw HTTP client is a std-only TcpStream helper) so the default + `--workspace` builds
+    // neither link the async server stack nor go red — the lean-core posture. Each assertion is
+    // a RAW HTTP request to the merged sq-ushvx in-process loopback server (an ephemeral
+    // 127.0.0.1:0 port) with an exact method / Content-Type / Accept / body, checking the
+    // status code, the response Content-Type and the payload shape: query via GET /
+    // POST-urlencoded / POST-direct, the HTTP QUERY method (#1304), update via POST, the
+    // default-graph-uri / named-graph-uri dataset overrides, result-format content negotiation
+    // (SRJ / SRX / CSV / TSV) and the 200/400/405/415 status codes. The floor is the MEASURED
+    // PASS count; documented protocol divergences (sparq's 406-less Accept fallback; an ASK
+    // boolean in CSV/TSV falling back to JSON) are reported separately and NOT summed into it,
+    // so a documented gap can never inflate the conformance number — an honest W3C-Protocol
+    // claim, scoped to what the server genuinely satisfies. Floor kept in lock-step by
+    // `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "W3C SPARQL 1.1 Protocol (HTTP)",
+        family: "W3C SPARQL",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "http_protocol_suite",
+            feature: "http-protocol",
+        },
+        ci_job: "service-federation-conformance",
+        ratchet_floor: 20,
+        floor_basis: "pass",
+        note: "SPARQL 1.1 Protocol operations (GET/POST query+update, the QUERY method, \
+               dataset overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/415) over RAW \
+               HTTP against the in-process loopback server; 406-less Accept fallback + \
+               ASK-in-CSV are documented divergences, NOT summed into the floor",
     },
     // [OPUS-4.8] sq-ripcg (epic sq-lk3aw) — the sparq-text DIFFERENTIAL BM25 ORACLE
     // (runner lives crate-local in `sparq-text/tests/bm25_oracle.rs`). This is
