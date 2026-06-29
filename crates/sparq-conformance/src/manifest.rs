@@ -41,6 +41,14 @@ pub struct QueryAction {
     /// The `sd:entailmentRegime` IRIs of the action (e.g. `ent:RDFS`), when
     /// present — consumed by the entailment-regime runner in `inference`.
     pub entailment_regimes: Vec<String>,
+    /// [OPUS-4.8] sq-kuvu3 (epic sq-pbz04) — the `sd:EntailmentProfile` IRIs of
+    /// the action (e.g. `pr:QL`), when present. A test lists every OWL 2 profile
+    /// its expected answers are sanctioned under; the EXPERIMENTAL OWL 2 QL
+    /// query-rewriting arm (`inference::sparql_entail`, behind the opt-in
+    /// `ql-experimental` feature) selects the `pr:QL`-tagged cases and reports
+    /// what the `sparq-reason-ql` rewriter genuinely computes — as
+    /// experimental/OutOfScope, never a graduated conformance pass.
+    pub entailment_profiles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -248,6 +256,25 @@ fn parse_query_action(g: &MiniGraph, action: &NamedOrBlankNode, action_term: &Te
                 for item in g.list(r) {
                     if let Term::NamedNode(n) = item {
                         qa.entailment_regimes.push(n.as_str().to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // [OPUS-4.8] sq-kuvu3 — `sd:EntailmentProfile` (the OWL 2 profile set a
+    // test's expected answers are sanctioned under: `pr:DL`/`pr:EL`/`pr:QL`/
+    // `pr:RL`/`pr:Full`). Same single-IRI-or-list shape as the regimes above.
+    for p in g.objects(
+        action,
+        "http://www.w3.org/ns/sparql-service-description#EntailmentProfile",
+    ) {
+        match p {
+            Term::NamedNode(n) => qa.entailment_profiles.push(n.as_str().to_string()),
+            Term::BlankNode(_) => {
+                for item in g.list(p) {
+                    if let Term::NamedNode(n) = item {
+                        qa.entailment_profiles.push(n.as_str().to_string());
                     }
                 }
             }

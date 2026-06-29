@@ -13,9 +13,13 @@
 //! folding), and `minimise` (UCQ-containment minimisation by homomorphism).
 //!
 //! EXPERIMENTAL regime: the rewriter is validated against a hand-checked DL-Lite oracle, NOT
-//! graduated to a conformance floor. The graduation of the QL entailment-regime arm to a pinned
-//! conformance floor is a separate, deferred bead (it must sequence through the contended
-//! conformance scoreboard) — see the README.
+//! graduated to a conformance floor. It IS wired into the conformance entailment-regime suite
+//! (sq-kuvu3, opt-in `sparq-conformance/ql-experimental`) as experimental / OutOfScope — the
+//! harness reports honestly what it computes over the `pr:QL` `sparql11/entailment` cases
+//! (fail-closed abstain / computed-equivalent evidence / computed-divergent gap), never a
+//! graduated conformance pass. The graduation of that arm to a pinned conformance FLOOR remains a
+//! separate, deferred bead (it must sequence through the contended conformance scoreboard) — see
+//! the README.
 
 mod cq;
 mod dllite;
