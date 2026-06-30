@@ -79,9 +79,21 @@ impl GraphFormat {
 /// `text/turtle`, `application/n-triples` and — [OPUS-4.8] sq-rt6v — `application/rdf+xml`
 /// (q-value aware), default N-Triples.
 pub fn negotiate_graph(accept: Option<&str>) -> GraphFormat {
+    negotiate_graph_or_406(accept).unwrap_or(GraphFormat::NTriples)
+}
+
+/// Negotiates the CONSTRUCT/DESCRIBE + GSP-read graph serialisation with Oxigraph-parity
+/// strictness ([OPUS-4.8] sq-406acc) — the RDF-graph analogue of [`negotiate_or_406`].
+///
+/// Returns `Ok(format)` when a supported RDF media type (or a wildcard) is named, or when the
+/// `Accept` header is ABSENT / empty (the permitted N-Triples default); returns
+/// `Err(`[`NotAcceptable`]`)` when the header is PRESENT and non-empty but names no supported
+/// RDF media type and no wildcard, which the HTTP layer maps to `406 Not Acceptable`.
+pub fn negotiate_graph_or_406(accept: Option<&str>) -> Result<GraphFormat, NotAcceptable> {
     let accept = match accept {
+        // Absent or empty `Accept` → the N-Triples default is permitted (never a 406).
         Some(a) if !a.trim().is_empty() => a,
-        _ => return GraphFormat::NTriples,
+        _ => return Ok(GraphFormat::NTriples),
     };
     let mut best: Option<(GraphFormat, f32, usize)> = None;
     for (media, q) in media_ranges(accept) {
@@ -113,7 +125,9 @@ pub fn negotiate_graph(accept: Option<&str>) -> GraphFormat {
             }
         }
     }
-    best.map(|(f, _, _)| f).unwrap_or(GraphFormat::NTriples)
+    // A present, non-empty `Accept` that matched no supported RDF range (and no wildcard) is
+    // unsatisfiable → 406, exactly as Oxigraph does for a CONSTRUCT/DESCRIBE result.
+    best.map(|(f, _, _)| f).ok_or(NotAcceptable)
 }
 
 /// Splits an `Accept` header into (lowercased media range, q-value) pairs.
@@ -131,11 +145,43 @@ fn media_ranges(accept: &str) -> impl Iterator<Item = (String, f32)> + '_ {
     })
 }
 
+/// A present-but-unsatisfiable `Accept` header — the HTTP layer maps this to `406 Not
+/// Acceptable`. [OPUS-4.8] sq-406acc: returned only by the `*_or_406` negotiators when an
+/// `Accept` header is PRESENT and non-empty yet names no supported media range and no wildcard.
+/// An absent / empty / `*/*` `Accept` is NEVER a `NotAcceptable` (the W3C SPARQL Protocol
+/// permits a default representation when `Accept` is absent), so the existing default-to-JSON /
+/// default-to-N-Triples behaviour is preserved in those cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotAcceptable;
+
 /// Negotiates the result format from an optional `Accept` header value.
+///
+/// This is the LENIENT entry point used by surfaces that never 406 (it always yields a concrete
+/// format, defaulting to JSON). The HTTP query path uses [`negotiate_or_406`] instead — see that
+/// function for the Oxigraph-parity strict behaviour ([OPUS-4.8] sq-406acc).
 pub fn negotiate(accept: Option<&str>) -> Format {
+    negotiate_or_406(accept).unwrap_or(Format::Json)
+}
+
+/// Negotiates the SELECT/ASK result format with Oxigraph-parity strictness ([OPUS-4.8] sq-406acc).
+///
+/// Returns:
+/// * `Ok(format)` — a usable format was selected: either an explicitly-named supported type,
+///   the wildcard `*/*` (or any matchable range), OR the JSON default when the `Accept` header
+///   is ABSENT / empty (the W3C SPARQL Protocol permits a default representation when `Accept`
+///   is absent — so an absent header is never a 406).
+/// * `Err(`[`NotAcceptable`]`)` — the `Accept` header is PRESENT and non-empty but names NO
+///   supported solution media type and NO wildcard, so the server cannot honour it. The HTTP
+///   layer turns this into a `406 Not Acceptable`, matching Oxigraph (w3c/sparql-protocol#40).
+///
+/// The selection logic (q-values, specificity, `q=0` rejection) is identical to [`negotiate`];
+/// the only difference is that a present-but-unsatisfiable header is reported as an error
+/// instead of silently falling back to JSON.
+pub fn negotiate_or_406(accept: Option<&str>) -> Result<Format, NotAcceptable> {
     let accept = match accept {
+        // Absent or empty `Accept` → the JSON default is permitted (never a 406).
         Some(a) if !a.trim().is_empty() => a,
-        _ => return Format::Json,
+        _ => return Ok(Format::Json),
     };
 
     let mut best: Option<(Format, f32, usize)> = None; // (format, q, specificity)
@@ -163,7 +209,10 @@ pub fn negotiate(accept: Option<&str>) -> Format {
             }
         }
     }
-    best.map(|(f, _, _)| f).unwrap_or(Format::Json)
+    // A present, non-empty `Accept` that matched no supported range (and no wildcard) is
+    // unsatisfiable → 406, exactly as Oxigraph does. `q=0` on a matched type counts as a
+    // rejection, not a match, so `Accept: application/sparql-results+json;q=0` is also a 406.
+    best.map(|(f, _, _)| f).ok_or(NotAcceptable)
 }
 
 #[cfg(test)]
@@ -206,6 +255,85 @@ mod tests {
     #[test]
     fn exact_beats_wildcard() {
         assert_eq!(negotiate(Some("text/csv, */*")), Format::Csv);
+    }
+
+    // [OPUS-4.8] sq-406acc: the Oxigraph-parity strict negotiator. An ABSENT / empty / `*/*`
+    // Accept keeps the JSON default (Ok); a PRESENT-but-unsatisfiable Accept is `NotAcceptable`
+    // (the HTTP layer maps it to 406), instead of the lenient `negotiate`'s JSON fallback.
+    #[test]
+    fn or_406_absent_or_wildcard_keeps_json_default() {
+        assert_eq!(negotiate_or_406(None), Ok(Format::Json));
+        assert_eq!(negotiate_or_406(Some("")), Ok(Format::Json));
+        assert_eq!(negotiate_or_406(Some("   ")), Ok(Format::Json));
+        assert_eq!(negotiate_or_406(Some("*/*")), Ok(Format::Json));
+    }
+
+    #[test]
+    fn or_406_supported_types_select_format() {
+        assert_eq!(
+            negotiate_or_406(Some("application/sparql-results+json")),
+            Ok(Format::Json)
+        );
+        assert_eq!(negotiate_or_406(Some("text/csv")), Ok(Format::Csv));
+        assert_eq!(negotiate_or_406(Some("text/tab-separated-values")), Ok(Format::Tsv));
+        // A supported type alongside an unsupported one still negotiates the supported one.
+        assert_eq!(negotiate_or_406(Some("image/png, text/csv")), Ok(Format::Csv));
+        // An explicit wildcard rescues an otherwise-unsupported list.
+        assert_eq!(negotiate_or_406(Some("image/png, */*")), Ok(Format::Json));
+    }
+
+    #[test]
+    fn or_406_present_unsatisfiable_is_not_acceptable() {
+        // A present Accept naming ONLY unsupported solution media types → 406 (Oxigraph parity).
+        assert_eq!(negotiate_or_406(Some("image/png")), Err(NotAcceptable));
+        assert_eq!(negotiate_or_406(Some("application/pdf")), Err(NotAcceptable));
+        assert_eq!(
+            negotiate_or_406(Some("text/turtle, application/rdf+xml")),
+            Err(NotAcceptable)
+        );
+        // `q=0` rejects the only otherwise-supported type, leaving nothing acceptable.
+        assert_eq!(
+            negotiate_or_406(Some("application/sparql-results+json;q=0")),
+            Err(NotAcceptable)
+        );
+    }
+
+    #[test]
+    fn negotiate_matches_or_406_modulo_default() {
+        // The lenient wrapper is exactly `_or_406` with the error collapsed to the JSON default.
+        for accept in [
+            None,
+            Some(""),
+            Some("*/*"),
+            Some("text/csv"),
+            Some("image/png"),
+            Some("application/sparql-results+json;q=0"),
+        ] {
+            assert_eq!(negotiate(accept), negotiate_or_406(accept).unwrap_or(Format::Json));
+        }
+    }
+
+    // [OPUS-4.8] sq-406acc: the graph (CONSTRUCT/DESCRIBE) analogue.
+    #[test]
+    fn graph_or_406_absent_or_wildcard_keeps_ntriples_default() {
+        assert_eq!(negotiate_graph_or_406(None), Ok(GraphFormat::NTriples));
+        assert_eq!(negotiate_graph_or_406(Some("")), Ok(GraphFormat::NTriples));
+        assert_eq!(negotiate_graph_or_406(Some("*/*")), Ok(GraphFormat::NTriples));
+    }
+
+    #[test]
+    fn graph_or_406_supported_and_unsatisfiable() {
+        assert_eq!(negotiate_graph_or_406(Some("text/turtle")), Ok(GraphFormat::Turtle));
+        assert_eq!(
+            negotiate_graph_or_406(Some("application/n-triples")),
+            Ok(GraphFormat::NTriples)
+        );
+        // A SELECT/ASK result media type is NOT an RDF graph type → 406 for a graph query.
+        assert_eq!(
+            negotiate_graph_or_406(Some("text/csv")),
+            Err(NotAcceptable)
+        );
+        assert_eq!(negotiate_graph_or_406(Some("image/png")), Err(NotAcceptable));
     }
 
     #[test]

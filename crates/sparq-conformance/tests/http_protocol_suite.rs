@@ -19,10 +19,12 @@
 //!
 //! `HTTP_PROTOCOL_FLOOR` is the MEASURED count of PASS assertions, NOT an aspirational target;
 //! MIRRORED in `scoreboard::SUITES` and read textually by `tests/scoreboard_floors.rs`. It may
-//! only RISE. The protocol features sparq does NOT implement (406 on an unsatisfiable Accept —
-//! it falls back to JSON; an ASK boolean in CSV/TSV — it falls back to a JSON boolean) are
-//! recorded as DOCUMENTED DIVERGENCES and are NOT summed into the floor, so a documented gap can
-//! never inflate the conformance number; a genuine FAILURE always fails the gate.
+//! only RISE. [OPUS-4.8] sq-406acc: a present-but-unsatisfiable `Accept` now genuinely returns
+//! 406 (Oxigraph parity) — a PASS, raising the floor 20→21. The remaining documented divergences
+//! (an absent / `*/*` Accept defaults to JSON per the W3C-permitted default; an ASK boolean in
+//! CSV/TSV falls back to a JSON boolean) are recorded as DOCUMENTED DIVERGENCES and are NOT summed
+//! into the floor, so a documented gap can never inflate the conformance number; a genuine FAILURE
+//! always fails the gate.
 //!
 //! ## Feature gating (both states)
 //!
@@ -51,8 +53,10 @@ mod gated {
     /// scoreboard (`scoreboard::SUITES`) and read textually by the guard test
     /// `tests/scoreboard_floors.rs`. It may only RISE — never lower it. This is the ACTUAL
     /// current pass count, not an aspirational target. Documented protocol DIVERGENCES (e.g.
-    /// sparq's 406-less Accept fallback) are reported separately and NOT counted here.
-    pub const HTTP_PROTOCOL_FLOOR: usize = 20;
+    /// sparq's absent-Accept JSON default) are reported separately and NOT counted here.
+    /// [OPUS-4.8] sq-406acc: raised 20→21 when the present-but-unsatisfiable-Accept 406 (Oxigraph
+    /// parity, w3c/sparql-protocol#40) flipped from a documented divergence to a genuine PASS.
+    pub const HTTP_PROTOCOL_FLOOR: usize = 21;
 
     #[test]
     fn http_protocol_ratchet() {

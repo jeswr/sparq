@@ -9,8 +9,9 @@
 //!   * OR the `query=` parameter of an `application/x-www-form-urlencoded` body;
 //!   * `default-graph-uri` / `named-graph-uri` come from the URL query string;
 //!   * Accept negotiates SRJ / SRX / CSV / TSV (SELECT/ASK) and RDF (CONSTRUCT/DESCRIBE),
-//!     reusing the SAME negotiation as GET/POST (sparq defaults unsatisfiable Accepts to JSON
-//!     rather than 406 — a documented sparq-vs-Oxigraph difference, see the relevant test);
+//!     reusing the SAME negotiation as GET/POST. A PRESENT-but-unsatisfiable Accept (naming no
+//!     supported result format and no wildcard) is `406 Not Acceptable`, matching Oxigraph
+//!     ([OPUS-4.8] sq-406acc); an absent / empty / `*/*` Accept still defaults to JSON;
 //!   * an `update=` form field is a 400 and `application/sparql-update` is a 415 (query-only).
 //!
 //! [OPUS-4.8] Gate the whole suite on the `server` feature (it spins the real axum server
@@ -224,13 +225,12 @@ async fn query_method_construct_rdf() {
     assert!(body.contains("<http://ex/years>"), "got {body}");
 }
 
-/// An Accept naming only unsupported solution media types falls back to SPARQL-results JSON,
-/// matching sparq's house negotiation for GET/POST (`negotiate::defaults_to_json`): sparq
-/// defaults rather than 406. NB this is a documented sparq-vs-Oxigraph negotiation difference
-/// (Oxigraph 406s an unsatisfiable Accept); the QUERY input path reuses the SAME negotiation
-/// as GET/POST, so changing it is out of scope for this bead (it would alter GET/POST too).
+/// [OPUS-4.8] sq-406acc: an Accept naming only unsupported solution media types (and no
+/// wildcard) is now `406 Not Acceptable`, matching Oxigraph (w3c/sparql-protocol#40) instead of
+/// the previous silent JSON fallback. The QUERY input path reuses the SAME negotiation as
+/// GET/POST, so this stricter behaviour is consistent across all three query input paths.
 #[tokio::test]
-async fn query_method_unsupported_accept_falls_back_to_json() {
+async fn query_method_unsupported_accept_is_406() {
     let base = spawn().await;
     let resp = client()
         .request(query_method(), format!("{base}/sparql"))
@@ -240,7 +240,38 @@ async fn query_method_unsupported_accept_falls_back_to_json() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 406, "present-but-unsatisfiable Accept → 406");
+}
+
+/// [OPUS-4.8] sq-406acc: the load-bearing converse — an ABSENT Accept (and `*/*`) still returns
+/// the SPARQL-results JSON default via QUERY, NOT a 406. The W3C SPARQL Protocol permits a
+/// default representation when Accept is absent, so the strictness change must not regress this.
+#[tokio::test]
+async fn query_method_absent_or_wildcard_accept_defaults_to_json() {
+    let base = spawn().await;
+    // No Accept header at all → JSON default, 200.
+    let resp = client()
+        .request(query_method(), format!("{base}/sparql"))
+        .header("content-type", "application/sparql-query")
+        .body("SELECT ?s WHERE { ?s <http://ex/age> ?a }")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "absent Accept → JSON default, not 406");
+    assert_eq!(
+        resp.headers()["content-type"],
+        "application/sparql-results+json"
+    );
+    // `Accept: */*` → JSON default, 200 (a wildcard is satisfiable).
+    let resp = client()
+        .request(query_method(), format!("{base}/sparql"))
+        .header("content-type", "application/sparql-query")
+        .header("accept", "*/*")
+        .body("SELECT ?s WHERE { ?s <http://ex/age> ?a }")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "*/* Accept → JSON default, not 406");
     assert_eq!(
         resp.headers()["content-type"],
         "application/sparql-results+json"

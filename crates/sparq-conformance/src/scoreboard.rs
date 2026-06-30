@@ -171,12 +171,13 @@ pub struct Suite {
 ///   a REAL in-process loopback endpoint — the sq-ushvx harness — and driving the
 ///   federated query end-to-end through the engine's REAL ureq transport; a
 ///   variable SERVICE endpoint + a nested non-SILENT SERVICE are documented Skips).
-/// * SPARQL 1.1 Protocol (HTTP) 20 — `sparq-conformance`
-///   `tests/http_protocol_suite.rs` `HTTP_PROTOCOL_FLOOR = 20` (sq-jaj38; opt-in
+/// * SPARQL 1.1 Protocol (HTTP) 21 — `sparq-conformance`
+///   `tests/http_protocol_suite.rs` `HTTP_PROTOCOL_FLOOR = 21` (sq-jaj38; opt-in
 ///   `http-protocol` feature; RAW HTTP requests at the in-process loopback server
 ///   exercising the SPARQL 1.1 Protocol contract — GET/POST query+update, the QUERY
-///   method, dataset overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/415; the
-///   406-less Accept fallback + ASK-in-CSV are documented divergences, NOT summed in).
+///   method, dataset overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/406/415; the
+///   present-but-unsatisfiable Accept now 406 (Oxigraph parity, sq-406acc); the
+///   absent/`*/*` Accept JSON default + ASK-in-CSV are documented divergences, NOT summed in).
 /// * SPARQL 1.1 Service Description + Graph Store Protocol 39 — `sparq-conformance`
 ///   `tests/sd_gsp_suite.rs` `SD_GSP_FLOOR = 39` (sq-1uuxz; opt-in
 ///   `federation-descriptors` feature; the `GET /sparql` (no query) Service-Description
@@ -596,12 +597,13 @@ pub const SUITES: &[Suite] = &[
     // status code, the response Content-Type and the payload shape: query via GET /
     // POST-urlencoded / POST-direct, the HTTP QUERY method (#1304), update via POST, the
     // default-graph-uri / named-graph-uri dataset overrides, result-format content negotiation
-    // (SRJ / SRX / CSV / TSV) and the 200/400/405/415 status codes. The floor is the MEASURED
-    // PASS count; documented protocol divergences (sparq's 406-less Accept fallback; an ASK
-    // boolean in CSV/TSV falling back to JSON) are reported separately and NOT summed into it,
-    // so a documented gap can never inflate the conformance number — an honest W3C-Protocol
-    // claim, scoped to what the server genuinely satisfies. Floor kept in lock-step by
-    // `tests/scoreboard_floors.rs`.
+    // (SRJ / SRX / CSV / TSV), the present-but-unsatisfiable Accept → 406 (Oxigraph parity,
+    // sq-406acc) and the 200/400/405/406/415 status codes. The floor is the MEASURED PASS count;
+    // documented protocol divergences (an absent/*/* Accept defaults to JSON per the W3C-permitted
+    // default representation; an ASK boolean in CSV/TSV falling back to JSON) are reported
+    // separately and NOT summed into it, so a documented gap can never inflate the conformance
+    // number — an honest W3C-Protocol claim, scoped to what the server genuinely satisfies. Floor
+    // kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C SPARQL 1.1 Protocol (HTTP)",
         family: "W3C SPARQL",
@@ -611,11 +613,12 @@ pub const SUITES: &[Suite] = &[
             feature: "http-protocol",
         },
         ci_job: "service-federation-conformance",
-        ratchet_floor: 20,
+        ratchet_floor: 21,
         floor_basis: "pass",
         note: "SPARQL 1.1 Protocol operations (GET/POST query+update, the QUERY method, \
-               dataset overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/415) over RAW \
-               HTTP against the in-process loopback server; 406-less Accept fallback + \
+               dataset overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/406/415) over RAW \
+               HTTP against the in-process loopback server; a present-but-unsatisfiable Accept \
+               now returns 406 (Oxigraph parity, sq-406acc); the absent/*/* Accept JSON default + \
                ASK-in-CSV are documented divergences, NOT summed into the floor",
     },
     // [OPUS-4.8] sq-1uuxz (epic sq-my8wd) — the SPARQL 1.1 SERVICE-DESCRIPTION + GRAPH-STORE
