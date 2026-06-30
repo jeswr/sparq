@@ -1645,7 +1645,9 @@ jobs:
             exit 1
           fi
           PASS=$(grep -E '^TOTAL http-protocol ' http-protocol-conformance.out | awk '{print $3}' | head -1)
-          FLOOR=20
+          # [OPUS-4.8] sq-406acc: raised 20→21 when the present-but-unsatisfiable Accept 406
+          # (Oxigraph parity, w3c/sparql-protocol#40) flipped from a divergence to a genuine PASS.
+          FLOOR=21
           echo "SPARQL 1.1 Protocol (HTTP) pass: ${PASS:-unknown} (floor: $FLOOR)"
           [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::SPARQL-Protocol lane regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
       # [OPUS-4.8] sq-1uuxz (epic sq-my8wd) — the SPARQL 1.1 SERVICE-DESCRIPTION + GRAPH-STORE

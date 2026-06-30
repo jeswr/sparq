@@ -121,7 +121,8 @@ service = ["service-loopback"]
 # and the runner compiles to a single self-SKIP `#[test]`, so the bare `cargo test -p
 # sparq-conformance` (and the default `--workspace` shards) link none of it — the lean opt-in
 # posture. The pinned `HTTP_PROTOCOL_FLOOR` is the MEASURED PASS count; documented protocol
-# divergences (e.g. sparq's 406-less Accept fallback) are reported separately, NEVER summed in.
+# divergences (e.g. an absent / */* Accept defaulting to JSON — the W3C-permitted default; a
+# present-but-unsatisfiable Accept now 406, sq-406acc) are reported separately, NEVER summed in.
 http-protocol = ["service-loopback"]
 
 # [OPUS-4.8] sq-1uuxz (epic sq-my8wd) — the SPARQL 1.1 **Service-Description** + **Graph-Store

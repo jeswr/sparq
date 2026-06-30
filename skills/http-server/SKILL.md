@@ -214,8 +214,11 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   into the axum endpoint and the canonical perf-validation are follow-ups (the perf
   targets need a canonical host).
 - Serializer/negotiation helpers (always compiled, no `server` feature): module
-  `sparq_server::negotiate` — `fn negotiate(accept: Option<&str>) -> Format`,
-  `fn negotiate_graph(accept: Option<&str>) -> GraphFormat`; module
+  `sparq_server::negotiate` — `fn negotiate(accept: Option<&str>) -> Format` (lenient, always
+  yields a format), `fn negotiate_or_406(accept: Option<&str>) -> Result<Format, NotAcceptable>`
+  (Oxigraph-parity strict — the query path uses this; a present-but-unsatisfiable `Accept` is
+  `Err(NotAcceptable)` → 406), `fn negotiate_graph(accept: Option<&str>) -> GraphFormat` and its
+  strict sibling `fn negotiate_graph_or_406(...) -> Result<GraphFormat, NotAcceptable>`; module
   `sparq_server::exec` — `fn prepare(&str) -> Result<Prepared, PrepareError>` and
   `fn prepare_with_dataset(&str, &DatasetOverride) -> Result<Prepared, PrepareError>` (applies the
   SPARQL-Protocol `default-graph-uri`/`named-graph-uri` override, sq-z33x),
@@ -254,7 +257,11 @@ re-export of the runtime-agnostic concurrency wrapper. No axum/tokio, no HTTP.
 
 **1. Query forms and result negotiation.** Default result media is SPARQL-JSON. Set
 `Accept` to choose (q-value aware, defaults to JSON for SELECT/ASK, N-Triples for
-CONSTRUCT/DESCRIBE):
+CONSTRUCT/DESCRIBE). <!-- [OPUS-4.8] sq-406acc --> An **absent / empty / `*/*` `Accept` gets
+that default**; a present `Accept` that names **only unsupported media types and no wildcard is
+`406 Not Acceptable`** (Oxigraph parity, w3c/sparql-protocol#40) — sparq no longer silently
+falls back to JSON in that case (the EXPLAIN `Accept: text/x-sparq-explain` short-circuits this
+and the Graph-Store-Protocol read path keeps its lenient default):
 
 | Query form | Accept | Content-Type returned |
 | --- | --- | --- |
@@ -320,12 +327,15 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
 > not touch the engine's egress allowlist). It ratchets a MEASURED PASS floor over: query via
 > GET / POST-urlencoded / POST-direct, the `QUERY` method, update via POST, the
 > `default-graph-uri` / `named-graph-uri` overrides, SELECT/ASK negotiation (SRJ / SRX / CSV /
-> TSV), and the **200 / 400 / 405 (with `Allow`) / 415** status codes. **Honest boundary:** two
-> behaviours are DOCUMENTED DIVERGENCES (reported separately, NOT summed into the floor, so they
-> never inflate the conformance number): an **unsatisfiable `Accept` on SELECT/ASK falls back to
-> SPARQL-results JSON, NOT a 406** (a W3C-permitted default representation — the documented
-> sparq-vs-Oxigraph difference), and an **ASK with `Accept: text/csv` falls back to a JSON
-> boolean** (CSV/TSV have no boolean serialisation). Run it with
+> TSV), a **present-but-unsatisfiable `Accept` → 406 Not Acceptable** (Oxigraph parity,
+> w3c/sparql-protocol#40 — <!-- [OPUS-4.8] sq-406acc --> formerly a divergence, now a genuine
+> PASS that raised the floor 20→21), and the **200 / 400 / 405 (with `Allow`) / 406 / 415**
+> status codes. **Honest boundary:** two behaviours remain DOCUMENTED DIVERGENCES (reported
+> separately, NOT summed into the floor, so they never inflate the conformance number): an
+> **absent / `*/*` `Accept` defaults to SPARQL-results JSON** (a W3C-permitted default
+> representation — only a *present-but-unsatisfiable* `Accept` is a 406), and an **ASK with
+> `Accept: text/csv` falls back to a JSON boolean** (CSV/TSV have no boolean serialisation). Run
+> it with
 > `cargo test -p sparq-conformance --features http-protocol --test http_protocol_suite`; the row
 > is in the central scoreboard (`W3C SPARQL 1.1 Protocol (HTTP)`). [OPUS-4.8]
 

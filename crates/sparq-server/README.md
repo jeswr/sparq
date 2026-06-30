@@ -39,8 +39,8 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
 - **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE and
   GSP read in N-Triples / prefix-Turtle / RDF-XML / **JSON-LD** (`application/ld+json` — the
   `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); streamed
-  SELECT bodies. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style
-  **WebSocket + SSE** live SELECT diffs.
+  SELECT bodies; a present-but-unsatisfiable `Accept` is **406** (Oxigraph parity), absent/`*/*`
+  keeps the default. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, **WebSocket + SSE**.
 - **Durable persistence** — `--persist <DIR>` makes the on-disk index the source of truth (off by
   default, in-memory). See "Durable persistence".
 - **Authentication** — optional `--auth-token <TOKEN>` Bearer write gate (constant-time; mirrors

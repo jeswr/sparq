@@ -55,7 +55,9 @@ use crate::exec::{
     apply_update_dataset, prepare_with_dataset, DatasetOverride, PrepareError, QueryForm,
     UpdateDatasetError, UsingOverride,
 };
-use crate::negotiate::{negotiate, negotiate_graph, Format, GraphFormat};
+use crate::negotiate::{
+    negotiate_graph, negotiate_graph_or_406, negotiate_or_406, Format, GraphFormat,
+};
 use crate::results;
 
 // ---------------------------------------------------------------------------
@@ -4963,7 +4965,6 @@ async fn run_query_pinned(
         return await_worker(task, &config).await;
     }
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
-    let fmt = negotiate(accept);
     let config = state.config.clone();
     // [OPUS-4.8] sq-9xoh: the per-request SERVICE egress allowlist for this read (the static
     // `service_allow` unless a per-request override hook is installed). Resolved here while the
@@ -4972,6 +4973,14 @@ async fn run_query_pinned(
 
     match prepared.form {
         QueryForm::Select | QueryForm::Ask => {
+            // [OPUS-4.8] sq-406acc: Oxigraph-parity content negotiation — a PRESENT-but-unsatisfiable
+            // `Accept` (naming no supported SELECT/ASK result format and no wildcard) is `406 Not
+            // Acceptable` rather than the old silent JSON fallback. An absent / empty / `*/*` Accept
+            // still defaults to SPARQL-results JSON (W3C-permitted default representation).
+            let fmt = match negotiate_or_406(accept) {
+                Ok(f) => f,
+                Err(_) => return not_acceptable_response(head_only),
+            };
             let is_ask = prepared.form == QueryForm::Ask;
             let select = prepared.runnable;
             let budget = make_budget(&config, !is_ask);
@@ -5006,8 +5015,14 @@ async fn run_query_pinned(
         // The engine's row budget applies to the WHERE-pattern solutions, the deadline
         // to the whole evaluation — same guard semantics as SELECT.
         QueryForm::Construct | QueryForm::Describe => {
+            // [OPUS-4.8] sq-406acc: same Oxigraph-parity strictness for the RDF-graph result — a
+            // PRESENT-but-unsatisfiable `Accept` (no supported RDF media type and no wildcard) is
+            // 406; absent / empty / `*/*` keeps the N-Triples default.
+            let gfmt = match negotiate_graph_or_406(accept) {
+                Ok(f) => f,
+                Err(_) => return not_acceptable_response(head_only),
+            };
             let query = prepared.runnable;
-            let gfmt = negotiate_graph(accept);
             let budget = make_budget(&config, true);
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
@@ -6507,6 +6522,26 @@ async fn json_error_bodies(resp: Response) -> Response {
 
 fn bad_request(msg: &str) -> Response {
     json_error(StatusCode::BAD_REQUEST, msg)
+}
+
+/// [OPUS-4.8] sq-406acc: a `406 Not Acceptable` for a present-but-unsatisfiable `Accept` header
+/// on a SPARQL query — the `Accept` named no result/RDF media type the server can produce and no
+/// wildcard, matching Oxigraph (w3c/sparql-protocol#40). The body is the structured
+/// `{"error":"..."}` envelope the rest of the surface uses (so a programmatic client need not
+/// scrape prose); `head_only` mirrors the GET headers with an empty body.
+fn not_acceptable_response(head_only: bool) -> Response {
+    let resp = json_error(
+        StatusCode::NOT_ACCEPTABLE,
+        "no acceptable result format for the request Accept header",
+    );
+    if head_only {
+        // Preserve the status + headers but drop the body, mirroring the HEAD contract used by
+        // `text_response`. `json_error` always builds a valid header set, so this never panics.
+        let (parts, _body) = resp.into_parts();
+        Response::from_parts(parts, axum::body::Body::empty())
+    } else {
+        resp
+    }
 }
 
 // ---------------------------------------------------------------------------

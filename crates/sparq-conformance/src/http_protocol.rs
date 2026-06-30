@@ -31,22 +31,23 @@
 //!
 //! This is a **W3C SPARQL Protocol** conformance lane (family `W3C SPARQL`), distinct from the
 //! experimental `sparq extension` ratchets. Each assertion that PASSES reflects a behaviour the
-//! server genuinely implements end-to-end over real HTTP. The protocol features the server does
-//! **NOT** implement are recorded as DOCUMENTED DIVERGENCES (an [`Outcome::Divergence`]), never
-//! a faked pass:
+//! server genuinely implements end-to-end over real HTTP. [OPUS-4.8] sq-406acc: the server now
+//! returns **406 Not Acceptable** for a present-but-unsatisfiable `Accept` (a SELECT/ASK request
+//! whose `Accept` names no supported result format and no wildcard), matching Oxigraph
+//! (w3c/sparql-protocol#40) — previously the documented sparq-vs-Oxigraph fallback divergence,
+//! now a genuine PASS that raises the floor 20→21. The protocol features the server does **NOT**
+//! implement are recorded as DOCUMENTED DIVERGENCES (an [`Outcome::Divergence`]), never a faked
+//! pass:
 //!
-//! * **406 Not Acceptable for an unsatisfiable `Accept` (SELECT/ASK)** — sparq's content
-//!   negotiation deliberately FALLS BACK to SPARQL-results JSON rather than returning 406 (the
-//!   documented sparq-vs-Oxigraph negotiation difference recorded in
-//!   `server/tests/query_method.rs::query_method_unsupported_accept_falls_back_to_json`). The
-//!   W3C Protocol permits a server to choose a default representation, so this is a permitted
-//!   divergence, not a violation — but it means a 406 is NOT a genuine status the SELECT/ASK
-//!   path emits, so this lane records it as a divergence and asserts the FALLBACK behaviour
-//!   (200 + JSON) honestly, rather than asserting a 406 the server never sends.
 //! * **ASK boolean in CSV/TSV** — CSV and TSV have no boolean serialisation, so an ASK with
 //!   `Accept: text/csv` correctly falls back to a JSON boolean (`ask_content_type`); the lane
 //!   asserts that genuine fallback (a divergence from a naive "every Accept yields its own
 //!   media type" expectation), not a CSV ASK body the server never produces.
+//! * **absent / `*/*` Accept defaults to SRJ** — the W3C Protocol permits a default
+//!   representation when `Accept` is absent (or a wildcard), so sparq keeps serving
+//!   SPARQL-results JSON in that case rather than 406; the lane records this default as a
+//!   divergence (asserting the converse of the 406 strictness) so the floor counts only the one
+//!   genuine 406 pass.
 //!
 //! The FLOOR (`HTTP_PROTOCOL_FLOOR`, in the gating runner `tests/http_protocol_suite.rs`) is
 //! the MEASURED count of PASS assertions — divergences are reported separately and are NOT
@@ -248,9 +249,10 @@ pub fn parse_response(raw: &[u8]) -> Result<HttpResponse, String> {
 pub enum Outcome {
     /// The server genuinely satisfied the W3C-Protocol behaviour this assertion checks.
     Pass,
-    /// A documented divergence: a behaviour the server deliberately does NOT implement (e.g.
-    /// 406 on an unsatisfiable Accept — it falls back to JSON instead). Reported separately,
-    /// NEVER summed into the floor. The string is the human-readable note.
+    /// A documented divergence: a permitted behaviour distinct from a naive expectation (e.g. an
+    /// absent / `*/*` Accept defaulting to SPARQL-results JSON rather than 406 — the W3C-permitted
+    /// default representation). Reported separately, NEVER summed into the floor. The string is
+    /// the human-readable note.
     Divergence(String),
     /// A genuine failure: the server's response contradicts what it is supposed to do. Always
     /// fails the gate.
@@ -577,32 +579,63 @@ pub fn run_protocol_suite() -> SuiteReport {
         &HttpRequest::new("DELETE", "/sparql"),
     );
 
-    // --- Documented divergence: 406 on an unsatisfiable Accept (SELECT) ---
-    // sparq FALLS BACK to SRJ rather than 406 (the documented sparq-vs-Oxigraph difference).
-    // We assert the genuine fallback and record it as a DIVERGENCE, never a faked 406 pass.
+    // --- 406 on a present-but-unsatisfiable Accept (SELECT) — now a genuine PASS ---
+    // [OPUS-4.8] sq-406acc: sparq now returns 406 Not Acceptable when an `Accept` header is
+    // present and names no supported SELECT/ASK result format (and no wildcard), matching
+    // Oxigraph (w3c/sparql-protocol#40). This was the documented sparq-vs-Oxigraph divergence;
+    // closing it raises HTTP_PROTOCOL_FLOOR 20→21 honestly (the server genuinely emits 406).
     {
-        let label = "unsatisfiable Accept (image/png) on SELECT falls back to SRJ, not 406 \
-                     (documented sparq-vs-Oxigraph divergence)";
+        let label = "unsatisfiable Accept (image/png) on SELECT → 406 Not Acceptable \
+                     (Oxigraph parity, sq-406acc)";
         match send(addr, &select_get(&urlenc_select, "image/png")) {
-            Ok(resp) if resp.status == 200 && content_type_is(resp.content_type(), "application/sparql-results+json") => {
-                report.record(
-                    label,
-                    Outcome::Divergence(
-                        "sparq returns 200 + SPARQL-results JSON for an unsatisfiable Accept; \
-                         it does not emit 406 (W3C-permitted default representation)"
-                            .to_string(),
-                    ),
-                );
-            }
+            Ok(resp) if resp.status == 406 => report.record(label, Outcome::Pass),
             Ok(resp) => report.record(
                 label,
                 Outcome::Fail(format!(
-                    "expected the documented 200+SRJ fallback, got status {} ct {:?}",
+                    "expected 406 for a present-but-unsatisfiable Accept, got status {} ct {:?}",
                     resp.status,
                     resp.content_type()
                 )),
             ),
             Err(e) => report.record(label, Outcome::Fail(e)),
+        }
+    }
+
+    // --- The converse: an absent / `*/*` Accept still defaults to SRJ (NOT a 406) ---
+    // [OPUS-4.8] sq-406acc: the strictness above must NOT regress the W3C-permitted default
+    // representation when `Accept` is absent or a wildcard. This is the load-bearing
+    // answer-safety check for the change; recorded as a DIVERGENCE so the floor stays at the
+    // honest single +1 (the 406 pass) while still exercising the converse on every run.
+    {
+        let label = "absent / */* Accept on SELECT still defaults to SRJ, not 406 (sq-406acc)";
+        // No Accept header at all → JSON default.
+        let no_accept = HttpRequest::new("GET", &urlenc_select);
+        let wildcard = select_get(&urlenc_select, "*/*");
+        let absent_ok = matches!(
+            send(addr, &no_accept),
+            Ok(ref r) if r.status == 200 && content_type_is(r.content_type(), "application/sparql-results+json")
+        );
+        let wildcard_ok = matches!(
+            send(addr, &wildcard),
+            Ok(ref r) if r.status == 200 && content_type_is(r.content_type(), "application/sparql-results+json")
+        );
+        if absent_ok && wildcard_ok {
+            report.record(
+                label,
+                Outcome::Divergence(
+                    "absent / */* Accept defaults to SPARQL-results JSON (W3C-permitted default \
+                     representation); only a present-but-unsatisfiable Accept is 406"
+                        .to_string(),
+                ),
+            );
+        } else {
+            report.record(
+                label,
+                Outcome::Fail(format!(
+                    "absent/*/* Accept must default to 200+SRJ (absent_ok={}, wildcard_ok={})",
+                    absent_ok, wildcard_ok
+                )),
+            );
         }
     }
 
