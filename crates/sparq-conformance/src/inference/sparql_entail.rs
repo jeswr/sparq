@@ -791,6 +791,357 @@ fn ql_eval_matches_oracle(
     crate::compare::rows_equal(&exp, &act, false)
 }
 
+// ===========================================================================
+// [OPUS-4.8] sq-qo1a9 (epic sq-pbz04) — the GRADUATED DL-Lite_R CERTAIN-ANSWER
+// oracle. This is the FORMAL OWL 2 QL conformance arm that earns a pinned floor.
+//
+// The broad `pr:QL` `sparql11/entailment` set (run by `run_ql_experimental_arm`
+// above) is NOT the formal OWL2-QL / DL-Lite_R suite: it mixes intensional /
+// non-DL-Lite certain-answer cases the sound query-rewriting fragment cannot
+// answer (so it stays EXPERIMENTAL / OutOfScope, with its 1 documented
+// divergence). The FORMAL suite is the HAND-DERIVED DL-Lite_R oracle from
+// sq-g19x0 — every case is a conjunctive query within sound rewriting, with a
+// hand-checked EXACT certain-answer set. On that suite the rewrite is sound AND
+// complete case by case, so it graduates.
+//
+// What "matches the oracle on a case" MEANS here (the load-bearing definition):
+// given the case's (TBox, ABox, CQ), `rewrite_production` produces a UCQ that,
+// evaluated over the UNMODIFIED ABox through the REAL engine, returns EXACTLY the
+// hand-derived certain-answer set — no missing answer (completeness) and no extra
+// answer (soundness). Each case's certain answers are derived by hand from the
+// DL-Lite_R semantics (the same derivations the rewrite-shape oracle in
+// `sparq-reason-ql/tests/oracle.rs` re-checks), so the comparison is against an
+// INDEPENDENT ground truth, not the rewriter's own output.
+//
+// HONEST SCOPE: this is a faithful DL-Lite_R certain-answer oracle, NOT the full
+// normative OWL 2 QL conformance suite (there is no runnable W3C answer-comparison
+// QL suite — the W3C QL material is structural). So the graduated ratchet is a
+// sparq EXTENSION row (like RIF-Core / RSP / BM25), tallied SEPARATELY and NEVER
+// folded into the standards-conformance total. The pinned floor is exactly the
+// count of cases on which the rewrite is sound AND complete.
+// ===========================================================================
+
+/// One hand-derived DL-Lite_R certain-answer oracle case: a TBox + ABox + a
+/// conjunctive `SELECT` query, with the EXACT certain-answer set derived by hand
+/// from the DL-Lite_R semantics. The runner asserts `rewrite_production`'s UCQ,
+/// evaluated over the UNMODIFIED ABox, returns exactly `certain`.
+#[cfg(feature = "ql-experimental")]
+pub struct QlOracleCase {
+    /// Short stable id (for the report + the per-case outcome).
+    pub id: &'static str,
+    /// The DL-Lite_R TBox, as Turtle (prefixes are prepended by the runner).
+    pub tbox: &'static str,
+    /// The ABox (the unmodified data the rewrite is evaluated over), as Turtle.
+    pub abox: &'static str,
+    /// The conjunctive `SELECT` query (a single answer variable `?x`, or two
+    /// `?x ?y` — the runner reads the projected variables from the parse).
+    pub query: &'static str,
+    /// The EXACT certain answers, each a row of local-name bindings aligned to the
+    /// query's projected variables in order (e.g. `&[&["alice"]]` for one row
+    /// binding `?x` to `:alice`). The empty slice means "no certain answers".
+    /// Local names resolve against the `http://ex/` prefix.
+    pub certain: &'static [&'static [&'static str]],
+}
+
+/// The result of running ONE [`QlOracleCase`] through the graduated arm.
+#[cfg(feature = "ql-experimental")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QlOracleOutcome {
+    /// The rewrite's UCQ, evaluated over the unmodified ABox, returned EXACTLY the
+    /// hand-derived certain answers — sound AND complete on this case. This is the
+    /// only outcome that counts toward the pinned floor.
+    SoundAndComplete,
+    /// The rewrite produced answers that differ from the certain-answer oracle (a
+    /// missing or an extra answer). NEVER counted into the floor — a divergence is
+    /// an honest gap (or a bug), reported with the mismatch.
+    Diverged(String),
+    /// The rewriter ABSTAINED (the fail-closed CQ-shape / non-DL-Lite gate). A
+    /// formal-suite case is constructed to be within sound rewriting, so an abstain
+    /// here is reported (never counted as a pass), but means the case is outside the
+    /// rewriter's current fragment — kept honest, not summed into the floor.
+    Abstained(String),
+    /// The harness could not set the case up (parse error). Never a pass.
+    Inconclusive(String),
+}
+
+/// The HAND-DERIVED DL-Lite_R certain-answer oracle corpus (sq-qo1a9). Each case
+/// is within the SOUND query-rewriting fragment of DL-Lite_R; the `certain` field
+/// is derived by hand from the DL-Lite_R semantics, INDEPENDENTLY of the rewriter.
+///
+/// The corpus exercises the DL-Lite_R rewriting axes the formal oracle proves:
+/// class subsumption (incl. a transitive chain), the existential domain/range
+/// inclusions (`∃R ⊑ A`, `∃R⁻ ⊑ A`), role inclusion, `owl:inverseOf`, the
+/// unqualified `∃R` super-class generator with its applicability condition (must
+/// NOT fire on a bound/projected filler), a two-distinguished-variable product
+/// (no over-minimisation), and the empty-TBox identity. Every certain-answer set
+/// is the set of bindings that hold in EVERY model of (TBox ∪ ABox).
+#[cfg(feature = "ql-experimental")]
+pub const QL_DLLITE_ORACLE: &[QlOracleCase] = &[
+    // C1 — class subsumption: Manager ⊑ Employee. A Manager is certainly an
+    // Employee, so { ?x a :Employee } over { :a a :Manager . :b a :Employee }
+    // certainly answers both :a and :b.
+    QlOracleCase {
+        id: "ql-class-subsumption",
+        tbox: ":Manager rdfs:subClassOf :Employee .",
+        abox: ":a a :Manager . :b a :Employee .",
+        query: "SELECT ?x WHERE { ?x a :Employee }",
+        certain: &[&["a"], &["b"]],
+    },
+    // C2 — transitive subclass chain: A ⊑ B ⊑ C. Any A or B is certainly a C.
+    QlOracleCase {
+        id: "ql-transitive-subclass",
+        tbox: ":A rdfs:subClassOf :B . :B rdfs:subClassOf :C .",
+        abox: ":a a :A . :b a :B . :c a :C . :d a :Other .",
+        query: "SELECT ?x WHERE { ?x a :C }",
+        certain: &[&["a"], &["b"], &["c"]],
+    },
+    // C3 — domain inclusion (∃worksFor ⊑ Employee): anyone who worksFor anything is
+    // certainly an Employee. { ?x a :Employee } answers :a (asserted) and :p (has a
+    // worksFor edge).
+    QlOracleCase {
+        id: "ql-domain-introduces-role",
+        tbox: ":worksFor rdfs:domain :Employee .",
+        abox: ":a a :Employee . :p :worksFor :acme .",
+        query: "SELECT ?x WHERE { ?x a :Employee }",
+        certain: &[&["a"], &["p"]],
+    },
+    // C4 — range inclusion (∃worksFor⁻ ⊑ Company): anything something worksFor is
+    // certainly a Company. :acme is the object of a worksFor edge.
+    QlOracleCase {
+        id: "ql-range-introduces-inverse-role",
+        tbox: ":worksFor rdfs:range :Company .",
+        abox: ":acme a :Company . :p :worksFor :globex .",
+        query: "SELECT ?y WHERE { ?y a :Company }",
+        certain: &[&["acme"], &["globex"]],
+    },
+    // C5 — role inclusion (manages ⊑ worksFor): a manages edge is certainly a
+    // worksFor edge. Two distinguished variables — the answer is the union of the
+    // asserted worksFor pairs and the manages pairs.
+    QlOracleCase {
+        id: "ql-role-inclusion",
+        tbox: ":manages rdfs:subPropertyOf :worksFor .",
+        abox: ":p :worksFor :acme . :q :manages :globex .",
+        query: "SELECT ?x ?y WHERE { ?x :worksFor ?y }",
+        certain: &[&["p", "acme"], &["q", "globex"]],
+    },
+    // C6 — owl:inverseOf (employs ≡ worksFor⁻) composed with a role inclusion
+    // (manages ⊑ employs). A :manages b ⇒ a employs b ⇒ b worksFor a. So
+    // { ?x :worksFor ?y } certainly answers the asserted worksFor pairs PLUS the
+    // inverse of every manages pair.
+    QlOracleCase {
+        id: "ql-inverse-of-role-chain",
+        tbox: ":employs owl:inverseOf :worksFor . :manages rdfs:subPropertyOf :employs .",
+        abox: ":p :worksFor :acme . :boss :manages :emp .",
+        query: "SELECT ?x ?y WHERE { ?x :worksFor ?y }",
+        certain: &[&["p", "acme"], &["emp", "boss"]],
+    },
+    // C7 — the unqualified ∃R super-class generator (Employee ⊑ ∃worksFor) FIRES on
+    // an UNBOUND (non-distinguished) filler. { ?x :worksFor ?y } with ?y not
+    // projected: anyone asserted Employee certainly has SOME worksFor witness, so
+    // :e (an Employee with no asserted edge) IS a certain answer, alongside :p (an
+    // asserted worksFor subject).
+    QlOracleCase {
+        id: "ql-exists-super-fires-unbound",
+        tbox: ":Employee rdfs:subClassOf [ owl:onProperty :worksFor ; owl:someValuesFrom owl:Thing ] .",
+        abox: ":e a :Employee . :p :worksFor :acme .",
+        query: "SELECT ?x WHERE { ?x :worksFor ?y }",
+        certain: &[&["e"], &["p"]],
+    },
+    // C8 — the APPLICABILITY CONDITION (the #1 unsoundness trap): the SAME
+    // Employee ⊑ ∃worksFor generator MUST NOT fire when the filler ?y is PROJECTED
+    // (bound). With ?y distinguished, { ?x :worksFor ?y } answers ONLY the asserted
+    // edges — :e (the witness-only Employee) is NOT a certain answer because its
+    // worksFor witness is anonymous (not a named binding for ?y).
+    QlOracleCase {
+        id: "ql-exists-super-blocked-bound",
+        tbox: ":Employee rdfs:subClassOf [ owl:onProperty :worksFor ; owl:someValuesFrom owl:Thing ] .",
+        abox: ":e a :Employee . :p :worksFor :acme .",
+        query: "SELECT ?x ?y WHERE { ?x :worksFor ?y }",
+        certain: &[&["p", "acme"]],
+    },
+    // C9 — two distinguished variables under A ⊑ B: { ?x a :B . ?y a :B } over an
+    // ABox with an A and a B. The certain answers are the full 2×2 product over the
+    // set { :a (an A, hence a B), :b (a B) } — the anti-over-minimisation case
+    // (minimisation must not collapse the disjuncts and lose a pair).
+    QlOracleCase {
+        id: "ql-two-var-product",
+        tbox: ":A rdfs:subClassOf :B .",
+        abox: ":a a :A . :b a :B .",
+        query: "SELECT ?x ?y WHERE { ?x a :B . ?y a :B }",
+        certain: &[&["a", "a"], &["a", "b"], &["b", "a"], &["b", "b"]],
+    },
+    // C10 — A∧C under A⊑B⊑C minimises to { A(?x) }: the conjunctive query
+    // { ?x a :A . ?x a :C } has the same certain answers as { ?x a :A } (A ⇒ C), so
+    // only the asserted/derivable A individuals answer. :a is an A; :c is only a C
+    // (not certainly an A), so it is NOT an answer.
+    QlOracleCase {
+        id: "ql-conjunction-minimises",
+        tbox: ":A rdfs:subClassOf :B . :B rdfs:subClassOf :C .",
+        abox: ":a a :A . :c a :C .",
+        query: "SELECT ?x WHERE { ?x a :A . ?x a :C }",
+        certain: &[&["a"]],
+    },
+    // C11 — empty TBox is the identity: no schema ⇒ the certain answers are exactly
+    // the asserted matches (a regression guard that the rewrite adds nothing).
+    QlOracleCase {
+        id: "ql-empty-tbox-identity",
+        tbox: "",
+        abox: ":a a :Employee . :b a :Manager .",
+        query: "SELECT ?x WHERE { ?x a :Employee }",
+        certain: &[&["a"]],
+    },
+];
+
+/// [OPUS-4.8] sq-qo1a9 — run the GRADUATED DL-Lite_R certain-answer oracle: for
+/// every [`QlOracleCase`], rewrite the CQ with `rewrite_production`, evaluate the
+/// UCQ over the UNMODIFIED ABox through the REAL engine, and compare to the
+/// hand-derived certain answers EXACTLY. Returns the per-case outcomes in corpus
+/// order. Pure (no fetched fixtures — the corpus is in-source), so it runs on any
+/// checkout. The caller (the ratchet test) counts `SoundAndComplete` outcomes as
+/// the pinned floor and FAILS on any divergence.
+#[cfg(feature = "ql-experimental")]
+pub fn run_ql_dllite_oracle() -> Vec<(&'static str, QlOracleOutcome)> {
+    QL_DLLITE_ORACLE
+        .iter()
+        .map(|case| (case.id, ql_oracle_one(case)))
+        .collect()
+}
+
+/// The `http://ex/` prefix the oracle corpus's local names resolve against.
+#[cfg(feature = "ql-experimental")]
+const QL_EX: &str = "http://ex/";
+
+/// Run ONE [`QlOracleCase`]: parse the TBox + ABox, rewrite the CQ, evaluate the
+/// UCQ over the unmodified ABox, compare to the hand-derived certain answers.
+#[cfg(feature = "ql-experimental")]
+fn ql_oracle_one(case: &QlOracleCase) -> QlOracleOutcome {
+    use crate::compare::Row;
+    use oxrdf::{NamedNode, Term};
+
+    // The Turtle prefix preamble shared by the TBox + ABox (and the query base).
+    const TTL_PRE: &str = "\
+@prefix : <http://ex/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+";
+    const Q_PRE: &str = "\
+PREFIX : <http://ex/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+";
+
+    // Parse the TBox triples (the schema the rewriter extracts DL-Lite_R axioms
+    // from). Positional `format!` args per the CodeQL `rust/unused-variable` guard.
+    let tbox_src = format!("{}{}", TTL_PRE, case.tbox);
+    let mut tbox: Vec<oxrdf::Triple> = Vec::new();
+    for t in oxttl::TurtleParser::new().for_slice(tbox_src.as_bytes()) {
+        match t {
+            Ok(tr) => tbox.push(tr),
+            Err(e) => return QlOracleOutcome::Inconclusive(format!("TBox parse: {}", e)),
+        }
+    }
+
+    // Parse + serialise the ABox as N-Triples for the engine (the UNMODIFIED data).
+    let abox_src = format!("{}{}", TTL_PRE, case.abox);
+    let mut nt = String::new();
+    for t in oxttl::TurtleParser::new().for_slice(abox_src.as_bytes()) {
+        match t {
+            Ok(tr) => nt.push_str(&format!("{} {} {} .\n", tr.subject, tr.predicate, tr.object)),
+            Err(e) => return QlOracleOutcome::Inconclusive(format!("ABox parse: {}", e)),
+        }
+    }
+
+    // Parse the conjunctive query and rewrite it (fail-closed: an abstain is
+    // reported, never a guessed pass).
+    let q_src = format!("{}{}", Q_PRE, case.query);
+    let query = match SparqlParser::new().parse_query(&q_src) {
+        Ok(q) => q,
+        Err(e) => return QlOracleOutcome::Inconclusive(format!("query parse: {}", e)),
+    };
+    let rewritten = match sparq_reason_ql::rewrite_production(&query, &tbox) {
+        Ok(r) => r,
+        Err(e) => return QlOracleOutcome::Abstained(e.to_string()),
+    };
+
+    // The projected variables, in order — defines the column alignment for both the
+    // expected certain answers and the engine's actual rows.
+    let proj: Vec<String> = match &rewritten.query {
+        spargebra::Query::Select { pattern, .. } => projected_vars(pattern),
+        _ => return QlOracleOutcome::Inconclusive("oracle case query is not SELECT".into()),
+    };
+
+    // Evaluate the rewritten UCQ over the unmodified ABox through the REAL engine.
+    let query_str = rewritten.query.to_string();
+    let graph = match sparq_core::Graph::load_dataset(&nt, "nquads") {
+        Ok(g) => g,
+        Err(e) => return QlOracleOutcome::Inconclusive(format!("load ABox: {}", e)),
+    };
+    let res = match sparq_engine::query(&graph, &query_str) {
+        Ok(r) => r,
+        Err(e) => return QlOracleOutcome::Inconclusive(format!("engine: {}", e)),
+    };
+    let actual_vars: Vec<String> = res.vars.iter().map(|v| v.as_str().to_string()).collect();
+
+    // Build the EXPECTED rows from the hand-derived certain answers (local names →
+    // `http://ex/<name>` IRIs), aligned to the projected variable order.
+    let exp: Vec<Row> = case
+        .certain
+        .iter()
+        .map(|binds| {
+            binds
+                .iter()
+                .map(|name| {
+                    Some(Term::NamedNode(NamedNode::new_unchecked(format!("{}{}", QL_EX, name))))
+                })
+                .collect::<Row>()
+        })
+        .collect();
+
+    // Align the engine's actual rows to the SAME projected-variable order.
+    let act: Vec<Row> = res
+        .rows
+        .iter()
+        .map(|r| {
+            proj.iter()
+                .map(|v| {
+                    actual_vars
+                        .iter()
+                        .position(|av| av == v)
+                        .and_then(|i| r.get(i).cloned().flatten())
+                })
+                .collect::<Row>()
+        })
+        .collect();
+
+    // EXACT multiset comparison: sound AND complete iff the actual rows equal the
+    // hand-derived certain answers (no missing, no extra).
+    match crate::compare::rows_equal(&exp, &act, false) {
+        Ok(true) => QlOracleOutcome::SoundAndComplete,
+        Ok(false) => QlOracleOutcome::Diverged(format!(
+            "expected {} certain row(s), engine returned {} row(s) over the rewritten UCQ",
+            exp.len(),
+            act.len()
+        )),
+        Err(e) => QlOracleOutcome::Inconclusive(format!("compare: {}", e)),
+    }
+}
+
+/// The projected variable names (in order) of a `SELECT` pattern — the answer
+/// columns the oracle aligns expected vs actual rows on. Peels the
+/// Project/Distinct/Reduced wrappers the rewrite re-wraps the UCQ in.
+#[cfg(feature = "ql-experimental")]
+fn projected_vars(p: &GraphPattern) -> Vec<String> {
+    match p {
+        GraphPattern::Project { variables, .. } => {
+            variables.iter().map(|v| v.as_str().to_string()).collect()
+        }
+        GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. } => projected_vars(inner),
+        _ => Vec::new(),
+    }
+}
+
 // [OPUS-4.8] sq-kuvu3 — DIRECT unit tests for the new public QL-arm surface (the
 // coverage-ratchet rule: one direct test per new public fn). These are hermetic
 // (no fetched fixtures) and assert the HONESTY INVARIANTS the arm must preserve.
@@ -863,5 +1214,75 @@ mod ql_tests {
                 assert!(reason.starts_with("QL experimental"), "reason: {reason}");
             }
         }
+    }
+
+    // [OPUS-4.8] sq-qo1a9 — DIRECT unit tests for the GRADUATED DL-Lite_R
+    // certain-answer oracle surface (the coverage-ratchet rule: one direct test
+    // per new public fn). Hermetic — the corpus is in-source, no fetched fixtures.
+    #[test]
+    fn dllite_oracle_is_sound_and_complete_on_every_formal_case() {
+        // The load-bearing graduation claim: on the FORMAL DL-Lite_R suite the
+        // rewrite is sound AND complete case by case — every case's rewritten UCQ,
+        // evaluated over the unmodified ABox, returns EXACTLY the hand-derived
+        // certain answers. ANY divergence/abstain/inconclusive must fail here.
+        let results = run_ql_dllite_oracle();
+        assert_eq!(
+            results.len(),
+            QL_DLLITE_ORACLE.len(),
+            "the runner must report one outcome per oracle case"
+        );
+        for (id, outcome) in &results {
+            assert_eq!(
+                *outcome,
+                QlOracleOutcome::SoundAndComplete,
+                "DL-Lite_R oracle case {} is not sound-and-complete: {:?}",
+                id,
+                outcome
+            );
+        }
+    }
+
+    #[test]
+    fn dllite_oracle_corpus_is_non_trivial_and_well_formed() {
+        // The corpus must be a meaningful conformance claim: enough cases, every id
+        // unique, and at least one case with NO certain answers (the applicability
+        // condition C8 — the existential generator must not fire on a bound filler).
+        assert!(
+            QL_DLLITE_ORACLE.len() >= 10,
+            "too few formal cases to be a meaningful conformance claim"
+        );
+        let mut ids: Vec<&str> = QL_DLLITE_ORACLE.iter().map(|c| c.id).collect();
+        ids.sort_unstable();
+        let n = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), n, "oracle case ids must be unique");
+        // A genuine certain-answer oracle must include a case whose answer set is a
+        // STRICT subset of the naive asserted matches (the soundness direction).
+        assert!(
+            QL_DLLITE_ORACLE.iter().any(|c| c.id == "ql-exists-super-blocked-bound"),
+            "the applicability-condition (bound-filler) soundness case must be present"
+        );
+    }
+
+    #[test]
+    fn dllite_oracle_outcome_variants_are_distinct() {
+        // Direct surface coverage of the public QlOracleOutcome enum: the floor
+        // only ever counts SoundAndComplete; the other three are honest non-passes.
+        assert_ne!(
+            QlOracleOutcome::SoundAndComplete,
+            QlOracleOutcome::Diverged("x".into())
+        );
+        assert_ne!(
+            QlOracleOutcome::Abstained("y".into()),
+            QlOracleOutcome::Inconclusive("z".into())
+        );
+        // The corpus's projected-var helper handles the re-wrapped Project/Distinct.
+        let q = SparqlParser::new()
+            .parse_query("SELECT DISTINCT ?x WHERE { ?x <http://ex/p> ?y }")
+            .unwrap();
+        let spargebra::Query::Select { pattern, .. } = &q else {
+            panic!("select");
+        };
+        assert_eq!(projected_vars(pattern), vec!["x".to_string()]);
     }
 }

@@ -12,14 +12,17 @@
 //! `perfectref` (the rewrite/reduce saturation), `treewitness` (bounded existential-witness
 //! folding), and `minimise` (UCQ-containment minimisation by homomorphism).
 //!
-//! EXPERIMENTAL regime: the rewriter is validated against a hand-checked DL-Lite oracle, NOT
-//! graduated to a conformance floor. It IS wired into the conformance entailment-regime suite
-//! (sq-kuvu3, opt-in `sparq-conformance/ql-experimental`) as experimental / OutOfScope — the
-//! harness reports honestly what it computes over the `pr:QL` `sparql11/entailment` cases
-//! (fail-closed abstain / computed-equivalent evidence / computed-divergent gap), never a
-//! graduated conformance pass. The graduation of that arm to a pinned conformance FLOOR remains a
-//! separate, deferred bead (it must sequence through the contended conformance scoreboard) — see
-//! the README.
+//! The rewriter is validated against a hand-checked DL-Lite_R oracle. On the FORMAL DL-Lite_R
+//! suite (the hand-derived certain-answer oracle from sq-g19x0) the rewrite is sound AND complete
+//! case by case — that has GRADUATED to a pinned floor (sq-qo1a9): `sparq-conformance`'s
+//! `ql_dllite_suite` runner rewrites each case and asserts its UCQ, evaluated over the unmodified
+//! ABox, returns exactly the hand-derived certain answers; it is a `sparq extension` row in the
+//! central scoreboard (tallied separately, NOT a full-OWL-2-QL-conformance claim, since no runnable
+//! normative W3C QL certain-answer suite exists). The BROADER `pr:QL` `sparql11/entailment` arm
+//! (sq-kuvu3, opt-in `sparq-conformance/ql-experimental`) stays experimental / OutOfScope — it
+//! mixes intensional cases outside sound rewriting, so the harness reports honestly what it
+//! computes (fail-closed abstain / computed-equivalent evidence / computed-divergent gap), never a
+//! graduated conformance pass — see the README.
 
 mod cq;
 mod dllite;

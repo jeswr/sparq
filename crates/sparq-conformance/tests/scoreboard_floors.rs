@@ -254,6 +254,20 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/rif_core_suite.rs",
         "RIF_CORE_FLOOR",
     ),
+    // [OPUS-4.8] sq-qo1a9 (epic sq-pbz04, the LAST conformance bead) — the GRADUATED
+    // OWL 2 QL (DL-Lite_R) CERTAIN-ANSWER oracle ratchet. The floor const
+    // (`pub const QL_DLLITE_FLOOR`) lives in THIS crate's `tests/ql_dllite_suite.rs`
+    // (behind the opt-in `ql-experimental` feature, inside the `gated` module — the
+    // guard reads it TEXTUALLY, so the `#[cfg]`/module nesting do not affect the
+    // match); the guard pins the central scoreboard's `ratchet_floor` to it so the
+    // two can never silently drift. It is a sparq EXTENSION-shaped ratchet over the
+    // hand-derived DL-Lite_R certain-answer oracle, NOT a full-OWL-2-QL-conformance
+    // claim.
+    (
+        "OWL 2 QL (DL-Lite_R) certain-answer oracle",
+        "crates/sparq-conformance/tests/ql_dllite_suite.rs",
+        "QL_DLLITE_FLOOR",
+    ),
 ];
 
 #[test]
@@ -360,11 +374,14 @@ fn scoreboard_renders_all_suites() {
     // pluralises to "rows".
     assert!(md.contains("RSP expressivity / SRBench correctness"));
     // [OPUS-4.8] sq-rh4gu — the RIF-Core expressivity ratchet, HONESTLY rendered as
-    // a sparq EXTENSION over the RIF-Core (monotone Horn) subset (the THIRD
-    // extension row — so the total line still pluralises to "rows").
+    // a sparq EXTENSION over the RIF-Core (monotone Horn) subset.
     assert!(md.contains("RIF-Core expressivity (monotone Horn subset)"));
+    // [OPUS-4.8] sq-qo1a9 — the GRADUATED OWL 2 QL (DL-Lite_R) certain-answer oracle,
+    // HONESTLY rendered as a sparq EXTENSION (the FOURTH extension row — so the total
+    // line still pluralises to "rows", and it is NOT folded into the conformance total).
+    assert!(md.contains("OWL 2 QL (DL-Lite_R) certain-answer oracle"));
     assert!(
-        md.contains("sparq-extension (3 rows, NOT conformance)"),
-        "three extension rows should be tallied separately and pluralised"
+        md.contains("sparq-extension (4 rows, NOT conformance)"),
+        "four extension rows should be tallied separately and pluralised"
     );
 }

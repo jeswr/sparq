@@ -199,6 +199,15 @@ pub struct Suite {
 ///   battery makes across window types / R2S operators / EvalModes / multi-window
 ///   joins against an INDEPENDENT batch-rebuild + closed-form oracle; default-on,
 ///   no opt-in feature required).
+/// * OWL 2 QL (DL-Lite_R) certain-answer oracle 11 — `sparq-conformance`
+///   `tests/ql_dllite_suite.rs` `QL_DLLITE_FLOOR = 11` (sq-qo1a9; opt-in
+///   `ql-experimental` feature; a sparq EXTENSION ratchet, NOT a
+///   full-OWL-2-QL-conformance claim — no runnable normative W3C QL certain-answer
+///   suite exists; floor = the MEASURED count of formal DL-Lite_R cases on which
+///   `sparq_reason_ql::rewrite_production` is sound AND complete, i.e. the rewritten
+///   UCQ evaluated over the unmodified ABox returns EXACTLY the hand-derived certain
+///   answers; the broader `pr:QL` entailment-arm intensional gap stays
+///   experimental/OutOfScope, never summed in).
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
@@ -761,6 +770,50 @@ pub const SUITES: &[Suite] = &[
                rif01 uncle rule); the normative SPARQL-RIF Core Entailment Regime + full \
                RIF-BLD/PRD are documented out-of-scope, asserted genuinely-rejected, \
                never faked as passes",
+    },
+    // [OPUS-4.8] sq-qo1a9 (epic sq-pbz04, the LAST conformance bead) — the GRADUATED
+    // OWL 2 QL (DL-Lite_R) CERTAIN-ANSWER oracle ratchet (runner lives crate-local
+    // in `sparq-conformance/tests/ql_dllite_suite.rs`, behind the opt-in
+    // `ql-experimental` feature). HONESTLY tallied as a sparq EXTENSION ratchet, NOT
+    // folded into the conformance total — even though OWL 2 QL is a real W3C profile,
+    // there is NO runnable normative W3C "QL certain-answer conformance suite" to
+    // point a harness at (the W3C QL material is structural/classification, not an
+    // answer-comparison corpus over the query-rewriting semantics). So — exactly like
+    // the RIF-Core / RSP / BM25 extension rows — this lane runs sparq's OWN faithful
+    // DL-Lite_R certain-answer oracle (the hand-derived suite from sq-g19x0): each
+    // case is a conjunctive query within SOUND DL-Lite_R rewriting, with a
+    // certain-answer set derived BY HAND from the DL-Lite_R semantics. The runner
+    // rewrites each case with the REAL `sparq_reason_ql::rewrite_production`
+    // (PerfectRef ∪ tree-witness ∪ UCQ-min) and evaluates the UCQ over the UNMODIFIED
+    // ABox through the REAL engine, asserting it returns EXACTLY the certain answers —
+    // sound (no extra) AND complete (no missing) case by case. The floor is the
+    // MEASURED count of sound-and-complete cases (the `QL DL-Lite_R sound-and-complete
+    // N (floor F)` line) — it may only RISE; a divergence is a soundness/completeness
+    // regression. The BROADER `pr:QL` `sparql11/entailment` arm (intensional /
+    // non-DL-Lite certain-answer cases the rewriter cannot soundly answer) stays
+    // EXPERIMENTAL / OutOfScope (`tests/ql_experimental_arm.rs`), NEVER summed in.
+    // `QL_DLLITE_FLOOR` is mirrored here and kept in lock-step by
+    // `tests/scoreboard_floors.rs` (read textually).
+    Suite {
+        label: "OWL 2 QL (DL-Lite_R) certain-answer oracle",
+        family: "sparq extension",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "ql_dllite_suite",
+            feature: "ql-experimental",
+        },
+        ci_job: "inference-conformance",
+        ratchet_floor: 11,
+        floor_basis: "sound-and-complete certain-answer cases (sparq EXTENSION over the \
+                      DL-Lite_R oracle, NOT a full-OWL-2-QL-conformance claim)",
+        note: "EXTENSION ratchet — no runnable normative W3C OWL 2 QL certain-answer \
+               conformance suite exists (the W3C QL material is structural): sparq's own \
+               faithful DL-Lite_R certain-answer oracle (the hand-derived suite from \
+               sq-g19x0), each conjunctive query rewritten by sparq_reason_ql's REAL \
+               rewrite_production (PerfectRef ∪ tree-witness ∪ UCQ-min) and evaluated over \
+               the UNMODIFIED ABox, asserting EXACTLY the hand-derived certain answers — \
+               sound AND complete case by case; the broader pr:QL entailment-arm \
+               intensional gap stays experimental/OutOfScope, never faked as a pass",
     },
 ];
 
