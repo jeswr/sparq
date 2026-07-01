@@ -50,6 +50,17 @@ export const STATUS_VARIANT: Record<
 
 export const SPECS: Spec[] = [
   {
+    slug: "zksparql",
+    source: "zksparql.typ",
+    title: "zkSPARQL: Zero-Knowledge Query Proofs over SPARQL",
+    shortName: "zksparql",
+    status: "unofficial",
+    date: "2026-07-01",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "Proving SPARQL query answers over committed RDF graphs in zero knowledge: the committed data model (RDFC-1.0 + Poseidon2/BN254), the supported query fragment and circuit family, the ProofManifest format, the verifier-nonce challenge-response, the fail-closed verifier obligations, external trust anchors, and the sec-prop/ODRL admissibility vocabulary. Research-grade and NOT externally audited (sq-qhy4); media type, JSON-LD context, and wire protocol are open proposals.",
+  },
+  {
     slug: "proposed-specifications-template",
     source: "proposed-specifications-template.typ",
     title: "SPARQ Proposed Specifications — Template",
