@@ -498,38 +498,46 @@ pub use precheck::{admit_with_precheck, AdmissibilityPreference, PrecheckOutcome
 mod precheck {
     use super::{admit, AdmittedFact, PresentedCredential, Session};
     use crate::admissibility::admissible;
+    use crate::secprop as secx;
     use oxrdf::NamedNode;
+    use sparq_zk::secprop::{parse_annotations, Assurance, MethodAnnotations, Scope};
 
     /// A requester's machine-reasonable ODRL **privacy preference** to enforce against
-    /// the presented proof method BEFORE admission (design §5b). It pairs the method's
-    /// recorded `secprop` property annotations with the `gteq` constraints the requester
-    /// requires — exactly the four inputs the Phase-2 `crate::admissibility::admissible`
-    /// reduction reads.
+    /// the presented proof method BEFORE admission (design §5b). The caller supplies
+    /// only the presented method's IRI and the requester's `gteq` constraints; the
+    /// method's `secprop` property annotations are **resolved from the bundled,
+    /// drift-pinned sparq-zk `secprop-methods.ttl`** — NOT from any caller-supplied N3
+    /// (the `sq-nrwqs` Phase-5.1 input-trust-boundary hardening). This makes the
+    /// admissibility check **self-contained and tamper-resistant**: a caller cannot
+    /// widen a method's recorded posture, and an unknown method fails closed.
     ///
-    /// The honesty of the verdict is exactly the honesty of the `annotations` graph: it
-    /// reasons over recorded (method, property)→level claims, **not** over cryptography,
-    /// and every sparq ZK property is at most `secx:Claimed` while the external audit
-    /// (`sq-qhy4`) is open. A `requiresAssurance gteq secx:Proven` constraint therefore
-    /// mechanically denies **every** sparq ZK method today — the principled refusal.
+    /// The honesty of the verdict is exactly the honesty of the **bundled** annotation
+    /// graph: it reasons over recorded (method, property)→level claims, **not** over
+    /// cryptography, and every positive sparq ZK property is at most `secx:Claimed`
+    /// while the external audit (`sq-qhy4`) is open. A `requiresAssurance gteq
+    /// secx:Proven` constraint therefore mechanically denies **every** sparq ZK method
+    /// today — the principled refusal. This hardens the input boundary only; it makes
+    /// **no** new soundness/privacy claim.
     #[derive(Debug, Clone)]
     pub struct AdmissibilityPreference {
         /// The presented proof's method IRI (the `zk:scheme` / `zk:cryptosuite` the
         /// `sparq-zk` registry records, e.g. `zk:poseidon2-rdfc10-v1`). The annotation
-        /// graph is keyed on this IRI; a method with no matching annotation block
-        /// satisfies nothing and is denied (fail-closed).
+        /// graph is resolved from the bundled ontology keyed on this IRI; a method with
+        /// no bundled annotation block is an **unknown method** and fails closed
+        /// ([`PrecheckOutcome::UnknownMethod`]).
         pub method_iri: NamedNode,
         /// The requester's policy constraint IRIs — each an `odrl:Constraint` carrying
         /// `odrl:leftOperand` (a `secx:requires…` leftOperand) / `operator odrl:gteq` /
         /// `rightOperand`. The method must satisfy **every** one (default-deny). An
-        /// EMPTY set is vacuously satisfied — the caller is responsible for not handing
-        /// an empty preference where one is required (the `admissible` contract).
+        /// EMPTY set is vacuously satisfied for a KNOWN method — the caller is
+        /// responsible for not handing an empty preference where one is required (the
+        /// `admissible` contract). An **unknown** method is denied regardless.
         pub constraint_iris: Vec<String>,
         /// The constraints' triples as an N3/Turtle fragment **without** the `@prefix`
-        /// preamble (it is prepended by the reduction).
+        /// preamble (it is prepended by the reduction). This carries only the
+        /// requester's POLICY — the method's property annotations are NOT taken from the
+        /// caller (they come from the bundled ontology).
         pub policy_n3: String,
-        /// The method's `secprop` `secx:hasProperty` annotation graph as an N3/Turtle
-        /// fragment **without** the `@prefix` preamble.
-        pub annotations_n3: String,
     }
 
     /// Why a pre-check DENIED admission — the honest, machine-readable refusal detail
@@ -538,6 +546,14 @@ mod precheck {
     pub enum PrecheckOutcome {
         /// The method satisfied every constraint — admission proceeded normally.
         Admitted,
+        /// The presented method IRI has **no annotation block in the bundled
+        /// `secprop-methods.ttl`** — an unknown method. Fail-closed (default-deny): a
+        /// method the estate does not record a posture for admits **nothing**,
+        /// regardless of the (possibly empty) constraint set. Carries the method IRI.
+        UnknownMethod {
+            /// The presented method IRI that is not in the bundled annotation graph.
+            method: String,
+        },
         /// The method failed at least one constraint; admission was refused
         /// (fail-closed). Carries the **sorted** constraint IRIs the method does not
         /// `secx:satisfies` — the "why no admissible proof" detail.
@@ -545,9 +561,9 @@ mod precheck {
             /// The policy constraint IRIs the method fails (sorted, non-empty).
             unsatisfied: Vec<String>,
         },
-        /// The reduction itself errored (a malformed policy/annotation fragment). This
-        /// is **also** a fail-closed denial — a pre-check that cannot be evaluated must
-        /// NEVER admit. Carries the reasoner's error string.
+        /// The reduction itself errored (a malformed policy fragment). This is **also**
+        /// a fail-closed denial — a pre-check that cannot be evaluated must NEVER admit.
+        /// Carries the reasoner's error string.
         ReductionError {
             /// The `sparq-reason` parse/closure error the reduction returned.
             error: String,
@@ -559,19 +575,26 @@ mod precheck {
     /// With `preference == None` this is **byte-identical** to `admit` (strict
     /// additivity — the opt-in property): no reasoning runs, no behaviour changes.
     ///
-    /// With `preference == Some(p)` the gate FIRST consults
-    /// `crate::admissibility::admissible` over `p`'s method IRI, constraints, policy, and
-    /// annotation graph. If the method does **not** satisfy every constraint — or the
-    /// reduction errors — the gate **fails closed**: it returns an EMPTY admitted set and
-    /// the `PrecheckOutcome` explaining the refusal, and the existing signature /
-    /// freshness / holder checks are **never reached**. Only when the pre-check is
-    /// satisfied does the unchanged `admit` gate run.
+    /// With `preference == Some(p)` the gate FIRST **resolves `p.method_iri`'s secprop
+    /// annotation graph from the bundled, drift-pinned sparq-zk `secprop-methods.ttl`**
+    /// (`sq-nrwqs` Phase 5.1) — the caller does NOT supply the annotations, so it cannot
+    /// widen the method's recorded posture. An unknown method (no bundled block) fails
+    /// closed ([`PrecheckOutcome::UnknownMethod`]). Otherwise it consults
+    /// `crate::admissibility::admissible` over the method IRI, the requester's
+    /// constraints + policy, and the **bundled** annotation graph. If the method does
+    /// **not** satisfy every constraint — or the reduction errors — the gate **fails
+    /// closed**: it returns an EMPTY admitted set and the `PrecheckOutcome` explaining
+    /// the refusal, and the existing signature / freshness / holder checks are **never
+    /// reached**. Only when the pre-check is satisfied does the unchanged `admit` gate
+    /// run.
     ///
     /// The pre-check is **default-deny and orthogonal** to the cryptographic checks: it
     /// constrains *which proof method* is acceptable, NOT whether the signature
     /// verifies. A satisfied pre-check does NOT weaken any downstream check — `admit`
     /// still verifies the checked issuer signature, freshness, statement-type scope, and
     /// the clear-WebID holder binding. The pre-check can only ever DENY, never broaden.
+    /// It hardens the input trust boundary; it makes **no** new soundness/privacy claim
+    /// (the estate stays externally UNAUDITED, `sq-qhy4`).
     ///
     /// Returns the admitted facts (empty on a pre-check denial — default-deny) and the
     /// `PrecheckOutcome`.
@@ -590,12 +613,24 @@ mod precheck {
             );
         };
 
+        // Resolve the method's annotation graph from the BUNDLED ontology (NOT the
+        // caller). An unknown method fails closed: it admits nothing, whatever the
+        // constraint set.
+        let Some(annotations_n3) = resolve_bundled_annotations_n3(pref.method_iri.as_str()) else {
+            return (
+                Vec::new(),
+                PrecheckOutcome::UnknownMethod {
+                    method: pref.method_iri.as_str().to_owned(),
+                },
+            );
+        };
+
         let constraint_refs: Vec<&str> = pref.constraint_iris.iter().map(String::as_str).collect();
         match admissible(
             pref.method_iri.as_str(),
             &constraint_refs,
             &pref.policy_n3,
-            &pref.annotations_n3,
+            &annotations_n3,
         ) {
             // The method satisfies every constraint: proceed to the unchanged gate.
             Ok(a) if a.admissible => (
@@ -615,6 +650,115 @@ mod precheck {
         }
     }
 
+    /// Resolve the presented method's secprop annotation graph from the **bundled,
+    /// drift-pinned** sparq-zk `secprop-methods.ttl` (the canonical source of truth,
+    /// behind sparq-zk's `secprop-annotations` feature), serialised into the N3 fragment
+    /// [`admissible`] reads. Returns `None` iff `method_iri` has no bundled annotation
+    /// block — an **unknown method**, which the caller turns into a fail-closed
+    /// [`PrecheckOutcome::UnknownMethod`].
+    ///
+    /// This is the `sq-nrwqs` hardening: the annotations are NEVER taken from the
+    /// caller, so a caller cannot inject a widened posture. It re-parses the bundled
+    /// graph per call (a research-PoC path; the graph is a compiled-in constant).
+    fn resolve_bundled_annotations_n3(method_iri: &str) -> Option<String> {
+        let all = parse_annotations();
+        let ann = all.get(method_iri)?;
+        Some(annotations_n3_from_bundled(ann))
+    }
+
+    /// Serialise the **query-proof-layer** assertions of one bundled method annotation
+    /// into the `secx:hasProperty [ secx:property … ; secx:level … ]` N3 fragment the
+    /// admissibility reduction reads, plus a derived method-wide `secx:AssuranceLevel`
+    /// block (see [`derived_assurance_level`]).
+    ///
+    /// SOURCE-LAYER-ONLY assertions are EXCLUDED (the §5a rule 2 non-transfer rule): a
+    /// property of a source credential's cryptosuite must never satisfy a query-proof
+    /// constraint. Only `secx:property` + `secx:level` are emitted (the two the
+    /// discharge rule reads); the assurance/audit/scope reification is not needed by the
+    /// reduction. The subject is the full method IRI so it matches the `method` argument
+    /// `admissible` filters on.
+    fn annotations_n3_from_bundled(ann: &MethodAnnotations) -> String {
+        let mut blocks: Vec<String> = Vec::new();
+        for a in ann
+            .assertions
+            .iter()
+            .filter(|a| a.scope == Scope::QueryProofLayer)
+        {
+            if let Some(level) = &a.level {
+                blocks.push(format!(
+                    "[ secx:property <{}> ; secx:level <{}> ]",
+                    a.property, level
+                ));
+            }
+        }
+        if let Some(level) = derived_assurance_level(ann) {
+            blocks.push(format!(
+                "[ secx:property <{}> ; secx:level <{}> ]",
+                secx::SECX_ASSURANCE_LEVEL,
+                level
+            ));
+        }
+        if blocks.is_empty() {
+            return String::new();
+        }
+        format!(
+            "<{}> secx:hasProperty {} .\n",
+            ann.method,
+            blocks.join(" ,\n  ")
+        )
+    }
+
+    /// The method-wide `secx:AssuranceLevel` for the `requiresAssurance` dimension =
+    /// the **weakest** assurance across the method's POSITIVE, query-proof-layer
+    /// property claims (`None` if it has none — then `requiresAssurance` denies). A
+    /// settled-NEGATIVE level (`PQForgeable` / `Replayable` / `SchemeRevealed`) may be
+    /// `secx:Proven` and is EXCLUDED: it is a fact ABOUT the construction, not a
+    /// positive assurance the requester relies on. While `sq-qhy4` is open every
+    /// positive sparq ZK claim is `secx:Claimed`, so this is `Claimed` for every sparq
+    /// method today — a `requiresAssurance gteq secx:Proven` constraint therefore denies
+    /// every method (the principled refusal, unchanged from Phase 5). This derivation is
+    /// bounded by the honesty of the bundled graph; it makes no new soundness claim.
+    fn derived_assurance_level(ann: &MethodAnnotations) -> Option<&'static str> {
+        // rank: Conjectured < Claimed < Proven; take the MIN over positive QP claims.
+        let mut min_rank: Option<u8> = None;
+        for a in ann
+            .assertions
+            .iter()
+            .filter(|a| a.scope == Scope::QueryProofLayer)
+        {
+            if is_settled_negative_level(a.level.as_deref()) {
+                continue;
+            }
+            let rank = match a.assurance {
+                Assurance::Conjectured => 0u8,
+                Assurance::Claimed => 1,
+                Assurance::Proven => 2,
+            };
+            min_rank = Some(min_rank.map_or(rank, |m| m.min(rank)));
+        }
+        match min_rank? {
+            0 => Some(secx::SECX_CONJECTURED),
+            1 => Some(secx::SECX_CLAIMED),
+            _ => Some(secx::SECX_PROVEN),
+        }
+    }
+
+    /// Whether `level` is one of the three SETTLED-NEGATIVE levels that may legitimately
+    /// carry `secx:Proven` (a fact about the construction, not a positive assurance).
+    /// Excluded from [`derived_assurance_level`] so a Proven negative never inflates a
+    /// method's positive assurance. Mirrors sparq-zk `secprop`'s own `is_positive`
+    /// negative set; the level IRIs are the drift-pinned `crate::secprop` constants.
+    fn is_settled_negative_level(level: Option<&str>) -> bool {
+        match level {
+            Some(l) => {
+                l == secx::SECX_PQ_FORGEABLE
+                    || l == secx::SECX_REPLAYABLE
+                    || l == secx::SECX_SCHEME_REVEALED
+            }
+            None => false,
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -623,13 +767,10 @@ mod precheck {
 
         const METHOD: &str = "https://sparq.dev/ns/zk#poseidon2-rdfc10-v1";
 
-        /// The string-canonical method's annotation block (the §4.3.3 levels) — keyed on
-        /// the method IRI the pre-check is handed. Used by every test below.
-        const ANNOTATIONS: &str = "\
-zk:poseidon2-rdfc10-v1\n\
-  secx:hasProperty [ secx:property secx:UnlinkabilityScope ; secx:level secx:PerPresentation ] ,\n\
-                   [ secx:property secx:AssuranceLevel ; secx:level secx:Claimed ] .\n";
-
+        /// Build a preference. The method's property annotations are NOT supplied here —
+        /// they are resolved from the bundled `secprop-methods.ttl` by the pre-check
+        /// (the `sq-nrwqs` hardening). The caller passes only the method IRI + the
+        /// requester's ODRL constraints/policy.
         fn pref(
             method: &str,
             constraint_iris: &[&str],
@@ -639,7 +780,6 @@ zk:poseidon2-rdfc10-v1\n\
                 method_iri: NamedNode::new(method).unwrap(),
                 constraint_iris: constraint_iris.iter().map(|s| (*s).to_owned()).collect(),
                 policy_n3: policy_n3.to_owned(),
-                annotations_n3: ANNOTATIONS.to_owned(),
             }
         }
 
@@ -672,8 +812,10 @@ zk:poseidon2-rdfc10-v1\n\
             assert_eq!(run(None), PrecheckOutcome::Admitted);
         }
 
-        /// A satisfiable `gteq` preference admits: the method holds PerPresentation, which
-        /// is `atLeast` the required PerPresentation (reflexive), and Claimed ≥ Claimed.
+        /// A satisfiable `gteq` preference admits — resolved from the BUNDLED graph: the
+        /// string-canonical method holds `UnlinkabilityScope PerPresentation` (`atLeast`
+        /// the required PerPresentation, reflexive) and its derived AssuranceLevel is
+        /// `Claimed` (≥ Claimed).
         #[test]
         fn satisfiable_preference_admits() {
             let policy = "\
@@ -687,6 +829,17 @@ zk:cAssur  odrl:leftOperand secx:requiresAssurance          ; odrl:operator odrl
                 ],
                 policy,
             );
+            assert_eq!(run(Some(&p)), PrecheckOutcome::Admitted);
+        }
+
+        /// BUNDLED-RESOLUTION direct test: a constraint over a dimension present ONLY in
+        /// the bundled ontology (`Soundness KnowledgeSound`, which no caller ever
+        /// supplied here) is satisfiable — proving the annotations are resolved from the
+        /// shipped `secprop-methods.ttl`, not from any caller-supplied fragment.
+        #[test]
+        fn bundled_resolution_uses_the_shipped_ontology() {
+            let policy = "zk:cSound odrl:leftOperand secx:requiresSoundness ; odrl:operator odrl:gteq ; odrl:rightOperand secx:KnowledgeSound .";
+            let p = pref(METHOD, &["https://sparq.dev/ns/zk#cSound"], policy);
             assert_eq!(run(Some(&p)), PrecheckOutcome::Admitted);
         }
 
@@ -705,17 +858,42 @@ zk:cAssur  odrl:leftOperand secx:requiresAssurance          ; odrl:operator odrl
             );
         }
 
-        /// A constraint over a dimension the method is NOT annotated for also fails
-        /// closed (the method satisfies nothing on that dimension).
+        /// TAMPER-RESISTANCE: the caller has no annotation channel, so it cannot widen
+        /// the method's recorded posture. `requiresAssurance gteq Proven` is denied for
+        /// the real method BECAUSE the bundled graph pins it at `Claimed` (every positive
+        /// sparq ZK property is `Claimed` while `sq-qhy4` is open) — there is no
+        /// caller-supplied override that could lift it to `Proven`. This is the
+        /// `sq-nrwqs` fail-closed input-boundary hardening; no new soundness claim.
         #[test]
-        fn unannotated_dimension_denies_fail_closed() {
+        fn caller_cannot_widen_bundled_assurance() {
+            let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Proven .";
+            let p = pref(METHOD, &["https://sparq.dev/ns/zk#cAssur"], policy);
+            // Denied, and the derived AssuranceLevel the reduction saw is Claimed, so no
+            // widening to Proven is possible through any caller-facing input.
+            assert!(matches!(run(Some(&p)), PrecheckOutcome::Denied { .. }));
+            let ann = super::parse_annotations();
+            let m = ann.get(METHOD).expect("string-canonical is bundled");
+            assert_eq!(
+                super::derived_assurance_level(m),
+                Some(crate::secprop::SECX_CLAIMED),
+                "the bundled method's derived assurance must be Claimed, never Proven",
+            );
+        }
+
+        /// Requiring a STRONGER level than the bundled method actually holds fails closed:
+        /// the method holds `ZeroKnowledgeType ComputationalZK`, which is NOT `atLeast`
+        /// the required `PerfectZK`.
+        #[test]
+        fn stronger_level_than_bundled_denies_fail_closed() {
             let policy = "zk:cZk odrl:leftOperand secx:requiresZeroKnowledge ; odrl:operator odrl:gteq ; odrl:rightOperand secx:PerfectZK .";
             let p = pref(METHOD, &["https://sparq.dev/ns/zk#cZk"], policy);
             assert!(matches!(run(Some(&p)), PrecheckOutcome::Denied { .. }));
         }
 
-        /// A method IRI with NO annotation block satisfies nothing ⇒ fail closed (the
-        /// graph is keyed on the IRI; a wrong/unknown method is denied).
+        /// A method IRI with NO bundled annotation block is an UNKNOWN method ⇒ fail
+        /// closed with the dedicated `UnknownMethod` outcome — regardless of the
+        /// constraints (the graph is the source of truth; a wrong/unknown method is
+        /// denied).
         #[test]
         fn unknown_method_denies_fail_closed() {
             let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .";
@@ -724,13 +902,28 @@ zk:cAssur  odrl:leftOperand secx:requiresAssurance          ; odrl:operator odrl
                 &["https://sparq.dev/ns/zk#cAssur"],
                 policy,
             );
-            assert!(matches!(run(Some(&p)), PrecheckOutcome::Denied { .. }));
+            assert_eq!(
+                run(Some(&p)),
+                PrecheckOutcome::UnknownMethod {
+                    method: "https://sparq.dev/ns/zk#no-such-method".to_owned()
+                },
+            );
         }
 
-        /// An EMPTY constraint set is vacuously satisfied (the `admissible` contract) —
-        /// admitted. (A caller wanting deny-on-empty must not hand an empty preference.)
+        /// An unknown method fails closed EVEN with an EMPTY constraint set — the
+        /// fail-closed-on-unknown-method rule (`sq-nrwqs`) is stronger than the vacuous
+        /// admit for a known method.
         #[test]
-        fn empty_constraint_set_is_vacuously_admitted() {
+        fn unknown_method_with_no_constraints_denies() {
+            let p = pref("https://sparq.dev/ns/zk#no-such-method", &[], "");
+            assert!(matches!(run(Some(&p)), PrecheckOutcome::UnknownMethod { .. }));
+        }
+
+        /// An EMPTY constraint set is vacuously satisfied for a KNOWN method (the
+        /// `admissible` contract) — admitted. (A caller wanting deny-on-empty must not
+        /// hand an empty preference.)
+        #[test]
+        fn empty_constraint_set_is_vacuously_admitted_for_known_method() {
             let p = pref(METHOD, &[], "");
             assert_eq!(run(Some(&p)), PrecheckOutcome::Admitted);
         }
@@ -749,6 +942,46 @@ zk:cAssur  odrl:leftOperand secx:requiresAssurance          ; odrl:operator odrl
                 run(Some(&p)),
                 PrecheckOutcome::ReductionError { .. }
             ));
+        }
+
+        /// DIRECT resolver test: the resolved N3 fragment for a known method carries the
+        /// bundled `Soundness`/`KnowledgeSound` pair and a derived `AssuranceLevel`, and
+        /// an unknown method resolves to `None` (fail-closed).
+        #[test]
+        fn resolver_serialises_bundled_levels_and_derives_assurance() {
+            let n3 = super::resolve_bundled_annotations_n3(METHOD)
+                .expect("string-canonical is bundled");
+            assert!(
+                n3.contains(crate::secprop::SECX_SOUNDNESS)
+                    && n3.contains(crate::secprop::SECX_KNOWLEDGE_SOUND),
+                "the resolved fragment must carry the bundled Soundness/KnowledgeSound pair: {}",
+                n3,
+            );
+            assert!(
+                n3.contains(crate::secprop::SECX_ASSURANCE_LEVEL)
+                    && n3.contains(crate::secprop::SECX_CLAIMED),
+                "the resolved fragment must carry a derived AssuranceLevel of Claimed: {}",
+                n3,
+            );
+            assert!(
+                super::resolve_bundled_annotations_n3("https://sparq.dev/ns/zk#no-such-method")
+                    .is_none(),
+                "an unknown method must resolve to None (fail-closed)",
+            );
+        }
+
+        /// DIRECT test that a settled-NEGATIVE Proven level (`PQForgeable`) is EXCLUDED
+        /// from the derived assurance, so a method's positive assurance is never inflated
+        /// by a negative Proven fact about the construction.
+        #[test]
+        fn settled_negative_is_excluded_from_derived_assurance() {
+            assert!(super::is_settled_negative_level(Some(
+                crate::secprop::SECX_PQ_FORGEABLE
+            )));
+            assert!(!super::is_settled_negative_level(Some(
+                crate::secprop::SECX_KNOWLEDGE_SOUND
+            )));
+            assert!(!super::is_settled_negative_level(None));
         }
     }
 }
