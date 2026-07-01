@@ -432,12 +432,13 @@ only if μ is a member of eval(P) — respectively eval(P) is non-empty — as d
 #note[
   Editor's note — three boundaries of this definition are deliberate. (1) It is a *set*
   semantics; whether the implementation preserves duplicate-solution multiplicities (the bag
-  semantics of #cite("PAG09")) is not pinned by this draft's grounding material — TODO:
-  transcribe with sq-rvgr2.7. (2) Projection (`SELECT` variable lists) is not transcribed;
-  the correctness property above is defined on full solution mappings — TODO: likewise.
-  (3) Result *completeness* — that no solutions were omitted — is #strong[not] claimed by
-  `bind_query_correctness` as glossed here; whether any obligation claims it is not pinned —
-  TODO: likewise. None of these boundaries weakens the membership property, but all three
+  semantics of #cite("PAG09")) is not pinned by this draft's grounding material;
+  transcription is tracked as bead sq-rvgr2.7. (2) Projection (`SELECT` variable lists) is not
+  transcribed; the correctness property above is defined on full solution mappings, and its
+  transcription is likewise tracked as bead sq-rvgr2.7. (3) Result *completeness* — that no
+  solutions were omitted — is #strong[not] claimed by `bind_query_correctness` as glossed here;
+  whether any obligation claims it is not pinned, and is likewise tracked as bead sq-rvgr2.7.
+  None of these boundaries weakens the membership property, but all three
   must be settled before a candidate-normative successor.
 ]
 
@@ -472,7 +473,7 @@ manifest #strong[MUST NOT] be accepted on the strength of its self-declared iden
 #note[
   Editor's note — the exact in-circuit statement of each circuit (its public-input schedule
   beyond field 0 and its constraint relation) is pinned by the implementation; the glosses
-  above are descriptive. TODO: transcribe per-circuit statements with sq-rvgr2.7.
+  above are descriptive; per-circuit statements are transcribed under bead sq-rvgr2.7.
 ]
 
 == Entailment regimes
@@ -533,7 +534,7 @@ public-input segment, and the verification key.
 
 #note[
   Editor's note — the width and endianness of the two length prefixes are not pinned by this
-  draft's grounding material. TODO: transcribe with sq-rvgr2.7.
+  draft's grounding material; transcription is tracked as bead sq-rvgr2.7.
 ]
 
 == Public-input encoding (descriptive; at-risk)
@@ -658,7 +659,7 @@ Full verification re-checks, independently of the prefilter:
 #note[
   Editor's note — the exact condition of the Q6 guard (deferred core 3, section 2.3) and the
   precise well-formedness clause of the attribution-arity check are pinned by the
-  implementation. TODO: transcribe with sq-rvgr2.7. Section 7.2 states the semantic minimum
+  implementation; transcription is tracked as bead sq-rvgr2.7. Section 7.2 states the semantic minimum
   the Q6 guard enforces.
 ]
 
@@ -702,8 +703,8 @@ subsequent draft will require the full set of every conforming verifier.
 
 #note[
   Editor's note — the precise clause of each obligation, including the superset *direction*
-  enforced by `bind_attributions`, is deferred core 4 of section 2.3. TODO: transcribe with
-  sq-rvgr2.7.
+  enforced by `bind_attributions`, is deferred core 4 of section 2.3; transcription is tracked
+  as bead sq-rvgr2.7.
 ]
 
 == Cryptographic checks and the four audit gates

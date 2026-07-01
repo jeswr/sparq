@@ -58,7 +58,7 @@ export const SPECS: Spec[] = [
     date: "2026-07-01",
     editors: "Jesse Wright · the sparq project",
     blurb:
-      "Proving SPARQL query answers over committed RDF graphs in zero knowledge: an explicit threat model, the committed data model (RDFC-1.0 + Poseidon2/BN254), a formally scoped query fragment and circuit family, the ProofManifest format with a worked example, the verifier-nonce challenge-response, the fail-closed verifier obligations and audit gates, external trust anchors, and the sec-prop/ODRL admissibility vocabulary. An architecture overview with an explicitly enumerated normative kernel — research-grade and NOT externally audited (sq-qhy4); media type, JSON-LD context, and wire protocol are open proposals.",
+      "Proving SPARQL query answers over committed RDF graphs in zero knowledge — an explicit threat model, the committed data model, a scoped query fragment and circuit family, the ProofManifest format, and the fail-closed verifier obligations and audit gates. Research-grade and NOT externally audited (sq-qhy4).",
   },
   {
     slug: "proposed-specifications-template",
