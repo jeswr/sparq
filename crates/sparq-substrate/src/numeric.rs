@@ -423,13 +423,19 @@ impl Num {
 
     /// XPath fn:round — round half towards POSITIVE INFINITY (so round(-2.5) = -2),
     /// preserving the argument's datatype.
+    ///
+    /// The float tiers use `round_half_to_pos_inf`, NOT the naive `(x + 0.5).floor()`:
+    /// the `x + 0.5` addition double-rounds, so a value just below half such as
+    /// `0.49999999999999994` would wrongly round up to `1` instead of `0`. [OPUS-4.8]
     #[inline]
     pub fn round(self) -> Num {
         match self {
             Num::Int(_) => self,
             Num::Dec(d) => Num::Dec(d.round_to_int(RoundMode::HalfUp)),
-            Num::Float(f) => Num::Float((f + 0.5).floor()),
-            Num::Double(d) => Num::Double((d + 0.5).floor()),
+            // f32 promotes to f64 losslessly and the integral result is exact in f32,
+            // so the shared f64 helper yields the correct f32 round. [OPUS-4.8]
+            Num::Float(f) => Num::Float(round_half_to_pos_inf(f as f64) as f32),
+            Num::Double(d) => Num::Double(round_half_to_pos_inf(d)),
         }
     }
 
@@ -583,6 +589,27 @@ fn apply_f64(a: f64, b: f64, op: ArithOp) -> f64 {
         ArithOp::Sub => a - b,
         ArithOp::Mul => a * b,
         ArithOp::Div => a / b,
+    }
+}
+
+/// Round `x` half towards POSITIVE INFINITY (XPath `fn:round`) WITHOUT the classic
+/// double-rounding defect of `(x + 0.5).floor()`.
+///
+/// `x + 0.5` is a rounded addition, so for a value just below half — e.g.
+/// `0.49999999999999994` (the f64 predecessor of `0.5`) — the sum rounds UP to `1.0`
+/// and `.floor()` then yields `1`, when the mathematically-nearest integer is `0`.
+///
+/// The fractional part `x - x.floor()` is instead computed EXACTLY (Sterbenz: the
+/// difference between a float and its floor is representable), so the half-comparison
+/// is exact. Ties (`x - floor(x) == 0.5`) go to the larger integer, i.e. towards
+/// `+INF`, matching `round(-2.5) = -2`. NaN / ±INF / ±0.0 pass through unchanged. [OPUS-4.8]
+#[inline]
+fn round_half_to_pos_inf(x: f64) -> f64 {
+    let fl = x.floor();
+    if x - fl >= 0.5 {
+        fl + 1.0
+    } else {
+        fl
     }
 }
 
@@ -741,6 +768,70 @@ mod tests {
         let neg = as_numeric(&typed("-2.5", xsd::DECIMAL)).unwrap();
         // fn:round is half-up towards +INF: round(-2.5) = -2.
         assert_eq!(neg.round().lexical(), "-2");
+    }
+
+    #[test]
+    fn round_float_tier_no_double_rounding() {
+        // Regression for sq-l11x2: the naive `(x + 0.5).floor()` double-rounds because
+        // the `x + 0.5` addition is itself rounded, so a value just below one-half wrongly
+        // rounds UP. `0.49999999999999994` (the f64 predecessor of 0.5) must round to 0. [OPUS-4.8]
+        let just_below_half = 0.49999999999999994_f64;
+        assert!(just_below_half < 0.5);
+        // Pin the exact defect the OLD formula exhibited so any regression is loud:
+        assert_eq!((just_below_half + 0.5).floor(), 1.0, "the naive formula rounds up");
+        // The corrected helper and the xsd:double path both round DOWN to 0.
+        assert_eq!(round_half_to_pos_inf(just_below_half), 0.0);
+        let rd = Num::Double(just_below_half).round();
+        assert_eq!(rd.f64(), 0.0);
+        assert_eq!(rd.datatype(), xsd::DOUBLE);
+
+        // The same double-rounding defect at the xsd:float tier: predecessor of 0.5_f32.
+        let jbh_f32 = f32::from_bits(0x3EFF_FFFF);
+        assert!(jbh_f32 < 0.5);
+        let rf = Num::Float(jbh_f32).round();
+        assert_eq!(rf.f64(), 0.0);
+        assert_eq!(rf.datatype(), xsd::FLOAT);
+    }
+
+    #[test]
+    fn round_float_tier_half_up_towards_pos_inf() {
+        // fn:round is round-half-towards-+INF at the float tiers, without double rounding.
+        assert_eq!(round_half_to_pos_inf(0.5), 1.0);
+        assert_eq!(round_half_to_pos_inf(1.5), 2.0);
+        assert_eq!(round_half_to_pos_inf(2.5), 3.0);
+        assert_eq!(round_half_to_pos_inf(-0.5), 0.0); // towards +INF, not -1
+        assert_eq!(round_half_to_pos_inf(-1.5), -1.0);
+        assert_eq!(round_half_to_pos_inf(-2.5), -2.0);
+        assert_eq!(round_half_to_pos_inf(2.4), 2.0);
+        assert_eq!(round_half_to_pos_inf(2.6), 3.0);
+        assert_eq!(round_half_to_pos_inf(-2.6), -3.0);
+        // And through the datatype-preserving Num::round entry points.
+        assert_eq!(Num::Double(-2.5).round().f64(), -2.0);
+        assert_eq!(Num::Double(2.5).round().f64(), 3.0);
+        assert_eq!(Num::Float(-2.5).round().f64(), -2.0);
+        assert_eq!(Num::Float(2.5).round().f64(), 3.0);
+    }
+
+    #[test]
+    fn round_float_tier_specials_pass_through() {
+        // NaN / ±INF flow through the fractional-part computation unchanged.
+        assert!(round_half_to_pos_inf(f64::NAN).is_nan());
+        assert!(Num::Double(f64::NAN).round().f64().is_nan());
+        assert_eq!(Num::Double(f64::INFINITY).round().f64(), f64::INFINITY);
+        assert_eq!(Num::Double(f64::NEG_INFINITY).round().f64(), f64::NEG_INFINITY);
+        assert!(Num::Float(f32::NAN).round().f64().is_nan());
+    }
+
+    #[test]
+    fn ceil_floor_float_tier_are_single_rounded() {
+        // ceil/floor already use the single correctly-rounded f64/f32 ops (no double
+        // rounding); pin the boundary value alongside round to keep the trio in scope. [OPUS-4.8]
+        let jbh = 0.49999999999999994_f64;
+        assert_eq!(Num::Double(jbh).ceil().f64(), 1.0);
+        assert_eq!(Num::Double(jbh).floor().f64(), 0.0);
+        let jbh_f32 = f32::from_bits(0x3EFF_FFFF);
+        assert_eq!(Num::Float(jbh_f32).ceil().f64(), 1.0);
+        assert_eq!(Num::Float(jbh_f32).floor().f64(), 0.0);
     }
 
     #[test]
