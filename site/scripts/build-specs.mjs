@@ -108,33 +108,59 @@ function readRegistry() {
   }));
 }
 
-// ---- build-boundary honesty scan (shared no-perf-numbers gate over the spec sources) -------
-// FAIL-CLOSED: a hard-coded performance number in a spec source aborts the build before any
-// artifact is written. (The privacy-claims gate's fixed surface does not yet include
-// site/specs/**; extending it before the ZK/MPC spec CONTENT beads land is tracked as a
-// follow-up bead — this template carries no ZK/MPC claims.)
+// ---- build-boundary honesty scan (the two shared honesty gates over the spec sources) ------
+// [OPUS-4.8] sq-rvgr2.5: FAIL-CLOSED, and now BOTH shared CI honesty gates run here — the same
+// pattern as build-papers.mjs's runBuildBoundaryHonestyScan — so the spec factory can never
+// serve an un-scanned or violating draft before the ZK/MPC spec CONTENT (zkSPARQL / MPC-SPARQL,
+// beads sq-rvgr2.2/.3) lands:
+//   - scripts/check-no-perf-numbers.py --enforce <each spec .typ>  (a hard-coded perf figure in
+//        a spec source aborts the build — a spec is a DESIGN surface, not a benchmark), and
+//   - scripts/check-privacy-claims.sh  (whole-tree; its git-ls-files surface now includes
+//        site/specs/**/*.typ — see the sq-rvgr2.5 note in that gate), so an unqualified ZK/MPC
+//        soundness/privacy claim typed into spec prose aborts the build too.
+// Both gates consume the SINGLE shared forbidden-phrase list (scripts/honesty-phrases.json), so
+// there is ONE source of truth and zero drift with the CI gates. A non-zero gate exit aborts the
+// build (no artifact is written). HONEST SCOPE: this is the COARSE phrase/number class only; a
+// subtle semantic overclaim remains Stage-5 human review.
 function runHonestyScan(specs) {
   const perfGate = join(REPO_ROOT, "scripts", "check-no-perf-numbers.py");
-  if (!existsSync(perfGate)) {
-    console.error(`\n[spec-factory] HONESTY SCAN: required gate missing: ${perfGate}\n`);
-    process.exit(1);
+  const privacyGate = join(REPO_ROOT, "scripts", "check-privacy-claims.sh");
+  const sharedList = join(REPO_ROOT, "scripts", "honesty-phrases.json");
+  for (const p of [perfGate, privacyGate, sharedList]) {
+    if (!existsSync(p)) {
+      console.error(`\n[spec-factory] HONESTY SCAN: required gate missing: ${p}\n`);
+      process.exit(1);
+    }
   }
   const typPaths = specs.map((s) => join(SPECS_DIR, s.source)).filter((t) => existsSync(t));
-  try {
-    execFileSync("python3", [perfGate, "--enforce", ...typPaths], {
-      cwd: REPO_ROOT,
-      stdio: ["ignore", "inherit", "inherit"],
-    });
-  } catch (e) {
-    const code = typeof e.status === "number" ? e.status : 1;
-    console.error(
-      `\n[spec-factory] BUILD-BOUNDARY HONESTY SCAN FAILED (no-perf-numbers, exit ${code}).\n` +
-        "  A spec .typ source carries a hard-coded performance number. Remove it — specs are a\n" +
-        "  design surface, not a benchmark. The factory will not serve an un-scanned spec.\n",
-    );
-    process.exit(1);
-  }
-  console.log(`[spec-factory] honesty scan passed: ${typPaths.length} spec source(s) scanned.`);
+
+  const run = (label, cmd, cmdArgs) => {
+    try {
+      // inherit stderr so a finding is visible; capture nothing — the gate self-reports.
+      execFileSync(cmd, cmdArgs, { cwd: REPO_ROOT, stdio: ["ignore", "inherit", "inherit"] });
+    } catch (e) {
+      const code = typeof e.status === "number" ? e.status : 1;
+      console.error(
+        `\n[spec-factory] BUILD-BOUNDARY HONESTY SCAN FAILED (${label}, exit ${code}).\n` +
+          "  A spec .typ source carries a hard-coded performance number or an unqualified ZK/MPC\n" +
+          "  soundness/privacy claim. A spec is a design surface, not a benchmark — remove the\n" +
+          "  number; and hedge the claim (or add the inline allow marker). The factory will not\n" +
+          "  serve an un-scanned spec. (Shared list: scripts/honesty-phrases.json.)\n",
+      );
+      process.exit(1);
+    }
+  };
+
+  // Perf gate over the exact spec sources (explicit paths => --enforce dispatch to the
+  // accessor-aware Typst scan). Privacy gate whole-tree (it enumerates its surface via
+  // git ls-files, which now includes site/specs/**/*.typ).
+  run("no-perf-numbers", "python3", [perfGate, "--enforce", ...typPaths]);
+  run("privacy-claims", "bash", [privacyGate]);
+
+  console.log(
+    `[spec-factory] honesty scan passed: ${typPaths.length} spec source(s) scanned by both ` +
+      "honesty gates (shared phrase list).",
+  );
 }
 
 // ---- HTML post-processing: inject heading ids + build a linked Table of Contents -----------
