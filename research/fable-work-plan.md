@@ -146,7 +146,7 @@ Ordered by Fable-leverage. "Fable does" = the design/proof only; "Fleet does" = 
 | `sq-bn2t8` | **OWL 2 QL query-rewriting** (PerfectRef/combined) — the last reasoning-profile gap; production tree-witness (`treewitness.rs`) + NP-complete UCQ-minimisation (`minimise.rs`) with **two silent-answer-loss traps** | Spec the strict CQ-shape gate that **REJECTS** non-CQ shapes (never silently loses answers) + sound UCQ minimisation + certain-answer proof; hand-check the DL-Lite oracle extension | Build the rewrite plumbing (`perfectref.rs`) + engine seam + entailment conformance harness | XL |
 | (none) | **OWL 2 Direct/DL (hyper)tableau** — 66 direct-semantics cases permanently `OutOfScope`; undecidable in full; no Rust hypertableau exists (`research/reasoner-suite-on-substrate.md §2.6`) | Decide whether a scoped, honestly-labelled EL++-toward-DL or a genuine tableau track is worth it; prove the soundness envelope; specify the fragment + external-audit gate | Classifier/normalisation plumbing once semantics pinned | XL |
 | (none) | **Datalog/existential regime** (chase + stratified negation + aggregates — the Nemo/VLog/RDFox tier, `research/inference-sota.md §1.3-1.4`) | Prove the hard parts: chase-termination (acyclicity classes), well-founded/stratified-negation soundness, aggregate stratification | Rule engine + expressivity ratchet | XL |
-| **#1307** (steering; **bead id UNVERIFIED — see note**) | **beyond-RL sound boundary** — 13 OWL-RL divergences are provably outside RL; some (differentFrom contrapositives) *are* sound RDF-Based entailments RL omits for polynomiality | Per-rule soundness + termination proof; maintainer steer on the polynomiality trade | Small code once each rule is proven | M |
+| **`sq-rhspl`** (steering; linked **#1307** — see note) | **beyond-RL sound boundary** — 13 OWL-RL divergences are provably outside RL; some (differentFrom contrapositives) *are* sound RDF-Based entailments RL omits for polynomiality | Per-rule soundness + termination proof; maintainer steer on the polynomiality trade | Small code once each rule is proven | M |
 
 > **Bead-id note (corrected 2026-07-01).** The beyond-RL steering work is **already tracked** by the
 > OPEN bead **`sq-rhspl`** (P3, DESIGN-FIRST + MAINTAINER-STEER, linked to **#1307**); the
@@ -398,7 +398,7 @@ never the reverse.
 - **Auth model #907 / `sq-70kx2`** (OIDC/JWT + RBAC + graph-level security) — the one feature
   deliberately NOT auto-built; needs the maintainer's security-model input first.
 - **Steer/Decision items** — #1001/#1002 (assurance-tier + DPV depth, also `sq-qhy4`-gated), the
-  beyond-RL bead (#1307; **id unverified — confirm with maintainer**), logos (PR #823/#207/`sq-8pbx`),
+  beyond-RL bead (`sq-rhspl`, linked #1307; **maintainer-steer required**), logos (PR #823/#207/`sq-8pbx`),
   #1139 (Semantic Scholar key), `sq-vbq9` (Pages source), #1135 (Copilot/bundle-budget), and the ~40
   post-hoc `Steer:`/`Decision:` issues (these are maintainer *review* items, not new work).
 
