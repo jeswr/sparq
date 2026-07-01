@@ -18,6 +18,7 @@ import {
   isAskResult,
   askValue,
   streamQueryRows,
+  COMMON_PREFIXES,
   type SparqlBinding,
   type SparqlResults,
   type SparqlTerm,
@@ -28,6 +29,7 @@ import {
 
 import { basePath } from "@/lib/base-path";
 import { SAMPLE_TURTLE, SAMPLE_FORMAT } from "@/data/sample-graph";
+import { type ExportFormat } from "@/lib/rdf-format";
 import {
   hasNativeLoader,
   nativeDiskUsage,
@@ -277,6 +279,17 @@ export interface EngineContextValue {
    */
   serializeStore: () => string | null;
   /**
+   * [OPUS-4.8] sq-xvj9 — export the WHOLE live store to a pretty, human-readable RDF document
+   * for download (the DatasetViewer's "Export data" action). Unlike {@link serializeStore} (an
+   * internal, unabbreviated TriG dump the SHACL tool consumes), this is the USER-facing export:
+   * indented + sorted, with IRIs abbreviated against the site's `COMMON_PREFIXES` (sq-l5kr's
+   * caller-supplied prefix map), so `ex:`/`foaf:`/`schema:`/… compact exactly like the rest of
+   * the workbench. `"turtle"` emits the DEFAULT GRAPH (Turtle has no named-graph syntax);
+   * `"trig"` and `"jsonld"` emit the WHOLE dataset (default + every named graph). Returns `null`
+   * before the engine is ready or if the loaded bundle lacks the serialise binding.
+   */
+  exportStore: (format: ExportFormat) => string | null;
+  /**
    * [OPUS-4.8] sq-ixc3.13 — bring RDF into the live store via the Import drawer. A `file` import
    * (a disk path) goes through the NATIVE loader (`load_path`: threads, no wasm-tab ceiling,
    * compressed streams, native-only HDT) when running inside the Tauri desktop shell; `paste` /
@@ -476,6 +489,21 @@ function computeReasoningInfo(
   const entailed = Math.max(0, closureTriples - baseTriples);
   return { mode, baseTriples, closureTriples, entailed };
 }
+
+// [OPUS-4.8] sq-xvj9 — the caller-supplied prefix map (sq-l5kr) as the `[prefix, iri]` pairs the
+// wasm `serialize` binding takes: the site's `COMMON_PREFIXES`, so an exported document abbreviates
+// `ex:`/`foaf:`/`schema:`/… consistently with the rest of the workbench (and byte-parity with the
+// site's serialiser opinion). Computed once — the registry is static.
+const EXPORT_PREFIXES: [string, string][] = COMMON_PREFIXES.map((b) => [b.prefix, b.iri]);
+
+// The engine `serialize` format string for each UI export format. JSON-LD uses the COMPACTED form
+// so the prefix map drives a readable `@context` (the plain `"jsonld"` form is expanded and ignores
+// `abbreviate`); Turtle/TriG abbreviate via a sorted `@prefix` header (the `abbreviate=true` flag).
+const EXPORT_SERIALIZE_FORMAT: Record<ExportFormat, string> = {
+  turtle: "turtle",
+  trig: "trig",
+  jsonld: "jsonld-compacted",
+};
 
 export function EngineProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = React.useState<EngineStatus>({ kind: "cold" });
@@ -907,6 +935,19 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     return store.serialize("trig", false, null, false, null);
   }, []);
 
+  // [OPUS-4.8] sq-xvj9 — the USER-facing dataset export the DatasetViewer downloads. Serialises the
+  // whole live store PRETTY (indented + sorted) and ABBREVIATED against the site's COMMON_PREFIXES
+  // (sq-l5kr's caller-supplied prefix map), through the SAME engine writer as `serializeStore`.
+  // `turtle` carries the default graph only (Turtle has no named-graph syntax); `trig`/`jsonld`
+  // carry the whole dataset. `null` if the store is cold or a lean bundle lacks the binding.
+  const exportStore = React.useCallback((format: ExportFormat): string | null => {
+    const store = storeRef.current;
+    if (!store) return null;
+    const serialize = (store as { serialize?: WasmStore["serialize"] }).serialize;
+    if (typeof serialize !== "function") return null;
+    return store.serialize(EXPORT_SERIALIZE_FORMAT[format], true, null, true, EXPORT_PREFIXES);
+  }, []);
+
   // [OPUS-4.8] sq-ixc3.13 — the N-Quads whole-dataset snapshot the workspace persists (sq-atb0).
   const snapshotStore = React.useCallback((): string | null => {
     const store = storeRef.current;
@@ -935,6 +976,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       lastRowCount,
       run,
       serializeStore,
+      exportStore,
       importRdf,
       nativeLoaderAvailable,
       snapshotStore,
@@ -954,6 +996,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       lastRowCount,
       run,
       serializeStore,
+      exportStore,
       importRdf,
       nativeLoaderAvailable,
       snapshotStore,

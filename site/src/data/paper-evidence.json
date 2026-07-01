@@ -229,7 +229,7 @@
       "kind": "answer-safety-invariant",
       "family": "ODRL access-control bridge",
       "source": "crates/sparq-solid/tests/odrl_bridge.rs::deny_overrides_allow_through_enforcement (and permit_plus_prohibition_same_subject_is_denied)",
-      "note": "Proven by assertion: when a matched ODRL Permission and a matched ODRL Prohibition both apply to the same principal, action, and target, the materialised deny carved into the auth view wins through the unchanged enforcement layer (which computes union-of-allow minus union-of-deny), so the principal's accessible set for that mode is empty. Deny-overrides is the ODRL Formal-Semantics conflict default and the bridge re-uses the existing access-control engine rather than adding one. A deterministic boolean invariant, not a timing, and not a security claim about the wider system."
+      "note": "Proven by assertion: when a matched ODRL Permission and a matched ODRL Prohibition both apply to the same principal, action, and target, the materialised deny carved into the auth view wins through the unchanged enforcement layer (which computes union-of-allow minus union-of-deny), so the principal's accessible set for that mode is empty. This realises ODRL's `prohibit` conflict strategy structurally (the bridge re-uses the existing access-control engine rather than adding one); note the bridge does NOT consult `odrl:conflict` — per ODRL IM 2.2 the default when the property is unset is `invalid`, and the `perm`/`invalid` strategies are not representable by set subtraction (disclosed as a first-class limitation in the paper). A deterministic boolean invariant, not a timing, and not a security claim about the wider system."
     },
     "policy_bridge.fail_closed_deny_retraction": {
       "value": true,

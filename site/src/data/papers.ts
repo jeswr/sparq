@@ -110,18 +110,29 @@ export const PAPERS: Paper[] = [
       "Deterministic conformance ratchet floors: Solid WAC decision parity (12) and Solid ACP decision parity (12), as the two newest rows of a 7-suite cross-family scoreboard totalling 3442, each floor CI-enforced, monotone, and guarded against drift. No latency claim and no security/soundness claim; library-level decision parity only, not HTTP/CTH wire conformance.",
   },
   {
+    // [FABLE-5] sq-gum8.3-odrl REVISION 2 (PR #1330 review response): ONE track picked (ESWC
+    // research track — the "in-use" framing is dropped: library-level, single-node, no
+    // deployment/users); the WAC/ACP floors reframed as CONTEXT for the target layer, not
+    // bridge evidence (the only direct bridge evidence is the four invariants); related work
+    // extended to the decision-caching / authorization-recycling / materialised-view
+    // neighborhood for C3; the conflict default corrected against ODRL IM 2.2 (`invalid` is
+    // the spec default — the bridge hard-wires `prohibit` and cannot honour `perm`/`invalid`,
+    // a first-class limitation); "pre-registered" corrected to "specified" (no registry
+    // deposit exists); worked end-to-end example + artifact statement added. Status stays
+    // `draft` until the §5.3 comparative study runs — the explicit bar for submission.
     slug: "odrl-policy-bridge",
     source: "odrl-policy-bridge.typ",
     title:
-      "Compiling ODRL Usage Policies into a Queryable Access-Control View for Solid/SPARQL: A Single-Node, Fail-Closed Conditional-Grant Bridge",
+      "An ODRL Policy Bridge for SPARQL Access Control: Fail-Closed Compilation of Usage Policies into a Queryable Solid Access-Control View",
     blurb:
-      "A single-node bridge that compiles a matched ODRL Permission/Prohibition into the same triples the engine's existing, queryable WAC/ACP view already understands — no new enforcement engine. The honest evidence is answer-safety (deny-overrides, asymmetric fail-closed deny retraction, re-checked conditional grants, atomic count enforcement) plus the CI-enforced WAC/ACP decision-parity floors the bridge materialises into. The federated ODRL→MPC / ODRL-Duty→ZK disclosure composition is deferred as honest future work; the crypto estate is research-grade and not externally audited.",
+      "Compile, don't co-evaluate: a matched ODRL Permission/Prohibition compiles into the same triples the engine's existing, queryable WAC/ACP view already understands — no second enforcement engine, and every compiled decision is auditable, provenance-tagged RDF (the paper walks one policy end-to-end: Turtle policy → compiled auth/provenance triples → SPARQL audit query and its result). The contribution is the fail-closed lifecycle discipline compilation demands: ODRL's prohibit conflict strategy realised structurally by allow-minus-deny set subtraction (the perm and spec-default invalid strategies are not representable — a disclosed, first-class limitation), asymmetric three-valued deny retraction on policy refresh (positioned against decision caching, authorization recycling, Zanzibar-style consistent authorization, and materialised-view maintenance — not only ODRL enforcers), per-session re-checked conditional grants with safe one-shot fallback, and atomic count budgets. Evidence, honestly: four machine-checked invariants are the only direct bridge evidence; the WAC/ACP decision-parity floors are context for the pre-existing target layer, not bridge evaluation; the specified comparative decision-agreement study vs ODRE/OAC has not run (hence draft — not submittable until it has). The federated ODRL→MPC / ODRL-Duty→ZK composition is deferred, unbuilt, and claims nothing (sq-qhy4).",
     authors: "Jesse Wright · the sparq project",
-    venue: "ISWC / ESWC (policy / systems-integration)",
-    status: "publishable-now",
+    venue:
+      "ESWC research track (policy) — draft; not submittable until the §5.3 comparative study runs",
+    status: "draft",
     family: "B",
     evidence:
-      "Deterministic, test-proven answer-safety invariants of the bridge (deny-overrides correct; asymmetric fail-closed deny retraction; recipient constraints persist as re-checked conditional grants with one-shot fallback; atomic stateful count enforcement) plus the CI-enforced, drift-guarded Solid WAC (12) and ACP (12) decision-parity ratchet floors it feeds. No latency claim; ODRL→access-control mapping is an integration, not a novel semantics. The federated/ZK disclosure half is explicitly deferred (research-grade crypto, not externally audited; sq-qhy4).",
+      "Honestly partitioned. Direct evidence (all of it, today): deterministic, test-proven answer-safety invariants of the bridge (prohibit-strategy set subtraction correct through unchanged enforcement; asymmetric fail-closed deny retraction; recipient constraints persist as re-checked conditional grants with one-shot fallback; atomic stateful count enforcement). Context — NOT bridge evidence: the CI-enforced, drift-guarded Solid WAC (12) and ACP (12) decision-parity ratchet floors of the pre-existing target layer. PENDING — the blocking gap to submission: a fully specified (not pre-registered: no registry deposit exists) decision-agreement study vs the ODRE enforcement engines and an OAC-style matcher over the cited systems' own policy corpora. No latency claim; no novel-semantics claim; no in-use claim; the federated/ZK disclosure half is explicitly deferred (research-grade crypto, not externally audited; sq-qhy4).",
   },
   {
     slug: "unsafe-attestation",

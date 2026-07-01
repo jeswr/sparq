@@ -19,7 +19,7 @@
 // system browser (the design's rule: the GUI never renders the site, it links to it).
 
 import * as React from "react";
-import { PanelsTopLeft, X, Layers, Upload } from "lucide-react";
+import { PanelsTopLeft, X, Layers, Upload, Download, AlertTriangle } from "lucide-react";
 
 import { LeftRail } from "@/components/workbench/left-rail";
 import { TitleBar } from "@/components/workbench/title-bar";
@@ -47,6 +47,10 @@ import {
 // [OPUS-4.8] sq-tp1m (#757) — keeps the engine's inference regime in lockstep with the active
 // workspace's persisted choice (restores it on load), mounted once regardless of the active tab.
 import { InferenceModeBridge } from "@/components/workbench/inference-control";
+// [OPUS-4.8] sq-xvj9 — the Cmd-K counterpart to the rail's "Export data…": serialise + download the
+// whole store as pretty Turtle / TriG / JSON-LD from the keyboard-first spine.
+import { downloadText } from "@/lib/download";
+import { EXPORT_FORMATS, exportFilename } from "@/lib/rdf-format";
 
 /** An open tab in the IDE tab strip — keyed by tool id (a tool opens at most once). */
 export interface OpenTab {
@@ -171,9 +175,21 @@ function ShellPaletteCommands({
   onSelectTab: (toolId: string) => void;
   onCloseTab: (toolId: string) => void;
 }) {
-  const { graphs } = useEngine();
+  const { graphs, status, storeSize, exportStore } = useEngine();
   // [OPUS-4.8] sq-ixc3.13 — the Cmd-K entry point for the Import drawer.
   const { setOpen: setImportOpen } = useImportDrawer();
+  // [OPUS-4.8] sq-xvj9 — export is only meaningful once the engine is warm with a non-empty store.
+  const exportDisabled = status.kind !== "ready" || storeSize === 0;
+  // [OPUS-4.8] sq-xvj9 — the Cmd-K export path must not fail silently: when `exportStore` returns
+  // null (a lean bundle without the serialise binding) surface the same message the rail shows,
+  // as an ephemeral aria-live alert (the palette has already closed, so an inline note is not
+  // visible from here).
+  const [exportError, setExportError] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    if (!exportError) return;
+    const id = window.setTimeout(() => setExportError(null), 6000);
+    return () => window.clearTimeout(id);
+  }, [exportError]);
 
   const commands = React.useMemo<PaletteCommand[]>(() => {
     const cmds: PaletteCommand[] = [];
@@ -188,6 +204,41 @@ function ShellPaletteCommands({
       icon: Upload,
       run: () => setImportOpen(true),
     });
+
+    // [OPUS-4.8] sq-xvj9 — export the whole store as pretty Turtle / TriG / JSON-LD (the rail's
+    // "Export data…" from the keyboard). Disabled until the engine is warm with a non-empty store.
+    for (const f of EXPORT_FORMATS) {
+      cmds.push({
+        id: `action.export.${f.value}`,
+        group: "Actions",
+        title: `Export dataset as ${f.label}`,
+        blurb: `Download the ${f.scope} as ${f.label}, prefix-abbreviated.`,
+        keywords: [
+          "export",
+          "download",
+          "save",
+          "serialize",
+          "serialise",
+          "dataset",
+          f.label,
+          f.value,
+          "turtle",
+          "trig",
+          "json-ld",
+        ],
+        icon: Download,
+        disabled: exportDisabled,
+        run: () => {
+          const text = exportStore(f.value);
+          if (text === null) {
+            setExportError("The engine is not ready, or this build cannot serialise RDF.");
+            return;
+          }
+          setExportError(null);
+          downloadText(exportFilename(f.value), text, f.mime);
+        },
+      });
+    }
 
     // Every TOOL as an "open …" command. A `built` tool opens its working tab; a stub still opens
     // (the panel states its tier + what it will do honestly — no fabricated result).
@@ -243,8 +294,40 @@ function ShellPaletteCommands({
     }
 
     return cmds;
-  }, [tabs, activeId, graphs, onOpenTool, onSelectTab, onCloseTab, setImportOpen]);
+  }, [
+    tabs,
+    activeId,
+    graphs,
+    onOpenTool,
+    onSelectTab,
+    onCloseTab,
+    setImportOpen,
+    exportDisabled,
+    exportStore,
+  ]);
 
   useRegisterPaletteCommands("shell", commands);
-  return null;
+
+  if (!exportError) return null;
+  return (
+    <div className="pointer-events-none fixed inset-x-0 bottom-8 z-[60] flex justify-center px-4">
+      <div
+        role="alert"
+        aria-live="assertive"
+        data-export-feedback="error"
+        className="pointer-events-auto flex max-w-md items-start gap-2 rounded-md border border-destructive/40 bg-popover px-3 py-2 text-xs text-destructive shadow-lg"
+      >
+        <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+        <span className="min-w-0">{exportError}</span>
+        <button
+          type="button"
+          onClick={() => setExportError(null)}
+          aria-label="Dismiss export error"
+          className="ml-1 shrink-0 rounded-sm text-muted-foreground hover:text-foreground"
+        >
+          <X className="size-3.5" />
+        </button>
+      </div>
+    </div>
+  );
 }
