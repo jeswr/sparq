@@ -17,29 +17,31 @@
 use crate::json::Solution;
 use crate::term::canonical_key;
 
-/// The `\u{1e}` (record separator) joins per-variable cells; `\u{1d}` (group separator) joins a
-/// variable name to its value. Neither can appear in a variable name or a datatype IRI, so a solution
-/// key is unambiguous.
-fn solution_key(sol: &Solution) -> String {
+/// A solution's value-canonical multiset key: the sorted `(var, term-key)` pairs held **structurally**
+/// (a `Vec` of pairs, not a delimiter-joined string). Delimiter-joining would be collision-prone — a
+/// literal lexical form can contain *any* byte, including a chosen separator, so a differently-shaped
+/// solution could forge an identical joined string and read as "equal". A vector of pairs has no
+/// separator to forge: two solutions share a key iff they bind the same variables to the same
+/// value-canonical terms.
+type SolutionKey = Vec<(String, String)>;
+
+/// A sort-variable-projection key: one `Option` per sort variable (`None` marks an unbound sort var, so
+/// bound-vs-unbound stays a distinct sort key), held structurally for the same anti-collision reason as
+/// [`SolutionKey`]. Drives the `ORDER BY` run partitioning.
+type SortKey = Vec<Option<String>>;
+
+fn solution_key(sol: &Solution) -> SolutionKey {
     // `Solution` is a BTreeMap, so iteration is already in sorted-variable order.
-    let mut parts = Vec::with_capacity(sol.len());
-    for (var, term) in sol {
-        parts.push(format!("{}\u{1d}{}", var, canonical_key(term)));
-    }
-    parts.join("\u{1e}")
+    sol.iter()
+        .map(|(var, term)| (var.clone(), canonical_key(term)))
+        .collect()
 }
 
-/// The value-canonical key of just the sort variables of a solution (unbound sort vars are marked, so
-/// bound-vs-unbound is a distinct sort key). Drives the `ORDER BY` run partitioning.
-fn sort_key(sol: &Solution, sort_vars: &[&str]) -> String {
-    let mut parts = Vec::with_capacity(sort_vars.len());
-    for v in sort_vars {
-        match sol.get(*v) {
-            Some(term) => parts.push(format!("{}\u{1d}{}", v, canonical_key(term))),
-            None => parts.push(format!("{}\u{1d}\u{0}UNBOUND", v)),
-        }
-    }
-    parts.join("\u{1e}")
+fn sort_key(sol: &Solution, sort_vars: &[&str]) -> SortKey {
+    sort_vars
+        .iter()
+        .map(|v| sol.get(*v).map(canonical_key))
+        .collect()
 }
 
 /// Exact **multiset (bag) equality** of two solution sequences, order-insensitive: equal iff they
@@ -48,8 +50,8 @@ pub fn multiset_equal(a: &[Solution], b: &[Solution]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut ka: Vec<String> = a.iter().map(solution_key).collect();
-    let mut kb: Vec<String> = b.iter().map(solution_key).collect();
+    let mut ka: Vec<SolutionKey> = a.iter().map(solution_key).collect();
+    let mut kb: Vec<SolutionKey> = b.iter().map(solution_key).collect();
     ka.sort_unstable();
     kb.sort_unstable();
     ka == kb
@@ -146,6 +148,25 @@ mod tests {
         assert!(!multiset_equal(&bound, &unbound));
         // different length.
         assert!(!multiset_equal(&a, &a[..1]));
+    }
+
+    #[test]
+    fn multiset_equal_is_not_fooled_by_delimiter_bytes_in_a_lexical() {
+        // Regression for the old delimiter-joined string key: a literal lexical may contain ANY byte,
+        // including the historical record/group/unit separators (\u{1e}/\u{1d}/\u{1f}). These two
+        // solutions are genuinely different SHAPES (one variable vs two), yet the single lexical of `a`
+        // is crafted so that the old `join`-based key of `a` stringified *identically* to that of `b`.
+        // With a structural key they must compare UNEQUAL.
+        let key_n = canonical_key(&s("N")); // the value-canonical key `b` would emit for its ?y = "N"
+        let forged = format!("M\u{1e}b\u{1d}{key_n}");
+        let a = vec![sol(&[("a", s(&forged))])];
+        let b = vec![sol(&[("a", s("M")), ("b", s("N"))])];
+        // Equal solution COUNT, so this exercises the key comparison rather than the length short-circuit.
+        assert_eq!(a.len(), b.len());
+        assert!(
+            !multiset_equal(&a, &b),
+            "a crafted literal lexical must not forge a differently-shaped solution's key"
+        );
     }
 
     #[test]

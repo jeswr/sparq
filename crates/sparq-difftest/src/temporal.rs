@@ -229,15 +229,31 @@ fn cmp_to_order(o: Ordering) -> TemporalOrder {
     }
 }
 
-/// Parse an `xsd:duration` / `xsd:yearMonthDuration` / `xsd:dayTimeDuration` into a comparable value.
+/// The XSD duration lexical subspace selected by the datatype — i.e. which unit letters are legal
+/// (XSD 1.1 §3.4.26–28). `xsd:yearMonthDuration` and `xsd:dayTimeDuration` are *restrictions* of
+/// `xsd:duration`, so a lexical carrying a unit outside its subset is invalid and must not be
+/// value-canonicalised (it falls through to exact-lexical keying instead).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DurKind {
+    /// `xsd:duration` — all of `Y M D H M S`.
+    Full,
+    /// `xsd:yearMonthDuration` — only `Y` and the date-side `M`; no day/time part.
+    YearMonth,
+    /// `xsd:dayTimeDuration` — only `D H` and the time-side `M S`; no year/month.
+    DayTime,
+}
+
+/// Parse an `xsd:duration` / `xsd:yearMonthDuration` / `xsd:dayTimeDuration` into a comparable value,
+/// enforcing each datatype's unit subset (a `dayTimeDuration` rejects `Y`/`M`, a `yearMonthDuration`
+/// rejects any day/time component) and the XSD rule that only the seconds component may be fractional.
 pub fn parse_duration(lexical: &str, datatype: &str) -> Option<Duration> {
     let local = datatype.strip_prefix(XSD)?;
-    if !matches!(
-        local,
-        "duration" | "yearMonthDuration" | "dayTimeDuration"
-    ) {
-        return None;
-    }
+    let kind = match local {
+        "duration" => DurKind::Full,
+        "yearMonthDuration" => DurKind::YearMonth,
+        "dayTimeDuration" => DurKind::DayTime,
+        _ => return None,
+    };
     let s = lexical.trim();
     let (neg, s) = match s.strip_prefix('-') {
         Some(r) => (true, r),
@@ -248,17 +264,21 @@ pub fn parse_duration(lexical: &str, datatype: &str) -> Option<Duration> {
         Some((d, t)) => (d, Some(t)),
         None => (s, None),
     };
+    // `xsd:yearMonthDuration` has no day/time part at all (not even an empty `T`).
+    if kind == DurKind::YearMonth && tpart.is_some() {
+        return None;
+    }
 
     let mut months = BigInt::from(0);
     let mut seconds = BigDecimal::from(0);
     let mut any = false;
-    read_components(dpart, false, &mut months, &mut seconds, &mut any)?;
+    read_components(dpart, false, kind, &mut months, &mut seconds, &mut any)?;
     if let Some(t) = tpart {
         // A 'T' with nothing after it is invalid.
         if t.is_empty() {
             return None;
         }
-        read_components(t, true, &mut months, &mut seconds, &mut any)?;
+        read_components(t, true, kind, &mut months, &mut seconds, &mut any)?;
     }
     if !any {
         return None;
@@ -271,10 +291,13 @@ pub fn parse_duration(lexical: &str, datatype: &str) -> Option<Duration> {
 }
 
 /// Read a run of `<number><unit>` components into the month/second accumulators. `is_time` selects the
-/// time-side unit set (`H`/`M`/`S`) versus the date-side set (`Y`/`M`/`D`).
+/// time-side unit set (`H`/`M`/`S`) versus the date-side set (`Y`/`M`/`D`); `kind` restricts the legal
+/// units to the datatype's lexical subspace (see [`DurKind`]). Only the seconds component may be
+/// fractional; a fraction on any other unit is an invalid lexical and is rejected.
 fn read_components(
     part: &str,
     is_time: bool,
+    kind: DurKind,
     months: &mut BigInt,
     seconds: &mut BigDecimal,
     any: &mut bool,
@@ -288,19 +311,29 @@ fn read_components(
         if num.is_empty() {
             return None;
         }
+        // In XSD duration lexical space only the seconds component may carry a fraction.
+        if num.contains('.') && !(is_time && unit == 'S') {
+            return None;
+        }
         match (is_time, unit) {
-            (false, 'Y') => *months += BigInt::from_str(num).ok()? * BigInt::from(12),
-            (false, 'M') => *months += BigInt::from_str(num).ok()?,
-            (false, 'D') => {
+            // Year/month axis — illegal in a `dayTimeDuration`.
+            (false, 'Y') if kind != DurKind::DayTime => {
+                *months += BigInt::from_str(num).ok()? * BigInt::from(12)
+            }
+            (false, 'M') if kind != DurKind::DayTime => *months += BigInt::from_str(num).ok()?,
+            // Day/time axis — illegal in a `yearMonthDuration`.
+            (false, 'D') if kind != DurKind::YearMonth => {
                 *seconds = seconds.clone() + BigDecimal::from_str(num).ok()? * BigDecimal::from(86_400)
             }
-            (true, 'H') => {
+            (true, 'H') if kind != DurKind::YearMonth => {
                 *seconds = seconds.clone() + BigDecimal::from_str(num).ok()? * BigDecimal::from(3_600)
             }
-            (true, 'M') => {
+            (true, 'M') if kind != DurKind::YearMonth => {
                 *seconds = seconds.clone() + BigDecimal::from_str(num).ok()? * BigDecimal::from(60)
             }
-            (true, 'S') => *seconds = seconds.clone() + BigDecimal::from_str(num).ok()?,
+            (true, 'S') if kind != DurKind::YearMonth => {
+                *seconds = seconds.clone() + BigDecimal::from_str(num).ok()?
+            }
             _ => return None,
         }
         *any = true;
@@ -401,6 +434,31 @@ mod tests {
         assert!(parse_duration("PT", DUR).is_none());
         assert!(parse_duration("P1.5Y", DUR).is_none());
         assert!(parse_duration("P1Y", DT).is_none());
+    }
+
+    #[test]
+    fn parse_duration_enforces_datatype_unit_subsets() {
+        // `xsd:yearMonthDuration`: only Y and (date) M; every day/time unit is rejected.
+        assert!(parse_duration("P1M", YM).is_some());
+        assert!(parse_duration("P1Y2M", YM).is_some());
+        assert!(parse_duration("P30D", YM).is_none(), "day is not a yearMonth unit");
+        assert!(parse_duration("PT1H", YM).is_none(), "a time part is illegal in yearMonth");
+        assert!(parse_duration("P1YT0S", YM).is_none(), "even a zero time part is illegal");
+        // `xsd:dayTimeDuration`: only D and (time) H/M/S; year and (date) month are rejected.
+        assert!(parse_duration("PT1H", DAYT).is_some());
+        assert!(parse_duration("P1DT2H3M4.5S", DAYT).is_some());
+        assert!(parse_duration("P1Y", DAYT).is_none(), "year is not a dayTime unit");
+        assert!(parse_duration("P1M", DAYT).is_none(), "date-side month is not a dayTime unit");
+    }
+
+    #[test]
+    fn parse_duration_only_seconds_may_be_fractional() {
+        // Seconds may carry a fraction; nothing else may.
+        assert!(parse_duration("PT1.5S", DUR).is_some());
+        assert!(parse_duration("P1.5D", DUR).is_none(), "fractional day is invalid");
+        assert!(parse_duration("P1.5M", DUR).is_none(), "fractional (date) month is invalid");
+        assert!(parse_duration("PT1.5H", DUR).is_none(), "fractional hour is invalid");
+        assert!(parse_duration("PT1.5M", DUR).is_none(), "fractional minute is invalid");
     }
 
     #[test]
