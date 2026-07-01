@@ -57,15 +57,16 @@ export const PAPERS: Paper[] = [
     slug: "filtered-ann",
     source: "filtered-ann.typ",
     title:
-      "Filter-as-Query: Predicate-Constrained Vector Search where the Filter is an Exact RDF BGP over the Engine's Own Dictionary Ids",
+      "Filter-as-Query: Filtered Approximate Nearest-Neighbour Search over SPARQL, where the Filter is an Exact BGP over the Engine's Own Dictionary Ids",
     blurb:
-      "An RDF-native filtered-ANN: the filter compiles to an exact, transitively-pushed-down BGP mask over the shared dictionary-id space, making pre-filtering answer-safe. A systems-integration contribution.",
+      "An RDF-native filtered-ANN integration: the filter on a vector-neighbour variable is the join-connected sub-BGP of the query itself, evaluated exactly by the engine and materialised as an id-mask over the shared dictionary-id space (no metadata mirroring, no boundary id translation), with the pre≡post answer contract enforced as machine-checked invariants — exact path by construction, approximate path preconditioned and verified on broad-mask fixtures. Related work covers the 2023–26 filtered-ANN wave incl. the engine-integrated systems (VBASE/NaviX) it is closest to; the performance evaluation is pre-registered (baselines, workloads, falsification criteria) pending the canonical runner.",
     authors: "Jesse Wright · the sparq project",
-    venue: "ISWC / ESWC research track (systems-integration)",
-    status: "publishable-now",
+    venue:
+      "EDBT short / demo or ESWC in-use/resources — results-free systems description; research-track submission deferred until the pre-registered evaluation is executed",
+    status: "draft",
     family: "A",
     evidence:
-      "Deterministic: recall floors (0.95 unfiltered, 0.90 filtered) + proven pre-filter ≡ post-filter equivalence (single / transitive / cyclic). No latency claim.",
+      "Deterministic only: recall floors (0.95 unfiltered, 0.90 filtered — sanity checks, labelled as such) + asserted pre-filter ≡ post-filter equivalence (single / transitive / cyclic; exact path unconditional, approximate path broad-mask) + the cost-model crossover constant. No latency/throughput claim; the performance evaluation is pre-registered but unexecuted (blocked on the canonical runner).",
   },
   {
     slug: "honest-benchmarking",
