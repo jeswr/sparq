@@ -257,6 +257,69 @@
       "family": "ODRL access-control bridge",
       "source": "crates/sparq-policy/tests/odrl_count.rs::lteq_grants_n_then_denies (and base_deny_consumes_nothing, budget_isolated_per_party_and_target)",
       "note": "Proven by assertion behind the opt-in count-enforcement feature: a stateful odrl:count constraint grants exactly up to its limit and then denies, consuming exactly one unit of budget per grant and zero on a denial, with budgets isolated per (rule, party, target). A deterministic boolean invariant over an integer counter, not a timing."
+    },
+    "fo_km.task_count": {
+      "value": 16,
+      "unit": "km-questions",
+      "environment": "canonical",
+      "kind": "corpus-structural-count",
+      "family": "FO-KM pilot",
+      "source": "bench/fo-km/tasks.jsonl (one task per line; schema checked by bench/fo-km/validate_tasks.py)",
+      "note": "Size of the committed knowledge-management task corpus: a deterministic, machine-independent line count over a git-tracked fixture, not a measurement and not an accuracy claim. [FABLE-5 sq-gum8.3-fokm]"
+    },
+    "fo_km.condition_count": {
+      "value": 4,
+      "unit": "ontology-conditions",
+      "environment": "canonical",
+      "kind": "corpus-structural-count",
+      "family": "FO-KM pilot",
+      "source": "bench/fo-km/overlays/ (no-fo.ttl, schema-org.ttl, gufo.ttl, dolce-dul.ttl)",
+      "note": "Number of committed typing-overlay conditions the pilot compares over the same instance graph: a deterministic count of git-tracked overlay fixtures, not a measurement. [FABLE-5 sq-gum8.3-fokm]"
+    },
+    "fo_km.accuracy_schema_org": {
+      "value": 0.84,
+      "unit": "answer-accuracy",
+      "environment": "indicative",
+      "kind": "llm-graded-single-run",
+      "family": "FO-KM pilot",
+      "source": "bench/fo-km/RESULTS.md (single counterbalanced run; heuristic grading via bench/fo-km/analyze.py)",
+      "note": "schema.org-as-top condition: fraction of the 16-task corpus graded correct in ONE counterbalanced run with a heuristic grader. NON-canonical by construction: the agent is an LLM (non-deterministic, model- and date-dependent) and the run executed on the dev work-box. Never a headline; indicative callout only. [FABLE-5 sq-gum8.3-fokm]"
+    },
+    "fo_km.accuracy_no_fo": {
+      "value": 0.64,
+      "unit": "answer-accuracy",
+      "environment": "indicative",
+      "kind": "llm-graded-single-run",
+      "family": "FO-KM pilot",
+      "source": "bench/fo-km/RESULTS.md (single counterbalanced run; heuristic grading via bench/fo-km/analyze.py)",
+      "note": "Untyped (no formal ontology) incumbent-baseline condition, same run protocol as the other conditions. NON-canonical (LLM-graded, single run, dev work-box); indicative callout only. [FABLE-5 sq-gum8.3-fokm]"
+    },
+    "fo_km.accuracy_dolce": {
+      "value": 0.64,
+      "unit": "answer-accuracy",
+      "environment": "indicative",
+      "kind": "llm-graded-single-run",
+      "family": "FO-KM pilot",
+      "source": "bench/fo-km/RESULTS.md (single counterbalanced run; heuristic grading via bench/fo-km/analyze.py)",
+      "note": "DOLCE (via DUL overlay) condition. VALUE TAKEN FROM THE PROJECT MEASUREMENT RECORD, not re-read from RESULTS.md during drafting — re-verify against bench/fo-km/RESULTS.md before any submission (draft obligation, sq-gum8.3-fokm). NON-canonical (LLM-graded, single run, dev work-box); indicative callout only. [FABLE-5]"
+    },
+    "fo_km.accuracy_gufo_hi": {
+      "value": 0.58,
+      "unit": "answer-accuracy",
+      "environment": "indicative",
+      "kind": "llm-graded-single-run",
+      "family": "FO-KM pilot",
+      "source": "bench/fo-km/RESULTS.md (single counterbalanced run; heuristic grading via bench/fo-km/analyze.py)",
+      "note": "Upper of the two gUFO figures the results record reports. DRAFT OBLIGATION (sq-gum8.3-fokm): confirm from bench/fo-km/RESULTS.md what distinguishes the two gUFO figures (grading pass vs run variant) before submission. NON-canonical; indicative callout only. [FABLE-5]"
+    },
+    "fo_km.accuracy_gufo_lo": {
+      "value": 0.54,
+      "unit": "answer-accuracy",
+      "environment": "indicative",
+      "kind": "llm-graded-single-run",
+      "family": "FO-KM pilot",
+      "source": "bench/fo-km/RESULTS.md (single counterbalanced run; heuristic grading via bench/fo-km/analyze.py)",
+      "note": "Lower of the two gUFO figures the results record reports (the figure quoted in the project verdict record). DRAFT OBLIGATION (sq-gum8.3-fokm): confirm the distinction between the two gUFO figures before submission. NON-canonical; indicative callout only. [FABLE-5]"
     }
   }
 }

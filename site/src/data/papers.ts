@@ -151,6 +151,21 @@ export const PAPERS: Paper[] = [
     evidence:
       "Negative result — asserts NO proven security/privacy/soundness/attestation property (the collaborative path is unbuilt: 6 proof/attestation entry points fail closed with NotYetImplemented). Committed structural counts only: 4 re-audit lenses, all RE-OPEN; a 5-clause R-WV witness-validation obligation encoded as a build-time gate; 12 prior single-prover findings under the open external-audit gate. Estate is research-grade and not externally audited; cites the gates sq-qhy4 (external single-prover audit, open) + sq-9hrn (coZK re-audit). No performance claim.",
   },
+  {
+    slug: "fo-km-agent",
+    source: "fo-km-agent.typ",
+    title:
+      "Formal Ontologies for LLM-Agent Knowledge Management: schema.org vs gUFO vs DOLCE",
+    blurb:
+      "A controlled pilot asking whether typing a project knowledge graph under a formal upper ontology helps an LLM agent answer knowledge-management questions — and which ontology. Holding instance data, agent, tasks, and grading fixed across four committed typing overlays, only schema.org-as-top improved over the untyped baseline; DOLCE tied it and gUFO fell below it. The ranking tracks the vocabulary's LLM training-data fluency, not its formal richness. Every accuracy figure is an indicative single-run pilot measurement; a pre-registered multi-run study is the stated gate before any venue submission.",
+    authors: "Jesse Wright · the sparq project",
+    venue:
+      "ISWC / ESWC research (empirical) after the pre-registered scale-up; K-CAP or an LLM+KG workshop as a pilot",
+    status: "draft",
+    family: "B",
+    evidence:
+      "Indicative-only pilot: LLM-graded answer accuracy over a committed 16-task counterbalanced corpus across 4 committed ontology-overlay conditions (bench/fo-km). The only canonical records are structural corpus counts (16 tasks, 4 conditions); every accuracy figure is environment=indicative (single run, heuristic grading, non-deterministic agent, dev work-box) and is structurally barred from headline citation. No latency claim, no significance claim.",
+  },
 ];
 
 export function paperBySlug(slug: string): Paper | undefined {
