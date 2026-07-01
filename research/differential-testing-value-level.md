@@ -28,7 +28,7 @@ three-part upgrade, kept inside the existing nightly/bench harness (NOT the per-
 
 ## 1. What the harness does today (verified against the code) — and three premise corrections
 
-Verified against `crates/sparq-bench/src/fuzz.rs` at `origin/main` (commit `4d125edf`).
+Verified against `crates/sparq-bench/src/fuzz.rs` as of commit `4d125edf` on `origin/main`.
 
 **What exists (verified):**
 
