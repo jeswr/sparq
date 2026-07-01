@@ -156,6 +156,13 @@ const LENS = (args && args.lens) || null
 const QUESTION = (args && args.question) || ''
 const SCOPE = (args && args.scope) || ''
 
+// [OPUS-4.8] The File stage runs on the HAIKU tier (dispatch below). Emit the CONCRETE,
+// greppable provenance marker for that tier rather than a `[<MODEL>]` placeholder the
+// bead-filing agent has to substitute — a literal placeholder is easy to copy verbatim,
+// producing non-greppable provenance. Keep FILE_MODEL and FILE_MARKER in lock-step.
+const FILE_MODEL = 'haiku'
+const FILE_MARKER = '[HAIKU-4.5]'
+
 if (!LENS) {
   log('no lens given — pass args.lens (e.g. "privacy-claims" | "unsafe-sites" | "perf-honesty" | "coverage-ratchet") and optionally args.question')
   return { lens: null, soundness_verdict: 'inconclusive', findings: [], follow_up_beads: [], created_beads: [] }
@@ -187,7 +194,7 @@ function adjudicatePrompt(tables) {
 
 function fileBeadsPrompt(beads) {
   return 'File these Fable-adjudicated follow-up beads for `jeswr/sparq` (review lens "' + LENS + '"): ' + JSON.stringify(beads) + '. ' +
-    'For each, run `export PATH=$PATH:/home/ubuntu/.local/bin && cd /home/ubuntu/sparq && bd create` with the title, a body carrying the rationale + the 🤖 SPARQ-agent self-id + a `[<MODEL>] via fable-lens-review` provenance note (stamp the model you run as, per AGENTS.md rule 5 Model-provenance), the surface as a label/tag, and the priority if given. Do NOT edit `.beads/` files by hand and do NOT open a code PR — `bd create` only (the orchestrator re-exports afterward). Skip a bead only if an obvious duplicate already exists (say so in `failed`). ' +
+    'For each, run `export PATH=$PATH:/home/ubuntu/.local/bin && cd /home/ubuntu/sparq && bd create` with the title, a body carrying the rationale + the 🤖 SPARQ-agent self-id + a `' + FILE_MARKER + ' via fable-lens-review` provenance note (the concrete marker for this stage, per AGENTS.md rule 5 Model-provenance), the surface as a label/tag, and the priority if given. Do NOT edit `.beads/` files by hand and do NOT open a code PR — `bd create` only (the orchestrator re-exports afterward). Skip a bead only if an obvious duplicate already exists (say so in `failed`). ' +
     'Return {created:[{id,title}], failed:[{title,error}]}.'
 }
 
@@ -219,7 +226,7 @@ log('fable verdict: ' + verdict + ' (' + findings.length + ' finding(s), ' + fol
 let created = []
 if (followUps.length) {
   phase('File')
-  const filed = await agent(fileBeadsPrompt(followUps), { label: 'file-beads:' + LENS, phase: 'File', schema: BEAD_FILE_SCHEMA, agentType: 'general-purpose', model: 'haiku' })
+  const filed = await agent(fileBeadsPrompt(followUps), { label: 'file-beads:' + LENS, phase: 'File', schema: BEAD_FILE_SCHEMA, agentType: 'general-purpose', model: FILE_MODEL })
   created = (filed && filed.created) || []
   log('filed ' + created.length + ' follow-up bead(s)')
 }

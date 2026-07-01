@@ -248,10 +248,13 @@ function armPrompt(v) {
 
 async function mechVerify(impl, b) {
   if (!impl || impl.skipped || !impl.pr_url) {
-    return { bead: b.id, pr: null, armed: false, escalate: false, honest: false, skipped: true, reason: (impl && impl.reason) || 'no PR produced' }
+    return { bead: b.id, surface: b.surface, pr: null, armed: false, escalate: false, honest: false, skipped: true, reason: (impl && impl.reason) || 'no PR produced' }
   }
   const m = await agent(mechPrompt(impl, b), { label: 'mech:' + b.id, phase: 'Verify', schema: MECH_SCHEMA, agentType: 'general-purpose', model: 'haiku' })
-  return { bead: b.id, pr: impl.pr_url, armed: (m && m.armed) || false, escalate: (m && m.escalate) || false, honest: (m && m.honest) || false, reason: (m && m.reason) || '' }
+  // [OPUS-4.8] Thread b.surface through the verdict object so the Stage5 'fable_implements'
+  // path can route pickAgent(v.surface) to the right implementer agent (else it is undefined
+  // and dispatch silently falls back to general-purpose).
+  return { bead: b.id, surface: b.surface, pr: impl.pr_url, armed: (m && m.armed) || false, escalate: (m && m.escalate) || false, honest: (m && m.honest) || false, reason: (m && m.reason) || '' }
 }
 
 async function processEpic(epic) {
@@ -301,7 +304,7 @@ async function processEpic(epic) {
     phase('Review')
     verdicts = await parallel(escalated, (r) =>
       agent(fableReviewPrompt(r), { label: 'fable:' + r.bead, phase: 'Review', schema: FABLE_VERDICT_SCHEMA, agentType: 'sparq-reviewer', model: 'fable' })
-        .then(v => ({ bead: r.bead, pr: r.pr, honest: (v && v.honest) || false, recommend_arm: (v && v.recommend_arm) || false, disposition: (v && v.disposition) || 'hold', concerns: (v && v.concerns) || [] }))
+        .then(v => ({ bead: r.bead, pr: r.pr, surface: r.surface, honest: (v && v.honest) || false, recommend_arm: (v && v.recommend_arm) || false, disposition: (v && v.disposition) || 'hold', concerns: (v && v.concerns) || [] }))
     )
   }
 
@@ -320,7 +323,7 @@ async function processEpic(epic) {
       phase('Implement')
       const fix = await agent(fableImplPrompt(v), { label: 'fable-impl:' + v.bead, phase: 'Implement', schema: IMPL_SCHEMA, agentType: pickAgent(v.surface), model: 'fable', isolation: 'worktree' })
       phase('Verify')
-      const m = await mechVerify(fix, { id: v.bead, surface: '', title: '' })
+      const m = await mechVerify(fix, { id: v.bead, surface: v.surface || '', title: '' })
       if (m.armed) armed.push(v.bead)
       else open_for_review.push({ bead: v.bead, pr: (fix && fix.pr_url) || v.pr, concerns: ['fable re-impl still needs review'].concat(m.reason ? [m.reason] : []) })
     } else {
