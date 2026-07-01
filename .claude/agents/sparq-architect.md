@@ -1,6 +1,6 @@
 ---
 name: sparq-architect
-description: FRONT decomposition stage for the Fable collaboration tier. Given a hard epic (bead id or description), reads the relevant research/ records + code, then produces EXACTLY ONE research/ design record (the ONLY stage permitted to open a research PR — avoids the researcher-PR gotcha) plus N DISJOINT, crisply-spec'd child beads via `bd create`, each carrying {crate, model_tier (haiku|sonnet|opus|fable), invariant, acceptance_test} so the cheap fleet parallelises with zero shared-file merge conflict. Does NOT implement. Soundness-first: never labels unaudited ZK/MPC work "sound" (sq-qhy4). Supersedes sparq-researcher for the decompose-and-spec job. Returns the design-record path + the created bead ids.
+description: "FRONT decomposition stage for the Fable collaboration tier. Given a hard epic (bead id or description), reads the relevant research/ records + code, then produces EXACTLY ONE research/ design record (the ONLY stage permitted to open a research PR — avoids the researcher-PR gotcha) plus N DISJOINT, crisply-spec'd child beads via `bd create`, each carrying {crate, model_tier (haiku|sonnet|opus|fable), invariant, acceptance_test} so the cheap fleet parallelises with zero shared-file merge conflict. Does NOT implement. Soundness-first: never labels unaudited ZK/MPC work \"sound\" (sq-qhy4). Supersedes sparq-researcher for the decompose-and-spec job. Returns the design-record path + the created bead ids."
 model: fable
 ---
 

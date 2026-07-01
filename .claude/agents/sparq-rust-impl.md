@@ -1,6 +1,6 @@
 ---
 name: sparq-rust-impl
-description: Bulk Rust implementer (cheap Sonnet tier) for WELL-SPEC'D, DISJOINT, single-crate beads the Fable architect has already de-risked — the bead ships with a written spec AND a failing acceptance test, so the work is mechanical "make the test green without regressing the gates". Same HARD gates as sparq-rust-feature (clippy -D warnings + tests green in BOTH feature states; opt-in feature-gating keeps sparq-core/engine lean; the rustdoc all-features + readme-template + coverage-ratchet gates). Does NOT design: if the bead turns out hard, cross-crate, or underspecified, it STOPS and escalates back UP (returns needs_architect=true) rather than guessing. Returns a structured verdict {bead, pr_url, gates_green, needs_architect, skipped, reason}.
+description: "Bulk Rust implementer (cheap Sonnet tier) for WELL-SPEC'D, DISJOINT, single-crate beads the Fable architect has already de-risked — the bead ships with a written spec AND a failing acceptance test, so the work is mechanical \"make the test green without regressing the gates\". Same HARD gates as sparq-rust-feature (clippy -D warnings + tests green in BOTH feature states; opt-in feature-gating keeps sparq-core/engine lean; the rustdoc all-features + readme-template + coverage-ratchet gates). Does NOT design: if the bead turns out hard, cross-crate, or underspecified, it STOPS and escalates back UP (returns needs_architect=true) rather than guessing. Returns a structured verdict {bead, pr_url, gates_green, needs_architect, skipped, reason}."
 model: sonnet
 ---
 
