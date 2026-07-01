@@ -2006,11 +2006,17 @@ pub fn prefilter_manifest_structure(
     revocation_policy: &RevocationPolicy,
 ) -> Result<Vec<JoinEdge>, CheckError> {
     // --- Stage 1a: sparq-zk layer-3 bnode / arity re-check. ---
-    let attributions: Vec<BTreeSet<usize>> = manifest
-        .attributions
-        .iter()
-        .map(|s| s.iter().copied().collect())
-        .collect();
+    // [OPUS-4.8] sq-en5dx (Finding A of the sq-1s2.6 composition review): feed the
+    // Q6 cross-graph obligation gate a GLOBAL-namespace attribution vector, NOT the
+    // raw scan-LOCAL indices. `manifest.attributions[pi]` indexes the ANSWERING
+    // scan's OWN `commitments`, so two DISTINCT `k=1` scans both declaring local
+    // index 0 (the `[[0],[0]]` cross-scan alias) would COLLAPSE to one element and
+    // the non-bnode obligation would be DROPPED for the cross-scan join. Keying the
+    // union on the committed-graph IDENTITY (via `global_attributions`) makes two
+    // distinct graphs distinct so the obligation is correctly required, while two
+    // scans over the SAME graph still collapse (a same-graph bnode join is
+    // legitimate). See `global_attributions` for the fail-closed edge cases.
+    let attributions = global_attributions(manifest);
     let declared: Vec<JoinEdge> = manifest
         .join_obligations
         .iter()
@@ -3951,6 +3957,93 @@ fn field_hex_eq(a: &FieldHex, b: &FieldHex) -> bool {
         (Some(fa), Some(fb)) => field_to_be_bytes_32(&fa) == field_to_be_bytes_32(&fb),
         _ => false,
     }
+}
+
+/// Reconcile the scan-LOCAL graph-index namespace of `manifest.attributions` into a
+/// GLOBAL namespace keyed by the answering scan's committed-graph IDENTITY (the
+/// canonical big-endian bytes of `commitments[g]`), so the Q6 gate
+/// `sparq_zk::verify::cross_graph_join_obligations` computes the union
+/// `|A_i ∪ A_j|` across patterns in a CONSISTENT namespace. [OPUS-4.8] sq-en5dx
+/// (Finding A of the sq-1s2.6 composition review, `research/zk-bind-composition-review.md`).
+///
+/// # The bug this closes
+/// `manifest.attributions[pi]` is a set of indices into the ANSWERING scan's OWN
+/// `commitments` vector — a scan-LOCAL index (`bind_attributions` cross-checks it
+/// against that scan's proof-bound `attribution` bits, and the audit-#1
+/// reconstruction byte-binds it per scan). But the Q6 gate treated those integers
+/// as globally-distinct graph identities (`attributions[i].union(&attributions[j]).count() > 1`).
+/// Two DISTINCT single-commitment (`k=1`) scans each declaring local index 0 (the
+/// Finding-A `[[0],[0]]` construction) therefore collapsed to a single element, so
+/// `|A_0 ∪ A_1| = 1` and the non-bnode obligation was DROPPED for the cross-scan
+/// join — the gate was inert, with commitment-salt separation the sole live
+/// backstop. Keying the union on the commitment identity makes two distinct graphs
+/// map to distinct global ids (obligation correctly required) while two scans over
+/// the SAME committed graph still collapse (a same-graph bnode join is legitimate,
+/// no spurious obligation).
+///
+/// # Consistency / fail-closed contract
+/// The output has the SAME length as `manifest.attributions`, so `recheck`'s
+/// `patterns.len() != attributions.len()` arity check still fires `ArityMismatch`
+/// on a mis-sized vector, and an empty declared set still yields an empty global
+/// set (fail-closed `EmptyAttribution`). A local index that resolves to NO
+/// answering scan's commitment (out-of-range, malformed hex, or an unparsable
+/// query) is mapped to a FRESH unique id: this can only WIDEN the union — demanding
+/// MORE obligations, the conservative-safe direction — never collapse two graphs;
+/// the malformed manifest is independently rejected by stage 1b
+/// (`AttributionMalformed`), stage 2b (`UnboundPattern`), or the reconstruction
+/// stage. A pattern legitimately answered by MORE THAN ONE scan (multi-scan) unions
+/// every matching scan's identity (widening = safe), mirroring the
+/// `scan_matches_pattern` membership test `bind_attributions`/`bind_joins` use.
+fn global_attributions(manifest: &ProofManifest) -> Vec<BTreeSet<usize>> {
+    // Intern each distinct committed-graph identity to a stable ascending global id.
+    let mut intern: std::collections::BTreeMap<[u8; 32], usize> =
+        std::collections::BTreeMap::new();
+    // Fresh, never-colliding ids for indices that resolve to no commitment, taken
+    // from the TOP of the range (descending) so they never meet the ascending
+    // interned ids.
+    let mut fresh_unique = usize::MAX;
+
+    // The query's per-pattern constant slots identify which scan answers each
+    // pattern (the same mapping `bind_attributions` uses). A parse failure leaves
+    // `consts` empty; every local index then falls through to a fresh unique id and
+    // `recheck` re-reports the parse error itself (it re-parses the query).
+    let consts = fragment_patterns(&manifest.query)
+        .map(|patterns| fragment_pattern_consts(&patterns))
+        .unwrap_or_default();
+
+    manifest
+        .attributions
+        .iter()
+        .enumerate()
+        .map(|(pi, local)| {
+            let mut out = BTreeSet::new();
+            for &g in local {
+                let mut resolved = false;
+                if let Some(c) = consts.get(pi) {
+                    for sp in &manifest.sub_proofs {
+                        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
+                            continue;
+                        };
+                        if !scan_matches_pattern(&sp.inputs, c) {
+                            continue;
+                        }
+                        let Some(field) = commitments.get(g).and_then(FieldHex::to_field) else {
+                            continue;
+                        };
+                        let key = field_to_be_bytes_32(&field);
+                        let next = intern.len();
+                        out.insert(*intern.entry(key).or_insert(next));
+                        resolved = true;
+                    }
+                }
+                if !resolved {
+                    fresh_unique -= 1;
+                    out.insert(fresh_unique);
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 /// Stage 2e: bind the prover's `manifest.attributions` (which drives the Q6

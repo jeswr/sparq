@@ -47,6 +47,9 @@ use sparq_zk::commit::{commit_triples, GraphCommitment};
 use sparq_zk::encode::salt_from_bytes;
 use sparq_zk::field::Fr;
 use sparq_zk::sig::{public_key_to_hex, SecretKey, SignatureScheme};
+// [OPUS-4.8] sq-en5dx: the Q6 obligation error surfaced by `recheck` through
+// `CheckError::Sparqzk` when a cross-scan join omits its non-bnode obligation.
+use sparq_zk::verify::VerifyError;
 use sparq_zk_compose::build::{build_join, build_scan, Pattern, Slot};
 use sparq_zk_compose::manifest::{
     AttestedStatusRef, BindingMode, CircuitId, CommitmentAttestation, EntailmentRegime, FieldHex,
@@ -221,9 +224,16 @@ fn join_manifest() -> ProofManifest {
         issuers: vec![],
         key_set: vec![public_key_to_hex(&sk.public_key())],
         commitment_attestations: vec![attest_full(ca, sa, &sk), attest_full(cb, sb, &sk)],
-        // Two patterns; each draws from its own (single) committed graph.
+        // Two patterns; each draws from its own (single) committed graph. The
+        // graphs are DISTINCT commitments, so the shared `?p` is a genuine
+        // cross-graph join: sq-en5dx makes the Q6 gate require the non-bnode
+        // obligation on `?p` (keyed on committed-graph identity, not the collapsing
+        // scan-local `[[0],[0]]` index). Declaring it discharges the disclosed-path
+        // obligation; the hidden `join_edge` below then additionally binds the join
+        // value in ZK. (Before sq-en5dx the Q6 gate was inert for cross-scan joins,
+        // so this vec was empty; the `finding_a_*` negative test pins that fix.)
         attributions: vec![vec![0], vec![0]],
-        join_obligations: vec![],
+        join_obligations: vec![("p".to_string(), 0, 1)],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
@@ -324,7 +334,8 @@ fn multi_scan_manifest() -> ProofManifest {
             attest_full(cb, sb, &sk),
         ],
         attributions: vec![vec![0], vec![0]],
-        join_obligations: vec![],
+        // Cross-graph `?p` join (distinct commitments) ⇒ sq-en5dx Q6 obligation.
+        join_obligations: vec![("p".to_string(), 0, 1)],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
@@ -481,23 +492,74 @@ fn forge_join_wrong_slot_b_rejected() {
 
 // === SCOPE: dropping the hidden edge falls back to the disclosed path ========
 
-/// Honesty/scope assertion (NOT a forge): DROP the JoinEdge. `bind_joins` does NOT
-/// demand a hidden join for a query cross-scan shared variable — that variable is
-/// discharged by the DISCLOSED-row path (`recheck`/`join_obligations`), the opt-in
-/// hidden join being an alternative. So the manifest with NO `join_edges` passes
-/// the structural prefilter (the hidden-join gate has nothing to validate). This
-/// pins the disclosed-vs-hidden boundary: a dropped hidden join is not a soundness
-/// hole, it reverts to the disclosed mechanism (verified separately).
+/// Honesty/scope assertion (NOT a forge): DROP the JoinEdge but KEEP the disclosed
+/// obligation `join_manifest` declares. `bind_joins` does NOT demand a hidden join
+/// for a query cross-scan shared variable — that variable is discharged by the
+/// DISCLOSED-row path (`recheck`/`join_obligations`), the opt-in hidden join being
+/// an alternative for the join VALUE. Post-sq-en5dx the Q6 obligation on the
+/// cross-graph `?p` is GENUINELY required (keyed on committed-graph identity), and
+/// the manifest passes because it DECLARES that obligation — so this pins the
+/// disclosed-vs-hidden boundary with the gate now actually live: a dropped hidden
+/// join is not a soundness hole, it reverts to the disclosed mechanism (whose
+/// obligation is declared and verified separately). Contrast `finding_a_*`, which
+/// drops BOTH the hidden edge AND the obligation and is rejected by Q6.
 #[test]
 fn drop_edge_falls_back_to_disclosed_path() {
     let mut m = join_manifest();
     m.join_edges.clear();
-    // With no hidden edge declared, `bind_joins` is a no-op; the disclosed-row
-    // obligation gate (`recheck`) governs the cross-scan `?p`. The manifest passes
-    // every structural gate (it would reach MissingProof in the full bb verify).
+    // The disclosed obligation `join_manifest` declares (`[("p", 0, 1)]`) discharges
+    // the cross-graph Q6 requirement; `bind_joins` is now a no-op (no hidden edge).
+    // The manifest passes every structural gate (it would reach MissingProof in the
+    // full bb verify).
+    assert_eq!(m.join_obligations, vec![("p".to_string(), 0, 1)]);
     prefilter(&m).expect(
-        "dropping the hidden JoinEdge falls back to the disclosed-row path and passes the structural gate",
+        "dropping the hidden JoinEdge but keeping the declared obligation falls back to the disclosed-row path and passes the structural gate",
     );
+}
+
+/// sq-en5dx NEGATIVE regression (Finding A of the sq-1s2.6 composition review,
+/// `research/zk-bind-composition-review.md`): construct the exact cross-scan
+/// attribution-alias forge and assert the Q6 obligation ITSELF rejects it.
+///
+/// The forge: two DISTINCT `k=1` scans (`graph_a`, `graph_b` — distinct salts ⇒
+/// distinct commitments) answer the two `JOIN_QUERY` patterns sharing `?p`, with the
+/// collapsed `attributions = [[0], [0]]`, NO declared non-bnode obligation, and NO
+/// hidden `join_edge`. Before sq-en5dx the Q6 gate keyed on the scan-LOCAL index, so
+/// both `{0}`s collapsed (`|A_0 ∪ A_1| = 1`), the non-bnode obligation was DROPPED
+/// for the cross-scan join, and this manifest passed the whole structural prefilter
+/// — the gate was inert, commitment-salt separation the sole live backstop. The
+/// namespace fix keys the union on the committed-graph IDENTITY, so the two distinct
+/// graphs no longer collapse and the obligation on `?p` is REQUIRED; omitting it ⇒
+/// rejection by the Q6 obligation itself (`recheck` → `MissingObligation`, surfaced
+/// as `CheckError::Sparqzk`).
+///
+/// This is rejection by Q6, NOT by salt-separation: the two distinct salts are
+/// well-formed, so `bind_issuer_attestations` (a different stage) would ACCEPT them;
+/// the rejection here is the missing cross-graph obligation, and it fires
+/// regardless of the salts. NON-VACUITY: revert the `global_attributions` namespace
+/// fix and `[[0], [0]]` collapses again ⇒ no obligation required ⇒ this manifest
+/// passes the structural prefilter ⇒ the `MissingObligation` match below fails and
+/// this test fails. [OPUS-4.8]
+#[test]
+fn finding_a_cross_scan_alias_forge_rejected_by_q6() {
+    let mut m = join_manifest();
+    m.join_edges.clear(); // no hidden join to discharge the cross-graph `?p`
+    m.join_obligations.clear(); // and NO disclosed obligation either — the forge
+    match prefilter(&m) {
+        Err(CheckError::Sparqzk(VerifyError::MissingObligation(edge))) => {
+            assert_eq!(edge.variable, "p", "the dropped obligation is on the join variable ?p");
+            assert_eq!(
+                edge.patterns,
+                (0, 1),
+                "the obligation is the cross-scan join between pattern 0 (graph A) and pattern 1 (graph B)"
+            );
+        }
+        other => panic!(
+            "the Finding-A cross-scan [[0],[0]] alias forge (distinct graphs, no obligation, \
+             no hidden join) must be rejected by the Q6 obligation ITSELF \
+             (MissingObligation on ?p), not merely by salt-separation; got {other:?}"
+        ),
+    }
 }
 
 // === N-WAY CHAIN: shared-commitment composition (design §2.4) ================
@@ -579,7 +641,13 @@ fn chain_manifest(shared_commitment: bool) -> ProofManifest {
             attest_full(gc.commitment, gc.salt, &sk),
         ],
         attributions: vec![vec![0], vec![0], vec![0]],
-        join_obligations: vec![],
+        // `?p` is joined cross-graph across ALL THREE distinct-commitment patterns,
+        // so sq-en5dx's Q6 gate requires the non-bnode obligation on every pair.
+        join_obligations: vec![
+            ("p".to_string(), 0, 1),
+            ("p".to_string(), 0, 2),
+            ("p".to_string(), 1, 2),
+        ],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
@@ -858,7 +926,8 @@ fn full_bb_join_accept_real_proof() {
             attest_full(gb.commitment, gb.salt, &sk),
         ],
         attributions: vec![vec![0], vec![0]],
-        join_obligations: vec![],
+        // Cross-graph `?p` join (distinct commitments) ⇒ sq-en5dx Q6 obligation.
+        join_obligations: vec![("p".to_string(), 0, 1)],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: challenge.clone() },
