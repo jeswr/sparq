@@ -496,11 +496,11 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   or off. When off, zero columnar code compiles and the default native + wasm builds are
   byte-identical (no new dependencies; no `unsafe`). The M4 wiring roadmap + coexistence model is
   `research/vector-at-a-time-m4.md` (epic `sq-pntvh`); its acceptance gate landed first (Phase 1,
-  `sq-pntvh.1`): the differential BYTE-IDENTITY harness `tests/vectorized_byte_identity.rs` (the
-  columnar kernel's serialised survivors are byte-identical to the row `FILTER` operator over the
+  `sq-pntvh.1`): the differential BYTE-IDENTITY harness `crates/sparq-engine/tests/vectorized_byte_identity.rs`
+  (the columnar kernel's serialised survivors are byte-identical to the row `FILTER` operator over the
   *same batch*, order-exact — a Phase-1 finding: cross-query byte-identity is unsound because a
   sargable filter re-plans the scan, so the invariant is operator-level not full-query) plus the
-  native FILTER/aggregate baseline bench `examples/bench_vectorized.rs` (`metric_us`, registered
+  native FILTER/aggregate baseline bench `crates/sparq-engine/examples/bench_vectorized.rs` (`metric_us`, registered
   `vectorized-eval-micro`, `featured = false`) later phases measure their speedup against.
 - **Exact-bitmap semi-join reducer** is the non-default `semijoin-bitmap` cargo feature (M4 plan,
   survey §A3, bead `sq-gr8mb`; CIDR'26 "Not Yannakakis"). When a binary BGP join scans the next

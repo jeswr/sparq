@@ -207,7 +207,12 @@ fn non_numeric_column_is_byte_identical_empty_to_query_json() {
             "non-numeric column must produce a byte-identical EMPTY result for `{}`",
             tail
         );
-        assert!(row_json.ends_with("\"bindings\":[]}}"), "the row result is empty too");
+        // Independent oracle: the REAL engine returns an empty bindings array for a string
+        // FILTER, anchoring that the byte-identical pair above is specifically the EMPTY
+        // document (byte-identity alone would not catch an equal-but-non-empty regression).
+        // `contains` rather than `ends_with` so a future trailing-whitespace tweak in the JSON
+        // writer does not make this brittle while still asserting emptiness.
+        assert!(row_json.contains("\"bindings\":[]"), "the row result is empty too");
     }
 }
 

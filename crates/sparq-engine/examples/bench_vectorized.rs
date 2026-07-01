@@ -22,7 +22,8 @@
 //! micro-measurement, run on a quiet host per `bench/benchmarks.toml`.
 //!
 //! Run: `cargo run -p sparq-engine --release --example bench_vectorized --features
-//! vectorized -- [n=200000] [iters=7]`.
+//! vectorized -- [N_ROWS] [ITERS]` — two optional POSITIONAL numeric args (not `key=value`);
+//! defaults are `N_ROWS=200000` and `ITERS=7`.
 
 use std::hint::black_box;
 use std::time::Instant;
