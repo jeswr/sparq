@@ -3995,14 +3995,6 @@ fn field_hex_eq(a: &FieldHex, b: &FieldHex) -> bool {
 /// every matching scan's identity (widening = safe), mirroring the
 /// `scan_matches_pattern` membership test `bind_attributions`/`bind_joins` use.
 fn global_attributions(manifest: &ProofManifest) -> Vec<BTreeSet<usize>> {
-    // Intern each distinct committed-graph identity to a stable ascending global id.
-    let mut intern: std::collections::BTreeMap<[u8; 32], usize> =
-        std::collections::BTreeMap::new();
-    // Fresh, never-colliding ids for indices that resolve to no commitment, taken
-    // from the TOP of the range (descending) so they never meet the ascending
-    // interned ids.
-    let mut fresh_unique = usize::MAX;
-
     // The query's per-pattern constant slots identify which scan answers each
     // pattern (the same mapping `bind_attributions` uses). A parse failure leaves
     // `consts` empty; every local index then falls through to a fresh unique id and
@@ -4010,6 +4002,62 @@ fn global_attributions(manifest: &ProofManifest) -> Vec<BTreeSet<usize>> {
     let consts = fragment_patterns(&manifest.query)
         .map(|patterns| fragment_pattern_consts(&patterns))
         .unwrap_or_default();
+
+    // Precompute, ONCE per scan sub-proof, the 32-byte committed-graph identity of
+    // each of its commitments (parsing each `FieldHex` exactly once). Non-scan
+    // sub-proofs (and commitments that fail to parse) get an empty / `None` slot.
+    // This turns the hot loop below into a slice lookup instead of a re-parse +
+    // convert per `(pattern, index, scan)` candidate, bounding verifier CPU / DoS
+    // surface. [OPUS-4.8] sq-en5dx (Copilot review): precompute commitment ids.
+    let scan_commit_ids: Vec<Vec<Option<[u8; 32]>>> = manifest
+        .sub_proofs
+        .iter()
+        .map(|sp| match &sp.inputs {
+            ProofInputs::Scan { commitments, .. } => commitments
+                .iter()
+                .map(|c| c.to_field().map(|f| field_to_be_bytes_32(&f)))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+
+    // Precompute, ONCE per pattern, the sub-proof indices whose scan answers it
+    // (the `scan_matches_pattern` membership test) so the hot loop iterates a small
+    // precomputed list instead of re-scanning every sub-proof for every local
+    // index. A pattern with no `consts` entry (parse failure / arity slip) matches
+    // nothing → every index falls through to a fresh id (fail-closed, widening).
+    // [OPUS-4.8] sq-en5dx (Copilot review): precompute pattern → matching scans.
+    let pattern_scans: Vec<Vec<usize>> = manifest
+        .attributions
+        .iter()
+        .enumerate()
+        .map(|(pi, _)| {
+            let Some(c) = consts.get(pi) else {
+                return Vec::new();
+            };
+            manifest
+                .sub_proofs
+                .iter()
+                .enumerate()
+                .filter(|(_, sp)| {
+                    matches!(sp.inputs, ProofInputs::Scan { .. })
+                        && scan_matches_pattern(&sp.inputs, c)
+                })
+                .map(|(idx, _)| idx)
+                .collect()
+        })
+        .collect();
+
+    // A SINGLE monotonic id generator shared by BOTH interned commitment identities
+    // and fresh unresolved-index ids: `intern` maps each distinct committed-graph
+    // identity to a stable id, and an unresolved index simply draws the next id
+    // too. Every id is allocated at most once (the only reuse is the intentional
+    // interning of a repeated identity), so ids are pairwise-distinct with NO
+    // reliance on wraparound — removing the descending `usize::MAX` underflow
+    // footgun. [OPUS-4.8] sq-en5dx (Copilot review): monotonic next_id.
+    let mut intern: std::collections::BTreeMap<[u8; 32], usize> =
+        std::collections::BTreeMap::new();
+    let mut next_id: usize = 0;
 
     manifest
         .attributions
@@ -4019,26 +4067,20 @@ fn global_attributions(manifest: &ProofManifest) -> Vec<BTreeSet<usize>> {
             let mut out = BTreeSet::new();
             for &g in local {
                 let mut resolved = false;
-                if let Some(c) = consts.get(pi) {
-                    for sp in &manifest.sub_proofs {
-                        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
-                            continue;
-                        };
-                        if !scan_matches_pattern(&sp.inputs, c) {
-                            continue;
-                        }
-                        let Some(field) = commitments.get(g).and_then(FieldHex::to_field) else {
-                            continue;
-                        };
-                        let key = field_to_be_bytes_32(&field);
-                        let next = intern.len();
-                        out.insert(*intern.entry(key).or_insert(next));
+                for &sp_idx in &pattern_scans[pi] {
+                    if let Some(Some(key)) = scan_commit_ids[sp_idx].get(g) {
+                        let id = *intern.entry(*key).or_insert_with(|| {
+                            let v = next_id;
+                            next_id += 1;
+                            v
+                        });
+                        out.insert(id);
                         resolved = true;
                     }
                 }
                 if !resolved {
-                    fresh_unique -= 1;
-                    out.insert(fresh_unique);
+                    out.insert(next_id);
+                    next_id += 1;
                 }
             }
             out
