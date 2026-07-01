@@ -118,10 +118,12 @@ function readRegistry() {
 //   - scripts/check-privacy-claims.sh  (whole-tree; its git-ls-files surface now includes
 //        site/specs/**/*.typ — see the sq-rvgr2.5 note in that gate), so an unqualified ZK/MPC
 //        soundness/privacy claim typed into spec prose aborts the build too.
-// Both gates consume the SINGLE shared forbidden-phrase list (scripts/honesty-phrases.json), so
-// there is ONE source of truth and zero drift with the CI gates. A non-zero gate exit aborts the
-// build (no artifact is written). HONEST SCOPE: this is the COARSE phrase/number class only; a
-// subtle semantic overclaim remains Stage-5 human review.
+// "Shared" means these are the SAME gate scripts CI runs — not a copy — so the build boundary and
+// CI stay in lockstep. The two gates DO NOT share one phrase list: the privacy-claims gate reads
+// scripts/honesty-phrases.json (its single source of truth, also used by CI), while the perf gate
+// carries its own PERF_PATTERNS in check-no-perf-numbers.py. A non-zero gate exit aborts the build
+// (no artifact is written). HONEST SCOPE: this is the COARSE phrase/number class only; a subtle
+// semantic overclaim remains Stage-5 human review.
 function runHonestyScan(specs) {
   const perfGate = join(REPO_ROOT, "scripts", "check-no-perf-numbers.py");
   const privacyGate = join(REPO_ROOT, "scripts", "check-privacy-claims.sh");
@@ -145,7 +147,8 @@ function runHonestyScan(specs) {
           "  A spec .typ source carries a hard-coded performance number or an unqualified ZK/MPC\n" +
           "  soundness/privacy claim. A spec is a design surface, not a benchmark — remove the\n" +
           "  number; and hedge the claim (or add the inline allow marker). The factory will not\n" +
-          "  serve an un-scanned spec. (Shared list: scripts/honesty-phrases.json.)\n",
+          "  serve an un-scanned spec. (Privacy-gate phrase list: scripts/honesty-phrases.json;\n" +
+          "  perf-gate patterns: PERF_PATTERNS in scripts/check-no-perf-numbers.py.)\n",
       );
       process.exit(1);
     }
@@ -159,7 +162,7 @@ function runHonestyScan(specs) {
 
   console.log(
     `[spec-factory] honesty scan passed: ${typPaths.length} spec source(s) scanned by both ` +
-      "honesty gates (shared phrase list).",
+      "honesty gates (perf-number + privacy-claim).",
   );
 }
 
