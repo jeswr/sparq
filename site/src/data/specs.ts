@@ -69,7 +69,7 @@ export const SPECS: Spec[] = [
     date: "2026-07-01",
     editors: "Jesse Wright · the sparq project",
     blurb:
-      "The vec: vector-search extension to SPARQL — magic-predicate k-NN patterns with score bindings, answer-exact vs approximate modes, filtered-search answer-safety, persisted store formats and their staleness contract, embedding acquisition, and grounded-generation decisions. Proposes a mandatory embedding provenance/versioning vocabulary; unbuilt surfaces are labelled proposals.",
+      "The vec: vector-search extension to SPARQL — magic-predicate k-NN patterns with score bindings, answer-exact vs approximate modes, filtered-search answer-safety, the persisted store format and its staleness contract, embedding acquisition, and grounded-generation obligations — plus a normative embedding-provenance record (model, version, metric, normalisation, dimension) with a MUST-reject compatibility rule and a deterministic tie-break. Every normative assertion carries a testable ID; an informative report states which requirements the sparq build satisfies today.",
   },
 ];
 
