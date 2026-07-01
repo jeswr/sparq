@@ -90,7 +90,7 @@ No off-by-one: both loops are 0-based over the same k. **BLOCKED.**
 ### 3. Attribution graph-index ALIASING across scans — **POTENTIAL-BREAK-CANDIDATE, BLOCKED-BY salt-separation** (Finding A)
 See §Finding A. Verdict: **no false-accept** because audit #9 salt-uniqueness independently
 blocks the only exploitable payload (cross-graph bnode correlation). But the Q6 non-bnode
-obligation gate is **inert** for cross-scan joins — a real composition weakness. → **P2 bead**.
+obligation gate is **inert** for cross-scan joins — a real composition weakness. → **P2 bead sq-en5dx**.
 
 ### 4. Cross-manifest splicing / stale-component replay
 Splice a scan sub-proof (or a `join_eq`, `hidden_issuer`, `holder_pok` proof) proved in an
@@ -110,7 +110,7 @@ scan-covering commitment's issuer-signed `att_status` must byte-match the ONE
 `manifest.revocation` (index+version), so A and B cannot both be attested (A forces rev.index=5,
 B forces rev.index=9). Setting rev to B's index makes `bind_revocation` read
 `authoritative.bit(9)==SET` → `CredentialRevoked`. No false-accept. **BLOCKED** — but it exposes
-a functional/latent-soundness concern; see §Finding B. → **P3 bead**.
+a functional/latent-soundness concern; see §Finding B. → **P3 bead sq-cuvmj**.
 
 ### 6. Holder-PoP field-ordering / A-presents-B
 Holder A (trusted key) presents B's credential; or reorder the PoP message fields.
@@ -203,7 +203,7 @@ salt-separation believing Q6 covers it, silently re-opens the audit-#8/#9 cross-
 bnode-correlation class. The `attributions[pi]` field doc (manifest.rs:1157) says "committed graph
 indices" as if a global namespace exists — there is none; each scan owns its `commitments`.
 
-**Recommended hardening (P2 bead sq-…, see below).** Either (i) key the Q6 gate on
+**Recommended hardening (P2 bead sq-en5dx).** Either (i) key the Q6 gate on
 globally-distinct graph identities — the canonical commitment hex of `commitments[g]` for the
 answering scan — instead of the scan-local integer, so two distinct graphs never collapse; or
 (ii) explicitly document salt-separation as the *primary* Q6 defense and the non-bnode obligation
@@ -220,7 +220,7 @@ issuer-signed `att_status` is cross-checked against that single reference (`reso
 verifier.rs:2563), and `scan_referenced_messages`/`verify_holder_attestation_signature` recompute
 every commitment's `status_ref` from the same single `manifest.revocation`.
 
-**Consequence (fail-closed, sound).** A presentation carrying two credentials with **distinct**
+**Consequence (fail-closed; structural rejection, no false-accept in attempt 5).** A presentation carrying two credentials with **distinct**
 (list, index, version) references is structurally rejected: they cannot both match the one
 `manifest.revocation`. No false-accept (attempt 5). But this means the headline **cross-credential
 JOIN** use case of `bind_joins` — joining two genuinely different credentials — only passes when
@@ -230,7 +230,7 @@ fail-closed gate, and a **latent soundness risk**: if `revocation`/`hidden_revoc
 promoted to `Vec` to support multi-credential presentations, the single-check assumptions in
 `bind_revocation`, `bind_hidden_revocation`, `scan_referenced_messages`, and
 `verify_holder_attestation_signature` must ALL be re-derived per-commitment, or a second
-credential's liveness would go unchecked. → **P3 bead** to (a) document the constraint on
+credential's liveness would go unchecked. → **P3 bead sq-cuvmj** to (a) document the constraint on
 `bind_joins`, and (b) pre-register the per-commitment obligations any future `Vec` migration owes.
 
 ## Overall composition verdict
@@ -240,8 +240,10 @@ boundary/off-by-one, cross-scan index aliasing, cross-manifest splice, stale-com
 single-reference multi-credential smuggle, holder-PoP A-presents-B, hidden-revocation re-point,
 hidden-issuer forge, join slot mis-binding, entailment ungrounding) is BLOCKED, either by the
 nonce-bound `reconstruct_public_inputs`/canonical-vk seam, by fail-closed structural gates, or by
-audit-#9 salt-separation. The obligation set composes soundly for the single-credential (and
-intra-credential multi-graph) presentations it structurally admits.
+audit-#9 salt-separation. No composition break was found for the single-credential (and
+intra-credential multi-graph) presentations the obligation set structurally admits — i.e. no
+false-accept in this single-model code-reading review; this is not a proof of soundness (see the
+header disclaimer and sq-qhy4).
 
 Two composition weaknesses are documented, neither an exploitable break at present:
 - **Finding A (P2):** the Q6 non-bnode-obligation gate is *inert* for cross-scan joins due to a
