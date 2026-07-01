@@ -96,7 +96,7 @@ bar kept at 6 destinations: Home/Capabilities/Try/App/Benchmarks/Download).
 papers pipeline. The `respec` npm package (v37.1.0, devDependency) provides a CLI that uses
 puppeteer (v24) to run ReSpec headlessly. The build script calls:
 
-```
+```sh
 respec --src file:///abs/path/to/spec.html --out /tmp/spec-full.html \
   --localhost --use-local --haltonerror --no-sandbox
 ```
