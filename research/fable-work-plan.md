@@ -148,11 +148,12 @@ Ordered by Fable-leverage. "Fable does" = the design/proof only; "Fleet does" = 
 | (none) | **Datalog/existential regime** (chase + stratified negation + aggregates — the Nemo/VLog/RDFox tier, `research/inference-sota.md §1.3-1.4`) | Prove the hard parts: chase-termination (acyclicity classes), well-founded/stratified-negation soundness, aggregate stratification | Rule engine + expressivity ratchet | XL |
 | **#1307** (steering; **bead id UNVERIFIED — see note**) | **beyond-RL sound boundary** — 13 OWL-RL divergences are provably outside RL; some (differentFrom contrapositives) *are* sound RDF-Based entailments RL omits for polynomiality | Per-rule soundness + termination proof; maintainer steer on the polynomiality trade | Small code once each rule is proven | M |
 
-> **Bead-id honesty note.** The FEATURE recon cites `sq-350ms` and the BACKLOG recon cites `sq-rhspl`
-> for the beyond-RL steering work. **Neither id exists in `.beads/issues.jsonl`** (verified 2026-07-01).
-> The stable anchor is **GitHub issue #1307**. Confirm/create the driving bead with the maintainer
-> before dispatch; the bead is explicitly **DESIGN-FIRST + MAINTAINER-STEER, do NOT implement without
-> steer**.
+> **Bead-id note (corrected 2026-07-01).** The beyond-RL steering work is **already tracked** by the
+> OPEN bead **`sq-rhspl`** (P3, DESIGN-FIRST + MAINTAINER-STEER, linked to **#1307**); the
+> ceiling-hardening bead **`sq-350ms`** is CLOSED (via #1308). An earlier draft of this note wrongly
+> called these ids "absent" — that was an artifact of grepping the **stale committed
+> `.beads/issues.jsonl` snapshot** (which lags the live Dolt DB by ~1000+ issues) instead of `bd show`.
+> Both exist. Do NOT implement the beyond-RL extension without the maintainer's steer.
 
 ### B-tier 3 — federation query-optimisation (planning-algorithm judgment)
 
