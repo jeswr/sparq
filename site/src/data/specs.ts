@@ -50,6 +50,17 @@ export const STATUS_VARIANT: Record<
 
 export const SPECS: Spec[] = [
   {
+    slug: "mpc-sparql",
+    source: "mpc-sparql.typ",
+    title: "MPC-SPARQL: Secure Multi-Party Federated SPARQL",
+    shortName: "mpc-sparql",
+    status: "unofficial",
+    date: "2026-07-01",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "A protocol proposal for evaluating federated SPARQL across mutually distrusting data sources under secure multi-party computation — party/role and trust model, secret-share and join-key encodings, per-operator disclosure routing, verifier-side binding rules, and an honest delimitation of what is designed-not-built (the collaborative proof, distributed attestation, and deployed transport). Security gated on an external audit; nothing is production-claimable today.",
+  },
+  {
     slug: "proposed-specifications-template",
     source: "proposed-specifications-template.typ",
     title: "SPARQ Proposed Specifications — Template",
