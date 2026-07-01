@@ -70,6 +70,19 @@ impl Duration {
     }
 }
 
+/// Days in a proleptic-Gregorian month, using astronomical year numbering (year 0 exists), so the leap
+/// rule applies directly to year 0 and negative (BCE) years. `None` for a month outside 1–12.
+fn days_in_month(year: i64, month: i64) -> Option<i64> {
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    Some(match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    })
+}
+
 /// Days from 1970-01-01 for a proleptic-Gregorian date, using astronomical year numbering (year 0
 /// exists). Howard Hinnant's `days_from_civil`; valid across the whole integer year range.
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -114,6 +127,12 @@ pub fn parse_datetime(lexical: &str, datatype: &str) -> Option<DateTimeValue> {
         return None;
     }
     let signed_year = if neg_year { -year } else { year };
+    // Reject an out-of-range calendar date (month 0/13, day 0/32, 30 Feb, 29 Feb in a non-leap year,
+    // …). An invalid lexical must NOT be value-canonicalised: it falls through to exact-lexical keying
+    // so a genuine cross-engine divergence is never masked by an accidental value collision.
+    if !(1..=days_in_month(signed_year, month)?).contains(&day) {
+        return None;
+    }
     let days = days_from_civil(signed_year, month, day);
 
     let (hh, mm, frac) = match time_str {
@@ -187,6 +206,20 @@ fn parse_time(t: &str) -> Option<(i64, i64, BigDecimal)> {
         return None;
     }
     let frac = BigDecimal::from_str(ss).ok()?;
+    // XSD time-of-day ranges: minutes 0–59; seconds in [0, 60) (XSD has no leap seconds, so 60 is
+    // invalid, and a negative seconds component such as `00:00:-1` is likewise invalid). Hours are
+    // 0–23, plus the special end-of-day `24:00:00` (equal to 00:00:00 of the next day). Anything else
+    // is an invalid lexical and must return `None` so the caller falls back to exact-lexical keying.
+    let zero = BigDecimal::from(0);
+    let sixty = BigDecimal::from(60);
+    if !(0..=59).contains(&mm) || frac < zero || frac >= sixty {
+        return None;
+    }
+    match hh {
+        0..=23 => {}
+        24 if mm == 0 && frac.cmp(&zero) == Ordering::Equal => {}
+        _ => return None,
+    }
     Some((hh, mm, frac))
 }
 
@@ -420,6 +453,37 @@ mod tests {
             ),
             TemporalOrder::Less
         );
+    }
+
+    #[test]
+    fn parse_datetime_rejects_invalid_calendar_fields() {
+        // Out-of-range month/day must NOT value-canonicalise — they fall back to exact-lexical keying.
+        assert!(parse_datetime("2020-00-01T00:00:00Z", DT).is_none(), "month 0");
+        assert!(parse_datetime("2020-13-01T00:00:00Z", DT).is_none(), "month 13");
+        assert!(parse_datetime("2020-01-00T00:00:00Z", DT).is_none(), "day 0");
+        assert!(parse_datetime("2020-01-32T00:00:00Z", DT).is_none(), "day 32");
+        assert!(parse_datetime("2019-04-31", DATE).is_none(), "April has 30 days");
+        assert!(parse_datetime("2021-02-29", DATE).is_none(), "29 Feb in a non-leap year");
+        // Real dates are still accepted, including the leap day of a leap year.
+        assert!(parse_datetime("2020-02-29", DATE).is_some(), "2020 is a leap year");
+        assert!(parse_datetime("2019-04-30", DATE).is_some());
+    }
+
+    #[test]
+    fn parse_time_rejects_out_of_range_and_accepts_end_of_day() {
+        // Hour/minute ranges and a non-negative seconds component in [0, 60).
+        assert!(parse_datetime("2020-01-01T25:00:00Z", DT).is_none(), "hour 25");
+        assert!(parse_datetime("2020-01-01T00:60:00Z", DT).is_none(), "minute 60");
+        assert!(parse_datetime("2020-01-01T00:00:60Z", DT).is_none(), "second 60 (no leap seconds)");
+        assert!(parse_datetime("2020-01-01T00:00:-1Z", DT).is_none(), "negative second");
+        // The XSD end-of-day form 24:00:00 equals 00:00:00 of the next day (so it must canonicalise).
+        assert_eq!(
+            dt_compare(&dt("2020-01-01T24:00:00Z"), &dt("2020-01-02T00:00:00Z")),
+            TemporalOrder::Equal
+        );
+        // …but a non-zero minute/second alongside hour 24 is invalid.
+        assert!(parse_datetime("2020-01-01T24:00:01Z", DT).is_none());
+        assert!(parse_datetime("2020-01-01T24:30:00Z", DT).is_none());
     }
 
     #[test]

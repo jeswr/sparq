@@ -101,7 +101,15 @@ fn parse_term(cell: &Value) -> Result<Term, ParseError> {
         "literal" | "typed-literal" => {
             let lexical = str_field(cell, "value")?.to_string();
             let lang = cell.get("xml:lang").and_then(Value::as_str).map(str::to_string);
-            let datatype = match (&lang, cell.get("datatype").and_then(Value::as_str)) {
+            let explicit_dt = cell.get("datatype").and_then(Value::as_str);
+            // A cell that names `rdf:langString` as its datatype but omits `xml:lang` is an invalid
+            // Results-JSON literal — a language-tagged literal must carry a tag. Reject it rather than
+            // fabricate an inconsistent `langString`-with-no-tag term, which would violate the term
+            // model and could corrupt strict equality / value keying.
+            if lang.is_none() && explicit_dt == Some(RDF_LANGSTRING) {
+                return err("literal cell has datatype rdf:langString but no xml:lang");
+            }
+            let datatype = match (&lang, explicit_dt) {
                 (Some(_), _) => RDF_LANGSTRING.to_string(),
                 (None, Some(d)) => d.to_string(),
                 (None, None) => XSD_STRING.to_string(),
@@ -201,5 +209,28 @@ mod tests {
         assert!(parse_results_json("[]").is_err());
         assert!(parse_results_json(r#"{"head":{}}"#).is_err());
         assert!(parse_results_json(r#"{"results":{"bindings":[{"x":{"type":"mystery","value":"?"}}]}}"#).is_err());
+    }
+
+    #[test]
+    fn rejects_langstring_datatype_without_lang() {
+        // A literal that names rdf:langString as its datatype but omits xml:lang is an invalid
+        // Results-JSON cell (a language-tagged literal must carry a tag); it must be rejected rather
+        // than fabricate an inconsistent langString-with-no-tag term.
+        let doc = r#"{
+          "head": { "vars": [ "x" ] },
+          "results": { "bindings": [ {
+            "x": { "type": "literal", "value": "hi",
+                   "datatype": "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString" }
+          } ] }
+        }"#;
+        assert!(parse_results_json(doc).is_err());
+        // …but the same lexical WITH a tag is a well-formed language-tagged literal.
+        let ok = r#"{
+          "head": { "vars": [ "x" ] },
+          "results": { "bindings": [ {
+            "x": { "type": "literal", "value": "hi", "xml:lang": "en" }
+          } ] }
+        }"#;
+        assert!(parse_results_json(ok).is_ok());
     }
 }
