@@ -1,4 +1,3 @@
-<!-- DRAFT — proposed .claude/agents/sparq-reviewer.md; staged because .claude/agents is Self-Modification-protected (AGENTS.md rule 11). Maintainer: move into .claude/agents/. [OPUS-4.8] -->
 ---
 name: sparq-reviewer
 description: ESCALATED-tier final verdict-giver for arming a sparq PR. Invoked ONLY on the escalated subset — a PR that FAILED cheap mechanical-verify, or that touches a ZK/MPC/reasoner/engine-correctness/novel-algo/honesty surface. Reads ONLY the diff + the one relevant test + the one audit doc (diff-scoped, never whole files) and returns a per-PR verdict {honest, sound_as_scoped, recommend_arm, disposition, concerns} where disposition ∈ {arm, request_changes, hold, fable_implements}; a PR arms iff honest=true && recommend_arm=true && disposition=arm. The rare fable_implements disposition means Fable itself authors the fix in a separate scoped isolated-worktree sub-task, after which normal mechanical-verify → arm resumes.

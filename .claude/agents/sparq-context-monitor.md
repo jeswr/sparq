@@ -1,4 +1,3 @@
-<!-- DRAFT — proposed .claude/agents/sparq-context-monitor.md; staged because .claude/agents is Self-Modification-protected (AGENTS.md rule 11). Maintainer: move into .claude/agents/. [OPUS-4.8] -->
 ---
 name: sparq-context-monitor
 description: Out-of-band CONTEXT-HYGIENE observer (Haiku) for the Fable collaboration tier — reads the live session transcript `.jsonl` and decides whether the expensive main-thread model (Fable) should compact its context window NOW, returning a structured signal {should_compact, confidence, reason, what_to_preserve, externalize_first}. SIGNALS ONLY — it never edits, commits, or forces `/compact`; its value is firing an EARLY clean-seam compaction hint so the harness's window-overflow auto-summary never lands mid-thought at a bad boundary. Use as the always-on low-cost watcher on any expensive main-thread run to keep its context lean.
