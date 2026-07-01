@@ -77,6 +77,51 @@ export function formatFromContentType(contentType: string | null): string | unde
   return CONTENT_TYPE_FORMATS[mime];
 }
 
+// [OPUS-4.8] sq-xvj9 (epic sq-ixc3) — the store-EXPORT serialisations offered by the DatasetViewer's
+// "Export data" action. This is the OUT direction (serialise the whole live store to a downloadable
+// document), distinct from {@link FORMAT_OPTIONS} above (the IN direction the Import drawer parses).
+// Only the three pretty, human-readable syntaxes the engine writer emits are offered — N-Triples /
+// N-Quads (flat, line-oriented) are the snapshot/merge format, not a "readable export".
+
+/** A store-export target serialisation. */
+export type ExportFormat = "turtle" | "trig" | "jsonld";
+
+/** Display + download metadata for one {@link ExportFormat}. */
+export interface ExportFormatMeta {
+  value: ExportFormat;
+  /** The menu label. */
+  label: string;
+  /** The download filename extension (no leading dot). */
+  ext: string;
+  /** The download MIME type. */
+  mime: string;
+  /**
+   * Which part of the store this serialisation carries. TriG + JSON-LD emit the WHOLE dataset
+   * (default graph + every named graph); Turtle has no named-graph syntax, so it emits the
+   * DEFAULT GRAPH only. Surfaced in the UI so the export scope is never silently misrepresented.
+   */
+  scope: "whole dataset" | "default graph";
+}
+
+/** The export serialisations, in menu order (Turtle · TriG · JSON-LD). */
+export const EXPORT_FORMATS: readonly ExportFormatMeta[] = [
+  { value: "turtle", label: "Turtle (.ttl)", ext: "ttl", mime: "text/turtle", scope: "default graph" },
+  { value: "trig", label: "TriG (.trig)", ext: "trig", mime: "application/trig", scope: "whole dataset" },
+  {
+    value: "jsonld",
+    label: "JSON-LD (.jsonld)",
+    ext: "jsonld",
+    mime: "application/ld+json",
+    scope: "whole dataset",
+  },
+];
+
+/** The download filename for an exported dataset in `format` (e.g. `dataset.trig`). */
+export function exportFilename(format: ExportFormat): string {
+  const meta = EXPORT_FORMATS.find((f) => f.value === format);
+  return `dataset.${meta?.ext ?? format}`;
+}
+
 /** A short display label for a URL: the last non-empty path segment, or the host. */
 export function urlLabel(url: string): string {
   try {

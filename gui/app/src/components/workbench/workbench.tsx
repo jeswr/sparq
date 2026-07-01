@@ -19,7 +19,7 @@
 // system browser (the design's rule: the GUI never renders the site, it links to it).
 
 import * as React from "react";
-import { PanelsTopLeft, X, Layers, Upload } from "lucide-react";
+import { PanelsTopLeft, X, Layers, Upload, Download } from "lucide-react";
 
 import { LeftRail } from "@/components/workbench/left-rail";
 import { TitleBar } from "@/components/workbench/title-bar";
@@ -44,6 +44,10 @@ import {
   ImportDrawerProvider,
   useImportDrawer,
 } from "@/components/workbench/import-drawer";
+// [OPUS-4.8] sq-xvj9 — the Cmd-K counterpart to the rail's "Export data…": serialise + download the
+// whole store as pretty Turtle / TriG / JSON-LD from the keyboard-first spine.
+import { downloadText } from "@/lib/download";
+import { EXPORT_FORMATS, exportFilename } from "@/lib/rdf-format";
 
 /** An open tab in the IDE tab strip — keyed by tool id (a tool opens at most once). */
 export interface OpenTab {
@@ -166,9 +170,11 @@ function ShellPaletteCommands({
   onSelectTab: (toolId: string) => void;
   onCloseTab: (toolId: string) => void;
 }) {
-  const { graphs } = useEngine();
+  const { graphs, status, storeSize, exportStore } = useEngine();
   // [OPUS-4.8] sq-ixc3.13 — the Cmd-K entry point for the Import drawer.
   const { setOpen: setImportOpen } = useImportDrawer();
+  // [OPUS-4.8] sq-xvj9 — export is only meaningful once the engine is warm with a non-empty store.
+  const exportDisabled = status.kind !== "ready" || storeSize === 0;
 
   const commands = React.useMemo<PaletteCommand[]>(() => {
     const cmds: PaletteCommand[] = [];
@@ -183,6 +189,36 @@ function ShellPaletteCommands({
       icon: Upload,
       run: () => setImportOpen(true),
     });
+
+    // [OPUS-4.8] sq-xvj9 — export the whole store as pretty Turtle / TriG / JSON-LD (the rail's
+    // "Export data…" from the keyboard). Disabled until the engine is warm with a non-empty store.
+    for (const f of EXPORT_FORMATS) {
+      cmds.push({
+        id: `action.export.${f.value}`,
+        group: "Actions",
+        title: `Export dataset as ${f.label}`,
+        blurb: `Download the ${f.scope} as ${f.label}, prefix-abbreviated.`,
+        keywords: [
+          "export",
+          "download",
+          "save",
+          "serialize",
+          "serialise",
+          "dataset",
+          f.label,
+          f.value,
+          "turtle",
+          "trig",
+          "json-ld",
+        ],
+        icon: Download,
+        disabled: exportDisabled,
+        run: () => {
+          const text = exportStore(f.value);
+          if (text !== null) downloadText(exportFilename(f.value), text, f.mime);
+        },
+      });
+    }
 
     // Every TOOL as an "open …" command. A `built` tool opens its working tab; a stub still opens
     // (the panel states its tier + what it will do honestly — no fabricated result).
@@ -238,7 +274,17 @@ function ShellPaletteCommands({
     }
 
     return cmds;
-  }, [tabs, activeId, graphs, onOpenTool, onSelectTab, onCloseTab, setImportOpen]);
+  }, [
+    tabs,
+    activeId,
+    graphs,
+    onOpenTool,
+    onSelectTab,
+    onCloseTab,
+    setImportOpen,
+    exportDisabled,
+    exportStore,
+  ]);
 
   useRegisterPaletteCommands("shell", commands);
   return null;
