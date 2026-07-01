@@ -1365,6 +1365,25 @@ mod tests {
         assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(ROUND(?v) = \"0\"^^xsd:decimal) }"), 1);
     }
 
+    /// [OPUS-4.8] sq-l11x2: fn:round at the FLOAT tiers must not double-round. The xsd:double
+    /// value just below one-half (0.49999999999999994, the f64 predecessor of 0.5) must ROUND
+    /// to 0, NOT 1 — the naive `(x + 0.5).floor()` returns 1 because `x + 0.5` rounds up to
+    /// exactly 1.0 before the floor. Same defect at the xsd:float tier.
+    #[test]
+    fn round_float_tier_no_double_rounding_via_sparql() {
+        let data = r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:p ex:v "0.49999999999999994"^^xsd:double .
+            ex:f ex:v "0.49999997"^^xsd:float ."#;
+        let gg = Graph::load_str(data, "turtle").unwrap();
+        let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+        let n = |q: &str| query(&gg, &format!("{pfx}{q}")).unwrap().len();
+        // xsd:double just below 1/2 rounds DOWN to 0, and NOT up to 1.
+        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = 0.0) }"), 1);
+        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = 1.0) }"), 0);
+        // xsd:float predecessor of 1/2 likewise rounds to 0.
+        assert_eq!(n("SELECT ?s WHERE { ex:f ex:v ?v FILTER(ROUND(?v) = 0.0) }"), 1);
+    }
+
     /// [OPUS-4.8] roborev 1429 (Med): GROUP BY aggregate over a >PAR_THRESHOLD (50k) input
     /// must produce complete, correct per-group results. This crosses the chunked parallel
     /// eval+intern boundary (default `parallel` feature) and the streaming sequential path
