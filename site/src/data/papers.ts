@@ -57,15 +57,16 @@ export const PAPERS: Paper[] = [
     slug: "filtered-ann",
     source: "filtered-ann.typ",
     title:
-      "Filter-as-Query: Predicate-Constrained Vector Search where the Filter is an Exact RDF BGP over the Engine's Own Dictionary Ids",
+      "Filter-as-Query: Filtered Approximate Nearest-Neighbour Search over SPARQL, where the Filter is an Exact BGP over the Engine's Own Dictionary Ids",
     blurb:
-      "An RDF-native filtered-ANN: the filter compiles to an exact, transitively-pushed-down BGP mask over the shared dictionary-id space, making pre-filtering answer-safe. A systems-integration contribution.",
+      "An RDF-native filtered-ANN: the filter compiles to an exact, transitively-pushed-down BGP mask over the shared dictionary-id space (no metadata mirroring), with answer-safety enforced end-to-end as machine-checked invariants. Rewritten per the sq-gum8.2 venue audit: related work covers the 2023–26 filtered-ANN wave (ACORN/NaviX/Filtered-DiskANN + preprints), answer-safety is honestly demoted to an enforcement result, and the performance evaluation is pre-registered (baselines, workloads, falsification criteria) pending the canonical runner.",
     authors: "Jesse Wright · the sparq project",
-    venue: "ISWC / ESWC research track (systems-integration)",
-    status: "publishable-now",
+    venue:
+      "ISWC / ESWC research track (systems-integration); EDBT short as fallback — per venue audit",
+    status: "draft",
     family: "A",
     evidence:
-      "Deterministic: recall floors (0.95 unfiltered, 0.90 filtered) + proven pre-filter ≡ post-filter equivalence (single / transitive / cyclic). No latency claim.",
+      "Deterministic only: recall floors (0.95 unfiltered, 0.90 filtered — sanity checks, labelled as such) + proven pre-filter ≡ post-filter equivalence (single / transitive / cyclic) + the cost-model crossover constant. No latency/throughput claim; the performance evaluation is pre-registered but unexecuted (blocked on the canonical runner).",
   },
   {
     slug: "honest-benchmarking",
