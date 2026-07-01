@@ -38,8 +38,11 @@ refinements the brief does not state are load-bearing for the design, so I recor
   ([`Cargo.toml`](../crates/sparq-engine/Cargo.toml) `vectorized = []`; default =
   `["parallel", "regex", "digest"]`) and registered only under that gate
   ([`lib.rs`](../crates/sparq-engine/src/lib.rs) `#[cfg(feature = "vectorized")] pub mod
-  chunk;`). **`grep` for `DataChunk` / `select_numeric` outside `chunk.rs` returns nothing** —
-  the evaluator never constructs a chunk. The intermediate relation everywhere is
+  chunk;`). Outside `chunk.rs`, the only references to `DataChunk` / `select_numeric` are the
+  gated re-export ([`lib.rs`](../crates/sparq-engine/src/lib.rs) `#[cfg(feature =
+  "vectorized")] pub use chunk::{DataChunk, SelVec, VecCmp};`) and an isolation test
+  (`tests/vectorized_exec_differential.rs`) — **the evaluator (`exec.rs`) never constructs a
+  chunk or calls the kernel.** The intermediate relation everywhere is
   `Bindings { vars: Vec<Variable>, rows: Vec<Row> }` with `Row = SmallVec<[Id; 4]>`
   (`exec.rs:788,937`). So: **row-materialising, confirmed.**
 
