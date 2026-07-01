@@ -1,16 +1,18 @@
-// [FABLE] sq-rvgr2.3 — MPC-SPARQL: Secure Multi-Party Federated SPARQL (Unofficial Proposal
-// Draft). Authored from the estate recon digest (research/specs/mpc-sparql-estate-recon.md,
-// bead sq-rvgr2.3): every normative statement below traces either to MERGED, TESTED behaviour
-// in the sparq-mpc / sparq-zk-compose / sparq-fedplan-mpc estate (M0–M3) or is explicitly
-// labelled a PROPOSAL. Sections that specify designed-not-built machinery say so in an
-// implementation-status note; the Security & Privacy Considerations section states plainly
-// that NO soundness/attestation/privacy property is production-claimable until the external
-// cryptographer audit (bead sq-qhy4) completes. No performance numbers appear in this source
-// (build-boundary honesty scan enforces this).
+// [FABLE] sq-rvgr2.3 — MPC-SPARQL: Secure Multi-Party Federated SPARQL — Requirements and
+// Reference Architecture (Unofficial Proposal Draft). Authored from the estate recon digest
+// (research/specs/mpc-sparql-estate-recon.md, bead sq-rvgr2.3): every normative statement
+// below traces either to MERGED, TESTED behaviour in the sparq-mpc / sparq-zk-compose /
+// sparq-fedplan-mpc estate (M0–M3) or is explicitly labelled a PROPOSAL. Revised per the
+// Fable soundness review of PR #1332: the document is framed as a REQUIREMENTS +
+// REFERENCE-ARCHITECTURE draft (not a protocol spec — the interoperable byte formats are
+// open, §1.2), every normative section carries a conformance class + a testable-now vs
+// future-implementation category stamp (§2.3), and audit scopes are reconciled (sq-qhy4
+// clears the single-prover ZK layer ONLY, §12.1). No performance numbers appear in this
+// source (build-boundary honesty scan enforces this).
 
 #import "_lib/spec.typ": spec-head, sotd, intro-section, references, dfn, note, cite
 
-#set document(title: "MPC-SPARQL: Secure Multi-Party Federated SPARQL")
+#set document(title: "MPC-SPARQL: Secure Multi-Party Federated SPARQL — Requirements and Reference Architecture")
 #set text(size: 11pt)
 #set par(justify: true)
 #set heading(numbering: "1.")
@@ -21,24 +23,36 @@
 #let impl-status(label, body) = note[#strong[Implementation status — #label.] #body]
 #let open-issue(id, body) = note[#strong[Open issue (#id).] #body]
 
+// A per-section conformance stamp (§2.3): which conformance class(es) the section's RFC 2119
+// statements bind, and whether they are checkable against the reference estate today
+// ("testable-now") or bind software that is not yet built ("future-implementation"). This is
+// the mechanism that lets a conformance test suite separate the two — a review requirement.
+#let conf(class, cat) = [#emph[Conformance: binds #class · category #strong[#cat] (§2.3).]]
+
 #spec-head()
 
 #intro-section("abstract", "Abstract")[
-  MPC-SPARQL is a protocol proposal for evaluating a federated SPARQL query across mutually
+  MPC-SPARQL is a proposal for evaluating a federated SPARQL query across mutually
   distrusting data sources using secure multi-party computation (MPC), so that each source's
-  private triples never leave its custody in the clear, while the relying party receives the
-  query result together with machine-checkable evidence about how it was derived. The proposal
-  targets four separable guarantees: input confidentiality during evaluation, correctness of
-  the disclosed result, attested-source derivation (the result was computed over data signed by
-  trusted issuers), and resilience against actively malicious participants. This draft
-  specifies the party and trust model, the secret-share and join-key encodings, per-operator
-  disclosure routing, the secure evaluation operators, a simulation-tier wire protocol, and the
-  verifier-side binding rules (freshness, key-set anchoring, public-input reconstruction) that
-  an implementation must honour. It also delimits, explicitly and non-optionally, what is
-  #emph[not] yet specified or built: the collaborative zero-knowledge proof over a
-  secret-shared witness, the distributed issuer-signature attestation, and the deployed
-  party-mesh transport are design-stage proposals, and no security property in this document is
-  production-claimable until an external cryptographic audit completes.
+  private triples would never leave its custody in the clear and so that — once the
+  proposal's verification layers are complete — the relying party would receive the query
+  result together with machine-checkable evidence about how it was derived. Today such
+  evidence exists only at the single-prover binding layer (§9); its federated, collaborative
+  form is designed but not built (§10). The proposal targets four separable guarantees:
+  input confidentiality during evaluation, correctness of the disclosed result,
+  attested-source derivation (the result was computed over data signed by trusted issuers),
+  and resilience against actively malicious participants.
+
+  This document is a #strong[requirements and reference-architecture draft], not yet a
+  protocol specification. It states the party and trust model, a consolidated adversary
+  model, the secret-share and join-key encodings, per-operator disclosure routing, the
+  secure evaluation operators, a simulation-tier wire protocol, and the verifier-side
+  binding rules (freshness, key-set anchoring, public-input reconstruction). The
+  interoperable artifacts a protocol specification would additionally need — the canonical
+  query form and digest, the deployed party-mesh wire format, the verifier–federation
+  handshake bytes, and the federated public-input layout — are explicitly open (§1.2), and
+  no security property in this document is production-claimable until external audits of
+  both the single-prover layer and the multi-party layer complete (§12.1).
 ]
 
 #sotd()
@@ -50,10 +64,13 @@ endpoint is willing to disclose the solution mappings it contributes. Many real 
 not satisfy that assumption: the parties hold data that is individually private (personal
 records, commercially sensitive holdings) yet jointly useful — a threshold decision over the
 sum of per-party values, an intersection over hidden keys, a path query whose intermediate
-nodes must remain undisclosed. MPC-SPARQL addresses this setting by evaluating the private
-fragments of a federated query #emph[inside] a secure multi-party computation among the data
-sources themselves, and by binding the disclosed output to cryptographic evidence a relying
-party can check.
+nodes must remain undisclosed. MPC-SPARQL proposes to address this setting by evaluating the
+private fragments of a federated query #emph[inside] a secure multi-party computation among
+the data sources themselves, and by binding the disclosed output to cryptographic evidence a
+relying party can check. That binding exists today only at the single-prover layer (§9); its
+federated, collaborative form — the evidence a relying party would check for a multi-holder
+run — is a design-stage proposal whose joint prove/verify operations are unimplemented
+stubs (§10).
 
 == Goals: the four guarantees
 
@@ -79,15 +96,78 @@ document tracks separately because their maturity differs sharply:
     the default operating tier remains semi-honest (§3.3, §12).],
 )
 
-== Position of this document
+== Position and maturity of this document
 
 This draft is written against a concrete research implementation (the sparq project's
 `sparq-mpc`, `sparq-zk-compose`, and `sparq-fedplan-mpc` crates, milestones M0–M3) and is
 grounded in its estate reconnaissance record. Where this document states a requirement with an
 RFC 2119 keyword, the requirement traces either to implemented, tested behaviour or to an
-explicitly labelled proposal; §2.3 defines the labelling convention. This document is an
-Unofficial Proposal Draft (see Status of This Document): it is published to make the design
-reviewable, not to claim a standard or a deployed security guarantee.
+explicitly labelled proposal; §2.3 defines the conformance classes and categories. This
+document is an Unofficial Proposal Draft (see Status of This Document): it is published to
+make the design reviewable, not to claim a standard or a deployed security guarantee.
+
+#strong[Why this is a requirements and reference-architecture draft, not a protocol
+specification.] Two independent parties cannot yet interoperate from this document alone,
+because every load-bearing interoperable artifact a protocol specification would need to pin
+at the byte level is currently open:
+
++ the canonical SPARQL query form and its digest (§6.4);
++ the deployed party-mesh wire format (§8.2) — only the simulation-tier harness protocol of
+  §8.1 has specified bytes;
++ the verifier–federation handshake formats (§8.3); and
++ the federated public-input byte layout that statement binding depends on (§9.2) — this
+  revision adds a proposed single-prover statement serialisation (§9.1), itself pending
+  reconciliation with the reference estate.
+
+Accordingly, this document claims to be the #emph[requirements baseline and reference
+architecture] that a future protocol-level revision must satisfy, and it #strong[MUST NOT]
+be cited as an implementable protocol specification until those artifacts land.
+
+== Related work and positioning
+
+This subsection is informative. MPC-SPARQL sits at the intersection of three literatures;
+its claim to novelty is narrow and architectural, not cryptographic.
+
+#strong[Secure collaborative query systems (relational).] SMCQL #cite("SMCQL") compiles a
+SQL fragment onto secure-computation backends for a mutually distrusting two-party
+federation; Conclave #cite("CONCLAVE") scales MPC queries by pushing work into annotated
+cleartext pre- and post-processing; Senate #cite("SENATE") provides maliciously secure
+collaborative analytics via a decomposition that localises cross-party computation; Cerebro
+#cite("CEREBRO") adds a platform layer (policy, auditing, release control) around
+collaborative cryptographic computation. MPC-SPARQL adapts two load-bearing ideas from this
+line — the cleartext/secure operator split (Conclave's routing appears here as the
+disclosed/hidden routing of §6.2) and policy-gated admission — to the SPARQL algebra. What
+that line does not address is what is RDF-specific here: encoding a schema-free term model
+into a protocol field (§4.2, including the blank-node problem), routing SPARQL-specific
+operators such as property paths and hidden-key `DISTINCT` (§7.4), and — the main delta —
+binding the disclosed output to #emph[attested-source derivation] (guarantee C): none of the
+systems above aims to convince a third-party relying party that the result derives only from
+issuer-signed inputs.
+
+#strong[Private set operations.] The hidden-value join of §7.1 is, in its equi-join case, a
+private set intersection evaluated inside generic MPC. Dedicated circuit-PSI protocols
+#cite("PSTY19") achieve far better asymptotics for the standalone problem; this draft
+therefore specifies the join #emph[interface] (secret-shared keys in, secret-shared match
+indicators out), not the join algorithm, so a PSI-based operator can replace the current
+exhaustive comparison (§7.1's implementation-status note) without a spec change.
+
+#strong[Privacy for RDF and SPARQL.] Prior work on sensitive RDF is predominantly
+access-control- and encryption-based: policy-driven SPARQL federation over access-controlled
+data (SAFE #cite("SAFE")), encrypted RDF storage and exchange (HDT-crypt #cite("HDTCRYPT")),
+and the access-control survey of Kirrane et al. #cite("KIRRANE17"). These protect data at
+rest or gate #emph[who may ask]; none evaluates a join or aggregate whose operands remain
+secret from #emph[every] party, which is the setting here. On the verification side,
+collaborative zk-SNARKs #cite("OB22") are the primitive the §10 proposal targets — a proof
+over a witness secret-shared among mutually distrusting provers — with the security caveats
+analysed in #cite("EPRINT-2025-1026"); the single-prover binding layer this document builds
+on follows the commit-and-prove line (for example #cite("ARTEMIS")).
+
+#strong[What is claimed as new.] To the knowledge of the reference estate: (i) per-operator
+disclosure routing expressed over the SPARQL algebra with a ratified leakage envelope
+(§6.1–§6.2); (ii) composing MPC evaluation with verifier-anchored, issuer-signed
+attested-source derivation for federated SPARQL (§9.3, §10.4); and (iii) a fail-closed
+security-model vocabulary reported per SPARQL operator (§3.3). Every cryptographic primitive
+used is standard and cited as such (§4, §7); no new primitive is proposed.
 
 = Terminology and conformance
 
@@ -116,24 +196,44 @@ and #cite("RFC8174") when, and only when, they appear in all capitals, as shown 
 - The #dfn[leakage envelope] is the explicit, machine-readable declaration of everything a
   protocol run reveals beyond the final disclosed result.
 
-== Conformance classes and status labels
+== Conformance classes, categories, and status labels
 
-This document defines conformance requirements for four classes: #emph[federation],
-#emph[holder], #emph[verifier], and #emph[planner]. Each normative section names the class it
-binds.
+This document defines conformance requirements for four implementation classes:
+#emph[federation], #emph[holder], #emph[verifier], and #emph[planner]. Each normative
+section names the class it binds.
 
-Two kinds of labelled asides qualify the normative text:
+Because this draft mixes requirements that are checkable against the reference estate today
+with requirements that bind software not yet built, every normative section additionally
+carries exactly one of two #emph[conformance categories], stamped in an explicit
+"Conformance:" line at the top of the section:
+
+- #strong[testable-now] — the requirement is backed by implemented, tested behaviour in the
+  reference estate, and a conformance test suite could check an implementation against it
+  today;
+- #strong[future-implementation] — the requirement binds a future implementation of a
+  designed-but-not-built feature. No conformance test can be executed against it today, and
+  it #strong[MUST NOT] be represented as an existing, working capability. All of §10, the
+  canonical-digest requirement of §6.4, and the canonical statement serialisation of §9.1
+  are in this category.
+
+Where a section mixes categories, its stamp names the dominant category and the text marks
+the exceptions inline. A conformance test suite #strong[MUST] treat the two categories as
+disjoint: only testable-now requirements may appear in a test report about existing
+software.
+
+Two kinds of labelled asides further qualify the normative text:
 
 - #emph[Implementation status] notes state whether the requirement is backed by implemented,
   tested behaviour in the reference estate, or is a #strong[proposal] — designed but not
-  built. A proposal-status requirement binds future implementations of that feature; it
-  #strong[MUST NOT] be represented as an existing, working capability.
+  built (the aside-level view of the future-implementation category).
 - #emph[Open issue] notes mark points this draft deliberately leaves unspecified, with the
   tracking identifier in the reference estate.
 
 = Roles and trust model
 
 == Party and role model
+
+#conf("federation", "testable-now")
 
 A conformant MPC-SPARQL federation #strong[MUST] distinguish four roles:
 
@@ -162,6 +262,8 @@ A conformant MPC-SPARQL federation #strong[MUST] distinguish four roles:
 
 == Corruption threshold
 
+#conf("federation", "testable-now")
+
 Each holder #strong[MUST] be exactly one compute party of an honest-majority MPC. For any
 operation that requires interaction beyond local share arithmetic — in particular secret-shared
 multiplication and secure comparison — the federation #strong[MUST] satisfy `n >= 2t + 1`,
@@ -179,6 +281,8 @@ met. It #strong[MUST NOT] silently downgrade to a weaker corruption model.
 ]
 
 == Security-model vocabulary
+
+#conf("federation and holder", "testable-now")
 
 An implementation #strong[MUST] describe the guarantee of every operator it executes over
 three orthogonal axes, plus one flag:
@@ -203,9 +307,61 @@ rejected by construction; the reference estate enforces this as a type-level inv
   reporting, and the Cleve invariant are implemented in the reference backend.
 ]
 
+== Consolidated adversary model and assumptions
+
+This subsection consolidates, in one place, the adversary and environment assumptions under
+which every security-relevant requirement in this document is stated. The assumptions
+themselves are preconditions, not testable requirements; the one normative duty here — a
+deployment operating outside any assumption below #strong[MUST] disclose that fact to its
+relying parties — is testable-now and binds every conformance class.
+
+- #strong[Corruption model.] The MPC layer assumes a #emph[static, honest-majority]
+  adversary: at most t of the n compute parties are corrupted, `n >= 2t + 1` (§3.2), and the
+  corrupted set is fixed before a run begins. Adaptive corruption is out of scope and
+  unanalysed. The default tier assumes #emph[semi-honest] (passive) corruption (§12.2); the
+  authenticated tier targets #emph[malicious] (active) corruption with abort and is only
+  partially built (§7.5).
+- #strong[Network and synchrony.] The protocol as drafted assumes synchronous, ordered,
+  reliable message delivery over confidential, mutually authenticated point-to-point
+  channels. This is an #emph[assumption], not a specified mechanism: the deployed transport
+  that would realise it is not specified (§8.2), and the simulation-tier star coordinator
+  (§8.1) realises the synchrony assumption trivially while violating the metadata-privacy
+  expectation entirely — the coordinator observes all traffic patterns (§12.8).
+- #strong[Setup and key distribution.] Issuer public keys are distributed out of band and
+  their authenticity is assumed; this draft specifies no PKI, key-discovery, or
+  revocation-distribution mechanism (revocation binding exists single-prover only, §9.4).
+  There is no trusted dealer: each holder deals Shamir shares of its own inputs (§4.1). The
+  trusted key-set K is supplied or agreed by the verifier (§4.4); it is a trust
+  #emph[input] to the run, not a protocol output.
+- #strong[What the verifier is trusted for.] The verifier is honest-but-curious (§3.1): it
+  is trusted to supply a fresh single-use nonce and to actually run the §9 checks it
+  reports; it is #emph[not] trusted with any party's private inputs (it never receives
+  shares) and #emph[not] trusted to keep disclosed outputs confidential. Collusion between
+  the verifier and a subset of holders is not analysed in this draft beyond the observation
+  that the verifier holds no share material.
+- #strong[Composition boundary (MPC layer vs single-prover ZK layer).] Guarantees B and C
+  compose two distinct mechanisms: the MPC evaluation layer (§7) and the single-prover ZK
+  verification layer (§9). A #dfn[sub-proof] is one proof checked by the §9 layer; a
+  #dfn[composed verification] is the conjunction (logical AND) of the §9 checks over every
+  sub-proof of a run, cross-bound by the shared challenge nonce N as public-input field 0 of
+  every sub-proof and by the shared statement of §9.1. The composition claim made by this
+  draft is exactly that conjunction under shared binding — nothing stronger. In particular,
+  no universal-composability or joint-state analysis of the MPC-plus-ZK composition has been
+  performed, and the collaborative proof that would tie the MPC execution itself into the
+  proven statement is a proposal (§10).
+
+#open-issue("adversary-model details to reconcile with the reference estate")[
+  Whether the reference estate's share-opening and reconstruction steps assume a broadcast
+  channel, and whether they tolerate a rushing adversary, is not recorded in the estate
+  digest this revision was authored from (a no-code-reading authoring constraint applied); a
+  future revision must pin both against the crate sources.
+]
+
 = Data model and encodings
 
 == Protocol field and secret-share format
+
+#conf("holder and federation", "testable-now")
 
 The protocol field is the prime field `F_p` with `p = 2^61 - 1` (a Mersenne prime). A
 #dfn[Shamir share] (#cite("SHAMIR79")) of a secret `s` is a pair `(x, y)`:
@@ -231,7 +387,34 @@ operations.
   are implemented and tested in the reference estate (milestones M0–M3, merged).
 ]
 
+#strong[Statistical security of the 61-bit field.] The choice of `F_p` with `p = 2^61 - 1`
+is a #emph[performance] choice (native 64-bit arithmetic with cheap Mersenne reduction); it
+caps, rather than follows from, the protocol's statistical-security level. This draft sets
+the target statistical-security parameter at `s = 40` (a common choice in the MPC
+literature) and accounts against it as follows:
+
+- #strong[IT-MAC forgery (§7.5).] A single information-theoretic MAC check over `F_p` is
+  forgeable with probability at most `1/p ≈ 2^-61`; a run performing R MAC checks has total
+  forgery probability at most `R · 2^-61` by the union bound, which stays below `2^-40` for
+  any R up to `2^21` checks. The per-check margin therefore #emph[exceeds] the `s = 40`
+  target, but by 21 bits only — far short of the `2^-128` a reader might assume — and it
+  #strong[MUST NOT] be described as providing 128-bit security of any kind.
+- #strong[Join-key collisions (§4.2).] The term encoding is birthday-bounded: q encoded
+  terms collide with probability approximately `q^2 / 2^62`. Meeting a `2^-s` failure bound
+  requires `q <= 2^((62-s)/2)`: roughly `2^11` (about two thousand) hidden join-key terms
+  for `s = 40`, `2^16` for `s = 30`, and `2^21` (about two million) for `s = 20`. This — not
+  MAC forgery — is the binding constraint of the 61-bit field, and it is why §4.2 mandates
+  fail-closed collision detection.
+
+An implementation #strong[MUST] document the statistical-security level it actually achieves
+for its run sizes, and a deployment whose hidden-key count pushes the collision bound above
+`2^-40` #strong[MUST] either reject the run or disclose the weakened bound to its relying
+parties. Restoring headroom (a larger field, or an extension-field MAC) is an open design
+choice traded against the performance that motivated `2^61 - 1`.
+
 == Join-key encoding for private terms
+
+#conf("holder and federation", "testable-now")
 
 When an RDF term serves as a #emph[hidden] join key (§7.1), it #strong[MUST] be encoded into
 `F_p` as:
@@ -269,6 +452,8 @@ collision rather than emit an incorrect join.
 
 == Graph commitments and issuer attestations
 
+#conf("issuer and verifier", "testable-now (single-prover)")
+
 Each named graph `G_i` contributed by a holder carries a commitment `C(G_i)`, and each
 commitment is signed by its issuer as:
 
@@ -288,6 +473,8 @@ computed under any other tag #strong[MUST NOT] be accepted as a graph attestatio
 ]
 
 == The disclosed issuer key-set K
+
+#conf("federation and verifier", "testable-now")
 
 The set K of issuer public keys that a run treats as trusted #strong[MUST] be canonicalised —
 sorted and deduplicated — before it is bound into any statement or digest, so that the proof
@@ -330,6 +517,8 @@ of each step lives in the section referenced.
 
 == The untrusted planner
 
+#conf("federation and planner", "testable-now")
+
 The planner's output #strong[MUST NOT] be trusted for soundness. A conformant federation
 #strong[MUST]:
 
@@ -357,6 +546,8 @@ properties into the plan.
 
 == Per-operator disclosure routing
 
+#conf("federation and planner", "testable-now")
+
 Every operator of the federated plan #strong[MUST] be explicitly tagged with exactly one
 routing class:
 
@@ -374,6 +565,8 @@ response are implemented in the reference pipeline.]
 
 == Post-processing convention: no proof of revealed properties
 
+#conf("verifier", "testable-now")
+
 Any operator that is a deterministic function of the #emph[disclosed] result multiset —
 `DISTINCT`, `ORDER BY`, `LIMIT`, `OFFSET`, and the aggregates `COUNT`, `SUM`, `AVG`, `MIN`,
 `MAX` of #cite("SPARQL11-QUERY") when applied to disclosed values — #strong[MUST] be recomputed by the verifier outside
@@ -387,6 +580,8 @@ in the clear — are not post-processing and are governed by §7.)
 
 == Canonical query digest
 
+#conf("federation and verifier", "future-implementation")
+
 The statement of §9.1 binds a digest of the query. This draft #strong[REQUIRES] that the
 digest be computed over a #emph[canonical] form of the federated query, so that two textually
 different but identical-in-algebra queries cannot yield distinguishable statements; however,
@@ -397,13 +592,17 @@ the canonicalisation algorithm is not yet specified.
   canonicalisation the caller's responsibility. A normative canonical SPARQL form (algebraic
   normalisation and serialisation) must be specified before interoperable statements are
   possible. Until then, implementations #strong[MUST] document exactly what byte string they
-  digest.
+  digest — this interim documentation duty is the one #emph[testable-now] requirement of
+  this section.
 ]
 
 = Secure evaluation operators
 
 This section binds the #emph[holder] and #emph[federation] classes. Each operator family
 below reports its class for the per-operator guarantee vocabulary of §3.3.
+
+#conf("holder and federation", "testable-now, except where an implementation-status note
+says otherwise (§7.5)")
 
 == Joins
 
@@ -483,6 +682,8 @@ For resilience against tampered shares and cheating parties:
 
 == Simulation-tier wire protocol
 
+#conf("federation", "testable-now (within the simulation tier only)")
+
 The reference estate defines a wire protocol for a #emph[star-coordinator simulation] tier,
 in which each party is a separate process holding only its own share column and a coordinator
 relays protocol steps. Within that tier, the following is normative:
@@ -524,7 +725,12 @@ relays protocol steps. Within that tier, the following is normative:
 
 This section binds the #emph[verifier] class. It specifies the binding rules of the
 #emph[implemented] single-prover verification layer, which the federated proposal of §10
-inherits. "Sub-proof" below refers to a component proof within a composed verification.
+inherits. #emph[Sub-proof] and #emph[composed verification] are as defined in §3.4: a
+sub-proof is one proof checked by this layer, and a composed verification is the conjunction
+of these checks over every sub-proof of a run under the shared nonce and statement binding.
+
+#conf("verifier", "testable-now (single-prover), except the canonical statement
+serialisation below, which is future-implementation")
 
 == The proof statement
 
@@ -542,6 +748,40 @@ ProofStatement = {
 #impl-status("implemented (shape)")[The statement structure is implemented and assembled by
 the reference pipeline. What #emph[binds] it for the federated case — the collaborative proof
 — is a proposal (§10).]
+
+#strong[Canonical statement serialisation (category: future-implementation).] For the
+binding rules of §9.2 to be independently implementable, the mapping from `ProofStatement`
+to bytes must be deterministic and canonical. The following single-prover encoding is
+#strong[REQUIRED] of any implementation claiming conformance to a future protocol-level
+revision of this draft; the federated (multi-holder) layout remains open (§9.2's open
+issue):
+
++ Component order is fixed: `challenge` N first — so that the nonce is public-input field 0,
+  per §9.2 — then the `query` digest, then `disclosed_key_set` K, then `disclosed_result`.
++ Each component is length-prefixed with an unsigned 64-bit big-endian byte count and
+  concatenated without padding; field elements are serialised as canonical unsigned 64-bit
+  big-endian integers, consistent with the wire encoding of §8.1.
++ K is serialised in its canonical sorted, deduplicated order (§4.4), each key individually
+  length-prefixed.
++ Where a single digest of the statement is bound instead of the full byte string, it
+  #strong[MUST] be computed as `SHA-512( DOMAIN_TAG_STMT || <the concatenation above> )`
+  reduced by the rule of §4.2, with
+  `DOMAIN_TAG_STMT = "sparq-mpc/proof-statement/v1\0"` — a fresh tag that #strong[MUST NOT]
+  be shared with the join-key encoder or any other use.
+
+The full public-input vector that §9.2 requires the verifier to reconstruct additionally
+packs the graph commitments, any disclosed FILTER operator and operands, and per-row source
+attribution; their packing exists in the reference implementation but is not yet transcribed
+into this draft.
+
+#open-issue("statement-serialisation reconciliation")[
+  Whether the reference estate's existing single-prover public-input packing already matches
+  the encoding above is #strong[not established]: this revision was authored from the prose
+  estate digest under a no-code-reading constraint, and the digest records the mapping as
+  previously unspecified. Before any protocol-level revision, the estate's actual packing
+  must be reconciled with — or migrated to — this encoding, and conformance test vectors
+  published.
+]
 
 == Public-input binding
 
@@ -596,6 +836,9 @@ multi-source form is a proposal (§10.4).]
 ]
 
 = Collaborative proof and distributed attestation (proposal)
+
+#conf("a future collaborative-proof implementation (no existing software)",
+"future-implementation, in full")
 
 #note[
   #strong[This entire section is a proposal.] The collaborative zero-knowledge proof over a
@@ -700,17 +943,30 @@ draft's proposals for capabilities.
 
 This section is normative for every conformance class.
 
+#conf("every conformance class (deployment duties)", "testable-now")
+
 == Audit status: nothing here is production-ready
 
 #strong[No soundness, attestation, or privacy property described in this document is
-production-claimable today.] Every such claim is #strong[hard-gated] on an external audit by
-accredited cryptographers, which #strong[has not been performed] (tracked in the reference
-estate as sq-qhy4, open at the date of this draft). All existing security
-review of the reference estate consists of internal, single-model self-audits; the estate's
-own security policy correctly instructs users to treat the implementation as untrusted.
+production-claimable today.] All existing security review of the reference estate consists
+of internal, single-model self-audits; the estate's own security policy correctly instructs
+users to treat the implementation as untrusted.
+
+Two #emph[distinct] external audit scopes gate this document's claims, and they must not be
+conflated:
+
+- The planned external audit by accredited cryptographers tracked in the reference estate as
+  sq-qhy4 (open at the date of this draft) is scoped to the #emph[single-prover ZK layer] —
+  the ZK verifier and its circuits. When it completes, it can clear the single-prover claims
+  of §9, and #strong[only] those.
+- The MPC evaluation layer (§4, §7, §8) and every §10 proposal require #emph[additional,
+  separately scoped] external review — of the MPC protocol suite, of the composition
+  boundary of §3.4, and of any collaborative-proof toolchain eventually chosen (§12.4) — for
+  which no audit is scoped or scheduled at the date of this draft.
+
 Implementations and deployments #strong[MUST NOT] represent MPC-SPARQL as providing audited
-or production-grade guarantees until an external audit completes, and #strong[MUST] surface
-this status to relying parties.
+or production-grade guarantees until the audit covering the #emph[relevant layer] completes,
+and #strong[MUST] surface this status to relying parties.
 
 == Default tier is semi-honest
 
@@ -732,15 +988,18 @@ corruptions, and requires explicit out-of-circuit freshness binding. Every deplo
 
 Collaborative zk-SNARK proving over invalid witnesses can leak honest provers' inputs
 (#cite("EPRINT-2025-1026")); §10.2 therefore makes pre-proof witness validation a
-#strong[MUST]. The collaborative path is #strong[not covered] by the single-prover security
-review that exists, and candidate collaborative-proof toolchains are unaudited.
+#strong[MUST]. The collaborative path is #strong[not covered] by the single-prover audit
+scope of §12.1 (sq-qhy4) nor by any existing internal review, and candidate
+collaborative-proof toolchains are unaudited.
 
 == Statistical encodings
 
 The join-key encoding of §4.2 carries a birthday-bound collision probability
 (approximately `q^2 / 2^62` for q keys); it is a statistical bound, not a cryptographic
 hardness guarantee. Deployments #strong[MUST] treat encoder collisions as a live failure
-mode (fail closed on detection) and #strong[SHOULD] account for the bound when sizing runs.
+mode (fail closed on detection) and #strong[MUST] size runs against the target
+statistical-security parameter and the run-size caps of §4.1 (`s = 40` admits only about
+`2^11` hidden join-key terms), disclosing any weakened bound per §4.1.
 
 == Leakage beyond the result
 
@@ -784,6 +1043,9 @@ counters); wall-clock measurements from development machines are non-canonical a
     RFC 8174, IETF, May 2017.]),
   ("SPARQL11-FED", [Prud'hommeaux, E., Buil-Aranda, C. #emph[SPARQL 1.1 Federated Query].
     W3C Recommendation, 21 March 2013.]),
+  ("SPARQL11-QUERY", [Harris, S., Seaborne, A. #emph[SPARQL 1.1 Query Language]. W3C
+    Recommendation, 21 March 2013. (Normative: the post-processing rule of §6.3 depends on
+    this recommendation's operator and aggregate definitions.)]),
   ("FIPS-180-4", [NIST. #emph[Secure Hash Standard (SHS)]. FIPS PUB 180-4, August 2015.]),
   ("RFC8439", [Nir, Y., Langley, A. #emph[ChaCha20 and Poly1305 for IETF Protocols].
     RFC 8439, IETF, June 2018.]),
@@ -794,14 +1056,14 @@ counters); wall-clock measurements from development machines are non-canonical a
 == Informative references
 
 #references((
-  ("SPARQL11-QUERY", [Harris, S., Seaborne, A. #emph[SPARQL 1.1 Query Language]. W3C
-    Recommendation, 21 March 2013.]),
   ("SHAMIR79", [Shamir, A. #emph[How to Share a Secret]. Communications of the ACM 22(11),
     1979.]),
   ("BGW88", [Ben-Or, M., Goldwasser, S., Wigderson, A. #emph[Completeness Theorems for
-    Non-Cryptographic Fault-Tolerant Distributed Computation]. STOC 1988.]),
+    Non-Cryptographic Fault-Tolerant Distributed Computation]. Proceedings of the 20th ACM
+    Symposium on Theory of Computing (STOC), 1988.]),
   ("CLEVE86", [Cleve, R. #emph[Limits on the Security of Coin Flips when Half the Processors
-    are Faulty]. STOC 1986.]),
+    are Faulty]. Proceedings of the 18th ACM Symposium on Theory of Computing (STOC),
+    1986.]),
   ("RABBIT", [Makri, E., Rotaru, D., Vercauteren, F., Wood, T. #emph[Rabbit: Efficient
     Comparison for Secure Multi-Party Computation]. Financial Cryptography and Data Security
     2021.]),
@@ -809,13 +1071,38 @@ counters); wall-clock measurements from development machines are non-canonical a
     Joint Computer Conference, 1968.]),
   ("WAKSMAN68", [Waksman, A. #emph[A Permutation Network]. Journal of the ACM 15(1), 1968.]),
   ("BW86", [Welch, L. R., Berlekamp, E. R. #emph[Error Correction for Algebraic Block
-    Codes]. U.S. Patent 4,633,470, 1986.]),
-  ("EPRINT-2022-1648", [IACR Cryptology ePrint Archive, Report 2022/1648 —
-    authenticated-input MPC pattern cited by the reference estate's verifier-side attestation
-    design (Dutta et al.).]),
-  ("ARTEMIS", [#emph[Artemis] — commit-and-prove anchoring, arXiv:2409.12055, cited by the
-    reference estate's verifier-side attestation design.]),
-  ("EPRINT-2025-1026", [IACR Cryptology ePrint Archive, Report 2025/1026 — analysis of
-    collaborative zk-SNARK soundness and witness-validation pitfalls, as applied in the
-    reference estate's collaborative-ZK risk review.]),
+    Codes]. U.S. Patent 4,633,470, filed 1983, granted 30 December 1986. (The
+    Berlekamp–Welch decoder; no journal version exists — the patent is the primary
+    source.)]),
+  ("EPRINT-2022-1648", [Dutta, M., Ganesh, C., Patranabis, S., Singh, N. #emph[Compute, but
+    Verify: Efficient Multiparty Computation over Authenticated Inputs]. IACR Cryptology
+    ePrint Archive, Report 2022/1648, 2022.]),
+  ("ARTEMIS", [Lycklama, H., Viand, A., Avramov, N., Küchler, N., Hithnawi, A.
+    #emph[Artemis: Efficient Commit-and-Prove SNARKs for zkML]. arXiv:2409.12055, 2024.]),
+  ("EPRINT-2025-1026", [Garg, S., Goel, A., Jain, A., Roberts, B., Sekar, S.
+    #emph[Malicious Security in Collaborative zk-SNARKs: More than Meets the Eye]. IACR
+    Cryptology ePrint Archive, Report 2025/1026, 2025.]),
+  ("OB22", [Ozdemir, A., Boneh, D. #emph[Experimenting with Collaborative zk-SNARKs:
+    Zero-Knowledge Proofs for Distributed Secrets]. 31st USENIX Security Symposium, 2022.]),
+  ("SMCQL", [Bater, J., Elliott, G., Eggen, C., Goel, S., Kho, A., Rogers, J. #emph[SMCQL:
+    Secure Querying for Federated Databases]. Proceedings of the VLDB Endowment 10(6),
+    2017.]),
+  ("CONCLAVE", [Volgushev, N., Schwarzkopf, M., Getchell, B., Varia, M., Lapets, A.,
+    Bestavros, A. #emph[Conclave: Secure Multi-Party Computation on Big Data]. Proceedings
+    of the 14th EuroSys Conference, 2019.]),
+  ("SENATE", [Poddar, R., Kalra, S., Yanai, A., Deng, R., Popa, R. A., Hellerstein, J. M.
+    #emph[Senate: A Maliciously-Secure MPC Platform for Collaborative Analytics]. 30th
+    USENIX Security Symposium, 2021.]),
+  ("CEREBRO", [Zheng, W., Deng, R., Chen, W., Popa, R. A., Panda, A., Stoica, I.
+    #emph[Cerebro: A Platform for Multi-Party Cryptographic Collaborative Learning]. 30th
+    USENIX Security Symposium, 2021.]),
+  ("PSTY19", [Pinkas, B., Schneider, T., Tkachenko, O., Yanai, A. #emph[Efficient
+    Circuit-Based PSI with Linear Communication]. EUROCRYPT 2019.]),
+  ("SAFE", [Khan, Y., Saleem, M., Mehdi, M., Hogan, A., Mehmood, Q., Rebholz-Schuhmann, D.,
+    Sahay, R. #emph[SAFE: SPARQL Federation over RDF Data Cubes with Access Control].
+    Journal of Biomedical Semantics 8:5, 2017.]),
+  ("HDTCRYPT", [Fernández, J. D., Kirrane, S., Polleres, A., Steyskal, S. #emph[HDT-crypt:
+    Compression and Encryption of RDF Datasets]. Semantic Web 11(2), 2020.]),
+  ("KIRRANE17", [Kirrane, S., Mileo, A., Decker, S. #emph[Access Control and the Resource
+    Description Framework: A Survey]. Semantic Web 8, 2017.]),
 ))
