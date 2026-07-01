@@ -13,12 +13,12 @@
 //                             HOLD honest=false and anything touching sq-qhy4 (external ZK audit)
 //
 // MODEL TIERS: opts.model ('fable'|'haiku') drives the tier TODAY. opts.agentType names the
-// PROPOSED role agent ('sparq-fable-reviewer'), STAGED under research/fable-collab-infra/agents/
-// because .claude/agents/ is Self-Modification-protected (AGENTS.md rule 11); the agentType ref
-// activates only once the maintainer MOVES it into .claude/agents/. UNTIL THEN the model
-// override alone drives the tier (an unknown agentType falls back to the default toolset).
+// role agent ('sparq-reviewer'), now APPLIED under .claude/agents/ (maintainer-authorized,
+// commit c28d90e4); the agentType ref resolves to that role config and opts.model overrides
+// the tier on top of it. (If the agent is ever removed, an unknown agentType falls back to the
+// default toolset and the model override alone still drives the tier.)
 //
-// DURABLE: committed under .claude/workflows/ + linked from AGENTS.md. Re-run with:
+// DURABLE: committed under .claude/workflows/. Re-run with:
 //   Workflow({ name: "fable-soundness-verdict" })                                 // by label
 //   Workflow({ name: "fable-soundness-verdict", args: { prs: ["<url>", ...] } })  // explicit
 //
@@ -144,7 +144,7 @@ log('enumerated ' + prs.length + ' PR(s) for Fable soundness review: ' + prs.map
 // Stage2 — FABLE reviewer, ONE call per PR (fan-out). Read-only verdicts.
 phase('Review')
 const verdicts = await parallel(prs, (p) =>
-  agent(reviewPrompt(p), { label: 'fable:' + (p.number || p.url), phase: 'Review', schema: SOUND_VERDICT_SCHEMA, agentType: 'sparq-fable-reviewer', model: 'fable' })
+  agent(reviewPrompt(p), { label: 'fable:' + (p.number || p.url), phase: 'Review', schema: SOUND_VERDICT_SCHEMA, agentType: 'sparq-reviewer', model: 'fable' })
     .then(v => ({
       pr: p.url,
       surface: p.surface,

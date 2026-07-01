@@ -16,15 +16,14 @@
 // pattern) so the Stage3 fleet runs in parallel worktrees with ZERO merge conflicts.
 //
 // MODEL TIERS: opts.model ('fable'|'sonnet'|'haiku') selects the tier and drives cost TODAY.
-// opts.agentType names the PROPOSED role agent ('sparq-architect', 'sparq-fable-reviewer').
-// Those role configs are STAGED under research/fable-collab-infra/agents/ because
-// .claude/agents/ is Self-Modification-protected (AGENTS.md rule 11); the agentType refs
-// activate only once the maintainer MOVES them into .claude/agents/. UNTIL THEN the model
-// override alone drives the tier (an unknown agentType falls back to the default toolset),
-// so this workflow is runnable as-is. Impl fan-out routes through pickAgent(surface) to the
-// EXISTING implementer agents, just dropped to the Sonnet tier.
+// opts.agentType names the role agents ('sparq-architect' for the decompose call, 'sparq-reviewer'
+// for the review call), now APPLIED under .claude/agents/ (maintainer-authorized, commit
+// c28d90e4); the agentType refs resolve to those role configs and opts.model overrides the tier
+// on top of them. (If an agent is ever removed, an unknown agentType falls back to the default
+// toolset and the model override alone still drives it.) Impl fan-out routes through
+// pickAgent(surface) to the EXISTING implementer agents, just dropped to the Sonnet tier.
 //
-// DURABLE: committed under .claude/workflows/ + linked from AGENTS.md. Re-run with:
+// DURABLE: committed under .claude/workflows/. Re-run with:
 //   Workflow({ name: "fable-architect-drain", args: { epics: ["sq-...", "sq-..."] } })
 //   Workflow({ name: "fable-architect-drain", args: { epic: "sq-..." } })
 //
@@ -301,7 +300,7 @@ async function processEpic(epic) {
   if (escalated.length) {
     phase('Review')
     verdicts = await parallel(escalated, (r) =>
-      agent(fableReviewPrompt(r), { label: 'fable:' + r.bead, phase: 'Review', schema: FABLE_VERDICT_SCHEMA, agentType: 'sparq-fable-reviewer', model: 'fable' })
+      agent(fableReviewPrompt(r), { label: 'fable:' + r.bead, phase: 'Review', schema: FABLE_VERDICT_SCHEMA, agentType: 'sparq-reviewer', model: 'fable' })
         .then(v => ({ bead: r.bead, pr: r.pr, honest: (v && v.honest) || false, recommend_arm: (v && v.recommend_arm) || false, disposition: (v && v.disposition) || 'hold', concerns: (v && v.concerns) || [] }))
     )
   }
@@ -316,8 +315,10 @@ async function processEpic(epic) {
     } else if (v.disposition === 'fable_implements') {
       // Fable takes the wheel: scoped isolated-worktree Fable impl, then RE-ENTER Stage4
       // (haiku mechanical verify). Bounded to a single Fable-fix pass to avoid recursion.
+      // Route through pickAgent for an IMPLEMENTER toolset (Edit/Write) — the architect role
+      // forbids implementation — while opts.model forces the Fable tier onto that role.
       phase('Implement')
-      const fix = await agent(fableImplPrompt(v), { label: 'fable-impl:' + v.bead, phase: 'Implement', schema: IMPL_SCHEMA, agentType: 'sparq-architect', model: 'fable', isolation: 'worktree' })
+      const fix = await agent(fableImplPrompt(v), { label: 'fable-impl:' + v.bead, phase: 'Implement', schema: IMPL_SCHEMA, agentType: pickAgent(v.surface), model: 'fable', isolation: 'worktree' })
       phase('Verify')
       const m = await mechVerify(fix, { id: v.bead, surface: '', title: '' })
       if (m.armed) armed.push(v.bead)

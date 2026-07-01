@@ -12,13 +12,12 @@
 //   Stage4  File       fleet  create the follow_up_beads via `bd create`
 //
 // MODEL TIERS: opts.model ('fable'|'sonnet'|'haiku') drives the tier TODAY. opts.agentType
-// names the PROPOSED role agents ('sparq-fable-reviewer'), STAGED under
-// research/fable-collab-infra/agents/ because .claude/agents/ is Self-Modification-protected
-// (AGENTS.md rule 11); the agentType refs activate only once the maintainer MOVES them into
-// .claude/agents/. UNTIL THEN the model override alone drives the tier (an unknown agentType
-// falls back to the default toolset).
+// names the role agent ('sparq-reviewer'), now APPLIED under .claude/agents/
+// (maintainer-authorized, commit c28d90e4); the agentType ref resolves to that role config and
+// opts.model overrides the tier on top of it. (If the agent is ever removed, an unknown
+// agentType falls back to the default toolset and the model override alone still drives it.)
 //
-// DURABLE: committed under .claude/workflows/ + linked from AGENTS.md. Re-run with:
+// DURABLE: committed under .claude/workflows/. Re-run with:
 //   Workflow({ name: "fable-lens-review", args: { lens: "privacy-claims", question: "..." } })
 //
 // SAFETY: Stages 1-3 are READ-ONLY (findings only; the recon + cross-ref fan-out uses
@@ -210,7 +209,7 @@ log('cross-ref built ' + tables.length + ' row(s)')
 
 // Stage3 — FABLE adjudicate the subtle question (the single Fable call).
 phase('Adjudicate')
-const adj = await agent(adjudicatePrompt(tables), { label: 'fable:' + LENS, phase: 'Adjudicate', schema: ADJUDICATION_SCHEMA, agentType: 'sparq-fable-reviewer', model: 'fable' })
+const adj = await agent(adjudicatePrompt(tables), { label: 'fable:' + LENS, phase: 'Adjudicate', schema: ADJUDICATION_SCHEMA, agentType: 'sparq-reviewer', model: 'fable' })
 const findings = (adj && adj.findings) || []
 const verdict = (adj && adj.soundness_verdict) || 'inconclusive'
 const followUps = (adj && adj.follow_up_beads) || []
