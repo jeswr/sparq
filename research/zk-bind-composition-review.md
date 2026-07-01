@@ -1,6 +1,9 @@
 # ZK verifier `bind_*` composition review — search for a satisfying-but-false aggregate manifest
 
-Bead: **sq-1s2.6** (epic sq-1s2). Reviewer: **Claude Fable 5** `[FABLE]`. Date: 2026-07-01.
+Bead: **sq-1s2.6** (epic sq-1s2). Reviewer: **Claude Opus 4.8** `[OPUS-4.8]` — dispatched as
+Fable but downgraded to Opus 4.8 mid-run by the dual-use safety classifier (only ~2 of ~88 turns
+ran on Fable before the downgrade on the adversarial-crypto content); see the Fable-safeguard note.
+Date: 2026-07-01.
 
 > **THIS REVIEW DOES NOT REPLACE THE EXTERNAL AUDIT (sq-qhy4).** It is a single-model
 > adversarial *composition* read of the `bind_*` obligation set in
@@ -250,3 +253,14 @@ Two composition weaknesses are documented, neither an exploitable break at prese
 **This does not lift any not-production-sound label. sq-qhy4 (external accredited-cryptographer
 audit, P0) remains the gating soundness authority; this review is advisory input to it, not a
 substitute.**
+
+---
+
+## Provenance / Fable-safeguard note `[OPUS-4.8]`
+
+This review was **dispatched as Claude Fable 5** but **ran ~97% on `claude-opus-4-8`**: Fable's
+dual-use safety classifier downgraded the run to Opus 4.8 mid-session on the adversarial-crypto
+content, so only ~2 of ~88 turns executed on Fable. The honest authorship stamp is therefore
+**Opus 4.8**, not Fable — the header stamp and the commit trailer were corrected accordingly
+(`docs(zk): correct provenance stamp to Opus 4.8 (Fable safeguard downgrade)`). The review
+*content* is unchanged; only the provenance attribution was fixed.
