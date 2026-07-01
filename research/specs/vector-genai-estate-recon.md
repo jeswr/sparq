@@ -61,7 +61,8 @@ designed-but-unbuilt.
   input, in order) + test-only `HashEmbedder` (NO semantics) `src/embed.rs:10–83`; `provider`
   feature = OpenAI-compatible `/v1/embeddings` request/response shape with caller `Transport`
   (`embed.rs:108–146`); `embeddings` feature = concrete reqwest `RemoteEmbedder::from_env`
-  reading `SPARQ_EMBEDDINGS_API_KEY/BASE_URL/MODEL` (`embed.rs:159–253`).
+  reading `SPARQ_EMBEDDINGS_API_KEY` / `SPARQ_EMBEDDINGS_BASE_URL` / `SPARQ_EMBEDDINGS_MODEL`
+  (`embed.rs:159–253`).
 
 - **Verbalisation + label pipelines** `verbalize`/`embed_entities`/`embed_labels` (label chain,
   multilingual, budgeted) `src/verbalize.rs`, `src/labels.rs`.
@@ -194,10 +195,11 @@ designed-but-unbuilt.
     input order; a live provider response MUST be rejected on wrong count/dim/non-finite/
     duplicate-index/missing-index/out-of-range index (`embed.rs:10–15,401–453`).
 
-12. **Provider protocol**: OpenAI-compatible `POST base/v1/embeddings` body model+input, Bearer
-    auth, honouring response index; env vars `SPARQ_EMBEDDINGS_API_KEY` (required) /
-    `BASE_URL` / `MODEL` with defaults `api.openai.com/v1/embeddings` and
-    `text-embedding-3-small` (`embed.rs:163–253`).
+12. **Provider protocol**: OpenAI-compatible `POST <endpoint>` (JSON body model+input, Bearer
+    auth, honouring response index); the endpoint is the full URL in `SPARQ_EMBEDDINGS_BASE_URL`
+    — POSTed as-is, nothing appended — env vars `SPARQ_EMBEDDINGS_API_KEY` (required) /
+    `SPARQ_EMBEDDINGS_BASE_URL` / `SPARQ_EMBEDDINGS_MODEL` with defaults
+    `https://api.openai.com/v1/embeddings` and `text-embedding-3-small` (`embed.rs:163–253`).
 
 13. **Provenance-weight vocabulary**: `pkg:confidence` (`https://sparq.dev/ns/pkg#confidence`),
     `pkg:assurance` (objects `secx:Proven/Claimed/Conjectured`), `prov:wasDerivedFrom`,
