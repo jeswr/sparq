@@ -531,6 +531,11 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   const reasonedKeyRef = React.useRef<string | null>(null);
   const storeEpochRef = React.useRef(0);
   const [storeEpoch, setStoreEpoch] = React.useState(0);
+  // [OPUS-4.8] sq-tp1m — a generation counter bumped on every applyInferenceMode invocation. An
+  // async materialisation that resolves AFTER a newer invocation (the user toggled modes quickly,
+  // or the store epoch bumped mid-build) is stale and must NOT publish its status, or the UI could
+  // land in the wrong state (e.g. mode Off but status Ready/Error). Only the latest generation writes.
+  const inferenceGenRef = React.useRef(0);
 
   // Warm the engine once on mount: load wasm, seed the sample graph, compute the summary.
   React.useEffect(() => {
@@ -632,6 +637,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   // counts. Idempotent; the single place reasoning is (re)applied (see the effect below).
   const applyInferenceMode = React.useCallback(
     async (mode: WorkspaceInferenceMode): Promise<void> => {
+      // Claim this generation up-front; any invocation started later supersedes us.
+      const gen = ++inferenceGenRef.current;
       if (mode === "off") {
         reasonedStoreRef.current = null;
         reasonedKeyRef.current = null;
@@ -644,12 +651,16 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       if (!alreadyBuilt) setInferenceStatus({ kind: "loading" });
       try {
         const reasoned = await buildReasonedStore(mode);
+        // A newer invocation ran while we awaited — drop this stale result so we don't clobber it.
+        if (gen !== inferenceGenRef.current) return;
         const base = storeRef.current;
         const info: ReasoningInfo = base
           ? computeReasoningInfo(base, reasoned, mode)
           : { mode, baseTriples: 0, closureTriples: 0, entailed: 0 };
         setInferenceStatus({ kind: "ready", info });
       } catch (err) {
+        // Superseded invocations must not publish a stale error over the newer state either.
+        if (gen !== inferenceGenRef.current) return;
         reasonedStoreRef.current = null;
         reasonedKeyRef.current = null;
         setInferenceStatus({

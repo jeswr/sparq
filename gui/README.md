@@ -123,7 +123,9 @@ The W-reason bundle is **optional at build time**: `app/scripts/sync-wasm.mjs` c
 `public/wasm/reason/` when present and warns-and-skips otherwise, so the frontend build never
 hard-fails on it. The CI `gui-app` job builds it (`js`: `npm run build:reason-wasm`) so the
 exported artifact ships live inference; a build without it degrades **honestly** — the tool shows
-a "reasoner unavailable" state and queries run over the asserted data. **N3** rule reasoning is
+a "reasoner unavailable" state, and a query issued while a non-`off` mode is active then fails with
+a clear message (turn inference **Off** to query the asserted data, or rebuild the bundle) rather
+than silently returning un-reasoned results. **N3** rule reasoning is
 deferred (it needs a rules-authoring surface + a store that can hold rule/formula terms, which the
 in-tab ground-triple store cannot represent) — tracked as a follow-up.
 
