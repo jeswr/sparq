@@ -188,7 +188,7 @@ function adjudicatePrompt(tables) {
 
 function fileBeadsPrompt(beads) {
   return 'File these Fable-adjudicated follow-up beads for `jeswr/sparq` (review lens "' + LENS + '"): ' + JSON.stringify(beads) + '. ' +
-    'For each, run `export PATH=$PATH:/home/ubuntu/.local/bin && cd /home/ubuntu/sparq && bd create` with the title, a body carrying the rationale + the 🤖 SPARQ-agent self-id + a `[OPUS-4.8] via fable-lens-review` provenance note, the surface as a label/tag, and the priority if given. Do NOT edit `.beads/` files by hand and do NOT open a code PR — `bd create` only (the orchestrator re-exports afterward). Skip a bead only if an obvious duplicate already exists (say so in `failed`). ' +
+    'For each, run `export PATH=$PATH:/home/ubuntu/.local/bin && cd /home/ubuntu/sparq && bd create` with the title, a body carrying the rationale + the 🤖 SPARQ-agent self-id + a `[<MODEL>] via fable-lens-review` provenance note (stamp the model you run as, per AGENTS.md rule 5 Model-provenance), the surface as a label/tag, and the priority if given. Do NOT edit `.beads/` files by hand and do NOT open a code PR — `bd create` only (the orchestrator re-exports afterward). Skip a bead only if an obvious duplicate already exists (say so in `failed`). ' +
     'Return {created:[{id,title}], failed:[{title,error}]}.'
 }
 
