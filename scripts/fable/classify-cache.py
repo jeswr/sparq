@@ -56,9 +56,12 @@ def load_cache(path):
     """Return the cache dict, or {} if the file is absent/empty."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
+            text = fh.read()
     except FileNotFoundError:
         return {}
+    if not text.strip():           # absent handled above; empty/whitespace-only file
+        return {}
+    data = json.loads(text)
     if not isinstance(data, dict):
         raise ValueError("cache root is not a JSON object: %s" % path)
     return data
@@ -195,6 +198,10 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    # Canonicalize the path once so the same file keys to one cache entry
+    # regardless of how the caller spelled it (relative vs absolute, ./ , .. ).
+    if getattr(args, "path", None) is not None:
+        args.path = os.path.abspath(args.path)
     return args.func(args)
 
 

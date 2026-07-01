@@ -73,11 +73,17 @@ for t in "${tiers[@]}"; do
 done
 
 echo
-if [ -n "$downgrade_at" ]; then
+# [FABLE] is safe ONLY when opus never served the run (opus_n == 0); any opus
+# occurrence — before OR after fable — means opus served part of the run, so the
+# run can never be stamped [FABLE].
+if [ "$opus_n" -eq 0 ]; then
+  echo "NO DOWNGRADE: run stayed on ${FABLE_ID} throughout — safe to stamp [FABLE]."
+elif [ "$fable_n" -eq 0 ]; then
+  echo "NO FABLE: run served entirely by ${OPUS_ID} (Fable never engaged)."
+elif [ -n "$downgrade_at" ]; then
   echo "DOWNGRADE: fable -> opus at model-occurrence #${downgrade_at} of ${#tiers[@]}"
   echo "verdict: stamp this run with its ACTUAL tier (${dominant}), NEVER [FABLE]."
-elif [ "$opus_n" -gt 0 ] && [ "$fable_n" -eq 0 ]; then
-  echo "NO FABLE: run served entirely by ${OPUS_ID} (Fable never engaged)."
 else
-  echo "NO DOWNGRADE: run stayed on ${FABLE_ID} throughout — safe to stamp [FABLE]."
+  echo "MIXED: both tiers served this run (fable=$fable_n opus=$opus_n) with no fable->opus"
+  echo "downgrade transition (opus preceded fable); opus served part of the run — NEVER [FABLE]."
 fi
