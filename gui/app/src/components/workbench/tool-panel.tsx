@@ -10,10 +10,14 @@
 
 import { QueryWorkbench } from "@/components/workbench/query-workbench";
 import { ShaclTool } from "@/components/workbench/shacl-tool";
+import { InferenceTool } from "@/components/workbench/inference-tool";
 import { ToolStub } from "@/components/workbench/tool-stub";
 
 export function ToolPanel({ toolId }: { toolId: string }) {
   if (toolId === "query") return <QueryWorkbench />;
   if (toolId === "shacl") return <ShaclTool />;
+  // [OPUS-4.8] sq-tp1m — the Inference tool is a real, working panel (per-workspace RDFS / OWL 2
+  // RL entailment wired to the engine's forward-chaining reasoner), no longer an honest stub.
+  if (toolId === "inference") return <InferenceTool />;
   return <ToolStub toolId={toolId} />;
 }

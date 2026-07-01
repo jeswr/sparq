@@ -58,6 +58,9 @@ import {
 } from "@sparq/client";
 import { WorkbenchSparqlEditor } from "@/components/workbench/sparql-editor";
 import { GraphView } from "@/components/workbench/graph-view";
+// [OPUS-4.8] sq-tp1m (#757) — the per-workspace inference (RDFS / OWL 2 RL) selector, in the
+// action row so the active entailment regime is visible + controllable while querying.
+import { InferenceControl } from "@/components/workbench/inference-control";
 import { DEFAULT_QUERY } from "@/data/sample-graph";
 // [OPUS-4.8] sq-ixc3.10 — the Query tool contributes its operational verbs (run / EXPLAIN /
 // EXPLAIN ANALYZE / re-run a recent query) to the Cmd-K spine while it is mounted.
@@ -591,6 +594,9 @@ export function QueryWorkbench() {
           <Badge variant="outline" className="h-5 gap-1 text-[10px]" title="Where this query runs">
             LOCAL · in-tab WASM
           </Badge>
+          {/* [OPUS-4.8] sq-tp1m — the per-workspace inference regime (queries run with the chosen
+              RDFS / OWL 2 RL entailment applied by the engine). */}
+          <InferenceControl className="ml-2" />
           <div className="ml-auto flex items-center gap-1.5">
             <Button
               size="sm"

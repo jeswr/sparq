@@ -107,6 +107,26 @@ engine instead (no compressed-file / HDT path — the drawer says so). A success
 `WorkspaceSourceMeta` + a workspace snapshot (the `sq-atb0` save/open cache). The full on-disk
 workspace persistence path activates once the shell grants the `fs` capability (`sq-ixc3.6`).
 
+## Inference (per-workspace entailment) — `sq-tp1m`
+
+The **Inference tool** (and a compact selector in the Query action row) applies an **RDFS / OWL 2
+RL** entailment regime to queries over the live store, **per workspace**. It is real
+forward-chaining, not a mock: a non-`off` mode lazily loads the tier-b **W-reason** wasm bundle
+(`crates/sparq-reason-wasm`, the same reasoner the site's `/surface/inference` page runs),
+materialises the deductive **closure** over the whole dataset (named graphs folded into the
+default graph), and runs **read** queries against that closure so an *entailed* triple can match.
+It is a **query-time** regime — it never mutates the persisted store; an `UPDATE` always targets
+the asserted data and invalidates the cached closure. The chosen mode is **persisted on the
+workspace** (`Workspace.inference`) and restored on reopen.
+
+The W-reason bundle is **optional at build time**: `app/scripts/sync-wasm.mjs` copies it into
+`public/wasm/reason/` when present and warns-and-skips otherwise, so the frontend build never
+hard-fails on it. The CI `gui-app` job builds it (`js`: `npm run build:reason-wasm`) so the
+exported artifact ships live inference; a build without it degrades **honestly** — the tool shows
+a "reasoner unavailable" state and queries run over the asserted data. **N3** rule reasoning is
+deferred (it needs a rules-authoring surface + a store that can hold rule/formula terms, which the
+in-tab ground-triple store cannot represent) — tracked as a follow-up.
+
 ## Shared TS client
 
 The frontend consumes the framework-agnostic `@sparq/client`
