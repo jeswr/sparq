@@ -280,46 +280,73 @@
       "value": 0.84,
       "unit": "answer-accuracy",
       "environment": "indicative",
-      "kind": "llm-graded-single-run",
+      "kind": "heuristic-graded-single-run",
       "family": "FO-KM pilot",
-      "source": "bench/fo-km/RESULTS.md (single counterbalanced run; heuristic grading via bench/fo-km/analyze.py)",
-      "note": "schema.org-as-top condition: fraction of the 16-task corpus graded correct in ONE counterbalanced run with a heuristic grader. NON-canonical by construction: the agent is an LLM (non-deterministic, model- and date-dependent) and the run executed on the dev work-box. Never a headline; indicative callout only. [FABLE-5 sq-gum8.3-fokm]"
+      "source": "bench/fo-km/RESULTS.md ('The measured result' table; deterministic heuristic grading via bench/fo-km/analyze.py)",
+      "note": "schema.org-as-top condition: task-kind-weighted graded-correct fraction of the 16-task corpus in ONE fully-crossed run (one fresh Claude Haiku agent instance per condition-task pair); abstained on 2/16 tasks (abstentions scored separately, not as wrong). NON-canonical by construction: the answering agent is an LLM (non-deterministic, model- and date-dependent) and the run executed on the dev work-box; grading itself is deterministic (no model in the grading loop). Never a headline; indicative callout only. Re-verified against bench/fo-km/RESULTS.md 2026-07-01 (PR #1335 revision). [FABLE-5 sq-gum8.3-fokm]"
     },
     "fo_km.accuracy_no_fo": {
-      "value": 0.64,
+      "value": 0.58,
       "unit": "answer-accuracy",
       "environment": "indicative",
-      "kind": "llm-graded-single-run",
+      "kind": "heuristic-graded-single-run",
       "family": "FO-KM pilot",
-      "source": "bench/fo-km/RESULTS.md (single counterbalanced run; heuristic grading via bench/fo-km/analyze.py)",
-      "note": "Untyped (no formal ontology) incumbent-baseline condition, same run protocol as the other conditions. NON-canonical (LLM-graded, single run, dev work-box); indicative callout only. [FABLE-5 sq-gum8.3-fokm]"
+      "source": "bench/fo-km/RESULTS.md ('The measured result' table; deterministic heuristic grading via bench/fo-km/analyze.py)",
+      "note": "Untyped (no formal ontology) incumbent-baseline condition, same run protocol as the other conditions; abstained on 5/16 tasks (the corpus is FO-exercising by construction — some tasks the untyped graph genuinely cannot answer). CORRECTED in the PR #1335 revision: the first draft mis-transcribed this baseline as 0.64 (DOLCE's figure); the canonical record value is 0.58. NON-canonical (single run, dev work-box); indicative callout only. [FABLE-5 sq-gum8.3-fokm]"
     },
     "fo_km.accuracy_dolce": {
       "value": 0.64,
       "unit": "answer-accuracy",
       "environment": "indicative",
-      "kind": "llm-graded-single-run",
+      "kind": "heuristic-graded-single-run",
       "family": "FO-KM pilot",
-      "source": "bench/fo-km/RESULTS.md (single counterbalanced run; heuristic grading via bench/fo-km/analyze.py)",
-      "note": "DOLCE (via DUL overlay) condition. VALUE TAKEN FROM THE PROJECT MEASUREMENT RECORD, not re-read from RESULTS.md during drafting — re-verify against bench/fo-km/RESULTS.md before any submission (draft obligation, sq-gum8.3-fokm). NON-canonical (LLM-graded, single run, dev work-box); indicative callout only. [FABLE-5]"
+      "source": "bench/fo-km/RESULTS.md ('The measured result' table; deterministic heuristic grading via bench/fo-km/analyze.py)",
+      "note": "DOLCE (via DUL overlay) condition; abstained on 1/16 tasks (the lowest abstention rate of the four conditions). Beats the untyped 0.58 baseline by +0.06 — a formally rich overlay that DID convert into accuracy, which qualifies any strong fluency-only reading. Verified against bench/fo-km/RESULTS.md 2026-07-01 (PR #1335 revision). NON-canonical (single run, dev work-box); indicative callout only. [FABLE-5]"
     },
-    "fo_km.accuracy_gufo_hi": {
-      "value": 0.58,
-      "unit": "answer-accuracy",
-      "environment": "indicative",
-      "kind": "llm-graded-single-run",
-      "family": "FO-KM pilot",
-      "source": "bench/fo-km/RESULTS.md (single counterbalanced run; heuristic grading via bench/fo-km/analyze.py)",
-      "note": "Upper of the two gUFO figures the results record reports. DRAFT OBLIGATION (sq-gum8.3-fokm): confirm from bench/fo-km/RESULTS.md what distinguishes the two gUFO figures (grading pass vs run variant) before submission. NON-canonical; indicative callout only. [FABLE-5]"
-    },
-    "fo_km.accuracy_gufo_lo": {
+    "fo_km.accuracy_gufo": {
       "value": 0.54,
       "unit": "answer-accuracy",
       "environment": "indicative",
-      "kind": "llm-graded-single-run",
+      "kind": "heuristic-graded-single-run",
       "family": "FO-KM pilot",
-      "source": "bench/fo-km/RESULTS.md (single counterbalanced run; heuristic grading via bench/fo-km/analyze.py)",
-      "note": "Lower of the two gUFO figures the results record reports (the figure quoted in the project verdict record). DRAFT OBLIGATION (sq-gum8.3-fokm): confirm the distinction between the two gUFO figures before submission. NON-canonical; indicative callout only. [FABLE-5]"
+      "source": "bench/fo-km/RESULTS.md ('The measured result' table; deterministic heuristic grading via bench/fo-km/analyze.py)",
+      "note": "gUFO condition — a SINGLE figure; abstained on 2/16 tasks. The only condition below the untyped 0.58 baseline. The first draft's 'accuracy_gufo_lo/_hi' pair (a 0.54-0.58 'range') was a digest artifact: the 0.58 was the no-FO baseline mis-attributed to gUFO; no second gUFO figure exists anywhere in bench/fo-km. Corrected in the PR #1335 revision, verified against RESULTS.md 2026-07-01. NON-canonical (single run, dev work-box); indicative callout only. [FABLE-5]"
+    },
+    "fo_km.abstain_no_fo": {
+      "value": 5,
+      "unit": "abstained-tasks",
+      "environment": "indicative",
+      "kind": "single-run-outcome-count",
+      "family": "FO-KM pilot",
+      "source": "bench/fo-km/RESULTS.md ('The measured result' table, abstain column)",
+      "note": "Tasks (of 16) on which the untyped no-FO condition honestly abstained in the single fully-crossed run. Abstentions are scored separately, never as wrong answers. The highest abstention rate of the four conditions — largely by corpus construction (FO-exercising tasks the untyped graph cannot answer). Indicative single-run outcome, not canonical. [FABLE-5 sq-gum8.3-fokm]"
+    },
+    "fo_km.abstain_gufo": {
+      "value": 2,
+      "unit": "abstained-tasks",
+      "environment": "indicative",
+      "kind": "single-run-outcome-count",
+      "family": "FO-KM pilot",
+      "source": "bench/fo-km/RESULTS.md ('The measured result' table, abstain column)",
+      "note": "Tasks (of 16) on which the gUFO condition abstained in the single fully-crossed run. Indicative single-run outcome, not canonical. [FABLE-5 sq-gum8.3-fokm]"
+    },
+    "fo_km.abstain_dolce": {
+      "value": 1,
+      "unit": "abstained-tasks",
+      "environment": "indicative",
+      "kind": "single-run-outcome-count",
+      "family": "FO-KM pilot",
+      "source": "bench/fo-km/RESULTS.md ('The measured result' table, abstain column)",
+      "note": "Tasks (of 16) on which the DOLCE-DUL condition abstained in the single fully-crossed run — the lowest of the four conditions. Indicative single-run outcome, not canonical. [FABLE-5 sq-gum8.3-fokm]"
+    },
+    "fo_km.abstain_schema_org": {
+      "value": 2,
+      "unit": "abstained-tasks",
+      "environment": "indicative",
+      "kind": "single-run-outcome-count",
+      "family": "FO-KM pilot",
+      "source": "bench/fo-km/RESULTS.md ('The measured result' table, abstain column)",
+      "note": "Tasks (of 16) on which the schema.org-as-top condition abstained in the single fully-crossed run. Indicative single-run outcome, not canonical. [FABLE-5 sq-gum8.3-fokm]"
     }
   }
 }
