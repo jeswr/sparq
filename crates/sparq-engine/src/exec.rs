@@ -6426,6 +6426,12 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
 fn cmp_sort_num(graph: &Graph, fa: f64, ia: Id, fb: f64, ib: Id) -> Ordering {
     match fa.partial_cmp(&fb) {
         Some(Ordering::Equal) => {
+            // Same dictionary id ⇒ identical value: skip the two lexical allocations.
+            // In a numeric ORDER BY column with repeated values this is the common f64
+            // tie (a sort compares equal-id rows often). [OPUS-4.8] sq-rikm7
+            if ia == ib {
+                return Ordering::Equal;
+            }
             match (graph.exact_numeric_lexical(ia), graph.exact_numeric_lexical(ib)) {
                 (Some(la), Some(lb)) => cmp_decimal_str(&la, &lb).unwrap_or(Ordering::Equal),
                 _ => Ordering::Equal,
