@@ -124,6 +124,11 @@
       "had_integration_dir": true,
       "min_tests": 15
     },
+    "sparq-substrate": {
+      "had_integration_dir": false,
+      "min_tests": 33,
+      "note": "[OPUS-4.8] sq-qcnn.3: 35 inline #[test]s measured across the rows/numeric/join/compare modules (all tests live in the src `mod tests` — the crate has no tests/ integration dir); floor 33 leaves a small margin (mirrors the sparq-algos/-canon style). Brought under the presence gate so the correctness core cannot silently lose its tests."
+    },
     "sparq-text": {
       "had_integration_dir": true,
       "min_tests": 37

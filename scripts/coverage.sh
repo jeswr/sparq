@@ -123,6 +123,18 @@ PER_COMMIT_CRATES=(
   # the focused bnode-isomorphism / oxrdf-bridge unit cases; sparq-algos' reflects the inline
   # PageRank/centrality/community oracles plus the tests/topology_oracles.rs integration suite.
   sparq-algos sparq-canon
+  # [OPUS-4.8] sq-qcnn.3 (epic sq-qcnn, umbrella sq-qonbz): the shared zero-overhead
+  # evaluation SUBSTRATE — the correctness core (the id-tuple Row/Key/Posting vocabulary,
+  # the XSD numeric value tower, the four id-tuple join kernels, and the SPARQL term total
+  # order). Its ENTIRE surface is behind DEFAULT-OFF features (numeric/join/compare/rows),
+  # so a default-feature `cargo llvm-cov -p sparq-substrate` would instrument an EMPTY crate
+  # and report a meaningless number — it MUST be measured WITH those features on (the `case`
+  # in measure() below names `--features numeric,join,compare,rows`, mirroring the sparq-core
+  # `mmap,dict-spill` and sparq-fedclient/-policy quirks). Nothing in the workspace depends on
+  # this crate, so its unit tests are otherwise run ONLY by the feature-matrix leg; wiring it
+  # here brings the correctness core under the line-coverage ratchet ("no crate silently
+  # dropped").
+  sparq-substrate
 )
 # Crates whose HEAVY tests are only run in the nightly tier.
 NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nightly tier"
@@ -362,6 +374,16 @@ measure() {
     # and the number is non-representative. (Mirrors the sparq-prov `reason` quirk above.)
     sparq-policy)
       cargo_args+=(--features count-enforcement); features+=("count-enforcement") ;;
+    # [OPUS-4.8] sq-qcnn.3 (epic sq-qcnn): the shared eval SUBSTRATE's whole surface is
+    # DEFAULT-OFF — measure it with the four features that turn the correctness core ON
+    # (`numeric` = XSD value tower, `join` = the four id-tuple join kernels, `compare` =
+    # the SPARQL term total order, `rows` = the id-tuple Row/Key/Posting vocabulary). A
+    # default-feature build compiles NONE of it (empty crate -> meaningless number); this
+    # names the maximal set so the measured line% reflects the real code the floor gates,
+    # exactly as sparq-core/-fedclient/-policy above name their whole-surface features.
+    sparq-substrate)
+      cargo_args+=(--features numeric,join,compare,rows)
+      features+=("numeric" "join" "compare" "rows") ;;
   esac
 
   local start end rc=0 json="$WORK/$crate.json"

@@ -31,6 +31,14 @@
       "measured_surviving": 12,
       "timeout": 6,
       "unviable": 0
+    },
+    "sparq-substrate": {
+      "caught": 183,
+      "caught_pct": 60.98,
+      "ceiling": 130,
+      "measured_surviving": 128,
+      "timeout": 17,
+      "unviable": 21
     }
   },
   "margin": 2

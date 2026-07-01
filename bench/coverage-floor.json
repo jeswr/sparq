@@ -109,6 +109,10 @@
     "sparq-solid": {
       "floor": 89
     },
+    "sparq-substrate": {
+      "floor": 80,
+      "note": "[OPUS-4.8] sq-qcnn.3 (epic sq-qcnn, umbrella sq-qonbz): the shared zero-overhead evaluation SUBSTRATE (correctness core). Its WHOLE surface is DEFAULT-OFF, so it is measured WITH --features numeric,join,compare,rows (the four features that turn the id-tuple Row/Key/Posting vocabulary, the XSD numeric value tower, the four id-tuple join kernels, and the SPARQL term total order ON — see scripts/coverage.sh measure() case; a default build is an empty crate). Measured line% 82.49 (763/925: rows.rs 100, compare.rs 95.80, join.rs 90.24, numeric.rs 71.36 — the numeric value-tower arithmetic/rounding/canonical-lexical surface carries the real test gaps the mutation baseline surfaces for adjudication); floor = floor(measured) - 2 margin = 80. Conservative work-box seed; CI's --check-robust is the ratchet of record. Nothing in the workspace depends on this crate, so its unit tests are otherwise run ONLY by the feature-matrix leg — this brings the correctness core under the ratchet ('no crate silently dropped')."
+    },
     "sparq-text": {
       "floor": 90
     },

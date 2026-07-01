@@ -2066,12 +2066,18 @@ jobs:
                   sparq-core sparq-engine sparq-reason sparq-shacl sparq-geo sparq-text \
                   sparq-hdt sparq-rsp sparq-sim sparq-solid sparq-nlq sparq-mpc \
                   sparq-serve sparq-server sparq-zk sparq-zk-compose sparq-vectors \
-                  sparq-fedplan sparq-fedclient sparq-policy"
+                  sparq-fedplan sparq-fedclient sparq-policy sparq-substrate"
           for c in $CRATES; do
             echo "::group::cargo-mutants $c"
             feat=()
             # shellcheck disable=SC2054 # mmap,dict-spill is ONE cargo arg, not two elements
             [ "$c" = "sparq-core" ] && feat=(--features mmap,dict-spill)
+            # [OPUS-4.8] sq-qcnn.3: the shared eval SUBSTRATE's whole surface is DEFAULT-OFF;
+            # measure its mutants WITH the four features that turn the correctness core ON
+            # (else cargo-mutants sees an empty crate and generates zero mutants). Mirrors the
+            # sparq-core quirk above + scripts/coverage.sh's measure() case for this crate.
+            # shellcheck disable=SC2054 # numeric,join,compare,rows is ONE cargo arg
+            [ "$c" = "sparq-substrate" ] && feat=(--features numeric,join,compare,rows)
             # Tolerate a per-crate failure while seeding (advisory). The OUTCOMES file is
             # what the gate reads; a crate that fails to produce one is simply not checked.
             cargo mutants -p "$c" "${feat[@]}" -o "target/mutants/$c" || \
