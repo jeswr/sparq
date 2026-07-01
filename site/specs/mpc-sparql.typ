@@ -3,7 +3,7 @@
 // (research/specs/mpc-sparql-estate-recon.md, bead sq-rvgr2.3): every normative statement
 // below traces either to MERGED, TESTED behaviour in the sparq-mpc / sparq-zk-compose /
 // sparq-fedplan-mpc estate (M0–M3) or is explicitly labelled a PROPOSAL. Revised per the
-// Fable soundness review of PR #1332: the document is framed as a REQUIREMENTS +
+// Fable soundness review of the initial draft: the document is framed as a REQUIREMENTS +
 // REFERENCE-ARCHITECTURE draft (not a protocol spec — the interoperable byte formats are
 // open, §1.2), every normative section carries a conformance class + a testable-now vs
 // future-implementation category stamp (§2.3), and audit scopes are reconciled (sq-qhy4

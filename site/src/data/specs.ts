@@ -59,7 +59,7 @@ export const SPECS: Spec[] = [
     date: "2026-07-01",
     editors: "Jesse Wright · the sparq project",
     blurb:
-      "A requirements and reference-architecture draft (not yet a protocol specification — the interoperable byte formats are explicitly open) for evaluating federated SPARQL across mutually distrusting data sources under secure multi-party computation: consolidated adversary model, secret-share and join-key encodings with a 61-bit-field statistical-security account, per-operator disclosure routing, verifier-side binding rules, related-work positioning, and testable-now vs future-implementation conformance categories separating what is built (M0–M3) from what is designed-not-built (the collaborative proof, distributed attestation, deployed transport). Nothing is production-claimable today: the planned external audit clears the single-prover ZK layer only, and the MPC layer needs its own.",
+      "A requirements and reference-architecture draft (not yet a protocol specification — the interoperable byte formats are explicitly open) for evaluating federated SPARQL across mutually distrusting sources under secure multi-party computation, with conformance categories separating what is built (M0–M3) from what is designed-not-built. Nothing is production-claimable today: the planned external audit clears the single-prover ZK layer only, and the MPC layer needs its own.",
   },
   {
     slug: "proposed-specifications-template",
