@@ -138,9 +138,12 @@ entirely on internal single-model (Opus 4.8) self-audits.
   `research/mpc-cozk-reaudit.md` exists (sq-9hrn) but is an adversarial risk-surfacing pass,
   NOT a soundness certificate.
 
-- **`secprop` property-admissibility pre-check** consuming the vendored ISWC-2025 `sec-prop:`
-  ontology in `sparq-trust::admit.rs` — bead sq-dt5hv OPEN (ontology is currently data;
-  nothing loads it, navigator §3.3).
+- **`secprop` property-admissibility pre-check in the MPC-SPARQL federated admission path** —
+  the pre-check primitive itself is BUILT and tested (`sparq_trust::admit_with_precheck`, opt-in
+  `secprop-precheck`, consuming the vendored ISWC-2025 `sec-prop:` ontology via the
+  `secprop-admissibility` N3 reduction; `tests/secprop_precheck_e2e.rs`, sq-dt5hv Phase 5). What
+  remains OPEN for MPC-SPARQL is wiring it into the federated / multi-source admission path —
+  today `admit_with_precheck` is exercised only in single-party `sparq-trust` tests (navigator §3.3).
 
 ---
 

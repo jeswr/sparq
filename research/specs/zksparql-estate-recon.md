@@ -43,7 +43,9 @@ guarantee under an adversarial prover.
   arity, circuit-id re-derivation, strictly-increasing commitments),
   `reconstruct_public_inputs` byte-compare with verifier nonce field 0 (4685 and 4786, audit
   1), canonical-vk recompute (4697, audit 2), bb verify (4705), nonce single-use `record_fresh`
-  and `NonceBindingMismatch` (4620–4644, audit 4).
+  and `NonceBindingMismatch` (4620–4644, audit 4). Audit 3 (issuer-signature / key-set
+  binding, codex #1) is enforced per-scan by `bind_issuer_attestations` (2242, listed above),
+  completing the verifier's audit 1–4 mapping.
 
 - **`ProofManifest` serde-JSON format**: `manifest.rs` 1116, default type
   `urn:sparq:zk:ProofManifest` (1497), `to_json` serde_json pretty (1539), `canonicalize`
