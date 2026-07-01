@@ -110,18 +110,25 @@ export const PAPERS: Paper[] = [
       "Deterministic conformance ratchet floors: Solid WAC decision parity (12) and Solid ACP decision parity (12), as the two newest rows of a 7-suite cross-family scoreboard totalling 3442, each floor CI-enforced, monotone, and guarded against drift. No latency claim and no security/soundness claim; library-level decision parity only, not HTTP/CTH wire conformance.",
   },
   {
+    // [FABLE-5] sq-gum8.3-odrl venue-bar REWRITE of the sq-gum8.2 audit verdict: related work
+    // now differentiates feature-by-feature vs OAC/ODRE/Slabbinck; novelty regrounded in the
+    // single-node lifecycle discipline (not the deferred crypto half); evaluation split into
+    // honest tiers with a pre-registered comparative decision-agreement protocol. Status is
+    // `draft` (was publishable-now) until that comparative study runs — the audit's explicit
+    // bar for this paper's target venue.
     slug: "odrl-policy-bridge",
     source: "odrl-policy-bridge.typ",
     title:
-      "Compiling ODRL Usage Policies into a Queryable Access-Control View for Solid/SPARQL: A Single-Node, Fail-Closed Conditional-Grant Bridge",
+      "An ODRL Policy Bridge for SPARQL Access Control: Fail-Closed Compilation of Usage Policies into a Queryable Solid Access-Control View",
     blurb:
-      "A single-node bridge that compiles a matched ODRL Permission/Prohibition into the same triples the engine's existing, queryable WAC/ACP view already understands — no new enforcement engine. The honest evidence is answer-safety (deny-overrides, asymmetric fail-closed deny retraction, re-checked conditional grants, atomic count enforcement) plus the CI-enforced WAC/ACP decision-parity floors the bridge materialises into. The federated ODRL→MPC / ODRL-Duty→ZK disclosure composition is deferred as honest future work; the crypto estate is research-grade and not externally audited.",
+      "Compile, don't co-evaluate: a matched ODRL Permission/Prohibition compiles into the same triples the engine's existing, queryable WAC/ACP view already understands — no second enforcement engine, and every usage-control decision is auditable, provenance-tagged RDF. The contribution is the fail-closed lifecycle discipline compilation demands: deny-overrides by set subtraction, asymmetric three-valued deny retraction on policy refresh, per-session re-checked conditional grants with safe one-shot fallback, and atomic count budgets — positioned feature-by-feature against OAC, ODRE, and Slabbinck-class ODRL/Solid integrations. Evaluation is honestly tiered: machine-checked invariants and CI-ratcheted WAC/ACP decision-parity floors are in hand; the pre-registered comparative decision-agreement study vs ODRE/OAC is pending (hence draft status). The federated ODRL→MPC / ODRL-Duty→ZK composition is deferred, unbuilt, and claims nothing (sq-qhy4).",
     authors: "Jesse Wright · the sparq project",
-    venue: "ISWC / ESWC (policy / systems-integration)",
-    status: "publishable-now",
+    venue:
+      "ESWC / ISWC research track (policy · in-use) — comparative evaluation pending",
+    status: "draft",
     family: "B",
     evidence:
-      "Deterministic, test-proven answer-safety invariants of the bridge (deny-overrides correct; asymmetric fail-closed deny retraction; recipient constraints persist as re-checked conditional grants with one-shot fallback; atomic stateful count enforcement) plus the CI-enforced, drift-guarded Solid WAC (12) and ACP (12) decision-parity ratchet floors it feeds. No latency claim; ODRL→access-control mapping is an integration, not a novel semantics. The federated/ZK disclosure half is explicitly deferred (research-grade crypto, not externally audited; sq-qhy4).",
+      "Tiered and honest. Tier 1: deterministic, test-proven answer-safety invariants of the bridge (deny-overrides correct; asymmetric fail-closed deny retraction; recipient constraints persist as re-checked conditional grants with one-shot fallback; atomic stateful count enforcement). Tier 2: the CI-enforced, drift-guarded Solid WAC (12) and ACP (12) decision-parity ratchet floors of the target layer. Tier 3 (PENDING — the blocking gap to submission): a pre-registered decision-agreement study vs the ODRE enforcement engines and an OAC-style matcher over the cited systems' own policy corpora. No latency claim; no novel-semantics claim; the federated/ZK disclosure half is explicitly deferred (research-grade crypto, not externally audited; sq-qhy4).",
   },
   {
     slug: "unsafe-attestation",
