@@ -43,7 +43,7 @@ function readSpecHtml(slug: string): string {
       "utf8",
     );
   } catch {
-    return `<p>This draft has not been built yet. Run <code>npm run build-specs</code> with the Typst CLI installed.</p>`;
+    return `<p class="spec-placeholder">This draft has not been built yet. Run <code>npm run build-specs</code> with the Typst CLI installed.</p>`;
   }
 }
 

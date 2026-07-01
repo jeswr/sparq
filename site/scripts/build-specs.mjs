@@ -186,6 +186,10 @@ export function injectTocAndIds(body) {
       const slug = hasId
         ? (/\sid\s*=\s*"([^"]*)"/.exec(attrs)?.[1] ?? slugify(label, used))
         : slugify(label, used);
+      // Record EVERY resolved id in `used` — including a heading's pre-existing custom id — so a
+      // later auto-generated slug can never collide with it (a duplicate id breaks ToC anchors).
+      // (In the slugify branch the id is already recorded; this add is then a harmless no-op.)
+      used.add(slug);
       toc.push({ level: tag === "h2" ? 2 : 3, num: m[1], id: slug, text: label });
       const newAttrs = hasId ? attrs : `${attrs} id="${slug}"`;
       return `<${tag}${newAttrs}>${inner}</${tag}>`;
@@ -216,10 +220,11 @@ export function injectTocAndIds(body) {
   }
   html += "</ol></nav>";
 
-  // Insert the ToC immediately before the first numbered heading.
-  const idx = withIds.search(/<h[23](?:\s[^>]*)?>\s*\d/);
-  if (idx === -1) return `${html}${withIds}`;
-  return withIds.slice(0, idx) + html + withIds.slice(idx);
+  // Insert the ToC immediately before the first numbered heading, reusing the byte offset already
+  // captured during the walk. Everything before that heading is untouched by the id injection, so
+  // the offset (taken in `body`) is still valid in `withIds`; and toc.length > 0 guarantees it was
+  // set. This avoids a second full-string scan and keeps the insertion point in one place.
+  return withIds.slice(0, firstNumberedIndex) + html + withIds.slice(firstNumberedIndex);
 }
 
 // ---- compile one spec to PDF + HTML -------------------------------------------------------

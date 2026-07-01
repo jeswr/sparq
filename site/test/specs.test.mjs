@@ -82,3 +82,15 @@ test("injectTocAndIds preserves a pre-existing id on a numbered heading", () => 
   assert.match(out, /<h2 id="custom">1\. Kept<\/h2>/);
   assert.match(out, /<a href="#custom">/);
 });
+
+test("injectTocAndIds never lets an auto-slug collide with a pre-existing custom id", () => {
+  // First heading claims the id "intro" explicitly; a LATER heading titled "Intro" would slugify
+  // to the same "intro" unless the pre-existing id is recorded. The auto-slug must be disambiguated.
+  const body = '<h2 id="intro">1. Preface</h2>' + "<h2>2. Intro</h2>";
+  const out = injectTocAndIds(body);
+  assert.match(out, /<h2 id="intro">1\. Preface<\/h2>/);
+  assert.match(out, /<h2 id="intro-2">2\. Intro<\/h2>/);
+  // Both anchors are distinct in the ToC.
+  assert.match(out, /<a href="#intro">/);
+  assert.match(out, /<a href="#intro-2">/);
+});
