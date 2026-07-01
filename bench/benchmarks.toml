@@ -132,6 +132,21 @@ records_to  = "stdout (TSV); CI emits op_<query>_<mode>_us into benchmark-data (
 featured    = false
 status      = "ok"
 
+# [OPUS-4.8] sq-pntvh.1 (epic sq-pntvh) — M4 Phase 1 vectorized FILTER/aggregate baseline.
+[[benchmark]]
+id          = "vectorized-eval-micro"
+name        = "Vectorized (M4) FILTER + aggregate micro-baseline over a synthetic column"
+category    = "query"
+measures    = "min-of-iters microseconds (metric_us lines) for the row-per-element FILTER vs the columnar select_numeric kernel (+ gather), and the row SUM/COUNT/MIN/MAX reductions, over an n-row integer column — the PERF BASELINE later M4 phases (decode primitive, columnar residual-FILTER/reducer-aggregate seams) measure their speedup against"
+invoke      = "cargo run -p sparq-engine --release --example bench_vectorized --features vectorized -- 200000 7   # required-features gate the example behind `vectorized`; args = [n_rows=200000] [iters=7]; self-contained synthetic in-process corpus"
+source      = "crates/sparq-engine/examples/bench_vectorized.rs; kernels crates/sparq-engine/src/chunk.rs (DataChunk::select_numeric/apply_selection); design research/vector-at-a-time-m4.md (§5.1, §6 Phase 1)"
+dataset     = "SYNTHETIC, generated in-process (no external data): n `(ex:s{i}, ex:age, i)` integer-literal triples; the object id column is the batch; args = [n_rows] [iters]"
+quiet_box_sensitive = true  # wall-clock micro-latency; trend-only, NOT in the deterministic perf-gate. Phase-1 row vs columnar-kernel are expected CLOSE (the kernel is a scaffold that re-gathers numeric_value per element — no SIMD win until the Phase 2 decode primitive)
+pinning     = "n_rows + iters (pin both for comparable numbers); corpus is deterministic (i in 0..n). No baked-in number — work-box timings are non-canonical (run on a quiet host)"
+records_to  = "stdout (metric_us lines)"
+featured    = false  # in-crate micro-bench for an opt-in capability; a relative baseline, not a dashboard series
+status      = "ok"
+
 # [OPUS-4.8] sq-0jp — SP2Bench (well-known suite) at CI scale; per-commit subset + heavy tier.
 [[benchmark]]
 id          = "sp2b"

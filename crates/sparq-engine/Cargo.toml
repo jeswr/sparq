@@ -200,6 +200,16 @@ semijoin-bitmap = []
 # baked-in number.
 yannakakis = ["semijoin-bitmap"]
 
+# [OPUS-4.8] (sq-pntvh.1) M4 Phase 1 native FILTER/aggregate micro-bench over a synthetic
+# numeric column — the perf baseline every later vectorized (M4) phase measures against.
+# `required-features` gates it behind `vectorized`, so the DEFAULT build (and
+# `cargo clippy --all-targets` with the feature off) never compiles it: byte-identical
+# feature-OFF bundle preserved. Emits `metric_us` lines (the repo's bench idiom); registered
+# in bench/benchmarks.toml as `vectorized-eval-micro` (featured = false).
+[[example]]
+name = "bench_vectorized"
+required-features = ["vectorized"]
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
