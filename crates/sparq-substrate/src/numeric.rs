@@ -599,10 +599,13 @@ fn apply_f64(a: f64, b: f64, op: ArithOp) -> f64 {
 /// `0.49999999999999994` (the f64 predecessor of `0.5`) — the sum rounds UP to `1.0`
 /// and `.floor()` then yields `1`, when the mathematically-nearest integer is `0`.
 ///
-/// The fractional part `x - x.floor()` is instead computed EXACTLY (Sterbenz: the
-/// difference between a float and its floor is representable), so the half-comparison
-/// is exact. Ties (`x - floor(x) == 0.5`) go to the larger integer, i.e. towards
-/// `+INF`, matching `round(-2.5) = -2`. NaN / ±INF / ±0.0 pass through unchanged. [OPUS-4.8]
+/// The fractional part `x - x.floor()` is instead computed EXACTLY for every non-negative
+/// `x` — trivially when `floor(x) == 0`, else by Sterbenz's lemma (`floor(x)/2 <= x <=
+/// 2*floor(x)`, so the difference loses no bits) — which covers the boundary case above,
+/// making the half-comparison exact there. (For negative `x` the subtraction is only
+/// correctly rounded, not exact, but that never flips the half tie.) Ties
+/// (`x - floor(x) == 0.5`) go to the larger integer, i.e. towards `+INF`, matching
+/// `round(-2.5) = -2`. NaN / ±INF / ±0.0 pass through unchanged. [OPUS-4.8]
 #[inline]
 fn round_half_to_pos_inf(x: f64) -> f64 {
     let fl = x.floor();
@@ -814,7 +817,9 @@ mod tests {
 
     #[test]
     fn round_float_tier_specials_pass_through() {
-        // NaN / ±INF flow through the fractional-part computation unchanged.
+        // NaN / ±INF: the fractional part `x - x.floor()` is itself NaN (e.g. INF - INF),
+        // so the `>= 0.5` branch is not taken and round() returns floor(x) — leaving the
+        // rounding RESULT as NaN / ±INF unchanged.
         assert!(round_half_to_pos_inf(f64::NAN).is_nan());
         assert!(Num::Double(f64::NAN).round().f64().is_nan());
         assert_eq!(Num::Double(f64::INFINITY).round().f64(), f64::INFINITY);
