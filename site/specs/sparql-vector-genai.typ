@@ -152,7 +152,10 @@ This document uses the following terms:
 
 - A #dfn[vector store] is a component that persists a mapping from RDF term identifiers to
   dense vectors (one vector per term in the mainline model) and answers nearest-neighbour
-  queries over it.
+  queries over it. The mainline #dfn[embeddable domain] is exactly #strong[IRIs and literals];
+  a blank node is never embedded in this model, so it is never a query seed (@sec-typing) nor a
+  candidate result — the property the boundary tie-break of @sec-ordering relies on to stay
+  well-defined across implementations.
 - A #dfn[vec-extended processor] is a SPARQL query processor that recognises and evaluates the
   graph patterns of @sec-patterns against a vector store.
 - An #dfn[embedding client] is a component that obtains vectors for text inputs from an
@@ -382,13 +385,23 @@ exposed as `xsd:double`.
 
 #strong[Tie-breaking.] When candidates tie on score at the boundary of the top-k (the k-th
 best and the next-best scores are equal), result-set #emph[membership] MUST be decided
-deterministically: the tied candidates are admitted in ascending Unicode-codepoint order of
-their canonical N-Triples serialisations #cite("RDF11-CONCEPTS") until `k` results are
-reached. #rid("VG-TIE-1") Ties strictly inside the top-k need no rule: the solution multiset
-is unordered, so the relative order of admitted equal-score rows is unobservable. This rule
-exists so that two conforming answer-exact implementations return the #emph[same] top-k set
-on the same store; without it, "exact" would not imply "reproducible" (see @sec-accuracy).
-An implementation MAY realise the rule through any internal order that agrees with it.
+deterministically. The #dfn[tie-break key] of a candidate is the N-Triples serialisation of
+its RDF term #cite("RDF11-NTRIPLES"): an IRI serialises as `<`, the IRI, then `>`; a literal
+as its quoted, escaped lexical form followed by its `^^<datatype-IRI>` or `@language-tag`
+suffix. This key is fixed by the term alone — the serialisation grammar leaves a conforming
+processor no freedom over it — so equal terms yield identical keys on every implementation. The
+tied candidates are admitted in ascending Unicode-codepoint order of their tie-break keys until
+`k` results are reached. #rid("VG-TIE-1") The key is total and stable because the mainline
+embeddable domain is exactly IRIs and literals (see the #emph[vector store] definition in
+@sec-conformance): no blank node is ever a candidate, so blank-node labels — which N-Triples
+scopes to a single document and does #emph[not] hold stable across implementations — never
+enter the ordering. A future revision that admits blank-node embedding MUST first assign each
+blank node a canonical label under RDF Dataset Canonicalization #cite("RDFC10") so this
+stability is preserved. Ties strictly inside the top-k need no rule: the solution multiset is
+unordered, so the relative order of admitted equal-score rows is unobservable. This rule exists
+so that two conforming answer-exact implementations return the #emph[same] top-k set on the
+same store; without it, "exact" would not imply "reproducible" (see @sec-accuracy). An
+implementation MAY realise the rule through any internal order that agrees with it.
 
 == Empty and degenerate queries
 
@@ -1051,6 +1064,10 @@ filtered answer-safety, staleness, import, embedding acquisition, grounded gener
   ("RDF11-CONCEPTS", [Cyganiak, R.; Wood, D.; Lanthaler, M. (eds.) #emph[RDF 1.1 Concepts and
     Abstract Syntax]. W3C Recommendation, 25 February 2014.
     https://www.w3.org/TR/rdf11-concepts/.]),
+  ("RDF11-NTRIPLES", [Beckett, D. (ed.) #emph[RDF 1.1 N-Triples: A line-based syntax for an RDF
+    graph]. W3C Recommendation, 25 February 2014. https://www.w3.org/TR/n-triples/.]),
+  ("RDFC10", [Longley, D.; Kellogg, G. (eds.) #emph[RDF Dataset Canonicalization (RDFC-1.0)].
+    W3C Recommendation, 2024. https://www.w3.org/TR/rdf-canon/.]),
   ("PROV-O", [Lebo, T.; Sahoo, S.; McGuinness, D. (eds.) #emph[PROV-O: The PROV Ontology].
     W3C Recommendation, 30 April 2013. https://www.w3.org/TR/prov-o/.]),
   ("HNSW", [Malkov, Y.; Yashunin, D. #emph[Efficient and Robust Approximate Nearest Neighbor
