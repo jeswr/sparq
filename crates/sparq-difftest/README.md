@@ -2,9 +2,8 @@
 # sparq-difftest
 
 The **engine-independent value-normalisation** library for [sparq](../../README.md)'s
-value-level multi-oracle differential fuzzer — node A of the DAG in
-[`research/differential-testing-value-level.md`](../../research/differential-testing-value-level.md)
-(bead `sq-qcnn.4`).
+value-level multi-oracle differential fuzzer — node A of the DAG tracked by
+bead `sq-qcnn.4`.
 
 It normalises and compares SPARQL solution **values** across independent engines
 ("oracles") so a query that returns the right *number* of rows with a **wrong bound

@@ -125,6 +125,10 @@ criteria = "safe-to-deploy"
 version = "1.8.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.bigdecimal]]
+version = "0.4.10"
+criteria = "safe-to-deploy"
+
 [[exemptions.bitflags]]
 version = "2.13.0"
 criteria = "safe-to-deploy"
