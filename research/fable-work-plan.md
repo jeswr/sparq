@@ -243,7 +243,7 @@ adjudicate;** the mechanical enumeration that feeds each review is Haiku/Sonnet 
 
 ### 5.3 Reusable review WORKFLOW (`fable-lens-review`)
 
-```
+```text
 Stage 1 (HAIKU recon): enumerate the lens's targets (call sites / field bindings / cast sites /
          public-input signatures) into a SCHEMA'd evidence pack. No judgment.  [query-pkg + ast-grep]
 Stage 2 (SONNET, optional): assemble the cross-reference tables (circuit↔reconstruct, manifest-field
