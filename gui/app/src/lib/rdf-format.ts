@@ -116,10 +116,18 @@ export const EXPORT_FORMATS: readonly ExportFormatMeta[] = [
   },
 ];
 
+/**
+ * Value-keyed view of {@link EXPORT_FORMATS} for O(1) metadata lookup. Typed as a total
+ * `Record<ExportFormat, …>`, so every `ExportFormat` is guaranteed an entry (and a valid
+ * `ext`) at compile time — no per-call `.find()` and no weak string fallback.
+ */
+export const EXPORT_FORMAT_META: Record<ExportFormat, ExportFormatMeta> = Object.fromEntries(
+  EXPORT_FORMATS.map((f) => [f.value, f]),
+) as Record<ExportFormat, ExportFormatMeta>;
+
 /** The download filename for an exported dataset in `format` (e.g. `dataset.trig`). */
 export function exportFilename(format: ExportFormat): string {
-  const meta = EXPORT_FORMATS.find((f) => f.value === format);
-  return `dataset.${meta?.ext ?? format}`;
+  return `dataset.${EXPORT_FORMAT_META[format].ext}`;
 }
 
 /** A short display label for a URL: the last non-empty path segment, or the host. */

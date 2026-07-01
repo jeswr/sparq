@@ -20,7 +20,7 @@ import { Download, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useEngine } from "@/lib/engine-context";
 import { downloadText } from "@/lib/download";
-import { EXPORT_FORMATS, exportFilename, type ExportFormat } from "@/lib/rdf-format";
+import { EXPORT_FORMATS, EXPORT_FORMAT_META, exportFilename, type ExportFormat } from "@/lib/rdf-format";
 
 /**
  * The "Export data…" control for the left rail's datasets tree: a dashed teal trigger (sibling of
@@ -37,8 +37,7 @@ export function ExportDataMenu() {
   const onExport = React.useCallback(
     (format: ExportFormat) => {
       setError(null);
-      const meta = EXPORT_FORMATS.find((f) => f.value === format);
-      if (!meta) return;
+      const meta = EXPORT_FORMAT_META[format];
       try {
         const text = exportStore(format);
         if (text === null) {
@@ -69,7 +68,7 @@ export function ExportDataMenu() {
             title={
               disabled
                 ? "Load some data first, then export the dataset"
-                : "Export the whole store as pretty Turtle / TriG / JSON-LD"
+                : "Export the dataset as pretty RDF: Turtle (default graph), TriG or JSON-LD (whole dataset)"
             }
           >
             <Download className="size-3" /> Export data…
@@ -107,7 +106,8 @@ export function ExportDataMenu() {
       </DropdownMenuPrimitive.Root>
       {error && (
         <p
-          role="status"
+          role="alert"
+          aria-live="assertive"
           data-export-feedback="error"
           className="mt-1 flex items-start gap-1.5 px-1 text-[11px] text-destructive"
         >
