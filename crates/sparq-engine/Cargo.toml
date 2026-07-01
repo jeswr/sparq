@@ -103,6 +103,18 @@ window-functions = []
 # Pulls in ZERO new dependencies (sparq-core is already a direct dep) and contains no
 # `unsafe` — the kernels are plain index loops the compiler auto-vectorises.
 vectorized = []
+# [OPUS-4.8] (sq-iywur) Opt-in DP join-order enumerator (`dp` module): a connected-
+# subgraph-complement-pair (DPccp; Moerkotte & Neumann, VLDB 2006) dynamic program that
+# finds a Cout-optimal BUSHY join tree for a BGP, with a greedy-GOO fallback ABOVE a
+# connected-subgraph-count budget (and on disconnected BGPs) to bound planning blow-up.
+# `with_dp_planner` / `with_dp_planner_budget` install it per-thread, exactly like
+# `with_cs_table`. The default planner stays greedy GOO. ORDER-ONLY: a BGP is a
+# commutative/associative natural join, so every tree yields the SAME bindings — the DP
+# only changes join order, never the answer (asserted by tests/dp_planner_differential.rs
+# in BOTH feature states). OPT-IN and OFF by default: when off, zero DP code compiles and
+# the default native + wasm builds are byte-identical. Pulls in ZERO new dependencies
+# (rustc-hash is already a direct dep) and contains no `unsafe`.
+dp-planner = []
 # [OPUS-4.8] (sq-a9cn) Materialised-view / query-result cache: a bounded, version-aware
 # LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed by `(parsed
 # query algebra, caller graph-version)`. Vendor-parity operational-perf feature for

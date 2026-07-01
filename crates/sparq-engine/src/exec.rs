@@ -4151,6 +4151,22 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
         return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
     }
 
+    // [OPUS-4.8] (sq-iywur) Optional DP join-order planner path. When the `dp-planner`
+    // feature is compiled AND a planner is installed on this thread (`with_dp_planner`*),
+    // enumerate connected-subgraph-complement pairs (DPccp) for a Cout-optimal BUSHY join
+    // tree and evaluate that, instead of the greedy GOO order below. Falls back to greedy
+    // (returns `None`) when no planner is installed, the BGP join graph is disconnected /
+    // has an all-constant pattern (no single connected plan), or the connected-subgraph
+    // count exceeds the budget. A BGP is a commutative/associative natural join, so the DP
+    // tree yields the SAME rows as greedy (differentially tested); the default build
+    // (feature off) is byte-identical — this whole block compiles away.
+    #[cfg(feature = "dp-planner")]
+    if let Some(cfg) = crate::dp::active() {
+        if let Some(bindings) = eval_bgp_dp(graph, &prepared, pat_filters, cfg) {
+            return Ok(bindings);
+        }
+    }
+
     let var_pos = |i: usize, v: &Variable| -> Option<usize> { prepared[i].var_pos(v) };
 
     // Cost-based greedy (GOO): seed with the smallest single-pattern cardinality,
@@ -4810,6 +4826,93 @@ fn pattern_var_ndv(graph: &Graph, id_pat: &IdPattern, pos: usize, est: usize) ->
         // object var, predicate bound, subject unbound -> distinct objects of P
         (2, Some(s)) if id_pat[0].is_none() => (s.ndv_obj as f64).clamp(1.0, est),
         _ => est,
+    }
+}
+
+// ---- [OPUS-4.8] (sq-iywur) DP join-order planner bridge -----------------------
+//
+// Builds the DP planner's `crate::dp::QueryGraph` from the prepared BGP patterns
+// (reusing the SAME `pattern_var_ndv` estimator the greedy planner consumes), runs
+// the DPccp enumerator, and evaluates the chosen bushy join tree. Both functions are
+// only compiled under the opt-in `dp-planner` feature and are reached only when a
+// planner is installed with `with_dp_planner`; the default build never sees them.
+
+/// Plans and evaluates a BGP with the DP enumerator, or returns `None` to fall back
+/// to greedy GOO (see `crate::dp::plan` for the fall-back conditions). The prepared
+/// patterns are assumed already satisfiable (the caller short-circuits an
+/// unsatisfiable BGP before this point).
+#[cfg(feature = "dp-planner")]
+fn eval_bgp_dp(
+    graph: &Graph,
+    prepared: &[Prepared],
+    pat_filters: &[Option<(usize, ScanCmp)>],
+    cfg: crate::dp::DpConfig,
+) -> Option<Bindings> {
+    let n = prepared.len();
+    if !(2..=63).contains(&n) {
+        return None;
+    }
+    // Dense-index every variable; record its pattern bitmask and per-pattern
+    // distinct-value estimate (the join-selectivity input the greedy planner uses).
+    let mut var_idx: FxHashMap<Variable, usize> = FxHashMap::default();
+    let mut var_pats: Vec<u64> = Vec::new();
+    let mut var_ndv: Vec<Vec<(usize, f64)>> = Vec::new();
+    for (p, prep) in prepared.iter().enumerate() {
+        for (pos, ov) in prep.pos_vars.iter().enumerate() {
+            if let Some(v) = ov {
+                let ndv = pattern_var_ndv(graph, &prep.id_pat, pos, prep.est);
+                let k = *var_idx.entry(v.clone()).or_insert_with(|| {
+                    var_pats.push(0);
+                    var_ndv.push(Vec::new());
+                    var_pats.len() - 1
+                });
+                var_pats[k] |= 1u64 << p;
+                // A variable can appear at several positions of one pattern — keep its
+                // most selective (smallest) per-pattern estimate.
+                if let Some(e) = var_ndv[k].iter_mut().find(|(pp, _)| *pp == p) {
+                    e.1 = e.1.min(ndv);
+                } else {
+                    var_ndv[k].push((p, ndv));
+                }
+            }
+        }
+    }
+    let est: Vec<f64> = prepared.iter().map(|p| p.est as f64).collect();
+    let qg = crate::dp::QueryGraph::build(est, var_pats, var_ndv);
+    let tree = crate::dp::plan(&qg, cfg.max_subgraphs)?;
+    Some(eval_join_tree(graph, prepared, &tree, pat_filters))
+}
+
+/// Evaluates a DP `JoinTree`: a `Leaf` scans its pattern (applying any pushed-down
+/// sargable filter, exactly like the greedy seed scan), a `Join` natural-joins the
+/// two sub-results with the shared `join_bindings` (merge / hash / compatibility
+/// nested-loop). The tree is bushy; `join_bindings` builds on the smaller side.
+#[cfg(feature = "dp-planner")]
+fn eval_join_tree(
+    graph: &Graph,
+    prepared: &[Prepared],
+    tree: &crate::dp::JoinTree,
+    pat_filters: &[Option<(usize, ScanCmp)>],
+) -> Bindings {
+    match tree {
+        crate::dp::JoinTree::Leaf(i) => {
+            let p = &prepared[*i];
+            scan_to_bindings(
+                graph,
+                &p.id_pat,
+                &p.pos_vars,
+                None,
+                pat_filters.get(*i).copied().flatten(),
+                None,
+                #[cfg(feature = "semijoin-bitmap")]
+                None,
+            )
+        }
+        crate::dp::JoinTree::Join(l, r) => {
+            let left = eval_join_tree(graph, prepared, l, pat_filters);
+            let right = eval_join_tree(graph, prepared, r, pat_filters);
+            join_bindings(left, right)
+        }
     }
 }
 
