@@ -144,12 +144,15 @@
 # --all-targets -D warnings` with the feature ON (the real gate) + `cargo test`, which
 # drives the REAL admit path behind the pre-check and the load-bearing SAFETY invariants:
 # with NO preference the gate is byte-identical to `admit`; a caller cannot widen a
-# method's recorded posture (bundled resolution) and an unknown method FAILS CLOSED
-# (`UnknownMethod`); and an unsatisfied ODRL preference (e.g. `requiresAssurance gteq
-# Proven` while sq-qhy4 is open) FAILS CLOSED — admits nothing, derives no grant — despite
-# a perfectly valid credential. Verified locally: `cargo test -p sparq-trust --features
-# secprop-precheck` runs the 12 precheck unit tests + the 5 `secprop_precheck_e2e.rs`
-# golden tests; `clippy --all-targets -D warnings` is clean in every state.
+# method's recorded posture — the annotations come from the bundled graph AND the requester
+# supplies STRUCTURED constraints (validated IRIs), not raw N3, so there is no
+# `secx:hasProperty`/`atLeast`/`satisfies` injection sink (the residual-channel review);
+# an unknown method FAILS CLOSED (`UnknownMethod`); and an unsatisfied ODRL preference
+# (e.g. `requiresAssurance gteq Proven` while sq-qhy4 is open) FAILS CLOSED — admits
+# nothing, derives no grant — despite a perfectly valid credential. Verified locally:
+# `cargo test -p sparq-trust --features secprop-precheck` runs the 12 precheck unit tests
+# (incl. the policy-injection negative test) + the 5 `secprop_precheck_e2e.rs` golden
+# tests; `clippy --all-targets -D warnings` is clean in every state.
 - name: "sparq-trust (secprop-precheck — property-admissibility pre-check in admit)"
   crate: "sparq-trust"
   features: "secprop-precheck"

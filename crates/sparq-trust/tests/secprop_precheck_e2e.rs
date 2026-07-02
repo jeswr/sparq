@@ -32,7 +32,9 @@
 #![cfg(feature = "secprop-precheck")]
 
 use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
-use sparq_trust::admit::{admit, admit_with_precheck, AdmissibilityPreference, PrecheckOutcome};
+use sparq_trust::admit::{
+    admit, admit_with_precheck, AdmissibilityConstraint, AdmissibilityPreference, PrecheckOutcome,
+};
 use sparq_trust::policy::{parse_policy, ControlGate, TrustRule};
 use sparq_trust::vocab;
 use sparq_trust::wire::derive_grants;
@@ -59,13 +61,31 @@ const ACR_ABAC_RULE: &str = r#"@prefix schema: <http://schema.org/> .
 
 // [OPUS-4.8] sq-nrwqs (Phase 5.1): the method's secprop annotation graph is NO LONGER
 // caller-supplied — the pre-check resolves it from the bundled sparq-zk
-// `secprop-methods.ttl`. The string-canonical method's bundled block records
-// `UnlinkabilityScope PerPresentation` and every positive property `Claimed` (so its
-// derived AssuranceLevel is `Claimed`; `Proven` is barred while `sq-qhy4` is open), which
-// is exactly the §4.3.3 worked-example posture these tests pin — now tamper-resistant.
+// `secprop-methods.ttl`, and the requester's ODRL preference is STRUCTURED (validated
+// `AdmissibilityConstraint` IRIs), not raw N3. The string-canonical method's bundled block
+// records `UnlinkabilityScope PerPresentation` and every positive property `Claimed` (so
+// its derived AssuranceLevel is `Claimed`; `Proven` is barred while `sq-qhy4` is open),
+// which is exactly the §4.3.3 worked-example posture these tests pin — now tamper-resistant.
+
+// The `secx:requires…` leftOperands + level IRIs the requester's `gteq` constraints name.
+const REQ_UNLINK: &str = "https://w3id.org/zkp-sparql/sec-prop#requiresUnlinkabilityScope";
+const REQ_ASSUR: &str = "https://w3id.org/zkp-sparql/sec-prop#requiresAssurance";
+const REQ_SOUND: &str = "https://w3id.org/zkp-sparql/sec-prop#requiresSoundness";
+const LVL_PER_PRESENTATION: &str = "https://w3id.org/zkp-sparql/sec-prop#PerPresentation";
+const LVL_CLAIMED: &str = "https://w3id.org/zkp-sparql/sec-prop#Claimed";
+const LVL_PROVEN: &str = "https://w3id.org/zkp-sparql/sec-prop#Proven";
+const LVL_KNOWLEDGE_SOUND: &str = "https://w3id.org/zkp-sparql/sec-prop#KnowledgeSound";
 
 fn iri(s: &str) -> NamedNode {
     NamedNode::new(s).unwrap()
+}
+
+/// A single `gteq` admissibility constraint from two IRI strings.
+fn constraint(left: &str, right: &str) -> AdmissibilityConstraint {
+    AdmissibilityConstraint {
+        left_operand: iri(left),
+        right_operand: iri(right),
+    }
 }
 
 fn age_credential_graph(subject: &str, value: &str) -> Vec<Triple> {
@@ -157,11 +177,10 @@ fn read_granted(grants: &[Triple], subject: &str) -> bool {
     })
 }
 
-fn pref(constraint_iris: &[&str], policy_n3: &str) -> AdmissibilityPreference {
+fn pref(constraints: Vec<AdmissibilityConstraint>) -> AdmissibilityPreference {
     AdmissibilityPreference {
         method_iri: iri(METHOD),
-        constraint_iris: constraint_iris.iter().map(|s| (*s).to_owned()).collect(),
-        policy_n3: policy_n3.to_owned(),
+        constraints,
     }
 }
 
@@ -197,16 +216,10 @@ fn satisfiable_preference_admits_and_derives_the_grant() {
     let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
 
     // Relaxed: unlinkability >= PerPresentation (held), assurance >= Claimed (held).
-    let policy = "\
-zk:rUnlink odrl:leftOperand secx:requiresUnlinkabilityScope ; odrl:operator odrl:gteq ; odrl:rightOperand secx:PerPresentation .\n\
-zk:rAssur  odrl:leftOperand secx:requiresAssurance          ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .\n";
-    let p = pref(
-        &[
-            "https://sparq.dev/ns/zk#rUnlink",
-            "https://sparq.dev/ns/zk#rAssur",
-        ],
-        policy,
-    );
+    let p = pref(vec![
+        constraint(REQ_UNLINK, LVL_PER_PRESENTATION),
+        constraint(REQ_ASSUR, LVL_CLAIMED),
+    ]);
 
     let (admitted, outcome) = admit_with_precheck(
         &cred,
@@ -245,8 +258,7 @@ fn bundled_soundness_preference_admits_and_derives_the_grant() {
     let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
     let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
 
-    let policy = "zk:rSound odrl:leftOperand secx:requiresSoundness ; odrl:operator odrl:gteq ; odrl:rightOperand secx:KnowledgeSound .";
-    let p = pref(&["https://sparq.dev/ns/zk#rSound"], policy);
+    let p = pref(vec![constraint(REQ_SOUND, LVL_KNOWLEDGE_SOUND)]);
 
     let (admitted, outcome) = admit_with_precheck(
         &cred,
@@ -278,8 +290,7 @@ fn strict_assurance_preference_fails_closed_despite_a_valid_credential() {
     let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
     let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
 
-    let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Proven .";
-    let p = pref(&["https://sparq.dev/ns/zk#cAssur"], policy);
+    let p = pref(vec![constraint(REQ_ASSUR, LVL_PROVEN)]);
 
     // Sanity: the SAME credential admits without the pre-check (so the denial below is
     // the pre-check's doing, not a broken credential).
@@ -300,9 +311,9 @@ fn strict_assurance_preference_fails_closed_despite_a_valid_credential() {
     assert_eq!(
         outcome,
         PrecheckOutcome::Denied {
-            unsatisfied: vec!["https://sparq.dev/ns/zk#cAssur".to_owned()]
+            unsatisfied: vec![REQ_ASSUR.to_owned()]
         },
-        "requiresAssurance gteq Proven names the unsatisfied constraint (the honest refusal)"
+        "requiresAssurance gteq Proven names the unsatisfied dimension (the honest refusal)"
     );
     assert!(
         admitted.is_empty(),
@@ -325,11 +336,9 @@ fn unknown_method_iri_fails_closed() {
     let rules = gov_age_policy(GOV_ISSUER, &pk, RESOURCE_X);
     let cred = fresh_cred(&sk, age_credential_graph(JESSE, "25"));
 
-    let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .";
     let p = AdmissibilityPreference {
         method_iri: iri("https://sparq.dev/ns/zk#no-such-method"),
-        constraint_iris: vec!["https://sparq.dev/ns/zk#cAssur".to_owned()],
-        policy_n3: policy.to_owned(),
+        constraints: vec![constraint(REQ_ASSUR, LVL_CLAIMED)],
     };
 
     let (admitted, outcome) = admit_with_precheck(

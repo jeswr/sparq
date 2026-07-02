@@ -617,13 +617,19 @@ worked example is the golden test: empty under Alice's strict preference, non-em
 `secprop-precheck`** feature, which enables `secprop-admissibility` **and** `sparq-zk/secprop-annotations`)
 wires the admissibility reduction above into the REAL admission path as an **optional pre-admission check**.
 The `preference: Option<&AdmissibilityPreference>` carries the requester's machine-reasonable **ODRL privacy
-preference** — the presented proof's `method_iri` (the `zk:scheme`/`zk:cryptosuite` the registry records),
-the `constraint_iris` (`secx:requires…` `gteq` constraints), and the `policy_n3`.
+preference** — the presented proof's `method_iri` (the `zk:scheme`/`zk:cryptosuite` the registry records)
+and a `constraints: Vec<AdmissibilityConstraint>`, each a **structured** `gteq` constraint of two validated
+IRIs (`left_operand` = a `secx:requires…` operand, `right_operand` = the required level).
 
-**Phase 5.1 (sq-nrwqs) — bundled, tamper-resistant annotations.** The method's `secprop` property
-annotations are **NO LONGER caller-supplied**; the gate resolves them from the bundled, drift-pinned
-`sparq-zk` `ontologies/secprop-methods.ttl` (the canonical source of truth) keyed on `method_iri`. So a
-caller cannot widen a method's recorded posture, and an **unknown method** (no bundled block) fails closed
+**Phase 5.1 (sq-nrwqs) — bundled annotations + structured policy = tamper-resistant.** The caller supplies
+**no raw N3 at all**: the method's `secprop` property annotations are resolved from the bundled, drift-pinned
+`sparq-zk` `ontologies/secprop-methods.ttl` (the canonical source of truth) keyed on `method_iri`, and the
+policy triples are **synthesised internally** from the structured constraints (each operand a validated
+`NamedNode` emitted only as an `odrl:` object). Because there is no caller-supplied raw-N3 channel — neither
+for the annotations nor for the policy — a caller **cannot** inject a `secx:hasProperty` / `secx:atLeast` /
+`secx:satisfies` triple (or an N3 rule) to widen a method's recorded posture. (The Phase-5 `annotations_n3` /
+`policy_n3` raw-string fields, which raw-concatenated caller text into the reasoning document, are gone — that
+closed a real widening channel, not merely renamed it.) An **unknown method** (no bundled block) fails closed
 with `PrecheckOutcome::UnknownMethod { method }` — regardless of the (possibly empty) constraint set. Only
 `secx:QueryProofLayer` assertions are used (the §5a non-transfer rule); the method-wide `secx:AssuranceLevel`
 the `requiresAssurance` dimension reads is DERIVED as the **weakest** assurance across the method's positive
@@ -631,12 +637,13 @@ query-proof claims (so every sparq method is `Claimed` while `sq-qhy4` is open, 
 levels like `PQForgeable` never inflate it). This hardens the input trust boundary; it makes **no** new
 soundness/privacy claim.
 
-Before the existing signature / freshness / holder checks, the gate calls `admissible` over the method IRI,
-the requester's constraints/policy, and the **bundled** annotation graph, and **fails closed** when the
-method does not satisfy every constraint — returning an EMPTY admitted set + a `PrecheckOutcome::{Admitted,
-UnknownMethod { method }, Denied { unsatisfied }, ReductionError { error }}` (an unknown method / an
-unsatisfied constraint / a reduction error are ALL fail-closed denials — a pre-check that cannot be
-evaluated never admits). **OPT-IN strict additivity:** with `preference == None` it is **byte-identical** to
+Before the existing signature / freshness / holder checks, the gate synthesises the policy from the structured
+constraints and calls `admissible` over the method IRI, that policy, and the **bundled** annotation graph, and
+**fails closed** when the method does not satisfy every constraint — returning an EMPTY admitted set + a
+`PrecheckOutcome::{Admitted, UnknownMethod { method }, Denied { unsatisfied }, ReductionError { error }}` (an
+unknown method / an unsatisfied constraint / a reduction error are ALL fail-closed denials — a pre-check that
+cannot be evaluated never admits; `Denied.unsatisfied` lists the failed constraints' `left_operand`
+dimensions). **OPT-IN strict additivity:** with `preference == None` it is **byte-identical** to
 `admit` (no reasoning runs); the pre-check can only ever **DENY**, never broaden, and never weakens a
 downstream crypto check (`admit` still verifies the checked issuer signature, scope, freshness, and holder
 binding). The golden e2e invariant (`tests/secprop_precheck_e2e.rs`): a perfectly valid credential is
