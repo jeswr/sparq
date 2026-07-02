@@ -722,8 +722,19 @@ impl TripleStore {
         // base range is returned untouched (borrowed, zero copies); with an overlay the
         // deleted triples are filtered out and the inserted ones merge-interleaved, so
         // the rows keep the permutation's sort order (merge joins stay valid).
+        //
+        // ZERO-COPY FAST PATH (sq-7d3dj.3) [OPUS-4.8]: even WITH an overlay, most ranges a small
+        // overlay does not touch. `count_correction` (O(|overlay|)) tells us exactly how
+        // many `added`/`deleted` triples fall in this range; when it is `(0, 0)` the
+        // overlay contributes nothing here — no `added` row projects into `[lo, hi]` (so
+        // nothing is interleaved) and no in-range base row is deleted (so nothing is
+        // dropped) — hence `merge` would reproduce `base` verbatim, rows AND sort order.
+        // We therefore return the BORROWED base slice directly, restoring allocation-free
+        // scans for every untouched range (the read-mostly mutated-server common case)
+        // instead of copying+re-sorting the whole range through the owned merge path.
         let rows = match &self.overlay {
             None => base,
+            Some(ov) if ov.count_correction(perm, lo, hi) == (0, 0) => base,
             Some(ov) => std::borrow::Cow::Owned(ov.merge(&base, perm, lo, hi)),
         };
         Scan { rows, perm }
@@ -1028,5 +1039,74 @@ mod tests {
         let mut orig: Vec<[Id; 3]> = triples.clone();
         orig.sort_unstable();
         assert_eq!(full.rows.as_ref(), &orig[..]);
+    }
+
+    /// The overlay zero-copy fast path (sq-7d3dj.3) must be PERF-ONLY: a scanned range the
+    /// overlay does not touch (`count_correction == (0, 0)`) returns the BORROWED base
+    /// slice, byte-identical (rows AND sort order) to the general merge path, while a range
+    /// the overlay DOES touch still takes the owned merge path and reflects the correction.
+    /// Proven directly — the `Cow` variant witnesses which path ran (a raw base range
+    /// borrows; `merge` allocates an owned `Vec`), so the equality checks are non-vacuous.
+    #[test]
+    fn overlay_zero_copy_fast_path() {
+        use std::borrow::Cow;
+
+        // Base: subjects 1..=100, predicate 1, objects 1..=10 (1000 triples, several perms).
+        let mut triples: Vec<[Id; 3]> = Vec::new();
+        for s in 1..=100u32 {
+            for o in 1..=10u32 {
+                triples.push([s, 1, o]);
+            }
+        }
+        // A no-overlay reference store: EVERY scan already borrows (the `None` branch).
+        let base_store = TripleStore::from_triples(triples.clone());
+        assert!(!base_store.has_overlay());
+
+        // A small overlay touching ONLY subject 50: insert (50,1,11), delete (50,1,1).
+        let mut store = TripleStore::from_triples(triples.clone());
+        store.apply_delta(&[[50, 1, 11]], &[[50, 1, 1]]);
+        assert!(store.has_overlay(), "the overlay must exist for a non-vacuous test");
+
+        // A full rebuild of the corrected triple set (the general-path oracle).
+        let mut reference: Vec<[Id; 3]> = triples.clone();
+        reference.retain(|t| *t != [50, 1, 1]);
+        reference.push([50, 1, 11]);
+        let rebuilt = TripleStore::from_triples(reference);
+
+        // (i) UNTOUCHED range (subject 7): fast path — rows are BORROWED and identical to
+        // the no-overlay base store (which also borrows). This is the "store WITH an
+        // overlay, scanned range clean" case the fast path exists for.
+        for s in [1u32, 7, 49, 51, 100] {
+            let pat: Pattern = [Some(s), None, None];
+            let scan = store.scan(&pat);
+            assert!(matches!(scan.rows, Cow::Borrowed(_)), "untouched subject {} must be zero-copy borrowed", s);
+            assert_eq!(scan.rows, base_store.scan(&pat).rows, "fast-path rows must equal the base for subject {}", s);
+            // A clean range is untouched by the overlay, so the rebuild agrees too.
+            assert_eq!(scan.rows, rebuilt.scan(&pat).rows, "fast-path rows must equal the rebuild for subject {}", s);
+        }
+
+        // (ii) TOUCHED range (subject 50): general merge path — rows are OWNED, reflect the
+        // correction (object 1 gone, 11 added), and match the rebuild in sort order.
+        let touched: Pattern = [Some(50), None, None];
+        let scan = store.scan(&touched);
+        assert!(matches!(scan.rows, Cow::Owned(_)), "a range the overlay touches must take the merge path");
+        assert_eq!(scan.rows, rebuilt.scan(&touched).rows, "merge-path rows must equal the rebuild");
+        assert!(scan.rows.windows(2).all(|w| w[0] <= w[1]), "merge-path rows must stay sorted");
+
+        // (iii) A full unbound scan intersects the overlay -> merge path, equals rebuild.
+        let all: Pattern = [None, None, None];
+        let scan = store.scan(&all);
+        assert!(matches!(scan.rows, Cow::Owned(_)), "an overlay-intersecting full scan takes the merge path");
+        assert_eq!(scan.rows, rebuilt.scan(&all).rows, "full merge-path scan must equal the rebuild");
+
+        // (iv) An overlay that touches a range only via a DELETE (no insert) must still take
+        // the merge path there (count_correction = (0, 1) != (0, 0)) and drop the row.
+        let mut del_store = TripleStore::from_triples(triples.clone());
+        del_store.apply_delta(&[], &[[7, 1, 5]]);
+        let pat: Pattern = [Some(7), None, None];
+        let scan = del_store.scan(&pat);
+        assert!(matches!(scan.rows, Cow::Owned(_)), "a delete-only touched range must take the merge path");
+        assert!(!scan.rows.contains(&[7, 1, 5]), "the deleted row must be absent");
+        assert_eq!(scan.rows.len(), base_store.scan(&pat).rows.len() - 1, "exactly one row dropped");
     }
 }
