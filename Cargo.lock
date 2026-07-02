@@ -2593,9 +2593,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.40.1"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
 ]
@@ -3623,7 +3623,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "oxrdfxml",
  "oxttl 0.2.3",
- "quick-xml 0.40.1",
+ "quick-xml 0.41.0",
  "rustc-hash 2.1.2",
  "serde_json",
  "spargebra",
@@ -3658,7 +3658,7 @@ dependencies = [
  "md-5 0.11.0",
  "oxiri",
  "oxrdf 0.3.3",
- "quick-xml 0.40.1",
+ "quick-xml 0.41.0",
  "rayon",
  "regex",
  "rustc-hash 2.1.2",
@@ -3715,7 +3715,7 @@ dependencies = [
  "i_overlay 7.0.1",
  "oxrdf 0.3.3",
  "proj4rs",
- "quick-xml 0.40.1",
+ "quick-xml 0.41.0",
  "rand 0.10.1",
  "rstar 0.13.0",
  "rustc-hash 2.1.2",

@@ -86,9 +86,11 @@ rstar = "0.13"
 # GML processor — we walk the OGC GML Simple-Features geometry subset GeoSPARQL
 # uses (Point/LineString/Polygon/Multi*). `default-features = false` keeps it to
 # the pull-parser with no serde. The transitive oxigraph stack (oxrdfxml /
-# sparesults) still pins quick-xml 0.37, so this 0.40 requirement currently
+# sparesults) still pins quick-xml 0.37, so this 0.41 requirement currently
 # resolves as a second copy in the lockfile until those upstreams bump. [OPUS-4.8]
-quick-xml = { version = "0.40", default-features = false }
+# Bumped 0.40 -> 0.41 for RUSTSEC-2026-0194 (quadratic duplicate-attribute check);
+# the transitive 0.37.5 copy is scoped-ignored in deny.toml until oxigraph bumps.
+quick-xml = { version = "0.41", default-features = false }
 # Behind the `reproject` feature: pure-Rust proj4 (NOT the C `proj` binding —
 # the workspace's pure-Rust constraint holds). One transitive dep (thiserror).
 proj4rs = { version = "0.1", optional = true }
