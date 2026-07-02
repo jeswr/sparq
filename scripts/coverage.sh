@@ -139,6 +139,74 @@ PER_COMMIT_CRATES=(
 # Crates whose HEAVY tests are only run in the nightly tier.
 NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nightly tier"
 
+# ---- per-commit MATRIX shard groups (sq-p0hcd) [OPUS-4.8] --------------------
+# WHY: the per-commit `coverage` job measured ALL of PER_COMMIT_CRATES in ONE serial
+# loop, which ran ~28 min wall-clock (2026-07-02 CI profile, run 28624093902): a single
+# `Measure + enforce` step = 1691s, of which the per-crate loop was 1676s, DOMINATED by
+# sparq-engine (668s ≈ 40%), then sparq-core (210s), sparq-vectors (167s), sparq-solid
+# (165s), sparq-server (114s). Serial => that whole cost is on the merge-queue critical
+# path. Splitting the loop across parallel MATRIX shards makes crates measure concurrently;
+# the wall-clock then floors at the slowest single shard.
+#
+# The groups are LPT-bin-packed by that measured per-crate wall time so the slowest shard
+# is ~= the sparq-engine elephant ALONE (it cannot be split without cross-runner profraw
+# merging — see the follow-up bead). The other three shards carry ~336s of measured work
+# EACH (balanced), comfortably under engine. Each shard runs the IDENTICAL coverage.sh +
+# `coverage-gate.py --check-robust` over its subset, so the ratchet semantics are unchanged
+# (every per-crate floor still enforced; a shard whose crate is below floor fails, failing
+# the gate). NB: these seconds are a MEASUREMENT-ORDER lower bound — a fresh shard also
+# re-builds the shared instrumented deps — so keep the count SMALL (4): more shards only
+# add duplicated build overhead without lowering the engine-bound wall-clock floor.
+#
+# INVARIANT (guarded by `coverage.sh --check-shards`, a fast no-compile CI step): the union
+# of SHARD_GROUPS equals PER_COMMIT_CRATES exactly and the groups are pairwise-disjoint —
+# so a crate ADDED to PER_COMMIT_CRATES but not to a shard fails the guard LOUDLY instead of
+# being silently un-gated (dropped from every shard => measured nowhere => floor unenforced).
+SHARD_GROUPS=(
+  # shard 1 — the sparq-engine elephant (668s): ALONE, it is the wall-clock floor.
+  "sparq-engine"
+  # shard 2 (~336s measured)
+  "sparq-core sparq-mpc sparq-fedclient sparq-geo sparq-cli sparq-conformance sparq-text sparq-policy sparq-nlq sparq-sim"
+  # shard 3 (~336s measured)
+  "sparq-vectors sparq-zk-compose sparq-gpu sparq-serve sparq-reason sparq-hdt sparq-shacl sparq-fedplan sparq-zk sparq-substrate sparq-introspect"
+  # shard 4 (~336s measured)
+  "sparq-solid sparq-server sparq-wasm sparq-canon sparq-rsp sparq-prov sparq-parse sparq-algos"
+)
+SHARD_TOTAL=${#SHARD_GROUPS[@]}
+
+# --check-shards: verify the SHARD_GROUPS partition invariant, then exit. Fast, NO compile —
+# run as an early CI gate (and locally) so a partition drift fails before any build. Emits
+# the offending crates on failure so the fix is obvious.
+if [ "${1:-}" = "--check-shards" ]; then
+  python3 - "$SHARD_TOTAL" "${PER_COMMIT_CRATES[*]}" "${SHARD_GROUPS[@]}" <<'PY'
+import sys
+total = int(sys.argv[1])
+per_commit = sys.argv[2].split()
+groups = [g.split() for g in sys.argv[3:]]
+assert len(groups) == total, f"SHARD_TOTAL={total} but {len(groups)} groups"
+flat = [c for g in groups for c in g]
+dupes = sorted({c for c in flat if flat.count(c) > 1})
+union = set(flat)
+want = set(per_commit)
+missing = sorted(want - union)      # in PER_COMMIT_CRATES but NO shard -> would be UN-GATED
+extra = sorted(union - want)        # in a shard but not PER_COMMIT_CRATES -> stale/typo
+ok = True
+if dupes:
+    print(f"::error::coverage --check-shards: crate(s) in >1 shard (not disjoint): {dupes}"); ok = False
+if missing:
+    print(f"::error::coverage --check-shards: PER_COMMIT_CRATES crate(s) missing from every "
+          f"shard (would be silently UN-GATED): {missing}"); ok = False
+if extra:
+    print(f"::error::coverage --check-shards: shard crate(s) not in PER_COMMIT_CRATES "
+          f"(stale/typo): {extra}"); ok = False
+if ok:
+    print(f"coverage --check-shards: OK — {total} shards partition "
+          f"{len(per_commit)} PER_COMMIT_CRATES exactly (disjoint, complete)")
+sys.exit(0 if ok else 1)
+PY
+  exit $?
+fi
+
 # Tests EXCLUDED from the per-commit subset, by name (libtest --skip substring).
 # DOCUMENTED here so the exclusion is never silent.
 VECTORS_HEAVY_SKIP="recall_at_10_vs_brute_force_on_50k"   # matches HNSW + DiskANN 50k
@@ -196,8 +264,23 @@ if [ "$FETCH_FIXTURES" = "1" ]; then
 fi
 
 # ---- pick the crate list for this run --------------------------------------
+# Precedence (sq-p0hcd) [OPUS-4.8]:
+#   1. COVERAGE_CRATES  — explicit subset (ad-hoc runs AND the robust gate's targeted
+#      re-measure of sub-floor crates; must win so a shard re-measures only ITS offenders).
+#   2. COVERAGE_SHARD=N — 1-based matrix shard index: measure SHARD_GROUPS[N-1] (the
+#      per-commit MATRIX leg). Validated against SHARD_TOTAL.
+#   3. neither          — the whole PER_COMMIT_CRATES set (single-job / nightly / local).
 if [ -n "${COVERAGE_CRATES:-}" ]; then
   read -r -a CRATES <<<"$COVERAGE_CRATES"
+elif [ -n "${COVERAGE_SHARD:-}" ]; then
+  case "$COVERAGE_SHARD" in
+    ''|*[!0-9]*) echo "ERROR: COVERAGE_SHARD='$COVERAGE_SHARD' is not a positive integer" >&2; exit 2 ;;
+  esac
+  if [ "$COVERAGE_SHARD" -lt 1 ] || [ "$COVERAGE_SHARD" -gt "$SHARD_TOTAL" ]; then
+    echo "ERROR: COVERAGE_SHARD=$COVERAGE_SHARD out of range 1..$SHARD_TOTAL" >&2; exit 2
+  fi
+  read -r -a CRATES <<<"${SHARD_GROUPS[$((COVERAGE_SHARD - 1))]}"
+  echo "==> shard $COVERAGE_SHARD/$SHARD_TOTAL: measuring ${#CRATES[@]} crate(s): ${CRATES[*]}"
 else
   CRATES=("${PER_COMMIT_CRATES[@]}")
 fi
