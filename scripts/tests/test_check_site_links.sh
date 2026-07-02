@@ -61,6 +61,7 @@ HTML
 cat > "${GOOD}/about/index.html" <<'HTML'
 <!doctype html><html><head><title>about</title></head><body>
   <a href="/">home</a>
+  <a href="/#section-a">home · section a (BARE-ROOT fragment)</a>
   <a href="/surface/sparql/">sparql</a>
   <h2 id="section-b">Section B</h2>
 </body></html>
@@ -135,6 +136,27 @@ if bash "$GATE" "$XFRAG" >/tmp/site-links-xfrag.log 2>&1; then
   exit 1
 else
   echo "PASS: dangling cross-page fragment is caught (exit non-zero)"
+fi
+
+# --------------------------------------------------------------------------- #
+# Case 5 (should-FAIL): a dangling BARE-ROOT fragment must fail. [OPUS-4.8] sq-uj38w —
+# the bare-root remap (/#frag -> root index.html) is what makes the /about RedirectStub's
+# /#how-it-runs link resolve at the custom-domain root; this pins that it still has TEETH
+# (a fragment that does NOT exist on the home page is caught). Case 1's about page already
+# proves a VALID /#section-a bare-root fragment passes.
+# --------------------------------------------------------------------------- #
+ROOTFRAG="${TMP}/rootfrag"
+cp -r "$GOOD" "$ROOTFRAG"
+cat >> "${ROOTFRAG}/about/index.html" <<'HTML'
+<a href="/#no-such-home-anchor">dangling bare-root fragment</a>
+HTML
+
+if bash "$GATE" "$ROOTFRAG" >/tmp/site-links-rootfrag.log 2>&1; then
+  echo "FAIL: a dangling bare-root fragment was NOT caught (bare-root remap lost its teeth):"
+  sed 's/^/    /' /tmp/site-links-rootfrag.log
+  exit 1
+else
+  echo "PASS: dangling bare-root fragment is caught (exit non-zero)"
 fi
 
 echo "All check-site-links self-tests passed."

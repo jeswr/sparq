@@ -59,17 +59,23 @@ OUT_ABS="$(cd "$OUT_DIR" && pwd)"
 
 echo "check-site-links: lychee --offline over ${OUT_ABS}/**/*.html (root-relative basePath, sq-uj38w)"
 
-# --root-dir lets lychee resolve absolute (/...) links against the export root. The single
-# --remap rewrites a fragment-carrying DIRECTORY link to that directory's index.html (see the
-# header — the no-dot last-segment `[^#/.]+` targets directory links only, never a same-page
-# anchor that already resolves to a `.html` file). `dev/` (the overlaid benchmark dashboard,
-# a separate first-party artifact written by bench.yml onto benchmark-data) is excluded:
-# it is not part of THIS site's source and carries its own link surface.
+# --root-dir lets lychee resolve absolute (/...) links against the export root. TWO --remap
+# rules cover the directory-with-fragment cases lychee can't resolve on its own:
+#   1. a SUB-DIRECTORY fragment link (/capabilities/#privacy) -> that dir's index.html. The no-dot
+#      last-segment `[^#/.]+` targets directory links only, never a same-page anchor (which lychee
+#      already resolves against the CURRENT `.html` file).
+#   2. the BARE-ROOT fragment link (/#how-it-runs — e.g. the /about RedirectStub back to the home
+#      page's #how-it-runs strip) -> the ROOT index.html. This is the root-basePath analogue of the
+#      old `/sparq` "rule 2"; without it lychee resolves `/` to the export dir and cannot find the
+#      fragment. `/?` makes it match both `/#frag` and the slashless `#frag` normalisation.
+# `dev/` (the overlaid benchmark dashboard, a separate first-party artifact written by bench.yml
+# onto benchmark-data) is excluded: it is not part of THIS site's source and carries its own links.
 lychee \
   --offline \
   --include-fragments \
   --no-progress \
   --root-dir "$OUT_ABS" \
   --remap "file://${OUT_ABS}/((?:[^#]*/)?[^#/.]+)/?#(.+) file://${OUT_ABS}/\$1/index.html#\$2" \
+  --remap "file://${OUT_ABS}/?#(.+) file://${OUT_ABS}/index.html#\$1" \
   --exclude-path "${OUT_ABS}/dev" \
   "${OUT_ABS}/**/*.html"
