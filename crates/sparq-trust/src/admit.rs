@@ -726,16 +726,22 @@ mod precheck {
     /// escape its `<…>` term. This is what makes the widening channel structurally absent,
     /// not merely renamed.
     fn synthesise_policy(constraints: &[AdmissibilityConstraint]) -> (Vec<String>, String) {
+        use std::fmt::Write as _;
         let mut iris = Vec::with_capacity(constraints.len());
         let mut n3 = String::new();
         for (i, c) in constraints.iter().enumerate() {
             let cid = format!("urn:sparq:secprop:c{}", i);
-            n3.push_str(&format!(
-                "<{}> odrl:leftOperand <{}> ; odrl:operator odrl:gteq ; odrl:rightOperand <{}> .\n",
+            // [OPUS-4.8] Write the per-constraint fragment straight into `n3` — writing to
+            // an in-memory `String` is infallible, so no temporary `String` allocation on
+            // the admission path. Byte-output-identical (same fragment, trailing `.\n`).
+            writeln!(
+                n3,
+                "<{}> odrl:leftOperand <{}> ; odrl:operator odrl:gteq ; odrl:rightOperand <{}> .",
                 cid,
                 c.left_operand.as_str(),
                 c.right_operand.as_str(),
-            ));
+            )
+            .expect("writing to an in-memory String is infallible");
             iris.push(cid);
         }
         (iris, n3)
