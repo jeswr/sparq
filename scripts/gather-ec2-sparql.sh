@@ -194,7 +194,14 @@ run_step apt $STEP_APT_TIMEOUT -- bash -c 'apt-get update -qq && apt-get install
 if [ "$GATHER_QLEVER" = "1" ]; then
   step "apt docker.io (qlever opt-in)"
   apt-get install -y -qq docker.io || true
-  systemctl start docker || true
+  # [OPUS-4.8] sq-vw3ax.12.1 — WAIT for the daemon (fixes the Wave-0 qlever fast-fail). Wave 0
+  # did `systemctl start docker || true` and moved on, so when the socket was not yet ready the
+  # qlever recipe hit an instant "Cannot connect to the Docker daemon" cascade (~9s, recorded
+  # only as qlever_status:"failed"). enable --now + a bounded `docker info` poll makes the daemon
+  # actually be up before scripts/qlever-same-box.sh runs (which itself now preflights the daemon).
+  systemctl enable --now docker || systemctl start docker || true
+  for _ in \$(seq 1 30); do docker info >/dev/null 2>&1 && { step "docker daemon up"; break; }; sleep 2; done
+  docker info >/dev/null 2>&1 || step "WARN: docker daemon still not reachable — qlever will stay honest-n/a"
 fi
 step "rustup install"
 run_step rustup $STEP_RUSTUP_TIMEOUT -- bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal" || true
