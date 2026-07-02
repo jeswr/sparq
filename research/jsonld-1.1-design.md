@@ -100,7 +100,7 @@ workspace crate `crates/sparq-jsonld`**, not inside sparq-engine:
 
 Module map:
 
-```
+```text
 crates/sparq-jsonld/src/
   json.rs        Json AST (moved from engine) + number/JSON-literal canonical form
   error.rs       JsonLdError { code: JsonLdErrorCode, detail } — full spec code registry
@@ -137,7 +137,7 @@ crates/sparq-jsonld/src/
 All output forms become compositions over the same two hinges (this is exactly the
 JSON-LD-API's own factoring):
 
-```
+```text
 RDF dataset --from_rdf--> expanded document --compact(ctx)-->  compacted
                           |--node_map+flatten(±ctx)-->         flattened
                           |--frame(frame doc)-->               framed (framed = frame ∘ compact)
