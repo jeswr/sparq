@@ -87,10 +87,12 @@ export const TOOLS: ToolDef[] = [
   {
     id: "inference",
     label: "Inference",
-    blurb: "Materialise RDFS / OWL-RL / N3 closure over the live store + proof trees.",
+    // [OPUS-4.8] sq-tp1m (#757) — a real, working tool: a per-workspace RDFS / OWL 2 RL
+    // entailment regime applied to queries by the engine's forward-chaining reasoner.
+    blurb: "Per-workspace RDFS / OWL 2 RL entailment — forward-chain the closure so queries match entailed triples.",
     tier: "live-new-wasm",
     icon: Brain,
-    built: false,
+    built: true,
   },
   {
     id: "full-text",
