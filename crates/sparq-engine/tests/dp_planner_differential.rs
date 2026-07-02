@@ -31,6 +31,12 @@ type T = (String, String, String);
 /// Run `q` and return its solutions as a SORTED bag of `(var, lexical)` rows —
 /// order-independent (join order is never observable) but exact on bound terms.
 fn result_bag(graph: &Graph, q: &str) -> Vec<Vec<(String, String)>> {
+    // Unbound cells are recorded with an explicit NUL-delimited sentinel, NOT the empty
+    // string: no `Term::to_string()` can ever produce this marker (every bound RDF term
+    // serializes as `<iri>`, `"lex"…`, or `_:b` — even the empty literal renders WITH its
+    // surrounding quotes), so an unbound slot can never collide with a legitimately bound
+    // value. [OPUS-4.8] sq-iywur (addresses Copilot review re: empty-string ambiguity).
+    const UNBOUND: &str = "\0\u{1}unbound\u{1}\0";
     let r = query(graph, &format!("{PFX}{q}")).unwrap();
     let vars: Vec<String> = r.vars.iter().map(|v| v.as_str().to_string()).collect();
     let mut bag: Vec<Vec<(String, String)>> = r
@@ -40,7 +46,7 @@ fn result_bag(graph: &Graph, q: &str) -> Vec<Vec<(String, String)>> {
             let mut cells: Vec<(String, String)> = vars
                 .iter()
                 .zip(row.iter())
-                .map(|(v, cell)| (v.clone(), cell.as_ref().map(|t| t.to_string()).unwrap_or_default()))
+                .map(|(v, cell)| (v.clone(), cell.as_ref().map(|t| t.to_string()).unwrap_or_else(|| UNBOUND.to_string())))
                 .collect();
             cells.sort();
             cells
