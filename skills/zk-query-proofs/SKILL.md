@@ -203,6 +203,11 @@ The nonce is **burned on presentation** (consumed even if verification then fail
 use sparq_zk_compose::verifier::{prefilter_manifest_structure, KeySet, RevocationPolicy};
 // Re-parses the query (Q6 cross-graph bnode-join guard + arity), re-derives circuit ids,
 // checks binding edges + issuer/key-set + revocation reference. NO bb, NO freshness.
+// [OPUS-4.8] sq-en5dx: the Q6 guard keys each pattern's attribution on committed-graph
+// IDENTITY (the answering scan's commitments[g]), NOT the scan-LOCAL index — so a
+// genuine cross-scan join over two DISTINCT committed graphs (e.g. two k=1 scans, the
+// `[[0],[0]]` alias) requires its non-bnode `join_obligations` entry to be DECLARED,
+// while two scans over the SAME graph stay obligation-free. Still under sq-qhy4: NOT sound.
 // NOT a sound verifier on its own — always follow with verify_manifest. privacy-claims-allow: negative usage; sq-toze.35
 let _required = prefilter_manifest_structure(&manifest, &KeySet::empty(), &RevocationPolicy::accept_version(1))?;
 ```
