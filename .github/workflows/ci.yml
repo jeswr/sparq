@@ -28,8 +28,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # [OPUS-4.8] sq-qcnn.11: scheduled/dispatch NIGHTLY runs get a PER-RUN concurrency group
+  # (keyed on github.run_id) and are NEVER auto-cancelled. Root bug (sq-52su close-note): a
+  # scheduled nightly runs on `refs/heads/main`, the SAME ref a push-to-main run uses, so
+  # both shared the group `ci-CI-refs/heads/main` and `cancel-in-progress: true` let the
+  # next push CANCEL the long-running nightly (the cargo-mutants sweep) after ~5-6 crates —
+  # leaving ~20 crates with no mutation signal. Giving schedule/workflow_dispatch a unique
+  # per-run group (and cancel-in-progress: false) means push-to-main can no longer cancel
+  # them. PR / push / merge_group runs keep the per-ref group + cancel-in-progress so a
+  # superseded build still auto-cancels to save CI minutes (unchanged behaviour for them —
+  # they resolve to the constant `-shared` suffix).
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.run_id || 'shared' }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -2028,20 +2038,22 @@ jobs:
     # sparq-prov (sq-52su, seeded from the mutants-outcomes-nightly artifact of the 2026-06-30
     # scheduled run — counts reproduced identically across four independent nightly artifacts,
     # so they are complete, not truncated). Every OTHER crate in CRATES below is measured +
-    # reported here and gets its ceiling seeded on its first nightly run (download the
-    # mutants-outcomes-nightly artifact, run scripts/mutants-gate.py --seed on each
+    # reported here and gets its ceiling seeded on its first nightly run (download that crate's
+    # mutants-outcomes-nightly-<crate> artifact, run scripts/mutants-gate.py --seed on the
     # outcomes.json, commit — sq-ep3f). The baseline's absence of a crate is NOT a claim that
     # it has zero surviving mutants — it just has not been measured yet.
     #
     # WHY STILL ADVISORY — two blockers to promotion, both HONEST (sq-52su):
-    #   1. SEEDING IS INCOMPLETE. This job shares the workflow concurrency group
-    #      (ci-${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true) with
-    #      push/merge_group runs on the SAME ref (main), so a push to main while the nightly
-    #      is running CANCELS it. The full CRATES list takes longer than the gap between main
-    #      pushes, so every scheduled run to date has been cancelled after ~5-6 crates — the
-    #      later crates (sparq-engine … sparq-policy) have NEVER been measured. Promotion needs
-    #      them seeded first (e.g. run the nightly on a dedicated, non-cancelled ref, shard the
-    #      crate list across nights, or drop this leg from cancel-in-progress).
+    #   1. SEEDING IS INCOMPLETE (but the MECHANISM is now fixed — sq-qcnn.11). Previously this
+    #      job shared the workflow concurrency group (ci-CI-refs/heads/main, cancel-in-progress:
+    #      true) with push/merge_group runs on the SAME ref (main), so a push to main while the
+    #      nightly ran CANCELLED it — every scheduled run to date was cancelled after ~5-6
+    #      crates, and the later crates (sparq-engine … sparq-policy) were NEVER measured. FIXED
+    #      HERE: schedule/dispatch runs now take a PER-RUN workflow concurrency group (top of
+    #      this file) so push-to-main can no longer cancel them, AND the crates are SHARDED
+    #      across a fail-fast:false matrix so each completes in its own budget. The next FULL
+    #      nightly seeds the ~20 remaining crates (per-crate artifacts above → --seed → commit,
+    #      reviewed). Promotion (sq-qcnn.27) waits on that seeded baseline existing.
     #   2. TWO SEEDED CEILINGS ARE STALE. The sparq-canon/sparq-parse ceilings (9 / 14) were
     #      seeded when those crates were small; the current nightly measures ~98 / ~32 surviving
     #      mutants, so `--check` against real outcomes FAILS them today. That is a genuine
@@ -2053,8 +2065,68 @@ jobs:
     needs: nightly-gate
     if: needs.nightly-gate.outputs.fresh == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # [OPUS-4.8] sq-qcnn.11: ONE crate PER MATRIX SHARD so the FULL eligible crate set is
+    # measured every nightly. The old single serial job walked all crates on ONE runner and
+    # (once the concurrency cancel was fixed) would still hit the whole-job timeout on the
+    # heavy crates before reaching the tail — so the later crates (engine … policy) were never
+    # measured. Sharded, each crate gets its OWN 120-min budget in parallel; a slow crate can
+    # no longer starve or truncate the rest.
+    timeout-minutes: 120 # per-crate budget (was the whole-job budget)
     continue-on-error: true # advisory while the baseline seeds; remove when promoted to gating
+    strategy:
+      # fail-fast MUST be false: one crate's failure/timeout must NOT cancel the sibling
+      # shards (that would re-create the "only the first few crates measured" bug). max-parallel
+      # bounds concurrent runners so the nightly does not inflate CI cost unboundedly — 26
+      # crates once a day, at most 8 runners at a time; wall-clock is non-critical for a nightly
+      # and the staggered waves warm the shared rust-cache for later waves.
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        crate:
+          - sparq-canon
+          - sparq-parse
+          - sparq-introspect
+          - sparq-prov
+          - sparq-algos
+          - sparq-core
+          - sparq-engine
+          - sparq-reason
+          - sparq-shacl
+          - sparq-geo
+          - sparq-text
+          - sparq-hdt
+          - sparq-rsp
+          - sparq-sim
+          - sparq-solid
+          - sparq-nlq
+          - sparq-mpc
+          - sparq-serve
+          - sparq-server
+          - sparq-zk
+          - sparq-zk-compose
+          - sparq-vectors
+          - sparq-fedplan
+          - sparq-fedclient
+          - sparq-policy
+          - sparq-substrate
+        include:
+          # [OPUS-4.8] sq-qcnn.3 / sparq-core QUIRK: two crates whose correctness surface is
+          # DEFAULT-OFF are measured WITH their representative features (else cargo-mutants sees
+          # an empty crate + generates zero mutants). `include` MERGES `features` into the
+          # matching base combination without creating a new one (features is not a base key),
+          # mirroring scripts/coverage.sh's measure() PER-CRATE QUIRKS.
+          - crate: sparq-core
+            features: mmap,dict-spill
+          - crate: sparq-substrate
+            features: numeric,join,compare,rows
+    concurrency:
+      # [OPUS-4.8] sq-qcnn.11: per-crate + per-ref concurrency key ("its own concurrency keys")
+      # with cancel-in-progress:false so an overlapping run (e.g. a manual workflow_dispatch
+      # while the scheduled nightly runs) queues this crate's shard rather than cancelling it —
+      # belt-and-braces on top of the per-run WORKFLOW-level group that already stops
+      # push-to-main from cancelling the nightly.
+      group: mutants-${{ github.ref }}-${{ matrix.crate }}
+      cancel-in-progress: false
     permissions:
       contents: read
     steps:
@@ -2069,58 +2141,49 @@ jobs:
         uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # cargo-mutants
         with:
           tool: cargo-mutants@25.3.1
-      - name: Run cargo-mutants per crate + ratchet against the baseline
-        # Per-crate (--package), one mutants.out dir per crate, so a slow/large crate cannot
-        # starve the others and the gate can attribute survivors precisely. The static
-        # exclusions (presence-gated / non-host crates) live in .cargo/mutants.toml. sparq-core
-        # is measured with its representative features (mmap,dict-spill) exactly like the
-        # coverage lane's PER-CRATE QUIRK. The 120-min budget is generous; per-crate failures
-        # are tolerated (continue-on-error) while seeding — the gate verdict is the --check.
+      - name: Run cargo-mutants for this crate + ratchet against the baseline
+        # [OPUS-4.8] sq-qcnn.11: measure exactly THIS shard's crate (--package). The static
+        # exclusions (presence-gated / non-host crates) live in .cargo/mutants.toml.
+        # matrix.features carries the whole-surface features for the two DEFAULT-OFF crates
+        # (sparq-core mmap,dict-spill / sparq-substrate numeric,join,compare,rows) — passed via
+        # env (not inline ${{ }}) to keep it out of the shell-injection surface. A per-crate
+        # failure is tolerated (continue-on-error) while seeding — the gate verdict is --check.
+        env:
+          CRATE: ${{ matrix.crate }}
+          FEATURES: ${{ matrix.features }}
         run: |
           set -o pipefail
-          mkdir -p target/mutants
-          # Crates measured by the mutation ratchet. Mirrors the coverage PER_COMMIT set
-          # MINUS the presence-gated / non-host crates excluded in .cargo/mutants.toml.
-          CRATES="sparq-canon sparq-parse sparq-introspect sparq-prov sparq-algos \
-                  sparq-core sparq-engine sparq-reason sparq-shacl sparq-geo sparq-text \
-                  sparq-hdt sparq-rsp sparq-sim sparq-solid sparq-nlq sparq-mpc \
-                  sparq-serve sparq-server sparq-zk sparq-zk-compose sparq-vectors \
-                  sparq-fedplan sparq-fedclient sparq-policy sparq-substrate"
-          for c in $CRATES; do
-            echo "::group::cargo-mutants $c"
-            feat=()
-            # shellcheck disable=SC2054 # mmap,dict-spill is ONE cargo arg, not two elements
-            [ "$c" = "sparq-core" ] && feat=(--features mmap,dict-spill)
-            # [OPUS-4.8] sq-qcnn.3: the shared eval SUBSTRATE's whole surface is DEFAULT-OFF;
-            # measure its mutants WITH the four features that turn the correctness core ON
-            # (else cargo-mutants sees an empty crate and generates zero mutants). Mirrors the
-            # sparq-core quirk above + scripts/coverage.sh's measure() case for this crate.
-            # shellcheck disable=SC2054 # numeric,join,compare,rows is ONE cargo arg
-            [ "$c" = "sparq-substrate" ] && feat=(--features numeric,join,compare,rows)
-            # Tolerate a per-crate failure while seeding (advisory). The OUTCOMES file is
-            # what the gate reads; a crate that fails to produce one is simply not checked.
-            cargo mutants -p "$c" "${feat[@]}" -o "target/mutants/$c" || \
-              echo "WARN: cargo-mutants $c did not complete cleanly (advisory)"
-            echo "::endgroup::"
-          done
-          # Collect every produced outcomes.json and run the ratchet --check. While advisory
-          # (continue-on-error) a regression here is REPORTED but does not block; promotion to
-          # gating drops continue-on-error + this job's "advisory" name token.
-          OUTCOMES=$(find target/mutants -name outcomes.json)
-          echo "outcomes files: $OUTCOMES"
+          mkdir -p "target/mutants/$CRATE"
+          feat=()
+          [ -n "$FEATURES" ] && feat=(--features "$FEATURES")
+          echo "::group::cargo-mutants $CRATE ${feat[*]}"
+          cargo mutants -p "$CRATE" "${feat[@]}" -o "target/mutants/$CRATE" \
+            || echo "WARN: cargo-mutants $CRATE did not complete cleanly (advisory)"
+          echo "::endgroup::"
+          # Run the ratchet --check on THIS crate's outcomes. --check NEVER fails on an
+          # UNSEEDED crate (it reports it for the next --seed); it exits 1 only if a SEEDED
+          # crate now has MORE survivors than its committed ceiling. While advisory
+          # (continue-on-error) that regression is REPORTED but does not block; promotion to
+          # gating (sq-qcnn.27) drops continue-on-error + this job's "advisory" name token.
+          OUTCOMES=$(find "target/mutants/$CRATE" -name outcomes.json)
+          echo "outcomes: ${OUTCOMES:-<none>}"
           if [ -n "$OUTCOMES" ]; then
             # shellcheck disable=SC2086 # intentional word-split: each path is a separate arg
             python3 scripts/mutants-gate.py --check $OUTCOMES \
               | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            echo "no outcomes produced — nothing to check" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "no outcomes produced for $CRATE — nothing to check" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
       - name: Upload mutation outcomes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: mutants-outcomes-nightly
-          path: target/mutants/*/mutants.out/outcomes.json
+          # [OPUS-4.8] sq-qcnn.11: per-crate artifact name — upload-artifact v4+ REJECTS two
+          # matrix jobs uploading the SAME artifact name. Seeding an unseeded crate: download
+          # its mutants-outcomes-nightly-<crate> artifact + run scripts/mutants-gate.py --seed
+          # on the outcomes.json, then commit bench/mutants-baseline.json (reviewed).
+          name: mutants-outcomes-nightly-${{ matrix.crate }}
+          path: target/mutants/${{ matrix.crate }}/mutants.out/outcomes.json
 
   unsafe-register:
     # [OPUS-4.8] sq-toze.6 / cert gap GX-5: GATING `unsafe`-count RATCHET. This is the
