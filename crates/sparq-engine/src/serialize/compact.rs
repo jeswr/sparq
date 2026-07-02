@@ -61,7 +61,7 @@
 //!   only to node references, never to a value that is already a literal.
 
 use super::{
-    coerce_native, detect_lists, json_escape, ListInfo, NamedGraph, RDF_LANG_STRING, RDF_TYPE, XSD,
+    coerce_native, detect_lists, ListInfo, NamedGraph, RDF_LANG_STRING, RDF_TYPE, XSD,
 };
 use oxrdf::{NamedOrBlankNode, Term, Triple};
 use std::collections::BTreeMap;
@@ -77,109 +77,17 @@ use std::fmt::Write as _;
 const REVERSE_RELOC: &str = "\u{0}sparq-reverse";
 
 // ===========================================================================
-// A tiny, dependency-free JSON value model.
-//
-// `serialize-rdf` must stay free of new deps (serde_json is dev-only), so the
-// Compaction Algorithm — which is naturally expressed over a JSON AST — gets its
-// own minimal value type. Object members preserve insertion order (the JSON-LD
-// writer is order-deterministic), so we key on a `Vec<(String, Json)>` rather
-// than a hash map.
+// JSON value model — the `Json` AST, now single-sourced in the `sparq-jsonld`
+// crate ([OPUS-4.8] sq-oy1f.23, epic sq-oy1f). The type moved out of this module
+// VERBATIM (public API preserved: re-exported here so `compact::Json` — and the
+// `serialize::JsonLdValue` alias in the parent module — resolve unchanged, and the
+// writer emits byte-identical output). Its `write`/`obj`/`set`/`get`/`as_str`/
+// `is_obj` helpers, previously `pub(super)`, are the crate's public `Json` API now.
+// The document-level JSON-LD 1.1 pipeline is built on top of it in beads
+// sq-oy1f.24+; this writer keeps using it exactly as before.
 // ===========================================================================
 
-/// A minimal JSON value used as the working representation for compaction. Object
-/// members preserve insertion order so the emitted document is deterministic.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Json {
-    /// A JSON string.
-    Str(String),
-    /// A pre-rendered JSON scalar token (`true`, `false`, a number). Stored verbatim so
-    /// the writer's lossless native-coercion text is preserved byte-for-byte.
-    Raw(String),
-    /// A JSON array.
-    Arr(Vec<Json>),
-    /// A JSON object, members in insertion order.
-    Obj(Vec<(String, Json)>),
-}
-
-impl Default for Json {
-    /// The default JSON value is an empty object — the natural "no context" value for
-    /// the active context's raw `@context` (`ActiveContext::raw_context`).
-    fn default() -> Json {
-        Json::Obj(Vec::new())
-    }
-}
-
-impl Json {
-    /// Constructs an empty JSON object. `pub(super)` so the sibling `frame` module
-    /// ([OPUS-4.8] sq-oy1f.17) can build framed node objects over the same AST.
-    pub(super) fn obj() -> Json {
-        Json::Obj(Vec::new())
-    }
-
-    /// Inserts/overwrites a member, preserving first-insertion position for an existing key.
-    pub(super) fn set(&mut self, key: &str, val: Json) {
-        if let Json::Obj(members) = self {
-            if let Some(slot) = members.iter_mut().find(|(k, _)| k == key) {
-                slot.1 = val;
-            } else {
-                members.push((key.to_string(), val));
-            }
-        }
-    }
-
-    pub(super) fn get(&self, key: &str) -> Option<&Json> {
-        match self {
-            Json::Obj(members) => members.iter().find(|(k, _)| k == key).map(|(_, v)| v),
-            _ => None,
-        }
-    }
-
-    pub(super) fn as_str(&self) -> Option<&str> {
-        match self {
-            Json::Str(s) => Some(s.as_str()),
-            _ => None,
-        }
-    }
-
-    pub(super) fn is_obj(&self) -> bool {
-        matches!(self, Json::Obj(_))
-    }
-
-    /// Serialises this value as canonical minified JSON into `out`.
-    pub fn write(&self, out: &mut String) {
-        match self {
-            Json::Str(s) => {
-                out.push('"');
-                json_escape(s, out);
-                out.push('"');
-            }
-            Json::Raw(r) => out.push_str(r),
-            Json::Arr(items) => {
-                out.push('[');
-                for (i, it) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    it.write(out);
-                }
-                out.push(']');
-            }
-            Json::Obj(members) => {
-                out.push('{');
-                for (i, (k, v)) in members.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    out.push('"');
-                    json_escape(k, out);
-                    out.push_str("\":");
-                    v.write(out);
-                }
-                out.push('}');
-            }
-        }
-    }
-}
+pub use sparq_jsonld::Json;
 
 // ===========================================================================
 // Active context — the processed caller `@context`.
