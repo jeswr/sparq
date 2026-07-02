@@ -193,6 +193,12 @@ Materialize the authorization view from the access-control documents, then enfor
   `principal auth:deny<Mode> graph` triple, honoured by this enforcement under **deny-overrides**
   (`∪ allow ∖ ∪ deny` — a deny beats any allow for the same principal+target+mode). `…_policy`
   does both sides at once. Same fail-closed rules; no new enforcement engine.
+- **Loud refusal of an unimplementable `odrl:conflict` strategy** ([OPUS-4.8] sq-ihqbl): the bridge
+  implements only `odrl:conflict odrl:prohibit` (deny-overrides). A policy declaring `odrl:perm`,
+  `odrl:invalid` **with** a detected conflict, or an unknown strategy IRI is **REFUSED** — every
+  `materialize_odrl_*` entry materializes nothing and returns `BridgeOutcome { refused: true, .. }`
+  with a `REFUSED (odrl:conflict): …` reason, rather than silently coercing it into deny-overrides.
+  An unset `odrl:conflict` defaults to `prohibit` (not refused). See the `usage-control-policy` skill.
 - `store.materialize_odrl_permission_conditional(&Policy, &Request) -> BridgeOutcome` —
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-hiz4): persists a *faithfully-mappable* ODRL
   constraint as a re-checked ACP `auth:ConditionalGrant` (agent matcher) instead of a

@@ -35,7 +35,9 @@ mod eval;
 pub mod model;
 mod parse;
 
-pub use compare::{contains, detect_conflicts, Conflict, Containment, Overlap};
+pub use compare::{
+    conflict_admissibility, contains, detect_conflicts, Conflict, Containment, Overlap,
+};
 pub use eval::{
     cmp_datetime, datetime_status, evaluate, matched_prohibition, prohibition_status,
     purpose_status, recipient_status, spatial_status, DateTimeMatch, Decision, ProhibitionStatus,
@@ -43,8 +45,8 @@ pub use eval::{
     ODRL_RECIPIENT, ODRL_SPATIAL,
 };
 pub use model::{
-    Action, Constraint, ConstraintNode, Duty, LogicalConstraint, LogicalOperator, Operator, Policy,
-    Rule, Value, ODRL_NS,
+    Action, ConflictStrategy, Constraint, ConstraintNode, Duty, LogicalConstraint, LogicalOperator,
+    Operator, Policy, Rule, Value, ODRL_NS,
 };
 pub use parse::{parse_policy, parse_policy_str};
 

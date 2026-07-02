@@ -18,8 +18,8 @@
 //! [OPUS-4.8]
 
 use crate::model::{
-    Action, Constraint, ConstraintNode, Duty, LogicalConstraint, LogicalOperator, Operator, Policy,
-    Rule, Value, ODRL_NS,
+    Action, ConflictStrategy, Constraint, ConstraintNode, Duty, LogicalConstraint, LogicalOperator,
+    Operator, Policy, Rule, Value, ODRL_NS,
 };
 use oxrdf::{Literal, Term};
 use sparq_core::Graph;
@@ -48,11 +48,54 @@ pub fn parse_policy(graph: &Graph) -> Result<Policy, String> {
     let iri = policy_iri(graph)?;
     let permissions = rules(graph, "permission", true)?;
     let prohibitions = rules(graph, "prohibition", false)?;
+    let conflict = policy_conflict(graph)?;
     Ok(Policy {
         iri,
         permissions,
         prohibitions,
+        conflict,
     })
+}
+
+/// Extract the policy's declared `odrl:conflict` conflict-resolution strategy, if any.
+/// [OPUS-4.8] sq-ihqbl.
+///
+/// The value is classified via [`ConflictStrategy::from_iri`], so an unrecognised term
+/// is preserved as [`ConflictStrategy::Unknown`] (and later *refused*) rather than
+/// silently dropped.
+///
+/// **Fail-closed on ambiguity.** For an authorization guard it is unsound to take only
+/// the first-sorted `?c`: a benign strategy that happens to sort first (e.g.
+/// `odrl:prohibit`) would mask a co-asserted unimplementable one (`odrl:perm`, an unknown
+/// IRI), and the graph would be mis-classified as admissible. So we gather **every**
+/// distinct declared strategy and *refuse* (`Err`) when more than one is present — a graph
+/// declaring multiple conflicting resolution strategies is ambiguous and cannot be honoured
+/// deterministically. (Any multi-value set necessarily contains a non-`Prohibit` strategy,
+/// so this only ever refuses a graph that declares a non-default strategy, never a benign
+/// deny-overrides one.) We deliberately do **not** tie `?p` to a specific policy node: an
+/// unrelated subject asserting `odrl:conflict` then contributes to the refusal set, which is
+/// strictly the *more* fail-closed direction. [OPUS-4.8] sq-ihqbl.
+fn policy_conflict(graph: &Graph) -> Result<Option<ConflictStrategy>, String> {
+    let res = sparq_engine::query(
+        graph,
+        &format!("SELECT DISTINCT ?c WHERE {{ ?p <{ODRL_NS}conflict> ?c }} ORDER BY ?c"),
+    )?;
+    let mut strategies: Vec<ConflictStrategy> = res
+        .rows
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .map(|t| ConflictStrategy::from_iri(&term_str(&t)))
+        .collect();
+    strategies.dedup();
+    match strategies.len() {
+        0 => Ok(None),
+        1 => Ok(Some(strategies.remove(0))),
+        _ => Err(format!(
+            "policy declares multiple conflicting `odrl:conflict` strategies ({strategies:?}); \
+             an ambiguous conflict-resolution set is refused (fail-closed) rather than resolved \
+             to whichever term sorts first"
+        )),
+    }
 }
 
 /// A stable string key identifying a rule/constraint/duty node, used to group

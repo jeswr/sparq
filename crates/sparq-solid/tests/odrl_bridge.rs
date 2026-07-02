@@ -2125,3 +2125,126 @@ fn conditional_deny_mixed_constraint_falls_back_one_shot() {
     // The frozen one-shot deny names carol via auth:denyRead.
     assert_eq!(out.deny_triple.as_ref().map(|t| t.1.contains("denyRead")), Some(true), "{out:?}");
 }
+
+// ===========================================================================
+// [OPUS-4.8] sq-ihqbl — the bridge LOUDLY REFUSES a policy whose declared
+// `odrl:conflict` strategy it cannot faithfully honour (fail-closed), rather than
+// silently processing it as deny-overrides. The bridge implements exactly one strategy
+// (`odrl:prohibit`); `odrl:perm`, `odrl:invalid`-with-conflict, and any unknown strategy
+// are rejected outright. NON-VACUOUS: every refusal policy below has a conflicting
+// permission+prohibition on the SAME subject, so under the pre-fix lenient behaviour
+// `materialize_policy` would have materialized the deny (deny-overrides) — here it
+// materializes NOTHING and flags `refused`.
+// ===========================================================================
+
+/// A conflicting modify-permission + modify-prohibition on N1 for alice, with the given
+/// `odrl:conflict` clause spliced in (empty = leave unset).
+fn conflicting_write_policy(conflict_clause: &str) -> sparq_policy::Policy {
+    let ttl = format!(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/both> a odrl:Set ;
+    {conflict_clause}
+    odrl:permission [
+        odrl:action odrl:modify ;
+        odrl:target <https://pod.ex/notes/n1> ;
+        odrl:assignee <https://alice.ex/card#me> ] ;
+    odrl:prohibition [
+        odrl:action odrl:modify ;
+        odrl:target <https://pod.ex/notes/n1> ;
+        odrl:assignee <https://alice.ex/card#me> ] .
+"#
+    );
+    parse_policy_str(&ttl, "turtle").expect("policy parses")
+}
+
+/// SUPPORTED strategy: an explicit `odrl:conflict odrl:prohibit` (deny-overrides — the
+/// one strategy the bridge implements) still materializes the deny exactly as before.
+/// Proves the gate does not over-refuse the strategy it does support.
+#[test]
+fn explicit_prohibit_strategy_still_materializes_deny() {
+    let mut g = pod();
+    let req = Request::new(odrl("modify")).on(N1).by(ALICE);
+    let out = materialize_policy(&mut g, &conflicting_write_policy("odrl:conflict odrl:prohibit ;"), &req);
+    assert!(!out.refused, "the supported strategy is not refused: {out:?}");
+    assert!(out.prohibited, "deny-overrides still materializes the deny: {out:?}");
+    assert!(!out.granted, "the permit is overridden by the prohibition: {out:?}");
+    assert!(out.deny_triple.is_some(), "{out:?}");
+}
+
+/// UNSUPPORTED strategy `odrl:perm` (permissions override prohibitions) → REFUSED.
+/// Non-vacuous: without the fix this policy materializes a deny (deny-overrides); with
+/// the fix it materializes NOTHING and says so loudly.
+#[test]
+fn perm_strategy_is_refused_and_materializes_nothing() {
+    let mut g = pod();
+    let req = Request::new(odrl("modify")).on(N1).by(ALICE);
+    let out = materialize_policy(&mut g, &conflicting_write_policy("odrl:conflict odrl:perm ;"), &req);
+
+    assert!(out.refused, "odrl:perm must be REFUSED, not silently enforced: {out:?}");
+    assert!(!out.granted && !out.prohibited, "a refusal materializes neither side: {out:?}");
+    assert!(out.grant_triple.is_none() && out.deny_triple.is_none(), "nothing emitted: {out:?}");
+    assert!(
+        out.reasons.iter().any(|r| r.contains("REFUSED") && r.contains("perm")),
+        "the refusal reason is loud and names the strategy: {out:?}",
+    );
+
+    // End-to-end: alice gets NO access through the real enforcement (fail-closed) — the
+    // refusal never materialized the (would-be) grant, and the deny that the old path
+    // would have written is absent because the whole policy was rejected.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_policy(&conflicting_write_policy("odrl:conflict odrl:perm ;"), &req).refused);
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    assert!(
+        store.accessible(&alice, Mode::Write).is_empty(),
+        "a refused policy grants nothing (fail-closed)",
+    );
+}
+
+/// `odrl:conflict odrl:invalid` WITH a detected conflict → the policy is void as a whole
+/// → REFUSED (materializes nothing). Non-vacuous the same way.
+#[test]
+fn invalid_strategy_with_conflict_is_refused() {
+    let mut g = pod();
+    let req = Request::new(odrl("modify")).on(N1).by(ALICE);
+    let out = materialize_policy(&mut g, &conflicting_write_policy("odrl:conflict odrl:invalid ;"), &req);
+    assert!(out.refused, "odrl:invalid + conflict must be REFUSED: {out:?}");
+    assert!(!out.granted && !out.prohibited, "{out:?}");
+    assert!(out.reasons.iter().any(|r| r.contains("REFUSED") && r.contains("invalid")), "{out:?}");
+}
+
+/// An UNKNOWN `odrl:conflict` strategy IRI → REFUSED. Also verifies the single-side
+/// entry points (`materialize_permission` / `materialize_prohibition`) refuse too.
+#[test]
+fn unknown_strategy_is_refused_on_every_entry_point() {
+    let pol = conflicting_write_policy("odrl:conflict <urn:custom:mediate> ;");
+    let req = Request::new(odrl("modify")).on(N1).by(ALICE);
+
+    let mut g1 = pod();
+    let policy_out = materialize_policy(&mut g1, &pol, &req);
+    assert!(policy_out.refused, "materialize_policy refuses unknown strategy: {policy_out:?}");
+    assert!(
+        policy_out.reasons.iter().any(|r| r.contains("urn:custom:mediate")),
+        "the refusal names the offending IRI: {policy_out:?}",
+    );
+
+    let mut g2 = pod();
+    assert!(materialize_permission(&mut g2, &pol, &req).refused, "permission side refuses too");
+
+    let mut g3 = pod();
+    let deny_out = materialize_prohibition(&mut g3, &pol, &req);
+    assert!(deny_out.refused, "prohibition side refuses too: {deny_out:?}");
+    assert!(!deny_out.prohibited, "and materializes no deny under an unimplementable strategy");
+}
+
+/// Regression: a policy that declares NO `odrl:conflict` is unaffected — the unset
+/// default is the implemented deny-overrides, so the existing deny materializes as before
+/// (the bridge's core use case is not refused).
+#[test]
+fn unset_conflict_is_not_refused() {
+    let mut g = pod();
+    let req = Request::new(odrl("modify")).on(N1).by(ALICE);
+    let out = materialize_policy(&mut g, &conflicting_write_policy(""), &req);
+    assert!(!out.refused, "an undeclared conflict strategy defaults to deny-overrides: {out:?}");
+    assert!(out.prohibited, "the deny still materializes: {out:?}");
+}
