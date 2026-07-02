@@ -28,13 +28,17 @@
 //!
 //! ## Bounded blow-up: greedy fallback above a budget
 //!
-//! DPccp is worst-case exponential (a clique BGP has `2ⁿ−1` connected subgraphs).
-//! To keep planning cheap this module counts the connected subgraphs first and, if
-//! the count would exceed a configurable **budget** (`DpConfig::max_subgraphs`),
-//! returns `None` so the caller transparently falls back to greedy GOO. It also
-//! bails (returns `None`) when the BGP join graph is **disconnected** (a deliberate
-//! cross-product query, or an all-constant pattern with no variables) — those have
-//! no single connected plan, and the greedy path already handles cross products.
+//! DPccp is worst-case exponential (a clique BGP has `2ⁿ−1` connected subgraphs, and
+//! ≈`3ⁿ` csg/cmp pairs). To keep planning cheap this module counts the connected
+//! subgraphs first and, if the count would exceed a configurable **budget**
+//! (`DpConfig::max_subgraphs`), returns `None` so the caller transparently falls back
+//! to greedy GOO. Because the pair count grows *super-linearly* in the subgraph count
+//! (≈`#csg^1.585`), a second guard caps emitted csg/cmp pairs at `max_subgraphs`
+//! times `PAIR_BUDGET_FACTOR` — that is what actually bounds the `pairs` allocation
+//! and sort, even for a very large budget. It also bails (returns `None`) when the BGP
+//! join graph is **disconnected** (a deliberate cross-product query, or an all-constant
+//! pattern with no variables) — those have no single connected plan, and the greedy
+//! path already handles cross products.
 //!
 //! ## Opt-in twice over
 //!
@@ -58,6 +62,16 @@ const DEFAULT_MAX_SUBGRAPHS: usize = 4096;
 /// this the budget would trip first anyway. A BGP with more patterns than this is
 /// planned greedily.
 const MAX_PATTERNS: usize = 63;
+
+/// Multiplier that derives the csg/cmp **pair** budget from `max_subgraphs`. The
+/// connected-subgraph count (the DP-table size) bounds `max_subgraphs`, but the number
+/// of csg/cmp *pairs* the DP materialises grows super-linearly in it (≈`#csg^1.585` on
+/// a clique, since `3ⁿ = (2ⁿ)^{log₂3}`), so the subgraph budget alone does *not* bound
+/// the `pairs` allocation + sort. Capping emitted pairs at `max_subgraphs *`
+/// this factor makes `max_subgraphs` reliably bound planner resource usage while still
+/// admitting the documented dense-`~12`-pattern case (a 12-clique emits `261 625`
+/// unordered pairs `< 4096 * 128`); denser/larger graphs abort to greedy GOO.
+const PAIR_BUDGET_FACTOR: usize = 128;
 
 // ---- thread-local installation (mirrors cs::with_cs_table) --------------------
 
@@ -304,34 +318,52 @@ impl QueryGraph {
     /// (disjoint, each connected, joined by ≥1 edge) exactly once, in an order where
     /// both components are enumerated before their union — the emission order DPccp
     /// relies on so `best[s1]` / `best[s2]` are final when the pair is combined.
-    fn enumerate_csg_cmp_pairs(&self, emit: &mut dyn FnMut(u64, u64)) {
+    ///
+    /// Returns `false` (aborting the walk) as soon as more than `cap` pairs have been
+    /// emitted, so the caller can bound the `pairs` allocation + sort even though the
+    /// pair count grows super-linearly in the connected-subgraph budget. Generic over
+    /// `F: FnMut` (rather than `&mut dyn FnMut`) so the hot per-emission call inlines
+    /// and carries no vtable indirection.
+    fn enumerate_csg_cmp_pairs<F: FnMut(u64, u64)>(&self, cap: usize, emit: &mut F) -> bool {
+        let mut count = 0usize;
         for i in (0..self.n).rev() {
             let s1 = 1u64 << i;
-            self.emit_csg_cmp(s1, emit);
-            self.enumerate_csg_rec(s1, self.b(i), emit);
+            if !self.emit_csg_cmp(s1, cap, &mut count, emit) {
+                return false;
+            }
+            if !self.enumerate_csg_rec(s1, self.b(i), cap, &mut count, emit) {
+                return false;
+            }
         }
+        true
     }
 
     /// Grows the connected subgraph `s` (whose minimum node fixed the outer seed),
-    /// emitting the complements of each larger connected subgraph it reaches.
-    fn enumerate_csg_rec(&self, s: u64, x: u64, emit: &mut dyn FnMut(u64, u64)) {
+    /// emitting the complements of each larger connected subgraph it reaches. Returns
+    /// `false` once `*count` exceeds `cap`.
+    fn enumerate_csg_rec<F: FnMut(u64, u64)>(&self, s: u64, x: u64, cap: usize, count: &mut usize, emit: &mut F) -> bool {
         let n = self.neighborhood(s) & !x;
         let mut sub = n;
         while sub != 0 {
-            self.emit_csg_cmp(s | sub, emit);
+            if !self.emit_csg_cmp(s | sub, cap, count, emit) {
+                return false;
+            }
             sub = sub.wrapping_sub(1) & n;
         }
         let mut sub = n;
         while sub != 0 {
-            self.enumerate_csg_rec(s | sub, x | n, emit);
+            if !self.enumerate_csg_rec(s | sub, x | n, cap, count, emit) {
+                return false;
+            }
             sub = sub.wrapping_sub(1) & n;
         }
+        true
     }
 
     /// For a connected subgraph `s1`, enumerates and emits all its connected
     /// complements (each with minimum node greater than `min(s1)`, so each unordered
-    /// pair is emitted once).
-    fn emit_csg_cmp(&self, s1: u64, emit: &mut dyn FnMut(u64, u64)) {
+    /// pair is emitted once). Returns `false` once `*count` exceeds `cap`.
+    fn emit_csg_cmp<F: FnMut(u64, u64)>(&self, s1: u64, cap: usize, count: &mut usize, emit: &mut F) -> bool {
         let min = s1.trailing_zeros() as usize;
         let x = s1 | self.b(min);
         let nbh = self.neighborhood(s1) & !x;
@@ -347,24 +379,39 @@ impl QueryGraph {
             m &= !(1u64 << v);
             let s2 = 1u64 << v;
             emit(s1, s2);
-            self.enumerate_cmp_rec(s1, s2, x | (self.b(v) & nbh), emit);
+            *count += 1;
+            if *count > cap {
+                return false;
+            }
+            if !self.enumerate_cmp_rec(s1, s2, x | (self.b(v) & nbh), cap, count, emit) {
+                return false;
+            }
         }
+        true
     }
 
     /// Grows the connected complement `s2` of `s1`, emitting `(s1, s2∪s')` for each
-    /// larger connected complement reachable within the allowed node set.
-    fn enumerate_cmp_rec(&self, s1: u64, s2: u64, x: u64, emit: &mut dyn FnMut(u64, u64)) {
+    /// larger connected complement reachable within the allowed node set. Returns
+    /// `false` once `*count` exceeds `cap`.
+    fn enumerate_cmp_rec<F: FnMut(u64, u64)>(&self, s1: u64, s2: u64, x: u64, cap: usize, count: &mut usize, emit: &mut F) -> bool {
         let n = self.neighborhood(s2) & !x;
         let mut sub = n;
         while sub != 0 {
             emit(s1, s2 | sub);
+            *count += 1;
+            if *count > cap {
+                return false;
+            }
             sub = sub.wrapping_sub(1) & n;
         }
         let mut sub = n;
         while sub != 0 {
-            self.enumerate_cmp_rec(s1, s2 | sub, x | n, emit);
+            if !self.enumerate_cmp_rec(s1, s2 | sub, x | n, cap, count, emit) {
+                return false;
+            }
             sub = sub.wrapping_sub(1) & n;
         }
+        true
     }
 }
 
@@ -379,14 +426,19 @@ struct Entry {
 ///
 /// * there are fewer than 2 patterns (nothing to order) or more than `MAX_PATTERNS`;
 /// * the BGP join graph is disconnected (no single connected plan; greedy does the
-///   cross products); or
-/// * the connected-subgraph count exceeds `max_subgraphs` (budget guard).
+///   cross products);
+/// * the connected-subgraph count exceeds `max_subgraphs` (DP-table budget guard); or
+/// * the csg/cmp pair count exceeds `max_subgraphs * PAIR_BUDGET_FACTOR` (a separate
+///   guard: pairs grow super-linearly in the subgraph count, so this is what bounds the
+///   `pairs` allocation + sort even for a very large `max_subgraphs`).
 pub(crate) fn plan(qg: &QueryGraph, max_subgraphs: usize) -> Option<JoinTree> {
     let n = qg.n;
     if !(2..=MAX_PATTERNS).contains(&n) || max_subgraphs == 0 {
         return None;
     }
-    let full: u64 = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
+    // `n <= MAX_PATTERNS` (63) after the guard above, so the shift never overflows and
+    // the full set is always `(1 << n) - 1` — no `n == 64` special case is reachable.
+    let full: u64 = (1u64 << n) - 1;
     if !qg.is_connected(full) {
         return None;
     }
@@ -399,8 +451,15 @@ pub(crate) fn plan(qg: &QueryGraph, max_subgraphs: usize) -> Option<JoinTree> {
     // exactly the right pairs; processing by increasing `|s1∪s2|` makes the DP
     // trivially correct — both components (which are strictly smaller) are always
     // finalised before their union is built, with no reliance on emission order.
+    //
+    // The pair count grows super-linearly in `count_csg` (≈`#csg^1.585` on a clique),
+    // so the DP-table budget above does not bound this allocation + sort; cap emitted
+    // pairs at `max_subgraphs * PAIR_BUDGET_FACTOR` and fall back to greedy on overflow.
+    let pair_cap = max_subgraphs.saturating_mul(PAIR_BUDGET_FACTOR);
     let mut pairs: Vec<(u64, u64)> = Vec::new();
-    qg.enumerate_csg_cmp_pairs(&mut |s1, s2| pairs.push((s1, s2)));
+    if !qg.enumerate_csg_cmp_pairs(pair_cap, &mut |s1, s2| pairs.push((s1, s2))) {
+        return None;
+    }
     pairs.sort_by_key(|&(s1, s2)| (s1 | s2).count_ones());
 
     let mut best: FxHashMap<u64, Entry> = FxHashMap::default();
@@ -556,6 +615,25 @@ mod tests {
         let (cost, span) = tree_cost(&g, &tree);
         assert_eq!(span, 0b11111);
         assert_eq!(Some(cost), ref_opt_cost(&g, 5));
+    }
+
+    #[test]
+    fn pair_budget_aborts_enumeration() {
+        // The csg/cmp pair count grows ≈3ⁿ while the subgraph budget bounds ≈2ⁿ, so the
+        // pair cap is a distinct guard. A 6-clique emits 301 unordered pairs; enumerating
+        // with a tiny cap must abort early and never materialise more than `cap + 1`,
+        // so `max_subgraphs` reliably bounds the planner's `pairs` allocation.
+        let g = qg(&[10.0; 6], &[(0b111111, 5.0)]);
+        let mut pairs = Vec::new();
+        let completed = g.enumerate_csg_cmp_pairs(4, &mut |s1, s2| pairs.push((s1, s2)));
+        assert!(!completed, "a tiny pair cap must abort the enumeration");
+        assert!(pairs.len() <= 5, "aborted enumeration must stay within cap+1, got {}", pairs.len());
+
+        // With a generous cap the same enumeration completes and yields every pair.
+        let mut all = Vec::new();
+        let completed = g.enumerate_csg_cmp_pairs(usize::MAX, &mut |s1, s2| all.push((s1, s2)));
+        assert!(completed, "a generous cap must let the full enumeration complete");
+        assert_eq!(all.len(), 301, "6-clique has (3⁶−2⁷+1)/2 = 301 unordered csg/cmp pairs");
     }
 
     #[test]
