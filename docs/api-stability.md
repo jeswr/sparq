@@ -127,8 +127,7 @@ under an opt-in feature flag unless that specific item is listed as tier-1.
 
 ## Deprecation policy
 
-Once a stable line exists, removing or breaking a tier-1 item follows a **deprecate-then-
-remove** window:
+Once a stable line exists, removing or breaking a tier-1 item follows a **deprecate-then-remove** window:
 
 1. **Announce.** Mark the item `#[deprecated(since = "...", note = "...")]` with a note that
    names the replacement and points at this document. The deprecation ships in a minor
