@@ -529,6 +529,12 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   // changes (warm / import / update) so a stale closure is rebuilt automatically.
   const reasonedStoreRef = React.useRef<WasmStore | null>(null);
   const reasonedKeyRef = React.useRef<string | null>(null);
+  // [OPUS-4.8] sq-tp1m — the SINGLE-FLIGHT slot for an in-flight closure build, keyed by the
+  // same `mode:epoch`. Overlapping callers (the applyInferenceMode effect + a run(), or two
+  // run()s) that request the same key while the first materialisation is still awaiting share
+  // this one Promise instead of each re-running the (expensive) materialize + racing to
+  // overwrite reasonedStoreRef/reasonedKeyRef (mirrors modulePromise in reason-wasm.ts).
+  const reasonedBuildRef = React.useRef<{ key: string; promise: Promise<WasmStore> } | null>(null);
   const storeEpochRef = React.useRef(0);
   const [storeEpoch, setStoreEpoch] = React.useState(0);
   // [OPUS-4.8] sq-tp1m — a generation counter bumped on every applyInferenceMode invocation. An
@@ -617,17 +623,35 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         throw new Error("The engine is not ready yet — wait for the store to warm.");
       }
       const key = `${mode}:${storeEpochRef.current}`;
+      // Completed-closure cache hit: reuse the already-materialised store.
       if (reasonedKeyRef.current === key && reasonedStoreRef.current) {
         return reasonedStoreRef.current;
       }
-      const reasoner = await loadReasoner();
-      // The whole-dataset N-Quads snapshot; the reasoner folds named graphs into the default graph.
-      const snapshot = storeToNQuads(base);
-      const closure = reasoner.materialize(snapshot, "nquads", modeToProfile(mode));
-      const reasoned = Store.load(closure, "ntriples");
-      reasonedStoreRef.current = reasoned;
-      reasonedKeyRef.current = key;
-      return reasoned;
+      // Single-flight: a build for this exact key is already in flight — await THAT promise
+      // rather than starting a second materialize() (the most expensive work) and racing to
+      // overwrite the refs. Once it resolves the completed-closure cache above serves the rest.
+      const inflight = reasonedBuildRef.current;
+      if (inflight && inflight.key === key) {
+        return inflight.promise;
+      }
+      const promise = (async () => {
+        const reasoner = await loadReasoner();
+        // The whole-dataset N-Quads snapshot; the reasoner folds named graphs into the default graph.
+        const snapshot = storeToNQuads(base);
+        const closure = reasoner.materialize(snapshot, "nquads", modeToProfile(mode));
+        const reasoned = Store.load(closure, "ntriples");
+        reasonedStoreRef.current = reasoned;
+        reasonedKeyRef.current = key;
+        return reasoned;
+      })();
+      reasonedBuildRef.current = { key, promise };
+      try {
+        return await promise;
+      } finally {
+        // Clear the in-flight slot only if it is still ours (a newer key may have replaced it),
+        // so a failed build releases the slot and a later attempt can retry.
+        if (reasonedBuildRef.current?.key === key) reasonedBuildRef.current = null;
+      }
     },
     [],
   );
@@ -643,6 +667,16 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         reasonedStoreRef.current = null;
         reasonedKeyRef.current = null;
         setInferenceStatus({ kind: "off" });
+        return;
+      }
+      // The engine/store may not have warmed yet — e.g. a workspace REOPENED with inference
+      // already on runs this before the mount warm-up seeds the store. That is a WARMING state,
+      // not a reasoner failure: show `loading` and let the storeEpoch bump (fired when the store
+      // warms) re-run this effect and retry. Reserve `error` for a genuine bundle-load /
+      // materialisation failure, so the toolbar never flashes "reasoner unavailable" over a
+      // reasoner that is in fact fine.
+      if (!storeRef.current || !ctorRef.current) {
+        setInferenceStatus({ kind: "loading" });
         return;
       }
       const cachedKey = `${mode}:${storeEpochRef.current}`;
