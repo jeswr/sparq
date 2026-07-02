@@ -14,7 +14,7 @@ name: Benchmarks
 #   PUBLIC DASHBOARD — REPO-OWNER TOGGLE REQUIRED (one-time, can't be set from a workflow):
 #   Settings → Pages → "Build and deployment" → Source = "Deploy from a branch",
 #   Branch = `benchmark-data` / `/ (root)` → Save. The chart then renders at
-#   https://jeswr.github.io/sparq/dev/bench (the action writes index.html + data.js under dev/bench
+#   https://sparq.jeswr.org/dev/bench (the action writes index.html + data.js under dev/bench
 #   on the benchmark-data branch — see gh-pages-branch + benchmark-data-dir-path below). No new
 #   branch is created; Pages just serves the existing benchmark-data branch.
 on:
@@ -349,7 +349,7 @@ jobs:
           auto-push: ${{ github.ref == 'refs/heads/main' }}
           # The history branch doubles as the Pages source: the action writes index.html + data.js
           # under dev/bench here, so once the owner points Settings → Pages at branch benchmark-data
-          # /(root) the dashboard renders at https://jeswr.github.io/sparq/dev/bench (see header).
+          # /(root) the dashboard renders at https://sparq.jeswr.org/dev/bench (see header).
           gh-pages-branch: benchmark-data
           benchmark-data-dir-path: dev/bench
           # [OPUS-4.8] sq-3g6q: CAP the retained history. github-action-benchmark accumulates EVERY
@@ -419,7 +419,7 @@ jobs:
           done
           # [OPUS-4.8] root redirect (sq-pages-root): the bare Pages root would 404 because the
           # dashboard lives under dev/bench/. Seed bench/dashboard/root-redirect.html to the
-          # benchmark-data branch ROOT as index.html so https://jeswr.github.io/sparq/ bounces to
+          # benchmark-data branch ROOT as index.html so https://sparq.jeswr.org/ bounces to
           # dev/bench/. github-action-benchmark only writes data.js + dev/bench/index.html (never a
           # root index.html), so this coexists with its data and is preserved across runs.
           if [ ! -f "$tmp/index.html" ] || ! cmp -s "$src/root-redirect.html" "$tmp/index.html"; then

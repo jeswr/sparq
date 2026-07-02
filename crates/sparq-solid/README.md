@@ -112,7 +112,7 @@ rather than trapping (rest of `MaterializeStats` unchanged); a wasm32 runtime sm
 - **API reference** — [docs.rs/sparq-solid](https://docs.rs/sparq-solid); walk-through `cargo run -p
   sparq-solid --example quickstart --release`. Migrating from Oxigraph?
   [`docs/migrating-from-oxigraph.md`](../../docs/migrating-from-oxigraph.md).
-- **Performance / Contribute** — [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench)
+- **Performance / Contribute** — [benchmarks dashboard](https://sparq.jeswr.org/dev/bench)
   (`--example bench`); [`AGENTS.md`](../../AGENTS.md), [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

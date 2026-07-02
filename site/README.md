@@ -1,7 +1,7 @@
 # sparq feature-showcase site
 
 The live-interactive feature-demonstration website for sparq, served at
-**https://jeswr.github.io/sparq/**. A Next.js static export (`output: "export"`)
+**https://sparq.jeswr.org/**. A Next.js static export (`output: "export"`)
 styled as a sibling of [`jeswr/solid-pod-manager`](https://github.com/jeswr/solid-pod-manager):
 Tailwind v4 theme-in-CSS, the privacy-first teal OKLCH palette, shadcn (`radix-nova`),
 Inter, `--radius 0.7rem`. Design record: `research/feature-showcase-site-design.md`.
@@ -86,7 +86,7 @@ import line — the #981 lazy-load posture:
 
 ```html
 <script type="module">
-  import { Dataset, DataFactory as DF } from "https://jeswr.github.io/sparq/wasm/sparq.js";
+  import { Dataset, DataFactory as DF } from "https://sparq.jeswr.org/wasm/sparq.js";
   const ds = await Dataset.fromString('<a> <b> "x" .', "ntriples"); // wasm lazy-fetched HERE
   ds.add(DF.quad(DF.namedNode("a"), DF.namedNode("b"), DF.literal("y")));
   console.log(ds.size, ds.store.queryBoolean("ASK { ?s ?p ?o }"));
@@ -103,7 +103,7 @@ use; the ~MB `.wasm` is fetched lazily by that init, not by the script tag:
 ```html
 <script type="module">
   // basePath-aware: '/sparq/...' on GitHub Pages, '/...' under the Tauri webview root.
-  import init, { Store } from "https://jeswr.github.io/sparq/wasm/sparq_wasm.js";
+  import init, { Store } from "https://sparq.jeswr.org/wasm/sparq_wasm.js";
   await init(); // lazily fetches + instantiates sparq_wasm_bg.wasm (off the critical path)
   const store = Store.load("<a> <b> <c> .", "ntriples");
   console.log(store.query("SELECT * WHERE { ?s ?p ?o }"));
@@ -122,12 +122,14 @@ prefix stay in lockstep.
 
 | Host | Command | `basePath` | When |
 |---|---|---|---|
-| **GitHub Pages** (default) | `npm run build` | `/sparq` | served under `https://jeswr.github.io/sparq/` — every asset/route is `/sparq`-prefixed |
+| **GitHub Pages** @ custom-domain root (production) | `cross-env NEXT_PUBLIC_BASE_PATH= npm run build` (the Pages workflow sets `NEXT_PUBLIC_BASE_PATH=''`) | `''` (root-relative) | served at `https://sparq.jeswr.org/` (org-migration cutover, `sq-uj38w`) — every asset/route is root-relative (`/_next/…`) |
 | **Tauri 2 webview** | `npm run build:tauri` (= `cross-env NEXT_PUBLIC_BASE_PATH= npm run build`) | `''` (root-relative) | the desktop GUI serves the export from the `tauri://` root, where a `/sparq` prefix would 404 |
+| **Legacy sub-path** (fallback) | `npm run build` (no env) | `/sparq` | the historical `jeswr.github.io/sparq/` sub-path; kept only as the unset-env fallback, not used in production |
 
-The env var is read once in `next.config.ts`: **unset** keeps the historical `/sparq` default
-(no caller change); an explicit **empty string** selects the root-relative export; a malformed
-value falls back to the Pages default. The `build:tauri` script uses [`cross-env`](https://www.npmjs.com/package/cross-env)
+The env var is read once in `next.config.ts`: **unset** keeps the historical `/sparq` sub-path as a
+LEGACY fallback (no test/caller change); an explicit **empty string** selects the root-relative
+export used by BOTH production Pages (custom domain) and Tauri; a malformed value falls back to the
+legacy default. The `build:tauri` script uses [`cross-env`](https://www.npmjs.com/package/cross-env)
 (`cross-env NEXT_PUBLIC_BASE_PATH= npm run build`) so the env var is set to an **empty string**
 identically on Linux, macOS, and Windows `cmd.exe` — the bare `NEXT_PUBLIC_BASE_PATH='' npm run build`
 inline-prefix form is a Unix-shell idiom that `cmd.exe` cannot parse. The GUI's

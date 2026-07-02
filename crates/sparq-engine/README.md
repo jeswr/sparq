@@ -112,7 +112,7 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
 - **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md) and the planning /
   parallelism verdicts in [`research/`](../../research).
 - **Performance** — numbers live on the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench), not in docs.
+  [benchmarks dashboard](https://sparq.jeswr.org/dev/bench), not in docs.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

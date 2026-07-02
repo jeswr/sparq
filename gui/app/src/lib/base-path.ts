@@ -2,7 +2,7 @@
 //
 // The operational GUI frontend is served under TWO targets (see gui/app/next.config.ts):
 //   * the Tauri 2 desktop webview — from the `tauri://` root, where a `/prefix` 404s (basePath '');
-//   * the hosted "Try the GUI live" web target — under a sub-path (default `/sparq/app`).
+//   * the hosted "Try the GUI live" web target — under a sub-path (default `/app`).
 //
 // `next.config.ts` env-switches `basePath`/`assetPrefix` off `NEXT_PUBLIC_BASE_PATH`, so Next
 // rewrites `_next/*` chunk URLs and `<Link href>` routes automatically. A HARDCODED absolute
@@ -14,20 +14,20 @@
  * The configured base path, derived from `NEXT_PUBLIC_BASE_PATH` (the same switch
  * `next.config.ts` uses):
  *
- *   * **unset** → `"/sparq/app"` (the hosted-web default);
+ *   * **unset** → `"/app"` (the hosted-web default);
  *   * **`""`** → `""` (the Tauri root-relative export);
  *   * a leading-`/` value → that value (an explicit deploy prefix);
- *   * any malformed value → falls back to `"/sparq/app"`.
+ *   * any malformed value → falls back to `"/app"`.
  *
  * Returns `""` (not `"/"`) for the root, so {@link withBasePath} composes a clean
  * `${basePath}/foo` without a double slash.
  */
 export function basePath(): string {
   const raw = process.env.NEXT_PUBLIC_BASE_PATH;
-  if (raw === undefined) return "/sparq/app";
+  if (raw === undefined) return "/app";
   if (raw === "") return "";
   if (raw.startsWith("/")) return raw.replace(/\/$/, ""); // strip any trailing slash
-  return "/sparq/app";
+  return "/app";
 }
 
 /** Prefix a root-absolute asset path with the configured {@link basePath}. */

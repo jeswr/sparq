@@ -30,7 +30,7 @@ concurrency:
 jobs:
   ec2-bench:
     name: heavy benchmark on EC2 (spot)
-    if: github.repository == 'jeswr/sparq'
+    if: github.repository == 'sparq-org/sparq'
     runs-on: ubuntu-latest
     # [OPUS-4.8] Job-scoped writes (least privilege):
     #   id-token: write — assume the short-lived, tag-scoped IAM role via OIDC

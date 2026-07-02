@@ -74,7 +74,7 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
 - **API reference** — run `cargo run -p sparq-cli -- --help`; rustdoc at
   [docs.rs/sparq-cli](https://docs.rs/sparq-cli).
 - **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md).
-- **Performance** — see the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench);
+- **Performance** — see the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench);
   numbers are not baked into docs.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 

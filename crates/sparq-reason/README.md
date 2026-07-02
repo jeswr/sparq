@@ -65,7 +65,7 @@ let g = Graph::from_parts(dict, triples);
 - **API reference** — [docs.rs/sparq-reason](https://docs.rs/sparq-reason).
 - **Design** — the inference verdicts in [`research/`](../../research) and
   [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md).
-- **Performance** — see the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+- **Performance** — see the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

@@ -67,8 +67,8 @@ jobs:
   release-plz-pr:
     name: release-plz / Release-PR
     # Guard against forks: release-plz needs repo write + would open PRs on a fork clone.
-    # Mirrors bench-ec2.yml's `github.repository == 'jeswr/sparq'` guard.
-    if: github.repository == 'jeswr/sparq'
+    # Mirrors bench-ec2.yml's `github.repository == 'sparq-org/sparq'` guard.
+    if: github.repository == 'sparq-org/sparq'
     runs-on: ubuntu-latest
     permissions:
       contents: write       # commit the version bump + changelog onto the Release-PR branch
@@ -100,7 +100,7 @@ jobs:
   #         all the building/packaging/releasing. No build matrix here by design.
   release-plz-release:
     name: release-plz / tag (handoff to release.yml)
-    if: github.repository == 'jeswr/sparq'
+    if: github.repository == 'sparq-org/sparq'
     runs-on: ubuntu-latest
     permissions:
       contents: write  # create + push the v<version> git tag

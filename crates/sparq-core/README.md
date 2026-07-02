@@ -55,7 +55,7 @@ assert_eq!(count, 1);
 - **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md); the indexing,
   compression and parsing verdicts live across the [`research/`](../../research) tree.
 - **Performance** — numbers are not baked into docs; see the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+  [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

@@ -16,7 +16,7 @@ import {
 //
 // WHAT ACTUALLY SERVES /app IN PRODUCTION. The hosted web GUI is a SEPARATE Next.js app
 // (gui/app — a workbench, not this site) that the Pages deploy builds with `build:web` and
-// OVERLAYS at /sparq/app/, deliberately replacing this source page (pages.yml, sq-vnd0i /
+// OVERLAYS at /app/, deliberately replacing this source page (pages.yml, sq-vnd0i /
 // maintainer's Option B). So in the deployed site, /app IS the real hosted GUI.
 //
 // WHY THIS SOURCE STILL EXISTS. It is (1) the link-check target for the deploy's lychee pass,
@@ -30,7 +30,7 @@ import {
 export const metadata: Metadata = {
   title: "App — the sparq GUI",
   description:
-    "The sparq operational GUI — a workbench over a persistent local store, hosted in your browser at /sparq/app. Run a quick query in the live REPL, or install the desktop GUI.",
+    "The sparq operational GUI — a workbench over a persistent local store, hosted in your browser at /app. Run a quick query in the live REPL, or install the desktop GUI.",
 };
 
 export default function AppPage() {
@@ -49,7 +49,7 @@ export default function AppPage() {
             </p>
           </div>
         </div>
-        <Badge variant="success">Hosted web GUI — live at /sparq/app</Badge>
+        <Badge variant="success">Hosted web GUI — live at /app</Badge>
       </header>
 
       <Card>
@@ -64,7 +64,7 @@ export default function AppPage() {
             persuades and proves with live demos) and the GUI (a workbench you use
             to do real RDF/SPARQL work over your own data). The hosted,
             run-it-in-your-browser GUI is served here at{" "}
-            <code className="font-mono text-[0.9em]">/sparq/app/</code> — the same
+            <code className="font-mono text-[0.9em]">/app/</code> — the same
             Rust engine compiled to wasm, nothing sent to a server. Want a quick
             query without leaving this tab, or a native build with no wasm ceiling?
             Both paths are below.

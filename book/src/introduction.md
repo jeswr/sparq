@@ -26,5 +26,5 @@ Per-surface how-to guides live in the
 [usage skills](https://github.com/jeswr/sparq/blob/main/skills/SKILL.md) router, and the full crate
 map is in [`AGENTS.md`](https://github.com/jeswr/sparq/blob/main/AGENTS.md). Live per-commit
 performance metrics are on the
-[benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench) — numbers are deliberately **not**
+[benchmarks dashboard](https://sparq.jeswr.org/dev/bench) — numbers are deliberately **not**
 baked into these docs, because they drift.
