@@ -392,4 +392,225 @@
     color: var(--muted-foreground);
     font-style: italic;
   }
+
+  /* [OPUS-4.8] sq-rvgr2.1 — scoped styling for the build-time-generated ReSpec/TR-style spec
+     render (components/specs/spec-html.tsx). The fragment is Typst HTML export post-processed
+     by scripts/build-specs.mjs into W3C TR conventions: a spec header, a Status-of-This-Document
+     box, a linked Table of Contents, numbered sections, term definitions, notes, and a
+     references list. All colours reuse the existing design-system tokens so light + dark follow
+     the theme automatically (no new palette). It shares the prose tag rules with .paper-prose
+     but adds the ReSpec-specific structural classes. */
+  .spec-prose {
+    max-width: 68ch;
+    margin-inline: auto;
+    line-height: 1.7;
+    color: var(--foreground);
+  }
+  .spec-prose p {
+    margin-bottom: 0.85rem;
+  }
+  .spec-prose h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-top: 1.9rem;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.2rem;
+    border-bottom: 1px solid var(--border);
+    scroll-margin-top: 5rem;
+  }
+  .spec-prose h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-top: 1.5rem;
+    margin-bottom: 0.4rem;
+    scroll-margin-top: 5rem;
+  }
+  .spec-prose code {
+    font-size: 0.85em;
+    background-color: var(--muted);
+    padding: 0.05rem 0.3rem;
+    border-radius: 0.25rem;
+  }
+  .spec-prose pre {
+    margin: 1rem 0;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--primary);
+    border-radius: 0.4rem;
+    background-color: color-mix(in oklch, var(--muted) 60%, transparent);
+    overflow-x: auto;
+    font-size: 0.85em;
+  }
+  .spec-prose pre code {
+    background: none;
+    padding: 0;
+  }
+  .spec-prose table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9em;
+  }
+  .spec-prose th,
+  .spec-prose td {
+    border: 1px solid var(--border);
+    padding: 0.4rem 0.6rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  .spec-prose th {
+    background-color: color-mix(in oklch, var(--muted) 60%, transparent);
+    font-weight: 600;
+  }
+
+  /* The document header: status line + title + metadata. */
+  .spec-prose .spec-head {
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid var(--border);
+  }
+  .spec-prose .spec-status-line {
+    margin: 0 0 0.35rem;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--primary);
+  }
+  .spec-prose .spec-title {
+    font-size: 1.6rem;
+    font-weight: 700;
+    line-height: 1.2;
+    margin: 0 0 0.6rem;
+  }
+  .spec-prose .spec-meta {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.15rem 0.75rem;
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--muted-foreground);
+  }
+  .spec-prose .spec-meta dt {
+    font-weight: 600;
+    color: var(--foreground);
+  }
+  .spec-prose .spec-meta dd {
+    margin: 0;
+  }
+
+  /* Introductory (unnumbered) sections: Abstract, Status of This Document. */
+  .spec-prose section.introductory > h2 {
+    border-bottom: none;
+    margin-top: 1.5rem;
+  }
+  /* The Status-of-This-Document box — the honest "no W3C standing" banner. */
+  .spec-prose section.sotd {
+    margin: 1.25rem 0;
+    padding: 0.9rem 1.1rem;
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--primary);
+    border-radius: 0.5rem;
+    background-color: color-mix(in oklch, var(--primary) 6%, transparent);
+  }
+  .spec-prose section.sotd > h2 {
+    margin-top: 0.25rem;
+    font-size: 1rem;
+  }
+
+  /* The linked Table of Contents. */
+  .spec-prose .spec-toc {
+    margin: 1.5rem 0;
+    padding: 0.75rem 1.1rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background-color: color-mix(in oklch, var(--muted) 45%, transparent);
+  }
+  .spec-prose .spec-toc > h2 {
+    margin-top: 0.25rem;
+    border-bottom: none;
+    font-size: 0.95rem;
+  }
+  .spec-prose .spec-toc ol {
+    list-style: none;
+    margin: 0.4rem 0 0;
+    padding-left: 0.5rem;
+  }
+  .spec-prose .spec-toc ol ol {
+    padding-left: 1.25rem;
+  }
+  .spec-prose .spec-toc li {
+    margin: 0.2rem 0;
+  }
+  .spec-prose .spec-toc a {
+    color: var(--foreground);
+    text-decoration: none;
+  }
+  .spec-prose .spec-toc a:hover {
+    text-decoration: underline;
+    color: var(--primary);
+  }
+  .spec-prose .spec-toc .toc-num {
+    color: var(--muted-foreground);
+    font-variant-numeric: tabular-nums;
+    margin-right: 0.4rem;
+  }
+
+  /* Inline term definitions and reference cross-links. */
+  .spec-prose dfn.respec-dfn {
+    font-style: italic;
+    font-weight: 600;
+  }
+  .spec-prose a.spec-ref {
+    color: var(--primary);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .spec-prose a.spec-ref:hover {
+    text-decoration: underline;
+  }
+
+  /* Informative note asides. */
+  .spec-prose aside.note {
+    display: block;
+    margin: 1rem 0;
+    padding: 0.7rem 0.9rem;
+    border-left: 3px solid var(--chart-2);
+    border-radius: 0.3rem;
+    background-color: color-mix(in oklch, var(--chart-2) 8%, transparent);
+    font-size: 0.92em;
+  }
+  .spec-prose aside.note .note-title {
+    display: inline-block;
+    margin-right: 0.4rem;
+    font-weight: 700;
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--chart-2);
+  }
+
+  /* The references list. */
+  .spec-prose dl.spec-refs {
+    margin: 0.75rem 0;
+    font-size: 0.9em;
+  }
+  .spec-prose dl.spec-refs dt {
+    font-weight: 600;
+    scroll-margin-top: 5rem;
+  }
+  .spec-prose dl.spec-refs dd {
+    margin: 0 0 0.6rem;
+    padding-left: 1.25rem;
+    color: var(--muted-foreground);
+  }
+
+  /* Local-dev placeholder (Typst absent). */
+  .spec-prose .spec-placeholder {
+    padding: 1rem;
+    border: 1px dashed var(--border);
+    border-radius: 0.5rem;
+    color: var(--muted-foreground);
+    font-size: 0.9em;
+  }
 }

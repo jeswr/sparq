@@ -91,6 +91,25 @@ pub trait CompareTerm: Sized {
     /// then the string form.
     fn as_f64(&self) -> Option<f64>;
 
+    /// An EXACT recheck of two **numeric** literals for the f64-collapse case. The lenient
+    /// numeric arm coerces both operands to `f64` (see [`as_f64`](Self::as_f64)); f64
+    /// rounding is MONOTONIC, so it can only COLLAPSE two distinct numeric values to Equal,
+    /// never flip a `Less`/`Greater`. So [`compare_terms`] calls this **only** when the f64
+    /// arm reports Equal, to recover the true order for distinct integers beyond 2^53 and
+    /// high-precision decimals that share one f64.
+    ///
+    /// Returns `Some(ordering)` only when BOTH terms are numeric and value-exactly
+    /// comparable via the exact numeric tower (`xsd:integer` / `xsd:decimal`); `None` when
+    /// either operand is non-numeric, is an inexact tier (`xsd:float`/`xsd:double`, whose
+    /// value IS its f64), or the exact comparison cannot decide — the collapsed f64 verdict
+    /// then stands. A purely symbolic consumer with no exact numeric tier returns `None`.
+    ///
+    /// This mirrors the engine's relational `=`/`<` recheck and its `MIN`/`MAX` value
+    /// comparison — the same value-exact numeric order, surfaced to the shared total order
+    /// so `ORDER BY` / `MIN` / `MAX` agree with them rather than collapsing an f64 tie to
+    /// Equal. [OPUS-4.8] sq-rikm7
+    fn exact_cmp(&self, other: &Self) -> Option<Ordering>;
+
     /// The **strict** value comparison for same-family typed literals the numeric arm
     /// cannot decide — principally `xsd:dateTime` / `xsd:date` by timeline, and the
     /// lenient same-tag / same-other-XSD lexical orders. `Some(ordering)` only when the
@@ -158,7 +177,22 @@ pub fn compare_terms<T: CompareTerm>(x: &T, y: &T) -> Option<Ordering> {
         }
         TermClass::Literal => {
             if let (Some(a), Some(b)) = (x.as_f64(), y.as_f64()) {
-                return a.partial_cmp(&b);
+                let ord = a.partial_cmp(&b);
+                // f64-collapse EXACT recheck. The lenient numeric arm coerces both operands
+                // to f64, whose rounding is MONOTONIC: it can only COLLAPSE two distinct
+                // numeric values to Equal, never flip a Less/Greater. So — and ONLY — when
+                // the f64 arm reports Equal, recheck the pair exactly; a decisive exact
+                // ordering (distinct integers beyond 2^53, or high-precision decimals that
+                // share one f64) overrides the collapsed verdict. This makes ORDER BY / MIN /
+                // MAX agree with the engine's relational =/< (`cmp_expr`) and MIN/MAX value
+                // comparison (`num_compare`), which already recheck. Perf-neutral: the exact
+                // work happens only on an f64 tie. [OPUS-4.8] sq-rikm7
+                if ord == Some(Ordering::Equal) {
+                    if let Some(exact) = x.exact_cmp(y) {
+                        return Some(exact);
+                    }
+                }
+                return ord;
             }
             // dateTime/date (and same-tag / same-other-XSD) order strictly when comparable.
             if let Some(o) = x.strict_cmp(y) {
@@ -183,8 +217,14 @@ mod tests {
         ErrorOrUnbound,
         Blank(String),
         Iri(String),
-        /// A numeric literal (orders by f64 value).
+        /// A numeric literal (orders by f64 value; no exact tier — models `xsd:double`).
         NumLit(f64),
+        /// A numeric literal carrying BOTH its lenient `f` (the possibly-collapsing f64)
+        /// AND its EXACT value as a scaled integer `mant * 10^-scale`, so the f64-collapse
+        /// recheck arm is exercised: two of these can share an `f` yet differ exactly —
+        /// modelling an `xsd:integer` beyond 2^53 (`scale` 0) and a high-precision
+        /// `xsd:decimal` (`scale > 0`). [OPUS-4.8] sq-rikm7
+        ExactNum { f: f64, mant: i128, scale: u32 },
         /// A plain-string literal (orders by string form; `strict_cmp` decides equal
         /// strings, else `None` → string fallback).
         StrLit(String),
@@ -201,7 +241,7 @@ mod tests {
                 T::ErrorOrUnbound => TermClass::ErrorOrUnbound,
                 T::Blank(_) => TermClass::Blank,
                 T::Iri(_) => TermClass::Iri,
-                T::NumLit(_) | T::StrLit(_) | T::Strict(_) => TermClass::Literal,
+                T::NumLit(_) | T::ExactNum { .. } | T::StrLit(_) | T::Strict(_) => TermClass::Literal,
                 T::Triple(..) => TermClass::Triple,
             }
         }
@@ -210,6 +250,7 @@ mod tests {
                 T::ErrorOrUnbound => None,
                 T::Blank(s) | T::Iri(s) | T::StrLit(s) => Some(s.clone()),
                 T::NumLit(n) => Some(n.to_string()),
+                T::ExactNum { f, .. } => Some(f.to_string()),
                 T::Strict(n) => Some(n.to_string()),
                 T::Triple(..) => None,
             }
@@ -217,6 +258,23 @@ mod tests {
         fn as_f64(&self) -> Option<f64> {
             match self {
                 T::NumLit(n) => Some(*n),
+                T::ExactNum { f, .. } => Some(*f),
+                _ => None,
+            }
+        }
+        fn exact_cmp(&self, other: &Self) -> Option<Ordering> {
+            match (self, other) {
+                // Align both scaled integers to the common (max) scale, then compare the
+                // mantissas exactly (mirrors the substrate `Dec::cmp` the engine's numeric
+                // tower uses). Only `ExactNum` pairs have an exact tier; everything else
+                // (a plain f64 `NumLit`, a non-numeric literal) returns `None` and keeps
+                // the collapsed f64 verdict. [OPUS-4.8] sq-rikm7
+                (T::ExactNum { mant: am, scale: asc, .. }, T::ExactNum { mant: bm, scale: bsc, .. }) => {
+                    let scale = (*asc).max(*bsc);
+                    let a = am.checked_mul(10i128.checked_pow(scale - asc)?)?;
+                    let b = bm.checked_mul(10i128.checked_pow(scale - bsc)?)?;
+                    Some(a.cmp(&b))
+                }
                 _ => None,
             }
         }
@@ -278,6 +336,45 @@ mod tests {
         // 9 < 10 by value even though "10" < "9" lexically — the numeric arm wins.
         assert_eq!(compare_terms(&T::NumLit(9.0), &T::NumLit(10.0)), Some(Ordering::Less));
         assert_eq!(compare_terms(&T::NumLit(2.5), &T::NumLit(2.5)), Some(Ordering::Equal));
+    }
+
+    #[test]
+    fn f64_collapse_recheck_orders_big_integers_beyond_2_53() {
+        // 2^53 and 2^53 + 1 share ONE f64 (2^53 + 1 is not representable) — the lenient
+        // numeric arm alone would report them Equal. The exact recheck (`exact_cmp`) keeps
+        // them ordered by value, so ORDER BY / MIN / MAX agree with relational =/<. This
+        // assertion FAILS if the recheck in `compare_terms` is reverted (it would be Equal).
+        let two53 = 9_007_199_254_740_992.0_f64;
+        let a = T::ExactNum { f: two53, mant: 9_007_199_254_740_992, scale: 0 };
+        let b = T::ExactNum { f: two53, mant: 9_007_199_254_740_993, scale: 0 };
+        // The f64 keys are byte-equal: the collapse the recheck must repair.
+        assert_eq!(a.as_f64(), b.as_f64());
+        assert_eq!(compare_terms(&a, &b), Some(Ordering::Less));
+        assert_eq!(compare_terms(&b, &a), Some(Ordering::Greater));
+        // Genuinely equal exact values stay Equal (no spurious inequality introduced).
+        let a2 = T::ExactNum { f: two53, mant: 9_007_199_254_740_992, scale: 0 };
+        assert_eq!(compare_terms(&a, &a2), Some(Ordering::Equal));
+    }
+
+    #[test]
+    fn f64_collapse_recheck_orders_high_precision_decimals() {
+        // 0.123456789012345678 and 0.123456789012345679 differ only in the 18th fraction
+        // digit and round to the SAME f64 (its shortest form is 0.12345678901234568); the
+        // `f` field is that shared collapsed f64. The exact recheck orders them by value.
+        let f = 0.12345678901234568_f64;
+        let a = T::ExactNum { f, mant: 123_456_789_012_345_678, scale: 18 };
+        let b = T::ExactNum { f, mant: 123_456_789_012_345_679, scale: 18 };
+        assert_eq!(a.as_f64(), b.as_f64()); // f64 COLLAPSES them
+        assert_eq!(compare_terms(&a, &b), Some(Ordering::Less));
+        assert_eq!(compare_terms(&b, &a), Some(Ordering::Greater));
+        // Different scales still align exactly: 0.10 (mant 10, scale 2) == 0.1 (mant 1, scale 1).
+        let ten_hundredths = T::ExactNum { f: 0.1, mant: 10, scale: 2 };
+        let one_tenth = T::ExactNum { f: 0.1, mant: 1, scale: 1 };
+        assert_eq!(compare_terms(&ten_hundredths, &one_tenth), Some(Ordering::Equal));
+        // And `exact_cmp` is `None` when either side has no exact tier (a plain f64 numeric),
+        // so such a pair keeps the (correct) f64 verdict.
+        assert_eq!(a.exact_cmp(&T::NumLit(f)), None);
+        assert_eq!(T::NumLit(f).exact_cmp(&a), None);
     }
 
     #[test]
