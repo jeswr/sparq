@@ -50,6 +50,17 @@ export const STATUS_VARIANT: Record<
 
 export const SPECS: Spec[] = [
   {
+    slug: "zksparql",
+    source: "zksparql.typ",
+    title: "zkSPARQL: Zero-Knowledge Query Proofs over SPARQL",
+    shortName: "zksparql",
+    status: "unofficial",
+    date: "2026-07-01",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "Proving SPARQL query answers over committed RDF graphs in zero knowledge — an explicit threat model, the committed data model, a scoped query fragment and circuit family, the ProofManifest format, and the fail-closed verifier obligations and audit gates. Research-grade and NOT externally audited (sq-qhy4).",
+  },
+  {
     slug: "mpc-sparql",
     source: "mpc-sparql.typ",
     title:
