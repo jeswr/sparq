@@ -105,8 +105,10 @@ panic = "unwind"
 # SIZE (opt-level "z") and strips local symbols. Pure parser code sits off every hot query
 # path, so this shrinks the wasm bundle with no runtime-perf change. Wired into BOTH the gated
 # measurement (scripts/ci-bench.sh -> the wasm_bundle_bytes ratchet) AND the shipped bundle
-# (js `build:wasm{,:lean}` -> `wasm-pack --profile release-wasm`), so the gate measures the
-# binary that ships. Blanket opt-level "z" was REJECTED — it would deopt the eval kernels.
+# (js `build:wasm{,:lean}` -> `wasm-pack --profile release-wasm`), so the gate builds under the
+# same cargo profile as the shipped bundle (it ratchets the raw `cargo build` `.wasm`, not the
+# post-wasm-bindgen/wasm-opt npm artifact). Blanket opt-level "z" was REJECTED — it would deopt
+# the eval kernels.
 # NATIVE / non-wasm builds NEVER select this profile, so the default `release` profile — and
 # every engine opt-level — is byte-for-byte unchanged.
 [profile.release-wasm]

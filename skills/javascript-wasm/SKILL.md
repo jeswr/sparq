@@ -41,7 +41,7 @@ Building from a source checkout of the sparq repo (the package ships the wasm pr
 
 ```sh
 cd js
-npm run build   # = wasm-pack build --target web --profile release-wasm  +  tsc
+npm run build   # = build:wasm (wasm-pack --profile release-wasm + copy) then build:ts (tsc)
 npm test        # node --test against the built dist/
 ```
 
@@ -269,7 +269,7 @@ const store = Store.load('<a> <b> <c> .', 'ntriples');
 - **Lifetime.** Call `.free()` (or use `using`) to release wasm linear memory; the store and any held cursors must not be used afterward. wasm32 caps linear memory at 4 GB (a real tab is happier under ~2 GB): ~30 M triples raw, ~75 M with `compressed`.
 - **Raw `Store` budget knobs are wasm-portable only.** `askWithMaxRows` bounds the working set by row count; the engine's wall-clock deadline budget is native-only (`std::time::Instant` is unusable on wasm32).
 - **`explainAnalyze` wall times read 0 on wasm32.** There is no monotonic clock in the wasm bundle, so the per-operator trace reports 0 for every wall time; the per-operator **row counts are exact**. `explainAnalyze` executes the query (SELECT/ASK only) — CONSTRUCT/DESCRIBE/UPDATE are rejected; use `explain` (a non-executing dry run that accepts every query form) for those.
-- **The bundle ships under the size-optimised `release-wasm` cargo profile ([OPUS-4.8] sq-7d3dj.1).** `build:wasm{,:lean}` build `wasm-pack --profile release-wasm` (root `Cargo.toml`): the COLD run-once parse crates (`spargebra`/`oxiri`/`oxttl`) compile at `opt-level = "z"` and local symbols are stripped (`strip = "symbols"`), while the HOT engine/core query-eval crates stay `opt-level 3` — so the bundle is materially smaller with no runtime-perf change (pure parser code, off every hot query path). The `wasm_bundle_bytes` perf-gate (`scripts/ci-bench.sh`) builds the SAME profile, so the ratchet measures the binary that ships.
+- **The bundle ships under the size-optimised `release-wasm` cargo profile ([OPUS-4.8] sq-7d3dj.1).** `build:wasm{,:lean}` build `wasm-pack --profile release-wasm` (root `Cargo.toml`): the COLD run-once parse crates (`spargebra`/`oxiri`/`oxttl`) compile at `opt-level = "z"` and local symbols are stripped (`strip = "symbols"`), while the HOT engine/core query-eval crates stay `opt-level 3` — so the bundle is materially smaller with no runtime-perf change (pure parser code, off every hot query path). The `wasm_bundle_bytes` perf-gate (`scripts/ci-bench.sh`) builds under the SAME cargo profile as the shipped bundle — it ratchets a raw `cargo build` `.wasm` (not the post-`wasm-bindgen`/`wasm-opt` npm artifact), so it tracks the profile the shipped bundle is built under rather than the shipped bytes themselves.
 
 ## See also
 
