@@ -503,6 +503,17 @@ mod precheck {
     use crate::secprop as secx;
     use oxrdf::NamedNode;
     use sparq_zk::secprop::{parse_annotations, Assurance, MethodAnnotations, Scope};
+    use std::sync::LazyLock;
+
+    /// The bundled secprop annotations, parsed **once** and cached for the process
+    /// lifetime. `parse_annotations()` reparses the compiled-in `secprop-methods.ttl` and
+    /// rebuilds the whole `BTreeMap` on every call; since [`resolve_bundled_annotations_n3`]
+    /// runs on the real admission path when `secprop-precheck` is enabled, caching removes
+    /// that per-admission reparse/allocation (and the DoS-amplification surface a frequent
+    /// admission caller would otherwise expose). The bundled graph is a compile-time
+    /// constant, so a single parse is always sound.
+    static BUNDLED_ANNOTATIONS: LazyLock<std::collections::BTreeMap<String, MethodAnnotations>> =
+        LazyLock::new(parse_annotations);
 
     /// One `gteq` admissibility constraint the requester requires (design §4.3.2): the
     /// method's asserted level for `left_operand`'s dimension must be `secx:atLeast`
@@ -706,10 +717,14 @@ mod precheck {
     ///
     /// SECURITY (`sq-nrwqs`): the only caller-controlled text placed in the reasoning
     /// document is the operand IRIs, and always as `odrl:` OBJECTS — never as a predicate
-    /// or a method-subject triple. A `NamedNode` IRI cannot contain N3 syntax (`<`, `>`,
-    /// whitespace, `{`, `}`, …), so a caller cannot break out of the `<…>` term to inject
-    /// a `secx:hasProperty` / `secx:atLeast` / `secx:satisfies` triple or an N3 rule.
-    /// This is what makes the widening channel structurally absent, not merely renamed.
+    /// or a method-subject triple. Each operand is emitted inside a `<…>` IRIREF term, so
+    /// breaking out of that term to inject a `secx:hasProperty` / `secx:atLeast` /
+    /// `secx:satisfies` triple or an N3 rule would require the IRI to carry the term
+    /// closer `>` (or the whitespace / control characters that also terminate an IRIREF).
+    /// `NamedNode::new` validates against RFC 3987 (oxiri), which excludes exactly those
+    /// delimiter and whitespace/control characters, so a **validated** operand cannot
+    /// escape its `<…>` term. This is what makes the widening channel structurally absent,
+    /// not merely renamed.
     fn synthesise_policy(constraints: &[AdmissibilityConstraint]) -> (Vec<String>, String) {
         let mut iris = Vec::with_capacity(constraints.len());
         let mut n3 = String::new();
@@ -734,11 +749,11 @@ mod precheck {
     /// [`PrecheckOutcome::UnknownMethod`].
     ///
     /// This is the `sq-nrwqs` hardening: the annotations are NEVER taken from the
-    /// caller, so a caller cannot inject a widened posture. It re-parses the bundled
-    /// graph per call (a research-PoC path; the graph is a compiled-in constant).
+    /// caller, so a caller cannot inject a widened posture. The bundled graph is parsed
+    /// once and cached in [`BUNDLED_ANNOTATIONS`]; this call only looks up `method_iri`
+    /// and serialises its per-method fragment.
     fn resolve_bundled_annotations_n3(method_iri: &str) -> Option<String> {
-        let all = parse_annotations();
-        let ann = all.get(method_iri)?;
+        let ann = BUNDLED_ANNOTATIONS.get(method_iri)?;
         Some(annotations_n3_from_bundled(ann))
     }
 
