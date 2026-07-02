@@ -2183,6 +2183,14 @@ jobs:
             features: mmap,dict-spill
           - crate: sparq-substrate
             features: numeric,join,compare,rows
+          # [OPUS-4.8] sq-qcnn.14: sparq-canon QUIRK — the `rdf12-triple-terms` feature
+          # gates rdf12.rs (the NON-STANDARD RDF-1.2 triple-term profile). Without it,
+          # cargo-mutants mutates rdf12.rs but the tests never compile that module, so all
+          # rdf12.rs mutations are trivially "missed" (not CAUGHT but also not from a test
+          # gap — just non-compiled code). Enabling the feature exposes the full crate
+          # surface (lib.rs + rdf12.rs) to mutation, making the ceiling honest.
+          - crate: sparq-canon
+            features: rdf12-triple-terms
     concurrency:
       # [OPUS-4.8] sq-qcnn.11: per-crate + per-ref concurrency key ("its own concurrency keys")
       # with cancel-in-progress:false so an overlapping run (e.g. a manual workflow_dispatch
