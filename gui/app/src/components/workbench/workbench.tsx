@@ -44,6 +44,9 @@ import {
   ImportDrawerProvider,
   useImportDrawer,
 } from "@/components/workbench/import-drawer";
+// [OPUS-4.8] sq-tp1m (#757) — keeps the engine's inference regime in lockstep with the active
+// workspace's persisted choice (restores it on load), mounted once regardless of the active tab.
+import { InferenceModeBridge } from "@/components/workbench/inference-control";
 // [OPUS-4.8] sq-xvj9 — the Cmd-K counterpart to the rail's "Export data…": serialise + download the
 // whole store as pretty Turtle / TriG / JSON-LD from the keyboard-first spine.
 import { downloadText } from "@/lib/download";
@@ -106,6 +109,8 @@ export function Workbench() {
           onSelectTab={setActiveId}
           onCloseTab={closeTab}
         />
+        {/* [OPUS-4.8] sq-tp1m — sync the persisted per-workspace inference regime into the engine. */}
+        <InferenceModeBridge />
         {/* [OPUS-4.8] sq-vw3ax (#820 redesign) — a native-feeling dark workspace. The ambient teal
             aura (a faint radial wash behind the chrome) makes the brand the lead, not garnish; the
             title bar above the top bar signals a real desktop window. */}

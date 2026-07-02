@@ -65,6 +65,30 @@ export interface WorkspaceSourceMeta {
 export type WorkspaceRunMode = "run" | "explain" | "analyze";
 
 /**
+ * [OPUS-4.8] sq-tp1m (#757) — the per-workspace INFERENCE (entailment) regime applied to
+ * QUERIES over the live store. `"off"` runs plain SPARQL over the asserted data; `"rdfs"` and
+ * `"owl-rl"` forward-chain the deductive closure under that entailment profile (OWL 2 RL
+ * includes RDFS) BEFORE the query runs, so an entailed triple can match. This is applied by the
+ * engine's real forward-chaining reasoner (`sparq-reason`, via the tier-b W-reason wasm
+ * bundle) — NOT a mock. It is a query-time regime: it never mutates the persisted store, only
+ * what queries see. (N3 rule reasoning needs a rules-authoring surface + a store that can hold
+ * rule/formula terms, which the in-tab ground-triple store cannot — tracked as a follow-up.)
+ */
+export type WorkspaceInferenceMode = "off" | "rdfs" | "owl-rl";
+
+/** The persisted inference modes, in selector order (the UI mirrors this). */
+export const WORKSPACE_INFERENCE_MODES: readonly WorkspaceInferenceMode[] = [
+  "off",
+  "rdfs",
+  "owl-rl",
+] as const;
+
+/** Normalise an arbitrary value to a {@link WorkspaceInferenceMode}, defaulting to `"off"`. */
+export function parseInferenceMode(value: unknown): WorkspaceInferenceMode {
+  return value === "rdfs" || value === "owl-rl" ? value : "off";
+}
+
+/**
  * The saved SPARQL editor state. `query` is the editor text; `mode` is the Run/EXPLAIN/ANALYZE
  * selector; `endpointActive` + `endpointUrl` capture whether the editor was pointed at a
  * running server (so the panel restores that view) — but the bearer TOKEN is NEVER persisted
@@ -98,6 +122,12 @@ export interface Workspace {
   dataSnapshot?: string;
   /** The saved SPARQL editor state. */
   editor: WorkspaceEditorState;
+  /**
+   * [OPUS-4.8] sq-tp1m (#757) — the per-workspace inference regime applied to queries (see
+   * {@link WorkspaceInferenceMode}). Optional + backward-compatible: a workspace persisted
+   * before this field existed simply omits it and loads as `"off"` (no schema bump needed).
+   */
+  inference?: WorkspaceInferenceMode;
   /**
    * The schema version of this persisted record. Bumped if the on-disk shape changes so a
    * loader can migrate or discard an incompatible old record rather than crash.
@@ -140,6 +170,7 @@ export function newWorkspace(name: string, query: string): Workspace {
     updatedAt: now,
     sources: [],
     editor: { query, mode: "run", endpointActive: false },
+    inference: "off",
     schema: WORKSPACE_SCHEMA,
   };
 }
@@ -191,6 +222,8 @@ export function parseWorkspace(value: unknown): Workspace | null {
       endpointUrl:
         typeof editor.endpointUrl === "string" ? editor.endpointUrl : undefined,
     },
+    // [OPUS-4.8] sq-tp1m — backward-compatible: an older record without `inference` → "off".
+    inference: parseInferenceMode(v.inference),
     schema: WORKSPACE_SCHEMA,
   };
 }

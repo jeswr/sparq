@@ -11,13 +11,13 @@ import { toolById, TIER_META } from "@/data/tools";
 
 /**
  * Which bead lands each remaining stub (so the stub is self-documenting, not a dead
- * placeholder). The `live-new-wasm` tools (inference/full-text/streaming) need a NEW wasm
- * bundle the lean GUI engine does not yet carry — that portability spike is sq-zeai's lane; the
- * ZK/MPC tools need the bb.js / in-tab-sim bundles, also not in this engine.
+ * placeholder). The `live-new-wasm` tools (full-text/streaming) need a NEW wasm bundle the lean
+ * GUI engine does not yet carry — that portability spike is sq-zeai's lane; the ZK/MPC tools
+ * need the bb.js / in-tab-sim bundles, also not in this engine. (Inference is now a WORKING tool,
+ * sq-tp1m — it loads the separate W-reason bundle itself — so it is no longer listed here.)
  */
 const TOOL_BEAD: Record<string, string> = {
   "graph-view": "sq-lyp8",
-  inference: "sq-zeai",
   "full-text": "sq-zeai",
   vector: "sq-zeai",
   geosparql: "sq-zeai",
