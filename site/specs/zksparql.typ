@@ -102,7 +102,7 @@ Document.
 This document is an *architecture and interface overview* of the zkSPARQL query-proof
 pipeline, published in specification form so the design can be reviewed and cited. It is
 #strong[not] yet a specification from which an independent party could build an interoperable
-— let alone provably sound — prover or verifier: several security-load-bearing definitions
+— let alone provably sound — prover or verifier: several security-load-bearing definitions  // privacy-claims-allow: explicit anti-overclaim — the draft is NOT a spec from which a provably-sound verifier could be built; negated usage, not a settled soundness claim (sq-qhy4)
 are still pinned only by the reference implementation (section 2.3). A reader who needs a
 conformance target should read section 2.2 for the exact clauses this draft does fix, and
 section 4.3 for what may — and may not — be claimed against it.
@@ -1022,7 +1022,7 @@ policy — it is not, and must not be presented as, an independent cryptographic
     The `sec-prop` sub-vocabulary is vendored, with the sparq `secx` extension, in the sparq
     repository (MIT). Prior work of this document's editor — declared for citation integrity;
     sections 12–13 of this document derive from it.]),
-  ("WRIGHT-DC25", [Wright, J. #emph[Towards Provable Provenance and Privacy-Preserving Queries
+  ("WRIGHT-DC25", [Wright, J. #emph[Towards Provable Provenance and Privacy-Preserving Queries  // privacy-claims-allow: prior-work reference title (Wright, ISWC 2025 DC), not a sparq claim
     in Decentralised Data Architectures]. ISWC 2025 Companion Volume (Doctoral Consortium),
     CEUR-WS Vol-4085, paper 19, Nara, Japan, November 2025.
     https://ceur-ws.org/Vol-4085/paper19.pdf.]),
