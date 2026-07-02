@@ -629,7 +629,12 @@ policy triples are **synthesised internally** from the structured constraints (e
 for the annotations nor for the policy — a caller **cannot** inject a `secx:hasProperty` / `secx:atLeast` /
 `secx:satisfies` triple (or an N3 rule) to widen a method's recorded posture. (The Phase-5 `annotations_n3` /
 `policy_n3` raw-string fields, which raw-concatenated caller text into the reasoning document, are gone — that
-closed a real widening channel, not merely renamed it.) An **unknown method** (no bundled block) fails closed
+closed a real widening channel, not merely renamed it.) **`sq-ddbm8` defence in depth:** the operand fields are
+`pub` and `NamedNode::new_unchecked` bypasses `NamedNode::new`'s RFC-3987 validation, so the synthesiser
+**re-validates every operand as a well-formed IRIREF at the emission site** and **fails closed**
+(`PrecheckOutcome::MalformedConstraint { operand }`) on any operand carrying a term-breaking character
+(`>` / whitespace / `< " { } | ^` `` ` `` `\`) that could otherwise break out of its `<…>` object term — so the
+escape channel is structurally absent even off the `NamedNode::new` path. An **unknown method** (no bundled block) fails closed
 with `PrecheckOutcome::UnknownMethod { method }` — regardless of the (possibly empty) constraint set. Only
 `secx:QueryProofLayer` assertions are used (the §5a non-transfer rule); the method-wide `secx:AssuranceLevel`
 the `requiresAssurance` dimension reads is DERIVED as the **weakest** assurance across the method's positive
@@ -640,10 +645,11 @@ soundness/privacy claim.
 Before the existing signature / freshness / holder checks, the gate synthesises the policy from the structured
 constraints and calls `admissible` over the method IRI, that policy, and the **bundled** annotation graph, and
 **fails closed** when the method does not satisfy every constraint — returning an EMPTY admitted set + a
-`PrecheckOutcome::{Admitted, UnknownMethod { method }, Denied { unsatisfied }, ReductionError { error }}` (an
-unknown method / an unsatisfied constraint / a reduction error are ALL fail-closed denials — a pre-check that
-cannot be evaluated never admits; `Denied.unsatisfied` lists the failed constraints' `left_operand`
-dimensions). **OPT-IN strict additivity:** with `preference == None` it is **byte-identical** to
+`PrecheckOutcome::{Admitted, UnknownMethod { method }, Denied { unsatisfied }, ReductionError { error },
+MalformedConstraint { operand }}` (an unknown method / an unsatisfied constraint / a reduction error / a
+non-IRIREF-safe operand are ALL fail-closed denials — a pre-check that cannot be evaluated never admits;
+`Denied.unsatisfied` lists the failed constraints' `left_operand` dimensions; `MalformedConstraint` is the
+`sq-ddbm8` input-boundary guard above). **OPT-IN strict additivity:** with `preference == None` it is **byte-identical** to
 `admit` (no reasoning runs); the pre-check can only ever **DENY**, never broaden, and never weakens a
 downstream crypto check (`admit` still verifies the checked issuer signature, scope, freshness, and holder
 binding). The golden e2e invariant (`tests/secprop_precheck_e2e.rs`): a perfectly valid credential is

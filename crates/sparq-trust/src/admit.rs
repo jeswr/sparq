@@ -520,12 +520,18 @@ mod precheck {
     /// `right_operand`. The operator is always `odrl:gteq` — the only operator the
     /// reduction discharges (a richer ODRL profile is a later phase, `sq-uor3g`).
     ///
-    /// Both operands are **validated `NamedNode` IRIs**. This is deliberate: the pre-check
-    /// synthesises the policy N3 from these IRIs itself (never from caller-supplied raw
-    /// N3), and a `NamedNode` cannot contain N3 syntax, so a caller has **no channel** to
-    /// inject an annotation / order / `secx:satisfies` triple or an N3 rule into the
-    /// reasoning document (the `sq-nrwqs` tamper-resistance property — see
-    /// [`AdmissibilityPreference`]).
+    /// Both operands are `NamedNode` IRIs. This is deliberate: the pre-check synthesises
+    /// the policy N3 from these IRIs itself (never from caller-supplied raw N3), and emits
+    /// each operand ONLY as an `odrl:` object inside a `<…>` IRIREF term, so a caller has
+    /// **no channel** to inject an annotation / order / `secx:satisfies` triple or an N3
+    /// rule into the reasoning document (the `sq-nrwqs` tamper-resistance property — see
+    /// [`AdmissibilityPreference`]). A `NamedNode` built via `NamedNode::new` cannot carry
+    /// a term-breaking character (RFC 3987), but these fields are `pub` and
+    /// `NamedNode::new_unchecked` bypasses that validation; the synthesiser therefore
+    /// RE-VALIDATES each operand at the emission site and **fails closed**
+    /// ([`PrecheckOutcome::MalformedConstraint`]) on any non-IRIREF-safe operand, so the
+    /// escape channel is structurally absent even off the `NamedNode::new` path
+    /// (`sq-ddbm8` defence in depth).
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct AdmissibilityConstraint {
         /// The `odrl:leftOperand` — a `secx:requires…` leftOperand (e.g.
@@ -606,6 +612,21 @@ mod precheck {
             /// The `sparq-reason` parse/closure error the reduction returned.
             error: String,
         },
+        /// A constraint carried an operand IRI that is **not a well-formed IRIREF** — it
+        /// contains a character the N3 `<…>` term grammar excludes (`>` / whitespace /
+        /// `<` / `"` / `{` / `}` / `|` / `^` / `` ` `` / `\` / any control char) that could
+        /// otherwise let the value **break out of object position** and inject a
+        /// `secx:hasProperty` / `secx:satisfies` triple or an N3 rule into the synthesised
+        /// policy. `NamedNode::new` (oxiri, RFC 3987) already rejects these, so this can
+        /// only arise from a `NamedNode::new_unchecked` / future unvalidated-`Deserialize`
+        /// operand; the pre-check **re-checks and fails closed** (`sq-ddbm8` defence in
+        /// depth) rather than emitting a policy it cannot trust. Admits **nothing**. This
+        /// is input-sanitisation hardening only; it makes no new soundness/privacy claim.
+        MalformedConstraint {
+            /// The offending operand IRI (inert — echoed only for the honest refusal
+            /// detail; it is never re-emitted into any reasoning document).
+            operand: String,
+        },
     }
 
     /// Run the admission gate with an OPTIONAL Phase-5 property-admissibility pre-check.
@@ -670,7 +691,18 @@ mod precheck {
         // has no way to inject a `secx:hasProperty` / `secx:atLeast` / `secx:satisfies`
         // triple (or an N3 rule) into the reasoning document. `cid -> left_operand` lets
         // us report the failed dimensions.
-        let (constraint_iris, policy_n3) = synthesise_policy(&pref.constraints);
+        //
+        // [OPUS-4.8] sq-ddbm8 DEFENCE-IN-DEPTH: `synthesise_policy` re-validates that every
+        // operand is a well-formed IRIREF before writing it inside a `<…>` term. A
+        // `NamedNode::new_unchecked` / unvalidated-`Deserialize` operand carrying a
+        // term-breaking char (only reachable OUTSIDE the `NamedNode::new` path) is refused
+        // BEFORE it can reach the reasoning document — fail closed, admit nothing.
+        let (constraint_iris, policy_n3) = match synthesise_policy(&pref.constraints) {
+            Ok(v) => v,
+            Err(operand) => {
+                return (Vec::new(), PrecheckOutcome::MalformedConstraint { operand });
+            }
+        };
         let cid_to_left: std::collections::BTreeMap<&str, &str> = constraint_iris
             .iter()
             .zip(pref.constraints.iter())
@@ -715,21 +747,40 @@ mod precheck {
     /// objects and a fixed `odrl:operator odrl:gteq`. The fragment has NO `@prefix`
     /// preamble (the reduction prepends it).
     ///
-    /// SECURITY (`sq-nrwqs`): the only caller-controlled text placed in the reasoning
-    /// document is the operand IRIs, and always as `odrl:` OBJECTS — never as a predicate
-    /// or a method-subject triple. Each operand is emitted inside a `<…>` IRIREF term, so
-    /// breaking out of that term to inject a `secx:hasProperty` / `secx:atLeast` /
-    /// `secx:satisfies` triple or an N3 rule would require the IRI to carry the term
-    /// closer `>` (or the whitespace / control characters that also terminate an IRIREF).
-    /// `NamedNode::new` validates against RFC 3987 (oxiri), which excludes exactly those
-    /// delimiter and whitespace/control characters, so a **validated** operand cannot
-    /// escape its `<…>` term. This is what makes the widening channel structurally absent,
-    /// not merely renamed.
-    fn synthesise_policy(constraints: &[AdmissibilityConstraint]) -> (Vec<String>, String) {
+    /// SECURITY (`sq-nrwqs` + `sq-ddbm8`): the only caller-controlled text placed in the
+    /// reasoning document is the operand IRIs, and always as `odrl:` OBJECTS — never as a
+    /// predicate or a method-subject triple. Each operand is emitted inside a `<…>` IRIREF
+    /// term, so breaking out of that term to inject a `secx:hasProperty` / `secx:atLeast`
+    /// / `secx:satisfies` triple or an N3 rule would require the IRI to carry the term
+    /// closer `>` (or the whitespace / control / `< " { } | ^` `` ` `` `\` characters that
+    /// also delimit an IRIREF). `NamedNode::new` validates against RFC 3987 (oxiri), which
+    /// excludes exactly those characters — but the operand fields are `pub` and a
+    /// `NamedNode::new_unchecked` / future unvalidated-`Deserialize` operand bypasses that
+    /// validation. So this synthesiser **re-checks each operand with [`is_iriref_safe`]
+    /// at the emission site** and **fails closed** (`Err(offending_operand)`) if any is
+    /// not a well-formed IRIREF, rather than emitting a term a caller could escape. That
+    /// makes the widening channel structurally absent even off the `NamedNode::new` path —
+    /// not merely renamed — and the guard cannot be bypassed by a future caller of this fn.
+    ///
+    /// # Errors
+    /// Returns the offending operand IRI string if any constraint's `left_operand` or
+    /// `right_operand` is not IRIREF-safe (the caller turns this into a fail-closed
+    /// [`PrecheckOutcome::MalformedConstraint`]).
+    fn synthesise_policy(
+        constraints: &[AdmissibilityConstraint],
+    ) -> Result<(Vec<String>, String), String> {
         use std::fmt::Write as _;
         let mut iris = Vec::with_capacity(constraints.len());
         let mut n3 = String::new();
         for (i, c) in constraints.iter().enumerate() {
+            // [OPUS-4.8] sq-ddbm8: re-validate BOTH operands are IRIREF-safe before either
+            // is written inside a `<…>` term. Fail closed on the first unsafe operand — an
+            // operand that could break out of object position must NEVER reach the policy.
+            for operand in [c.left_operand.as_str(), c.right_operand.as_str()] {
+                if !is_iriref_safe(operand) {
+                    return Err(operand.to_owned());
+                }
+            }
             let cid = format!("urn:sparq:secprop:c{}", i);
             // [OPUS-4.8] Write the per-constraint fragment straight into `n3` — writing to
             // an in-memory `String` is infallible, so no temporary `String` allocation on
@@ -744,7 +795,24 @@ mod precheck {
             .expect("writing to an in-memory String is infallible");
             iris.push(cid);
         }
-        (iris, n3)
+        Ok((iris, n3))
+    }
+
+    /// Whether `iri` is safe to embed verbatim inside an N3/Turtle `<…>` IRIREF term —
+    /// i.e. it contains **none** of the characters the IRIREF grammar excludes and that
+    /// would otherwise let the value break out of object position and inject a triple or
+    /// rule into the synthesised policy. The excluded set is exactly the N-Triples/Turtle
+    /// `IRIREF` production's: every code point `<= U+0020` (all C0 controls **and** space),
+    /// plus `<`, `>`, `"`, `{`, `}`, `|`, `^`, `` ` ``, `\`. This is precisely the set
+    /// oxiri (`NamedNode::new`, RFC 3987) already rejects, so a `NamedNode::new`-validated
+    /// operand ALWAYS passes; the check only ever catches a `NamedNode::new_unchecked` /
+    /// unvalidated-`Deserialize` operand (`sq-ddbm8` defence in depth). An empty IRI is
+    /// also rejected (a degenerate operand that is never a real dimension/level).
+    fn is_iriref_safe(iri: &str) -> bool {
+        !iri.is_empty()
+            && iri.chars().all(|ch| {
+                ch > '\u{20}' && !matches!(ch, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\')
+            })
     }
 
     /// Resolve the presented method's secprop annotation graph from the **bundled,
@@ -998,7 +1066,8 @@ mod precheck {
                 "the bundled method's derived assurance must be Claimed, never Proven",
             );
             // The synthesised policy contains ONLY `odrl:` predicates — no `secx:` sink.
-            let (_iris, policy) = super::synthesise_policy(&inject.constraints);
+            let (_iris, policy) = super::synthesise_policy(&inject.constraints)
+                .expect("validated operands synthesise a policy");
             assert!(
                 !policy.contains("secx:hasProperty")
                     && !policy.contains("secx:level")
@@ -1062,7 +1131,8 @@ mod precheck {
             let (iris, policy) = super::synthesise_policy(&[
                 c(REQ_ASSUR, crate::secprop::SECX_CLAIMED),
                 c(REQ_SOUND, crate::secprop::SECX_KNOWLEDGE_SOUND),
-            ]);
+            ])
+            .expect("validated operands synthesise a policy");
             assert_eq!(iris.len(), 2);
             assert!(iris.iter().all(|i| i.starts_with("urn:sparq:secprop:c")));
             assert!(policy.contains(REQ_ASSUR) && policy.contains(REQ_SOUND));
@@ -1070,6 +1140,186 @@ mod precheck {
             // No `secx:` predicate is ever emitted by the policy synthesiser.
             for pred in ["secx:hasProperty", "secx:level", "secx:property", "secx:satisfies"] {
                 assert!(!policy.contains(pred), "policy leaked a secx predicate: {}", pred);
+            }
+        }
+
+        /// DEFENCE-IN-DEPTH (`sq-ddbm8`): [`is_iriref_safe`] accepts every IRI the real
+        /// admission path uses and rejects **exactly** the characters the N-Triples/Turtle
+        /// `IRIREF` grammar excludes — the chars that could break an operand out of its
+        /// `<…>` object term. This is the closure the injection guard rests on.
+        #[test]
+        fn is_iriref_safe_accepts_valid_iris_and_rejects_term_breaking_chars() {
+            for ok in [
+                METHOD,
+                REQ_ASSUR,
+                REQ_SOUND,
+                REQ_ZK,
+                REQ_UNLINK,
+                crate::secprop::SECX_PROVEN,
+                crate::secprop::SECX_CLAIMED,
+                "urn:sparq:secprop:c0",
+            ] {
+                assert!(super::is_iriref_safe(ok), "must accept valid IRI: {}", ok);
+            }
+            // An empty operand is a degenerate, never-real dimension/level — rejected.
+            assert!(!super::is_iriref_safe(""));
+            // Every excluded IRIREF character makes an otherwise-valid IRI unsafe.
+            for bad in [
+                '>', '<', '"', '{', '}', '|', '^', '`', '\\', ' ', '\t', '\n', '\r', '\u{0}',
+                '\u{1f}',
+            ] {
+                let iri = format!("urn:x{}y", bad);
+                assert!(
+                    !super::is_iriref_safe(&iri),
+                    "must reject term-breaking char {:?}",
+                    bad,
+                );
+            }
+        }
+
+        /// INJECTION CLOSURE (`sq-ddbm8`): a caller that constructs an operand via
+        /// `NamedNode::new_unchecked` — the ONLY route past `NamedNode::new`'s RFC-3987
+        /// validation — and tries to close the `<…>` object term with `>` and inject a
+        /// `<METHOD> secx:hasProperty [ … secx:level secx:Proven ]` widening triple is
+        /// **rejected before synthesis**: the pre-check fails closed with
+        /// `MalformedConstraint`, the synthesiser returns `Err` (never emits the payload),
+        /// and the bundled method's derived assurance stays `Claimed` — the injection could
+        /// not (and did not) widen it. Input-sanitisation hardening only; no soundness claim.
+        #[test]
+        fn new_unchecked_escaping_left_operand_fails_closed_no_widening() {
+            let payload = format!(
+                "urn:x> secx:hasProperty [ secx:property secx:AssuranceLevel ; secx:level \
+                 secx:Proven ] . <{}> secx:hasProperty [ secx:property secx:AssuranceLevel ; \
+                 secx:level secx:Proven ] . <urn:sink",
+                METHOD,
+            );
+            let p = AdmissibilityPreference {
+                method_iri: NamedNode::new(METHOD).unwrap(),
+                constraints: vec![AdmissibilityConstraint {
+                    left_operand: NamedNode::new_unchecked(payload.clone()),
+                    right_operand: NamedNode::new(crate::secprop::SECX_PROVEN).unwrap(),
+                }],
+            };
+            // Fail closed: the pre-check refuses the malformed operand and admits nothing.
+            assert_eq!(
+                run(Some(&p)),
+                PrecheckOutcome::MalformedConstraint {
+                    operand: payload.clone(),
+                },
+            );
+            // The synthesiser NEVER emits the payload: it returns Err with the operand.
+            assert_eq!(
+                super::synthesise_policy(&p.constraints).unwrap_err(),
+                payload,
+            );
+            // Belt-and-braces: the bundled method's derived assurance is STILL Claimed.
+            let ann = super::parse_annotations();
+            let m = ann.get(METHOD).expect("string-canonical is bundled");
+            assert_eq!(
+                super::derived_assurance_level(m),
+                Some(crate::secprop::SECX_CLAIMED),
+                "an injection attempt must never widen the bundled method to Proven",
+            );
+        }
+
+        /// The RIGHT operand is guarded identically (`sq-ddbm8`): an escaping
+        /// `new_unchecked` `right_operand` also fails closed with `MalformedConstraint`.
+        #[test]
+        fn new_unchecked_escaping_right_operand_fails_closed() {
+            let payload = "urn:x> . <urn:sink";
+            let p = AdmissibilityPreference {
+                method_iri: NamedNode::new(METHOD).unwrap(),
+                constraints: vec![AdmissibilityConstraint {
+                    left_operand: NamedNode::new(REQ_ASSUR).unwrap(),
+                    right_operand: NamedNode::new_unchecked(payload),
+                }],
+            };
+            assert_eq!(
+                run(Some(&p)),
+                PrecheckOutcome::MalformedConstraint {
+                    operand: payload.to_owned(),
+                },
+            );
+        }
+
+        /// A malformed operand fails closed EVEN when a first, VALID constraint precedes it
+        /// (`sq-ddbm8`): the guard is per-operand and the whole pre-check denies — the
+        /// injection can never be "diluted" into a vacuous admit by neutralising it.
+        #[test]
+        fn one_malformed_operand_among_valid_ones_fails_the_whole_precheck() {
+            let bad = "urn:evil> . <urn:sink";
+            let p = AdmissibilityPreference {
+                method_iri: NamedNode::new(METHOD).unwrap(),
+                constraints: vec![
+                    c(REQ_ASSUR, crate::secprop::SECX_CLAIMED),
+                    AdmissibilityConstraint {
+                        left_operand: NamedNode::new_unchecked(bad),
+                        right_operand: NamedNode::new(crate::secprop::SECX_PROVEN).unwrap(),
+                    },
+                ],
+            };
+            assert_eq!(
+                run(Some(&p)),
+                PrecheckOutcome::MalformedConstraint {
+                    operand: bad.to_owned(),
+                },
+            );
+        }
+
+        /// INVARIANT (`sq-ddbm8`): `synthesise_policy` emits every caller operand ONLY as an
+        /// `odrl:` OBJECT under an internally-generated `urn:sparq:secprop:c{i}` subject.
+        /// This pins the positional structure of each synthesised statement, so it FAILS if
+        /// the synthesiser is ever extended to emit an operand as a SUBJECT or a PREDICATE —
+        /// the exact regression that would reopen the widening channel.
+        #[test]
+        fn synthesise_policy_emits_operands_only_as_objects() {
+            const L0: &str = "urn:test:left-operand-zero";
+            const R0: &str = "urn:test:right-operand-zero";
+            const L1: &str = "urn:test:left-operand-one";
+            const R1: &str = "urn:test:right-operand-one";
+            let (iris, policy) = super::synthesise_policy(&[c(L0, R0), c(L1, R1)])
+                .expect("validated operands synthesise a policy");
+            assert_eq!(iris, vec!["urn:sparq:secprop:c0", "urn:sparq:secprop:c1"]);
+            let operands = [L0, R0, L1, R1];
+            let expected = [(L0, R0), (L1, R1)];
+            let lines: Vec<&str> = policy.lines().filter(|l| !l.trim().is_empty()).collect();
+            assert_eq!(lines.len(), 2, "one statement per constraint: {}", policy);
+            for (i, line) in lines.iter().enumerate() {
+                let tok: Vec<&str> = line.split_whitespace().collect();
+                // Deterministic `S P O ; P O ; P O .` shape (operands carry no whitespace).
+                assert_eq!(tok.len(), 10, "unexpected statement shape: {}", line);
+                // SUBJECT (token 0) is the INTERNAL cid — never a caller operand.
+                assert_eq!(tok[0], format!("<urn:sparq:secprop:c{}>", i).as_str());
+                assert!(
+                    !operands.iter().any(|o| tok[0] == format!("<{}>", o)),
+                    "an operand appeared in SUBJECT position: {}",
+                    line,
+                );
+                // PREDICATES (tokens 1, 4, 7) are fixed `odrl:` predicates — never an operand.
+                for p in [tok[1], tok[4], tok[7]] {
+                    assert!(p.starts_with("odrl:"), "non-odrl predicate {}: {}", p, line);
+                    assert!(
+                        !operands.iter().any(|o| p == format!("<{}>", o)),
+                        "an operand appeared in PREDICATE position: {}",
+                        line,
+                    );
+                }
+                assert_eq!(tok[4], "odrl:operator");
+                assert_eq!(tok[5], "odrl:gteq");
+                // OBJECTS (tokens 2, 8) are exactly this constraint's operands.
+                let (l, r) = expected[i];
+                assert_eq!(tok[2], format!("<{}>", l).as_str());
+                assert_eq!(tok[8], format!("<{}>", r).as_str());
+            }
+            // No statement BEGINS with an operand IRI (belt-and-braces subject check).
+            for o in operands {
+                assert!(
+                    !policy
+                        .lines()
+                        .any(|l| l.trim_start().starts_with(&format!("<{}>", o))),
+                    "operand {} began a statement (subject position)",
+                    o,
+                );
             }
         }
 
