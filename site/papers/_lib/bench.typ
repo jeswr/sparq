@@ -42,9 +42,11 @@
 }
 
 // A provenance line for a headline number (source test + environment).
+// [FABLE-5] sq-gum8.3 render fix: `#r.source` inside raw backticks printed LITERALLY
+// (raw content does not interpolate); use #raw(r.source) so the actual source renders.
 #let provenance(key) = {
   let r = _rec(key)
-  text(size: 0.85em, fill: gray)[evidence: `#r.source` (environment: #r.environment)]
+  text(size: 0.85em, fill: gray)[evidence: #raw(r.source) (environment: #r.environment)]
 }
 
 // Author block honours the double-blind anon toggle.
