@@ -1819,39 +1819,85 @@ jobs:
           name: inference-conformance-report
           path: inference-conformance-report.md
 
-  coverage:
-    # [OPUS-4.8] PER-CRATE line-coverage RATCHET + test-PRESENCE gate (sq-hbg7).
-    # Mirrors the conformance-ratchet idiom above: a checked-in per-crate FLOOR
-    # (bench/coverage-floor.json) that may only RISE, plus a per-crate #[test]
-    # count floor (bench/coverage-presence.json) that catches a whole crate
-    # losing its tests — which a % gate alone can miss (e.g. the subprocess-
-    # driven sparq-cli, which reports ~0% by construction).
+  coverage-floors:
+    # [OPUS-4.8] sq-p0hcd: the FAST, NO-COMPILE coverage gates, split out of the old
+    # single `coverage` job so they run ONCE (not per shard) and FAIL FAST — before the
+    # ~15 min instrumented shard builds — on a ratchet-direction violation or a shard-
+    # partition drift. Three cheap source-only checks:
+    #   - test-PRESENCE gate: per-crate #[test]-count FLOOR (bench/coverage-presence.json),
+    #     catches a whole crate losing its tests (which a line-% ratchet can miss, e.g. the
+    #     subprocess-driven sparq-cli at ~0%).
+    #   - coverage-floor MONOTONICITY gate (sq-neq8): FAIL if this branch LOWERS/DROPS any
+    #     crate's floor vs origin/main — the ratchet only RISES.
+    #   - shard-partition guard (sq-p0hcd): FAIL if SHARD_GROUPS no longer partitions
+    #     PER_COMMIT_CRATES exactly, so a crate added to the per-commit set can never be
+    #     silently dropped from every shard (which would leave it un-gated).
+    # The heavy per-crate line-% MEASUREMENT moved to the `coverage-measure` MATRIX below.
+    name: coverage floors (presence + monotonicity + shard-partition, no compile)
+    needs: changes
+    # Same trigger envelope as the old job: never on the nightly schedule (the heavy tier
+    # is coverage-nightly), skip a doc-only PR. push/merge_group force rust_changed=true.
+    if: github.event_name != 'schedule' && needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Test-presence gate (fast, no compile)
+        run: python3 scripts/coverage-presence.py --check
+      - name: Shard-partition guard (fast, no compile)
+        # FAIL if the per-commit MATRIX shard groups drift from PER_COMMIT_CRATES (missing/
+        # extra/overlapping crate) — a missing crate would be measured by NO shard and thus
+        # SILENTLY UN-GATED. Reproduced locally: bash scripts/coverage.sh --check-shards.
+        run: ./scripts/coverage.sh --check-shards
+      - name: Coverage-floor MONOTONICITY gate (ratchet only rises, fast, no compile)
+        # [OPUS-4.8] sq-neq8: FAIL if THIS branch LOWERS/DROPS any crate's coverage floor
+        # vs origin/main. --check-robust only compares measured-vs-floor, so a floor
+        # DECREASE in a PR is otherwise invisible — exactly how #661 (sq-cafc) silently
+        # re-seeded sparq-serve 92->83 (caught by a human, not CI). Mirrors the conformance
+        # ratchet's only-rises enforcement. A deliberate, reviewed regression must add
+        # --allow-lower to this command in the PR (and a reviewer must approve it).
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          python3 scripts/coverage-gate.py --check-monotonic --base-ref origin/main
+
+  coverage-measure:
+    # [OPUS-4.8] PER-CRATE line-coverage RATCHET (sq-hbg7), now SHARDED for merge-queue
+    # throughput (sq-p0hcd). Mirrors the conformance-ratchet idiom: a checked-in per-crate
+    # FLOOR (bench/coverage-floor.json) that may only RISE.
     #
     # WHY PER-CRATE, NOT `cargo llvm-cov --workspace`: a single whole-workspace
     # instrumented run does NOT finish in a bounded window. So scripts/coverage.sh
     # measures PER-CRATE, with these audit-discovered quirks (no silent caps —
     # research/coverage-and-benchmark-plan.md §2.2/§2.3):
-    #   - sparq-core measured with --features dict-spill (else dictspill/extsort 0%);
-    #   - W3C fixtures fetched FIRST (SHACL/reason-explain/EYE/rdf-turtle suites
-    #     SKIP when fixtures are absent -> misleadingly-low + flaky number);
-    #   - the two sparq-vectors *_recall_at_10_vs_brute_force_on_50k tests (HNSW +
-    #     DiskANN, 50k vecs each) are EXCLUDED here (measured >10 min for that ONE
-    #     crate under instrumentation) and run in `coverage-nightly` instead;
-    #   - sparq-cli / sparq-conformance / sparq-gpu have floor 0 (subprocess
-    #     artifact / test-driver / device-gated) — guarded by the presence gate.
+    #   - sparq-core measured with --features mmap,dict-spill,rdfxml (else those surfaces 0%);
+    #   - W3C fixtures fetched FIRST (SHACL/reason-explain/EYE/rdf-turtle suites SKIP when
+    #     fixtures are absent -> misleadingly-low + flaky number);
+    #   - the two sparq-vectors *_recall_at_10_vs_brute_force_on_50k tests (HNSW + DiskANN,
+    #     50k vecs each) are EXCLUDED here (measured >10 min under instrumentation) and run
+    #     in `coverage-nightly` instead;
+    #   - sparq-cli / sparq-conformance / sparq-gpu have floor 0 (subprocess artifact /
+    #     test-driver / device-gated) — guarded by the presence gate.
     # sparq-py is excluded (pyo3/maturin, not an llvm-cov target).
     #
-    # TIERING (timing-justified): the per-commit set is the FAST/MEDIUM crates,
-    # well under the ~15-20 min budget; only the heavy sparq-vectors full set is
-    # nightly. Never silently drop a crate — every exclusion is in the floor file.
-    name: coverage ratchet + test-presence gate (per-crate)
-    needs: changes
-    # [OPUS-4.8] Combine the pre-existing schedule exclusion with the rust-changed gate:
-    # the per-commit coverage tier still never runs on the nightly schedule, AND now also
-    # skips on a doc-only PR. On `push`/`merge_group` rust_changed is force-'true', so the
-    # canonical/queue coverage run is unchanged.
+    # WHY SHARDED (sq-p0hcd): the old single job measured ALL per-commit crates in ONE
+    # SERIAL loop = ~28 min wall-clock on the merge-queue critical path (2026-07-02 profile,
+    # run 28624093902: the `Measure + enforce` step alone was 1691s, the per-crate loop
+    # 1676s, DOMINATED by sparq-engine 668s ≈ 40%, then core 210s / vectors 167s / solid
+    # 165s / server 114s). scripts/coverage.sh SHARD_GROUPS LPT-bin-packs the crates by that
+    # measured time into 4 balanced shards (engine ALONE = the wall-clock floor; the other
+    # three ~336s each) that measure CONCURRENTLY here — halving the wall-clock. Each shard
+    # runs the IDENTICAL coverage.sh + `--check-robust`, so the ratchet semantics are
+    # unchanged: a shard whose crate is below floor FAILS -> the ci-summary gate FAILS.
+    # A crate outside a shard's subset is reported MISSING by --check-robust (non-fatal for
+    # that shard — it is gated by the shard that DOES measure it). The `coverage-floors`
+    # shard-partition guard proves every per-commit crate is measured by exactly one shard.
+    name: coverage ratchet (shard ${{ matrix.shard }}/4)
+    needs: [changes, coverage-floors]
     if: github.event_name != 'schedule' && needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # one failing shard must NOT cancel the others (want all verdicts)
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
@@ -1865,7 +1911,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: llvm-tools-preview
+      # Per-shard cache key: each shard builds a DIFFERENT crate subset (different
+      # instrumented objects), so keying the cache by shard keeps them from clobbering /
+      # thrashing one another's saved target dir.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: coverage-shard-${{ matrix.shard }}
       - name: Install cargo-llvm-cov
         # [OPUS-4.8] sq-tool-pin: taiki-e/install-action picks the tool from its @<tool> ref;
         # SHA-pinning (our code-scanning=0 policy) drops that ref, so an explicit `with: tool:`
@@ -1873,49 +1924,62 @@ jobs:
         uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov
-      - name: Test-presence gate (fast, no compile)
-        run: python3 scripts/coverage-presence.py --check
-      - name: Coverage-floor MONOTONICITY gate (ratchet only rises, fast, no compile)
-        # [OPUS-4.8] sq-neq8: FAIL if THIS branch LOWERS/DROPS any crate's coverage floor
-        # vs origin/main. --check-robust only compares measured-vs-floor, so a floor
-        # DECREASE in a PR is otherwise invisible — exactly how #661 (sq-cafc) silently
-        # re-seeded sparq-serve 92->83 (caught by a human, not CI). Mirrors the conformance
-        # ratchet's only-rises enforcement. A deliberate, reviewed regression must add
-        # --allow-lower to this command in the PR (and a reviewer must approve it).
-        # Cheap (no compile) so it fails fast before the instrumented build.
-        run: |
-          git fetch --no-tags --depth=1 origin main
-          python3 scripts/coverage-gate.py --check-monotonic --base-ref origin/main
-      - name: Measure + enforce per-crate coverage (per-commit tier, max-remeasure gate)
-        # [OPUS-4.8] sq-x4jy: ROBUST per-crate MAX-REMEASURE gate. Measure once, then
-        # --check-robust re-measures ONLY the crates below floor (up to K=3 total
+      - name: Measure + enforce per-crate coverage (shard ${{ matrix.shard }}, max-remeasure gate)
+        # [OPUS-4.8] sq-x4jy: ROBUST per-crate MAX-REMEASURE gate. Measure this shard's crate
+        # subset once (COVERAGE_SHARD selects SHARD_GROUPS[shard-1]), then --check-robust
+        # re-measures ONLY this shard's crates that are below floor (up to K=3 total
         # measurements each) and keeps the per-crate MAX, failing only if a crate is STILL
         # below floor after K independent reads.
         #
-        # WHY this replaces the old "re-measure the WHOLE suite once" backstop: llvm-cov
-        # only ever UNDERCOUNTS (an aborted test / un-merged .profraw LOSES coverage,
-        # never adds it), so the true coverage is the MAX across independent measurements.
-        # The whole-suite-once backstop was structurally insufficient — in PR #62 it
-        # re-measured EVERYTHING, which let a SECOND, PR-unrelated crate (sparq-engine)
-        # flake 0.28% low on the re-measure and fail the job even though pass-1 had it
-        # comfortably above floor. Re-measuring ONLY the offenders and taking the MAX
-        # fixes that: a crate that was fine on an earlier pass keeps its good number.
-        #
-        # SAFE (does NOT mask a real regression): it never ACCEPTS a low number — it
-        # re-measures and keeps the best. A genuine drop is reproducible and fails ALL K
-        # measurements; a transient undercount is not and recovers on a re-measure.
-        # coverage.sh still serialises each binary's tests (--test-threads=1) to minimise
-        # the profraw-merge race at the source; this gate is the principled backstop.
+        # WHY the robust gate: llvm-cov only ever UNDERCOUNTS (an aborted test / un-merged
+        # .profraw LOSES coverage, never adds it), so the true coverage is the MAX across
+        # independent measurements. It never ACCEPTS a low number — a genuine drop is
+        # reproducible and fails ALL K measurements; a transient undercount recovers on a
+        # re-measure. coverage.sh still serialises each binary's tests (--test-threads=1) to
+        # minimise the profraw-merge race at the source; this gate is the principled backstop.
+        env:
+          COVERAGE_SHARD: ${{ matrix.shard }}
         run: |
           set -o pipefail
           ./scripts/coverage.sh
           python3 scripts/coverage-gate.py --check-robust target/coverage/coverage-summary.json
-      - name: Upload coverage summary
+      - name: Upload coverage summary (shard ${{ matrix.shard }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: coverage-summary
+          name: coverage-summary-shard-${{ matrix.shard }}
           path: target/coverage/coverage-summary.json
+
+  coverage:
+    # [OPUS-4.8] sq-p0hcd: single AGGREGATED pass/fail for the sharded coverage gate,
+    # keeping the EXACT original required-check NAME so any tooling / branch-protection
+    # reference to it stays valid (the ci-summary `gate` is the only ruleset-required
+    # check and discovers all siblings dynamically, but this preserves the clean, stable
+    # name and gives reviewers ONE coverage verdict instead of five checks). `if: always()`
+    # so it always produces a terminal check-run (never "expected but missing"); it fails
+    # iff a needed gating job concluded non-green (failure/cancelled), and passes when they
+    # succeeded or were skipped (doc-only PR).
+    name: coverage ratchet + test-presence gate (per-crate)
+    needs: [coverage-floors, coverage-measure]
+    if: ${{ always() && github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate coverage floor + shard results
+        run: |
+          floors='${{ needs.coverage-floors.result }}'
+          measure='${{ needs.coverage-measure.result }}'
+          echo "coverage-floors=$floors  coverage-measure(matrix)=$measure"
+          rc=0
+          for r in "$floors" "$measure"; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "::error::coverage gate FAILED — a needed job concluded '$r'"; rc=1 ;;
+            esac
+          done
+          if [ "$rc" -eq 0 ]; then
+            echo "### coverage ratchet + test-presence gate: PASS" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
 
   nightly-gate:
     # [OPUS-4.8] Freshness gate for ALL nightly (schedule-triggered) jobs: run them
