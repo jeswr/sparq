@@ -13,9 +13,12 @@ mod applier;
 /// [`update_in_place`](embed::update_in_place) / [`apply_delta_nquads`](embed::apply_delta_nquads)
 /// / [`exists`](embed::exists)+[`metadata`](embed::metadata)) plus a re-export of the
 /// runtime-agnostic concurrency wrapper ([`GenerationRing`] + [`GraphApplier`] / [`Writer`]),
-/// so an external host can call sparq in-process instead of over HTTP. INTENDED stable embedding
-/// API; the formal semver-tier-1 freeze is **pending maintainer ratification on #1248** (see the
-/// module docs) — not unilaterally frozen here. Thin re-exports only; no new behaviour.
+/// so an external host can call sparq in-process instead of over HTTP. **API tier-1
+/// (proposed-stable)** — the proposed semver-stable embedding surface in the [API stability
+/// policy]; the formal freeze is **pending maintainer ratification on #1248** (see the module
+/// docs), not unilaterally frozen here. Thin re-exports only; no new behaviour.
+///
+/// [API stability policy]: https://github.com/jeswr/sparq/blob/main/docs/api-stability.md
 pub mod embed;
 /// [OPUS-4.8] (sq-o5bi) ONLINE consistent-snapshot backup + restore for the serving store
 /// — export an already-immutable pinned [`Generation`] to a single self-describing artifact

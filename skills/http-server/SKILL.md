@@ -247,8 +247,9 @@ re-export of the runtime-agnostic concurrency wrapper. No axum/tokio, no HTTP.
   `TimeTravelConfig`) — the SAME `fork → update → publish` + generation-pinning model
   `sparq-server` wraps behind its endpoint. A reader `ring.current()` pins an
   immutable snapshot; the writer publishes new generations without blocking readers.
-- **Stability:** the INTENDED stable embedding API, but **NOT yet a frozen
-  semver-tier-1 surface** — the formal freeze is the maintainer's to ratify on #1248
+- **Stability — API tier-1 (proposed-stable):** the proposed semver-stable embedding
+  surface in the [API stability & deprecation policy](../../docs/api-stability.md), but
+  **NOT yet frozen** — the formal freeze is the maintainer's to ratify on #1248 / #1346
   (pre-`1.0` minor releases MAY still change it). Pin to `sparq_serve::embed` rather
   than reaching into `sparq-core` / `sparq-engine` directly so the freeze, when
   ratified, has one well-defined shape.

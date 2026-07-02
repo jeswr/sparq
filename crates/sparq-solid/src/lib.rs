@@ -379,6 +379,8 @@ impl PodStore {
     /// `user="…",public="…"` permission advertisement a Solid server returns on a
     /// `GET`/`HEAD`. [OPUS-4.8] sq-i7k08.
     ///
+    /// **API tier-1 (proposed-stable)** — see [`PodStore::decide`].
+    ///
     /// `user` lists the modes the **authenticated** agent (`session`) holds on the
     /// named graph backing `resource`; `public` lists the modes an **anonymous**
     /// caller ([`Session::default`]) holds — so an unauthenticated request still learns
@@ -458,6 +460,11 @@ impl PodStore {
     /// **may `principal` do `mode` on `resource`?** Returns a typed [`WacDecision`]
     /// (`allow`, `granted_modes`, `governing_acl`, `scope`, fail-closed `status`).
     ///
+    /// **API tier-1 (proposed-stable).** Part of the proposed semver-stable per-resource
+    /// decision surface (with `decide_batch` / [`PodStore::resolve_acl`] /
+    /// [`PodStore::wac_allow`]); the freeze is pending maintainer ratification — see the
+    /// [API stability policy](https://github.com/jeswr/sparq/blob/main/docs/api-stability.md).
+    ///
     /// This is the point-query an LDP resource server asks per request, NOT graph
     /// filtering. Where [`PodStore::query_as`] / [`PodStore::accessible`] return the *set*
     /// of authorized graphs, `decide` answers the single `(principal, resource, mode)`
@@ -516,6 +523,8 @@ impl PodStore {
     /// ONCE and reusing it for every request (the LDP server's "decide a page of
     /// resources" call). Each element's [`WacDecision`] is independent and fail-closed
     /// exactly as [`PodStore::decide`]; the result vector is parallel to the input.
+    ///
+    /// **API tier-1 (proposed-stable)** — see [`PodStore::decide`].
     pub fn decide_batch(&self, session: &Session, requests: &[(&str, Mode)]) -> Vec<WacDecision> {
         let index = decide::AclIndex::build(&self.graph);
         requests
@@ -537,6 +546,8 @@ impl PodStore {
     /// so this per-resource discovery and the materialize-time inheritance can never
     /// disagree. Feeds [`PodStore::decide`]'s `governing_acl`/`scope`, which
     /// [`WacDecision::acl_link_header`] turns into the FR-5 `Link: rel="acl"` surface.
+    ///
+    /// **API tier-1 (proposed-stable)** — see [`PodStore::decide`].
     ///
     /// # Examples
     ///

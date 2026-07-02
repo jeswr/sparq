@@ -146,7 +146,10 @@ Materialize the authorization view from the access-control documents, then enfor
   `AuthIndex::accessible` oracle, so a `decide` allow is never wider than `query_as` would
   grant; `granted_modes` carries the full mode set in one decision (build a `WAC-Allow`
   body without four sweeps). `decide_batch` builds the structural ACL index ONCE for a page
-  of resources. Always-present API (no cargo gate; mirrors `wac_allow`).
+  of resources. Always-present API (no cargo gate; mirrors `wac_allow`). **API tier-1
+  (proposed-stable)** — the proposed semver-stable per-resource decision surface (freeze
+  pending maintainer ratification, #1346 / #1248; see
+  [`docs/api-stability.md`](../../docs/api-stability.md)).
 - `WacDecision::acl_link_header() -> Option<String>` / `AclScope::as_acl_predicate() ->
   &'static str` — **effective-ACL provenance surface** (FR-5, sq-snopa.4): the `<acl-iri>;
   rel="acl"` RFC-8288 [`Link`](https://solidproject.org/TR/protocol#acl-resource) value a
