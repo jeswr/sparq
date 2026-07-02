@@ -16,12 +16,16 @@
 // sq-9hrn (this coZK re-audit). The concept the literature calls the hyphenated adjective is
 // referred to here as "malicious security" (the noun) on purpose.
 
-#import "_lib/bench.typ": headline, ev, provenance, authors, anon
+// [OPUS-4.8] sq-iixdh — import paper_heading_numbering so the Abstract is un-numbered and
+// sections render as "1.", "2." (not "0.1", "0.2").
+#import "_lib/bench.typ": headline, ev, provenance, authors, anon, paper_heading_numbering
 
 #set document(title: "A Collaborative-zk-SNARK Re-Audit as a Witness-Validation Negative Result for Federated SPARQL")
 #set text(size: 11pt)
 #set par(justify: true)
-#set heading(numbering: "1.")
+// Section numbering switched on here; the Abstract below is explicitly un-numbered so it
+// renders as front matter (venue convention), and == sections number as "1.", "2.", ...
+#set heading(numbering: paper_heading_numbering)
 
 #align(center)[
   #text(size: 17pt, weight: "bold")[
@@ -43,7 +47,7 @@
   collaborative re-audit (`sq-9hrn`) — neither of which is discharged here.
 ]]
 
-== Abstract
+#heading(level: 2, numbering: none, outlined: false)[Abstract]
 
 A federated query engine that wants to let several data holders jointly prove one statement over
 their private graphs is reaching for a _collaborative_ zero-knowledge SNARK: an MPC among the
