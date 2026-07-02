@@ -2023,13 +2023,32 @@ jobs:
     # Until then `continue-on-error: true` keeps the run green while it seeds.
     #
     # SEEDED SO FAR (honest): the crates listed in bench/mutants-baseline.json carry a real
-    # committed ceiling from an actual cargo-mutants run (sparq-canon, sparq-parse from the
-    # original local run; sparq-algos added locally under sq-ep3f). Every OTHER crate in
-    # CRATES below is measured + reported here and gets its ceiling seeded on its first
-    # nightly run (download the mutants-outcomes-nightly artifact, run
-    # scripts/mutants-gate.py --seed on each outcomes.json, commit — sq-ep3f). The
-    # baseline's absence of a crate is NOT a claim that it has zero surviving mutants — it
-    # just has not been measured yet.
+    # committed ceiling from an actual cargo-mutants run — sparq-canon, sparq-parse (original
+    # local run), sparq-algos + sparq-substrate (sq-ep3f / sq-qcnn.3), and sparq-introspect +
+    # sparq-prov (sq-52su, seeded from the mutants-outcomes-nightly artifact of the 2026-06-30
+    # scheduled run — counts reproduced identically across four independent nightly artifacts,
+    # so they are complete, not truncated). Every OTHER crate in CRATES below is measured +
+    # reported here and gets its ceiling seeded on its first nightly run (download the
+    # mutants-outcomes-nightly artifact, run scripts/mutants-gate.py --seed on each
+    # outcomes.json, commit — sq-ep3f). The baseline's absence of a crate is NOT a claim that
+    # it has zero surviving mutants — it just has not been measured yet.
+    #
+    # WHY STILL ADVISORY — two blockers to promotion, both HONEST (sq-52su):
+    #   1. SEEDING IS INCOMPLETE. This job shares the workflow concurrency group
+    #      (ci-${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true) with
+    #      push/merge_group runs on the SAME ref (main), so a push to main while the nightly
+    #      is running CANCELS it. The full CRATES list takes longer than the gap between main
+    #      pushes, so every scheduled run to date has been cancelled after ~5-6 crates — the
+    #      later crates (sparq-engine … sparq-policy) have NEVER been measured. Promotion needs
+    #      them seeded first (e.g. run the nightly on a dedicated, non-cancelled ref, shard the
+    #      crate list across nights, or drop this leg from cancel-in-progress).
+    #   2. TWO SEEDED CEILINGS ARE STALE. The sparq-canon/sparq-parse ceilings (9 / 14) were
+    #      seeded when those crates were small; the current nightly measures ~98 / ~32 surviving
+    #      mutants, so `--check` against real outcomes FAILS them today. That is a genuine
+    #      test-QUALITY gap (their tests must be strengthened) — NOT something to paper over by
+    #      raising the ceiling. Promoting to gating now would turn the required `gate` red on
+    #      main. So this leg stays advisory (continue-on-error + "advisory" name token) until
+    #      both blockers clear.
     name: mutation ratchet (cargo-mutants, advisory)
     needs: nightly-gate
     if: needs.nightly-gate.outputs.fresh == 'true'
