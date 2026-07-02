@@ -127,6 +127,27 @@ fn unknown_strategy_is_refused() {
     assert!(err.contains("urn:custom:mediate"), "error names the offending IRI: {err}");
 }
 
+/// **Fail-closed on ambiguity (sq-ihqbl).** A graph asserting *two* distinct
+/// `odrl:conflict` strategies — a benign `odrl:prohibit` that sorts BEFORE an unknown
+/// `<urn:zzz:mediate>` — must be refused. Under the old "take the first-sorted `?c`"
+/// behaviour the benign `odrl:prohibit` sorted first and the graph parsed as admissible,
+/// silently masking the co-asserted unimplementable strategy. The parser now refuses the
+/// ambiguous set outright.
+#[test]
+fn multiple_conflicting_strategies_refused_ambiguous() {
+    let ttl = "@prefix odrl: <http://www.w3.org/ns/odrl/2/> .\n\
+        <urn:pol/p> a odrl:Set ;\n\
+          odrl:conflict odrl:prohibit ;\n\
+          odrl:conflict <urn:zzz:mediate> ;\n\
+          odrl:permission [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] .";
+    let err = parse_policy_str(ttl, "turtle")
+        .expect_err("a graph declaring multiple distinct conflict strategies must be refused");
+    assert!(
+        err.contains("multiple") && err.contains("conflict"),
+        "error explains the ambiguous conflict set: {err}",
+    );
+}
+
 /// An empty policy (no rules) declaring no conflict is trivially admissible.
 #[test]
 fn empty_policy_is_admissible() {
