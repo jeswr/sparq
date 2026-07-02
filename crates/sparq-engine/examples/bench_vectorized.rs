@@ -6,8 +6,9 @@
 //! 🤖 SPARQ agent. Prints `metric_us` lines (min-of-`iters` microseconds) so a harness can
 //! scrape them, matching the repo's established bench idiom (`sparq-algos`'
 //! `examples/bench_algos.rs`, `sparq-vectors`' `examples/bench_vectors.rs`) — NOT the
-//! criterion crate, which the workspace does not use and which would be the first-ever
-//! criterion dependency, against the "lean, dependency-light core" constraint. Zero new
+//! criterion crate, which the root workspace and its production crates avoid (the only
+//! criterion deps live in the isolated, standalone `bench/*` workspaces, e.g.
+//! `bench/zk/Cargo.toml`), against the "lean, dependency-light core" constraint. Zero new
 //! dependencies; the corpus is generated in-process (no external dataset).
 //!
 //! ## Honest Phase-1 semantics (no win is claimed here)
@@ -49,7 +50,9 @@ fn best<T>(label: &str, iters: u32, f: impl Fn() -> T) {
 fn main() {
     let mut args = std::env::args().skip(1);
     let n: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(200_000);
-    let iters: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(7);
+    // Clamp to ≥1: `ITERS=0` would leave `best()`'s min-fold at `u128::MAX`, printing a
+    // nonsense (huge) timing instead of running the closure at all.
+    let iters: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(7).max(1);
 
     // Synthetic integer-age graph: `(ex:s{i}, ex:age, i)` for i in 0..n.
     let mut nt = String::with_capacity(n * 48);
