@@ -1085,4 +1085,172 @@ mod tests {
         bind_combine(&result, &[0, 2], &[99], &mut out);
         assert_eq!(out, vec![row(&[1, 10, 99]), row(&[3, 30, 99])]);
     }
+
+    // [OPUS-4.8] sq-qcnn.12 — DIRECT unit tests over the join kernels' descriptor projection,
+    // the radix-partitioned hash build/probe path, the budget-truncation branches, the
+    // merge-join advance arms, and the solution-compatibility helpers. Each asserts EXACT
+    // output rows / counts so a mutation of the branch or index logic goes red.
+
+    #[test]
+    fn no_budget_never_exhausts_or_hits() {
+        // The unbounded Budget / BudgetSnapshot both fold to a constant `false`.
+        assert!(!Budget::exhausted(&NoBudget, 0));
+        assert!(!Budget::exhausted(&NoBudget, 1_000_000));
+        assert!(!BudgetSnapshot::hit(&NoBudget, 0));
+        assert!(!BudgetSnapshot::hit(&NoBudget, 1_000_000));
+    }
+
+    #[test]
+    fn key_hash_agrees_on_equal_keys() {
+        // The only correctness requirement: equal keys must hash identically so build
+        // and probe land in the same partition.  Hash collisions between distinct keys
+        // are permitted — the FxHashMap in each bucket handles them correctly.
+        let k1: Key = smallvec![1u32, 2u32];
+        let k2: Key = smallvec![1u32, 2u32];
+        assert_eq!(key_hash(&k1), key_hash(&k2)); // build & probe MUST agree
+    }
+
+    #[test]
+    fn join_keys_project_left_and_right_to_the_same_shape() {
+        // key_cols = [(0,1),(2,3)]: left picks cols 0,2 ; right picks cols 1,3.
+        let keys = JoinKeys { key_cols: vec![(0, 1), (2, 3)], right_only: vec![4] };
+        let lrow = [10u32, 20, 30, 40];
+        let rrow = [5u32, 10, 7, 30, 99];
+        let lk = keys.left_key(&lrow);
+        let rk = keys.right_key(&rrow);
+        assert_eq!(lk.as_slice(), &[10u32, 30u32]);
+        assert_eq!(rk.as_slice(), &[10u32, 30u32]);
+        assert_eq!(lk, rk); // equal exactly when the join columns agree
+    }
+
+    #[test]
+    fn merge_join_greater_arm_advances_the_right_cursor() {
+        // left's first key (3) EXCEEDS right's first key (1), so the Ordering::Greater arm
+        // must advance the right cursor before the keys line up at 3.
+        let left = vec![row(&[3, 30])];
+        let right = vec![row(&[1, 10]), row(&[3, 300])];
+        let mut out = Vec::new();
+        merge_join(&left, 0, &right, 0, &[], &[1], &NoBudget, &mut out);
+        assert_eq!(out, vec![row(&[3, 30, 300])]);
+    }
+
+    #[test]
+    fn merge_join_empty_inputs_produce_no_output() {
+        let mut out = Vec::new();
+        merge_join::<NoBudget>(&[], 0, &[], 0, &[], &[], &NoBudget, &mut out);
+        assert!(out.is_empty());
+        let left = vec![row(&[1, 10])];
+        merge_join::<NoBudget>(&left, 0, &[], 0, &[], &[], &NoBudget, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn build_partitioned_covers_all_rows_across_the_radix_maps() {
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let build = vec![row(&[1, 10]), row(&[2, 20]), row(&[3, 30])];
+        // The engine computes each row's partition as key_hash(left_key) % JOIN_PARTS.
+        let parts: Vec<u8> = build
+            .iter()
+            .map(|r| (key_hash(&keys.left_key(r)) % JOIN_PARTS as u64) as u8)
+            .collect();
+        let tables = build_partitioned(&build, &keys, &parts);
+        assert_eq!(tables.len(), JOIN_PARTS);
+        // Every build row lands in exactly one partition — the union covers all 3.
+        let total: usize = tables.iter().map(|t| t.values().map(|v| v.len()).sum::<usize>()).sum();
+        assert_eq!(total, 3);
+        // The row for key=1 is findable in its own partition.
+        let part1 = (key_hash(&keys.left_key(&build[0])) % JOIN_PARTS as u64) as usize;
+        let k1: Key = keys.left_key(&build[0]);
+        assert_eq!(tables[part1].get(&k1), Some(&smallvec![0usize] as &Posting));
+    }
+
+    #[test]
+    fn probe_emit_multi_partition_finds_the_matching_build_row() {
+        // A partitioned table (len != 1) exercises the radix branch of probe_emit.
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let build = vec![row(&[1, 10]), row(&[2, 20])];
+        let parts: Vec<u8> = build
+            .iter()
+            .map(|r| (key_hash(&keys.left_key(r)) % JOIN_PARTS as u64) as u8)
+            .collect();
+        let tables = build_partitioned(&build, &keys, &parts);
+        let probe_row = row(&[1, 0]);
+        let mut out = Vec::new();
+        probe_emit(&probe_row, &keys, &build, &tables, &[], &mut out);
+        assert_eq!(out, vec![row(&[1, 10])]);
+        // A probe with no match emits nothing.
+        let mut out2 = Vec::new();
+        probe_emit(&row(&[99, 0]), &keys, &build, &tables, &[], &mut out2);
+        assert!(out2.is_empty());
+    }
+
+    #[test]
+    fn hash_probe_serial_budget_truncates_after_the_cap() {
+        struct Cap(usize);
+        impl Budget for Cap {
+            fn exhausted(&self, rows: usize) -> bool {
+                rows >= self.0
+            }
+        }
+        let build = vec![row(&[1, 10]), row(&[2, 20]), row(&[3, 30])];
+        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let tables = vec![build_table(&build, &keys)];
+        let probe = vec![row(&[1, 0]), row(&[2, 0]), row(&[3, 0])];
+        let mut out = Vec::new();
+        hash_probe_serial(&probe, &keys, &build, &tables, &[], &Cap(1), &mut out);
+        assert_eq!(out.len(), 1); // the second probe row's pre-check trips and stops
+    }
+
+    #[test]
+    fn lftj_empty_trie_yields_no_output() {
+        let r = Trie { tuples: vec![] };
+        let s = Trie { tuples: vec![vec![1, 2]] };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s)];
+        let parts_at_level = vec![vec![0, 1], vec![0, 1]];
+        let mut current = vec![NO_ID, NO_ID];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 2, &mut current, &NoBudget, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn lftj_budget_truncates_after_the_first_match() {
+        struct Cap(usize);
+        impl Budget for Cap {
+            fn exhausted(&self, rows: usize) -> bool {
+                rows >= self.0
+            }
+        }
+        // Two identical relations over levels [0,1]; their intersection is all four tuples,
+        // but the sticky Cap(1) budget truncates after the first full match.
+        let r = Trie { tuples: vec![vec![1, 2], vec![1, 3], vec![2, 4], vec![3, 5]] };
+        let s = Trie { tuples: vec![vec![1, 2], vec![1, 3], vec![2, 4], vec![3, 5]] };
+        let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s)];
+        let parts_at_level = vec![vec![0, 1], vec![0, 1]];
+        let mut current = vec![NO_ID, NO_ID];
+        let mut out = Vec::new();
+        lftj_recurse(&mut iters, &parts_at_level, 0, 2, &mut current, &Cap(1), &mut out);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn merge_rows_keeps_a_bound_left_and_appends_right_only() {
+        // The left's shared column is already bound (not NO_ID), so merge_rows must KEEP it
+        // and ignore the right's value for that column — only right_only cols are appended.
+        let l = [10u32, 7u32];
+        let r = [10u32, 99u32, 42u32];
+        let out = merge_rows(&l, &r, &[(0, 0)], &[2]);
+        let expected: Row = smallvec![10u32, 7u32, 42u32];
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn any_unbound_detects_an_unbound_column() {
+        let rows = vec![row(&[1, NO_ID, 3])];
+        assert!(any_unbound(&rows, &[1])); // col 1 is unbound
+        assert!(!any_unbound(&rows, &[0])); // col 0 is bound
+        assert!(any_unbound(&rows, &[0, 1])); // any unbound in the set trips it
+        let full = vec![row(&[1, 2, 3])];
+        assert!(!any_unbound(&full, &[0, 1, 2])); // all bound
+    }
 }
