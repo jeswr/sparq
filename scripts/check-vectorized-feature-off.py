@@ -107,11 +107,20 @@ def check_leg1(metadata_path: str) -> int:
 
 def check_leg2(bench_results_path: str, floor_path: str) -> int:
     """
-    Returns 0 if measured wasm_bundle_bytes exactly equals the pinned floor, 1 otherwise.
+    Returns 0 if measured wasm_bundle_bytes exactly equals the pinned feature_off_exact
+    value, 1 otherwise.
+
     bench_results_path: JSON list in github-action-benchmark format
       [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": N}, ...]
     floor_path: bench/perf-baseline.json with structure
-      {"metrics": {"wasm_bundle_bytes": {"floor": N, ...}}}
+      {"metrics": {"wasm_bundle_bytes": {"floor": N, "feature_off_exact": N, ...}}}
+
+    NOTE: leg 2 compares against `feature_off_exact`, NOT `floor`.
+    The ratchet floor (bench/perf-baseline.json wasm_bundle_bytes.floor) is the 2%-band
+    lower bound used by bench.yml — it can sit BELOW the current wasm size by up to 2%.
+    An exact-equality check against the floor therefore fails whenever main drifts
+    within-band. `feature_off_exact` is a dedicated pin updated in the same PR as any
+    wasm change; it always equals the ACTUAL byte count of the feature-OFF build.
     """
     try:
         with open(bench_results_path) as fh:
@@ -146,25 +155,42 @@ def check_leg2(bench_results_path: str, floor_path: str) -> int:
         if metric_name != "wasm_bundle_bytes":
             # This script only gates on the wasm bundle as the feature-OFF proof metric
             continue
-        floor_value = metric_cfg.get("floor")
+
+        # [OPUS-4.8] Use feature_off_exact, NOT floor.
+        # The floor is the 2%-band ratchet lower bound (bench.yml); wasm can legitimately
+        # sit anywhere from floor to floor*1.02 and still pass bench.yml. Comparing against
+        # the floor in an exact-equality check fails whenever main drifts within-band.
+        exact_value = metric_cfg.get("feature_off_exact")
+        if exact_value is None:
+            violations.append(
+                f"[leg2] VIOLATION: 'wasm_bundle_bytes.feature_off_exact' is absent from "
+                f"{floor_path!r}. This field must be set to the exact byte count of the "
+                "feature-OFF wasm build (`cargo build --profile release-wasm -p sparq-wasm "
+                "--target wasm32-unknown-unknown`). Re-pin it by measuring the build output "
+                "and committing the value alongside any wasm change."
+            )
+            continue
+
         actual_value = measured[metric_name]
-        if actual_value != floor_value:
-            delta = actual_value - floor_value
-            pct = (delta / floor_value * 100) if floor_value else float("inf")
+        if actual_value != exact_value:
+            delta = actual_value - exact_value
+            pct = (delta / exact_value * 100) if exact_value else float("inf")
             violations.append(
                 f"[leg2] VIOLATION: wasm_bundle_bytes mismatch — "
-                f"measured={actual_value}, floor={floor_value}, "
+                f"measured={actual_value}, feature_off_exact={exact_value}, "
                 f"delta={delta:+d} bytes ({pct:+.3f}%). "
-                "Zero delta required: any accidental vectorized code would change the bundle size."
+                "Zero delta required: any accidental vectorized code would change the bundle "
+                "size. If this is a legitimate wasm change, update feature_off_exact in "
+                "bench/perf-baseline.json to the new measured value."
             )
         else:
-            print(f"[leg2] OK — wasm_bundle_bytes exact match: {actual_value} == {floor_value} "
-                  "(zero delta, compile-time absence confirmed)")
+            print(f"[leg2] OK — wasm_bundle_bytes exact match: {actual_value} == {exact_value} "
+                  "(zero delta vs feature_off_exact pin, compile-time absence confirmed)")
 
     if violations:
         for v in violations:
             print(v)
-        print("\n[leg2] FAIL — wasm bundle size does not exactly match the pinned floor. "
+        print("\n[leg2] FAIL — wasm bundle size does not exactly match the feature_off_exact pin. "
               "This gate requires ZERO delta (stricter than the 2% ratchet in bench.yml).")
         return 1
 
@@ -359,14 +385,24 @@ def run_self_test() -> int:
         all_passed = False
 
     # ----- Tripwire 2: Leg 2 must reject a perturbed wasm bundle size -----
-    pinned_floor = 1399703
-    perturbed = pinned_floor + 1  # 1 byte off — must be caught
+    # [OPUS-4.8] Uses feature_off_exact (NOT floor) — mirrors the live check_leg2() logic.
+    pinned_exact = 1399830
+    perturbed = pinned_exact + 1  # 1 byte off — must be caught
     bad_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": perturbed}]
-    bad_floor = {"metrics": {"wasm_bundle_bytes": {"floor": pinned_floor, "threshold": 0.02, "mode": "auto"}}}
+    bad_floor = {
+        "metrics": {
+            "wasm_bundle_bytes": {
+                "floor": 1399703,
+                "threshold": 0.02,
+                "mode": "auto",
+                "feature_off_exact": pinned_exact,
+            }
+        }
+    }
     rc = _leg2_on_dicts(bad_results, bad_floor)
     if rc != 0:
         print("TRIPWIRE 2 (leg2): PASS — comparator correctly rejected perturbed bundle size "
-              f"({perturbed} != {pinned_floor})")
+              f"({perturbed} != feature_off_exact={pinned_exact})")
     else:
         print("TRIPWIRE 2 (leg2): FAIL — comparator did NOT reject mismatched size; the leg2 check is broken")
         all_passed = False

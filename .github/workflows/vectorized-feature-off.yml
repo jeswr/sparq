@@ -8,8 +8,11 @@
 #     feature-unification trap before any build.
 #
 #   Leg 2 (artifact exact-equality): wasm bundle built feature-OFF, size asserted ==
-#     the pinned bench/perf-baseline.json floor (zero delta, stricter than the 2%
-#     ratchet in bench.yml). Any accidental vectorized code would change the bundle size.
+#     bench/perf-baseline.json metrics.wasm_bundle_bytes.feature_off_exact (zero delta,
+#     stricter than the 2% ratchet in bench.yml). Uses feature_off_exact, NOT the ratchet
+#     floor — the floor can sit below the current wasm size by up to 2% (within-band),
+#     so an exact-equality check against it gives false failures on within-band main drift.
+#     Any accidental vectorized code would change the bundle size.
 #
 #   Leg 3 (cfg-audit): script asserting every `vectorized` module registration and
 #     evaluator call site in crates/sparq-engine/src/lib.rs and exec.rs is under
@@ -17,8 +20,8 @@
 #
 # Honest scope:
 #   - Legs 1 and 3 prove COMPILE-TIME ABSENCE of the vectorized feature in the default build.
-#   - Leg 2 proves ARTIFACT BYTE-DETERMINISM (zero delta vs pinned floor). Any accidental
-#     vectorized code would change the bundle size.
+#   - Leg 2 proves ARTIFACT BYTE-DETERMINISM (zero delta vs feature_off_exact pin). Any
+#     accidental vectorized code would change the bundle size.
 #   - This does NOT prove runtime performance neutrality — that is EC2-gated.
 #
 # Gate integration:

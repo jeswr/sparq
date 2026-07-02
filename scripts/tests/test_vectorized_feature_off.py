@@ -150,20 +150,29 @@ def test_leg1_accepts_clean_metadata() -> bool:
 def test_leg2_comparator_rejects_perturbed_size() -> bool:
     """
     Tripwire 2: leg2 MUST reject a wasm_bundle_bytes value that differs from the
-    pinned floor by even 1 byte.
+    pinned feature_off_exact by even 1 byte.
+
+    [OPUS-4.8] leg2 now compares against feature_off_exact, NOT floor.  The floor
+    (1399703) is the 2%-band ratchet lower bound for bench.yml; the exact equality pin
+    is separate so that within-band main drift does not cause a false failure.
     """
-    pinned_floor = 1399703
-    perturbed = pinned_floor + 1
+    pinned_exact = 1399830  # [OPUS-4.8] feature_off_exact pin (measured 2026-07-02)
+    perturbed = pinned_exact + 1
     bad_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": perturbed}]
     bad_floor = {
         "metrics": {
-            "wasm_bundle_bytes": {"floor": pinned_floor, "threshold": 0.02, "mode": "auto"}
+            "wasm_bundle_bytes": {
+                "floor": 1399703,
+                "threshold": 0.02,
+                "mode": "auto",
+                "feature_off_exact": pinned_exact,
+            }
         }
     }
     rc = _leg2_on_dicts(bad_results, bad_floor)
     if rc != 0:
         print(f"  PASS — leg2 comparator correctly rejected perturbed size "
-              f"({perturbed} != {pinned_floor})")
+              f"({perturbed} != feature_off_exact={pinned_exact})")
         return True
     else:
         print("  FAIL — leg2 comparator did NOT reject mismatched size; the comparator is broken")
@@ -172,18 +181,26 @@ def test_leg2_comparator_rejects_perturbed_size() -> bool:
 
 def test_leg2_accepts_exact_match() -> bool:
     """
-    Sanity check: leg2 MUST accept results that exactly match the floor.
+    Sanity check: leg2 MUST accept results that exactly match the feature_off_exact pin.
+
+    [OPUS-4.8] Uses feature_off_exact, not floor — mirrors the updated check_leg2() logic.
     """
-    pinned_floor = 1399703
-    good_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": pinned_floor}]
+    pinned_exact = 1399830  # [OPUS-4.8] feature_off_exact pin (measured 2026-07-02)
+    good_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": pinned_exact}]
     good_floor = {
         "metrics": {
-            "wasm_bundle_bytes": {"floor": pinned_floor, "threshold": 0.02, "mode": "auto"}
+            "wasm_bundle_bytes": {
+                "floor": 1399703,
+                "threshold": 0.02,
+                "mode": "auto",
+                "feature_off_exact": pinned_exact,
+            }
         }
     }
     rc = _leg2_on_dicts(good_results, good_floor)
     if rc == 0:
-        print(f"  PASS — leg2 comparator correctly accepted exact match ({pinned_floor} == {pinned_floor})")
+        print(f"  PASS — leg2 comparator correctly accepted exact match "
+              f"(feature_off_exact={pinned_exact})")
         return True
     else:
         print("  FAIL — leg2 comparator incorrectly rejected an exact match; false positive")
