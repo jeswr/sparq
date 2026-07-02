@@ -861,4 +861,56 @@ mod tests {
         // plain lexical keeps the integral-plain convention.
         assert_eq!(two.lexical(), "2");
     }
+
+    #[test]
+    fn parse_xsd_f64_f32_accept_xsd_specials_reject_rust_only_spellings() {
+        // [OPUS-4.8] sq-rkzhr — direct coverage of the shared parser that BOTH the exact
+        // `as_numeric` path and (after sq-rkzhr) the lenient engine `as_num`/`as_f64`
+        // compare seam route through: the XSD spellings parse; the Rust-`FromStr`-only
+        // spellings XSD forbids do not, so the two comparison paths can never disagree on
+        // which double/float lexicals are numeric.
+        assert_eq!(parse_xsd_f64("INF"), Some(f64::INFINITY));
+        assert_eq!(parse_xsd_f64("+INF"), Some(f64::INFINITY));
+        assert_eq!(parse_xsd_f64("-INF"), Some(f64::NEG_INFINITY));
+        assert!(matches!(parse_xsd_f64("NaN"), Some(d) if d.is_nan()));
+        assert_eq!(parse_xsd_f64("1.5E2"), Some(150.0));
+        assert_eq!(parse_xsd_f64("6"), Some(6.0));
+        for bad in ["inf", "+inf", "infinity", "-infinity", "nan", "Infinity", "NAN", ""] {
+            // Positional arg (not inline `{bad}`) to dodge the CodeQL
+            // `rust/unused-variable` false positive. [OPUS-4.8]
+            assert_eq!(parse_xsd_f64(bad), None, "parse_xsd_f64 must reject {:?}", bad);
+        }
+        // f32 narrows the same acceptance set.
+        assert_eq!(parse_xsd_f32("INF"), Some(f32::INFINITY));
+        assert_eq!(parse_xsd_f32("-INF"), Some(f32::NEG_INFINITY));
+        assert!(parse_xsd_f32("nan").is_none());
+    }
+
+    #[test]
+    fn double_float_lexical_two_convention_per_surface_policy() {
+        // [OPUS-4.8] sq-rkzhr — LOCK the deliberate two-convention split so a future
+        // refactor cannot silently collapse it. `lexical` (STR / serialize / arithmetic
+        // result construction) keeps the PLAIN-integral form the W3C SPARQL expected-result
+        // files use for computed double/float arithmetic ("6", not "6.0E0"); while
+        // `canonical_lexical` (the SUM/MIN/MAX aggregate-term surface) is the XSD-mandatory
+        // scientific form. A global flip of `lexical` to scientific was MEASURED to REGRESS
+        // 5 W3C eval tests (expr-ops +/-/*/unary-minus, AVG DISTINCT), so this split is
+        // intentional and conformance-load-bearing, not an oversight.
+        let dbl = Num::Double(6.0);
+        assert_eq!(dbl.lexical(), "6"); // plain-integral (W3C-suite convention)
+        assert_eq!(dbl.canonical_lexical(), "6.0E0"); // XSD-canonical scientific
+        let flt = Num::Float(6.0);
+        assert_eq!(flt.lexical(), "6");
+        assert_eq!(flt.canonical_lexical(), "6.0E0");
+        // Non-integral values are scientific under BOTH surfaces (no divergence there).
+        assert_eq!(Num::Double(0.2).lexical(), "2.0E-1");
+        assert_eq!(Num::Double(0.2).canonical_lexical(), "2.0E-1");
+        // The XSD specials spell identically under both surfaces.
+        assert_eq!(Num::Double(f64::INFINITY).lexical(), "INF");
+        assert_eq!(Num::Double(f64::INFINITY).canonical_lexical(), "INF");
+        assert_eq!(Num::Double(f64::NEG_INFINITY).lexical(), "-INF");
+        assert_eq!(Num::Double(f64::NEG_INFINITY).canonical_lexical(), "-INF");
+        assert_eq!(Num::Double(f64::NAN).lexical(), "NaN");
+        assert_eq!(Num::Double(f64::NAN).canonical_lexical(), "NaN");
+    }
 }
