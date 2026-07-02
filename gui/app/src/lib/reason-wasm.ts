@@ -10,7 +10,9 @@
 // the GUI keys off (@/lib/base-path), so they resolve under both the Tauri root-relative export
 // and the hosted "/sparq/app" sub-path. The bundle is OPTIONAL: a build that did not sync it
 // (see gui/app/scripts/sync-wasm.mjs) surfaces an honest "reasoning unavailable" state at
-// runtime rather than crashing — queries then run without inference and the UI says so.
+// runtime rather than crashing — and, rather than silently answering un-reasoned, queries then
+// hard-fail with a clear message while inference is on (until it is turned off or the bundle is
+// rebuilt), as the UI says.
 
 import { basePath } from "@/lib/base-path";
 import type { WorkspaceInferenceMode } from "@sparq/client";

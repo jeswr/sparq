@@ -91,8 +91,8 @@ export function InferenceTool() {
             The reasoning bundle could not run: {inferenceStatus.message} It is a separate wasm
             bundle that must be synced into this build — rebuild it with{" "}
             <code className="rounded bg-muted px-1 py-0.5">npm run build:reason-wasm</code> in{" "}
-            <code className="rounded bg-muted px-1 py-0.5">js/</code>. Until then, queries run over
-            the asserted data.
+            <code className="rounded bg-muted px-1 py-0.5">js/</code>. Until then, queries fail while
+            inference is on — turn inference Off to query the asserted data.
           </div>
         ) : status.kind !== "ready" ? (
           <p className="text-sm text-muted-foreground">Waiting for the engine to warm…</p>

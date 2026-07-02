@@ -37,7 +37,8 @@ console.log(`[sync-wasm] copied ${files.length} files → public/wasm/`);
 // (it is NOT part of the published @jeswr/sparq package), so we copy it from there into
 // public/wasm/reason/. This bundle is OPTIONAL: if it has not been built (e.g. a `next dev` that
 // skips it, or the gated CI build), we WARN and skip rather than fail — the Inference tool then
-// surfaces a clear "reasoner unavailable" state at runtime and queries run without inference.
+// surfaces a clear "reasoner unavailable" state at runtime, and (rather than silently running
+// un-reasoned) queries hard-fail while inference is on until it is rebuilt or inference is off.
 const reasonSrc = join(here, "..", "..", "..", "crates", "sparq-reason-wasm", "pkg");
 const reasonDest = join(dest, "reason");
 const reasonFiles = [
