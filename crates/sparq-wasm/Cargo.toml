@@ -118,3 +118,18 @@ wasm-bindgen-test = "0.3"
 [package.metadata.wasm-pack.profile.release]
 # Optimise the wasm for size.
 wasm-opt = ["-Oz"]
+
+# [OPUS-4.8] sq-7d3dj.1: the shipped bundle (js `build:wasm{,:lean}`) builds the `release-wasm`
+# cargo profile (root Cargo.toml — size-optimised cold parse crates). There is intentionally NO
+# `[package.metadata.wasm-pack.profile.release-wasm]` block: wasm-pack only recognises the built-in
+# `dev`/`profiling`/`release` profile keys and warns "unknown key … ignored" for any custom profile
+# name, so wasm-opt for `--profile release-wasm` runs wasm-pack's default `-O` (NOT the `release`
+# block's `-Oz`) — a block here would be dead config that lies about `-Oz`. The size win comes from
+# the cargo profile itself; wasm-opt `-O` strips + shrinks the shipped `_bg.wasm` on top.
+#
+# The `release-wasm` cargo profile sets `strip = "symbols"` for the deterministic `wasm_bundle_bytes`
+# gate (raw `cargo build`, no wasm-opt). cargo-level stripping ALSO drops the wasm `target_features`
+# custom section, which wasm-opt reads to auto-enable SIMD / bulk-memory; without it wasm-opt fails
+# validation ("SIMD operations require SIMD"). So the js `build:wasm{,:lean}` scripts pass
+# `--config profile.release-wasm.strip=false` to the shipped cargo build (wasm-opt does the stripping
+# instead) — the gate keeps the profile's strip verbatim, the shipped build lets wasm-opt validate.
