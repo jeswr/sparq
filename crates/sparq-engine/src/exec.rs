@@ -892,7 +892,11 @@ impl LocalVocab {
         }
         let id = LOCAL_BASE + self.terms.len() as Id;
         self.nums.push(match &t {
-            Term::Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
+            // [OPUS-4.8] sq-rkzhr: parse through `parse_xsd_f64` — the SAME acceptance set
+            // as `as_num` / `as_numeric` — so the local-vocab numeric cache agrees with the
+            // lenient/exact compare seams on the XSD spelling rules (INF/+INF/-INF/NaN yes;
+            // Rust-only inf/infinity/nan no). A rejected spelling folds to the NaN sentinel.
+            Term::Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()).unwrap_or(f64::NAN),
             _ => f64::NAN,
         });
         // [OPUS-4.8] (sq-s5is) Charge the byte cap for this newly-computed term (BIND /
@@ -907,8 +911,12 @@ impl LocalVocab {
     fn term(&self, id: Id) -> &Term {
         &self.terms[(id - LOCAL_BASE) as usize]
     }
-    /// The cached numeric value of a local id (`None` for non-numeric terms) —
-    /// exactly what `as_num` of the materialised term would return.
+    /// The cached numeric value of a local id (`None` for a non-numeric term).
+    /// For every non-NaN numeric term this is exactly what `as_num` of the
+    /// materialised term returns — both parse through `parse_xsd_f64`. A genuine
+    /// `xsd:double`/`float` `NaN` is the one case they differ: the cache uses NaN as
+    /// its not-a-number sentinel, so it reports `None` where `as_num` returns
+    /// `Some(NaN)` (a pre-existing sentinel limitation, not a parse-set disagreement).
     #[inline]
     fn numeric(&self, id: Id) -> Option<f64> {
         let v = self.nums[(id - LOCAL_BASE) as usize];
@@ -3055,7 +3063,7 @@ fn extract_sargable(e: &Expression) -> Option<(Variable, ScanCmp)> {
     fn lit_num(e: &Expression) -> Option<f64> {
         match e {
             Expression::Literal(l) if is_numeric_dt(l) => {
-                let v: f64 = l.value().parse().ok()?;
+                let v: f64 = parse_xsd_f64(l.value())?;
                 // A threshold f64 can't represent precisely (> 15 significant digits —
                 // large integers or high-precision decimals) makes the sargable f64 scan
                 // unsafe; decline so the filter takes the exact general comparison path.
@@ -6682,10 +6690,10 @@ fn ebv(v: &Value) -> Option<bool> {
                     _ => None,
                 }
             } else if is_numeric_dt(l) {
-                match l.value().parse::<f64>() {
-                    Ok(n) => Some(n != 0.0 && !n.is_nan()),
-                    Err(_) => None,
-                }
+                // [OPUS-4.8] sq-rkzhr: XSD acceptance set (via `parse_xsd_f64`) — a
+                // numeric-typed literal with an ill-formed lexical is a type error (`None`),
+                // matching `as_num` rather than silently swallowing Rust-only spellings.
+                parse_xsd_f64(l.value()).map(|n| n != 0.0 && !n.is_nan())
             } else if dt == xsd::STRING.as_str() {
                 Some(!l.value().is_empty())
             } else {
@@ -6900,7 +6908,7 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
                 graph.numeric_value(id)
             }
         }
-        Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
+        Literal(l) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
         Add(a, c) => Some(eval_numeric(graph, local, b, row, a)? + eval_numeric(graph, local, b, row, c)?),
         Subtract(a, c) => Some(eval_numeric(graph, local, b, row, a)? - eval_numeric(graph, local, b, row, c)?),
         Multiply(a, c) => Some(eval_numeric(graph, local, b, row, a)? * eval_numeric(graph, local, b, row, c)?),
@@ -7367,7 +7375,16 @@ fn as_num(v: &Value) -> Option<f64> {
     match v {
         Value::Num(n) => Some(n.f64()),
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
-        Value::Term(Term::Literal(l)) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
+        // [OPUS-4.8] sq-rkzhr: route the lexical→f64 arm through `parse_xsd_f64` (the SAME
+        // parser the exact/typed `as_numeric` path uses) instead of Rust's `str::parse::<f64>`.
+        // Two reasons, both about keeping this LENIENT `as_f64` seam in lock-step with the
+        // exact `as_numeric` one that the sq-rikm7 `exact_cmp` recheck drives: (a) it accepts
+        // the XSD specials `INF`/`+INF`/`-INF`/`NaN`; (b) it REJECTS the non-XSD spellings
+        // Rust's parser also swallows (`inf`/`infinity`/`nan`), which `as_numeric` already
+        // rejects. Before this the two paths disagreed on those spellings, so a numeric compare
+        // could succeed via `as_f64` yet find no exact recheck value — the f64-collapse
+        // asymmetry sq-rikm7 set out to remove.
+        Value::Term(Term::Literal(l)) if is_numeric_dt(l) => parse_xsd_f64(l.value()),
         _ => None,
     }
 }
@@ -11493,6 +11510,74 @@ mod f64_collapse_order_agreement {
         // A non-numeric operand has no exact recheck at all -> `None` (the f64 verdict stands).
         let iri = Value::Term(Term::NamedNode(oxrdf::NamedNode::new("http://ex/x").unwrap()));
         assert_eq!(dbl.exact_cmp(&iri), None, "non-numeric -> no exact recheck");
+    }
+
+    #[test]
+    fn as_num_routes_through_parse_xsd_f64_agreeing_with_as_numeric() {
+        // [OPUS-4.8] sq-rkzhr: the LENIENT `as_num` (the `CompareTerm::as_f64` seam that
+        // drives ORDER BY / the lenient numeric compare) must accept EXACTLY the double /
+        // float lexicals the EXACT `as_numeric` path accepts. Otherwise the sq-rikm7
+        // f64-collapse recheck can see a literal that is "numeric-and-equal" under `as_f64`
+        // yet yields no exact-recheck value (`exact_cmp` -> None) — the very asymmetry
+        // sq-rikm7 removed. `str::parse::<f64>` swallowed the non-XSD `inf`/`infinity`/`nan`
+        // spellings; `parse_xsd_f64` (shared with `as_numeric`) does not.
+        let dbl = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::DOUBLE)));
+        let flt = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::FLOAT)));
+
+        // The XSD specials parse (this held via Rust's parser before, and still does).
+        assert_eq!(as_num(&dbl("INF")), Some(f64::INFINITY));
+        assert_eq!(as_num(&dbl("+INF")), Some(f64::INFINITY));
+        assert_eq!(as_num(&dbl("-INF")), Some(f64::NEG_INFINITY));
+        assert!(matches!(as_num(&dbl("NaN")), Some(n) if n.is_nan()));
+        assert_eq!(as_num(&flt("INF")), Some(f64::INFINITY));
+        assert!(matches!(as_num(&flt("NaN")), Some(n) if n.is_nan()));
+
+        // Non-XSD spellings Rust's `str::parse::<f64>` accepts are now REJECTED, matching
+        // `as_numeric` (before the fix `as_num` accepted them -> the two paths disagreed).
+        for bad in ["inf", "+inf", "infinity", "-infinity", "nan", "Infinity"] {
+            // Positional args dodge the CodeQL `rust/unused-variable` false positive. [OPUS-4.8]
+            assert_eq!(as_num(&dbl(bad)), None, "as_num must reject non-XSD spelling {:?}", bad);
+            assert!(as_numeric(&dbl(bad)).is_none(), "as_numeric already rejects {:?}", bad);
+        }
+
+        // The alignment invariant: the lenient and exact paths agree on presence for EVERY
+        // lexical — valid specials, ordinary numbers, non-XSD spellings, and non-numerics.
+        for s in ["INF", "+INF", "-INF", "NaN", "6", "6.0E0", "2.0E-1", "inf", "nan", "hello"] {
+            assert_eq!(
+                as_num(&dbl(s)).is_some(),
+                as_numeric(&dbl(s)).is_some(),
+                "as_num / as_numeric disagree on the validity of {:?}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn compare_orders_double_infinities_and_isolates_nan() {
+        // [OPUS-4.8] sq-rkzhr: with `as_num` routed through `parse_xsd_f64`, the lenient
+        // compare seam orders the XSD floating specials by value (-INF < finite < +INF),
+        // and NaN is numerically incomparable (the f64 arm's `partial_cmp` -> None, and an
+        // f64 tie is required before any exact recheck, so NaN never reaches one).
+        let d = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::DOUBLE)));
+        let (neg_inf, inf, five, nan) = (d("-INF"), d("INF"), d("5.0E0"), d("NaN"));
+        assert_eq!(compare_values(&neg_inf, &five), Some(Ordering::Less));
+        assert_eq!(compare_values(&five, &inf), Some(Ordering::Less));
+        assert_eq!(compare_values(&neg_inf, &inf), Some(Ordering::Less));
+        assert_eq!(compare_values(&inf, &inf), Some(Ordering::Equal));
+        assert_eq!(compare_values(&nan, &five), None);
+        assert_eq!(compare_values(&nan, &nan), None);
+
+        // End-to-end ORDER BY over stored double specials exercises the REAL query path.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             ex:a ex:v \"-INF\"^^xsd:double .\n\
+             ex:b ex:v \"5.0E0\"^^xsd:double .\n\
+             ex:c ex:v \"INF\"^^xsd:double .\n",
+            "turtle",
+        )
+        .unwrap();
+        assert_eq!(order_by(&g, "ASC(?v)"), vec!["-INF", "5.0E0", "INF"]);
+        assert_eq!(order_by(&g, "DESC(?v)"), vec!["INF", "5.0E0", "-INF"]);
     }
 
     #[test]
