@@ -175,7 +175,72 @@ JSON
 code="$(run_priv)"
 expect_exit 0 "privacy: hedged + allow-marked claim in an evidence note => clean" "$code"
 
+# [OPUS-4.8] bead sq-rvgr2.5 — the /specs spec-factory sources (site/specs/**/*.typ) are the
+# NEXT outward claim surface: the ZK/MPC spec CONTENT (zkSPARQL / MPC-SPARQL) lands there. Pin
+# that BOTH gates now cover it BEFORE that content arrives, so a spec draft cannot smuggle an
+# unqualified soundness/privacy claim or a hard-coded perf figure past CI.
+echo "== 4. honesty gates cover site/specs/**/*.typ (the spec-factory sources, sq-rvgr2.5) =="
+
+# 4a. PERF (WHOLE-TREE): the perf gate's default tree scan must now include a spec .typ — i.e.
+#     TYPST_SCAN_PREFIXES covers site/specs/. Drive the gate in WHOLE-TREE mode (no explicit
+#     paths) inside a throwaway git repo, so the coverage rides on is_typst_paper()'s prefix
+#     SET — not on an explicit-path dispatch (which scans any .typ regardless of prefix and so
+#     would NOT prove the prefix change). $PERF_GATE reads git-tracked files relative to cwd.
+SPECREPO="${TMP}/specrepo"
+mkdir -p "${SPECREPO}/site/specs"
+(
+  cd "$SPECREPO"
+  git init -q
+  git config user.email t@t && git config user.name t
+)
+run_specperf() {  # whole-tree perf scan inside $SPECREPO -> echoes exit code
+  (
+    cd "$SPECREPO"
+    git add -A >/dev/null 2>&1
+    set +e
+    python3 "$PERF_GATE" --enforce >/dev/null 2>&1
+    echo $?
+  )
+}
+cat > "${SPECREPO}/site/specs/planted.typ" <<'TYP'
+= Results
+Our engine sustains 12× faster query throughput than the baseline.
+TYP
+code="$(run_specperf)"
+expect_exit 1 "perf: planted '12× faster' in a site/specs/*.typ (whole-tree) => fail" "$code"
+
+# 4b. PERF: the same figure in a Typst comment + a bare setup count (no result-shaped unit) is
+#     the narrow/accessor-aware net — must NOT trip (exit 0).
+cat > "${SPECREPO}/site/specs/planted.typ" <<'TYP'
+// dev note: an earlier draft said 12× faster — do not bake that into a spec.
+This proposal constrains a query over a 50000-triple example graph.
+TYP
+code="$(run_specperf)"
+expect_exit 0 "perf: comment + bare setup count in a site/specs/*.typ (whole-tree) => clean" "$code"
+
+# 4c. PRIVACY: an unqualified ZK/MPC claim in a spec .typ must be caught — proving the privacy
+#     gate's git-ls-files surface now includes site/specs/**/*.typ. Reuse the throwaway $REPO;
+#     remove the section-3 evidence fixture first so the verdict is attributable to the spec.
+rm -f "${REPO}/site/src/data/paper-evidence.json"
+mkdir -p "${REPO}/site/specs"
+cat > "${REPO}/site/specs/planted.typ" <<'TYP'
+= Security considerations
+This zkSPARQL profile is zero-knowledge-secure and the verifier is sound.
+TYP
+code="$(run_priv)"
+expect_exit 1 "privacy: planted 'zero-knowledge-secure' + 'verifier is sound' in a spec .typ => fail" "$code"
+
+# 4d. PRIVACY: the same mentions HEDGED (negator) + ALLOW-MARKED must PASS (exit 0) — the
+#     inline-allow / negator-exemption machinery applies to spec sources unchanged.
+cat > "${REPO}/site/specs/planted.typ" <<'TYP'
+= Security considerations
+The zkSPARQL verifier is NOT yet sound pending external audit.
+This profile does not offer a privacy-preserving guarantee. // privacy-claims-allow: hedged spec caveat
+TYP
+code="$(run_priv)"
+expect_exit 0 "privacy: hedged + allow-marked claim in a spec .typ => clean" "$code"
+
 echo ""
 echo "test_typ_honesty_gates: ${pass} passed, ${fail} failed."
 [ "$fail" -eq 0 ] || exit 1
-echo "test_typ_honesty_gates: OK — both honesty gates cover site/papers/**/*.typ + paper-evidence.json prose."
+echo "test_typ_honesty_gates: OK — both honesty gates cover site/papers/**/*.typ + site/specs/**/*.typ + paper-evidence.json prose."

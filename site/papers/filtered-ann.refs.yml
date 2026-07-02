@@ -1,0 +1,261 @@
+# [FABLE-5] sq-gum8.3 — bibliography for the filtered-ann paper (Hayagriva format).
+#
+# The four 2025–26 preprints (pathfinder, ema, e2e-termination, filtered-ann-benchmark)
+# carry titles/authors verified against their arXiv abstract pages (2026-07-01). All other
+# entries are standard literature.
+
+hnsw:
+  type: article
+  title: "Efficient and Robust Approximate Nearest Neighbor Search Using Hierarchical Navigable Small World Graphs"
+  author:
+    - Malkov, Yury A.
+    - Yashunin, Dmitry A.
+  date: 2020
+  parent:
+    type: periodical
+    title: "IEEE Transactions on Pattern Analysis and Machine Intelligence"
+    volume: 42
+    issue: 4
+
+diskann:
+  type: article
+  title: "DiskANN: Fast Accurate Billion-point Nearest Neighbor Search on a Single Node"
+  author:
+    - Jayaram Subramanya, Suhas
+    - Devvrit, Fnu
+    - Kadekodi, Rohan
+    - Krishnaswamy, Ravishankar
+    - Simhadri, Harsha Vardhan
+  date: 2019
+  parent:
+    type: proceedings
+    title: "Advances in Neural Information Processing Systems 32 (NeurIPS)"
+
+filtered-diskann:
+  type: article
+  title: "Filtered-DiskANN: Graph Algorithms for Approximate Nearest Neighbor Search with Filters"
+  author:
+    - Gollapudi, Siddharth
+    - Karia, Neel
+    - Sivashankar, Varun
+    - Krishnaswamy, Ravishankar
+    - Begwani, Nikit
+    - Simhadri, Harsha Vardhan
+  date: 2023
+  parent:
+    type: proceedings
+    title: "Proceedings of the ACM Web Conference (WWW)"
+
+acorn:
+  type: article
+  title: "ACORN: Performant and Predicate-Agnostic Search Over Vector Embeddings and Structured Data"
+  author:
+    - Patel, Liana
+    - Kraft, Peter
+    - Guestrin, Carlos
+    - Zaharia, Matei
+  date: 2024
+  parent:
+    type: periodical
+    title: "Proceedings of the ACM on Management of Data (SIGMOD)"
+    volume: 2
+    issue: 3
+
+navix:
+  type: article
+  title: "NaviX: A Native Vector Index Design for Graph DBMSs with Robust Predicate-Agnostic Search Performance"
+  author:
+    - Sehgal, Gaurav
+    - Salihoglu, Semih
+  date: 2025
+  serial-number:
+    arxiv: "2506.23397"
+  url: "https://arxiv.org/abs/2506.23397"
+
+pathfinder:
+  type: article
+  title: "PathFinder: Efficiently Supporting Conjunctions and Disjunctions for Filtered Approximate Nearest Neighbor Search"
+  author:
+    - Wu, Tianming
+    - Tang, Dixin
+  date: 2025
+  serial-number:
+    arxiv: "2511.00995"
+  url: "https://arxiv.org/abs/2511.00995"
+
+ema:
+  type: article
+  title: "EMA: Approximate Nearest Neighbor Search with General Attribute Filtering and Dynamic Updates"
+  author:
+    - Li, Mocheng
+    - Lu, Baotong
+    - Cheng, James
+    - Ma, Chenhao
+  date: 2026
+  serial-number:
+    arxiv: "2606.00734"
+  url: "https://arxiv.org/abs/2606.00734"
+
+e2e-termination:
+  type: article
+  title: "E2E: Efficient Filtered AKNN Search via Adaptive Termination"
+  author:
+    - Xia, Wenxuan
+    - Yang, Mingyu
+    - Li, Wentao
+    - Wang, Wei
+  date: 2026
+  serial-number:
+    arxiv: "2602.06721"
+  url: "https://arxiv.org/abs/2602.06721"
+  note: "To appear in KDD 2026"
+
+filtered-ann-benchmark:
+  type: article
+  title: "Filtered Approximate Nearest Neighbor Search: A Unified Benchmark and Systematic Experimental Study"
+  author:
+    - Shi, Jiayang
+    - Cai, Yuzheng
+    - Zheng, Weiguo
+  date: 2025
+  serial-number:
+    arxiv: "2509.07789"
+  url: "https://arxiv.org/abs/2509.07789"
+
+serf:
+  type: article
+  title: "SeRF: Segment Graph for Range-Filtering Approximate Nearest Neighbor Search"
+  author:
+    - Zuo, Chaoji
+    - Qiao, Miao
+    - Zhou, Wenchao
+    - Li, Feifei
+    - Deng, Dong
+  date: 2024
+  parent:
+    type: periodical
+    title: "Proceedings of the ACM on Management of Data (SIGMOD)"
+    volume: 2
+    issue: 1
+
+milvus:
+  type: article
+  title: "Milvus: A Purpose-Built Vector Data Management System"
+  author:
+    - Wang, Jianguo
+    - Yi, Xiaomeng
+    - Guo, Rentong
+    - Jin, Hai
+    - Xu, Peng
+    - Li, Shengjun
+    - Wang, Xiangyu
+    - Guo, Xiangzhou
+    - Li, Chengming
+    - Xu, Xiaohai
+  date: 2021
+  parent:
+    type: proceedings
+    title: "Proceedings of the 2021 ACM SIGMOD International Conference on Management of Data"
+
+vbase:
+  type: article
+  title: "VBASE: Unifying Online Vector Similarity Search and Relational Queries via Relaxed Monotonicity"
+  author:
+    - Zhang, Qianxi
+    - Xu, Shuotao
+    - Chen, Qi
+    - Sui, Guoxin
+    - Xie, Jiadong
+    - Cai, Zhizhen
+    - Chen, Yaoqi
+    - He, Yinxuan
+    - Yang, Yuqing
+    - Yang, Fan
+    - Yang, Mao
+    - Zhou, Lidong
+  date: 2023
+  parent:
+    type: proceedings
+    title: "17th USENIX Symposium on Operating Systems Design and Implementation (OSDI)"
+
+analyticdb-v:
+  type: article
+  title: "AnalyticDB-V: A Hybrid Analytical Engine Towards Query Fusion for Structured and Unstructured Data"
+  author:
+    - Wei, Chuangxian
+    - Wu, Bin
+    - Wang, Sheng
+    - Lou, Renjie
+    - Zhan, Chaoqun
+    - Li, Feifei
+    - Cai, Yuanzhe
+  date: 2020
+  parent:
+    type: periodical
+    title: "Proceedings of the VLDB Endowment"
+    volume: 13
+    issue: 12
+
+rdf3x:
+  type: article
+  title: "RDF-3X: a RISC-style engine for RDF"
+  author:
+    - Neumann, Thomas
+    - Weikum, Gerhard
+  date: 2008
+  parent:
+    type: periodical
+    title: "Proceedings of the VLDB Endowment"
+    volume: 1
+    issue: 1
+
+sparql-semantics:
+  type: article
+  title: "Semantics and Complexity of SPARQL"
+  author:
+    - Pérez, Jorge
+    - Arenas, Marcelo
+    - Gutierrez, Claudio
+  date: 2009
+  parent:
+    type: periodical
+    title: "ACM Transactions on Database Systems"
+    volume: 34
+    issue: 3
+
+sparql11:
+  type: reference
+  title: "SPARQL 1.1 Query Language, W3C Recommendation"
+  author:
+    - Harris, Steve
+    - Seaborne, Andy
+  date: 2013
+  url: "https://www.w3.org/TR/sparql11-query/"
+
+transe:
+  type: article
+  title: "Translating Embeddings for Modeling Multi-relational Data"
+  author:
+    - Bordes, Antoine
+    - Usunier, Nicolas
+    - Garcia-Durán, Alberto
+    - Weston, Jason
+    - Yakhnenko, Oksana
+  date: 2013
+  parent:
+    type: proceedings
+    title: "Advances in Neural Information Processing Systems 26 (NIPS)"
+
+faiss:
+  type: article
+  title: "Billion-Scale Similarity Search with GPUs"
+  author:
+    - Johnson, Jeff
+    - Douze, Matthijs
+    - Jégou, Hervé
+  date: 2019
+  parent:
+    type: periodical
+    title: "IEEE Transactions on Big Data"
+    volume: 7
+    issue: 3

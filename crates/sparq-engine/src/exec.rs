@@ -6463,6 +6463,13 @@ fn slice_bindings(b: &mut Bindings, start: usize, length: Option<usize>) {
 /// comparison of the sort). Everything else keeps the identity-preserving `Value`.
 enum SortCell {
     Temp { t: Temporal, id: Id },
+    /// A numeric GRAPH term: the cached f64 for the fast compare PLUS its dictionary id, so
+    /// an f64 TIE can be rechecked EXACTLY from the id's exact lexical — distinct integers
+    /// beyond 2^53 / high-precision decimals that share one f64 (the numerics cache stores
+    /// only f64, so the fast path alone collapses them). This makes `ORDER BY ?v` over a
+    /// numeric column agree with the relational `<` (`cmp_expr`) and MIN/MAX, which already
+    /// recheck. [OPUS-4.8] sq-rikm7
+    Num { f: f64, id: Id },
     Val(Value),
 }
 
@@ -6481,13 +6488,60 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
                 None => cmp_sort_cells_lex(graph, *ia, *ib),
             }
         }
+        // Two numeric graph terms: f64 fast compare, with the EXACT tie recheck below.
+        (SortCell::Num { f: fa, id: ia }, SortCell::Num { f: fb, id: ib }) => {
+            cmp_sort_num(graph, *fa, *ia, *fb, *ib)
+        }
         (SortCell::Temp { id, .. }, SortCell::Val(v)) => {
             compare_values(&sort_cell_term(graph, local, *id), v).unwrap_or(Ordering::Equal)
         }
         (SortCell::Val(v), SortCell::Temp { id, .. }) => {
             compare_values(v, &sort_cell_term(graph, local, *id)).unwrap_or(Ordering::Equal)
         }
+        // A numeric cell against a temporal or a general Value (a MIXED-type column, cold):
+        // reconstruct the pre-change `Val(Num::Double)` representation and defer to the shared
+        // `compare_values`, so the mixed-column order stays byte-identical to pre-change — only
+        // the same-numeric-column (`Num`, `Num`) arm above adds the exact f64-tie recheck.
+        (SortCell::Num { f, .. }, SortCell::Temp { id, .. }) => {
+            compare_values(&Value::Num(Num::Double(*f)), &sort_cell_term(graph, local, *id)).unwrap_or(Ordering::Equal)
+        }
+        (SortCell::Temp { id, .. }, SortCell::Num { f, .. }) => {
+            compare_values(&sort_cell_term(graph, local, *id), &Value::Num(Num::Double(*f))).unwrap_or(Ordering::Equal)
+        }
+        (SortCell::Num { f, .. }, SortCell::Val(v)) => {
+            compare_values(&Value::Num(Num::Double(*f)), v).unwrap_or(Ordering::Equal)
+        }
+        (SortCell::Val(v), SortCell::Num { f, .. }) => {
+            compare_values(v, &Value::Num(Num::Double(*f))).unwrap_or(Ordering::Equal)
+        }
         (SortCell::Val(av), SortCell::Val(cv)) => compare_values(av, cv).unwrap_or(Ordering::Equal),
+    }
+}
+
+/// Compares two numeric ORDER BY sort cells by f64, rechecking EXACTLY on an f64 tie.
+/// [OPUS-4.8] sq-rikm7: f64 rounding is MONOTONIC, so it only ever collapses distinct
+/// numeric values to Equal — so on (and only on) an f64 tie, disambiguate via the ids'
+/// exact lexicals (`exact_numeric_lexical` + `cmp_decimal_str`, the SAME exact path the
+/// relational `cmp_expr` uses). Integers beyond 2^53 and high-precision decimals then
+/// order by value; float/double ids have no exact lexical and stay Equal (their value IS
+/// the f64). Perf-neutral: the allocation happens only on a tie, never on the fast path.
+#[inline]
+fn cmp_sort_num(graph: &Graph, fa: f64, ia: Id, fb: f64, ib: Id) -> Ordering {
+    match fa.partial_cmp(&fb) {
+        Some(Ordering::Equal) => {
+            // Same dictionary id ⇒ identical value: skip the two lexical allocations.
+            // In a numeric ORDER BY column with repeated values this is the common f64
+            // tie (a sort compares equal-id rows often). [OPUS-4.8] sq-rikm7
+            if ia == ib {
+                return Ordering::Equal;
+            }
+            match (graph.exact_numeric_lexical(ia), graph.exact_numeric_lexical(ib)) {
+                (Some(la), Some(lb)) => cmp_decimal_str(&la, &lb).unwrap_or(Ordering::Equal),
+                _ => Ordering::Equal,
+            }
+        }
+        Some(o) => o,
+        None => Ordering::Equal, // NaN: unordered, an incomparable tie (as pre-change).
     }
 }
 
@@ -6523,7 +6577,9 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
                 let id = row[c];
                 if id != NO_ID && !is_local(id) {
                     if let Some(n) = graph.numeric_value(id) {
-                        return Ok(SortCell::Val(Value::Num(Num::Double(n))));
+                        // [OPUS-4.8] sq-rikm7: keep the id so an f64 TIE can be rechecked
+                        // exactly (integers > 2^53 / high-precision decimals sharing one f64).
+                        return Ok(SortCell::Num { f: n, id });
                     }
                     if let Some(t) = graph.temporal_value(id) {
                         return Ok(SortCell::Temp { t, id });
@@ -7452,6 +7508,19 @@ impl CompareTerm for Value {
     #[inline]
     fn as_f64(&self) -> Option<f64> {
         as_num(self)
+    }
+    #[inline]
+    fn exact_cmp(&self, other: &Self) -> Option<Ordering> {
+        // [OPUS-4.8] sq-rikm7: f64-collapse recheck — when the lenient `as_num` arm reports
+        // two numeric literals EQUAL, distinct integers beyond 2^53 or high-precision
+        // decimals that share one f64 must still order. This is the SAME value-exact numeric
+        // comparison the relational `<`/`=` (`cmp_expr`) and MIN/MAX (`minmax_values`) use —
+        // `num_compare` is exact via the decimal tower for the int/decimal tiers and falls
+        // back to f64 for float/double (whose value IS the f64, so the collapse is correct).
+        match (as_numeric(self), as_numeric(other)) {
+            (Some(a), Some(b)) => num_compare(a, b),
+            _ => None,
+        }
     }
     #[inline]
     fn strict_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -11409,5 +11478,155 @@ mod multiplicity_builtin {
             assert_eq!(multiplicity::current(), Some(3), "inner guard drop restores outer");
         }
         assert_eq!(multiplicity::current(), None, "outer guard drop clears the context");
+    }
+}
+
+/// [OPUS-4.8] sq-rikm7 — ORDER BY / MIN / MAX agree with relational `=`/`<` on
+/// f64-collapsed DISTINCT numeric values (integers beyond 2^53, high-precision decimals).
+///
+/// The lenient numeric arm coerces operands to f64, whose rounding COLLAPSES two distinct
+/// exact values that share one f64. The relational operators (`cmp_expr`/`equal_expr`) and
+/// MIN/MAX (`num_compare`) already recheck exactly; before this fix ORDER BY did NOT (the
+/// substrate `compare_terms` numeric arm and the engine's numeric SortCell fast path both
+/// collapsed), so ORDER BY disagreed with them. These tests pin the agreement and FAIL if
+/// either recheck (the `compare_terms` `exact_cmp` hook or the `cmp_sort_num` tie recheck)
+/// is reverted.
+#[cfg(test)]
+mod f64_collapse_order_agreement {
+    use super::*;
+
+    fn lex(t: &Option<Term>) -> String {
+        match t {
+            Some(Term::Literal(l)) => l.value().to_string(),
+            // Positional arg (not inline `{other:?}`) to dodge the CodeQL
+            // `rust/unused-variable` false positive. [OPUS-4.8]
+            other => panic!("expected a literal sort key, got {:?}", other),
+        }
+    }
+
+    fn order_by(g: &Graph, clause: &str) -> Vec<String> {
+        let q = format!("PREFIX ex: <http://ex/> SELECT ?v WHERE {{ ?s ex:v ?v }} ORDER BY {}", clause);
+        crate::query(g, &q).unwrap().rows.iter().map(|r| lex(&r[0])).collect()
+    }
+
+    #[test]
+    fn order_by_agrees_with_minmax_on_big_integers_beyond_2_53() {
+        // 2^53 (…992) and 2^53 + 1 (…993) share ONE f64 (…993 is not representable). Both
+        // fit i64, so the graph interns them as exact `xsd:integer` terms; the numerics
+        // cache stores only f64, collapsing them. The ids are laid out big-then-small so a
+        // COLLAPSE (Equal) sort would keep the input order — the ASC/DESC checks catch it.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> .\n\
+             ex:a ex:v 9007199254740993 .\n\
+             ex:b ex:v 9007199254740992 .\n",
+            "turtle",
+        )
+        .unwrap();
+        let small = "9007199254740992".to_string();
+        let big = "9007199254740993".to_string();
+
+        // ORDER BY orders by VALUE now — ASC and DESC are proper reverses (pre-fix they were
+        // IDENTICAL, both the collapsed input order: THIS is the revert detector).
+        assert_eq!(order_by(&g, "ASC(?v)"), vec![small.clone(), big.clone()]);
+        assert_eq!(order_by(&g, "DESC(?v)"), vec![big.clone(), small.clone()]);
+
+        // MIN/MAX (already exact via `num_compare`) agree with ORDER BY's endpoints.
+        let agg = crate::query(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT (MIN(?v) AS ?mn) (MAX(?v) AS ?mx) WHERE { ?s ex:v ?v }",
+        )
+        .unwrap();
+        assert_eq!(lex(&agg.rows[0][0]), small, "MIN == ORDER BY ASC head");
+        assert_eq!(lex(&agg.rows[0][1]), big, "MAX == ORDER BY DESC head");
+
+        // And relational `<` sees them distinct (b < a): the FILTER keeps exactly the b row.
+        let rel = crate::query(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT ?vb WHERE { ex:b ex:v ?vb . ex:a ex:v ?va . FILTER(?vb < ?va) }",
+        )
+        .unwrap();
+        assert_eq!(rel.rows.len(), 1, "b < a must hold exactly");
+        assert_eq!(lex(&rel.rows[0][0]), small);
+    }
+
+    #[test]
+    fn order_by_orders_high_precision_decimals_by_value() {
+        // Two xsd:decimals differing only in the 18th fraction digit — they share one f64.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             ex:a ex:v \"0.123456789012345679\"^^xsd:decimal .\n\
+             ex:b ex:v \"0.123456789012345678\"^^xsd:decimal .\n",
+            "turtle",
+        )
+        .unwrap();
+        let small = "0.123456789012345678".to_string();
+        let big = "0.123456789012345679".to_string();
+        assert_eq!(order_by(&g, "ASC(?v)"), vec![small.clone(), big.clone()]);
+        assert_eq!(order_by(&g, "DESC(?v)"), vec![big, small]);
+    }
+
+    #[test]
+    fn compare_values_exact_rechecks_f64_collapsed_numeric_values() {
+        // Directly exercises the substrate `exact_cmp` hook the engine implements for `Value`
+        // (the general `compare_values` path — the MIN/MAX mixed-type fallback and any consumer
+        // that orders numeric Values). Two integers beyond 2^53 share an f64 yet must order.
+        let a = Value::Term(Term::Literal(Literal::new_typed_literal("9007199254740993", xsd::INTEGER)));
+        let b = Value::Term(Term::Literal(Literal::new_typed_literal("9007199254740992", xsd::INTEGER)));
+        assert_eq!(as_num(&a), as_num(&b), "the f64 arm COLLAPSES the pair");
+        assert_eq!(compare_values(&a, &b), Some(Ordering::Greater));
+        assert_eq!(compare_values(&b, &a), Some(Ordering::Less));
+
+        // High-precision decimals sharing one f64.
+        let c = Value::Term(Term::Literal(Literal::new_typed_literal("0.123456789012345679", xsd::DECIMAL)));
+        let d = Value::Term(Term::Literal(Literal::new_typed_literal("0.123456789012345678", xsd::DECIMAL)));
+        assert_eq!(as_num(&c), as_num(&d));
+        assert_eq!(compare_values(&c, &d), Some(Ordering::Greater));
+
+        // A genuinely equal-VALUED cross-type pair stays Equal (no spurious inequality):
+        // 1 (integer) vs 1.0 (decimal).
+        let one_int = Value::Term(Term::Literal(Literal::new_typed_literal("1", xsd::INTEGER)));
+        let one_dec = Value::Num(Num::Dec(Dec { mant: 10, scale: 1 }));
+        assert_eq!(compare_values(&one_int, &one_dec), Some(Ordering::Equal));
+
+        // Two xsd:doubles that are f64-equal ARE equal: the engine's `exact_cmp` delegates to
+        // `num_compare`, whose f64 fallback (doubles have no exact decimal tier) returns Equal
+        // — so the collapse is correctly left in place, never a spurious inequality.
+        let dbl = Value::Num(Num::Double(9_007_199_254_740_992.0));
+        assert_eq!(dbl.exact_cmp(&dbl), Some(Ordering::Equal));
+        // A non-numeric operand has no exact recheck at all -> `None` (the f64 verdict stands).
+        let iri = Value::Term(Term::NamedNode(oxrdf::NamedNode::new("http://ex/x").unwrap()));
+        assert_eq!(dbl.exact_cmp(&iri), None, "non-numeric -> no exact recheck");
+    }
+
+    #[test]
+    fn order_by_mixed_numeric_string_temporal_column_is_unchanged() {
+        // A single ORDER BY column mixing a numeric graph term, a plain-string literal and an
+        // xsd:dateTime exercises the new `Num`-vs-`Val` / `Num`-vs-`Temp` sort-cell cross arms
+        // (which reconstruct the pre-change `Val(Num::Double)` representation, so the mixed
+        // order stays byte-identical). SPARQL orders literals: numerics first (by value), then
+        // the deterministic string-form fallback across the remaining literal datatypes.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             ex:n ex:v 5 .\n\
+             ex:s ex:v \"apple\" .\n\
+             ex:t ex:v \"2024-03-15T13:00:00Z\"^^xsd:dateTime .\n",
+            "turtle",
+        )
+        .unwrap();
+        // The result is a stable, deterministic permutation (the exact cross-type tie order is
+        // spec-unconstrained, but must not panic and must round-trip every row exactly once).
+        let asc = order_by(&g, "ASC(?v)");
+        let desc = order_by(&g, "DESC(?v)");
+        assert_eq!(asc.len(), 3);
+        assert_eq!(desc.len(), 3);
+        let mut sorted_asc = asc.clone();
+        sorted_asc.sort();
+        let mut sorted_desc = desc.clone();
+        sorted_desc.sort();
+        assert_eq!(sorted_asc, sorted_desc, "ASC and DESC are permutations of the same rows");
+        // DESC is the exact reverse of ASC (total order over distinct-valued rows).
+        let mut rev = asc.clone();
+        rev.reverse();
+        assert_eq!(rev, desc, "DESC(?v) is ASC(?v) reversed");
     }
 }

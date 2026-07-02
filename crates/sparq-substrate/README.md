@@ -68,8 +68,11 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   the class precedence error/unbound < blank < IRI < literal < triple, the numeric-aware /
   strict typed-temporal / lexical-string arms within the literal class, and the recursive
   component-wise triple-term order. Generic over a tiny `CompareTerm` trait (`term_class` /
-  `value_str` / `as_f64` / `strict_cmp` / `triple_parts`) the consumer implements for its own
-  term type — a **monomorphisation seam**, never a `dyn` object. Pure-`std`: links nothing new.
+  `value_str` / `as_f64` / `exact_cmp` / `strict_cmp` / `triple_parts`) the consumer implements
+  for its own term type — a **monomorphisation seam**, never a `dyn` object. `exact_cmp` is the
+  f64-collapse recheck: when the lenient `as_f64` arm ties, it recovers the exact order of
+  distinct integers beyond 2^53 / high-precision decimals so `ORDER BY` / `MIN` / `MAX` agree
+  with the relational `=`/`<`. Pure-`std`: links nothing new.
 
 All features are **off by default**. The crate is `forbid(unsafe_code)`.
 

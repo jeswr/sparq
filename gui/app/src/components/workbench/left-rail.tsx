@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { useEngine } from "@/lib/engine-context";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useImportDrawer } from "@/components/workbench/import-drawer";
+import { ExportDataMenu } from "@/components/workbench/store-export";
 import { TIER_META, type ToolDef } from "@/data/tools";
 
 interface LeftRailProps {
@@ -108,6 +109,11 @@ function DatasetsTree() {
       >
         <Plus className="size-3" /> Import data…
       </button>
+
+      {/* [OPUS-4.8] sq-xvj9 — the sibling EXPORT entry point: serialise the whole live store to a
+          pretty Turtle / TriG / JSON-LD document and download it (disabled while the store is
+          cold/empty). */}
+      <ExportDataMenu />
     </div>
   );
 }
