@@ -249,7 +249,7 @@ serde_json = { version = "1", optional = true }
 # it is safe in the main dep block, like serde_json) and is already in the workspace tree
 # (sparq-conformance, sparq-geo). Pulled in only when `service` is on. `default-features =
 # false` drops its (unused) serde derive support.
-quick-xml = { version = "0.40", default-features = false, optional = true }
+quick-xml = { version = "0.41", default-features = false, optional = true }
 
 # UUID()/STRUUID() need an OS RNG; depending on uuid from the wasm build would drag
 # getrandom into the browser dependency graph, so the functions are native-only.
