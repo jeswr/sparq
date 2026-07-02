@@ -131,7 +131,7 @@ its claim to novelty is narrow and architectural, not cryptographic.
 #strong[Secure collaborative query systems (relational).] SMCQL #cite("SMCQL") compiles a
 SQL fragment onto secure-computation backends for a mutually distrusting two-party
 federation; Conclave #cite("CONCLAVE") scales MPC queries by pushing work into annotated
-cleartext pre- and post-processing; Senate #cite("SENATE") provides maliciously secure
+cleartext pre- and post-processing; Senate #cite("SENATE") provides maliciously secure  // privacy-claims-allow: describes prior work (Senate), not a sparq claim
 collaborative analytics via a decomposition that localises cross-party computation; Cerebro
 #cite("CEREBRO") adds a platform layer (policy, auditing, release control) around
 collaborative cryptographic computation. MPC-SPARQL adapts two load-bearing ideas from this
@@ -373,7 +373,7 @@ The protocol field is the prime field `F_p` with `p = 2^61 - 1` (a Mersenne prim
 The evaluation point `x = 0` is #strong[RESERVED] for the secret itself and #strong[MUST
 NEVER] be handed to any party as a share.
 
-Randomness used for share masking #strong[MUST] come from a cryptographically secure
+Randomness used for share masking #strong[MUST] come from a cryptographically secure  // privacy-claims-allow: normative requirement on the RNG, not a soundness claim about sparq
 pseudorandom generator; the reference estate uses ChaCha20 #cite("RFC8439") and confines any
 deterministic test generator behind a test-only build feature that #strong[MUST NOT] be
 enabled in production builds.
@@ -627,7 +627,7 @@ a Rabbit-style full-field bit decomposition #cite("RABBIT") covering operand mag
 `2^60`.
 
 #impl-status("implemented")[Verdict-bit-only comparison is implemented; a
-maliciously-secure (MAC-checked) variant exists for the authenticated tier (§7.5).]
+maliciously-secure (MAC-checked) variant exists for the authenticated tier (§7.5, though not externally audited — see sq-qhy4).]  // privacy-claims-allow: authenticated tier is partially built and here qualified as not externally audited (sq-qhy4); not a settled soundness claim
 
 == Secure aggregates and threshold verdicts
 
@@ -675,7 +675,7 @@ For resilience against tampered shares and cheating parties:
   honest-majority malicious-with-abort protocol suite is incomplete (open work items in the
   reference estate, sq-km34 series), and the default operating tier of the reference pipeline is
   #strong[semi-honest honest-majority]. Deployments MUST NOT describe the default tier as
-  maliciously secure (§12).
+  maliciously secure (§12).  // privacy-claims-allow: honesty caveat forbidding the overclaim; the default tier is semi-honest, not a sparq claim
 ]
 
 = Transport and message formats
@@ -973,7 +973,7 @@ and #strong[MUST] surface this status to relying parties.
 The default operating tier of the reference implementation is #strong[honest-majority
 semi-honest]. The authenticated (IT-MAC) malicious-with-abort tier is only partially built
 (§7.5). A deployment #strong[MUST] report the actual per-operator tier (§3.3) and #strong[MUST
-NOT] describe a semi-honest run as maliciously secure. Semi-honest security assumes every
+NOT] describe a semi-honest run as maliciously secure. Semi-honest security assumes every  // privacy-claims-allow: this is the honesty caveat itself, warning against the overclaim
 party follows the protocol; it provides #emph[no] guarantees against a participant who
 deviates.
 
@@ -1091,7 +1091,7 @@ counters); wall-clock measurements from development machines are non-canonical a
     Bestavros, A. #emph[Conclave: Secure Multi-Party Computation on Big Data]. Proceedings
     of the 14th EuroSys Conference, 2019.]),
   ("SENATE", [Poddar, R., Kalra, S., Yanai, A., Deng, R., Popa, R. A., Hellerstein, J. M.
-    #emph[Senate: A Maliciously-Secure MPC Platform for Collaborative Analytics]. 30th
+    #emph[Senate: A Maliciously-Secure MPC Platform for Collaborative Analytics]. 30th  // privacy-claims-allow: prior-work reference title (Senate), not a sparq claim
     USENIX Security Symposium, 2021.]),
   ("CEREBRO", [Zheng, W., Deng, R., Chen, W., Popa, R. A., Panda, A., Stoica, I.
     #emph[Cerebro: A Platform for Multi-Party Cryptographic Collaborative Learning]. 30th
