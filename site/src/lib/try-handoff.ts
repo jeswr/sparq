@@ -82,7 +82,10 @@ function toBase64Url(json: string): string {
 /** base64url (no padding) → UTF-8. Throws on malformed input (the caller catches). */
 function fromBase64Url(b64url: string): string {
   const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(b64);
+  // [OPUS-4.8] restore `=` padding stripped by toBase64Url so atob() doesn't throw on lengths that
+  // are not a multiple of 4 (e.g. a 10-char base64url → 10%4=2 → needs "==" appended).
+  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+  const binary = atob(padded);
   const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
   return new TextDecoder().decode(bytes);
 }
