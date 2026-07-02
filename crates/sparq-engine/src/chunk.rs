@@ -127,15 +127,19 @@ impl DataChunk {
 
     /// Transposes a slice of row-major tuples into a column-major chunk. All rows must
     /// have the same `width`; returns `None` otherwise. The inverse of [`Self::to_rows`].
+    ///
+    /// Generic over the row representation (`impl AsRef<[Id]>`) so it transposes the engine's
+    /// `SmallVec<[Id; 4]>` rows directly — no intermediate `Vec<Id>` per row — as well as plain
+    /// `Vec<Id>` rows in tests.
     #[must_use]
-    pub fn from_rows(rows: &[Vec<Id>], width: usize) -> Option<Self> {
-        if rows.iter().any(|r| r.len() != width) {
+    pub fn from_rows<R: AsRef<[Id]>>(rows: &[R], width: usize) -> Option<Self> {
+        if rows.iter().any(|r| r.as_ref().len() != width) {
             return None;
         }
         let mut columns: Vec<Vec<Id>> =
             (0..width).map(|_| Vec::with_capacity(rows.len())).collect();
         for row in rows {
-            for (c, &id) in row.iter().enumerate() {
+            for (c, &id) in row.as_ref().iter().enumerate() {
                 columns[c].push(id);
             }
         }
@@ -239,6 +243,31 @@ impl DataChunk {
         let mut sel = SelVec::new();
         for (r, &id) in col.iter().enumerate() {
             if graph.numeric_value(id).is_some_and(|x| cmp.test(x)) {
+                sel.push(r);
+            }
+        }
+        sel
+    }
+
+    /// **Vectorized compare over a pre-decoded column — the auto-vectorising kernel.**
+    /// Given a contiguous value column `decoded` (as produced by
+    /// [`Self::decode_numeric_column`]), returns the ascending [`SelVec`] of positions whose
+    /// value passes `cmp`. Unlike [`Self::select_numeric`], this does **no** per-element cache
+    /// gather — it is one branchless straight-line loop over contiguous `f64`, so the compiler
+    /// is free to auto-vectorise it (NEON/AVX on native, `+simd128` on wasm). It is the
+    /// "select over the decoded column" step: decode **once**, then compare (and, later, reuse
+    /// the same decoded column for a reducer aggregate) without re-touching the value cache.
+    ///
+    /// The `f64::NAN` sentinel a non-numeric cell decodes to never passes any comparison
+    /// (IEEE-754), so a non-numeric / unbound cell is excluded here exactly as the row FILTER's
+    /// type-error path excludes it — the selection is identical to
+    /// `select_numeric` over the same column (see the `decode_then_compare_matches_select_numeric`
+    /// test).
+    #[must_use]
+    pub fn select_decoded(decoded: &[f64], cmp: VecCmp) -> SelVec {
+        let mut sel = SelVec::with_capacity(decoded.len());
+        for (r, &x) in decoded.iter().enumerate() {
+            if cmp.test(x) {
                 sel.push(r);
             }
         }
@@ -517,11 +546,34 @@ mod tests {
         ] {
             let via_decode: SelVec = (0..n).filter(|&r| cmp.test(decoded[r])).collect();
             let via_kernel = chunk.select_numeric(&g, 0, cmp);
+            // The `select_decoded` kernel (compare over the pre-decoded column) must agree
+            // with both the hand loop and the direct `select_numeric` gather.
+            let via_select_decoded = DataChunk::select_decoded(&decoded, cmp);
             assert_eq!(
                 via_decode, via_kernel,
                 "decode+compare != select_numeric for {:?}",
                 cmp
             );
+            assert_eq!(
+                via_select_decoded, via_kernel,
+                "select_decoded != select_numeric for {:?}",
+                cmp
+            );
+        }
+    }
+
+    #[test]
+    fn select_decoded_rejects_nan_sentinel_and_is_ascending() {
+        // A hand-built decoded column mixing real values with the NaN sentinel: the kernel
+        // keeps exactly the passing NON-NaN positions, ascending, and never the NaN cells.
+        let decoded = [1.0, f64::NAN, 5.0, 5.0, f64::NAN, 9.0];
+        assert_eq!(DataChunk::select_decoded(&decoded, VecCmp::Ge(5.0)), vec![2, 3, 5]);
+        assert_eq!(DataChunk::select_decoded(&decoded, VecCmp::Eq(5.0)), vec![2, 3]);
+        assert_eq!(DataChunk::select_decoded(&decoded, VecCmp::Lt(5.0)), vec![0]);
+        // No comparison ever selects a NaN-sentinel position (1 and 4).
+        for cmp in [VecCmp::Gt(-1e18), VecCmp::Ge(-1e18), VecCmp::Le(1e18)] {
+            let sel = DataChunk::select_decoded(&decoded, cmp);
+            assert!(!sel.contains(&1) && !sel.contains(&4), "{cmp:?} must skip NaN cells");
         }
     }
 

@@ -6665,7 +6665,87 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
 
 // ---- FILTER + expression evaluation ------------------------------------------
 
+/// FILTER application. When the opt-in `vectorized` feature is on and the residual filter is
+/// eligible (see `columnar_filter`), a columnar vector-at-a-time path runs and the row loop is
+/// skipped; otherwise the scalar row path (`apply_filter_scalar`) runs verbatim. When the
+/// feature is OFF this compiles to exactly the scalar body — byte-identical, zero overhead.
 fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
+    // [OPUS-4.8] (sq-pntvh.3, M4 Phase 3) Columnar residual-FILTER seam (Seam A): for an
+    // eligible single sargable numeric residual over an all-inline-integer column, transpose to
+    // a `DataChunk`, decode the column ONCE (the Phase-2 primitive), compare over the decoded
+    // column, gather the survivors, and materialise back — byte-identical to the scalar row
+    // path but as one branchless, auto-vectorising compare loop instead of per-row `eval_expr`
+    // dispatch. Declines (→ scalar path) for anything not provably byte-identical.
+    #[cfg(feature = "vectorized")]
+    if let Some(rows) = columnar_filter(graph, b, expr) {
+        b.rows = rows;
+        return Ok(());
+    }
+    apply_filter_scalar(graph, local, b, expr)
+}
+
+/// The columnar residual-FILTER attempt. Returns `Some(new_rows)` (the surviving rows, in the
+/// scalar path's order) when it handled the filter, or `None` to fall back to the scalar row
+/// path. The returned rows are **byte-identical** to `apply_filter_scalar`'s output.
+///
+/// Eligibility is deliberately narrow so the result is *provably* identical to the scalar
+/// `cmp_expr`/`equal_expr` path, not merely "close":
+/// * a **single sargable numeric** residual `?v OP const` (`extract_sargable` → `ScanCmp::Num`);
+///   temporal comparisons decline (there is no temporal vector kernel yet);
+/// * the compared variable is a present column;
+/// * **every** id in that column is an inline integer (`dict::is_inline`). Inline integers are
+///   f64-exact small non-negative integers, so the kernel's f64 comparison agrees with
+///   `cmp_expr` on every value — including the operator's f64-tie exact-lexical recheck, which
+///   for an exact small integer and a ≤15-significant-digit sargable threshold can only agree.
+///   The all-inline gate ALSO excludes local-vocab (computed) numerics — resolved by
+///   `eval_numeric` via `local.numeric`, not `graph.numeric_value` — and any unbound (`NO_ID`,
+///   which is not inline), both of which would otherwise diverge from the row path.
+///
+/// **ZK coupling (soundness-relevant):** when the `zk` trace is armed the seam declines
+/// unconditionally, so the row path records the identical per-row `FILTER` obligation set
+/// (`split_sargable` already keeps every filter residual under `zk`). See
+/// `research/vector-at-a-time-m4.md` §3.2.
+#[cfg(feature = "vectorized")]
+fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec<Row>> {
+    use crate::chunk::{DataChunk, VecCmp};
+
+    // ZK trace armed ⇒ decline so the scalar path records the FILTER obligation set.
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return None;
+    }
+
+    // Only a single sargable NUMERIC comparison `?v OP const` is columnar-eligible.
+    let num = match extract_sargable(expr)? {
+        (var, ScanCmp::Num(c)) => (var, c),
+        (_, ScanCmp::Temp(..)) => return None,
+    };
+    let (var, cmp) = num;
+    let c = b.col(&var)?;
+
+    // Provable byte-identity gate: the whole filtered column must be inline integers.
+    if !b.rows.iter().all(|r| dict::is_inline(r[c])) {
+        return None;
+    }
+
+    let veccmp = match cmp {
+        NumCmp::Gt(t) => VecCmp::Gt(t),
+        NumCmp::Ge(t) => VecCmp::Ge(t),
+        NumCmp::Lt(t) => VecCmp::Lt(t),
+        NumCmp::Le(t) => VecCmp::Le(t),
+        NumCmp::Eq(t) => VecCmp::Eq(t),
+    };
+
+    // transpose → decode column ONCE → compare over the decoded column → gather → materialise.
+    let width = b.vars.len();
+    let chunk = DataChunk::from_rows(&b.rows, width)?;
+    let decoded = chunk.decode_numeric_column(graph, c);
+    let sel = DataChunk::select_decoded(&decoded, veccmp);
+    let filtered = chunk.apply_selection(&sel);
+    Some(filtered.to_rows().iter().map(|r| Row::from_slice(r.as_slice())).collect())
+}
+
+fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
     // Per-row FILTER evaluation is independent and read-only over the graph/bindings, so a
     // large residual (non-pushed-down) filter is evaluated in parallel on native.
     // Row identity for BNODE(str)'s per-solution scoping (see ROW_SCOPE).
@@ -11713,5 +11793,205 @@ mod f64_collapse_order_agreement {
         let mut rev = asc.clone();
         rev.reverse();
         assert_eq!(rev, desc, "DESC(?v) is ASC(?v) reversed");
+    }
+}
+
+// [OPUS-4.8] (sq-pntvh.3, M4 Phase 3) Seam-level differential for the columnar residual-FILTER
+// path. The chunk-primitive kernels are unit-tested in `chunk.rs`; this asserts the load-bearing
+// wiring invariant: `apply_filter`'s columnar seam produces `b.rows` BYTE-IDENTICAL (same rows,
+// same order) to the scalar row path over a REAL graph, and DECLINES (falls back to the scalar
+// path) on every column shape not provably identical. Only built under the opt-in `vectorized`
+// feature.
+#[cfg(all(test, feature = "vectorized"))]
+mod columnar_filter_seam {
+    use super::*;
+
+    const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+    /// `n` triples `ex:s{i} ex:age {i}` (integer literal → inline id). Returns
+    /// (graph, subject ids [dict IRIs, NON-inline], age ids [inline integers]).
+    fn ages_graph(n: u32) -> (Graph, Vec<Id>, Vec<Id>) {
+        let mut nt = String::new();
+        for i in 0..n {
+            nt.push_str(&format!("<http://ex/s{i}> <http://ex/age> \"{i}\"^^<{XSD_INT}> .\n"));
+        }
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        let subj = (0..n)
+            .map(|i| g.id_of(&Term::NamedNode(oxrdf::NamedNode::new(format!("http://ex/s{i}")).unwrap())).unwrap())
+            .collect();
+        let age = (0..n)
+            .map(|i| g.id_of(&Term::Literal(Literal::new_typed_literal(i.to_string(), xsd::INTEGER))).unwrap())
+            .collect();
+        (g, subj, age)
+    }
+
+    fn var(name: &str) -> Variable {
+        Variable::new(name).unwrap()
+    }
+
+    fn int_lit(s: &str) -> Expression {
+        Expression::Literal(Literal::new_typed_literal(s, xsd::INTEGER))
+    }
+
+    /// `?v OP konst`.
+    fn mk_filter(op: &str, v: &Variable, konst: Expression) -> Expression {
+        let a = Box::new(Expression::Variable(v.clone()));
+        let k = Box::new(konst);
+        match op {
+            ">" => Expression::Greater(a, k),
+            ">=" => Expression::GreaterOrEqual(a, k),
+            "<" => Expression::Less(a, k),
+            "<=" => Expression::LessOrEqual(a, k),
+            "=" => Expression::Equal(a, k),
+            _ => unreachable!(),
+        }
+    }
+
+    /// The numeric age values (inline column, index 1) of a result row set, in order.
+    fn age_values(g: &Graph, rows: &[Row]) -> Vec<f64> {
+        rows.iter().map(|r| g.numeric_value(r[1]).unwrap()).collect()
+    }
+
+    #[test]
+    fn columnar_seam_is_byte_identical_to_scalar_on_inline_column() {
+        let n = 40u32;
+        let (g, subj, age) = ages_graph(n);
+        let vars = vec![var("s"), var("age")];
+        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let local = LocalVocab::default();
+        let age_var = var("age");
+
+        for (op, t) in [
+            (">", "20"), (">=", "20"), ("<", "10"), ("<=", "10"),
+            ("=", "13"), (">", "39"), (">=", "0"), (">", "100"),
+        ] {
+            let expr = mk_filter(op, &age_var, int_lit(t));
+
+            // The seam ENGAGES for an all-inline column.
+            let via_columnar = columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &expr);
+            assert!(via_columnar.is_some(), "all-inline column must be columnar-eligible ({op} {t})");
+
+            // Scalar reference (the real row path).
+            let mut scalar = Bindings::unsorted(vars.clone(), rows.clone());
+            apply_filter_scalar(&g, &local, &mut scalar, &expr).unwrap();
+
+            // Dispatcher (takes the columnar branch under the feature).
+            let mut disp = Bindings::unsorted(vars.clone(), rows.clone());
+            apply_filter(&g, &local, &mut disp, &expr).unwrap();
+
+            // BYTE-IDENTICAL: same rows (incl. the NON-inline subject column), same order.
+            assert_eq!(disp.rows, scalar.rows, "dispatcher rows != scalar for {op} {t}");
+            assert_eq!(via_columnar.as_ref().unwrap(), &scalar.rows, "columnar_filter rows != scalar for {op} {t}");
+        }
+    }
+
+    #[test]
+    fn columnar_seam_pins_exact_survivors_and_order() {
+        // Non-vacuous: pin the EXACT surviving age sequence (content + ascending order) so a
+        // wrong mask (off-by-one / inverted / column desync) turns this red.
+        let n = 40u32;
+        let (g, subj, age) = ages_graph(n);
+        let vars = vec![var("s"), var("age")];
+        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let age_var = var("age");
+
+        let out = columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &mk_filter(">", &age_var, int_lit("20"))).unwrap();
+        let expected: Vec<f64> = (21..40).map(f64::from).collect();
+        assert_eq!(age_values(&g, &out), expected, "age > 20 must keep 21..=39, ascending");
+
+        // A DIFFERENT filter must select a DIFFERENT set (the mask does real work).
+        let other = columnar_filter(&g, &Bindings::unsorted(vars, rows), &mk_filter("<", &age_var, int_lit("20"))).unwrap();
+        assert_ne!(age_values(&g, &other), expected, "distinct filters must select distinct rows");
+    }
+
+    #[test]
+    fn columnar_seam_declines_and_matches_scalar_on_non_eligible_columns() {
+        // A non-inline dict integer, a negative integer, a non-numeric literal, and an unbound
+        // cell each break the all-inline gate → the seam DECLINES and the row path runs, still
+        // byte-identical.
+        let big = 2_000_000_000u32.to_string(); // > INLINE_MAX (2^30-1): a NON-inline dict integer
+        let nt = format!(
+            "<http://ex/a> <http://ex/age> \"5\"^^<{XSD_INT}> .\n\
+             <http://ex/b> <http://ex/age> \"{big}\"^^<{XSD_INT}> .\n\
+             <http://ex/c> <http://ex/age> \"-7\"^^<{XSD_INT}> .\n\
+             <http://ex/d> <http://ex/age> \"hello\" .\n"
+        );
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        let lit_id = |s: &str, dt: Option<&str>| -> Id {
+            let t = match dt {
+                Some(d) => Term::Literal(Literal::new_typed_literal(s, oxrdf::NamedNode::new(d).unwrap())),
+                None => Term::Literal(oxrdf::Literal::new_simple_literal(s)),
+            };
+            g.id_of(&t).unwrap()
+        };
+        let five = lit_id("5", Some(XSD_INT));
+        assert!(dict::is_inline(five));
+        let big_id = lit_id(&big, Some(XSD_INT));
+        assert!(!dict::is_inline(big_id), "2e9 must be a NON-inline dict integer");
+        let neg = lit_id("-7", Some(XSD_INT));
+        let hello = lit_id("hello", None);
+
+        let vars = vec![var("s"), var("age")];
+        let expr = mk_filter(">", &var("age"), int_lit("0"));
+        let local = LocalVocab::default();
+
+        for age_cell in [big_id, neg, hello, NO_ID] {
+            let rows: Vec<Row> = vec![Row::from_slice(&[five, five]), Row::from_slice(&[five, age_cell])];
+            assert!(
+                columnar_filter(&g, &Bindings::unsorted(vars.clone(), rows.clone()), &expr).is_none(),
+                "a non-inline / unbound column cell must make the seam DECLINE"
+            );
+            let mut disp = Bindings::unsorted(vars.clone(), rows.clone());
+            let mut scalar = Bindings::unsorted(vars.clone(), rows);
+            apply_filter(&g, &local, &mut disp, &expr).unwrap();
+            apply_filter_scalar(&g, &local, &mut scalar, &expr).unwrap();
+            assert_eq!(disp.rows, scalar.rows, "row-path result must be identical on decline");
+        }
+    }
+
+    #[test]
+    fn columnar_seam_declines_non_sargable_and_temporal_filters() {
+        let n = 8u32;
+        let (g, subj, age) = ages_graph(n);
+        let vars = vec![var("s"), var("age")];
+        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let b = Bindings::unsorted(vars, rows);
+        let age_var = var("age");
+
+        // var-vs-var: not sargable → decline.
+        let var_var = Expression::Greater(
+            Box::new(Expression::Variable(age_var.clone())),
+            Box::new(Expression::Variable(var("s"))),
+        );
+        assert!(columnar_filter(&g, &b, &var_var).is_none());
+
+        // A temporal comparison is sargable but has NO vector kernel yet → decline.
+        let dt = Expression::Literal(Literal::new_typed_literal(
+            "2020-01-01T00:00:00Z",
+            oxrdf::NamedNode::new("http://www.w3.org/2001/XMLSchema#dateTime").unwrap(),
+        ));
+        let temporal = Expression::Greater(Box::new(Expression::Variable(age_var)), Box::new(dt));
+        assert!(columnar_filter(&g, &b, &temporal).is_none(), "temporal comparison has no vector kernel");
+    }
+
+    #[cfg(feature = "zk")]
+    #[test]
+    fn columnar_seam_declines_while_zk_trace_armed() {
+        // The zk trace must capture the FILTER obligation set, so the columnar seam DECLINES
+        // while the recorder is armed and the scalar path records it
+        // (research/vector-at-a-time-m4.md §3.2, open question 2 — simplest-safe rule).
+        let n = 8u32;
+        let (g, subj, age) = ages_graph(n);
+        let vars = vec![var("s"), var("age")];
+        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let b = Bindings::unsorted(vars, rows);
+        let expr = mk_filter(">", &var("age"), int_lit("0"));
+
+        // Sanity: eligible (and firing) when zk is NOT armed.
+        assert!(columnar_filter(&g, &b, &expr).is_some(), "eligible without zk armed");
+        // Armed ⇒ decline.
+        let _guard = crate::zk::install();
+        assert!(crate::zk::enabled());
+        assert!(columnar_filter(&g, &b, &expr).is_none(), "columnar seam must decline while zk is armed");
     }
 }

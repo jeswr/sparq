@@ -493,17 +493,28 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   a **decode kernel** (`DataChunk::decode_numeric_column` → a contiguous `Vec<f64>` value column,
   `f64::NAN` sentinel for a non-numeric cell, with a gather-free fast path for an all-inline-integer
   column — the SIMD enabler, M4 Phase 2 `sq-pntvh.2`), a numeric FILTER comparison kernel
-  (`DataChunk::select_numeric` → a `SelVec`), and a
-  selection/gather kernel (`DataChunk::apply_selection`). This is a **building block**, NOT yet
-  wired into the query evaluator — `query`/`query_json`/etc. are unchanged whether the feature is on
-  or off. When off, zero columnar code compiles and the default native + wasm builds are
-  byte-identical (no new dependencies; no `unsafe`). The M4 wiring roadmap + coexistence model is
-  `research/vector-at-a-time-m4.md` (epic `sq-pntvh`); its acceptance gate landed first (Phase 1,
-  `sq-pntvh.1`): the differential BYTE-IDENTITY harness `crates/sparq-engine/tests/vectorized_byte_identity.rs`
-  (the columnar kernel's serialised survivors are byte-identical to the row `FILTER` operator over the
-  *same batch*, order-exact — a Phase-1 finding: cross-query byte-identity is unsound because a
-  sargable filter re-plans the scan, so the invariant is operator-level not full-query) plus the
-  native FILTER/aggregate baseline bench `crates/sparq-engine/examples/bench_vectorized.rs` (`metric_us`, registered
+  (`DataChunk::select_numeric` → a `SelVec`), a **compare-over-decoded-column** kernel
+  (`DataChunk::select_decoded`, the branchless auto-vectorising compare that consumes the decode
+  kernel's output — M4 Phase 3 `sq-pntvh.3`), and a selection/gather kernel
+  (`DataChunk::apply_selection`). When off, zero columnar code compiles and the default native + wasm
+  builds are byte-identical (no new dependencies; no `unsafe`).
+  **`query`/`query_json`/etc. return byte-identical results whether the feature is on or off** — it
+  is a perf optimisation, never a semantics change. The first evaluator wiring landed in Phase 3
+  (`sq-pntvh.3`): a **columnar residual-FILTER seam** inside `apply_filter` (Seam A) that, for an
+  eligible single sargable-numeric residual `?v OP const` over an **all-inline-integer** column,
+  transposes to a `DataChunk`, decodes the column once, compares over the decoded column, gathers the
+  survivors, and materialises back — provably byte-identical to the scalar row path (same rows, same
+  order). It **declines** to the row path for anything not provably identical (non-inline / negative /
+  computed / unbound cells, temporal or non-sargable filters) and is **disabled whenever the `zk`
+  trace is armed** so the row path records the complete FILTER obligation set. The M4 wiring roadmap +
+  coexistence model is `research/vector-at-a-time-m4.md` (epic `sq-pntvh`); its acceptance gate landed
+  first (Phase 1, `sq-pntvh.1`): the differential BYTE-IDENTITY harness
+  `crates/sparq-engine/tests/vectorized_byte_identity.rs` (the columnar kernel's serialised survivors
+  are byte-identical to the row `FILTER` operator over the *same batch*, order-exact — a Phase-1
+  finding: cross-query byte-identity is unsound because a sargable filter re-plans the scan, so the
+  invariant is operator-level not full-query), the seam-level differential in
+  `crates/sparq-engine/src/exec.rs` (`mod columnar_filter_seam`), plus the native FILTER/aggregate
+  baseline bench `crates/sparq-engine/examples/bench_vectorized.rs` (`metric_us`, registered
   `vectorized-eval-micro`, `featured = false`) later phases measure their speedup against.
 - **Exact-bitmap semi-join reducer** is the non-default `semijoin-bitmap` cargo feature (M4 plan,
   survey §A3, bead `sq-gr8mb`; CIDR'26 "Not Yannakakis"). When a binary BGP join scans the next
