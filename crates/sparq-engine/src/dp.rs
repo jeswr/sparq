@@ -267,7 +267,17 @@ impl QueryGraph {
                 c /= ndv.powi((occ - 1) as i32);
             }
         }
-        c.max(0.0)
+        // Map an overflowed (+∞, the product of many large `est[p]`) or ill-defined
+        // (NaN — e.g. ∞/∞ when the product AND a distinct-value power both saturate)
+        // cardinality to a large FINITE sentinel so it ranks as the WORST plan. A bare
+        // `max(0.0)` would silently fold NaN → 0.0 (`f64::max` returns the non-NaN
+        // operand), making the DP PREFER the pathological join instead of avoiding it.
+        // [OPUS-4.8] sq-iywur
+        if c.is_finite() {
+            c.max(0.0)
+        } else {
+            f64::MAX
+        }
     }
 
     // ---- connected-subgraph counting (budget pre-check) -----------------------
