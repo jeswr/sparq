@@ -110,8 +110,10 @@ crates/sparq-jsonld/src/
                  omitDefault/requireAll)
   loader.rs      DocumentLoader trait (LoadDocumentCallback) + RemoteDocument
                  { document, documentUrl, contentType, contextUrl, profile }
-                 impls: NoopLoader (default: raises `loading document failed`),
-                 FsLoader (URL→fixture map, for conformance)
+                 impls: NoopLoader (default: refuses remote fetch —
+                 `loading document failed`, or `loading remote context failed`
+                 when the failure is a remote `@context`),
+                 FsLoader (URL→fixture map), MockLoader (conformance remote-doc, §5)
   http.rs        [feature http-loader] HttpLoader: redirects, content-type + profile,
                  Link rel="…json-ld#context" alternate handling, SSRF allowlist policy
   html.rs        [feature html] script-element extraction (see §6)
@@ -175,10 +177,10 @@ Consequences:
 `error.rs` carries the full JSON-LD 1.1 error-code registry as a closed enum with the
 spec's exact string forms (`"invalid @context"`, `"keyword redefinition"`,
 `"protected term redefinition"`, `"invalid @embed value"`, `"loading document failed"`,
-`"loading remote context failed"`, `"invalid base direction"`, `"processing mode
-conflict"`, `"invalid @nest value"`, `"invalid reverse property map"`, `"colliding
-keywords"`, `"invalid @import value"`, `"context overflow"`, `"invalid script element"`,
-`"invalid frame"`, …). Rules:
+`"loading remote context failed"`, `"invalid base direction"`,
+`"processing mode conflict"`, `"invalid @nest value"`,
+`"invalid reverse property map"`, `"colliding keywords"`, `"invalid @import value"`,
+`"context overflow"`, `"invalid script element"`, `"invalid frame"`, …). Rules:
 
 - Every native algorithm is **fallible**: `Result<_, JsonLdError>`. The engine adapters
   translate to the engine's existing error surface without losing the code.
@@ -192,9 +194,10 @@ keywords"`, `"invalid @import value"`, `"context overflow"`, `"invalid script el
 ## 5. Document loading (remote-doc, `@import`)
 
 - `DocumentLoader` is a trait (dyn-friendly, sync; wasm gets a caller-supplied callback
-  variant). **Default is `NoopLoader`** — any remote fetch raises
-  `loading remote context failed`. No surface acquires ambient network by merely
-  enabling `jsonld`.
+  variant). **Default is `NoopLoader`** — any remote fetch is refused: a failed
+  top-level document load raises `loading document failed`, and a failed remote
+  `@context` dereference raises `loading remote context failed`. No surface
+  acquires ambient network by merely enabling `jsonld`.
 - `FsLoader` maps URL prefixes to fixture directories; the conformance `MockLoader`
   additionally honours the manifest's `httpStatus` / `redirectTo` / `contentType` /
   HTTP-`Link` options so the remote-doc category runs **hermetically offline**.
@@ -223,7 +226,7 @@ ratcheted lane when this lands.
 
 | Surface | Feature default | Behaviour |
 |---|---|---|
-| sparq-server | `jsonld` default ON | `Accept: application/ld+json` honoured today; add the four **profile params** — `profile="http://www.w3.org/ns/json-ld#expanded"` (also `#compacted`, `#flattened`, `#framed`) select the output form. `#compacted`/`#framed` need a context/frame: taken from a request `Link` header with `rel=".../json-ld#context"` / `#frame"` (dereferenced only under the loader policy §5, else 400 with the spec error code) . No usable profile → today's default form (stable). Ingest (GSP PUT/POST): profile + Link-context honoured symmetrically; unsatisfiable Accept keeps the existing 406 parity semantics. |
+| sparq-server | `jsonld` default ON | `Accept: application/ld+json` honoured today; add the four **profile params** — `profile="http://www.w3.org/ns/json-ld#expanded"` (also `#compacted`, `#flattened`, `#framed`) select the output form. `#compacted`/`#framed` need a context/frame: taken from a request `Link` header with `rel=".../json-ld#context"` / `rel=".../json-ld#frame"` (dereferenced only under the loader policy §5, else 400 with the spec error code). No usable profile → today's default form (stable). Ingest (GSP PUT/POST): profile + Link-context honoured symmetrically; unsatisfiable Accept keeps the existing 406 parity semantics. |
 | sparq-cli | `jsonld` default ON | dump/load gain `--jsonld-form expanded\|compacted\|flattened\|framed`, `--jsonld-context <file\|URL>`, `--jsonld-frame <file>`, `--jsonld-base`, `--rdf-direction`; remote fetch only with `--allow-remote-contexts` (HttpLoader). |
 | sparq-wasm | OPT-IN, off | unchanged posture (bundle byte-floor). When enabled: same processor; loader = caller-supplied JS callback; no fetch inside the wasm module. |
 | sparq-py | carries feature | `expand/compact/flatten/frame` functions + options dict mirroring pyld naming (drop-in familiarity). |
