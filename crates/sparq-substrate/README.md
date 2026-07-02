@@ -55,8 +55,9 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   the XPath promotion ranks), `as_numeric` (classifies an `oxrdf::Literal` into the tower
   while keeping the **exact** integer / fixed-point `Dec` representation — a high-precision
   decimal is not silently flattened to `f64`), the arithmetic ops (`binop` / `neg` / `abs` /
-  `ceil` / `floor` / `round`), the two serialisation surfaces — `canonical_lexical` (always
-  the XSD-mandatory scientific form for float/double, e.g. `6.0E0`) and `lexical` (the plain
+  `ceil` / `floor` / `round`), the two serialisation surfaces — `canonical_lexical` (a
+  *finite* float/double in the XSD-mandatory scientific form, e.g. `6.0E0`; the specials keep
+  their XSD spellings `INF` / `-INF` / `NaN`, which are not scientific) and `lexical` (the plain
   form the W3C SPARQL expected-result files use for computed arithmetic, e.g. `6`) — and the
   shared lexical helpers (`split_decimal`, `parse_xsd_f32` / `parse_xsd_f64`, `fmt_xsd_double`).
   `parse_xsd_f64`/`f32` accept the XSD `INF` / `+INF` / `-INF` / `NaN` spellings and reject the
