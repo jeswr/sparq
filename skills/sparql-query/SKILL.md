@@ -490,7 +490,10 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   ```
 - **Vectorized columnar primitives** are the non-default `vectorized` cargo feature (M4 plan, bead
   `sq-hvfe`): the `chunk` module's `DataChunk` (a column-major, vector-at-a-time id-level batch),
-  a numeric FILTER comparison kernel (`DataChunk::select_numeric` → a `SelVec`), and a
+  a **decode kernel** (`DataChunk::decode_numeric_column` → a contiguous `Vec<f64>` value column,
+  `f64::NAN` sentinel for a non-numeric cell, with a gather-free fast path for an all-inline-integer
+  column — the SIMD enabler, M4 Phase 2 `sq-pntvh.2`), a numeric FILTER comparison kernel
+  (`DataChunk::select_numeric` → a `SelVec`), and a
   selection/gather kernel (`DataChunk::apply_selection`). This is a **building block**, NOT yet
   wired into the query evaluator — `query`/`query_json`/etc. are unchanged whether the feature is on
   or off. When off, zero columnar code compiles and the default native + wasm builds are
