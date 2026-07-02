@@ -26,12 +26,16 @@
 //     grader's exact abstention/denominator arithmetic inside analyze.py) are marked as DRAFT
 //     OBLIGATIONS rather than read from code or invented. Grep marker: "DRAFT OBLIGATION".
 
-#import "_lib/bench.typ": headline, ev, provenance, authors, anon
+// [OPUS-4.8] sq-iixdh — import paper_heading_numbering so the Abstract is un-numbered and
+// sections render as "1.", "2." (not "0.1", "0.2").
+#import "_lib/bench.typ": headline, ev, provenance, authors, anon, paper_heading_numbering
 
 #set document(title: "Formal Ontologies for LLM-Agent Knowledge Management: schema.org vs gUFO vs DOLCE")
 #set text(size: 11pt)
 #set par(justify: true)
-#set heading(numbering: "1.")
+// Section numbering switched on here; the Abstract below is explicitly un-numbered so it
+// renders as front matter (venue convention), and == sections number as "1.", "2.", ...
+#set heading(numbering: paper_heading_numbering)
 
 #align(center)[
   #text(size: 17pt, weight: "bold")[
@@ -51,7 +55,7 @@
   to be pre-registered before it runs, is the gate.
 ]]
 
-== Abstract
+#heading(level: 2, numbering: none, outlined: false)[Abstract]
 
 An LLM agent that manages durable project knowledge — decisions, provenance, task structure,
 design records — increasingly does so over a _project knowledge graph_ (PKG) that the agent

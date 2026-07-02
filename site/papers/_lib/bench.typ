@@ -55,3 +55,25 @@
 } else {
   align(center)[Jesse Wright · the sparq project]
 }
+
+// [OPUS-4.8] sq-iixdh — canonical heading-numbering function for all papers.
+//
+// Papers use level-2 headings (== Section) as their top-level sections (the page h1 or
+// document title occupies the conceptual level-1 slot). A plain `#set heading(numbering:
+// "1.")` over level-2 headings with no level-1 ancestor renders them as "0.1", "0.2",
+// because Typst counts the never-incremented level-1 counter as 0.
+//
+// This function drops the level-1 component so == headings render as "1.", "2.", "3." and
+// === headings as "1.1.", "1.2." — the venue-conventional numbering.
+//
+// Usage in a paper:
+//   #import "_lib/bench.typ": ..., paper_heading_numbering
+//   #set heading(numbering: paper_heading_numbering)
+//   // Abstract must be explicitly un-numbered:
+//   #heading(level: 2, numbering: none, outlined: false)[Abstract]
+#let paper_heading_numbering = (..n) => {
+  let ns = n.pos()
+  // Drop the leading level-1 counter (always 0 for papers) so == sections
+  // are "1.", "2.", ... and === sub-sections are "1.1.", "1.2.", ...
+  numbering("1.", ..if ns.len() > 1 { ns.slice(1) } else { ns })
+}

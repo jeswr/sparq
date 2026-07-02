@@ -12,17 +12,16 @@
 // The SPARQL surface (vec:nearest / vec:search) and the recomposition pipeline are documented
 // from skills/vector-search/SKILL.md (the crate's public-API doc).
 
-#import "_lib/bench.typ": headline, ev, provenance, authors, anon
+// [OPUS-4.8] sq-iixdh — use shared paper_heading_numbering (consolidated into _lib/bench.typ).
+#import "_lib/bench.typ": headline, ev, provenance, authors, anon, paper_heading_numbering
 
 #set document(title: "Filter-as-Query")
 #set text(size: 11pt)
 #set par(justify: true)
 // Sections are level-2 headings (the site's HTML convention: h2 under the page h1), so a
-// plain "1." pattern would render "0.1", "0.2" — drop the never-used level-1 component.
-#set heading(numbering: (..n) => {
-  let ns = n.pos()
-  numbering("1.", ..if ns.len() > 1 { ns.slice(1) } else { ns })
-})
+// plain "1." pattern would render "0.1", "0.2" — paper_heading_numbering drops the
+// never-used level-1 component (defined once in _lib/bench.typ, used by all papers).
+#set heading(numbering: paper_heading_numbering)
 
 #align(center)[
   #text(size: 17pt, weight: "bold")[

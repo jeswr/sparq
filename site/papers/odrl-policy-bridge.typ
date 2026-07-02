@@ -31,12 +31,16 @@
 // federated ODRL->MPC / ODRL-Duty->ZK composition is deferred, unbuilt, research-grade, and not
 // externally audited (open gate sq-qhy4) — see §7.
 
-#import "_lib/bench.typ": headline, ev, provenance, authors, anon
+// [OPUS-4.8] sq-iixdh — import paper_heading_numbering so the Abstract is un-numbered and
+// sections render as "1.", "2." (not "0.1", "0.2").
+#import "_lib/bench.typ": headline, ev, provenance, authors, anon, paper_heading_numbering
 
 #set document(title: "An ODRL Policy Bridge for SPARQL Access Control")
 #set text(size: 11pt)
 #set par(justify: true)
-#set heading(numbering: "1.")
+// Section numbering switched on here; the Abstract below is explicitly un-numbered so it
+// renders as front matter (venue convention), and == sections number as "1.", "2.", ...
+#set heading(numbering: paper_heading_numbering)
 
 #align(center)[
   #text(size: 17pt, weight: "bold")[
@@ -51,7 +55,7 @@
   specified in §5.3 has been run and reported; artifact availability is stated in §8.
 ]]
 
-== Abstract
+#heading(level: 2, numbering: none, outlined: false)[Abstract]
 
 Solid's access-control models answer _may this agent read graph G?_; ODRL usage control
 answers a richer question — _may this party use this asset, for purpose P, until time T, with
