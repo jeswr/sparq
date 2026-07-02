@@ -24,6 +24,7 @@ import {
   type SparqlTerm,
   type WasmStore,
   type WasmStoreCtor,
+  type WorkspaceInferenceMode,
 } from "@sparq/client";
 
 import { basePath } from "@/lib/base-path";
@@ -36,6 +37,10 @@ import {
   nativeLoadText,
   type LoadedDocument,
 } from "@/lib/tauri-ipc";
+// [OPUS-4.8] sq-tp1m (#757) — the tier-b W-reason wasm bundle loader: the REAL forward-chaining
+// RDFS / OWL 2 RL reasoner (crates/sparq-reason via sparq-reason-wasm), lazy-loaded so the lean
+// query engine pays nothing until a workspace turns inference on.
+import { loadReasoner, modeToProfile } from "@/lib/reason-wasm";
 
 /**
  * Internal sentinel thrown out of the streaming loop when the caller's {@link AbortSignal} fires,
@@ -101,6 +106,35 @@ export interface RunResult {
 
 /** How to run a query — plain execution, EXPLAIN (plan only), or EXPLAIN ANALYZE (plan + run). */
 export type RunMode = "run" | "explain" | "analyze";
+
+/**
+ * [OPUS-4.8] sq-tp1m (#757) — counts describing what the active inference regime ADDED over the
+ * live store. `baseTriples` is the distinct asserted triples the reasoner saw (named graphs are
+ * folded into the default graph by the forward-chainer); `closureTriples` the size of the
+ * materialised closure (base + entailed); `entailed` the delta reasoning produced. Real measured
+ * counts from the engine's reasoner + store, never fabricated.
+ */
+export interface ReasoningInfo {
+  mode: Exclude<WorkspaceInferenceMode, "off">;
+  baseTriples: number;
+  closureTriples: number;
+  entailed: number;
+}
+
+/**
+ * [OPUS-4.8] sq-tp1m — the reasoning lifecycle for the active workspace's inference mode:
+ *   * `off`     — no inference regime (queries run over the asserted store);
+ *   * `loading` — the W-reason bundle is being fetched / the closure materialised;
+ *   * `ready`   — the closure is materialised; queries run against it ({@link ReasoningInfo});
+ *   * `error`   — the reasoning bundle failed to load/run (e.g. it was not synced into this
+ *                 build) — surfaced honestly; queries then fail with a clear message until the
+ *                 user turns inference off or the bundle is rebuilt.
+ */
+export type InferenceStatus =
+  | { kind: "off" }
+  | { kind: "loading" }
+  | { kind: "ready"; info: ReasoningInfo }
+  | { kind: "error"; message: string };
 
 /** Optional per-run controls. */
 export interface RunOptions {
@@ -269,6 +303,24 @@ export interface EngineContextValue {
   /** True when the native loader IPC is available (inside the Tauri desktop shell). */
   nativeLoaderAvailable: boolean;
   /**
+   * [OPUS-4.8] sq-tp1m (#757) — the active per-workspace INFERENCE regime (query-time entailment).
+   * `"off"` runs plain SPARQL; `"rdfs"` / `"owl-rl"` forward-chain the deductive closure (via the
+   * real `sparq-reason` W-reason bundle) so a query matches entailed triples too. This is the
+   * ENGINE's view of the mode; PERSISTING the choice per workspace is the workspace context's job
+   * (the two are kept in lockstep by the inference-mode bridge).
+   */
+  inferenceMode: WorkspaceInferenceMode;
+  /** [OPUS-4.8] sq-tp1m — the reasoning bundle/closure lifecycle for {@link inferenceMode}. */
+  inferenceStatus: InferenceStatus;
+  /**
+   * [OPUS-4.8] sq-tp1m — set the active inference regime. `"off"` tears down the closure and runs
+   * plain SPARQL; `"rdfs"` / `"owl-rl"` lazily load the W-reason bundle and materialise the
+   * forward-chaining closure over the live store so subsequent queries see entailed triples. The
+   * closure is a QUERY-TIME view — it never mutates the persisted store — and is rebuilt
+   * automatically when the store changes (import / update).
+   */
+  setInferenceMode: (mode: WorkspaceInferenceMode) => void;
+  /**
    * [OPUS-4.8] sq-ixc3.13 — the whole-dataset N-QUADS snapshot of the live store (default graph +
    * every named graph), the save/open cache a workspace persists as its `dataSnapshot` (sq-atb0).
    * N-Quads (not the TriG `serializeStore` emits) because that is the workspace snapshot format,
@@ -406,6 +458,38 @@ function snapshotBytes(store: WasmStore): number {
   }
 }
 
+/**
+ * [OPUS-4.8] sq-tp1m (#757) — measure what the active inference regime added: the distinct
+ * asserted triples the reasoner saw (`base`, folded to the default graph exactly as the
+ * forward-chainer folds named graphs), the closure size (`reasoned`, default-graph N-Triples),
+ * and the entailed delta. All three are REAL counts queried from the two live stores — never a
+ * fabricated figure. A count over an empty store can throw; treat that as zero.
+ */
+function computeReasoningInfo(
+  base: WasmStore,
+  reasoned: WasmStore,
+  mode: Exclude<WorkspaceInferenceMode, "off">,
+): ReasoningInfo {
+  let baseTriples = 0;
+  try {
+    // Distinct s/p/o across the default graph AND every named graph — the reasoner folds named
+    // graphs into the default graph, so this is the base-triple count it actually reasoned over.
+    baseTriples = base.count(
+      "SELECT DISTINCT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
+    );
+  } catch {
+    /* empty store */
+  }
+  let closureTriples = 0;
+  try {
+    closureTriples = reasoned.count("SELECT * WHERE { ?s ?p ?o }");
+  } catch {
+    /* empty closure */
+  }
+  const entailed = Math.max(0, closureTriples - baseTriples);
+  return { mode, baseTriples, closureTriples, entailed };
+}
+
 // [OPUS-4.8] sq-xvj9 — the caller-supplied prefix map (sq-l5kr) as the `[prefix, iri]` pairs the
 // wasm `serialize` binding takes: the site's `COMMON_PREFIXES`, so an exported document abbreviates
 // `ex:`/`foaf:`/`schema:`/… consistently with the rest of the workbench (and byte-parity with the
@@ -437,6 +521,28 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   const storeRef = React.useRef<WasmStore | null>(null);
   const ctorRef = React.useRef<WasmStoreCtor | null>(null);
 
+  // [OPUS-4.8] sq-tp1m (#757) — the per-workspace inference regime + its materialised closure.
+  const [inferenceMode, setInferenceModeState] = React.useState<WorkspaceInferenceMode>("off");
+  const [inferenceStatus, setInferenceStatus] = React.useState<InferenceStatus>({ kind: "off" });
+  // The reasoned (closure) store read queries run against when a regime is active, plus the cache
+  // key (`mode:epoch`) it was built for. `storeEpoch` bumps whenever the BASE store content
+  // changes (warm / import / update) so a stale closure is rebuilt automatically.
+  const reasonedStoreRef = React.useRef<WasmStore | null>(null);
+  const reasonedKeyRef = React.useRef<string | null>(null);
+  // [OPUS-4.8] sq-tp1m — the SINGLE-FLIGHT slot for an in-flight closure build, keyed by the
+  // same `mode:epoch`. Overlapping callers (the applyInferenceMode effect + a run(), or two
+  // run()s) that request the same key while the first materialisation is still awaiting share
+  // this one Promise instead of each re-running the (expensive) materialize + racing to
+  // overwrite reasonedStoreRef/reasonedKeyRef (mirrors modulePromise in reason-wasm.ts).
+  const reasonedBuildRef = React.useRef<{ key: string; promise: Promise<WasmStore> } | null>(null);
+  const storeEpochRef = React.useRef(0);
+  const [storeEpoch, setStoreEpoch] = React.useState(0);
+  // [OPUS-4.8] sq-tp1m — a generation counter bumped on every applyInferenceMode invocation. An
+  // async materialisation that resolves AFTER a newer invocation (the user toggled modes quickly,
+  // or the store epoch bumped mid-build) is stale and must NOT publish its status, or the UI could
+  // land in the wrong state (e.g. mode Off but status Ready/Error). Only the latest generation writes.
+  const inferenceGenRef = React.useRef(0);
+
   // Warm the engine once on mount: load wasm, seed the sample graph, compute the summary.
   React.useEffect(() => {
     let cancelled = false;
@@ -449,6 +555,9 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         ctorRef.current = Store;
         const store = Store.load(SAMPLE_TURTLE, SAMPLE_FORMAT);
         storeRef.current = store;
+        // [OPUS-4.8] sq-tp1m — first content ready: bump the epoch so any active regime materialises.
+        storeEpochRef.current += 1;
+        setStoreEpoch(storeEpochRef.current);
         const { size, graphs: gs } = summariseGraphs(store);
         setStoreSize(size);
         setStoreBytes(snapshotBytes(store));
@@ -499,6 +608,116 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     setGraphs(gs);
     refreshDiskUsage();
   }, [refreshDiskUsage]);
+
+  // [OPUS-4.8] sq-tp1m (#757) — build (or reuse) the reasoned CLOSURE store for `mode` over the
+  // current base store: serialise the whole dataset to N-Quads, forward-chain the RDFS / OWL 2 RL
+  // closure with the real W-reason bundle, and load the closure N-Triples into a fresh in-tab
+  // store queries can run against. Cached by `mode:epoch`, so every query while the mode + store
+  // are unchanged reuses the same closure (the materialisation cost is paid once per change).
+  // Throws if the bundle is unavailable or the closure fails — the caller surfaces that honestly.
+  const buildReasonedStore = React.useCallback(
+    async (mode: Exclude<WorkspaceInferenceMode, "off">): Promise<WasmStore> => {
+      const Store = ctorRef.current;
+      const base = storeRef.current;
+      if (!Store || !base) {
+        throw new Error("The engine is not ready yet — wait for the store to warm.");
+      }
+      const key = `${mode}:${storeEpochRef.current}`;
+      // Completed-closure cache hit: reuse the already-materialised store.
+      if (reasonedKeyRef.current === key && reasonedStoreRef.current) {
+        return reasonedStoreRef.current;
+      }
+      // Single-flight: a build for this exact key is already in flight — await THAT promise
+      // rather than starting a second materialize() (the most expensive work) and racing to
+      // overwrite the refs. Once it resolves the completed-closure cache above serves the rest.
+      const inflight = reasonedBuildRef.current;
+      if (inflight && inflight.key === key) {
+        return inflight.promise;
+      }
+      const promise = (async () => {
+        const reasoner = await loadReasoner();
+        // The whole-dataset N-Quads snapshot; the reasoner folds named graphs into the default graph.
+        const snapshot = storeToNQuads(base);
+        const closure = reasoner.materialize(snapshot, "nquads", modeToProfile(mode));
+        const reasoned = Store.load(closure, "ntriples");
+        reasonedStoreRef.current = reasoned;
+        reasonedKeyRef.current = key;
+        return reasoned;
+      })();
+      reasonedBuildRef.current = { key, promise };
+      try {
+        return await promise;
+      } finally {
+        // Clear the in-flight slot only if it is still ours (a newer key may have replaced it),
+        // so a failed build releases the slot and a later attempt can retry.
+        if (reasonedBuildRef.current?.key === key) reasonedBuildRef.current = null;
+      }
+    },
+    [],
+  );
+
+  // [OPUS-4.8] sq-tp1m — reconcile the reasoning STATUS with the active mode + current store:
+  // tear the closure down for "off", else (re)materialise it and publish the entailed-triple
+  // counts. Idempotent; the single place reasoning is (re)applied (see the effect below).
+  const applyInferenceMode = React.useCallback(
+    async (mode: WorkspaceInferenceMode): Promise<void> => {
+      // Claim this generation up-front; any invocation started later supersedes us.
+      const gen = ++inferenceGenRef.current;
+      if (mode === "off") {
+        reasonedStoreRef.current = null;
+        reasonedKeyRef.current = null;
+        setInferenceStatus({ kind: "off" });
+        return;
+      }
+      // The engine/store may not have warmed yet — e.g. a workspace REOPENED with inference
+      // already on runs this before the mount warm-up seeds the store. That is a WARMING state,
+      // not a reasoner failure: show `loading` and let the storeEpoch bump (fired when the store
+      // warms) re-run this effect and retry. Reserve `error` for a genuine bundle-load /
+      // materialisation failure, so the toolbar never flashes "reasoner unavailable" over a
+      // reasoner that is in fact fine.
+      if (!storeRef.current || !ctorRef.current) {
+        setInferenceStatus({ kind: "loading" });
+        return;
+      }
+      const cachedKey = `${mode}:${storeEpochRef.current}`;
+      const alreadyBuilt =
+        reasonedKeyRef.current === cachedKey && reasonedStoreRef.current !== null;
+      if (!alreadyBuilt) setInferenceStatus({ kind: "loading" });
+      try {
+        const reasoned = await buildReasonedStore(mode);
+        // A newer invocation ran while we awaited — drop this stale result so we don't clobber it.
+        if (gen !== inferenceGenRef.current) return;
+        const base = storeRef.current;
+        const info: ReasoningInfo = base
+          ? computeReasoningInfo(base, reasoned, mode)
+          : { mode, baseTriples: 0, closureTriples: 0, entailed: 0 };
+        setInferenceStatus({ kind: "ready", info });
+      } catch (err) {
+        // Superseded invocations must not publish a stale error over the newer state either.
+        if (gen !== inferenceGenRef.current) return;
+        reasonedStoreRef.current = null;
+        reasonedKeyRef.current = null;
+        setInferenceStatus({
+          kind: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [buildReasonedStore],
+  );
+
+  // [OPUS-4.8] sq-tp1m — the PUBLIC mode setter is a plain state write; the effect below does the
+  // (async) reasoning work. Keeping the two apart means import/update need only bump the store
+  // epoch to trigger a closure rebuild, and the workspace-restore bridge just calls this setter.
+  const setInferenceMode = React.useCallback((mode: WorkspaceInferenceMode) => {
+    setInferenceModeState(mode);
+  }, []);
+
+  // [OPUS-4.8] sq-tp1m — whenever the mode OR the base store content changes, reconcile the
+  // closure + status. The SINGLE place reasoning is applied.
+  React.useEffect(() => {
+    void applyInferenceMode(inferenceMode);
+  }, [inferenceMode, storeEpoch, applyInferenceMode]);
 
   // [OPUS-4.8] sq-ixc3.13 — the Import drawer's ingest. A `file` import (a disk path) goes
   // through the NATIVE loader IPC (`load_path`: compressed + native-only HDT, no wasm-tab
@@ -562,6 +781,10 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       }
       const merged = Store.loadDataset(combined, "nquads");
       storeRef.current = merged;
+      // [OPUS-4.8] sq-tp1m — the base store changed: bump the epoch so an active regime rebuilds
+      // its closure over the newly-imported data.
+      storeEpochRef.current += 1;
+      setStoreEpoch(storeEpochRef.current);
 
       // 3. Refresh the datasets tree + store size + on-device footprint from the new store.
       const { size, graphs: gs } = summariseGraphs(merged);
@@ -616,6 +839,31 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       const rowCap = opts.rowCap ?? DEFAULT_ROW_CAP;
       const signal = opts.signal;
       const form = classifyQuery(query);
+      // [OPUS-4.8] sq-tp1m (#757) — pick the target store. When an inference regime is active,
+      // READ queries run against the materialised forward-chaining CLOSURE so entailed triples
+      // match; UPDATEs always mutate the ASSERTED base store (the closure is a derived, read-only
+      // view — a successful UPDATE bumps the store epoch, invalidating the cached closure). A
+      // missing / broken reasoner bundle is surfaced honestly, never silently queried un-reasoned.
+      // The closure build is OUTSIDE the latency window below so `latencyMs` measures the query,
+      // not the one-time materialisation (which is cached across queries).
+      let target = store;
+      if (inferenceMode !== "off" && form !== "update") {
+        try {
+          target = await buildReasonedStore(inferenceMode);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return {
+            outcome: {
+              kind: "error",
+              message:
+                `Inference is set to ${inferenceMode.toUpperCase()}, but the reasoning bundle ` +
+                `could not run: ${message} Turn inference Off to query the asserted data, or ` +
+                `rebuild the reasoner bundle (js: npm run build:reason-wasm).`,
+            },
+            latencyMs: 0,
+          };
+        }
+      }
       const t0 = performance.now();
       let outcome: QueryOutcome;
       try {
@@ -623,22 +871,26 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           // EXPLAIN renders the planner's chosen plan; EXPLAIN ANALYZE also EXECUTES it and
           // traces the per-operator work (the wasm `explain` / `explainAnalyze` bindings, which
           // mirror `sparq_engine::explain[_analyze]` and the server's `explain=plan|analyze`).
-          const plan = mode === "analyze" ? store.explainAnalyze(query) : store.explain(query);
+          const plan = mode === "analyze" ? target.explainAnalyze(query) : target.explain(query);
           outcome = { kind: "explain", mode, plan };
         } else if (form === "ask") {
-          const json = store.query(query);
+          const json = target.query(query);
           const parsed = JSON.parse(json) as SparqlResults;
           outcome = isAskResult(parsed)
             ? { kind: "ask", value: askValue(parsed) ?? false, rawJson: formatSparqlJson(parsed) }
             : { kind: "error", message: "ASK query did not return a boolean result." };
         } else if (form === "construct" || form === "describe") {
-          const ntriples = store.queryQuads(query);
+          const ntriples = target.queryQuads(query);
           const tripleCount = ntriples
             .split("\n")
             .filter((l) => l.trim().length > 0).length;
           outcome = { kind: "graph", ntriples, tripleCount };
         } else if (form === "update") {
           store.updateInPlace(query);
+          // [OPUS-4.8] sq-tp1m — the asserted store changed: bump the epoch so an active regime
+          // rebuilds its closure over the post-update data.
+          storeEpochRef.current += 1;
+          setStoreEpoch(storeEpochRef.current);
           // `size` reports the default graph only; recompute the full per-graph total below.
           const { size } = summariseGraphs(store);
           outcome = { kind: "update", sizeAfter: size };
@@ -650,7 +902,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           const kept: SparqlBinding[] = [];
           let total = 0;
           let cancelled = false;
-          const meta = streamQueryRows(store, query, STREAM_BATCH_SIZE, (batch) => {
+          const meta = streamQueryRows(target, query, STREAM_BATCH_SIZE, (batch) => {
             if (signal?.aborted) {
               cancelled = true;
               // Throw to break streamQueryRows' loop; the cursor is freed in its `finally`.
@@ -703,7 +955,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       if (outcome.kind === "update") refreshSummary();
       return { outcome, latencyMs };
     },
-    [refreshSummary],
+    [refreshSummary, inferenceMode, buildReasonedStore],
   );
 
   // [OPUS-4.8] sq-ixc3.10/.12 — EXPLAIN / EXPLAIN ANALYZE is NOT a separate context method: it is
@@ -773,6 +1025,9 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       importRdf,
       nativeLoaderAvailable,
       snapshotStore,
+      inferenceMode,
+      inferenceStatus,
+      setInferenceMode,
     }),
     [
       status,
@@ -790,6 +1045,9 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       importRdf,
       nativeLoaderAvailable,
       snapshotStore,
+      inferenceMode,
+      inferenceStatus,
+      setInferenceMode,
     ],
   );
 
