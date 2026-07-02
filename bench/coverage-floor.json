@@ -82,7 +82,8 @@
       "note": "[OPUS-4.8] sq-bif.1: tier-b WASM bundle (cdylib+rlib). Its gate-exercising surface is the #[wasm_bindgen] JS API exercised ONLY by `wasm-pack test --node` (tests/web.rs is #[wasm_bindgen_test]); a NATIVE `cargo llvm-cov` runs 0 of those and reports a misleadingly-low ~55% over the rlib helpers alone — a measurement artifact in the same class as sparq-cli (subprocess) / sparq-gpu (device-gated). Floor 0 + PRESENCE-gated (bench/coverage-presence.json) instead of an unenforceable %; not added to scripts/coverage.sh."
     },
     "sparq-rsp": {
-      "floor": 87
+      "floor": 92,
+      "note": "[OPUS-4.8] sq-qcnn.18: direct unit tests for window open/close/slide boundaries (exact-tick assertion kills <-><=  mutants), TripleStream helpers (len/is_empty/items/push_item), WindowSpec panic guards (zero range/step/rows, wrong-type max_delay/t0/slide), advance() heartbeat path, accessor fns (sparql/spec/r2s/mode/late_dropped) on all three query types, ContinuousMultiQuery accessor and error paths (non-SELECT/single-window/undeclared-WINDOW), and RSP-QL parser error paths (year/month durations, bad time unit, empty duration, unterminated bracket, missing IRI/AS, WINDOW-in-string-literal, DSTREAM/RSTREAM/STREAM keywords). Measured line% 94.39 (1936/2051 total: window.rs 94.82, stream.rs 100, eval.rs 96.52, query.rs 99.54, rspql.rs 92.07, multi.rs 95.60); floor = floor(measured) - 2 margin = 92. Conservative work-box seed; CI's --check-robust is the ratchet of record."
     },
     "sparq-rsp-wasm": {
       "floor": 0,
