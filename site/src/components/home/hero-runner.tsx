@@ -108,6 +108,7 @@ function ResultsTable({
           {vars.map((v) => (
             <th
               key={v}
+              scope="col"
               className={cn(
                 "px-3 py-2 font-mono text-xs font-medium text-primary",
                 numericVar[v] ? "text-right" : "text-left",
@@ -145,6 +146,7 @@ function PreviewTable() {
           {HERO_RESULT_VARS.map((v, i) => (
             <th
               key={v}
+              scope="col"
               className={cn(
                 "px-3 py-2 font-mono text-xs font-medium text-primary",
                 i === 0 ? "text-left" : "text-right",
@@ -281,9 +283,11 @@ export function HeroQueryRunner() {
         {(["query", "data"] as const).map((t) => (
           <button
             key={t}
+            id={`hero-tab-${t}`}
             type="button"
             role="tab"
             aria-selected={tab === t}
+            aria-controls={`hero-panel-${t}`}
             onClick={() => setTab(t)}
             className={cn(
               "rounded-md px-3 py-1 text-xs font-medium capitalize transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
@@ -302,7 +306,12 @@ export function HeroQueryRunner() {
 
       {/* Editors. Both mounted; the inactive one is hidden (not unmounted) so edits persist. */}
       <div className="p-3">
-        <div className={cn(tab === "query" ? "block" : "hidden")}>
+        <div
+          id="hero-panel-query"
+          role="tabpanel"
+          aria-labelledby="hero-tab-query"
+          className={cn(tab === "query" ? "block" : "hidden")}
+        >
           <label htmlFor="hero-query" className="sr-only">
             SPARQL query
           </label>
@@ -314,7 +323,12 @@ export function HeroQueryRunner() {
             rows={8}
           />
         </div>
-        <div className={cn(tab === "data" ? "block" : "hidden")}>
+        <div
+          id="hero-panel-data"
+          role="tabpanel"
+          aria-labelledby="hero-tab-data"
+          className={cn(tab === "data" ? "block" : "hidden")}
+        >
           <label htmlFor="hero-data" className="sr-only">
             Sample data (Turtle)
           </label>
