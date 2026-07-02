@@ -320,8 +320,11 @@ function detectOs(): OsKey | null {
 function Sha256Line({ digest }: { digest: string }) {
   const hex = digest.replace(/^sha256:/, "");
   const [copied, setCopied] = React.useState(false);
-  // [OPUS-4.8] track the reset timer id so it can be cancelled on unmount / re-arm to avoid leaks
-  const timerRef = React.useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  // [OPUS-4.8] track the reset timer id so it can be cancelled on unmount / re-arm to avoid leaks.
+  // `window.setTimeout` returns `number` in the DOM lib; type the ref as `number` to avoid the
+  // @types/node global-augmentation ambiguity where `ReturnType<typeof window.setTimeout>`
+  // resolves to Node's `Timeout` and the assignment fails typecheck (TS2322).
+  const timerRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
     return () => {
