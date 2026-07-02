@@ -69,34 +69,6 @@ export const PAPERS: Paper[] = [
       "Deterministic only: recall floors (0.95 unfiltered, 0.90 filtered — sanity checks, labelled as such) + asserted pre-filter ≡ post-filter equivalence (single / transitive / cyclic; exact path unconditional, approximate path broad-mask) + the cost-model crossover constant. No latency/throughput claim; the performance evaluation is pre-registered but unexecuted (blocked on the canonical runner).",
   },
   {
-    slug: "honest-benchmarking",
-    source: "honest-benchmarking.typ",
-    title:
-      "Honest Same-Box Benchmarking for RDF Engines: Differential-Correctness-Gated, Hardware-Labelled, Negative-Results-Inclusive",
-    blurb:
-      "A benchmarking methodology: correctness gates timing, every number is environment-labelled, canonical evidence is separated from indicative work-box measurement by a build-time gate, and negative results are first-class.",
-    authors: "Jesse Wright · the sparq project",
-    venue: "Reproducibility / E&A track (methods note)",
-    status: "publishable-now",
-    family: "A",
-    evidence:
-      "Methodology contribution — reports no performance number as evidence; demonstrates the canonical/indicative honesty gate this factory enforces.",
-  },
-  {
-    slug: "geosparql-optin-crate",
-    source: "geosparql-optin-crate.typ",
-    title:
-      "A Conformant, Opt-In GeoSPARQL Layer for a Dictionary-Id RDF Engine, Backed by a Cross-Family Conformance Ratchet",
-    blurb:
-      "An opt-in GeoSPARQL 1.0/1.1 layer that imposes no cost on a core or wasm build that never uses it, reusing the host engine's extension-function registry and generic entailment. The honest evidence is conformance, not speed: an OGC topology floor that is one row of a single cross-family, CI-enforced, drift-guarded ratchet.",
-    authors: "Jesse Wright · the sparq project",
-    venue: "ISWC resources / in-use track (or demo)",
-    status: "publishable-now",
-    family: "B",
-    evidence:
-      "Deterministic conformance ratchet floors: OGC GeoSPARQL topology (119) as one row of a 7-suite cross-family scoreboard totalling 3442, each floor CI-enforced, monotone, and guarded against drift. No latency claim; spatial algorithms are standard prior art.",
-  },
-  {
     slug: "solid-acl-conformance",
     source: "solid-acl-conformance.typ",
     title:
@@ -134,20 +106,6 @@ export const PAPERS: Paper[] = [
     family: "B",
     evidence:
       "Honestly partitioned. Direct evidence (all of it, today): deterministic, test-proven answer-safety invariants of the bridge (prohibit-strategy set subtraction correct through unchanged enforcement; asymmetric fail-closed deny retraction; recipient constraints persist as re-checked conditional grants with one-shot fallback; atomic stateful count enforcement). Context — NOT bridge evidence: the CI-enforced, drift-guarded Solid WAC (12) and ACP (12) decision-parity ratchet floors of the pre-existing target layer. PENDING — the blocking gap to submission: a fully specified (not pre-registered: no registry deposit exists) decision-agreement study vs the ODRE enforcement engines and an OAC-style matcher over the cited systems' own policy corpora. No latency claim; no novel-semantics claim; no in-use claim; the federated/ZK disclosure half is explicitly deferred (research-grade crypto, not externally audited; sq-qhy4).",
-  },
-  {
-    slug: "unsafe-attestation",
-    source: "unsafe-attestation.typ",
-    title:
-      "Auditing the unsafe: A Confined, Registered, CI-Ratcheted unsafe-Rust Surface as a Machine-Checkable Memory-Safety Attestation for an RDF Engine",
-    blurb:
-      "How an RDF engine makes its unsafe-Rust surface auditable rather than trusted: confined to 5 of 35 crates by compile-time forbiddance, counted at 59 sites behind a required CI ratchet that gates any growth, justified per-site in a lint-pinned register, and bounded by a layered Miri / corruption-oracle / fuzz / sanitizer coverage matrix. The honest evidence is coverage and discipline, not a proof of soundness: no claim that the engine is free of undefined behaviour, and the open soundness gaps on the untrusted-input mmap boundary are named, not hidden.",
-    authors: "Jesse Wright · the sparq project",
-    venue: "Security-engineering / resources / in-use track (or workshop)",
-    status: "publishable-now",
-    family: "A",
-    evidence:
-      "Deterministic, committed, CI-enforced integers: an unsafe-site count ratchet (59 sites, ceiling-gated), a crate confinement partition (30 forbid + 5 unsafe-bearing = 35), and a 100%-coverage per-site register, plus a Miri/fuzz/ASan coverage matrix. No latency claim and explicitly NOT a proof of memory safety; open soundness gaps on the untrusted-input boundary are stated.",
   },
   {
     slug: "cozk-witness-validation",
