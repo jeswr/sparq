@@ -652,6 +652,16 @@ pub mod delta {
         /// `budget` is polled once per probe row (sticky: if exhausted, the remainder of
         /// `delta` is skipped). `emit` and `budget` are generic type parameters — no
         /// `Box<dyn>`, no vtable.
+        ///
+        /// **Budget count is per-pass, by design.** The value passed to `Budget::exhausted`
+        /// is the number of rows emitted by *this* `probe_emit` call, not a cumulative total
+        /// across successive `build`/`extend`/`probe_emit` rounds. A caller that wants one
+        /// bound spanning a whole Δ fixpoint owns that cumulative count in its own `Budget`
+        /// state — this is the reasoner's closure-level budget, deliberately a reasoner (not
+        /// a substrate) concern per `research/shared-eval-substrate.md` §5. The seam only
+        /// exposes the cooperative poll; it does not track fixpoint-global progress. A budget
+        /// whose exhaustion depends solely on the passed count (e.g. a bare max-rows cap)
+        /// will therefore reset each pass — such a caller must feed its own running total.
         #[inline]
         pub fn probe_emit<B: Budget, F: FnMut(&Row, &Row)>(
             &self,
