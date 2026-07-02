@@ -81,9 +81,9 @@ view; `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
   `sq-ufsi9`) — the sparq **`sec-prop:` extension** ([`secprop-ext.ttl`](ontologies/zkp-sparql/secprop-ext.ttl); proof-system
   dimensions + the **assurance / audit-status axis** the vendored ontology lacks) and the §4.3 ODRL → admissible-proof-set
   reduction as a RUNNABLE N3 ruleset on `sparq-reason` (Rust **default-deny**). Reasons over ANNOTATIONS, not crypto (`sq-qhy4`).
-- **Property-admissibility pre-check** (`admit_with_precheck`, **opt-in `secprop-precheck`**, `sq-dt5hv` Ph 5 / `sq-nrwqs` Ph 5.1) —
+- **Property-admissibility pre-check** (`admit_with_precheck`, **opt-in `secprop-precheck`**, `sq-dt5hv` Ph 5 / `sq-nrwqs` / `sq-ddbm8`) —
   an OPTIONAL pre-admission check: the caller passes ONLY the requester's ODRL preference + the method IRI; the gate resolves the
-  method's posture from the **bundled** `secprop-methods.ttl` (tamper-resistant, unknown method fails closed) and **fails closed** *before* the sig/holder checks. NO preference ⇒ **byte-identical** to `admit`.
+  method's posture from the **bundled** `secprop-methods.ttl` (tamper-resistant; unknown method / malformed operand fail closed) and **fails closed** *before* the sig/holder checks. NO preference ⇒ **byte-identical** to `admit`.
 - **Live status / revocation** (`status_list`, **opt-in `status-list`**, `sq-pfae.7`) — gate derivations on a **live
   W3C Bitstring Status List** instead of `revoked: bool`: fetch (pluggable `StatusListResolver`) + decode (multibase
   over a pluggable `GzipDecoder`; built-in `Flate2GzipDecoder` behind `status-list-flate2`); `admit_with_status` admits
