@@ -153,8 +153,9 @@ unchanged.
 
 ### 5. Canonical loopback HTTP throughput harness (P2, http — prerequisite)
 
-**Approach.** The server has NO throughput metric anywhere in `bench/` — every HTTP
-opportunity is currently unmeasurable, so this bead gates the lane. Add a bench lane
+**Approach.** The server has no *canonical, CI-emitted* HTTP throughput metric in `bench/`
+(the research spike in `bench/serve/loadgen` is non-canonical and not tracked for regressions) —
+every HTTP opportunity is currently unmeasurable for trend/regression purposes, so this bead gates the lane. Add a bench lane
 that binds the loopback server and drives it with an external load generator
 (oha/wrk/k6): fixed small-SELECT workload at concurrency 1/8/32 (matching
 `max_concurrent` 32) reporting req/s + p50/p99, PLUS peak RSS while serving one large
