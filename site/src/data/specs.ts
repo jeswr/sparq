@@ -72,6 +72,17 @@ export const SPECS: Spec[] = [
     blurb:
       "The template and worked example every sparq Unofficial Proposal Draft follows — status notice, numbered sections, an RFC 2119 conformance section, a worked example, and references. Proves the single-source PDF + in-site render pipeline.",
   },
+  {
+    slug: "sparql-vector-genai",
+    source: "sparql-vector-genai.typ",
+    title: "SPARQL Vector & GenAI Extension",
+    shortName: "sparql-vec-genai",
+    status: "unofficial",
+    date: "2026-07-01",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "The vec: vector-search extension to SPARQL — magic-predicate k-NN patterns with score bindings, answer-exact vs approximate modes, filtered-search answer-safety, the persisted store format and its staleness contract, embedding acquisition, and grounded-generation obligations — plus a normative embedding-provenance record (model, version, metric, normalisation, dimension) with a MUST-reject compatibility rule and a deterministic tie-break. Every normative assertion carries a testable ID; an informative report states which requirements the sparq build satisfies today.",
+  },
 ];
 
 export function specBySlug(slug: string): Spec | undefined {
