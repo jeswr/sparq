@@ -320,13 +320,22 @@ function detectOs(): OsKey | null {
 function Sha256Line({ digest }: { digest: string }) {
   const hex = digest.replace(/^sha256:/, "");
   const [copied, setCopied] = React.useState(false);
+  // [OPUS-4.8] track the reset timer id so it can be cancelled on unmount / re-arm to avoid leaks
+  const timerRef = React.useRef<ReturnType<typeof window.setTimeout> | null>(null);
+
+  React.useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    };
+  }, []);
 
   const copy = React.useCallback(async () => {
     try {
       await navigator.clipboard.writeText(hex);
       setCopied(true);
       toast.success("sha256 copied");
-      window.setTimeout(() => setCopied(false), 1500);
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => setCopied(false), 1500);
     } catch {
       toast.error("Couldn't copy to the clipboard");
     }
