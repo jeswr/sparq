@@ -201,23 +201,46 @@ impl Parser<'_> {
     }
 
     fn parse_number(&mut self) -> Result<Json, JsonParseError> {
+        // [OPUS-4.8] (sq-oy1f.24) Enforce the RFC 8259 number grammar strictly:
+        //   number = [ "-" ] int [ frac ] [ exp ]
+        //   int    = "0" / ( digit1-9 *DIGIT )   (no leading zeros)
+        //   frac   = "." 1*DIGIT                 (a "." requires a digit)
+        //   exp    = ("e" / "E") ["+" / "-"] 1*DIGIT
+        // A minimal, remote-context parser must not silently accept malformed forms such as
+        // `01`, `1.`, or `1e`, otherwise invalid JSON is treated as valid.
         let start = self.pos;
         if self.peek() == Some(b'-') {
             self.pos += 1;
         }
-        while matches!(self.peek(), Some(b'0'..=b'9')) {
-            self.pos += 1;
+        // Integer part: a lone "0", or a 1-9 lead followed by any digits.
+        match self.peek() {
+            Some(b'0') => self.pos += 1,
+            Some(b'1'..=b'9') => {
+                self.pos += 1;
+                while matches!(self.peek(), Some(b'0'..=b'9')) {
+                    self.pos += 1;
+                }
+            }
+            _ => return Err(self.error("invalid number: expected a digit")),
         }
+        // Fraction: "." then at least one digit.
         if self.peek() == Some(b'.') {
             self.pos += 1;
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(self.error("invalid number: fraction requires a digit"));
+            }
             while matches!(self.peek(), Some(b'0'..=b'9')) {
                 self.pos += 1;
             }
         }
+        // Exponent: e/E, optional sign, then at least one digit.
         if matches!(self.peek(), Some(b'e') | Some(b'E')) {
             self.pos += 1;
             if matches!(self.peek(), Some(b'+') | Some(b'-')) {
                 self.pos += 1;
+            }
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(self.error("invalid number: exponent requires a digit"));
             }
             while matches!(self.peek(), Some(b'0'..=b'9')) {
                 self.pos += 1;
@@ -225,10 +248,6 @@ impl Parser<'_> {
         }
         let raw = std::str::from_utf8(&self.bytes[start..self.pos])
             .map_err(|_| self.error("invalid number"))?;
-        // Reject a lone "-" or ".".
-        if raw == "-" || !raw.bytes().any(|b| b.is_ascii_digit()) {
-            return Err(self.error("invalid number"));
-        }
         Ok(Json::Raw(raw.to_string()))
     }
 
@@ -257,6 +276,12 @@ impl Parser<'_> {
                         Some(b'u') => self.push_unicode_escape(&mut out)?,
                         _ => return Err(self.error("invalid escape")),
                     }
+                }
+                // [OPUS-4.8] (sq-oy1f.24) RFC 8259 forbids raw control characters
+                // (U+0000..=U+001F) inside a string; they must be escaped. Reject them so a
+                // malformed remote `@context`/`@import` document is not treated as valid.
+                Some(b) if b < 0x20 => {
+                    return Err(self.error("unescaped control character in string"));
                 }
                 Some(_) => {
                     // Copy a whole UTF-8 char.
@@ -546,5 +571,37 @@ mod tests {
         assert!(Json::parse(r#""unterminated"#).is_err());
         let err = Json::parse("@").unwrap_err();
         assert!(err.to_string().contains("byte 0"));
+    }
+
+    #[test]
+    fn parse_rejects_unescaped_control_char_in_string() {
+        // RFC 8259 forbids raw control chars (U+0000..=U+001F) inside a string.
+        assert!(Json::parse("\"a\u{01}b\"").is_err());
+        assert!(Json::parse("\"tab\there\"").is_err()); // literal TAB
+        assert!(Json::parse("\"nl\nhere\"").is_err()); // literal newline
+        // The escaped forms remain accepted.
+        assert_eq!(Json::parse("\"\\t\"").unwrap(), Json::Str("\t".into()));
+    }
+
+    #[test]
+    fn parse_rejects_malformed_numbers() {
+        // Leading zeros are forbidden (int = "0" / digit1-9 *DIGIT).
+        assert!(Json::parse("01").is_err());
+        assert!(Json::parse("-01").is_err());
+        assert!(Json::parse("00").is_err());
+        // A fraction requires at least one digit.
+        assert!(Json::parse("1.").is_err());
+        assert!(Json::parse("1.e5").is_err());
+        // An exponent requires at least one digit.
+        assert!(Json::parse("1e").is_err());
+        assert!(Json::parse("1e+").is_err());
+        assert!(Json::parse("1E-").is_err());
+        // A lone sign / no integer part is invalid.
+        assert!(Json::parse("-").is_err());
+        assert!(Json::parse(".5").is_err());
+        // Well-formed forms still parse (including a bare "0").
+        assert_eq!(Json::parse("0").unwrap(), Json::Raw("0".into()));
+        assert_eq!(Json::parse("-0.5e-2").unwrap(), Json::Raw("-0.5e-2".into()));
+        assert_eq!(Json::parse("10").unwrap(), Json::Raw("10".into()));
     }
 }

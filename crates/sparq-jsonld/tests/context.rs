@@ -380,6 +380,22 @@ fn invalid_import_value_error() {
 }
 
 #[test]
+fn invalid_nest_value_rejects_keyword_form() {
+    // A keyword-form value other than `@nest` (even an unrecognised one) is invalid.
+    assert_eq!(
+        err_code(r#"{"x": {"@id": "http://example.org/x", "@nest": "@bogus"}}"#),
+        JsonLdErrorCode::InvalidNestValue
+    );
+    assert_eq!(
+        err_code(r#"{"x": {"@id": "http://example.org/x", "@nest": "@id"}}"#),
+        JsonLdErrorCode::InvalidNestValue
+    );
+    // `@nest` itself and a plain nest property name are accepted.
+    ok(r#"{"x": {"@id": "http://example.org/x", "@nest": "@nest"}}"#);
+    ok(r#"{"x": {"@id": "http://example.org/x", "@nest": "nestProp"}}"#);
+}
+
+#[test]
 fn processing_mode_conflict_error() {
     let mut opts = JsonLdOptions::default();
     opts.processing_mode = ProcessingMode::JsonLd10;

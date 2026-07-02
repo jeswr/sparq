@@ -669,7 +669,10 @@ fn finish_definition(
         let Json::Str(ns) = n else {
             return Err(JsonLdError::new(E::InvalidNestValue));
         };
-        if ns != "@nest" && is_keyword(ns) {
+        // [OPUS-4.8] (sq-oy1f.24) Per JSON-LD 1.1 Create Term Definition, an `@nest` value
+        // must not be a keyword *or have keyword form* other than `@nest` itself — a token
+        // like `@bogus` (keyword-form but unrecognised) is still an invalid @nest value.
+        if ns != "@nest" && has_keyword_form(ns) {
             return Err(JsonLdError::new(E::InvalidNestValue));
         }
         def.nest = Some(ns.clone());
