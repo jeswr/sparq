@@ -49,7 +49,21 @@
     "deterministic CI-measured value 1686907 — runs 28351377270 & 28349508714 and the benchmark-data series both",
     "publish 1686907 on the x86_64 runner; a cross-arch local aarch64 build reads 1687481, +0.034%, host-arch",
     "non-reproducibility, so the CI value is authoritative). NOT set above current so the push-to-main auto-",
-    "ratchet-down stays stable. threshold 0.02 + mode auto UNCHANGED — the +2% guard is RETAINED, not widened."
+    "ratchet-down stays stable. threshold 0.02 + mode auto UNCHANGED — the +2% guard is RETAINED, not widened.",
+    "[OPUS-4.8] (sq-7d3dj.1) 2026-07-02: wasm_bundle_bytes floor RE-BASELINED DOWNWARD 1686907 -> 1399703",
+    "(-17.0%) — an OPTIMISATION win, not a feature bump. The new `release-wasm` cargo profile (root Cargo.toml)",
+    "size-optimises the COLD, run-once parse crates (spargebra/oxiri/oxttl at opt-level \"z\") and strips local",
+    "symbols (strip=symbols), while the HOT engine/core query-eval crates stay opt-level 3 — so the bundle",
+    "shrinks with no runtime-perf change (pure parser code, off every hot path). BOTH the gate (scripts/ci-",
+    "bench.sh) AND the shipped bundle (js build:wasm{,:lean} -> wasm-pack --profile release-wasm) now build",
+    "this profile, so the gate measures the binary that ships. Measured split on the aarch64 work box (lean,",
+    "no-features build, identical to ci-bench.sh): release 1699660 -> strip-only 1561759 (-8.1%) -> +opt-z",
+    "1399703 (-17.65% total). Floor set to the aarch64 work-box AFTER value 1399703 — this is a WORK-BOX",
+    "measurement, not the canonical x86_64 CI value (which cannot be produced here). It is a SAFE upper bound:",
+    "the historical arch relationship has aarch64 reading ABOVE x86_64 (old bundle 1687481 aarch64 vs 1686907",
+    "x86_64, +0.034%), so the x86_64 CI build is expected at-or-just-below 1399703 and passes the strict gate;",
+    "the +2% band (=1427697) covers any residual cross-arch codegen delta. On the next push to main the auto-",
+    "ratchet-down step re-floors this to the exact x86_64 CI value. threshold 0.02 + mode auto UNCHANGED."
   ],
   "metrics": {
     "store_bytes_per_triple": {
@@ -68,7 +82,7 @@
       "mode": "auto"
     },
     "wasm_bundle_bytes": {
-      "floor": 1686907,
+      "floor": 1399703,
       "threshold": 0.02,
       "mode": "auto"
     },

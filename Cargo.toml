@@ -98,6 +98,31 @@ panic = "abort"
 inherits = "release"
 panic = "unwind"
 
+# [OPUS-4.8] sq-7d3dj.1 — WASM release profile that BUILDS THE SHIPPED BROWSER BUNDLE.
+# Inherits the tuned `release` profile (opt-level 3, fat LTO, codegen-units 1, panic=abort) so
+# the HOT engine/core query-eval crates keep their opt-level-3 + simd128 / core::simd FILTER
+# investment untouched, then makes only the COLD, run-once RDF/SPARQL PARSE crates build for
+# SIZE (opt-level "z") and strips local symbols. Pure parser code sits off every hot query
+# path, so this shrinks the wasm bundle with no runtime-perf change. Wired into BOTH the gated
+# measurement (scripts/ci-bench.sh -> the wasm_bundle_bytes ratchet) AND the shipped bundle
+# (js `build:wasm{,:lean}` -> `wasm-pack --profile release-wasm`), so the gate measures the
+# binary that ships. Blanket opt-level "z" was REJECTED — it would deopt the eval kernels.
+# NATIVE / non-wasm builds NEVER select this profile, so the default `release` profile — and
+# every engine opt-level — is byte-for-byte unchanged.
+[profile.release-wasm]
+inherits = "release"
+strip = "symbols"
+
+# Cold, run-once RDF/SPARQL parse crates only (spargebra = SPARQL query parser, oxiri = IRI
+# parser, oxttl = Turtle/N-Triples parser). They are reached once at load/parse time, never on
+# the hot query-eval loop, so size-optimising them costs no measurable runtime perf.
+[profile.release-wasm.package.spargebra]
+opt-level = "z"
+[profile.release-wasm.package.oxiri]
+opt-level = "z"
+[profile.release-wasm.package.oxttl]
+opt-level = "z"
+
 # A profile for benchmarking that keeps symbols for profiling.
 [profile.bench]
 opt-level = 3

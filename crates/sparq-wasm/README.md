@@ -14,8 +14,8 @@ SPARQL 1.1 JSON).
 ## 🚀 Quickstart
 
 ```sh
-wasm-pack build --target web --release            # browser (ES modules)
-wasm-pack build --target nodejs --release --out-dir pkg-node   # Node (CommonJS)
+wasm-pack build --target web --profile release-wasm            # browser (ES modules)
+wasm-pack build --target nodejs --profile release-wasm --out-dir pkg-node   # Node (CommonJS)
 ```
 
 ```js
