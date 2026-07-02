@@ -20,7 +20,9 @@
 //! come from a quiet EC2 runner — the same disposition the competitor-gather and the
 //! perf-gate give every wall-clock metric. Nothing here is wired into the deterministic
 //! perf-gate (`scripts/perf-gate.py`): req/s is a TREND / EC2 metric, not a gated ratchet.
-//! Every printed and JSON-emitted line carries a NON-CANONICAL note.
+//! Every report carries the NON-CANONICAL note: as a header comment line (`# {NOTE}`) on
+//! the text summary, and as a top-level `"note"` field (plus `"canonical": false`) in the
+//! `--json` document.
 //!
 //! # What it measures
 //!
@@ -395,12 +397,18 @@ fn run_cell(addr: SocketAddr, query: &str, conns: usize, duration: Duration) -> 
     }
 }
 
-/// Percentile of a sorted µs latency slice, in milliseconds. Empty slice => 0.0.
+/// Percentile of a sorted µs latency slice, in milliseconds, using the standard
+/// NEAREST-RANK definition: the value at 1-based ordinal rank `⌈p·N⌉` (clamped to
+/// `[1, N]`), i.e. index `⌈p·N⌉ − 1`. So `p=0` is the min, `p=1` the max, and for a
+/// 4-sample slice `p=0.5` is the 2nd sample (not the 3rd, as a `⌊p·N⌋` index would give).
+/// Empty slice => 0.0. [OPUS-4.8]
 fn percentile_ms(sorted_us: &[u64], p: f64) -> f64 {
     if sorted_us.is_empty() {
         return 0.0;
     }
-    let idx = ((sorted_us.len() as f64 * p) as usize).min(sorted_us.len() - 1);
+    let n = sorted_us.len();
+    let rank = (p * n as f64).ceil() as usize; // 1-based ordinal rank ⌈p·N⌉
+    let idx = rank.max(1).min(n) - 1; // clamp to [1, N], then to a 0-based index
     sorted_us[idx] as f64 / 1000.0
 }
 

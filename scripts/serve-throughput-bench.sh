@@ -44,5 +44,10 @@ ARGS+=("${EXTRA[@]:-}")
 # Drop an empty trailing element the ${EXTRA[@]:-} default may introduce under `set -u`.
 CLEAN=(); for a in "${ARGS[@]}"; do [ -n "$a" ] && CLEAN+=("$a"); done
 
-echo "# running: $HARNESS_DIR/target/release/serve_throughput ${CLEAN[*]}" >&2
-"$HARNESS_DIR/target/release/serve_throughput" "${CLEAN[@]}"
+# Run via `cargo run` from the harness dir so cargo — not a hard-coded path — resolves the
+# binary. This tracks CARGO_TARGET_DIR / an explicit --target (common in CI/dev shells),
+# where the artifact is NOT under `$HARNESS_DIR/target/release/`. --quiet keeps STDOUT the
+# harness's own output only (cargo status goes to STDERR); after the build above it is a fast
+# freshness check, no rebuild. [OPUS-4.8]
+echo "# running: cargo run --release --bin serve_throughput -- ${CLEAN[*]}" >&2
+( cd "$HARNESS_DIR" && cargo run --release --quiet --bin serve_throughput -- "${CLEAN[@]}" )

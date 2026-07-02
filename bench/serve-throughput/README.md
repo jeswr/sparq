@@ -22,8 +22,9 @@ absolute numbers are **directional brackets only**, never a claim — exactly ho
 competitor-gather and the perf-gate treat every wall-clock metric. The **canonical**
 numbers come from a **quiet EC2 runner** (the `ci-bench-ec2` disposition). Nothing here is
 wired into the deterministic perf-gate (`scripts/perf-gate.py`): `req/s` is a **trend / EC2
-metric**, not a gated ratchet. Every printed and JSON-emitted line carries a NON-CANONICAL
-note.
+metric**, not a gated ratchet. Every report carries the NON-CANONICAL note — as a header
+comment line (`# …`) on the text summary, and as a top-level `"note"` field (plus
+`"canonical": false`) in the `--json` document.
 
 ## What it measures
 
