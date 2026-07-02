@@ -363,6 +363,18 @@ original triples in a strict external processor, not only in sparq. (An `@id`/`@
 *input* — i.e. compacting an already-indexed document, as distinct from the fromRdf graph sparq
 produces — remains out of scope and falls back to default framing as noted above.)
 
+*Native document-level pipeline (in progress, opt-in, not yet wired to the surfaces).* The
+scope gaps above (scoped/typed contexts, `@propagate`, `@protected`, remote `@context` +
+`@import`) are being closed by a from-scratch, dependency-free **document-level** pipeline in
+the `sparq-jsonld` crate (design record `research/jsonld-1.1-design.md`, epic sq-oy1f). Its
+Context Processing foundation (sq-oy1f.24) ships today: `sparq_jsonld::context::ActiveContext`
+with `process()` (Context Processing + Create Term Definition, fallible with exact spec error
+codes), `expand_iri()` (IRI Expansion), RFC 3986 reference resolution, and **deny-by-default**
+remote-context loading via `DocumentLoader` (`NoopLoader` refuses every fetch — no ambient
+network — while `FsLoader` serves trusted local fixtures). Expansion / compaction / framing on
+this substrate, and the surface wiring, land in later beads; the RDF-first writers above remain
+the shipped path until then.
+
 ```rust
 use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};
 let ctx = parse_context_json(r#"{
