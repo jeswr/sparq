@@ -206,11 +206,11 @@ surface is minimal (§7 P7):
 | `feature-matrix.yml` ~50 opt-in legs | **scoped** | same guard, keyed on the leg's `-p` crate |
 | benchmark jobs | **scoped** | same guard |
 | workspace nextest archive / bulk partitions | **scoped by filterset** | if a job runs a cross-crate partition, don't skip the job — narrow it: `cargo nextest run -E 'package(a) + package(b) ...'` over the affected set. The archive/compile job runs whenever `affected ≠ ∅` |
-| lint / fmt / clippy, docs-quality, readme-template | always-run (cheap) |
-| coverage ratchet | always-run (single job; exception: skip only when `affected = ∅`, since coverage is a function of compiled code + tests) |
-| CodeQL, supply-chain (deny/vet/SBOM) | always-run (security semantics are whole-repo) |
-| fuzz smoke, wasm builds, perf-gate | always-run in phase 1; **phase 2** scopes them by mapping each to the crate closure it exercises (bead 6) |
-| `select` itself, `ci-summary` | always-run |
+| lint / fmt / clippy, docs-quality, readme-template | always-run (cheap) | — |
+| coverage ratchet | always-run (single job; exception: skip only when `affected = ∅`, since coverage is a function of compiled code + tests) | — |
+| CodeQL, supply-chain (deny/vet/SBOM) | always-run (security semantics are whole-repo) | — |
+| fuzz smoke, wasm builds, perf-gate | always-run in phase 1; **phase 2** scopes them by mapping each to the crate closure it exercises (bead 6) | — |
+| `select` itself, `ci-summary` | always-run | — |
 
 The wiring bead reconciles this table against the real job topology in
 `ci.yml` / `feature-matrix.yml` / the bench workflows — the design fixes the
