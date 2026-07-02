@@ -193,6 +193,13 @@ fn parse_tz_offset(tz: &str) -> Option<i64> {
     let (h, m) = body.split_once(':')?;
     let h: i64 = h.parse().ok()?;
     let m: i64 = m.parse().ok()?;
+    // XSD `timezoneFrag` range: minutes 0–59, hours 0–14, and at the ±14:00 bound the minutes must be
+    // 0 (14:01..14:59 is out of range). An out-of-range offset is an invalid lexical and must NOT be
+    // value-canonicalised — it falls through to exact-lexical keying so a genuine cross-engine
+    // divergence is never masked by an accidental value collision.
+    if !(0..=59).contains(&m) || !(0..=14).contains(&h) || (h == 14 && m != 0) {
+        return None;
+    }
     Some(sign * (h * 3_600 + m * 60))
 }
 
@@ -336,6 +343,11 @@ fn read_components(
     any: &mut bool,
 ) -> Option<()> {
     let mut cur = part;
+    // XSD duration requires each unit to appear at most once and in the fixed order Y,M,D (date part) /
+    // H,M,S (time part). A strictly increasing rank enforces both: an out-of-order or repeated unit
+    // (e.g. `P1D2Y`, `P1Y1Y`) is an invalid lexical and must be rejected — it falls through to
+    // exact-lexical keying rather than being value-canonicalised (which could mask a divergence).
+    let mut last_rank: i32 = -1;
     while !cur.is_empty() {
         let numend = cur.find(|c: char| !c.is_ascii_digit() && c != '.')?;
         let (num, rest) = cur.split_at(numend);
@@ -348,6 +360,19 @@ fn read_components(
         if num.contains('.') && !(is_time && unit == 'S') {
             return None;
         }
+        let rank = match (is_time, unit) {
+            (false, 'Y') => 0,
+            (false, 'M') => 1,
+            (false, 'D') => 2,
+            (true, 'H') => 0,
+            (true, 'M') => 1,
+            (true, 'S') => 2,
+            _ => return None,
+        };
+        if rank <= last_rank {
+            return None;
+        }
+        last_rank = rank;
         match (is_time, unit) {
             // Year/month axis — illegal in a `dayTimeDuration`.
             (false, 'Y') if kind != DurKind::DayTime => {
@@ -487,6 +512,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_datetime_rejects_out_of_range_timezone() {
+        // XSD timezone range is ±14:00; the bound itself is inclusive but must have zero minutes.
+        assert!(parse_datetime("2020-01-01T00:00:00+14:00", DT).is_some(), "±14:00 is the bound");
+        assert!(parse_datetime("2020-01-01T00:00:00-14:00", DT).is_some());
+        assert!(parse_datetime("2020-01-01T00:00:00+15:00", DT).is_none(), "beyond ±14:00");
+        assert!(parse_datetime("2020-01-01T00:00:00+14:30", DT).is_none(), "14:30 exceeds the bound");
+        assert!(parse_datetime("2020-01-01T00:00:00+00:60", DT).is_none(), "tz minute 60");
+        assert!(parse_datetime("2020-01-01-15:00", DATE).is_none(), "date tz beyond ±14:00");
+    }
+
+    #[test]
     fn parse_duration_forms() {
         assert!(parse_duration("P1Y2M3DT4H5M6S", DUR).is_some());
         assert!(parse_duration("-P1Y", YM).is_some());
@@ -523,6 +559,18 @@ mod tests {
         assert!(parse_duration("P1.5M", DUR).is_none(), "fractional (date) month is invalid");
         assert!(parse_duration("PT1.5H", DUR).is_none(), "fractional hour is invalid");
         assert!(parse_duration("PT1.5M", DUR).is_none(), "fractional minute is invalid");
+    }
+
+    #[test]
+    fn parse_duration_requires_ordered_unique_units() {
+        // Correct order is accepted.
+        assert!(parse_duration("P1Y2M3DT4H5M6S", DUR).is_some());
+        // Out-of-order units are an invalid lexical (must fall back to exact-lexical keying).
+        assert!(parse_duration("P1D2Y", DUR).is_none(), "date units out of order");
+        assert!(parse_duration("PT1M2H", DUR).is_none(), "time units out of order");
+        // A repeated unit is invalid.
+        assert!(parse_duration("P1Y1Y", DUR).is_none(), "repeated year");
+        assert!(parse_duration("PT1S2S", DAYT).is_none(), "repeated second");
     }
 
     #[test]

@@ -102,12 +102,20 @@ fn parse_term(cell: &Value) -> Result<Term, ParseError> {
             let lexical = str_field(cell, "value")?.to_string();
             let lang = cell.get("xml:lang").and_then(Value::as_str).map(str::to_string);
             let explicit_dt = cell.get("datatype").and_then(Value::as_str);
-            // A cell that names `rdf:langString` as its datatype but omits `xml:lang` is an invalid
-            // Results-JSON literal — a language-tagged literal must carry a tag. Reject it rather than
-            // fabricate an inconsistent `langString`-with-no-tag term, which would violate the term
-            // model and could corrupt strict equality / value keying.
-            if lang.is_none() && explicit_dt == Some(RDF_LANGSTRING) {
-                return err("literal cell has datatype rdf:langString but no xml:lang");
+            // `xml:lang` and `datatype` must agree: a language-tagged literal's datatype is
+            // `rdf:langString`, and nothing else may carry that datatype. Reject either contradiction
+            // rather than silently fabricate/override a term — masking invalid oracle output would let
+            // a real divergence slip past strict equality / value keying.
+            match (&lang, explicit_dt) {
+                // datatype names `rdf:langString` but there is no tag: invalid.
+                (None, Some(d)) if d == RDF_LANGSTRING => {
+                    return err("literal cell has datatype rdf:langString but no xml:lang");
+                }
+                // a tag is present but the explicit datatype is not `rdf:langString`: contradictory.
+                (Some(_), Some(d)) if d != RDF_LANGSTRING => {
+                    return err("language-tagged literal cell has a non-rdf:langString datatype");
+                }
+                _ => {}
             }
             let datatype = match (&lang, explicit_dt) {
                 (Some(_), _) => RDF_LANGSTRING.to_string(),
@@ -125,6 +133,16 @@ fn parse_term(cell: &Value) -> Result<Term, ParseError> {
             let s = parse_term(v.get("subject").ok_or_else(|| ParseError("triple missing subject".into()))?)?;
             let p = parse_term(v.get("predicate").ok_or_else(|| ParseError("triple missing predicate".into()))?)?;
             let o = parse_term(v.get("object").ok_or_else(|| ParseError("triple missing object".into()))?)?;
+            // RDF triple-term positional constraints (universal across RDF versions): the subject
+            // cannot be a literal, and the predicate must be an IRI. Reject a structurally-invalid
+            // triple rather than canonicalise non-conformant oracle output, which could mask a
+            // divergence. (The object may be any term kind, so it is unconstrained here.)
+            if matches!(s, Term::Literal { .. }) {
+                return err("triple-term subject cannot be a literal");
+            }
+            if !matches!(p, Term::Iri(_)) {
+                return err("triple-term predicate must be an IRI");
+            }
             Ok(Term::Triple(Box::new([s, p, o])))
         }
         other => err(format!("unknown binding type {:?}", other)),
@@ -232,5 +250,56 @@ mod tests {
           } ] }
         }"#;
         assert!(parse_results_json(ok).is_ok());
+    }
+
+    #[test]
+    fn rejects_lang_with_conflicting_datatype() {
+        // A tag alongside a non-langString datatype is contradictory and must be rejected rather than
+        // silently overridden to rdf:langString (which would mask invalid oracle output).
+        let doc = r#"{
+          "head": { "vars": [ "x" ] },
+          "results": { "bindings": [ {
+            "x": { "type": "literal", "value": "hi", "xml:lang": "en",
+                   "datatype": "http://www.w3.org/2001/XMLSchema#string" }
+          } ] }
+        }"#;
+        assert!(parse_results_json(doc).is_err());
+        // A redundant but consistent langString datatype alongside the tag is fine.
+        let ok = r#"{
+          "head": { "vars": [ "x" ] },
+          "results": { "bindings": [ {
+            "x": { "type": "literal", "value": "hi", "xml:lang": "en",
+                   "datatype": "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString" }
+          } ] }
+        }"#;
+        assert!(parse_results_json(ok).is_ok());
+    }
+
+    #[test]
+    fn rejects_structurally_invalid_triple_term() {
+        // A literal subject is never valid RDF; reject rather than canonicalise.
+        let lit_subject = r#"{
+          "head": { "vars": [ "t" ] },
+          "results": { "bindings": [ {
+            "t": { "type": "triple", "value": {
+              "subject":   { "type": "literal", "value": "x" },
+              "predicate": { "type": "uri", "value": "http://p" },
+              "object":    { "type": "uri", "value": "http://o" }
+            } }
+          } ] }
+        }"#;
+        assert!(parse_results_json(lit_subject).is_err());
+        // A non-IRI predicate (here a blank node) is likewise invalid.
+        let bnode_predicate = r#"{
+          "head": { "vars": [ "t" ] },
+          "results": { "bindings": [ {
+            "t": { "type": "triple", "value": {
+              "subject":   { "type": "uri", "value": "http://s" },
+              "predicate": { "type": "bnode", "value": "b0" },
+              "object":    { "type": "uri", "value": "http://o" }
+            } }
+          } ] }
+        }"#;
+        assert!(parse_results_json(bnode_predicate).is_err());
     }
 }

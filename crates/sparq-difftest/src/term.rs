@@ -97,16 +97,23 @@ pub fn term_equal_rdf(a: &Term, b: &Term) -> bool {
 /// value within each datatype, so cross-engine canonical-*lexical* variance collapses (`05` vs `5`,
 /// `1.50` vs `1.5`, `6` vs `6.0E0`, `true` vs `1`, same-instant dateTimes) while a genuinely different
 /// value, term kind, or datatype does not. Language tags are lowercased; simple literals fold to
-/// `xsd:string`. The `\u{1f}` unit separator cannot appear in a datatype IRI, so keys are unambiguous.
+/// `xsd:string`.
+///
+/// The `\u{1f}` unit separator cannot appear in a datatype IRI, and a literal's lexical is the *last*
+/// field of its key, so a leaf (IRI/blank/literal) key is unambiguous. A **triple** key, however,
+/// nests three leaf keys — and a literal lexical *can* contain any character, including `\u{1f}` — so
+/// plain delimiter-joining would be ambiguous: two distinct triple terms could concatenate to one key
+/// (a false "equal"). Each nested component is therefore **length-prefixed** (`field`) so decoding
+/// boundaries never depend on the separator and the composite key stays injective.
 pub fn canonical_key(term: &Term) -> String {
     match term {
         Term::Iri(x) => format!("I\u{1f}{}", x),
         Term::Blank(x) => format!("B\u{1f}{}", x),
         Term::Triple(t) => format!(
-            "T\u{1f}{}\u{1f}{}\u{1f}{}",
-            canonical_key(&t[0]),
-            canonical_key(&t[1]),
-            canonical_key(&t[2])
+            "T\u{1f}{}{}{}",
+            field(&canonical_key(&t[0])),
+            field(&canonical_key(&t[1])),
+            field(&canonical_key(&t[2]))
         ),
         Term::Literal {
             lexical,
@@ -114,6 +121,15 @@ pub fn canonical_key(term: &Term) -> String {
             lang,
         } => literal_key(lexical, datatype, lang),
     }
+}
+
+/// Length-prefix a nested component key (`"<byte-len>\u{1f}<key>"`) so composite (triple) keys stay
+/// injective even when a component itself contains the `\u{1f}` separator — a literal lexical may
+/// contain any character, and a triple key nests other keys. Decoding reads the digit run up to the
+/// first separator (a byte length), then exactly that many bytes, so the boundary never depends on the
+/// separator appearing inside the component.
+fn field(key: &str) -> String {
+    format!("{}\u{1f}{}", key.len(), key)
 }
 
 /// Value-canonical key for a literal.
@@ -218,5 +234,37 @@ mod tests {
             canonical_key(&lit("01", "http://example.org/weird")),
             canonical_key(&lit("1", "http://example.org/weird"))
         );
+    }
+
+    #[test]
+    fn triple_key_is_injective_across_component_boundaries() {
+        // A literal lexical may legitimately contain the `\u{1f}` unit separator. Without
+        // length-prefixing the nested keys, two distinct triple terms could concatenate to the same
+        // key (a false "equal" that would mask a divergence). These two triples differ only in where
+        // the separator-bearing content sits, and must therefore key differently.
+        let sep = "\u{1f}";
+        let t1 = Term::Triple(Box::new([
+            lit(&format!("a{sep}I{sep}b"), XSD_STRING),
+            Term::Iri("c".into()),
+            Term::Iri("d".into()),
+        ]));
+        let t2 = Term::Triple(Box::new([
+            lit("a", XSD_STRING),
+            Term::Iri("b".into()),
+            Term::Iri(format!("c{sep}I{sep}d")),
+        ]));
+        assert_ne!(canonical_key(&t1), canonical_key(&t2));
+        // Equal triples still key equal (regression guard on the length-prefix scheme).
+        let t3 = Term::Triple(Box::new([
+            Term::Iri("s".into()),
+            Term::Iri("p".into()),
+            lit("1", XSD_INT),
+        ]));
+        let t4 = Term::Triple(Box::new([
+            Term::Iri("s".into()),
+            Term::Iri("p".into()),
+            lit("01", XSD_INT),
+        ]));
+        assert_eq!(canonical_key(&t3), canonical_key(&t4));
     }
 }
