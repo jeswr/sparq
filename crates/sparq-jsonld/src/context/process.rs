@@ -66,8 +66,10 @@ impl ActiveContext {
     /// this exposes the two flags Expansion needs: `override_protected` (true when a
     /// property-scoped context re-applies, so it may legally redefine a protected term) and
     /// `propagate` (false when a type-scoped context is applied, so it does not carry into
-    /// child node objects). The scoped context was already syntactically validated when its
-    /// term definition was created, so remote-context re-validation is off.
+    /// child node objects). Context validation is left on (`validate_scoped: true`, the same
+    /// as [`ActiveContext::process`]); the scoped context's term definitions are only
+    /// pre-checked syntactically at Create Term Definition time, so applying it here still
+    /// runs the full validating Context Processing pass.
     ///
     /// [OPUS-4.8] (sq-oy1f.25)
     pub(crate) fn process_scoped(

@@ -757,15 +757,24 @@ fn expand_value(active_context: &ActiveContext, active_property: &str, value: &J
     let td = active_context.term_definition(active_property);
     let type_mapping = td.and_then(|t| t.type_mapping());
 
-    // @id / @vocab coercion of a string value → a node reference.
+    // @id / @vocab coercion of a string value → a node reference. When IRI expansion returns
+    // `None` (the value expands to null — a keyword-shaped token, or a `@vocab` term bound to
+    // null), the value has no valid `@id`, so the entry is dropped rather than emitted as an
+    // invalid empty-string `@id` (mirrors the `@id`-keyword handling in `expand_property`).
     if let Json::Str(s) = value {
         if type_mapping == Some("@id") {
-            let id = active_context.expand_iri(s, true, false).unwrap_or_default();
-            return Json::Obj(vec![("@id".to_string(), Json::Str(id))]);
+            let mut node = Vec::new();
+            if let Some(id) = active_context.expand_iri(s, true, false) {
+                node.push(("@id".to_string(), Json::Str(id)));
+            }
+            return Json::Obj(node);
         }
         if type_mapping == Some("@vocab") {
-            let id = active_context.expand_iri(s, true, true).unwrap_or_default();
-            return Json::Obj(vec![("@id".to_string(), Json::Str(id))]);
+            let mut node = Vec::new();
+            if let Some(id) = active_context.expand_iri(s, true, true) {
+                node.push(("@id".to_string(), Json::Str(id)));
+            }
+            return Json::Obj(node);
         }
     }
 
@@ -1181,5 +1190,52 @@ mod tests {
         assert!(type_values(&raw("42"), false).is_err());
         // Frame expansion tolerates a map / non-string members.
         assert!(type_values(&Json::obj(), true).unwrap().is_empty());
+    }
+
+    /// Builds an active context that coerces term `id_term` with `@type: @id` and `vocab_term`
+    /// with `@type: @vocab`, over a `@vocab` base so a plain vocab reference resolves.
+    fn coercion_context() -> ActiveContext {
+        let ctx = Json::parse(
+            r#"{"@vocab":"http://ex/v#","id_term":{"@type":"@id"},"vocab_term":{"@type":"@vocab"}}"#,
+        )
+        .unwrap();
+        ActiveContext::new(None)
+            .process(&ctx, None, &crate::loader::NoopLoader, &JsonLdOptions::default())
+            .expect("context processes")
+    }
+
+    #[test]
+    fn expand_value_id_coercion_expands_and_drops_null() {
+        let ac = coercion_context();
+        // A resolvable absolute IRI under `@id` coercion → a `{"@id": <iri>}` node reference.
+        assert_eq!(
+            expand_value(&ac, "id_term", &Json::Str("http://ex/target".into())),
+            Json::Obj(vec![("@id".to_string(), Json::Str("http://ex/target".into()))]),
+        );
+        // A keyword-shaped token IRI-expands to null under `@id` coercion (document-relative,
+        // no vocab); the fix drops the entry rather than emitting an invalid empty-string
+        // `@id` (regression guard for the Copilot review on the old `unwrap_or_default()`).
+        let dropped = expand_value(&ac, "id_term", &Json::Str("@notakeyword".into()));
+        assert_eq!(dropped, Json::Obj(vec![]), "null @id must be dropped, never emitted as \"\"");
+        assert!(
+            !matches!(&dropped, Json::Obj(m) if m.iter().any(|(k, v)| k == "@id"
+                && matches!(v, Json::Str(s) if s.is_empty()))),
+            "must never produce an empty-string @id",
+        );
+    }
+
+    #[test]
+    fn expand_value_vocab_coercion_expands_and_drops_null() {
+        let ac = coercion_context();
+        // A plain term under `@vocab` coercion resolves against `@vocab`.
+        assert_eq!(
+            expand_value(&ac, "vocab_term", &Json::Str("thing".into())),
+            Json::Obj(vec![("@id".to_string(), Json::Str("http://ex/v#thing".into()))]),
+        );
+        // A keyword-shaped token still expands to null under `@vocab` coercion → dropped.
+        assert_eq!(
+            expand_value(&ac, "vocab_term", &Json::Str("@notakeyword".into())),
+            Json::Obj(vec![]),
+        );
     }
 }
