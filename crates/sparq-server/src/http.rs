@@ -7960,3 +7960,537 @@ mod egress_refusal_status_tests {
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
+
+/// [OPUS-4.8] (sq-qcnn.19) Direct unit tests for `engine_error_response` budget-envelope
+/// branches that are not reached by the loopback integration tests:
+///   * the byte-cap (max-bytes) path naming `--max-query-bytes`
+///   * the row-cap which-knob logic:
+///       - both caps set, max_query_rows is tighter → `--max-query-rows (memory cap)`
+///       - both caps set, max_results is tighter → `--max-results`
+///       - only max_results present → `--max-results`
+///       - only max_query_rows present (apply_max_results=false) → `--max-query-rows (memory cap)`
+///   * the timeout relay (engine_error_response delegates to timeout_response → 503)
+#[cfg(test)]
+mod budget_envelope_tests {
+    use super::{engine_error_response, timeout_response, ServerConfig};
+    use axum::http::StatusCode;
+
+    async fn body_of(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn max_bytes_cap_produces_413_naming_byte_knob() {
+        let cfg = ServerConfig {
+            max_query_bytes: Some(1000),
+            ..ServerConfig::default()
+        };
+        let resp = engine_error_response("query budget exceeded (max-bytes)", &cfg, true);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = body_of(resp).await;
+        assert!(body.contains("1000 bytes"), "expected '1000 bytes' in: {}", body);
+        assert!(body.contains("--max-query-bytes"), "expected '--max-query-bytes' in: {}", body);
+    }
+
+    #[tokio::test]
+    async fn row_cap_both_set_rows_tighter_names_memory_cap_knob() {
+        // max_query_rows=50 <= results_cap=100 → which = "--max-query-rows (memory cap)"
+        // tighter(50, 100) = 50, so the message says "50 rows".
+        let cfg = ServerConfig {
+            max_query_rows: Some(50),
+            max_results: Some(100),
+            ..ServerConfig::default()
+        };
+        let resp = engine_error_response("query budget exceeded (max-rows)", &cfg, true);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = body_of(resp).await;
+        assert!(body.contains("50 rows"), "expected '50 rows' in: {}", body);
+        assert!(
+            body.contains("--max-query-rows (memory cap)"),
+            "expected '--max-query-rows (memory cap)' in: {}",
+            body
+        );
+    }
+
+    #[tokio::test]
+    async fn row_cap_both_set_results_tighter_names_results_knob() {
+        // max_query_rows=100 > results_cap=50 → which = "--max-results"
+        // tighter(100, 50) = 50, so the message says "50 rows".
+        let cfg = ServerConfig {
+            max_query_rows: Some(100),
+            max_results: Some(50),
+            ..ServerConfig::default()
+        };
+        let resp = engine_error_response("query budget exceeded (max-rows)", &cfg, true);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = body_of(resp).await;
+        assert!(body.contains("50 rows"), "expected '50 rows' in: {}", body);
+        assert!(body.contains("--max-results"), "expected '--max-results' in: {}", body);
+    }
+
+    #[tokio::test]
+    async fn row_cap_only_max_results_set_names_results_knob() {
+        // max_query_rows=None, apply_max_results=true, max_results=Some(42)
+        // → results_cap=Some(42); match (None, Some(42)) → `_` → "--max-results"
+        let cfg = ServerConfig {
+            max_query_rows: None,
+            max_results: Some(42),
+            ..ServerConfig::default()
+        };
+        let resp = engine_error_response("query budget exceeded (max-rows)", &cfg, true);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = body_of(resp).await;
+        assert!(body.contains("42 rows"), "expected '42 rows' in: {}", body);
+        assert!(body.contains("--max-results"), "expected '--max-results' in: {}", body);
+    }
+
+    #[tokio::test]
+    async fn row_cap_only_max_query_rows_names_memory_cap_knob() {
+        // max_query_rows=Some(7), apply_max_results=false → results_cap=None
+        // → match (Some(7), None) → "--max-query-rows (memory cap)"
+        let cfg = ServerConfig {
+            max_query_rows: Some(7),
+            ..ServerConfig::default()
+        };
+        let resp = engine_error_response("query budget exceeded (max-rows)", &cfg, false);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = body_of(resp).await;
+        assert!(body.contains("7 rows"), "expected '7 rows' in: {}", body);
+        assert!(
+            body.contains("--max-query-rows (memory cap)"),
+            "expected '--max-query-rows (memory cap)' in: {}",
+            body
+        );
+    }
+
+    #[test]
+    fn timeout_in_engine_error_delegates_to_timeout_response_503() {
+        // engine_error_response shortcuts to timeout_response when it sees "timeout",
+        // which returns 503 SERVICE_UNAVAILABLE.
+        let cfg = ServerConfig::default();
+        let resp = engine_error_response("query budget exceeded (timeout)", &cfg, true);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn timeout_response_with_explicit_timeout_embeds_the_seconds() {
+        use std::time::Duration;
+        let cfg = ServerConfig {
+            query_timeout: Some(Duration::from_secs(42)),
+            ..ServerConfig::default()
+        };
+        let resp = timeout_response(&cfg);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_of(resp).await;
+        assert!(body.contains("42s"), "expected '42s' in: {}", body);
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `timeout_response` with `query_timeout = None` uses
+/// `unwrap_or(0)` → the body says "0s". Pins the None arm of the timeout formatter,
+/// which is dead under the default config (`query_timeout` defaults to `Some(30s)`).
+#[cfg(test)]
+mod timeout_none_tests {
+    use super::{timeout_response, ServerConfig};
+    use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn timeout_none_produces_zero_seconds_in_body() {
+        let cfg = ServerConfig {
+            query_timeout: None,
+            ..ServerConfig::default()
+        };
+        let resp = timeout_response(&cfg);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("0s"), "expected '0s' (no timeout configured) in: {}", body);
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `not_acceptable_response` HEAD vs GET branch: `head_only=true`
+/// must preserve the 406 status + headers but emit an EMPTY body (HEAD contract);
+/// `head_only=false` must carry the structured `{"error":"…"}` envelope.
+#[cfg(test)]
+mod not_acceptable_head_tests {
+    use super::not_acceptable_response;
+    use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn not_acceptable_get_carries_json_error_body() {
+        let resp = not_acceptable_response(false);
+        assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!body.is_empty(), "GET 406 must carry a non-empty JSON error body");
+        assert!(body.contains("error"), "body must contain the 'error' key: {}", body);
+    }
+
+    #[tokio::test]
+    async fn not_acceptable_head_has_empty_body_and_406_status() {
+        // head_only=true: the status is preserved but the body MUST be empty (HEAD contract).
+        let resp = not_acceptable_response(true);
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_ACCEPTABLE,
+            "HEAD 406 must still be 406",
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert!(bytes.is_empty(), "HEAD 406 must have an empty body; got: {:?}", bytes);
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `json_error_bodies` async middleware — three distinct code
+/// paths that the unit tests here pin directly (the integration tests only exercise the
+/// middleware indirectly via the full stack and do not exercise every branch):
+///
+///   1. A 200 (non-error) response passes through UNCHANGED.
+///   2. An error response that already carries `application/json` passes through UNCHANGED.
+///   3. An error response with a plain-text body is REWRITTEN to `{"error":"…"}` with
+///      `Content-Type: application/json`, while other headers (e.g. `Allow` on a 405)
+///      are PRESERVED.
+#[cfg(test)]
+mod json_error_bodies_middleware_tests {
+    use super::json_error_bodies;
+    use axum::http::{header, StatusCode};
+    use axum::response::Response;
+
+    async fn body_str(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn non_error_200_passes_through_unchanged() {
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .body(axum::body::Body::from("hello"))
+            .unwrap();
+        let out = json_error_bodies(resp).await;
+        assert_eq!(out.status(), StatusCode::OK);
+        assert_eq!(body_str(out).await, "hello");
+    }
+
+    #[tokio::test]
+    async fn already_json_error_passes_through_unchanged() {
+        let payload = "{\"error\":\"already json\"}";
+        let resp = Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload))
+            .unwrap();
+        let out = json_error_bodies(resp).await;
+        assert_eq!(out.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_str(out).await, payload);
+    }
+
+    #[tokio::test]
+    async fn plain_text_error_is_rewritten_to_json_envelope() {
+        let resp = Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(axum::body::Body::from("something went wrong"))
+            .unwrap();
+        let out = json_error_bodies(resp).await;
+        assert_eq!(out.status(), StatusCode::BAD_REQUEST);
+        let ct = out
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("application/json"),
+            "rewritten Content-Type must be application/json, got: {}",
+            ct
+        );
+        let body = body_str(out).await;
+        assert!(
+            body.contains("something went wrong"),
+            "rewritten body must carry the original message: {}",
+            body
+        );
+        assert!(body.starts_with('{'), "rewritten body must be a JSON object: {}", body);
+    }
+
+    #[tokio::test]
+    async fn allow_header_is_preserved_after_plain_text_rewrite() {
+        // A 405 from `method_not_allowed` carries a plain-text body AND an Allow header;
+        // the middleware must rewrite the body to JSON while keeping the Allow header.
+        let resp = Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header(header::ALLOW, "GET, POST")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(axum::body::Body::from("method not allowed"))
+            .unwrap();
+        let out = json_error_bodies(resp).await;
+        assert_eq!(out.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let allow = out
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            allow.contains("GET"),
+            "Allow header must be preserved after rewrite: {}",
+            allow
+        );
+        let body = body_str(out).await;
+        assert!(body.contains("error"), "rewritten body must be a JSON error envelope: {}", body);
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `method_not_allowed` helper: must build a 405 with a correctly
+/// formatted `Allow` header listing every supplied method.
+#[cfg(test)]
+mod method_not_allowed_tests {
+    use super::method_not_allowed;
+    use axum::http::{header, Method, StatusCode};
+
+    #[test]
+    fn two_methods_produces_405_with_both_in_allow_header() {
+        let resp = method_not_allowed(&[Method::GET, Method::POST]);
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let allow = resp
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(allow.contains("GET"), "Allow must list GET: {}", allow);
+        assert!(allow.contains("POST"), "Allow must list POST: {}", allow);
+    }
+
+    #[test]
+    fn single_method_allow_header_is_that_method_verbatim() {
+        let resp = method_not_allowed(&[Method::GET]);
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let allow = resp
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(allow, "GET");
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `gsp_post` empty-body early-return paths (lines ~5774-5788).
+///
+/// An empty body after decode means no triples to merge. The three cases are:
+///
+/// - Default graph + empty body → 204 (always a no-op; spec §5.5).
+/// - Named graph + empty body + graph absent → 201 (CREATE SILENT GRAPH).
+/// - Named graph + empty body + graph exists → 204 (no-op).
+///
+/// The integration tests only exercise non-empty bodies, so these branches sat at 0%.
+/// These direct tests pin them.
+#[cfg(test)]
+mod gsp_empty_body_paths_tests {
+    use super::{gsp_post, AppState, GraphRef};
+    use axum::body::Bytes;
+    use axum::http::{header, HeaderMap, StatusCode};
+    use sparq_core::Graph;
+
+    #[tokio::test]
+    async fn default_graph_empty_body_is_204_noop() {
+        let state = AppState::new(Graph::default());
+        let headers = HeaderMap::new();
+        let body = Bytes::new();
+        let resp = gsp_post(&state, GraphRef::Default, &headers, &body).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "empty body on the default graph must be a 204 no-op",
+        );
+    }
+
+    #[tokio::test]
+    async fn named_graph_absent_empty_body_creates_graph_201() {
+        // The named graph has never been written → graph_exists() returns false
+        // → `gsp_post` issues `CREATE SILENT GRAPH <g>` → 201 Created.
+        let state = AppState::new(Graph::default());
+        let headers = HeaderMap::new();
+        let body = Bytes::new();
+        let resp = gsp_post(
+            &state,
+            GraphRef::Named("http://example.org/new-graph".into()),
+            &headers,
+            &body,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "empty body on an absent named graph must issue CREATE SILENT GRAPH (201)",
+        );
+    }
+
+    #[tokio::test]
+    async fn named_graph_exists_empty_body_is_204_noop() {
+        // Set up: POST a real N-Triples triple into the named graph so graph_exists() → true.
+        let state = AppState::new(Graph::default());
+        let iri = "http://example.org/existing-graph";
+        let nt_body = Bytes::from_static(b"<http://ex/s> <http://ex/p> <http://ex/o> .\n");
+        let mut setup_headers = HeaderMap::new();
+        setup_headers.insert(
+            header::CONTENT_TYPE,
+            "application/n-triples".parse().unwrap(),
+        );
+        let setup_resp =
+            gsp_post(&state, GraphRef::Named(iri.into()), &setup_headers, &nt_body).await;
+        assert_eq!(
+            setup_resp.status(),
+            StatusCode::CREATED,
+            "setup POST must write the triple and return 201",
+        );
+        // Now POST an empty body — graph_exists() returns true → 204 no-op.
+        let headers = HeaderMap::new();
+        let body = Bytes::new();
+        let resp = gsp_post(&state, GraphRef::Named(iri.into()), &headers, &body).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "empty body on an existing named graph must be a 204 no-op",
+        );
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `AppState::apply_update` MVCC sequencing: a successful INSERT
+/// DATA returns a positive generation number; a malformed update returns Err; two sequential
+/// updates advance the generation monotonically. Pins the `Ok(number)` / `Err(Rejected(_))`
+/// arms of the `submit` result mapping.
+#[cfg(test)]
+mod apply_update_mvcc_tests {
+    use super::AppState;
+    use sparq_core::Graph;
+
+    #[tokio::test]
+    async fn successful_insert_data_returns_positive_generation() {
+        let state = AppState::new(Graph::default());
+        let s = state.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            s.apply_update("INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }")
+        })
+        .await
+        .unwrap();
+        let gen = result.expect("INSERT DATA must succeed");
+        assert!(gen > 0, "published generation must be positive, got {}", gen);
+    }
+
+    #[tokio::test]
+    async fn malformed_update_returns_err() {
+        let state = AppState::new(Graph::default());
+        let s = state.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            s.apply_update("NOT VALID SPARQL UPDATE !!!!")
+        })
+        .await
+        .unwrap();
+        assert!(result.is_err(), "a malformed update must return Err");
+    }
+
+    #[tokio::test]
+    async fn sequential_updates_advance_generation_monotonically() {
+        let state = AppState::new(Graph::default());
+        let s1 = state.clone();
+        let gen1 = tokio::task::spawn_blocking(move || {
+            s1.apply_update(
+                "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/1> }",
+            )
+        })
+        .await
+        .unwrap()
+        .expect("first update must succeed");
+        let s2 = state.clone();
+        let gen2 = tokio::task::spawn_blocking(move || {
+            s2.apply_update(
+                "INSERT DATA { <http://ex/b> <http://ex/p> <http://ex/2> }",
+            )
+        })
+        .await
+        .unwrap()
+        .expect("second update must succeed");
+        assert!(
+            gen2 >= gen1,
+            "generation must be non-decreasing: gen1={}, gen2={}",
+            gen1,
+            gen2
+        );
+    }
+}
+
+/// [OPUS-4.8] (sq-qcnn.19) `ServerConfig::from_env()` and `env_parse` coverage.
+///
+/// `from_env()` is the production entry point for reading all `SPARQ_*` environment
+/// variables into the config. These tests pin the function's scaffolding (the path
+/// that runs when no relevant env vars are set) and one env-var body (covering the
+/// inner assignment branches that are otherwise dead when the env vars are absent).
+///
+/// ISOLATION: each test uses a distinct, process-internal env var name unlikely to
+/// collide with real deployment vars or other tests. Tests clean up after themselves
+/// via `std::env::remove_var`. Running in a single-threaded test binary means the
+/// set/remove sequence is not racy with other tests in this module.
+#[cfg(test)]
+mod from_env_tests {
+    use super::{env_parse, ServerConfig};
+
+    #[test]
+    fn from_env_with_no_sparq_vars_set_returns_ok_with_default_values() {
+        // Call from_env() in an environment where none of the SPARQ_* vars are set.
+        // This covers the function's scaffolding (all `if let` condition sites) and
+        // the `env_parse` function body (the fast-path that short-circuits on None).
+        // The returned config must equal the default (no env var overrides the defaults).
+        let cfg = ServerConfig::from_env()
+            .expect("from_env must succeed when no SPARQ_* vars are set");
+        let def = ServerConfig::default();
+        assert_eq!(
+            cfg.max_concurrent,
+            def.max_concurrent,
+            "from_env with no overrides must equal the default max_concurrent",
+        );
+    }
+
+    #[test]
+    fn from_env_reads_sparq_max_results_env_var() {
+        // Set a single env var and verify from_env() picks it up.
+        // This covers the `if let Some(n) = env_parse("SPARQ_MAX_RESULTS")` body branch
+        // (line ~887: `cfg.max_results = (n > 0).then_some(n)`).
+        // Use a scoped set/remove so other tests are not affected.
+        std::env::set_var("SPARQ_MAX_RESULTS", "77");
+        let result = ServerConfig::from_env();
+        std::env::remove_var("SPARQ_MAX_RESULTS");
+        let cfg = result.expect("from_env must succeed with SPARQ_MAX_RESULTS=77");
+        assert_eq!(
+            cfg.max_results,
+            Some(77),
+            "SPARQ_MAX_RESULTS=77 must set max_results to Some(77)",
+        );
+    }
+
+    #[test]
+    fn env_parse_returns_none_for_an_unset_var() {
+        // `env_parse` returns None when the named env var is not set.
+        // Using an implausible key so we don't accidentally hit a real var.
+        let result: Option<u64> = env_parse("_SPARQ_QCNN19_NONEXISTENT_TEST_VAR_");
+        assert!(result.is_none(), "unset env var must yield None from env_parse");
+    }
+
+    #[test]
+    fn env_parse_returns_some_when_var_is_set_to_a_valid_value() {
+        // `env_parse` returns Some(T) when the env var is set to a parseable value.
+        let key = "_SPARQ_QCNN19_TEST_ENV_PARSE_U64_";
+        std::env::set_var(key, "123");
+        let result: Option<u64> = env_parse(key);
+        std::env::remove_var(key);
+        assert_eq!(result, Some(123u64), "env var set to '123' must parse to Some(123)");
+    }
+
+    #[test]
+    fn env_parse_returns_none_when_var_has_unparseable_value() {
+        // `env_parse::<u64>("…")` returns None when the env var value cannot be parsed.
+        let key = "_SPARQ_QCNN19_TEST_ENV_PARSE_BAD_";
+        std::env::set_var(key, "not-a-number");
+        let result: Option<u64> = env_parse(key);
+        std::env::remove_var(key);
+        assert!(result.is_none(), "unparseable env var value must yield None from env_parse");
+    }
+}
