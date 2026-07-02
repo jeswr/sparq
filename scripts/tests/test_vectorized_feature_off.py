@@ -156,7 +156,7 @@ def test_leg2_comparator_rejects_perturbed_size() -> bool:
     (1399703) is the 2%-band ratchet lower bound for bench.yml; the exact equality pin
     is separate so that within-band main drift does not cause a false failure.
     """
-    pinned_exact = 1399830  # [OPUS-4.8] feature_off_exact pin (measured 2026-07-02)
+    pinned_exact = 1399110  # [OPUS-4.8] CI x86_64 feature_off_exact pin. Re-pin from CI, never aarch64.
     perturbed = pinned_exact + 1
     bad_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": perturbed}]
     bad_floor = {
@@ -185,7 +185,7 @@ def test_leg2_accepts_exact_match() -> bool:
 
     [OPUS-4.8] Uses feature_off_exact, not floor — mirrors the updated check_leg2() logic.
     """
-    pinned_exact = 1399830  # [OPUS-4.8] feature_off_exact pin (measured 2026-07-02)
+    pinned_exact = 1399110  # [OPUS-4.8] CI x86_64 feature_off_exact pin. Re-pin from CI, never aarch64.
     good_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": pinned_exact}]
     good_floor = {
         "metrics": {
