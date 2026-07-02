@@ -5,7 +5,7 @@
 // literal snippet shape the maintainer's issue asked for.
 //
 // [OPUS-4.8] sq-55w5a (#981) — the PRIMARY recipe now imports from the project's OWN GitHub
-// Pages origin (`https://jeswr.github.io/sparq/wasm/sparq.js`), a SELF-HOSTED single-file ESM
+// Pages origin (`https://sparq.jeswr.org/wasm/sparq.js`), a SELF-HOSTED single-file ESM
 // bundle (built by site/scripts/bundle-wasm-esm.mjs, published into the static export). So the
 // named `Dataset` import works with zero dependency on a third-party CDN — the ~MB engine wasm
 // is still fetched lazily by the first `await Dataset.…` (the bundle keeps the binary external).
@@ -25,7 +25,7 @@ const SNIPPET = `<script type="module">
   // Self-hosted: this project's OWN GitHub Pages origin — no third-party CDN. The
   // ~MB engine wasm is fetched LAZILY by the first \`await Dataset.fromString(...)\`
   // below — NOT by this import line — so it never blocks the page paint.
-  import { Dataset, DataFactory as DF } from "https://jeswr.github.io/sparq/wasm/sparq.js";
+  import { Dataset, DataFactory as DF } from "https://sparq.jeswr.org/wasm/sparq.js";
 
   const ds = await Dataset.fromString(
     '<http://ex/a> <http://ex/name> "Alice" .',
@@ -52,7 +52,7 @@ const CDN_SNIPPET = `<script type="module">
 
 const GLUE_SNIPPET = `<script type="module">
   // Low-level: the wasm-pack \`--target web\` glue is itself a real ESM module.
-  import init, { Store } from "https://jeswr.github.io/sparq/wasm/sparq_wasm.js";
+  import init, { Store } from "https://sparq.jeswr.org/wasm/sparq_wasm.js";
   await init(); // lazily fetches + instantiates sparq_wasm_bg.wasm
   const store = Store.load("<a> <b> <c> .", "ntriples");
 </script>`;

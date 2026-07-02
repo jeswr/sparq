@@ -109,7 +109,7 @@ let r = query_text(&graph, r#"
 - **Benchmark** — `cargo run --release -p sparq-text --example bench_text` (no figures
   baked in here; query cost is dominated by hits scored — a short prefix over the
   synthetic Zipf vocabulary is a worst case by construction). Tracked figures on the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+  [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 
 ## License

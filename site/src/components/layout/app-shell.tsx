@@ -12,13 +12,13 @@
 // OPTION-B (the maintainer's decision after #1004 opened, sq-rclb8 / sq-vnd0i). Two DISTINCT
 // destinations, not one "Try the GUI": "Try" → /try is the lightweight in-browser SPARQL REPL
 // playground (kept unchanged); "App" → /app is the LIVE operational GUI. That GUI is a SEPARATE
-// Next.js app (gui/app), overlaid at /sparq/app/ by the Pages deploy (pages.yml) — it is NOT a
+// Next.js app (gui/app), overlaid at /app/ by the Pages deploy (pages.yml) — it is NOT a
 // route of this site. The old single "Try the GUI" → /gui slot is dropped (/gui now redirects to
 // /app).
 //
 // [OPUS-4.8] sq-vw3ax.11 — the "App" slot is therefore a HARD (full-page) link, not a next/link
 // soft navigation: soft-navigating across two distinct Next builds fetches the WRONG app's RSC
-// Flight payload (/sparq/app/index.txt) and lands on a raw .txt instead of the GUI. See NavLink.
+// Flight payload (/app/index.txt) and lands on a raw .txt instead of the GUI. See NavLink.
 //
 // Destinations (research §2 + the maintainer's discoverability gaps), slim at 6:
 //   Home · Capabilities · Try · App · Benchmarks · Download
@@ -59,7 +59,7 @@ const REPO_URL = "https://github.com/jeswr/sparq";
 // maintainer's discoverability ask). Each is a real, built route. Papers is intentionally NOT in
 // the bar (it stays a route, reachable via Cmd-K) so the bar stays slim at 6, not bloated.
 // `external: true` marks a destination that is served by a SEPARATE deployed app at the same
-// origin (here: /app = the gui/app workbench overlaid at /sparq/app/). Such a slot must be a hard,
+// origin (here: /app = the gui/app workbench overlaid at /app/). Such a slot must be a hard,
 // full-page navigation — see NavLink — not a next/link soft nav (sq-vw3ax.11).
 const NAV_ITEMS: { href: string; label: string; external?: boolean }[] = [
   { href: "/", label: "Home" },
@@ -97,9 +97,9 @@ function NavLink({
   );
 
   // [OPUS-4.8] sq-vw3ax.11 — an `external` destination (e.g. /app) is served in production by a
-  // DIFFERENT Next.js app overlaid at /sparq/app/ (gui/app, sq-vnd0i), so it must be a hard,
+  // DIFFERENT Next.js app overlaid at /app/ (gui/app, sq-vnd0i), so it must be a hard,
   // full-page navigation. A next/link soft nav across two distinct Next builds would fetch the
-  // foreign RSC Flight payload (/sparq/app/index.txt) and render a raw .txt instead of the GUI —
+  // foreign RSC Flight payload (/app/index.txt) and render a raw .txt instead of the GUI —
   // exactly the bug this fixes. withBasePath prefixes the hand-written absolute href for the
   // /sparq (Pages) vs "" (Tauri) hosts — Next does NOT auto-prefix a plain <a>. The trailing
   // slash matches `trailingSlash: true` so the static export's directory index resolves.

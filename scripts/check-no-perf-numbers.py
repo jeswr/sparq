@@ -56,7 +56,7 @@ ALLOW_LINE_SUBSTRINGS = [
     # platform / spec limits
     "wasm32", "4 GB", "2 GB", "4 GiB",
     # the canonical perf homes — a line that POINTS to them is fine
-    "jeswr.github.io/sparq/dev/bench", "benchmarks.toml", "bench/CATALOG.md",
+    "sparq.jeswr.org/dev/bench", "benchmarks.toml", "bench/CATALOG.md",
     "perf-baseline.json", "perf dashboard",
     # explicit opt-out marker a reviewer can add on a justified line
     "<!-- perf-ok -->", "perf-ok:",

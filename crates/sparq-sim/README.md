@@ -113,7 +113,7 @@ semantics, hub-cap, neighbor-sparse fallback, AUC gate) plus 1 integration
 - Text embeddings: [`sparq-vectors` README](../sparq-vectors/README.md),
   [`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md)
 - Skill: `skills/structural-similarity/SKILL.md`
-- Perf dashboard: <https://jeswr.github.io/sparq/dev/bench>
+- Perf dashboard: <https://sparq.jeswr.org/dev/bench>
 
 ## License
 

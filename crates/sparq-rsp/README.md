@@ -72,7 +72,7 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
 - **Performance** — the `throughput` example
   (`cargo run --release -p sparq-rsp --example throughput`; append `-- --json <path>` to
   also write the same rows as a machine-readable JSON document, STDOUT unchanged) and
-  [`bench/rsp/`](../../bench/rsp); the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+  [`bench/rsp/`](../../bench/rsp); the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

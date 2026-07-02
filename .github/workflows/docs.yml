@@ -8,7 +8,7 @@
 #
 # WHY IT DOES NOT DEPLOY TO PAGES (the deferred half, reported as a blocker):
 #   GitHub Pages exposes exactly ONE deploy slot. The live site at
-#   https://jeswr.github.io/sparq/ is ALREADY published by pages.yml — the Next.js
+#   https://sparq.jeswr.org/ is ALREADY published by pages.yml — the Next.js
 #   feature-showcase at the root, with the benchmark dashboard overlaid at
 #   /sparq/dev/. A SECOND `actions/deploy-pages` workflow here would race pages.yml
 #   on every main/benchmark-data push (last-writer-wins) AND replace the live

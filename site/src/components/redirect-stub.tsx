@@ -33,8 +33,8 @@ export function RedirectStub({
   /**
    * [OPUS-4.8] sq-vw3ax.11 — force a HARD (full-page) redirect via `window.location` instead of a
    * next/router soft `replace`. Required when `to` is served by a SEPARATE Next.js app at the same
-   * origin (e.g. /app = the gui/app workbench overlaid at /sparq/app/): a soft nav across two
-   * distinct Next builds fetches the foreign RSC Flight payload (/sparq/app/index.txt) and lands
+   * origin (e.g. /app = the gui/app workbench overlaid at /app/): a soft nav across two
+   * distinct Next builds fetches the foreign RSC Flight payload (/app/index.txt) and lands
    * on a raw .txt instead of the destination app. Same-site removed routes (the /surface/* and
    * /about stubs) stay a soft `replace` and pass `hard` falsy.
    */

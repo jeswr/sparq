@@ -6,9 +6,9 @@ import type { Metadata } from "next";
 // CLIENT REDIRECT STUB that keeps the old /gui path alive — inbound links land on /app.
 //
 // [OPUS-4.8] sq-vw3ax.11 — /app is served by a SEPARATE Next.js app (gui/app, overlaid at
-// /sparq/app/ by pages.yml, sq-vnd0i), so this must be a HARD (full-page) redirect: a router
+// /app/ by pages.yml, sq-vnd0i), so this must be a HARD (full-page) redirect: a router
 // soft `replace` across two distinct Next builds fetches the foreign RSC payload
-// (/sparq/app/index.txt) and lands on a raw .txt instead of the GUI. `hard` forces window.location.
+// (/app/index.txt) and lands on a raw .txt instead of the GUI. `hard` forces window.location.
 import { RedirectStub } from "@/components/redirect-stub";
 
 export const metadata: Metadata = {

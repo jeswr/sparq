@@ -34,8 +34,8 @@ license = "MIT"
 rust-version = "1.88"
 # Shared crates.io metadata (T20). Each publishable crate inherits these via
 # `<field>.workspace = true` and adds its own `description`.
-repository = "https://github.com/jeswr/sparq"
-homepage = "https://github.com/jeswr/sparq"
+repository = "https://github.com/sparq-org/sparq"
+homepage = "https://github.com/sparq-org/sparq"
 keywords = ["rdf", "sparql", "semantic-web", "triplestore", "query-engine"]
 categories = ["database-implementations", "parsing", "science"]
 

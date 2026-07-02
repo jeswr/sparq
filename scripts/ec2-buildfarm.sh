@@ -73,7 +73,7 @@ MAX_LIFETIME_SEC="${BUILDFARM_MAX_LIFETIME_SEC:-7200}"
 MAX_FLEET="${BUILDFARM_MAX_FLEET:-12}"
 USE_SPOT="${BUILDFARM_SPOT:-1}"            # 1=spot (default, cheap), 0=on-demand
 DISK_GB="${BUILDFARM_DISK_GB:-40}"
-REPO="https://github.com/jeswr/sparq.git"
+REPO="https://github.com/sparq-org/sparq.git"
 
 # ---- tag + protected ids (mirror orphan-check-bench.sh's hard-exclusion discipline) ----
 readonly TAG_KEY="purpose"
@@ -106,10 +106,10 @@ resolve_ref() { # <token> -> prints a git ref (branch name or pull/<n>/head)
                 n="$t" ;;
     *)          printf '%s' "$t"; return 0 ;;     # a normal branch name
   esac
-  # PR form: ask gh for the head ref of PR #n in jeswr/sparq.
+  # PR form: ask gh for the head ref of PR #n in sparq-org/sparq.
   if command -v gh >/dev/null 2>&1; then
     local head
-    head="$(gh pr view "$n" --repo jeswr/sparq --json headRefName --jq .headRefName 2>/dev/null || true)"
+    head="$(gh pr view "$n" --repo sparq-org/sparq --json headRefName --jq .headRefName 2>/dev/null || true)"
     [ -n "$head" ] && { printf '%s' "$head"; return 0; }
   fi
   # Fallback: fetch the immutable pull/<n>/head ref directly (works without gh).

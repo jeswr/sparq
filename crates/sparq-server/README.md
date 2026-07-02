@@ -112,7 +112,7 @@ every update is WAL-fsync'd **before the `204` ack** (restart replays the WAL, n
   (generation-ring + sequenced-writer) and
   [`research/adr-horizontal-scaling.md`](../../research/adr-horizontal-scaling.md) (the non-goal).
 - **Performance** — not baked into docs; see the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+  [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md), [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License
