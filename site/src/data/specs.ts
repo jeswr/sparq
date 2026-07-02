@@ -50,6 +50,29 @@ export const STATUS_VARIANT: Record<
 
 export const SPECS: Spec[] = [
   {
+    slug: "zksparql",
+    source: "zksparql.typ",
+    title: "zkSPARQL: Zero-Knowledge Query Proofs over SPARQL",
+    shortName: "zksparql",
+    status: "unofficial",
+    date: "2026-07-01",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "Proving SPARQL query answers over committed RDF graphs in zero knowledge — an explicit threat model, the committed data model, a scoped query fragment and circuit family, the ProofManifest format, and the fail-closed verifier obligations and audit gates. Research-grade and NOT externally audited (sq-qhy4).",
+  },
+  {
+    slug: "mpc-sparql",
+    source: "mpc-sparql.typ",
+    title:
+      "MPC-SPARQL: Secure Multi-Party Federated SPARQL — Requirements and Reference Architecture",
+    shortName: "mpc-sparql",
+    status: "unofficial",
+    date: "2026-07-01",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "A requirements and reference-architecture draft (not yet a protocol specification — the interoperable byte formats are explicitly open) for evaluating federated SPARQL across mutually distrusting sources under secure multi-party computation, with conformance categories separating what is built (M0–M3) from what is designed-not-built. Nothing is production-claimable today: the planned external audit clears the single-prover ZK layer only, and the MPC layer needs its own.",
+  },
+  {
     slug: "proposed-specifications-template",
     source: "proposed-specifications-template.typ",
     title: "SPARQ Proposed Specifications — Template",
@@ -59,6 +82,17 @@ export const SPECS: Spec[] = [
     editors: "Jesse Wright · the sparq project",
     blurb:
       "The template and worked example every sparq Unofficial Proposal Draft follows — status notice, numbered sections, an RFC 2119 conformance section, a worked example, and references. Proves the single-source PDF + in-site render pipeline.",
+  },
+  {
+    slug: "sparql-vector-genai",
+    source: "sparql-vector-genai.typ",
+    title: "SPARQL Vector & GenAI Extension",
+    shortName: "sparql-vec-genai",
+    status: "unofficial",
+    date: "2026-07-01",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "The vec: vector-search extension to SPARQL — magic-predicate k-NN patterns with score bindings, answer-exact vs approximate modes, filtered-search answer-safety, the persisted store format and its staleness contract, embedding acquisition, and grounded-generation obligations — plus a normative embedding-provenance record (model, version, metric, normalisation, dimension) with a MUST-reject compatibility rule and a deterministic tie-break. Every normative assertion carries a testable ID; an informative report states which requirements the sparq build satisfies today.",
   },
 ];
 
