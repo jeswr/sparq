@@ -20,6 +20,7 @@ import {
   newWorkspace,
   type Workspace,
   type WorkspaceBackend,
+  type WorkspaceInferenceMode,
   type WorkspaceSourceMeta,
   type WorkspaceStore,
 } from "@sparq/client";
@@ -43,6 +44,17 @@ export interface WorkspaceContextValue {
    * write failure does not throw (the import itself already succeeded in-memory).
    */
   recordImport: (source: WorkspaceSourceMeta, snapshot: string | null) => Promise<void>;
+  /**
+   * [OPUS-4.8] sq-tp1m (#757) — the active workspace's persisted INFERENCE regime (query-time
+   * RDFS / OWL 2 RL entailment), defaulting to `"off"`. The inference-mode bridge pushes this
+   * into the engine so the two stay in lockstep.
+   */
+  inference: WorkspaceInferenceMode;
+  /**
+   * [OPUS-4.8] sq-tp1m — persist a new inference regime for the active workspace (best-effort,
+   * mirroring {@link recordImport}: a write failure never breaks the in-memory selection).
+   */
+  setInference: (mode: WorkspaceInferenceMode) => Promise<void>;
 }
 
 const WorkspaceContext = React.createContext<WorkspaceContextValue | null>(null);
@@ -110,14 +122,40 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
+  // [OPUS-4.8] sq-tp1m (#757) — persist a new inference regime for the active workspace. Same
+  // best-effort discipline as recordImport: update the in-memory workspace immediately and write
+  // through to the backend without letting a persistence failure surface to the caller.
+  const setInference = React.useCallback(
+    async (mode: WorkspaceInferenceMode): Promise<void> => {
+      setWorkspace((prev) => {
+        const base = prev ?? newWorkspace("default workspace", STARTER_QUERY);
+        if (base.inference === mode) return base;
+        const next: Workspace = { ...base, inference: mode, updatedAt: Date.now() };
+        const store = storeRef.current;
+        if (store) {
+          store
+            .save(next)
+            .then(() => store.setLastOpenedId(next.id))
+            .catch(() => {
+              /* a write failure must not break the in-memory selection */
+            });
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
   const value = React.useMemo<WorkspaceContextValue>(
     () => ({
       workspace,
       backend,
       sources: workspace?.sources ?? [],
       recordImport,
+      inference: workspace?.inference ?? "off",
+      setInference,
     }),
-    [workspace, backend, recordImport],
+    [workspace, backend, recordImport, setInference],
   );
 
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;
