@@ -56,13 +56,17 @@ its off-by-default `serialize-rdf` feature; the crate has **zero mandatory
 dependencies**, is `#![forbid(unsafe_code)]`, and adds no default dependency
 anywhere.
 
-### Scaffold status
+### Build-out status
 
-This is Phase A: the `Json` AST, error registry, options, and loader trait ship
-today. The algorithm modules (`context`, `expand`, `flatten`, `compact`, `frame`,
-`from_rdf`, `to_rdf`, `api`) are documented stubs — spec references and public
-shape only — filled by the dependency-ordered follow-on beads (`sq-oy1f.24`+).
-The crate is `publish = false` until the pipeline is real.
+The `Json` AST, error registry, options, and loader trait ship today, alongside the
+**Context Processing** foundation (`context`): the `ActiveContext`, Create Term
+Definition, and IRI Expansion — the hinge every other algorithm builds on — with
+RFC 3986 reference resolution and deny-by-default remote-context loading. The
+remaining modules (`expand`, `flatten`, `compact`, `frame`, `from_rdf`, `to_rdf`,
+`api`) are documented stubs, filled by dependency-ordered follow-on beads. The
+compaction-side companions of context processing (inverse context, IRI compaction)
+are also deferred to a follow-on bead. The crate is `publish = false` until the
+pipeline is real.
 
 ## 📚 Learn more
 

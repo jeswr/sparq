@@ -109,6 +109,270 @@ impl Json {
             }
         }
     }
+
+    /// Parses a JSON text into a [`Json`] value. [OPUS-4.8] (sq-oy1f.24) A minimal,
+    /// dependency-free recursive-descent parser used to read remote `@context` and
+    /// `@import` documents retrieved through a [`DocumentLoader`](crate::loader::DocumentLoader).
+    ///
+    /// Numbers, `true`, `false`, and `null` are preserved verbatim as [`Json::Raw`] scalar
+    /// tokens; strings are unescaped. Duplicate object keys keep the last value (first
+    /// position). Object member order is preserved.
+    pub fn parse(input: &str) -> Result<Json, JsonParseError> {
+        let mut p = Parser {
+            bytes: input.as_bytes(),
+            pos: 0,
+        };
+        p.skip_ws();
+        let value = p.parse_value()?;
+        p.skip_ws();
+        if p.pos != p.bytes.len() {
+            return Err(p.error("trailing characters after JSON value"));
+        }
+        Ok(value)
+    }
+}
+
+/// An error from [`Json::parse`]: a human-readable message and the byte offset into the
+/// input at which parsing failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JsonParseError {
+    /// A human-readable description of the failure.
+    pub message: String,
+    /// The byte offset into the input at which the error was detected.
+    pub position: usize,
+}
+
+impl std::fmt::Display for JsonParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "JSON parse error at byte {}: {}", self.position, self.message)
+    }
+}
+
+impl std::error::Error for JsonParseError {}
+
+/// A minimal recursive-descent JSON parser over the input bytes.
+struct Parser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl Parser<'_> {
+    fn error(&self, msg: &str) -> JsonParseError {
+        JsonParseError {
+            message: msg.to_string(),
+            position: self.pos,
+        }
+    }
+
+    fn skip_ws(&mut self) {
+        while let Some(&b) = self.bytes.get(self.pos) {
+            if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn parse_value(&mut self) -> Result<Json, JsonParseError> {
+        match self.peek() {
+            Some(b'{') => self.parse_object(),
+            Some(b'[') => self.parse_array(),
+            Some(b'"') => Ok(Json::Str(self.parse_string()?)),
+            Some(b't') => self.parse_literal("true", Json::Raw("true".to_string())),
+            Some(b'f') => self.parse_literal("false", Json::Raw("false".to_string())),
+            Some(b'n') => self.parse_literal("null", Json::Raw("null".to_string())),
+            Some(b'-') | Some(b'0'..=b'9') => self.parse_number(),
+            _ => Err(self.error("expected a JSON value")),
+        }
+    }
+
+    fn parse_literal(&mut self, word: &str, value: Json) -> Result<Json, JsonParseError> {
+        if self.bytes[self.pos..].starts_with(word.as_bytes()) {
+            self.pos += word.len();
+            Ok(value)
+        } else {
+            Err(self.error("invalid literal"))
+        }
+    }
+
+    fn parse_number(&mut self) -> Result<Json, JsonParseError> {
+        let start = self.pos;
+        if self.peek() == Some(b'-') {
+            self.pos += 1;
+        }
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.pos += 1;
+        }
+        if self.peek() == Some(b'.') {
+            self.pos += 1;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.pos += 1;
+            }
+        }
+        if matches!(self.peek(), Some(b'e') | Some(b'E')) {
+            self.pos += 1;
+            if matches!(self.peek(), Some(b'+') | Some(b'-')) {
+                self.pos += 1;
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.pos += 1;
+            }
+        }
+        let raw = std::str::from_utf8(&self.bytes[start..self.pos])
+            .map_err(|_| self.error("invalid number"))?;
+        // Reject a lone "-" or ".".
+        if raw == "-" || !raw.bytes().any(|b| b.is_ascii_digit()) {
+            return Err(self.error("invalid number"));
+        }
+        Ok(Json::Raw(raw.to_string()))
+    }
+
+    fn parse_string(&mut self) -> Result<String, JsonParseError> {
+        // Consumes the opening quote.
+        self.pos += 1;
+        let mut out = String::new();
+        loop {
+            match self.peek() {
+                None => return Err(self.error("unterminated string")),
+                Some(b'"') => {
+                    self.pos += 1;
+                    return Ok(out);
+                }
+                Some(b'\\') => {
+                    self.pos += 1; // now at the escape character
+                    match self.peek() {
+                        Some(b'"') => self.push_simple_escape(&mut out, '"'),
+                        Some(b'\\') => self.push_simple_escape(&mut out, '\\'),
+                        Some(b'/') => self.push_simple_escape(&mut out, '/'),
+                        Some(b'b') => self.push_simple_escape(&mut out, '\u{08}'),
+                        Some(b'f') => self.push_simple_escape(&mut out, '\u{0C}'),
+                        Some(b'n') => self.push_simple_escape(&mut out, '\n'),
+                        Some(b'r') => self.push_simple_escape(&mut out, '\r'),
+                        Some(b't') => self.push_simple_escape(&mut out, '\t'),
+                        Some(b'u') => self.push_unicode_escape(&mut out)?,
+                        _ => return Err(self.error("invalid escape")),
+                    }
+                }
+                Some(_) => {
+                    // Copy a whole UTF-8 char.
+                    let rest = &self.bytes[self.pos..];
+                    let s = std::str::from_utf8(rest).map_err(|_| self.error("invalid UTF-8"))?;
+                    let c = s.chars().next().unwrap();
+                    out.push(c);
+                    self.pos += c.len_utf8();
+                }
+            }
+        }
+    }
+
+    /// Pushes a single-character escape (`self.pos` is at the escape letter) and steps past it.
+    fn push_simple_escape(&mut self, out: &mut String, c: char) {
+        out.push(c);
+        self.pos += 1;
+    }
+
+    /// Handles a `\u` escape (and a surrogate pair). `self.pos` is at `u`; on return it is
+    /// positioned just past the last consumed hex digit.
+    fn push_unicode_escape(&mut self, out: &mut String) -> Result<(), JsonParseError> {
+        let cp = self.read_hex4_after_u()?;
+        if (0xD800..=0xDBFF).contains(&cp) {
+            // High surrogate: a low surrogate `\uXXXX` must follow.
+            if self.bytes[self.pos..].starts_with(b"\\u") {
+                self.pos += 1; // skip the '\', leaving pos at 'u'
+                let lo = self.read_hex4_after_u()?;
+                if !(0xDC00..=0xDFFF).contains(&lo) {
+                    return Err(self.error("invalid low surrogate"));
+                }
+                let c = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                out.push(char::from_u32(c).ok_or_else(|| self.error("invalid code point"))?);
+                Ok(())
+            } else {
+                Err(self.error("unpaired high surrogate"))
+            }
+        } else if (0xDC00..=0xDFFF).contains(&cp) {
+            Err(self.error("unexpected low surrogate"))
+        } else {
+            out.push(char::from_u32(cp).ok_or_else(|| self.error("invalid code point"))?);
+            Ok(())
+        }
+    }
+
+    /// Reads the four hex digits of a `\u` escape. `self.pos` is at `u`; on return it is
+    /// positioned just past the fourth hex digit.
+    fn read_hex4_after_u(&mut self) -> Result<u32, JsonParseError> {
+        let start = self.pos + 1;
+        let end = start + 4;
+        if end > self.bytes.len() {
+            return Err(self.error("truncated \\u escape"));
+        }
+        let hex = std::str::from_utf8(&self.bytes[start..end])
+            .map_err(|_| self.error("invalid \\u escape"))?;
+        let cp = u32::from_str_radix(hex, 16).map_err(|_| self.error("invalid \\u escape"))?;
+        self.pos = end;
+        Ok(cp)
+    }
+
+    fn parse_array(&mut self) -> Result<Json, JsonParseError> {
+        self.pos += 1; // '['
+        let mut items = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(b']') {
+            self.pos += 1;
+            return Ok(Json::Arr(items));
+        }
+        loop {
+            self.skip_ws();
+            items.push(self.parse_value()?);
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b']') => {
+                    self.pos += 1;
+                    return Ok(Json::Arr(items));
+                }
+                _ => return Err(self.error("expected ',' or ']'")),
+            }
+        }
+    }
+
+    fn parse_object(&mut self) -> Result<Json, JsonParseError> {
+        self.pos += 1; // '{'
+        let mut obj = Json::obj();
+        self.skip_ws();
+        if self.peek() == Some(b'}') {
+            self.pos += 1;
+            return Ok(obj);
+        }
+        loop {
+            self.skip_ws();
+            if self.peek() != Some(b'"') {
+                return Err(self.error("expected a string key"));
+            }
+            let key = self.parse_string()?;
+            self.skip_ws();
+            if self.peek() != Some(b':') {
+                return Err(self.error("expected ':'"));
+            }
+            self.pos += 1;
+            self.skip_ws();
+            let value = self.parse_value()?;
+            obj.set(&key, value);
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b'}') => {
+                    self.pos += 1;
+                    return Ok(obj);
+                }
+                _ => return Err(self.error("expected ',' or '}'")),
+            }
+        }
+    }
 }
 
 /// Escapes a string as a JSON string body (without the surrounding quotes) per RFC 8259:
@@ -213,5 +477,74 @@ mod tests {
         Json::Str("\u{01}\u{1f}".into()).write(&mut out);
         // A quote, the two C0 controls as `\u00XX` lower-hex, then a quote.
         assert_eq!(out, "\"\\u0001\\u001f\"");
+    }
+
+    #[test]
+    fn parse_scalars_are_preserved_as_raw_tokens() {
+        assert_eq!(Json::parse("true").unwrap(), Json::Raw("true".into()));
+        assert_eq!(Json::parse("false").unwrap(), Json::Raw("false".into()));
+        assert_eq!(Json::parse("null").unwrap(), Json::Raw("null".into()));
+        assert_eq!(Json::parse("  42 ").unwrap(), Json::Raw("42".into()));
+        assert_eq!(Json::parse("-3.5e10").unwrap(), Json::Raw("-3.5e10".into()));
+        assert_eq!(Json::parse(r#""hi""#).unwrap(), Json::Str("hi".into()));
+    }
+
+    #[test]
+    fn parse_object_preserves_order_and_last_duplicate_wins() {
+        let v = Json::parse(r#"{"b": 1, "a": "x", "b": 2}"#).unwrap();
+        assert_eq!(
+            v,
+            Json::Obj(vec![
+                ("b".into(), Json::Raw("2".into())),
+                ("a".into(), Json::Str("x".into())),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_nested_arrays_and_objects() {
+        let v = Json::parse(r#"{"@context": {"n": "x"}, "list": [1, "two", true, null]}"#).unwrap();
+        let ctx = v.get("@context").unwrap();
+        assert_eq!(ctx.get("n"), Some(&Json::Str("x".into())));
+        let list = v.get("list").unwrap();
+        assert_eq!(
+            list,
+            &Json::Arr(vec![
+                Json::Raw("1".into()),
+                Json::Str("two".into()),
+                Json::Raw("true".into()),
+                Json::Raw("null".into()),
+            ])
+        );
+        assert_eq!(Json::parse("[]").unwrap(), Json::Arr(vec![]));
+        assert_eq!(Json::parse("{}").unwrap(), Json::obj());
+    }
+
+    #[test]
+    fn parse_decodes_string_escapes_including_unicode_and_surrogates() {
+        // Two-char escapes: quote, backslash, newline, tab, and `\/`.
+        let input = "\"a\\\"b\\\\c\\n\\t\\/A\"";
+        assert_eq!(Json::parse(input).unwrap(), Json::Str("a\"b\\c\n\t/A".into()));
+        // A BMP `\u` escape (U+00E9 "é").
+        assert_eq!(Json::parse("\"\\u00e9\"").unwrap(), Json::Str("é".into()));
+        // A surrogate-pair escape `😀` encoding U+1F600 ("😀").
+        assert_eq!(
+            Json::parse("\"\\uD83D\\uDE00\"").unwrap(),
+            Json::Str("\u{1F600}".into())
+        );
+        // A lone (unpaired) high surrogate is rejected.
+        assert!(Json::parse("\"\\uD83D\"").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_malformed_input() {
+        assert!(Json::parse("{").is_err());
+        assert!(Json::parse("[1,]").is_err());
+        assert!(Json::parse(r#"{"k": }"#).is_err());
+        assert!(Json::parse("nul").is_err());
+        assert!(Json::parse("1 2").is_err()); // trailing characters
+        assert!(Json::parse(r#""unterminated"#).is_err());
+        let err = Json::parse("@").unwrap_err();
+        assert!(err.to_string().contains("byte 0"));
     }
 }
