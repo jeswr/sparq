@@ -61,9 +61,12 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   `hash_probe_serial` / `build_table` / `build_partitioned` / `probe_emit` (hash, with a
   radix-partitioned parallel build), `bind_combine` (index-nested-loop), and `lftj_recurse`
   over `Trie` / `TrieIter` (leapfrog trie-join / WCOJ), plus the `compatible` / `merge_rows` /
-  `any_unbound` solution-compatibility helpers. Each is generic over a `JoinKeys` column
-  descriptor and a `Budget` cooperative-cancel hook (both monomorphised, never a trait object).
-  Pulls only `rustc-hash` (the hash join's `FxHashMap`) when enabled; implies `rows`.
+  `any_unbound` solution-compatibility helpers. Also `join::delta::DeltaTable` — a persistent,
+  extendable build-side table (`build` / `extend` / `rebuild` / `probe_emit`) with an
+  insertion-order-deterministic match enumeration guarantee for the OWL-RL semi-naive Δ⋈full
+  fixpoint (sq-qonbz.1). Each kernel is generic over a `JoinKeys` column descriptor and a
+  `Budget` cooperative-cancel hook (both monomorphised, never a trait object). Pulls only
+  `rustc-hash` when enabled; implies `rows`.
 - **`compare`** — the SPARQL **term total order** `compare_terms` (the engine's `compare_values`):
   the class precedence error/unbound < blank < IRI < literal < triple, the numeric-aware /
   strict typed-temporal / lexical-string arms within the literal class, and the recursive

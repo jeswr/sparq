@@ -534,6 +534,437 @@ pub fn any_unbound(rows: &[Row], cols: &[usize]) -> bool {
     rows.iter().any(|r| cols.iter().any(|&c| r[c] == NO_ID))
 }
 
+/// Delta-aware build-side table for the semi-naive Δ⋈full join shape.
+///
+/// This module adds a persistent, extendable build-side table alongside the static
+/// kernels so the OWL-RL semi-naive fixpoint can share the substrate join without
+/// paying per-round O(|full|) rebuild cost. See `research/substrate-remaining-design.md`
+/// §3 (decision R1) and §4 (the seam shape) for the design rationale and the
+/// byte-identity guarantee.
+///
+/// [SONNET-4.6] sq-qonbz.1
+pub mod delta {
+    use super::{Budget, JoinKeys};
+    use crate::rows::{Key, Posting, Row};
+    use rustc_hash::FxHashMap;
+
+    /// A persistent, extendable build-side hash table for the semi-naive Δ⋈full join.
+    ///
+    /// ## Layout
+    ///
+    /// A `Vec<Row>` arena plus an `FxHashMap<Key, Posting>` where each posting list
+    /// holds **arena offsets in insertion order** (ascending). Match enumeration by
+    /// `probe_emit` yields results in that order so that, given an identical insertion
+    /// sequence, the consumer's emission sequence is byte-identical — the determinism
+    /// guarantee required by the OWL-RL ratchet (decision R1, §4.2 of the design record).
+    ///
+    /// ## Zero-overhead contract
+    ///
+    /// No `Box<dyn>` / `&dyn` anywhere on any path. The emit closure and the budget are
+    /// generic type parameters — the compiler emits one monomorphised body per call site.
+    /// `probe_emit` carries `#[inline]` so cross-crate LTO keeps the probe hot loop
+    /// identical to a hand-written equivalent. `scripts/check-no-dyn-dispatch.py` covers
+    /// the parent `join.rs` file (which contains this module) structurally.
+    ///
+    /// ## Feature requirement
+    ///
+    /// Available only with the `join` Cargo feature (which implies `rows`).
+    ///
+    /// [SONNET-4.6] sq-qonbz.1
+    pub struct DeltaTable {
+        /// Row arena — build-side rows stored in insertion order.
+        arena: Vec<Row>,
+        /// Key to list of arena offsets (ascending = insertion order).
+        map: FxHashMap<Key, Posting>,
+    }
+
+    impl DeltaTable {
+        /// Construct an empty `DeltaTable`.
+        ///
+        /// Equivalent to `DeltaTable::default()`.
+        #[inline]
+        pub fn new() -> Self {
+            DeltaTable { arena: Vec::new(), map: FxHashMap::default() }
+        }
+
+        /// Build the table from `rows` using the left-side key projection from `keys`.
+        ///
+        /// Shares the same hashing and keying discipline as the static `build_table`
+        /// kernel so there is exactly one keying convention in the crate.
+        #[inline]
+        pub fn build(rows: &[Row], keys: &JoinKeys) -> Self {
+            let mut t = DeltaTable {
+                arena: Vec::with_capacity(rows.len()),
+                map: FxHashMap::default(),
+            };
+            for row in rows {
+                let offset = t.arena.len();
+                t.arena.push(row.clone());
+                t.map.entry(keys.left_key(row)).or_default().push(offset);
+            }
+            t
+        }
+
+        /// Append a round's Δ rows to the arena and index.
+        ///
+        /// Per-round cost is O(|Δ|): existing rows are never rehashed or copied, so the
+        /// asymptotic cost matches the hand-rolled `FxHashMap` adjacency the OWL-RL
+        /// closure uses today.
+        #[inline]
+        pub fn extend(&mut self, delta_rows: &[Row], keys: &JoinKeys) {
+            self.arena.reserve(delta_rows.len());
+            for row in delta_rows {
+                let offset = self.arena.len();
+                self.arena.push(row.clone());
+                self.map.entry(keys.left_key(row)).or_default().push(offset);
+            }
+        }
+
+        /// Full reconstruction from `rows`, discarding all prior content.
+        ///
+        /// Provided for the consumer's union-find merge-epoch policy: when a union merges
+        /// representatives and the consumer must re-canonicalise its rows, it calls
+        /// `rebuild` at the same program points where the hand-rolled code rebuilt its
+        /// adjacency map. The seam is policy-free — it neither observes the `UnionFind`
+        /// nor decides when to rebuild.
+        #[inline]
+        pub fn rebuild(&mut self, rows: &[Row], keys: &JoinKeys) {
+            self.arena.clear();
+            self.map.clear();
+            self.arena.reserve(rows.len());
+            for row in rows {
+                let offset = self.arena.len();
+                self.arena.push(row.clone());
+                self.map.entry(keys.left_key(row)).or_default().push(offset);
+            }
+        }
+
+        /// Probe the build side with each row in `delta`, invoking `emit` for every match.
+        ///
+        /// For each probe row in `delta` this looks up its right-side key (via `keys`)
+        /// in the build index and calls `emit(build_row, probe_row)` for each build-side
+        /// match, in **insertion order** (ascending arena offset).
+        ///
+        /// **Determinism contract**: given an identical insertion sequence (`build` +
+        /// `extend` calls), the emission sequence is identical. This is load-bearing for
+        /// the OWL-RL byte-identity ratchet (§4.2 of the design record).
+        ///
+        /// `budget` is polled once per probe row (sticky: if exhausted, the remainder of
+        /// `delta` is skipped). `emit` and `budget` are generic type parameters — no
+        /// `Box<dyn>`, no vtable.
+        #[inline]
+        pub fn probe_emit<B: Budget, F: FnMut(&Row, &Row)>(
+            &self,
+            delta: &[Row],
+            keys: &JoinKeys,
+            budget: &B,
+            emit: &mut F,
+        ) {
+            let mut emitted = 0usize;
+            for prow in delta {
+                if budget.exhausted(emitted) {
+                    break;
+                }
+                let key: Key = keys.right_key(prow);
+                if let Some(offsets) = self.map.get(&key) {
+                    for &offset in offsets {
+                        emit(&self.arena[offset], prow);
+                        emitted += 1;
+                    }
+                }
+            }
+        }
+
+        /// The number of rows currently in the build-side arena.
+        #[inline]
+        pub fn len(&self) -> usize {
+            self.arena.len()
+        }
+
+        /// Whether the build-side arena is empty.
+        #[inline]
+        pub fn is_empty(&self) -> bool {
+            self.arena.is_empty()
+        }
+    }
+
+    impl Default for DeltaTable {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use super::super::{Budget, NoBudget, JoinKeys, build_table, probe_emit as static_probe_emit};
+        use crate::rows::Row;
+
+        fn row(xs: &[u32]) -> Row {
+            Row::from_slice(xs)
+        }
+
+        /// `JoinKeys` that joins on column 0 of both sides, no additional probe columns.
+        fn keys_col0() -> JoinKeys {
+            JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] }
+        }
+
+        // --- new() / Default ---
+
+        #[test]
+        fn new_is_empty() {
+            let t = DeltaTable::new();
+            assert!(t.is_empty());
+            assert_eq!(t.len(), 0);
+        }
+
+        #[test]
+        fn default_is_empty() {
+            let t: DeltaTable = Default::default();
+            assert!(t.is_empty());
+            assert_eq!(t.len(), 0);
+        }
+
+        // --- build() ---
+
+        #[test]
+        fn build_indexes_rows_by_key() {
+            let rows = vec![row(&[1, 10]), row(&[2, 20]), row(&[1, 11])];
+            let keys = keys_col0();
+            let t = DeltaTable::build(&rows, &keys);
+            assert_eq!(t.len(), 3);
+            assert!(!t.is_empty());
+
+            // Probe key=1: expect build rows [1,10] then [1,11] in insertion order.
+            let probe = vec![row(&[1, 99])];
+            let mut hits: Vec<Row> = Vec::new();
+            t.probe_emit(&probe, &keys, &NoBudget, &mut |b, _p| {
+                hits.push(b.clone());
+            });
+            assert_eq!(hits, vec![row(&[1, 10]), row(&[1, 11])]);
+        }
+
+        #[test]
+        fn build_empty_rows_is_empty() {
+            let t = DeltaTable::build(&[], &keys_col0());
+            assert!(t.is_empty());
+            assert_eq!(t.len(), 0);
+        }
+
+        // --- extend() ---
+
+        #[test]
+        fn extend_appends_delta_rows_in_order() {
+            let base = vec![row(&[1, 10])];
+            let keys = keys_col0();
+            let mut t = DeltaTable::build(&base, &keys);
+            let delta = vec![row(&[1, 11]), row(&[2, 20])];
+            t.extend(&delta, &keys);
+            assert_eq!(t.len(), 3);
+
+            // Probe key=1: base row then delta row, insertion order.
+            let probe = vec![row(&[1, 0])];
+            let mut hits: Vec<Row> = Vec::new();
+            t.probe_emit(&probe, &keys, &NoBudget, &mut |b, _p| {
+                hits.push(b.clone());
+            });
+            assert_eq!(hits, vec![row(&[1, 10]), row(&[1, 11])]);
+        }
+
+        #[test]
+        fn extend_empty_delta_is_noop() {
+            let base = vec![row(&[1, 10])];
+            let keys = keys_col0();
+            let mut t = DeltaTable::build(&base, &keys);
+            t.extend(&[], &keys);
+            assert_eq!(t.len(), 1);
+        }
+
+        // --- rebuild() ---
+
+        #[test]
+        fn rebuild_replaces_entire_table() {
+            let initial = vec![row(&[1, 10]), row(&[2, 20])];
+            let keys = keys_col0();
+            let mut t = DeltaTable::build(&initial, &keys);
+
+            let new_rows = vec![row(&[3, 30]), row(&[3, 31])];
+            t.rebuild(&new_rows, &keys);
+            assert_eq!(t.len(), 2);
+
+            // Old key=1 entry must be gone.
+            let mut hits_old: Vec<Row> = Vec::new();
+            t.probe_emit(&[row(&[1, 0])], &keys, &NoBudget, &mut |b, _| {
+                hits_old.push(b.clone());
+            });
+            assert!(hits_old.is_empty(), "rebuild must clear old entries");
+
+            // New key=3 entries present in insertion order.
+            let mut hits_new: Vec<Row> = Vec::new();
+            t.probe_emit(&[row(&[3, 0])], &keys, &NoBudget, &mut |b, _| {
+                hits_new.push(b.clone());
+            });
+            assert_eq!(hits_new, vec![row(&[3, 30]), row(&[3, 31])]);
+        }
+
+        #[test]
+        fn rebuild_to_empty_clears_all() {
+            let rows = vec![row(&[1, 10])];
+            let keys = keys_col0();
+            let mut t = DeltaTable::build(&rows, &keys);
+            t.rebuild(&[], &keys);
+            assert!(t.is_empty());
+            let mut count = 0usize;
+            t.probe_emit(&[row(&[1, 0])], &keys, &NoBudget, &mut |_, _| count += 1);
+            assert_eq!(count, 0);
+        }
+
+        // --- probe_emit() ---
+
+        #[test]
+        fn probe_emit_empty_delta_emits_nothing() {
+            let rows = vec![row(&[1, 10])];
+            let keys = keys_col0();
+            let t = DeltaTable::build(&rows, &keys);
+            let mut count = 0usize;
+            t.probe_emit(&[], &keys, &NoBudget, &mut |_, _| count += 1);
+            assert_eq!(count, 0);
+        }
+
+        #[test]
+        fn probe_emit_empty_table_emits_nothing() {
+            let keys = keys_col0();
+            let t = DeltaTable::new();
+            let probe = vec![row(&[1, 99])];
+            let mut count = 0usize;
+            t.probe_emit(&probe, &keys, &NoBudget, &mut |_, _| count += 1);
+            assert_eq!(count, 0);
+        }
+
+        #[test]
+        fn probe_emit_no_matching_key_emits_nothing() {
+            let rows = vec![row(&[1, 10]), row(&[2, 20])];
+            let keys = keys_col0();
+            let t = DeltaTable::build(&rows, &keys);
+            let probe = vec![row(&[99, 0])];
+            let mut count = 0usize;
+            t.probe_emit(&probe, &keys, &NoBudget, &mut |_, _| count += 1);
+            assert_eq!(count, 0);
+        }
+
+        #[test]
+        fn probe_emit_passes_probe_row_to_closure() {
+            let rows = vec![row(&[1, 10])];
+            let keys = keys_col0();
+            let t = DeltaTable::build(&rows, &keys);
+            let probe = vec![row(&[1, 77])];
+            let mut probe_rows_seen: Vec<Row> = Vec::new();
+            t.probe_emit(&probe, &keys, &NoBudget, &mut |_b, p| {
+                probe_rows_seen.push(p.clone());
+            });
+            assert_eq!(probe_rows_seen, vec![row(&[1, 77])]);
+        }
+
+        // --- Determinism contract (load-bearing for byte-identity) ---
+
+        #[test]
+        fn probe_emit_insertion_order_is_deterministic_across_build_extend_rebuild() {
+            // Build incrementally (build + two extends), then rebuild with the same
+            // concatenated rows. Both paths must yield matches in the same insertion order.
+            let keys = keys_col0();
+            let r1 = vec![row(&[5, 1])];
+            let r2 = vec![row(&[5, 2])];
+            let r3 = vec![row(&[5, 3])];
+
+            // Incremental path.
+            let mut t_incr = DeltaTable::build(&r1, &keys);
+            t_incr.extend(&r2, &keys);
+            t_incr.extend(&r3, &keys);
+
+            // Batch path (build over the concatenated rows).
+            let mut all: Vec<Row> = Vec::new();
+            all.extend_from_slice(&r1);
+            all.extend_from_slice(&r2);
+            all.extend_from_slice(&r3);
+            let t_batch = DeltaTable::build(&all, &keys);
+
+            // Rebuild path.
+            let mut t_rebuild = DeltaTable::new();
+            t_rebuild.rebuild(&all, &keys);
+
+            let probe = vec![row(&[5, 0])];
+            let collect = |t: &DeltaTable| -> Vec<Row> {
+                let mut seq = Vec::new();
+                t.probe_emit(&probe, &keys, &NoBudget, &mut |b, _p| seq.push(b.clone()));
+                seq
+            };
+
+            let seq_incr = collect(&t_incr);
+            let seq_batch = collect(&t_batch);
+            let seq_rebuild = collect(&t_rebuild);
+
+            let expected = vec![row(&[5, 1]), row(&[5, 2]), row(&[5, 3])];
+            assert_eq!(seq_incr, expected, "incremental build+extend must yield insertion order");
+            assert_eq!(seq_batch, expected, "batch build must yield insertion order");
+            assert_eq!(seq_rebuild, expected, "rebuild must yield insertion order");
+        }
+
+        // --- Equivalence vs. static build_table + probe_emit ---
+
+        #[test]
+        fn build_extend_equivalent_to_static_build_over_concatenated_rows() {
+            // DeltaTable::build(base) + extend(delta) must yield the same probe matches
+            // as the static build_table over (base ++ delta) — the primary correctness claim.
+            let base = vec![row(&[7, 1]), row(&[8, 2])];
+            let delta = vec![row(&[7, 3]), row(&[9, 4])];
+            let keys = keys_col0();
+
+            // Delta path.
+            let mut dt = DeltaTable::build(&base, &keys);
+            dt.extend(&delta, &keys);
+
+            // Static path over the concatenated rows.
+            let mut all: Vec<Row> = base.clone();
+            all.extend_from_slice(&delta);
+            let static_tables = vec![build_table(&all, &keys)];
+
+            let probe = vec![row(&[7, 0]), row(&[8, 0]), row(&[9, 0]), row(&[99, 0])];
+
+            // Collect delta-table build rows.
+            let mut dt_hits: Vec<Row> = Vec::new();
+            dt.probe_emit(&probe, &keys, &NoBudget, &mut |b, _p| dt_hits.push(b.clone()));
+
+            // Collect static build rows (probe_only=[] so output IS the build row).
+            let mut st_hits: Vec<Row> = Vec::new();
+            for prow in &probe {
+                static_probe_emit(prow, &keys, &all, &static_tables, &[], &mut st_hits);
+            }
+
+            assert_eq!(dt_hits, st_hits, "DeltaTable must yield the same matches as static build_table");
+        }
+
+        // --- Budget truncation ---
+
+        #[test]
+        fn probe_emit_budget_truncates_after_first_match() {
+            struct Cap(usize);
+            impl Budget for Cap {
+                fn exhausted(&self, rows: usize) -> bool {
+                    rows >= self.0
+                }
+            }
+            // Three probe rows each match one build row; cap at 1 match.
+            let rows = vec![row(&[1, 10]), row(&[2, 20]), row(&[3, 30])];
+            let keys = keys_col0();
+            let t = DeltaTable::build(&rows, &keys);
+            let probe = vec![row(&[1, 0]), row(&[2, 0]), row(&[3, 0])];
+            let mut count = 0usize;
+            t.probe_emit(&probe, &keys, &Cap(1), &mut |_, _| count += 1);
+            assert_eq!(count, 1, "Cap(1) must stop after the first emitted match");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
