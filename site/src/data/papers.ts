@@ -178,6 +178,24 @@ export const PAPERS: Paper[] = [
     evidence:
       "Indicative-only pilot: deterministically-graded answer accuracy of a non-deterministic LLM agent (Claude Haiku, one fresh instance per condition-task pair) over a committed 16-task corpus fully crossed with 4 committed ontology-overlay conditions (bench/fo-km). The only canonical records are structural corpus counts (16 tasks, 4 conditions); every accuracy/abstention figure is environment=indicative (single run, heuristic gold-key grading, dev work-box) and is structurally barred from headline citation. No latency claim, no significance claim.",
   },
+  {
+    // [FABLE-5] sq-gum8.4 — Paper C-SoK: the systematization paper over the verifiable/
+    // confidential federated-SPARQL estate (zkSPARQL single-prover lane + MPC-SPARQL lane +
+    // attested-input binding). C-family, so wip-arxiv and it cites the open external-audit
+    // gate sq-qhy4 throughout; it asserts NO security/privacy/soundness/attestation property.
+    slug: "verifiable-fed-sparql",
+    source: "verifiable-fed-sparql.typ",
+    title: "SoK: Systematizing Verifiable and Private Federated SPARQL",
+    blurb:
+      "A systematization of verifiable and confidential federated SPARQL along three independent axes — cryptographic mechanism (single-prover ZK over committed graphs / MPC evaluation over secret-shared graphs / attested-input binding), prover topology (one holder vs N mutually distrusting holders), and adversary model (semi-honest / covert / malicious, crossed with output guarantees under Cleve's bound). Contributes an operator-level capability matrix exposing the disclosed/hidden two-regime split and the disclosed-key-join advantage global IRIs give RDF over relational and property-graph MPC; a catalogue of settled negatives (Cleve, the post-quantum attestation boundary, blank-node cross-graph joins, in-circuit entailment) distinguished from merely vacant cells; and a precise statement of the open frontier — verifying issuer signatures over a secret-shared witness inside one source-unlinkable collaborative proof, a composition no published venue instantiates as of the stated survey date. Anchored honestly in one research-grade estate: single-prover layer not externally audited (sq-qhy4, open), MPC layer semi-honest by default, collaborative-proof path unbuilt and fail-closed. No security property is claimed and no wall-clock number appears.",
+    authors: "Jesse Wright · the sparq project",
+    venue:
+      "PoPETs / IEEE S&P SoK track — WIP; C-family, so arXiv-only until the external audit gate (sq-qhy4) and the frontier's publication-absence claims are re-verified at submission time",
+    status: "wip-arxiv",
+    family: "C",
+    evidence:
+      "Systematization — asserts NO proven security/privacy/soundness/attestation property and cites no wall-clock measurement. The only build-injected counts are the deterministic structural facts already gated as canonical for the C-family estate (fail-closed collaborative entry points, re-audit lenses all RE-OPEN, witness-validation obligation clauses, prior single-prover audit findings under the open gate sq-qhy4). Capability tiers are documentary (spec corpus + reconciled capability review), stated as such in the paper's limitations.",
+  },
 ];
 
 export function paperBySlug(slug: string): Paper | undefined {
