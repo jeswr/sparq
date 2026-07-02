@@ -19,10 +19,12 @@ import {
   FolderOpen,
   FilePlus2,
   Save,
+  ChevronDown,
 } from "lucide-react";
+import { DropdownMenu } from "radix-ui";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 // [OPUS-4.8] sq-vw3ax (bold /try redesign) — the local IDE-workbench panel chrome + the
@@ -48,6 +50,9 @@ import {
   type WasmStore,
 } from "@/lib/sparq-wasm";
 import { downloadText } from "@/lib/download";
+// [OPUS-4.8] sq-vw3ax.11 — consume the home → /try handoff (a query + optional dataset handed
+// from the home hero's in-browser runner, via sessionStorage or a shareable /try#q=<…> link).
+import { consumeHandoff, decodeQueryHash } from "@/lib/try-handoff";
 import {
   classifyQueryForm,
   isGraphForm,
@@ -200,6 +205,15 @@ export function Repl() {
   const [workspaceBusy, setWorkspaceBusy] = React.useState(false);
   // Guards the one-shot startup re-hydration so it runs at most once per mount.
   const rehydratedRef = React.useRef(false);
+  // [OPUS-4.8] sq-vw3ax.11 fix — tracks the dataset that the component was asked to load on
+  // mount (either the handoff payload or DEFAULT_DATASET). `ensureStore` reads from this ref
+  // so that clicking "Run query" before `prewarmSparqWhenIdle` fires still loads the correct
+  // dataset (handoff or default) rather than always falling back to DEFAULT_DATASET.
+  const initialDataRef = React.useRef<{
+    text: string;
+    format: string;
+    fromHandoff: boolean;
+  }>({ text: DEFAULT_DATASET.text, format: DEFAULT_DATASET.format, fromHandoff: false });
 
   // Build (or rebuild) the store from RDF text + format. Centralises error handling so
   // every load path (default, picker, upload, URL) reports failures the same way.
@@ -231,16 +245,41 @@ export function Repl() {
   React.useEffect(() => {
     let cancelled = false;
     setEngine("warming");
+    // [OPUS-4.8] sq-vw3ax.11 — consume a home → /try handoff EXACTLY ONCE on mount: the
+    // sessionStorage payload (read + cleared) takes precedence, else a shareable `/try#q=<…>`
+    // link. When present it preloads the editor query and — if the handoff carried a dataset —
+    // loads THAT into the store instead of the default, so "Open in workbench →" continues the
+    // exact home-runner state. No handoff = the historical default dataset, unchanged.
+    const handoff =
+      consumeHandoff() ??
+      (typeof window !== "undefined" ? decodeQueryHash(window.location.hash) : null);
+    if (handoff) setSparql(handoff.query);
+    const initialData =
+      handoff?.data != null
+        ? { text: handoff.data, format: handoff.format ?? "turtle", fromHandoff: true }
+        : { text: DEFAULT_DATASET.text, format: DEFAULT_DATASET.format, fromHandoff: false };
+    // Persist for the `ensureStore` fallback so a "Run query" before idle warm-up uses the
+    // same dataset (handoff or default) rather than always falling back to DEFAULT_DATASET.
+    initialDataRef.current = initialData;
     const handle = prewarmSparqWhenIdle({
       onReady: () => {
         if (cancelled || storeRef.current) {
           if (!cancelled) setEngine("ready");
           return;
         }
-        // The engine is ready; build the default dataset off the render path, then mark ready.
-        buildStore(DEFAULT_DATASET.text, DEFAULT_DATASET.format)
+        // The engine is ready; build the initial dataset off the render path, then mark ready.
+        buildStore(initialData.text, initialData.format)
           .then(() => {
-            if (!cancelled) setEngine("ready");
+            if (cancelled) return;
+            if (initialData.fromHandoff) {
+              // The handoff dataset is a custom in-tab load, not a built-in — reflect that.
+              setActiveBuiltinId(null);
+              setActive({
+                label: "Shared query dataset",
+                description: "Loaded from a shared query link, in your tab.",
+              });
+            }
+            setEngine("ready");
           })
           .catch((e) => {
             if (cancelled) return;
@@ -266,13 +305,20 @@ export function Repl() {
 
   // Guarantees a store exists before a query runs — the safety net if pre-warm hasn't
   // finished (or failed): never lets "Run query" no-op or throw on a cold engine.
+  // Uses `initialDataRef` (not DEFAULT_DATASET) so a handoff dataset is respected even when
+  // the user clicks Run before `prewarmSparqWhenIdle` has fired.
   const ensureStore = React.useCallback(async (): Promise<WasmStore> => {
     if (storeRef.current) return storeRef.current;
     setEngine("warming");
-    const store = await buildStore(
-      DEFAULT_DATASET.text,
-      DEFAULT_DATASET.format,
-    );
+    const { text, format, fromHandoff } = initialDataRef.current;
+    const store = await buildStore(text, format);
+    if (fromHandoff) {
+      setActiveBuiltinId(null);
+      setActive({
+        label: "Shared query dataset",
+        description: "Loaded from a shared query link, in your tab.",
+      });
+    }
     setEngine("ready");
     return store;
   }, [buildStore]);
@@ -1096,7 +1142,16 @@ export function Repl() {
             </Badge>
           }
         >
-          <div className="p-3.5">
+          <div
+            className="p-3.5"
+            onKeyDown={(e) => {
+              // [OPUS-4.8] sq-vw3ax.11 — Ctrl/Cmd+Enter runs the query (the keyboard spine).
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                if (!busy) void runWithMode("run");
+              }
+            }}
+          >
             <label htmlFor="repl-query" className="sr-only">
               SPARQL query
             </label>
@@ -1110,25 +1165,23 @@ export function Repl() {
           </div>
         </ReplPanel>
 
+        {/* [OPUS-4.8] sq-vw3ax.11 — Run is the SOLE primary action. The Run / EXPLAIN / ANALYZE
+            toolbar collapses into ONE split-button: the big teal "Run query" (Ctrl/Cmd+Enter) plus
+            a ▾ menu for EXPLAIN / EXPLAIN ANALYZE (feeding the same plan-tree views). The status-bar
+            chip states the engine posture — "in-browser" by default, or the connected host. */}
         <div className="flex flex-wrap items-center gap-3">
-          <Button
-            onClick={() => void run()}
-            disabled={busy}
-            className="bg-[var(--hero-grad)] text-primary-foreground shadow-elevation-glow hover:opacity-95"
-          >
-            {busy ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Play className="size-4" />
-            )}
-            {mode === "run" ? "Run query" : "Run EXPLAIN"}
-          </Button>
-          <ModeTabs
-            mode={mode}
-            onChange={setMode}
-            disabled={busy}
+          <RunSplitButton
+            busy={busy}
             form={form}
             endpointMode={endpointActive}
+            onRun={() => void runWithMode("run")}
+            onExplain={() => void runWithMode("explain")}
+            onAnalyze={() => void runWithMode("analyze")}
+          />
+          <EngineChip
+            endpointActive={endpointActive}
+            endpointUrl={endpointConfig.url}
+            onDisconnect={() => setEndpointActive(false)}
           />
           <p
             aria-live="polite"
@@ -1137,13 +1190,6 @@ export function Repl() {
             {statusLine}
           </p>
         </div>
-
-        <ConnectPanel
-          config={endpointConfig}
-          onConfigChange={setEndpointConfig}
-          active={endpointActive}
-          onActiveChange={setEndpointActive}
-        />
       </main>
 
       {/* ── RIGHT: results + EXPLAIN plan-tree + mini-viz ──────────────────────────────── */}
@@ -1156,18 +1202,42 @@ export function Repl() {
           <ResultPanel state={state} statusLine={statusLine} />
         </ReplPanel>
 
-        {/* [OPUS-4.8] sq-9ij6 — the live subscriptions view. Only meaningful in endpoint
-            mode (it streams from a real, mutating server's /subscriptions/sse), so it
-            renders an honest "switch on endpoint mode" hint otherwise. It reuses the SAME
-            endpoint config + bearer/connection-safety posture the Connect panel established. */}
-        <SubscriptionsView config={endpointConfig} active={endpointActive} />
+        {/* [OPUS-4.8] sq-vw3ax.11 / sq-9ij6 — the live subscriptions view mounts ONLY in endpoint
+            mode (it streams from a real, mutating server's /subscriptions/sse — off the workbench
+            there is nothing to subscribe to, so the panel never mounts and never clutters the
+            default in-browser view). */}
+        {endpointActive && (
+          <SubscriptionsView config={endpointConfig} active={endpointActive} />
+        )}
 
-        {/* [OPUS-4.8] sq-he72 — the server health / capabilities panel. Reads the connected
-            server's /health, Prometheus /metrics, and the opt-in VoID / SPARQL Service
-            Description, rendering "not exposed" honestly when the operator left a feature off.
-            Like the subscriptions view, it only runs in endpoint mode and reuses the SAME
-            endpoint config + bearer/connection-safety posture. */}
-        <ServerHealthPanel config={endpointConfig} active={endpointActive} />
+        {/* [OPUS-4.8] sq-vw3ax.11 — the remote endpoint is DEMOTED, never required. It lives in a
+            collapsed "Advanced" disclosure at the bottom of the right rail; the URL field, protocol
+            notes and (when connected) the server-health panel render ONLY inside the expanded
+            drawer. Disconnected (the default) shows no endpoint input anywhere. */}
+        <details className="group overflow-hidden rounded-lg border bg-card shadow-elevation-2">
+          <summary className="flex cursor-pointer select-none items-center gap-2 border-b bg-muted/25 px-3.5 py-3 text-[11.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/40">
+            <PlugZap className="size-3.5 text-primary" aria-hidden />
+            Advanced · Connect to a sparq-server
+            <ChevronDown
+              className="ml-auto size-3.5 transition-transform group-open:rotate-180"
+              aria-hidden
+            />
+          </summary>
+          <div className="space-y-4 p-3.5">
+            <ConnectPanel
+              config={endpointConfig}
+              onConfigChange={setEndpointConfig}
+              active={endpointActive}
+              onActiveChange={setEndpointActive}
+            />
+            {/* [OPUS-4.8] sq-he72 — server health / capabilities: /health, Prometheus /metrics, and
+                the opt-in VoID / SPARQL Service Description. Only when connected (nothing to read
+                otherwise), and only inside this drawer. */}
+            {endpointActive && (
+              <ServerHealthPanel config={endpointConfig} active={endpointActive} />
+            )}
+          </div>
+        </details>
       </section>
 
       <DatasetViewer
@@ -1209,76 +1279,138 @@ function EngineIndicator({ engine }: { engine: EngineState }) {
 // [OPUS-4.8] sq-xe4f — EXPLAIN / ANALYZE drive the query planner, which rejects SPARQL
 // Update forms, so those tabs are grayed (disabled + aria-disabled) when the editor
 // holds an Update example. The decision is the pure `modeSupportsForm` predicate.
-function ModeTabs({
-  mode,
-  onChange,
-  disabled,
+// [OPUS-4.8] sq-vw3ax.11 — the Run split-button: Run is the SOLE primary action, so the old
+// Run/EXPLAIN/ANALYZE tab strip collapses into ONE control. The big teal primary always executes
+// the query in run mode (label kept exactly "Run query" — Ctrl/Cmd+Enter), and the ▾ menu offers
+// EXPLAIN / EXPLAIN ANALYZE, which feed the SAME plan-tree views. EXPLAIN/ANALYZE are an in-tab
+// planner introspection, so they are disabled in endpoint mode or for a query form that cannot
+// plan (an Update); ANALYZE additionally needs a SELECT/ASK.
+function RunSplitButton({
+  busy,
   form,
   endpointMode,
+  onRun,
+  onExplain,
+  onAnalyze,
 }: {
-  mode: RunMode;
-  onChange: (m: RunMode) => void;
-  disabled: boolean;
+  busy: boolean;
   form: QueryForm;
-  // [OPUS-4.8] sq-2mke — in endpoint mode EXPLAIN / ANALYZE are unavailable (they drive
-  // the in-tab WASM planner, not the remote server), so those tabs are grayed.
   endpointMode: boolean;
+  onRun: () => void;
+  onExplain: () => void;
+  onAnalyze: () => void;
 }) {
-  const tabs: { value: RunMode; label: string; title: string }[] = [
-    { value: "run", label: "Run", title: "Execute the query / update" },
-    {
-      value: "explain",
-      label: "EXPLAIN",
-      title: "Show the query plan without executing it",
-    },
-    {
-      value: "analyze",
-      label: "ANALYZE",
-      title: "Show the plan and execute it with a per-operator trace (SELECT/ASK)",
-    },
-  ];
+  const explainDisabled = endpointMode || !modeSupportsForm("explain", form);
+  const analyzeDisabled = endpointMode || !modeSupportsForm("analyze", form);
+  const menuDisabled = busy || (explainDisabled && analyzeDisabled);
   return (
-    <div
-      role="tablist"
-      aria-label="Run mode"
-      className="inline-flex rounded-lg border bg-muted/40 p-0.5"
-    >
-      {tabs.map((t) => {
-        // Gray out a mode the current query form cannot use (EXPLAIN/ANALYZE on an
-        // Update). The engine still validates — this only stops the user picking a
-        // mode that would parse-error. EXPLAIN/ANALYZE are also unavailable in endpoint
-        // mode (an in-tab planner introspection, not a protocol operation).
-        const planMode = t.value !== "run";
-        const unsupported = !modeSupportsForm(t.value, form) || (endpointMode && planMode);
-        const tabDisabled = disabled || unsupported;
-        return (
+    <div className="inline-flex">
+      <Button
+        onClick={onRun}
+        disabled={busy}
+        className="rounded-r-none bg-[var(--hero-grad)] text-primary-foreground shadow-elevation-glow hover:opacity-95"
+      >
+        {busy ? (
+          <Loader2 className="size-4 animate-spin" aria-hidden />
+        ) : (
+          <Play className="size-4" aria-hidden />
+        )}
+        Run query
+      </Button>
+      <DropdownMenu.Root>
+        {/* A NATIVE button (not the <Button> function component) so radix's asChild ref attaches
+            cleanly to a DOM node; styled with the shared buttonVariants so it matches the primary. */}
+        <DropdownMenu.Trigger asChild>
           <button
-            key={t.value}
             type="button"
-            role="tab"
-            aria-selected={mode === t.value}
-            aria-disabled={unsupported}
-            title={
-              endpointMode && planMode
-                ? `${t.label} runs the in-tab WASM planner — switch to In-tab WASM to use it`
-                : unsupported
-                  ? `${t.label} is unavailable for SPARQL Update — it plans a query`
-                  : t.title
-            }
-            disabled={tabDisabled}
-            onClick={() => onChange(t.value)}
+            aria-label="More run options"
+            disabled={menuDisabled}
             className={cn(
-              "rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:opacity-50 disabled:cursor-not-allowed",
-              mode === t.value
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground",
+              buttonVariants(),
+              "rounded-l-none border-l border-primary-foreground/25 bg-[var(--hero-grad)] px-2 text-primary-foreground shadow-elevation-glow hover:opacity-95",
             )}
           >
-            {t.label}
+            <ChevronDown className="size-4" aria-hidden />
           </button>
-        );
-      })}
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content
+            align="start"
+            sideOffset={6}
+            className="z-50 min-w-[15rem] rounded-lg border bg-card p-1 text-sm text-card-foreground shadow-elevation-2"
+          >
+            <DropdownMenu.Item
+              disabled={explainDisabled}
+              onSelect={onExplain}
+              className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground"
+            >
+              <Telescope className="size-4 text-primary" aria-hidden />
+              <span className="flex flex-col">
+                <span className="font-medium">Run EXPLAIN</span>
+                <span className="text-xs text-muted-foreground">
+                  Show the query plan without executing it
+                </span>
+              </span>
+            </DropdownMenu.Item>
+            <DropdownMenu.Item
+              disabled={analyzeDisabled}
+              onSelect={onAnalyze}
+              className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground"
+            >
+              <Gauge className="size-4 text-primary" aria-hidden />
+              <span className="flex flex-col">
+                <span className="font-medium">Run EXPLAIN ANALYZE</span>
+                <span className="text-xs text-muted-foreground">
+                  Plan + execute with a per-operator trace (SELECT/ASK)
+                </span>
+              </span>
+            </DropdownMenu.Item>
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
     </div>
+  );
+}
+
+// [OPUS-4.8] sq-vw3ax.11 — the status-bar engine chip. Disconnected (the default) states the
+// in-browser posture; connected flips to the remote host + a one-click disconnect (which reverts
+// to the in-tab WASM engine without losing editor state).
+function EngineChip({
+  endpointActive,
+  endpointUrl,
+  onDisconnect,
+}: {
+  endpointActive: boolean;
+  endpointUrl: string;
+  onDisconnect: () => void;
+}) {
+  if (!endpointActive) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card/80 px-3 py-1.5 text-xs font-medium text-muted-foreground">
+        <CheckCircle2 className="size-3.5 text-[var(--success)]" aria-hidden />
+        Engine: in-browser · nothing leaves this tab
+      </span>
+    );
+  }
+  let host = endpointUrl;
+  try {
+    host = new URL(endpointUrl).host;
+  } catch {
+    // keep the raw string if it is not a parseable URL
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-foreground">
+      <PlugZap className="size-3.5 text-primary" aria-hidden />
+      Remote: <span className="font-mono">{host}</span>
+      <span className="size-1.5 rounded-full bg-[var(--success)]" aria-hidden />
+      <button
+        type="button"
+        onClick={onDisconnect}
+        className="ml-1 rounded text-muted-foreground underline-offset-2 outline-none hover:text-foreground hover:underline focus-visible:ring-3 focus-visible:ring-ring/40"
+      >
+        Disconnect
+      </button>
+    </span>
   );
 }
 
