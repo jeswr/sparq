@@ -128,23 +128,31 @@
   features: "status-list-flate2,did"
   test: true
 
-# [OPUS-4.8] sq-dt5hv (epic sq-0dksu, Phase 5): the opt-in property-admissibility
-# PRE-CHECK in the admission gate. The `admit::precheck` module
-# (`admit_with_precheck` + `AdmissibilityPreference` + `PrecheckOutcome`), its 7
+# [OPUS-4.8] sq-dt5hv (epic sq-0dksu, Phase 5) + sq-nrwqs (Phase 5.1): the opt-in
+# property-admissibility PRE-CHECK in the admission gate. The `admit::precheck` module
+# (`admit_with_precheck` + `AdmissibilityPreference` + `PrecheckOutcome`), its
 # `admit::precheck::tests` unit tests, and the `secprop_precheck_e2e.rs` golden
 # integration suite (`#![cfg(feature = "secprop-precheck")]`) are ALL behind the
 # default-OFF `secprop-precheck` feature, so ci.yml's default-feature `nextest archive`
 # compiles them EMPTY and runs ZERO of them — the silent-skip gap (#1171) this leg
 # closes. The feature enables `secprop-admissibility` (it drives the merged Phase-2
-# reduction) and adds NO new dependency. The leg runs `clippy --all-targets -D warnings`
-# with the feature ON (the real gate) + `cargo test`, which drives the REAL admit path
-# behind the pre-check and the load-bearing SAFETY invariant: with NO preference the gate
-# is byte-identical to `admit`, and an unsatisfied ODRL preference (e.g.
-# `requiresAssurance gteq Proven` while sq-qhy4 is open) FAILS CLOSED — admits nothing,
-# derives no grant — despite a perfectly valid credential. Verified locally: `cargo test
-# -p sparq-trust --features secprop-precheck` runs the 7 precheck unit tests + the 4
-# `secprop_precheck_e2e.rs` golden tests; `clippy --all-targets -D warnings` is clean in
-# every state.
+# reduction) AND, since sq-nrwqs, `sparq-zk/secprop-annotations` — the pre-check now
+# resolves the presented method's secprop annotation graph from the BUNDLED, drift-pinned
+# `sparq-zk` `secprop-methods.ttl` (tamper-resistant) instead of caller-supplied N3;
+# `oxttl` (its only dep) is already an optional sparq-zk dep the default build never
+# pulls, so this adds NO new dependency to the lean default build. The leg runs `clippy
+# --all-targets -D warnings` with the feature ON (the real gate) + `cargo test`, which
+# drives the REAL admit path behind the pre-check and the load-bearing SAFETY invariants:
+# with NO preference the gate is byte-identical to `admit`; a caller cannot widen a
+# method's recorded posture — the annotations come from the bundled graph AND the requester
+# supplies STRUCTURED constraints (validated IRIs), not raw N3, so there is no
+# `secx:hasProperty`/`atLeast`/`satisfies` injection sink (the residual-channel review);
+# an unknown method FAILS CLOSED (`UnknownMethod`); and an unsatisfied ODRL preference
+# (e.g. `requiresAssurance gteq Proven` while sq-qhy4 is open) FAILS CLOSED — admits
+# nothing, derives no grant — despite a perfectly valid credential. Verified locally:
+# `cargo test -p sparq-trust --features secprop-precheck` runs the 12 precheck unit tests
+# (incl. the policy-injection negative test) + the 5 `secprop_precheck_e2e.rs` golden
+# tests; `clippy --all-targets -D warnings` is clean in every state.
 - name: "sparq-trust (secprop-precheck — property-admissibility pre-check in admit)"
   crate: "sparq-trust"
   features: "secprop-precheck"
