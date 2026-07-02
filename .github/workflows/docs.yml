@@ -10,7 +10,7 @@
 #   GitHub Pages exposes exactly ONE deploy slot. The live site at
 #   https://sparq.jeswr.org/ is ALREADY published by pages.yml — the Next.js
 #   feature-showcase at the root, with the benchmark dashboard overlaid at
-#   /sparq/dev/. A SECOND `actions/deploy-pages` workflow here would race pages.yml
+#   /dev/. A SECOND `actions/deploy-pages` workflow here would race pages.yml
 #   on every main/benchmark-data push (last-writer-wins) AND replace the live
 #   showcase root with the mdBook guide. The sq-w9sr design (mdBook at "/") predates
 #   the showcase deploy and does not account for it; reconciling "mdBook-at-root vs
