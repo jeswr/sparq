@@ -1,0 +1,36 @@
+# [OPUS-4.8] sq-7d3dj.5 (epic sq-7d3dj) — CANONICAL loopback HTTP-throughput harness for
+# sparq-server. Deliberately a STANDALONE cargo project (own [workspace] table, like
+# bench/serve and bench/memtier) so the repo's root workspace — and its clippy/test gate —
+# is untouched. It is MEASUREMENT infrastructure: it changes no server behaviour; it drives
+# the REAL in-process server (sparq_server::serve) and reports {req/s, p50/p99, peak RSS}.
+[package]
+name = "serve-throughput-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# The root workspace patches spargebra with the vendored W3C-conformance fork; the
+# engine's behaviour (and build) depends on it, so this detached project must apply the
+# same patch.
+[patch.crates-io]
+spargebra = { path = "../../vendor/spargebra" }
+
+[dependencies]
+# The REAL server stack (default features pull in the `server` HTTP path: serve / router /
+# AppState) plus the graph type for the fixture corpus. The load client is pure std (threads
+# + blocking keep-alive sockets), so no HTTP-client dependency is added.
+sparq-core = { path = "../../crates/sparq-core" }
+sparq-server = { path = "../../crates/sparq-server" }
+# Only for the server's background runtime + ephemeral loopback listener (mirrors the
+# conformance loopback harness). The client side needs no async.
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "io-util"] }
+
+[[bin]]
+name = "serve_throughput"
+path = "src/main.rs"
+
+[profile.release]
+debug = false
+lto = "thin"
