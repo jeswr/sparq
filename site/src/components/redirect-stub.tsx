@@ -48,7 +48,7 @@ export function RedirectStub({
 
   React.useEffect(() => {
     if (hard) {
-      window.location.assign(hardDest);
+      window.location.replace(hardDest); // [OPUS-4.8] replace (not assign) — keeps /gui out of back-stack per the "dead route out of history" intent
     } else {
       router.replace(to);
     }
