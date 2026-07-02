@@ -163,6 +163,21 @@ export const PAPERS: Paper[] = [
     evidence:
       "Negative result — asserts NO proven security/privacy/soundness/attestation property (the collaborative path is unbuilt: 6 proof/attestation entry points fail closed with NotYetImplemented). Committed structural counts only: 4 re-audit lenses, all RE-OPEN; a 5-clause R-WV witness-validation obligation encoded as a build-time gate; 12 prior single-prover findings under the open external-audit gate. Estate is research-grade and not externally audited; cites the gates sq-qhy4 (external single-prover audit, open) + sq-9hrn (coZK re-audit). No performance claim.",
   },
+  {
+    slug: "fo-km-agent",
+    source: "fo-km-agent.typ",
+    title:
+      "Formal Ontologies for LLM-Agent Knowledge Management: schema.org vs gUFO vs DOLCE",
+    blurb:
+      "A controlled pilot asking whether typing a project knowledge graph under a formal upper ontology helps an LLM agent answer knowledge-management questions — and which ontology. Holding instance data, agent, tasks, and grading fixed across four committed typing overlays in a fully-crossed single run, two overlays beat the untyped baseline — schema.org-as-top by the largest margin, DOLCE modestly — while gUFO fell below it. The overlay ranking is consistent with LLM training-data fluency, stated as a correlational hypothesis with its confounds named (overlay verbosity/closure noise, hand-authored overlay quality), not a demonstrated mechanism. Every accuracy figure is an indicative single-run measurement from one small agent model (Claude Haiku); a multi-run scale-up, to be pre-registered before it runs, is the stated gate before any venue submission.",
+    authors: "Jesse Wright · the sparq project",
+    venue:
+      "ISWC / ESWC research (empirical) after the scale-up (to be pre-registered); K-CAP or an LLM+KG workshop as a pilot",
+    status: "draft",
+    family: "B",
+    evidence:
+      "Indicative-only pilot: deterministically-graded answer accuracy of a non-deterministic LLM agent (Claude Haiku, one fresh instance per condition-task pair) over a committed 16-task corpus fully crossed with 4 committed ontology-overlay conditions (bench/fo-km). The only canonical records are structural corpus counts (16 tasks, 4 conditions); every accuracy/abstention figure is environment=indicative (single run, heuristic gold-key grading, dev work-box) and is structurally barred from headline citation. No latency claim, no significance claim.",
+  },
 ];
 
 export function paperBySlug(slug: string): Paper | undefined {
