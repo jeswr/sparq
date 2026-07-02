@@ -205,6 +205,15 @@ export function Repl() {
   const [workspaceBusy, setWorkspaceBusy] = React.useState(false);
   // Guards the one-shot startup re-hydration so it runs at most once per mount.
   const rehydratedRef = React.useRef(false);
+  // [OPUS-4.8] sq-vw3ax.11 fix — tracks the dataset that the component was asked to load on
+  // mount (either the handoff payload or DEFAULT_DATASET). `ensureStore` reads from this ref
+  // so that clicking "Run query" before `prewarmSparqWhenIdle` fires still loads the correct
+  // dataset (handoff or default) rather than always falling back to DEFAULT_DATASET.
+  const initialDataRef = React.useRef<{
+    text: string;
+    format: string;
+    fromHandoff: boolean;
+  }>({ text: DEFAULT_DATASET.text, format: DEFAULT_DATASET.format, fromHandoff: false });
 
   // Build (or rebuild) the store from RDF text + format. Centralises error handling so
   // every load path (default, picker, upload, URL) reports failures the same way.
@@ -249,6 +258,9 @@ export function Repl() {
       handoff?.data != null
         ? { text: handoff.data, format: handoff.format ?? "turtle", fromHandoff: true }
         : { text: DEFAULT_DATASET.text, format: DEFAULT_DATASET.format, fromHandoff: false };
+    // Persist for the `ensureStore` fallback so a "Run query" before idle warm-up uses the
+    // same dataset (handoff or default) rather than always falling back to DEFAULT_DATASET.
+    initialDataRef.current = initialData;
     const handle = prewarmSparqWhenIdle({
       onReady: () => {
         if (cancelled || storeRef.current) {
@@ -293,13 +305,20 @@ export function Repl() {
 
   // Guarantees a store exists before a query runs — the safety net if pre-warm hasn't
   // finished (or failed): never lets "Run query" no-op or throw on a cold engine.
+  // Uses `initialDataRef` (not DEFAULT_DATASET) so a handoff dataset is respected even when
+  // the user clicks Run before `prewarmSparqWhenIdle` has fired.
   const ensureStore = React.useCallback(async (): Promise<WasmStore> => {
     if (storeRef.current) return storeRef.current;
     setEngine("warming");
-    const store = await buildStore(
-      DEFAULT_DATASET.text,
-      DEFAULT_DATASET.format,
-    );
+    const { text, format, fromHandoff } = initialDataRef.current;
+    const store = await buildStore(text, format);
+    if (fromHandoff) {
+      setActiveBuiltinId(null);
+      setActive({
+        label: "Shared query dataset",
+        description: "Loaded from a shared query link, in your tab.",
+      });
+    }
     setEngine("ready");
     return store;
   }, [buildStore]);
