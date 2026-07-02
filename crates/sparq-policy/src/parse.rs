@@ -18,8 +18,8 @@
 //! [OPUS-4.8]
 
 use crate::model::{
-    Action, Constraint, ConstraintNode, Duty, LogicalConstraint, LogicalOperator, Operator, Policy,
-    Rule, Value, ODRL_NS,
+    Action, ConflictStrategy, Constraint, ConstraintNode, Duty, LogicalConstraint, LogicalOperator,
+    Operator, Policy, Rule, Value, ODRL_NS,
 };
 use oxrdf::{Literal, Term};
 use sparq_core::Graph;
@@ -48,11 +48,34 @@ pub fn parse_policy(graph: &Graph) -> Result<Policy, String> {
     let iri = policy_iri(graph)?;
     let permissions = rules(graph, "permission", true)?;
     let prohibitions = rules(graph, "prohibition", false)?;
+    let conflict = policy_conflict(graph)?;
     Ok(Policy {
         iri,
         permissions,
         prohibitions,
+        conflict,
     })
+}
+
+/// Extract the policy's declared `odrl:conflict` conflict-resolution strategy, if any.
+/// [OPUS-4.8] sq-ihqbl.
+///
+/// The value is classified via [`ConflictStrategy::from_iri`], so an unrecognised term
+/// is preserved as [`ConflictStrategy::Unknown`] (and later *refused*) rather than
+/// silently dropped. When several `odrl:conflict` values are asserted the first in
+/// sorted order is taken — deterministic, and the admissibility gate refuses on *any*
+/// unimplementable value anyway.
+fn policy_conflict(graph: &Graph) -> Result<Option<ConflictStrategy>, String> {
+    let res = sparq_engine::query(
+        graph,
+        &format!("SELECT ?c WHERE {{ ?p <{ODRL_NS}conflict> ?c }} ORDER BY ?c"),
+    )?;
+    Ok(res
+        .rows
+        .into_iter()
+        .next()
+        .and_then(|r| r.into_iter().next().flatten())
+        .map(|t| ConflictStrategy::from_iri(&term_str(&t))))
 }
 
 /// A stable string key identifying a rule/constraint/duty node, used to group

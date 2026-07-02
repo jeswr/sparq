@@ -117,8 +117,8 @@ use oxrdf::{Literal, NamedNode, Term};
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
 use sparq_policy::{
-    evaluate, matched_prohibition, prohibition_status, Operator, Policy, ProhibitionStatus,
-    Request, Rule, Value,
+    conflict_admissibility, evaluate, matched_prohibition, prohibition_status, Operator, Policy,
+    ProhibitionStatus, Request, Rule, Value,
 };
 
 /// The ODRL namespace prefix (`odrl:`), re-exported for caller convenience.
@@ -205,8 +205,16 @@ pub struct BridgeOutcome {
     /// On a deny: the materialized `principal auth:deny<Mode> graph` triple, as
     /// `(principal_iri, deny_predicate_iri, graph_iri)`. [OPUS-4.8] sq-w693.
     pub deny_triple: Option<(String, String, String)>,
+    /// Whether the whole policy was **REFUSED** as unimplementable — the bridge cannot
+    /// faithfully honour its declared `odrl:conflict` strategy, so it materialised
+    /// NOTHING (no grant, no deny). Distinct from a plain deny (`granted == false`): a
+    /// refusal is a loud, fail-closed rejection of the policy itself, not a rule that
+    /// simply did not match. The reason is in [`reasons`](BridgeOutcome::reasons). See
+    /// [`sparq_policy::conflict_admissibility`]. [OPUS-4.8] sq-ihqbl.
+    pub refused: bool,
     /// Human-readable reason a grant/deny was NOT materialized (the ODRL decision's
-    /// caveats, an unmapped action, or a missing party/target). Empty on success.
+    /// caveats, an unmapped action, a missing party/target, or a policy-level refusal).
+    /// Empty on success.
     pub reasons: Vec<String>,
     /// On a STATEFUL `odrl:count` grant ([OPUS-4.8] sq-58mh, via
     /// [`crate::PodStore::materialize_odrl_permission_counted`]): the new consumed count
@@ -225,6 +233,28 @@ impl BridgeOutcome {
     fn denied(reasons: Vec<String>) -> BridgeOutcome {
         BridgeOutcome { reasons, ..BridgeOutcome::default() }
     }
+
+    /// A loud, fail-closed **refusal**: the policy's `odrl:conflict` strategy is one the
+    /// bridge cannot faithfully honour, so nothing is materialised. [OPUS-4.8] sq-ihqbl.
+    fn refused(reason: String) -> BridgeOutcome {
+        BridgeOutcome { refused: true, reasons: vec![reason], ..BridgeOutcome::default() }
+    }
+}
+
+/// Refuse (fail-closed) to materialise `policy` when its declared `odrl:conflict`
+/// conflict-resolution strategy is one the bridge cannot faithfully honour — the guard
+/// every materialise entry point runs FIRST. Returns `Some(refusal outcome)` to
+/// short-circuit (materialising nothing), or `None` when the strategy is admissible
+/// (deny-overrides — the one strategy the bridge implements). [OPUS-4.8] sq-ihqbl.
+///
+/// Silently coercing an unimplementable strategy (e.g. `odrl:perm`) into the bridge's
+/// deny-overrides would mis-apply the policy author's intent — an authorization-
+/// correctness hazard — so the bridge refuses loudly instead. See
+/// [`sparq_policy::conflict_admissibility`] for the exact admissibility rules.
+fn refuse_unimplementable_conflict(policy: &Policy) -> Option<BridgeOutcome> {
+    conflict_admissibility(policy)
+        .err()
+        .map(|reason| BridgeOutcome::refused(format!("REFUSED (odrl:conflict): {}", reason)))
 }
 
 /// Evaluate `policy` against `request` and, **iff** the result is a definite Permit
@@ -289,6 +319,11 @@ pub fn materialize_permission(
     policy: &Policy,
     request: &Request,
 ) -> BridgeOutcome {
+    // 0. Refuse (fail-closed) an unimplementable odrl:conflict strategy BEFORE evaluating —
+    //    a policy the bridge cannot faithfully honour materialises nothing. [OPUS-4.8] sq-ihqbl.
+    if let Some(refusal) = refuse_unimplementable_conflict(policy) {
+        return refusal;
+    }
     // 1. ODRL evaluation — the single source of the allow/deny decision.
     let decision = evaluate(policy, request);
     if !decision.allow {
@@ -393,6 +428,12 @@ pub fn materialize_prohibition(
     policy: &Policy,
     request: &Request,
 ) -> BridgeOutcome {
+    // 0. Refuse (fail-closed) an unimplementable odrl:conflict strategy first — under an
+    //    unimplementable strategy we trust NONE of the policy's rules, not even a deny
+    //    (e.g. `odrl:perm` means the PERMISSION should win). [OPUS-4.8] sq-ihqbl.
+    if let Some(refusal) = refuse_unimplementable_conflict(policy) {
+        return refusal;
+    }
     // 1. Does a prohibition CARVE THIS REQUEST OUT? (Same match test the evaluator's
     //    conflict step uses — not `!decision.allow`, which over-fires on a plain
     //    no-permission deny.)
@@ -459,6 +500,11 @@ pub fn materialize_prohibition(
 /// else the grant mode; `reasons` aggregates the caveats of whichever side(s) did not
 /// materialize.
 pub fn materialize_policy(graph: &mut Graph, policy: &Policy, request: &Request) -> BridgeOutcome {
+    // Fail-closed FIRST on an unimplementable odrl:conflict strategy — materialise
+    // nothing (neither side), rather than silently apply deny-overrides. [OPUS-4.8] sq-ihqbl.
+    if let Some(refusal) = refuse_unimplementable_conflict(policy) {
+        return refusal;
+    }
     let allow = materialize_permission(graph, policy, request);
     let deny = materialize_prohibition(graph, policy, request);
 
@@ -469,6 +515,8 @@ pub fn materialize_policy(graph: &mut Graph, policy: &Policy, request: &Request)
     BridgeOutcome {
         granted: allow.granted,
         prohibited: deny.prohibited,
+        // A refusal on either side (defence-in-depth; the top gate already short-circuits).
+        refused: allow.refused || deny.refused,
         // Under deny-overrides the deny is the operative decision when present.
         mode: deny.mode.or(allow.mode),
         grant_triple: allow.grant_triple,
@@ -809,6 +857,10 @@ pub fn materialize_permission_conditional(
     policy: &Policy,
     request: &Request,
 ) -> BridgeOutcome {
+    // 0. Refuse (fail-closed) an unimplementable odrl:conflict strategy first. [OPUS-4.8] sq-ihqbl.
+    if let Some(refusal) = refuse_unimplementable_conflict(policy) {
+        return refusal;
+    }
     // 1. Action → Mode (shared with the one-shot path). Unmapped → no grant.
     let Some(mode) = action_to_mode(&request.action) else {
         return BridgeOutcome::denied(vec![format!(
@@ -947,6 +999,10 @@ pub fn materialize_prohibition_conditional(
     policy: &Policy,
     request: &Request,
 ) -> BridgeOutcome {
+    // 0. Refuse (fail-closed) an unimplementable odrl:conflict strategy first. [OPUS-4.8] sq-ihqbl.
+    if let Some(refusal) = refuse_unimplementable_conflict(policy) {
+        return refusal;
+    }
     // 1. Action → Mode (shared with the one-shot path). Unmapped → no deny.
     let Some(mode) = action_to_mode(&request.action) else {
         return BridgeOutcome::denied(vec![format!(
@@ -1624,6 +1680,7 @@ fn refresh_policy(graph: &mut Graph, policy: &Policy, request: &Request) -> Brid
     BridgeOutcome {
         granted: allow.granted,
         prohibited: deny.prohibited,
+        refused: allow.refused || deny.refused,
         mode: deny.mode.or(allow.mode),
         grant_triple: allow.grant_triple,
         deny_triple: deny.deny_triple,
@@ -1735,7 +1792,7 @@ mod set_tighter_tests {
 // ============================================================================
 #[cfg(feature = "count-enforcement")]
 pub(crate) mod count {
-    use super::{action_to_mode, append_grant, BridgeOutcome, AUTH_NS};
+    use super::{action_to_mode, append_grant, refuse_unimplementable_conflict, BridgeOutcome, AUTH_NS};
     use sparq_core::Graph;
     use sparq_policy::{
         count_status, evaluate, evaluate_and_exercise, CountStatus, Policy, Request,
@@ -1790,6 +1847,11 @@ pub(crate) mod count {
         request: &Request,
         store: &dyn UsageCounterStore,
     ) -> BridgeOutcome {
+        // 0. Refuse (fail-closed) an unimplementable odrl:conflict strategy BEFORE the
+        //    atomic exercise — a refused policy must consume no budget. [OPUS-4.8] sq-ihqbl.
+        if let Some(refusal) = refuse_unimplementable_conflict(policy) {
+            return refusal;
+        }
         // 1. The atomic, count-aware decision — the single source of allow/deny AND the
         //    one place a unit is consumed. A base deny / exhausted / store-unavailable
         //    returns allow == false and consumes nothing.

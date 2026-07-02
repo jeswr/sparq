@@ -39,7 +39,7 @@
 //!   (that would be the fail-OPEN failure mode: claiming an ask is covered when it
 //!   is not).
 
-use crate::model::{Action, Constraint, Operator, Policy, Rule, Value};
+use crate::model::{Action, ConflictStrategy, Constraint, Operator, Policy, Rule, Value};
 
 /// How strongly two rules overlap — the three-valued result of the conflict test.
 /// [OPUS-4.8] sq-zabv.
@@ -136,6 +136,81 @@ pub fn detect_conflicts(policy: &Policy) -> Vec<Conflict> {
         }
     }
     out
+}
+
+/// Decide whether sparq can faithfully honour `policy`'s declared `odrl:conflict`
+/// conflict-resolution strategy — the fail-closed authorization guard the bridge
+/// consults before it materialises **any** grant or deny. [OPUS-4.8] sq-ihqbl.
+///
+/// The bridge implements exactly one ODRL conflict strategy — `odrl:prohibit`
+/// (deny-overrides): the session layer subtracts `∪ deny` from `∪ allow`, so a matching
+/// prohibition already beats any permission. Any *other* declared strategy is one the
+/// bridge cannot represent, so this returns `Err(reason)` — a **loud refusal** the
+/// caller surfaces and fails closed on, instead of silently coercing the policy into
+/// deny-overrides (which would mis-apply the author's intent — an authorization-
+/// correctness hazard):
+///
+/// * [`ConflictStrategy::Perm`] (`odrl:perm`, permissions override prohibitions) —
+///   unrepresentable by allow-minus-deny subtraction (a deny always wins). **Always
+///   refused.**
+/// * [`ConflictStrategy::Invalid`] (`odrl:invalid`, the ODRL default) — a conflicting
+///   policy is void as a whole, which the bridge cannot represent. Refused **iff**
+///   [`detect_conflicts`] finds a permission/prohibition conflict; an `Invalid` policy
+///   with no detected conflict has nothing to void and is admissible.
+/// * [`ConflictStrategy::Unknown`] — an `odrl:conflict` value that is not a recognised
+///   ODRL `ConflictTerm`. **Always refused** (the engine has no semantics for it).
+///
+/// Admissible (`Ok`): a policy that declares [`ConflictStrategy::Prohibit`], or declares
+/// no `odrl:conflict` at all (the bridge's operative default is deny-overrides — the one
+/// strategy it implements). An unset default is treated as `prohibit`, **not** the ODRL
+/// spec default of `invalid`: fully honouring `invalid` for every conflicting-yet-
+/// undeclared policy would refuse the bridge's core deny-overrides use case, a larger
+/// breaking change tracked as a follow-up. See the crate README for the honest boundary.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_policy::{conflict_admissibility, parse_policy_str};
+/// // `odrl:conflict odrl:perm` cannot be honoured → a loud refusal.
+/// let p = parse_policy_str(r#"
+/// @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+/// <urn:pol/p> a odrl:Set ; odrl:conflict odrl:perm ;
+///   odrl:permission  [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+///   odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] .
+/// "#, "turtle").unwrap();
+/// assert!(conflict_admissibility(&p).is_err());
+/// ```
+pub fn conflict_admissibility(policy: &Policy) -> Result<(), String> {
+    match &policy.conflict {
+        // Deny-overrides is exactly what the bridge implements; unset defaults to it.
+        None | Some(ConflictStrategy::Prohibit) => Ok(()),
+        Some(ConflictStrategy::Perm) => Err(
+            "policy declares `odrl:conflict odrl:perm` (permissions override prohibitions), \
+             which the bridge cannot represent (its `∪ allow ∖ ∪ deny` enforcement always \
+             lets a deny win); refusing to materialise rather than silently enforce \
+             deny-overrides"
+                .to_owned(),
+        ),
+        Some(ConflictStrategy::Invalid) => {
+            let conflicts = detect_conflicts(policy);
+            if conflicts.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "policy declares `odrl:conflict odrl:invalid` (a conflicting policy is void \
+                     as a whole) and has {} detected permission/prohibition conflict(s); the \
+                     bridge cannot void a whole policy, so refusing to materialise any rule \
+                     rather than honour its uncontested rules",
+                    conflicts.len()
+                ))
+            }
+        }
+        Some(ConflictStrategy::Unknown(iri)) => Err(format!(
+            "policy declares an unsupported `odrl:conflict` strategy <{}>; the engine has no \
+             semantics for it, so refusing to materialise rather than silently ignore it",
+            iri
+        )),
+    }
 }
 
 /// Does `outer` permit everything `inner` permits? See the module-level docs for

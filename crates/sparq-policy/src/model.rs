@@ -33,6 +33,59 @@ pub struct Policy {
     pub permissions: Vec<Rule>,
     /// `odrl:prohibition` rules — each, if matched, forbids access (overrides).
     pub prohibitions: Vec<Rule>,
+    /// The declared `odrl:conflict` conflict-resolution [`ConflictStrategy`], if the
+    /// policy names one. `None` means the policy left it unset. [OPUS-4.8] sq-ihqbl.
+    ///
+    /// **The bridge implements exactly one strategy — `odrl:prohibit` (deny-overrides).**
+    /// A strategy this engine cannot faithfully honour (`odrl:perm`, an `odrl:invalid`
+    /// policy that has a detected conflict, or an unknown value) is *refused* rather than
+    /// silently mis-applied — see [`crate::conflict_admissibility`].
+    pub conflict: Option<ConflictStrategy>,
+}
+
+/// The ODRL `odrl:conflict` conflict-resolution strategy (an `odrl:ConflictTerm`)
+/// declared on a [`Policy`] to resolve a permission/prohibition conflict.
+/// [OPUS-4.8] sq-ihqbl.
+///
+/// Per the [ODRL 2.2 Information Model](https://www.w3.org/TR/odrl-model/#conflict) the
+/// property takes one of three terms; sparq's bridge implements only `odrl:prohibit`
+/// (deny-overrides), so the others are recorded here and *refused* at materialisation
+/// time (see [`crate::conflict_admissibility`]) rather than silently coerced — silently
+/// mishandling a conflict strategy is an authorization-correctness hazard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictStrategy {
+    /// `odrl:prohibit` — the Prohibitions override the Permissions (deny-overrides).
+    /// The one strategy the bridge implements: enforcement subtracts `∪ deny` from
+    /// `∪ allow`, so a matching prohibition already beats any permission.
+    Prohibit,
+    /// `odrl:perm` — the Permissions override the Prohibitions. **Unrepresentable** by
+    /// the bridge's allow-minus-deny subtraction (a deny always wins), so a policy
+    /// declaring it is refused rather than silently enforced as deny-overrides.
+    Perm,
+    /// `odrl:invalid` — a conflicting policy is void *as a whole* (the ODRL default when
+    /// unset). The bridge cannot represent "void the whole policy", so an `Invalid`
+    /// policy with a detected permission/prohibition conflict is refused; one with no
+    /// detected conflict is admissible (nothing to void).
+    Invalid,
+    /// An `odrl:conflict` value that is not one of the three ODRL `ConflictTerm`s — an
+    /// unknown/unsupported strategy IRI. Always refused (fail-closed): the engine has no
+    /// semantics for it, so it must not be silently ignored.
+    Unknown(String),
+}
+
+impl ConflictStrategy {
+    /// Parse an `odrl:conflict` value IRI into a [`ConflictStrategy`]. The three ODRL
+    /// `ConflictTerm`s (`odrl:prohibit`/`odrl:perm`/`odrl:invalid`) map to their variant;
+    /// anything else becomes [`ConflictStrategy::Unknown`] (carrying the raw IRI) so an
+    /// unrecognised strategy is refused, never silently dropped. [OPUS-4.8] sq-ihqbl.
+    pub fn from_iri(iri: &str) -> ConflictStrategy {
+        match iri.strip_prefix(ODRL_NS) {
+            Some("prohibit") => ConflictStrategy::Prohibit,
+            Some("perm") => ConflictStrategy::Perm,
+            Some("invalid") => ConflictStrategy::Invalid,
+            _ => ConflictStrategy::Unknown(iri.to_owned()),
+        }
+    }
 }
 
 /// A deontic rule (a Permission or a Prohibition). They share the same shape;
