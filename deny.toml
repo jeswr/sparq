@@ -20,10 +20,11 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # registry — a yanked crate is an unbuildable / pulled release.
 yanked = "deny"
 # Advisory IDs to tolerate — each MUST carry a justification. The policy here is
-# strict on what matters: a real VULNERABILITY or a YANKED crate FAILS the gate.
-# Exactly TWO advisories are tolerated (below), BOTH the same root cause — a
-# quick-xml < 0.41 DoS still present ONLY in a transitive copy; the gate re-flags
-# anything else.
+# strict on what matters: a YANKED crate ALWAYS fails the gate, and every
+# vulnerability fails UNLESS it is one of the explicitly justified `ignore` ids
+# listed below. Exactly TWO advisories are tolerated (below), BOTH the same root
+# cause — a quick-xml < 0.41 DoS still present ONLY in a transitive copy; the gate
+# re-flags anything else (any new advisory, or a yanked crate).
 #
 # RUSTSEC-2026-0194 (quick-xml < 0.41: quadratic run time checking a start tag for
 # duplicate attribute names — a CPU/availability DoS, NOT memory-unsafety) and
