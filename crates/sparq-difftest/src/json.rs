@@ -57,13 +57,25 @@ pub fn parse_results_json(s: &str) -> Result<QueryResults, ParseError> {
         };
     }
 
-    // SELECT: head.vars + results.bindings.
-    let vars: Vec<String> = obj
+    // SELECT: head.vars + results.bindings. [OPUS-4.8] sq-qcnn.4 — parse `head.vars`
+    // STRICTLY (reject, do not silently default): a SELECT Results-JSON must carry
+    // `head.vars` as an array of strings (SPARQL 1.1 §Query Results JSON). Silently
+    // defaulting a missing/ill-typed header to `[]`, or dropping a non-string element,
+    // would let a broken oracle output be compared as if it had no projected vars —
+    // exactly the masking of invalid oracle output this differential harness must reject.
+    let vars_arr = obj
         .get("head")
         .and_then(|h| h.get("vars"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-        .unwrap_or_default();
+        .ok_or_else(|| ParseError("missing head.vars (and no boolean)".into()))?
+        .as_array()
+        .ok_or_else(|| ParseError("head.vars is not an array".into()))?;
+    let mut vars: Vec<String> = Vec::with_capacity(vars_arr.len());
+    for v in vars_arr {
+        let name = v
+            .as_str()
+            .ok_or_else(|| ParseError("head.vars element is not a string".into()))?;
+        vars.push(name.to_string());
+    }
 
     let bindings = obj
         .get("results")
@@ -301,5 +313,28 @@ mod tests {
           } ] }
         }"#;
         assert!(parse_results_json(bnode_predicate).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_head_vars() {
+        // [OPUS-4.8] sq-qcnn.4 — a SELECT result (no top-level "boolean") must carry a
+        // well-formed `head.vars`: rejecting malformed headers rather than defaulting to `[]`
+        // keeps a broken oracle output from being compared as if it had no projected vars.
+        // (a) head.vars entirely absent.
+        assert!(parse_results_json(r#"{"head":{},"results":{"bindings":[]}}"#).is_err());
+        // (b) head.vars is not an array.
+        assert!(parse_results_json(r#"{"head":{"vars":"x"},"results":{"bindings":[]}}"#).is_err());
+        // (c) a non-string element must be rejected, not silently dropped.
+        assert!(
+            parse_results_json(r#"{"head":{"vars":["x",5]},"results":{"bindings":[]}}"#).is_err()
+        );
+        // …but an empty projection (valid `SELECT *` over a var-less pattern) is accepted, and
+        // a well-formed all-string header round-trips its variable order.
+        let empty = parse_results_json(r#"{"head":{"vars":[]},"results":{"bindings":[]}}"#).unwrap();
+        assert!(matches!(empty, QueryResults::Solutions { ref vars, .. } if vars.is_empty()));
+        let two = parse_results_json(r#"{"head":{"vars":["a","b"]},"results":{"bindings":[]}}"#)
+            .unwrap();
+        let QueryResults::Solutions { vars, .. } = two else { panic!() };
+        assert_eq!(vars, vec!["a", "b"]);
     }
 }
