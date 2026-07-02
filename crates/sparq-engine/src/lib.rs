@@ -88,6 +88,15 @@ pub use construct::{
 pub mod txn;
 #[cfg(feature = "cs-planner")]
 pub use cs::{with_cs_table, CsSet, CsTable};
+// [OPUS-4.8] (sq-iywur) Opt-in DPccp dynamic-programming join-order enumerator — gated
+// on the non-default `dp-planner` feature. `with_dp_planner`(`_budget`) installs it per
+// thread (like `with_cs_table`); the default planner stays greedy GOO. Order-only: it
+// changes join order, never the query answer. When off, zero DP code compiles and the
+// default native + wasm builds are byte-identical.
+#[cfg(feature = "dp-planner")]
+pub mod dp;
+#[cfg(feature = "dp-planner")]
+pub use dp::{with_dp_planner, with_dp_planner_budget};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
 // [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN re-exports — gated on `explain-json`.
 #[cfg(feature = "explain-json")]
