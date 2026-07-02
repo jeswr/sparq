@@ -20,14 +20,18 @@ use std::borrow::Cow;
 /// the per-chunk triple `Vec` (here) and the per-chunk partial `Dict` (in `parse_block`) before
 /// filling them — killing the reallocation/rehash churn the ingest profile flagged (~5% of the
 /// parallel load). It is a pure capacity HINT: `bytes / AVG_NT_LINE_BYTES` estimates the triple
-/// (and, as an upper-ish bound, the distinct-term) count of a chunk, but it NEVER changes the
-/// parsed triples, their order, or the interned term/id bijection (pinned by
-/// `presizing_is_pure_capacity_hint`). The estimate is self-bounded by the real chunk length —
-/// unlike HDT's independently-declared `num_strings` (`decode.rs`), a chunk of `B` bytes can hold
-/// at most `B / AVG_NT_LINE_BYTES` triples — so no HDT-style clamp against an untrusted count is
-/// needed. `64` matches the mean line of the deterministic CI corpus (`sparq-bench dump`) and
-/// stays at or below typical real N-Triples lines, so the reservation biases toward a slight
-/// UNDER-estimate (a few absorbed doublings) rather than transient over-allocation.
+/// (and, loosely, the distinct-term) count of a chunk, but it NEVER changes the parsed triples,
+/// their order, or the interned term/id bijection (pinned by
+/// `parse_chunk_dict_capacity_is_pure_hint` here and `presizing_is_pure_capacity_hint` for
+/// `parse_block`). Crucially, the reservation is derived ENTIRELY from
+/// the real chunk length: it is `bytes.len() / AVG_NT_LINE_BYTES`, hence never exceeds
+/// `bytes.len()` and cannot grow independently of the input. So — unlike HDT's independently
+/// declared `num_strings` (`decode.rs`), which an attacker could set huge behind a tiny file — it
+/// needs no HDT-style clamp against an untrusted count. `64` tracks the mean line of the
+/// deterministic CI corpus (`sparq-bench dump`); it is NOT a lower bound on line length, so
+/// shorter lines make it a slight under-reservation and longer ones a slight over-reservation —
+/// either way the miss is absorbed by ordinary `Vec`/`Dict` growth, since this only reserves
+/// capacity and never bounds the parsed count.
 pub(crate) const AVG_NT_LINE_BYTES: usize = 64;
 
 /// [OPUS-4.8] (sq-53s1, ASVS V5.5.2) Maximum nesting depth of RDF 1.2 triple terms
@@ -901,12 +905,15 @@ mod tests {
         );
     }
 
-    /// [OPUS-4.8] (sq-7d3dj.2) The out-`Vec` pre-sizing is a PURE capacity hint: parsing the same
-    /// bytes into a `Dict::new()` vs a `Dict::with_capacity(BIG)` must yield byte-identical
-    /// triples AND an identical term↔id bijection (same distinct-term count, same `term(id)` for
-    /// every id) — capacity changes reservation, never the parsed result or id-assignment order.
+    /// [OPUS-4.8] (sq-7d3dj.2) The `Dict` capacity is a PURE hint: parsing the same bytes into a
+    /// `Dict::new()` vs a `Dict::with_capacity(BIG)` must yield byte-identical triples AND an
+    /// identical term↔id bijection (same distinct-term count, same `term(id)` for every id) —
+    /// the reserved capacity changes the allocation, never the parsed result or id-assignment
+    /// order. (The out-`Vec` reservation is a fixed `bytes.len() / AVG_NT_LINE_BYTES` and is not
+    /// varied here; its own purity — being derived solely from the input length — is argued at
+    /// `AVG_NT_LINE_BYTES`.)
     #[test]
-    fn parse_chunk_presize_is_pure_capacity_hint() {
+    fn parse_chunk_dict_capacity_is_pure_hint() {
         // Repeated predicate + type IRIs, distinct subjects/objects, a typed literal, a lang
         // literal, a blank node, and a nested triple term — a mix that grows both the term arena
         // and the lookup table across many interns.
