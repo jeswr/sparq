@@ -17,8 +17,12 @@ use std::fmt;
 /// A JSON-LD 1.1 error code. The [`JsonLdErrorCode::as_str`] form is the exact string the
 /// specification defines, so it can be compared directly against a suite manifest's
 /// `expectErrorCode`.
+// [OPUS-4.8] Deliberately a *closed* enum (no `#[non_exhaustive]`): the JSON-LD 1.1 error
+// registry is a fixed, spec-defined set, and closing it lets the conformance harness match
+// `expectErrorCode` exhaustively so an unhandled or renamed spec code is a compile-time
+// failure rather than a silent wrong-code pass (design record §4). A spec erratum adding a
+// code is intentionally a breaking change here — it must be handled everywhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum JsonLdErrorCode {
     /// `colliding keywords`
     CollidingKeywords,

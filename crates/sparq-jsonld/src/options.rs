@@ -89,8 +89,10 @@ pub struct JsonLdOptions {
     pub base: Option<String>,
     /// `processingMode` — `json-ld-1.1` by default.
     pub processing_mode: ProcessingMode,
-    /// `expandContext` — a context used to initialise the active context (an IRI string
-    /// carried as a [`Json::Str`], or an inline context object).
+    /// `expandContext` — a context used to initialise the active context. Per the JSON-LD
+    /// API this may be an IRI string (carried as a [`Json::Str`]), an inline context object
+    /// (a [`Json::Obj`]), or an array of any of these (a [`Json::Arr`]), matching the
+    /// context forms accepted by the Context Processing algorithm.
     pub expand_context: Option<Json>,
     /// `rdfDirection` — how base direction is serialised to RDF.
     pub rdf_direction: RdfDirection,
