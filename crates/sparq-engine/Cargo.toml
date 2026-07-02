@@ -63,7 +63,13 @@ service = ["dep:serde_json", "dep:ureq", "dep:quick-xml"]
 # nothing — the writers reuse the existing oxrdf term/IRI/literal infrastructure and
 # pull in ZERO new dependencies (oxrdf is already a direct dep), so the default build's
 # dependency graph is byte-for-byte unchanged when this is off.
-serialize-rdf = []
+# [OPUS-4.8] sq-oy1f.23: the hand-rolled JSON-LD writer's `Json` AST now lives in the new
+# `sparq-jsonld` crate (Phase A of the document-level JSON-LD 1.1 pipeline). The writer
+# re-exports it (public API preserved, byte-identical output), so this feature — and only
+# this feature — pulls the (zero-dependency) `sparq-jsonld` crate in. The DEFAULT build has
+# `serialize-rdf` OFF, so it never compiles `sparq-jsonld`: the lean default + wasm bundles
+# are unchanged.
+serialize-rdf = ["dep:sparq-jsonld"]
 # [OPUS-4.8] (sq-townn, survey §A7) Streaming Turtle / TriG serialisation. The buffered
 # `write_turtle` / `write_trig` build a FULL in-memory `String` for the whole graph, so a
 # CONSTRUCT/DESCRIBE over a large graph holds BOTH the materialised triples AND the fully
@@ -103,6 +109,18 @@ window-functions = []
 # Pulls in ZERO new dependencies (sparq-core is already a direct dep) and contains no
 # `unsafe` — the kernels are plain index loops the compiler auto-vectorises.
 vectorized = []
+# [OPUS-4.8] (sq-iywur) Opt-in DP join-order enumerator (`dp` module): a connected-
+# subgraph-complement-pair (DPccp; Moerkotte & Neumann, VLDB 2006) dynamic program that
+# finds a Cout-optimal BUSHY join tree for a BGP, with a greedy-GOO fallback ABOVE a
+# connected-subgraph-count budget (and on disconnected BGPs) to bound planning blow-up.
+# `with_dp_planner` / `with_dp_planner_budget` install it per-thread, exactly like
+# `with_cs_table`. The default planner stays greedy GOO. ORDER-ONLY: a BGP is a
+# commutative/associative natural join, so every tree yields the SAME bindings — the DP
+# only changes join order, never the answer (asserted by tests/dp_planner_differential.rs
+# in BOTH feature states). OPT-IN and OFF by default: when off, zero DP code compiles and
+# the default native + wasm builds are byte-identical. Pulls in ZERO new dependencies
+# (rustc-hash is already a direct dep) and contains no `unsafe`.
+dp-planner = []
 # [OPUS-4.8] (sq-a9cn) Materialised-view / query-result cache: a bounded, version-aware
 # LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed by `(parsed
 # query algebra, caller graph-version)`. Vendor-parity operational-perf feature for
@@ -200,6 +218,16 @@ semijoin-bitmap = []
 # baked-in number.
 yannakakis = ["semijoin-bitmap"]
 
+# [OPUS-4.8] (sq-pntvh.1) M4 Phase 1 native FILTER/aggregate micro-bench over a synthetic
+# numeric column — the perf baseline every later vectorized (M4) phase measures against.
+# `required-features` gates it behind `vectorized`, so the DEFAULT build (and
+# `cargo clippy --all-targets` with the feature off) never compiles it: byte-identical
+# feature-OFF bundle preserved. Emits `metric_us` lines (the repo's bench idiom); registered
+# in bench/benchmarks.toml as `vectorized-eval-micro` (featured = false).
+[[example]]
+name = "bench_vectorized"
+required-features = ["vectorized"]
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
@@ -225,6 +253,11 @@ oxiri = "0.2"
 rustc-hash.workspace = true
 smallvec.workspace = true
 rayon = { workspace = true, optional = true }
+# [OPUS-4.8] sq-oy1f.23: the JSON-LD writer's `Json` AST moved here (Phase A of the
+# document-level JSON-LD 1.1 pipeline). OPTIONAL + pulled in ONLY by `serialize-rdf`
+# (see the feature note above), so the default build never compiles it. Zero-dependency +
+# `forbid(unsafe_code)`, so it adds no dependency to the writer's dep-free contract.
+sparq-jsonld = { path = "../sparq-jsonld", version = "0.1.0", optional = true, default-features = false }
 regex = { version = "1", optional = true }
 md-5 = { version = "0.11", optional = true }
 sha1 = { version = "0.11", optional = true }

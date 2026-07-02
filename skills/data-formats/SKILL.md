@@ -377,6 +377,20 @@ let doc = graph_to_jsonld_compact(&g, &ctx); // term defs + @vocab + @type:@id c
 Exposed on the wasm `Store` as `serializeCompact(context, pretty, indent?)` (the JSON-LD
 SKILL note) and on the CLI as the `jsonld-compact[-pretty]` `dump` out-format (sq-oy1f.5).
 
+**Document-level JSON-LD 1.1 pipeline — the `sparq-jsonld` crate (epic sq-oy1f, in progress).**
+The RDF-first writers above have a hard conformance ceiling (scoped/typed contexts, `@nest`,
+`@index` maps, negative tests — structures an RDF projection has already erased). The full
+document-level pipeline (Context Processing, Expansion, Flattening, Compaction, Framing,
+from/to-RDF) is being built in the new **opt-in, dependency-free `sparq-jsonld` crate**
+(`crates/sparq-jsonld`, design record `research/jsonld-1.1-design.md`). Phase A (sq-oy1f.23)
+scaffolds it: the writer's `Json` AST moved out of `sparq-engine` into `sparq_jsonld::Json`
+(public API preserved — `sparq_engine::serialize::JsonLdValue` re-exports it, byte-identical
+output), alongside the full `JsonLdErrorCode` registry, `JsonLdOptions`, and a **deny-by-default**
+`DocumentLoader` (the default `NoopLoader` refuses every remote load — no ambient network). The
+crate is `serialize-rdf`-gated on the engine side, so the lean default + wasm builds are unchanged.
+The algorithms land in the follow-on beads (sq-oy1f.24+); until then the writer above is the JSON-LD
+emit path.
+
 **W3C JSON-LD 1.1 Framing (caller frame).** `graph_to_jsonld_framed(&g, &frame)` (or the
 slice-level `write_jsonld_framed(&named_graphs, &frame)`) reshapes the graph into a deterministic
 tree matching a caller **frame** document, then compacts it against the frame's `@context`. Build

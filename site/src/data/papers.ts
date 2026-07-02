@@ -69,34 +69,6 @@ export const PAPERS: Paper[] = [
       "Deterministic only: recall floors (0.95 unfiltered, 0.90 filtered — sanity checks, labelled as such) + asserted pre-filter ≡ post-filter equivalence (single / transitive / cyclic; exact path unconditional, approximate path broad-mask) + the cost-model crossover constant. No latency/throughput claim; the performance evaluation is pre-registered but unexecuted (blocked on the canonical runner).",
   },
   {
-    slug: "honest-benchmarking",
-    source: "honest-benchmarking.typ",
-    title:
-      "Honest Same-Box Benchmarking for RDF Engines: Differential-Correctness-Gated, Hardware-Labelled, Negative-Results-Inclusive",
-    blurb:
-      "A benchmarking methodology: correctness gates timing, every number is environment-labelled, canonical evidence is separated from indicative work-box measurement by a build-time gate, and negative results are first-class.",
-    authors: "Jesse Wright · the sparq project",
-    venue: "Reproducibility / E&A track (methods note)",
-    status: "publishable-now",
-    family: "A",
-    evidence:
-      "Methodology contribution — reports no performance number as evidence; demonstrates the canonical/indicative honesty gate this factory enforces.",
-  },
-  {
-    slug: "geosparql-optin-crate",
-    source: "geosparql-optin-crate.typ",
-    title:
-      "A Conformant, Opt-In GeoSPARQL Layer for a Dictionary-Id RDF Engine, Backed by a Cross-Family Conformance Ratchet",
-    blurb:
-      "An opt-in GeoSPARQL 1.0/1.1 layer that imposes no cost on a core or wasm build that never uses it, reusing the host engine's extension-function registry and generic entailment. The honest evidence is conformance, not speed: an OGC topology floor that is one row of a single cross-family, CI-enforced, drift-guarded ratchet.",
-    authors: "Jesse Wright · the sparq project",
-    venue: "ISWC resources / in-use track (or demo)",
-    status: "publishable-now",
-    family: "B",
-    evidence:
-      "Deterministic conformance ratchet floors: OGC GeoSPARQL topology (119) as one row of a 7-suite cross-family scoreboard totalling 3442, each floor CI-enforced, monotone, and guarded against drift. No latency claim; spatial algorithms are standard prior art.",
-  },
-  {
     slug: "solid-acl-conformance",
     source: "solid-acl-conformance.typ",
     title:
@@ -136,20 +108,6 @@ export const PAPERS: Paper[] = [
       "Honestly partitioned. Direct evidence (all of it, today): deterministic, test-proven answer-safety invariants of the bridge (prohibit-strategy set subtraction correct through unchanged enforcement; asymmetric fail-closed deny retraction; recipient constraints persist as re-checked conditional grants with one-shot fallback; atomic stateful count enforcement). Context — NOT bridge evidence: the CI-enforced, drift-guarded Solid WAC (12) and ACP (12) decision-parity ratchet floors of the pre-existing target layer. PENDING — the blocking gap to submission: a fully specified (not pre-registered: no registry deposit exists) decision-agreement study vs the ODRE enforcement engines and an OAC-style matcher over the cited systems' own policy corpora. No latency claim; no novel-semantics claim; no in-use claim; the federated/ZK disclosure half is explicitly deferred (research-grade crypto, not externally audited; sq-qhy4).",
   },
   {
-    slug: "unsafe-attestation",
-    source: "unsafe-attestation.typ",
-    title:
-      "Auditing the unsafe: A Confined, Registered, CI-Ratcheted unsafe-Rust Surface as a Machine-Checkable Memory-Safety Attestation for an RDF Engine",
-    blurb:
-      "How an RDF engine makes its unsafe-Rust surface auditable rather than trusted: confined to 5 of 35 crates by compile-time forbiddance, counted at 59 sites behind a required CI ratchet that gates any growth, justified per-site in a lint-pinned register, and bounded by a layered Miri / corruption-oracle / fuzz / sanitizer coverage matrix. The honest evidence is coverage and discipline, not a proof of soundness: no claim that the engine is free of undefined behaviour, and the open soundness gaps on the untrusted-input mmap boundary are named, not hidden.",
-    authors: "Jesse Wright · the sparq project",
-    venue: "Security-engineering / resources / in-use track (or workshop)",
-    status: "publishable-now",
-    family: "A",
-    evidence:
-      "Deterministic, committed, CI-enforced integers: an unsafe-site count ratchet (59 sites, ceiling-gated), a crate confinement partition (30 forbid + 5 unsafe-bearing = 35), and a 100%-coverage per-site register, plus a Miri/fuzz/ASan coverage matrix. No latency claim and explicitly NOT a proof of memory safety; open soundness gaps on the untrusted-input boundary are stated.",
-  },
-  {
     slug: "cozk-witness-validation",
     source: "cozk-witness-validation.typ",
     title:
@@ -177,6 +135,24 @@ export const PAPERS: Paper[] = [
     family: "B",
     evidence:
       "Indicative-only pilot: deterministically-graded answer accuracy of a non-deterministic LLM agent (Claude Haiku, one fresh instance per condition-task pair) over a committed 16-task corpus fully crossed with 4 committed ontology-overlay conditions (bench/fo-km). The only canonical records are structural corpus counts (16 tasks, 4 conditions); every accuracy/abstention figure is environment=indicative (single run, heuristic gold-key grading, dev work-box) and is structurally barred from headline citation. No latency claim, no significance claim.",
+  },
+  {
+    // [FABLE-5] sq-gum8.4 — Paper C-SoK: the systematization paper over the verifiable/
+    // confidential federated-SPARQL estate (zkSPARQL single-prover lane + MPC-SPARQL lane +
+    // attested-input binding). C-family, so wip-arxiv and it cites the open external-audit
+    // gate sq-qhy4 throughout; it asserts NO security/privacy/soundness/attestation property.
+    slug: "verifiable-fed-sparql",
+    source: "verifiable-fed-sparql.typ",
+    title: "SoK: Systematizing Verifiable and Private Federated SPARQL",
+    blurb:
+      "A systematization of verifiable and confidential federated SPARQL under a stated method (inclusion criteria plus a dated search protocol) along three independent axes — cryptographic mechanism (single-prover ZK over committed graphs / MPC evaluation over secret-shared graphs / attested-input binding), prover topology (one holder vs N mutually distrusting holders), and adversary model (semi-honest / covert / malicious, crossed with output guarantees under Cleve's bound) — axes assembled from established MPC and collaborative-proof taxonomy, applied jointly to federated SPARQL. Contributes an operator-level capability matrix cross-referenced to the published systems, exposing the disclosed/hidden two-regime split and the disclosed-key-join cost advantage global IRIs give RDF — analyzed together with its privacy price (the cleartext join disclosing exactly the cross-source linkage that source-unlinkability protects); a catalogue of settled negatives (Cleve, the post-quantum boundary of the signature and SNARK layers — with the hash-based Poseidon2 commitment binding stated as PQ-resilient, blank-node cross-graph joins, in-circuit entailment) distinguished from merely vacant cells; and a method-bounded statement of the open frontier — verifying issuer signatures over a secret-shared witness inside one source-unlinkable collaborative proof, a composition no publication in the searched peer-reviewed venues or preprint archives instantiates as of the stated survey dates. Anchored in one research-grade estate whose capability tiers are self-reported documentary provenance (a stated independence limitation): single-prover layer not externally audited (sq-qhy4, open), MPC layer semi-honest by default, collaborative-proof path unbuilt and fail-closed. No security property is claimed and no wall-clock number appears.",
+    authors: "Jesse Wright · the sparq project",
+    venue:
+      "PoPETs / IEEE S&P SoK track — WIP; C-family, so arXiv-only until the external audit gate (sq-qhy4) and the frontier's publication-absence claims are re-verified at submission time",
+    status: "wip-arxiv",
+    family: "C",
+    evidence:
+      "Systematization — asserts NO proven security/privacy/soundness/attestation property and cites no wall-clock measurement. The only build-injected counts are the deterministic structural facts already gated as canonical for the C-family estate (fail-closed collaborative entry points, re-audit lenses all RE-OPEN, witness-validation obligation clauses, prior single-prover audit findings under the open gate sq-qhy4). Capability tiers are documentary (spec corpus + reconciled capability review), stated as such in the paper's limitations.",
   },
 ];
 

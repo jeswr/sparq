@@ -24,6 +24,14 @@
       "timeout": 0,
       "unviable": 8
     },
+    "sparq-introspect": {
+      "caught": 179,
+      "caught_pct": 75.37,
+      "ceiling": 68,
+      "measured_surviving": 66,
+      "timeout": 23,
+      "unviable": 5
+    },
     "sparq-parse": {
       "caught": 25,
       "caught_pct": 72.09,
@@ -31,6 +39,14 @@
       "measured_surviving": 12,
       "timeout": 6,
       "unviable": 0
+    },
+    "sparq-prov": {
+      "caught": 155,
+      "caught_pct": 70.09,
+      "ceiling": 69,
+      "measured_surviving": 67,
+      "timeout": 2,
+      "unviable": 22
     },
     "sparq-substrate": {
       "caught": 183,

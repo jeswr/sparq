@@ -217,3 +217,23 @@
   crate: "sparq-engine"
   features: "streaming-serialization"
   test: true
+
+# [OPUS-4.8] sq-iywur: opt-in DPccp dynamic-programming join-order enumerator. The whole
+# `dp` module (`src/dp.rs`, `pub mod dp` in lib.rs — the DPccp csg-cmp-pair enumerator, the
+# `with_dp_planner`/`with_dp_planner_budget` per-thread install, `QueryGraph`/`JoinTree`)
+# with its 7 in-src unit tests (`dp::tests::*`, incl. the 4000-random-graph brute-force
+# optimality check) AND the executor bridge (`eval_bgp_dp`/`eval_join_tree` + the planner
+# hook in `eval_bgp_binary`) are ALL `#[cfg(feature = "dp-planner")]`, so the default build
+# (and ci.yml's `--workspace --all-targets` archive, which passes NO `--features`) compiled
+# them EMPTY and ran ZERO of the 7 — the silent "compiled EMPTY ... tests never ran" gap
+# this lane closes. The end-to-end result-equivalence suite `tests/dp_planner_differential.rs`
+# is INTENTIONALLY NOT feature-gated (it runs in BOTH states to prove DP == greedy), but the
+# in-src unit tests are gated and run ZERO times by default. No new dep (`dp-planner = []`,
+# only the already-direct rustc-hash; no `unsafe`) and no `not(feature=…)` divergence (the
+# off path is byte-identical), so a single isolated leg covers it; verified `cargo test -p
+# sparq-engine --features dp-planner` runs the 7 unit + 9 differential tests and `cargo
+# clippy -p sparq-engine --all-targets --features dp-planner -- -D warnings` is clean.
+- name: "sparq-engine (dp-planner)"
+  crate: "sparq-engine"
+  features: "dp-planner"
+  test: true

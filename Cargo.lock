@@ -3691,6 +3691,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-introspect",
+ "sparq-jsonld",
  "sparq-substrate",
  "ureq",
  "uuid",
@@ -3786,6 +3787,10 @@ dependencies = [
  "sparq-core",
  "wasm-bindgen-test",
 ]
+
+[[package]]
+name = "sparq-jsonld"
+version = "0.1.0"
 
 [[package]]
 name = "sparq-kb"

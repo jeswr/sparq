@@ -211,6 +211,19 @@ as advisory-only, and add a cross-scan aliasing regression test asserting the cu
 salt-separation backstop. Option (i) restores the obligation's intended teeth and removes the
 namespace ambiguity.
 
+> **RESOLVED (sq-en5dx, Option (i)) `[OPUS-4.8]`.** `prefilter_manifest_structure` now feeds the
+> Q6 gate a GLOBAL-namespace attribution vector via `global_attributions` (verifier.rs), which
+> keys each pattern's attribution set on the answering scan's committed-graph IDENTITY
+> (`field_to_be_bytes_32(commitments[g])`) rather than the scan-local integer. Two distinct `k=1`
+> scans no longer collapse: `|A_0 ∪ A_1| = 2`, so the cross-scan non-bnode obligation is REQUIRED
+> and a manifest omitting it (and any hidden `join_edge`) is rejected by the Q6 obligation itself
+> (`recheck` → `MissingObligation`), independent of salt-separation. Same-graph multi-scan still
+> collapses correctly (no spurious obligation). Negative regression:
+> `join_gates::finding_a_cross_scan_alias_forge_rejected_by_q6` (fails if the namespace fix is
+> reverted — verified). This does **NOT** lift any not-production-sound label (sq-qhy4): it removes
+> a fragility (Q6 was dead code for cross-scan; salt-separation was the sole live backstop), giving
+> defense-in-depth, not a new soundness guarantee.
+
 ## Finding B — single-reference revocation binding (fail-closed over-restriction; latent risk)
 
 `manifest.revocation: Option<RevocationStatus>` (manifest.rs:1183) and
@@ -246,8 +259,11 @@ false-accept in this single-model code-reading review; this is not a proof of so
 header disclaimer and sq-qhy4).
 
 Two composition weaknesses are documented, neither an exploitable break at present:
-- **Finding A (P2):** the Q6 non-bnode-obligation gate is *inert* for cross-scan joins due to a
-  scan-local vs global graph-index namespace mismatch; salt-separation is the sole live backstop.
+- **Finding A (P2) — RESOLVED (sq-en5dx):** the Q6 non-bnode-obligation gate WAS *inert* for
+  cross-scan joins due to a scan-local vs global graph-index namespace mismatch (salt-separation the
+  sole live backstop). Fixed by Option (i): `global_attributions` keys the union on committed-graph
+  identity, so cross-scan joins over distinct graphs now require the obligation (see the RESOLVED
+  note under Finding A). Does not lift any not-production-sound label (sq-qhy4).
 - **Finding B (P3):** scalar `revocation`/`hidden_revocation` fail-closes multi-credential
   presentations (restricting `bind_joins`) and is a latent soundness pitfall for any future
   `Vec` migration.

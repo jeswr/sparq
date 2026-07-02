@@ -55,15 +55,24 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   the XPath promotion ranks), `as_numeric` (classifies an `oxrdf::Literal` into the tower
   while keeping the **exact** integer / fixed-point `Dec` representation — a high-precision
   decimal is not silently flattened to `f64`), the arithmetic ops (`binop` / `neg` / `abs` /
-  `ceil` / `floor` / `round`), the XSD-canonical `lexical` / `canonical_lexical`, and the
+  `ceil` / `floor` / `round`), the two serialisation surfaces — `canonical_lexical` (a
+  *finite* float/double in the XSD-mandatory scientific form, e.g. `6.0E0`; the specials keep
+  their XSD spellings `INF` / `-INF` / `NaN`, which are not scientific) and `lexical` (the plain
+  form the W3C SPARQL expected-result files use for computed arithmetic, e.g. `6`) — and the
   shared lexical helpers (`split_decimal`, `parse_xsd_f32` / `parse_xsd_f64`, `fmt_xsd_double`).
+  `parse_xsd_f64`/`f32` accept the XSD `INF` / `+INF` / `-INF` / `NaN` spellings and reject the
+  Rust-`FromStr`-only `inf` / `infinity` / `nan`, so the engine's lenient compare seam agrees
+  with the exact classifier on which lexicals are numeric.
 - **`join`** — the four id-tuple join kernels over `&[Row]` slices: `merge_join` (sorted),
   `hash_probe_serial` / `build_table` / `build_partitioned` / `probe_emit` (hash, with a
   radix-partitioned parallel build), `bind_combine` (index-nested-loop), and `lftj_recurse`
   over `Trie` / `TrieIter` (leapfrog trie-join / WCOJ), plus the `compatible` / `merge_rows` /
-  `any_unbound` solution-compatibility helpers. Each is generic over a `JoinKeys` column
-  descriptor and a `Budget` cooperative-cancel hook (both monomorphised, never a trait object).
-  Pulls only `rustc-hash` (the hash join's `FxHashMap`) when enabled; implies `rows`.
+  `any_unbound` solution-compatibility helpers. Also `join::delta::DeltaTable` — a persistent,
+  extendable build-side table (`build` / `extend` / `rebuild` / `probe_emit`) with an
+  insertion-order-deterministic match enumeration guarantee for the OWL-RL semi-naive Δ⋈full
+  fixpoint (sq-qonbz.1). Each kernel is generic over a `JoinKeys` column descriptor and a
+  `Budget` cooperative-cancel hook (both monomorphised, never a trait object). Pulls only
+  `rustc-hash` when enabled; implies `rows`.
 - **`compare`** — the SPARQL **term total order** `compare_terms` (the engine's `compare_values`):
   the class precedence error/unbound < blank < IRI < literal < triple, the numeric-aware /
   strict typed-temporal / lexical-string arms within the literal class, and the recursive

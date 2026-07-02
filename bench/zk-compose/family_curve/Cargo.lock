@@ -1065,7 +1065,18 @@ dependencies = [
  "smallvec",
  "spargebra",
  "sparq-core",
+ "sparq-substrate",
  "uuid",
+]
+
+[[package]]
+name = "sparq-substrate"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "rustc-hash",
+ "smallvec",
+ "sparq-core",
 ]
 
 [[package]]
