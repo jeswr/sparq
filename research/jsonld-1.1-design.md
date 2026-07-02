@@ -140,8 +140,8 @@ JSON-LD-API's own factoring):
 ```
 RDF dataset --from_rdf--> expanded document --compact(ctx)-->  compacted
                           |--node_map+flatten(±ctx)-->         flattened
-                          |--frame(frame doc)-->               framed (framed = frame ∘
-                          '--(identity)-->                     expanded        compact)
+                          |--frame(frame doc)-->               framed (framed = frame ∘ compact)
+                          '--(identity)-->                     expanded
 
 JSON doc --(html extract?)--> parsed --expand(ctx chain, loader, options)--> expanded
          --to_rdf--> RDF dataset          (native path; oxjsonld remains the default)
