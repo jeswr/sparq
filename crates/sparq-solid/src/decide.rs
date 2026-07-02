@@ -10,6 +10,18 @@
 //! and adds no dependency, so it is an always-present public API (no cargo gate), mirroring
 //! [`crate::PodStore::wac_allow`].
 //!
+//! # Stability — **API tier-1 (proposed-stable)**
+//!
+//! The per-resource decision surface ([`crate::PodStore::decide`] / `decide_batch` /
+//! `resolve_acl` / [`crate::PodStore::wac_allow`], with [`WacDecision`] / [`AclStatus`] /
+//! [`AclScope`] / [`EffectiveAcl`]) is proposed **tier-1** (semver-stable) in the [API
+//! stability & deprecation policy]. The freeze is **pending maintainer ratification**
+//! (issue #1346 P0 / #1248); the marker asserts a *proposal*, not an active guarantee.
+//! This is the authorization-**decision** surface only — it does not authenticate and makes
+//! no cryptographic claim (a `Session` is a caller-asserted claim; see the crate README).
+//!
+//! [API stability & deprecation policy]: https://github.com/jeswr/sparq/blob/main/docs/api-stability.md
+//!
 //! # Security posture — fail-CLOSED, never fail-OPEN (FR-6, sq-snopa.2)
 //!
 //! This is authorization decision logic; the cardinal rule is **any uncertainty ⇒ deny**.
@@ -117,6 +129,11 @@ pub struct EffectiveAcl {
 /// module docs and [`AclStatus`]. The grant verdict reuses
 /// [`crate::AuthIndex::accessible`] (the same `∪ allow ∖ ∪ deny` per-mode set), so a
 /// `decide` allow is never wider than what `accessible` / `query_as` would grant.
+///
+/// **API tier-1 (proposed-stable)** — the return type of the proposed semver-stable
+/// per-resource decision surface; see the module docs and the [API stability policy].
+///
+/// [API stability policy]: https://github.com/jeswr/sparq/blob/main/docs/api-stability.md
 ///
 /// # Examples
 ///

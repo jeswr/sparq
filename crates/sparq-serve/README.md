@@ -36,9 +36,9 @@ read/write/probe entry points (`query_json` / `ask` / `update_in_place` /
 re-export of the runtime-agnostic concurrency wrapper (`GenerationRing` +
 `GraphApplier` / `Writer`, factored out of `sparq-server`'s axum/tokio glue so an
 embedder reuses sparq's *tested* fork → update → publish + generation-pinning model).
-It is the surface the maintainer **intends** to commit to as the stable embedding
-API ([#1248](https://github.com/jeswr/sparq/issues/1248)) — but **NOT yet a frozen
-semver-tier-1 surface**: the formal freeze is the maintainer's to ratify on #1248,
+It is the proposed **API tier-1 (proposed-stable)** embedding surface (the
+[API stability policy](../../docs/api-stability.md)) — but **NOT yet frozen**: the
+semver freeze is the maintainer's to ratify ([#1248](https://github.com/jeswr/sparq/issues/1248)),
 and until then a minor pre-`1.0` release MAY still change it.
 
 ## 🚀 Quickstart
