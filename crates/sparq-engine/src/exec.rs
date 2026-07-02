@@ -230,15 +230,37 @@ pub(crate) mod budget {
         ACTIVE.with(|a| a.get())
     }
 
-    /// `true` while a deadline / row-cap / byte-cap budget is installed. [OPUS-4.8]
-    /// roborev 1538: the streaming-JSON fast path uses this to take the cooperative
-    /// SERIAL loop (which breaks every 1024 rows) instead of the parallel fan-out that
-    /// materialises every matching fragment before any budget check — so `--max-results`
-    /// / timeouts / the byte cap bound CPU and memory, not just the final response.
-    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    /// Decides whether the multi-core SELECT-JSON serializer may fan out under the
+    /// CURRENTLY installed budget, returning the limit snapshot its workers re-check at
+    /// each par-chunk boundary. [OPUS-4.8] (sq-7d3dj.10, roborev 1538, audit item 6)
+    ///
+    /// The parallel path builds every matching JSON fragment before it can know a row or
+    /// byte count, so it cannot enforce a ROW / BYTE cap mid-serialize:
+    ///
+    /// * `Some(limits)` — fan out. Either NO budget is installed (`limits.on == false`,
+    ///   making the per-chunk `hit` re-check a no-op) OR the budget is DEADLINE-ONLY
+    ///   (both row and byte caps at their `usize::MAX` sentinel). Under a deadline-only
+    ///   budget the per-chunk `limits.hit(0)` re-check stops launching new chunks once
+    ///   the wall-clock deadline has passed, so the worst-case CPU overrun is bounded to
+    ///   the chunks already in flight — approximately one per worker, a bounded constant
+    ///   — not the unbounded burn an uncheckable fan-out under a row/byte cap would allow.
+    /// * `None` — a row and/or byte cap is installed; the caller must take the
+    ///   cooperative SERIAL loop, which cannot over-produce (it checks the sticky flag
+    ///   every 1024 rows and stops early). A blanket "fan out whenever a budget is
+    ///   installed" was REJECTED for exactly this reason (roborev 1538 / audit item 6).
+    ///
+    /// Compiled only for the `parallel` feature — the wasm/serial build never fans out.
+    #[cfg(feature = "parallel")]
     #[inline]
-    pub(crate) fn active() -> bool {
-        ACTIVE.with(|a| a.get().on)
+    pub(crate) fn parallel_json_fanout() -> Option<Limits> {
+        ACTIVE.with(|a| {
+            let l = a.get();
+            if l.on && (l.max_rows != usize::MAX || l.max_bytes != usize::MAX) {
+                None // a row/byte cap the fan-out cannot enforce mid-serialize → serial loop
+            } else {
+                Some(l)
+            }
+        })
     }
 
     /// Time remaining until the installed wall-clock deadline, if any. [OPUS-4.8] (sq-d4p)
@@ -1167,52 +1189,72 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
     };
 
     let mut s = head;
-    // [OPUS-4.8] roborev 1538: only take the parallel fan-out when NO budget is active. The
-    // parallel path builds every matching JSON fragment before it can check the budget, so a
-    // row cap / deadline would not bound CPU or memory — it would serialise the full result and
-    // only then fail. With a budget installed we fall through to the cooperative serial loop
-    // below, which checks `budget::exhausted` every 1024 rows and stops early.
+    // [OPUS-4.8] roborev 1538 / sq-7d3dj.10 (audit item 6): fan the JSON serialize out
+    // across cores when the installed budget cannot be violated by doing so — NO budget,
+    // or a DEADLINE-ONLY budget (the default HTTP server's 30s timeout, which has no
+    // row/byte cap). The fan-out builds every matching fragment before it can know a row
+    // or byte count, so a ROW / BYTE cap stays on the cooperative serial loop below
+    // (which checks `budget::exhausted` every 1024 rows and stops early). A deadline-only
+    // budget is admitted because the coarse `limits.hit(0)` re-check at each par-chunk
+    // boundary stops launching new chunks once the wall-clock deadline passes, bounding
+    // the overrun to ~one chunk per worker. A blanket !budget-active → true flip is
+    // REJECTED (see `parallel_json_fanout`).
     #[cfg(feature = "parallel")]
-    if scan_rows.len() >= PAR_THRESHOLD && !budget::active() {
-        use rayon::prelude::*;
-        // One string per chunk (≈ per worker), not per row — avoids one heap allocation per
-        // result cell. Chunks stay in order, so the bytes are identical to the serial path.
-        let chunk = scan_rows.len().div_ceil(rayon::current_num_threads() * 4).max(1);
-        let frags: Vec<(usize, String)> = scan_rows
-            .par_chunks(chunk)
-            .map(|rows| {
-                let mut n = 0usize;
-                let mut f = String::new();
-                for row in rows {
-                    if !passes(row) {
-                        continue;
+    if scan_rows.len() >= PAR_THRESHOLD {
+        if let Some(limits) = budget::parallel_json_fanout() {
+            use rayon::prelude::*;
+            // One string per chunk (≈ per worker), not per row — avoids one heap
+            // allocation per result cell. Chunks stay in order, so on the success path
+            // the bytes are identical to the serial path.
+            let chunk = scan_rows.len().div_ceil(rayon::current_num_threads() * 4).max(1);
+            let frags: Vec<(usize, String)> = scan_rows
+                .par_chunks(chunk)
+                .map(|rows| {
+                    // Coarse deadline re-check at the chunk boundary: once the wall-clock
+                    // deadline has passed, every later chunk produces nothing, so at most
+                    // the chunks already in flight (~one per worker) run to completion.
+                    // The installing thread's post-fan-out gate turns the passed deadline
+                    // into the timeout error, discarding this (now partial) result — so a
+                    // skipped chunk NEVER escapes as a truncated body. Under no budget / an
+                    // unexpired deadline this is one non-tripping `Instant` read per chunk.
+                    if limits.hit(0) {
+                        return (0usize, String::new());
                     }
-                    if !f.is_empty() {
-                        f.push(',');
+                    let mut n = 0usize;
+                    let mut f = String::new();
+                    for row in rows {
+                        if !passes(row) {
+                            continue;
+                        }
+                        if !f.is_empty() {
+                            f.push(',');
+                        }
+                        n += 1;
+                        write_row(row, &mut f);
                     }
-                    n += 1;
-                    write_row(row, &mut f);
+                    (n, f)
+                })
+                .collect();
+            // Budget gate on the installing thread over the total row count — and, for a
+            // deadline-only budget, the now-past wall clock: sets the sticky flag the
+            // caller's `budget::check(0)` converts into the budget error (a chunk skipped
+            // above means the deadline is globally past, so this fires deterministically).
+            let _ = budget::exhausted(frags.iter().map(|(n, _)| n).sum());
+            let mut chunks = vec![s];
+            let mut wrote = false;
+            for (_, f) in frags {
+                if f.is_empty() {
+                    continue;
                 }
-                (n, f)
-            })
-            .collect();
-        // Budget gate on the total row count (sets the sticky flag; the caller's
-        // check converts it into the budget error).
-        let _ = budget::exhausted(frags.iter().map(|(n, _)| n).sum());
-        let mut chunks = vec![s];
-        let mut wrote = false;
-        for (_, f) in frags {
-            if f.is_empty() {
-                continue;
+                if wrote {
+                    chunks.last_mut().expect("chunks start non-empty").push(',');
+                }
+                wrote = true;
+                emit_chunk(&mut chunks, f, flush);
             }
-            if wrote {
-                chunks.last_mut().expect("chunks start non-empty").push(',');
-            }
-            wrote = true;
-            emit_chunk(&mut chunks, f, flush);
+            chunks.last_mut().expect("chunks start non-empty").push_str("]}}");
+            return Some(chunks);
         }
-        chunks.last_mut().expect("chunks start non-empty").push_str("]}}");
-        return Some(chunks);
     }
     let mut chunks: Vec<String> = Vec::new();
     let mut written = 0usize;

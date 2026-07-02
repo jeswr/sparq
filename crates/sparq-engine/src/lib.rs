@@ -2115,14 +2115,16 @@ mod tests {
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
     }
 
-    /// [OPUS-4.8] roborev 1538 (High): a budget must bound CPU/memory on a LARGE
-    /// single-pattern SELECT, not just the final response. Above PAR_THRESHOLD the
-    /// streaming-JSON path used to fan out to rayon and build EVERY matching fragment
-    /// before checking the budget. With a budget active it must instead take the
-    /// cooperative serial loop that stops within ~1024 scanned rows. We build >50k
-    /// matching rows and assert (a) the budget error fires, and (b) an already-expired
-    /// deadline returns near-instantly (a full parallel materialisation of 60k rows
-    /// would be far slower) — guarding against re-introducing the eager fan-out.
+    /// [OPUS-4.8] roborev 1538 (High) / sq-7d3dj.10: a budget must bound CPU/memory on a
+    /// LARGE single-pattern SELECT, not just the final response. A ROW/BYTE cap cannot be
+    /// enforced mid-fan-out (fragments are built before any count is known), so it takes
+    /// the cooperative serial loop that stops within ~1024 scanned rows. A DEADLINE-only
+    /// budget IS allowed to fan out (audit item 6), but the coarse per-par-chunk deadline
+    /// re-check bounds the overrun: an already-expired deadline makes every chunk produce
+    /// nothing, so the call still returns near-instantly. We build >50k matching rows and
+    /// assert (a) the row-cap budget error fires, and (b) an already-expired deadline
+    /// returns the timeout error near-instantly (a full 60k-row materialisation would be
+    /// far slower) — guarding against an UNBOUNDED fan-out under a deadline.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn budget_bounds_large_single_pattern_json_scan() {
@@ -2136,8 +2138,11 @@ mod tests {
         let b = QueryBudget { max_rows: Some(5), ..QueryBudget::unlimited() };
         let e = query_json_with_budget(&big, q, &b).unwrap_err();
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
-        // Already-expired deadline: the serial loop trips on its first 1024-row check,
-        // so the call returns quickly without materialising the whole result.
+        // Already-expired deadline-only budget: the multi-core fan-out is now ADMITTED
+        // (no row/byte cap to enforce mid-serialize), but the coarse per-par-chunk
+        // deadline re-check sees the passed deadline so every chunk produces nothing —
+        // the call returns near-instantly without serialising the 60k rows, and the
+        // installing thread's post-fan-out gate reports the timeout.
         let b = QueryBudget {
             deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
             ..QueryBudget::unlimited()
@@ -2151,6 +2156,69 @@ mod tests {
         // one `"s":` binding key per result row.
         let full = query_json(&big, q).unwrap();
         assert_eq!(full.matches("\"s\":").count(), 60_000, "unbudgeted scan must return all rows");
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.10) The multi-core SELECT-JSON serializer runs under a
+    /// DEADLINE-ONLY budget (the default HTTP server's shape) but MUST produce bytes
+    /// identical to the single-core serial path — same row order, same formatting — and
+    /// MUST bound its overrun on an expired deadline. The #1 risk is a nondeterministic
+    /// row order or formatting drift, which breaks SPARQL-results-JSON conformance; the
+    /// `par_chunks` split + ordered `collect` keep the order deterministic.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parallel_select_json_deadline_only_is_byte_identical_and_bounded() {
+        use std::time::{Duration, Instant};
+
+        // A >PAR_THRESHOLD (50k) result so the fan-out actually engages, plus small and
+        // empty result sets for the required size coverage.
+        let mut big_ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..60_000u32 {
+            big_ttl.push_str(&format!("ex:s{} ex:p \"value-{}-padding-padding-padding\" .\n", i, i));
+        }
+        let big = Graph::load_str(&big_ttl, "turtle").unwrap();
+        let small = g();
+        let cases: Vec<(&Graph, &str)> = vec![
+            (&big, "SELECT * WHERE { ?s ?p ?o }"),                   // large — fan-out engaged
+            (&big, "SELECT ?o WHERE { ?s ?p ?o }"),                 // large, projected
+            (&big, "SELECT * WHERE { ?s <http://ex/absent> ?o }"),  // empty (unsatisfiable predicate)
+            (&small, "SELECT * WHERE { ?s ?p ?o }"),                // small — below the fan-out threshold
+        ];
+
+        for (graph, q) in cases {
+            // Single-core reference: a generous ROW cap forces the cooperative SERIAL
+            // loop (parallel_json_fanout → None) yet never trips (cap ≫ result size).
+            let serial_b = QueryBudget { max_rows: Some(10_000_000), ..QueryBudget::unlimited() };
+            let serial = query_json_with_budget(graph, q, &serial_b).unwrap();
+
+            // Multi-core: a DEADLINE-only budget far in the future admits the fan-out.
+            let par_b = QueryBudget {
+                deadline: Some(Instant::now() + Duration::from_secs(3600)),
+                ..QueryBudget::unlimited()
+            };
+            let parallel = query_json_with_budget(graph, q, &par_b).unwrap();
+            assert_eq!(parallel, serial, "multi-core deadline-only body must be byte-identical to single-core for: {}", q);
+
+            // The chunked (streamed) form the HTTP server uses must concatenate to the
+            // same bytes — Content-Length is derived from these bytes, so this pins it.
+            let chunks = query_json_chunks_with_budget(graph, q, &par_b).unwrap();
+            assert_eq!(chunks.concat(), serial, "chunked deadline-only concat must equal single-core for: {}", q);
+
+            // And the fully-unbudgeted parallel path agrees too.
+            assert_eq!(query_json(graph, q).unwrap(), serial, "unbudgeted body must equal single-core for: {}", q);
+        }
+
+        // Bounded overrun: a huge result under an ALREADY-EXPIRED deadline-only budget
+        // must NOT serialise the whole thing — every par-chunk re-check trips, so the
+        // call returns the timeout error near-instantly rather than 60k serialised rows.
+        let expired = QueryBudget {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            ..QueryBudget::unlimited()
+        };
+        let start = Instant::now();
+        let e = query_json_with_budget(&big, "SELECT * WHERE { ?s ?p ?o }", &expired).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(e.contains("query budget exceeded (timeout)"), "got: {}", e);
+        assert!(elapsed < Duration::from_secs(2), "expired-deadline fan-out took {:?} — overrun not bounded", elapsed);
     }
 
     #[test]
