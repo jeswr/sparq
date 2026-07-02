@@ -221,7 +221,11 @@ impl LoopbackServer {
                 });
             })
             .expect("spawn loopback server thread");
-        let addr = addr_rx.recv().expect("loopback reported bound address");
+        // recv_timeout (not recv) so a server thread that panics before binding fails the
+        // harness fast + deterministically instead of hanging forever. [OPUS-4.8]
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("loopback reported bound address");
         LoopbackServer {
             addr,
             shutdown: Some(shutdown_tx),
@@ -330,7 +334,10 @@ struct Sample {
 /// to the level — the classic closed-loop caveat).
 fn run_cell(addr: SocketAddr, query: &str, conns: usize, duration: Duration) -> Sample {
     let req = Arc::new(request_bytes(&addr, query));
-    let deadline = Instant::now() + duration;
+    // Anchor the deadline AND the elapsed timer to one `start` instant so req/s and latency
+    // aren't skewed by requests completed during worker spawn-up. [OPUS-4.8]
+    let start = Instant::now();
+    let deadline = start + duration;
     let errors = Arc::new(AtomicU64::new(0));
     let non200 = Arc::new(AtomicU64::new(0));
 
@@ -369,7 +376,6 @@ fn run_cell(addr: SocketAddr, query: &str, conns: usize, duration: Duration) -> 
         })
         .collect();
 
-    let start = Instant::now();
     let mut all: Vec<u64> = Vec::new();
     for w in workers {
         all.extend(w.join().expect("client worker join"));
@@ -487,7 +493,8 @@ fn write_json(
     }
     s.push_str("  ]\n}\n");
     std::fs::write(path, s).unwrap_or_else(|e| panic!("write --json {}: {}", path, e));
-    println!("# wrote {}", path);
+    // stderr, not stdout, so the promised "STDOUT byte-for-byte unchanged" holds. [OPUS-4.8]
+    eprintln!("# wrote {}", path);
 }
 
 /// Minimal JSON string escaping (double-quote, backslash, control chars).
