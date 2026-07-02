@@ -66,7 +66,9 @@ overflow demand to /try.
 ### 1.3 Default sample data + query
 
 Chosen to be legible in five seconds and to produce an *obviously computed* answer (a join
-+ aggregate + sort — not something a static site could fake credibly). ~12 triples:
++ aggregate + sort — not something a static site could fake credibly). 23 triples (11 on
+the three people, 12 on the four components — count the `a` / `linesOfCode` / `lang`
+components once expanded):
 
 ```turtle
 @prefix : <https://sparq.dev/demo#> .
@@ -97,8 +99,9 @@ GROUP BY ?name
 ORDER BY DESC(?linesOfRust)
 ```
 
-Three result rows, aggregated and ordered — visibly real SPARQL 1.1 (BGP join + GROUP BY +
-SUM + ORDER BY), answerable in one glance.
+Three result rows, aggregated and ordered — visibly real SPARQL 1.1/1.2 (BGP join +
+GROUP BY + SUM + ORDER BY; aggregation entered the language at SPARQL 1.1), answerable in
+one glance.
 
 ### 1.4 Runner states
 
@@ -115,7 +118,11 @@ SUM + ORDER BY), answerable in one glance.
   (abbreviated by the demo prefixes), literals neutral, numeric literals right-aligned with
   a subtle datatype affordance on hover. Footer strip (mono, muted):
   `3 results · <t> ms · in-browser · 0 network requests` — timing measured around the
-  `store.query()` call; "0 network requests" is the load-bearing proof line. A small
+  `store.query()` call. "0 network requests" is the load-bearing proof line, **scoped to the
+  query execution**: pressing Run makes no server round-trip — the engine evaluates entirely
+  in-tab (the same posture as the site's existing "nothing is sent to a server" copy). It is
+  not a claim that the page issued zero fetches overall — the wasm/JS bundle is a one-time
+  page-load cost (warm-up, §1.5), fetched *before* Run, not per query. A small
   "Open in workbench →" action (§1.6) sits at the footer's right.
 - **error** — a compact destructive-token strip *between editor and results*: first line of
   the engine's parse/eval error, plus line:col when derivable; the previous results (or the
@@ -214,26 +221,48 @@ names for any nav/panel collapse — ship it with, not after, the declutter.
 
 ## 3. /app — fix the deploy, then earn the nav slot
 
-### 3.1 The txt-redirect is a stale export — fix and prevent
+### 3.1 The txt-redirect is a cross-app soft-nav, not a stale export
 
-Per the brief's finding: the source page (`site/src/app/app/page.tsx`) is complete and
-correct; the checked-in static export (`site/out/`) predates it, so `out/app/` was never
-emitted. Hard refresh → 404; client-side nav → Next.js requests `/sparq/app/index.txt`
-(the RSC Flight payload the App Router fetches for SPA transitions) → 404. Fix:
+> **Implementation note (reconciled with PR #1352, sq-vw3ax.11):** this record's original
+> premise — a *checked-in, stale* `site/out/` that a fresh build heals — was **falsified by
+> the repo during implementation**. `site/out/` is **gitignored** (`site/.gitignore: /out`)
+> and rebuilt fresh on every deploy by `pages.yml`, so there is no committed export to drift
+> and an export-parity gate would be dead machinery over a non-committed tree. The subsection
+> below is corrected to the actual root cause.
 
-1. **Immediate**: run a fresh `next build`; the export emits `out/app/index.html` +
-   `out/app/index.txt` from the existing source. Redeploy.
-2. **Prevent recurrence — export-parity gate**: the deploy pipeline must **build the
-   export fresh on every deploy** rather than serving a checked-in `out/` (preferred:
-   stop committing `out/` at all). If a committed export must remain, add a CI check that
-   every `site/src/app/**/page.tsx` route has a matching `out/<route>/index.html` (+
-   `index.txt`), failing the gate on drift. Either way, this class of bug (route exists in
-   source, absent in deploy) becomes impossible to ship silently.
+The real mechanism: `/app` in production is served by a **separate Next.js app** (`gui/app`
+— the hosted workbench, sq-vnd0i / Option B) that the Pages deploy builds with `build:web`
+and **overlays at `/sparq/app/`**, deliberately replacing this site's own `/app`. The site
+linked to `/app` with `next/link` (a **soft** SPA navigation). A soft nav across two
+*distinct* Next builds fetches the foreign app's RSC Flight payload `/sparq/app/index.txt`
+→ the browser lands on a raw `.txt`. (It reproduces only in the deployed overlay; `next dev`
+and the e2e suite render the site's own `/app`, so it never showed locally.) Fix:
+
+1. **Make the "App" nav slot a HARD, full-page navigation** — a plain
+   `<a href="/sparq/app/">` (base-path-prefixed, trailing slash for `trailingSlash: true`),
+   not `next/link`. The browser then loads the overlaid GUI's own HTML instead of chasing the
+   site build's RSC payload. The legacy `/gui` redirect stub likewise becomes a hard
+   `window.location` redirect.
+2. **No export-parity gate is warranted** (superseded): `out/` is generated fresh per deploy,
+   never committed, so there is no source-vs-deploy drift to guard. The `/app` *source* page
+   is kept as the honest local/preview/lychee-target fallback (it never renders in production
+   because of the overlay).
 
 ### 3.2 What /app should be
 
-Keep the route as the honest bridge the source already is — but **remove "App" from the
-top-bar nav until the hosted web GUI (sq-rclb8 / epic sq-ixc3) actually ships**. A nav slot
+> **Implementation note (reconciled with PR #1352, sq-vw3ax.11):** this record's original
+> recommendation — *remove* the "App" nav slot and rewrite `/app` to a "being built" bridge —
+> **also rested on a premise the repo falsifies: the hosted web GUI has already shipped** and
+> is deployed at `/sparq/app` (sq-vnd0i / the maintainer's Option B). So during implementation
+> the slot was **kept** (removing it would regress a live feature and break
+> `e2e/site-nav.spec.ts`, which hard-asserts the "App" slot), made a hard-nav link (§3.1), and
+> the `/app` source copy was corrected from "coming soon" to the honest "the hosted GUI is
+> **live** at `/sparq/app`" — a "being built" bridge would have re-introduced a now-false
+> claim. The original spec below is retained for the record but is superseded on these points;
+> de-listing the GUI for a maturity/trust reason remains the maintainer's separate call.
+
+~~Keep the route as the honest bridge the source already is — but **remove "App" from the
+top-bar nav until the hosted web GUI (sq-rclb8 / epic sq-ixc3) actually ships**.~~ A nav slot
 that lands on "coming soon" erodes trust in the whole bar (problem 4) and violates the
 "fewer top-level entries" principle; a live route without a nav slot costs nothing and
 keeps deep links working.
