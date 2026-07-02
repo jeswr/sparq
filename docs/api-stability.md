@@ -14,7 +14,7 @@ does today, ADR 0001) takes on breakage risk on every revision bump. This docume
 **proposes** the tier-1 surface and the guarantees attached to it so that the freeze — the
 governance act — has one well-defined shape to ratify.
 
-## Status — PROPOSED, not yet in force
+## Status: PROPOSED, not yet in force
 
 > **The tier-1 semver freeze is NOT active.** Declaring it active is the maintainer's
 > (@jeswr's) governance call ([#1346](https://github.com/jeswr/sparq/issues/1346) P0,
@@ -101,7 +101,7 @@ as **tier-1-adjacent** and would be resolved (in or out) at ratification.
 
 ## Tier-1 guarantees
 
-These take effect **only once the freeze is ratified** (see [Status](#status--proposed-not-yet-in-force)).
+These take effect **only once the freeze is ratified** (see [Status](#status-proposed-not-yet-in-force)).
 They are stated here so the ratification is a decision about a known contract.
 
 Within a stable `MAJOR.MINOR.PATCH` line, for a tier-1 item:
@@ -149,7 +149,7 @@ in-place breaking change wherever a compatible shape exists. Deprecations are tr
 The proposed tier-1 surface is annotated in-code with lightweight, non-breaking rustdoc
 markers (a module- or item-level *"API tier-1 (proposed-stable)"* line linking here). The
 markers are documentation only: they change no signature and no behaviour, and — per
-[Status](#status--proposed-not-yet-in-force) — they assert a *proposal*, not an active
+[Status](#status-proposed-not-yet-in-force) — they assert a *proposal*, not an active
 guarantee. On ratification, the markers are updated from "proposed-stable" to the ratified
 wording in the same pass that records the freeze.
 
@@ -161,7 +161,7 @@ Activating the freeze is a governance decision. When @jeswr elects to ratify:
    load-time helpers).
 2. Cut a version line that carries the tier-1 contract (see `docs/release.md`) and record
    the freeze in `CHANGELOG.md`.
-3. Flip the in-code markers and the [Status](#status--proposed-not-yet-in-force) section
+3. Flip the in-code markers and the [Status](#status-proposed-not-yet-in-force) section
    from *proposed* to *in force*.
 4. Note the ratification on [#1248](https://github.com/jeswr/sparq/issues/1248) /
    [#1346](https://github.com/jeswr/sparq/issues/1346) so the consumer can pin the stable
