@@ -371,9 +371,15 @@ Context Processing foundation (sq-oy1f.24) ships today: `sparq_jsonld::context::
 with `process()` (Context Processing + Create Term Definition, fallible with exact spec error
 codes), `expand_iri()` (IRI Expansion), RFC 3986 reference resolution, and **deny-by-default**
 remote-context loading via `DocumentLoader` (`NoopLoader` refuses every fetch — no ambient
-network — while `FsLoader` serves trusted local fixtures). Expansion / compaction / framing on
-this substrate, and the surface wiring, land in later beads; the RDF-first writers above remain
-the shipped path until then.
+network — while `FsLoader` serves trusted local fixtures). The document-level **Expansion
+Algorithm** (sq-oy1f.25) ships too: `sparq_jsonld::expand(&input, &opts, &loader)` returns the
+canonical expanded array — Value Expansion, scoped (property/type) contexts,
+`@index`/`@id`/`@type`/`@language`/`@graph` container maps, `@nest`, `@reverse`, `@included`,
+`@json` literals, keyword aliases, and the drop-null + array-normalisation rules — raising the
+exact spec error code on invalid input and threading `frameExpansion`. Compaction / flattening /
+framing on this substrate, the surface wiring, and the conformance-lane switch to the normative
+document-level expand oracle land in later beads; the RDF-first writers above remain the shipped
+emit path until then.
 
 ```rust
 use sparq_engine::serialize::{graph_to_jsonld_compact, parse_context_json};

@@ -60,6 +60,34 @@ impl ActiveContext {
         };
         process_inner(self, local_context, false, true, &mut env)
     }
+
+    /// Applies a **scoped** context (a property-scoped or type-scoped `@context`) during
+    /// Expansion (JSON-LD 1.1 API §5.1.2 steps 8 and 11). Unlike [`ActiveContext::process`]
+    /// this exposes the two flags Expansion needs: `override_protected` (true when a
+    /// property-scoped context re-applies, so it may legally redefine a protected term) and
+    /// `propagate` (false when a type-scoped context is applied, so it does not carry into
+    /// child node objects). The scoped context was already syntactically validated when its
+    /// term definition was created, so remote-context re-validation is off.
+    ///
+    /// [OPUS-4.8] (sq-oy1f.25)
+    pub(crate) fn process_scoped(
+        &self,
+        local_context: &Json,
+        base_url: Option<&str>,
+        override_protected: bool,
+        propagate: bool,
+        loader: &dyn DocumentLoader,
+        options: &JsonLdOptions,
+    ) -> Result<ActiveContext, JsonLdError> {
+        let mut env = Env {
+            loader,
+            mode: options.processing_mode,
+            base_url: base_url.map(str::to_string),
+            remote_contexts: Vec::new(),
+            validate_scoped: true,
+        };
+        process_inner(self, local_context, override_protected, propagate, &mut env)
+    }
 }
 
 /// The recursive core of Context Processing (§4.1.2). `override_protected` disables the
