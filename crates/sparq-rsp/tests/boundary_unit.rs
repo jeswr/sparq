@@ -320,6 +320,7 @@ fn continuous_construct_with_mode_roundtrip() {
     let mut out = Vec::new();
     let mut q2 = q;
     q2.flush(|r| out.push(r)).unwrap(); // no-op (nothing pushed), must not panic
+    assert!(out.is_empty(), "flush() with no pushes must emit nothing, got {:?} windows", out.len()); // [OPUS-4.8]
 }
 
 #[test]
@@ -644,7 +645,7 @@ fn istream_dstream_multiset_exact_counts() {
     assert_eq!(dstream, vec![0, 1], "dstream exact counts: {dstream:?}");
 }
 
-// [OPUS-4.8] sq-qcnn.18: CONSTRUCT R2S ISTREAM — set-difference test.
+// [OPUS-4.8] sq-qcnn.18: CONSTRUCT R2S DSTREAM — set-difference test.
 // set_minus fn is exercised through ContinuousConstruct::with_r2s(R2S::DStream).
 // Pin that the exact triple set diff is computed (not just "non-empty result").
 #[test]
