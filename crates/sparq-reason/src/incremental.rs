@@ -2824,6 +2824,9 @@ mod tests {
         assert_matches_oracle(&g, &mut dict, &set);
         assert_eq!(g.full_rebuilds(), 0, "new() is not a fallback rebuild");
         assert_eq!(g.base_len(), base.len());
+        // [OPUS-4.8] sq-qcnn.16: exercise base_triples() iterator (previously uncovered).
+        let base_via_iter: FxHashSet<[Id; 3]> = g.base_triples().collect();
+        assert_eq!(base_via_iter, set, "base_triples() iterator yields the exact asserted set");
     }
 
     #[test]
