@@ -63,7 +63,13 @@ service = ["dep:serde_json", "dep:ureq", "dep:quick-xml"]
 # nothing — the writers reuse the existing oxrdf term/IRI/literal infrastructure and
 # pull in ZERO new dependencies (oxrdf is already a direct dep), so the default build's
 # dependency graph is byte-for-byte unchanged when this is off.
-serialize-rdf = []
+# [OPUS-4.8] sq-oy1f.23: the hand-rolled JSON-LD writer's `Json` AST now lives in the new
+# `sparq-jsonld` crate (Phase A of the document-level JSON-LD 1.1 pipeline). The writer
+# re-exports it (public API preserved, byte-identical output), so this feature — and only
+# this feature — pulls the (zero-dependency) `sparq-jsonld` crate in. The DEFAULT build has
+# `serialize-rdf` OFF, so it never compiles `sparq-jsonld`: the lean default + wasm bundles
+# are unchanged.
+serialize-rdf = ["dep:sparq-jsonld"]
 # [OPUS-4.8] (sq-townn, survey §A7) Streaming Turtle / TriG serialisation. The buffered
 # `write_turtle` / `write_trig` build a FULL in-memory `String` for the whole graph, so a
 # CONSTRUCT/DESCRIBE over a large graph holds BOTH the materialised triples AND the fully
@@ -225,6 +231,11 @@ oxiri = "0.2"
 rustc-hash.workspace = true
 smallvec.workspace = true
 rayon = { workspace = true, optional = true }
+# [OPUS-4.8] sq-oy1f.23: the JSON-LD writer's `Json` AST moved here (Phase A of the
+# document-level JSON-LD 1.1 pipeline). OPTIONAL + pulled in ONLY by `serialize-rdf`
+# (see the feature note above), so the default build never compiles it. Zero-dependency +
+# `forbid(unsafe_code)`, so it adds no dependency to the writer's dep-free contract.
+sparq-jsonld = { path = "../sparq-jsonld", version = "0.1.0", optional = true, default-features = false }
 regex = { version = "1", optional = true }
 md-5 = { version = "0.11", optional = true }
 sha1 = { version = "0.11", optional = true }
