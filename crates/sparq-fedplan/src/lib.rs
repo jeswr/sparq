@@ -57,7 +57,7 @@ also serves under the `scs:` vocab (`http://sparq.dev/ns/cs#`). The planner is:
 ## Opt-in (hard constraint)
 
 The whole planner is behind the **`fedplan` cargo feature, OFF by default**, and the
-crate is a standalone workspace member with `publish = false` — `sparq-core` /
+crate is a standalone workspace member published on crates.io — `sparq-core` /
 `sparq-engine` never depend on it, so the default engine and the WASM artifact are
 byte-identical with or without it. A build that does not enable `fedplan` compiles
 an empty crate.
@@ -108,8 +108,8 @@ cost-based federation (bead sq-a35t, epic sq-3183). See `README.md` and
 whole planner (source selection, the bind-vs-hash join planner, the `StreamJoin` streaming
 operator, and the opt-in `AdaptiveExecutor`) and every re-exported item is gated behind the
 **`fedplan` cargo feature, OFF by default**. Build the docs with `--features fedplan` to see the
-planner API and the per-phase narrative; this crate is a standalone workspace member with
-`publish = false`, and `sparq-core` / `sparq-engine` **never** depend on it, so the default
+planner API and the per-phase narrative; this crate is a standalone workspace member published
+on crates.io, and `sparq-core` / `sparq-engine` **never** depend on it, so the default
 engine build and the WASM artifact are byte-identical with or without `sparq-fedplan`. Live
 adaptive re-planning (`AdaptiveExecutor`) is behind the further `adaptive-replan` feature
 (which implies `fedplan`).

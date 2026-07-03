@@ -108,8 +108,8 @@ fn bench_plan_bgp(c: &mut Criterion) {
             &n_sources,
             |b, _| {
                 b.iter(|| {
-                    // plan_bgp returns Ok(_) when the BGP is non-empty and sources exist;
-                    // unwrap is infallible here — the bench setup guarantees it.
+                    // plan_bgp returns Some(JoinTree) when the BGP is non-empty and sources
+                    // exist; unwrap is infallible here — the bench setup guarantees it.
                     black_box(
                         plan_bgp(
                             black_box(&bgp),
