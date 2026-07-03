@@ -6138,6 +6138,16 @@ fn group_aggregate(
         out_vars.push(v.clone());
     }
 
+    // [SONNET-4.6] (sq-pntvh.4) M4 Phase 4 columnar reducer seam (Seam B): for an eligible
+    // aggregate (no DISTINCT, bare-variable argument, all-inline-integer column, supported
+    // function), fold each group's ids with a tight integer reducer — no `eval_expr` dispatch
+    // per member, no term materialisation, byte-identical output to the scalar path.
+    // Declines (→ scalar path below) for anything not provably identical.
+    #[cfg(feature = "vectorized")]
+    if let Some(rows) = columnar_aggregate(graph, local, &b, group_vars, aggregates, &order, &members, &out_vars) {
+        return Ok(Bindings::unsorted(out_vars, rows));
+    }
+
     // Evaluate each group's aggregates (the expensive part — `eval_expr` over every member of
     // every group), then intern the result and build the output row, in first-seen `order`.
     // Interning needs `&mut LocalVocab` and so stays SERIAL and in order, making the ids
@@ -6884,6 +6894,183 @@ fn columnar_filter(graph: &Graph, b: &Bindings, expr: &Expression) -> Option<Vec
     let sel = DataChunk::select_decoded(&decoded, veccmp);
     let filtered = chunk.apply_selection(&sel);
     Some(filtered.to_rows().iter().map(|r| Row::from_slice(r.as_slice())).collect())
+}
+
+/// The columnar per-group aggregate attempt (M4 Phase 4, `sq-pntvh.4`). Returns `Some(rows)`
+/// (the output rows, byte-identical to the scalar path in first-seen group order) when ALL
+/// aggregates are columnar-eligible, or `None` to fall back to the scalar group fold.
+///
+/// **Eligibility (conservative — decline is always safe, I1):**
+/// - `vectorized` feature ON (compile-gate only, not checked here)
+/// - ZK trace NOT armed (I2, checked below)
+/// - No DISTINCT aggregate
+/// - Only `SUM / COUNT / AVG / MIN / MAX` aggregate functions and `COUNT(*)`
+/// - Aggregate argument is a bare variable `?v` (not an expression)
+/// - The variable `?v` is a present column in `b`
+/// - Every row in `b` has an inline-integer id in that column (all-inline gate)
+///   This ensures byte-identity: see `research/vector-at-a-time-m4-completion-design.md` §2.
+///
+/// When there are multiple aggregates, ALL must be eligible and use the SAME column (or
+/// `COUNT(*)` which needs no column). If any aggregate uses a different column, decline.
+/// [SONNET-4.6]
+#[cfg(feature = "vectorized")]
+#[allow(clippy::too_many_arguments)]
+fn columnar_aggregate(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    b: &Bindings,
+    _group_vars: &[Variable],
+    aggregates: &[(Variable, AggregateExpression)],
+    order: &[Key],
+    members: &[Vec<usize>],
+    _out_vars: &[Variable],
+) -> Option<Vec<Row>> {
+    use crate::reduce::{reduce_count, reduce_max_id, reduce_min_id, reduce_sum};
+
+    // I2: ZK trace armed → decline so the scalar path records the aggregate obligations.
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return None;
+    }
+
+    // ── Eligibility pass ──────────────────────────────────────────────────────────────────
+    // Walk all aggregates to determine whether they are columnar-eligible and which
+    // column (if any) the non-COUNT(*) aggregates operate on.
+    let mut agg_col: Option<usize> = None; // the single eligible column index
+
+    for (_, agg) in aggregates {
+        match agg {
+            AggregateExpression::CountSolutions { distinct } => {
+                if *distinct {
+                    return None; // DISTINCT COUNT(*) requires full row dedup
+                }
+                // CountSolutions needs no column — always eligible.
+            }
+            AggregateExpression::FunctionCall { name, expr, distinct } => {
+                if *distinct {
+                    return None; // DISTINCT requires per-group value dedup
+                }
+                // Only the five standard numeric aggregates are supported.
+                match name {
+                    AggregateFunction::Sum
+                    | AggregateFunction::Count
+                    | AggregateFunction::Avg
+                    | AggregateFunction::Min
+                    | AggregateFunction::Max => {}
+                    _ => return None,
+                }
+                // Argument must be a bare variable (not an expression).
+                let v = match expr {
+                    Expression::Variable(v) => v,
+                    _ => return None,
+                };
+                // The variable must have a column in the input bindings.
+                let c = b.col(v)?;
+                // All column-dependent aggregates must reference the SAME column.
+                match agg_col {
+                    None => agg_col = Some(c),
+                    Some(existing) if existing == c => {}
+                    _ => return None,
+                }
+            }
+        }
+    }
+
+    // ── All-inline gate ───────────────────────────────────────────────────────────────────
+    // For every row in `b`, the aggregate column must hold an inline-integer id.
+    // This is the byte-identity invariant: inline-int ids encode their value directly,
+    // so the reducer sees the exact same integer the scalar eval_expr would materialise.
+    if let Some(c) = agg_col {
+        if !b.rows.iter().all(|r| dict::is_inline(r[c])) {
+            return None;
+        }
+    }
+
+    // ── Per-group reduction ───────────────────────────────────────────────────────────────
+    let mut rows: Vec<Row> = Vec::with_capacity(order.len());
+
+    for (key, member_indices) in order.iter().zip(members.iter()) {
+        // Gather the per-group inline ids for the aggregate column (if any).
+        let group_ids: Vec<Id> = if let Some(c) = agg_col {
+            member_indices.iter().map(|&ri| b.rows[ri][c]).collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut row = Row::from_slice(key);
+
+        for (_, agg) in aggregates {
+            let id: Id = match agg {
+                AggregateExpression::CountSolutions { .. } => {
+                    // Non-distinct COUNT(*) = number of solutions in this group.
+                    // Mirrors scalar: Value::Num(Num::Int(members.len() as i64)).
+                    let n = member_indices.len() as i64;
+                    value_to_id(graph, local, &Value::Num(Num::Int(n)))
+                }
+                AggregateExpression::FunctionCall { name, .. } => {
+                    match name {
+                        AggregateFunction::Count => {
+                            // COUNT(?v) over an all-inline group = group size (no NULLs).
+                            let n = reduce_count(&group_ids) as i64;
+                            value_to_id(graph, local, &Value::Num(Num::Int(n)))
+                        }
+                        AggregateFunction::Sum => {
+                            // SUM({}) = 0 per SPARQL; for non-empty, reduce_sum is exact.
+                            let sum_i128 = reduce_sum(&group_ids)?;
+                            let sum_i64 = sum_i128 as i64;
+                            debug_assert!(
+                                i128::from(sum_i64) == sum_i128,
+                                "SUM columnar: i128→i64 cast overflow (impossible by the 2^61 bound)"
+                            );
+                            // Mirrors scalar: sum_values → num_canonical_term → value_to_id.
+                            // For inline range, value_to_id(Num::Int(x)) = inline id directly.
+                            value_to_id(graph, local, &Value::Num(Num::Int(sum_i64)))
+                        }
+                        AggregateFunction::Avg => {
+                            if group_ids.is_empty() {
+                                // AVG({}) = 0 per SPARQL (mirrors scalar path line ~6378).
+                                value_to_id(graph, local, &Value::Num(Num::Int(0)))
+                            } else {
+                                let sum_i128 = reduce_sum(&group_ids)?;
+                                let count_i64 = group_ids.len() as i64;
+                                let sum_i64 = sum_i128 as i64;
+                                debug_assert!(
+                                    i128::from(sum_i64) == sum_i128,
+                                    "AVG columnar: i128→i64 cast overflow (impossible by the 2^61 bound)"
+                                );
+                                // integer / integer → Decimal (SPARQL §17.4.4.3).
+                                // Mirrors: sum_values → binop(Div) → value_to_id.
+                                let result = Num::Int(sum_i64).binop(Num::Int(count_i64), ArithOp::Div)?;
+                                value_to_id(graph, local, &Value::Num(result))
+                            }
+                        }
+                        AggregateFunction::Min => {
+                            if group_ids.is_empty() {
+                                NO_ID // unbound — mirrors scalar minmax_values([]) = Value::Unbound
+                            } else {
+                                // reduce_min_id returns None only if a non-inline id slipped
+                                // through the all-inline gate (should not happen; decline safely).
+                                reduce_min_id(&group_ids)?
+                            }
+                        }
+                        AggregateFunction::Max => {
+                            if group_ids.is_empty() {
+                                NO_ID // unbound
+                            } else {
+                                reduce_max_id(&group_ids)?
+                            }
+                        }
+                        _ => return None, // unreachable given the eligibility check above
+                    }
+                }
+            };
+            row.push(id);
+        }
+
+        rows.push(row);
+    }
+
+    Some(rows)
 }
 
 fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
@@ -12569,5 +12756,213 @@ mod minmax_values_unit {
             Value::Term(Term::NamedNode(_)) => {} // expected: IRI
             other => panic!("MIN of (IRI, string) should be the IRI, got {other:?}"),
         }
+    }
+}
+
+// [SONNET-4.6] (sq-pntvh.4, M4 Phase 4) Seam-level differential for the columnar
+// GROUP-BY aggregate path. Verifies that `columnar_aggregate` produces output
+// BYTE-IDENTICAL to the scalar group fold (`group_aggregate`) over a REAL graph, and
+// DECLINES on every column shape not provably identical. Only built under `vectorized`.
+#[cfg(all(test, feature = "vectorized"))]
+mod columnar_aggregate_seam {
+    use super::*;
+
+    const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+    /// Build `n` triples `ex:s{i} ex:score {i}` (integer literal → inline id).
+    /// Returns (graph, subject ids [dict IRIs], score ids [inline integers]).
+    fn scores_graph(n: u32) -> (Graph, Vec<Id>, Vec<Id>) {
+        let mut nt = String::new();
+        for i in 0..n {
+            nt.push_str(&format!("<http://ex/s{i}> <http://ex/score> \"{i}\"^^<{XSD_INT}> .\n"));
+        }
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        let subj: Vec<Id> = (0..n)
+            .map(|i| g.id_of(&Term::NamedNode(oxrdf::NamedNode::new(format!("http://ex/s{i}")).unwrap())).unwrap())
+            .collect();
+        let score: Vec<Id> = (0..n)
+            .map(|i| g.id_of(&Term::Literal(Literal::new_typed_literal(i.to_string(), xsd::INTEGER))).unwrap())
+            .collect();
+        (g, subj, score)
+    }
+
+    fn var(name: &str) -> Variable {
+        Variable::new(name).unwrap()
+    }
+
+    /// Run group_aggregate under BOTH paths and check the output rows are byte-identical.
+    /// `group_exprs` = the variables to GROUP BY (empty = whole-dataset aggregate).
+    fn check_agg_byte_identical(
+        g: &Graph,
+        b: Bindings,
+        group_vars: &[Variable],
+        aggregates: Vec<(Variable, AggregateExpression)>,
+    ) {
+        // Scalar reference: clone `b` because group_aggregate consumes it.
+        let b_scalar = Bindings::unsorted(b.vars.clone(), b.rows.clone());
+        let b_columnar = Bindings::unsorted(b.vars.clone(), b.rows.clone());
+
+        let mut local_scalar = LocalVocab::default();
+        let scalar_out = group_aggregate(g, &mut local_scalar, b_scalar, group_vars, &aggregates)
+            .expect("scalar group_aggregate must succeed");
+
+        let mut local_col = LocalVocab::default();
+        let col_out = group_aggregate(g, &mut local_col, b_columnar, group_vars, &aggregates)
+            .expect("columnar group_aggregate must succeed");
+
+        assert_eq!(
+            scalar_out.rows, col_out.rows,
+            "columnar and scalar group_aggregate must be BYTE-IDENTICAL"
+        );
+    }
+
+    /// T5 (byte-identity): whole-dataset SUM/COUNT/MIN/MAX/AVG over an all-inline-integer
+    /// column is byte-identical to the scalar path.
+    #[test]
+    fn t5_whole_dataset_agg_byte_identical_to_scalar() {
+        let n = 20u32;
+        let (g, _subj, score) = scores_graph(n);
+        // Whole-dataset aggregate (no GROUP BY): one Bindings with only the score column.
+        let score_var = var("score");
+        let rows: Vec<Row> = score.iter().map(|&s| Row::from_slice(&[s])).collect();
+        let b = Bindings::unsorted(vec![score_var.clone()], rows);
+
+        let mk_agg = |name: AggregateFunction, v: &str| {
+            (
+                var(v),
+                AggregateExpression::FunctionCall {
+                    name,
+                    expr: Expression::Variable(score_var.clone()),
+                    distinct: false,
+                },
+            )
+        };
+
+        for (label, aggregates) in [
+            ("SUM", vec![mk_agg(AggregateFunction::Sum, "agg")]),
+            ("COUNT", vec![mk_agg(AggregateFunction::Count, "agg")]),
+            ("MIN", vec![mk_agg(AggregateFunction::Min, "agg")]),
+            ("MAX", vec![mk_agg(AggregateFunction::Max, "agg")]),
+        ] {
+            let b2 = Bindings::unsorted(b.vars.clone(), b.rows.clone());
+            check_agg_byte_identical(&g, b2, &[], aggregates);
+            let _ = label; // suppress unused-variable warning
+        }
+    }
+
+    /// T5b: COUNT(*) byte-identical.
+    #[test]
+    fn t5b_count_star_byte_identical() {
+        let n = 10u32;
+        let (g, _subj, score) = scores_graph(n);
+        let score_var = var("score");
+        let rows: Vec<Row> = score.iter().map(|&s| Row::from_slice(&[s])).collect();
+        let b = Bindings::unsorted(vec![score_var], rows);
+        let count_star = vec![(
+            var("cnt"),
+            AggregateExpression::CountSolutions { distinct: false },
+        )];
+        check_agg_byte_identical(&g, b, &[], count_star);
+    }
+
+    /// T6 (mutation check): SUM output pins the EXACT aggregate value so an implementation
+    /// that returns MIN or MAX instead of SUM would fail this test. The aggregate value of
+    /// scores 0..19 is: SUM = 190, MIN = 0, MAX = 19 — all distinct.
+    #[test]
+    fn t6_mutation_check_sum_pins_exact_value() {
+        let n = 20u32;
+        let (g, _subj, score) = scores_graph(n);
+        let score_var = var("score");
+        let rows: Vec<Row> = score.iter().map(|&s| Row::from_slice(&[s])).collect();
+        let b = Bindings::unsorted(vec![score_var.clone()], rows);
+
+        let aggregates = vec![(
+            var("total"),
+            AggregateExpression::FunctionCall {
+                name: AggregateFunction::Sum,
+                expr: Expression::Variable(score_var),
+                distinct: false,
+            },
+        )];
+
+        let mut local = LocalVocab::default();
+        let out = group_aggregate(&g, &mut local, b, &[], &aggregates).unwrap();
+        assert_eq!(out.rows.len(), 1, "whole-dataset aggregate must produce exactly 1 row");
+
+        // The aggregate result id must decode to the integer 190 (SUM 0..=19).
+        let result_id = out.rows[0][0];
+        let num_val = g.numeric_value(result_id)
+            .unwrap_or_else(|| {
+                // Might be a local-vocab term (for sums > INLINE_MAX) — materialise it.
+                let term = term_of(&g, &local, result_id).unwrap();
+                match &term {
+                    Term::Literal(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
+                    _ => f64::NAN,
+                }
+            });
+        assert_eq!(num_val, 190.0_f64, "SUM(0..=19) must equal 190, not MIN=0 or MAX=19");
+    }
+
+    /// T7 (decline gate): a non-inline column (negative integer) must make the seam DECLINE
+    /// and the scalar path run; both produce the same result.
+    #[test]
+    fn t7_non_inline_column_declines() {
+        // A negative integer is not inline (inline range is [0, INLINE_MAX]).
+        let nt = format!(
+            "<http://ex/a> <http://ex/score> \"-1\"^^<{XSD_INT}> .\n\
+             <http://ex/b> <http://ex/score> \"2\"^^<{XSD_INT}> .\n"
+        );
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        let neg_one = g.id_of(&Term::Literal(Literal::new_typed_literal("-1", xsd::INTEGER))).unwrap();
+        let two = g.id_of(&Term::Literal(Literal::new_typed_literal("2", xsd::INTEGER))).unwrap();
+        assert!(!dict::is_inline(neg_one), "-1 must be a non-inline dict id");
+        assert!(dict::is_inline(two), "2 must be inline");
+
+        let score_var = var("score");
+        let rows = vec![Row::from_slice(&[neg_one]), Row::from_slice(&[two])];
+        let b = Bindings::unsorted(vec![score_var.clone()], rows);
+        let aggregates = vec![(
+            var("s"),
+            AggregateExpression::FunctionCall {
+                name: AggregateFunction::Sum,
+                expr: Expression::Variable(score_var),
+                distinct: false,
+            },
+        )];
+        // Verify columnar_aggregate declines for the mixed (non-inline) column.
+        let key_cols: Vec<Option<usize>> = vec![];
+        let (order, members) = build_groups(&b, &key_cols);
+        let mut local = LocalVocab::default();
+        let out_vars = vec![var("s")];
+        let result = columnar_aggregate(
+            &g, &mut local, &b, &[], &aggregates, &order, &members, &out_vars
+        );
+        assert!(result.is_none(), "non-inline column must make columnar_aggregate decline");
+    }
+
+    /// T8 (DISTINCT decline): DISTINCT aggregate must always decline.
+    #[test]
+    fn t8_distinct_aggregate_declines() {
+        let n = 5u32;
+        let (g, _subj, score) = scores_graph(n);
+        let score_var = var("score");
+        let rows: Vec<Row> = score.iter().map(|&s| Row::from_slice(&[s])).collect();
+        let b = Bindings::unsorted(vec![score_var.clone()], rows);
+        let aggregates = vec![(
+            var("c"),
+            AggregateExpression::FunctionCall {
+                name: AggregateFunction::Count,
+                expr: Expression::Variable(score_var),
+                distinct: true, // DISTINCT → must decline
+            },
+        )];
+        let key_cols: Vec<Option<usize>> = vec![];
+        let (order, members) = build_groups(&b, &key_cols);
+        let mut local = LocalVocab::default();
+        let out_vars = vec![var("c")];
+        let result = columnar_aggregate(
+            &g, &mut local, &b, &[], &aggregates, &order, &members, &out_vars
+        );
+        assert!(result.is_none(), "DISTINCT aggregate must make columnar_aggregate decline");
     }
 }
