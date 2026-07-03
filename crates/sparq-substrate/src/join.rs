@@ -972,6 +972,89 @@ pub mod delta {
             t.probe_emit(&probe, &keys, &Cap(1), &mut |_, _| count += 1);
             assert_eq!(count, 1, "Cap(1) must stop after the first emitted match");
         }
+
+        #[test]
+        fn probe_emit_budget_cooperative_cancel_with_control() {
+            // [HAIKU-4.5] sq-qonbz.6
+            // Test Budget-driven cooperative cancellation mid-enumeration, spanning
+            // multiple budget checks (one per probe row). Asserts truncation vs. a
+            // NoBudget control run to verify deterministic emission order.
+            struct Cap(usize);
+            impl Budget for Cap {
+                fn exhausted(&self, rows: usize) -> bool {
+                    rows >= self.0
+                }
+            }
+
+            let keys = keys_col0();
+
+            // Build table with distinct keys so each probe row matches exactly one build row.
+            // This allows us to control the emission count and span multiple budget checks.
+            let build = vec![
+                row(&[1, 100]),
+                row(&[2, 200]),
+                row(&[3, 300]),
+                row(&[4, 400]),
+                row(&[5, 500]),
+            ];
+            let t = DeltaTable::build(&build, &keys);
+
+            // Probe with 5 rows (5 budget checks).
+            let probe = vec![
+                row(&[1, 0]),
+                row(&[2, 0]),
+                row(&[3, 0]),
+                row(&[4, 0]),
+                row(&[5, 0]),
+            ];
+
+            // === Full run (NoBudget control) ===
+            // Should emit all 5 matches (one per probe row).
+            let mut full_output: Vec<Row> = Vec::new();
+            t.probe_emit(&probe, &keys, &NoBudget, &mut |b, _p| {
+                full_output.push(b.clone());
+            });
+            assert_eq!(full_output.len(), 5, "full NoBudget run must emit all 5 matches");
+            let expected_full = vec![
+                row(&[1, 100]),
+                row(&[2, 200]),
+                row(&[3, 300]),
+                row(&[4, 400]),
+                row(&[5, 500]),
+            ];
+            assert_eq!(
+                full_output, expected_full,
+                "full run must preserve insertion order and deterministic multiset"
+            );
+
+            // === Budgeted run (Cap at 2 emits) ===
+            // Budget is checked once per probe row. Probe row 0 emits 1 (emitted=1), probe
+            // row 1 emits 1 (emitted=2), probe row 2: budget.exhausted(2)? Yes (2 >= 2).
+            // Break. So we get exactly 2 emits, stopping before the third probe row.
+            let mut budgeted_output: Vec<Row> = Vec::new();
+            t.probe_emit(&probe, &keys, &Cap(2), &mut |b, _p| {
+                budgeted_output.push(b.clone());
+            });
+            assert_eq!(
+                budgeted_output.len(),
+                2,
+                "Cap(2) must truncate after 2 emits: budget.exhausted fires at the START of \
+                 the third probe row (third budget check; emitted=2 >= 2), so that row is \
+                 never processed"
+            );
+            let expected_budgeted = vec![row(&[1, 100]), row(&[2, 200])];
+            assert_eq!(
+                budgeted_output, expected_budgeted,
+                "budgeted run must emit deterministic prefix and stop mid-enumeration"
+            );
+
+            // Verify truncation: budgeted_output is a proper prefix of full_output.
+            assert_eq!(&full_output[..2], &budgeted_output[..], "budgeted output must be a prefix of full");
+            assert!(
+                budgeted_output.len() < full_output.len(),
+                "Budget must have truncated before completion"
+            );
+        }
     }
 }
 
