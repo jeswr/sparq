@@ -142,9 +142,10 @@ fn disjoint_with_increments_consistency_relevant() {
     )]);
     let tbox = TBox::extract(&ts);
 
-    assert!(
-        tbox.consistency_relevant > 0,
-        "owl:disjointWith must increment consistency_relevant"
+    assert_eq!(
+        tbox.consistency_relevant,
+        1,
+        "owl:disjointWith must increment consistency_relevant by exactly 1"
     );
     assert_eq!(
         tbox.concept_incl.len(),
@@ -162,12 +163,14 @@ fn property_disjoint_with_increments_consistency_relevant() {
     )]);
     let tbox = TBox::extract(&ts);
 
-    assert!(
-        tbox.consistency_relevant > 0,
-        "owl:propertyDisjointWith must increment consistency_relevant"
+    assert_eq!(
+        tbox.consistency_relevant,
+        1,
+        "owl:propertyDisjointWith must increment consistency_relevant by exactly 1"
     );
     assert_eq!(tbox.role_incl.len(), 0, "owl:propertyDisjointWith must NOT produce a role inclusion");
     assert_eq!(tbox.skipped, 0, "owl:propertyDisjointWith is QL-legal");
+    assert_eq!(tbox.unrecognised_schema, 0, "owl:propertyDisjointWith is a recognised predicate");
 }
 
 #[test]
@@ -177,9 +180,10 @@ fn complement_of_increments_consistency_relevant() {
     )]);
     let tbox = TBox::extract(&ts);
 
-    assert!(
-        tbox.consistency_relevant > 0,
-        "owl:complementOf must increment consistency_relevant"
+    assert_eq!(
+        tbox.consistency_relevant,
+        1,
+        "owl:complementOf must increment consistency_relevant by exactly 1"
     );
     assert_eq!(
         tbox.concept_incl.len(),
@@ -459,5 +463,66 @@ fn ql_legal_declarations_stay_fully_captured() {
     assert!(
         tbox.fully_captured(),
         "a TBox with only QL-legal declarations + subClassOf must be fully captured"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// B3 — ontology metadata predicates (owl:imports, owl:versionIRI, etc.) must
+//      NOT be counted as unrecognised_schema [SONNET-4.6] sq-pbz04.3.3
+//
+// MUTATION-KILL: this test MUST go RED on the pre-fix code (before owl:imports
+// and owl:versionIRI were added to ANNOTATION_OWL). On pre-fix code those
+// predicates fall through to is_unrecognised_schema() which returns true
+// (they are in the owl: namespace and were not listed as restriction
+// sub-predicates or annotations), so unrecognised_schema > 0 and
+// fully_captured() returns false. After the fix they are classified as the
+// "classified-annotation" bucket (silently ignored) and the test passes.
+// [SONNET-4.6] sq-pbz04.3.3
+// ---------------------------------------------------------------------------
+
+/// MUTATION-KILL: an ontology carrying `owl:imports`, `owl:versionIRI`, and
+/// `owl:versionInfo` (plus a QL-legal axiom) must have `fully_captured()==true`
+/// and `unrecognised_schema==0`. This goes RED on the pre-fix code where those
+/// predicates were classified as unrecognised schema vocabulary. [SONNET-4.6]
+#[test]
+fn ontology_metadata_predicates_not_counted_as_unrecognised() {
+    // A realistic ontology header: imports link, version IRI, version info label,
+    // plus an rdfs:label annotation and one QL-legal subClassOf axiom.
+    const OWL_IRI: &str = "http://www.w3.org/2002/07/owl#";
+    let ts = triples(&[
+        // owl:imports — ontology import metadata (NOT a TBox axiom)
+        &format!("<{EX}onto> <{}imports> <{EX}other> .", OWL_IRI),
+        // owl:versionIRI — version identifier metadata (NOT a TBox axiom)
+        &format!("<{EX}onto> <{}versionIRI> <{EX}onto/1.0> .", OWL_IRI),
+        // owl:versionInfo — annotation property
+        &format!("<{EX}onto> <{}versionInfo> \"1.0\" .", OWL_IRI),
+        // rdfs:label — RDFS annotation property
+        &format!("<{EX}Employee> <{RDFS}label> \"Employee\" ."),
+        // One genuine QL-legal schema axiom so the TBox is non-trivially captured.
+        &format!("<{EX}Manager> <{RDFS}subClassOf> <{EX}Employee> ."),
+    ]);
+    let tbox = TBox::extract(&ts);
+
+    assert_eq!(
+        tbox.unrecognised_schema,
+        0,
+        "owl:imports / owl:versionIRI / owl:versionInfo / rdfs:label must NOT count \
+         as unrecognised_schema; got unrecognised_schema={}",
+        tbox.unrecognised_schema
+    );
+    assert_eq!(
+        tbox.skipped,
+        0,
+        "ontology metadata predicates must not count as skipped"
+    );
+    assert!(
+        tbox.fully_captured(),
+        "a TBox whose non-QL predicates are all metadata/annotation must be fully captured"
+    );
+    // The one schema axiom must have been captured.
+    assert_eq!(
+        tbox.concept_incl.len(),
+        1,
+        "the Manager subClassOf Employee axiom must be captured"
     );
 }

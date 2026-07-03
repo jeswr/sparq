@@ -16,8 +16,8 @@
 // consistency (a documented boundary — see the crate README / the deferred-path note).
 //
 // Extraction reads OWL axioms out of an RDF graph given as oxrdf triples. Only the QL fragment
-// is recognised; an axiom using a non-QL construct is COUNTED in `TBox::skipped` (honest "n
-// axioms outside the QL fragment were ignored"), never misapplied.
+// is recognised; an axiom using a non-QL construct is COUNTED in `TBox::skipped` (the honest
+// "N axioms outside the QL fragment were ignored" count), never misapplied.
 //
 // INVARIANT (sq-pbz04.3.3): NO silently-ignored rdfs:/owl: triple — every schema predicate in
 // the rdfs:/owl: vocabulary is EITHER captured (positive inclusion), counted in `skipped` (non-QL
@@ -520,14 +520,23 @@ const RESTRICTION_SUB_PREDICATES: &[&str] = &[
 ];
 
 /// OWL 2 built-in annotation-property local names. Triples whose predicate is `{OWL}{name}`
-/// carry human-readable / versioning metadata and are NOT TBox axioms — silently ignored, not
-/// counted in `unrecognised_schema`. [SONNET-4.6] sq-pbz04.3.3
+/// carry human-readable / versioning / import metadata and are NOT TBox axioms — silently
+/// ignored (classified-annotation bucket per §3 of the design record), not counted in
+/// `unrecognised_schema`. Covers: `owl:imports` (ontology import metadata), `owl:versionIRI`
+/// (ontology version identifier), and the standard OWL 2 annotation properties. An ontology
+/// carrying any of these as predicates must still yield `fully_captured() == true` when its
+/// actual schema axioms are QL-legal. [SONNET-4.6] sq-pbz04.3.3
 const ANNOTATION_OWL: &[&str] = &[
+    // Ontology-metadata predicates (header triples, not schema axioms):
+    "imports",
+    "versionIRI",
+    // OWL 2 built-in annotation properties (human-readable / versioning):
     "deprecated",
     "versionInfo",
     "priorVersion",
     "backwardCompatibleWith",
     "incompatibleWith",
+    // Annotation re-ification sub-predicates (owl:Annotation axiom triples):
     "annotatedSource",
     "annotatedProperty",
     "annotatedTarget",
