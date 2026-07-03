@@ -426,7 +426,8 @@ fn semantics_preserving_rewrite_matches_explicit_filter_form() {
 
     // Manually-written equivalent FILTER form — the expansion the rewrite
     // produces, written explicitly so we can run it through the STANDARD path.
-    // Uses positional format args (CodeQL rust/unused-variable guard). [SONNET-4.6]
+    // Plain string literal (no format! — the earlier "positional format args" comment
+    // was a copy/paste error and has been removed). [SONNET-4.6]
     let filter_sparql = "PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
                          PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
                          PREFIX ex:   <http://example.org/>
@@ -447,14 +448,37 @@ fn semantics_preserving_rewrite_matches_explicit_filter_form() {
     let filter_result =
         with_functions(&reg, || query(&graph, filter_sparql)).expect("filter execute");
 
-    // Collect and sort both result sets as (f1_iri, f2_iri) string pairs.
+    // Assert row counts match first so a count divergence is caught before the
+    // pair-by-pair comparison (otherwise a shorter result set could coincidentally
+    // compare equal after sorting). [SONNET-4.6]
+    assert_eq!(
+        rewrite_result.rows.len(),
+        filter_result.rows.len(),
+        "rewrite and FILTER paths returned different row counts ({} vs {})",
+        rewrite_result.rows.len(),
+        filter_result.rows.len(),
+    );
+
+    // Collect both result sets using `map` (NOT `filter_map`) so that a row with an
+    // unbound ?f1 or ?f2 binding causes the test to FAIL loudly rather than being
+    // silently dropped — a silent drop could hide a divergence between the two paths.
+    // [SONNET-4.6]
     let mut rewrite_pairs: Vec<(String, String)> = rewrite_result
         .rows
         .iter()
-        .filter_map(|row| {
-            let f1 = row.first().and_then(|t| t.as_ref()).map(|t| t.to_string())?;
-            let f2 = row.get(1).and_then(|t| t.as_ref()).map(|t| t.to_string())?;
-            Some((f1, f2))
+        .enumerate()
+        .map(|(i, row)| {
+            let f1 = row
+                .first()
+                .and_then(|t| t.as_ref())
+                .unwrap_or_else(|| panic!("rewrite row {i}: ?f1 is unbound"))
+                .to_string();
+            let f2 = row
+                .get(1)
+                .and_then(|t| t.as_ref())
+                .unwrap_or_else(|| panic!("rewrite row {i}: ?f2 is unbound"))
+                .to_string();
+            (f1, f2)
         })
         .collect();
     rewrite_pairs.sort();
@@ -462,10 +486,19 @@ fn semantics_preserving_rewrite_matches_explicit_filter_form() {
     let mut filter_pairs: Vec<(String, String)> = filter_result
         .rows
         .iter()
-        .filter_map(|row| {
-            let f1 = row.first().and_then(|t| t.as_ref()).map(|t| t.to_string())?;
-            let f2 = row.get(1).and_then(|t| t.as_ref()).map(|t| t.to_string())?;
-            Some((f1, f2))
+        .enumerate()
+        .map(|(i, row)| {
+            let f1 = row
+                .first()
+                .and_then(|t| t.as_ref())
+                .unwrap_or_else(|| panic!("filter row {i}: ?f1 is unbound"))
+                .to_string();
+            let f2 = row
+                .get(1)
+                .and_then(|t| t.as_ref())
+                .unwrap_or_else(|| panic!("filter row {i}: ?f2 is unbound"))
+                .to_string();
+            (f1, f2)
         })
         .collect();
     filter_pairs.sort();
