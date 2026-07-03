@@ -1,0 +1,22 @@
+{
+  "name": "sparq-gui-e2e-playwright",
+  "version": "0.0.0",
+  "private": true,
+  "description": "[SONNET-4.6] sq-ymr2e.5 — Playwright mocked-IPC deterministic desktop lane: 5 journeys driving gui/app/out in headless Chromium with window.__TAURI__ + __TAURI_INTERNALS__ stubbed. No Tauri binary, no display server, fully hermetic — intended as the required gate for the GUI frontend.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "typecheck": "tsc --noEmit",
+    "no-timeout-gate": "bash support/no-timeout-gate.sh"
+  },
+  "engines": {
+    "node": ">=18.20.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.0",
+    "@types/node": "^22.10.0",
+    "serve": "14.2.6",
+    "typescript": "^5.7.0"
+  }
+}
