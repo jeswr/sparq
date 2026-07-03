@@ -73,7 +73,15 @@
     "no --features vectorized). MUST be re-pinned from a CI run — NEVER a local aarch64 measurement.",
     "The vectorized-feature-off gate leg 2 compares against this field, NOT",
     "the floor. A legitimate wasm change (feature add, size opt) MUST update both floor AND feature_off_exact",
-    "in the same PR diff — the script rejects a missing feature_off_exact to prevent silent drift."
+    "in the same PR diff — the script rejects a missing feature_off_exact to prevent silent drift.",
+    "[OPUS-4.8] (sq-7d3dj.17) 2026-07-03: feature_off_exact RE-PINNED 1399110 -> 1399868 (+758 bytes, +0.054%).",
+    "The radix-sort permutation-index change in sparq-core (PR #1407) alters compiled code that sparq-wasm links",
+    "in, so the feature-OFF bundle legitimately grew. The feature-OFF INVARIANT (bundle identical with vectorized",
+    "ON vs OFF) is PRESERVED — only the absolute baseline moved, so re-pinning is correct, not a gate weakening.",
+    "1399868 is the CI x86_64 runner measurement (run 28634216610, artifact-exact-equality leg: cargo build",
+    "--profile release-wasm -p sparq-wasm --target wasm32-unknown-unknown, no --features vectorized) — NEVER a",
+    "local aarch64 build. The ratchet floor (1399703) is UNCHANGED: 1399868 sits within its +2% band (top 1427697),",
+    "so bench.yml stays green; the floor only ratchets DOWN on improvement, never up on a within-band drift."
   ],
   "metrics": {
     "store_bytes_per_triple": {
@@ -95,7 +103,7 @@
       "floor": 1399703,
       "threshold": 0.02,
       "mode": "auto",
-      "feature_off_exact": 1399110
+      "feature_off_exact": 1399868
     },
     "parse_ns_per_byte": {
       "floor": 4.9721,
