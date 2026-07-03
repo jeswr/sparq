@@ -614,3 +614,20 @@
     font-size: 0.9em;
   }
 }
+
+/* [OPUS-4.8] sq-ymr2e.4 / sq-ymr2e.14 — WCAG 2.1 AA color-contrast on the Sonner `richColors`
+   error toast. Sonner 2.x's default light-theme error palette is hsl(360 100% 45%) (#e60000)
+   text on hsl(359 100% 97%) (#fff0f0) → 4.34:1, below the AA 4.5:1 minimum (axe flags it on the
+   "Engine failed to load" toast the /try REPL raises when the in-tab engine can't load — the
+   wasm-free CI lane, and any real browser where the engine genuinely fails). Darken the error
+   text/border/icon to hsl(360 100% 38%) ≈ #c20000, which is ~5.8:1 on the same background — a
+   comfortable AA margin while staying unmistakably red. Sonner exposes the colour as the
+   `--error-text` custom property on its toaster element (keyed by `data-sonner-theme`), consumed
+   by the `[data-rich-colors=true][data-sonner-toast][data-type=error]` rule; overriding the
+   variable there recolours text, border and icon in one place. The selector is intentionally
+   UNLAYERED and one specificity step above Sonner's own definition so it wins over the style
+   Sonner injects at runtime, regardless of source order. Dark-theme error text (light-on-dark)
+   already clears AA, so it is left untouched. */
+html [data-sonner-toaster][data-sonner-theme="light"] {
+  --error-text: hsl(360, 100%, 38%);
+}

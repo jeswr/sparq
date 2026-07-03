@@ -511,8 +511,11 @@ export function DownloadClient() {
           The sparq desktop GUI bundles the engine and the playground into a
           native app for macOS, Windows, and Linux. Prefer not to install
           anything? The full SPARQL playground runs entirely in your browser at{" "}
+          {/* [OPUS-4.8] sq-ymr2e.4 — inline prose links carry a PERSISTENT underline (WCAG 2.1
+              §1.4.1 Use of Color / axe `link-in-text-block`): distinguishable without relying on
+              the teal colour alone, which fails the 3:1 contrast vs the surrounding muted text. */}
           <Link
-            className="text-primary underline-offset-4 hover:underline"
+            className="text-primary underline underline-offset-4"
             href="/try"
           >
             /try
@@ -540,7 +543,7 @@ export function DownloadClient() {
             and notarized builds (Apple Developer ID + Windows Authenticode) are
             coming; until then, only install builds you fetched yourself from the{" "}
             <a
-              className="text-primary underline-offset-4 hover:underline"
+              className="text-primary underline underline-offset-4"
               href={RELEASES_URL}
               target="_blank"
               rel="noopener noreferrer"
@@ -657,7 +660,7 @@ export function DownloadClient() {
           build for <strong>{cli.label}</strong>; every other platform&rsquo;s
           archive is attached to the{" "}
           <a
-            className="text-primary underline-offset-4 hover:underline"
+            className="text-primary underline underline-offset-4"
             href={RELEASES_URL}
             target="_blank"
             rel="noopener noreferrer"

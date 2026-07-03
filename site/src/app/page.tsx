@@ -59,9 +59,11 @@ export default function HomePage() {
             <>
               From a live in-tab proof to a faithful protocol simulation — pick one,
               or{" "}
+              {/* [OPUS-4.8] sq-ymr2e.4 — persistent underline so the inline link is distinguishable
+                  without relying on colour (WCAG 2.1 §1.4.1 / axe `link-in-text-block`). */}
               <Link
                 href="/examples"
-                className="text-primary underline-offset-4 hover:underline"
+                className="text-primary underline underline-offset-4"
               >
                 browse the examples gallery
               </Link>
@@ -87,7 +89,7 @@ export default function HomePage() {
               its honesty tier.{" "}
               <Link
                 href="/capabilities"
-                className="text-primary underline-offset-4 hover:underline"
+                className="text-primary underline underline-offset-4"
               >
                 Browse all surfaces
               </Link>
@@ -154,7 +156,7 @@ export default function HomePage() {
             </p>
             <p className="flex flex-wrap gap-4">
               <a
-                className="text-primary underline-offset-4 hover:underline"
+                className="text-primary underline underline-offset-4"
                 href={REPO_URL}
                 target="_blank"
                 rel="noopener noreferrer"
@@ -162,7 +164,7 @@ export default function HomePage() {
                 Source on GitHub
               </a>
               <Link
-                className="text-primary underline-offset-4 hover:underline"
+                className="text-primary underline underline-offset-4"
                 href="/capabilities"
               >
                 Every surface, by theme

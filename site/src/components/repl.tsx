@@ -1440,8 +1440,14 @@ function ResultPanel({
   }
   if (state.kind === "error") {
     return (
+      // [OPUS-4.8] sq-ymr2e.4 — the horizontally-scrollable error region is keyboard-focusable
+      // (tabIndex + a label) so a keyboard-only user can reach + scroll it (WCAG 2.1 §2.1.1 /
+      // axe `scrollable-region-focusable`).
       <pre
         data-result-kind="error"
+        tabIndex={0}
+        role="group"
+        aria-label="Query error"
         className="m-3.5 overflow-x-auto rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"
       >
         {state.message}
