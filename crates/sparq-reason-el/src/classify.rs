@@ -19,6 +19,75 @@
 // derived membership is processed once. CR6 (the nominal rule, "Pushing the EL Envelope"
 // IJCAI-05) runs as a between-fixpoint pass — see `cr6_pass` for the rule, the ⇝_R
 // side-condition, and the soundness argument. Single-threaded (Phase E1; concurrency is E4).
+//
+// ## Substrate adoption evaluation -- REASONED NON-ADOPTION [SONNET-4.6] sq-pbz04.2.3
+//
+// Bead sq-pbz04.2.3 evaluated whether the CR1-CR5 saturation joins can adopt the shared
+// `sparq_substrate::join` kernels (the `build_table`/`probe_emit`/`hash_probe_serial` and
+// `join::delta::DeltaTable` path, analogously to `sparq-reason/src/substrate_join.rs`
+// which drives rdfs2/3/7 on the substrate). Disposition: DOCUMENTED NON-ADOPTION.
+// Referenced from `research/reasoner-federation-program.md` sections 3 and 6.
+//
+// Five structural reasons this module's join shapes are not profitable substrate consumers:
+//
+// 1. PER-EVENT WORKLIST, NOT BATCH BUILD/PROBE. The substrate `build_table`+`probe_emit`
+//    requires two static `&[Row]` slices: a build side and a batch of probe rows. The EL
+//    fixpoint processes memberships one at a time from a `Vec<(Concept, Concept)>` worklist;
+//    each dequeued `(X, D)` immediately fires rules whose outputs re-enter the queue before
+//    the outer loop resumes. Batching would require collecting an entire delta round first,
+//    but the five rules have heterogeneous triggers and no meaningful "round" boundary --
+//    unlike the OWL-RL semi-naive `delta join full` pattern `DeltaTable` was designed for.
+//
+// 2. SIMULTANEOUS READ AND WRITE ON THE SAME RELATIONS. CR2 reads `S(X)` (checks whether
+//    a partner conjunct is already present) while CR1/CR3/CR4/CR5 write new members into
+//    `S(X)` within the same worklist pass. The substrate kernels assume `&[Row]` immutability
+//    at probe time; there is no safe seam to hand `S(X)` to a kernel as a probe slice while
+//    also holding it mutably for insertion. The `add()` helper at the bottom of this file is
+//    called inside rule-specific borrows that cannot be widened to a whole-relation borrow.
+//
+// 3. AXIOMINDEX IS ALREADY AN OPTIMAL SINGLE-KEY HASH TABLE. The `AxiomIndex` fields are
+//    `FxHashMap<Concept, Vec<...>>` keyed by `Concept = u32` -- a direct O(1) lookup using
+//    the native integer hash. Reshaping to substrate `Row` (`SmallVec<[u32; 4]>`) build
+//    tables would add per-axiom `Row::from_slice` allocation and per-lookup key projection
+//    through `JoinKeys`, replacing a 4-byte integer hash with a `SmallVec` hash over the
+//    same data. Asymptotic complexity is identical; the per-lookup constant is strictly
+//    higher with no algorithmic benefit.
+//
+// 4. CR4 IS A 3-WAY TRIANGLE JOIN WITH THREE GROWING SIDES. CR4 combines S(Y) memberships,
+//    R(r) predecessor links, and axiom index lookups, where both S(Y) and R(r) grow during
+//    the same pass. The substrate handles 2-way binary joins (static build probed by a
+//    batch probe slice) and the 2-way semi-naive delta/full shape. The EL triangle -- where
+//    S-sets, R-links, and AxiomIndex all inform the same rule firing -- has no direct
+//    mapping to any of the four substrate kernels (merge-join, hash-join, bind-join,
+//    trie-join) or to the `DeltaTable` seam. Forcing it would require rebuilding all three
+//    sides at each queue step, which is strictly worse than the current per-event probe.
+//
+// 5. THE QL PRECEDENT APPLIES IN FULL. The OWL 2 QL certain-answer oracle (sq-qo1a9) is a
+//    documented non-consumer of the substrate join kernels: its query-rewriting shape
+//    (PerfectRef + tree-witness + UCQ minimisation) is not a build/probe or semi-naive
+//    fixpoint. The EL worklist fixpoint is a cleaner non-consumer still: QL at least
+//    evaluates CQ answers over a static dataset, which could use the engine join path;
+//    EL saturation joins never produce a relational tuple output -- they grow set-based
+//    state incrementally, and every "join" is a membership test, not a tuple production.
+//
+// Comparison with the RDFS precedent (`sparq-reason/src/substrate_join.rs`, sq-yk6or):
+// rdfs2/3/7 are profitable substrate consumers because (a) the schema closure maps are
+// built ONCE and probed many times without mutation, and (b) the output is a multiset
+// of triples, exactly what `probe_emit`'s combined-row output models. Neither condition
+// holds here: S(X) and R(r) grow during every worklist step, and the output is
+// side-effectful set membership, not a combinatorial tuple join.
+//
+// Also mirroring the note in `substrate_join.rs` module doc: "The OWL-RL semi-naive
+// fixpoint (owl.rs): a delta-driven delta/full join with union-find sameAs
+// canonicalisation. Genuinely a different (incremental, mutating) join shape than the
+// substrate's static &[Row] build/probe kernel." The EL worklist is even more tightly
+// coupled, with no round boundary to hang a delta on.
+//
+// Conclusion: this module stays on its hand-rolled FxHashMap worklist. There is no
+// profitable behaviour-neutral seam to the substrate kernels for CR1-CR5. If a
+// concurrency refactor (Phase E4) eventually batches derivations by concept, that is
+// the point to reconsider whether a per-batch substrate probe makes sense -- that
+// decision belongs to E4, not here.
 
 use crate::normal::{Concept, Names, Normal, Role, BOTTOM, TOP};
 #[cfg(feature = "rbox")]
