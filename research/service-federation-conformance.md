@@ -94,7 +94,10 @@ Scope, honestly bounded:
   bounded cooperatively post-HTTP). The harness should not paper over this; if the suite exercises
   it, surface it (and consider a follow-up bead for a per-query remote-request cap). Remote-result
   materialisation is non-streaming (full relation into memory) — fine for conformance fixtures,
-  noted as a scaling caveat, not a conformance failure.
+  noted as a scaling caveat, not a conformance failure. *(Both since addressed: the per-query
+  remote-request cap landed as `sq-b93pv`, and remote-result consumption is streaming/bounded as
+  of `sq-my8wd.4` — rows are interned to id-level bindings as parsed, never held as a
+  whole-document DOM or term-level relation. [FABLE-5])*
 
 ---
 
