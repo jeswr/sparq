@@ -5,7 +5,7 @@
 //! entry points are [`classify_graph`] (emit the complete subsumption lattice into a
 //! `(Dict, triples)` pair) and [`Classifier`] (the typed [`ClassHierarchy`] API). The
 //! algorithm lives in three private modules: `normal` (Baader–Brandt–Lutz normalization),
-//! `classify` (CR1–CR5 saturation), and `extract` (RDF → EL+⊥ axioms).
+//! `classify` (CR1–CR6 saturation), and `extract` (RDF → EL+⊥ axioms).
 
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{Dict, Id};
@@ -28,34 +28,44 @@ const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
 /// "n axioms outside the EL fragment were ignored" can be surfaced).
 ///
 /// The classifier is SOUND but only COMPLETE for the fragment it recognises. By default that is
-/// EL+⊥-minus-RBox (the E1 MVP); with the `rbox` feature it is EL+ (E1 + the RBox role automaton:
-/// `rdfs:subPropertyOf` role inclusions, `owl:propertyChainAxiom` chains, `owl:TransitiveProperty`
-/// — completion rules CR10/CR11). Axioms using constructs outside the active fragment are NOT
-/// applied and their class-axiom occurrences are counted in [`Report::skipped_axioms`] (honest
-/// incompleteness rather than a silent wrong answer). Two kinds of skip are distinguished by the
-/// EL theory:
+/// EL+⊥-minus-RBox (the E1 MVP) **plus safe nominals** (sq-pbz04.2.1: singleton `owl:oneOf` and
+/// object-valued `owl:hasValue` — the `{a}` / `∃r.{a}` concepts, completion rule **CR6**); with
+/// the `rbox` feature it adds the RBox role automaton (`rdfs:subPropertyOf` role inclusions,
+/// `owl:propertyChainAxiom` chains, `owl:TransitiveProperty` — completion rules CR10/CR11).
+/// Axioms using constructs outside the active fragment are NOT applied and their class-axiom
+/// occurrences are counted in [`Report::skipped_axioms`] (honest incompleteness rather than a
+/// silent wrong answer). Two kinds of skip are distinguished by the EL theory:
 /// - **Outside EL entirely** — `owl:unionOf`, `owl:complementOf`, `owl:allValuesFrom`, cardinality,
-///   `owl:hasSelf`: these need ALC / Horn-SHIQ expressivity, not a deferred EL slice.
-/// - **Deliberately-deferred EL fragment** — OWL 2 EL itself admits **safe nominals** (`owl:oneOf`
-///   / `owl:hasValue`, completion rule **CR6**) and **concrete domains** (`owl:onDataRange` /
-///   `owl:withRestrictions` / `owl:onDatatype`, **CR7–CR9**); this classifier defers both and
-///   surfaces every occurrence via `skipped_axioms` so a user sees the gap. See the crate README
-///   and `skills/inference/SKILL.md` for the deferred-fragment table.
+///   `owl:hasSelf`, and a MULTI-individual `owl:oneOf` (the profile's `ObjectOneOf` admits exactly
+///   one individual; more is a disjunction): these need ALC / Horn-SHIQ expressivity.
+/// - **Deliberately-deferred EL fragment** — OWL 2 EL itself admits **concrete domains**
+///   (`owl:onDataRange` / `owl:withRestrictions` / `owl:onDatatype`, **CR7–CR9**), which this
+///   classifier still defers — including the literal-valued `owl:hasValue`/`owl:oneOf` forms
+///   (`DataHasValue`/`DataOneOf`); every occurrence is surfaced via `skipped_axioms` so a user
+///   sees the gap. See the crate README and `skills/inference/SKILL.md` for the fragment table.
+///
+/// Nominal honesty notes (sq-pbz04.2.1): CR6 uses the classic reachability side-condition — every
+/// derived subsumption is sound, but completeness is claimed only for the typical "safe" nominal
+/// usage, not every EL++ nominal interplay (see `classify.rs` `cr6_pass` for the boundary); and
+/// ABox `rdf:type` assertions are NOT internalized as nominal axioms (TBox classification only —
+/// materializing instance closures is the RL path's job).
 ///
 /// Without `rbox`, RBox axioms (`rdfs:subPropertyOf` / property chains / transitivity) are also
 /// left unapplied (roles are compared for equality only) — but those are gated capability, not the
-/// permanently-deferred CR6–CR9 fragment.
+/// deferred CR7–CR9 fragment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Report {
     /// Distinct named classes (and ⊤/⊥ if they occur) seen by the extractor.
     pub named_classes: usize,
     /// Class-axioms (`subClassOf`/`equivalentClass`/`disjointWith`) whose class expression
-    /// used a construct OUTSIDE the recognised EL+⊥ fragment, and were therefore IGNORED. This
-    /// includes both constructs outside EL entirely (union/complement/universal/cardinality) AND
-    /// the deliberately-deferred EL fragment — safe nominals (`owl:oneOf`/`owl:hasValue`, CR6) and
-    /// concrete domains (`owl:onDataRange`/`owl:withRestrictions`/`owl:onDatatype`, CR7–CR9). A
-    /// non-zero count is the honest signal that the input used a construct this classifier does
-    /// not reason over, so the emitted lattice may be incomplete for those axioms.
+    /// used a construct OUTSIDE the recognised fragment, and were therefore IGNORED. This
+    /// includes constructs outside EL entirely (union/complement/universal/cardinality/
+    /// multi-individual `oneOf`) AND the deliberately-deferred EL fragment — concrete domains
+    /// (`owl:onDataRange`/`owl:withRestrictions`/`owl:onDatatype` and the literal-valued
+    /// `hasValue`/`oneOf` forms, CR7–CR9). Safe nominals (singleton `owl:oneOf`, object-valued
+    /// `owl:hasValue`) are APPLIED since sq-pbz04.2.1 (CR6), no longer skipped. A non-zero
+    /// count is the honest signal that the input used a construct this classifier does not
+    /// reason over, so the emitted lattice may be incomplete for those axioms.
     pub skipped_axioms: usize,
     /// New `rdfs:subClassOf` triples emitted by [`classify_graph`].
     pub emitted_subsumptions: usize,
@@ -158,9 +168,9 @@ impl Classifier {
         #[cfg(feature = "rbox")]
         let role_box = rbox::RoleBox::build(&role_axioms, names.role_count());
         #[cfg(feature = "rbox")]
-        let sat = classify::saturate(&axioms, names.concept_count(), &role_box);
+        let sat = classify::saturate(&axioms, &names, &role_box);
         #[cfg(not(feature = "rbox"))]
-        let sat = classify::saturate(&axioms, names.concept_count());
+        let sat = classify::saturate(&axioms, &names);
         let cls = classify::classify(&sat, &names);
         // Re-key the named-concept lattice onto dict ids for the public view.
         let mut subsumers: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
@@ -339,26 +349,49 @@ mod tests {
     }
 
     #[test]
-    fn deferred_nominals_are_surfaced_as_skipped() {
-        // CR6 (safe nominals) is deferred: an `owl:oneOf` enumeration and an `owl:hasValue` value
-        // restriction must each be counted in `skipped_axioms`, NOT silently mis-classified — the
-        // answer-safety invariant for the deferred EL fragment.
+    fn out_of_fragment_nominal_shapes_are_surfaced_as_skipped() {
+        // [FABLE-5] sq-pbz04.2.1: safe nominals are now APPLIED (CR6), but the out-of-fragment
+        // shapes stay honestly skipped: a MULTI-individual `owl:oneOf` is a disjunction
+        // (outside EL — the profile's ObjectOneOf admits exactly one individual) and a
+        // LITERAL-valued `owl:hasValue` is DataHasValue (a concrete domain, the deferred
+        // CR7–CR9 surface). Neither may be silently mis-classified.
         let ttl = format!(
             "{PRE}
              [ owl:oneOf ( :a :b ) ] rdfs:subClassOf :C .
-             :D rdfs:subClassOf [ owl:onProperty :r ; owl:hasValue :a ] .
+             :D rdfs:subClassOf [ owl:onProperty :p ; owl:hasValue 5 ] .
              :E rdfs:subClassOf :F ."
         );
         let (dict, triples) = parse(&ttl);
         let h = Classifier::classify(&dict, &triples);
-        assert!(
-            h.report().skipped_axioms >= 2,
-            "the oneOf + hasValue axioms must both be recorded as skipped (CR6 deferred), got {}",
-            h.report().skipped_axioms
+        assert_eq!(
+            h.report().skipped_axioms,
+            2,
+            "the multi-individual oneOf + the literal hasValue must both be skipped"
         );
-        // The plain-EL part must still classify.
+        // The plain-EL part must still classify, and the skipped axioms derive nothing.
         let (e, f) = (iri(&dict, "http://ex/E"), iri(&dict, "http://ex/F"));
         assert!(h.is_subclass_of(e, f), "the EL part (E ⊑ F) must still classify");
+        let (d, c) = (iri(&dict, "http://ex/D"), iri(&dict, "http://ex/C"));
+        assert!(
+            !h.is_subclass_of(d, c),
+            "skipped nominal shapes must not fabricate subsumptions"
+        );
+    }
+
+    #[test]
+    fn safe_nominal_has_value_classifies_instead_of_skipping() {
+        // [FABLE-5] sq-pbz04.2.1: the CR6 slice — an object-valued hasValue (∃r.{a}) on both
+        // sides of ⊑ must classify (A ⊑ B through the shared nominal filler) with ZERO skips.
+        let ttl = format!(
+            "{PRE}
+             :A rdfs:subClassOf [ owl:onProperty :r ; owl:hasValue :a ] .
+             [ owl:onProperty :r ; owl:hasValue :a ] rdfs:subClassOf :B ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let h = Classifier::classify(&dict, &triples);
+        let (a, b) = (iri(&dict, "http://ex/A"), iri(&dict, "http://ex/B"));
+        assert!(h.is_subclass_of(a, b), "A ⊑ ∃r.{{a}} ⊑ B must classify");
+        assert_eq!(h.report().skipped_axioms, 0, "safe nominals are in-fragment now");
     }
 
     #[test]

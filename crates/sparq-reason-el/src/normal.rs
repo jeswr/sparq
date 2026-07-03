@@ -7,7 +7,7 @@
 // interning fresh names back into the Dict) means normalization never pollutes the store's
 // dictionary, and the saturation runs over dense `u32` keys.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::Id;
 
 /// A `Concept` is a node in the internal classification index space. It is NOT a dict id —
@@ -45,12 +45,22 @@ pub enum RoleAxiom {
 pub struct Names {
     /// `dict Id -> internal Concept` for named classes.
     by_dict: FxHashMap<Id, Concept>,
-    /// `internal Concept -> dict Id` for named classes (None for ⊤/⊥/fresh names).
+    /// `internal Concept -> dict Id` for named classes (None for ⊤/⊥/fresh names/nominals).
     to_dict: Vec<Option<Id>>,
     /// `dict Id -> internal Role` for named object properties.
     role_by_dict: FxHashMap<Id, Role>,
     /// `internal Role -> dict Id`.
     role_to_dict: Vec<Id>,
+    /// [FABLE-5] sq-pbz04.2.1: `individual dict Id -> internal Concept` for nominals `{a}`
+    /// (`owl:oneOf` singletons / `owl:hasValue` values). SEPARATE from `by_dict` so a punned
+    /// id (used both as a class and as an individual) yields two distinct concepts, matching
+    /// OWL 2 direct-semantics punning. A nominal concept has NO dict id in `to_dict` (it must
+    /// never be emitted as a named class in the subsumption lattice).
+    nominal_by_dict: FxHashMap<Id, Concept>,
+    /// The set of concepts that are nominals (for the CR6 saturation pass), plus the mint-order
+    /// list used as the roots of the "reachable from a nominal" non-emptiness search.
+    nominal_set: FxHashSet<Concept>,
+    nominal_list: Vec<Concept>,
 }
 
 /// The internal concept index for ⊤ (`owl:Thing`).
@@ -62,10 +72,8 @@ impl Names {
     /// A fresh table pre-seeded with ⊤ at [`TOP`] and ⊥ at [`BOTTOM`].
     pub fn new() -> Names {
         Names {
-            by_dict: FxHashMap::default(),
             to_dict: vec![None, None],
-            role_by_dict: FxHashMap::default(),
-            role_to_dict: Vec::new(),
+            ..Names::default()
         }
     }
 
@@ -117,6 +125,42 @@ impl Names {
         let c = self.to_dict.len() as Concept;
         self.to_dict.push(None);
         c
+    }
+
+    /// [FABLE-5] sq-pbz04.2.1: maps an individual's dict id to its NOMINAL concept `{a}`,
+    /// minting one on first sight. The same individual (dict id) always yields the same
+    /// concept, so `owl:hasValue :a` and `owl:someValuesFrom [owl:oneOf (:a)]` unify on one
+    /// filler. The concept carries NO dict id (`dict_of` returns `None`): a nominal is not a
+    /// named class and must never surface in the emitted `rdfs:subClassOf` lattice.
+    pub fn nominal(&mut self, dict_id: Id) -> Concept {
+        if let Some(&c) = self.nominal_by_dict.get(&dict_id) {
+            return c;
+        }
+        let c = self.to_dict.len() as Concept;
+        self.to_dict.push(None);
+        self.nominal_by_dict.insert(dict_id, c);
+        self.nominal_set.insert(c);
+        self.nominal_list.push(c);
+        c
+    }
+
+    /// Whether `c` is a nominal concept `{a}` (the CR6 trigger test).
+    pub fn is_nominal(&self, c: Concept) -> bool {
+        self.nominal_set.contains(&c)
+    }
+
+    /// Whether ANY nominal was minted — the O(1) fast-path guard that keeps the CR6 pass a
+    /// no-op (zero scans) on nominal-free ontologies, so the SNOMED/GO-shaped scaling bound
+    /// is unaffected by this rule.
+    pub fn has_nominals(&self) -> bool {
+        !self.nominal_list.is_empty()
+    }
+
+    /// The minted nominal concepts, in mint order — the roots of CR6's "reachable from a
+    /// nominal ⇒ provably non-empty" search (a nominal `{a}` always denotes the non-empty
+    /// set containing `a`).
+    pub fn nominal_concepts(&self) -> &[Concept] {
+        &self.nominal_list
     }
 
     /// The dict id of a concept, if it is a NAMED class (⊤/⊥/fresh names return `None`).
