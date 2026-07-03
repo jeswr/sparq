@@ -166,25 +166,28 @@ export async function assertA11y(
   const observedSerious = seriousRuleIds(violations);
   measured.set(key, { counts, seriousRules: observedSerious, knownGap: opts.knownGap });
 
-  // In seed mode we purely MEASURE (no assertions): writeSeedBaseline rewrites the ratchet from
-  // these counts, and the author reviews the seeded baseline before committing. The real gate
-  // (enforce mode below) is where the zero-tier serious bar + the known-gap guard actually bite.
-  if (SEED) return counts;
-
   const blocking = violations.filter((v) => v.impact === "serious" || v.impact === "critical");
 
   if (opts.knownGap) {
     // ── KNOWN-GAP tier: only the beaded serious rule-ids are tolerated; NEW ones fail. ──────────
-    const allowed = new Set(baseline.surfaces[key]?.allowedSeriousRules ?? []);
-    const regressions = blocking.filter((v) => !allowed.has(v.id));
-    expect(
-      regressions,
-      `\n[a11y ${key}] NEW serious/critical WCAG 2.1 AA violation on a KNOWN-GAP surface ` +
-        `(allowance: [${[...allowed].join(", ")}], tracked in ${opts.knownGap.bead}) — a regression ` +
-        `beyond the beaded set:\n${formatViolations(regressions)}\n`,
-    ).toHaveLength(0);
+    // In SEED mode this surface's allowance is being RE-MEASURED — writeSeedBaseline captures the
+    // currently-observed serious rule-ids as `allowedSeriousRules` and the author reviews the
+    // seeded diff — so there is no fixed allowance to enforce against yet; skip while seeding.
+    if (!SEED) {
+      const allowed = new Set(baseline.surfaces[key]?.allowedSeriousRules ?? []);
+      const regressions = blocking.filter((v) => !allowed.has(v.id));
+      expect(
+        regressions,
+        `\n[a11y ${key}] NEW serious/critical WCAG 2.1 AA violation on a KNOWN-GAP surface ` +
+          `(allowance: [${[...allowed].join(", ")}], tracked in ${opts.knownGap.bead}) — a regression ` +
+          `beyond the beaded set:\n${formatViolations(regressions)}\n`,
+      ).toHaveLength(0);
+    }
   } else {
-    // ── ZERO tier: unconditional hard fail on any serious/critical. ─────────────────────────────
+    // ── ZERO tier: unconditional hard fail on any serious/critical — ENFORCED EVEN IN SEED mode.
+    // The zero bar is never read from the baseline, so this bites before/independent of the seed
+    // early-return below: a re-seed can never be a hole that blesses a NEW serious/critical bug on
+    // a supposedly-clean surface by writing it into the baseline. ────────────────────────────────
     expect(
       blocking,
       `\n[a11y ${key}] serious/critical WCAG 2.1 AA violation(s) — must be ZERO:\n${formatViolations(
@@ -192,6 +195,12 @@ export async function assertA11y(
       )}\n`,
     ).toHaveLength(0);
   }
+
+  // In SEED mode the moderate/minor ceiling (and any known-gap allowance) is purely RE-MEASURED,
+  // not enforced: writeSeedBaseline rewrites the ratchet from these counts in afterAll and the
+  // author reviews the seeded baseline before committing. The unconditional zero-tier serious bar
+  // above has ALREADY bitten, so returning here can never bless a new serious/critical violation.
+  if (SEED) return counts;
 
   // ── RATCHET (both tiers): moderate + minor may only FALL vs the committed ceiling. ────────────
   const ceiling = baseline.surfaces[key];
