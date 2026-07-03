@@ -9,7 +9,7 @@ support.
 
 Three legs:
   --leg1 <metadata-json>   cargo metadata check: `vectorized` absent from default features
-  --leg2 <bench-json> <floor-json>  wasm bundle exact-equality vs pinned floor
+  --leg2 <bench-json> <floor-json>  wasm bundle exact-equality vs feature_off_exact pin
   --leg3                   cfg-audit: every vectorized call site in lib.rs/exec.rs is gated
   --self-test              run built-in tripwires that MUST fail (guard the guards)
 """
@@ -140,6 +140,22 @@ def check_leg2(bench_results_path: str, floor_path: str) -> int:
     # Build lookup from list
     measured: dict[str, int] = {item["name"]: item["value"] for item in results_list}
     floor_metrics: dict = floor_data.get("metrics", {})
+
+    # [OPUS-4.8] Fail-closed if the pin itself is missing. The comparison loop below only
+    # iterates over keys PRESENT in floor_metrics, so a floor file that never defines
+    # 'wasm_bundle_bytes' (edited/corrupted/renamed baseline) would produce zero violations
+    # and silently PASS — disabling the exact-equality gate. Require the pinned metric up
+    # front so a missing baseline is a hard failure, not a skip.
+    if "wasm_bundle_bytes" not in floor_metrics:
+        print(
+            f"[leg2] VIOLATION: 'wasm_bundle_bytes' metric absent from the 'metrics' section "
+            f"of {floor_path!r}. The exact-equality gate cannot run without a pin. Restore "
+            "metrics.wasm_bundle_bytes.feature_off_exact in bench/perf-baseline.json to the "
+            "exact byte count of the feature-OFF wasm build."
+        )
+        print("\n[leg2] FAIL — the feature_off_exact pin is missing; refusing to pass a "
+              "gate that never compared the wasm bundle.")
+        return 1
 
     # Only check metrics present in BOTH the floor AND the results
     violations: list[str] = []

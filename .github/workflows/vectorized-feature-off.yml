@@ -79,6 +79,7 @@ jobs:
               - 'rust-toolchain*'
               - '.github/workflows/vectorized-feature-off.yml'
               - 'scripts/check-vectorized-feature-off.py'
+              - 'scripts/tests/test_vectorized_feature_off.py'
               - 'bench/perf-baseline.json'
       - name: Decide rust_changed (safe-by-default off the PR path)
         id: decide
@@ -129,8 +130,8 @@ jobs:
   # ---------------------------------------------------------------------------
   # Job 2: artifact exact-equality (wasm bundle feature-OFF)
   # Builds sparq-wasm without the `vectorized` feature and asserts the bundle size
-  # equals the pinned floor EXACTLY (zero delta). Any accidental vectorized code would
-  # change the bundle size.
+  # equals the pinned feature_off_exact value EXACTLY (zero delta) — NOT the ratchet
+  # floor. Any accidental vectorized code would change the bundle size.
   #
   # Honest scope: this leg proves compile-time absence via artifact byte-determinism.
   # It does NOT prove runtime perf neutrality, which is EC2-gated. The native
@@ -176,7 +177,7 @@ jobs:
           echo "[{\"name\":\"wasm_bundle_bytes\",\"unit\":\"bytes\",\"value\":$SIZE}]" > feature-off-results.json
           cat feature-off-results.json
 
-      - name: Leg 2 — exact equality vs pinned floor (zero delta)
+      - name: Leg 2 — exact equality vs feature_off_exact pin (zero delta)
         run: |
           set -euo pipefail
           python3 scripts/check-vectorized-feature-off.py \

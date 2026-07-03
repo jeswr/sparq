@@ -179,6 +179,29 @@ def test_leg2_comparator_rejects_perturbed_size() -> bool:
         return False
 
 
+def test_leg2_rejects_missing_pin() -> bool:
+    """
+    [OPUS-4.8] Tripwire 3: leg2 MUST fail-closed when the floor file has no
+    'wasm_bundle_bytes' metric at all. The comparison loop only iterates keys present
+    in the floor, so a corrupted/edited baseline that drops the pin would otherwise
+    yield zero violations and silently pass — disabling the exact-equality gate.
+    """
+    good_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": 1399110}]
+    floor_without_pin = {
+        "metrics": {
+            # wasm_bundle_bytes intentionally absent; only an unrelated metric present.
+            "native_bytes_per_triple": {"floor": 42, "threshold": 0.02, "mode": "auto"},
+        }
+    }
+    rc = _leg2_on_dicts(good_results, floor_without_pin)
+    if rc != 0:
+        print("  PASS — leg2 fail-closed when the floor file omits wasm_bundle_bytes")
+        return True
+    else:
+        print("  FAIL — leg2 silently passed with no wasm_bundle_bytes pin; the gate is disabled")
+        return False
+
+
 def test_leg2_accepts_exact_match() -> bool:
     """
     Sanity check: leg2 MUST accept results that exactly match the feature_off_exact pin.
@@ -217,6 +240,7 @@ def main() -> int:
         ("leg1 rejects vectorized in default features", test_leg1_guard_rejects_vectorized_in_default_features),
         ("leg1 accepts clean metadata (sanity)", test_leg1_accepts_clean_metadata),
         ("leg2 rejects perturbed wasm size (tripwire)", test_leg2_comparator_rejects_perturbed_size),
+        ("leg2 fail-closed on missing pin (tripwire)", test_leg2_rejects_missing_pin),
         ("leg2 accepts exact match (sanity)", test_leg2_accepts_exact_match),
     ]
 
