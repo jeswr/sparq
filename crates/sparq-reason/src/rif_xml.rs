@@ -15,6 +15,13 @@
 // Fix-4: func:count → Builtin::ListLength added to iri_to_builtin (was wrongly
 //        rejected as UnknownExternal). [SONNET-4.6]
 // Fix-5: honesty claims in module docs updated to match final behaviour. [SONNET-4.6]
+// Fix-6: <declare> with != 1 <Var> child now returns MalformedXml in BOTH the
+//        Exists arm (parse_condition) and the Forall arm (parse_sentence). The old
+//        filter_map(.first()) silently dropped all but the first Var, leaving the
+//        others unrenamed and causing variable capture (demonstrated: Exists
+//        <declare>?a ?b</declare> conflated universal ?b with existential ?b).
+//        Fail-closed beats guessing; multi-Var-per-declare is not schema-valid
+//        RIF-XML. [SONNET-4.6]
 // Beads for deferred low-priority items: see bead notes inline.
 
 //! # `rif_xml` — W3C RIF-Core XML importer
@@ -994,16 +1001,28 @@ fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
         }
         "Exists" => {
             // <Exists>
-            //   <declare><Var>z</Var></declare>  (one or more)
+            //   <declare><Var>z</Var></declare>  (one or more, each with exactly one <Var>)
             //   <formula>CONDITION</formula>
             // </Exists>
             // Collect declared variable names (used by alpha_rename_cond in parse_implies).
-            let declared_vars: Vec<String> = node
-                .children_named("declare")
-                .filter_map(|d| d.children.first())
-                .filter(|c| c.tag == "Var")
-                .map(|c| c.text.trim().to_string())
-                .collect();
+            //
+            // [SONNET-4.6] Fix-6: fail-closed on <declare> with != 1 <Var> child.
+            // The old filter_map(.first()) silently dropped all but the first <Var>,
+            // leaving extras unrenamed (demonstrated capture: Exists <declare>?a ?b</declare>
+            // conflated universal ?b with existential ?b). Multi-Var-per-declare is
+            // not schema-valid RIF-XML; we reject rather than guess the intent.
+            let mut declared_vars: Vec<String> = Vec::new();
+            for d in node.children_named("declare") {
+                let var_children: Vec<&XmlNode> =
+                    d.children.iter().filter(|c| c.tag == "Var").collect();
+                if var_children.len() != 1 {
+                    return Err(ImportError::MalformedXml(format!(
+                        "<declare> must contain exactly one <Var> child, found {} (in <Exists>)",
+                        var_children.len()
+                    )));
+                }
+                declared_vars.push(var_children[0].text.trim().to_string());
+            }
             let formula = node.child("formula").ok_or_else(|| ImportError::MalformedXml(
                 "Exists missing <formula>".to_string(),
             ))?;
@@ -1076,12 +1095,22 @@ fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
             // Collect universally declared variable names.
             // These seed the alpha-rename universe so generated fresh names cannot
             // collide with universally-declared vars.
-            let forall_vars: BTreeSet<String> = node
-                .children_named("declare")
-                .filter_map(|d| d.children.first())
-                .filter(|c| c.tag == "Var")
-                .map(|c| c.text.trim().to_string())
-                .collect();
+            //
+            // [SONNET-4.6] Fix-6: identical guard to Exists arm — reject <declare>
+            // with != 1 <Var> child instead of silently dropping extras.
+            let mut forall_vars_vec: Vec<String> = Vec::new();
+            for d in node.children_named("declare") {
+                let var_children: Vec<&XmlNode> =
+                    d.children.iter().filter(|c| c.tag == "Var").collect();
+                if var_children.len() != 1 {
+                    return Err(ImportError::MalformedXml(format!(
+                        "<declare> must contain exactly one <Var> child, found {} (in <Forall>)",
+                        var_children.len()
+                    )));
+                }
+                forall_vars_vec.push(var_children[0].text.trim().to_string());
+            }
+            let forall_vars: BTreeSet<String> = forall_vars_vec.into_iter().collect();
 
             let formula = node.child("formula").ok_or_else(|| ImportError::MalformedXml(
                 "Forall missing <formula>".to_string(),
@@ -1657,6 +1686,128 @@ mod tests {
   </sentences></Group></payload>
 </Document>"#;
 
+    // ---- Fix-6 fixtures (multi-Var/empty declare rejection) -----------------
+
+    /// Demonstrated capture case (Opus re-verify): Exists with a single <declare> that
+    /// holds TWO <Var> children (?a and ?b). The old filter_map(.first()) silently
+    /// dropped ?b, leaving it unrenamed and conflated with the universal ?b.
+    /// Fix-6 rejects this with MalformedXml.
+    ///
+    /// Mutation check: removing the count guard in `parse_condition`'s Exists arm
+    /// causes this test to fail — `import` returns `Ok` (accepting the malformed
+    /// document and silently dropping the second Var) instead of `Err`.
+    const MULTI_VAR_DECLARE_EXISTS_XML: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>b</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Exists>
+              <declare><Var>a</Var><Var>b</Var></declare>
+              <formula>
+                <And>
+                  <formula>
+                    <Frame>
+                      <object><Var>b</Var></object>
+                      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/f</Const><Var>a</Var></slot>
+                    </Frame>
+                  </formula>
+                  <formula>
+                    <Frame>
+                      <object><Var>b</Var></object>
+                      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/g</Const><Var>b</Var></slot>
+                    </Frame>
+                  </formula>
+                </And>
+              </formula>
+            </Exists>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>b</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/h</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+
+    /// Empty <declare/> in an Exists — no <Var> children → Fix-6 rejects with MalformedXml.
+    const EMPTY_DECLARE_EXISTS_XML: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Exists>
+              <declare/>
+              <formula>
+                <Frame>
+                  <object><Var>x</Var></object>
+                  <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+                </Frame>
+              </formula>
+            </Exists>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+
+    /// Valid multi-declare Exists: two <declare> elements each with exactly one <Var>.
+    /// Regression guard: Fix-6 must NOT reject this; both vars must be alpha-renamed
+    /// to distinct fresh names (one-Var-per-declare is schema-valid RIF-XML).
+    const MULTI_DECLARE_VALID_EXISTS_XML: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Exists>
+              <declare><Var>a</Var></declare>
+              <declare><Var>b</Var></declare>
+              <formula>
+                <And>
+                  <formula>
+                    <Frame>
+                      <object><Var>x</Var></object>
+                      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Var>a</Var></slot>
+                    </Frame>
+                  </formula>
+                  <formula>
+                    <Frame>
+                      <object><Var>x</Var></object>
+                      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Var>b</Var></slot>
+                    </Frame>
+                  </formula>
+                </And>
+              </formula>
+            </Exists>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+
     // ---- Tests --------------------------------------------------------------
 
     /// Minimal document: one rule (Frame body → Frame head). Parse succeeds.
@@ -2219,5 +2370,104 @@ mod tests {
         let b = iri_to_builtin("http://www.w3.org/2007/rif-builtin-function#count")
             .expect("func:count must map to Builtin::ListLength (Fix-4)");
         assert_eq!(b, Builtin::ListLength);
+    }
+
+    // ---- Fix-6 tests: <declare> cardinality guard ---------------------------
+
+    /// Test (a) — demonstrated capture case: Exists with a single <declare> holding
+    /// TWO <Var> children (?a and ?b) must be rejected (MalformedXml).
+    ///
+    /// Mutation-check annotation: without the count guard (`var_children.len() != 1`
+    /// check removed, reverting to the old `filter_map(.first())` path), `import`
+    /// returns `Ok` — it silently accepts the document and drops the second Var,
+    /// leaving ?b unrenamed. With the guard this test returns `Err(MalformedXml)`
+    /// and the assertion passes; removing the guard causes the `expect_err` to panic
+    /// (import returns `Ok`), making the test RED. [SONNET-4.6]
+    #[test]
+    fn test_reject_multi_var_declare_exists() {
+        let err = import(MULTI_VAR_DECLARE_EXISTS_XML)
+            .expect_err("multi-Var <declare> in Exists must be rejected (Fix-6)");
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml for multi-Var <declare>, got: {}",
+            err
+        );
+        // Verify the error message names the element for debuggability.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("declare"),
+            "error message must mention <declare>: {}",
+            msg
+        );
+    }
+
+    /// Test (b): empty <declare/> in Exists (zero <Var> children) must be rejected.
+    #[test]
+    fn test_reject_empty_declare_exists() {
+        let err = import(EMPTY_DECLARE_EXISTS_XML)
+            .expect_err("empty <declare/> in Exists must be rejected (Fix-6)");
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml for empty <declare/>, got: {}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("declare"),
+            "error message must mention <declare>: {}",
+            msg
+        );
+    }
+
+    /// Test (c): valid one-Var-per-declare multi-declare Exists imports successfully.
+    /// Both declared vars must be alpha-renamed to DISTINCT fresh names.
+    /// This is the regression guard: Fix-6 must not break schema-valid multi-declare.
+    #[test]
+    fn test_multi_declare_valid_exists() {
+        let doc = import(MULTI_DECLARE_VALID_EXISTS_XML)
+            .expect("valid multi-declare Exists (one Var per declare) must import (Fix-6 regression guard)");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        // Body has two atoms (one per declared var in the multi-declare Exists).
+        assert_eq!(rule.body.len(), 2, "both atoms from the multi-declare Exists body are present");
+
+        // Neither original var name "a" nor "b" must appear (both unconditionally renamed).
+        let a_var = Term::Var("a".to_string());
+        let b_var = Term::Var("b".to_string());
+        let has_original = rule.body.iter().any(|atom| match atom {
+            Atom::Frame { obj, pred, val } => {
+                [obj, pred, val].iter().any(|t| *t == &a_var || *t == &b_var)
+            }
+            Atom::Builtin { args, .. } => args.iter().any(|t| t == &a_var || t == &b_var),
+            _ => false,
+        });
+        assert!(
+            !has_original,
+            "original vars 'a' and 'b' must be alpha-renamed (Fix-6 regression guard)"
+        );
+
+        // Collect all fresh vars from body val positions.
+        let fresh_vals: Vec<String> = rule.body.iter().filter_map(|a| {
+            if let Atom::Frame { val: Term::Var(v), .. } = a {
+                Some(v.clone())
+            } else {
+                None
+            }
+        }).collect();
+        assert_eq!(fresh_vals.len(), 2, "both body atoms have a Var value (the renamed existentials)");
+
+        // Both must be fresh __ex names AND must be DISTINCT.
+        assert!(
+            fresh_vals.iter().all(|v| v.starts_with("__ex")),
+            "all existential vars must be renamed to __ex fresh names; got {:?}",
+            fresh_vals
+        );
+        let distinct: BTreeSet<_> = fresh_vals.iter().cloned().collect();
+        assert_eq!(
+            distinct.len(),
+            2,
+            "the two declared vars must produce TWO distinct fresh names; got {:?}",
+            fresh_vals
+        );
     }
 }
