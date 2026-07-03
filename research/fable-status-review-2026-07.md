@@ -83,7 +83,7 @@ sq-qhy4 + scope-add sq-tcz0k); hdt 0.7 decision (sq-wzm4 closed); QLever diverge
 **Not beaded, deliberately:** federation/geo/RSP child decomposition — in flight as
 PR #1411; duplicating it would collide. **Post-merge verification advised** that
 sq-my8wd / sq-lk3aw / sq-2n1q3 actually receive implementable children **[inferred that
-#1411 will create them; the PR was still open at review time]**.
+\#1411 will create them; the PR was still open at review time]**.
 
 ## (c) NEEDS DEEPER (FABLE/OPUS) REVIEW — ranked
 
