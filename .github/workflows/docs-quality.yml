@@ -479,6 +479,18 @@ jobs:
       # runtime-honesty teeth. HARD job (no "advisory" token) — a regression reds the ci-summary gate.
       - name: "Self-test js-sbom lane vs external dev-deps on a published member (sq-pl1p)"
         run: bash scripts/tests/test_js_sbom_external_devdep.sh
+      # [FABLE-5] sq-90cv4: the ci-summary gate poll loop — the brain of the SINGLE
+      # required branch-protection check — lives in scripts/ci_summary_gate.py
+      # (extracted from ci-summary.yml's inline bash). Its verdict semantics
+      # (all-green=>PASS, real-failure=>FAIL, advisory word-boundary exclusion,
+      # sq-ipkku settle guard + #997 graceful timeout, anchored self-exclusion) AND
+      # the sq-90cv4 adaptive saturation budget (queued-siblings-under-saturation =>
+      # still-settling, idle-queue hang => RED, absolute cap bounded) are pinned by a
+      # hermetic stdlib-unittest suite (NO gh, NO network — injected fetchers). HARD
+      # (no "advisory" token): a regression in the gate's own logic must red CI
+      # before every merge depends on it.
+      - name: Self-test ci-summary gate loop (verdict semantics + adaptive saturation budget — sq-90cv4)
+        run: python3 scripts/tests/test_ci_summary_gate.py
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:

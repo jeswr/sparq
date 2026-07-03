@@ -1,4 +1,4 @@
-//! [OPUS-4.8] RSP-QL surface-syntax parser (sq-9u1).
+//! [SONNET-4.6] RSP-QL surface-syntax parser (sq-9u1, extended sq-2n1q3.2).
 //!
 //! The crate's public API is *programmatic*: you build a [`WindowSpec`] in Rust
 //! and register plain SPARQL ([`ContinuousQuery`](crate::ContinuousQuery) etc.).
@@ -14,7 +14,8 @@
 //! REGISTER [RSTREAM|ISTREAM|DSTREAM] <output-stream-iri> AS
 //! SELECT ...                       -- any spargebra-parseable SELECT projection
 //! FROM NAMED WINDOW <w1> ON <s1> [RANGE <dur> STEP <dur>]
-//! FROM NAMED WINDOW <w2> ON <s2> [RANGE <dur> STEP <dur>]
+//! FROM NAMED WINDOW <w2> ON <s2> [TUMBLING RANGE <dur>]
+//! FROM NAMED WINDOW <w3> ON <s3> [SLIDING RANGE <dur> STEP <dur>]
 //! WHERE {
 //!   WINDOW <w1> { ?s :p ?o }       -- a graph pattern scoped to window <w1>
 //!   WINDOW <w2> { ?s :q ?x }       -- joined with <w2>'s pattern (shared vars)
@@ -25,16 +26,21 @@
 //! ## What is parsed
 //!
 //! * **`REGISTER [R2S] <out> AS`** — the registration header. The optional
-//!   relation-to-stream operator (`RSTREAM` default / `ISTREAM` / `DSTREAM`)
-//!   maps onto [`R2S`](crate::R2S); the output-stream IRI is retained as
+//!   relation-to-stream operator (`RSTREAM` default / `ISTREAM` / `DSTREAM` /
+//!   `STREAM`) maps onto [`R2S`](crate::R2S); the output-stream IRI is retained as
 //!   metadata ([`RspqlQuery::output_stream`]).
-//! * **`FROM NAMED WINDOW <w> ON <stream> [RANGE r STEP s]`** — one *physical*
-//!   window declaration. `RANGE r STEP s` is a time window
-//!   (tumbling when `r == s`, sliding when `s < r`); the omitted form
-//!   `RANGE r` defaults `STEP` to `r` (tumbling). Durations are ISO-8601
-//!   (`PT10S`, `PT1M30S`, `PT2H`) or a bare integer (logical ticks — the
-//!   crate's native `u64` timestamp scale). Every window is bound to its
-//!   `<stream>` so a push routes to the windows over that stream.
+//! * **`FROM NAMED WINDOW <w> ON <stream> [<window-op>]`** — one *physical*
+//!   window declaration. Three textual window-operator forms are accepted:
+//!   - `RANGE r [STEP s]` — the W3C-community form; `STEP` defaults to `r`
+//!     (tumbling) when omitted.
+//!   - `TUMBLING RANGE r` — explicit tumbling-window keyword (equivalent to
+//!     `RANGE r`, i.e. `step = range`). Brackets optional: `[TUMBLING RANGE r]`.
+//!   - `SLIDING RANGE r STEP s` — explicit sliding-window keyword; `STEP` is
+//!     required (rejected with a clear error if omitted). Brackets optional.
+//!
+//!   Durations are ISO-8601 (`PT10S`, `PT1M30S`, `PT2H`) or a bare integer
+//!   (logical ticks — the crate's native `u64` timestamp scale). Every window is
+//!   bound to its `<stream>` so a push routes to the windows over that stream.
 //! * **`WHERE { WINDOW <w> { … } … }`** — the window graph patterns. Each
 //!   `WINDOW <w>` is rewritten to a standard SPARQL `GRAPH <w>` pattern; the
 //!   engine then evaluates it against the per-window materialised named graph
@@ -43,13 +49,19 @@
 //!   untouched for spargebra to parse, so the full embedded SPARQL algebra is
 //!   supported without re-implementing a SPARQL parser here.
 //!
-//! ## Scoped out (documented, not silently dropped)
+//! ## Scoped out — fail closed with a clear error (NOT silently dropped)
 //!
-//! * **`STEP` as report cadence / `TUMBLING` / `SLIDING` keywords** — RSP-QL
-//!   dialects vary; we accept the W3C-community `RANGE … STEP …` form and the
-//!   single-arg tumbling shorthand. Count windows (`ROWS`) are not part of the
-//!   surface grammar (they have no standard RSP-QL textual form); use the
-//!   programmatic [`WindowSpec::count`](crate::WindowSpec::count).
+//! * **`ROWS n`** — count-window textual form: rejected with
+//!   `"ROWS (count) windows are not supported in the RSP-QL textual surface
+//!   grammar; use the programmatic WindowSpec::count builder"`. The programmatic
+//!   [`WindowSpec::count`](crate::WindowSpec::count) builder is the supported path.
+//! * **`NOW`-relative window bounds** (`NOW-PT10S TO NOW` etc.) — rejected with
+//!   `"NOW-relative window bounds … are not supported; use RANGE/STEP"`.
+//! * **`SLIDING RANGE r` without a `STEP`** — rejected with
+//!   `"SLIDING window declaration requires a STEP duration"`.
+//! * **`TUMBLING RANGE r STEP s`** — rejected with a clear error: `TUMBLING`
+//!   implies `step == range`; a contradictory `STEP` clause is not allowed.
+//!   Use `SLIDING RANGE r STEP s` for an explicit sliding step. [SONNET-4.6]
 //! * **Named-window *variables*** (`FROM NAMED WINDOW ?w …`, `WINDOW ?w { … }`)
 //!   — RSP-QL permits a window variable ranging over declared windows; we
 //!   require a concrete window IRI (the common case). A `WINDOW ?w` is rejected
@@ -288,10 +300,23 @@ fn parse_one_window_decl<'a>(
     Ok((WindowDecl { window, stream, spec }, rest))
 }
 
-/// Parses the window operator `[RANGE r [STEP s]]`. The surrounding `[ … ]`
-/// brackets (W3C-community grammar) are optional. `RANGE r` alone tumbles
-/// (`STEP = r`). The text after the operator (the next clause, or the `WHERE`)
-/// is returned.
+/// Parses the window operator. Accepted forms (brackets optional in all cases):
+///
+/// - `[RANGE r [STEP s]]` — W3C-community form; `STEP` defaults to `r` (tumbling).
+/// - `[TUMBLING RANGE r]` — explicit tumbling keyword; equivalent to `RANGE r`.
+/// - `[SLIDING RANGE r STEP s]` — explicit sliding keyword; `STEP` is required.
+///
+/// Rejected with a clear error (fail-closed, never silently mis-parsed):
+///
+/// - `ROWS n` — count-window textual form; use the programmatic
+///   `WindowSpec::count` builder instead.
+/// - `NOW …` — NOW-relative window bounds; use `RANGE/STEP`.
+/// - `SLIDING RANGE r` without `STEP` — `STEP` is required for `SLIDING`.
+/// - `TUMBLING RANGE r STEP s` — `STEP` is contradictory with `TUMBLING`
+///   (tumbling implies `step == range`); use `SLIDING RANGE r STEP s` instead.
+///   [SONNET-4.6]
+///
+/// Returns the parsed [`WindowSpec`] and the text after the operator.
 fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
     let text = text.trim_start();
     // Optional opening bracket.
@@ -299,15 +324,69 @@ fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
         Some(inner) => (true, inner.trim_start()),
         None => (false, text),
     };
-    let rest = keyword_prefix(text, "RANGE")
-        .ok_or("window declaration needs a `[RANGE <dur> [STEP <dur>]]` operator")?;
+
+    // ROWS n — count-window textual form: not supported in the surface grammar.
+    // Fail closed so callers get a diagnostic, not a mis-parse.
+    if keyword_prefix(text, "ROWS").is_some() {
+        return Err(
+            "ROWS (count) windows are not supported in the RSP-QL textual surface grammar; \
+             use the programmatic `WindowSpec::count` builder instead"
+                .into(),
+        );
+    }
+
+    // NOW-relative window bounds — not supported; fail closed with a clear hint.
+    if keyword_prefix(text, "NOW").is_some() {
+        return Err(
+            "NOW-relative window bounds (e.g. NOW-PT10S TO NOW) are not supported in this parser; \
+             express windows as `RANGE <dur> [STEP <dur>]`"
+                .into(),
+        );
+    }
+
+    // TUMBLING RANGE r — explicit tumbling keyword (step == range).
+    // SLIDING RANGE r STEP s — explicit sliding keyword (STEP required).
+    // [SONNET-4.6] Track both flags: explicit_tumbling lets us reject TUMBLING + STEP.
+    let (explicit_tumbling, explicit_sliding, text) = if let Some(after) = keyword_prefix(text, "TUMBLING") {
+        // TUMBLING: semantically identical to plain RANGE r (step = range).
+        // An explicit STEP is contradictory and must be rejected (see below).
+        (true, false, after.trim_start())
+    } else if let Some(after) = keyword_prefix(text, "SLIDING") {
+        // SLIDING: a STEP is mandatory — reject without it (see below).
+        (false, true, after.trim_start())
+    } else {
+        (false, false, text)
+    };
+
+    let rest = keyword_prefix(text, "RANGE").ok_or(
+        "window declaration needs a `[RANGE <dur> [STEP <dur>]]`, \
+         `[TUMBLING RANGE <dur>]`, or `[SLIDING RANGE <dur> STEP <dur>]` operator",
+    )?;
     let (range, rest) = take_duration(rest.trim_start())?;
     let rest_ws = rest.trim_start();
     let (spec, rest) = if let Some(after_step) = keyword_prefix(rest_ws, "STEP") {
+        // [SONNET-4.6] TUMBLING with an explicit STEP is contradictory: tumbling
+        // means step == range by definition. Reject rather than silently accepting
+        // an inconsistent spec.
+        if explicit_tumbling {
+            return Err(
+                "TUMBLING windows have step == range implicitly; \
+                 a STEP clause is not allowed with TUMBLING — \
+                 use SLIDING RANGE <dur> STEP <dur> for an explicit step"
+                    .into(),
+            );
+        }
         let (step, rest) = take_duration(after_step.trim_start())?;
         (WindowSpec::time(range, step), rest)
+    } else if explicit_sliding {
+        // SLIDING without STEP is a user error — STEP defines the slide interval.
+        return Err(
+            "SLIDING window declaration requires a STEP duration: \
+             `SLIDING RANGE <dur> STEP <dur>`"
+                .into(),
+        );
     } else {
-        // No STEP: tumbling (step == range).
+        // No STEP and not a SLIDING keyword: tumbling (step == range).
         (WindowSpec::time(range, range), rest_ws)
     };
     // Consume the matching closing bracket if we opened one.

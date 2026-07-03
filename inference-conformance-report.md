@@ -2,7 +2,7 @@
 
 - rdf-tests commit: `f25dbc092c654d792974848e81bb519d7328f0e8`
 - w3c/N3 commit: `23ccf3d56b25cb60a68878a04aae0d52493080f0`
-- sparq commit: `3ed3b2cc71b4bc5f07d5a2069600bca51ab0b432`
+- sparq commit: `e321ee200c915f6d677636aea07b6e89540c8f15`
 
 Every manifest entry lands in exactly one bucket — pass, fail, documented divergence, or out-of-scope WITH its reason (no silent skips). Pass rate is `(pass + divergence) / run`; out-of-scope entries are excluded from the rate but counted in coverage.
 
@@ -36,31 +36,31 @@ Method: premise → `sparq_reason::materialize_owl_rl` → `sparq_reason::incons
 
 ### Documented divergences
 
-- `owl2-rl/positive-entailment` — **chain2trans1**: conclusion is a TBox axiom (owl:TransitiveProperty) that no RL/RDF rule derives — PR1 completeness covers assertions only.
+- `owl2-rl/positive-entailment` — **chain2trans1**: PERMANENT — conclusion is the TBox axiom `p rdf:type owl:TransitiveProperty` (from the self-chain p∘p ⊑ p); prp-spo2 consumes owl:propertyChainAxiom only in its BODY to derive chained assertions, no rule head emits owl:TransitiveProperty, and PR1 completeness is assertion-only.
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **DisjointClasses-001**: conclusion invents an owl:complementOf class expression; the RL/RDF rules derive no new class expressions (PR1 assertion-only completeness).
+- `owl2-rl/positive-entailment` — **DisjointClasses-001**: PERMANENT — conclusion types Stewie into an INVENTED anonymous owl:complementOf class; complementOf occurs only in the BODY of the clash rule cls-com — no RL/RDF rule head constructs a class expression (PR1 covers named-class assertions only).
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **DisjointClasses-003**: conclusion invents an owl:complementOf class expression; the RL/RDF rules derive no new class expressions (PR1 assertion-only completeness).
+- `owl2-rl/positive-entailment` — **DisjointClasses-003**: PERMANENT — as DisjointClasses-001 via owl:AllDisjointClasses: the conclusion invents TWO anonymous owl:complementOf classes; cax-adc consumes the members list to derive `false` only, and no rule head constructs a class expression.
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **New-Feature-DisjointDataProperties-002**: conclusion is a reified owl:AllDifferent structure; the RL/RDF rules derive inconsistency from AllDifferent (eq-diff2/3) but never construct one.
+- `owl2-rl/positive-entailment` — **New-Feature-DisjointDataProperties-002**: PERMANENT — conclusion is a REIFIED owl:AllDifferent/owl:distinctMembers structure; eq-diff2/3 and prp-adp consume these structures in rule BODIES (clash detection) and no rule head constructs one — and differentFrom between individuals is underivable anyway (dt-diff emits it only between unequal-value literals).
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **New-Feature-DisjointObjectProperties-001**: conclusion needs the CONTRAPOSITIVE of prp-pdw (property disjointness ⊢ owl:differentFrom of the fillers), which is not an RL/RDF rule.
+- `owl2-rl/positive-entailment` — **New-Feature-DisjointObjectProperties-001**: PERMANENT — needs the CONTRAPOSITIVE of prp-pdw: were Peter = Lois, one pair would lie in BOTH disjoint properties, so full semantics entails `Peter differentFrom Lois`; prp-pdw derives only `false` from an actual shared pair, no rule emits differentFrom between individuals (dt-diff covers literals only), and DifferentIndividuals conclusions are outside PR1's assertion scope.
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **New-Feature-DisjointObjectProperties-002**: conclusion needs the CONTRAPOSITIVE of prp-pdw (property disjointness ⊢ owl:differentFrom of the fillers), which is not an RL/RDF rule.
+- `owl2-rl/positive-entailment` — **New-Feature-DisjointObjectProperties-002**: PERMANENT — the prp-adp/prp-pdw contrapositive exactly as in New-Feature-DisjointObjectProperties-001, PLUS the conclusion is a reified owl:AllDifferent/owl:distinctMembers structure that no rule head constructs.
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **New-Feature-ObjectQCR-002**: conclusion invents an owl:complementOf class expression; the RL/RDF rules derive no new class expressions (PR1 assertion-only completeness).
+- `owl2-rl/positive-entailment` — **New-Feature-ObjectQCR-002**: PERMANENT — needs the CONTRAPOSITIVE of cls-maxqc3: were Stewie a Woman, Peter's maxQC-1-on-Woman restriction would force `Stewie sameAs Meg` against their differentFrom, so full semantics types Stewie into the complement of Woman; cls-maxqc3/4 derive sameAs only from ALREADY-co-typed fillers, and no rule head constructs the required owl:complementOf class.
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **New-Feature-ReflexiveProperty-001**: premise uses ReflexiveObjectProperty, which the OWL 2 RL profile grammar excludes — the export's RL tag contradicts the profile, and prp-rfx is accordingly absent from the RL/RDF rules table.
+- `owl2-rl/positive-entailment` — **New-Feature-ReflexiveProperty-001**: PERMANENT — the premise's ReflexiveObjectProperty is EXCLUDED from the RL grammar (Profiles §4.2: all OWL 2 axioms 'apart from disjoint unions of classes and reflexive object property axioms'), the export's RL tag notwithstanding; accordingly no prp-rfx rule exists, so `Peter knows Peter` is underivable.
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **owl2-rl-rules-fp-differentFrom**: conclusion needs the CONTRAPOSITIVE of prp-fp (functionality + differentFrom fillers ⊢ differentFrom subjects), which is not an RL/RDF rule.
+- `owl2-rl/positive-entailment` — **owl2-rl-rules-fp-differentFrom**: PERMANENT — needs the CONTRAPOSITIVE of prp-fp: were Y1 = Y2, prp-fp would merge X1/X2 against their differentFrom, so full semantics entails `Y1 differentFrom Y2`; prp-fp requires the SAME subject and derives only sameAs, and no rule emits differentFrom between individuals (dt-diff covers literals only).
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **owl2-rl-rules-ifp-differentFrom**: conclusion needs the CONTRAPOSITIVE of prp-ifp, which is not an RL/RDF rule.
+- `owl2-rl/positive-entailment` — **owl2-rl-rules-ifp-differentFrom**: PERMANENT — the prp-ifp CONTRAPOSITIVE, symmetric to the fp case: were X1 = X2, prp-ifp would merge Y1/Y2 against their differentFrom; prp-ifp derives only sameAs, and differentFrom between individuals has no producing rule.
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **WebOnt-I5.5-005**: conclusion invents an owl:unionOf class expression; the RL/RDF rules derive no new class expressions (PR1 assertion-only completeness).
+- `owl2-rl/positive-entailment` — **WebOnt-I5.5-005**: PERMANENT — conclusion asserts the EXISTENCE of an anonymous class `[ owl:unionOf (a) ]`; no RL/RDF rule head emits owl:unionOf or rdf:first/rdf:rest list cells (cls-uni/scm-uni consume unionOf in bodies), so the closure can never contain the required structure.
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **WebOnt-I5.8-008**: needs datatype-range INTERSECTION reasoning (xsd:short ∩ xsd:unsignedInt ⊑ xsd:unsignedShort), beyond the RL/RDF rules' datatype support.
+- `owl2-rl/positive-entailment` — **WebOnt-I5.8-008**: PERMANENT — a TBox rdfs:range conclusion needing value-space INTERSECTION (xsd:short ∩ xsd:unsignedInt ⊑ xsd:unsignedShort); scm-rng1 only propagates a range UP existing subClassOf edges, no dt-*/scm-* rule intersects datatype ranges, and PR1 is assertion-only.
   *observed*: conclusion not entailed by the RL/RDF-rules closure
-- `owl2-rl/positive-entailment` — **WebOnt-I5.8-009**: needs datatype-range INTERSECTION reasoning (xsd:nonNegativeInteger ∩ xsd:nonPositiveInteger = {0} ⊑ xsd:short), beyond the RL/RDF rules' datatype support.
+- `owl2-rl/positive-entailment` — **WebOnt-I5.8-009**: PERMANENT — as WebOnt-I5.8-008 with xsd:nonNegativeInteger ∩ xsd:nonPositiveInteger = {0} ⊑ xsd:short: datatype-range intersection is beyond the RL/RDF dt-* rules, and the rdfs:range conclusion is a TBox axiom outside PR1.
   *observed*: conclusion not entailed by the RL/RDF-rules closure
 
 ### Out-of-scope reasons
@@ -124,6 +124,19 @@ Source: `sparql11/entailment` from the pinned rdf-tests clone. Each test runs as
 | entailment regime(s) RIF not supported (no materialization mapping) | 4 |
 | entailment regime(s) D not supported (no materialization mapping) | 1 |
 
-## Overall (all inference suites)
+## W3C rdf-turtle through the sparq Turtle parser (parse_to_triples)
 
-**1637 pass / 0 fail / 17 documented divergence / 185 out-of-scope — pass+divergence 100.0% of run, 89.9% of all in-scope tests.**
+Source: w3c/rdf-tests `rdf/rdf11/rdf-turtle/manifest.ttl` (pinned clone). Runs THROUGH the sparq Turtle parser (`Graph::parse_to_triples("turtle")`) — the rejection/acceptance oracle for the Turtle parse path, distinct from the oxttl-differential chunked-vs-serial test and from the N3-parser TurtleTests. PositiveSyntax must parse, NegativeSyntax must be rejected, Eval must parse to a graph isomorphic to the N-Triples expectation, NegativeEval must be rejected. Comparison is blank-node-isomorphic term-set equality (never line-by-line).
+
+| suite | pass | fail | divergence | out-of-scope | pass-rate (of run) |
+|---|---:|---:|---:|---:|---:|
+| rdf-turtle | 313 | 0 | 0 | 0 | 100.0% |
+| **total** | **313** | **0** | **0** | **0** | **100.0%** |
+
+**Overall (W3C rdf-turtle through the sparq Turtle parser (parse_to_triples)): 313 pass / 0 fail / 0 documented divergence / 0 out-of-scope — pass+divergence 100.0% of run, 100.0% of all in-scope tests.**
+
+## Overall (all suites)
+
+Covers the four inference regime suites (rdf-mt, OWL 2 RL, N3, SPARQL 1.1 entailment) plus the W3C rdf-turtle Turtle parser suite (not an inference suite; shares the same `inference-conformance` CI ratchet job per the central scoreboard).
+
+**1950 pass / 0 fail / 17 documented divergence / 185 out-of-scope — pass+divergence 100.0% of run, 91.4% of all in-scope tests.**

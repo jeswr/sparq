@@ -286,6 +286,49 @@ pub(crate) mod budget {
         })
     }
 
+    /// A savepoint of the local-vocab byte accumulator + the sticky exhaustion flag,
+    /// taken BEFORE a speculative interning burst — a streaming SERVICE block whose
+    /// rows a SILENT error must discard. [`restore_bytes`] rewinds to it so the
+    /// discarded interns leave the byte budget EXACTLY as if they never happened,
+    /// keeping SILENT SERVICE behaviour-neutral with the pre-streaming
+    /// collect-then-intern-on-success path (which charged nothing on a swallowed
+    /// remote error). [OPUS-4.8] (sq-my8wd.4)
+    #[cfg(feature = "service")]
+    #[derive(Clone, Copy)]
+    pub(crate) struct ByteSavepoint {
+        extra_bytes: usize,
+        exceeded: Option<&'static str>,
+    }
+
+    /// Capture the current byte accumulator + exhaustion flag. [OPUS-4.8] (sq-my8wd.4)
+    #[cfg(feature = "service")]
+    #[inline]
+    pub(crate) fn byte_savepoint() -> ByteSavepoint {
+        ByteSavepoint {
+            extra_bytes: ACTIVE.with(|c| c.get().extra_bytes),
+            exceeded: EXCEEDED.with(|e| e.get()),
+        }
+    }
+
+    /// Rewind the byte accumulator + exhaustion flag to a [`ByteSavepoint`]. Only the
+    /// bytes charged (and any max-bytes exhaustion tripped) SINCE the savepoint are
+    /// undone; an exhaustion that fired for an independent reason before it is
+    /// preserved. Sound because the interning burst it brackets is synchronous and
+    /// single-threaded — the SERVICE sink is the only writer between the savepoint and
+    /// here — so the pre-burst snapshot is exactly the current state minus this burst.
+    /// A deadline that elapsed during the burst is not masked: the next `exhausted`
+    /// re-derives it from the wall clock. [OPUS-4.8] (sq-my8wd.4)
+    #[cfg(feature = "service")]
+    #[inline]
+    pub(crate) fn restore_bytes(sp: ByteSavepoint) {
+        ACTIVE.with(|c| {
+            let mut a = c.get();
+            a.extra_bytes = sp.extra_bytes;
+            c.set(a);
+        });
+        EXCEEDED.with(|e| e.set(sp.exceeded));
+    }
+
     /// `true` once the budget is exhausted (sticky) — row-producing loops break
     /// on it; `rows` is the loop's current output size.
     #[inline]
@@ -929,6 +972,26 @@ impl LocalVocab {
         self.terms.push(t.clone());
         self.ids.insert(t, id);
         id
+    }
+    /// The append cursor into the local vocab, paired with [`LocalVocab::rollback_to`]
+    /// to discard a speculative interning burst. [OPUS-4.8] (sq-my8wd.4)
+    #[cfg(feature = "service")]
+    fn savepoint(&self) -> usize {
+        self.terms.len()
+    }
+    /// Drop every term interned since `mark`, so the rows a SILENT SERVICE error
+    /// discards leave the local vocab EXACTLY as if they were never interned — no
+    /// retained memory. Pairs with a `budget::ByteSavepoint` (which refunds the bytes
+    /// those terms charged); together they are the resource twin of dropping the
+    /// discarded id rows, keeping SILENT SERVICE behaviour-neutral with the pre-streaming
+    /// path. Interns BEFORE `mark` — and re-interns that returned an existing id, which
+    /// pushed nothing — are untouched. [OPUS-4.8] (sq-my8wd.4)
+    #[cfg(feature = "service")]
+    fn rollback_to(&mut self, mark: usize) {
+        for t in self.terms.drain(mark..) {
+            self.ids.remove(&t);
+        }
+        self.nums.truncate(mark);
     }
     fn term(&self, id: Id) -> &Term {
         &self.terms[(id - LOCAL_BASE) as usize]
@@ -2453,46 +2516,60 @@ fn eval_service(
     // inside the SERVICE block are all forwarded verbatim.
     let query = format!("SELECT * WHERE {{ {inner} }}");
 
-    let fetched = service_transport::with(|t| crate::service::eval_remote(t, &endpoint, &query));
-    let rel = match fetched {
-        Ok(rel) => rel,
+    // [FABLE-5] (sq-my8wd.4) STREAMING consumption: each remote row is interned to a
+    // compact id-level `Row` AS IT IS PARSED (the owned terms are dropped immediately)
+    // instead of collecting the whole remote relation as `Term`s first. Result-identical
+    // to the collect-then-intern path — same rows, multiplicity and order (pinned by the
+    // service.rs `streaming_equivalence` tests) — but the per-response peak memory is
+    // the response body plus the id-level relation the join needs anyway, not a
+    // whole-document DOM plus a second term-level copy.
+    let mut id_rows: Vec<Row> = Vec::new();
+    // [OPUS-4.8] (sq-my8wd.4) Savepoint the local vocab + byte budget BEFORE streaming so
+    // a SILENT error can roll the partially-interned rows back out — see the SILENT arm.
+    let vocab_mark = local.savepoint();
+    let byte_mark = budget::byte_savepoint();
+    let fetched = service_transport::with(|t| {
+        crate::service::eval_remote_into(t, &endpoint, &query, &mut |row| {
+            id_rows.push(intern_remote_row(graph, local, &row));
+            Ok(())
+        })
+    });
+    match fetched {
+        Ok(vars) => Ok(Bindings::unsorted(vars, id_rows)),
         Err(e) if silent => {
-            // SILENT: swallow the error, keep the surrounding bindings.
+            // SILENT: swallow the error, keep the surrounding bindings. Rows already
+            // interned from a partially-parsed response are discarded with `id_rows` —
+            // and, so the discard is behaviour-NEUTRAL with the pre-streaming
+            // collect-then-intern-on-success path (which interned nothing on a swallowed
+            // error), we ROLL the interned terms out of the local vocab and REFUND the
+            // byte budget they charged. Without this a partial stream would retain memory
+            // and could trip `max_bytes`, turning a query the old path answered into a
+            // "query budget exceeded" error. [OPUS-4.8] (sq-my8wd.4)
             let _ = e;
-            return Ok(identity());
+            id_rows.clear();
+            local.rollback_to(vocab_mark);
+            budget::restore_bytes(byte_mark);
+            Ok(identity())
         }
-        Err(e) => return Err(e),
-    };
-
-    Ok(service_relation_to_bindings(graph, local, rel))
+        Err(e) => Err(e),
+    }
 }
 
-/// Intern a remote [`ServiceRelation`](crate::service::ServiceRelation) into id-level
-/// [`Bindings`] against this query's dictionaries — exactly as `VALUES` does — so it
-/// joins with local BGP results. Shared by the verbatim and bound-join paths.
-/// [OPUS-4.8] (sq-sjkj)
+/// Intern ONE remote solution row into an id-level [`Row`] against this query's
+/// dictionaries — exactly as `VALUES` does — so it joins with local BGP results: each
+/// term resolves against the graph dictionary first, else the query-local vocab.
+/// Shared by the verbatim and bound-join paths, which feed it row-by-row from the
+/// streaming SERVICE parser rather than materialising the remote relation first.
+/// [FABLE-5] (sq-my8wd.4; formerly the whole-relation `service_relation_to_bindings`,
+/// sq-sjkj)
 #[cfg(feature = "service")]
-fn service_relation_to_bindings(
-    graph: &Graph,
-    local: &mut LocalVocab,
-    rel: crate::service::ServiceRelation,
-) -> Bindings {
-    // Intern each remote term against the graph dictionary (so it joins with local
-    // BGP results) or the local vocab (terms absent from the data can still match
-    // other remote/VALUES rows) — identical to `values_bindings`.
-    let rows: Vec<Row> = rel
-        .rows
-        .iter()
-        .map(|r| {
-            r.iter()
-                .map(|cell| match cell {
-                    None => NO_ID,
-                    Some(t) => graph.id_of(t).unwrap_or_else(|| local.intern(t.clone())),
-                })
-                .collect()
+fn intern_remote_row(graph: &Graph, local: &mut LocalVocab, row: &[Option<Term>]) -> Row {
+    row.iter()
+        .map(|cell| match cell {
+            None => NO_ID,
+            Some(t) => graph.id_of(t).unwrap_or_else(|| local.intern(t.clone())),
         })
-        .collect();
-    Bindings::unsorted(rel.vars, rows)
+        .collect()
 }
 
 /// Attempt a bind-join (`VALUES` pushdown) of a SERVICE sub-query against the
@@ -2623,21 +2700,37 @@ fn bound_join_to_endpoint(
     let inner_sparql = format!("{inner}");
     let block = crate::service::bind_block_size();
 
-    // Accumulate the union of the per-block remote relations. All blocks share the
-    // remote `head.vars`, so we keep the first block's var list and concatenate rows.
+    // Accumulate the union of the per-block remote relations, interning each row to the
+    // id level AS IT ARRIVES from the streaming parser ([FABLE-5] sq-my8wd.4) — no
+    // block's relation is ever held as owned `Term` rows. All blocks share the remote
+    // `head.vars`, so we keep the first block's var list and concatenate rows
+    // positionally: the same accumulation, and the same row order, as the previous
+    // collect-then-intern path.
     let mut acc_vars: Option<Vec<Variable>> = None;
-    let mut acc_rows: Vec<Vec<Option<oxrdf::Term>>> = Vec::new();
+    let mut acc_rows: Vec<Row> = Vec::new();
+    // [OPUS-4.8] (sq-my8wd.4) Savepoint the local vocab + byte budget BEFORE the first
+    // block so a SILENT failure in ANY block can roll EVERY block's interns back out —
+    // a SILENT failure discards all blocks' rows together (see the SILENT arm), so the
+    // interns must all be rolled back too, or the discarded stream would retain memory
+    // and charge `max_bytes`.
+    let vocab_mark = local.savepoint();
+    let byte_mark = budget::byte_savepoint();
 
     for chunk in tuples.chunks(block) {
         let values = crate::service::render_values_block(&join_vars, chunk);
         // Inject the VALUES inside the SELECT * group, alongside the inner pattern, so
         // the remote inner-joins the pushed bindings with its pattern.
         let query = format!("SELECT * WHERE {{ {values} {inner_sparql} }}");
-        match service_transport::with(|t| crate::service::eval_remote(t, endpoint, &query)) {
-            Ok(rel) => {
-                acc_rows.extend(rel.rows);
+        let fetched = service_transport::with(|t| {
+            crate::service::eval_remote_into(t, endpoint, &query, &mut |row| {
+                acc_rows.push(intern_remote_row(graph, local, &row));
+                Ok(())
+            })
+        });
+        match fetched {
+            Ok(vars) => {
                 if acc_vars.is_none() {
-                    acc_vars = Some(rel.vars);
+                    acc_vars = Some(vars);
                 }
             }
             // SILENT: a failed block means the SERVICE as a whole must behave EXACTLY
@@ -2647,7 +2740,14 @@ fn bound_join_to_endpoint(
             // caller the identity relation (one zero-column row); joining / left-outer
             // joining `left` with it leaves `left` exactly as it was. This matches the
             // unbound-then-local-join path's SILENT semantics precisely. [OPUS-4.8]
+            // (Rows already interned from earlier blocks — or a partially-parsed
+            // failing block — are ROLLED BACK out of the local vocab below, and their
+            // byte-budget charge refunded, so no stray entry or `max_bytes` charge
+            // survives the discard. [OPUS-4.8] sq-my8wd.4)
             Err(_) if silent => {
+                acc_rows.clear();
+                local.rollback_to(vocab_mark);
+                budget::restore_bytes(byte_mark);
                 return Ok(Some(Bindings::unsorted(Vec::new(), vec![Row::new()])));
             }
             Err(e) => return Err(e),
@@ -2660,8 +2760,7 @@ fn bound_join_to_endpoint(
     // relation has zero rows, so the var list only names columns that, being the join
     // keys, always exist on both sides). [OPUS-4.8]
     let vars = acc_vars.unwrap_or_else(|| join_vars.clone());
-    let rel = crate::service::ServiceRelation { vars, rows: acc_rows };
-    Ok(Some(service_relation_to_bindings(graph, local, rel)))
+    Ok(Some(Bindings::unsorted(vars, acc_rows)))
 }
 
 /// Evaluate `SERVICE ?ep { inner }` — a VARIABLE endpoint — against the `left`
@@ -10542,6 +10641,26 @@ mod service_exec_tests {
             Ok(self.0.to_string())
         }
     }
+    /// Returns an owned body, so a test can build a valid-rows-then-malformed document
+    /// at runtime to drive the SILENT-error-mid-stream path. [OPUS-4.8] (sq-my8wd.4)
+    struct CannedOwned(String);
+    impl Transport for CannedOwned {
+        fn fetch(&self, _e: &str, _q: &str) -> Result<String, String> {
+            Ok(self.0.clone())
+        }
+    }
+    /// An SRJ document that streams ONE valid binding for `vars` (a long literal on the
+    /// last var, so interning it charges the byte budget) then a MALFORMED second
+    /// binding, so the streaming parser delivers row 0 to the sink and then errors —
+    /// the exact adversarial shape the SILENT-rollback fix must neutralise. [OPUS-4.8]
+    fn valid_then_malformed_srj(head_and_first_row: &str, big_literal: &str) -> String {
+        let mut body = String::from(head_and_first_row);
+        body.push_str(big_literal);
+        // Close the first (valid) binding, comma, then a malformed second binding whose
+        // value is an invalid JSON token (`%`), then close results.
+        body.push_str(r#""}},{"o":{"type":"literal","value":%}}]}}"#);
+        body
+    }
     struct Boom;
     impl Transport for Boom {
         fn fetch(&self, _e: &str, _q: &str) -> Result<String, String> {
@@ -10579,6 +10698,67 @@ mod service_exec_tests {
         );
         let res = eval_select(&g, &p).unwrap();
         assert_eq!(res.rows.len(), 1, "SILENT -> identity -> local row survives");
+    }
+
+    // -------------------------------------------------------------------------
+    // [OPUS-4.8] (sq-my8wd.4) SILENT-error-MID-STREAM behaviour-neutrality (Copilot
+    // review of PR #1424, threads on eval_service + bound_join_to_endpoint).
+    //
+    // The streaming path interns each remote row AS IT PARSES, which charges the
+    // `LocalVocab` byte budget (`intern` -> `budget::add_bytes`). The pre-streaming
+    // collect-then-intern-on-success path interned NOTHING on a swallowed (SILENT)
+    // error, so it charged 0 bytes. Without the rollback these tests pin, a SILENT
+    // SERVICE whose response streams a row then errors would RETAIN that row's intern
+    // and its byte charge — tripping a `max_bytes` budget the SILENT fallback (join
+    // identity) otherwise fits, turning a query the old path ANSWERED into a
+    // "query budget exceeded" error. That is an observable, non-neutral result
+    // difference — hence a fix, not just documentation. The budget is deliberately
+    // tight so the single discarded remote row's charge alone would trip it.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn service_silent_midstream_rollback_verbatim_neutral_under_byte_budget() {
+        let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a a ex:T .", "turtle").unwrap();
+        let big = "A".repeat(120);
+        let body = valid_then_malformed_srj(
+            r#"{"head":{"vars":["o"]},"results":{"bindings":[{"o":{"type":"literal","value":""#,
+            &big,
+        );
+        let _t = service_transport::install(Box::new(CannedOwned(body)));
+        // Standalone SERVICE (no left bindings to push) -> verbatim `eval_service`.
+        let p = pattern(
+            "PREFIX ex: <http://ex/> SELECT ?o WHERE \
+             { SERVICE SILENT <http://remote/> { ?o ex:p ?x } }",
+        );
+        // A cap the ONE discarded remote literal (interned twice) blows, but the SILENT
+        // fallback's own working set (one identity row) fits well under.
+        let b = crate::QueryBudget { max_bytes: Some(64), ..crate::QueryBudget::unlimited() };
+        let _bg = budget::install(&b);
+        let res = eval_select(&g, &p)
+            .expect("SILENT mid-stream error must roll back the discarded row's byte charge");
+        assert_eq!(res.rows.len(), 1, "SILENT verbatim -> identity -> one (unbound ?o) row");
+    }
+
+    #[test]
+    fn service_silent_midstream_rollback_boundjoin_neutral_under_byte_budget() {
+        let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a a ex:T .", "turtle").unwrap();
+        let big = "A".repeat(120);
+        let body = valid_then_malformed_srj(
+            r#"{"head":{"vars":["s","o"]},"results":{"bindings":[{"s":{"type":"uri","value":"http://ex/a"},"o":{"type":"literal","value":""#,
+            &big,
+        );
+        let _t = service_transport::install(Box::new(CannedOwned(body)));
+        // `?s` is bound by the left BGP and shared with the SERVICE -> bind-join pushdown,
+        // so this exercises the `bound_join_to_endpoint` SILENT arm.
+        let p = pattern(
+            "PREFIX ex: <http://ex/> SELECT ?s ?o WHERE \
+             { ?s a ex:T . SERVICE SILENT <http://remote/> { ?s ex:p ?o } }",
+        );
+        let b = crate::QueryBudget { max_bytes: Some(64), ..crate::QueryBudget::unlimited() };
+        let _bg = budget::install(&b);
+        let res = eval_select(&g, &p)
+            .expect("bind-join SILENT mid-stream error must roll back the discarded row's byte charge");
+        assert_eq!(res.rows.len(), 1, "SILENT block failure -> identity -> local ?s=ex:a row survives");
     }
 
     #[test]

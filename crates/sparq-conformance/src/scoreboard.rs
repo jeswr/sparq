@@ -128,9 +128,11 @@ pub struct Suite {
 ///   sq-lk3aw.1 raised it 158 -> 197: 39 net-new assertions covering
 ///   edge-adjacent polygons / disjoint line+polygon / parallel lines /
 ///   point-on-line / and multi-pair rcc8/eh disjoint cells).
-/// * OGC GeoSPARQL query-rewrite 38 — `sparq-geo` `ogc_query_rewrite_ratchet.rs`
-///   `OGC_QUERY_REWRITE_FLOOR = 38` (sq-wf9qg; opt-in `geosparql_rewrite` feature;
-///   topology PROPERTY forms answered via the rewrite, MEASURED pass count).
+/// * OGC GeoSPARQL query-rewrite 48 — `sparq-geo` `ogc_query_rewrite_ratchet.rs`
+///   `OGC_QUERY_REWRITE_FLOOR = 48` (sq-wf9qg raised to 38; sq-lk3aw.2 raised 38→48:
+///   [SONNET-4.6] strengthened semantics-preserving comparison + extended coverage;
+///   opt-in `geosparql_rewrite` feature; topology PROPERTY forms answered via the
+///   rewrite, MEASURED pass count).
 /// * Solid WAC 12 — `sparq-solid` `tests/common/mod.rs` `WAC_SCENARIO_FLOOR = 12`
 ///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6).
 /// * Solid ACP 12 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 12`
@@ -297,7 +299,7 @@ pub const SUITES: &[Suite] = &[
             feature: "geosparql_rewrite",
         },
         ci_job: "geo-conformance",
-        ratchet_floor: 38,
+        ratchet_floor: 48,
         floor_basis: "pass",
         note: "topology PROPERTY forms (geo:sf*/eh*/rcc8*) answered end-to-end via the \
                opt-in query-rewrite extension, result-equivalent to the geof: oracle",
