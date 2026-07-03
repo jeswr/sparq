@@ -205,7 +205,15 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep) ->
                 len(completed_hist) > cfg.progress_window
                 and completed_hist[-1] > completed_hist[-1 - cfg.progress_window]
             )
-            depth = fetch_queue_depth()
+            # [SONNET-4.6] Guard: if fetch_queue_depth() raises (e.g. subprocess.run
+            # raises inside the closure before returning None), treat depth as the
+            # "unknown" sentinel — never crash the gate, and never grant a saturation
+            # extension on depth alone (None → saturated = False, conservative branch).
+            try:
+                depth = fetch_queue_depth()
+            except Exception as exc:
+                print(f"  (queue-depth fetch raised {exc!r} — treating depth as unknown)")
+                depth = None
             saturated = depth is not None and depth >= cfg.sat_queue_min
             if not (saturated or progressing):
                 print(
@@ -261,7 +269,14 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep) ->
 
 
 def _gh_json_lines(args: list[str]) -> list[dict]:
-    proc = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
+    # [SONNET-4.6] Wrap subprocess.run so FileNotFoundError / TimeoutExpired / OSError
+    # (e.g. `gh` not on PATH) are converted into FetchError, routing them into the
+    # existing bounded-retry / skip-this-poll tolerance in run_gate exactly as a
+    # non-zero exit code does — no raw crash, no false pass.
+    try:
+        proc = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise FetchError(f"subprocess raised: {exc}") from exc
     if proc.returncode != 0:
         raise FetchError(proc.stderr.strip()[:300] or f"gh api exited {proc.returncode}")
     out = []

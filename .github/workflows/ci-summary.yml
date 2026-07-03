@@ -119,10 +119,11 @@ jobs:
     # saturated/progressing queue.
     timeout-minutes: 80
     steps:
-      # Sparse checkout of ONLY the gate script (+ its blobless tree): the gate needs
-      # no sources. Same trust model as before — on pull_request the workflow file
-      # itself already comes from the merge ref, so scripting from the same ref does
-      # not widen anything. [FABLE-5]
+      # Sparse checkout of ONLY the gate script: the gate needs no sources. (No
+      # partial-clone filter is configured — this is sparse checkout only, not a
+      # blobless clone.) Same trust model as before — on pull_request the workflow
+      # file itself already comes from the merge ref, so scripting from the same ref
+      # does not widen anything. [FABLE-5] [SONNET-4.6]
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false

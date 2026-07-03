@@ -282,5 +282,108 @@ class TestAdvisoryRule(unittest.TestCase):
         self.assertFalse(g.is_advisory("gate"))
 
 
+# [SONNET-4.6] Robustness-hardening tests (sq-90cv4 follow-up: Copilot gaps).
+# Covers:
+#   (a) _gh_json_lines converts subprocess raises (FileNotFoundError, TimeoutExpired)
+#       → FetchError → routed into the existing bounded skip path, not a raw crash.
+#   (b) fetch_queue_depth raising in run_gate → depth treated as None (unknown) →
+#       NO saturation extension granted on depth alone (conservative branch).
+# Mutation check: removing either try/except causes the test to go RED (the
+# underlying exception propagates instead of being caught/re-raised as FetchError).
+class TestSubprocessRobustness(unittest.TestCase):
+    """[SONNET-4.6] subprocess raises in _gh_json_lines / fetch_queue_depth must be
+    converted to graceful-degradation paths, never raw crashes."""
+
+    def test_gh_json_lines_file_not_found_raises_fetch_error(self):
+        """FileNotFoundError (gh not on PATH) must surface as FetchError so the
+        caller's FetchError handler (bounded retry / skip-this-poll) applies."""
+        from unittest.mock import patch
+        with patch("subprocess.run", side_effect=FileNotFoundError("gh: not found")):
+            with self.assertRaises(g.FetchError) as ctx:
+                g._gh_json_lines(["repos/x/y"])
+        self.assertIn("subprocess raised", str(ctx.exception))
+
+    def test_gh_json_lines_timeout_raises_fetch_error(self):
+        """TimeoutExpired must also surface as FetchError (same bounded-retry path)."""
+        from unittest.mock import patch
+        import subprocess as _sp
+        with patch("subprocess.run", side_effect=_sp.TimeoutExpired("gh", 30)):
+            with self.assertRaises(g.FetchError):
+                g._gh_json_lines(["repos/x/y"])
+
+    def test_subprocess_raise_routed_into_skip_tolerance(self):
+        """A FileNotFoundError inside _gh_json_lines → FetchError → treated as a
+        skipped poll (not a gate crash).  Two such errors then a green poll must pass
+        (within the 3-failure tolerance of tiny_cfg)."""
+        # Simulate _gh_json_lines raising FetchError (as it does after the fix for
+        # FileNotFoundError) for the first two calls, then returning [GREEN].
+        call_count = {"n": 0}
+
+        def fake_fetch():
+            n = call_count["n"]
+            call_count["n"] += 1
+            if n < 2:
+                raise g.FetchError("subprocess raised: gh: not found")
+            return [dict(GREEN)]
+
+        out = io.StringIO()
+
+        def depth_fn():
+            return 0
+
+        with redirect_stdout(out):
+            code = g.run_gate(tiny_cfg(), fake_fetch, depth_fn, sleep_fn=lambda s: None)
+        output = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("skipping this poll", output)
+        self.assertIn("PASSED", output)
+
+    def test_fetch_queue_depth_raises_treated_as_unknown_no_extension(self):
+        """When fetch_queue_depth() RAISES (subprocess spawn error inside the closure),
+        run_gate must catch it, treat depth as None (unknown), and NOT grant a
+        saturation extension — unknown depth with no progress is a genuine hang → RED.
+        Mutation check: remove the try/except in run_gate → RuntimeError propagates
+        instead of being caught → this test goes RED."""
+        out = io.StringIO()
+        fetch = scripted([[GREEN, IN_PROGRESS]])
+
+        def raising_depth():
+            raise RuntimeError("subprocess.run raised: gh not found")
+
+        with redirect_stdout(out):
+            code = g.run_gate(tiny_cfg(), fetch, raising_depth, sleep_fn=lambda s: None)
+        output = out.getvalue()
+        self.assertEqual(code, 1, "unknown-depth + no-progress must be a genuine hang RED")
+        self.assertIn("genuine hang", output)
+        self.assertNotIn("Extending the wait", output)
+
+    def test_fetch_queue_depth_raises_progress_still_extends(self):
+        """Unknown depth (depth_fn raises) does NOT block the progress-signal path:
+        if completions are landing the gate still extends (progress alone suffices)."""
+        # Six polls with decreasing pending; completions rising → progress=True.
+        # depth_fn always raises (unknown). Verify extension activates then passes.
+        polls = [
+            [R("a"), R("b"), PENDING, R("d", status="queued", conclusion=None),
+             R("e", status="queued", conclusion=None), R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d", status="queued", conclusion=None),
+             R("e", status="queued", conclusion=None), R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d"),
+             R("e", status="queued", conclusion=None), R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d"), R("e"),
+             R("f", status="queued", conclusion=None)],
+            [R("a"), R("b"), R("coverage"), R("d"), R("e"), R("f")],
+        ]
+        out = io.StringIO()
+        fetch = scripted(polls)
+
+        def raising_depth():
+            raise RuntimeError("depth API down")
+
+        with redirect_stdout(out):
+            code = g.run_gate(tiny_cfg(), fetch, raising_depth, sleep_fn=lambda s: None)
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
