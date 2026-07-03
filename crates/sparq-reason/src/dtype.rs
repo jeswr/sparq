@@ -661,7 +661,7 @@ fn is_valid_xml_ncname(lex: &str) -> bool {
 /// Returns `None` for odd-length strings or strings containing non-hex characters.
 /// [SONNET-4.6] sq-pbz04.6.2.
 fn decode_hex_binary(lex: &str) -> Option<Vec<u8>> {
-    if lex.len() % 2 != 0 {
+    if !lex.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(lex.len() / 2);
@@ -699,7 +699,7 @@ fn hex_nibble(b: u8) -> Option<u8> {
 fn decode_base64_binary(lex: &str) -> Option<Vec<u8>> {
     // Strip embedded whitespace (XSD 1.1 §3.3.16 explicitly allows it).
     let cleaned: Vec<u8> = lex.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if cleaned.len() % 4 != 0 {
+    if !cleaned.len().is_multiple_of(4) {
         return None;
     }
     let mut bytes = Vec::with_capacity(cleaned.len() * 3 / 4);
