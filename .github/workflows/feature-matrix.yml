@@ -104,6 +104,12 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # [SONNET-4.6] sq-6vshe.1: CI build-profile speedup (mirrors ci.yml). See ci.yml's
+  # global env comment for the full rationale. mold must be installed in each compilation
+  # job via an explicit "Install mold linker" step (see below).
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
 jobs:
   # [OPUS-4.8] merge-throughput: path-filtered gate (same pattern as ci.yml's `changes`).
@@ -261,6 +267,9 @@ jobs:
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install mold linker
+        # [SONNET-4.6] sq-6vshe.1: fast linker for all opt-in build/clippy/test steps.
+        run: sudo apt-get install -y --no-install-recommends mold
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -356,6 +365,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install mold linker
+        # [SONNET-4.6] sq-6vshe.1: fast linker for no-default-features build/test/clippy.
+        run: sudo apt-get install -y --no-install-recommends mold
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
