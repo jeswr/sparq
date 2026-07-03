@@ -59,8 +59,36 @@ impl NodeKind {
 /// `rdf:type` — used by the (experimental) query-atom mapper to recognise class atoms.
 #[cfg(feature = "experimental")]
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
+
+/// OWL 2 characteristic property types — when used as the OBJECT of an `rdf:type` triple,
+/// these signal a non-QL axiom (functionality, transitivity, symmetry, …). Each occurrence is
+/// counted into `TBox::unrecognised_schema`. The predicate is `rdf:type` (not `rdfs:`/`owl:`),
+/// so `is_unrecognised_schema(p)` (which checks the predicate namespace) cannot catch these;
+/// the `rdf:type` extraction arm handles them by object-IRI inspection. [SONNET-4.6] sq-pbz04.3.3
+const OWL_CHARACTERISTIC_TYPES: &[&str] = &[
+    "FunctionalProperty",
+    "InverseFunctionalProperty",
+    "TransitiveProperty",
+    "SymmetricProperty",
+    "AsymmetricProperty",
+    "ReflexiveProperty",
+    "IrreflexiveProperty",
+];
+
+/// OWL 2 QL-legal `rdf:type` objects — entity-kind declarations that are metadata, not axioms.
+/// These are silently ignored (not counted in any tally). A purely QL-legal TBox that carries
+/// only these declarations (plus the recognised schema predicates) still yields
+/// `fully_captured() == true`. [SONNET-4.6] sq-pbz04.3.3
+const OWL_LEGAL_DECL_TYPES: &[&str] = &[
+    "Class",
+    "ObjectProperty",
+    "DatatypeProperty",
+    "NamedIndividual",
+    "Ontology",
+];
 
 /// A basic role: a named property, or its inverse. Equality/ordering is by IRI + direction so
 /// roles intern cleanly into the rewrite's working sets.
@@ -169,6 +197,15 @@ impl TBox {
     /// `owl:disjointWith`, `owl:propertyDisjointWith`, and `owl:complementOf` are counted in
     /// `consistency_relevant` (QL-legal but not used for rewriting — see `TBox::consistency_relevant`).
     ///
+    /// `rdf:type` triples whose OBJECT is one of the 7 OWL characteristic property classes
+    /// (`owl:FunctionalProperty`, `owl:InverseFunctionalProperty`, `owl:TransitiveProperty`,
+    /// `owl:SymmetricProperty`, `owl:AsymmetricProperty`, `owl:ReflexiveProperty`,
+    /// `owl:IrreflexiveProperty`) are counted in `unrecognised_schema` — they are non-QL axioms
+    /// that cannot be applied in certain-answer rewriting. `rdf:type` declarations that are
+    /// QL-legal entity-kind metadata (`owl:Class`, `owl:ObjectProperty`, `owl:DatatypeProperty`,
+    /// `owl:NamedIndividual`, `owl:Ontology`, `rdfs:Class`, `rdf:Property`) are silently ignored
+    /// (not schema axioms). [SONNET-4.6] sq-pbz04.3.3
+    ///
     /// A QUALIFIED `owl:someValuesFrom` (filler other than `owl:Thing`) on the LEFT is QL-legal
     /// (`∃R.C ⊑ A` is in QL via `∃R ⊑ A` weakening? — NO: that would be unsound), so it is
     /// conservatively SKIPPED. Anything else (unionOf, allValuesFrom, cardinality, hasValue,
@@ -266,6 +303,38 @@ impl TBox {
                 _ if p == disjoint_with() => tbox.consistency_relevant += 1,
                 _ if p == property_disjoint_with() => tbox.consistency_relevant += 1,
                 _ if p == complement_of() => tbox.consistency_relevant += 1,
+                // [SONNET-4.6] sq-pbz04.3.3 — `rdf:type` triples encode OWL characteristic-
+                // property axioms via the OBJECT position (e.g. `:p rdf:type
+                // owl:FunctionalProperty`). The predicate `rdf:type` is in the `rdf:` namespace,
+                // so `is_unrecognised_schema(p)` returns false and these would be silently
+                // dropped. We inspect the OBJECT IRI to classify:
+                //   • one of the 7 non-QL characteristic types → `unrecognised_schema += 1`
+                //   • QL-legal entity-kind declarations → silently ignore (metadata, not axioms)
+                //   • other `owl:`/`rdfs:` object → `unrecognised_schema += 1` (unknown vocab)
+                //   • non-`owl:`/`rdfs:` object → silently ignore (ABox or custom IRI)
+                _ if p == rdf_type_str() => {
+                    if let Some(NodeKind::Iri(obj)) = NodeKind::from_object(&t.object) {
+                        if OWL_CHARACTERISTIC_TYPES
+                            .iter()
+                            .any(|n| obj == format!("{}{}", OWL, n))
+                        {
+                            // Non-QL property characteristic: not applicable for rewriting.
+                            tbox.unrecognised_schema += 1;
+                        } else if OWL_LEGAL_DECL_TYPES
+                            .iter()
+                            .any(|n| obj == format!("{}{}", OWL, n))
+                            || obj == format!("{}Class", RDFS)
+                            || obj == format!("{}Property", RDF)
+                        {
+                            // QL-legal declaration — silently ignore (not a TBox axiom).
+                        } else if obj.starts_with(OWL) || obj.starts_with(RDFS) {
+                            // Unknown owl:/rdfs: object in rdf:type: count as unrecognised.
+                            tbox.unrecognised_schema += 1;
+                        }
+                        // else: non-owl/rdfs object (custom class or rdf: vocab) — ignore.
+                    }
+                    // Literal or blank-node rdf:type objects are not TBox targets — ignore.
+                }
                 _ => {
                     // Not a TBox-shaping predicate recognised above. If the predicate is in the
                     // rdfs:/owl: vocabulary namespace and is NOT a known restriction sub-predicate
@@ -546,6 +615,11 @@ fn property_disjoint_with() -> String {
 }
 fn complement_of() -> String {
     format!("{OWL}complementOf")
+}
+/// `rdf:type` IRI as a `String` — used in the `TBox::extract` match arm that classifies
+/// characteristic-property typing triples by OBJECT position. [SONNET-4.6] sq-pbz04.3.3
+fn rdf_type_str() -> String {
+    format!("{}type", RDF)
 }
 
 /// The `rdf:type` IRI (a role-atom predicate that means "class membership", handled specially by

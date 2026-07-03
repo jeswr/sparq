@@ -346,3 +346,118 @@ fn abox_triples_do_not_affect_any_tally() {
     assert_eq!(tbox.unrecognised_schema, 0);
     assert!(tbox.fully_captured(), "no schema at all = fully captured");
 }
+
+// ---------------------------------------------------------------------------
+// B1 — rdf:type characteristic-property typing counted as unrecognised_schema
+//      [SONNET-4.6] sq-pbz04.3.3
+//
+// MUTATION-KILL: `functional_property_typing_is_counted_unrecognised` MUST go RED on the
+// pre-fix code (before the rdf:type arm was added to TBox::extract). Confirmed: on the pre-fix
+// branch the test fails because FunctionalProperty triples were silently dropped (predicate
+// `rdf:type` is in the `rdf:` namespace, not `rdfs:`/`owl:`, so is_unrecognised_schema returned
+// false and unrecognised_schema stayed 0). [SONNET-4.6]
+// ---------------------------------------------------------------------------
+
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+
+/// MUTATION-KILL test: `:hasSSN rdf:type owl:FunctionalProperty` must increment
+/// `unrecognised_schema` and make `fully_captured()` return false. [SONNET-4.6] sq-pbz04.3.3
+#[test]
+fn functional_property_typing_is_counted_unrecognised() {
+    let ts = triples(&[&format!(
+        "<{EX}hasSSN> <{RDF_TYPE}> <{OWL}FunctionalProperty> ."
+    )]);
+    let tbox = TBox::extract(&ts);
+
+    assert!(
+        tbox.unrecognised_schema >= 1,
+        "owl:FunctionalProperty in rdf:type object must increment unrecognised_schema; got {}",
+        tbox.unrecognised_schema
+    );
+    assert!(
+        !tbox.fully_captured(),
+        "FunctionalProperty typing must make fully_captured() return false"
+    );
+    assert_eq!(
+        tbox.concept_incl.len(),
+        0,
+        "FunctionalProperty must NOT produce a concept inclusion"
+    );
+    assert_eq!(
+        tbox.role_incl.len(),
+        0,
+        "FunctionalProperty must NOT produce a role inclusion"
+    );
+    assert_eq!(
+        tbox.skipped,
+        0,
+        "FunctionalProperty is not 'outside QL rewriting' via skipped — it uses unrecognised_schema"
+    );
+}
+
+/// Cover all 7 characteristic property types to pin the full enumeration. [SONNET-4.6] sq-pbz04.3.3
+#[test]
+fn characteristic_property_types_are_all_counted() {
+    let characteristic = [
+        "FunctionalProperty",
+        "InverseFunctionalProperty",
+        "TransitiveProperty",
+        "SymmetricProperty",
+        "AsymmetricProperty",
+        "ReflexiveProperty",
+        "IrreflexiveProperty",
+    ];
+    for local in &characteristic {
+        let line = format!("<{EX}p> <{RDF_TYPE}> <{OWL}{}> .", local);
+        let tbox = TBox::extract(&triples(&[&line]));
+        assert!(
+            tbox.unrecognised_schema >= 1,
+            "owl:{} in rdf:type object must increment unrecognised_schema; got {}",
+            local,
+            tbox.unrecognised_schema
+        );
+        assert!(
+            !tbox.fully_captured(),
+            "owl:{} typing must make fully_captured() return false",
+            local
+        );
+        assert_eq!(
+            tbox.concept_incl.len(),
+            0,
+            "owl:{} must NOT produce any inclusion",
+            local
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B2 — QL-legal rdf:type declarations must NOT be miscounted [SONNET-4.6]
+// ---------------------------------------------------------------------------
+
+/// A TBox with only QL-legal entity-kind declarations stays `fully_captured`. [SONNET-4.6] sq-pbz04.3.3
+#[test]
+fn ql_legal_declarations_stay_fully_captured() {
+    let ts = triples(&[
+        &format!("<{EX}MyClass> <{RDF_TYPE}> <{OWL}Class> ."),
+        &format!("<{EX}myProp> <{RDF_TYPE}> <{OWL}ObjectProperty> ."),
+        &format!("<{EX}myData> <{RDF_TYPE}> <{OWL}DatatypeProperty> ."),
+        &format!("<{EX}alice>  <{RDF_TYPE}> <{OWL}NamedIndividual> ."),
+        &format!("<{EX}onto>   <{RDF_TYPE}> <{OWL}Ontology> ."),
+        // rdfs:Class declaration
+        &format!("<{EX}Other> <{RDF_TYPE}> <{RDFS}Class> ."),
+        // A plain subClassOf so the TBox is non-trivially captured.
+        &format!("<{EX}MyClass> <{RDFS}subClassOf> <{EX}Thing> ."),
+    ]);
+    let tbox = TBox::extract(&ts);
+
+    assert_eq!(
+        tbox.unrecognised_schema,
+        0,
+        "QL-legal rdf:type declarations must NOT count as unrecognised_schema"
+    );
+    assert_eq!(tbox.skipped, 0, "QL-legal declarations must not count as skipped");
+    assert!(
+        tbox.fully_captured(),
+        "a TBox with only QL-legal declarations + subClassOf must be fully captured"
+    );
+}
