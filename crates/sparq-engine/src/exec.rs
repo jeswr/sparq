@@ -12040,9 +12040,11 @@ mod columnar_filter_seam {
 
 // [OPUS-4.8] sq-qcnn.13 — Direct unit tests for internal exec functions (private API).
 // These supplement the integration tests in tests/eval_semantics.rs with white-box
-// coverage of paths reachable only from inside the crate: `minus_bindings` general
-// path, `left_outer_join` with OPTIONAL filter, `effective_boolean` / `ebv` error
-// arms, and aggregate-error propagation via `sum_values(_, errored=true)`. [OPUS-4.8]
+// coverage of paths reachable only from inside the crate: `minus_bindings` (disjoint
+// fast path + fully-bound fast path + the unbound-shared-variable general compatibility
+// scan), `effective_boolean` / `ebv` error arms, aggregate-error propagation via
+// `sum_values(_, errored=true)`, and the `minmax_values` numeric-promotion + mixed-type
+// fallback paths. [OPUS-4.8]
 
 /// Direct unit tests for `minus_bindings` — exercises the fast-path (disjoint
 /// domains → no-op, fully-bound compatible rows) and the general path (unbound
@@ -12069,9 +12071,14 @@ mod minus_bindings_unit {
         .unwrap()
     }
 
+    /// Resolve an IRI to its dictionary `Id` in the scratch graph. PANICS if the term
+    /// is absent (a test-setup mistake): a silent `NO_ID` fallback would masquerade as
+    /// an "unbound" sentinel and mask a typo, producing false pass/fail in the MINUS
+    /// compatibility tests. The IRI MUST be one interned by `scratch()`.
     fn id(g: &Graph, iri: &str) -> Id {
         use oxrdf::{NamedNode, Term};
-        g.id_of(&Term::NamedNode(NamedNode::new(iri).unwrap())).unwrap_or(NO_ID)
+        g.id_of(&Term::NamedNode(NamedNode::new(iri).unwrap()))
+            .unwrap_or_else(|| panic!("test-setup error: IRI {} is not present in the scratch graph", iri))
     }
 
     /// Disjoint variable domains: left has {?s} only, right has {?x} only (no overlap).
@@ -12102,34 +12109,25 @@ mod minus_bindings_unit {
         assert_eq!(result.rows[0][0], b, "remaining row should have s=b");
     }
 
-    /// General path: left row has an UNBOUND shared variable (`NO_ID`).
-    /// SPARQL MINUS: a row whose shared domain is absent does NOT overlap with a right
-    /// row that binds the same variable → not removed. This exercises the
-    /// `any_unbound` guard that switches to the compatibility scan.
+    /// General path: the left row has an UNBOUND shared variable (`?t = NO_ID`) alongside
+    /// a BOUND shared variable (`?s`) whose value agrees with the right row. The unbound
+    /// `?t` forces `minus_bindings` off the fast path into the per-row compatibility scan.
+    ///
+    /// SPARQL MINUS (§18.5): a left row is removed iff some right row is compatible AND
+    /// their bound domains overlap on ≥1 shared variable. Here the domains overlap on `?s`
+    /// (both bound, `a == a`); `?t` is unbound on the left so it is skipped (compatibility
+    /// only constrains variables bound on BOTH sides). Overlap holds ⇒ the row IS removed.
     #[test]
-    fn minus_general_path_unbound_left_not_removed() {
+    fn minus_general_path_bound_overlap_removes_despite_unbound_var() {
         let g = scratch();
         let a = id(&g, "http://ex/a");
-        // Left: row with ?s = a, ?t = NO_ID (unbound).
-        // Right: row with ?s = a, ?t = a (bound).
+        // Left: {?s = a, ?t = NO_ID (unbound)}; Right: {?s = a, ?t = a (bound)}.
         let left = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[a, NO_ID])]);
         let right = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[a, a])]);
         let result = minus_bindings(left, right);
-        // ?t is unbound on the left: bound domain of ?t is absent → no overlap on ?t →
-        // the row is NOT compatible → NOT removed.
-        // (Although ?s matches (a==a), ?t's domain is absent → no OVERLAP → not removed.)
-        // Actually per SPARQL spec: overlap requires at least one shared variable with BOUND
-        // values on BOTH sides agreeing. Since ?t has no bound value on the left, domain
-        // overlap is over {?s} only. ?s = a = a → overlap on ?s → IS compatible → REMOVED.
-        // (This is the documented spec: even one shared bound var that matches causes removal.)
-        // Verify: the row IS removed (s=a matches on the left, t doesn't gate it since it's
-        // the SAME group domain check: "at least one shared variable with a value on both sides").
-        // Actually let me re-read the code: `overlap` is set true when BOTH sides are bound AND
-        // equal; the row IS removed if `overlap` is true after checking all shared pairs.
-        // So: ?s = a (both bound, equal) → overlap = true → removed.
-        // ?t = NO_ID on left → skipped (not both bound) → overlap unchanged.
-        // Result: overlap=true → removed.
-        assert_eq!(result.rows.len(), 0, "?s matches (both sides bound, equal) → row removed even though ?t is unbound on left");
+        // Overlap on ?s (both bound, equal) ⇒ compatible ⇒ removed; the unbound ?t is
+        // skipped by the "both sides bound" guard and neither blocks nor causes removal.
+        assert_eq!(result.rows.len(), 0, "bound overlap on ?s removes the row even though ?t is unbound on the left");
     }
 
     /// General path: left row has unbound ?t and right row also has unbound ?t.

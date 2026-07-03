@@ -181,11 +181,13 @@ mod aggregate_mixed_numeric {
         )
         .unwrap();
         let result = one_cell(&g, "PREFIX ex: <http://ex/> SELECT (AVG(?v) AS ?a) WHERE { ?x ex:v ?v }");
-        // 2+4+6 = 12; 12/3 = 4.0 (decimal division, canonical "4.0" or "4")
-        let s = result.as_deref().unwrap_or("");
-        assert!(
-            s.contains('4') && (s.contains("decimal") || s.contains("integer")),
-            "AVG(2,4,6)=4 (decimal or integer form), got {result:?}"
+        // 2+4+6 = 12 (integer SUM); AVG = 12/3, and xsd:integer÷xsd:integer is DECIMAL
+        // division per SPARQL/XPath. The exact quotient is 4, serialised at the smallest
+        // scale ≥ 1 the engine's `Dec::checked_div` produces → the canonical "4.0"^^xsd:decimal.
+        assert_eq!(
+            result,
+            Some(dec_lit("4.0")),
+            "AVG(2,4,6) must be the exact decimal 4.0 (not integer 4, not any other value), got {result:?}"
         );
     }
 
@@ -585,40 +587,44 @@ mod minus_scoping {
 mod order_by_type_boundary {
     use super::*;
 
-    /// A VALUES clause binds a mix of blank, IRI, and literal. ORDER BY ASC(?x) must
-    /// place blank before IRI before literal; DESC(?x) must be the reverse.
+    /// A result mixes a blank node, an IRI, and a plain literal. ORDER BY ASC(?x) must
+    /// place blank < IRI < literal (the SPARQL §15.1 cross-type total order); DESC(?x)
+    /// must be the exact reverse. The three kinds are supplied via data triples rather
+    /// than a VALUES block, because SPARQL VALUES cannot bind a blank node.
     ///
-    /// Note: blank node IRIs are opaque in the output string; we check positions, not values.
+    /// Note: blank-node labels are opaque in the output string, so we assert on the
+    /// leading term-kind sigil at each position (`_` blank, `<` IRI, `"` literal), not
+    /// on the value.
     #[test]
-    fn order_by_iri_before_literal() {
-        // Mix IRIs and plain literals; ORDER BY must put IRI before literal.
-        let g = Graph::load_str("@prefix ex: <http://ex/> . ex:s ex:p 1 .", "turtle").unwrap();
-        let r_asc = query(
-            &g,
-            "SELECT ?x WHERE { VALUES ?x { <http://ex/iri> \"lit\" } } ORDER BY ASC(?x)",
+    fn order_by_blank_before_iri_before_literal() {
+        // Same subject/predicate, three objects of distinct kinds: blank, IRI, literal.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> .\
+             ex:s ex:p _:b .\
+             ex:s ex:p <http://ex/iri> .\
+             ex:s ex:p \"lit\" .",
+            "turtle",
         )
         .unwrap();
-        assert_eq!(r_asc.rows.len(), 2, "VALUES must bind 2 rows");
-        let first = r_asc.rows[0][0].as_ref().map(|t| t.to_string());
-        let second = r_asc.rows[1][0].as_ref().map(|t| t.to_string());
-        assert!(
-            first.as_deref().map(|s| s.starts_with('<')).unwrap_or(false),
-            "IRI must come BEFORE literal in ASC order, first={first:?}"
+        let kinds = |q: &str| -> Vec<char> {
+            let r = query(&g, q).unwrap();
+            assert_eq!(r.rows.len(), 3, "3 objects must yield 3 rows for: {q}");
+            r.rows
+                .iter()
+                .map(|row| row[0].as_ref().expect("bound").to_string().chars().next().expect("non-empty term"))
+                .collect()
+        };
+        // ASC: blank ('_') < IRI ('<') < literal ('"').
+        assert_eq!(
+            kinds("PREFIX ex: <http://ex/> SELECT ?x WHERE { ex:s ex:p ?x } ORDER BY ASC(?x)"),
+            vec!['_', '<', '"'],
+            "ASC(?x) must order blank < IRI < literal"
         );
-        assert!(
-            second.as_deref().map(|s| s.starts_with('"')).unwrap_or(false),
-            "literal must come AFTER IRI in ASC order, second={second:?}"
-        );
-        // DESC is the exact reverse.
-        let r_desc = query(
-            &g,
-            "SELECT ?x WHERE { VALUES ?x { <http://ex/iri> \"lit\" } } ORDER BY DESC(?x)",
-        )
-        .unwrap();
-        let d_first = r_desc.rows[0][0].as_ref().map(|t| t.to_string());
-        assert!(
-            d_first.as_deref().map(|s| s.starts_with('"')).unwrap_or(false),
-            "literal must come BEFORE IRI in DESC order, first={d_first:?}"
+        // DESC over the SAME data must be the exact reverse: literal > IRI > blank.
+        assert_eq!(
+            kinds("PREFIX ex: <http://ex/> SELECT ?x WHERE { ex:s ex:p ?x } ORDER BY DESC(?x)"),
+            vec!['"', '<', '_'],
+            "DESC(?x) must be the exact reverse: literal > IRI > blank"
         );
     }
 
