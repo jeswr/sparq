@@ -23,7 +23,7 @@ Architecture: [`research/federation-client-design.md`](../../research/federation
 Planner it reuses: [`skills/federated-planning/SKILL.md`](../../skills/federated-planning/SKILL.md).
 Contributing: [`AGENTS.md`](../../AGENTS.md).
 
-Correctness suite under `tests/` (gated on the `fedclient` feature; the default build compiles it to nothing) — run on the REAL path, with local `sparq-engine` evaluation as the canonical answer: result-equivalence (planner / streaming / multi-source UNION / adaptive vs. static), fail-closed wire & error paths (SRJ decode, brTPF binary codec, interpreter), discovery + source-adapter error paths (incl. the SSRF egress guard), and the one-way `sparq-core`/`sparq-engine` dependency boundary.
+Correctness suite under `tests/` (gated on the `fedclient` feature; the default build compiles it to nothing) — run on the REAL path, with local `sparq-engine` evaluation as the canonical answer: result-equivalence (planner / streaming / multi-source UNION / adaptive vs. static, and end-to-end over a REAL in-process `sparq-server` loopback on `127.0.0.1:0`, not just the in-memory `Transport` seam), fail-closed wire & error paths (SRJ decode, brTPF binary codec, interpreter), discovery + source-adapter error paths (incl. the load-bearing SSRF egress guard: an egress attempt outside the per-endpoint allowlist scope is refused), and the one-way `sparq-core`/`sparq-engine` dependency boundary.
 
 ## License
 
