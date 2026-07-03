@@ -164,13 +164,14 @@ pub struct Suite {
 ///   `D_ENTAIL_FLOOR = 1` (sq-e5atd; opt-in `d-entail` feature; the D-only
 ///   `sparql11/entailment` tests graduated from OutOfScope to Pass through
 ///   sparq-reason's `Profile::D` — rdfD1 typing + typed value-space equality).
-/// * sparql11/service evaluation 5 — `sparq-conformance`
-///   `tests/service_eval_suite.rs` `SERVICE_EVAL_FLOOR = 5` (sq-ddpgx; opt-in
-///   `service` feature; the deferred SERVICE/federation tests graduated from the
+/// * sparql11/service evaluation 6 — `sparq-conformance`
+///   `tests/service_eval_suite.rs` `SERVICE_EVAL_FLOOR = 6` (sq-ddpgx + sq-my8wd.1;
+///   opt-in `service` feature; the deferred SERVICE/federation tests graduated from the
 ///   SPARQL binary's skip bucket to Pass by serving each `qt:serviceData` block on
 ///   a REAL in-process loopback endpoint — the sq-ushvx harness — and driving the
-///   federated query end-to-end through the engine's REAL ureq transport; a
-///   variable SERVICE endpoint + a nested non-SILENT SERVICE are documented Skips).
+///   federated query end-to-end through the engine's REAL ureq transport; [SONNET-4.6]
+///   nested non-SILENT SERVICE now handled by configuring outer-endpoint egress
+///   allowlists; a variable SERVICE endpoint is the one remaining documented Skip).
 /// * SPARQL 1.1 Protocol (HTTP) 21 — `sparq-conformance`
 ///   `tests/http_protocol_suite.rs` `HTTP_PROTOCOL_FLOOR = 21` (sq-jaj38; opt-in
 ///   `http-protocol` feature; RAW HTTP requests at the in-process loopback server
@@ -566,9 +567,10 @@ pub const SUITES: &[Suite] = &[
     // federated SERVICE query runs end-to-end through the engine's REAL ureq
     // transport, compared to the `.srx` oracle. The floor is the MEASURED pass
     // count at the pinned rdf-tests revision (NOT 100%: a variable SERVICE endpoint
-    // and a nested non-SILENT SERVICE are honest tracked-not-asserted divergences —
-    // documented Skips, never skip-laundered into the count). Floor kept in
-    // lock-step by `tests/scoreboard_floors.rs`.
+    // is the one remaining honest tracked-not-asserted divergence — documented Skip,
+    // never skip-laundered into the count; [SONNET-4.6] sq-my8wd.1 raised the floor
+    // from 5→6 by handling nested non-SILENT SERVICE via per-endpoint egress config).
+    // Floor kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C SPARQL 1.1 sparql11/service evaluation",
         family: "W3C SPARQL",
@@ -578,7 +580,7 @@ pub const SUITES: &[Suite] = &[
             feature: "service",
         },
         ci_job: "service-federation-conformance",
-        ratchet_floor: 5,
+        ratchet_floor: 6,
         floor_basis: "pass",
         note: "sparql11/service federated SERVICE queries run end-to-end through \
                REAL in-process loopback endpoints (the sq-ushvx harness) + the \

@@ -53,6 +53,8 @@ use spargebra::algebra::GraphPattern;
 use spargebra::term::NamedNodePattern;
 use spargebra::{Query, SparqlParser};
 
+use sparq_server::{AppState, ServerConfig};
+
 use crate::compare::{rows_equal, Row};
 use crate::manifest::{MF, QT};
 use crate::rdf::{as_node, file_iri, iri_to_path, parse_file, MiniGraph};
@@ -206,6 +208,33 @@ fn stand_up(doc: &Path) -> Result<LoopbackEndpoint, String> {
     Ok(LoopbackEndpoint::serve(graph))
 }
 
+/// [SONNET-4.6] sq-my8wd.1 — Like [`stand_up`] but configures the loopback server
+/// with a custom service egress allowlist so it can federate onward to other loopback
+/// endpoints. Used for service3-style tests where a top-level loopback endpoint hosts
+/// a body that contains nested non-SILENT `SERVICE` calls to a second loopback endpoint.
+///
+/// `allowed_entries` are `"host:port"` strings (e.g. `"127.0.0.1:54321"`) added via
+/// [`sparq_server::ServiceAllowlist::add`]. The server's per-request egress mode is
+/// `AllowlistOnly` — the same strict mode the stock server installs — so only the
+/// explicitly listed inner endpoints are reachable; all other destinations stay refused.
+fn stand_up_with_egress(doc: &Path, allowed_entries: &[String]) -> Result<LoopbackEndpoint, String> {
+    let triples = parse_file(doc)?;
+    let mut nt = String::new();
+    for t in &triples {
+        nt.push_str(&format!("{} {} {} .\n", t.subject, t.predicate, t.object));
+    }
+    let graph = sparq_core::Graph::load_str(&nt, "ntriples")
+        .map_err(|e| format!("load remote dataset {}: {e}", doc.display()))?;
+    let mut config = ServerConfig::default();
+    for entry in allowed_entries {
+        config
+            .service_allow
+            .add(entry)
+            .map_err(|e| format!("allowlist entry \"{}\": {}", entry, e))?;
+    }
+    Ok(LoopbackEndpoint::serve_with(move || AppState::with_config(graph, config)))
+}
+
 /// Rewrites every well-known endpoint IRI to its loopback `sparql_url()` in `text`.
 /// Endpoints are replaced longest-IRI-first so a prefix IRI never clobbers a longer one.
 fn rewrite_endpoints(text: &str, map: &BTreeMap<String, String>) -> String {
@@ -267,9 +296,49 @@ fn walk(p: &GraphPattern, f: &mut impl FnMut(&GraphPattern)) {
     }
 }
 
+/// [SONNET-4.6] sq-my8wd.1 — Walks the query pattern and returns a map from each
+/// outer non-SILENT named `SERVICE` endpoint IRI to the list of non-SILENT named
+/// `SERVICE` endpoint IRIs nested within its body. Used in [`run_test`] to determine
+/// endpoint startup order and to configure each outer endpoint's egress allowlist so it
+/// can reach its inner neighbours (e.g. the `service3` test: `SERVICE <ep1>` whose body
+/// contains `OPTIONAL { SERVICE <ep2> { … } }`).
+///
+/// A nested **SILENT** `SERVICE` is excluded from the map: the inner server's strict
+/// empty-allowlist refuses it, and `SILENT` swallows the refusal — no allowlist entry
+/// is needed. A **variable** endpoint (`SERVICE ?var`) is not matched by this function
+/// (it cannot appear in the map key); `out_of_scope_reason` handles that case before
+/// `find_service_nesting` is called.
+fn find_service_nesting(pattern: &GraphPattern) -> BTreeMap<String, Vec<String>> {
+    let mut result: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    walk(pattern, &mut |p| {
+        // Only consider non-SILENT SERVICE nodes with a named (IRI) endpoint.
+        if let GraphPattern::Service { name: NamedNodePattern::NamedNode(outer_name), inner, .. } = p {
+            if !matches!(p, GraphPattern::Service { silent: true, .. }) {
+                let outer_iri = outer_name.as_str().to_string();
+                let mut nested = Vec::new();
+                walk(inner, &mut |q| {
+                    if let GraphPattern::Service {
+                        name: NamedNodePattern::NamedNode(inner_name),
+                        ..
+                    } = q
+                    {
+                        if !matches!(q, GraphPattern::Service { silent: true, .. }) {
+                            nested.push(inner_name.as_str().to_string());
+                        }
+                    }
+                });
+                if !nested.is_empty() {
+                    result.insert(outer_iri, nested);
+                }
+            }
+        }
+    });
+    result
+}
+
 /// Classifies a query's SERVICE shape against what THIS in-process loopback
-/// fixture can serve, returning a documented `Skip` reason for the two known
-/// out-of-scope shapes (an honest tracked-not-asserted divergence — never
+/// fixture can serve, returning a documented `Skip` reason for the known
+/// out-of-scope shape (an honest tracked-not-asserted divergence — never
 /// skip-laundered into the pass count), or `None` when the test is in scope.
 ///
 /// * A **variable** SERVICE endpoint (`SERVICE ?var { … }`, the `service5` test)
@@ -277,50 +346,26 @@ fn walk(p: &GraphPattern, f: &mut impl FnMut(&GraphPattern)) {
 ///   the endpoint from a binding before the remote call); reported as an explicit
 ///   engine "not supported" error, classified here BEFORE the run so it is a Skip,
 ///   not a Fail.
-/// * A **nested NON-SILENT** SERVICE (a `SERVICE` whose inner pattern itself
-///   contains a non-`SILENT` `SERVICE`, the `service3` test) would require the
-///   LOOPBACK endpoint to itself federate ONWARD to a second endpoint. The merged
-///   harness serves a plain in-memory `Graph` with federation disabled (an
-///   unconfigured `sparq-server` refuses ALL onward SERVICE — fail-closed), so the
-///   inner server cannot reach the second endpoint and the non-silent inner call
-///   propagates the refusal. Wiring inner-endpoint federation (so two loopback
-///   servers can reach each other) is a separately-reviewable harness extension —
-///   see the crate README / the deferred-bead note in the PR body. A nested
-///   **SILENT** SERVICE (the `service6` test) is fine: the inner server's refusal
-///   is swallowed by the `SILENT`, exactly as the oracle expects, so that test is
-///   IN scope and PASSES end-to-end through this harness.
+///
+/// A **nested non-SILENT** SERVICE (e.g. the `service3` test, where `SERVICE <ep1>`
+/// contains `OPTIONAL { SERVICE <ep2> { … } }`) is now IN scope: [`run_test`] detects
+/// this topology via [`find_service_nesting`] and configures the outer loopback
+/// endpoint's egress allowlist to include the inner endpoint, so ep1 can reach ep2.
+/// A nested **SILENT** SERVICE (`service6`, `service7`) has always been in scope — the
+/// inner server's strict empty-allowlist refuses it and `SILENT` swallows the refusal.
 fn out_of_scope_reason(pattern: &GraphPattern) -> Option<String> {
     let mut variable_endpoint = false;
-    let mut nested_non_silent_service = false;
     walk(pattern, &mut |p| {
-        if let GraphPattern::Service { name, inner, .. } = p {
+        if let GraphPattern::Service { name, .. } = p {
             if matches!(name, NamedNodePattern::Variable(_)) {
                 variable_endpoint = true;
             }
-            // A NON-SILENT SERVICE nested inside this SERVICE's inner pattern: the
-            // inner endpoint would have to federate onward, which the plain-Graph
-            // loopback fixture cannot do — and being non-silent, the refusal would
-            // propagate. (A nested SILENT one is swallowed by the inner server, so
-            // it stays in scope.)
-            walk(inner, &mut |q| {
-                if matches!(q, GraphPattern::Service { silent: false, .. }) {
-                    nested_non_silent_service = true;
-                }
-            });
         }
     });
     if variable_endpoint {
         Some(
             "variable SERVICE endpoint (`SERVICE ?var`) — engine federation evaluator does not \
              resolve a bound endpoint (tracked-not-asserted, sq-my8wd child)"
-                .into(),
-        )
-    } else if nested_non_silent_service {
-        Some(
-            "nested non-SILENT SERVICE — the in-process loopback fixture serves a plain Graph \
-             with federation disabled, so the inner endpoint cannot federate onward \
-             (tracked-not-asserted; inner-endpoint federation is a harness extension, \
-             sq-my8wd child)"
                 .into(),
         )
     } else {
@@ -349,38 +394,92 @@ fn run_test(test: &ServiceTest) -> Outcome {
     };
     let base = file_iri(&test.query);
 
-    // Classify the query's SERVICE shape up front: the two known out-of-scope
-    // shapes (a variable endpoint, a nested SERVICE) become documented Skips, not
-    // Fails — an honest tracked-not-asserted divergence, never skip-laundered.
+    // Classify the query's SERVICE shape up front: a variable endpoint becomes a
+    // documented Skip (tracked-not-asserted, never skip-laundered). We also keep the
+    // parsed pattern for nested-SERVICE topology analysis below.
     let parser = match SparqlParser::new().with_base_iri(&base) {
         Ok(p) => p,
         Err(e) => return Outcome::Fail(format!("bad base IRI: {e}")),
     };
-    match parser.parse_query(&query_text) {
+    let pattern_opt = match parser.parse_query(&query_text) {
         Ok(Query::Select { pattern, .. }) => {
             if let Some(why) = out_of_scope_reason(&pattern) {
                 return Outcome::Skip(why);
             }
+            Some(pattern)
         }
-        Ok(_) => {} // service suite is all SELECT; let the run path report any surprise
+        Ok(_) => None, // service suite is all SELECT; let the run path report any surprise
         Err(e) => return Outcome::Fail(format!("query parse error: {e}")),
-    }
+    };
 
-    // Stand up one loopback endpoint per qt:serviceData block and build the
-    // endpoint-IRI -> loopback-sparql-URL rewrite map. The endpoints are held in
-    // `_endpoints` for the lifetime of the query (RAII teardown on return/unwind).
-    let mut endpoints = Vec::new();
+    // [SONNET-4.6] sq-my8wd.1 — Analyse nested SERVICE topology so inner endpoints
+    // (those nested in another SERVICE's body) are started BEFORE the outer endpoints
+    // that need to reach them, and the outer endpoints are configured with an egress
+    // allowlist that permits onward federation to the already-bound inner endpoints.
+    // For queries with no nesting (all currently passing tests), `service_deps` is
+    // empty and the loop below degenerates to the original single-pass stand_up().
+    let service_deps: BTreeMap<String, Vec<String>> = pattern_opt
+        .as_ref()
+        .map(find_service_nesting)
+        .unwrap_or_default();
+    let all_inner_iris: std::collections::BTreeSet<&str> = service_deps
+        .values()
+        .flat_map(|v| v.iter().map(|s| s.as_str()))
+        .collect();
+
+    // `started` holds inner endpoints (keyed by original IRI) until they are moved
+    // into `endpoints` at the end; both Vecs are dropped after the query returns.
+    let mut started: BTreeMap<String, LoopbackEndpoint> = BTreeMap::new();
+    let mut endpoints: Vec<LoopbackEndpoint> = Vec::new();
     let mut map: BTreeMap<String, String> = BTreeMap::new();
     let mut allow_hosts: Vec<String> = Vec::new();
+
+    // Phase 1: start inner endpoints first so their loopback addresses are known
+    // before the outer endpoint's allowlist is built.
     for sd in &test.service_data {
+        if !all_inner_iris.contains(sd.endpoint.as_str()) {
+            continue;
+        }
         let ep = match stand_up(&sd.data) {
             Ok(ep) => ep,
             Err(e) => return Outcome::Fail(e),
         };
         map.insert(sd.endpoint.clone(), ep.sparql_url());
         allow_hosts.push(ep.host());
+        started.insert(sd.endpoint.clone(), ep);
+    }
+
+    // Phase 2: start outer or plain endpoints. Outer endpoints (those with nested deps)
+    // receive a custom egress allowlist containing `host:port` entries for each
+    // already-started inner endpoint, so their per-request `AllowlistOnly` policy
+    // permits calling those inner endpoints. Plain endpoints use the stock config.
+    for sd in &test.service_data {
+        if all_inner_iris.contains(sd.endpoint.as_str()) {
+            continue; // already started in phase 1
+        }
+        let ep = if let Some(inner_iris) = service_deps.get(&sd.endpoint) {
+            // Build `host:port` allowlist entries from the already-started inner endpoints.
+            let allowed: Vec<String> = inner_iris
+                .iter()
+                .filter_map(|iri| started.get(iri.as_str()))
+                .map(|ep| format!("{}", ep.addr()))
+                .collect();
+            match stand_up_with_egress(&sd.data, &allowed) {
+                Ok(ep) => ep,
+                Err(e) => return Outcome::Fail(e),
+            }
+        } else {
+            match stand_up(&sd.data) {
+                Ok(ep) => ep,
+                Err(e) => return Outcome::Fail(e),
+            }
+        };
+        map.insert(sd.endpoint.clone(), ep.sparql_url());
+        allow_hosts.push(ep.host());
         endpoints.push(ep);
     }
+    // Keep inner endpoints alive for the full query lifetime (RAII teardown on return).
+    endpoints.extend(started.into_values());
 
     // Rewrite the endpoint IRIs in the query so SERVICE dials the loopback ports.
     let query_rewritten = rewrite_endpoints(&query_text, &map);

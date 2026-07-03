@@ -68,7 +68,7 @@ mod gated {
     /// (`scoreboard::SUITES`) and read textually by the guard test
     /// `tests/scoreboard_floors.rs`. It may only RISE — never lower it. This is the
     /// ACTUAL current pass count, not an aspirational target.
-    pub const SERVICE_EVAL_FLOOR: usize = 5;
+    pub const SERVICE_EVAL_FLOOR: usize = 6; // [SONNET-4.6] sq-my8wd.1: +service3 (nested non-SILENT SERVICE now handled)
 
     fn rdf_tests_root() -> PathBuf {
         // CARGO_MANIFEST_DIR is crates/sparq-conformance; the data lives at the
