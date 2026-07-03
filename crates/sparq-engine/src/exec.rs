@@ -2453,46 +2453,48 @@ fn eval_service(
     // inside the SERVICE block are all forwarded verbatim.
     let query = format!("SELECT * WHERE {{ {inner} }}");
 
-    let fetched = service_transport::with(|t| crate::service::eval_remote(t, &endpoint, &query));
-    let rel = match fetched {
-        Ok(rel) => rel,
+    // [FABLE-5] (sq-my8wd.4) STREAMING consumption: each remote row is interned to a
+    // compact id-level `Row` AS IT IS PARSED (the owned terms are dropped immediately)
+    // instead of collecting the whole remote relation as `Term`s first. Result-identical
+    // to the collect-then-intern path — same rows, multiplicity and order (pinned by the
+    // service.rs `streaming_equivalence` tests) — but the per-response peak memory is
+    // the response body plus the id-level relation the join needs anyway, not a
+    // whole-document DOM plus a second term-level copy.
+    let mut id_rows: Vec<Row> = Vec::new();
+    let fetched = service_transport::with(|t| {
+        crate::service::eval_remote_into(t, &endpoint, &query, &mut |row| {
+            id_rows.push(intern_remote_row(graph, local, &row));
+            Ok(())
+        })
+    });
+    match fetched {
+        Ok(vars) => Ok(Bindings::unsorted(vars, id_rows)),
         Err(e) if silent => {
-            // SILENT: swallow the error, keep the surrounding bindings.
+            // SILENT: swallow the error, keep the surrounding bindings. Rows already
+            // interned from a partially-parsed response are discarded with `id_rows`;
+            // the stray LocalVocab entries are inert (no surviving row references them).
             let _ = e;
-            return Ok(identity());
+            Ok(identity())
         }
-        Err(e) => return Err(e),
-    };
-
-    Ok(service_relation_to_bindings(graph, local, rel))
+        Err(e) => Err(e),
+    }
 }
 
-/// Intern a remote [`ServiceRelation`](crate::service::ServiceRelation) into id-level
-/// [`Bindings`] against this query's dictionaries — exactly as `VALUES` does — so it
-/// joins with local BGP results. Shared by the verbatim and bound-join paths.
-/// [OPUS-4.8] (sq-sjkj)
+/// Intern ONE remote solution row into an id-level [`Row`] against this query's
+/// dictionaries — exactly as `VALUES` does — so it joins with local BGP results: each
+/// term resolves against the graph dictionary first, else the query-local vocab.
+/// Shared by the verbatim and bound-join paths, which feed it row-by-row from the
+/// streaming SERVICE parser rather than materialising the remote relation first.
+/// [FABLE-5] (sq-my8wd.4; formerly the whole-relation `service_relation_to_bindings`,
+/// sq-sjkj)
 #[cfg(feature = "service")]
-fn service_relation_to_bindings(
-    graph: &Graph,
-    local: &mut LocalVocab,
-    rel: crate::service::ServiceRelation,
-) -> Bindings {
-    // Intern each remote term against the graph dictionary (so it joins with local
-    // BGP results) or the local vocab (terms absent from the data can still match
-    // other remote/VALUES rows) — identical to `values_bindings`.
-    let rows: Vec<Row> = rel
-        .rows
-        .iter()
-        .map(|r| {
-            r.iter()
-                .map(|cell| match cell {
-                    None => NO_ID,
-                    Some(t) => graph.id_of(t).unwrap_or_else(|| local.intern(t.clone())),
-                })
-                .collect()
+fn intern_remote_row(graph: &Graph, local: &mut LocalVocab, row: &[Option<Term>]) -> Row {
+    row.iter()
+        .map(|cell| match cell {
+            None => NO_ID,
+            Some(t) => graph.id_of(t).unwrap_or_else(|| local.intern(t.clone())),
         })
-        .collect();
-    Bindings::unsorted(rel.vars, rows)
+        .collect()
 }
 
 /// Attempt a bind-join (`VALUES` pushdown) of a SERVICE sub-query against the
@@ -2623,21 +2625,30 @@ fn bound_join_to_endpoint(
     let inner_sparql = format!("{inner}");
     let block = crate::service::bind_block_size();
 
-    // Accumulate the union of the per-block remote relations. All blocks share the
-    // remote `head.vars`, so we keep the first block's var list and concatenate rows.
+    // Accumulate the union of the per-block remote relations, interning each row to the
+    // id level AS IT ARRIVES from the streaming parser ([FABLE-5] sq-my8wd.4) — no
+    // block's relation is ever held as owned `Term` rows. All blocks share the remote
+    // `head.vars`, so we keep the first block's var list and concatenate rows
+    // positionally: the same accumulation, and the same row order, as the previous
+    // collect-then-intern path.
     let mut acc_vars: Option<Vec<Variable>> = None;
-    let mut acc_rows: Vec<Vec<Option<oxrdf::Term>>> = Vec::new();
+    let mut acc_rows: Vec<Row> = Vec::new();
 
     for chunk in tuples.chunks(block) {
         let values = crate::service::render_values_block(&join_vars, chunk);
         // Inject the VALUES inside the SELECT * group, alongside the inner pattern, so
         // the remote inner-joins the pushed bindings with its pattern.
         let query = format!("SELECT * WHERE {{ {values} {inner_sparql} }}");
-        match service_transport::with(|t| crate::service::eval_remote(t, endpoint, &query)) {
-            Ok(rel) => {
-                acc_rows.extend(rel.rows);
+        let fetched = service_transport::with(|t| {
+            crate::service::eval_remote_into(t, endpoint, &query, &mut |row| {
+                acc_rows.push(intern_remote_row(graph, local, &row));
+                Ok(())
+            })
+        });
+        match fetched {
+            Ok(vars) => {
                 if acc_vars.is_none() {
-                    acc_vars = Some(rel.vars);
+                    acc_vars = Some(vars);
                 }
             }
             // SILENT: a failed block means the SERVICE as a whole must behave EXACTLY
@@ -2647,6 +2658,9 @@ fn bound_join_to_endpoint(
             // caller the identity relation (one zero-column row); joining / left-outer
             // joining `left` with it leaves `left` exactly as it was. This matches the
             // unbound-then-local-join path's SILENT semantics precisely. [OPUS-4.8]
+            // (Rows already interned from earlier blocks — or a partially-parsed
+            // failing block — are discarded with `acc_rows`; the stray LocalVocab
+            // entries are inert. [FABLE-5])
             Err(_) if silent => {
                 return Ok(Some(Bindings::unsorted(Vec::new(), vec![Row::new()])));
             }
@@ -2660,8 +2674,7 @@ fn bound_join_to_endpoint(
     // relation has zero rows, so the var list only names columns that, being the join
     // keys, always exist on both sides). [OPUS-4.8]
     let vars = acc_vars.unwrap_or_else(|| join_vars.clone());
-    let rel = crate::service::ServiceRelation { vars, rows: acc_rows };
-    Ok(Some(service_relation_to_bindings(graph, local, rel)))
+    Ok(Some(Bindings::unsorted(vars, acc_rows)))
 }
 
 /// Evaluate `SERVICE ?ep { inner }` — a VARIABLE endpoint — against the `left`

@@ -21,17 +21,44 @@
 //!    a blank node, …). The block size is the one OPT-IN tuning knob
 //!    ([`with_service_bound_join_block_size`] / `SPARQ_SERVICE_BIND_BLOCK`,
 //!    default [`DEFAULT_BIND_BLOCK`]). The remote relation that is NOT bound-joined is
-//!    still materialised and joined locally by the caller.
+//!    still fetched in full and consumed row-by-row into the caller's id-level join
+//!    input (see *Bounded result consumption* below).
 //! 2. The query is sent over HTTP (form-encoded POST, `Accept:
 //!    application/sparql-results+json, application/sparql-results+xml;q=0.9` — JSON is
 //!    preferred but XML is accepted as a fallback).
-//! 3. The response is parsed into a [`ServiceRelation`] (variable list + rows of optional
-//!    [`Term`]s). The body is content-sniffed (`parse_results`): a leading `{` is parsed
-//!    as SPARQL-Results-JSON ([`parse_srj`]); a leading `<` as SPARQL-Results-XML
-//!    ([`parse_srx`]). The XML path matters because some endpoints ignore `Accept` and
-//!    always return XML — without it the whole SERVICE call would fail (bead sq-ycu).
-//! 4. The caller (`exec::eval_service`) interns those terms into the local/graph
-//!    dictionaries — exactly like `VALUES` — and joins them with the rest of the query.
+//! 3. The response is parsed INCREMENTALLY ([`parse_results_into`], bead sq-my8wd.4):
+//!    each solution row (`Vec<Option<Term>>`, `None` = unbound) is handed to the
+//!    caller's row sink AS IT IS PARSED — the parser never materialises the whole
+//!    remote relation, and a sink error aborts the parse. The body is content-sniffed:
+//!    a leading `{` is parsed as SPARQL-Results-JSON ([`parse_srj_into`]); a leading
+//!    `<` as SPARQL-Results-XML ([`parse_srx_into`]). The XML path matters because
+//!    some endpoints ignore `Accept` and always return XML — without it the whole
+//!    SERVICE call would fail (bead sq-ycu).
+//! 4. The caller (`exec::eval_service`) interns each row into the local/graph
+//!    dictionaries as it arrives — exactly like `VALUES` — dropping the owned terms
+//!    immediately, and joins the compact id-level relation with the rest of the query.
+//!
+//! ## Bounded result consumption (bead sq-my8wd.4)
+//!
+//! A large (or adversarial) remote result must not exhaust engine memory. The bounds:
+//!
+//! * the raw response BODY is capped at a finite limit (`SERVICE_MAX_BODY_BYTES`, the
+//!   native transport's read limit) — a runaway endpoint cannot stream unbounded bytes;
+//! * parsing is per-row streaming for BOTH result formats: the SRJ parser walks the
+//!   `results.bindings` array one binding object at a time (never building a whole-
+//!   document JSON DOM), and the SRX parser was already event-driven — so the parser's
+//!   own working state is one solution, not the relation;
+//! * the consumer interns rows to id-level `Bindings` on arrival, so the only
+//!   result-sized state is the compact id relation the join itself requires.
+//!
+//! Result-equivalence with the previous collect-everything path (identical rows,
+//! multiplicity AND order, and identical errors on malformed documents) is pinned by
+//! the `streaming_equivalence` tests against a frozen DOM reference implementation.
+//! Honest boundary: an SRJ document whose `results` precedes its `head` (legal JSON,
+//! unseen in practice) degrades to buffering the raw binding objects until `head`
+//! arrives — still bounded by the body cap; and on documents with DUPLICATE top-level
+//! keys (malformed per RFC 8259 §4) the error/row precedence may reflect document
+//! order rather than the old DOM's fixed check order.
 //!
 //! ## `SERVICE SILENT`
 //!
@@ -70,13 +97,28 @@
 
 use oxrdf::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Term, Triple, Variable};
 
-/// A materialised remote SELECT result: the projected variables and one row per
+/// A fully-collected remote SELECT result: the projected variables and one row per
 /// solution (`None` = the variable is unbound in that solution).
-#[derive(Debug)]
+///
+/// PRODUCTION consumption is streaming ([`eval_remote_into`] hands rows to a sink as
+/// they are parsed, bead sq-my8wd.4); this collected form backs the convenience
+/// wrappers ([`eval_remote`], [`parse_results`], [`parse_srj`], [`parse_srx`]) and the
+/// tests. `PartialEq` supports the streaming-vs-reference equivalence tests. [FABLE-5]
+#[derive(Debug, PartialEq)]
 pub(crate) struct ServiceRelation {
     pub vars: Vec<Variable>,
     pub rows: Vec<Vec<Option<Term>>>,
 }
+
+/// Shorthand for the streaming row-sink contract (bead sq-my8wd.4): called once per
+/// parsed solution row, positionally projected over the result's variables (`None` =
+/// unbound). Returning `Err` ABORTS the parse and the error string is propagated to
+/// the caller VERBATIM (so a sink can enforce its own resource policy). [FABLE-5]
+///
+/// A closure bound rather than a trait object: every call site is monomorphised, so
+/// the per-row delivery adds no dynamic dispatch (the #1303 perf-neutrality stance).
+pub(crate) trait RowSink: FnMut(Vec<Option<Term>>) -> Result<(), String> {}
+impl<F: FnMut(Vec<Option<Term>>) -> Result<(), String>> RowSink for F {}
 
 /// Abstracts the HTTP round-trip so tests can inject a fake endpoint. `query` is the
 /// SPARQL query string; the return is the raw response body (expected to be
@@ -85,19 +127,42 @@ pub(crate) trait Transport {
     fn fetch(&self, endpoint: &str, query: &str) -> Result<String, String>;
 }
 
-/// Evaluate one SERVICE call end-to-end: send `query` to `endpoint` via `transport`
-/// and parse the response into a [`ServiceRelation`]. SILENT handling is the caller's
-/// responsibility (it owns the join-identity fallback).
+/// Evaluate one SERVICE call end-to-end, STREAMING the parsed rows into `on_row` as
+/// they are decoded (bead sq-my8wd.4): send `query` to `endpoint` via `transport`,
+/// content-sniff + parse the response incrementally, and return the projected
+/// variable list. SILENT handling is the caller's responsibility (it owns the
+/// join-identity fallback, and must discard whatever the sink accumulated when this
+/// returns `Err`). [FABLE-5]
+pub(crate) fn eval_remote_into<F: RowSink>(
+    transport: &dyn Transport,
+    endpoint: &str,
+    query: &str,
+    on_row: &mut F,
+) -> Result<Vec<Variable>, String> {
+    let body = transport.fetch(endpoint, query)?;
+    parse_results_into(&body, on_row)
+}
+
+/// Collecting wrapper over [`eval_remote_into`]: evaluate one SERVICE call end-to-end
+/// into a fully-collected [`ServiceRelation`]. Kept for tests and small-result
+/// callers; production SERVICE evaluation streams via [`eval_remote_into`].
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn eval_remote(
     transport: &dyn Transport,
     endpoint: &str,
     query: &str,
 ) -> Result<ServiceRelation, String> {
-    let body = transport.fetch(endpoint, query)?;
-    parse_results(&body)
+    let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
+    let vars = eval_remote_into(transport, endpoint, query, &mut |row| {
+        rows.push(row);
+        Ok(())
+    })?;
+    Ok(ServiceRelation { vars, rows })
 }
 
-/// Parse a remote SELECT results document, content-sniffing JSON vs XML. [OPUS-4.8]
+/// Parse a remote SELECT results document incrementally, content-sniffing JSON vs
+/// XML, delivering each row to `on_row` and returning the projected variables.
+/// [OPUS-4.8] / streaming form [FABLE-5] (sq-my8wd.4)
 ///
 /// The SPARQL Protocol lets a client advertise an `Accept` preference, but a server MAY
 /// ignore it; in practice some endpoints always emit SPARQL-Results-XML even when we ask
@@ -106,10 +171,13 @@ pub(crate) fn eval_remote(
 /// SPARQL-Results-JSON, `<` ⇒ SPARQL-Results-XML. Anything else is an error (or, under
 /// `SILENT`, the caller's empty result).
 #[cfg(feature = "service")]
-pub(crate) fn parse_results(text: &str) -> Result<ServiceRelation, String> {
+pub(crate) fn parse_results_into<F: RowSink>(
+    text: &str,
+    on_row: &mut F,
+) -> Result<Vec<Variable>, String> {
     match text.trim_start().as_bytes().first() {
-        Some(b'<') => parse_srx(text),
-        Some(b'{') => parse_srj(text),
+        Some(b'<') => parse_srx_into(text, on_row),
+        Some(b'{') => parse_srj_into(text, on_row),
         // An empty body or a leading byte that is neither `{` nor `<` is not a results
         // document we can parse; report it (SILENT turns this into an empty result).
         _ => Err(
@@ -118,6 +186,18 @@ pub(crate) fn parse_results(text: &str) -> Result<ServiceRelation, String> {
                 .into(),
         ),
     }
+}
+
+/// Collecting wrapper over [`parse_results_into`] (tests / small-result callers).
+#[cfg(feature = "service")]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn parse_results(text: &str) -> Result<ServiceRelation, String> {
+    let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
+    let vars = parse_results_into(text, &mut |row| {
+        rows.push(row);
+        Ok(())
+    })?;
+    Ok(ServiceRelation { vars, rows })
 }
 
 // ---------------------------------------------------------------------------
@@ -404,49 +484,328 @@ pub(crate) fn pushable_term(t: &Term) -> bool {
 // (https://www.w3.org/TR/sparql11-results-json/)
 // ---------------------------------------------------------------------------
 
-/// Parse a SELECT result document. ASK results (`{"boolean": …}`) are reported as an
-/// error here — `SERVICE { … }` always wraps a SELECT in our forwarding, so a boolean
-/// body indicates a misbehaving endpoint.
+/// Parse a SELECT result document INCREMENTALLY (bead sq-my8wd.4): the
+/// `results.bindings` array is walked one binding object at a time through a custom
+/// serde seed (never building a whole-document JSON DOM), each row is projected
+/// positionally over `head.vars` and handed to `on_row` immediately, and the
+/// projected variables are returned. ASK results (`{"boolean": …}`) are reported as
+/// an error — `SERVICE { … }` always wraps a SELECT in our forwarding, so a boolean
+/// body indicates a misbehaving endpoint. [FABLE-5]
+///
+/// Result-equivalent to the previous whole-DOM parse (same rows, order, multiplicity
+/// and errors — pinned by the `streaming_equivalence` tests), with two documented
+/// pathological-input caveats (see the module doc): a `results`-before-`head`
+/// document buffers raw binding objects until `head` arrives, and duplicate top-level
+/// keys (malformed JSON) resolve in document order rather than DOM check order.
 #[cfg(feature = "service")]
-pub(crate) fn parse_srj(text: &str) -> Result<ServiceRelation, String> {
-    let v: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("SERVICE: invalid results JSON: {e}"))?;
-    if v.get("boolean").is_some() {
-        return Err("SERVICE: endpoint returned an ASK boolean, expected SELECT bindings".into());
-    }
-    let vars: Vec<Variable> = v
-        .pointer("/head/vars")
-        .and_then(|a| a.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str())
-                .map(|s| Variable::new(s).map_err(|e| format!("SERVICE: bad result variable {s:?}: {e}")))
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .ok_or_else(|| "SERVICE: results JSON missing head.vars".to_string())?;
+pub(crate) fn parse_srj_into<F: RowSink>(
+    text: &str,
+    on_row: &mut F,
+) -> Result<Vec<Variable>, String> {
+    use serde::de::DeserializeSeed;
 
+    let mut st = srj_stream::State::new(on_row);
+    let mut de = serde_json::Deserializer::from_str(text);
+    if let Err(e) = srj_stream::TopSeed(&mut st).deserialize(&mut de) {
+        // A semantic error (bad term / bad variable / sink refusal) was smuggled out
+        // through the side channel VERBATIM; anything else is a JSON syntax error and
+        // gets the same wrapping the DOM path used.
+        return Err(st
+            .take_fail()
+            .unwrap_or_else(|| format!("SERVICE: invalid results JSON: {}", e)));
+    }
+    de.end()
+        .map_err(|e| format!("SERVICE: invalid results JSON: {}", e))?;
+    // Post-parse checks in the SAME precedence order as the old DOM path: ASK boolean
+    // first, then a missing/invalid `head.vars`, then a missing `results.bindings`.
+    st.finish()
+}
+
+/// Collecting wrapper over [`parse_srj_into`] (tests / small-result callers).
+#[cfg(feature = "service")]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn parse_srj(text: &str) -> Result<ServiceRelation, String> {
     let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
-    for sol in v
-        .pointer("/results/bindings")
-        .and_then(|a| a.as_array())
-        .ok_or_else(|| "SERVICE: results JSON missing results.bindings".to_string())?
-    {
-        let obj = sol
-            .as_object()
-            .ok_or_else(|| "SERVICE: a solution binding is not a JSON object".to_string())?;
-        // Build a row positionally over `vars`; a variable absent from the solution
-        // object is UNBOUND (`None`) — identical to the VALUES UNDEF semantics.
-        let mut row: Vec<Option<Term>> = Vec::with_capacity(vars.len());
-        for var in &vars {
-            match obj.get(var.as_str()) {
-                Some(cell) => row.push(Some(srj_term(cell)?)),
-                None => row.push(None),
+    let vars = parse_srj_into(text, &mut |row| {
+        rows.push(row);
+        Ok(())
+    })?;
+    Ok(ServiceRelation { vars, rows })
+}
+
+/// Streaming serde seeds for SPARQL-Results-JSON (bead sq-my8wd.4). [FABLE-5]
+///
+/// The document shape is `{"head": {"vars": […]}, "results": {"bindings": […]}}`.
+/// Only the `bindings` ARRAY is result-sized, so that is the one place a streaming
+/// seed walks elements one at a time; `head` (and each individual binding object) is
+/// small and is still read through a `serde_json::Value` so the term reconstruction
+/// (`srj_term`) and the `head.vars` extraction are byte-identical to the old DOM
+/// path. Every other value shape is accepted-and-ignored exactly where the DOM path
+/// tolerated it, so the "missing head.vars" / "missing results.bindings" errors fire
+/// under the same conditions.
+#[cfg(feature = "service")]
+mod srj_stream {
+    use super::{srj_term, RowSink};
+    use oxrdf::{Term, Variable};
+    use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+    use serde_json::Value;
+    use std::fmt;
+
+    /// Shared parse state threaded through the seeds.
+    pub(super) struct State<'f, F> {
+        on_row: &'f mut F,
+        /// `head.vars`, once seen (rows are projected positionally over these).
+        vars: Option<Vec<Variable>>,
+        /// Raw binding objects seen BEFORE `head` (the reversed-order fallback);
+        /// flushed the moment `head.vars` arrives. Bounded by the response-body cap.
+        pending: Vec<Value>,
+        /// Whether a `results.bindings` ARRAY was seen (empty is fine).
+        bindings_seen: bool,
+        /// Whether a top-level `boolean` key was seen (an ASK body — rejected).
+        boolean_seen: bool,
+        /// Side channel for semantic errors: serde's `Error::custom` would append
+        /// position info, so the exact message is smuggled out here instead.
+        fail: Option<String>,
+    }
+
+    impl<'f, F: RowSink> State<'f, F> {
+        pub(super) fn new(on_row: &'f mut F) -> Self {
+            State {
+                on_row,
+                vars: None,
+                pending: Vec::new(),
+                bindings_seen: false,
+                boolean_seen: false,
+                fail: None,
             }
         }
-        rows.push(row);
+
+        pub(super) fn take_fail(&mut self) -> Option<String> {
+            self.fail.take()
+        }
+
+        /// The post-parse checks, in the old DOM path's precedence order.
+        pub(super) fn finish(self) -> Result<Vec<Variable>, String> {
+            if self.boolean_seen {
+                return Err(
+                    "SERVICE: endpoint returned an ASK boolean, expected SELECT bindings".into(),
+                );
+            }
+            let vars = self
+                .vars
+                .ok_or_else(|| "SERVICE: results JSON missing head.vars".to_string())?;
+            if !self.bindings_seen {
+                return Err("SERVICE: results JSON missing results.bindings".to_string());
+            }
+            Ok(vars)
+        }
+
+        /// Record `msg` in the side channel and produce the serde error that aborts
+        /// the deserialisation (the caller surfaces the side channel verbatim).
+        fn bail<E: serde::de::Error>(&mut self, msg: String) -> E {
+            let e = E::custom(&msg);
+            self.fail = Some(msg);
+            e
+        }
+
+        /// Project one binding object over `vars` and hand the row to the sink.
+        /// Identical cell handling to the old DOM path (absent variable ⇒ `None`).
+        fn emit(&mut self, sol: &Value) -> Result<(), String> {
+            let row = {
+                let vars = self.vars.as_ref().expect("emit is only called once vars are known");
+                let obj = sol.as_object().ok_or_else(|| {
+                    "SERVICE: a solution binding is not a JSON object".to_string()
+                })?;
+                let mut row: Vec<Option<Term>> = Vec::with_capacity(vars.len());
+                for var in vars {
+                    match obj.get(var.as_str()) {
+                        Some(cell) => row.push(Some(srj_term(cell)?)),
+                        None => row.push(None),
+                    }
+                }
+                row
+            };
+            (self.on_row)(row)
+        }
     }
-    Ok(ServiceRelation { vars, rows })
+
+    /// Implements the non-target `Visitor` shapes as accept-and-ignore, so a seed
+    /// tolerates any JSON type exactly where the DOM path did (leaving the relevant
+    /// `*_seen` flag unset ⇒ the same "missing …" error at the end).
+    macro_rules! ignore_scalars {
+        () => {
+            fn visit_bool<E: serde::de::Error>(self, _v: bool) -> Result<(), E> {
+                Ok(())
+            }
+            fn visit_i64<E: serde::de::Error>(self, _v: i64) -> Result<(), E> {
+                Ok(())
+            }
+            fn visit_u64<E: serde::de::Error>(self, _v: u64) -> Result<(), E> {
+                Ok(())
+            }
+            fn visit_f64<E: serde::de::Error>(self, _v: f64) -> Result<(), E> {
+                Ok(())
+            }
+            fn visit_str<E: serde::de::Error>(self, _v: &str) -> Result<(), E> {
+                Ok(())
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+                Ok(())
+            }
+        };
+    }
+
+    /// Drain-and-ignore a sequence / map (the value is structurally skipped).
+    fn drain_seq<'de, A: SeqAccess<'de>>(mut seq: A) -> Result<(), A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(())
+    }
+    fn drain_map<'de, A: MapAccess<'de>>(mut map: A) -> Result<(), A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(())
+    }
+
+    /// Top-level document seed: `{"head": …, "results": …, "boolean": …, …}`.
+    pub(super) struct TopSeed<'a, 'f, F>(pub &'a mut State<'f, F>);
+
+    impl<'de, F: RowSink> DeserializeSeed<'de> for TopSeed<'_, '_, F> {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_any(self)
+        }
+    }
+
+    impl<'de, F: RowSink> Visitor<'de> for TopSeed<'_, '_, F> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a SPARQL results document")
+        }
+        // A non-object top level parses, binds nothing, and yields the DOM path's
+        // "missing head.vars" from the post-checks.
+        ignore_scalars!();
+        fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<(), A::Error> {
+            drain_seq(seq)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "head" => {
+                        // `head` is small; a Value keeps the vars extraction
+                        // byte-identical to the DOM path (non-string entries are
+                        // SKIPPED, a bad variable NAME is an error).
+                        let hv: Value = map.next_value()?;
+                        let extracted = hv
+                            .get("vars")
+                            .and_then(|a| a.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|s| s.as_str())
+                                    .map(|s| {
+                                        Variable::new(s).map_err(|e| {
+                                            format!(
+                                                "SERVICE: bad result variable {:?}: {}",
+                                                s, e
+                                            )
+                                        })
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()
+                            })
+                            .transpose()
+                            .map_err(|m| self.0.bail(m))?;
+                        if let Some(vars) = extracted {
+                            self.0.vars = Some(vars);
+                            // Flush any rows that arrived before `head` (reversed-order
+                            // documents), in their original order.
+                            for sol in std::mem::take(&mut self.0.pending) {
+                                self.0.emit(&sol).map_err(|m| self.0.bail(m))?;
+                            }
+                        }
+                    }
+                    "results" => map.next_value_seed(ResultsSeed(&mut *self.0))?,
+                    "boolean" => {
+                        self.0.boolean_seen = true;
+                        let _: IgnoredAny = map.next_value()?;
+                    }
+                    // Unknown members (e.g. `link`) are ignored, as in the DOM path.
+                    _ => {
+                        let _: IgnoredAny = map.next_value()?;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Seed for the `results` member: only its `bindings` key matters.
+    struct ResultsSeed<'a, 'f, F>(&'a mut State<'f, F>);
+
+    impl<'de, F: RowSink> DeserializeSeed<'de> for ResultsSeed<'_, '_, F> {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_any(self)
+        }
+    }
+
+    impl<'de, F: RowSink> Visitor<'de> for ResultsSeed<'_, '_, F> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a SPARQL results member")
+        }
+        // A non-object `results` leaves `bindings_seen` unset ⇒ the DOM path's
+        // "missing results.bindings".
+        ignore_scalars!();
+        fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<(), A::Error> {
+            drain_seq(seq)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            while let Some(key) = map.next_key::<String>()? {
+                if key.as_str() == "bindings" {
+                    map.next_value_seed(BindingsSeed(&mut *self.0))?;
+                } else {
+                    let _: IgnoredAny = map.next_value()?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Seed for the `bindings` array — THE streaming site: one binding object is
+    /// deserialised (as a small `Value`), projected and delivered at a time, so the
+    /// parser's working state is a single solution, never the relation.
+    struct BindingsSeed<'a, 'f, F>(&'a mut State<'f, F>);
+
+    impl<'de, F: RowSink> DeserializeSeed<'de> for BindingsSeed<'_, '_, F> {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_any(self)
+        }
+    }
+
+    impl<'de, F: RowSink> Visitor<'de> for BindingsSeed<'_, '_, F> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a SPARQL bindings array")
+        }
+        // A non-array `bindings` leaves `bindings_seen` unset ⇒ "missing
+        // results.bindings", matching the DOM path's `as_array` guard.
+        ignore_scalars!();
+        fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<(), A::Error> {
+            drain_map(map)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            self.0.bindings_seen = true;
+            while let Some(sol) = seq.next_element::<Value>()? {
+                if self.0.vars.is_some() {
+                    self.0.emit(&sol).map_err(|m| self.0.bail(m))?;
+                } else {
+                    // `head` has not arrived yet (reversed-order document): buffer the
+                    // raw binding for the flush at `head` — bounded by the body cap.
+                    self.0.pending.push(sol);
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Reconstruct one term from an SRJ binding value object. Mirrors the conformance
@@ -615,10 +974,17 @@ fn srx_term(
     }
 }
 
-/// Parse a SPARQL-Results-XML SELECT document into a [`ServiceRelation`]. ASK `<boolean>`
-/// bodies are rejected (SERVICE always wraps a SELECT in our forwarding).
+/// Parse a SPARQL-Results-XML SELECT document incrementally, delivering each row to
+/// `on_row` at its closing `</result>` and returning the declared variables. ASK
+/// `<boolean>` bodies are rejected (SERVICE always wraps a SELECT in our forwarding).
+/// The quick-xml event loop was already streaming; the only sq-my8wd.4 change is that
+/// a finished row goes to the sink instead of a collected `Vec` — same projection,
+/// same order, same errors. [FABLE-5]
 #[cfg(feature = "service")]
-pub(crate) fn parse_srx(text: &str) -> Result<ServiceRelation, String> {
+pub(crate) fn parse_srx_into<F: RowSink>(
+    text: &str,
+    on_row: &mut F,
+) -> Result<Vec<Variable>, String> {
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
@@ -628,7 +994,6 @@ pub(crate) fn parse_srx(text: &str) -> Result<ServiceRelation, String> {
     let mut vars: Vec<Variable> = Vec::new();
     // Per-row map of variable-name → term; projected positionally over `vars` at </result>.
     let mut cur_row: rustc_hash::FxHashMap<String, Term> = rustc_hash::FxHashMap::default();
-    let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
     let mut cur_var: Option<String> = None;
     // The open value element: (kind, xml:lang, its:dir, datatype, text).
     #[allow(clippy::type_complexity)]
@@ -801,11 +1166,13 @@ pub(crate) fn parse_srx(text: &str) -> Result<ServiceRelation, String> {
                     b"result" => {
                         // Project the row positionally over the declared variables; an
                         // absent binding is UNBOUND (`None`) — the same VALUES-UNDEF
-                        // semantics the SRJ path uses.
+                        // semantics the SRJ path uses. Delivered to the sink NOW
+                        // (streaming, sq-my8wd.4): a sink error aborts the parse and
+                        // propagates verbatim.
                         let row: Vec<Option<Term>> =
                             vars.iter().map(|v| cur_row.remove(v.as_str())).collect();
                         cur_row.clear();
-                        rows.push(row);
+                        on_row(row)?;
                     }
                     b"boolean" => in_boolean = false,
                     _ => {}
@@ -820,6 +1187,18 @@ pub(crate) fn parse_srx(text: &str) -> Result<ServiceRelation, String> {
             "SERVICE: endpoint returned an ASK boolean, expected SELECT bindings".into(),
         );
     }
+    Ok(vars)
+}
+
+/// Collecting wrapper over [`parse_srx_into`] (tests / small-result callers).
+#[cfg(feature = "service")]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn parse_srx(text: &str) -> Result<ServiceRelation, String> {
+    let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
+    let vars = parse_srx_into(text, &mut |row| {
+        rows.push(row);
+        Ok(())
+    })?;
     Ok(ServiceRelation { vars, rows })
 }
 
@@ -2288,6 +2667,311 @@ mod tests {
                 assert_eq!(addrs.len(), 1);
                 assert_eq!(addrs[0].port(), port);
             }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Streaming / bounded result consumption [FABLE-5] (bead sq-my8wd.4)
+    // ---------------------------------------------------------------------
+
+    mod streaming_equivalence {
+        use super::*;
+
+        /// FROZEN pre-sq-my8wd.4 whole-DOM implementation of `parse_srj`, kept
+        /// verbatim as the result-equivalence oracle: the streaming parser must
+        /// produce the SAME relation (rows, multiplicity AND order) and the SAME
+        /// errors. `srj_term` is shared deliberately — it is unchanged by the
+        /// streaming rework; the delta under test is the document walk.
+        fn parse_srj_reference(text: &str) -> Result<ServiceRelation, String> {
+            let v: serde_json::Value = serde_json::from_str(text)
+                .map_err(|e| format!("SERVICE: invalid results JSON: {e}"))?;
+            if v.get("boolean").is_some() {
+                return Err(
+                    "SERVICE: endpoint returned an ASK boolean, expected SELECT bindings".into(),
+                );
+            }
+            let vars: Vec<Variable> = v
+                .pointer("/head/vars")
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .map(|s| {
+                            Variable::new(s)
+                                .map_err(|e| format!("SERVICE: bad result variable {s:?}: {e}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?
+                .ok_or_else(|| "SERVICE: results JSON missing head.vars".to_string())?;
+
+            let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
+            for sol in v
+                .pointer("/results/bindings")
+                .and_then(|a| a.as_array())
+                .ok_or_else(|| "SERVICE: results JSON missing results.bindings".to_string())?
+            {
+                let obj = sol.as_object().ok_or_else(|| {
+                    "SERVICE: a solution binding is not a JSON object".to_string()
+                })?;
+                let mut row: Vec<Option<Term>> = Vec::with_capacity(vars.len());
+                for var in &vars {
+                    match obj.get(var.as_str()) {
+                        Some(cell) => row.push(Some(srj_term(cell)?)),
+                        None => row.push(None),
+                    }
+                }
+                rows.push(row);
+            }
+            Ok(ServiceRelation { vars, rows })
+        }
+
+        /// Assert the streaming parser and the frozen DOM reference agree on one
+        /// document — `Ok`: identical vars + rows (order and multiplicity); `Err`:
+        /// identical message.
+        fn assert_equiv(body: &str) {
+            let got = parse_srj(body);
+            let want = parse_srj_reference(body);
+            assert_eq!(got, want, "streaming vs DOM reference diverged on: {}", body);
+        }
+
+        #[test]
+        fn equivalence_on_representative_and_boundary_documents() {
+            for body in [
+                // Boundary: no vars / no rows / a single row.
+                r#"{"head":{"vars":[]},"results":{"bindings":[]}}"#,
+                r#"{"head":{"vars":["x"]},"results":{"bindings":[]}}"#,
+                r#"{"head":{"vars":["x"]},"results":{"bindings":[{"x":{"type":"uri","value":"http://ex/1"}}]}}"#,
+                // Unbound cells + solution keys out of head order.
+                r#"{"head":{"vars":["a","b"]},"results":{"bindings":[
+                    {"b":{"type":"literal","value":"1"}},
+                    {"b":{"type":"bnode","value":"b0"},"a":{"type":"uri","value":"http://ex/a"}}]}}"#,
+                // Every term kind: uri, bnode, plain / lang / dir-lang / typed
+                // literal, legacy typed-literal, SPARQL 1.2 triple term.
+                r#"{"head":{"vars":["u","b","l","g","d","t","o","r"]},"results":{"bindings":[{
+                    "u":{"type":"uri","value":"http://ex/u"},
+                    "b":{"type":"bnode","value":"n1"},
+                    "l":{"type":"literal","value":"plain"},
+                    "g":{"type":"literal","value":"hi","xml:lang":"en"},
+                    "d":{"type":"literal","value":"مرحبا","xml:lang":"ar","its:dir":"rtl"},
+                    "t":{"type":"literal","value":"7","datatype":"http://www.w3.org/2001/XMLSchema#integer"},
+                    "o":{"type":"typed-literal","value":"1.5","datatype":"http://www.w3.org/2001/XMLSchema#decimal"},
+                    "r":{"type":"triple","value":{
+                        "subject":{"type":"uri","value":"http://ex/s"},
+                        "predicate":{"type":"uri","value":"http://ex/p"},
+                        "object":{"type":"literal","value":"o"}}}}]}}"#,
+                // Unknown members are ignored (SRJ `link`, arbitrary extras).
+                r#"{"head":{"vars":["x"],"link":["http://ex/meta"]},"results":{"bindings":[]},"extra":42}"#,
+                // Reversed member order: `results` BEFORE `head` (legal JSON — the
+                // documented buffered fallback must be result-identical).
+                r#"{"results":{"bindings":[{"x":{"type":"uri","value":"http://ex/r"}}]},"head":{"vars":["x"]}}"#,
+                // Leading whitespace before the sniffed `{`.
+                " \n\t {\"head\":{\"vars\":[\"x\"]},\"results\":{\"bindings\":[]}}",
+                // Non-string entries in head.vars are SKIPPED (filter_map parity).
+                r#"{"head":{"vars":["x",5,"y"]},"results":{"bindings":[{"y":{"type":"literal","value":"v"}}]}}"#,
+            ] {
+                assert_equiv(body);
+            }
+        }
+
+        #[test]
+        fn equivalence_on_malformed_documents() {
+            for body in [
+                "not json at all",
+                "{",                                                   // truncated
+                r#"{"head":{}}"#,                                      // missing head.vars
+                r#"{"head":{"vars":5}}"#,                              // vars not an array
+                r#"{"head":{"vars":["x"]}}"#,                          // missing results
+                r#"{"head":{"vars":["x"]},"results":{}}"#,             // results without bindings
+                r#"{"head":{"vars":["x"]},"results":5}"#,              // results not an object
+                r#"{"head":{"vars":["x"]},"results":[1,2]}"#,          // results an array
+                r#"{"head":{"vars":["x"]},"results":{"bindings":5}}"#, // bindings not an array
+                r#"{"head":{"vars":["x"]},"results":{"bindings":{}}}"#, // bindings an object
+                r#"{"head":{"vars":["x"]},"results":{"bindings":[5]}}"#, // binding not an object
+                r#"{"boolean":true}"#,                                 // ASK body
+                // ASK key trailing a full SELECT shape — still rejected.
+                r#"{"head":{"vars":["x"]},"results":{"bindings":[]},"boolean":false}"#,
+                r#"{"head":{"vars":["not a var"]},"results":{"bindings":[]}}"#, // bad var name
+                // Bad IRI / unknown binding type inside a solution.
+                r#"{"head":{"vars":["x"]},"results":{"bindings":[{"x":{"type":"uri","value":"no spaces"}}]}}"#,
+                r#"{"head":{"vars":["x"]},"results":{"bindings":[{"x":{"type":"wat","value":"?"}}]}}"#,
+                // Non-object top levels (all "missing head.vars" in the DOM path).
+                "[]",
+                "5",
+                "\"x\"",
+                "null",
+                "true",
+                // Trailing garbage after a valid document.
+                r#"{"head":{"vars":["x"]},"results":{"bindings":[]}} trailing"#,
+            ] {
+                assert_equiv(body);
+            }
+        }
+
+        #[test]
+        fn equivalence_on_a_large_duplicate_heavy_document() {
+            // 10_000 rows over 7 distinct solutions: multiplicity AND ordering must
+            // survive the streaming rework exactly (row-for-row equality, not just
+            // multiset equality).
+            let mut bindings = Vec::with_capacity(10_000);
+            for i in 0..10_000usize {
+                let k = i % 7;
+                bindings.push(format!(
+                    r#"{{"s":{{"type":"uri","value":"http://ex/dup/{}"}},"n":{{"type":"literal","value":"{}","datatype":"http://www.w3.org/2001/XMLSchema#integer"}}}}"#,
+                    k, k
+                ));
+            }
+            let body = format!(
+                r#"{{"head":{{"vars":["s","n"]}},"results":{{"bindings":[{}]}}}}"#,
+                bindings.join(",")
+            );
+            let got = parse_srj(&body).unwrap();
+            let want = parse_srj_reference(&body).unwrap();
+            assert_eq!(got.rows.len(), 10_000);
+            assert_eq!(got.vars, want.vars);
+            assert_eq!(got.rows, want.rows, "row-for-row identical incl. duplicates");
+        }
+
+        #[test]
+        fn srj_streams_rows_before_later_input_is_parsed() {
+            // Two good rows then a JSON syntax error. A materialise-first parser (the
+            // frozen DOM reference) cannot deliver ANY row from such a document; the
+            // streaming parser must have delivered both BEFORE reaching the error —
+            // the load-bearing "no full-relation buffering" property.
+            let body = r#"{"head":{"vars":["x"]},"results":{"bindings":[
+                {"x":{"type":"uri","value":"http://ex/1"}},
+                {"x":{"type":"uri","value":"http://ex/2"}},
+                {{{"#;
+            let mut seen = 0usize;
+            let err = parse_srj_into(body, &mut |_row| {
+                seen += 1;
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(err.contains("invalid results JSON"), "got: {}", err);
+            assert_eq!(seen, 2, "rows are delivered as parsed, not after the document");
+            // The DOM reference, by contrast, delivers nothing from this document.
+            assert!(parse_srj_reference(body).is_err());
+        }
+
+        #[test]
+        fn srx_streams_rows_before_later_input_is_parsed() {
+            // Two good results, then a stray `</triple>` the parser rejects: both
+            // rows must already have been delivered when the error is reported.
+            let body = r#"<sparql xmlns="http://www.w3.org/2005/sparql-results#">
+              <head><variable name="x"/></head>
+              <results>
+                <result><binding name="x"><uri>http://ex/1</uri></binding></result>
+                <result><binding name="x"><uri>http://ex/2</uri></binding></result>
+                </triple>
+              </results></sparql>"#;
+            let mut seen = 0usize;
+            let err = parse_srx_into(body, &mut |_row| {
+                seen += 1;
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(err.contains("SERVICE:"), "got: {}", err);
+            assert_eq!(seen, 2, "rows are delivered as parsed, not after the document");
+        }
+
+        #[test]
+        fn srj_sink_error_aborts_the_parse_and_propagates_verbatim() {
+            // A 50_000-row document refused by the sink after 3 rows: the consumer's
+            // bound is ENFORCED (the parse stops, no further rows are delivered) and
+            // the sink's own error string surfaces unchanged — the seam an embedder's
+            // resource policy hangs off.
+            let row = r#"{"x":{"type":"uri","value":"http://ex/big"}}"#;
+            let body = format!(
+                r#"{{"head":{{"vars":["x"]}},"results":{{"bindings":[{}]}}}}"#,
+                vec![row; 50_000].join(",")
+            );
+            let mut seen = 0usize;
+            let err = parse_srj_into(&body, &mut |_row| {
+                seen += 1;
+                if seen >= 3 {
+                    Err("row cap exceeded (test sink)".to_string())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+            assert_eq!(err, "row cap exceeded (test sink)", "sink error is verbatim");
+            assert_eq!(seen, 3, "no rows are delivered after the sink refuses");
+        }
+
+        #[test]
+        fn srx_sink_error_aborts_the_parse_and_propagates_verbatim() {
+            let mut body = String::from(
+                r#"<sparql xmlns="http://www.w3.org/2005/sparql-results#">
+                   <head><variable name="x"/></head><results>"#,
+            );
+            for _ in 0..10_000 {
+                body.push_str(
+                    r#"<result><binding name="x"><uri>http://ex/big</uri></binding></result>"#,
+                );
+            }
+            body.push_str("</results></sparql>");
+            let mut seen = 0usize;
+            let err = parse_srx_into(&body, &mut |_row| {
+                seen += 1;
+                if seen >= 3 {
+                    Err("row cap exceeded (test sink)".to_string())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+            assert_eq!(err, "row cap exceeded (test sink)", "sink error is verbatim");
+            assert_eq!(seen, 3, "no rows are delivered after the sink refuses");
+        }
+
+        #[test]
+        fn eval_remote_into_streams_rows_from_the_transport() {
+            // Direct coverage for the streaming end-to-end entry point (the
+            // production path exec.rs drives): transport → content sniff → rows.
+            let body = r#"{"head":{"vars":["x"]},"results":{"bindings":[
+                {"x":{"type":"uri","value":"http://ex/1"}},
+                {"x":{"type":"uri","value":"http://ex/2"}}]}}"#;
+            let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
+            let vars = eval_remote_into(
+                &super::Canned(body),
+                "http://unused/",
+                "SELECT * WHERE {}",
+                &mut |r| {
+                    rows.push(r);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(vars.len(), 1);
+            assert_eq!(rows.len(), 2);
+        }
+
+        #[test]
+        fn parse_results_into_sniffs_both_formats_and_rejects_neither() {
+            let srj = r#"{"head":{"vars":["x"]},"results":{"bindings":[{"x":{"type":"uri","value":"http://ex/j"}}]}}"#;
+            let srx = r#"<sparql xmlns="http://www.w3.org/2005/sparql-results#">
+                <head><variable name="x"/></head>
+                <results><result><binding name="x"><uri>http://ex/x</uri></binding></result></results>
+              </sparql>"#;
+            for body in [srj, srx] {
+                let mut n = 0usize;
+                let vars = parse_results_into(body, &mut |_r| {
+                    n += 1;
+                    Ok(())
+                })
+                .unwrap();
+                assert_eq!(vars.len(), 1);
+                assert_eq!(n, 1);
+            }
+            let mut n = 0usize;
+            assert!(parse_results_into("plain text", &mut |_r| {
+                n += 1;
+                Ok(())
+            })
+            .is_err());
+            assert_eq!(n, 0);
         }
     }
 }
