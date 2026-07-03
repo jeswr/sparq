@@ -163,6 +163,7 @@ No sub-epics were created for substrate/federation/RSP/geo — those epics alrea
 existed (above) and duplicating them would violate the tracker's dedup discipline.
 
 ### First wave — foundation tasks (disjoint; children of sq-qonbz unless noted)
+
 | Id | Item | Crate / files | Tier |
 |---|---|---|---|
 | sq-qonbz.4 | F1: flip `publish=false` → publishable + join/numeric micro-bench + SKILL surface | `sparq-substrate` (Cargo.toml, benches/, skills/) | sonnet |
