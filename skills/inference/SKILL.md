@@ -213,7 +213,22 @@ The three profile reasoners above (RL / EL / QL) each cover a *tractable* OWL fr
 - **A structural OWL model** (`sparq_reason_dl::model`) — `Axiom` / `ClassExpression` / `ObjectPropertyExpression` typed enums for the ALCH fragment: named classes, `owl:Thing`/`owl:Nothing`, `owl:intersectionOf` (⊓), `owl:unionOf` (⊔), `owl:complementOf` (¬), `owl:someValuesFrom` (∃R.C) and `owl:allValuesFrom` (∀R.C) over **named object properties**; GCIs, `owl:equivalentClass`, `owl:disjointWith`, `rdfs:subPropertyOf`, `rdfs:domain`/`rdfs:range`, and a ground ABox. Purely structural — **no semantics attached at L1**.
 - **A FAIL-CLOSED reverse RDF mapping** — `extract(&Dict, &[[Id; 3]]) -> Result<Ontology, ExtractError>` maps the `(Dict, triples)` substrate into the model per the W3C *Mapping to RDF Graphs* tables restricted to ALCH. **A single out-of-fragment or malformed triple aborts the WHOLE extraction** with a typed `ExtractError`, rather than being silently dropped: the (future) checker must never reason over a graph it only *partially* understood — a dropped axiom can flip a consistency verdict. Understood in full, or refused. The rejection taxonomy has five arms — `OutOfFragment` (cardinality / nominals / inverses / `owl:sameAs` / property characteristics / chains / keys), `DataConstruct` (datatypes / data properties — no concrete domain in L1), `MalformedList`, `MalformedClassExpression`, `Unclassifiable` (an undeclared predicate that cannot be mapped soundly) — while annotations, declarations, and ontology headers are recognised and ignored.
 
-**Not yet built (reserved stubs, later beads):** the syntactic EL/QL/RL profile-membership checker (L2, `profile`), the terminating ALCH tableau (L3, `nnf`/`tableau`), the fragment-dispatch checker + entailment-by-refutation (L4, `check`), and the `sparq-conformance` DIRECT-arm (L5). Deferred constructs — inverse roles, cardinality/functionality, nominals, transitivity, `sameAs`/`differentFrom`, datatypes, keys — are each **rejected, never mis-mapped**, with a named reason and unlock path in the design record's deferral ledger. See `research/owl2-direct-semantics-scoping.md`.
+**L2 — syntactic EL/QL/RL profile-membership checker (`profile`, bead sq-pbz04.4.2):** NOW
+BUILT. `profile::profiles(onto: &Ontology) -> ProfileSet` runs a purely syntactic grammar walk
+(W3C OWL 2 Profiles §2/§3/§4) over the structural model and returns a `ProfileSet` with three
+fields — `el`, `ql`, `rl` — each a `Membership` enum: `Membership::In` (all axioms pass),
+`Membership::NotIn(reason)` (first violation, fail-fast), or `Membership::Unknown(err)`
+(extraction failure, only from `profile::profiles_from_extraction(&Result<Ontology, ExtractError>)`).
+Convenience methods: `Membership::is_in()` / `is_not_in()` / `is_unknown()`;
+`ProfileSet::in_all()` / `in_any()`. An empty ontology is `In` all three profiles. Terminating
+by construction — no semantic reasoning, just a grammar walk over the finite acyclic structural model.
+
+**Not yet built (reserved stubs, later beads):** the terminating ALCH tableau (L3,
+`nnf`/`tableau`), the fragment-dispatch checker + entailment-by-refutation (L4, `check`), and
+the `sparq-conformance` DIRECT-arm (L5). Deferred constructs — inverse roles,
+cardinality/functionality, nominals, transitivity, `sameAs`/`differentFrom`, datatypes, keys —
+are each **rejected, never mis-mapped**, with a named reason and unlock path in the design
+record's deferral ledger. See `research/owl2-direct-semantics-scoping.md`.
 
 ## Common recipes
 

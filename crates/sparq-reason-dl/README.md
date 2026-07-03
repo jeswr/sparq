@@ -61,9 +61,17 @@ match extract(&dict, &triples) {
   test; annotations, declarations, and ontology headers are recognised and ignored (they carry
   no ALCH-logical import).
 
-**Reserved (empty in L1):** the `profile` (L2), `nnf`/`tableau` (L3), and `check` (L4) modules
-are pre-declared stubs with no logic — they are populated by the later beads without touching
-`lib.rs`. **Deferred** (each rejected, never mis-mapped): inverse roles, cardinality/functionality,
+**Profile checker (L2, bead sq-pbz04.4.2):** the `profile` module is NOW BUILT. Call
+`profile::profiles(onto)` to check OWL 2 EL/QL/RL profile membership of a structural ontology
+via a purely syntactic grammar walk (W3C OWL 2 Profiles §2/§3/§4). Returns a `ProfileSet` with
+`el`, `ql`, and `rl` fields each holding `Membership::In`, `Membership::NotIn(reason)`, or
+`Membership::Unknown(err)` (only from `profile::profiles_from_extraction` on an extraction
+failure). An empty ontology is `In` all three profiles. Terminating by construction, no semantic
+reasoning.
+
+**Reserved (empty stubs):** `nnf`/`tableau` (L3) and `check` (L4) modules are pre-declared
+stubs with no logic — they are populated by the later beads without touching `lib.rs`.
+**Deferred** (each rejected, never mis-mapped): inverse roles, cardinality/functionality,
 nominals (`owl:oneOf`/`owl:hasValue`), transitivity, `sameAs`/`differentFrom`, datatypes, keys —
 with a named reason and unlock path in the design record's deferral ledger.
 
