@@ -458,3 +458,89 @@ fn union_marked_range_is_not_strengthened_through_an_existential() {
     assert_eq!(h.report().skipped_axioms, 1, "exactly the union+range axiom is refused");
     assert_closure(&ttl, &["C", "D", "E", "G", "H"], &[]);
 }
+
+// [SONNET-4.6] sq-pbz04.2.2 non-vacuous regression tests for the cd_foreign_marker guards on
+// the DataHasValue path (extract.rs:451) and the DataOneOf path (extract.rs:412, inside
+// `structure()`). The four existing tests above only exercise faceted-range nodes; these two
+// confirm that LITERAL-hasValue and singleton-oneOf nodes carrying a foreign marker (unionOf)
+// are also refused, killing the clean mutation survivors identified by the Opus adversarial
+// re-verify on PR #1434.
+
+#[test]
+fn data_has_value_marked_node_is_refused_not_strengthened() {
+    // SOUNDNESS GUARD: a DataHasValue restriction node (owl:onProperty + literal owl:hasValue)
+    // that ALSO carries owl:unionOf is poisoned by `cd_foreign_marker`.  Without the
+    // `!idx.cd_foreign_marker.contains(&n)` guard at extract.rs:451, the node would be
+    // decoded as ∃p.{5}, silently dropping the unionOf structure and STRENGTHENING the
+    // enclosing axiom (A ⊑ ∃p.{5} instead of A ⊑ ∃p.{5} ⊓ (C ⊔ D)), enabling a spurious
+    // CR9/CR8 chain to B. The guard must refuse the mixed node (skip it), so A never
+    // acquires the ∃p.{5} link. Control: A2 with a CLEAN DataHasValue axiom must still
+    // derive B (oracle: {5} ⊆ [0, 10]).
+    //
+    // MUTATION-KILL (extract.rs:451): deleting the guard lets the mixed node enter `cd_exists`
+    // — the A axiom stops being skipped (skipped_axioms drops to 0) and A wrongly derives B
+    // via CR9/CR8 — both `assert_eq!(skipped_axioms, 1)` and `assert!(!A ⊑ B)` go RED.
+    let ttl = format!(
+        "{PRE}
+         :A rdfs:subClassOf [ owl:onProperty :p ; owl:hasValue 5 ; owl:unionOf ( :C :D ) ] .
+         :A2 rdfs:subClassOf [ owl:onProperty :p ; owl:hasValue 5 ] .
+         [ owl:onProperty :p ; owl:someValuesFrom
+           [ owl:onDatatype xsd:integer ;
+             owl:withRestrictions ( [ xsd:minInclusive 0 ] [ xsd:maxInclusive 10 ] ) ] ]
+           rdfs:subClassOf :B ."
+    );
+    let (dict, triples) = classify(&ttl);
+    let h = Classifier::classify(&dict, &triples);
+    assert_eq!(
+        h.report().skipped_axioms,
+        1,
+        "exactly the union-poisoned DataHasValue axiom is refused; the clean A2 axiom is processed"
+    );
+    assert!(
+        !h.is_subclass_of(iri(&dict, "A"), iri(&dict, "B")),
+        "A ⊑ B must NOT be derived: the mixed node is refused — decoding it as ∃p.{{5}} \
+         would silently drop the unionOf structure and STRENGTHEN the axiom"
+    );
+    assert!(
+        h.is_subclass_of(iri(&dict, "A2"), iri(&dict, "B")),
+        "A2 ⊑ B must be derived: clean DataHasValue ∃p.{{5}} chains through {{5}} ⊆ [0, 10]"
+    );
+    assert_closure(&ttl, &["A", "A2", "B", "C", "D"], &[("A2", "B")]);
+}
+
+#[test]
+fn data_one_of_marked_node_is_refused_not_strengthened() {
+    // SOUNDNESS GUARD: a DataOneOf range node (singleton literal owl:oneOf) that ALSO
+    // carries owl:unionOf is poisoned by the `cd_foreign_marker` branch inside `structure()`
+    // at extract.rs:412. Without that branch, the node would enter `points` → `cd_range`,
+    // and the axiom `<mixed> rdfs:subClassOf :E` would decode as `R_{{5}} ⊑ E`, silently
+    // dropping the unionOf structure (LHS-strengthening). The guard refuses it (skip).
+    //
+    // MUTATION-KILL (extract.rs:412, `|| idx.cd_foreign_marker.contains(&n)` in `structure()`):
+    // deleting it lets the mixed node enter `cd_range` — the axiom is decoded instead of
+    // skipped, so `assert_eq!(skipped_axioms, 1)` goes RED. Control: F via a PURE DataOneOf
+    // someValuesFrom filler must still chain through {{5}} ⊆ [0, 10] into G.
+    let ttl = format!(
+        "{PRE}
+         [ owl:oneOf ( 5 ) ; owl:unionOf ( :C :D ) ] rdfs:subClassOf :E .
+         :F rdfs:subClassOf
+           [ owl:onProperty :p ; owl:someValuesFrom [ owl:oneOf ( 5 ) ] ] .
+         [ owl:onProperty :p ; owl:someValuesFrom
+           [ owl:onDatatype xsd:integer ;
+             owl:withRestrictions ( [ xsd:minInclusive 0 ] [ xsd:maxInclusive 10 ] ) ] ]
+           rdfs:subClassOf :G ."
+    );
+    let (dict, triples) = classify(&ttl);
+    let h = Classifier::classify(&dict, &triples);
+    assert_eq!(
+        h.report().skipped_axioms,
+        1,
+        "exactly the union-poisoned DataOneOf axiom is refused; the F axiom and range axiom proceed"
+    );
+    assert!(
+        h.is_subclass_of(iri(&dict, "F"), iri(&dict, "G")),
+        "F ⊑ G must be derived: clean ∃p.{{5}} (pure DataOneOf filler) chains through \
+         {{5}} ⊆ [0, 10] into G — the non-poisoned DataOneOf path is unaffected by the guard"
+    );
+    assert_closure(&ttl, &["C", "D", "E", "F", "G"], &[("F", "G")]);
+}
