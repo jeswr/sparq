@@ -268,6 +268,11 @@ pub use cache::{is_cacheable, CacheStats, ResultCache};
 pub mod chunk;
 #[cfg(feature = "vectorized")]
 pub use chunk::{DataChunk, SelVec, VecCmp};
+// [SONNET-4.6] (sq-pntvh.4) M4 Phase 4 columnar reducer kernels (SUM/COUNT/MIN/MAX/AVG
+// over inline-integer id slices). NON-DEFAULT `vectorized` feature; zero code compiles
+// when off. No new dependencies.
+#[cfg(feature = "vectorized")]
+pub(crate) mod reduce;
 
 // [OPUS-4.8] (sq-gr8mb, survey §A3) Exact-bitmap semi-join reducer on dense u32 ids
 // (CIDR'26 "Not Yannakakis"; research/optimization-techniques.md §1.1/§2(a)). The binary
