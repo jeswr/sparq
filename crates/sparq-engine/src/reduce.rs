@@ -17,19 +17,13 @@ pub(crate) const INLINE_MAX_I64: i64 = (1_u64 << 30) as i64 - 1;
 /// Returns `Some(0)` for an empty slice (the identity element, matching the empty-SUM
 /// SPARQL rule `SUM({}) = 0`).
 ///
-/// **Byte-identity with the scalar `sum_values` path:**
-///
-/// The scalar accumulator is `Num::Int(i64)`.
-/// `Num::Int(x).binop(Num::Int(y), ArithOp::Add)` uses `i64::checked_add`.
-///
-/// Overflow bound (load-bearing for byte-identity with the scalar path):
-///   max inline value = `INLINE_MAX_I64` = 2^30 - 1 < 2^30
-///   max rows bounded by dictionary capacity (< 2^31 distinct terms)
-///   max sum < 2^30 · 2^31 = 2^61 < i64::MAX (2^63 − 1)
-///
-/// Therefore the scalar SUM accumulator (`Num::Int(i64)`) does NOT overflow for
-/// any all-inline-integer column, and the exact i128 sum equals the scalar i64 result.
-/// A `debug_assert!` at the cast site in `columnar_aggregate` checks this at test time.
+/// **Bound argument:** per-element values are bounded by `INLINE_MAX_I64` (< 2^30), so
+/// the i128 accumulation is exact with no risk of i128 overflow. However, group
+/// cardinality is NOT bounded by dictionary capacity — the same inline value can repeat
+/// arbitrarily many times across rows — so the i128 sum can exceed `i64::MAX`. The
+/// caller (`columnar_aggregate`) guards the narrowing with [`narrow_sum_to_i64`] and
+/// declines to the scalar path on overflow, ensuring no silent truncation in release
+/// builds. [SONNET-4.6]
 pub(crate) fn reduce_sum(ids: &[Id]) -> Option<i128> {
     let mut acc: i128 = 0;
     for &id in ids {
@@ -41,6 +35,20 @@ pub(crate) fn reduce_sum(ids: &[Id]) -> Option<i128> {
         acc += i128::from(id - INLINE_BASE);
     }
     Some(acc)
+}
+
+/// Narrow an exact i128 SUM result to `i64`, returning `None` on overflow.
+///
+/// `columnar_aggregate` calls this instead of `sum_i128 as i64` (which silently
+/// wraps in release builds). On `None` the caller declines to the scalar path, which
+/// promotes through `Num::Double` — the same value and datatype the scalar
+/// `sum_values` / `Num::Int::checked_add` fall-through produces. [SONNET-4.6]
+///
+/// Extracted as a separate `pub(crate)` function so the overflow-decline invariant
+/// is unit-testable without constructing a group large enough to overflow i64 at the
+/// caller level (which would require an unbounded number of rows in a test).
+pub(crate) fn narrow_sum_to_i64(sum: i128) -> Option<i64> {
+    i64::try_from(sum).ok()
 }
 
 /// COUNT of non-`NO_ID` ids in the slice.
@@ -179,6 +187,34 @@ mod tests {
         let no_id: Id = NO_ID;
         assert!(!is_inline(no_id));
         assert_eq!(reduce_sum(&[mk_inline(7), no_id]), None);
+    }
+
+    /// T3b: `narrow_sum_to_i64` declines (returns `None`) for values exceeding `i64::MAX`
+    /// and succeeds for values within range. [SONNET-4.6]
+    ///
+    /// Mutation proof: restoring `as i64` gives `Some(-9223372036854775808)` for
+    /// `just_over`, so the `assert_eq!(…, None)` fails — the guard compiles out on
+    /// `as i64` exactly like the old `debug_assert!` did.
+    #[test]
+    fn t3b_narrow_overflow_decline() {
+        let just_over: i128 = i64::MAX as i128 + 1;
+        assert_eq!(
+            narrow_sum_to_i64(just_over),
+            None,
+            "i64::MAX + 1 must decline (overflow guard)"
+        );
+        assert_eq!(
+            narrow_sum_to_i64(i64::MAX as i128),
+            Some(i64::MAX),
+            "i64::MAX itself must succeed"
+        );
+        assert_eq!(narrow_sum_to_i64(0), Some(0));
+        assert_eq!(narrow_sum_to_i64(190), Some(190), "typical small SUM must succeed");
+        // Negative sums can arise if the caller somehow passes a negative i128.
+        // We do not currently generate these (all inline values are non-negative),
+        // but try_from is still defined: any i128 in [i64::MIN, i64::MAX] succeeds.
+        assert_eq!(narrow_sum_to_i64(-1_i128), Some(-1));
+        assert_eq!(narrow_sum_to_i64(i64::MIN as i128), Some(i64::MIN));
     }
 
     /// T4: reduce_count counts non-NO_ID ids.

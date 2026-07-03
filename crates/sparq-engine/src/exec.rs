@@ -7015,15 +7015,14 @@ fn columnar_aggregate(
                             value_to_id(graph, local, &Value::Num(Num::Int(n)))
                         }
                         AggregateFunction::Sum => {
-                            // SUM({}) = 0 per SPARQL; for non-empty, reduce_sum is exact.
+                            // SUM({}) = 0 per SPARQL; for non-empty, reduce_sum is exact i128.
                             let sum_i128 = reduce_sum(&group_ids)?;
-                            let sum_i64 = sum_i128 as i64;
-                            debug_assert!(
-                                i128::from(sum_i64) == sum_i128,
-                                "SUM columnar: i128→i64 cast overflow (impossible by the 2^61 bound)"
-                            );
+                            // Guard the i128→i64 narrowing: group cardinality is unbounded so
+                            // the sum CAN exceed i64::MAX. Decline to scalar on overflow; the
+                            // scalar path promotes via Num::Double, matching scalar semantics.
+                            // [SONNET-4.6] (C1-fix sq-pntvh.4 adversarial review)
+                            let sum_i64 = crate::reduce::narrow_sum_to_i64(sum_i128)?;
                             // Mirrors scalar: sum_values → num_canonical_term → value_to_id.
-                            // For inline range, value_to_id(Num::Int(x)) = inline id directly.
                             value_to_id(graph, local, &Value::Num(Num::Int(sum_i64)))
                         }
                         AggregateFunction::Avg => {
@@ -7033,11 +7032,9 @@ fn columnar_aggregate(
                             } else {
                                 let sum_i128 = reduce_sum(&group_ids)?;
                                 let count_i64 = group_ids.len() as i64;
-                                let sum_i64 = sum_i128 as i64;
-                                debug_assert!(
-                                    i128::from(sum_i64) == sum_i128,
-                                    "AVG columnar: i128→i64 cast overflow (impossible by the 2^61 bound)"
-                                );
+                                // Guard the i128→i64 narrowing (same as SUM).
+                                // [SONNET-4.6] (C1-fix sq-pntvh.4 adversarial review)
+                                let sum_i64 = crate::reduce::narrow_sum_to_i64(sum_i128)?;
                                 // integer / integer → Decimal (SPARQL §17.4.4.3).
                                 // Mirrors: sum_values → binop(Div) → value_to_id.
                                 let result = Num::Int(sum_i64).binop(Num::Int(count_i64), ArithOp::Div)?;
@@ -12790,39 +12787,93 @@ mod columnar_aggregate_seam {
         Variable::new(name).unwrap()
     }
 
-    /// Run group_aggregate under BOTH paths and check the output rows are byte-identical.
-    /// `group_exprs` = the variables to GROUP BY (empty = whole-dataset aggregate).
+    /// TRUE scalar oracle: calls `eval_aggregate` directly, bypassing the columnar seam.
+    /// Returns `(rows, local_vocab)` — caller uses `local_vocab` for [`term_of`] decoding.
+    ///
+    /// Under `feature="vectorized"`, calling `group_aggregate` for the "reference" side is
+    /// vacuous — it takes the columnar path too, making a columnar-vs-columnar comparison that
+    /// cannot catch a columnar mutation. This helper replicates the sequential scalar fallback
+    /// of `group_aggregate` WITHOUT the columnar seam. [SONNET-4.6]
+    /// (C2-fix sq-pntvh.4 adversarial review)
+    fn scalar_oracle(
+        g: &Graph,
+        b: &Bindings,
+        group_vars: &[Variable],
+        aggregates: &[(Variable, AggregateExpression)],
+    ) -> (Vec<Row>, LocalVocab) {
+        let key_cols: Vec<Option<usize>> = group_vars.iter().map(|v| b.col(v)).collect();
+        let (mut order, mut members) = build_groups(b, &key_cols);
+        if group_vars.is_empty() && order.is_empty() {
+            order.push(Key::new());
+            members.push(Vec::new());
+        }
+        let mut local = LocalVocab::default();
+        let mut rows = Vec::with_capacity(order.len());
+        for (key, mems) in order.iter().zip(&members) {
+            let mut row = Row::from_slice(key);
+            for (_, agg) in aggregates {
+                let v = eval_aggregate(g, &local, b, mems, agg)
+                    .expect("scalar oracle eval_aggregate must succeed");
+                let id = value_to_id(g, &mut local, &v);
+                row.push(id);
+            }
+            rows.push(row);
+        }
+        (rows, local)
+    }
+
+    /// Decode rows to `Option<Term>` slices for full-term comparison
+    /// (lexical + datatype, not raw ids or f64 values). [SONNET-4.6]
+    fn rows_to_terms(g: &Graph, local: &LocalVocab, rows: &[Row]) -> Vec<Vec<Option<oxrdf::Term>>> {
+        rows.iter()
+            .map(|row| row.iter().map(|&id| term_of(g, local, id)).collect())
+            .collect()
+    }
+
+    /// Run the columnar path (via `group_aggregate`) and the TRUE scalar oracle, then
+    /// assert their outputs are FULL-TERM-identical (lexical + datatype).
+    ///
+    /// `group_aggregate` — under `feature="vectorized"` — tries the columnar seam first.
+    /// The scalar oracle calls `eval_aggregate` directly, so the comparison is
+    /// columnar-vs-scalar, not columnar-vs-columnar. A datatype mutation in the columnar
+    /// path (e.g., SUM returning `Num::Double` instead of `Num::Int`) produces a different
+    /// term (different xsd: datatype) and fails. [SONNET-4.6]
+    /// (C2-fix sq-pntvh.4 adversarial review)
     fn check_agg_byte_identical(
         g: &Graph,
         b: Bindings,
         group_vars: &[Variable],
         aggregates: Vec<(Variable, AggregateExpression)>,
     ) {
-        // Scalar reference: clone `b` because group_aggregate consumes it.
-        let b_scalar = Bindings::unsorted(b.vars.clone(), b.rows.clone());
-        let b_columnar = Bindings::unsorted(b.vars.clone(), b.rows.clone());
+        // TRUE scalar reference: calls eval_aggregate directly.
+        let (scalar_rows, scalar_local) = scalar_oracle(g, &b, group_vars, &aggregates);
 
-        let mut local_scalar = LocalVocab::default();
-        let scalar_out = group_aggregate(g, &mut local_scalar, b_scalar, group_vars, &aggregates)
-            .expect("scalar group_aggregate must succeed");
-
+        // Columnar path: group_aggregate (tries columnar under vectorized, falls back otherwise).
+        let b_col = Bindings::unsorted(b.vars.clone(), b.rows.clone());
         let mut local_col = LocalVocab::default();
-        let col_out = group_aggregate(g, &mut local_col, b_columnar, group_vars, &aggregates)
+        let col_out = group_aggregate(g, &mut local_col, b_col, group_vars, &aggregates)
             .expect("columnar group_aggregate must succeed");
 
+        // Compare as full Terms (lexical + datatype), not raw ids.
+        // Raw ids across different LocalVocab instances diverge for non-inline terms.
+        let scalar_terms = rows_to_terms(g, &scalar_local, &scalar_rows);
+        let col_terms = rows_to_terms(g, &local_col, &col_out.rows);
         assert_eq!(
-            scalar_out.rows, col_out.rows,
-            "columnar and scalar group_aggregate must be BYTE-IDENTICAL"
+            scalar_terms, col_terms,
+            "columnar and scalar group_aggregate must produce FULL-TERM-identical output \
+             (lexical + datatype)"
         );
     }
 
     /// T5 (byte-identity + non-vacuity): whole-dataset SUM/COUNT/MIN/MAX over an
     /// all-inline-integer column: (a) `columnar_aggregate` returns `Some` (path engaged),
-    /// and (b) the aggregate result id decodes to the scalar-expected value.
+    /// (b) the aggregate result decodes to the scalar-expected value, and (c) the columnar
+    /// result is FULL-TERM-identical to the TRUE scalar oracle (catches datatype mutations).
     ///
-    /// Scores 0..=19: SUM=190, COUNT=20, MIN=0, MAX=19.  A mutation that returns MIN or
-    /// MAX instead of SUM (or vice versa) changes the decoded numeric value and fails.
-    /// [SONNET-4.6]
+    /// Scores 0..=19: SUM=190 (xsd:integer), COUNT=20 (xsd:integer), MIN=0, MAX=19.
+    /// A mutation returning `Num::Double` instead of `Num::Int` for SUM changes the xsd:
+    /// datatype and fails (c); a MIN→MAX mutation changes the numeric value and fails (b).
+    /// [SONNET-4.6] (C2-fix sq-pntvh.4 adversarial review)
     #[test]
     fn t5_whole_dataset_agg_byte_identical_to_scalar() {
         let n = 20u32;
@@ -12871,7 +12922,7 @@ mod columnar_aggregate_seam {
             let col_rows = col_rows.unwrap();
             assert_eq!(col_rows.len(), 1, "whole-dataset agg must produce exactly 1 row for {:?}", name);
 
-            // (b) Decode the result id and compare with the scalar expected value.
+            // (b) Decode the result id and compare with the scalar expected value (value check).
             let result_id = col_rows[0][0];
             let got = g.numeric_value(result_id).unwrap_or_else(|| {
                 // For sums beyond INLINE_MAX the result is in local vocab.
@@ -12883,6 +12934,19 @@ mod columnar_aggregate_seam {
             assert_eq!(
                 got, expected,
                 "aggregate {:?} over scores 0..=19 must equal {}", name, expected
+            );
+
+            // (c) FULL-TERM identity against the TRUE scalar oracle (catches datatype mutations).
+            // scalar_oracle calls eval_aggregate directly — it never touches the columnar seam,
+            // so a SUM Int→Double mutation in columnar is caught here by the xsd: datatype
+            // difference. [SONNET-4.6]
+            let (scalar_rows, scalar_local) = scalar_oracle(&g, &b2, &[], &aggregates);
+            let col_terms = rows_to_terms(&g, &local_col, &col_rows);
+            let scalar_terms = rows_to_terms(&g, &scalar_local, &scalar_rows);
+            assert_eq!(
+                col_terms, scalar_terms,
+                "columnar {:?} must be FULL-TERM-identical to scalar oracle (lexical + datatype)",
+                name
             );
         }
     }
@@ -12940,8 +13004,9 @@ mod columnar_aggregate_seam {
         assert_eq!(num_val, 190.0_f64, "SUM(0..=19) must equal 190, not MIN=0 or MAX=19");
     }
 
-    /// T5c: AVG over inline-integer column — columnar path engaged, result byte-identical.
-    /// AVG(0..=19) = 190/20 = 9.5 (xsd:decimal). [SONNET-4.6]
+    /// T5c: AVG over inline-integer column — columnar path engaged, result FULL-TERM-identical
+    /// to the TRUE scalar oracle. AVG(0..=19) = 190/20 = 9.5 (xsd:decimal). [SONNET-4.6]
+    /// (C2-fix sq-pntvh.4 adversarial review)
     #[test]
     fn t5c_avg_byte_identical_to_scalar() {
         let n = 20u32;
@@ -12966,19 +13031,17 @@ mod columnar_aggregate_seam {
             &g, &mut local_col, &b, &[], &aggregates, &order, &members, &[var("avg")],
         ).expect("AVG over inline-integer column must engage (return Some)");
 
-        // Scalar path for comparison: group_aggregate forces scalar on non-eligible
-        // by using a SUM expression on b's clone, then separately compute AVG from the sum.
-        // For correctness, check via the SPARQL query path instead.
-        let scalar_out = {
-            let b2 = Bindings::unsorted(b.vars.clone(), b.rows.clone());
-            let mut local_s = LocalVocab::default();
-            group_aggregate(&g, &mut local_s, b2, &[], &aggregates).unwrap()
-        };
+        // TRUE scalar oracle: calls eval_aggregate directly, bypassing the columnar seam.
+        // Previously this called group_aggregate which under vectorized also went through
+        // the columnar path — producing a vacuous columnar-vs-columnar comparison. [SONNET-4.6]
+        let (scalar_rows, scalar_local) = scalar_oracle(&g, &b, &[], &aggregates);
 
-        // (a) Byte-identical: the columnar row must equal the scalar row.
+        // (a) FULL-TERM-identical: compare lexical + datatype, not raw ids.
+        let col_terms = rows_to_terms(&g, &local_col, &col_rows);
+        let scalar_terms = rows_to_terms(&g, &scalar_local, &scalar_rows);
         assert_eq!(
-            col_rows, scalar_out.rows,
-            "columnar AVG must be byte-identical to the scalar path"
+            col_terms, scalar_terms,
+            "columnar AVG must be FULL-TERM-identical to the scalar oracle (lexical + datatype)"
         );
 
         // (b) Non-vacuous: verify the result is 9.5 (190/20), not 0 or some wrong value.
@@ -12999,11 +13062,12 @@ mod columnar_aggregate_seam {
 
     /// T5d (GROUP BY, first-seen order): two-group GROUP BY with first-seen order
     /// deliberately different from sorted order. Columnar path must preserve first-seen order
-    /// and produce byte-identical GROUP BY results to the scalar path. [SONNET-4.6]
+    /// and produce FULL-TERM-identical GROUP BY results to the TRUE scalar oracle. [SONNET-4.6]
+    /// (C2-fix sq-pntvh.4 adversarial review)
     #[test]
     fn t5d_group_by_first_seen_order_preserved() {
-        // Two groups: "b" appears FIRST, "a" appears SECOND (first-seen ≠ alphabetic order).
-        // score column: b→10, b→20, a→5, a→15.
+        // Two groups: group "2" appears FIRST, group "1" appears SECOND.
+        // score column: group "2"→[10,20], group "1"→[5,15].
         let nt = format!(
             "<http://ex/r1> <http://ex/g> \"b\"^^<{XSD_INT}> .\n\
              <http://ex/r1> <http://ex/score> \"10\"^^<{XSD_INT}> .\n\
@@ -13018,7 +13082,7 @@ mod columnar_aggregate_seam {
         let lit = |v: &str| {
             g.id_of(&Term::Literal(Literal::new_typed_literal(v, xsd::INTEGER))).unwrap()
         };
-        // Bindings: two columns [g_val, score], rows in order [b→10, b→20, a→5, a→15].
+        // Bindings: two columns [g_val, score], rows in order [group2→10, group2→20, group1→5, group1→15].
         let group_var = var("g");
         let score_var = var("score");
         let rows: Vec<Row> = vec![
@@ -13039,20 +13103,22 @@ mod columnar_aggregate_seam {
         )];
         let group_vars = vec![group_var];
 
-        // Scalar reference (forces scalar via group_aggregate on an expr-typed aggregate).
-        let b_scalar = Bindings::unsorted(b.vars.clone(), b.rows.clone());
-        let mut local_s = LocalVocab::default();
-        let scalar_out = group_aggregate(&g, &mut local_s, b_scalar, &group_vars, &aggregates).unwrap();
+        // TRUE scalar reference: calls eval_aggregate directly, never the columnar seam.
+        // Previously called group_aggregate for both sides — under vectorized both took the
+        // columnar path, making the comparison vacuous. [SONNET-4.6]
+        let (scalar_rows, scalar_local) = scalar_oracle(&g, &b, &group_vars, &aggregates);
 
         // Columnar path (via group_aggregate under vectorized).
         let b_col = Bindings::unsorted(b.vars.clone(), b.rows.clone());
         let mut local_c = LocalVocab::default();
         let col_out = group_aggregate(&g, &mut local_c, b_col, &group_vars, &aggregates).unwrap();
 
-        // First-seen order: group "2" first (SUM=30), group "1" second (SUM=20).
+        // FULL-TERM-identical comparison: lexical + datatype, not raw ids or f64.
+        let scalar_terms = rows_to_terms(&g, &scalar_local, &scalar_rows);
+        let col_terms = rows_to_terms(&g, &local_c, &col_out.rows);
         assert_eq!(
-            col_out.rows, scalar_out.rows,
-            "GROUP BY columnar must preserve first-seen order and be byte-identical to scalar"
+            col_terms, scalar_terms,
+            "GROUP BY columnar must preserve first-seen order and be FULL-TERM-identical to scalar oracle"
         );
         assert_eq!(col_out.rows.len(), 2, "must have 2 groups");
         // Pin: first row = group "2" (SUM=30), second = group "1" (SUM=20).
