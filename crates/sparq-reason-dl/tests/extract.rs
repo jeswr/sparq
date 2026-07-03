@@ -404,6 +404,213 @@ fn reject_unclassifiable_undeclared_predicate() {
     ));
 }
 
+// ============================== REJECT (Fix 1: duplicate backbone edges — branching / double-define) ==============================
+
+/// A branching list: the same list cell carries two DIFFERENT rdf:first values.
+/// Before fix 1 the second value silently overwrote the first, dropping the constraint.
+/// After fix 1 this must be refused with MalformedList. [OPUS-4.8]
+#[test]
+fn reject_branching_list_rdf_first() {
+    let (d, t) = parse(
+        ":C rdfs:subClassOf _:x .\n\
+         _:x owl:intersectionOf _:l .\n\
+         _:l rdf:first :A .\n\
+         _:l rdf:first :B .\n\
+         _:l rdf:rest rdf:nil .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedList(_))),
+        "branching rdf:first must be refused"
+    );
+}
+
+/// A named class carrying two different owl:intersectionOf heads — duplicate backbone predicate.
+/// Before fix 1 the second list head silently overwrote the first.
+#[test]
+fn reject_duplicate_intersection_of_definition() {
+    // Turtle list syntax generates fresh blank nodes for each list,
+    // so the two heads are distinct ids — the duplicate-value check fires.
+    let (d, t) = parse(
+        ":C rdfs:subClassOf :A .\n\
+         :A owl:intersectionOf ( :B :D ) .\n\
+         :A owl:intersectionOf ( :E :F ) .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
+        "double owl:intersectionOf on a named class must be refused"
+    );
+}
+
+/// A restriction node carrying two different owl:someValuesFrom fillers.
+#[test]
+fn reject_duplicate_some_values_from() {
+    let (d, t) = parse(
+        ":A rdfs:subClassOf _:r .\n\
+         _:r owl:onProperty :p .\n\
+         _:r owl:someValuesFrom :B .\n\
+         _:r owl:someValuesFrom :C .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
+        "duplicate someValuesFrom must be refused"
+    );
+}
+
+/// A restriction node carrying two different owl:onProperty values.
+#[test]
+fn reject_duplicate_on_property() {
+    let (d, t) = parse(
+        ":A rdfs:subClassOf _:r .\n\
+         _:r owl:onProperty :p .\n\
+         _:r owl:onProperty :q .\n\
+         _:r owl:someValuesFrom :B .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
+        "duplicate owl:onProperty must be refused"
+    );
+}
+
+// ============================== REJECT (Fix 2: blank node in object-property position) ==============================
+
+/// owl:onProperty _:bp — a blank node is not a named object property.
+/// Before fix 2 this was accepted as an opaque named property.
+/// After fix 2 it must be refused with Unclassifiable. [OPUS-4.8]
+#[test]
+fn reject_blank_node_object_property_on_property() {
+    let (d, t) = parse(
+        ":A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty _:bp ; owl:someValuesFrom :C ] .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "blank node in owl:onProperty position must be refused"
+    );
+}
+
+/// _:bp rdfs:subPropertyOf :q — a blank node as the sub-property subject is not a named property.
+#[test]
+fn reject_blank_node_sub_property_of() {
+    let (d, t) = parse("_:bp rdfs:subPropertyOf :q .");
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "blank node in rdfs:subPropertyOf subject position must be refused"
+    );
+}
+
+// ============================== REJECT (Fix 3: punned predicate) ==============================
+
+/// :p declared as both AnnotationProperty AND ObjectProperty, then used in :a :p :b.
+/// Before fix 3 the annotation arm silently dropped the triple (wrong classification).
+/// After fix 3 this must be refused with Unclassifiable. [OPUS-4.8]
+#[test]
+fn reject_punned_annotation_and_object_property() {
+    let (d, t) = parse(
+        ":p a owl:AnnotationProperty .\n\
+         :p a owl:ObjectProperty .\n\
+         :a :p :b .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "predicate declared as both AnnotationProperty and ObjectProperty must be refused"
+    );
+}
+
+// ============================== ACCEPT (Fix 4: owl:Deprecated* meta-classes) ==============================
+
+/// owl:DeprecatedClass is a structural meta-class (OWL 2 §11.2) — no logical axioms.
+/// Before fix 4 this produced a spurious ClassAssertion. [OPUS-4.8]
+#[test]
+fn accept_deprecated_class_as_declaration() {
+    let (d, t) = parse(":A a owl:DeprecatedClass .");
+    let o = extract(&d, &t).expect("accept");
+    assert!(o.is_empty(), "owl:DeprecatedClass must be ignored, got {:?}", o.axioms);
+}
+
+/// owl:DeprecatedProperty is a structural meta-class — no logical axioms.
+#[test]
+fn accept_deprecated_property_as_declaration() {
+    let (d, t) = parse(":p a owl:DeprecatedProperty .");
+    let o = extract(&d, &t).expect("accept");
+    assert!(o.is_empty(), "owl:DeprecatedProperty must be ignored, got {:?}", o.axioms);
+}
+
+// ============================== REJECT (existing guards, now explicitly pinned) ==============================
+
+/// Direct self-referential cycle: _:x owl:complementOf _:x.
+/// The cycle guard (visiting set) must catch this. [OPUS-4.8] pinned
+#[test]
+fn reject_cyclic_class_expression() {
+    let (d, t) = parse(
+        ":A rdfs:subClassOf _:x .\n\
+         _:x owl:complementOf _:x .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
+        "cyclic complementOf must be refused"
+    );
+}
+
+/// A complementOf chain 513 levels deep exceeds MAX_CE_DEPTH (512): must produce
+/// MalformedClassExpression rather than a stack overflow. [OPUS-4.8] pinned
+#[test]
+fn reject_max_ce_depth() {
+    let mut ttl = String::from(":A rdfs:subClassOf _:n0 .\n");
+    for i in 0..513usize {
+        ttl.push_str(&format!("_:n{} owl:complementOf _:n{} .\n", i, i + 1));
+    }
+    // _:n513 is the leaf; the depth check fires when decode_class_inner is called at
+    // depth 513 (513 > MAX_CE_DEPTH=512), before any properties of _:n513 are inspected.
+    let (d, t) = parse(&ttl);
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
+        "expression exceeding MAX_CE_DEPTH must be refused"
+    );
+}
+
+/// A node simultaneously carrying owl:intersectionOf AND owl:unionOf shapes — shape_count > 1.
+/// [OPUS-4.8] pinned
+#[test]
+fn reject_multi_shape_node() {
+    let (d, t) = parse(
+        ":C rdfs:subClassOf _:x .\n\
+         _:x owl:intersectionOf ( :A :B ) .\n\
+         _:x owl:unionOf ( :D :E ) .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
+        "node with multiple class-expression shapes must be refused"
+    );
+}
+
+/// A restriction carrying BOTH someValuesFrom AND allValuesFrom — decode_restriction rejects.
+/// [OPUS-4.8] pinned
+#[test]
+fn reject_restriction_both_some_and_all_values_from() {
+    let (d, t) = parse(
+        ":A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; \
+         owl:someValuesFrom :B ; owl:allValuesFrom :C ] .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
+        "restriction with both someValuesFrom and allValuesFrom must be refused"
+    );
+}
+
+/// A class-expression / restriction blank node used as the TARGET of a role assertion —
+/// role_assertion checks structural_nodes. [OPUS-4.8] pinned
+#[test]
+fn reject_structural_node_used_as_individual() {
+    let (d, t) = parse(
+        ":p a owl:ObjectProperty .\n\
+         :x :p _:r .\n\
+         _:r a owl:Restriction .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
+        "structural (restriction) node used as a role-assertion individual must be refused"
+    );
+}
+
 // ============================== FAIL-CLOSED INVARIANT ==============================
 
 #[test]

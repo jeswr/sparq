@@ -105,7 +105,9 @@ const MAX_CE_DEPTH: usize = 512;
 /// triple that cannot be classified without a declaration.
 pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Result<Ontology, ExtractError> {
     let v = Vocab::intern(dict);
-    let idx = Index::build(triples, &v);
+    // [OPUS-4.8] Fix 1 + Fix 3: Index::build now returns Err on a branching list,
+    // duplicate backbone value, or cross-type punned declaration.
+    let idx = Index::build(triples, &v)?;
     let mut onto = Ontology::new();
 
     for &[s, p, o] in triples {
@@ -196,6 +198,17 @@ fn classify_triple(
     // --- Ignorable built-in annotations --------------------------------------------------
     if v.annotation.contains(&p) {
         return Ok(());
+    }
+
+    // --- Punned predicates: declared as multiple property types — fail-closed ------------
+    // [OPUS-4.8] Fix 3: a predicate simultaneously declared as AnnotationProperty AND
+    // ObjectProperty (or any other cross-type punning) is Unclassifiable — the downstream
+    // checker must never reason over an axiom whose classification was ambiguous.
+    if idx.punned_props.contains(&p) {
+        return Err(ExtractError::Unclassifiable(format!(
+            "predicate {} is declared as multiple property types (ambiguous classification)",
+            term_iri(dict, p)
+        )));
     }
 
     // --- Declared annotation properties (from the declaration pass) — ignorable ----------
@@ -513,7 +526,8 @@ fn decode_class_list(
 
 /// Decodes a node used in an object-property position. In L1 only a NAMED object property is
 /// admitted; an `owl:inverseOf` node (an inverse property expression) is refused
-/// (`OutOfFragment`), as is a literal.
+/// (`OutOfFragment`), a literal is refused (`MalformedClassExpression`), and — per
+/// model.rs:20-33 — a blank node or RDF 1.2 triple term is refused (`Unclassifiable`).
 fn decode_object_property(
     dict: &Dict,
     idx: &Index,
@@ -523,6 +537,19 @@ fn decode_object_property(
         return Err(ExtractError::MalformedClassExpression(
             "literal in an object-property position".to_string(),
         ));
+    }
+    // [OPUS-4.8] Fix 2: blank nodes and triple terms are not named object properties.
+    // The ALCH fragment admits ONLY named (IRI) object properties — model.rs:20-33.
+    if is_triple_term(dict, id) {
+        return Err(ExtractError::Unclassifiable(
+            "RDF 1.2 triple term in an object-property position".to_string(),
+        ));
+    }
+    if !is_inline(id) && matches!(dict.term_parts(id), TermParts::Blank(_)) {
+        return Err(ExtractError::Unclassifiable(format!(
+            "blank node {} in an object-property position (named properties only in L1)",
+            term_iri(dict, id)
+        )));
     }
     if idx.inverse_of.contains(&id) {
         return Err(ExtractError::OutOfFragment(format!(
@@ -629,6 +656,11 @@ const DECLARATION_TYPE_LOCALS: &[(&str, &str)] = &[
     (OWL, "Ontology"),
     (OWL, "Restriction"),
     (OWL, "OntologyProperty"),
+    // [OPUS-4.8] Fix 4: owl:DeprecatedClass and owl:DeprecatedProperty are structural
+    // meta-classes (OWL 2 §11.2) with no logical content in ALCH — treat as ignorable
+    // declarations rather than producing a spurious ClassAssertion.
+    (OWL, "DeprecatedClass"),
+    (OWL, "DeprecatedProperty"),
     (RDFS, "Class"),
     (RDFS, "Datatype"),
     (RDF, "List"),
@@ -801,48 +833,122 @@ struct Index {
     data_props: FxHashSet<Id>,
     /// Entities declared as annotation properties.
     annotation_props: FxHashSet<Id>,
+    /// Entities declared as MORE THAN ONE property type (e.g. both AnnotationProperty and
+    /// ObjectProperty) — a punning clash that makes their use in triples Unclassifiable.
+    /// [OPUS-4.8] Fix 3.
+    punned_props: FxHashSet<Id>,
 }
 
 impl Index {
-    fn build(triples: &[[Id; 3]], v: &Vocab) -> Index {
+    // [OPUS-4.8] Fix 1 + Fix 3: returns Err on a branching list / duplicate backbone
+    // value (different value for same functional-position predicate on same node), or on a
+    // cross-type punned declaration. Identical re-assertion (same value) is silently allowed.
+    fn build(triples: &[[Id; 3]], v: &Vocab) -> Result<Index, ExtractError> {
         let mut idx = Index::default();
         for &[s, p, o] in triples {
             if p == v.on_property {
-                idx.on_property.insert(s, o);
+                // owl:onProperty is functional on a restriction node — exactly one value.
+                if let Some(prev) = idx.on_property.insert(s, o) {
+                    if prev != o {
+                        return Err(ExtractError::MalformedClassExpression(
+                            "restriction node has two conflicting owl:onProperty values"
+                                .to_string(),
+                        ));
+                    }
+                }
                 idx.structural_nodes.insert(s);
-                idx.object_props.insert(o); // used-as-object-property
+                idx.object_props.insert(o); // usage-based typing
             } else if p == v.some_values_from {
-                idx.some_values_from.insert(s, o);
+                if let Some(prev) = idx.some_values_from.insert(s, o) {
+                    if prev != o {
+                        return Err(ExtractError::MalformedClassExpression(
+                            "restriction node has two conflicting owl:someValuesFrom values"
+                                .to_string(),
+                        ));
+                    }
+                }
                 idx.structural_nodes.insert(s);
             } else if p == v.all_values_from {
-                idx.all_values_from.insert(s, o);
+                if let Some(prev) = idx.all_values_from.insert(s, o) {
+                    if prev != o {
+                        return Err(ExtractError::MalformedClassExpression(
+                            "restriction node has two conflicting owl:allValuesFrom values"
+                                .to_string(),
+                        ));
+                    }
+                }
                 idx.structural_nodes.insert(s);
             } else if p == v.intersection_of {
-                idx.intersection_of.insert(s, o);
+                if let Some(prev) = idx.intersection_of.insert(s, o) {
+                    if prev != o {
+                        return Err(ExtractError::MalformedClassExpression(
+                            "class node has two conflicting owl:intersectionOf values"
+                                .to_string(),
+                        ));
+                    }
+                }
                 idx.structural_nodes.insert(s);
             } else if p == v.union_of {
-                idx.union_of.insert(s, o);
+                if let Some(prev) = idx.union_of.insert(s, o) {
+                    if prev != o {
+                        return Err(ExtractError::MalformedClassExpression(
+                            "class node has two conflicting owl:unionOf values".to_string(),
+                        ));
+                    }
+                }
                 idx.structural_nodes.insert(s);
             } else if p == v.complement_of {
-                idx.complement_of.insert(s, o);
+                if let Some(prev) = idx.complement_of.insert(s, o) {
+                    if prev != o {
+                        return Err(ExtractError::MalformedClassExpression(
+                            "class node has two conflicting owl:complementOf values".to_string(),
+                        ));
+                    }
+                }
                 idx.structural_nodes.insert(s);
             } else if p == v.inverse_of {
                 idx.inverse_of.insert(s);
             } else if p == v.rdf_first {
-                idx.first.insert(s, o);
+                // rdf:first is functional — each list cell carries exactly one member.
+                if let Some(prev) = idx.first.insert(s, o) {
+                    if prev != o {
+                        return Err(ExtractError::MalformedList(
+                            "list cell has two conflicting rdf:first values (branching list)"
+                                .to_string(),
+                        ));
+                    }
+                }
                 idx.structural_nodes.insert(s);
             } else if p == v.rdf_rest {
-                idx.rest.insert(s, o);
+                // rdf:rest is functional — each list cell carries exactly one continuation.
+                if let Some(prev) = idx.rest.insert(s, o) {
+                    if prev != o {
+                        return Err(ExtractError::MalformedList(
+                            "list cell has two conflicting rdf:rest values (branching list)"
+                                .to_string(),
+                        ));
+                    }
+                }
                 idx.structural_nodes.insert(s);
             } else if p == v.ty {
                 if o == v.restriction_ty {
                     idx.is_restriction.insert(s);
                     idx.structural_nodes.insert(s);
                 } else if o == v.owl_object_property {
+                    // Fix 3: track cross-type punning on declaration.
+                    if idx.data_props.contains(&s) || idx.annotation_props.contains(&s) {
+                        idx.punned_props.insert(s);
+                    }
                     idx.object_props.insert(s);
                 } else if o == v.owl_datatype_property {
+                    if idx.object_props.contains(&s) || idx.annotation_props.contains(&s) {
+                        idx.punned_props.insert(s);
+                    }
                     idx.data_props.insert(s);
                 } else if o == v.owl_annotation_property {
+                    if idx.object_props.contains(&s) || idx.data_props.contains(&s) {
+                        idx.punned_props.insert(s);
+                    }
                     idx.annotation_props.insert(s);
                 }
             } else if let Some(name) = v.out_of_fragment.get(&p) {
@@ -864,7 +970,7 @@ impl Index {
                 }
             }
         }
-        idx
+        Ok(idx)
     }
 }
 
