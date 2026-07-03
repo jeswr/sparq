@@ -2,6 +2,8 @@
 # [FABLE-5] sq-fmx4u.3: cross-file INSPECTION tests for the change-based
 # test-selection wiring — the acceptance criterion "all guards verified
 # fail-closed by inspection test (empty outputs => run)".
+# [SONNET-4.6] sq-fmx4u.4: TestRequiredCheckAnchor — pin the three structural
+# properties that make plain-skip merge-queue-safe (design §5.3 graduation note).
 #
 # YAML `if:` expressions cannot be unit-tested by execution, so this suite pins
 # their SHAPE instead, plus every cross-file contract the wiring relies on:
@@ -23,6 +25,10 @@
 #   * matrix-context trap — the per-shard skip must NOT be a job-level `if:`
 #     referencing `matrix.*` (the matrix context is unavailable there and
 #     silently evaluates empty — under enforcement that would skip every leg).
+#   * REQUIRED-CHECK ANCHOR (sq-fmx4u.4) — the `ci-summary / gate` job must
+#     retain the name "gate" (branch-protection context anchor), have no job-
+#     level `if:` guard (always runs → queue never times out waiting), and the
+#     workflow must trigger on merge_group. All three make plain-skip safe.
 #
 # Needs PyYAML (same dependency the assembler already has); everything else is
 # stdlib. Run:  python3 scripts/tests/test_ci_select_wiring.py
@@ -210,6 +216,101 @@ class TestWiring(unittest.TestCase):
     def test_members_parse_sanity(self):
         self.assertIn("sparq-core", self.members)
         self.assertGreater(len(self.members), 30)
+
+
+# [SONNET-4.6] sq-fmx4u.4: required-check anchor tests.
+#
+# VERIFIED SEMANTICS (2026-07-03, against ruleset id 17688455):
+# `gh api repos/sparq-org/sparq/rulesets/17688455` shows required_status_checks
+# contains EXACTLY ONE entry: {"context":"gate","integration_id":15368} — i.e.
+# `ci-summary / gate` is the SOLE required check.  No individual per-crate matrix
+# legs, no individual `opt-in <X>` legs are in the required list.  The merge queue
+# (grouping_strategy=ALLGREEN, check_response_timeout_minutes=60) therefore blocks
+# ONLY on the single "gate" check, not on absent or skipped siblings.
+#
+# Consequence: PLAIN-SKIP IS SAFE.  A selection-skipped job (conclusion=skipped
+# from a job-level `if:` guard) reports a complete check-run; the gate already
+# treats `skipped` as non-failing when the select pre-job succeeded.  A leg
+# filtered at assembly time (unassembled → no check-run spawned) is also safe
+# because no leg name is individually required.  Neither case hangs the queue.
+#
+# The shim (guard moved inside the job as a first step so the job always occupies
+# a slot but exits early) is NOT needed.  It would only be needed if a per-crate
+# leg name appeared in required_status_checks — it does not.
+#
+# Three structural properties must not drift for the above to remain true.  They
+# are pinned here (hermetically, no network/API calls):
+#   (1) gate job name == "gate"  (matches the ruleset's context:"gate")
+#   (2) gate job has NO if: guard  (always runs → merge queue always gets a
+#       response within the 60-minute timeout window)
+#   (3) ci-summary.yml triggers on merge_group  (required for the gate to produce
+#       a check-run on queue entries at all)
+# Bead sq-fmx4u.5 can safely flip CI_SELECT_MODE to "enforce" once these hold.
+CISUM_YML = REPO_ROOT / ".github" / "workflows" / "ci-summary.yml"
+
+
+class TestRequiredCheckAnchor(unittest.TestCase):
+    """[SONNET-4.6] sq-fmx4u.4: pin the three properties that make plain-skip
+    merge-queue-safe in this repo (design §5.3 graduation note)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cs = _load(CISUM_YML)
+        cls.gate = _gate_module()
+
+    def test_gate_job_name_is_exactly_gate(self):
+        """The branch-protection ruleset (id 17688455) requires context='gate'.
+        If this name drifts the required check silently stops matching and the
+        gate weakens with no error anywhere — so pin it."""
+        job = self.cs["jobs"]["gate"]
+        self.assertEqual(
+            job["name"], "gate",
+            "ci-summary gate job name must stay exactly 'gate' — "
+            "the branch-protection ruleset anchors on context='gate' (id 17688455); "
+            "renaming breaks the required check without any CI warning",
+        )
+
+    def test_gate_job_has_no_job_level_conditional(self):
+        """The gate must run unconditionally on every event (pull_request,
+        merge_group, push).  A job-level `if:` could silently skip it on some
+        triggers, leaving the merge queue waiting 60 minutes before timing out."""
+        job = self.cs["jobs"]["gate"]
+        self.assertNotIn(
+            "if", job,
+            "ci-summary gate job must have no `if:` guard — it must always run "
+            "so the merge queue receives the required 'gate' check-run within the "
+            "60-minute check_response_timeout window (ruleset 17688455)",
+        )
+
+    def test_ci_summary_triggers_on_merge_group(self):
+        """Without merge_group trigger ci-summary never runs on queue entries and
+        the merge queue hangs forever waiting for the required 'gate' check."""
+        on = self.cs.get("on", self.cs.get(True, {}))
+        self.assertIn(
+            "merge_group", on,
+            "ci-summary must trigger on merge_group — absent, the queue entry "
+            "never receives the required 'gate' check-run and hangs until timeout",
+        )
+
+    def test_gate_is_not_advisory_or_informational(self):
+        """The gate name must never accidentally match the advisory/informational
+        exclusion — that would un-gate it (its failure would stop being required).
+        Both the bare job name and the `workflow / job` display form are checked."""
+        for name in ("gate", "ci-summary / gate"):
+            self.assertFalse(
+                self.gate.is_advisory(name),
+                f"gate check name {name!r} must NOT match the advisory exclusion",
+            )
+
+    def test_gate_is_not_detected_as_a_select_job(self):
+        """The gate name must not match SELECT_RE — that would make the gate
+        self-detect as a selection pre-job and add a circular verdict dependency
+        (skipped gating only valid if 'gate' itself concluded success)."""
+        for name in ("gate", "ci-summary / gate"):
+            self.assertFalse(
+                self.gate.is_select(name),
+                f"gate check name {name!r} must NOT match SELECT_RE",
+            )
 
 
 if __name__ == "__main__":
