@@ -58,4 +58,22 @@ mod tests {
             assert_eq!(tl.instant() as i64, secs, "round-trip mismatch for {lex}");
         }
     }
+
+    /// Epoch seconds at 2100-03-01T00:00:00Z — the first date where `doe / 36524 = 1`
+    /// in the Hinnant calendar algorithm (doe = 36524 relative to the start of the
+    /// 400-year Gregorian era that began ~2000-03-01). In the formula:
+    ///   `yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365`
+    /// the `+ doe/36524` term changes from 0 to 1 at this date; a mutation that
+    /// replaces it with `- doe/36524` would produce `yoe=99` (year 2099) instead of
+    /// `yoe=100` (year 2100), yielding the nonexistent date "2100-02-29". This test
+    /// pins the exact output to catch that arithmetic mutation. [OPUS-4.8] sq-qcnn.20
+    #[test]
+    fn year_2100_first_century_correction_date() {
+        // 2100-03-01 00:00:00 UTC: epoch secs = 47541 * 86400 = 4_107_542_400.
+        // 2100 is NOT a leap year (divisible by 100 but not by 400), so
+        // 2100-02-29 does not exist — formatting to that date is the mutation's tell.
+        assert_eq!(format_utc(4_107_542_400), "2100-03-01T00:00:00Z");
+        // One day earlier is still February (year 2100, not 2099).
+        assert_eq!(format_utc(4_107_456_000), "2100-02-28T00:00:00Z");
+    }
 }
