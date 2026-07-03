@@ -336,11 +336,17 @@ fn ql_sub_ce(ce: &ClassExpression, ctx: &str) -> Result<(), String> {
 /// super-CE := Class (including owl:Thing and owl:Nothing)
 ///           | ObjectIntersectionOf(super-CE super-CE ...)   [≥ 2 conjuncts]
 ///           | ObjectComplementOf(sub-CE)
-///           | ObjectSomeValuesFrom(OPE Class)   [§3 superObjectSomeValuesFrom;
-///                                                filler must be a named user class]
+///           | ObjectSomeValuesFrom(OPE Class)   [§3.2.3 superObjectSomeValuesFrom;
+///                                                Class := IRI includes owl:Thing/owl:Nothing]
 /// ```
 ///
 /// NOT valid: `ObjectUnionOf`, `ObjectAllValuesFrom`.
+///
+/// Note on the QL ∃ asymmetry (§3.2.3):
+/// - `subObjectSomeValuesFrom`   := `ObjectSomeValuesFrom(OPE owl:Thing)` — filler EXACTLY ⊤.
+/// - `superObjectSomeValuesFrom` := `ObjectSomeValuesFrom(OPE Class)` — filler any `Class := IRI`,
+///   which includes owl:Thing AND owl:Nothing (OWL 2 Syntax §5.1).  The two productions are NOT
+///   a disjoint pair; the super-∃ is a strict superset.
 fn ql_super_ce(ce: &ClassExpression, ctx: &str) -> Result<(), String> {
     match ce {
         ClassExpression::Class(_) | ClassExpression::Thing | ClassExpression::Nothing => Ok(()),
@@ -359,21 +365,19 @@ fn ql_super_ce(ce: &ClassExpression, ctx: &str) -> Result<(), String> {
         }
         // ObjectComplementOf(sub-CE) is a valid QL super-CE (§3 superObjectComplementOf)
         ClassExpression::ObjectComplementOf(inner) => ql_sub_ce(inner, ctx),
-        // ObjectSomeValuesFrom(OPE, Class) is a valid QL super-CE (§3 superObjectSomeValuesFrom).
-        // The filler must be a named user-defined class — the QL grammar production explicitly
-        // uses "Class" (not "owl:Thing") in the super position, distinguishing it from the
-        // sub-CE production which uses "owl:Thing".
-        ClassExpression::ObjectSomeValuesFrom(_, filler) => {
-            if let ClassExpression::Class(_) = filler.as_ref() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "{}: ObjectSomeValuesFrom as QL super-CE requires a named Class filler \
-                     (QL §3 superObjectSomeValuesFrom; got owl:Thing, owl:Nothing, or complex CE)",
-                    ctx
-                ))
-            }
-        }
+        // ObjectSomeValuesFrom(OPE, Class) is a valid QL super-CE (§3.2.3 superObjectSomeValuesFrom).
+        // "Class" in the OWL 2 grammar (§5.1) is any IRI — it includes owl:Thing and owl:Nothing.
+        // Only a complex CE filler (intersection, union, complement, etc.) is invalid here.
+        // [SONNET-4.6] sq-pbz04.4.2: corrected from "named-only" to "any Class (IRI)".
+        ClassExpression::ObjectSomeValuesFrom(_, filler) => match filler.as_ref() {
+            ClassExpression::Class(_) | ClassExpression::Thing | ClassExpression::Nothing => Ok(()),
+            _ => Err(format!(
+                "{}: ObjectSomeValuesFrom as QL super-CE requires a Class (IRI) filler \
+                 (QL §3.2.3 superObjectSomeValuesFrom; Class includes owl:Thing and owl:Nothing; \
+                 got a complex class expression)",
+                ctx
+            )),
+        },
         ClassExpression::ObjectUnionOf(_) => Err(format!(
             "{}: ObjectUnionOf is not a valid QL super-class expression (QL §3)",
             ctx

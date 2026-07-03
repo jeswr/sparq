@@ -760,3 +760,87 @@ fn rl_reject_union_arity_one_in_sub_ce() {
         "ObjectUnionOf with 1 member is not a valid RL sub-CE (arity ≥ 2 required)"
     );
 }
+
+// -------------------------------------------------------------------------------------------
+// Test 39: QL accept — SubClassOf(A, ∃R.owl:Thing): ∃R.⊤ IS a valid QL super-CE (QL §3.2.3)
+//
+// W3C OWL 2 Profiles §3.2.3:
+//   superObjectSomeValuesFrom := ObjectSomeValuesFrom(ObjectPropertyExpression Class)
+//   Class := IRI                                               (OWL 2 Syntax §5.1)
+// "Class" is any IRI — it INCLUDES owl:Thing and owl:Nothing.
+// "SubClassOf(A, ∃R.⊤)" is the canonical DL-Lite_R "every A-instance has an R-successor"
+// axiom (cf. Calvanese et al., PerfectRef §3).
+// W3C Table 1 (OWL 2 Profiles §3.1, Superclass column) reads: "existential quantification
+// to a class" with NO carve-out of owl:Thing from the class filler — it is unrestricted.
+// Asymmetry: the QL SUB-∃ (§3.2.3 subObjectSomeValuesFrom) restricts the filler to
+// EXACTLY owl:Thing; the QL SUPER-∃ allows ANY Class filler, owl:Thing included.
+// -------------------------------------------------------------------------------------------
+
+#[test]
+fn ql_accept_some_thing_as_super_ce() {
+    // [SONNET-4.6] sq-pbz04.4.2 — TDD: written RED first, then production fixed.
+    // QL §3.2.3 superObjectSomeValuesFrom := ∃R.Class; Class ∋ owl:Thing (OWL 2 Syntax §5.1).
+    let mut onto = Ontology::new();
+    onto.axioms.push(Axiom::SubClassOf {
+        sub: named(A),
+        sup: CE::ObjectSomeValuesFrom(prop(R), Box::new(CE::Thing)),
+    });
+    let ps = profiles(&onto);
+    assert_eq!(
+        ps.ql,
+        Membership::In,
+        "∃R.owl:Thing as QL super-CE must be In (QL §3.2.3 superObjectSomeValuesFrom; \
+         DL-Lite_R canonical has-successor axiom)"
+    );
+}
+
+// -------------------------------------------------------------------------------------------
+// Test 40: QL accept — SubClassOf(A, ∃R.owl:Nothing): ∃R.⊥ IS a valid QL super-CE (QL §3.2.3)
+//
+// Same rationale as Test 39: Class := IRI includes owl:Nothing.
+// QL SUPER-∃ allows ANY Class filler (the sub-∃ is the restricted form).
+// -------------------------------------------------------------------------------------------
+
+#[test]
+fn ql_accept_some_nothing_as_super_ce() {
+    // [SONNET-4.6] sq-pbz04.4.2 — TDD: written RED first, then production fixed.
+    // QL §3.2.3 superObjectSomeValuesFrom := ∃R.Class; Class ∋ owl:Nothing (OWL 2 Syntax §5.1).
+    let mut onto = Ontology::new();
+    onto.axioms.push(Axiom::SubClassOf {
+        sub: named(A),
+        sup: CE::ObjectSomeValuesFrom(prop(R), Box::new(CE::Nothing)),
+    });
+    let ps = profiles(&onto);
+    assert_eq!(
+        ps.ql,
+        Membership::In,
+        "∃R.owl:Nothing as QL super-CE must be In (QL §3.2.3 superObjectSomeValuesFrom; \
+         Class := IRI includes owl:Nothing)"
+    );
+}
+
+// -------------------------------------------------------------------------------------------
+// Test 41: QL accept — ObjectPropertyDomain(R, ∃S.owl:Thing): domain is a super-CE (QL §3.2.5)
+//
+// QL §3.2.5 ObjectPropertyDomain := ObjectPropertyDomain(ObjectPropertyExpression superCE).
+// ∃S.owl:Thing is a valid QL super-CE per §3.2.3 (see Tests 39/40).
+// -------------------------------------------------------------------------------------------
+
+#[test]
+fn ql_accept_property_domain_some_thing() {
+    // [SONNET-4.6] sq-pbz04.4.2 — TDD: written RED first, then production fixed.
+    // QL §3.2.5 domain := superCE; ∃S.⊤ is a valid QL super-CE per §3.2.3.
+    let s: u32 = 11;
+    let mut onto = Ontology::new();
+    onto.axioms.push(Axiom::ObjectPropertyDomain {
+        property: prop(R),
+        domain: CE::ObjectSomeValuesFrom(prop(s), Box::new(CE::Thing)),
+    });
+    let ps = profiles(&onto);
+    assert_eq!(
+        ps.ql,
+        Membership::In,
+        "ObjectPropertyDomain(R, ∃S.owl:Thing) must be In QL \
+         (QL §3.2.5 domain := superCE; ∃S.⊤ is valid per §3.2.3)"
+    );
+}
