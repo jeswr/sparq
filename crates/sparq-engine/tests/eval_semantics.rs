@@ -157,7 +157,8 @@ mod aggregate_mixed_numeric {
         assert_eq!(result, Some(dec_lit("10.5")), "SUM(int, decimal) must be decimal, got {result:?}");
     }
 
-    /// SUM(int, double) → double.  10 (int) + 1.5E0 (double) = 11.5E0 double.
+    /// SUM(int, double) → double.  10 (int) + 1.5E0 (double) = 11.5, whose canonical
+    /// xsd:double lexical form (mantissa-E-exponent, one integer digit) is "1.15E1".
     #[test]
     fn sum_int_plus_double_is_double() {
         let g = Graph::load_str(
@@ -635,16 +636,19 @@ mod order_by_type_boundary {
         let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a ex:p 1 . ex:b ex:p \"abc\" .", "turtle").unwrap();
         let r = query(&g, "PREFIX ex: <http://ex/> SELECT ?o WHERE { ?s ex:p ?o } ORDER BY ASC(?o)").unwrap();
         assert_eq!(r.rows.len(), 2);
-        // numeric (1) should precede string ("abc") in SPARQL total order.
+        // numeric (1) should precede string ("abc") in SPARQL total order. Assert the
+        // EXACT terms rather than a `contains("integer")` datatype-substring check.
         let first = r.rows[0][0].as_ref().map(|t| t.to_string());
         let second = r.rows[1][0].as_ref().map(|t| t.to_string());
-        assert!(
-            first.as_deref().map(|s| s.contains("integer")).unwrap_or(false),
-            "integer must sort before string, got first={first:?}"
+        assert_eq!(
+            first.as_deref(),
+            Some(int_lit(1).as_str()),
+            "integer 1 must sort first, got first={first:?}"
         );
-        assert!(
-            second.as_deref().map(|s| s.starts_with('"')).unwrap_or(false),
-            "string must sort after integer, got second={second:?}"
+        assert_eq!(
+            second.as_deref(),
+            Some("\"abc\""),
+            "plain string \"abc\" must sort after the integer, got second={second:?}"
         );
     }
 
@@ -783,9 +787,11 @@ mod sample_and_group_concat {
         // Lexicographic: "x" < "y" < "z".
         let mn = one_cell(&g(), "PREFIX ex: <http://ex/> SELECT (MIN(?o) AS ?v) WHERE { ?s ex:p ?o }");
         let mx = one_cell(&g(), "PREFIX ex: <http://ex/> SELECT (MAX(?o) AS ?v) WHERE { ?s ex:p ?o }");
-        // MIN = "x", MAX = "z".
-        assert!(mn.as_deref().map(|s| s.contains('"') && s.contains('x')).unwrap_or(false), "MIN must be \"x\", got {mn:?}");
-        assert!(mx.as_deref().map(|s| s.contains('"') && s.contains('z')).unwrap_or(false), "MAX must be \"z\", got {mx:?}");
+        // MIN = "x", MAX = "z". Assert the EXACT plain-literal term (a simple xsd:string
+        // renders without a datatype suffix) — a `contains('"') && contains('x')` check
+        // would also pass for a wrong value like "xyz" or "x-ray".
+        assert_eq!(mn.as_deref(), Some("\"x\""), "MIN of {{\"x\",\"y\",\"z\"}} must be the plain literal \"x\", got {mn:?}");
+        assert_eq!(mx.as_deref(), Some("\"z\""), "MAX of {{\"x\",\"y\",\"z\"}} must be the plain literal \"z\", got {mx:?}");
     }
 }
 

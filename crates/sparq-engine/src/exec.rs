@@ -12130,10 +12130,17 @@ mod minus_bindings_unit {
         assert_eq!(result.rows.len(), 0, "bound overlap on ?s removes the row even though ?t is unbound on the left");
     }
 
-    /// General path: left row has unbound ?t and right row also has unbound ?t.
-    /// Both sides have the SAME bound ?s but unbound ?t. Overlap is on ?s alone.
+    /// General path (unbound `?t` on the left forces the per-row compatibility scan off
+    /// the fast path): the shared variable `?s` is BOUND on both sides but to DIFFERENT
+    /// ids (`a` on the left, `b` on the right); `?t` is unbound on both sides.
+    ///
+    /// SPARQL MINUS (§18.5): remove the left row iff some right row is compatible AND the
+    /// bound domains overlap on ≥1 shared variable. The domains DO overlap on `?s` (bound
+    /// on both sides), but the values disagree (`a != b`), so the rows are INCOMPATIBLE —
+    /// nothing is removed and the left row is KEPT. (`?t`, unbound on both sides, is in
+    /// neither solution's domain and cannot force removal.)
     #[test]
-    fn minus_general_path_both_unbound_in_shared_var_no_overlap() {
+    fn minus_general_path_incompatible_bound_shared_var_keeps_row() {
         let g = scratch();
         let a = id(&g, "http://ex/a");
         let b = id(&g, "http://ex/b");
@@ -12142,8 +12149,8 @@ mod minus_bindings_unit {
         let left = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[a, NO_ID])]);
         let right = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[b, NO_ID])]);
         let result = minus_bindings(left, right);
-        // ?s=a != ?s=b → incompatible → NOT removed.
-        assert_eq!(result.rows.len(), 1, "incompatible ?s values: row must be kept");
+        // ?s=a != ?s=b → incompatible ⇒ NOT removed.
+        assert_eq!(result.rows.len(), 1, "incompatible bound ?s (a != b): left row must be kept");
     }
 }
 
@@ -12325,14 +12332,23 @@ mod minmax_values_unit {
     fn min_over_integers_is_smallest() {
         let vals = vec![Value::Num(Num::Int(5)), Value::Num(Num::Int(2)), Value::Num(Num::Int(8))];
         let min = minmax_values(vals, std::cmp::Ordering::Less);
+        // MIN over an all-integer set is the smallest member (2). `minmax_values` returns
+        // it via `num_canonical_term`, i.e. a `Value::Term` carrying the canonical
+        // xsd:integer literal "2". Assert the EXACT lexical value AND datatype — NOT a
+        // substring `contains('2')`, which is vacuous because the xsd:integer datatype
+        // IRI (…/2001/XMLSchema#integer) already contains '2' regardless of the value.
         match min {
-            Value::Num(Num::Int(2)) => {} // exact match
-            // The engine may also return a canonical-term Value::Term for exact integers
-            Value::Term(ref t) => {
-                let s = t.to_string();
-                assert!(s.contains('2'), "MIN of [5,2,8] must contain '2', got {}", s);
+            Value::Num(Num::Int(n)) => assert_eq!(n, 2, "MIN of [5,2,8] must be exactly 2, got {}", n),
+            Value::Term(Term::Literal(ref l)) => {
+                assert_eq!(l.value(), "2", "MIN of [5,2,8] must have lexical value \"2\", got {}", l);
+                assert_eq!(
+                    l.datatype(),
+                    xsd::INTEGER,
+                    "MIN of integers must keep xsd:integer, got {}",
+                    l.datatype()
+                );
             }
-            other => panic!("MIN of integers must be 2 (numeric or term), got {other:?}"),
+            other => panic!("MIN of integers must be the integer 2 (numeric or integer term), got {other:?}"),
         }
     }
 
@@ -12340,13 +12356,22 @@ mod minmax_values_unit {
     fn max_over_integers_is_largest() {
         let vals = vec![Value::Num(Num::Int(5)), Value::Num(Num::Int(2)), Value::Num(Num::Int(8))];
         let max = minmax_values(vals, std::cmp::Ordering::Greater);
+        // MAX over an all-integer set is the largest member (8), returned as a canonical
+        // xsd:integer `Value::Term`. Assert the EXACT lexical value AND datatype — a
+        // substring `contains('8')` would also pass for wrong values like 18 or 80, so it
+        // is not an acceptable check for the `Value::Term` representation.
         match max {
-            Value::Num(Num::Int(8)) => {}
-            Value::Term(ref t) => {
-                let s = t.to_string();
-                assert!(s.contains('8'), "MAX of [5,2,8] must contain '8', got {}", s);
+            Value::Num(Num::Int(n)) => assert_eq!(n, 8, "MAX of [5,2,8] must be exactly 8, got {}", n),
+            Value::Term(Term::Literal(ref l)) => {
+                assert_eq!(l.value(), "8", "MAX of [5,2,8] must have lexical value \"8\", got {}", l);
+                assert_eq!(
+                    l.datatype(),
+                    xsd::INTEGER,
+                    "MAX of integers must keep xsd:integer, got {}",
+                    l.datatype()
+                );
             }
-            other => panic!("MAX of integers must be 8 (numeric or term), got {other:?}"),
+            other => panic!("MAX of integers must be the integer 8 (numeric or integer term), got {other:?}"),
         }
     }
 
