@@ -48,16 +48,34 @@ import sys
 #     leaf crate's hot paths (join kernels + numeric tower + the shared row/key
 #     vocabulary they operate on) plus lib.rs, which today is module wiring + the
 #     zero-overhead doc-contract but is included so a future hot helper added there is
-#     also covered. Adding a new hot-path module to the substrate? Add it here. ---
+#     also covered. Adding a new hot-path module to the substrate? Add it here.
+#
+#     [HAIKU-4.5] sq-qonbz.7: EXPLICIT enumeration of the FOUR substrate hot-loop modules
+#     (join::delta is a SUBMODULE of join, not a fifth top-level module — the count and the
+#     list agree at four):
+#     - rows (shared Row/Key/Posting id-tuple vocabulary)
+#     - numeric (XSD numeric value tower + arithmetic + lexical helpers)
+#     - join (four id-tuple join kernels: merge-join, hash-join, bind-join, trie-join/WCOJ;
+#       INCLUDES the join::delta submodule — persistent extendable build-side hash table for
+#       semi-naive Δ⋈full join)
+#     - compare (SPARQL term total order over a generic CompareTerm trait)
+#     This enumeration makes the perf-neutrality boundary structurally explicit and auditable.
 SUBSTRATE_HOT_PATHS = [
-    "crates/sparq-substrate/src/join.rs",
-    "crates/sparq-substrate/src/numeric.rs",
+    # Rows: shared Row/Key/Posting vocabulary for both join kernels and reasoner consumers.
     "crates/sparq-substrate/src/rows.rs",
-    # [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): the SPARQL term total order
-    # (`compare::compare_terms`, generic over the `CompareTerm` trait) — an ORDER BY / sort /
+    # Numeric: XSD numeric value tower (Num/Dec + as_numeric + arithmetic ops).
+    "crates/sparq-substrate/src/numeric.rs",
+    # Join: four id-tuple join kernels (merge-join, hash-join, bind-join, trie-join/WCOJ)
+    # behind a generic JoinKeys descriptor and generic Budget cooperative-cancel hook.
+    # INCLUDES join::delta submodule (persistent extendable hash table for semi-naive
+    # Δ⋈full join — no Box<dyn> on the delta probe path either).
+    "crates/sparq-substrate/src/join.rs",
+    # [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): SPARQL term total order
+    # (compare::compare_terms, generic over the CompareTerm trait) — an ORDER BY / sort /
     # range-filter hot path, so it joins the guarded set: the algorithm must stay monomorphic
     # (a `dyn CompareTerm` on the per-comparison loop would defeat the zero-overhead seam).
     "crates/sparq-substrate/src/compare.rs",
+    # Library wiring and zero-overhead doc-contract.
     "crates/sparq-substrate/src/lib.rs",
 ]
 
