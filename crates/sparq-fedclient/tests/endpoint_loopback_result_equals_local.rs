@@ -37,12 +37,16 @@
 //! host allowlisted), the refusal assertion would flip to a success and this test would go
 //! RED; that is the non-vacuity proof. See the PR body for the mechanical flip-to-red run.
 //!
-//! **Honest boundary:** the fedclient allowlist is keyed by **bare host** (`127.0.0.1`), with
-//! no port granularity for a host-level entry — a host-level entry re-opens that host on
-//! every port. A genuinely port-scoped allowlist entry (`host:port`) is a SEPARATE reviewable
-//! narrowing tracked as its own bead (sq-xemcd); this test deliberately does NOT depend on it,
-//! and keys the allowlist by bare host exactly as the conformance keystone does. Each loopback
-//! endpoint binds a fresh ephemeral port and the assertions target exactly that bound port.
+//! **Honest boundary (what THIS test keys on).** The fedclient `EgressGuard` ALREADY supports
+//! port-scoped `host:port` allowlist entries — `allow_host("127.0.0.1:PORT")` is honoured by the
+//! port-aware `is_allowed_port` / `check_endpoint`, which share the engine SERVICE guard's
+//! per-entry rule (`sparq_engine::allowlist_entry_permits`); this landed in bead sq-vbnyc
+//! (PR #1311). So port-scoping is present in the guard, not missing. This test simply does NOT
+//! exercise it: it keys its allowlist by **bare host** (`127.0.0.1`) — a host-level entry that
+//! re-opens that host on every port — because a bare-host entry is sufficient here and mirrors the
+//! conformance keystone. The still-open bead sq-xemcd is a SEPARATE surface (the `sparq-engine`
+//! SERVICE-egress allowlist at the engine layer), NOT this fedclient guard's port scoping. Each
+//! loopback endpoint binds a fresh ephemeral port and the assertions target exactly that port.
 //!
 //! Gated on the `fedclient` feature; with the feature off the whole file compiles to nothing,
 //! so the default build (and the `--workspace` byte/wasm ratchets) are unaffected.
@@ -54,6 +58,7 @@
 use std::net::SocketAddr;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use sparq_core::Graph;
 use sparq_engine::query;
@@ -125,9 +130,23 @@ impl Loopback {
             })
             .expect("spawn loopback server thread");
 
-        let addr = addr_rx
-            .recv()
-            .expect("loopback server reported its bound address");
+        // Bound with a hard deadline so a DEAD server thread fails the test FAST instead of
+        // hanging the whole binary (and CI): if the thread panics or exits before it reports its
+        // bound `127.0.0.1:0` address, a plain `recv()` would block forever. A few seconds is ample
+        // for an in-process ephemeral-port bind; a timeout or a dropped sender both mean the server
+        // thread died before binding, so we panic with a clear message (the thread's own panic is
+        // already on stderr) rather than deadlocking. [OPUS-4.8] sq-my8wd.2.
+        let addr = match addr_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(addr) => addr,
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "loopback server thread did not report its bound address within 10s — it likely \
+                 panicked or hung before binding 127.0.0.1:0 (see its panic on stderr)"
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!(
+                "loopback server thread exited before reporting its bound address — its bind/serve \
+                 setup panicked before send (see its panic on stderr)"
+            ),
+        };
         Loopback {
             addr,
             shutdown: Some(shutdown_tx),
@@ -424,8 +443,18 @@ fn egress_refused_outside_guard_scope_discovery() {
     let denied = HttpFetcher::new();
     let err = discover(&url, &denied)
         .expect_err("default-deny discovery must REFUSE the loopback (127.0.0.0/8) host");
+    // EGRESS-DENIAL-SPECIFIC (not vacuous): `discover`'s failure path ALWAYS wraps the cause in
+    // "…did not answer an ASK probe…", so matching "ASK probe" would pass for ANY discovery
+    // failure (a connection error, a parse error) — it would NOT prove the SSRF guard refused. The
+    // guard's refusal is the ONLY `discover` error carrying the resolver's
+    // "discovery egress refused: … resolves only to private/internal addresses …" text, so we
+    // require BOTH distinguishing fragments. Non-vacuity is nailed by the CONTROL above: the SAME
+    // discovery against the SAME live server SUCCEEDS once the host is allowlisted, so the only
+    // thing that turned success into failure here is the egress scope — this is the guard
+    // refusing, not a "server is down" / unrelated-failure artifact. [OPUS-4.8] sq-my8wd.2.
     assert!(
-        err.contains("egress refused") || err.contains("ASK probe"),
-        "discovery of a private host with no allowlist must fail-closed, got: {err}"
+        err.contains("egress refused") && err.contains("private/internal"),
+        "discovery must fail-closed with an EGRESS-DENIAL error specifically (not a generic \
+         unreachability that merely mentions the ASK probe), got: {err}"
     );
 }
