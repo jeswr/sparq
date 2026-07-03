@@ -37,7 +37,7 @@ returns `Unknown` — never a guessed verdict.
 
 ### 1.1 The corpus, quantified (drives the fragment choice)
 
-The vendored OWL WG export (`tests/w3c/owl2/all.rdf`, 493 test cases) contains **485
+The OWL WG export (`tests/w3c/owl2/all.rdf`, fetched by `scripts/fetch-inference-suites.sh`; 493 test cases) contains **485
 Direct-Semantics-sanctioned** cases (6 DIRECT-only, 479 dual-tagged DIRECT+RDF-BASED).
 Status: 355 Approved / 79 Proposed / 19 Extracredit. By (overlapping) type among the 485:
 
@@ -75,7 +75,7 @@ Three consequences fall straight out of the data:
 
 ### Option A — full SROIQ(D) tableau ("real OWL 2 DL"). REJECTED for v1.
 
-SROIQ satisfiability is **N2EXPTIME-complete** (Kazakov, KR 2008). The implementation
+SROIQ satisfiability is **2NEXPTIME-complete** (Kazakov, KR 2008). The implementation
 hazards are exactly the epic's #1 trap: the nominals + inverse-roles + qualified-cardinality
 interaction forces pairwise/dynamic blocking and merging with NI-rule bookkeeping, where a
 subtly wrong blocking condition is *silently unsound or non-terminating* — the two failure
@@ -301,7 +301,7 @@ traps; the mechanical spec-table work (`.1`, `.2`, `.5`) is sonnet; docs are hai
 - Baader & Sattler, *An Overview of Tableau Algorithms for Description Logics*, Studia Logica 69, 2001 (subset blocking; ALC+GCI termination/completeness).
 - Baader, Calvanese, McGuinness, Nardi, Patel-Schneider (eds.), *The Description Logic Handbook*, 2nd ed. (ALC EXPTIME-completeness; blocking taxonomy).
 - Horrocks & Sattler, *A Description Logic with Transitive and Inverse Roles and Role Hierarchies*, J. Logic & Computation 9(3), 1999 (why inverses force stronger blocking; the S-extension path).
-- Kazakov, *RIQ and SROIQ Are Harder than SHOIQ*, KR 2008 (SROIQ N2EXPTIME-completeness).
-- In-repo: `research/reasoner-federation-program.md` (program frame; "Direct last, gated on its design record"); `research/owl2-el-ql-reasoning-spike.md` (profile-reasoner scoping precedent); `crates/sparq-reason{,-el,-ql}` and `crates/sparq-conformance/src/inference/*` as surveyed in §1; `tests/w3c/owl2/all.rdf` (corpus quantification in §1.1, measured by script over the vendored file).
+- Kazakov, *RIQ and SROIQ Are Harder than SHOIQ*, KR 2008 (SROIQ 2NEXPTIME-completeness).
+- In-repo: `research/reasoner-federation-program.md` (program frame; "Direct last, gated on its design record"); `research/owl2-el-ql-reasoning-spike.md` (profile-reasoner scoping precedent); `crates/sparq-reason{,-el,-ql}` and `crates/sparq-conformance/src/inference/*` as surveyed in §1; `tests/w3c/owl2/all.rdf` (corpus quantification in §1.1, measured by script over the file fetched by `scripts/fetch-inference-suites.sh`).
 
 <!-- [FABLE-5] sq-pbz04.4 decomposition record. No performance numbers by design; floors live in CI ratchets. -->
