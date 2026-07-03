@@ -14,6 +14,12 @@ import { cn } from "@/lib/utils";
 //      card flagged. Inert for non-focusable spans.
 //   2. a `count` variant (min-w + centred padding + tabular figures) for numeric pills, so
 //      single/double-digit counts stay aligned. Default variant unchanged.
+//
+// [SONNET-4.6] sq-ymr2e.14 — success text uses --success-on-tint (the WCAG AA accessible
+// dark green) instead of --success for the text-on-tinted-bg context. The badge background
+// keeps --success (15%-tinted light green). Light mode: --success-on-tint = oklch(0.46 0.12
+// 155) → ~6.1:1 on the tinted bg (was 4.09:1 with --success). Dark mode: same as --success
+// (already ~5.7:1). Defined in globals.css.
 const badgeVariants = cva(
   "inline-flex items-center justify-center rounded-4xl h-5 px-2 text-xs font-medium w-fit whitespace-nowrap shrink-0 gap-1 [&>svg]:size-3 transition-shadow outline-none focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background",
   {
@@ -23,7 +29,7 @@ const badgeVariants = cva(
         secondary: "bg-secondary text-secondary-foreground",
         outline: "text-foreground ring-1 ring-foreground/15",
         success:
-          "bg-[color-mix(in_oklch,var(--success)_15%,transparent)] text-[var(--success)]",
+          "bg-[color-mix(in_oklch,var(--success)_15%,transparent)] text-[var(--success-on-tint)]",
         warning:
           "bg-[color-mix(in_oklch,var(--warning)_18%,transparent)] text-[color-mix(in_oklch,var(--warning)_80%,var(--foreground))]",
         muted: "bg-muted text-muted-foreground",
