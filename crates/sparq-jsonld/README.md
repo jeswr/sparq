@@ -6,8 +6,8 @@ Context Processing, Expansion, Flattening, Compaction, Framing, and RDF
 
 [JSON-LD 1.1]: https://www.w3.org/TR/json-ld11/
 
-> Model: Opus 4.8 (Fable unavailable — flag for re-review when Fable returns).
-> Phase A scaffold of epic `sq-oy1f` (design record `research/jsonld-1.1-design.md`).
+> Model: Sonnet 4.6 (sq-90mu3) extending Opus 4.8 scaffold. Flag for re-review with Fable.
+> Epic `sq-oy1f` (design record `research/jsonld-1.1-design.md`).
 
 ## 🚀 Quickstart
 
@@ -58,16 +58,22 @@ anywhere.
 
 ### Build-out status
 
-The `Json` AST, error registry, options, and loader trait ship today, alongside the
-**Context Processing** foundation (`context`) and the document-level **Expansion
-Algorithm** (`expand::expand`) — Value Expansion, scoped (property/type) contexts,
-`@index`/`@id`/`@type`/`@language`/`@graph` container maps, `@nest`, `@reverse`,
-`@included`, `@json` literals, keyword aliases, and the drop-null + array-normalisation
-rules — raising the exact spec error codes and threading `frameExpansion`. The
-remaining modules (`flatten`, `compact`, `frame`, `from_rdf`, `to_rdf`, `api`) are
-documented stubs, filled by dependency-ordered follow-on beads; so are the
-compaction-side companions of context processing (inverse context, IRI compaction) and
-the conformance-lane switch to the normative document-level expand oracle. The crate is
+Shipped: `Json` AST, error registry, options, loader trait, **Context Processing**
+(`context`), and document-level **Expansion** (`expand::expand`) — scoped contexts,
+container maps, `@nest`, `@reverse`, `@included`, `@json`, keyword aliases (beads
+`sq-oy1f.24`/`sq-oy1f.25`). Bead `sq-90mu3` adds the compaction-side companions:
+
+- **Inverse Context Creation** (`InverseContext` / `ActiveContext::inverse_context`)
+  — §4.3: maps every IRI to the best term per (container, type/language), tie-broken
+  shortest-first then lexicographic.
+- **IRI Compaction** (`compact_iri`) — §7.1: keyword aliases, term lookup via inverse
+  context, vocab-relative suffix, `prefix:suffix` compact IRIs, base-relative paths.
+- **Term Selection** (internal to `context::inverse`) — §7.2: the container ×
+  preferred-value walk, consumed by `compact_iri` and by the document Compaction
+  Algorithm (bead `sq-oy1f.27`, not yet landed).
+
+The remaining modules (`flatten`, `compact`, `frame`, `from_rdf`, `to_rdf`, `api`) are
+documented stubs, filled by dependency-ordered follow-on beads. The crate is
 `publish = false` until the pipeline is real.
 
 ## 📚 Learn more
