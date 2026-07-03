@@ -26,6 +26,15 @@
 //!   cargo test -p sparq-engine --features service --test service_stream_bounded
 
 #![cfg(feature = "service")]
+// [OPUS-4.8] sq-my8wd.4 / cert gap GX-5: this is the ONLY first-party `unsafe` in
+// sparq-engine — a byte-counting `#[global_allocator]`, which a custom allocator
+// unavoidably requires (the `GlobalAlloc` trait is `unsafe` by definition and there is
+// no safe substitute for a deterministic thread-local allocation counter). The engine
+// LIBRARY stays `#![forbid(unsafe_code)]`; the allocator is confined to this one
+// integration-test binary and each site carries a `// SAFETY:` argument, mechanically
+// enforced here by `clippy::undocumented_unsafe_blocks` (mirroring the register's
+// 5 unsafe-bearing lib crates) and registered in `compliance/memsafety/unsafe-register.md`.
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -64,7 +73,17 @@ fn add(d: isize) {
 
 struct Counting;
 
+// SAFETY: every method forwards its call VERBATIM to the process `System` allocator
+// with the identical `Layout`/pointer arguments it received, so all of `GlobalAlloc`'s
+// safety obligations are discharged by `System`'s own (correct) implementation. The
+// wrapper adds nothing unsound: it only reads `layout.size()`/`new_size` (always valid
+// `usize` reads) and updates a thread-local `Cell<isize>` counter; no pointer that
+// `System` returns is ever dereferenced, retained, or aliased here. `System` is
+// zero-sized, so `Counting` is a valid stand-in global allocator. [OPUS-4.8]
 unsafe impl GlobalAlloc for Counting {
+    // SAFETY: forwards to `System.alloc(layout)` unchanged — the caller's `layout`
+    // validity contract (non-zero size, valid align) is passed straight through, and
+    // only the returned pointer's nullness is inspected before recording the size.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let p = System.alloc(layout);
         if !p.is_null() {
@@ -72,10 +91,18 @@ unsafe impl GlobalAlloc for Counting {
         }
         p
     }
+    // SAFETY: forwards `ptr`/`layout` unchanged to `System.dealloc`. The caller
+    // guarantees `ptr` was returned by a previous `alloc`/`realloc` of THIS allocator
+    // with this same `layout`; that holds because those methods above also forward to
+    // `System`, so the pointer is always a genuine `System` allocation.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         System.dealloc(ptr, layout);
         add(-(layout.size() as isize));
     }
+    // SAFETY: forwards `ptr`/`layout`/`new_size` unchanged to `System.realloc` — the
+    // caller's contract (valid `ptr` for `layout`, `new_size` non-zero and not
+    // overflowing when rounded up to `layout.align()`) is passed straight through, and
+    // only the returned pointer's nullness is inspected before recording the delta.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let p = System.realloc(ptr, layout, new_size);
         if !p.is_null() {
