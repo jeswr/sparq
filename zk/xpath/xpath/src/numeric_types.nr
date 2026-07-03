@@ -365,7 +365,7 @@ fn f32_denorm_leading_bit(v: u32) -> u64 {
 /// Get the common type for two numeric types according to XPath promotion rules
 /// Returns the type that both operands should be promoted to
 pub fn get_common_type(t1: NumericType, t2: NumericType) -> NumericType {
-    // XPath 2.0 F&O Section 17.1.4 numeric type promotion hierarchy:
+    // XPath 2.0 F&O Section 6.2 / Appendix B.1 numeric type promotion hierarchy:
     //   xs:integer <: xs:decimal -> xs:float -> xs:double
     // When both operands are the same type, that type is returned.
     // When mixing: promote to the least-general common type.
@@ -513,7 +513,8 @@ pub fn abs_double(a: XsdDouble) -> XsdDouble {
 // ============================================================================
 
 /// Compare integer to double for equality.
-/// Promotes integer to double using exact i64->f64 conversion. [SONNET-4.6]
+/// Promotes integer to double using IEEE 754 i64->f64 conversion: exact for |n| <= 2^53,
+/// correctly-rounded (round-to-nearest-ties-even) beyond. [SONNET-4.6]
 pub fn compare_int_double_eq(a: i64, b: XsdDouble) -> bool {
     let a_double = XsdDouble::from_i64(a);
     numeric_equal_double(a_double, b)
@@ -634,7 +635,8 @@ pub fn compare_double_float_ge(a: XsdDouble, b: XsdFloat) -> bool {
 }
 
 /// Compare integer to float for equality.
-/// Promotes integer to float using exact i64->f32 conversion. [SONNET-4.6]
+/// Promotes integer to float using IEEE 754 i64->f32 conversion: exact for |n| <= 2^24,
+/// correctly-rounded (round-to-nearest-ties-even) beyond. [SONNET-4.6]
 pub fn compare_int_float_eq(a: i64, b: XsdFloat) -> bool {
     let a_float = XsdFloat::from_i64(a);
     numeric_equal_float(a_float, b)

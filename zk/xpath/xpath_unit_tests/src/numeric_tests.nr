@@ -903,3 +903,40 @@ fn test_from_float_large_denorm_mantissa() {
     let expected = XsdDouble::from_bits(0x37FFFFFF80000000);
     assert(numeric_equal_double(promoted, expected));
 }
+
+/// Largest f32 denormal: bits 0x007FFFFF, all 23 mantissa bits set.
+/// This exercises k=22 (the first branch of f32_denorm_leading_bit).
+/// Derivation:
+///   mant32 = 0x7FFFFF, bit 22 (0x400000) is set -> k = 22
+///   lower  = 0x7FFFFF ^ 0x400000 = 0x3FFFFF
+///   f64 biased exp = 22 + 874 = 896 = 0x380
+///   f64 mant = 0x3FFFFF << 30 = 0x000FFFFFC0000000
+///   f64 bits = 0x3800000000000000 | 0x000FFFFFC0000000
+///            = 0x380FFFFFC0000000
+/// Mutation guard: changing the k=22 branch to return 21 gives wrong exp+mant,
+/// causing this assertion to fail. [SONNET-4.6]
+#[test]
+fn test_from_float_largest_denorm_k22() {
+    let f32_denorm = XsdFloat::from_bits(0x007FFFFF); // largest f32 denormal
+    let promoted = XsdDouble::from_float(f32_denorm);
+    let expected = XsdDouble::from_bits(0x380FFFFFC0000000);
+    assert(numeric_equal_double(promoted, expected));
+}
+
+/// Denormal f32 with mantissa 0x100001 (bits 20 and 0 set).
+/// This exercises k=20 (bit 20 is the highest set bit).
+/// Derivation:
+///   mant32 = 0x100001, bits 22 and 21 are clear -> k = 20
+///   lower  = 0x100001 ^ 0x100000 = 0x000001
+///   f64 biased exp = 20 + 874 = 894 = 0x37E
+///   f64 mant = 0x000001 << 32 = 0x0000000100000000
+///   f64 bits = 0x37E0000000000000 | 0x0000000100000000
+///            = 0x37E0000100000000
+/// Value check: (2^20 + 1) * 2^-149 = 2^-129 + 2^-149. [SONNET-4.6]
+#[test]
+fn test_from_float_denorm_k20() {
+    let f32_denorm = XsdFloat::from_bits(0x00100001); // mant = 0x100001, k=20
+    let promoted = XsdDouble::from_float(f32_denorm);
+    let expected = XsdDouble::from_bits(0x37E0000100000000);
+    assert(numeric_equal_double(promoted, expected));
+}
