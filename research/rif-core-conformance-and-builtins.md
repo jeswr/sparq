@@ -200,8 +200,8 @@ tiny additive blocks — rebase-trivial, but the beads note them.
   production actions, function symbols, aggregation remain excluded by dialect.
 - **No "complete RIF-DTB builtins" claim** — §3.2 is the deferral ledger; the
   conformance arm's skip taxonomy keeps the incompleteness measurable per run.
-- **`integer-divide`/`mod`/`matches` are deferred *because mapping them would be
-  unsound*** (sign-semantics and regex-dialect mismatches) — this record is the
+- **`integer-divide`/`mod`/`matches` are deferred _because mapping them would be
+  unsound_** (sign-semantics and regex-dialect mismatches) — this record is the
   citable argument.
 - **B1 is behaviour-neutral or it does not land** — floors byte-identical, with
   reasoned non-adoption as the honest fallback outcome.
