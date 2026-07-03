@@ -88,8 +88,11 @@ const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langSt
 /// Declarative single-table for the D-entailment datatype map.
 ///
 /// Each entry is `(xsd_local_name, has_value_mapping)`.  A `true` flag means this
-/// module has a complete, sound value mapping for the datatype (i.e. `d_value_key`
-/// will return `Some` for every well-formed lexical form of that type).
+/// module has a **sound** value mapping for the datatype — `d_value_key` never
+/// accepts an ill-formed lexical form, but some entries are intentionally
+/// incomplete (e.g. `Name`/`NCName`/`NMTOKEN` reject well-formed non-ASCII input
+/// by design; `anyURI` applies similar restrictions).  See the per-type fn docs
+/// for the precise contract of each entry.
 ///
 /// This table is the single source of truth for `Recognized::standard()` and
 /// `has_value_mapping()` — add a datatype here to enroll it in BOTH.  The key
@@ -701,16 +704,23 @@ fn hex_nibble(b: u8) -> Option<u8> {
 /// Decode an `xsd:base64Binary` lexical form to a byte sequence.
 ///
 /// XSD 1.1 §3.3.16 allows embedded whitespace in the lexical form; this function
-/// strips all ASCII whitespace before decoding (decision: ACCEPT whitespace-laden
-/// forms, consistent with the XSD spec's explicit allowance).
+/// strips XML S characters (SP/TAB/CR/LF — the four characters in the XML 1.0
+/// production `S`) before decoding.  Non-XML whitespace (VT 0x0B, FF 0x0C, …)
+/// is NOT stripped and causes the form to be rejected as ill-formed, per XSD 1.1
+/// which inherits the XML S definition.
 ///
 /// The cleaned form must be a multiple of 4 characters from the base64 alphabet
 /// (`A-Z`, `a-z`, `0-9`, `+`, `/`) with `=` padding. Returns `None` for ill-formed
 /// input.
 /// [SONNET-4.6] sq-pbz04.6.2.
 fn decode_base64_binary(lex: &str) -> Option<Vec<u8>> {
-    // Strip embedded whitespace (XSD 1.1 §3.3.16 explicitly allows it).
-    let cleaned: Vec<u8> = lex.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    // Strip XML S characters only (SP/TAB/CR/LF per XML 1.0 production S).
+    // `is_ascii_whitespace()` would also strip VT (0x0B) and FF (0x0C), which
+    // are NOT XML whitespace; those must be rejected as ill-formed. [SONNET-4.6]
+    let cleaned: Vec<u8> = lex
+        .bytes()
+        .filter(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+        .collect();
     if !cleaned.len().is_multiple_of(4) {
         return None;
     }
@@ -1222,10 +1232,17 @@ mod tests {
             d_value_key("", &format!("{}base64Binary", XSD)).is_some(),
             "empty base64Binary is valid (0 octets)"
         );
-        // Embedded whitespace allowed (XSD 1.1 §3.3.16)
+        // Embedded XML-S whitespace (SP/TAB/CR/LF) is allowed (XSD 1.1 §3.3.16)
         assert!(
             d_value_key("YQ ==", &format!("{}base64Binary", XSD)).is_some(),
-            "embedded whitespace is accepted in base64Binary lexical form"
+            "embedded SP is accepted in base64Binary lexical form"
+        );
+        // Non-XML whitespace (FF 0x0C) is NOT XML S and must cause rejection.
+        // MUTATION CHECK: revert the filter to is_ascii_whitespace() → this assert
+        // goes RED because FF is then stripped and "YQ==" is accepted. [SONNET-4.6]
+        assert!(
+            d_value_key("YQ\x0c==", &format!("{}base64Binary", XSD)).is_none(),
+            "form feed (0x0C) is not XML whitespace — must be rejected as ill-formed"
         );
         // Invalid: not a multiple of 4 after stripping whitespace
         assert!(
