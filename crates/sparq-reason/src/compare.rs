@@ -22,8 +22,10 @@
 //! and same-other-XSD lexically), then lexical string fallback; triple terms component-wise
 //! recursively. Every observation hook mirrors the engine's `Value` impl over the SAME
 //! shared machinery (`Timeline`, the substrate `Num`/`Dec` tower, `parse_xsd_f64`), and the
-//! parity is pinned byte-for-byte against a REAL engine `ORDER BY` over the same
-//! materialised closure by `tests/compare_parity.rs`.
+//! full-multiset parity is pinned against a REAL engine `ORDER BY` over the same
+//! materialised closure by `tests/compare_parity.rs`; the `exact_cmp` collapse-recheck
+//! for distinct integers beyond 2^53 is pinned by the unit test
+//! `exact_recheck_orders_big_integers_beyond_2_53`.
 //!
 //! # Zero-overhead + behaviour-neutrality
 //!
