@@ -46,7 +46,9 @@ Four seams define the shared surface:
 yet in consumption*. The engine has migrated onto all four (it pulls
 `numeric`+`join`+`compare` and implements `CompareTerm` for its `Value`); the
 reasoners have adopted almost none — the only reasoner consumer today is the
-RDFS static predicate join (`sparq-reason/src/substrate_join.rs`, rdfs2/3/7);
+RDFS static predicate join (`sparq-reason/src/substrate_join.rs`, rdfs2/3/7 — plus
+the rdfs9 type join since the sq-pbz04.1.1 disposition; only the PropExpand
+orientation-swap branch stays hand-rolled there, documented as permanent);
 on the stream side, `sparq-rsp` now drives `join::delta::DeltaTable` + `rows`
 for its `EvalMode::Delta`/`Snapshot` consecutive-window diff
 (`sparq-rsp/src/eval.rs`, sq-2n1q3.4 [FABLE-5] — the windowed ISTREAM/DSTREAM

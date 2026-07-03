@@ -1,7 +1,8 @@
 //! [OPUS-4.8] sq-yk6or (epic sq-pbz04, THE SUBSTRATE PAYOFF) — drive the SHARED
 //! [`sparq_substrate::join`] hash-join kernels for the RDFS single-pass predicate join
-//! (rdfs2 / rdfs3 / rdfs7), in place of the hand-rolled [`FxHashMap`](rustc_hash::FxHashMap)
-//! adjacency probe in [`crate::rdfs::emit_consequences`].
+//! (rdfs2 / rdfs3 / rdfs7) and — [FABLE-5] sq-pbz04.1.1 — the `rdf:type`/rdfs9
+//! subclass-typing join, in place of the hand-rolled [`FxHashMap`](rustc_hash::FxHashMap)
+//! adjacency probes in [`crate::rdfs::emit_consequences`].
 //!
 //! This is the end-to-end proof of the maintainer's "share join logic across the engine AND
 //! the reasoners" goal (`research/shared-eval-substrate.md`, Phase 5): the SPARQL engine's
@@ -17,34 +18,55 @@
 //! `(s, p, o)` joins, on its predicate `p`, against the already-saturated schema-closure
 //! relations:
 //!
-//! | rule  | build relation (key = its `p` column) | conclusion           |
-//! |-------|----------------------------------------|----------------------|
-//! | rdfs7 | `sp_closure`: `(p, q)`  (super-property)| `(s, q, o)`         |
-//! | rdfs2 | `dom_full`:   `(p, c)`  (domain class)  | `(s, type, c)`      |
-//! | rdfs3 | `rng_full`:   `(p, c)`  (range class)   | `(o, type, c)`      |
+//! | rule  | build relation (key = col 0)            | probe key (ABox col) | conclusion      |
+//! |-------|------------------------------------------|----------------------|-----------------|
+//! | rdfs7 | `sp_closure`: `(p, q)`  (super-property) | predicate (col 1)    | `(s, q, o)`     |
+//! | rdfs2 | `dom_full`:   `(p, c)`  (domain class)   | predicate (col 1)    | `(s, type, c)`  |
+//! | rdfs3 | `rng_full`:   `(p, c)`  (range class)    | predicate (col 1)    | `(o, type, c)`  |
+//! | rdfs9 | `sc_closure`: `(c, d)`  (super-class)    | object (col 2)       | `(s, type, d)`  |
 //!
-//! So we build ONE substrate hash table per schema relation (key = the predicate column) and
-//! probe it with the ABox triples (key = the triple's predicate column). The kernel does the
-//! keyed lookup + per-match row combine; this module reshapes the combined row into the rule's
-//! conclusion triple (a fixed column permutation — exactly the thin layout adapter the engine
-//! wraps the kernels with).
+//! So we build ONE substrate hash table per schema relation and probe it with the ABox
+//! triples — the rdfs2/3/7 sweep keyed on the triple's predicate column, the rdfs9 sweep
+//! keyed on the type-assertion's object column. The kernel does the keyed lookup + per-match
+//! row combine; this module reshapes the combined row into the rule's conclusion triple (a
+//! fixed column permutation — exactly the thin layout adapter the engine wraps the kernels
+//! with).
 //!
 //! The result is the SAME emitted multiset as [`crate::rdfs::emit_consequences`]'s hand-rolled
 //! path — only the join machinery differs. Verified byte-for-byte by
 //! [`crate::rdfs::tests`]' equivalence test over both paths.
 //!
-//! # Join shapes that genuinely cannot reuse the kernel (kept on the hand-rolled path)
+//! # Disposition of the residual branches ([FABLE-5] sq-pbz04.1.1)
 //!
-//! - **The `rdf:type` / subclass branch (`rdfs9`)** and the **`PropExpand` predicate-rewrite
-//!   branch** (inverseOf / Symmetric / equivalentProperty orientation-swap). These are still a
-//!   predicate-keyed lookup, but the orientation swap and the `type`-object key make the
-//!   combine non-uniform per match; they stay on the direct adjacency path. Folding them in
-//!   would not change *what* is emitted, only add reshape cost, so they are out of scope for
-//!   this slice and noted here (and tracked for a follow-up).
+//! sq-yk6or left two `emit_consequences` branches hand-rolled, lumping them together as a
+//! "non-uniform combine". The per-branch disposition splits them:
+//!
+//! - **The `rdf:type` / subclass branch (`rdfs9`): ADOPTED** — [`sweep_type_join`]. On
+//!   inspection it is a UNIFORM join after all: build = the saturated subclass closure
+//!   `(c, d)` keyed on `c`, probe = the type assertions keyed on their OBJECT column, and
+//!   the per-match combine is the FIXED permutation `(s, rdf:type, d)`. The "swapped" key
+//!   orientation is only a different probe column index, which [`JoinKeys`]'
+//!   `(build_col, probe_col)` pairs express by construction — same kernels, same thin
+//!   layout adapter as rdfs2/3/7.
+//! - **The `PropExpand` predicate-rewrite branch (inverseOf / Symmetric /
+//!   equivalentProperty): RETAINED hand-rolled, permanently.** Its per-match combine is
+//!   DATA-DEPENDENT, not a fixed permutation: each matched `(r, swapped)` build row selects
+//!   its own output orientation (`swapped` transposes subject/object), and each match then
+//!   fans out through a SECOND join — the domain/range typing of the DERIVED predicate `r`,
+//!   a column that exists only in the first join's output. The kernel emits exactly one
+//!   fixed-layout row per match, so adoption would need swap-partitioned build tables plus a
+//!   cascaded second probe that must also suppress the subPropertyOf re-rewrite
+//!   (`PropExpand` is already the closure over sp/inverse/symmetric composition — re-probing
+//!   `sp_closure` over derived rows would duplicate emissions and break the sweep-level
+//!   multiset equivalence). That machinery would rebuild the rule structure AROUND the
+//!   kernel to share only its innermost map lookup: all reshape cost, no shared logic. The
+//!   oriented emission is pinned by `rdfs::tests` (the inverse/symmetric fixtures and
+//!   `prop_expand_inverse_types_through_oriented_domain`), so any future adoption attempt
+//!   inherits a red/green harness.
 //! - **The OWL-RL semi-naive fixpoint** (`owl.rs`): a delta-driven `Δ ⋈ full ∪ full ⋈ Δ` join
 //!   with union-find `sameAs` canonicalisation. Genuinely a different (incremental, mutating)
-//!   join shape than the substrate's static `&[Row]` build/probe kernel; adopting it is a
-//!   separate, larger slice. Out of scope here; the RDFS path is the clean, isolated win.
+//!   join shape than the substrate's static `&[Row]` build/probe kernel; its migration onto
+//!   the `join::delta` seam is a separate slice (sq-qonbz.2).
 
 use sparq_core::dict::Id;
 use sparq_substrate::join::{self as sjoin, JoinKeys, NoBudget};
@@ -72,12 +94,15 @@ fn schema_rows(map: &rustc_hash::FxHashMap<Id, Vec<Id>>) -> Vec<Row> {
     rows
 }
 
-/// The [`JoinKeys`] for a predicate-keyed RDFS join: build column 0 (the schema relation's
-/// predicate) equi-joins probe column 1 (the asserted triple's predicate). `right_only` is
-/// empty because this module reshapes the combined row itself (the conclusion is a fixed
-/// permutation, not a column append), matching the engine's layout-adapter pattern.
-fn predicate_keys() -> JoinKeys {
-    JoinKeys { key_cols: vec![(0, 1)], right_only: Vec::new() }
+/// The [`JoinKeys`] for an RDFS join keyed on ONE ABox probe column: build column 0 (the
+/// schema relation's key — the predicate for rdfs2/3/7, the class for rdfs9) equi-joins the
+/// given probe column. `right_only` is empty because this module reshapes the combined row
+/// itself (the conclusion is a fixed permutation, not a column append), matching the
+/// engine's layout-adapter pattern. [FABLE-5] sq-pbz04.1.1: generalised from the
+/// predicate-only (col 1) form so the rdfs9 sweep can key on the object column (col 2) —
+/// the key orientation is plain index data to the kernel.
+fn keys_probing(probe_col: usize) -> JoinKeys {
+    JoinKeys { key_cols: vec![(0, probe_col)], right_only: Vec::new() }
 }
 
 /// The substrate-driven equivalent of the rdfs2/3/7 portion of
@@ -85,9 +110,9 @@ fn predicate_keys() -> JoinKeys {
 /// [`sjoin::build_table`] per schema relation (sp/dom/rng), then drives [`sjoin::probe_emit`]
 /// per matching pair via [`sjoin::hash_probe_serial`] with the reasoner's [`ReasonBudget`].
 ///
-/// The `type` / subclass (`rdfs9`) branch and the `PropExpand` predicate-rewrite branch are
-/// NOT computed here (see the module doc) — the caller runs those on the hand-rolled path.
-/// This function emits EXACTLY the triples the hand-rolled `else`/non-`type` branch of
+/// The `type` / subclass (`rdfs9`) branch ([`sweep_type_join`]) and the `PropExpand`
+/// predicate-rewrite branch (retained hand-rolled — see the module doc) are NOT computed
+/// here. This function emits EXACTLY the triples the hand-rolled `else`/non-`type` branch of
 /// `emit_consequences` emits for the same inputs (the equivalence is asserted by a test).
 pub(crate) fn sweep_predicate_join(
     asserted: &[[Id; 3]],
@@ -97,7 +122,8 @@ pub(crate) fn sweep_predicate_join(
     rng_full: &rustc_hash::FxHashMap<Id, Vec<Id>>,
     out: &mut Vec<[Id; 3]>,
 ) {
-    let keys = predicate_keys();
+    // rdfs2/3/7 probe on the asserted triple's PREDICATE column.
+    let keys = keys_probing(1);
     // The ABox probe rows: the asserted triples as `[s, p, o]` substrate rows. Column 1 (`p`)
     // is the probe key — exactly the column `emit_consequences` keys its `.get(&p)` lookups on.
     let probe: Vec<Row> = asserted.iter().map(|t| Row::from_slice(t)).collect();
@@ -116,6 +142,33 @@ pub(crate) fn sweep_predicate_join(
     let rng_rows = schema_rows(rng_full);
     let rng_tables = vec![sjoin::build_table(&rng_rows, &keys)];
     probe_into(&probe, &keys, &rng_rows, &rng_tables, out, |b, p| [p[2], ty, b[1]]);
+}
+
+/// [FABLE-5] sq-pbz04.1.1 — the substrate-driven equivalent of the `rdf:type`/rdfs9 branch
+/// of [`crate::rdfs::emit_consequences`] over the type-assertion partition:
+/// `(s, rdf:type, o), (o, subClassOf*, d) ⊢ (s, rdf:type, d)`. Builds ONE shared
+/// [`sjoin::build_table`] over the saturated subclass closure (`sc_closure` as `[c, d]`
+/// rows, keyed on `c`) and probes it with the type assertions keyed on their OBJECT column
+/// — the same kernels and layout-adapter shape as [`sweep_predicate_join`], with a
+/// different probe column (the join's "orientation" is plain index data to [`JoinKeys`]).
+///
+/// `typed` MUST be the `p == rdf:type` partition of the asserted triples (the caller
+/// filters; `emit_consequences` suppresses its hand-rolled rdfs9 arm under this feature).
+/// Emits EXACTLY the triples that arm emits for the same inputs — asserted by
+/// `rdfs::tests::substrate_join_emits_identical_type_branch`.
+pub(crate) fn sweep_type_join(
+    typed: &[[Id; 3]],
+    sc_closure: &rustc_hash::FxHashMap<Id, Vec<Id>>,
+    out: &mut Vec<[Id; 3]>,
+) {
+    // rdfs9 probe on the type assertion's OBJECT column (the asserted class).
+    let keys = keys_probing(2);
+    let probe: Vec<Row> = typed.iter().map(|t| Row::from_slice(t)).collect();
+    let sc_rows = schema_rows(sc_closure);
+    let sc_tables = vec![sjoin::build_table(&sc_rows, &keys)];
+    // Emit `(s, type, d)`: probe row `[s, type, o]`, matched build row `[o, d]`. `p[1]` IS
+    // `rdf:type` for every probe row (the caller's partition), so the conclusion reuses it.
+    probe_into(&probe, &keys, &sc_rows, &sc_tables, out, |b, p| [p[0], p[1], b[1]]);
 }
 
 /// Drive [`sjoin::hash_probe_serial`] (the shared probe loop + [`ReasonBudget`] poll) over the

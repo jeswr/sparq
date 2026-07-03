@@ -17,3 +17,14 @@
   crate: "sparq-reason"
   features: "explain"
   test: true
+
+# [FABLE-5] sq-pbz04.1.1: the shared substrate-join sweep (the rdfs2/3/7 predicate join,
+# sq-yk6or, + the rdfs9 type join). DISCOVERED GAP closed here: sq-yk6or (#1301) landed the
+# feature and its behaviour-neutrality equivalence tests but wired NO matrix leg, so
+# `substrate_join_emits_identical_plain_branch` ran in NO CI lane. This leg builds + tests +
+# clippies the feature-ON state (the per-branch equivalence tests + the whole-closure
+# byte-identity pin).
+- name: "sparq-reason (substrate-join)"
+  crate: "sparq-reason"
+  features: "substrate-join"
+  test: true

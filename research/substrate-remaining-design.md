@@ -169,6 +169,13 @@ Per implementing PR, in order of authority:
   residuals. The epic's exit criterion is *"every uniform join shape shared; residuals
   individually documented"* — not "zero hand-rolled loops". After sq-qonbz.2, the semi-naive
   fixpoint moves **off** that residual list; the orientation-swap branches remain on it.
+  *(Disposition update, sq-pbz04.1.1 [FABLE-5]: on per-branch inspection the rdf:type/rdfs9
+  branch turned out to be a UNIFORM join after all — an object-keyed probe with a fixed
+  permutation combine, expressible directly by `JoinKeys`' `(build_col, probe_col)` pairs —
+  and was ADOPTED (`sweep_type_join`), consistent with the exit criterion above. Only the
+  PropExpand branch remains on the residual list, now documented as permanent: its per-match
+  combine is data-dependent (the swap flag) and cascades into a second join on the derived
+  predicate. Rationale + pinning tests live in `substrate_join.rs` / `rdfs.rs`.)*
 - **sq-v5evr stays parked (P4) and is not a blocker.** The full `Value`/`LitKind` value-space
   hoist (equality + relational compare beyond the ordering already shared via `CompareTerm`)
   earns its keep only with a second concrete consumer — e.g. OWL-RL datatype rules or RIF

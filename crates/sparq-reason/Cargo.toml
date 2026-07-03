@@ -54,7 +54,9 @@ rif-core = []
 # [OPUS-4.8] sq-yk6or (epic sq-pbz04, THE SUBSTRATE PAYOFF) — OPT-IN: drive the SHARED
 # `sparq-substrate::join` hash-join kernels (the same `JoinKeys` + `build_table` + `probe_emit`
 # + generic `Budget` the SPARQL engine drives) for the RDFS single-pass predicate join
-# (rdfs2/3/7), instead of the hand-rolled `FxHashMap` adjacency probe. This proves the
+# (rdfs2/3/7) and — [FABLE-5] sq-pbz04.1.1 — the rdfs9 type join (object-keyed probe; only
+# the PropExpand orientation-swap branch stays hand-rolled, by documented disposition in
+# substrate_join.rs), instead of the hand-rolled `FxHashMap` adjacency probe. This proves the
 # maintainer's "share join logic across the engine AND the reasoners" goal end-to-end. The
 # materialised closure is BYTE-IDENTICAL — only the join machinery changes (the reasoner
 # supplies its OWN key projection + its OWN `Budget`, monomorphically, NO `Box<dyn>`).
