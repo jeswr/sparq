@@ -28,7 +28,12 @@
 // exists). The light site-e2e CI lane has no Rust toolchain to build it, so this whole spec SKIPS
 // when the bundle is absent and runs in full when present. Run after `npm run sync-wasm`:
 //   npx playwright install chromium && npm run test:e2e
-import { test, expect, type Page, type ConsoleMessage } from "@playwright/test";
+// [OPUS-4.8] sq-ymr2e.1 — runs under the shared hermetic + deterministic `test` (e2e/support):
+// the SHACL validator loads a same-origin wasm bundle and makes no external request, so the
+// hermetic network block is a no-op here and simply proves this spec is compatible with the
+// foundation fixture (research/web-gui-test-program.md §1 acceptance).
+import { test, expect } from "./support";
+import { type Page, type ConsoleMessage } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 

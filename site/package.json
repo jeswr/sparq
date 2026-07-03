@@ -18,7 +18,10 @@
     "start": "npx --yes serve out",
     "lint": "next lint",
     "test:unit": "node --import ./test-support/register-ts.mjs --test test/*.test.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:stress": "playwright test --repeat-each=5 --retries=0",
+    "test:e2e:grep-gate": "bash e2e/support/no-timeout-gate.sh",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@aztec/bb.js": "5.0.0-nightly.20260324",

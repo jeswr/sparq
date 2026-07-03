@@ -1,0 +1,6 @@
+{
+  "_fixture": "[OPUS-4.8] sq-ymr2e.1 — FAKE GitHub releases/latest 5xx / rate-limit body (the 'API error' variant). Served with HTTP 500 by the hermetic fixture so /download exercises its designed graceful degradation (buttons keep working latest/download hrefs even when the enrichment fetch fails).",
+  "message": "API rate limit exceeded",
+  "documentation_url": "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api",
+  "status": "500"
+}

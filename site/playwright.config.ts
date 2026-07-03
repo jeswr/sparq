@@ -4,6 +4,12 @@
 // drives a REAL browser against a REAL Next.js server so the "first proof pays no cold
 // start" claim is verified by an automated run, not just by code reasoning.
 //
+// [OPUS-4.8] sq-ymr2e.1 — this config is now also the base for the shared E2E foundation
+// (e2e/support/**): a determinism harness (frozen clock, seeded random, animations-off,
+// pinned viewport/dark/reduced-motion/UTC/en-US) and a hermetic-network fixture. The
+// determinism CONTEXT options live in `use` below; the per-page bits are auto-fixtures in
+// e2e/support/fixtures.ts. Design of record: research/web-gui-test-program.md §1.
+//
 // The server is `next dev` (NOT the static export): the ZK route is fully functional in
 // dev — it dynamic-imports @noir-lang/noir_js + @aztec/bb.js (real deps) and fetches the
 // committed circuit from public/zk/, none of which need the wasm-REPL/Typst prebuild
@@ -37,12 +43,26 @@ export default defineConfig({
   reporter: process.env.CI ? [["github"], ["list"]] : [["list"]],
   use: {
     baseURL: BASE_URL,
+    // trace on the first retry is CI telemetry: a pass-on-retry is a defect to fix, not a
+    // success (determinism doctrine §1.5).
     trace: "on-first-retry",
+    // [OPUS-4.8] sq-ymr2e.1 — DETERMINISM defaults that are CONTEXT options, so they apply to
+    // EVERY spec (migrated or not) with no per-spec change (research/web-gui-test-program.md §1):
+    // a pinned viewport, the site's dark-first colour scheme, reduced motion, and a fixed
+    // timezone/locale. Frozen clock + seeded random + animations-off are applied per-page by the
+    // support/ auto-fixtures (they need page.clock / addInitScript) — see e2e/support/determinism.ts.
+    viewport: { width: 1280, height: 720 },
+    colorScheme: "dark",
+    timezoneId: "UTC",
+    locale: "en-US",
+    // reducedMotion is a browser-context option in the test runner (not a top-level `use` key).
+    contextOptions: { reducedMotion: "reduce" },
   },
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      // Keep the pinned viewport at the project level too (device presets carry their own).
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 720 } },
     },
   ],
   webServer: {

@@ -130,6 +130,13 @@ function NavLink({
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = React.useState(false);
+  // [OPUS-4.8] sq-ymr2e.1 — post-hydration readiness marker for E2E. Set in a mount effect, so
+  // `[data-app-ready]` appears only after React has hydrated the shell — and, because the attribute
+  // is applied on the RE-RENDER after the passive-effect batch, strictly after the wrapping
+  // <CommandPalette>'s global ⌘K keydown effect has been registered. The E2E navigation barrier
+  // waits on this instead of a fixed sleep (site/e2e/support/app-ready.ts); no user-facing effect.
+  const [appReady, setAppReady] = React.useState(false);
+  React.useEffect(() => setAppReady(true), []);
   const isActive = useIsActive();
 
   return (
@@ -140,7 +147,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     // and the workbench (register side) share one operational-command registry.
     <CommandPalette>
       <PaletteCommandsProvider>
-      <div className="flex min-h-svh flex-col">
+      <div
+        className="flex min-h-svh flex-col"
+        data-app-ready={appReady ? "true" : undefined}
+      >
         {/* Sticky slim top bar (h-16, backdrop blur) — the ONE navigation. */}
         <header className="sticky top-0 z-30 flex h-16 items-center gap-2 border-b bg-background/90 px-4 backdrop-blur md:px-6">
           {/* Mobile hamburger → left Sheet drawer with the SAME slim links (no full tree). */}
