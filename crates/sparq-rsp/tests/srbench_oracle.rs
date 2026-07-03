@@ -457,10 +457,13 @@ fn axis_r2s_evalmode_crosscheck(tally: &mut Tally) {
                     r2s, mode
                 ),
             );
-            for i in 0..reference.len() {
+            // Use get() so a short `result` (regression) compares [] vs the
+            // reference window through tally rather than panicking on index.
+            // [SONNET-4.6] sq-2n1q3.1 robustness
+            for (i, ref_win) in reference.iter().enumerate() {
                 tally.eq(
-                    subjects(&result[i]),
-                    subjects(&reference[i]),
+                    result.get(i).map(|w| subjects(w)).unwrap_or_default(),
+                    subjects(ref_win),
                     &format!(
                         "r2s {:?}/{:?} w{}: rows match PersistentDict reference",
                         r2s, mode, i
@@ -545,9 +548,16 @@ fn axis_count_window_evalmode_crosscheck(tally: &mut Tally) {
             expected_counts.len(),
             &format!("count window/{:?}: exactly {} slots reported", mode, expected_counts.len()),
         );
+        // Use get() so a short `r` (regression with fewer slots) records -1 vs
+        // want through tally rather than panicking on index.
+        // [SONNET-4.6] sq-2n1q3.1 robustness
         for (i, &want) in expected_counts.iter().enumerate() {
-            let got =
-                r[i].rows.first().and_then(|row| row.first()).and_then(count_val).unwrap_or(-1);
+            let got = r
+                .get(i)
+                .and_then(|win| win.rows.first())
+                .and_then(|row| row.first())
+                .and_then(count_val)
+                .unwrap_or(-1);
             tally.eq(
                 got,
                 want,
