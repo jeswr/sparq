@@ -18,12 +18,22 @@
 #   filterset — nextest filterset ("package(a) + package(b)") for NARROWING the
 #               cross-crate bulk shards (they are never skipped, design §5.2).
 #
-# SHADOW MODE (design §6.4 — the sq-fmx4u.5 rollout): DEFAULT-ON. Until the repo
-# variable CI_SELECT_MODE is set to the literal string "enforce", the selector runs
-# with --shadow: it computes + reports the would-be selection in the step summary
-# but emits mode=shadow, so every guard's `mode != 'selected'` disjunct is true and
-# NOTHING is skipped. Fail-safe by construction: an unset/typo'd variable means
-# shadow (full matrix). Bead sq-fmx4u.5 flips enforcement after the shadow window.
+# ENFORCE MODE (design §6 — the sq-fmx4u.5 rollout, ENFORCEMENT FLIPPED). [FABLE-5]
+# Enforce is now the DEFAULT: the selector's mode=selected skips are HONORED, so a
+# not-affected crate's wide-lane tests/benchmarks are actually SKIPPED. Two overrides,
+# both fail toward RUNNING MORE:
+#   * ci-full PR label => the selector runs with --full (mode=full, nothing skipped);
+#     the calling workflows react to labeled/unlabeled so toggling re-evaluates.
+#   * CI_SELECT_MODE repo variable == the literal "shadow" => report-only rollback
+#     escape hatch (--shadow: compute + report the would-skip set, skip nothing).
+# Any other CI_SELECT_MODE value (incl. unset / "enforce") enforces. Fail-safe is
+# unaffected — ci_select.py returns mode=full for every §4.1 trigger (shared crate /
+# build file / .github/** / Cargo.lock / selector-self change) and for ANY internal
+# error, so enforce NEVER skips a test for an affected crate or its reverse-dep
+# closure. Safe per bead sq-fmx4u.4: the ruleset requires exactly one check
+# (ci-summary / gate), so a selection-skipped leg reports `skipped` (= satisfied) and
+# can never hang the merge queue. Nightly cron (ci.yml `schedule`) + the ci-full label
+# are the permanent backstops (design §6.1/§6.2).
 #
 # FAIL-CLOSED CONTRACT (design §4.3):
 #   * the selector traps ALL internal errors => mode=full, exit 0 (this job stays
@@ -86,16 +96,30 @@ jobs:
           # per design §3.1/P8). Exactly one pair is non-empty per event.
           BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
-          # The sq-fmx4u.5 enforcement flip: shadow (report-only) unless the repo
-          # variable CI_SELECT_MODE is exactly "enforce".
+          # [FABLE-5] sq-fmx4u.5 ENFORCEMENT FLIP: enforce is the DEFAULT now. The
+          # selector's mode=selected skips are HONORED unless CI_SELECT_MODE is set
+          # to the literal "shadow" (the report-only rollback escape hatch below).
           CI_SELECT_MODE: ${{ vars.CI_SELECT_MODE }}
+          # [FABLE-5] sq-fmx4u.5 ci-full label override (design §6.2): applying the
+          # `ci-full` label to a PR forces the FULL matrix (mode=full, nothing
+          # skipped); removing it re-selects. The calling workflows react to
+          # labeled/unlabeled PR events so a toggle re-runs this pre-job. On non-PR
+          # events there is no pull_request payload, so this evaluates false and the
+          # override is inert (non-PR events already resolve to full by construction).
+          CI_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-full') }}
         run: |
           set -euo pipefail
           args=(--event "$EVENT")
           case "$EVENT" in
             pull_request|merge_group) args+=(--base "$BASE" --head "$HEAD") ;;
           esac
-          if [ "${CI_SELECT_MODE:-}" != "enforce" ]; then
+          if [ "$CI_FULL_LABEL" = "true" ]; then
+            # ci-full label: force the full matrix regardless of mode (design §6.2).
+            args+=(--full)
+          elif [ "${CI_SELECT_MODE:-}" = "shadow" ]; then
+            # Report-only rollback escape hatch (design §6.4): set the repo variable
+            # CI_SELECT_MODE=shadow to compute + report the would-skip set while every
+            # job still runs. Any other value (incl. unset / "enforce") => enforce.
             args+=(--shadow)
           fi
           python3 scripts/ci_select.py "${args[@]}"

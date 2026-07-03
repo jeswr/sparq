@@ -83,8 +83,13 @@
 # the skips was never soundly observed. With select green (or absent — a
 # pre-selection sibling set), `skipped` stays non-failing exactly as before, and
 # a job that FAILED still fails the gate regardless (selection can never mask a
-# real failure). Selection ships SHADOW-first (report-only; enforcement flip is
-# bead sq-fmx4u.5 via the CI_SELECT_MODE repo variable).
+# real failure). [FABLE-5] sq-fmx4u.5: selection is now ENFORCED by default (the
+# shadow rollout is flipped) — a not-affected crate's lane reports `skipped`, which
+# the rule above counts as satisfied only under a successful select. This is safe
+# because the ruleset requires exactly one check (this `gate`); no per-leg name is
+# individually required, so a plain-skipped leg can never hang the merge queue
+# (verified in bead sq-fmx4u.4). The `ci-full` PR label + the nightly cron full run
+# are the permanent backstops; CI_SELECT_MODE=shadow is the report-only rollback.
 #
 # IMPLEMENTATION (sq-90cv4). [FABLE-5] The poll loop + verdict live in
 # scripts/ci_summary_gate.py (extracted from the previous inline bash so the

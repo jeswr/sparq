@@ -303,6 +303,46 @@ id 17688455, last updated 2026-07-02):
 6. **Transparency**: the per-PR step-summary (§5.1) makes every skip decision
    reviewable where reviewers already look.
 
+**§6 graduation note (bead sq-fmx4u.5, ENFORCEMENT FLIPPED 2026-07-03). [FABLE-5]**
+The shadow rollout is now flipped to **enforce by default** — a not-affected
+crate's wide-lane tests/benchmarks are actually skipped. This is the culmination
+of the epic and is proven-safe by bead sq-fmx4u.4: the live ruleset requires
+exactly one check (`ci-summary / gate`), so a selection-skipped leg reports
+`skipped` (= satisfied) and can never individually hang the merge queue. No
+ruleset change was needed. What landed:
+
+- **Enforce flip** (`.github/workflows/ci-select.yml`): `--shadow` is now added
+  *only* when the repo variable `CI_SELECT_MODE` is the literal `"shadow"` (the
+  report-only rollback escape hatch); any other value — including unset and
+  `"enforce"` — enforces. The pre-flip `!= "enforce" ⇒ --shadow` default is gone.
+- **`ci-full` label override** (safeguard 2): the select step computes
+  `CI_FULL_LABEL = contains(github.event.pull_request.labels.*.name, 'ci-full')`
+  and, when true, runs the selector with `--full` (mode=full, nothing skipped).
+  `ci.yml` + `feature-matrix.yml` now trigger on `pull_request:` types
+  `[opened, synchronize, reopened, labeled, unlabeled]`, so toggling the label
+  re-evaluates selection.
+- **Nightly full-matrix backstop** (safeguard 1): the existing `schedule` cron on
+  `ci.yml` resolves to `mode=full` by construction (a non-PR event carries no
+  diff), and a new `selection-backstop` job asserts that `mode=full` invariant
+  fail-loud on `schedule`/`workflow_dispatch` (it REDs if a scheduled run were
+  ever narrowed). `workflow_dispatch` (safeguard 3) is the ad-hoc full run.
+- **Fail-safe preserved** (non-negotiable): `ci_select.py` is unchanged — every
+  §4.1 trigger (shared crate / build file / `.github/**` / `Cargo.lock` /
+  selector-self change) and any internal error still return `mode=full`, so
+  enforce never skips a test for an affected crate or its reverse-dep closure.
+- **Tests** (`scripts/tests/`): `EnforceRolloutTests` (affected⇒RUNS,
+  not-affected⇒SKIPS via the exact shard-guard membership rule, ci-full⇒full,
+  nightly⇒full, fail-safe trigger⇒full, selector-error⇒full, a mutation check on
+  the quoted-needle guard) + wiring inspection (enforce-default, ci-full override,
+  label-toggle triggers, the nightly backstop job).
+
+**Deferred** (proceed-and-document): the §6.1 *selection-bug alarm* — auto-filing
+a P1 bead/issue that names the offending nightly job + the suspect PRs landed
+since the last green nightly — is a distinct, more involved correlation feature
+(it must cross-reference the per-PR selection summaries). The backstop itself
+(the full nightly run that reds the gate on any regression) is live now; the
+auto-alarm is tracked as a follow-up bead.
+
 ## 7. Firm positions (decision record)
 
 - **P1 — selector is stdlib-only Python** (`scripts/ci_select.py`), not a
@@ -333,7 +373,9 @@ id 17688455, last updated 2026-07-02):
   construction, and queue width is where the throughput pain concentrates.
 - **P9 — the SAFE list starts empty** and only audit-proven entries join it.
 - **P10 — enforce only after the shadow window** (§6.4); nightly full +
-  `ci-full` label remain permanent backstops.
+  `ci-full` label remain permanent backstops. *(sq-fmx4u.5, 2026-07-03:
+  ENFORCEMENT FLIPPED — enforce is now the default; `CI_SELECT_MODE=shadow` is the
+  report-only rollback escape hatch. See the §6 graduation note.)*
 
 ## 8. Implementation plan — child beads (disjoint)
 

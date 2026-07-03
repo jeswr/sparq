@@ -438,5 +438,130 @@ class RealMetadataShapeTests(unittest.TestCase):
         self.assertNotIn("sparq-parse", sel.affected)  # parse does not depend on geo
 
 
+class EnforceRolloutTests(unittest.TestCase):
+    """[FABLE-5] sq-fmx4u.5: the ENFORCE-mode rollout invariants — the selector
+    outputs the wide-lane skip guards consume once the shadow rollout is flipped
+    OFF (enforce is the default). Under enforce (no --shadow) the affected closure
+    is the RUN set: a crate in it RUNS, a crate absent from it is SKIPPED. Every
+    fail-safe path (§4.1 triggers, the ci-full override, non-PR events) still
+    resolves to mode=full even without shadow — enforce never weakens fail-safe."""
+
+    def _run_main(self, argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cs.main(argv)
+        return code, json.loads(buf.getvalue())
+
+    def _write(self, text, suffix=".json"):
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    @staticmethod
+    def _guard_runs(affected, crate):
+        """Exact mirror of the ci.yml shard skip guard's membership test:
+            case "$SELECT_AFFECTED" in *"\\"$SHARD_CRATE\\""*) run ;; *) skip ;;
+        i.e. the QUOTED needle '"<crate>"' must be a substring of the affected JSON.
+        `affected` is the parsed list; we re-serialise with json.dumps exactly as
+        ci_select.py writes the $GITHUB_OUTPUT `affected=` line the guard reads."""
+        return f'"{crate}"' in json.dumps(affected)
+
+    def _selected(self, changed_line):
+        meta = self._write(json.dumps(_synthetic_meta()))
+        changed = self._write(changed_line, suffix=".txt")
+        # No --shadow: this is ENFORCE (the sq-fmx4u.5 default).
+        code, obj = self._run_main(["--metadata-file", meta, "--changed-file", changed,
+                                    "--repo-root", ROOT])
+        self.assertEqual(code, 0)
+        return obj
+
+    def test_enforce_affected_crate_runs(self):
+        # An `engine` change under enforce => mode=selected; engine + its dependent
+        # `app` are in the closure, so the shard guard RUNS both.
+        obj = self._selected("crates/engine/src/lib.rs\n")
+        self.assertEqual(obj["mode"], "selected")
+        self.assertTrue(self._guard_runs(obj["affected"], "engine"), "affected -> RUNS")
+        self.assertTrue(self._guard_runs(obj["affected"], "app"), "dependent -> RUNS")
+
+    def test_enforce_not_affected_crate_skips(self):
+        # An `app` change under enforce => `app` is a reverse-graph leaf, so nothing
+        # else is affected; `core`/`parse`/`engine` are NOT in the closure and the
+        # shard guard SKIPS them (exit 0 — gate-satisfied via `skipped`, no hang;
+        # the merge-queue safety is pinned by TestRequiredCheckAnchor / sq-fmx4u.4).
+        obj = self._selected("crates/app/src/lib.rs\n")
+        self.assertEqual(obj["mode"], "selected")
+        self.assertEqual(obj["affected"], ["app"])
+        for skipped in ("core", "parse", "engine"):
+            self.assertFalse(self._guard_runs(obj["affected"], skipped),
+                             f"{skipped} not affected -> shard guard SKIPS it")
+
+    def test_enforce_ci_full_label_path_is_full(self):
+        # The `ci-full` label maps to ci_select.py --full: mode=full even without
+        # --shadow, and every member is in `affected` (everything runs).
+        meta = self._write(json.dumps(_synthetic_meta()))
+        code, obj = self._run_main(["--full", "--metadata-file", meta, "--repo-root", ROOT])
+        self.assertEqual(code, 0)
+        self.assertEqual(obj["mode"], "full")
+        self.assertEqual(obj["affected"], ALL_MEMBERS)
+
+    def test_enforce_nightly_schedule_is_full(self):
+        # The nightly full-matrix backstop: a schedule event carries no PR diff, so
+        # the selector returns full even without --shadow.
+        meta = self._write(json.dumps(_synthetic_meta()))
+        code, obj = self._run_main(["--event", "schedule", "--metadata-file", meta,
+                                    "--repo-root", ROOT])
+        self.assertEqual(code, 0)
+        self.assertEqual(obj["mode"], "full")
+        self.assertEqual(obj["affected"], ALL_MEMBERS)
+
+    def test_enforce_failsafe_trigger_stays_full(self):
+        # FAIL-SAFE PRESERVED: a §4.1 trigger (Cargo.lock) under enforce (NO --shadow)
+        # still forces full — enforce must never skip a shared/build-file change even
+        # when an otherwise-narrow crate change rides alongside it.
+        obj = self._selected("Cargo.lock\ncrates/app/src/lib.rs\n")
+        self.assertEqual(obj["mode"], "full")
+        self.assertEqual(obj["affected"], ALL_MEMBERS)
+        # And every crate's guard consequently RUNS (nothing skipped under full).
+        for crate in ALL_MEMBERS:
+            self.assertTrue(self._guard_runs(obj["affected"], crate))
+
+    def test_enforce_selector_error_stays_full(self):
+        # FAIL-CLOSED PRESERVED under enforce: a selector error (bad metadata) with
+        # NO --shadow still resolves to full, exit 0 — nothing is skipped on error.
+        changed = self._write("crates/app/src/lib.rs\n", suffix=".txt")
+        code, obj = self._run_main(["--metadata-file", "/no/such/meta.json",
+                                    "--changed-file", changed, "--repo-root", ROOT])
+        self.assertEqual(code, 0)
+        self.assertEqual(obj["mode"], "full")
+
+    def test_enforce_never_emits_shadow(self):
+        # Without --shadow the mode is never 'shadow' (enforce honors selected/full).
+        for changed in ("crates/app/src/lib.rs\n", "Cargo.lock\n", "docs/x.md\n"):
+            obj = self._selected(changed)
+            self.assertIn(obj["mode"], ("selected", "full"))
+            self.assertNotEqual(obj["mode"], "shadow")
+
+    def test_guard_needle_quotes_prevent_prefix_collision(self):
+        # MUTATION CHECK. A guard that dropped the quote delimiters (a bare-name
+        # substring match) would treat `sparq-core` as affected whenever
+        # `sparq-core-foo` is — a SILENT UNSOUND run of a crate selection proved
+        # unaffected. Prove the REAL guard rule (the QUOTED needle) distinguishes
+        # them and the mutant (unquoted substring) does not.
+        affected = ["sparq-core-foo"]
+        self.assertTrue(self._guard_runs(affected, "sparq-core-foo"))
+        self.assertFalse(self._guard_runs(affected, "sparq-core"),
+                         "the quoted needle must NOT match the prefix crate")
+        # The mutant's unquoted substring test WOULD wrongly match:
+        mutant_match = "sparq-core" in json.dumps(affected)
+        self.assertTrue(mutant_match, "sanity: the bare substring IS present")
+        self.assertNotEqual(
+            mutant_match, self._guard_runs(affected, "sparq-core"),
+            "the real (quoted) guard and the mutant (unquoted) must disagree here — "
+            "that disagreement is exactly the soundness the quoting buys",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
