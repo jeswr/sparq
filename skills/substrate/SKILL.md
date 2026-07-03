@@ -1,5 +1,5 @@
 ---
-name: sparq-substrate
+name: substrate
 description: The opt-in shared zero-overhead evaluation substrate for the sparq engine and the reasoners — id-tuple row/key/posting vocabulary (`rows`), the XSD numeric value tower (`numeric`), the four id-tuple join kernels (`join`), and the SPARQL term total order (`compare`). All features are DEFAULT-OFF; opt in to exactly the slice you need. Use this crate when wiring a new reasoner that shares joins or numeric evaluation with the engine, or when working on the sparq-substrate crate itself. [SONNET-4.6] sq-qonbz.4
 ---
 
@@ -155,7 +155,7 @@ identical wasm bundle). The crate is `forbid(unsafe_code)`.
 - `crates/sparq-engine` — the primary consumer: keeps its planner, `Bindings`, and `Value`
   private; calls the shared kernels through thin adapters.
 
-_Status: PUBLISHED (sq-qonbz.4 [SONNET-4.6]). All four modules implemented and behaviour-
+_Status: publishable (sq-qonbz.4 [SONNET-4.6]). All four modules implemented and behaviour-
 neutral vs the pre-move engine baseline (W3C SPARQL conformance floor bit-identical; join/
 numeric/compare micro-benches within noise). Phase-5 reasoner adoption (consuming `join` from
 `sparq-reason` / `sparq-reason-el`) is tracked separately._

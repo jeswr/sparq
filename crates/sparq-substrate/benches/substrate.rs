@@ -15,7 +15,7 @@
 //! - `numeric::Num::binop` — `+` / `*` arithmetic on the `Int` / `Dec` / `Double`
 //!   tiers.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use sparq_substrate::{
     join::{build_table, hash_probe_serial, merge_join, JoinKeys, NoBudget},
     numeric::{ArithOp, Dec, Num},
@@ -85,7 +85,9 @@ fn bench_hash_build(c: &mut Criterion) {
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
-                let _table = build_table(&left, &keys);
+                // [SONNET-4.6] black_box prevents LLVM from eliding the build entirely
+                // when the result would otherwise be dropped without being observed.
+                black_box(build_table(&left, &keys));
             });
         });
     }
