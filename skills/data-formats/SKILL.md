@@ -86,8 +86,10 @@ pub fn load_dataset(text: &str, format: &str) -> Result<Graph, String>
 pub fn load_reader<R: std::io::Read>(reader: R, format: &str) -> Result<Graph, String>
 
 // Streaming + PARALLEL (needs `parallel`): pipelined 32 MiB block parse, never
-// materializes the whole decompressed doc. N-Triples gets the fast path; other
-// formats fall back to serial load_reader.
+// materializes the whole decompressed doc. N-Triples gets this parallel pipelined
+// path; other formats fall back to serial load_reader. (This is the PARALLEL-LOADER
+// fast path — distinct from the byte-level IRI-validation fast path noted below, which
+// is a separate, opt-in mechanism that covers N-Triples AND N-Quads.)
 pub fn load_reader_parallel<R: std::io::Read + Send>(reader: R, format: &str) -> Result<Graph, String>
 
 // [OPUS-4.8] sq-7d3dj.18 — the byte-level N-Triples/N-Quads fast path does NOT validate IRIs

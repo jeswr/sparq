@@ -220,13 +220,15 @@ impl IriPrefixMemo {
     }
 }
 
-/// Validate `s` as an absolute IRI (RFC-3987) with a throwaway memo — a convenience for callers
-/// that validate a single IRI and keep no state. Accepts exactly `oxiri::Iri::parse(s).is_ok()`.
-/// [OPUS-4.8]
+/// Validate `s` as an absolute IRI (RFC-3987) — a convenience for one-shot callers that
+/// validate a single IRI and keep no state. Calls the `oxiri` automaton DIRECTLY (no memo
+/// fast path). Accepts exactly `oxiri::Iri::parse(s).is_ok()`. [OPUS-4.8]
 #[must_use]
 pub fn is_valid_iri(s: &str) -> bool {
-    // No memo state to reuse, so this is just the oxiri automaton (with the ASCII pre-scan of an
-    // empty ring, which never fires) — kept as a named entry point for one-shot callers.
+    // This one-shot entry point does NOT run the prefix-memo fast path or the ASCII suffix
+    // pre-scan — it calls the `oxiri` automaton directly. Those fast paths need caller-held
+    // ring state, so they live on the stateful validator `IriPrefixMemo::validate`, which the
+    // byte-level N-Triples/N-Quads loader (see `nt.rs`) drives per worker thread.
     oxiri::Iri::parse(s).is_ok()
 }
 
