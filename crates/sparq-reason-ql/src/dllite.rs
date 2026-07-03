@@ -59,7 +59,6 @@ impl NodeKind {
 /// `rdf:type` — used by the (experimental) query-atom mapper to recognise class atoms.
 #[cfg(feature = "experimental")]
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
 
@@ -314,21 +313,23 @@ impl TBox {
                 //   • non-`owl:`/`rdfs:` object → silently ignore (ABox or custom IRI)
                 _ if p == rdf_type_str() => {
                     if let Some(NodeKind::Iri(obj)) = NodeKind::from_object(&t.object) {
-                        if OWL_CHARACTERISTIC_TYPES
-                            .iter()
-                            .any(|n| obj == format!("{}{}", OWL, n))
+                        // Use strip_prefix + slice::contains to avoid per-iteration String
+                        // allocation — allocation-free membership test. [SONNET-4.6]
+                        if let Some(local) = obj.strip_prefix(OWL) {
+                            if OWL_CHARACTERISTIC_TYPES.contains(&local) {
+                                // Non-QL property characteristic: not applicable for rewriting.
+                                tbox.unrecognised_schema += 1;
+                            } else if !OWL_LEGAL_DECL_TYPES.contains(&local) {
+                                // Unknown owl: object in rdf:type: count as unrecognised.
+                                tbox.unrecognised_schema += 1;
+                            }
+                            // else: QL-legal owl: declaration — silently ignore (not a TBox axiom).
+                        } else if obj == "http://www.w3.org/2000/01/rdf-schema#Class"
+                            || obj == "http://www.w3.org/1999/02/22-rdf-syntax-ns#Property"
                         {
-                            // Non-QL property characteristic: not applicable for rewriting.
-                            tbox.unrecognised_schema += 1;
-                        } else if OWL_LEGAL_DECL_TYPES
-                            .iter()
-                            .any(|n| obj == format!("{}{}", OWL, n))
-                            || obj == format!("{}Class", RDFS)
-                            || obj == format!("{}Property", RDF)
-                        {
-                            // QL-legal declaration — silently ignore (not a TBox axiom).
-                        } else if obj.starts_with(OWL) || obj.starts_with(RDFS) {
-                            // Unknown owl:/rdfs: object in rdf:type: count as unrecognised.
+                            // QL-legal rdfs:/rdf: declaration — silently ignore (not a TBox axiom).
+                        } else if obj.starts_with(RDFS) {
+                            // Unknown rdfs: object in rdf:type: count as unrecognised.
                             tbox.unrecognised_schema += 1;
                         }
                         // else: non-owl/rdfs object (custom class or rdf: vocab) — ignore.
@@ -498,9 +499,21 @@ const NON_QL_RESTRICTION: &[&str] = &[
     "onClass",
 ];
 
-/// `owl:` restriction sub-predicates handled by `index_restrictions`: their triples contribute
-/// to the restriction-indexing machinery and are accounted for via `add_subclass`; they are NOT
-/// unrecognised schema vocabulary. [SONNET-4.6] sq-pbz04.3.3
+/// `owl:` restriction sub-predicates excluded from the `unrecognised_schema` tally.
+///
+/// Three groups, each handled differently at the blank-node level:
+/// - `onProperty` / `someValuesFrom` — consumed by `index_restrictions` (build the restriction
+///   map) and resolved to basic concepts via `add_subclass`.
+/// - `allValuesFrom` / `hasValue` / cardinality variants / `hasSelf` / `onClass` — consumed
+///   by `index_restrictions` (poison the blank node so the containing `subClassOf` is counted
+///   as `skipped`; these shapes are non-QL).
+/// - `onDatatype` / `withRestrictions` — NOT consumed by `index_restrictions`; they appear on
+///   OWL DL/Full datatype-restriction blank nodes that are never resolved into the restriction
+///   map, so any parent `subClassOf` is counted as `skipped` at the axiom level.  The
+///   individual sub-predicate triples are silently dropped (expected vocabulary on restriction
+///   blank nodes, not an independent gap in accounting).
+///
+/// None of the entries above are counted as `unrecognised_schema`. [SONNET-4.6] sq-pbz04.3.3
 const RESTRICTION_SUB_PREDICATES: &[&str] = &[
     "onProperty",
     "someValuesFrom",
@@ -552,32 +565,19 @@ const ANNOTATION_RDFS: &[&str] = &["comment", "label", "isDefinedBy", "seeAlso"]
 /// sub-predicate (handled by `index_restrictions`) or a known annotation predicate. These are
 /// the triples that contribute to `TBox::unrecognised_schema`. [SONNET-4.6] sq-pbz04.3.3
 fn is_unrecognised_schema(p: &str) -> bool {
-    // Fast path: most ABox predicates are NOT in the rdfs:/owl: namespace.
-    if !p.starts_with(RDFS) && !p.starts_with(OWL) {
-        return false;
+    // Use strip_prefix + slice::contains to avoid allocating a String per membership test.
+    // [SONNET-4.6]
+    if let Some(local) = p.strip_prefix(OWL) {
+        // Restriction sub-predicates (excluded from unrecognised_schema — see
+        // RESTRICTION_SUB_PREDICATES doc) and owl: annotation predicates → not unrecognised.
+        !RESTRICTION_SUB_PREDICATES.contains(&local) && !ANNOTATION_OWL.contains(&local)
+    } else if let Some(local) = p.strip_prefix(RDFS) {
+        // Known rdfs: annotation predicates → not unrecognised.
+        !ANNOTATION_RDFS.contains(&local)
+    } else {
+        // Not in rdfs:/owl: namespace → ABox predicate, not a schema gap.
+        false
     }
-    // Restriction sub-predicates: handled via index_restrictions, not unrecognised.
-    if RESTRICTION_SUB_PREDICATES
-        .iter()
-        .any(|s| p == format!("{OWL}{s}"))
-    {
-        return false;
-    }
-    // Known rdfs: annotation predicates — not schema axioms.
-    if ANNOTATION_RDFS
-        .iter()
-        .any(|s| p == format!("{RDFS}{s}"))
-    {
-        return false;
-    }
-    // Known owl: annotation predicates — not schema axioms.
-    if ANNOTATION_OWL
-        .iter()
-        .any(|s| p == format!("{OWL}{s}"))
-    {
-        return false;
-    }
-    true
 }
 
 fn role_of_subject(t: &NamedOrBlankNode) -> Option<Role> {
