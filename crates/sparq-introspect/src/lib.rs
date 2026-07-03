@@ -2992,17 +2992,14 @@ mod tests {
             "no elision marker when nothing was truncated"
         );
 
-        // -- No marker when truncated but no room (used+2 > limit) ------------------
-        // "helloworld" = 10 chars, cost=11. limit=11 so 0+11+2=13 > 11 → rejected.
-        // used=0, 0+2=2 <= 11 → marker would appear... actually used=0 since line failed.
-        // Let me use a tighter setup: fit one char line then fill up.
-        // "a" cost=2. limit=4: 0+2+2=4 > 4? NO (=limit exactly, > is false) → fits.
-        // "b" cost=2. used=2, 2+2+2=6 > 4? YES → truncated.
-        // finish: used=2, 2+2=4 <= 4 → marker. Hmm, that's a valid marker case.
-        // For a "no room" case: fit a line that uses up all but 1 char.
-        // "ab" cost=3. limit=4: 0+3+2=5 > 4 → rejected (cost=3). But used stays 0.
-        // Actually this doesn't produce a "used+2 > limit" scenario because used is only
-        // incremented on successful writes. Let's accept that this case is defensive code.
+        // -- No marker when limit is too small for the marker itself (used+2 > limit) ----
+        // The elision marker "…\n" costs 2 chars. With limit=1 no line can ever fit
+        // (min cost = 1 char + 1 newline = 2 > 1), so used stays 0 but truncated=true.
+        // finish: 0+2=2 > 1=limit → the elision marker has no room and is not emitted.
+        // [SONNET-4.6] sq-v411r
+        let mut w3 = BudgetWriter::new(1);
+        assert!(!w3.line("x"), "no line fits when limit=1");
+        assert_eq!(w3.finish(), "", "no marker emitted when limit=1 (no room for the marker)");
     }
 
     /// [OPUS-4.8] sq-qcnn.21: `PrefixAssigner::compact` exact `i + 1` split point.
