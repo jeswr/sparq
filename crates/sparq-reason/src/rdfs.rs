@@ -210,12 +210,29 @@ pub(crate) fn emit_consequences(
 ) {
     if p == v.ty {
         // rdfs9: (s type o), (o sc* d) ⊢ (s type d)
-        if let Some(ds) = sc_closure.get(&o) {
-            out.extend(ds.iter().map(|&d| [s, v.ty, d]));
-        }
+        //
+        // [FABLE-5] sq-pbz04.1.1: with the `substrate-join` feature this arm is computed in
+        // a BATCH by the shared substrate join kernels (`sweep_type_join` — an object-keyed
+        // probe with a uniform fixed-permutation combine), so it is suppressed here to avoid
+        // double emission, mirroring the plain rdfs2/3/7 arm below. The `if` arm itself
+        // stays so a type assertion NEVER falls through to the PropExpand/plain arms —
+        // branch precedence is part of the pinned behaviour.
+        #[cfg(not(feature = "substrate-join"))]
+        emit_type_rdfs9([s, p, o], v, sc_closure, out);
+        #[cfg(feature = "substrate-join")]
+        let _ = sc_closure;
     } else if let Some(px) = px.filter(|px| px.map.contains_key(&p)) {
         // Monotone-OWL path: rewrite the predicate AND orient through inverse/symmetric, then
         // type via domain/range of the (oriented) derived predicate.
+        //
+        // [FABLE-5] sq-pbz04.1.1 DISPOSITION — PERMANENTLY hand-rolled (not a substrate-join
+        // candidate): the per-match combine is DATA-DEPENDENT — each matched `(r, swapped)`
+        // row selects its own subject/object orientation — and fans out through a SECOND
+        // join, the dom/rng typing keyed on the DERIVED predicate `r` (a column that exists
+        // only in the first join's output). The shared kernel emits one fixed-layout row per
+        // match, so it cannot express this shape without rebuilding the rule structure
+        // around it. Full rationale in `substrate_join.rs`; pinned by
+        // `tests::prop_expand_inverse_types_through_oriented_domain`.
         for &(r, swapped) in &px.map[&p] {
             let (rs_, ro_) = if swapped { (o, s) } else { (s, o) };
             out.push([rs_, r, ro_]); // rdfs7 / prp-inv / prp-symp / prp-eqp
@@ -274,6 +291,27 @@ fn emit_plain_rdfs(
     // rdfs3 + rdfs9: range typing
     if let Some(cs) = rng_full.get(&p) {
         out.extend(cs.iter().map(|&c| [o, v.ty, c]));
+    }
+}
+
+/// The `rdf:type`/rdfs9 subclass-typing join for one asserted `(s, rdf:type, o)`: type `s`
+/// with every superclass `d` in the saturated subclass closure of `o`. Factored out of
+/// [`emit_consequences`] so the substrate-join path (`sweep_type_join` under the
+/// `substrate-join` feature) can compute the SAME emission in a batch through the shared
+/// `sparq_substrate::join` kernels ([FABLE-5] sq-pbz04.1.1, mirroring [`emit_plain_rdfs`]).
+/// The two paths emit the identical multiset (asserted by
+/// `tests::substrate_join_emits_identical_type_branch`).
+#[cfg(any(not(feature = "substrate-join"), test))]
+#[inline]
+fn emit_type_rdfs9(
+    [s, _p, o]: [Id; 3],
+    v: &Vocab,
+    sc_closure: &FxHashMap<Id, Vec<Id>>,
+    out: &mut Vec<[Id; 3]>,
+) {
+    // rdfs9: (s type o), (o sc* d) ⊢ (s type d)
+    if let Some(ds) = sc_closure.get(&o) {
+        out.extend(ds.iter().map(|&d| [s, v.ty, d]));
     }
 }
 
@@ -338,14 +376,18 @@ pub(crate) fn sweep(
 }
 
 /// [OPUS-4.8] sq-yk6or (epic sq-pbz04, THE SUBSTRATE PAYOFF): the ABox sweep driving the SHARED
-/// [`sparq_substrate::join`] hash-join kernels for the plain rdfs2/3/7 predicate join — the same
-/// `build_table` + `probe_emit` body the SPARQL engine drives, with the reasoner supplying its
-/// OWN `JoinKeys` + `Budget` monomorphically (NO `Box<dyn>`). The `rdf:type`/rdfs9 branch and the
-/// active-`PropExpand` predicate-rewrite branch are NOT a uniform predicate-keyed combine, so they
-/// stay on the hand-rolled adjacency path (via [`emit_non_plain`]); the substrate join is the
-/// clean, isolated win. The EMITTED SET is identical to the hand-rolled `sweep` (the downstream
-/// `dedup_derived` sorts + dedups, so per-triple order is irrelevant — only the multiset matters).
-/// Asserted byte-for-byte by `tests::substrate_join_emits_identical_closure`.
+/// [`sparq_substrate::join`] hash-join kernels for the plain rdfs2/3/7 predicate join and —
+/// [FABLE-5] sq-pbz04.1.1 — the `rdf:type`/rdfs9 subclass-typing join (an object-keyed probe,
+/// `substrate_join::sweep_type_join`): the same `build_table` + `probe_emit` body the SPARQL
+/// engine drives, with the reasoner supplying its OWN `JoinKeys` + `Budget` monomorphically
+/// (NO `Box<dyn>`). Only the active-`PropExpand` predicate-rewrite branch stays on the
+/// hand-rolled adjacency path — its per-match combine is data-dependent (orientation swap) and
+/// cascades into a second join on the derived predicate; see the disposition in
+/// `substrate_join.rs`. The EMITTED SET is identical to the hand-rolled `sweep` (the downstream
+/// `dedup_derived` sorts + dedups, so per-triple order is irrelevant — only the multiset
+/// matters). Asserted per-branch by `tests::substrate_join_emits_identical_plain_branch` /
+/// `tests::substrate_join_emits_identical_type_branch`, and whole-closure by
+/// `tests::closure_is_byte_identical_across_join_paths`.
 #[cfg(feature = "substrate-join")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sweep(
@@ -364,10 +406,16 @@ pub(crate) fn sweep(
     let plain: Vec<[Id; 3]> =
         triples.iter().copied().filter(|&t| is_plain_branch(t, v, px)).collect();
     crate::substrate_join::sweep_predicate_join(&plain, v.ty, sp, dom, rng, &mut out);
-    // The non-plain branches (rdfs9 type-propagation + the PropExpand predicate rewrite) stay on
-    // the direct adjacency path: `emit_consequences` suppresses its plain `else` arm under the
-    // `substrate-join` feature, so this emits ONLY the rdfs9 / PropExpand consequences — no double
-    // emission of the plain branch the substrate sweep above already covered.
+    // [FABLE-5] sq-pbz04.1.1: the `rdf:type`/rdfs9 batch — the type-assertion partition
+    // (exactly the triples `emit_consequences` routes to its `p == v.ty` arm) probed against
+    // the subclass closure, object-keyed, through the SAME shared kernels.
+    let typed: Vec<[Id; 3]> = triples.iter().copied().filter(|t| t[1] == v.ty).collect();
+    crate::substrate_join::sweep_type_join(&typed, sc, &mut out);
+    // The one remaining non-batched branch — the active-`PropExpand` predicate rewrite,
+    // RETAINED hand-rolled by disposition (see `substrate_join.rs`) — runs on the direct
+    // adjacency path: `emit_consequences` suppresses its plain AND type arms under the
+    // `substrate-join` feature, so this loop emits ONLY the PropExpand consequences — no
+    // double emission of the batches above.
     for &t in triples {
         emit_consequences(t, v, sc, sp, dom, rng, px, &mut out);
     }
@@ -1006,12 +1054,162 @@ mod tests {
         ];
         materialize_rdfs(&mut dict, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
-        // rdfs7 (substrate plain branch), rdfs2/3 (substrate plain branch), rdfs9/11 (hand-rolled).
+        // rdfs7/rdfs2/rdfs3 (substrate plain batch), rdfs9 (substrate type batch,
+        // sq-pbz04.1.1), rdfs11 (schema-closure emission).
         assert!(set.contains(&[a, rel, b]), "rdfs7 via shared join");
         assert!(set.contains(&[a, ty, person]), "rdfs2 domain via shared join");
         assert!(set.contains(&[b, ty, person]), "rdfs3 range via shared join");
-        assert!(set.contains(&[rex, ty, mammal]), "rdfs9 one hop");
-        assert!(set.contains(&[rex, ty, animal]), "rdfs9 transitive");
+        assert!(set.contains(&[rex, ty, mammal]), "rdfs9 one hop via shared type join");
+        assert!(set.contains(&[rex, ty, animal]), "rdfs9 transitive via shared type join");
         assert!(set.contains(&[dog, sc, animal]), "rdfs11 subclass transitivity");
+    }
+
+    // ---- [FABLE-5] sq-pbz04.1.1: per-branch disposition tests (rdfs9 adopt / PropExpand retain) ----
+
+    /// The rdfs9 half of the disposition (ADOPTED): driving the shared `sparq-substrate::join`
+    /// kernels for the `rdf:type`/subclass-typing join — an OBJECT-keyed probe — emits the
+    /// BYTE-IDENTICAL multiset as the hand-rolled `emit_type_rdfs9` adjacency arm, over a
+    /// fixture with a multi-hop closure, a class absent from the closure, and assertions
+    /// sharing a class (so duplicate conclusions must be PRESERVED, not collapsed). Mirrors
+    /// `substrate_join_emits_identical_plain_branch` for the rdfs2/3/7 half.
+    #[cfg(feature = "substrate-join")]
+    #[test]
+    fn substrate_join_emits_identical_type_branch() {
+        let mut dict = Dict::new();
+        let v = Vocab::intern(&mut dict);
+        let (dog, mammal, animal, plant, rex, fido, fern) = (
+            ex(&mut dict, "Dog"),
+            ex(&mut dict, "Mammal"),
+            ex(&mut dict, "Animal"),
+            ex(&mut dict, "Plant"),
+            ex(&mut dict, "rex"),
+            ex(&mut dict, "fido"),
+            ex(&mut dict, "fern"),
+        );
+        // Saturated subclass closure (as `rdfs_closure` builds it): Dog ⊑* {Mammal, Animal},
+        // Mammal ⊑* {Animal}. Plant appears in NO closure entry (emits nothing).
+        let sc: FxHashMap<Id, Vec<Id>> =
+            [(dog, vec![mammal, animal]), (mammal, vec![animal])].into_iter().collect();
+        // The type-assertion partition the substrate sweep routes to the type join.
+        let typed =
+            vec![[rex, v.ty, dog], [fido, v.ty, dog], [rex, v.ty, mammal], [fern, v.ty, plant]];
+
+        // Hand-rolled reference emission (the arm the default build runs).
+        let mut hand = Vec::new();
+        for &t in &typed {
+            emit_type_rdfs9(t, &v, &sc, &mut hand);
+        }
+        hand.sort_unstable();
+
+        // Shared substrate-join emission.
+        let mut shared = Vec::new();
+        crate::substrate_join::sweep_type_join(&typed, &sc, &mut shared);
+        shared.sort_unstable();
+
+        assert_eq!(
+            shared, hand,
+            "the shared substrate type join must emit the byte-identical rdfs9 multiset"
+        );
+        // Anchor BOTH paths to the expected rdfs9 multiset (not just to each other): note
+        // `[rex, ty, animal]` appears TWICE — once via `rex a Dog`, once via `rex a Mammal` —
+        // and the pre-dedup emission must preserve the duplicate exactly like the hand arm.
+        let mut expect = vec![
+            [rex, v.ty, mammal],
+            [rex, v.ty, animal],
+            [fido, v.ty, mammal],
+            [fido, v.ty, animal],
+            [rex, v.ty, animal],
+        ];
+        expect.sort_unstable();
+        assert_eq!(shared, expect, "rdfs9 emission is exactly the expected multiset");
+    }
+
+    /// The PropExpand half of the disposition (RETAINED hand-rolled): pins the data-dependent
+    /// per-match ORIENTATION the shared kernel cannot express — an inverse-derived predicate
+    /// types the SWAPPED subject through ITS domain. `hasParent owl:inverseOf hasChild`;
+    /// `hasChild rdfs:domain Child`; `a hasParent b` ⊢ `(b hasChild a)` AND `(b type Child)`
+    /// — the typing lands on `b` (the swapped subject), never on `a`. Runs in BOTH feature
+    /// states (under `substrate-join` the PropExpand branch is the retained per-triple path
+    /// inside the substrate sweep), so a future adoption attempt that mis-handles the
+    /// orientation goes red here.
+    #[test]
+    fn prop_expand_inverse_types_through_oriented_domain() {
+        let mut dict = Dict::new();
+        let v = Vocab::intern(&mut dict);
+        let (hp, hc, child, a, b) = (
+            ex(&mut dict, "hasParent"),
+            ex(&mut dict, "hasChild"),
+            ex(&mut dict, "Child"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+        );
+        let mono = MonoOwl {
+            inverse: [(hp, vec![hc]), (hc, vec![hp])].into_iter().collect(),
+            ..MonoOwl::default()
+        };
+        let mut triples = vec![[hc, v.domain, child], [a, hp, b]];
+        rdfs_closure(&mut dict, &mut triples, false, &mono);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[b, hc, a]), "prp-inv: derived edge is oriented (b hasChild a)");
+        assert!(
+            set.contains(&[b, v.ty, child]),
+            "the SWAPPED subject b is domain-typed through the derived predicate"
+        );
+        assert!(
+            !set.contains(&[a, v.ty, child]),
+            "the unswapped subject a must NOT be domain-typed — the orientation is load-bearing"
+        );
+    }
+
+    /// The whole-closure pin for the disposition: a fixture driving ALL THREE sweep branches
+    /// (the plain rdfs2/3/7 batch, the rdfs9 type batch, and the retained PropExpand rewrite)
+    /// materialises to EXACTLY this output — full-vector equality, not membership. The SAME
+    /// assertion runs in BOTH feature states (default hand-rolled vs `substrate-join`), so CI
+    /// holding it green in both proves the closure is byte-identical across the join-machinery
+    /// swap — the bead's invariant — with any added, dropped, or mis-oriented inference (or a
+    /// double emission surviving dedup) going red.
+    #[test]
+    fn closure_is_byte_identical_across_join_paths() {
+        let mut dict = Dict::new();
+        let v = Vocab::intern(&mut dict);
+        let (p, q, c, d, sym, x, y, s, o) = (
+            ex(&mut dict, "p"),
+            ex(&mut dict, "q"),
+            ex(&mut dict, "C"),
+            ex(&mut dict, "D"),
+            ex(&mut dict, "sym"),
+            ex(&mut dict, "x"),
+            ex(&mut dict, "y"),
+            ex(&mut dict, "s"),
+            ex(&mut dict, "o"),
+        );
+        // TBox: p ⊑ q ; q domain C ; C ⊑ D ; sym symmetric (activates PropExpand).
+        // ABox: (s p o) → the PropExpand path (p is px-keyed via its super-property edge);
+        //       (x sym y) → the orientation-swap path; (x type C) → the rdfs9 type path.
+        let mono = MonoOwl { symmetric: [sym].into_iter().collect(), ..MonoOwl::default() };
+        let asserted = vec![
+            [p, v.sub_prop, q],
+            [q, v.domain, c],
+            [c, v.sub_class, d],
+            [s, p, o],
+            [x, sym, y],
+            [x, v.ty, c],
+        ];
+        let mut triples = asserted.clone();
+        rdfs_closure(&mut dict, &mut triples, false, &mono);
+        // Expected output layout (documented `rdfs_closure` contract): sorted originals, then
+        // the sorted derived set — (s q o) by rdfs7/prp-eqp composition, (s type C/D) by the
+        // inherited-domain typing closed up the subclass graph, (y sym x) by prp-symp, and
+        // (x type D) by rdfs9.
+        let mut expect = asserted;
+        expect.sort_unstable();
+        let mut derived =
+            vec![[s, q, o], [s, v.ty, c], [s, v.ty, d], [y, sym, x], [x, v.ty, d]];
+        derived.sort_unstable();
+        expect.extend(derived);
+        assert_eq!(
+            triples, expect,
+            "the materialised closure must be byte-identical in both feature states"
+        );
     }
 }
