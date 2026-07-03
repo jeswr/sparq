@@ -111,12 +111,14 @@ smallvec = { workspace = true, optional = true }
 regex = "1"
 
 [dev-dependencies]
-# [FABLE-5] sq-pbz04.1.2: the ordering-parity ORACLE for the `substrate-compare` seam —
-# tests/compare_parity.rs runs a REAL engine `ORDER BY` over the same materialised closure
-# and asserts the reasoner-side sort is byte-identical. Dev-only and path-only (cargo strips
-# path-only dev-deps on publish, same pattern as sparq-conformance/-canon/-mpc); NO cycle:
-# sparq-engine does not depend on sparq-reason.
-sparq-engine = { path = "../sparq-engine" }
+# [FABLE-5] sq-pbz04.1.2 / [SONNET-4.6]: the ordering-parity ORACLE for the
+# `substrate-compare` seam — tests/compare_parity.rs runs a REAL engine `ORDER BY`
+# over the same materialised closure and asserts the reasoner-side sort is
+# byte-identical. `sparq-reason` is publishable (no `publish = false`), so the
+# dev-dep MUST carry a `version` alongside `path` (crates.io cannot resolve
+# path-only dev-deps; same pattern as sparq-cli/nlq/mcp). NO cycle: sparq-engine
+# does not depend on sparq-reason.
+sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 
 # [FABLE-5] sq-pbz04.1.2: the engine-vs-reasoner ordering-parity test — compiled only with
 # the feature it exercises, so default-feature `--all-targets` builds stay engine-light.

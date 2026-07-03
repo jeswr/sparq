@@ -11,9 +11,21 @@
 //! (pins the `exact_cmp` collapse-recheck), inline and stored integer ids, RDF 1.2 triple
 //! terms (pins the component-wise recursion), plus blanks / IRIs / language-tagged /
 //! boolean / date / gYear / unknown-datatype literals for the class ranks and the string
-//! fallback. Mis-wire any arm and the two sequences diverge. All fixture terms are
-//! pairwise DISTINCT under the total order, so the sorted sequence is unique and the
-//! assertion is independent of either side's tie-breaking.
+//! fallback. Mis-wire any arm and the two sequences diverge.
+//!
+//! ## Distinct-set comparison (main parity test)
+//!
+//! `entailed_solution_order_matches_engine_order_by` deduplicates both sides (using
+//! `SELECT DISTINCT` on the engine and `.dedup()` after sort on the reasoner) before
+//! asserting byte-identity.  RDFS materialisation introduces duplicate objects — e.g.
+//! `ex:Person` appears as an object in the asserted `ex:knows rdfs:domain ex:Person` AND
+//! the entailed `_:alice rdf:type ex:Person` — so the raw multiset may differ in
+//! insertion order between sides, making a byte-identical multiset comparison potentially
+//! sort-stability-dependent.  Deduplication removes that ambiguity: every distinct term
+//! appears exactly once in a uniquely-ordered sequence, so the assertion is independent
+//! of either side's tie-breaking.  The NEW `multiset_duplicate_order_matches_engine_order_by`
+//! test covers the duplicate-preservation path with a fully-controlled fixture (no RDFS
+//! schema, explicit duplicate objects, zero surprise entailments). [SONNET-4.6]
 //!
 //! (Compiled only with `--features substrate-compare` — a Cargo `required-features`
 //! target. sparq-engine is a dev-dependency here purely as the parity oracle.)
@@ -25,7 +37,8 @@ use sparq_reason::{materialize, Profile};
 
 /// Mixed-term fixture WITH an RDFS schema, so materialisation genuinely ENTAILS new
 /// solutions (domain/range/subClassOf/subPropertyOf firings) that participate in the
-/// ordered multiset.
+/// ordered set.  Both sides are deduplicated before comparison so the assertion is
+/// independent of the insertion-order of RDFS-introduced duplicate objects.
 const FIXTURE: &str = r#"
 @prefix ex: <http://ex/> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -57,8 +70,10 @@ ex:bob ex:y2 "2021"^^xsd:gYear .
 ex:bob ex:odd "weird"^^ex:custom .
 "#;
 
-/// The reasoner-side sort of the ENTAILED object multiset equals the engine's real
-/// `ORDER BY ?o` over the identical materialised closure, term-for-term.
+/// The reasoner-side sort of the ENTAILED object set (deduplicated) equals the engine's
+/// real `SELECT DISTINCT … ORDER BY ?o` over the identical materialised closure, term-for-term.
+/// Deduplication ensures the assertion is stable even though RDFS materialisation produces
+/// duplicate objects (the same IRI as both an asserted and an entailed object).
 #[test]
 fn entailed_solution_order_matches_engine_order_by() {
     let (mut dict, mut triples) = Graph::parse_to_triples(FIXTURE, "turtle").expect("fixture parses");
@@ -87,14 +102,21 @@ fn entailed_solution_order_matches_engine_order_by() {
     let added = materialize(Profile::Rdfs, &mut dict, &mut triples);
     assert!(added > 0, "the fixture must actually entail new solutions (got {} added)", added);
 
-    // Reasoner side: order the full object multiset with the seam-3 comparator.
+    // Reasoner side: sort the full object multiset, then dedup to obtain the distinct
+    // set.  `.dedup()` removes consecutive equal ids; after sort_ids equal ids are
+    // adjacent, so this is an O(n) pass that eliminates RDFS-introduced duplicates.
     let mut objects: Vec<Id> = triples.iter().map(|t| t[2]).collect();
     sort_ids(&dict, &mut objects);
+    objects.dedup();
     let reason_order: Vec<String> = objects.iter().map(|&id| dict.term(id).to_string()).collect();
 
-    // Engine side: the SAME closure through the real engine, real ORDER BY.
+    // Engine side: SAME closure, DISTINCT to match the reasoner-side dedup, real ORDER BY.
     let graph = Graph::from_parts(dict, triples);
-    let res = sparq_engine::query(&graph, "SELECT ?o WHERE { ?s ?p ?o } ORDER BY ?o").expect("engine query runs");
+    let res = sparq_engine::query(
+        &graph,
+        "SELECT DISTINCT ?o WHERE { ?s ?p ?o } ORDER BY ?o",
+    )
+    .expect("engine query runs");
     let engine_order: Vec<String> = res
         .rows
         .iter()
@@ -104,10 +126,69 @@ fn entailed_solution_order_matches_engine_order_by() {
     assert_eq!(
         reason_order.len(),
         engine_order.len(),
-        "both sides must order the same solution multiset"
+        "both sides must produce the same distinct solution set"
     );
     assert_eq!(
         reason_order, engine_order,
         "entailed-solution ordering diverged from the engine's ORDER BY total order"
+    );
+}
+
+/// The reasoner-side comparator preserves and correctly orders DUPLICATE bindings — the
+/// multiset case.  Uses a controlled fixture with NO RDFS schema (so `materialize` adds
+/// nothing and the multiset is exactly the asserted triples' objects), with explicit
+/// numeric duplicates whose ORDER BY differs from lexicographic order.
+///
+/// Expected numeric ORDER BY: `[−3, 2, 2, 5, 10, 10]`.  A lexicographic comparator
+/// would yield `["−3"…, "10"…, "10"…, "2"…, "2"…, "5"…]`, diverging from the engine.
+/// This test goes RED if `sort_ids` is substituted with a lexicographic sort —
+/// the mutation spot-check confirming the assertion is not vacuous. [SONNET-4.6]
+#[test]
+fn multiset_duplicate_order_matches_engine_order_by() {
+    // No RDFS schema: every object in `triples` comes from the asserted statements only.
+    // Intentional duplicates: "10"^^xsd:integer × 2, "2"^^xsd:integer × 2.
+    const MULTI: &str = r#"
+@prefix ex: <http://ex/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:a1 ex:val "10"^^xsd:integer .
+ex:a2 ex:val "10"^^xsd:integer .
+ex:b1 ex:val "2"^^xsd:integer .
+ex:b2 ex:val "2"^^xsd:integer .
+ex:c  ex:val "-3"^^xsd:integer .
+ex:d  ex:val "5"^^xsd:integer .
+"#;
+    let (mut dict, mut triples) =
+        Graph::parse_to_triples(MULTI, "turtle").expect("fixture parses");
+
+    // No RDFS axioms in the fixture — materialise must add nothing.
+    let added = materialize(Profile::Rdfs, &mut dict, &mut triples);
+    assert_eq!(added, 0, "no RDFS schema in fixture — materialise must add nothing");
+
+    // Reasoner side: sort the full object multiset (duplicates preserved).
+    let mut objects: Vec<Id> = triples.iter().map(|t| t[2]).collect();
+    sort_ids(&dict, &mut objects);
+    let reason_order: Vec<String> =
+        objects.iter().map(|&id| dict.term(id).to_string()).collect();
+
+    // Engine side: same multiset via real ORDER BY, no DISTINCT (duplicates kept).
+    let graph = Graph::from_parts(dict, triples);
+    let res = sparq_engine::query(&graph, "SELECT ?o WHERE { ?s ?p ?o } ORDER BY ?o")
+        .expect("engine query runs");
+    let engine_order: Vec<String> = res
+        .rows
+        .iter()
+        .map(|r| r[0].as_ref().expect("?o is always bound").to_string())
+        .collect();
+
+    assert_eq!(
+        reason_order.len(),
+        engine_order.len(),
+        "multiset sizes must match (duplicates preserved on both sides)"
+    );
+    assert_eq!(
+        reason_order,
+        engine_order,
+        "multiset ORDER BY parity diverged for duplicate bindings"
     );
 }
