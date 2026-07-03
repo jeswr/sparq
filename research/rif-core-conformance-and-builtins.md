@@ -164,6 +164,41 @@ Design points, each load-bearing for oracle soundness:
   taxonomy is the denominator's honesty), distinct from the self-asserting
   expressivity ratchet, which stays and keeps its sparq-extension label.
 
+### 4.1 Capture-avoidance in the Exists-flatten desugaring (sq-pbz04.5.3 post-verify)
+
+An Opus adversarial-verify on sq-pbz04.5.3 confirmed that the original Exists-flatten
+implementation suffered **variable capture** in two distinct patterns:
+
+1. **Quantifier shadow** — `Forall ?x: h(?x) :- And(p(?x), Exists ?x(q(?x)))`. The
+   outer `Exists ?x` re-declares a name already in scope as a universally-quantified
+   variable. Without renaming, the body after flattening contains two atoms both
+   referencing `Var("x")` — no way to tell universals from existentials apart, and the
+   existential's binding scope collapses into the universal's scope.
+
+2. **Sibling reuse** — `Forall ?x: h :- And(Exists ?y(p(?x,?y)), Exists ?y(q(?x,?y)))`.
+   Two sibling `Exists` nodes each declare `?y`. Without renaming, both atoms use
+   `Var("y")` after flattening — a single binding of `y` during forward chaining
+   satisfies both atoms simultaneously, which is semantically incorrect (they must use
+   DIFFERENT witnesses).
+
+The **fix** (sq-pbz04.5.3, applied and shipped) is **unconditional alpha-renaming**:
+every Exists-declared variable is renamed to a fresh name in the `__ex{N}` reserved
+namespace before the Exists wrapper is dropped. "Unconditional" means even non-colliding
+variables are renamed — this uniformly handles both patterns above without any
+case-analysis on whether a collision exists. Freshness is verified against the complete
+variable universe (universally-declared vars + all Exists-declared vars + previously
+generated fresh names) so no `__ex{N}` name can collide with anything in scope.
+
+Renaming is innermost-first (via DFS pre-order on sub-conditions before the enclosing
+Exists), so the **innermost binder wins** when the same name is redeclared in nested
+Exists nodes — consistent with standard lexical-scope semantics.
+
+The implementation carries a **mutation-check proof** (`test_capture_mutation_check`):
+calling `expand_body` without prior `alpha_rename_cond` produces provably duplicate body
+vars for both capture patterns, and the test asserts that. Disabling
+`alpha_rename_cond` in `parse_implies` makes `test_alpha_rename_shadow` and
+`test_alpha_rename_sibling` RED — the alpha-renaming step is the load-bearing mechanism.
+
 ## 5. Decomposition — six disjoint child beads
 
 Wave order expresses real dependencies (shared files are serialized by `bd dep`; no
