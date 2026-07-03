@@ -153,6 +153,15 @@ impl XsdFloat {
     pub fn from_small_int(n: i8) -> Self {
         XsdFloat { value: f32::from(n) }
     }
+
+    /// Create from an i64 integer with exact IEEE 754 single-precision conversion.
+    /// Uses the full i64 range; exact for |n| <= 2^24, IEEE round-to-nearest-even beyond.
+    /// This is the correct conversion for XPath xs:integer -> xs:float promotion.
+    /// Use this instead of `from_small_int(n as i8)` which silently truncates to [-128,127].
+    /// [SONNET-4.6]
+    pub fn from_i64(n: i64) -> Self {
+        XsdFloat { value: f32::from(n) }
+    }
 }
 
 impl Eq for XsdFloat {
@@ -218,6 +227,15 @@ impl XsdDouble {
         XsdDouble { value: f64::from(n) }
     }
 
+    /// Create from an i64 integer with exact IEEE 754 double-precision conversion.
+    /// Uses the full i64 range; exact for |n| <= 2^53, IEEE round-to-nearest-even beyond.
+    /// This is the correct conversion for XPath xs:integer -> xs:double promotion.
+    /// Use this instead of `from_small_int(n as i8)` which silently truncates to [-128,127].
+    /// [SONNET-4.6]
+    pub fn from_i64(n: i64) -> Self {
+        XsdDouble { value: f64::from(n) }
+    }
+
     /// Promote from float32 to float64
     /// This is exact for all finite float32 values
     pub fn from_float(f: XsdFloat) -> Self {
@@ -247,9 +265,19 @@ impl XsdDouble {
         let normal_mant: u64 = (mant32 as u64) << 29;
         let normal_bits: u64 = (sign << 63) | (normal_exp << 52) | normal_mant;
 
-        // Denormalized - simplified handling (treat as zero for now)
-        // Full denorm handling requires unbounded loops
-        let denorm_bits: u64 = sign << 63;
+        // Denormalized f32: value = sign * 2^(-126) * (0.mant32)
+        //                        = sign * mant32 * 2^(-149)
+        // Let k = position of the highest set bit in mant32 (0-indexed from LSB).
+        // Then: mant32 = (1 << k) + lower_bits  (lower_bits < 2^k)
+        //        value = sign * (1 + lower_bits/2^k) * 2^(k - 149)
+        // f64 biased exponent = (k - 149) + 1023 = k + 874
+        // f64 mantissa (52 bits) = lower_bits << (52 - k)
+        // This is an exact widening: every finite f32 value is representable in f64. [SONNET-4.6]
+        let k = f32_denorm_leading_bit(mant32);
+        let lower_mant: u64 = (mant32 as u64) ^ (1_u64 << k);
+        let denorm_f64_exp: u64 = k + 874;
+        let denorm_f64_mant: u64 = lower_mant << (52 - k);
+        let denorm_bits: u64 = (sign << 63) | (denorm_f64_exp << 52) | denorm_f64_mant;
 
         // Select the appropriate result
         let result_bits = if is_zero {
@@ -273,20 +301,82 @@ impl Eq for XsdDouble {
 }
 
 // ============================================================================
+// Denormal f32 helper
+// ============================================================================
+
+/// Returns the 0-indexed position of the highest set bit in a non-zero 23-bit
+/// f32 mantissa value (bits 22..0). Used exclusively by `XsdDouble::from_float`
+/// to normalise denormal f32 values when widening to f64.
+/// The caller must guarantee `v != 0`. [SONNET-4.6]
+fn f32_denorm_leading_bit(v: u32) -> u64 {
+    if (v & 0x400000) != 0 {
+        22
+    } else if (v & 0x200000) != 0 {
+        21
+    } else if (v & 0x100000) != 0 {
+        20
+    } else if (v & 0x080000) != 0 {
+        19
+    } else if (v & 0x040000) != 0 {
+        18
+    } else if (v & 0x020000) != 0 {
+        17
+    } else if (v & 0x010000) != 0 {
+        16
+    } else if (v & 0x008000) != 0 {
+        15
+    } else if (v & 0x004000) != 0 {
+        14
+    } else if (v & 0x002000) != 0 {
+        13
+    } else if (v & 0x001000) != 0 {
+        12
+    } else if (v & 0x000800) != 0 {
+        11
+    } else if (v & 0x000400) != 0 {
+        10
+    } else if (v & 0x000200) != 0 {
+        9
+    } else if (v & 0x000100) != 0 {
+        8
+    } else if (v & 0x000080) != 0 {
+        7
+    } else if (v & 0x000040) != 0 {
+        6
+    } else if (v & 0x000020) != 0 {
+        5
+    } else if (v & 0x000010) != 0 {
+        4
+    } else if (v & 0x000008) != 0 {
+        3
+    } else if (v & 0x000004) != 0 {
+        2
+    } else if (v & 0x000002) != 0 {
+        1
+    } else {
+        0 // bit 0 is set (guaranteed by caller: v != 0)
+    }
+}
+
+// ============================================================================
 // Type Promotion Functions
 // ============================================================================
 
 /// Get the common type for two numeric types according to XPath promotion rules
 /// Returns the type that both operands should be promoted to
 pub fn get_common_type(t1: NumericType, t2: NumericType) -> NumericType {
-    // double has highest precedence, then float, then decimal, then integer
-    // When mixing types, promote to the highest precedence type
+    // XPath 2.0 F&O Section 6.2 / Appendix B.1 numeric type promotion hierarchy:
+    //   xs:integer <: xs:decimal -> xs:float -> xs:double
+    // When both operands are the same type, that type is returned.
+    // When mixing: promote to the least-general common type.
+    //   double + anything          -> double
+    //   float  + integer/decimal   -> float  (not double -- Bug B fix [SONNET-4.6])
+    //   decimal + integer          -> decimal
+    //   integer + integer          -> integer
     if t1.is_double() | t2.is_double() {
         NumericType::double()
     } else if t1.is_float() | t2.is_float() {
-        // Per XPath spec: When mixing float with decimal, promote to double
-        // to avoid precision loss
-        NumericType::double()
+        NumericType::float()
     } else if t1.is_decimal() | t2.is_decimal() {
         NumericType::decimal()
     } else {
@@ -422,40 +512,41 @@ pub fn abs_double(a: XsdDouble) -> XsdDouble {
 // Mixed Type Comparison Functions
 // ============================================================================
 
-/// Compare integer to double for equality
-/// Promotes integer to double first
+/// Compare integer to double for equality.
+/// Promotes integer to double using IEEE 754 i64->f64 conversion: exact for |n| <= 2^53,
+/// correctly-rounded (round-to-nearest-ties-even) beyond. [SONNET-4.6]
 pub fn compare_int_double_eq(a: i64, b: XsdDouble) -> bool {
-    let a_double = XsdDouble::from_small_int(a as i8);
+    let a_double = XsdDouble::from_i64(a);
     numeric_equal_double(a_double, b)
 }
 
-/// Compare integer to double for less-than
+/// Compare integer to double for less-than. [SONNET-4.6]
 pub fn compare_int_double_lt(a: i64, b: XsdDouble) -> bool {
-    let a_double = XsdDouble::from_small_int(a as i8);
+    let a_double = XsdDouble::from_i64(a);
     numeric_less_than_double(a_double, b)
 }
 
-/// Compare integer to double for greater-than
+/// Compare integer to double for greater-than. [SONNET-4.6]
 pub fn compare_int_double_gt(a: i64, b: XsdDouble) -> bool {
-    let a_double = XsdDouble::from_small_int(a as i8);
+    let a_double = XsdDouble::from_i64(a);
     numeric_greater_than_double(a_double, b)
 }
 
-/// Compare double to integer for equality
+/// Compare double to integer for equality. [SONNET-4.6]
 pub fn compare_double_int_eq(a: XsdDouble, b: i64) -> bool {
-    let b_double = XsdDouble::from_small_int(b as i8);
+    let b_double = XsdDouble::from_i64(b);
     numeric_equal_double(a, b_double)
 }
 
-/// Compare double to integer for less-than
+/// Compare double to integer for less-than. [SONNET-4.6]
 pub fn compare_double_int_lt(a: XsdDouble, b: i64) -> bool {
-    let b_double = XsdDouble::from_small_int(b as i8);
+    let b_double = XsdDouble::from_i64(b);
     numeric_less_than_double(a, b_double)
 }
 
-/// Compare double to integer for greater-than
+/// Compare double to integer for greater-than. [SONNET-4.6]
 pub fn compare_double_int_gt(a: XsdDouble, b: i64) -> bool {
-    let b_double = XsdDouble::from_small_int(b as i8);
+    let b_double = XsdDouble::from_i64(b);
     numeric_greater_than_double(a, b_double)
 }
 
@@ -477,27 +568,27 @@ pub fn compare_float_double_gt(a: XsdFloat, b: XsdDouble) -> bool {
     numeric_greater_than_double(a_double, b)
 }
 
-/// Compare integer to double for less-than-or-equal
+/// Compare integer to double for less-than-or-equal. [SONNET-4.6]
 pub fn compare_int_double_le(a: i64, b: XsdDouble) -> bool {
-    let a_double = XsdDouble::from_small_int(a as i8);
+    let a_double = XsdDouble::from_i64(a);
     numeric_le_double(a_double, b)
 }
 
-/// Compare integer to double for greater-than-or-equal
+/// Compare integer to double for greater-than-or-equal. [SONNET-4.6]
 pub fn compare_int_double_ge(a: i64, b: XsdDouble) -> bool {
-    let a_double = XsdDouble::from_small_int(a as i8);
+    let a_double = XsdDouble::from_i64(a);
     numeric_ge_double(a_double, b)
 }
 
-/// Compare double to integer for less-than-or-equal
+/// Compare double to integer for less-than-or-equal. [SONNET-4.6]
 pub fn compare_double_int_le(a: XsdDouble, b: i64) -> bool {
-    let b_double = XsdDouble::from_small_int(b as i8);
+    let b_double = XsdDouble::from_i64(b);
     numeric_le_double(a, b_double)
 }
 
-/// Compare double to integer for greater-than-or-equal
+/// Compare double to integer for greater-than-or-equal. [SONNET-4.6]
 pub fn compare_double_int_ge(a: XsdDouble, b: i64) -> bool {
-    let b_double = XsdDouble::from_small_int(b as i8);
+    let b_double = XsdDouble::from_i64(b);
     numeric_ge_double(a, b_double)
 }
 
@@ -543,63 +634,65 @@ pub fn compare_double_float_ge(a: XsdDouble, b: XsdFloat) -> bool {
     numeric_ge_double(a, b_double)
 }
 
-/// Compare integer to float for equality
+/// Compare integer to float for equality.
+/// Promotes integer to float using IEEE 754 i64->f32 conversion: exact for |n| <= 2^24,
+/// correctly-rounded (round-to-nearest-ties-even) beyond. [SONNET-4.6]
 pub fn compare_int_float_eq(a: i64, b: XsdFloat) -> bool {
-    let a_float = XsdFloat::from_small_int(a as i8);
+    let a_float = XsdFloat::from_i64(a);
     numeric_equal_float(a_float, b)
 }
 
-/// Compare integer to float for less-than
+/// Compare integer to float for less-than. [SONNET-4.6]
 pub fn compare_int_float_lt(a: i64, b: XsdFloat) -> bool {
-    let a_float = XsdFloat::from_small_int(a as i8);
+    let a_float = XsdFloat::from_i64(a);
     numeric_less_than_float(a_float, b)
 }
 
-/// Compare integer to float for greater-than
+/// Compare integer to float for greater-than. [SONNET-4.6]
 pub fn compare_int_float_gt(a: i64, b: XsdFloat) -> bool {
-    let a_float = XsdFloat::from_small_int(a as i8);
+    let a_float = XsdFloat::from_i64(a);
     numeric_greater_than_float(a_float, b)
 }
 
-/// Compare integer to float for less-than-or-equal
+/// Compare integer to float for less-than-or-equal. [SONNET-4.6]
 pub fn compare_int_float_le(a: i64, b: XsdFloat) -> bool {
-    let a_float = XsdFloat::from_small_int(a as i8);
+    let a_float = XsdFloat::from_i64(a);
     numeric_le_float(a_float, b)
 }
 
-/// Compare integer to float for greater-than-or-equal
+/// Compare integer to float for greater-than-or-equal. [SONNET-4.6]
 pub fn compare_int_float_ge(a: i64, b: XsdFloat) -> bool {
-    let a_float = XsdFloat::from_small_int(a as i8);
+    let a_float = XsdFloat::from_i64(a);
     numeric_ge_float(a_float, b)
 }
 
-/// Compare float to integer for equality
+/// Compare float to integer for equality. [SONNET-4.6]
 pub fn compare_float_int_eq(a: XsdFloat, b: i64) -> bool {
-    let b_float = XsdFloat::from_small_int(b as i8);
+    let b_float = XsdFloat::from_i64(b);
     numeric_equal_float(a, b_float)
 }
 
-/// Compare float to integer for less-than
+/// Compare float to integer for less-than. [SONNET-4.6]
 pub fn compare_float_int_lt(a: XsdFloat, b: i64) -> bool {
-    let b_float = XsdFloat::from_small_int(b as i8);
+    let b_float = XsdFloat::from_i64(b);
     numeric_less_than_float(a, b_float)
 }
 
-/// Compare float to integer for greater-than
+/// Compare float to integer for greater-than. [SONNET-4.6]
 pub fn compare_float_int_gt(a: XsdFloat, b: i64) -> bool {
-    let b_float = XsdFloat::from_small_int(b as i8);
+    let b_float = XsdFloat::from_i64(b);
     numeric_greater_than_float(a, b_float)
 }
 
-/// Compare float to integer for less-than-or-equal
+/// Compare float to integer for less-than-or-equal. [SONNET-4.6]
 pub fn compare_float_int_le(a: XsdFloat, b: i64) -> bool {
-    let b_float = XsdFloat::from_small_int(b as i8);
+    let b_float = XsdFloat::from_i64(b);
     numeric_le_float(a, b_float)
 }
 
-/// Compare float to integer for greater-than-or-equal
+/// Compare float to integer for greater-than-or-equal. [SONNET-4.6]
 pub fn compare_float_int_ge(a: XsdFloat, b: i64) -> bool {
-    let b_float = XsdFloat::from_small_int(b as i8);
+    let b_float = XsdFloat::from_i64(b);
     numeric_ge_float(a, b_float)
 }
 

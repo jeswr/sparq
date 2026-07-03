@@ -142,12 +142,17 @@ fn test_get_common_type() {
     // Integer + Decimal = Decimal
     assert(get_common_type(NumericType::integer(), NumericType::decimal()).is_decimal());
 
-    // Float + Integer = Double (promoted)
-    assert(get_common_type(NumericType::float(), NumericType::integer()).is_double());
+    // Float + Integer = Float (XPath 2.0 F&O Section 17.1.4: xs:decimal/xs:integer promote to xs:float,
+    // not xs:double; only xs:double triggers double promotion - Bug B fix [SONNET-4.6])
+    assert(get_common_type(NumericType::float(), NumericType::integer()).is_float());
+
+    // Float + Decimal = Float (same reasoning)
+    assert(get_common_type(NumericType::float(), NumericType::decimal()).is_float());
 
     // Double + anything = Double
     assert(get_common_type(NumericType::double(), NumericType::integer()).is_double());
     assert(get_common_type(NumericType::double(), NumericType::float()).is_double());
+    assert(get_common_type(NumericType::double(), NumericType::decimal()).is_double());
 }
 
 #[test]
@@ -666,4 +671,272 @@ fn test_compare_float_int_ge() {
     let float_val2 = XsdFloat::from_small_int(10);
     let int_val2 = 10;
     assert(compare_float_int_ge(float_val2, int_val2) == true);
+}
+
+// ============================================================================
+// Bug A fix (sq-3x7dl.5): soundness tests for exact i64->f64/f32 conversion.
+// These cases FAIL under the old `a as i8` truncation and PASS with from_i64.
+// [SONNET-4.6]
+// ============================================================================
+
+/// 256 as i8 truncates to 0, so the old code reported 256 == 0.0 as TRUE.
+/// With exact i64->f64: 256.0 != 0.0, result must be FALSE.
+#[test]
+fn test_int_double_eq_256_vs_zero_is_false() {
+    let d = XsdDouble::zero(); // 0.0
+    assert(!compare_int_double_eq(256, d));
+}
+
+/// 1000 as i8 truncates to -24 (1000 mod 256 = 232, interpreted as signed = -24),
+/// so the old code reported 1000 == 1000.0 as FALSE.
+/// With exact i64->f64: 1000 == 1000.0 must be TRUE.
+#[test]
+fn test_int_double_eq_1000_is_true() {
+    // 1000.0 in f64: 0x408F400000000000
+    let d = XsdDouble::from_bits(0x408F400000000000);
+    assert(compare_int_double_eq(1000, d));
+}
+
+/// 65536 (2^16) is outside i8 range; 65536 as i8 = 0 (truncation).
+/// compare_int_double_gt(65536, 0.0) must be TRUE.
+#[test]
+fn test_int_double_gt_large_positive() {
+    let d = XsdDouble::zero();
+    assert(compare_int_double_gt(65536, d));
+}
+
+/// -256 as i8 = 0 (truncation: -256 mod 256 interpreted as 0),
+/// so old code reported -256 == 0.0 as TRUE. Must be FALSE.
+#[test]
+fn test_int_double_eq_neg256_vs_zero_is_false() {
+    let d = XsdDouble::zero();
+    assert(!compare_int_double_eq(-256, d));
+}
+
+/// 1000000 (10^6) vs its exact f64 representation must be equal.
+/// 10^6 as i8 = -24, so old code would report NOT equal. Must be TRUE.
+#[test]
+fn test_int_double_eq_million_is_true() {
+    // 1000000.0 in f64: 0x412E848000000000
+    let d = XsdDouble::from_bits(0x412E848000000000);
+    assert(compare_int_double_eq(1000000, d));
+}
+
+/// compare_int_double_lt(-300, 0.0): -300 < 0 must be TRUE.
+/// Old code: -300 as i8 = -44, which is still < 0, but this verifies
+/// the sign is preserved correctly for out-of-i8-range negatives.
+#[test]
+fn test_int_double_lt_neg300_vs_zero() {
+    let d = XsdDouble::zero();
+    assert(compare_int_double_lt(-300, d));
+}
+
+/// compare_int_double_ge(256, 256.0) must be TRUE (equal case).
+#[test]
+fn test_int_double_ge_256_is_true() {
+    // 256.0 in f64: 0x4070000000000000
+    let d = XsdDouble::from_bits(0x4070000000000000);
+    assert(compare_int_double_ge(256, d));
+}
+
+/// compare_int_double_le(256, 257.0) must be TRUE.
+#[test]
+fn test_int_double_le_256_lt_257() {
+    // 257.0 in f64: 0x4070100000000000
+    let d = XsdDouble::from_bits(0x4070100000000000);
+    assert(compare_int_double_le(256, d));
+}
+
+/// double to int direction: compare_double_int_eq(1000.0, 1000) must be TRUE.
+/// Old code: 1000 as i8 = -24, so the double side gets -24.0 and 1000.0 != -24.0.
+#[test]
+fn test_double_int_eq_1000_is_true() {
+    // 1000.0 in f64
+    let d = XsdDouble::from_bits(0x408F400000000000);
+    assert(compare_double_int_eq(d, 1000));
+}
+
+/// compare_double_int_lt(0.0, 256) must be TRUE (0.0 < 256).
+/// Old code: 256 as i8 = 0, so comparing 0.0 < 0.0 = FALSE (wrong).
+#[test]
+fn test_double_int_lt_zero_lt_256() {
+    let d = XsdDouble::zero();
+    assert(compare_double_int_lt(d, 256));
+}
+
+/// compare_double_int_gt(256.0, 255) must be TRUE.
+/// 255 as i8 = -1, so old code compared 256.0 > -1.0 (accidentally TRUE for this case,
+/// but the semantics are wrong). We keep this as a regression guard.
+#[test]
+fn test_double_int_gt_256_gt_255() {
+    // 256.0 in f64: 0x4070000000000000
+    let d = XsdDouble::from_bits(0x4070000000000000);
+    assert(compare_double_int_gt(d, 255));
+}
+
+// ----------------------------------------------------------------------------
+// Float (f32) direction - same class of bug
+// ----------------------------------------------------------------------------
+
+/// compare_int_float_eq(256, 256.0f) must be TRUE.
+/// 256 as i8 = 0, so old code compared 0.0f == 256.0f = FALSE (wrong).
+#[test]
+fn test_int_float_eq_256_is_true() {
+    // 256.0f in f32: 0x43800000
+    let f = XsdFloat::from_bits(0x43800000);
+    assert(compare_int_float_eq(256, f));
+}
+
+/// compare_int_float_eq(1000, 0.0f) must be FALSE.
+/// 1000 as i8 = -24, so old code compared -24.0f == 0.0f = FALSE (accidentally correct)
+/// but compare_int_float_eq(256, 0.0f) = (0.0f == 0.0f) = TRUE (wrong). Explicit:
+#[test]
+fn test_int_float_eq_256_vs_zero_is_false() {
+    let f = XsdFloat::zero();
+    assert(!compare_int_float_eq(256, f));
+}
+
+/// compare_int_float_gt(300, 0.0f) must be TRUE.
+/// 300 as i8 = 44, so old code gave 44.0f > 0.0f = TRUE (correct by coincidence),
+/// but this is a direct correctness guard for the exact conversion.
+#[test]
+fn test_int_float_gt_300_vs_zero() {
+    let f = XsdFloat::zero();
+    assert(compare_int_float_gt(300, f));
+}
+
+/// compare_float_int_eq(1000.0f, 1000) must be TRUE.
+/// 1000 as i8 = -24, so old code compared 1000.0f == -24.0f = FALSE (wrong).
+#[test]
+fn test_float_int_eq_1000_is_true() {
+    // 1000.0f in f32: 0x447A0000
+    let f = XsdFloat::from_bits(0x447A0000);
+    assert(compare_float_int_eq(f, 1000));
+}
+
+/// compare_float_int_lt(0.0f, 256) must be TRUE.
+/// 256 as i8 = 0, so old code compared 0.0f < 0.0f = FALSE (wrong).
+#[test]
+fn test_float_int_lt_zero_lt_256() {
+    let f = XsdFloat::zero();
+    assert(compare_float_int_lt(f, 256));
+}
+
+// ----------------------------------------------------------------------------
+// IEEE preservation: NaN and signed-zero semantics must be unaffected
+// ----------------------------------------------------------------------------
+
+/// NaN vs integer: all comparisons must return false (NaN is unordered).
+#[test]
+fn test_nan_vs_integer_all_false() {
+    let nan = XsdDouble::nan();
+    assert(!compare_double_int_eq(nan, 0));
+    assert(!compare_double_int_lt(nan, 0));
+    assert(!compare_double_int_gt(nan, 0) );
+    assert(!compare_double_int_le(nan, 0));
+    assert(!compare_double_int_ge(nan, 0));
+}
+
+/// +0.0 == integer 0 must be TRUE.
+#[test]
+fn test_pos_zero_eq_integer_zero() {
+    assert(compare_double_int_eq(XsdDouble::zero(), 0));
+}
+
+/// -0.0 == integer 0 must also be TRUE (IEEE: -0.0 == +0.0).
+#[test]
+fn test_neg_zero_eq_integer_zero() {
+    assert(compare_double_int_eq(XsdDouble::neg_zero(), 0));
+}
+
+// ----------------------------------------------------------------------------
+// Bug C fix (sq-3x7dl.5): denormal f32->f64 promotion must be exact [SONNET-4.6]
+// ----------------------------------------------------------------------------
+
+/// The smallest denormal f32 (bits 0x00000001 = 2^-149) promoted to f64
+/// must equal 2^-149 in f64 (bits 0x36A0000000000000).
+/// Old code mapped all denormals to signed zero - this would give 0.0 != 2^-149.
+#[test]
+fn test_from_float_smallest_denorm_is_exact() {
+    let f32_denorm = XsdFloat::from_bits(0x00000001); // 2^-149
+    let promoted = XsdDouble::from_float(f32_denorm);
+    // 2^-149 in f64
+    let expected = XsdDouble::from_bits(0x36A0000000000000);
+    assert(numeric_equal_double(promoted, expected));
+}
+
+/// A larger denormal f32 (bits 0x00000003 = 3 * 2^-149 = 1.5 * 2^-148).
+/// f64 bits: biased exp = 1 + 874 = 875 = 0x36B; mantissa = 1 << 51 = 0x0008000000000000
+///           combined: 0x36B8000000000000
+#[test]
+fn test_from_float_denorm_with_lower_bits_is_exact() {
+    let f32_denorm = XsdFloat::from_bits(0x00000003); // 3 * 2^-149
+    let promoted = XsdDouble::from_float(f32_denorm);
+    let expected = XsdDouble::from_bits(0x36B8000000000000);
+    assert(numeric_equal_double(promoted, expected));
+}
+
+/// Negative denormal f32 (bits 0x80000001 = -2^-149).
+#[test]
+fn test_from_float_negative_denorm_is_exact() {
+    let f32_denorm = XsdFloat::from_bits(0x80000001); // -2^-149
+    let promoted = XsdDouble::from_float(f32_denorm);
+    // -2^-149 in f64: sign bit set
+    let expected = XsdDouble::from_bits(0xB6A0000000000000);
+    assert(numeric_equal_double(promoted, expected));
+}
+
+/// Denorm with multi-bit mantissa: f32 bits 0x003FFFFF
+/// mant32 = 0x3FFFFF (bits 21..0 all set), exp32 = 0, sign = 0.
+/// Derivation:
+///   k = 21  (highest set bit of 0x3FFFFF is bit 21 = 0x200000)
+///   lower = 0x3FFFFF ^ 0x200000 = 0x1FFFFF
+///   f64 biased exp = 21 + 874 = 895 = 0x37F
+///   f64 mant = 0x1FFFFF as u64 << 31 = 0x000F_FFFF_8000_0000
+///   f64 bits = 0x37F0_0000_0000_0000 | 0x000F_FFFF_8000_0000
+///            = 0x37FF_FFFF_8000_0000
+#[test]
+fn test_from_float_large_denorm_mantissa() {
+    let f32_denorm = XsdFloat::from_bits(0x003FFFFF);
+    let promoted = XsdDouble::from_float(f32_denorm);
+    // 0x37FF_FFFF_8000_0000 = (895 << 52) | (0x1FFFFF_u64 << 31)
+    let expected = XsdDouble::from_bits(0x37FFFFFF80000000);
+    assert(numeric_equal_double(promoted, expected));
+}
+
+/// Largest f32 denormal: bits 0x007FFFFF, all 23 mantissa bits set.
+/// This exercises k=22 (the first branch of f32_denorm_leading_bit).
+/// Derivation:
+///   mant32 = 0x7FFFFF, bit 22 (0x400000) is set -> k = 22
+///   lower  = 0x7FFFFF ^ 0x400000 = 0x3FFFFF
+///   f64 biased exp = 22 + 874 = 896 = 0x380
+///   f64 mant = 0x3FFFFF << 30 = 0x000FFFFFC0000000
+///   f64 bits = 0x3800000000000000 | 0x000FFFFFC0000000
+///            = 0x380FFFFFC0000000
+/// Mutation guard: changing the k=22 branch to return 21 gives wrong exp+mant,
+/// causing this assertion to fail. [SONNET-4.6]
+#[test]
+fn test_from_float_largest_denorm_k22() {
+    let f32_denorm = XsdFloat::from_bits(0x007FFFFF); // largest f32 denormal
+    let promoted = XsdDouble::from_float(f32_denorm);
+    let expected = XsdDouble::from_bits(0x380FFFFFC0000000);
+    assert(numeric_equal_double(promoted, expected));
+}
+
+/// Denormal f32 with mantissa 0x100001 (bits 20 and 0 set).
+/// This exercises k=20 (bit 20 is the highest set bit).
+/// Derivation:
+///   mant32 = 0x100001, bits 22 and 21 are clear -> k = 20
+///   lower  = 0x100001 ^ 0x100000 = 0x000001
+///   f64 biased exp = 20 + 874 = 894 = 0x37E
+///   f64 mant = 0x000001 << 32 = 0x0000000100000000
+///   f64 bits = 0x37E0000000000000 | 0x0000000100000000
+///            = 0x37E0000100000000
+/// Value check: (2^20 + 1) * 2^-149 = 2^-129 + 2^-149. [SONNET-4.6]
+#[test]
+fn test_from_float_denorm_k20() {
+    let f32_denorm = XsdFloat::from_bits(0x00100001); // mant = 0x100001, k=20
+    let promoted = XsdDouble::from_float(f32_denorm);
+    let expected = XsdDouble::from_bits(0x37E0000100000000);
+    assert(numeric_equal_double(promoted, expected));
 }
