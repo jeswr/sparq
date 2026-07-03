@@ -14,7 +14,7 @@ The epic said "there is no RIF conformance-suite arm today". That is **half righ
 | Surface | State | Where |
 |---|---|---|
 | RIF-Core in-engine model + Datalog-safety validation + N3 lowering + closure | **BUILT** | `crates/sparq-reason/src/rif.rs` (`rif-core` feature; 16 builtins; `Document::validate` enforces range-restriction left-to-right, arity, builtin-in-head rejection) |
-| RIF **expressivity** ratchet (self-asserting, sparq-extension-labelled) | **BUILT** | `crates/sparq-conformance/tests/rif_core_suite.rs` (`RIF_CORE_FLOOR`, mirrored textually by `tests/scoreboard_floors.rs`; honestly framed as NOT a W3C-suite or SPARQL-RIF-entailment claim) |
+| RIF **expressivity** ratchet (self-asserting, sparq-extension-labelled) | **BUILT** | `crates/sparq-conformance/tests/rif_core_suite.rs` (`RIF_CORE_FLOOR`, mirrored textually by `crates/sparq-conformance/tests/scoreboard_floors.rs`; honestly framed as NOT a W3C-suite or SPARQL-RIF-entailment claim) |
 | RIF/XML presentation-syntax importer | **ABSENT** | listed in `rif::UNIMPLEMENTED` — the front-end takes the in-engine model only |
 | W3C **RIF WG test-suite** arm (the actual Core test cases) | **ABSENT** | nothing consumes the RIF WG test repository |
 | Builtins over the **shared** `sparq_substrate::numeric` tower | **ABSENT** | RIF builtins lower to N3 `math:`/`string:`/`list:` builtins, which the chainer evaluates with its own **private** `NumVal` tower (`n3/mod.rs`, `enum NumVal { Int(i128), Dec(i128,u32), F64 }`, EYE-parity semantics) — this private tower is the real seam-2 gap |
@@ -159,7 +159,7 @@ Design points, each load-bearing for oracle soundness:
   D-entailment lane already uses (`tests/w3c/rdf-tests` fetched by script, lane skips
   offline). No fabricated fixtures in either path.
 - **Floor mechanics:** a pinned calibrated floor const in the new lane, textually
-  mirrored in `tests/scoreboard_floors.rs` (the established guard), tallied as a
+  mirrored in `crates/sparq-conformance/tests/scoreboard_floors.rs` (the established guard), tallied as a
   **standards-suite lane with an honest denominator** (W3C-authored cases; the skip
   taxonomy is the denominator's honesty), distinct from the self-asserting
   expressivity ratchet, which stays and keeps its sparq-extension label.
@@ -171,11 +171,11 @@ two *parallel* beads touch any common file).
 
 | Bead | Wave | Crate | Tier | Exclusive files | One-line scope |
 |---|---|---|---|---|---|
-| **sq-pbz04.5.1** (B1 tower adoption) | 1 | sparq-reason | opus | `src/n3/mod.rs`, `Cargo.toml` | replace the private `NumVal` arithmetic core with `sparq_substrate::numeric` behind an EYE-compat adapter; byte-identical floors; escape hatch = documented non-adoption |
-| **sq-pbz04.5.2** (B2 builtin mapping) | 1 | sparq-reason | sonnet | `src/rif.rs`, `sparq-conformance/tests/rif_core_suite.rs` | add exactly the §3.1 table (5 builtins) + record the §3.2 deferrals; expressivity floor rises |
-| **sq-pbz04.5.3** (B3 RIF/XML importer) | 2 | sparq-reason | opus | `src/rif_xml.rs` (new), `src/lib.rs`, `Cargo.toml` | new `rif-xml` feature (+ workspace `quick-xml`, optional dep); Or-split + Exists-flatten desugaring; fail-closed taxonomy |
-| **sq-pbz04.5.4** (B5 Equal-atom audit) | 2 | sparq-reason | opus | `src/rif.rs`, `sparq-conformance/tests/rif_core_suite.rs` | the §3.3 fix: reject `=` in conclusions; ground-identity + variable-substitution body semantics; distinct-constant value equality fail-closed pending sq-v5evr |
-| **sq-pbz04.5.5** (B4 WG suite arm) | 3 | sparq-conformance | opus | `tests/rif_wg_core_suite.rs` (new), `Cargo.toml`, `tests/scoreboard_floors.rs`, fixtures/fetch script | the §4 arm: categories, NET vacuity rule, value-aware matching, license-gated fixtures, pinned floor |
+| **sq-pbz04.5.1** (B1 tower adoption) | 1 | sparq-reason | opus | `crates/sparq-reason/src/n3/mod.rs`, `crates/sparq-reason/Cargo.toml` | replace the private `NumVal` arithmetic core with `sparq_substrate::numeric` behind an EYE-compat adapter; byte-identical floors; escape hatch = documented non-adoption |
+| **sq-pbz04.5.2** (B2 builtin mapping) | 1 | sparq-reason | sonnet | `crates/sparq-reason/src/rif.rs`, `crates/sparq-conformance/tests/rif_core_suite.rs` | add exactly the §3.1 table (5 builtins) + record the §3.2 deferrals; expressivity floor rises |
+| **sq-pbz04.5.3** (B3 RIF/XML importer) | 2 | sparq-reason | opus | `crates/sparq-reason/src/rif_xml.rs` (new), `crates/sparq-reason/src/lib.rs`, `crates/sparq-reason/Cargo.toml` | new `rif-xml` feature (+ workspace `quick-xml`, optional dep); Or-split + Exists-flatten desugaring; fail-closed taxonomy |
+| **sq-pbz04.5.4** (B5 Equal-atom audit) | 2 | sparq-reason | opus | `crates/sparq-reason/src/rif.rs`, `crates/sparq-conformance/tests/rif_core_suite.rs` | the §3.3 fix: reject `=` in conclusions; ground-identity + variable-substitution body semantics; distinct-constant value equality fail-closed pending sq-v5evr |
+| **sq-pbz04.5.5** (B4 WG suite arm) | 3 | sparq-conformance | opus | `crates/sparq-conformance/tests/rif_wg_core_suite.rs` (new), `crates/sparq-conformance/Cargo.toml`, `crates/sparq-conformance/tests/scoreboard_floors.rs`, fixtures/fetch script | the §4 arm: categories, NET vacuity rule, value-aware matching, license-gated fixtures, pinned floor |
 | **sq-pbz04.5.6** (B6 lowering-boundary docs) | 3 | sparq-reason (docs) | haiku | `crates/sparq-reason/README.md`, `skills/inference/SKILL.md` | document the accepted safety class, the lowering boundary, and the deferral table (epic item c); readme-template gate respected |
 
 Dependency edges (all real, no artificial serialization; wired via `bd dep`):
@@ -189,8 +189,8 @@ Dependency edges (all real, no artificial serialization; wired via `bd dep`):
 ```
 
 Cross-epic shared-file cautions (outside this epic's control, flagged for the
-scheduler): `tests/scoreboard_floors.rs` is also a target of the EL arm bead
-sq-pbz04.2.4; `src/lib.rs` may also gain a module line from sq-pbz04.1.2. Both are
+scheduler): `crates/sparq-conformance/tests/scoreboard_floors.rs` is also a target of the EL arm bead
+sq-pbz04.2.4; `crates/sparq-reason/src/lib.rs` may also gain a module line from sq-pbz04.1.2. Both are
 tiny additive blocks — rebase-trivial, but the beads note them.
 
 ## 6. Non-goals and honesty ledger
