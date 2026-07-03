@@ -51,6 +51,14 @@ d-entail = []
 # anyway). Pure-Rust, reuses the in-tree N3 engine — no new deps, no new Profile
 # variant (so no cfg-gated match-arm churn in any consumer crate).
 rif-core = []
+# [SONNET-4.6] sq-pbz04.5.3 — OPT-IN RIF/XML importer: parse the W3C RIF-Core XML
+# presentation syntax into `rif::Document` with Or-split / Exists-flatten desugaring
+# and a fail-closed taxonomy (ImportDirective / NonCoreElement / UnknownExternal /
+# NamedArgUniterm / UnrecognizedElement / MalformedXml / ValidationFailed variants).
+# Wires `rif-core` (the AST + validator the importer targets) and `quick-xml` for XML
+# parsing. NON-DEFAULT — when off the `rif_xml` module is cfg'd out entirely; the lean
+# default / wasm build carries zero RIF/XML code. Unblocks sq-pbz04.5.5 (W3C RIF test-suite arm).
+rif-xml = ["rif-core", "dep:quick-xml"]
 # [OPUS-4.8] sq-yk6or (epic sq-pbz04, THE SUBSTRATE PAYOFF) — OPT-IN: drive the SHARED
 # `sparq-substrate::join` hash-join kernels (the same `JoinKeys` + `build_table` + `probe_emit`
 # + generic `Budget` the SPARQL engine drives) for the RDFS single-pass predicate join
@@ -88,3 +96,10 @@ smallvec = { workspace = true, optional = true }
 # wasm-portable: sparq-reason ships to the browser via the tier-b sparq-reason-wasm bundle
 # ([OPUS-4.8] sq-6qw3) — regex compiles to wasm32-unknown-unknown.
 regex = "1"
+# [SONNET-4.6] sq-pbz04.5.3 — RIF/XML importer; OPTIONAL, linked only by `rif-xml`.
+# No `encoding` feature: RIF/XML from the W3C test suite is UTF-8; non-UTF-8 XML will
+# fail at parse with EncodingError::Utf8 (acceptable fail-closed posture).  Dropping
+# the feature avoids pulling in unvetted `encoding_rs 0.8.35` (cargo-vet gating failure
+# sq-pbz04.5.3 fix-3).  If non-UTF-8 RIF/XML support is ever needed, re-enable the
+# feature AND add a cargo-vet exemption per supply-chain/config.toml precedent.
+quick-xml = { version = "0.41", default-features = false, optional = true }
