@@ -41,11 +41,11 @@
       "unviable": 1
     },
     "sparq-prov": {
-      "caught": 155,
-      "caught_pct": 70.09,
-      "ceiling": 69,
-      "measured_surviving": 67,
-      "timeout": 2,
+      "caught": 151,
+      "caught_pct": 74.15,
+      "ceiling": 55,
+      "measured_surviving": 53,
+      "timeout": 1,
       "unviable": 22
     },
     "sparq-substrate": {
