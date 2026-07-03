@@ -53,6 +53,27 @@ If your agent runtime supports the Agent Skills standard, these load via progres
 
 The engine's `compare_values` total order **now lives in `compare` here** (bead [sq-vezew], Phase 4): the ALGORITHM moved as the generic `compare::compare_terms` over a tiny `CompareTerm` trait, and the engine implements that trait for its `Value` (zero-cost wrappers over `value_str` / `as_num` / `value_compare_strict`) and calls the substrate body — so the engine AND the reasoners share ONE total-order body with no `Box<dyn>` on the compare path. The seam deliberately leaves `Value` **engine-resident**: the engine's `Value` enum, its `LitKind` literal-family classifier and `value_compare_strict` typed/temporal comparison ALSO drive the relational `<`/`>`/`=` operators (not just ORDER BY) and are coupled to `oxrdf::Term`, so a wholesale `Value` relocation would be non-perf-neutral and sprawling; moving the algorithm while surfacing the term observations through the trait is the clean perf-neutral seam (mirrors how `join` keeps `Bindings` engine-private behind `JoinKeys`). The genuinely-deferred remainder — should a reasoner ever need the *full* `Value`/`LitKind` value-space (not just the ordering) shared — is captured as a follow-up bead, not faked complete.
 
+#### Substrate boundary: what lives in sparq-substrate vs. what stays engine-private (durable architecture fact)
+
+[HAIKU-4.5] sq-qonbz.7 — the substrate boundary is architecturally explicit: sparq-substrate holds **ONLY** the four generic hot-loop modules (rows / numeric / join—including join::delta / compare) and nothing else. These modules are consumed by BOTH the SPARQL engine and the reasoners, monomorphised and vtable-free.
+
+**In sparq-substrate (generic, consumer-agnostic, monomorphised, shared):**
+- `rows` — Row/Key/Posting id-tuple vocabulary.
+- `numeric` — XSD numeric value tower + arithmetic ops (monomorphic over concrete u32 ids and SmallVec).
+- `join` — four id-tuple join kernels (merge-join, hash-join, bind-join, trie-join) + `join::delta` (persistent extendable hash table for semi-naive Δ⋈full join). All generic over JoinKeys descriptor and Budget cooperative-cancel hook; no vtable on the hot path.
+- `compare` — SPARQL term total order (compare_terms over CompareTerm trait). Generic over the trait; concrete consumer implements it for its term type; no vtable on the per-comparison hot loop.
+
+**In sparq-engine (engine-private, NOT in sparq-substrate — never moved to the shared crate):**
+- `Value` enum + `LitKind` literal-family classifier + `value_compare_strict` typed/temporal comparison (drives relational ops, ORDER BY, and all value semantics; coupled to oxrdf::Term).
+- `Bindings` struct (engine's result binding representation; the join kernels expose Row/Key instead).
+- `LocalVocab` interning (engine-specific; reasoners have their own vocab).
+- `QueryBudget` thread-local cancellation (engine-specific; reasoners may supply their own Budget impl).
+- `ScanCmp` pushdown filter logic (engine optimizer detail).
+- `service.rs` (SPARQL SERVICE federation).
+- Serializers and EXISTS/aggregation (engine executor details).
+
+The seam is **clean and intentional**: generic algorithms flow outward to sparq-substrate; engine-private types and optimizations stay inward. This is verified structurally by the perf-neutrality gate (scripts/check-no-dyn-dispatch.py enumerates all four hot-loop modules — rows/numeric/join/join::delta/compare — and fails if any Box<dyn> / &dyn enters a hot path).
+
 ## MAINTENANCE RULE (REQUIRED — read before changing any public surface)
 
 **When you change a public API, update the matching skill in the SAME change (same commit/PR).** A "public API" means any of:
