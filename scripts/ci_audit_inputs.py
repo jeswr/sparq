@@ -28,7 +28,8 @@
 #   ci_audit_inputs.py                          # real: cargo metadata + repo scan
 #   ci_audit_inputs.py --metadata-file m.json   # hermetic metadata snapshot
 #   ci_audit_inputs.py --repo-root DIR --map DIR/ci/path-ownership.toml
-# Exit 0 == every out-of-crate input is covered; exit 1 == findings (printed).
+# Exit 0 == every out-of-crate input is covered; exit 1 == findings (printed);
+# exit 2 == cargo metadata could not be loaded (fail-closed error, printed to stderr).
 #
 # Stdlib only (matches ci_select.py + the CI setup-python 3.12).
 
