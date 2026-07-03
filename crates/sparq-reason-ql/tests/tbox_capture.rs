@@ -373,9 +373,10 @@ fn functional_property_typing_is_counted_unrecognised() {
     )]);
     let tbox = TBox::extract(&ts);
 
-    assert!(
-        tbox.unrecognised_schema >= 1,
-        "owl:FunctionalProperty in rdf:type object must increment unrecognised_schema; got {}",
+    assert_eq!(
+        tbox.unrecognised_schema,
+        1,
+        "owl:FunctionalProperty in rdf:type object must increment unrecognised_schema exactly once; got {}",
         tbox.unrecognised_schema
     );
     assert!(
@@ -414,9 +415,10 @@ fn characteristic_property_types_are_all_counted() {
     for local in &characteristic {
         let line = format!("<{EX}p> <{RDF_TYPE}> <{OWL}{}> .", local);
         let tbox = TBox::extract(&triples(&[&line]));
-        assert!(
-            tbox.unrecognised_schema >= 1,
-            "owl:{} in rdf:type object must increment unrecognised_schema; got {}",
+        assert_eq!(
+            tbox.unrecognised_schema,
+            1,
+            "owl:{} in rdf:type object must increment unrecognised_schema exactly once; got {}",
             local,
             tbox.unrecognised_schema
         );

@@ -594,41 +594,42 @@ fn role_of_object(t: &Term) -> Option<Role> {
     }
 }
 
-// Vocabulary IRI helpers (kept as functions to avoid `const` String concat churn).
-fn sub_class_of() -> String {
-    format!("{RDFS}subClassOf")
+// Vocabulary IRI helpers — return `&'static str` so the per-triple extraction loop incurs no
+// heap allocation per comparison. [SONNET-4.6] sq-pbz04.3.3
+fn sub_class_of() -> &'static str {
+    "http://www.w3.org/2000/01/rdf-schema#subClassOf"
 }
-fn sub_property_of() -> String {
-    format!("{RDFS}subPropertyOf")
+fn sub_property_of() -> &'static str {
+    "http://www.w3.org/2000/01/rdf-schema#subPropertyOf"
 }
-fn domain() -> String {
-    format!("{RDFS}domain")
+fn domain() -> &'static str {
+    "http://www.w3.org/2000/01/rdf-schema#domain"
 }
-fn range() -> String {
-    format!("{RDFS}range")
+fn range() -> &'static str {
+    "http://www.w3.org/2000/01/rdf-schema#range"
 }
-fn inverse_of() -> String {
-    format!("{OWL}inverseOf")
+fn inverse_of() -> &'static str {
+    "http://www.w3.org/2002/07/owl#inverseOf"
 }
-fn equivalent_class() -> String {
-    format!("{OWL}equivalentClass")
+fn equivalent_class() -> &'static str {
+    "http://www.w3.org/2002/07/owl#equivalentClass"
 }
-fn equivalent_property() -> String {
-    format!("{OWL}equivalentProperty")
+fn equivalent_property() -> &'static str {
+    "http://www.w3.org/2002/07/owl#equivalentProperty"
 }
-fn disjoint_with() -> String {
-    format!("{OWL}disjointWith")
+fn disjoint_with() -> &'static str {
+    "http://www.w3.org/2002/07/owl#disjointWith"
 }
-fn property_disjoint_with() -> String {
-    format!("{OWL}propertyDisjointWith")
+fn property_disjoint_with() -> &'static str {
+    "http://www.w3.org/2002/07/owl#propertyDisjointWith"
 }
-fn complement_of() -> String {
-    format!("{OWL}complementOf")
+fn complement_of() -> &'static str {
+    "http://www.w3.org/2002/07/owl#complementOf"
 }
-/// `rdf:type` IRI as a `String` — used in the `TBox::extract` match arm that classifies
+/// `rdf:type` IRI as a `&'static str` — used in the `TBox::extract` match arm that classifies
 /// characteristic-property typing triples by OBJECT position. [SONNET-4.6] sq-pbz04.3.3
-fn rdf_type_str() -> String {
-    format!("{}type", RDF)
+fn rdf_type_str() -> &'static str {
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 }
 
 /// The `rdf:type` IRI (a role-atom predicate that means "class membership", handled specially by
