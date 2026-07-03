@@ -343,10 +343,8 @@ impl ContinuousMultiQuery {
                 diff_rows(self.r2s, result.rows, &mut self.prev_rows, &mut self.prev_hashes)
             }
         };
-        // When RSTREAM, advance the diff base anyway so that switching R2S
-        // between ticks (not a public API, but defensive) stays consistent.
-        // Actually for RSTREAM we skip updating prev_rows / prev_hashes — they
-        // are never read and keeping them empty avoids a pointless clone.
+        // For RSTREAM we skip updating prev_rows / prev_hashes — they are never
+        // read, and keeping them empty avoids a pointless clone. [SONNET-4.6]
         // The reported bounds: the tick's span is the join boundary. We report
         // [start, end) where end = tick and start = the min snapshot start, so
         // the window result carries a meaningful interval for the embedder.

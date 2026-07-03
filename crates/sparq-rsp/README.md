@@ -56,7 +56,7 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
 - **Relation-to-stream (R2S)** — `R2S::{RStream, IStream, DStream}`: full / added /
   removed rows per window, computed as multiset diffs over 64-bit row hashes.
 - **RSP-QL surface syntax + multi-window joins** — `RspqlQuery::parse` reads
-  `REGISTER [ISTREAM|DSTREAM] … FROM NAMED WINDOW <w> ON <s> RANGE … STEP …`, and
+  `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM] … FROM NAMED WINDOW <w> ON <s> RANGE … STEP …`, and
   `ContinuousMultiQuery` joins across 2 or more named windows on one synchronized
   event-time clock with full RSTREAM/ISTREAM/DSTREAM support.
 - **Pluggable materialisation (`EvalMode`)** — `PersistentDict` (default, compacted
