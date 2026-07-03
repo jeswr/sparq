@@ -63,6 +63,26 @@ env:
   # the cargo layer before they ever sink a job. A genuine fetch failure (crate
   # truly absent) still exhausts the retries and fails honestly.
   CARGO_NET_RETRY: "10"
+  # [SONNET-4.6] sq-6vshe.1: CI build-profile speedup applied to all native Linux Rust jobs.
+  # CARGO_INCREMENTAL=0: incremental compilation is pure overhead on cold-cache one-shot CI
+  # builds (no .incremental/ artifacts survive across jobs).
+  # CARGO_PROFILE_DEV_DEBUG=line-tables-only: keeps file:line backtraces (RUST_BACKTRACE=1
+  # above still works) while dropping bulky DWARF variable-info sections — cuts both
+  # debuginfo-emission time and link time on the dev profile. Sufficient for line-coverage
+  # tracking (cargo-llvm-cov uses LLVM coverage counters, not DWARF; llvm-cov adds its own
+  # -C instrument-coverage rustflag which coexists cleanly with this setting).
+  # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=lld": routes ALL
+  # native x86_64 link steps through lld (LLVM's fast linker). The per-target env var scopes
+  # this to the HOST triple only — wasm32-unknown-unknown builds use wasm-ld and are
+  # unaffected (proc macros and build scripts that compile for the host DO benefit).
+  # lld is chosen over mold because: (a) Rust 1.86+ already ships rust-lld and uses it as
+  # the default for x86_64-unknown-linux-gnu (the -B<sysroot>/gcc-ld path provides it);
+  # (b) lld-18 is pre-installed on ubuntu-24.04 runners; (c) no per-job apt install step is
+  # needed — tests that spawn cargo as a subprocess (e.g. crate-doc guard tests) inherit
+  # this flag safely. Bench/release/dist profiles are NOT changed (bench.yml, build-matrix.yml).
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
 jobs:
   # [OPUS-4.8] merge-throughput: path-filtered gate. Compute whether THIS change

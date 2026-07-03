@@ -104,6 +104,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # [SONNET-4.6] sq-6vshe.1: CI build-profile speedup (mirrors ci.yml). See ci.yml's
+  # global env comment for the full rationale. lld is pre-installed on ubuntu-24.04
+  # runners and also provided via the Rust toolchain's rust-lld, so no per-job install
+  # step is needed.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
 jobs:
   # [OPUS-4.8] merge-throughput: path-filtered gate (same pattern as ci.yml's `changes`).
