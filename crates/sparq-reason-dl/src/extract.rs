@@ -136,6 +136,22 @@ fn classify_triple(
     o: Id,
     onto: &mut Ontology,
 ) -> Result<(), ExtractError> {
+    // --- Hoisted punned-predicate guard — fires BEFORE the axiom-dispatch arms ----------
+    // [SONNET-4.6] sq-pbz04.4.1 soundness closure: a predicate simultaneously declared as
+    // AnnotationProperty AND ObjectProperty (or any other cross-type punning) is
+    // Unclassifiable — the downstream checker must never reason over an axiom whose
+    // classification was ambiguous. Hoisted here so no axiom is produced from an
+    // ambiguous predicate regardless of which arm would have matched.
+    // The companion chokepoint in `decode_object_property` covers punned IRIs that arrive
+    // in the property-ARGUMENT position (domain/range subject, subPropertyOf operands,
+    // owl:onProperty object) rather than as the triple's predicate.
+    if idx.punned_props.contains(&p) {
+        return Err(ExtractError::Unclassifiable(format!(
+            "predicate {} is declared as multiple property types (ambiguous classification)",
+            term_iri(dict, p)
+        )));
+    }
+
     // --- Axiom predicates ---------------------------------------------------------------
     if p == v.sub_class_of {
         let sub = decode_class(dict, v, idx, s)?;
@@ -200,16 +216,8 @@ fn classify_triple(
         return Ok(());
     }
 
-    // --- Punned predicates: declared as multiple property types — fail-closed ------------
-    // [OPUS-4.8] Fix 3: a predicate simultaneously declared as AnnotationProperty AND
-    // ObjectProperty (or any other cross-type punning) is Unclassifiable — the downstream
-    // checker must never reason over an axiom whose classification was ambiguous.
-    if idx.punned_props.contains(&p) {
-        return Err(ExtractError::Unclassifiable(format!(
-            "predicate {} is declared as multiple property types (ambiguous classification)",
-            term_iri(dict, p)
-        )));
-    }
+    // (Punned-predicate guard has already fired at the top of this function before the axiom
+    // arms — no duplicate check needed here.)
 
     // --- Declared annotation properties (from the declaration pass) — ignorable ----------
     if idx.annotation_props.contains(&p) {
@@ -554,6 +562,19 @@ fn decode_object_property(
     if idx.inverse_of.contains(&id) {
         return Err(ExtractError::OutOfFragment(format!(
             "inverse object property expression {}",
+            term_iri(dict, id)
+        )));
+    }
+    // [SONNET-4.6] sq-pbz04.4.1 soundness closure: structural chokepoint for punned IRIs
+    // arriving in the property-ARGUMENT position (domain/range subject, subPropertyOf
+    // operands, owl:onProperty object). A property IRI declared under multiple property
+    // types is Unclassifiable at this call site — the downstream checker must never reason
+    // over an axiom whose classification was ambiguous. This covers all current and future
+    // callers (decode_restriction for owl:onProperty; classify_triple for axiom arms)
+    // without requiring per-call-site discipline.
+    if idx.punned_props.contains(&id) {
+        return Err(ExtractError::Unclassifiable(format!(
+            "property IRI {} is declared as multiple property types (ambiguous classification)",
             term_iri(dict, id)
         )));
     }

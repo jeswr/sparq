@@ -515,6 +515,146 @@ fn reject_punned_annotation_and_object_property() {
     );
 }
 
+// ============================== REJECT (soundness closure: punned property in axiom-arg position) ==============================
+// [SONNET-4.6] sq-pbz04.4.1: the original Fix-3 check only covered the role-assertion
+// fall-through path. The axiom-dispatch arms (domain/range/subPropertyOf) and decode_restriction
+// (owl:onProperty) each call decode_object_property, which is now the structural chokepoint.
+// These four tests confirm that a punned property is refused in EVERY axiom-argument position.
+
+/// Punned :p (AnnotationProperty + ObjectProperty) in rdfs:domain subject position.
+/// Must be refused — ObjectPropertyDomain(:p, :C) must NOT be produced. [SONNET-4.6]
+#[test]
+fn reject_punned_property_in_domain() {
+    let (d, t) = parse(
+        ":p a owl:ObjectProperty .\n\
+         :p a owl:AnnotationProperty .\n\
+         :p rdfs:domain :C .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "punned property in rdfs:domain subject position must be refused"
+    );
+}
+
+/// Punned :p (AnnotationProperty + ObjectProperty) in rdfs:range subject position.
+/// Must be refused — ObjectPropertyRange(:p, :C) must NOT be produced. [SONNET-4.6]
+#[test]
+fn reject_punned_property_in_range() {
+    let (d, t) = parse(
+        ":p a owl:ObjectProperty .\n\
+         :p a owl:AnnotationProperty .\n\
+         :p rdfs:range :C .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "punned property in rdfs:range subject position must be refused"
+    );
+}
+
+/// Punned :p (AnnotationProperty + ObjectProperty) in rdfs:subPropertyOf subject AND object
+/// positions (two separate triples). Both must be refused. [SONNET-4.6]
+#[test]
+fn reject_punned_property_in_sub_property_of() {
+    // Subject position: :p rdfs:subPropertyOf :q — :p is punned.
+    let (d, t) = parse(
+        ":p a owl:ObjectProperty .\n\
+         :p a owl:AnnotationProperty .\n\
+         :q a owl:ObjectProperty .\n\
+         :p rdfs:subPropertyOf :q .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "punned property in rdfs:subPropertyOf subject position must be refused"
+    );
+
+    // Object position: :q rdfs:subPropertyOf :p — :p is punned.
+    let (d, t) = parse(
+        ":p a owl:ObjectProperty .\n\
+         :p a owl:AnnotationProperty .\n\
+         :q a owl:ObjectProperty .\n\
+         :q rdfs:subPropertyOf :p .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "punned property in rdfs:subPropertyOf object position must be refused"
+    );
+}
+
+/// Punned :p (AnnotationProperty + ObjectProperty) in owl:onProperty object position inside a
+/// restriction. Must be refused — ObjectSomeValuesFrom(:p, :C) must NOT be produced. [SONNET-4.6]
+#[test]
+fn reject_punned_property_in_on_property() {
+    let (d, t) = parse(
+        ":p a owl:ObjectProperty .\n\
+         :p a owl:AnnotationProperty .\n\
+         :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :p ; owl:someValuesFrom :C ] .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "punned property in owl:onProperty position must be refused"
+    );
+}
+
+// ============================== ACCEPT (control: unambiguous property in each axiom-arg position) ==============================
+// [SONNET-4.6] sq-pbz04.4.1: confirm the fix does not over-reject an unambiguous ObjectProperty.
+
+/// An unambiguously declared ObjectProperty in rdfs:domain produces ObjectPropertyDomain. [SONNET-4.6]
+#[test]
+fn accept_unambiguous_property_in_domain() {
+    let (d, t) = parse(":p a owl:ObjectProperty .\n:p rdfs:domain :C .");
+    let o = extract(&d, &t).expect("accept");
+    assert!(
+        o.axioms.iter().any(|ax| matches!(ax, Axiom::ObjectPropertyDomain { .. })),
+        "unambiguous ObjectProperty in rdfs:domain must produce ObjectPropertyDomain"
+    );
+}
+
+/// An unambiguously declared ObjectProperty in rdfs:range produces ObjectPropertyRange. [SONNET-4.6]
+#[test]
+fn accept_unambiguous_property_in_range() {
+    let (d, t) = parse(":p a owl:ObjectProperty .\n:p rdfs:range :C .");
+    let o = extract(&d, &t).expect("accept");
+    assert!(
+        o.axioms.iter().any(|ax| matches!(ax, Axiom::ObjectPropertyRange { .. })),
+        "unambiguous ObjectProperty in rdfs:range must produce ObjectPropertyRange"
+    );
+}
+
+/// An unambiguously declared ObjectProperty in rdfs:subPropertyOf produces SubObjectPropertyOf. [SONNET-4.6]
+#[test]
+fn accept_unambiguous_property_in_sub_property_of() {
+    let (d, t) = parse(
+        ":p a owl:ObjectProperty .\n\
+         :q a owl:ObjectProperty .\n\
+         :p rdfs:subPropertyOf :q .",
+    );
+    let o = extract(&d, &t).expect("accept");
+    assert!(
+        o.axioms.iter().any(|ax| matches!(ax, Axiom::SubObjectPropertyOf { .. })),
+        "unambiguous ObjectProperty in rdfs:subPropertyOf must produce SubObjectPropertyOf"
+    );
+}
+
+/// An unambiguous restriction over a declared ObjectProperty produces ObjectSomeValuesFrom. [SONNET-4.6]
+#[test]
+fn accept_unambiguous_property_in_on_property() {
+    let (d, t) = parse(
+        ":p a owl:ObjectProperty .\n\
+         :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :p ; owl:someValuesFrom :C ] .",
+    );
+    let o = extract(&d, &t).expect("accept");
+    assert!(
+        o.axioms.iter().any(|ax| matches!(
+            ax,
+            Axiom::SubClassOf {
+                sup: sparq_reason_dl::model::ClassExpression::ObjectSomeValuesFrom(..),
+                ..
+            }
+        )),
+        "unambiguous ObjectProperty in owl:onProperty must produce ObjectSomeValuesFrom"
+    );
+}
+
 // ============================== ACCEPT (Fix 4: owl:Deprecated* meta-classes) ==============================
 
 /// owl:DeprecatedClass is a structural meta-class (OWL 2 §11.2) — no logical axioms.
