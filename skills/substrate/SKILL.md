@@ -79,7 +79,7 @@ The four id-tuple join kernels over `&[Row]` slices. Requires `rows`; pulls `rus
 | `probe_emit` | per-row probe emit (used by both serial and parallel paths) |
 | `bind_combine` | index-nested-loop combine step |
 | `lftj_recurse` over `Trie`/`TrieIter` | leapfrog trie-join (WCOJ) |
-| `join::delta::DeltaTable` | persistent build-side table for OWL-RL semi-naive fixpoint |
+| `join::delta::DeltaTable` | persistent build-side table for semi-naive Δ-vs-full shapes (built for the OWL-RL fixpoint; drives `sparq-rsp`'s Delta/Snapshot window diff) |
 
 All kernels are generic over a `JoinKeys` column descriptor and a `Budget` cooperative-cancel
 hook — both monomorphised, never a trait object. Use `NoBudget` for an unbounded join.
@@ -143,6 +143,9 @@ identical wasm bundle). The crate is `forbid(unsafe_code)`.
 
 - **Implementing a new sparq reasoner** that shares join kernels or numeric evaluation with
   the engine — depend on `sparq-substrate` directly (it is below `sparq-engine`, so no cycle).
+  Direct consumers today: `sparq-engine` (all four seams), `sparq-reason` (`substrate-join`,
+  opt-in), and `sparq-rsp` (`join::delta::DeltaTable` for the windowed-materialisation
+  Delta/Snapshot diff). [FABLE-5] sq-2n1q3.4
 - **Working on the substrate crate itself** — see `research/shared-eval-substrate.md` for the
   full design record (what is shareable vs engine-private, the options considered, the
   perf-neutrality proof).

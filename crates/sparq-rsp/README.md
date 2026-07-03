@@ -62,7 +62,9 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
 - **Pluggable materialisation (`EvalMode`)** — `PersistentDict` (default, compacted
   dictionary), `Rebuild` (v1 baseline), `Delta` (one live graph, per-slide delta), and
   `Snapshot` (one live graph + a cheap O(overlay) immutable point-in-time snapshot per
-  closed window), all producing identical results.
+  closed window), all producing identical results. The `Delta`/`Snapshot` window diff
+  runs on the shared eval substrate (`sparq-substrate` `join::delta::DeltaTable`,
+  id-level, monomorphic — no dynamic dispatch on the probe path).
 
 ## 📚 Learn more
 

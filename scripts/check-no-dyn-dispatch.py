@@ -77,6 +77,13 @@ SUBSTRATE_HOT_PATHS = [
     "crates/sparq-substrate/src/compare.rs",
     # Library wiring and zero-overhead doc-contract.
     "crates/sparq-substrate/src/lib.rs",
+    # [FABLE-5] sq-2n1q3.4: the first guarded CONSUMER probe path — sparq-rsp's windowed
+    # materialisation drives join::delta::DeltaTable for the EvalMode::Delta/Snapshot
+    # consecutive-window (ISTREAM/DSTREAM-shaped) diff (WindowDiff::contains /
+    # apply_window_delta). The invariant applies on the consumer side of the seam too: the
+    # probe's emit hook is a monomorphised closure and its budget the NoBudget ZST — never
+    # a trait object between the probe loop and its comparison.
+    "crates/sparq-rsp/src/eval.rs",
 ]
 
 # --- The dynamic-dispatch patterns. We match the three trait-OBJECT spellings; a

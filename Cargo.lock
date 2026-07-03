@@ -4103,6 +4103,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+ "sparq-substrate",
 ]
 
 [[package]]
