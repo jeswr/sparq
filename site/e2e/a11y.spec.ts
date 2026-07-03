@@ -39,11 +39,16 @@ import { assertA11y, writeSeedBaseline, WCAG_TAGS } from "./support/a11y";
 const WASM_BUNDLE = fileURLToPath(new URL("../public/wasm/sparq_wasm_bg.wasm", import.meta.url));
 const WASM_PRESENT = existsSync(WASM_BUNDLE);
 
-// The beaded, structural color-contrast gaps this harness surfaced but did not fix here (§3.1).
-const GAP_HOME = {
-  bead: "sq-ymr2e.13",
-  reason: "hero preview-table syntax tokens + primary th + gradient Run button need a design-token AA pass",
-};
+// [SONNET-4.6] sq-ymr2e.13 — GAP_HOME is fixed: the home hero surfaces are now ZERO-tier.
+// The three failing pairs were: (a) sq-tok-string / sq-tok-number / text-primary th on the
+// opacity-45 PreviewTable (removed opacity — axe scans aria-hidden visual content; at α=0.45
+// even black text only reaches ~3.3:1 on white, so no token colour could clear 4.5:1 AA);
+// (b) chart-3 (number token, oklch(0.62 0.14 95) → ~3.6:1) darkened to oklch(0.54 0.14 95)
+// → ~5.0:1 and chart-4 (string token, oklch(0.58 0.16 30) → borderline) to oklch(0.55 0.16 30)
+// → ~5.2:1 in globals.css :root; (c) the gradient Run button: tailwind-merge drops bg-primary
+// when bg-[var(--hero-grad)] is appended, leaving background-color: transparent, so axe sees
+// near-white text on the near-white muted/15 parent (≈1.1:1) — fixed by style.backgroundColor:
+// var(--primary) on the Button, giving axe a computable 5.3:1 teal-on-near-white ratio.
 const GAP_PALETTE = {
   bead: "sq-ymr2e.14",
   reason: "command-palette --success badge is ~4.09:1 (need 4.5); a global token nudge",
@@ -52,13 +57,13 @@ const GAP_PALETTE = {
 // In A11Y_SEED mode, rewrite the ratchet baseline from the measured counts (no-op otherwise).
 test.afterAll(() => writeSeedBaseline());
 
-// ── Home — the hero runner is the product claim (§2.1 / §3.1). KNOWN-GAP: color-contrast (.13). ──
+// ── Home — the hero runner is the product claim (§2.1 / §3.1). ZERO-tier after sq-ymr2e.13. ──
 test.describe("a11y · home", () => {
   test("idle-preview state — WCAG 2.1 AA", async ({ page }) => {
     const home = new BasePage(page);
     await home.goto("");
     await home.expectRunnerState("home", "idle-preview");
-    await assertA11y(page, "home:idle", { knownGap: GAP_HOME });
+    await assertA11y(page, "home:idle"); // ZERO tier: sq-ymr2e.13 fixed.
   });
 
   test("results state — WCAG 2.1 AA", async ({ page }) => {
@@ -69,7 +74,7 @@ test.describe("a11y · home", () => {
     // Run the shipped sample; the results table is the wasm-computed state a11y must also cover.
     await page.getByRole("button", { name: /Run/ }).first().click();
     await home.expectRunnerState("home", "results");
-    await assertA11y(page, "home:results", { knownGap: GAP_HOME });
+    await assertA11y(page, "home:results"); // ZERO tier: sq-ymr2e.13 fixed.
   });
 });
 
