@@ -258,4 +258,80 @@ mod tests {
         drop(sink);
         assert!(stream.collect_solutions().is_err());
     }
+
+    // [OPUS-4.8] sq-qcnn.22: Additional direct unit tests for coverage ratchet
+    #[test]
+    fn solution_get_returns_none_for_unbound() {
+        let sol = Solution::new(
+            vec!["x".into(), "y".into()],
+            vec![Some(nn("http://ex/a")), None],
+        );
+        assert_eq!(sol.get("x"), Some(&nn("http://ex/a")));
+        assert_eq!(sol.get("y"), None);
+        assert_eq!(sol.get("z"), None); // variable not in solution
+    }
+
+    #[test]
+    fn solution_get_empty_solution() {
+        let sol = Solution::new(vec![], vec![]);
+        assert_eq!(sol.get("x"), None);
+    }
+
+    #[test]
+    fn solution_new_builds_correctly() {
+        let vars = vec!["a".into(), "b".into()];
+        let cells = vec![Some(nn("http://ex/1")), None];
+        let sol = Solution::new(vars.clone(), cells.clone());
+        assert_eq!(sol.vars, vars);
+        assert_eq!(sol.cells, cells);
+    }
+
+    #[test]
+    fn bounded_zero_capacity_promoted_to_one() {
+        // Capacity 0 → promoted to 1 (rendezvous → 1 item slack), so a single `emit` on this
+        // thread does not block on the bound. Drop the sink before draining so the channel
+        // closes and `next()` terminates (same discipline as `error_item_short_circuits_collect`);
+        // otherwise the live sender keeps the receiver blocking after the last item. [OPUS-4.8] sq-qcnn.22
+        let (sink, stream) = SolutionStream::bounded(0);
+        assert!(sink.emit(sol("http://ex/a")), "promoted-to-1 slack accepts one item without blocking");
+        drop(sink);
+        let items: Vec<_> = stream.collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].as_ref().unwrap().get("s"), Some(&nn("http://ex/a")));
+    }
+
+    #[test]
+    fn from_rows_zero_rows() {
+        let stream = SolutionStream::from_rows(vec!["x".into()], vec![]);
+        let got = stream.collect_solutions().unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn from_rows_single_row() {
+        let stream = SolutionStream::from_rows(
+            vec!["x".into()],
+            vec![vec![Some(nn("http://ex/obj"))]],
+        );
+        let got = stream.collect_solutions().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].get("x"), Some(&nn("http://ex/obj")));
+    }
+
+    #[test]
+    fn solution_sink_clone_multiple_emits() {
+        // Cloned sink can emit independently; solutions arrive in emission order. [OPUS-4.8] sq-qcnn.22
+        let (sink, stream) = SolutionStream::bounded(2);
+        let sink2 = sink.clone();
+        let ok1 = sink.emit(sol("http://ex/a"));
+        let ok2 = sink2.emit(sol("http://ex/b"));
+        drop(sink);
+        drop(sink2);
+        assert!(ok1);
+        assert!(ok2);
+        let got: Vec<_> = stream.map(|i| i.unwrap()).collect();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].get("s"), Some(&nn("http://ex/a")));
+        assert_eq!(got[1].get("s"), Some(&nn("http://ex/b")));
+    }
 }

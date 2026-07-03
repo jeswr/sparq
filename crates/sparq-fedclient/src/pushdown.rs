@@ -954,4 +954,122 @@ mod tests {
         assert_eq!(render_values_block(&[], &[]), "");
         assert_eq!(render_values_block(&["j".to_string()], &[]), "");
     }
+
+    // [OPUS-4.8] sq-qcnn.22: Additional direct unit tests for coverage ratchet
+    #[test]
+    fn group_vars_collects_in_position_order_dedup() {
+        // Verify group_vars collects variables in s→p→o position order with dedup.
+        let bgp = Bgp::new(vec![
+            tp(var("s"), iri("http://ex/p"), var("o")),
+            tp(var("o"), iri("http://ex/q"), var("z")),
+        ]);
+        let group = ExclusiveGroup {
+            source: 0,
+            patterns: vec![0, 1],
+        };
+        let vars = group_vars(&group, &bgp);
+        // s from pattern 0 subject, o from pattern 0 object + pattern 1 subject, z from pattern 1 object.
+        assert_eq!(vars, vec!["s", "o", "z"]);
+    }
+
+    #[test]
+    fn group_vars_single_pattern_bound_positions() {
+        // Group over a single pattern with one variable; bound positions ignored.
+        let bgp = Bgp::new(vec![tp(
+            var("x"),
+            iri("http://ex/type"),
+            iri("http://ex/Person"),
+        )]);
+        let group = ExclusiveGroup {
+            source: 0,
+            patterns: vec![0],
+        };
+        let vars = group_vars(&group, &bgp);
+        assert_eq!(vars, vec!["x"]);
+    }
+
+    #[test]
+    fn push_group_single_pattern_fragment_projects_vars() {
+        // Fragment source: single-pattern group, select exactly what the group needs.
+        let bgp = Bgp::new(vec![tp(var("s"), iri("http://ex/p"), var("o"))]);
+        let group = ExclusiveGroup {
+            source: 0,
+            patterns: vec![0],
+        };
+        let cap = Capability::brtpf(50);
+        let pushed = push_group(
+            &group,
+            &bgp,
+            &cap,
+            &["s".to_string(), "o".to_string()],
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        // Fragment: first pattern only; SELECT projects s, o.
+        assert_eq!(pushed.sub.project, vec!["s".to_string(), "o".to_string()]);
+        assert_eq!(
+            pushed.sub.sparql,
+            "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }"
+        );
+    }
+
+    #[test]
+    fn push_group_output_includes_cross_group_join_vars() {
+        // Output must include vars needed for joins with other groups, even if not in final projection.
+        let bgp = Bgp::new(vec![
+            tp(var("s"), iri("http://ex/p1"), var("o1")),
+            tp(var("s"), iri("http://ex/p2"), var("o2")),
+        ]);
+        let group = ExclusiveGroup {
+            source: 0,
+            patterns: vec![0, 1],
+        };
+        let cap = Capability::endpoint();
+        // output_vars includes both s (cross-group join key) and o1 (final projection var).
+        // push_group projects exactly the group vars present in output_vars. [OPUS-4.8] sq-qcnn.22
+        let pushed = push_group(
+            &group,
+            &bgp,
+            &cap,
+            &["s".to_string(), "o1".to_string()],
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        // Both s and o1 in projection (s is join var, o1 is output).
+        assert_eq!(
+            pushed.sub.project,
+            vec!["s".to_string(), "o1".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_values_block_three_vars() {
+        // Three-variable VALUES block: comprehensive test of the multi-var form.
+        let block = render_values_block(
+            &["x".to_string(), "y".to_string(), "z".to_string()],
+            &[
+                vec!["<http://ex/a>".to_string(), "<http://ex/b>".to_string(), "<http://ex/c>".to_string()],
+                vec!["<http://ex/d>".to_string(), "<http://ex/e>".to_string(), "<http://ex/f>".to_string()],
+            ],
+        );
+        assert_eq!(
+            block,
+            "VALUES (?x ?y ?z) { (<http://ex/a> <http://ex/b> <http://ex/c>) (<http://ex/d> <http://ex/e> <http://ex/f>) }"
+        );
+    }
+
+    #[test]
+    fn class_covers_hierarchy() {
+        // FilterClass hierarchy: None < Equality < Full.
+        assert!(class_covers(FilterClass::Full, FilterClass::Equality));
+        assert!(class_covers(FilterClass::Full, FilterClass::Full));
+        assert!(class_covers(FilterClass::Equality, FilterClass::Equality));
+        assert!(!class_covers(FilterClass::Equality, FilterClass::Full));
+        assert!(!class_covers(FilterClass::None, FilterClass::Equality));
+        assert!(class_covers(FilterClass::Full, FilterClass::None));
+    }
 }

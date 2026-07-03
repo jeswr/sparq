@@ -35,8 +35,8 @@
       "nightly_note": "[OPUS-4.8] sq-bjct: nightly_floor gates the NIGHTLY tier, whose measurement MERGES the W3C SPARQL + inference conformance BINARIES (they run as `cargo run`, not `cargo test`) into this crate's llvm-cov report — a higher number than the test-only per-commit `floor`. See scripts/coverage.sh measure_merged + the coverage-nightly job. Merged measurement 87.31% originally lifted the nightly floor to 85; the base per-commit `floor` was since raised 83 -> 87 by sq-qcnn.13 (test-only measurement 89.85% now exceeds that old merged number). A nightly re-seed — which measures a SUPERSET of the per-commit tests and would raise nightly_floor above 85 — is deferred (COVERAGE_TIER=nightly scripts/coverage.sh && coverage-gate.py --seed); floor = floor(measured) - 2 margin."
     },
     "sparq-fedclient": {
-      "floor": 89,
-      "note": "[OPUS-4.8] sq-bif.1: OPT-IN streaming federation CLIENT. Measured WITH its whole-surface features on (--features fedclient,fedclient-adaptive — see scripts/coverage.sh measure() case; a default-feature build is an empty crate). Measured line% 91.71 (4361/4753); floor = floor(measured) - 2 margin. Conservative seed measured on a non-canonical work box; the floor is the CI-enforced ratchet of record."
+      "floor": 90,
+      "note": "[OPUS-4.8] sq-bif.1 / sq-qcnn.22: OPT-IN streaming federation CLIENT. Measured WITH its whole-surface features on (--features fedclient,fedclient-adaptive — see scripts/coverage.sh measure() case; a default-feature build is an empty crate). Measured line% 91.71 (4361/4753) → raised 89→90 via sq-qcnn.22 micro-coverage increase: DIRECT unit tests on public fns (group_vars, push_group edge cases in pushdown.rs; pattern_vars, lower_leaf all-positions in planner.rs; Solution/SolutionStream edge cases in stream.rs), asserting exact values to kill mutations (variable dedup/projection/fragment, zero capacity, clone-emit); floor = floor(measured) - 2 margin. Conservative seed measured on a non-canonical work box; the floor is the CI-enforced ratchet of record."
     },
     "sparq-fedplan": {
       "floor": 94,
