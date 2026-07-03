@@ -86,9 +86,23 @@ pub fn load_dataset(text: &str, format: &str) -> Result<Graph, String>
 pub fn load_reader<R: std::io::Read>(reader: R, format: &str) -> Result<Graph, String>
 
 // Streaming + PARALLEL (needs `parallel`): pipelined 32 MiB block parse, never
-// materializes the whole decompressed doc. N-Triples gets the fast path; other
-// formats fall back to serial load_reader.
+// materializes the whole decompressed doc. N-Triples gets this parallel pipelined
+// path; other formats fall back to serial load_reader. (This is the PARALLEL-LOADER
+// fast path — distinct from the byte-level IRI-validation fast path noted below, which
+// is a separate, opt-in mechanism that covers N-Triples AND N-Quads.)
 pub fn load_reader_parallel<R: std::io::Read + Send>(reader: R, format: &str) -> Result<Graph, String>
+
+// [OPUS-4.8] sq-7d3dj.18 — the byte-level N-Triples/N-Quads fast path does NOT validate IRIs
+// against RFC-3987 by default (it trusts input; the serial oxttl path DOES validate). The
+// OPT-IN `iri-fast` feature on `sparq-core` (OFF by default) turns that validation on for the
+// byte parser via a prefix-memoized fast path IN FRONT of `oxiri` — a last-N validated
+// `scheme://authority/` memo + a one-pass ASCII `iunreserved`/sub-delims suffix scan, falling
+// back to the full `oxiri` automaton on any non-ASCII / `%`-escape / `#` / delimiter anomaly.
+// It accepts EXACTLY what `oxiri::Iri::parse` accepts (an absolute IRI) — a MANDATORY
+// differential-fuzz gate (`sparq_core::iri`, run under `--features iri-fast`) asserts
+// `fast_accept ⇒ oxiri` and `validate == oxiri` over a committed adversarial corpus + a
+// deterministic generator, so a malformed IRI can never be wrong-accepted into the store.
+// The `oxiri` dep is already in-tree (via oxttl), so the feature adds zero new compilation.
 
 // Parse WITHOUT building indexes — the seam reasoning/transform hooks use.
 pub fn parse_to_triples(text: &str, format: &str) -> Result<(Dict, Vec<[Id; 3]>), String>

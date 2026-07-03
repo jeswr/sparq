@@ -9,6 +9,12 @@ pub mod dict;
 pub mod dictspill;
 #[cfg(feature = "mmap")]
 pub mod extsort;
+// [OPUS-4.8] (sq-7d3dj.18) Prefix-memoized IRI-validation fast path in FRONT of the full
+// `oxiri` RFC-3987 automaton. OPT-IN behind `iri-fast` (OFF by default) so the lean default /
+// wasm build never names `oxiri` as a direct dep and pays nothing; when on, the parallel
+// N-Triples / N-Quads loader validates each IRI through it (fast path, oxiri-equivalent).
+#[cfg(feature = "iri-fast")]
+pub mod iri;
 mod nt;
 // [OPUS-4.8] sq-yj76l (gh #1121): the opt-in `SharedGraph` server-sharing handle. OFF by
 // default so the lean default / wasm build never links it (it is `std::sync` only — no new

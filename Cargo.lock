@@ -3656,6 +3656,7 @@ dependencies = [
  "libc",
  "memchr",
  "memmap2",
+ "oxiri",
  "oxjsonld",
  "oxrdf 0.3.3",
  "oxrdfxml",

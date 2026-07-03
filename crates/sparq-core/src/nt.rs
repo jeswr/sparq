@@ -436,9 +436,31 @@ fn decode<'a>(raw: &'a [u8], esc: bool) -> Result<Cow<'a, str>, String> {
     }
 }
 
+// [OPUS-4.8] (sq-7d3dj.18) Per-thread `scheme://authority/` prefix memo for the opt-in IRI
+// validation fast path. A thread-local is sound under the rayon chunk-parallel loader — each
+// worker keeps its own ring — and needs no clearing between parses: every memoized prefix was
+// accepted by `oxiri`, and IRI validity is a pure function of the bytes, so a retained (or
+// cross-parse) prefix can only change SPEED, never the accept/reject answer.
+#[cfg(feature = "iri-fast")]
+thread_local! {
+    static IRI_MEMO: std::cell::RefCell<crate::iri::IriPrefixMemo> =
+        std::cell::RefCell::new(crate::iri::IriPrefixMemo::new());
+}
+
 fn iri(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
     let (start, end, esc, next) = scan_delim(b, i, b'>')?;
     let s = decode(&b[start..end], esc)?;
+    // [OPUS-4.8] (sq-7d3dj.18) When the opt-in `iri-fast` feature is on, validate every IRIREF
+    // against RFC-3987 (fast path in front of `oxiri`) so the byte-level loader rejects the
+    // malformed IRIs the serial oxttl path already rejects — reaching conformance parity at
+    // fast-path cost. OFF by default: the loader keeps its current unvalidated-fast behaviour.
+    #[cfg(feature = "iri-fast")]
+    {
+        let valid = IRI_MEMO.with(|m| m.borrow_mut().validate(&s));
+        if !valid {
+            return Err(format!("N-Triples: invalid IRI <{}> at byte {}", s, i));
+        }
+    }
     Ok((dict.intern_iri(&s), next))
 }
 
