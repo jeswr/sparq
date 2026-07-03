@@ -796,4 +796,202 @@ mod tests {
             })
             .collect()
     }
+
+    // =====================================================================
+    // [OPUS-4.8] sq-qcnn.26 — DIRECT unit tests on the private polynomial /
+    // linear-algebra helpers of the robust (Berlekamp–Welch) reconstruction
+    // path. Each asserts EXACT VALUES (not just "no panic") so the mutation
+    // ratchet's semantic mutant classes — arithmetic swaps (`+`/`-`/`*`/`/`),
+    // comparison flips (`<`/`==`/`>=`), `&&`/`||` guard flips, and default-body
+    // replacements — are NOTICED in the helper that actually computes the
+    // reconstruction, not only end-to-end where a wrong intermediate can be
+    // masked. Semi-honest scope only; NO protocol logic changed, NO security
+    // claim (sq-qhy4 gates that). `[OPUS-4.8]`
+    // =====================================================================
+
+    #[test]
+    fn eval_poly_horner_exact_values() {
+        // Q(x) = 6 + 5x + x^2 ; Q(2) = 6 + 10 + 4 = 20.
+        assert_eq!(eval_poly(&[fp(6), fp(5), fp(1)], fp(2)), fp(20));
+        // The empty polynomial is identically 0.
+        assert_eq!(eval_poly(&[], fp(9)), fp(0));
+        // A constant polynomial ignores x.
+        assert_eq!(eval_poly(&[fp(3)], fp(100)), fp(3));
+        // Q(x) = 2 + 3x^2 ; Q(2) = 2 + 12 = 14 (pins the x^2 coefficient path).
+        assert_eq!(eval_poly(&[fp(2), fp(0), fp(3)], fp(2)), fp(14));
+    }
+
+    #[test]
+    fn trim_trailing_zeros_drops_only_high_zeros() {
+        assert_eq!(trim_trailing_zeros(vec![fp(1), fp(2), fp(0), fp(0)]), vec![fp(1), fp(2)]);
+        // Interior zeros are preserved — only TRAILING zeros are dropped.
+        assert_eq!(trim_trailing_zeros(vec![fp(1), fp(0), fp(3)]), vec![fp(1), fp(0), fp(3)]);
+        // An all-zero polynomial collapses to the empty vec.
+        assert_eq!(trim_trailing_zeros(vec![fp(0), fp(0)]), Vec::<Fp>::new());
+        assert_eq!(trim_trailing_zeros(vec![fp(0)]), Vec::<Fp>::new());
+        assert_eq!(trim_trailing_zeros(Vec::<Fp>::new()), Vec::<Fp>::new());
+        // No trailing zero → unchanged.
+        assert_eq!(trim_trailing_zeros(vec![fp(7)]), vec![fp(7)]);
+    }
+
+    #[test]
+    fn poly_mul_linear_multiplies_by_x_plus_c() {
+        // (1 + x)·(x + 2) = 2 + 3x + x^2.
+        assert_eq!(
+            poly_mul_linear(&[fp(1), fp(1)], fp(2)),
+            vec![fp(2), fp(3), fp(1)]
+        );
+        // 3·(x + 5) = 15 + 3x (the constant-poly case; pins BOTH the `p·c` and
+        // the `p·x` shift terms).
+        assert_eq!(poly_mul_linear(&[fp(3)], fp(5)), vec![fp(15), fp(3)]);
+    }
+
+    #[test]
+    fn poly_divmod_exact_quotient_and_remainder() {
+        // (x+2)(x+3) = x^2 + 5x + 6, divided by (x+2), is exactly (x+3) rem 0.
+        let (q, r) = poly_divmod(&[fp(6), fp(5), fp(1)], &[fp(2), fp(1)]).unwrap();
+        assert_eq!(q, vec![fp(3), fp(1)], "quotient must be x+3");
+        assert_eq!(r, Vec::<Fp>::new(), "remainder must vanish (exact division)");
+    }
+
+    #[test]
+    fn poly_divmod_nonzero_remainder_and_low_degree_dividend() {
+        // x^2 + 1 divided by (x+1): quotient x-1 = x + (p-1), remainder 2.
+        // (x+1)(x-1) = x^2 - 1, so x^2 + 1 = (x+1)(x-1) + 2.
+        let (q, r) = poly_divmod(&[fp(1), fp(0), fp(1)], &[fp(1), fp(1)]).unwrap();
+        assert_eq!(q, vec![fp(1).neg(), fp(1)], "quotient must be x - 1");
+        assert_eq!(r, vec![fp(2)], "remainder must be the constant 2");
+
+        // Dividend of LOWER degree than the divisor → the early-return arm:
+        // quotient is the zero polynomial [0] and the whole dividend is the
+        // remainder. (Pins the `rem.len() < den.len()` comparison + return.)
+        let (q2, r2) = poly_divmod(&[fp(5)], &[fp(2), fp(1)]).unwrap();
+        assert_eq!(q2, vec![fp(0)]);
+        assert_eq!(r2, vec![fp(5)]);
+    }
+
+    #[test]
+    fn poly_divmod_by_zero_polynomial_is_none() {
+        assert!(poly_divmod(&[fp(1), fp(2)], &[fp(0)]).is_none());
+        assert!(poly_divmod(&[fp(1), fp(2)], &[]).is_none());
+    }
+
+    #[test]
+    fn lagrange_recovers_polynomial_and_secret() {
+        // Q(x) = 10 + 4x + 7x^2. Sample at x = 1,2,3 and interpolate back.
+        let q = [fp(10), fp(4), fp(7)];
+        let shares: Vec<Share> = [1u64, 2, 3]
+            .iter()
+            .map(|&x| Share { x, y: eval_poly(&q, fp(x)) })
+            .collect();
+        // The full polynomial is recovered coefficient-for-coefficient.
+        assert_eq!(lagrange_at_zero_poly(&shares).unwrap(), q.to_vec());
+        // The secret (value at x = 0) is the constant term.
+        assert_eq!(lagrange_at_zero(&shares).unwrap(), fp(10));
+        // No points → a protocol error, never a bogus zero.
+        assert!(matches!(
+            lagrange_at_zero_poly(&[]),
+            Err(MpcError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn solve_linear_system_unique_inconsistent_and_underdetermined() {
+        // Unique: 2x + 3y = 8 ; x + 2y = 5  ⇒  x = 1, y = 2.
+        let unique = vec![
+            vec![fp(2), fp(3), fp(8)],
+            vec![fp(1), fp(2), fp(5)],
+        ];
+        assert_eq!(solve_linear_system(unique, 2), Some(vec![fp(1), fp(2)]));
+
+        // Inconsistent: x = 1 and x = 2 has no solution.
+        let inconsistent = vec![vec![fp(1), fp(1)], vec![fp(1), fp(2)]];
+        assert_eq!(solve_linear_system(inconsistent, 1), None);
+
+        // Under-determined: one equation, two unknowns ⇒ no UNIQUE solution.
+        let under = vec![vec![fp(1), fp(0), fp(3)]];
+        assert_eq!(solve_linear_system(under, 2), None);
+    }
+
+    #[test]
+    fn for_each_combination_enumerates_exact_subsets() {
+        let mut got: Vec<Vec<usize>> = Vec::new();
+        for_each_combination(4, 2, &mut |idx| got.push(idx.to_vec()));
+        assert_eq!(
+            got,
+            vec![
+                vec![0, 1],
+                vec![0, 2],
+                vec![0, 3],
+                vec![1, 2],
+                vec![1, 3],
+                vec![2, 3],
+            ],
+            "C(4,2) in lexicographic order"
+        );
+
+        // k == 0 yields the single empty combination.
+        let mut zero: Vec<Vec<usize>> = Vec::new();
+        for_each_combination(3, 0, &mut |idx| zero.push(idx.to_vec()));
+        assert_eq!(zero, vec![Vec::<usize>::new()]);
+
+        // k > n yields NO combination.
+        let mut none: Vec<Vec<usize>> = Vec::new();
+        for_each_combination(2, 3, &mut |idx| none.push(idx.to_vec()));
+        assert!(none.is_empty());
+
+        // k == n yields exactly the one full combination.
+        let mut full: Vec<Vec<usize>> = Vec::new();
+        for_each_combination(3, 3, &mut |idx| full.push(idx.to_vec()));
+        assert_eq!(full, vec![vec![0, 1, 2]]);
+    }
+
+    #[test]
+    fn check_distinct_points_rejects_repeats() {
+        let ok = [Share { x: 1, y: fp(1) }, Share { x: 2, y: fp(2) }];
+        assert!(check_distinct_points(&ok).is_ok());
+        let dup = [
+            Share { x: 1, y: fp(1) },
+            Share { x: 2, y: fp(2) },
+            Share { x: 2, y: fp(9) },
+        ];
+        assert!(matches!(
+            check_distinct_points(&dup),
+            Err(MpcError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn disagreeing_points_flags_exactly_the_off_curve_shares() {
+        // Q(x) = 10 + 4x + 7x^2 sampled at x = 1..4; then tamper index 1.
+        let q = [fp(10), fp(4), fp(7)];
+        let mut shares: Vec<Share> = [1u64, 2, 3, 4]
+            .iter()
+            .map(|&x| Share { x, y: eval_poly(&q, fp(x)) })
+            .collect();
+        assert!(disagreeing_points(&shares, &q).is_empty(), "clean → none");
+        shares[1].y = shares[1].y.add(fp(1)); // off-curve by 1
+        assert_eq!(
+            disagreeing_points(&shares, &q),
+            vec![1],
+            "exactly the tampered index is off-curve"
+        );
+    }
+
+    #[test]
+    fn berlekamp_welch_corrects_one_error_directly() {
+        // Q(x) = 5 + 3x sampled at x = 1..4, one share tampered; e = 1 recovers Q.
+        let q = [fp(5), fp(3)];
+        let mut shares: Vec<Share> = [1u64, 2, 3, 4]
+            .iter()
+            .map(|&x| Share { x, y: eval_poly(&q, fp(x)) })
+            .collect();
+        shares[2].y = shares[2].y.add(fp(99)); // one off-curve share
+        let recovered = berlekamp_welch(&shares, 1, 1).expect("e=1 must decode");
+        assert_eq!(recovered, vec![fp(5), fp(3)], "BW recovers Q = 5 + 3x");
+        assert_eq!(eval_poly(&recovered, fp(0)), fp(5), "secret Q(0) = 5");
+        // e = 0 cannot absorb the tampered share (the points are not all on one
+        // degree-1 line) → the key-equation system is inconsistent → None.
+        assert!(berlekamp_welch(&shares, 1, 0).is_none());
+    }
 }
