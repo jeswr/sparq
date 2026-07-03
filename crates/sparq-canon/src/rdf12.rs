@@ -769,3 +769,498 @@ fn permutations(items: &[String]) -> Vec<Vec<String>> {
     }
     out
 }
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-qcnn.14 — direct unit tests for PRIVATE helper functions in
+// rdf12.rs. These kill mutation survivors that the external functional tests
+// cannot see (the external tests verify final canonical OUTPUT; internal
+// mutations that produce the same output via different intermediate steps
+// survive unless the intermediates themselves are asserted on here).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod private_tests {
+    use super::*;
+    use oxrdf::{BlankNode, GraphName, Literal, NamedNode, NamedOrBlankNode, Term, Triple};
+
+    fn iri(s: &str) -> NamedNode {
+        NamedNode::new(s).unwrap()
+    }
+    fn bn(s: &str) -> BlankNode {
+        BlankNode::new(s).unwrap()
+    }
+
+    // ---- special_label ----
+
+    /// `special_label(label, reference)` must return `"a"` when label == reference
+    /// and `"z"` otherwise. Kills the `== with !=` comparison mutation (line 609).
+    #[test]
+    fn special_label_reference_becomes_a() {
+        let label = special_label("x", "x");
+        assert_eq!(
+            label.as_str(),
+            "a",
+            "the reference bnode must receive the 'a' special label"
+        );
+    }
+
+    #[test]
+    fn special_label_other_becomes_z() {
+        let label = special_label("y", "x");
+        assert_eq!(
+            label.as_str(),
+            "z",
+            "any non-reference bnode must receive the 'z' special label"
+        );
+    }
+
+    // ---- push_unique ----
+
+    /// `push_unique` must NOT add a label that is already in the list.
+    /// Kills the `delete !` mutation (line 546) that would always push.
+    #[test]
+    fn push_unique_does_not_add_duplicates() {
+        let mut labels: Vec<String> = vec!["a".to_string()];
+        push_unique(&mut labels, "a");
+        assert_eq!(labels.len(), 1, "duplicate must not be added: {labels:?}");
+    }
+
+    #[test]
+    fn push_unique_adds_new_label() {
+        let mut labels: Vec<String> = vec!["a".to_string()];
+        push_unique(&mut labels, "b");
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[1], "b");
+    }
+
+    // ---- collect_bnodes_term ----
+
+    /// A `Term::BlankNode` must be collected. Kills `delete match arm
+    /// Term::BlankNode(b)` (line 559).
+    #[test]
+    fn collect_bnodes_term_collects_blank_node() {
+        let mut out: Vec<String> = Vec::new();
+        collect_bnodes_term(&Term::BlankNode(bn("myb")), &mut out);
+        assert_eq!(out, vec!["myb".to_string()]);
+    }
+
+    /// A `Term::Triple` must recurse into subject and object to collect nested
+    /// bnodes. Kills `delete match arm Term::Triple(t)` (line 560).
+    #[test]
+    fn collect_bnodes_term_recurses_into_triple_term() {
+        let inner_bnode = Term::BlankNode(bn("inner"));
+        let tt = Term::Triple(Box::new(Triple::new(
+            NamedOrBlankNode::BlankNode(bn("subj")),
+            iri("http://ex/p"),
+            inner_bnode,
+        )));
+        let mut out: Vec<String> = Vec::new();
+        collect_bnodes_term(&tt, &mut out);
+        // Both the subject bnode and the inner object bnode must be collected.
+        assert!(out.contains(&"subj".to_string()), "subject bnode in triple term: {out:?}");
+        assert!(out.contains(&"inner".to_string()), "object bnode in triple term: {out:?}");
+        assert_eq!(out.len(), 2, "exactly two bnodes: {out:?}");
+    }
+
+    /// A `Term::NamedNode` must NOT contribute any bnodes.
+    #[test]
+    fn collect_bnodes_term_ignores_iri() {
+        let mut out: Vec<String> = Vec::new();
+        collect_bnodes_term(&Term::NamedNode(iri("http://ex/n")), &mut out);
+        assert!(out.is_empty(), "IRI must not contribute a bnode: {out:?}");
+    }
+
+    // ---- collect_bnodes_subject ----
+
+    #[test]
+    fn collect_bnodes_subject_collects_blank_node() {
+        let mut out: Vec<String> = Vec::new();
+        collect_bnodes_subject(&NamedOrBlankNode::BlankNode(bn("s")), &mut out);
+        assert_eq!(out, vec!["s".to_string()]);
+    }
+
+    #[test]
+    fn collect_bnodes_subject_ignores_named_node() {
+        let mut out: Vec<String> = Vec::new();
+        collect_bnodes_subject(&NamedOrBlankNode::NamedNode(iri("http://ex/s")), &mut out);
+        assert!(out.is_empty());
+    }
+
+    // ---- HndqCallCounter ----
+
+    /// `add` must increment the counter and return `Ok(())` until the limit, then
+    /// return an error. Kills `replace += with -=` (line 529) and `replace add
+    /// with Ok(())` (line 529 / replace fn).
+    #[test]
+    fn hndq_call_counter_increments_and_fails_at_limit() {
+        let mut c = HndqCallCounter::new(2);
+        assert!(c.add().is_ok(), "first call must succeed");
+        assert!(c.add().is_ok(), "second call (at limit) must succeed");
+        assert!(c.add().is_err(), "third call (over limit) must fail");
+    }
+
+    // ---- IdentifierIssuer ----
+
+    /// `get` must return `None` for an unlabelled node and `Some(...)` for an
+    /// issued one. Kills `replace get with None` (line 227) and
+    /// `replace get with Some(String::new())` (line 227).
+    #[test]
+    fn identifier_issuer_get_returns_none_for_unlabelled() {
+        let issuer = IdentifierIssuer::new("c14n");
+        assert_eq!(issuer.get("x"), None);
+    }
+
+    #[test]
+    fn identifier_issuer_get_returns_issued_label() {
+        let mut issuer = IdentifierIssuer::new("c14n");
+        let issued = issuer.issue("x");
+        assert_eq!(issuer.get("x"), Some(issued.clone()));
+        assert_eq!(issued, "c14n0");
+    }
+
+    /// `issue` must return incrementing labels `c14n0`, `c14n1`, ... and be
+    /// idempotent (re-issuing the same label returns the same value).
+    /// Kills `replace issue with String::new()` (line 232).
+    #[test]
+    fn identifier_issuer_issues_sequential_labels() {
+        let mut issuer = IdentifierIssuer::new("c14n");
+        assert_eq!(issuer.issue("a"), "c14n0");
+        assert_eq!(issuer.issue("b"), "c14n1");
+        assert_eq!(issuer.issue("c"), "c14n2");
+        // Idempotent: re-issuing returns the SAME label, counter does not advance.
+        assert_eq!(issuer.issue("a"), "c14n0", "re-issue must be idempotent");
+        assert_eq!(issuer.issue("d"), "c14n3", "counter must not advance on re-issue");
+    }
+
+    // ---- hash_hex ----
+
+    /// `hash_hex::<Sha256>` must produce the EXACT lowercase hex of the SHA-256
+    /// digest. Kills format-string mutations (e.g. `{:02x}` → `{:02X}` or `{}`).
+    #[test]
+    fn hash_hex_sha256_known_value() {
+        use sha2::Sha256;
+        // SHA-256("") is a well-known constant; must be exact + lowercase + 64 chars.
+        let hex = hash_hex::<Sha256>(b"");
+        assert_eq!(
+            hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "hash_hex must produce lowercase hex of SHA-256"
+        );
+        assert_eq!(hex.len(), 64, "SHA-256 hex must be 64 chars");
+        // A non-empty input must differ from the empty-string digest (not hardcoded).
+        let hex2 = hash_hex::<Sha256>(b"abc");
+        assert_ne!(hex, hex2, "different inputs must produce different hashes");
+        assert_eq!(hex2.len(), 64, "SHA-256 hex must be 64 chars");
+        // Must be all-lowercase hex (no uppercase A-F).
+        assert!(
+            hex.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "hash_hex must be lowercase hex: {hex}"
+        );
+    }
+
+    // ---- permutations ----
+
+    /// `permutations` must return the complete factorial-sized set of orderings.
+    /// Kills `replace with vec![]` and `replace with vec![vec![...]]`.
+    #[test]
+    fn permutations_empty_gives_one_empty_perm() {
+        let result = permutations(&[]);
+        assert_eq!(result, vec![vec![] as Vec<String>]);
+    }
+
+    #[test]
+    fn permutations_one_item() {
+        let result = permutations(&["a".to_string()]);
+        assert_eq!(result, vec![vec!["a".to_string()]]);
+    }
+
+    #[test]
+    fn permutations_two_items_exact() {
+        let mut result = permutations(&["a".to_string(), "b".to_string()]);
+        result.sort();
+        // Both orderings must appear.
+        assert_eq!(
+            result,
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["b".to_string(), "a".to_string()],
+            ],
+            "two-item permutations must yield exactly [a,b] and [b,a]"
+        );
+    }
+
+    #[test]
+    fn permutations_three_items_count() {
+        let result = permutations(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(result.len(), 6, "3! = 6 permutations");
+        // Every distinct item must appear as the first element in exactly 2 perms.
+        for head in &["a", "b", "c"] {
+            let count = result.iter().filter(|p| p[0].as_str() == *head).count();
+            assert_eq!(count, 2, "each item must head exactly 2 permutations");
+        }
+    }
+
+    // ---- serialize_quad_line ----
+
+    /// `serialize_quad_line` must produce `"s p o .\n"` for a default-graph quad
+    /// and `"s p o g .\n"` for a named-graph quad. Kills the `replace with
+    /// "xyzzy".into()` and `replace with String::new()` mutations.
+    #[test]
+    fn serialize_quad_line_default_graph() {
+        let q = oxrdf::Quad::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            Term::NamedNode(iri("http://ex/o")),
+            GraphName::DefaultGraph,
+        );
+        let line = serialize_quad_line(&q);
+        assert_eq!(
+            line,
+            "<http://ex/s> <http://ex/p> <http://ex/o> .\n",
+            "default-graph quad must serialize without a graph term"
+        );
+    }
+
+    #[test]
+    fn serialize_quad_line_named_graph() {
+        let q = oxrdf::Quad::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            Term::NamedNode(iri("http://ex/o")),
+            GraphName::NamedNode(iri("http://ex/g")),
+        );
+        let line = serialize_quad_line(&q);
+        assert_eq!(
+            line,
+            "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .\n",
+            "named-graph quad must carry the graph term"
+        );
+    }
+
+    // ---- canonical_line_no_newline ----
+
+    /// `canonical_line_no_newline` must produce `"s p o ."` (NO trailing newline).
+    /// Kills `replace with "xyzzy".into()`. Distinct from `serialize_quad_line`
+    /// which DOES have a trailing `\n`.
+    #[test]
+    fn canonical_line_no_newline_default_graph() {
+        let q = oxrdf::Quad::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("v")),
+            GraphName::DefaultGraph,
+        );
+        let line = canonical_line_no_newline(&q);
+        assert_eq!(
+            line,
+            "<http://ex/s> <http://ex/p> \"v\" .",
+            "default-graph line must have NO trailing newline"
+        );
+        assert!(
+            !line.ends_with('\n'),
+            "canonical_line_no_newline must NOT end with newline: {line:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_line_no_newline_named_graph() {
+        let q = oxrdf::Quad::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("v")),
+            GraphName::NamedNode(iri("http://ex/g")),
+        );
+        let line = canonical_line_no_newline(&q);
+        assert_eq!(
+            line,
+            "<http://ex/s> <http://ex/p> \"v\" <http://ex/g> .",
+        );
+    }
+
+    // ---- relabel_quad_first_degree ----
+
+    /// `relabel_quad_first_degree` must replace the reference bnode with `_:a`
+    /// and any other bnode with `_:z`. Kills `replace with Default::default()`.
+    #[test]
+    fn relabel_quad_first_degree_reference_becomes_a_others_z() {
+        let q = oxrdf::Quad::new(
+            NamedOrBlankNode::BlankNode(bn("ref")),
+            iri("http://ex/p"),
+            Term::BlankNode(bn("other")),
+            GraphName::DefaultGraph,
+        );
+        let relabelled = relabel_quad_first_degree(&q, "ref");
+        assert_eq!(
+            relabelled.subject,
+            NamedOrBlankNode::BlankNode(BlankNode::new_unchecked("a")),
+            "reference bnode in subject must become 'a'"
+        );
+        assert_eq!(
+            relabelled.object,
+            Term::BlankNode(BlankNode::new_unchecked("z")),
+            "non-reference bnode in object must become 'z'"
+        );
+    }
+
+    // ---- relabel_term / relabel_subject / relabel_graph (first-degree) ----
+
+    /// `relabel_term` for a `Term::Triple` must recurse through the triple term
+    /// and relabel bnodes at every depth. Kills `replace relabel_term -> Term
+    /// with Default::default()`.
+    #[test]
+    fn relabel_term_recurses_through_triple_term() {
+        let inner = Term::Triple(Box::new(Triple::new(
+            NamedOrBlankNode::BlankNode(bn("ref")),
+            iri("http://ex/p"),
+            Term::BlankNode(bn("other")),
+        )));
+        let relabelled = relabel_term(&inner, "ref");
+        if let Term::Triple(t) = relabelled {
+            assert_eq!(
+                t.subject,
+                NamedOrBlankNode::BlankNode(BlankNode::new_unchecked("a")),
+                "reference bnode in inner subject must become 'a'"
+            );
+            assert_eq!(
+                t.object,
+                Term::BlankNode(BlankNode::new_unchecked("z")),
+                "non-reference bnode in inner object must become 'z'"
+            );
+        } else {
+            panic!("relabel_term must preserve Term::Triple wrapper");
+        }
+    }
+
+    /// `relabel_graph` for a `GraphName::BlankNode` must apply the special label.
+    #[test]
+    fn relabel_graph_blank_graph_name() {
+        let g = GraphName::BlankNode(bn("ref"));
+        let relabelled = relabel_graph(&g, "ref");
+        assert_eq!(
+            relabelled,
+            GraphName::BlankNode(BlankNode::new_unchecked("a")),
+            "bnode graph name equal to reference must become 'a'"
+        );
+        let g2 = GraphName::BlankNode(bn("other"));
+        let relabelled2 = relabel_graph(&g2, "ref");
+        assert_eq!(
+            relabelled2,
+            GraphName::BlankNode(BlankNode::new_unchecked("z")),
+            "bnode graph name not equal to reference must become 'z'"
+        );
+    }
+
+    // ---- serialize_canonical / canonical_lines ----
+
+    /// `serialize_canonical` must concatenate `canonical_lines` with trailing
+    /// newlines. Kills `replace serialize_canonical -> String with String::new()`.
+    #[test]
+    fn serialize_canonical_concatenates_lines() {
+        use std::collections::HashMap;
+        let q = oxrdf::Quad::new(
+            NamedOrBlankNode::BlankNode(bn("b")),
+            iri("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("v")),
+            GraphName::DefaultGraph,
+        );
+        let mut issued = HashMap::new();
+        issued.insert("b".to_string(), "c14n0".to_string());
+        let doc = serialize_canonical(&[q], &issued);
+        assert!(!doc.is_empty(), "serialize_canonical must not return empty string");
+        assert!(doc.ends_with('\n'), "each line must be newline-terminated");
+        assert!(
+            doc.contains("_:c14n0"),
+            "issued label must appear in serialized output: {doc:?}"
+        );
+    }
+
+    /// `canonical_lines` must deduplicate identical canonical lines and sort them.
+    /// Kills `replace canonical_lines -> Vec<String> with vec![]` and
+    /// `replace with vec![String::new()]`.
+    #[test]
+    fn canonical_lines_deduplicates_and_sorts() {
+        use std::collections::HashMap;
+        // Two quads that are IDENTICAL after canonicalization (dup-test).
+        let q1 = oxrdf::Quad::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+            iri("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("v")),
+            GraphName::DefaultGraph,
+        );
+        let q2 = q1.clone();
+        let issued: HashMap<String, String> = HashMap::new();
+        let lines = canonical_lines(&[q1, q2], &issued);
+        assert_eq!(lines.len(), 1, "duplicate quads must be deduplicated");
+
+        // Two distinct quads — must be sorted in code-point order.
+        let qa = oxrdf::Quad::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/z")),
+            iri("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("b")),
+            GraphName::DefaultGraph,
+        );
+        let qb = oxrdf::Quad::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+            iri("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("a")),
+            GraphName::DefaultGraph,
+        );
+        let lines2 = canonical_lines(&[qa, qb], &issued);
+        assert_eq!(lines2.len(), 2, "distinct quads give two lines");
+        let mut sorted = lines2.clone();
+        sorted.sort();
+        assert_eq!(lines2, sorted, "canonical_lines must be in sorted order");
+    }
+
+    // ---- relabel_subject_canonical / relabel_term_canonical / relabel_graph_canonical ----
+
+    /// `relabel_term_canonical` for a `Term::Triple` must recurse into the nested
+    /// triple and replace any bnodes with their issued canonical labels.
+    /// Kills `replace relabel_term_canonical -> Term with Default::default()`.
+    #[test]
+    fn relabel_term_canonical_recurses_through_triple_term() {
+        use std::collections::HashMap;
+        let inner = Term::Triple(Box::new(Triple::new(
+            NamedOrBlankNode::BlankNode(bn("b")),
+            iri("http://ex/p"),
+            Term::BlankNode(bn("c")),
+        )));
+        let mut issued = HashMap::new();
+        issued.insert("b".to_string(), "c14n0".to_string());
+        issued.insert("c".to_string(), "c14n1".to_string());
+        let relabelled = relabel_term_canonical(&inner, &issued);
+        if let Term::Triple(t) = relabelled {
+            assert_eq!(
+                t.subject,
+                NamedOrBlankNode::BlankNode(BlankNode::new_unchecked("c14n0")),
+                "inner subject bnode must be relabelled canonically"
+            );
+            assert_eq!(
+                t.object,
+                Term::BlankNode(BlankNode::new_unchecked("c14n1")),
+                "inner object bnode must be relabelled canonically"
+            );
+        } else {
+            panic!("relabel_term_canonical must preserve Term::Triple wrapper");
+        }
+    }
+
+    /// `relabel_graph_canonical` for a `GraphName::BlankNode` must substitute
+    /// the issued canonical label. Kills `replace with Default::default()`.
+    #[test]
+    fn relabel_graph_canonical_substitutes_issued_label() {
+        use std::collections::HashMap;
+        let mut issued = HashMap::new();
+        issued.insert("g".to_string(), "c14n0".to_string());
+        let result = relabel_graph_canonical(&GraphName::BlankNode(bn("g")), &issued);
+        assert_eq!(
+            result,
+            GraphName::BlankNode(BlankNode::new_unchecked("c14n0")),
+            "bnode graph name must be replaced with its canonical label"
+        );
+        // DefaultGraph stays DefaultGraph.
+        assert_eq!(
+            relabel_graph_canonical(&GraphName::DefaultGraph, &issued),
+            GraphName::DefaultGraph
+        );
+    }
+}
