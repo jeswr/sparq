@@ -59,9 +59,11 @@ use sparq_geo::{geof_registry, geosparql_rewrite, GeoError};
 /// serializations) is TRACKED in the module header, NOT asserted — an honest
 /// floor, no skip-laundering.
 ///
-/// MEASURED: the 19 cases in [`CASES`], each driven in BOTH the subject-variable
-/// and object-variable orientation, all pass = 38. Set to that actual count.
-const OGC_QUERY_REWRITE_FLOOR: usize = 38;
+/// MEASURED: the 24 cases in [`CASES`] (19 original + 5 added in sq-lk3aw.2:
+/// `sfCrosses`, `ehEquals`, `ehCovers`, `rcc8eq`, `rcc8tppi`), each driven in
+/// BOTH the subject-variable and object-variable orientation, all pass = 48.
+/// Set to that actual count. [SONNET-4.6] sq-lk3aw.2
+const OGC_QUERY_REWRITE_FLOOR: usize = 48;
 
 /// A named WKT geometry body assigned to a feature in the test graph.
 struct Feature {
@@ -160,6 +162,11 @@ const CASES: &[Case] = &[
     // ---- Simple Features over the region corpus -----------------------------
     Case { relation: "sfOverlaps", features: REGIONS, fixed: "big" },
     Case { relation: "sfEquals", features: REGIONS, fixed: "big" },
+    // [SONNET-4.6] sq-lk3aw.2 — sfCrosses: a line that enters and exits the
+    // big polygon crosses it; the MIXED corpus contains `lineCross` which does
+    // exactly that. sfCrosses is undefined for point-polygon (always false in
+    // DE-9IM), so only `lineCross` matches in the subject orientation.
+    Case { relation: "sfCrosses", features: MIXED, fixed: "region" },
     // ---- Egenhofer over the region corpus -----------------------------------
     Case { relation: "ehInside", features: REGIONS, fixed: "big" },
     Case { relation: "ehContains", features: REGIONS, fixed: "big" },
@@ -167,6 +174,12 @@ const CASES: &[Case] = &[
     Case { relation: "ehDisjoint", features: REGIONS, fixed: "far" },
     Case { relation: "ehMeet", features: REGIONS, fixed: "big" },
     Case { relation: "ehOverlap", features: REGIONS, fixed: "big" },
+    // [SONNET-4.6] sq-lk3aw.2 — ehEquals: reflexive on `big`; the only pair
+    // in REGIONS with the same WKT is (big, big). ehCovers(A, B): A covers B
+    // (every point of B is in the closure of A's interior); `big` covers all
+    // contained regions (`small`, `tangent`). Both fixed on "big".
+    Case { relation: "ehEquals", features: REGIONS, fixed: "big" },
+    Case { relation: "ehCovers", features: REGIONS, fixed: "big" },
     // ---- RCC8 over the region corpus ----------------------------------------
     Case { relation: "rcc8ntpp", features: REGIONS, fixed: "big" },
     Case { relation: "rcc8ntppi", features: REGIONS, fixed: "big" },
@@ -174,6 +187,12 @@ const CASES: &[Case] = &[
     Case { relation: "rcc8ec", features: REGIONS, fixed: "big" },
     Case { relation: "rcc8dc", features: REGIONS, fixed: "far" },
     Case { relation: "rcc8po", features: REGIONS, fixed: "big" },
+    // [SONNET-4.6] sq-lk3aw.2 — rcc8eq: reflexive on `big`. rcc8tppi(A, B)
+    // means B is a Tangential Proper Part of A; with fixed="tangent" the
+    // subject orientation finds `big` (which has `tangent` as a TPP sharing
+    // the corner-vertex boundary).
+    Case { relation: "rcc8eq", features: REGIONS, fixed: "big" },
+    Case { relation: "rcc8tppi", features: REGIONS, fixed: "tangent" },
 ];
 
 /// Build the Turtle for a feature corpus: each feature resolves through
@@ -391,4 +410,75 @@ fn rewrite_is_structural_noop_for_non_topology_query() {
     let before = PreparedQuery::parse(q).unwrap().into_query();
     let after = sparq_geo::rewrite_query(before.clone());
     assert_eq!(before.to_string(), after.to_string());
+}
+
+/// Semantics-preservation assertion for the TWO-VARIABLE form: the property-form
+/// rewrite of `?f1 geo:sfWithin ?f2` yields EXACTLY the same result set as the
+/// manually-written geometry-resolution FILTER form executed through the STANDARD
+/// engine. This directly proves the rewrite is a semantics-preserving algebra
+/// transformation, not just a syntax convenience. [SONNET-4.6] sq-lk3aw.2
+#[test]
+fn semantics_preserving_rewrite_matches_explicit_filter_form() {
+    let graph = Graph::load_str(&corpus_ttl(MIXED), "turtle").unwrap();
+
+    // Property-form query via the REWRITE path.
+    let prop_sparql = format!("{PREFIXES} SELECT ?f1 ?f2 WHERE {{ ?f1 geo:sfWithin ?f2 }}");
+
+    // Manually-written equivalent FILTER form — the expansion the rewrite
+    // produces, written explicitly so we can run it through the STANDARD path.
+    // Uses positional format args (CodeQL rust/unused-variable guard). [SONNET-4.6]
+    let filter_sparql = "PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
+                         PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+                         PREFIX ex:   <http://example.org/>
+                         SELECT ?f1 ?f2 WHERE {
+                             ?f1 (geo:hasDefaultGeometry|geo:hasGeometry)/geo:asWKT ?g1 .
+                             ?f2 (geo:hasDefaultGeometry|geo:hasGeometry)/geo:asWKT ?g2 .
+                             FILTER(geof:sfWithin(?g1, ?g2))
+                         }";
+
+    let reg = geof_registry();
+
+    // Execute property form through the rewrite.
+    let rewrite_prepared = geosparql_rewrite(&prop_sparql).expect("rewrite parse");
+    let rewrite_result =
+        with_functions(&reg, || query_prepared(&graph, &rewrite_prepared)).expect("rewrite execute");
+
+    // Execute FILTER form through the STANDARD engine (geof: functions registered).
+    let filter_result =
+        with_functions(&reg, || query(&graph, filter_sparql)).expect("filter execute");
+
+    // Collect and sort both result sets as (f1_iri, f2_iri) string pairs.
+    let mut rewrite_pairs: Vec<(String, String)> = rewrite_result
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let f1 = row.first().and_then(|t| t.as_ref()).map(|t| t.to_string())?;
+            let f2 = row.get(1).and_then(|t| t.as_ref()).map(|t| t.to_string())?;
+            Some((f1, f2))
+        })
+        .collect();
+    rewrite_pairs.sort();
+
+    let mut filter_pairs: Vec<(String, String)> = filter_result
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let f1 = row.first().and_then(|t| t.as_ref()).map(|t| t.to_string())?;
+            let f2 = row.get(1).and_then(|t| t.as_ref()).map(|t| t.to_string())?;
+            Some((f1, f2))
+        })
+        .collect();
+    filter_pairs.sort();
+
+    // The two paths must agree exactly on every (f1, f2) pair.
+    assert_eq!(
+        rewrite_pairs, filter_pairs,
+        "property-form rewrite yielded different results than the explicit FILTER form"
+    );
+    // Sanity: sfWithin is reflexive for equal geometries, so we always have
+    // at least the (region, region) self-pair in MIXED.
+    assert!(
+        !rewrite_pairs.is_empty(),
+        "sfWithin must bind at least one pair in the MIXED corpus"
+    );
 }
