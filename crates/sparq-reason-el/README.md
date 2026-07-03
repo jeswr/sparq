@@ -45,6 +45,10 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
 - **Same dict/Graph seam as RL** — emits the lattice as `rdfs:subClassOf` triples queryable by
   plain BGP eval; no store changes.
 - **Unsatisfiable-class detection** — `owl:disjointWith` clashes surface `C ⊑ owl:Nothing`.
+- **Safe nominals — CR6** — singleton `owl:oneOf` (`{a}`) and object-valued `owl:hasValue`
+  (`∃r.{a}`) classify (the reachability-guarded merge rule; every derivation sound, with
+  negative tests pinning the guard). Completeness is claimed for typical safe usage, NOT for
+  every EL++ nominal interplay; ABox `rdf:type` assertions are not internalized (TBox only).
 - **RBox role automaton** *(opt-in `rbox` feature, Phase E2)* — `rdfs:subPropertyOf` role
   inclusions (**CR10**), `owl:propertyChainAxiom` + `owl:TransitiveProperty` compositions
   (**CR11**), incl. the SNOMED-critical right-identity `r ∘ s ⊑ s`. OFF by default: zero
@@ -56,14 +60,14 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   `owl:equivalentClass`) — O(N) Hasse edges on a deep chain instead of the O(N²) full closure.
 - **Honest fragment reporting** — class axioms outside the active fragment are counted in
   `Report::skipped_axioms`, never silently misapplied. This includes the **deliberately-deferred
-  EL fragment**: *safe nominals* (`owl:oneOf` / `owl:hasValue`, completion rule **CR6**) and
-  *concrete domains* (`owl:onDataRange` / `owl:withRestrictions` / `owl:onDatatype`, **CR7–CR9**)
-  are NOT applied — so a user sees the gap rather than a silent wrong answer.
+  EL fragment**: *concrete domains* (`owl:onDataRange` / `owl:withRestrictions` /
+  `owl:onDatatype`, and the literal-valued `hasValue`/`oneOf` = `DataHasValue`/`DataOneOf`,
+  **CR7–CR9**) are NOT applied — so a user sees the gap rather than a silent wrong answer.
 
-**Scope:** EL+⊥ (E1, default), EL+ role reasoning (E2, `rbox`), transitive reduction (E3, `hasse`).
-**Deferred** (surfaced in `skipped_axioms`): safe nominals (CR6) + concrete domains (CR7–CR9);
+**Scope:** EL+⊥ + safe nominals/CR6 (E1, default), EL+ role reasoning (E2, `rbox`), transitive
+reduction (E3, `hasse`). **Deferred** (surfaced in `skipped_axioms`): concrete domains (CR7–CR9);
 concurrency is **E4**. Constructs outside EL entirely (union / complement / `allValuesFrom` /
-cardinality) are also skipped. The classifier is **single-threaded**. Enable with
+cardinality / multi-individual `oneOf`) are also skipped. The classifier is **single-threaded**. Enable with
 `sparq-reason-el = { version = "0.1", features = ["rbox", "hasse"] }`. The `snomed_go_scale_bench`
 example (`--features rbox,hasse`) is a *relative* (dimensionless, no hard-coded ms) end-to-end
 scaling check confirming normalise + RBox + Hasse compose with no hidden quadratic.
