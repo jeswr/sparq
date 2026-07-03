@@ -9,7 +9,12 @@ name: CI
 on:
   push:
     branches: [main]
+  # [FABLE-5] sq-fmx4u.5: react to labeled/unlabeled too so toggling the `ci-full`
+  # label re-evaluates the change-based selection (ci-select.yml maps the label to
+  # `--full`). The default types (opened/synchronize/reopened) are listed explicitly
+  # so adding the label events does NOT drop `synchronize` (the push-to-PR trigger).
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   # [OPUS-4.8] Merge queue: re-run the identical PR check-set on the queue's
   # merge_group ref so the required ci-summary gate finds the same siblings it finds
   # on a PR. The per-commit `coverage` job (if: event_name != 'schedule') runs here;
@@ -21,6 +26,11 @@ on:
   # tests under llvm-cov instrumentation, which a per-commit job cannot afford
   # (measured >10 min for that ONE crate under instrumentation — see the job
   # comment + bench/coverage-floor.json). 03:17 UTC daily.
+  # [FABLE-5] sq-fmx4u.5: this scheduled run is ALSO the change-based-selection
+  # FULL-MATRIX BACKSTOP (design §6.1) — a `schedule` event carries no PR diff so
+  # the `select` pre-job resolves to mode=full and the whole matrix runs, so nothing
+  # a PR selection-skipped can silently rot. The `selection-backstop` job below
+  # asserts that mode=full invariant fail-loud.
   schedule:
     - cron: "17 3 * * *"
 
@@ -152,13 +162,48 @@ jobs:
   # Relationship to `changes` (dorny paths-filter) is layered, both directions
   # preserved: rust_changed==false skips a lane regardless of selection (the
   # existing doc-PR fast path), and selection can only skip WITHIN
-  # rust_changed==true. SHADOW default-ON until the CI_SELECT_MODE repo variable
-  # says "enforce" (bead sq-fmx4u.5).
+  # rust_changed==true. [FABLE-5] sq-fmx4u.5: ENFORCE is now the DEFAULT — a
+  # not-affected crate's wide lane is actually skipped. Overrides: the `ci-full`
+  # PR label forces mode=full; CI_SELECT_MODE=shadow is the report-only rollback
+  # escape hatch (see ci-select.yml). Fail-safe unchanged (§4.1 triggers => full).
   select:
     name: select
     uses: ./.github/workflows/ci-select.yml
     permissions:
       contents: read
+
+  # [FABLE-5] sq-fmx4u.5 (design §6.1): the nightly FULL-MATRIX BACKSTOP guard. The
+  # scheduled (cron) run + a manual workflow_dispatch drive the whole test matrix
+  # with the selector in mode=full — a non-PR event carries no diff, so the `select`
+  # job returns full and NOTHING is narrowed/skipped. That is what stops anything a
+  # PR selection-skipped from silently rotting: a regression in a crate that looked
+  # unaffected on some PR still fails the nightly gate. This job makes that invariant
+  # OBSERVABLE and fail-loud: if a future change ever let a scheduled/dispatch run
+  # resolve to a NARROWED (mode=selected) selection, it REDs here rather than quietly
+  # running a partial nightly. It runs ONLY on the backstop events; on
+  # pull_request/push/merge_group it is `skipped` (which ci-summary counts as
+  # satisfied — no per-leg name is individually required, bead sq-fmx4u.4). Reading
+  # the select mode in a STEP (not the job `if:`) keeps the always-run-on-backstop
+  # trigger decoupled from the selection outputs.
+  selection-backstop:
+    name: nightly selection backstop (full-matrix guard)
+    needs: select
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Assert the scheduled/dispatch run uses the FULL matrix (no selection narrowing)
+        env:
+          SELECT_MODE: ${{ needs.select.outputs.mode }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$SELECT_MODE" != "full" ]; then
+            echo "::error::nightly selection backstop: expected select mode=full on a '$EVENT' run, got '${SELECT_MODE:-<empty>}'. Change-based selection must NEVER narrow the scheduled full-matrix backstop (design §6.1) — a non-PR event carries no diff and must resolve to full."
+            exit 1
+          fi
+          echo "nightly selection backstop OK ($EVENT): select mode=full — the whole matrix runs, so nothing a PR selection-skipped can silently rot."
 
   # [OPUS-4.8] BUILD-ONCE for the sharded test suite (sq-vyxy folded in). The old
   # design had every shard run `cargo build --workspace --all-targets` itself — the

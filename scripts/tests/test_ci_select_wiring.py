@@ -64,6 +64,12 @@ def _load(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def _on_block(wf: dict) -> dict:
+    """The workflow `on:` mapping. Bare `on` is the YAML boolean True, so PyYAML
+    keys it under `True`; fall back to that (same trick as the anchor tests)."""
+    return wf.get("on", wf.get(True, {})) or {}
+
+
 def _gate_module():
     spec = importlib.util.spec_from_file_location("ci_summary_gate", GATE_PY)
     mod = importlib.util.module_from_spec(spec)
@@ -177,12 +183,83 @@ class TestWiring(unittest.TestCase):
         self.assertFalse(self.gate.is_advisory(name),
                          "the select job name must GATE (no advisory/informational)")
 
-    def test_shadow_default_on_until_enforce(self):
+    def test_enforce_is_default_shadow_is_the_escape_hatch(self):
+        """[FABLE-5] sq-fmx4u.5 ENFORCEMENT FLIP. Enforce is now the DEFAULT — the
+        selector's mode=selected skips are honored unless CI_SELECT_MODE is set to
+        the literal 'shadow' (the report-only rollback escape hatch). The pre-flip
+        shadow-by-default condition (`!= "enforce"` => --shadow) must be GONE."""
         text = SELECT_YML.read_text(encoding="utf-8")
-        self.assertIn("--shadow", text)
+        self.assertIn("--shadow", text, "the shadow escape hatch must still exist")
         self.assertIn("CI_SELECT_MODE", text)
-        self.assertIn('!= "enforce"', text,
-                      "shadow must be the default for ANY value but the literal 'enforce'")
+        self.assertIn('= "shadow"', text,
+                      "shadow must now be OPT-IN (CI_SELECT_MODE == 'shadow'); "
+                      "enforce is the default")
+        self.assertNotIn('!= "enforce"', text,
+                         "the pre-flip shadow-by-default condition must be removed "
+                         "(sq-fmx4u.5 enforce flip)")
+        # Structural: the select step wires the shadow branch off CI_SELECT_MODE.
+        step = self._select_step()
+        self.assertIn("CI_SELECT_MODE", step.get("env", {}))
+
+    def _select_step(self) -> dict:
+        steps = self.sel["jobs"]["select"]["steps"]
+        return next(s for s in steps if s.get("id") == "sel")
+
+    def test_ci_full_label_override_forces_full(self):
+        """[FABLE-5] sq-fmx4u.5 (design §6.2). Applying the `ci-full` PR label maps
+        to ci_select.py --full (mode=full, nothing skipped). The override reads the
+        PR label set and, when present, adds --full."""
+        text = SELECT_YML.read_text(encoding="utf-8")
+        self.assertIn("ci-full", text, "the ci-full label override must be wired")
+        step = self._select_step()
+        env = step.get("env", {})
+        self.assertIn("CI_FULL_LABEL", env, "the select step must compute CI_FULL_LABEL")
+        self.assertIn("labels.*.name", str(env["CI_FULL_LABEL"]),
+                      "CI_FULL_LABEL must read the PR label name set")
+        self.assertIn("'ci-full'", str(env["CI_FULL_LABEL"]))
+        run = str(step["run"])
+        self.assertIn("--full", run, "the ci-full path must force ci_select.py --full")
+        # The label check must gate the --full branch (fail-open toward RUNNING more).
+        self.assertIn('[ "$CI_FULL_LABEL" = "true" ]', run)
+
+    def test_label_toggle_reevaluates_selection(self):
+        """[FABLE-5] sq-fmx4u.5. Toggling the ci-full label must re-run selection, so
+        both selection-consuming workflows react to labeled/unlabeled — and must NOT
+        drop the default `synchronize` (push-to-PR) trigger while doing so."""
+        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm)):
+            on = _on_block(wf)
+            pr = on.get("pull_request") or {}
+            self.assertIsInstance(
+                pr, dict, f"{wf_name}: pull_request must carry a types list")
+            types = pr.get("types", [])
+            for needed in ("labeled", "unlabeled"):
+                self.assertIn(needed, types,
+                              f"{wf_name}: pull_request must react to {needed} so the "
+                              f"ci-full label toggle re-evaluates selection")
+            for keep in ("opened", "synchronize", "reopened"):
+                self.assertIn(keep, types,
+                              f"{wf_name}: must keep the default {keep} trigger")
+
+    def test_nightly_full_matrix_backstop(self):
+        """[FABLE-5] sq-fmx4u.5 (design §6.1). ci.yml runs on a cron schedule (the
+        nightly full-matrix backstop) and carries the `selection-backstop` guard job
+        that fail-loud asserts a scheduled/dispatch run resolves to mode=full."""
+        on = _on_block(self.ci)
+        self.assertIn("schedule", on, "ci.yml must run on a cron schedule (nightly)")
+        job = self.ci["jobs"].get("selection-backstop")
+        self.assertIsNotNone(job, "ci.yml must carry the nightly selection-backstop guard")
+        # Runs ONLY on the backstop events (skipped => gate-satisfied elsewhere).
+        cond = str(job.get("if", ""))
+        self.assertIn("schedule", cond)
+        self.assertIn("workflow_dispatch", cond)
+        # It must depend on select and read its mode, failing if it is not 'full'.
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        self.assertIn("select", needs, "backstop must need the select job")
+        run = " ".join(str(s.get("run", "")) for s in job.get("steps", []))
+        self.assertIn('"$SELECT_MODE" != "full"', run,
+                      "the backstop must fail-loud when the scheduled run is not full")
+        self.assertIn("exit 1", run)
 
     # ---- narrowing + assembly wiring ----------------------------------------------
     def test_bulk_shards_narrow_with_no_tests_pass_only_under_selection(self):

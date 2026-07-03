@@ -506,8 +506,9 @@ jobs:
       #     `mode != 'selected'` disjunct (empty outputs => run), every literal
       #     '"<crate>"' guard needle is a REAL workspace member (a typo would
       #     skip a lane exactly when it should run), the ci-select.yml job name
-      #     matches the gate's SELECT_RE, select callers are unconditional, and
-      #     shadow stays default-ON until CI_SELECT_MODE == 'enforce'.
+      #     matches the gate's SELECT_RE, select callers are unconditional,
+      #     ENFORCE is the default with a ci-full label override + shadow rollback
+      #     escape hatch, and the nightly full-matrix backstop is wired (sq-fmx4u.5).
       # The wiring test needs PyYAML to parse the workflows — same hash-pinned
       # install the skill-frontmatter/setup jobs use (complete closure, no deps).
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
