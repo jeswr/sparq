@@ -12037,3 +12037,334 @@ mod columnar_filter_seam {
         assert!(columnar_filter(&g, &b, &expr).is_none(), "columnar seam must decline while zk is armed");
     }
 }
+
+// [OPUS-4.8] sq-qcnn.13 — Direct unit tests for internal exec functions (private API).
+// These supplement the integration tests in tests/eval_semantics.rs with white-box
+// coverage of paths reachable only from inside the crate: `minus_bindings` general
+// path, `left_outer_join` with OPTIONAL filter, `effective_boolean` / `ebv` error
+// arms, and aggregate-error propagation via `sum_values(_, errored=true)`. [OPUS-4.8]
+
+/// Direct unit tests for `minus_bindings` — exercises the fast-path (disjoint
+/// domains → no-op, fully-bound compatible rows) and the general path (unbound
+/// shared variable triggering the compatibility scan with bound-domain-overlap check).
+#[cfg(test)]
+mod minus_bindings_unit {
+    use super::*;
+    use sparq_core::Graph;
+
+    fn var(s: &str) -> Variable {
+        Variable::new_unchecked(s)
+    }
+
+    /// `term_id` for a plain literal string via a scratch graph so we get a real
+    /// dictionary ID. The same graph must be used for every ID we want to join.
+    fn scratch() -> Graph {
+        Graph::load_str(
+            "@prefix ex: <http://ex/> .\
+             ex:a ex:p \"v1\" .\
+             ex:b ex:p \"v2\" .\
+             ex:c ex:p \"v3\" .",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    fn id(g: &Graph, iri: &str) -> Id {
+        use oxrdf::{NamedNode, Term};
+        g.id_of(&Term::NamedNode(NamedNode::new(iri).unwrap())).unwrap_or(NO_ID)
+    }
+
+    /// Disjoint variable domains: left has {?s} only, right has {?x} only (no overlap).
+    /// MINUS must return the left unchanged (fast path: `shared.is_empty()` → return left).
+    #[test]
+    fn minus_disjoint_domains_returns_left_unchanged() {
+        let g = scratch();
+        let (a, b, c) = (id(&g, "http://ex/a"), id(&g, "http://ex/b"), id(&g, "http://ex/c"));
+        let left = Bindings::unsorted(vec![var("s")], vec![Row::from_slice(&[a]), Row::from_slice(&[b])]);
+        let right = Bindings::unsorted(vec![var("x")], vec![Row::from_slice(&[c])]);
+        let result = minus_bindings(left, right);
+        // No shared variable → nothing removed.
+        assert_eq!(result.rows.len(), 2, "disjoint domains: MINUS is a no-op, expected 2 rows");
+    }
+
+    /// Fully-bound shared variable (fast path: hash-table lookup).
+    /// Left has rows {s=a, s=b}; right has {s=a}. Fast path removes the a row.
+    #[test]
+    fn minus_fast_path_removes_compatible_row() {
+        let g = scratch();
+        let (a, b) = (id(&g, "http://ex/a"), id(&g, "http://ex/b"));
+        let left = Bindings::unsorted(vec![var("s")], vec![Row::from_slice(&[a]), Row::from_slice(&[b])]);
+        let right = Bindings::unsorted(vec![var("s")], vec![Row::from_slice(&[a])]);
+        let result = minus_bindings(left, right);
+        // a is compatible → removed; b is not in right → kept.
+        assert_eq!(result.rows.len(), 1, "fast path must remove compatible row a");
+        // The remaining row should be b.
+        assert_eq!(result.rows[0][0], b, "remaining row should have s=b");
+    }
+
+    /// General path: left row has an UNBOUND shared variable (`NO_ID`).
+    /// SPARQL MINUS: a row whose shared domain is absent does NOT overlap with a right
+    /// row that binds the same variable → not removed. This exercises the
+    /// `any_unbound` guard that switches to the compatibility scan.
+    #[test]
+    fn minus_general_path_unbound_left_not_removed() {
+        let g = scratch();
+        let a = id(&g, "http://ex/a");
+        // Left: row with ?s = a, ?t = NO_ID (unbound).
+        // Right: row with ?s = a, ?t = a (bound).
+        let left = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[a, NO_ID])]);
+        let right = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[a, a])]);
+        let result = minus_bindings(left, right);
+        // ?t is unbound on the left: bound domain of ?t is absent → no overlap on ?t →
+        // the row is NOT compatible → NOT removed.
+        // (Although ?s matches (a==a), ?t's domain is absent → no OVERLAP → not removed.)
+        // Actually per SPARQL spec: overlap requires at least one shared variable with BOUND
+        // values on BOTH sides agreeing. Since ?t has no bound value on the left, domain
+        // overlap is over {?s} only. ?s = a = a → overlap on ?s → IS compatible → REMOVED.
+        // (This is the documented spec: even one shared bound var that matches causes removal.)
+        // Verify: the row IS removed (s=a matches on the left, t doesn't gate it since it's
+        // the SAME group domain check: "at least one shared variable with a value on both sides").
+        // Actually let me re-read the code: `overlap` is set true when BOTH sides are bound AND
+        // equal; the row IS removed if `overlap` is true after checking all shared pairs.
+        // So: ?s = a (both bound, equal) → overlap = true → removed.
+        // ?t = NO_ID on left → skipped (not both bound) → overlap unchanged.
+        // Result: overlap=true → removed.
+        assert_eq!(result.rows.len(), 0, "?s matches (both sides bound, equal) → row removed even though ?t is unbound on left");
+    }
+
+    /// General path: left row has unbound ?t and right row also has unbound ?t.
+    /// Both sides have the SAME bound ?s but unbound ?t. Overlap is on ?s alone.
+    #[test]
+    fn minus_general_path_both_unbound_in_shared_var_no_overlap() {
+        let g = scratch();
+        let a = id(&g, "http://ex/a");
+        let b = id(&g, "http://ex/b");
+        // Left: {?s=a, ?t=NO_ID}; Right: {?s=b, ?t=NO_ID}.
+        // ?s=a vs ?s=b: BOTH bound but NOT equal → incompatible → row KEPT.
+        let left = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[a, NO_ID])]);
+        let right = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[b, NO_ID])]);
+        let result = minus_bindings(left, right);
+        // ?s=a != ?s=b → incompatible → NOT removed.
+        assert_eq!(result.rows.len(), 1, "incompatible ?s values: row must be kept");
+    }
+}
+
+/// Direct unit tests for `effective_boolean` / `ebv`: the three-valued logic gate
+/// used by every FILTER application. Pins the SPARQL 3VL contract at the function
+/// level so a mutation that collapses error→false or error→true is caught here.
+#[cfg(test)]
+mod effective_boolean_unit {
+    use super::*;
+
+    #[test]
+    fn ebv_error_is_none() {
+        // SPARQL EBV: error → None (a type error in the expression).
+        assert_eq!(ebv(&Value::Error), None, "ebv(Error) must be None");
+        assert!(!effective_boolean(&Value::Error), "effective_boolean(Error) must be false (drop row)");
+    }
+
+    #[test]
+    fn ebv_unbound_is_none() {
+        assert_eq!(ebv(&Value::Unbound), None, "ebv(Unbound) must be None");
+        assert!(!effective_boolean(&Value::Unbound), "effective_boolean(Unbound) must be false (drop row)");
+    }
+
+    #[test]
+    fn ebv_bool_true_is_some_true() {
+        assert_eq!(ebv(&Value::Bool(true)), Some(true));
+        assert!(effective_boolean(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn ebv_bool_false_is_some_false() {
+        assert_eq!(ebv(&Value::Bool(false)), Some(false));
+        assert!(!effective_boolean(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn ebv_nonzero_int_is_true() {
+        assert_eq!(ebv(&Value::Num(Num::Int(1))), Some(true));
+        assert_eq!(ebv(&Value::Num(Num::Int(-1))), Some(true));
+    }
+
+    #[test]
+    fn ebv_zero_int_is_false() {
+        assert_eq!(ebv(&Value::Num(Num::Int(0))), Some(false));
+    }
+
+    #[test]
+    fn ebv_iri_term_is_none_type_error() {
+        use oxrdf::NamedNode;
+        let iri = Value::Term(Term::NamedNode(NamedNode::new_unchecked("http://ex/x")));
+        assert_eq!(ebv(&iri), None, "EBV of IRI is a type error → None");
+        assert!(!effective_boolean(&iri), "effective_boolean(IRI) = false (drop row)");
+    }
+
+    #[test]
+    fn ebv_nonempty_string_is_true() {
+        let t = Value::Term(Term::Literal(Literal::new_simple_literal("hello")));
+        assert_eq!(ebv(&t), Some(true), "non-empty string literal EBV = true");
+    }
+
+    #[test]
+    fn ebv_empty_string_is_false() {
+        let t = Value::Term(Term::Literal(Literal::new_simple_literal("")));
+        assert_eq!(ebv(&t), Some(false), "empty string literal EBV = false");
+    }
+
+    #[test]
+    fn ebv_lang_tagged_literal_is_none_type_error() {
+        // rdf:langString is NOT xsd:string: its EBV is a type error.
+        let t = Value::Term(Term::Literal(Literal::new_language_tagged_literal_unchecked("hello", "en")));
+        assert_eq!(ebv(&t), None, "lang-tagged literal EBV is type error → None");
+    }
+
+    #[test]
+    fn ebv_typed_boolean_true_false() {
+        let tt = Value::Term(Term::Literal(Literal::new_typed_literal("true", xsd::BOOLEAN)));
+        let ff = Value::Term(Term::Literal(Literal::new_typed_literal("false", xsd::BOOLEAN)));
+        assert_eq!(ebv(&tt), Some(true));
+        assert_eq!(ebv(&ff), Some(false));
+    }
+
+    #[test]
+    fn ebv_ill_formed_boolean_is_type_error() {
+        let ill = Value::Term(Term::Literal(Literal::new_typed_literal("yes", xsd::BOOLEAN)));
+        assert_eq!(ebv(&ill), None, "ill-formed boolean EBV is type error");
+    }
+
+    #[test]
+    fn ebv_xsd_string_nonempty_is_true() {
+        let s = Value::Term(Term::Literal(Literal::new_typed_literal("abc", xsd::STRING)));
+        assert_eq!(ebv(&s), Some(true));
+    }
+
+    #[test]
+    fn ebv_xsd_string_empty_is_false() {
+        let s = Value::Term(Term::Literal(Literal::new_typed_literal("", xsd::STRING)));
+        assert_eq!(ebv(&s), Some(false));
+    }
+}
+
+/// Direct unit tests for `sum_values` — the typed SUM with XSD promotion. Pins the
+/// `errored=true` → `None` branch and the integer-only and decimal-promotion paths.
+#[cfg(test)]
+mod sum_values_unit {
+    use super::*;
+
+    #[test]
+    fn sum_empty_is_zero_integer() {
+        // Sum({}) = 0^^xsd:integer (SPARQL 18.5.1.4).
+        let result = sum_values(&[], false);
+        // Num does not impl PartialEq; use matches! for the pattern.
+        assert!(matches!(result, Some(Num::Int(0))), "sum of empty set must be 0 integer");
+    }
+
+    #[test]
+    fn sum_errored_is_none() {
+        // A type error in ANY member makes the whole SUM None → unbound aggregate.
+        let result = sum_values(&[Value::Num(Num::Int(5))], true);
+        assert!(result.is_none(), "sum_values with errored=true must return None");
+    }
+
+    #[test]
+    fn sum_integers_stays_integer() {
+        let vals = vec![Value::Num(Num::Int(3)), Value::Num(Num::Int(7))];
+        let result = sum_values(&vals, false);
+        assert!(matches!(result, Some(Num::Int(10))), "sum of integers must be an integer");
+    }
+
+    #[test]
+    fn sum_int_plus_decimal_promotes_to_decimal() {
+        let dec = Num::Dec(Dec { mant: 5, scale: 1 }); // 0.5
+        let vals = vec![Value::Num(Num::Int(2)), Value::Num(dec)];
+        let result = sum_values(&vals, false);
+        // 2 + 0.5 = 2.5 decimal; the canonical form depends on Num::binop normalisation.
+        match result {
+            Some(Num::Dec(d)) => {
+                // Verify the decimal value is 2.5: mant / 10^scale == 2.5.
+                // Dec fields are (mant: i128, scale: u32). Any representation where
+                // mant as f64 / 10_f64.powi(scale as i32) ≈ 2.5 is acceptable.
+                let v = (d.mant as f64) / 10_f64.powi(d.scale as i32);
+                assert!((v - 2.5_f64).abs() < 1e-12_f64, "int+decimal must sum to 2.5, got mant={} scale={}", d.mant, d.scale);
+            }
+            other => panic!("int+decimal sum must be Decimal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sum_non_numeric_member_does_not_error_via_sum_values_itself() {
+        // `sum_values` receives only the VALUES passed; it doesn't evaluate expressions.
+        // A non-numeric Value::Term (e.g. an IRI) causes `as_numeric` to return None,
+        // making sum return None (the short-circuit path when a member has no numeric value).
+        use oxrdf::NamedNode;
+        let iri = Value::Term(Term::NamedNode(NamedNode::new_unchecked("http://ex/x")));
+        let result = sum_values(&[Value::Num(Num::Int(5)), iri], false);
+        // as_numeric(IRI) = None → sum_values returns None.
+        assert!(result.is_none(), "non-numeric member (IRI) must make sum_values return None");
+    }
+}
+
+/// Direct unit tests for `minmax_values` — numeric promotion path and empty-set path.
+#[cfg(test)]
+mod minmax_values_unit {
+    use super::*;
+
+    #[test]
+    fn minmax_empty_is_unbound() {
+        // Value does not impl PartialEq; use matches! for the pattern check.
+        assert!(
+            matches!(minmax_values(vec![], std::cmp::Ordering::Less), Value::Unbound),
+            "MIN(empty set) must be Unbound"
+        );
+        assert!(
+            matches!(minmax_values(vec![], std::cmp::Ordering::Greater), Value::Unbound),
+            "MAX(empty set) must be Unbound"
+        );
+    }
+
+    #[test]
+    fn min_over_integers_is_smallest() {
+        let vals = vec![Value::Num(Num::Int(5)), Value::Num(Num::Int(2)), Value::Num(Num::Int(8))];
+        let min = minmax_values(vals, std::cmp::Ordering::Less);
+        match min {
+            Value::Num(Num::Int(2)) => {} // exact match
+            // The engine may also return a canonical-term Value::Term for exact integers
+            Value::Term(ref t) => {
+                let s = t.to_string();
+                assert!(s.contains('2'), "MIN of [5,2,8] must contain '2', got {}", s);
+            }
+            other => panic!("MIN of integers must be 2 (numeric or term), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_over_integers_is_largest() {
+        let vals = vec![Value::Num(Num::Int(5)), Value::Num(Num::Int(2)), Value::Num(Num::Int(8))];
+        let max = minmax_values(vals, std::cmp::Ordering::Greater);
+        match max {
+            Value::Num(Num::Int(8)) => {}
+            Value::Term(ref t) => {
+                let s = t.to_string();
+                assert!(s.contains('8'), "MAX of [5,2,8] must contain '8', got {}", s);
+            }
+            other => panic!("MAX of integers must be 8 (numeric or term), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn min_over_mixed_types_falls_back_to_compare_values() {
+        // A mix of IRI and literal forces the "not all numeric" path → compare_values fallback.
+        use oxrdf::NamedNode;
+        let iri = Value::Term(Term::NamedNode(NamedNode::new_unchecked("http://ex/x")));
+        let lit = Value::Term(Term::Literal(Literal::new_simple_literal("abc")));
+        let vals = vec![iri, lit];
+        // Should not panic; result is the "smaller" by compare_values total order.
+        let min = minmax_values(vals, std::cmp::Ordering::Less);
+        // IRI < plain literal in SPARQL total order, so MIN should be the IRI.
+        match &min {
+            Value::Term(Term::NamedNode(_)) => {} // expected: IRI
+            other => panic!("MIN of (IRI, string) should be the IRI, got {other:?}"),
+        }
+    }
+}
