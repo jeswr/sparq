@@ -39,7 +39,7 @@ import { assertA11y, writeSeedBaseline, WCAG_TAGS } from "./support/a11y";
 const WASM_BUNDLE = fileURLToPath(new URL("../public/wasm/sparq_wasm_bg.wasm", import.meta.url));
 const WASM_PRESENT = existsSync(WASM_BUNDLE);
 
-// [SONNET-4.6] sq-ymr2e.13 — GAP_HOME is fixed: the home hero surfaces are now ZERO-tier.
+// [SONNET-4.6] sq-ymr2e.13 — home-hero contrast gap fixed: the home hero surfaces are now ZERO-tier.
 // The three failing pairs were: (a) sq-tok-string / sq-tok-number / text-primary th on the
 // opacity-45 PreviewTable (removed opacity — axe scans aria-hidden visual content; at α=0.45
 // even black text only reaches ~3.3:1 on white, so no token colour could clear 4.5:1 AA);

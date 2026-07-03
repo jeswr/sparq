@@ -137,7 +137,7 @@ function ResultsTable({
   );
 }
 
-/** The dimmed PREVIEW table (idle state): the expected answer, honestly labelled — not computed.
+/** The PREVIEW table (idle state): the expected answer, honestly labelled — not computed.
  *
  * [SONNET-4.6] sq-ymr2e.13 — WCAG 2.1 AA fix: removed the `opacity-45` that was on the table.
  * At 45% opacity on a white background, text contrast is physically capped at ~3.3:1 (even black
