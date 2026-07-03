@@ -127,7 +127,7 @@ class TestFeatureMatrixAssemble(unittest.TestCase):
                 self.mod.main()
         finally:
             sys.argv = argv
-        printed = [l for l in buf.getvalue().splitlines() if l.strip()]
+        printed = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
         self.assertEqual(printed, self.names)
 
     # ---- workflow wiring guard (prevents reintroducing the static list) ----------
@@ -157,6 +157,81 @@ class TestFeatureMatrixAssemble(unittest.TestCase):
             self.assertIsInstance(
                 data, list, f"{frag.name}: top level must be a YAML list of legs"
             )
+
+
+# [FABLE-5] sq-fmx4u.3: change-based selection over the assembled leg list
+# (filter_legs_by_selection). The load-bearing property is FAIL-CLOSED: the ONLY
+# input shape that may drop a leg is the exact mode "selected" with a well-formed
+# affected list; every other input (shadow, full, unset, malformed JSON, wrong
+# type) yields the FULL leg set — running more is always sound (design §2/§4.3).
+class TestSelectionFiltering(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_assembler()
+        cls.legs = cls.mod.load_legs()
+
+    def _filter(self, mode, affected):
+        return self.mod.filter_legs_by_selection(self.legs, mode, affected)
+
+    def test_selected_keeps_only_affected_crates(self):
+        crates = sorted({leg["crate"] for leg in self.legs})
+        keep = crates[0]
+        got = self._filter("selected", json.dumps([keep]))
+        self.assertTrue(got, "expected at least one leg for a real crate")
+        self.assertEqual({leg["crate"] for leg in got}, {keep})
+        # And every one of that crate's legs survives — filtering is per-crate,
+        # never per-leg-subset.
+        self.assertEqual(len(got), sum(1 for leg in self.legs if leg["crate"] == keep))
+
+    def test_selected_with_empty_affected_yields_zero_legs(self):
+        # Legitimate: a provably-empty closure => no legs; the workflow's `legs`
+        # count output then SKIPS the matrix job (never an empty-matrix error).
+        self.assertEqual(self._filter("selected", "[]"), [])
+
+    def test_shadow_full_and_unset_modes_keep_all(self):
+        for mode in ("shadow", "full", "", None, "SELECTED", "enforce"):
+            self.assertEqual(len(self._filter(mode, "[]")), len(self.legs),
+                             f"mode={mode!r} must fail-close to the FULL leg set")
+
+    def test_malformed_affected_fails_closed_to_full(self):
+        for bad in (None, "", "not json", '{"a": 1}', '"str"', '[1, 2]'):
+            self.assertEqual(len(self._filter("selected", bad)), len(self.legs),
+                             f"affected={bad!r} must fail-close to the FULL leg set")
+
+    def test_names_mode_ignores_selection_flags(self):
+        # The golden gate-name proof must always dump the FULL set.
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        argv = sys.argv
+        sys.argv = ["assemble-feature-matrix.py", "--names",
+                    "--select-mode", "selected", "--affected", "[]"]
+        try:
+            with redirect_stdout(buf):
+                self.mod.main()
+        finally:
+            sys.argv = argv
+        printed = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+        self.assertEqual(printed, sorted(f"opt-in {leg['name']}" for leg in self.legs))
+
+    def test_main_applies_selection_to_matrix_json(self):
+        import io
+        from contextlib import redirect_stdout
+
+        crates = sorted({leg["crate"] for leg in self.legs})
+        keep = crates[-1]
+        buf = io.StringIO()
+        argv = sys.argv
+        sys.argv = ["assemble-feature-matrix.py",
+                    "--select-mode", "selected", "--affected", json.dumps([keep])]
+        try:
+            with redirect_stdout(buf):
+                self.mod.main()
+        finally:
+            sys.argv = argv
+        obj = json.loads(buf.getvalue())
+        self.assertEqual({leg["crate"] for leg in obj["include"]}, {keep})
 
 
 if __name__ == "__main__":

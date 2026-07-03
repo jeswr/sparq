@@ -8,7 +8,8 @@
     "js",
     "site",
     "gui/app",
-    "gui/e2e"
+    "gui/e2e",
+    "gui/e2e-playwright"
   ],
   "devDependencies": {
     "@solid/acl-check": "^0.4.5",

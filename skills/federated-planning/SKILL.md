@@ -299,7 +299,17 @@ since:
   leaf's SRJ through the Phase-2 adapter, parses it, and natural-joins in the plan's join
   order. The load-bearing property — the materialised federated result **equals** local
   `sparq-engine` evaluation of the same query (`solutions_equal` bag comparison) — is driven
-  end-to-end in `tests/planner_result_equals_local_eval.rs`. `materialize_single_source` is
+  end-to-end in `tests/planner_result_equals_local_eval.rs` (in-memory `Transport` double)
+  **and, over a REAL in-process `sparq-server` loopback on `127.0.0.1:0`, in
+  `tests/endpoint_loopback_result_equals_local.rs`** (`sq-my8wd.2`): the latter closes the
+  honest gap that the equivalence tests otherwise only exercise the in-memory seam (the SRJ
+  HTTP round-trip + the on-the-wire SSRF guard are never touched), and asserts the load-bearing
+  egress invariant **non-vacuously** — a sibling *default-deny* `Endpoint` against the *same*
+  live loopback host is `FedError::EgressRefused` while the per-endpoint-allowlisted one
+  reaches the server, so the refusal cannot be a "server is down" artifact; `discovery` is
+  driven the same way (allowlisted `HttpFetcher` reaches it via the ASK-probe fallback, a
+  default-deny one is refused). The fedclient guard is owned per-endpoint (no process-global to
+  widen), so the allowlist granted to one endpoint never leaks to another. `materialize_single_source` is
   single-source + blocking (its streaming counterpart is Phase 5 below); a leaf the planner
   retained >1 source for fails closed with `InterpError::MultiSource`. To fan such a leaf out
   as a per-source UNION use `materialize_multi_source` / `stream_multi_source` (bead `sq-7yf0`,

@@ -30,6 +30,11 @@
 #                                                         #   names ("opt-in <name>"), one
 #                                                         #   per line (for the gate-name
 #                                                         #   preservation proof / tests)
+#   ... --select-mode <mode> --affected '<json array>'    # [FABLE-5] sq-fmx4u.3: when
+#                                                         #   mode == "selected", keep only
+#                                                         #   legs whose crate is affected;
+#                                                         #   ANY other/malformed input
+#                                                         #   fail-closes to the FULL set
 # Exit non-zero (with a diagnostic on stderr) on any malformed fragment.
 
 import glob
@@ -125,12 +130,64 @@ def load_legs():
     return legs
 
 
+def filter_legs_by_selection(legs, select_mode, affected_json):
+    """[FABLE-5] sq-fmx4u.3 (design §5.2): change-based selection over the leg list.
+
+    Keep only the legs whose `crate` is in the affected closure — but ONLY when
+    the selection pre-job says `--select-mode selected`. Every other input is
+    FAIL-CLOSED to the FULL leg set (running more is always sound, design §2/§4.3):
+      * select_mode empty / "shadow" / "full" / anything else  => full set
+      * affected missing, unparsable, or not a list of strings => full set
+        (with a loud stderr warning — that combination means a wiring bug, and
+        the sound degradation is the status quo, never a skip).
+    An affected closure of [] legitimately yields ZERO legs; the workflow's
+    `setup` job emits a `legs` count so the matrix job skips instead of
+    exploding on an empty `include`. Note: matrix-key selection cannot be a
+    job-level `if:` on GitHub Actions — the `matrix` context is not available
+    there (docs: contexts availability), which is why this filtering happens at
+    assembly time. The gate aggregator discovers checks by polling, so an
+    unassembled leg is simply absent (never an "expected but missing" hang);
+    requiredness continues to flow through `ci-summary / gate`.
+    """
+    if select_mode != "selected":
+        return legs
+    affected = None
+    if affected_json:
+        try:
+            affected = json.loads(affected_json)
+        except json.JSONDecodeError:
+            affected = None
+    if not isinstance(affected, list) or not all(isinstance(a, str) for a in affected):
+        sys.stderr.write(
+            "warning: --select-mode selected but --affected is missing/malformed; "
+            "FAILING CLOSED to the full leg set (sq-fmx4u.3, design §4.3)\n"
+        )
+        return legs
+    keep = set(affected)
+    return [leg for leg in legs if leg["crate"] in keep]
+
+
+def _flag_value(argv, flag):
+    """Value of `--flag value` in argv, or None."""
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
 def main():
     legs = load_legs()
     if "--names" in sys.argv[1:]:
+        # The golden gate-name proof ALWAYS dumps the full set — selection must
+        # never make the byte-identical name contract unverifiable.
         for name in sorted(f"opt-in {leg['name']}" for leg in legs):
             print(name)
         return
+    legs = filter_legs_by_selection(
+        legs,
+        _flag_value(sys.argv[1:], "--select-mode"),
+        _flag_value(sys.argv[1:], "--affected"),
+    )
     # Emit a single-line JSON object so the workflow can capture it with
     # `echo "matrix=$(...)" >> "$GITHUB_OUTPUT"` and feed `fromJSON(... .matrix)`.
     print(json.dumps({"include": legs}, ensure_ascii=False, separators=(",", ":")))

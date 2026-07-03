@@ -49,8 +49,10 @@
 # verdict, so this cannot create a false pass.
 #
 # Exit-0 paths, exhaustively: (1) render_verdict over a stable-empty set;
-# (2) render_verdict over an all-terminal set with zero non-passing GATING checks.
-# There is no other `return 0`.
+# (2) render_verdict over an all-terminal set with zero non-passing GATING checks
+# AND every change-based-selection pre-job check green (sq-fmx4u.3: `skipped` is
+# satisfied only under a successful selection; a present-but-not-success select
+# REDs outright). There is no other `return 0`.
 #
 # Hermetic tests: scripts/tests/test_ci_summary_gate.py (stdlib-only unittest; no
 # network — fetchers are injected). Run: python3 scripts/tests/test_ci_summary_gate.py
@@ -67,6 +69,11 @@ from dataclasses import dataclass, field
 
 ADVISORY_RE = re.compile(r"\b(advisory|informational)\b")
 _PASSING = ("success", "skipped", "neutral")
+# [FABLE-5] sq-fmx4u.3: the change-based test-selection pre-job (the reusable
+# .github/workflows/ci-select.yml job, called from ci.yml + feature-matrix.yml).
+# Its check-run name embeds this phrase; scripts/tests/test_ci_select_wiring.py
+# pins the workflow job name against this regex so the two cannot drift apart.
+SELECT_RE = re.compile(r"change-based test selection")
 
 
 @dataclass
@@ -99,6 +106,15 @@ def is_advisory(name: str) -> bool:
     return bool(ADVISORY_RE.search(name.lower()))
 
 
+def is_select(name: str) -> bool:
+    """[FABLE-5] sq-fmx4u.3: is this check-run the change-based test-selection
+    pre-job? Matched by the stable phrase in its job name (case-insensitive).
+    If the name ever drifts, detection degrades to select_runs == [] — i.e. the
+    PRE-selection semantics (skipped is unconditionally satisfied), never a
+    false RED; the wiring inspection test pins the name so it does not drift."""
+    return bool(SELECT_RE.search(name.lower()))
+
+
 def is_self(run: dict, self_run_id: str) -> bool:
     """True iff this check-run belongs to THIS gate's workflow run. Anchored to
     /runs/<id>(/|$) so a longer sibling run id sharing the prefix can't match."""
@@ -117,14 +133,53 @@ def _emit(line: str, summary_path: str = "") -> None:
 
 def render_verdict(runs: list[dict], summary_path: str = "") -> int:
     """Shared by the clean-converge, graceful-timeout, and post-extension paths, so
-    every path applies IDENTICAL gating semantics. Returns the process exit code."""
+    every path applies IDENTICAL gating semantics. Returns the process exit code.
+
+    SELECTION SEMANTICS ([FABLE-5] sq-fmx4u.3, design §5.3): a `skipped`
+    conclusion is satisfied ONLY when the change-based selection pre-job
+    (is_select) succeeded — a skip is trustworthy iff the thing that decided to
+    skip ran to a successful conclusion. Concretely:
+      * every select check-run present must have conclusion == "success";
+        anything else (failure, cancelled, skipped, neutral, stale) REDs the
+        gate outright, even if every other sibling is green — an unobservable
+        selection means the skips on this commit are unattributable (§4.3);
+      * with select green (or absent — e.g. a pre-selection sibling set, where
+        no skip was produced by selection), `skipped` stays non-failing exactly
+        as before. Absent-select degradation is deliberately the PRE-sq-fmx4u.3
+        behaviour, never a new failure mode.
+    A job that FAILED still fails the gate regardless of selection — selection
+    can only ever decide whether a SKIP is satisfied, never mask a failure."""
     total = len(runs)
     if total == 0:
         _emit("ci-summary: no sibling checks to aggregate (stable empty set) — passing.", summary_path)
         return 0
     gating = [r for r in runs if not is_advisory(r.get("name", ""))]
     excluded = total - len(gating)
-    failed = [r for r in gating if r.get("conclusion") not in _PASSING]
+    # Selection pre-job health — searched over ALL runs (not just gating) so a
+    # hypothetical advisory-renamed select could still never green-light a skip.
+    select_runs = [r for r in runs if is_select(r.get("name", ""))]
+    select_ok = all(r.get("conclusion") == "success" for r in select_runs)
+    skipped_ct = sum(1 for r in gating if r.get("conclusion") == "skipped")
+    if not select_ok:
+        _emit(
+            f"### ci-summary: FAILED — the change-based test-selection pre-job did not "
+            f"succeed, so the {skipped_ct} skipped gating check(s) on this commit cannot "
+            f"be attributed to a sound selection (fail-closed, sq-fmx4u.3 / design §4.3).",
+            summary_path,
+        )
+        for r in select_runs:
+            _emit(f"- ✗ {r.get('name')}: {r.get('conclusion') or 'incomplete'}", summary_path)
+        print("::error::ci-summary failed — the selection pre-job must conclude success.")
+        return 1
+
+    def _satisfied(r: dict) -> bool:
+        c = r.get("conclusion")
+        if c == "skipped":
+            return select_ok  # always True past the gate above; kept explicit so a
+            # future refactor that moves this check cannot silently trust a skip.
+        return c in _PASSING
+
+    failed = [r for r in gating if not _satisfied(r)]
     if failed:
         _emit(
             f"### ci-summary: FAILED — {len(failed)} non-passing gating check(s) of "
@@ -140,6 +195,12 @@ def render_verdict(runs: list[dict], summary_path: str = "") -> int:
         f"{excluded} advisory check(s) excluded; set stable.",
         summary_path,
     )
+    if select_runs:
+        _emit(
+            f"selection: {len(gating) - skipped_ct} of {len(gating)} gating check(s) ran, "
+            f"{skipped_ct} skipped (selection and/or path-filter; selection pre-job succeeded).",
+            summary_path,
+        )
     return 0
 
 

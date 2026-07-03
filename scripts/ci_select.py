@@ -10,9 +10,14 @@
 #   closure (transitive dependents) of every changed crate, derived from
 #   `cargo metadata`. Emits JSON: {"mode": "selected"|"full", "reason", "affected"}.
 #
-#   This is the SELECTOR LIBRARY ONLY (design §3). The CI WIRING — the `select`
-#   pre-job, the job-level `if:` guards, nextest filtersets, ci-summary
-#   semantics — is the LATER beads sq-fmx4u.2-.6. This file touches no workflow.
+#   This is the SELECTOR LIBRARY (design §3). The CI WIRING — the `select`
+#   pre-job (.github/workflows/ci-select.yml), the job-level `if:` guards, the
+#   nextest filterset narrowing, ci-summary semantics — landed with bead
+#   sq-fmx4u.3 [FABLE-5]; the rollout backstops (nightly full, ci-full label,
+#   the enforcement flip) are bead sq-fmx4u.5. This file stays workflow-
+#   agnostic: it reads a diff + cargo metadata and emits {mode, reason,
+#   affected} plus the $GITHUB_OUTPUT lines (mode/affected/filterset) that the
+#   wiring consumes.
 #
 # THE CORE INVARIANT (design §2, normative):
 #   *A test is skipped => provably no change could affect it.* Skipping is an
@@ -37,6 +42,9 @@
 #   ci_select.py --base <sha> --head <sha>         # explicit revision pair
 #   ci_select.py --event schedule                  # no diff => mode=full
 #   ci_select.py --full                            # forced full (e.g. the `ci-full` label)
+#   ci_select.py --shadow ...                      # report-only: compute + report the
+#                                                  #   selection but emit mode=shadow so no
+#                                                  #   downstream guard skips (design §6.4)
 #   ci_select.py --changed-file paths.txt \        # hermetic inputs (tests): newline-delimited
 #                --metadata-file meta.json          # cargo metadata JSON snapshot
 #
@@ -407,15 +415,48 @@ def load_ownership_map(map_file: str | None) -> list[dict]:
     return entries
 
 
+# --- shadow mode (design §6.4; wired by sq-fmx4u.3, flipped by sq-fmx4u.5) ---
+def shadow_wrap(sel: Selection) -> Selection:
+    """[FABLE-5] Report-only rollout mode: keep the computed selection for the
+    step summary but emit mode="shadow", which every downstream guard treats
+    exactly like any non-"selected" mode — RUN EVERYTHING. The wrap is applied
+    UNIFORMLY (even over a computed mode=full / the error path) so the emitted
+    contract is one rule: --shadow => mode is never "selected" => nothing skips.
+    """
+    return Selection(
+        mode="shadow",
+        reason=f"SHADOW (computed mode={sel.mode}; report-only, nothing is skipped): {sel.reason}",
+        affected=sel.affected,
+        changed_crates=sel.changed_crates,
+        file_owners=sel.file_owners,
+        all_members=sel.all_members,
+    )
+
+
+def filterset(sel: Selection) -> str:
+    """[FABLE-5] The nextest filterset over the affected members, e.g.
+    "package(a) + package(b)". Consumed by the cross-crate bulk test shards to
+    NARROW (never skip) their partition when mode == "selected" (design §5.2).
+    nextest fails loud on a package() naming no package in the archive, so a
+    stale name here cannot silently select nothing."""
+    return " + ".join(f"package({m})" for m in sel.affected)
+
+
 # --- step summary + outputs --------------------------------------------------
 def render_summary(sel: Selection) -> str:
     lines = ["### CI test-selection", "", f"**Mode:** `{sel.mode}` — {sel.reason}", ""]
+    if sel.mode == "shadow":
+        lines.append(
+            "**SHADOW MODE** — selection is REPORT-ONLY on this run: every job still "
+            "runs; the closure below is what enforcement WOULD run (flip: sq-fmx4u.5)."
+        )
+        lines.append("")
     if sel.file_owners:
         lines += ["| Changed file | Owning crate |", "|---|---|"]
         for path, owner in sel.file_owners:
             lines.append(f"| `{path}` | {owner} |")
         lines.append("")
-    if sel.mode == "selected":
+    if sel.mode in ("selected", "shadow"):
         total = len(sel.all_members)
         run = len(sel.affected)
         lines.append(f"**Affected closure ({run} of {total}):** " + (", ".join(sel.affected) or "_none_"))
@@ -431,6 +472,7 @@ def _write_outputs(sel: Selection, output_file: str | None, summary_file: str | 
         with open(output_file, "a", encoding="utf-8") as fh:
             fh.write(f"mode={sel.mode}\n")
             fh.write("affected=" + json.dumps(sel.affected) + "\n")
+            fh.write("filterset=" + filterset(sel) + "\n")
     if summary_file:
         with open(summary_file, "a", encoding="utf-8") as fh:
             fh.write(render_summary(sel))
@@ -440,8 +482,11 @@ def _write_outputs(sel: Selection, output_file: str | None, summary_file: str | 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Change-based CI test-selection (design §3).")
     p.add_argument("--event", default="pull_request",
-                   help="GitHub event; schedule/workflow_dispatch => full")
+                   help="GitHub event; anything but pull_request/merge_group => full (no PR diff)")
     p.add_argument("--full", action="store_true", help="force mode=full (e.g. the ci-full label)")
+    p.add_argument("--shadow", action="store_true",
+                   help="report-only rollout mode (design §6.4): compute + report the "
+                        "selection but emit mode=shadow so no downstream guard skips")
     p.add_argument("--base", help="base SHA/ref for the three-dot diff")
     p.add_argument("--head", default="HEAD", help="head SHA/ref (default HEAD)")
     p.add_argument("--changed-file", help="hermetic: newline-delimited changed paths")
@@ -470,9 +515,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         repo_root = _resolve_repo_root(args.repo_root)
 
-        # Events with no diff, or the explicit override => full (design §3.1, §6).
-        if args.full or args.event in ("schedule", "workflow_dispatch"):
-            reason = "forced full run (ci-full override)" if args.full else f"{args.event} event: no diff"
+        # Events with no PR diff, or the explicit override => full (design §3.1, §6).
+        # [FABLE-5] sq-fmx4u.3: only pull_request and merge_group carry a sound
+        # (base, head) revision pair; push/schedule/workflow_dispatch (and any
+        # future event) get the full matrix by construction, not by error-trap.
+        if args.full or args.event not in ("pull_request", "merge_group"):
+            reason = "forced full run (ci-full override)" if args.full else f"{args.event} event: no PR diff"
             meta = load_metadata(args.metadata_file, repo_root)
             ws = parse_workspace(meta)
             sel = Selection(mode="full", reason=reason, affected=sorted(ws.members),
@@ -499,6 +547,9 @@ def main(argv: list[str] | None = None) -> int:
         # We could not even build the member list; emit full with an empty
         # affected is still "run everything" downstream (mode != 'selected').
         sel = Selection(mode="full", reason=f"selector error, failing to full run: {exc}", affected=[])
+
+    if args.shadow:  # [FABLE-5] report-only rollout (design §6.4; flip: sq-fmx4u.5)
+        sel = shadow_wrap(sel)
 
     print(json.dumps(sel.to_json_obj(), indent=2))
     try:

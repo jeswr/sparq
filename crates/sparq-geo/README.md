@@ -86,13 +86,17 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
 - **R-tree `GeoIndex`** — packed-STR `rstar` build over the default and every named
   graph, with antimeridian-safe windows and incremental `apply_delta` upkeep.
 
-**Distance accuracy caveat.** Metric units measure great-circle distance on the GRS80
-mean sphere; point↔point is exact haversine, but extended↔extended geometry uses a
-**local equirectangular approximation** about mean latitude — accurate at local scale,
-degrading for continent-spanning pairs. `uom:degree`/`radian` measure coordinate-space
-distance. Line/polygon set-subtraction is rolled in-crate over `i_overlay` (`geo`'s
-`BooleanOps` overlays only polygons); a `LineString` difference is proposed upstream to
-[georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`).
+**Distance accuracy.** Metric units measure great-circle distance on the GRS80 mean
+sphere; point↔point and point↔extended geometry are exact haversine (spherical
+closest-point). Extended↔extended geometry uses **vertex-HaversineClosestPoint
+iteration** (sq-lk3aw.3): for each vertex of each geometry the haversine distance to
+the nearest point on the other geometry is computed, resolving the prior equirectangular
+projection distortion. Remaining approximation: interior-of-segment↔interior-of-segment
+pairs (bounded by vertex arc spacing; uncommon for typical GeoSPARQL geometries).
+`uom:degree`/`radian` measure coordinate-space distance. `geof:buffer` in metric units
+still uses a local equirectangular frame (no exact sphere-buffer equivalent). Line/polygon
+set-subtraction is rolled in-crate over `i_overlay`; a `LineString` difference is proposed
+upstream to [georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`).
 
 ## 📚 Learn more
 

@@ -370,6 +370,7 @@ export function HeroQueryRunner() {
       {phase === "error" && error && (
         <div
           role="alert"
+          data-testid="hero-error"
           className="flex items-start gap-2 border-t border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
         >
           <span className="font-mono">{error}</span>
