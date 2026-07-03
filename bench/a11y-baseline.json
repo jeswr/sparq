@@ -1,0 +1,95 @@
+{
+  "_comment": [
+    "[OPUS-4.8] A11Y RATCHET (sq-ymr2e.4) — automated axe-core WCAG 2.1 AA violation counts per P1",
+    "interactive surface x UI state, reviewed in diffs exactly like the coverage-floor counts.",
+    "GATE (e2e/support/a11y.ts): two tiers. ZERO-tier surfaces (no allowedSeriousRules) HARD-FAIL on",
+    "any serious/critical (unconditional). KNOWN-GAP surfaces (allowedSeriousRules + bead) tolerate",
+    "EXACTLY the listed, beaded serious rule-ids and FAIL on any NEW one — the allowance may only",
+    "SHRINK. In both tiers moderate+minor are a CEILING that may only FALL. Color-contrast and form-",
+    "label rules are explicitly on and cannot be excluded. Re-seed after a fix or a new state:",
+    "A11Y_SEED=1 npm run test:e2e -- a11y.spec.ts  (needs the wasm bundle for the results/error",
+    "states — synced from `(cd ../js && npm run build:wasm)`; the light CI lane has no wasm, so it",
+    "scans only the wasm-free states and never trips a wasm-state ratchet). Counts are measured on a",
+    "non-canonical work box / CI runner — a REGRESSION ratchet, not a canonical audit number, and a",
+    "FLOOR not a certificate (axe covers ~the mechanical half of WCAG; the keyboard/focus half is",
+    "sq-ymr2e.9). We claim 'zero known serious/critical automated violations at WCAG 2.1 AA' on the",
+    "gated surfaces, never 'WCAG-compliant'."
+  ],
+  "wcagTags": [
+    "wcag2a",
+    "wcag2aa",
+    "wcag21a",
+    "wcag21aa"
+  ],
+  "ruleExclusions": {},
+  "surfaces": {
+    "download:no-release": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    },
+    "download:release": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    },
+    "home:idle": {
+      "critical": 0,
+      "serious": 1,
+      "moderate": 0,
+      "minor": 0,
+      "allowedSeriousRules": [
+        "color-contrast"
+      ],
+      "bead": "sq-ymr2e.13",
+      "reason": "hero preview-table syntax tokens + primary th + gradient Run button need a design-token AA pass"
+    },
+    "home:results": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "allowedSeriousRules": [
+        "color-contrast"
+      ],
+      "bead": "sq-ymr2e.13",
+      "reason": "same hero gradient Run button as home:idle (bead sq-ymr2e.13); axe evaluates the --hero-grad gradient bg nondeterministically, so color-contrast is tolerated here to prevent flake — a NEW serious rule still fails the guard"
+    },
+    "try:connect-drawer-open": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    },
+    "try:default": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    },
+    "try:error": {
+      "critical": 0,
+      "serious": 1,
+      "moderate": 0,
+      "minor": 0,
+      "allowedSeriousRules": [
+        "color-contrast"
+      ],
+      "bead": "sq-ymr2e.14",
+      "reason": "the sonner rich-colours error toast is ~4.34:1; override the toast palette for AA"
+    },
+    "try:palette-open": {
+      "critical": 0,
+      "serious": 1,
+      "moderate": 0,
+      "minor": 0,
+      "allowedSeriousRules": [
+        "color-contrast"
+      ],
+      "bead": "sq-ymr2e.14",
+      "reason": "command-palette --success badge is ~4.09:1 (need 4.5); a global token nudge"
+    }
+  }
+}

@@ -88,3 +88,14 @@ jobs:
       - name: Foundation smoke (headless Chromium)
         continue-on-error: true
         run: npm run test:e2e -- support/foundation.smoke.spec.ts
+
+      # [OPUS-4.8] sq-ymr2e.4 — ADVISORY axe-core WCAG 2.1 AA a11y scan of the P1 interactive
+      # surfaces x their key UI states (research/web-gui-test-program.md §3.1). This lane builds no
+      # wasm bundle, so the two engine-dependent states (home:results, /try:error) self-SKIP; the
+      # wasm-free states (home:idle, /try default/palette/drawer, /download release+no-release) run.
+      # Gate shape: serious+critical = ZERO on the ZERO-tier surfaces, a known-gap regression guard
+      # on the beaded color-contrast surfaces, and a moderate/minor ratchet (bench/a11y-baseline.json).
+      # continue-on-error keeps it advisory until the sq-ymr2e.12 promotion bar.
+      - name: A11y — axe WCAG 2.1 AA (headless Chromium)
+        continue-on-error: true
+        run: npm run test:e2e -- a11y.spec.ts
