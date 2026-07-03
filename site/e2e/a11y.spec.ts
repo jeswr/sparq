@@ -13,10 +13,13 @@
 // fall). Non-vacuity: the last test injects an unlabelled icon-button and asserts axe CATCHES it,
 // so a green run proves the scanner is live, not silently disabled.
 //
-// The harness itself found + this PR FIXED two serious findings (WCAG 1.4.1 inline-link underline
+// The harness itself found + this PR FIXED three serious findings (WCAG 1.4.1 inline-link underline
 // on home + /download → both /download states are ZERO-gated; keyboard access to the /try error
-// <pre>). The remaining structural color-contrast gaps are beaded (sq-ymr2e.13 home hero table +
-// button; sq-ymr2e.14 palette badge + error toast) and their surfaces run in the KNOWN-GAP tier.
+// <pre>; and the Sonner rich-colours error-toast color-contrast — #e60000 on #fff0f0 = 4.34:1,
+// darkened to ~5.8:1 in globals.css, so the "Engine failed to load"/"Query failed" toast the /try
+// REPL raises clears AA and the wasm-free /try states stay ZERO-gated even when the engine can't
+// load). The remaining structural color-contrast gaps are beaded (sq-ymr2e.13 home hero table +
+// button; sq-ymr2e.14 command-palette --success badge) and their surfaces run in the KNOWN-GAP tier.
 //
 // Design of record: research/web-gui-test-program.md §3.1. Determinism doctrine §1 (frozen clock,
 // seeded random, hermetic network, web-first waiters — inherited from the shared `test`).
@@ -44,10 +47,6 @@ const GAP_HOME = {
 const GAP_PALETTE = {
   bead: "sq-ymr2e.14",
   reason: "command-palette --success badge is ~4.09:1 (need 4.5); a global token nudge",
-};
-const GAP_ERROR = {
-  bead: "sq-ymr2e.14",
-  reason: "the sonner rich-colours error toast is ~4.34:1; override the toast palette for AA",
 };
 
 // In A11Y_SEED mode, rewrite the ratchet baseline from the measured counts (no-op otherwise).
@@ -112,7 +111,9 @@ test.describe("a11y · /try", () => {
     await page.getByRole("textbox", { name: "SPARQL query" }).fill("SELECT ?s WHERE { ?s ?p");
     await page.getByRole("button", { name: "Run query" }).click();
     await expect(page.locator('[data-result-kind="error"]')).toBeVisible({ timeout: 30_000 });
-    await assertA11y(page, "try:error", { knownGap: GAP_ERROR });
+    // ZERO tier: the rich-colours error toast this state raises had a 4.34:1 color-contrast gap
+    // (the former GAP_ERROR / sq-ymr2e.14); it is now fixed in globals.css, so this surface is clean.
+    await assertA11y(page, "try:error");
   });
 });
 
