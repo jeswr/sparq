@@ -12,15 +12,23 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "Cost-based federated source selection (HiBISCuS prune + CostFed cardinality) and bind-vs-hash join planning over served source descriptors — opt-in, no network I/O"
-publish = false
+readme = "README.md"
+# [SONNET-4.6] sq-my8wd.3: Graduate from publish=false to publishable. The
+# select_sources + plan_bgp planner is feature-complete (HiBISCuS + CostFed +
+# StreamJoin + AdaptiveExecutor). Flip, add the criterion micro-bench and the
+# docs.rs all-features metadata (mirrors sq-qonbz.4 / sparq-substrate).
+publish = true
 
 # OPT-IN, lean core. NOTHING in the workspace's default build depends on this crate:
 # it is a standalone member (like `sparq-canon` / `sparq-prov`), so `sparq-core`'s
 # default build and the wasm artifact are byte-identical with or without it. The
 # capability is therefore OFF BY DEFAULT at the dependency level — the leanest gating,
-# with zero core overhead when absent. A `publish = false` PLANNING crate (no runtime
-# data path, like `sparq-canon`/`sparq-prov`) is bench-exempt under gate G1.
+# with zero core overhead when absent.
 # [OPUS-4.8] sq-a35t, branch feat-fedplan-cost-selection.
+
+# [SONNET-4.6] sq-my8wd.3: Render README.md as the docs.rs front page.
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 # The whole planner is feature-gated so even a crate that DOES depend on sparq-fedplan
@@ -40,6 +48,19 @@ oxrdf = { workspace = true }
 oxttl = { workspace = true }
 rustc-hash = { workspace = true }
 
+# [SONNET-4.6] sq-my8wd.3: criterion for the select_sources + plan_bgp micro-bench
+# (dev-only, never reaches the lean default or wasm build). Pinned at "0.5" to match
+# the workspace bench pattern (sparq-substrate). Transitive deps (anes, ciborium*,
+# oorandom) are already covered by upstream imports (bytecode-alliance / google /
+# mozilla) in supply-chain/imports.lock from when sparq-substrate added criterion.
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 # Round-trip a descriptor parsed from the served N-Triples form.
 oxttl = { workspace = true }
+
+# [SONNET-4.6] sq-my8wd.3: The micro-bench exercises select_sources + plan_bgp
+# over a 3-source, 3-pattern BGP at varying scales. Feature-gated on `fedplan`.
+[[bench]]
+name = "fedplan"
+harness = false
+required-features = ["fedplan"]
