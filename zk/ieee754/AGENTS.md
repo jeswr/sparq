@@ -30,6 +30,12 @@ When the agent runtime supports skills, load the relevant skill before editing. 
 
 - The public API is intentionally the generated `f16`, `f32`, `f64`, and `f128` types.
 - Raw bits are constructed with `new(bits)` and recovered with `bits()`.
+  `new()` enforces TWO in-circuit invariants: (1) `decoded.bits() == bits` and
+  (2) `exponent < 2^EXP_SIZE` and `mantissa < 2^MANT_SIZE` for each width.
+  Invariant (2) is the soundness fix from sq-3x7dl.1: without it the packing
+  `bits() = sign*2^(W-1) + exponent*2^mant_size + mantissa` is non-injective
+  and a malicious prover can substitute `{exp-1, mantissa+2^mant_size}` to
+  prove false float statements.
 - Generated fields, `to_parts`, and internal helpers must remain private.
 - `scripts/test_public_api.sh` checks that external packages can import the generated types and cannot import helper internals.
 - Generated public `type` aliases are not viable in current Noir; generated public structs are used instead.

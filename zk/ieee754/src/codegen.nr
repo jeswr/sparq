@@ -3,6 +3,9 @@ use crate::sizing::{exponent_size, mantissa_size, uint_type};
 pub comptime fn float_type_from_params(bits: u8) -> Quoted {
     let exp_size: u8 = exponent_size(bits);
     let mant_size: u8 = mantissa_size(bits);
+    // [SONNET-4.6] sq-3x7dl.1: u32 versions for assert_max_bit_size::<N: u32>().
+    let exp_size_u32: u32 = exp_size as u32;
+    let mant_size_u32: u32 = mant_size as u32;
 
     let exp_type = uint_type(exp_size);
     let mant_type = uint_type(mant_size);
@@ -91,11 +94,33 @@ pub comptime fn float_type_from_params(bits: u8) -> Quoted {
         }
 
         impl $type_name {
+            // Private helper: constrain exponent and mantissa to their real IEEE field
+            // widths.  new() calls this after decode; the forge tests call it directly
+            // on malicious field values so that removing the body makes those tests RED
+            // -- they pin the helper's logic, not a disconnected inline assert.
+            // [SONNET-4.6] sq-3x7dl.1
+            fn assert_canonical_fields(exponent: $exp_type, mantissa: $mant_type) {
+                (exponent as Field).assert_max_bit_size::<$exp_size_u32>();
+                (mantissa as Field).assert_max_bit_size::<$mant_size_u32>();
+            }
+
             pub fn new(bits: $full_type) -> Self {
                 // Safety: the decoded witness is constrained by re-encoding it with bits()
                 // and asserting that it exactly matches the input bit pattern.
                 let decoded = unsafe { Self::decode_unconstrained(bits) };
                 assert_eq(decoded.bits(), bits);
+                // [SONNET-4.6] sq-3x7dl.1 SOUNDNESS FIX: assert_eq above is NECESSARY
+                // but NOT SUFFICIENT -- because bits() = sign*2^(W-1) + exp*2^mant_size
+                // + mantissa is non-injective when field types exceed IEEE field widths, a
+                // malicious prover can substitute {exp-1, mantissa+2^mant_size} for the
+                // canonical {exp, mantissa} and produce the same bits() while denoting a
+                // DIFFERENT real number.  assert_canonical_fields makes bits() injective
+                // and pins the unique canonical IEEE decomposition for every generated width.
+                // NOTE: circuit-level pinning of the new() call-site (a malicious witness
+                // fed through the prover) is a forge/proving-level obligation tracked under
+                // sq-l9ulg / sq-qhy4 -- the functional tests pin the helper's logic; the
+                // forge suite + audit pin the call-site.
+                Self::assert_canonical_fields(decoded.exponent, decoded.mantissa);
 
                 decoded
             }
