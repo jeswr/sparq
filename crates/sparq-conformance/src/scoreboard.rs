@@ -153,10 +153,13 @@ pub struct Suite {
 ///   `EXPAND_FLOOR = 240` (sq-kk1mq oracle-correction re-baseline; opt-in
 ///   `jsonld-suite` feature; the expand lane now calls `sparq_jsonld::expand()`
 ///   directly and compares the result to the expected document via `json_ld_equal`
-///   — a document-level JSON comparator; object key order insignificant, array
-///   order significant only inside `@list`, numbers as f64.  OLD floor was 247
-///   under the RDF-equivalence oracle (sq-oy1f); the rebase reveals 7 cases that
-///   over-passed via coincidental RDF equivalence and 26 new honest fails).
+///   — a document-level JSON comparator measuring JSON-LD data-model (semantic)
+///   equivalence, NOT structural identity: object key order insignificant, array
+///   order significant only inside `@list`, integers compared exactly (i64/u64),
+///   non-integral numbers as f64.  ~18 of 240 passes are semantically-equal-but-
+///   reordered vs. the W3C reference (strict-ordered count 222).  OLD floor was
+///   247 under the RDF-equivalence oracle (sq-oy1f); the rebase reveals a net 7
+///   fewer passes (20 flips minus 13 recoveries) and 26 new honest fails).
 /// * JSON-LD flatten 50 — `sparq-conformance` `tests/jsonld_suite.rs`
 ///   `FLATTEN_FLOOR = 50` (sq-oy1f; opt-in `jsonld-suite` feature; RDF → flattened
 ///   JSON-LD via the shipping `graph_to_jsonld(JsonLdForm::Flattened)` writer,
@@ -483,13 +486,18 @@ pub const SUITES: &[Suite] = &[
     // sq-oy1f). Each `jld:ExpandTest` / `jld:FlattenTest` input is parsed to RDF (the
     // [SONNET-4.6] sq-kk1mq oracle-correction re-baseline: the expand lane now calls
     // sparq_jsonld::expand() directly and compares the result to the suite's expected
-    // document via json_ld_equal (document-level JSON comparator; object key order
-    // insignificant; array order significant only inside @list; numbers as f64).
+    // document via json_ld_equal (document-level JSON comparator measuring JSON-LD
+    // data-model (semantic) equivalence, NOT structural identity; object key order
+    // insignificant; array order significant only inside @list; integers compared exactly
+    // via i64/u64, non-integral numbers as f64).  ~18 of 240 passes are semantically-
+    // equal-but-reordered vs. the W3C reference (strict-ordered count 222).
     // The old floor was 247 under the RDF-equivalence oracle (sq-oy1f); the rebase
-    // reveals 7 over-passes (oracle artefacts) and 26 new honest failures.  The new
-    // floor 240 is the MEASURED pass count with the corrected oracle at the pinned suite
-    // revision (sq-kk1mq).  The flatten lane keeps the old RDF-equivalence oracle
-    // (native flatten algorithm deferred; writer path is the correct oracle there).
+    // reveals a net 7 fewer passes (20 old-pass→new-fail flips minus 13 recoveries:
+    // 8 old-fail→new-pass via oracle precision + 5 old-skip→new-pass via options
+    // forwarding) and 26 new honest failures.  The new floor 240 is the MEASURED pass
+    // count with the corrected oracle at the pinned suite revision (sq-kk1mq).  The
+    // flatten lane keeps the old RDF-equivalence oracle (native flatten algorithm
+    // deferred; writer path is the correct oracle there).
     // Floors kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C JSON-LD 1.1 expand",
@@ -502,8 +510,9 @@ pub const SUITES: &[Suite] = &[
         ci_job: "jsonld-conformance",
         ratchet_floor: 240,
         floor_basis: "pass",
-        note: "native sparq_jsonld::expand() + json_ld_equal document-level comparator \
-               (sq-kk1mq oracle-correction re-baseline from 247 under RDF-equivalence \
+        note: "native sparq_jsonld::expand() + json_ld_equal semantic-equivalence comparator \
+               (sq-kk1mq; NOT structural identity — ~18/240 passes are reordered, \
+               strict-ordered count 222; re-baseline from 247 under RDF-equivalence \
                oracle sq-oy1f); options forwarded (base, expandContext, processingMode)",
     },
     Suite {

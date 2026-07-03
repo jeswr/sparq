@@ -222,15 +222,22 @@ mod gated {
     /// "pass" by coincidence (writer happened to produce equivalent RDF) even when the
     /// expansion JSON shape differed from the spec, or fail spuriously when the input
     /// had no RDF projection but the expander output was correct. The new oracle
-    /// directly measures what the W3C expansion tests actually test: the expansion
-    /// algorithm's JSON-level output.
+    /// measures JSON-LD data-model (semantic) equivalence — order-insensitive outside
+    /// `@list` per bead sq-kk1mq — NOT structural identity with the reference output.
+    ///
+    /// NOTE: ~18 of the 240 passes are semantically-equal-but-reordered vs. the W3C
+    /// reference (@type order #tpr30, @id-map #tm001, @index #tpi06, multi-value
+    /// #tn004/#t0030 families); a strict order-sensitive harness would fail these 18
+    /// (strict-ordered count = 222).  The comparator is intentionally order-insensitive
+    /// per the JSON-LD data model (elements outside `@list` are a set).
     ///
     /// This is an HONEST REBASE, not a ratchet weakening: the new floor may be lower
     /// than 247 (old oracle measured 247/385) because some old passes were oracle
     /// artefacts (the writer round-tripped to equivalent RDF while the JSON was wrong).
-    /// The gain is precision: every pass now means the expander produced the correct
-    /// expanded JSON. See `run_expand_native` for the skip buckets and the PR body for
-    /// the full old-vs-new breakdown (bead sq-kk1mq).
+    /// The gain is precision: passes now mean the expander produced a semantically
+    /// correct expanded document (data-model equivalence, not byte-identical structure).
+    /// See `run_expand_native` for the skip buckets and the PR body for the full
+    /// old-vs-new breakdown (bead sq-kk1mq).
     ///
     /// ## What changed from the old oracle
     ///
@@ -258,8 +265,11 @@ mod gated {
     /// expander fixes known divergences (tracked as children of sq-oy1f).
     /// MEASURED 240/385 at the pinned revision under the new document-level oracle
     /// (sq-kk1mq): 240 pass / 36 fail / 109 skip.  Breakdown vs. old oracle (247/10/128):
-    ///   - 7 fewer passes (247→240): cases where the old RDF-equivalence oracle over-passed
-    ///     (writer happened to produce equivalent RDF; the JSON structure differed from spec)
+    ///   - 7 fewer passes (247→240): NET of 20 old-pass→new-fail flips (old oracle over-passed;
+    ///     writer happened to produce equivalent RDF while JSON structure differed from spec),
+    ///     offset by 13 recoveries: 8 old-fail→new-pass via oracle precision (new oracle
+    ///     correctly passes cases the old oracle spuriously failed), plus 5 old-skip→new-pass
+    ///     via options forwarding (processingMode/expandContext now forwarded; previously skipped)
     ///   - 26 more fails (10→36): honest divergences the new oracle reveals (JSON-level
     ///     mismatches invisible to the old RDF oracle, options-driven, or @direction shapes)
     ///   - 19 fewer skips (128→109): the old 1.0-mode and empty-RDF skip buckets are gone
@@ -1211,14 +1221,21 @@ mod gated {
     //     of a `"@list"` key**; insignificant everywhere else (multiset / set
     //     semantics).  In expanded JSON-LD `@list` is the only structured-sequence
     //     construct; all other arrays are bags.
-    //   • Numbers: compared as f64 (mathematical equality; `1` ≡ `1.0`).
+    //   • Numbers: integral (i64/u64-representable) compared exactly so integers
+    //     ≥ 2^53 remain distinct; non-integral (either side is a JSON float) fall
+    //     back to f64, so `1` ≡ `1.0`.  [SONNET-4.6] sq-kk1mq numeric-guard.
     //   • Strings, booleans, null: exact equality.
     //
     // Why document-level rather than RDF-level?  The expansion algorithm operates
     // purely at the JSON-LD document level.  Two expansions can produce the same
     // RDF yet differ in JSON structure (e.g. `@direction` handling, `@json` literals,
-    // `@list` vs plain-array shapes) — the RDF oracle missed those differences.  The
-    // document-level oracle measures what the W3C tests actually test.
+    // `@list` vs plain-array shapes) — the RDF oracle missed those differences.
+    //
+    // PRECISION NOTE: this comparator measures JSON-LD data-model (semantic)
+    // equivalence — order-insensitive outside `@list` — NOT structural identity
+    // with the reference output.  ~18 of 240 passes are semantically-equal-but-
+    // reordered vs. the W3C reference (strict-ordered count 222).  Tracked as
+    // part of bead sq-kk1mq.
 
     /// Returns `true` iff `a` and `b` are equal under the JSON-LD comparison rules
     /// described in the module-level comment.
@@ -1235,11 +1252,22 @@ mod gated {
             (Value::Null, Value::Null) => true,
             (Value::Bool(x), Value::Bool(y)) => x == y,
             (Value::Number(x), Value::Number(y)) => {
-                // JSON-LD numeric equality: compare as f64 so `1` and `1.0` are equal.
-                match (x.as_f64(), y.as_f64()) {
-                    (Some(xf), Some(yf)) => xf == yf,
-                    // Fallback for numbers outside f64 range (unlikely in JSON-LD).
-                    _ => x == y,
+                // JSON-LD numeric equality [SONNET-4.6] sq-kk1mq numeric-guard:
+                // • Both i64-representable: compare exactly so integers ≥ 2^53 are
+                //   not wrongly collapsed by f64 rounding
+                //   (e.g. 9007199254740992 ≢ 9007199254740993 must remain distinct).
+                // • Both u64-representable (one side exceeds i64::MAX): compare exactly.
+                // • Otherwise: fall back to f64 so integer JSON `1` ≡ float JSON `1.0`.
+                if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
+                    xi == yi
+                } else if let (Some(xu), Some(yu)) = (x.as_u64(), y.as_u64()) {
+                    xu == yu
+                } else {
+                    match (x.as_f64(), y.as_f64()) {
+                        (Some(xf), Some(yf)) => xf == yf,
+                        // Fallback for numbers outside f64 range (unlikely in JSON-LD).
+                        _ => x == y,
+                    }
                 }
             }
             (Value::String(x), Value::String(y)) => x == y,
@@ -1331,7 +1359,8 @@ mod gated {
     ///    by writing and re-parsing (no structural loss — both ASTs are JSON).
     /// 5. Parse the suite's expected document as a `serde_json::Value`.
     /// 6. Compare with `json_ld_equal` (object key order insignificant; array
-    ///    order significant only inside `@list`; numbers compared as f64).
+    ///    order significant only inside `@list`; integers compared exactly,
+    ///    non-integral numbers compared as f64 so `1` ≡ `1.0`).
     ///
     /// ## Honest SKIP buckets (recorded, not passed, not failed)
     ///
@@ -1565,6 +1594,34 @@ mod gated {
             let a = json!(1);
             let b = json!(2);
             assert!(!json_ld_equal(&a, &b));
+        }
+
+        /// Large integers ≥ 2^53 that are distinct as i64 must not be collapsed by f64
+        /// rounding.  Under the old f64-only path 9007199254740992 and 9007199254740993
+        /// round to the same f64 and would be wrongly equal.  The numeric-guard fix
+        /// [SONNET-4.6] sq-kk1mq compares integral values exactly via i64/u64.
+        #[test]
+        fn large_integer_numeric_guard() {
+            // 2^53 and 2^53+1 are distinct i64 values but collapse to the same f64.
+            let a: Value = serde_json::from_str("9007199254740992").unwrap();
+            let b: Value = serde_json::from_str("9007199254740993").unwrap();
+            assert!(
+                !json_ld_equal(&a, &b),
+                "2^53 and 2^53+1 must be UNEQUAL under exact i64 comparison"
+            );
+        }
+
+        /// Integer JSON `1` equals float JSON `1.0` (f64 fallback when one side
+        /// is non-integral; already covered by numeric_equality_int_float but
+        /// kept as an explicit guard for the mixed-representation case).
+        #[test]
+        fn integer_equals_float_one() {
+            let a: Value = serde_json::from_str("1").unwrap();
+            let b: Value = serde_json::from_str("1.0").unwrap();
+            assert!(
+                json_ld_equal(&a, &b),
+                "integer JSON 1 and float JSON 1.0 must be EQUAL"
+            );
         }
 
         /// Duplicate elements in unordered arrays use multiset semantics.
