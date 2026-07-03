@@ -32,7 +32,9 @@ export default defineConfig({
 
   use: {
     baseURL: "http://127.0.0.1:3007",
-    trace: "on-first-retry",
+    // [SONNET-4.6] retain-on-failure: with retries=0, "on-first-retry" never fires → no trace
+    // ever captured. retain-on-failure emits a trace for every failed test regardless of retries.
+    trace: "retain-on-failure",
     viewport: { width: 1280, height: 720 },
     colorScheme: "dark",
     timezoneId: "UTC",
@@ -59,7 +61,10 @@ export default defineConfig({
   // already installed). Using `npm run serve` via a package.json script would also work; npx
   // is simpler (single config change, no extra script entry). [SONNET-4.6] sq-ymr2e.5 fix.
   webServer: {
-    command: "npx serve -l 3007 -s ../app/out",
+    // [SONNET-4.6] --no-install: fails CLOSED if serve is not already installed rather than
+    // fetching from the registry. serve is a pinned devDependency so it WILL be present after
+    // `npm install`; --no-install makes the dependency on that being true explicit + hermetic.
+    command: "npx --no-install serve -l 3007 -s ../app/out",
     url: "http://127.0.0.1:3007",
     reuseExistingServer: !process.env.CI,
     timeout: 15_000,
