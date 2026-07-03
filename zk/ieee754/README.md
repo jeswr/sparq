@@ -43,7 +43,9 @@ fn main(a_bits: u64, b_bits: u64) -> pub u64 {
 The public API is intentionally only the generated `f16`, `f32`, `f64`, and
 `f128` structs:
 
-- `new(bits)` — construct from raw bits (`u16`/`u32`/`u64`/`u128`).
+- `new(bits)` — construct from raw bits (`u16`/`u32`/`u64`/`u128`);
+  constrains `(sign, exponent, mantissa)` to canonical IEEE field widths so
+  `bits()` is injective (soundness fix sq-3x7dl.1).
 - `bits()` — recover raw bits.
 - `std::ops::Add`, `Sub`, `Mul`, `Div` — round-to-nearest-even arithmetic with
   full subnormal, infinity, and NaN handling (NaNs are canonicalised).

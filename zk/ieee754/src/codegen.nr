@@ -3,6 +3,9 @@ use crate::sizing::{exponent_size, mantissa_size, uint_type};
 pub comptime fn float_type_from_params(bits: u8) -> Quoted {
     let exp_size: u8 = exponent_size(bits);
     let mant_size: u8 = mantissa_size(bits);
+    // [SONNET-4.6] sq-3x7dl.1: u32 versions for assert_max_bit_size::<N: u32>().
+    let exp_size_u32: u32 = exp_size as u32;
+    let mant_size_u32: u32 = mant_size as u32;
 
     let exp_type = uint_type(exp_size);
     let mant_type = uint_type(mant_size);
@@ -96,6 +99,17 @@ pub comptime fn float_type_from_params(bits: u8) -> Quoted {
                 // and asserting that it exactly matches the input bit pattern.
                 let decoded = unsafe { Self::decode_unconstrained(bits) };
                 assert_eq(decoded.bits(), bits);
+                // [SONNET-4.6] sq-3x7dl.1 SOUNDNESS FIX: pin each decoded field to its
+                // real IEEE field width. The `assert_eq(decoded.bits(), bits)` above is
+                // NECESSARY but NOT SUFFICIENT: because
+                //   bits() = sign*2^(W-1) + exponent*2^mant_size + mantissa
+                // is non-injective when the field types are wider than the IEEE fields, a
+                // malicious prover can substitute {exp-1, mantissa+2^mant_size} for the
+                // canonical {exp, mantissa} and produce the same bits() while denoting a
+                // DIFFERENT real number.  The two range checks below make bits() injective
+                // and pin the unique canonical IEEE decomposition for every generated width.
+                (decoded.exponent as Field).assert_max_bit_size::<$exp_size_u32>();
+                (decoded.mantissa as Field).assert_max_bit_size::<$mant_size_u32>();
 
                 decoded
             }
