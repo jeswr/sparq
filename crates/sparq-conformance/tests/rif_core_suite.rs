@@ -85,7 +85,11 @@ mod gated {
     /// RIF-Core feature coverage grows). HONESTLY a sparq EXTENSION-shaped ratchet
     /// over the RIF-Core (monotone Horn) subset, NOT a full RIF-BLD/PRD or
     /// SPARQL-RIF-entailment conformance claim. [OPUS-4.8] sq-rh4gu
-    pub const RIF_CORE_FLOOR: usize = 47;
+    // [SONNET-4.6] sq-pbz04.5.2 — raised 47 → 58: 11 new assertions for the 5 new
+    // soundly-mapped builtins (NumericNotEqual, StringUpperCase, StringLowerCase,
+    // StringEncodeForUri, ListConcatenate): 1 positive + 1 negative per builtin
+    // (10 total) + 1 extra positive for NumericNotEqual = 11 net new assertions.
+    pub const RIF_CORE_FLOOR: usize = 58;
 
     /// RIF surface DOCUMENTED out-of-scope for this front-end (the honest move: a
     /// floor reflecting reality + a recorded gap, never a faked pass). Mirrors
@@ -155,6 +159,20 @@ mod gated {
             })
     }
 
+    /// The string object of the (s, p, ?) frame, if present.
+    // [SONNET-4.6] sq-pbz04.5.2
+    fn str_obj(dict: &Dict, closure: &[[Id; 3]], s: &str, p: &str) -> Option<String> {
+        use oxrdf::Term as OxT;
+        let (a, b) = (id(dict, s), id(dict, p));
+        closure
+            .iter()
+            .find(|t| t[0] == a && t[1] == b)
+            .map(|t| match dict.term(t[2]) {
+                OxT::Literal(l) => l.value().to_string(),
+                other => other.to_string(),
+            })
+    }
+
     #[test]
     fn rif_core_expressivity_ratchet() {
         let mut tally = Tally::default();
@@ -164,6 +182,7 @@ mod gated {
         numeric_builtins(&mut tally);
         string_builtins(&mut tally);
         list_builtins(&mut tally);
+        new_builtins(&mut tally); // [SONNET-4.6] sq-pbz04.5.2
         monotonicity(&mut tally);
         safety_rejections(&mut tally);
         canonical_uncle(&mut tally);
@@ -414,6 +433,262 @@ mod gated {
         let mut dict = Dict::new();
         let c = doc.closure(&mut dict).expect("safe list contains doc");
         t.ok(has(&dict, &c, &ns("a"), RDF_TYPE, &ns("HasTwo")), "list:member finds 2");
+    }
+
+    /// Tests for the 5 new soundly-mapped RIF-Core DTB builtins (sq-pbz04.5.2):
+    /// `pred:numeric-not-equal`, `func:upper-case`, `func:lower-case`,
+    /// `func:encode-for-uri`, `func:concatenate`. [SONNET-4.6] sq-pbz04.5.2
+    fn new_builtins(t: &mut Tally) {
+        // --- pred:numeric-not-equal → math:notEqualTo ---
+        // Positive: filter keeps only the subject where value ≠ 5
+        let mut doc = Document::new();
+        doc.push(Rule::fact(Atom::Frame { obj: iri("a"), pred: iri("v"), val: Term::int(5) }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("b"), pred: iri("v"), val: Term::int(7) }));
+        doc.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("NotFive") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("v"), val: var("n") },
+                Atom::Builtin {
+                    op: Builtin::NumericNotEqual,
+                    args: vec![var("n"), Term::int(5)],
+                },
+            ],
+        ));
+        let mut dict = Dict::new();
+        let c = doc.closure(&mut dict).expect("safe notEqual doc");
+        t.ok(
+            !has(&dict, &c, &ns("a"), RDF_TYPE, &ns("NotFive")),
+            "pred:numeric-not-equal: 5≠5 false → filtered out",
+        );
+        t.ok(
+            has(&dict, &c, &ns("b"), RDF_TYPE, &ns("NotFive")),
+            "pred:numeric-not-equal: 7≠5 true → kept",
+        );
+        // Negative: wrong arity → rejected
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("C") }],
+            vec![
+                Atom::Member { obj: var("x"), class: iri("D") },
+                Atom::Builtin { op: Builtin::NumericNotEqual, args: vec![var("x")] },
+            ],
+        ));
+        t.ok(
+            matches!(
+                d.validate(),
+                Err(RifError::BadBuiltinArity { op: Builtin::NumericNotEqual, got: 1, want: 2 })
+            ),
+            "pred:numeric-not-equal: wrong arity rejected",
+        );
+
+        // --- func:upper-case → string:upperCase ---
+        // Positive: upper-cases ASCII string
+        let mut doc = Document::new();
+        doc.push(Rule::fact(Atom::Frame { obj: iri("x"), pred: iri("s"), val: Term::string("hello") }));
+        doc.push(Rule::implies(
+            vec![Atom::Frame { obj: var("o"), pred: iri("u"), val: var("r") }],
+            vec![
+                Atom::Frame { obj: var("o"), pred: iri("s"), val: var("sv") },
+                Atom::Builtin { op: Builtin::StringUpperCase, args: vec![var("sv"), var("r")] },
+            ],
+        ));
+        let mut dict = Dict::new();
+        let c = doc.closure(&mut dict).expect("safe upperCase doc");
+        t.eq(
+            str_obj(&dict, &c, &ns("x"), &ns("u")).as_deref(),
+            Some("HELLO"),
+            "func:upper-case: hello → HELLO",
+        );
+        // Negative: wrong arity (3 args for a 2-arg function) → rejected
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Frame { obj: var("o"), pred: iri("r"), val: var("z") }],
+            vec![
+                Atom::Frame { obj: var("o"), pred: iri("s"), val: var("sv") },
+                Atom::Builtin {
+                    op: Builtin::StringUpperCase,
+                    args: vec![var("sv"), var("z"), var("extra")],
+                },
+            ],
+        ));
+        t.ok(
+            matches!(
+                d.validate(),
+                Err(RifError::BadBuiltinArity { op: Builtin::StringUpperCase, got: 3, want: 2 })
+            ),
+            "func:upper-case: wrong arity rejected",
+        );
+
+        // --- func:lower-case → string:lowerCase ---
+        // Positive: lower-cases correctly
+        let mut doc = Document::new();
+        doc.push(Rule::fact(Atom::Frame { obj: iri("x"), pred: iri("s"), val: Term::string("WORLD") }));
+        doc.push(Rule::implies(
+            vec![Atom::Frame { obj: var("o"), pred: iri("l"), val: var("r") }],
+            vec![
+                Atom::Frame { obj: var("o"), pred: iri("s"), val: var("sv") },
+                Atom::Builtin { op: Builtin::StringLowerCase, args: vec![var("sv"), var("r")] },
+            ],
+        ));
+        let mut dict = Dict::new();
+        let c = doc.closure(&mut dict).expect("safe lowerCase doc");
+        t.eq(
+            str_obj(&dict, &c, &ns("x"), &ns("l")).as_deref(),
+            Some("world"),
+            "func:lower-case: WORLD → world",
+        );
+        // Negative: wrong arity → rejected
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Frame { obj: var("o"), pred: iri("l"), val: var("r") }],
+            vec![
+                Atom::Frame { obj: var("o"), pred: iri("s"), val: var("sv") },
+                Atom::Builtin {
+                    op: Builtin::StringLowerCase,
+                    args: vec![var("sv"), var("r"), var("extra")],
+                },
+            ],
+        ));
+        t.ok(
+            matches!(
+                d.validate(),
+                Err(RifError::BadBuiltinArity { op: Builtin::StringLowerCase, got: 3, want: 2 })
+            ),
+            "func:lower-case: wrong arity rejected",
+        );
+
+        // --- func:encode-for-uri → string:encodeForUri ---
+        // Positive: RFC 3986 space → %20
+        let mut doc = Document::new();
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("x"),
+            pred: iri("raw"),
+            val: Term::string("hello world"),
+        }));
+        doc.push(Rule::implies(
+            vec![Atom::Frame { obj: var("o"), pred: iri("enc"), val: var("e") }],
+            vec![
+                Atom::Frame { obj: var("o"), pred: iri("raw"), val: var("r") },
+                Atom::Builtin { op: Builtin::StringEncodeForUri, args: vec![var("r"), var("e")] },
+            ],
+        ));
+        let mut dict = Dict::new();
+        let c = doc.closure(&mut dict).expect("safe encodeForUri doc");
+        t.eq(
+            str_obj(&dict, &c, &ns("x"), &ns("enc")).as_deref(),
+            Some("hello%20world"),
+            "func:encode-for-uri: space → %20",
+        );
+        // Negative: wrong arity (1 arg, need 2) → rejected
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Frame { obj: var("o"), pred: iri("enc"), val: var("e") }],
+            vec![
+                Atom::Frame { obj: var("o"), pred: iri("raw"), val: var("r") },
+                Atom::Builtin { op: Builtin::StringEncodeForUri, args: vec![var("r")] },
+            ],
+        ));
+        t.ok(
+            matches!(
+                d.validate(),
+                Err(RifError::BadBuiltinArity {
+                    op: Builtin::StringEncodeForUri,
+                    got: 1,
+                    want: 2
+                })
+            ),
+            "func:encode-for-uri: wrong arity rejected",
+        );
+
+        // --- func:concatenate (lists) → list:append ---
+        // Positive: concatenates [10,20] ++ [30] → [10,20,30]; check length = 3
+        let list_a = Term::List(vec![Term::int(10), Term::int(20)]);
+        let list_b = Term::List(vec![Term::int(30)]);
+        let mut doc = Document::new();
+        doc.push(Rule::fact(Atom::Frame { obj: iri("x"), pred: iri("la"), val: list_a }));
+        doc.push(Rule::fact(Atom::Frame { obj: iri("x"), pred: iri("lb"), val: list_b }));
+        // func:concatenate(?la, ?lb, ?out) → out is [10, 20, 30]
+        doc.push(Rule::implies(
+            vec![Atom::Frame { obj: var("x"), pred: iri("concat_out"), val: var("out") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("la"), val: var("la") },
+                Atom::Frame { obj: var("x"), pred: iri("lb"), val: var("lb") },
+                Atom::Builtin {
+                    op: Builtin::ListConcatenate,
+                    args: vec![var("la"), var("lb"), var("out")],
+                },
+            ],
+        ));
+        // Derive the length of the concatenated list
+        doc.push(Rule::implies(
+            vec![Atom::Frame { obj: var("x"), pred: iri("concat_len"), val: var("n") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("concat_out"), val: var("out") },
+                Atom::Builtin { op: Builtin::ListLength, args: vec![var("out"), var("n")] },
+            ],
+        ));
+        let mut dict = Dict::new();
+        let c = doc.closure(&mut dict).expect("safe concatenate doc");
+        t.eq(
+            int_obj(&dict, &c, &ns("x"), &ns("concat_len")).as_deref(),
+            Some("3"),
+            "func:concatenate: [10,20]++[30] → length 3",
+        );
+        // Variadic (3+ inputs): [1,2] ++ [3] ++ [4,5] → [1,2,3,4,5]; length = 5
+        // [SONNET-4.6] sq-pbz04.5.2 — exercises the args[..n_inputs] join path in
+        // lower_builtin (ListConcatenate) with n_inputs=3.
+        let list_x = Term::List(vec![Term::int(1), Term::int(2)]);
+        let list_y = Term::List(vec![Term::int(3)]);
+        let list_z = Term::List(vec![Term::int(4), Term::int(5)]);
+        let mut doc3 = Document::new();
+        doc3.push(Rule::fact(Atom::Frame { obj: iri("r"), pred: iri("lx"), val: list_x }));
+        doc3.push(Rule::fact(Atom::Frame { obj: iri("r"), pred: iri("ly"), val: list_y }));
+        doc3.push(Rule::fact(Atom::Frame { obj: iri("r"), pred: iri("lz"), val: list_z }));
+        // func:concatenate(?lx, ?ly, ?lz, ?out) — variadic 3-input form
+        doc3.push(Rule::implies(
+            vec![Atom::Frame { obj: var("r"), pred: iri("cat3_out"), val: var("out") }],
+            vec![
+                Atom::Frame { obj: var("r"), pred: iri("lx"), val: var("lx") },
+                Atom::Frame { obj: var("r"), pred: iri("ly"), val: var("ly") },
+                Atom::Frame { obj: var("r"), pred: iri("lz"), val: var("lz") },
+                Atom::Builtin {
+                    op: Builtin::ListConcatenate,
+                    args: vec![var("lx"), var("ly"), var("lz"), var("out")],
+                },
+            ],
+        ));
+        doc3.push(Rule::implies(
+            vec![Atom::Frame { obj: var("r"), pred: iri("cat3_len"), val: var("n") }],
+            vec![
+                Atom::Frame { obj: var("r"), pred: iri("cat3_out"), val: var("out") },
+                Atom::Builtin { op: Builtin::ListLength, args: vec![var("out"), var("n")] },
+            ],
+        ));
+        let mut dict3 = Dict::new();
+        let c3 = doc3.closure(&mut dict3).expect("safe 3-input concatenate doc");
+        t.eq(
+            int_obj(&dict3, &c3, &ns("r"), &ns("cat3_len")).as_deref(),
+            Some("5"),
+            "func:concatenate variadic: [1,2]++[3]++[4,5] → length 5",
+        );
+        // Negative: too few args (1 < min 2) → rejected
+        let list_c = Term::List(vec![Term::int(1)]);
+        let mut d = Document::new();
+        d.push(Rule::fact(Atom::Frame { obj: iri("x"), pred: iri("l"), val: list_c }));
+        d.push(Rule::implies(
+            vec![Atom::Frame { obj: var("x"), pred: iri("r"), val: var("out") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("l"), val: var("l") },
+                Atom::Builtin { op: Builtin::ListConcatenate, args: vec![var("out")] },
+            ],
+        ));
+        t.ok(
+            matches!(
+                d.validate(),
+                Err(RifError::BadBuiltinArity { op: Builtin::ListConcatenate, got: 1, .. })
+            ),
+            "func:concatenate: too few args (< min 2) rejected",
+        );
     }
 
     /// MONOTONICITY — the load-bearing invariant: adding a fact only ADDS

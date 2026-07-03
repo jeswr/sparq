@@ -82,6 +82,21 @@ rif-core = ["sparq-reason/rif-core"]
 # single self-SKIP `#[test]`. Pure-Rust, no new third-party deps.
 ql-experimental = ["dep:sparq-reason-ql", "sparq-reason-ql/experimental"]
 
+# [SONNET-4.6] sq-pbz04.2.4 (epic sq-pbz04) — the OWL 2 EL entailment-regime
+# EXPRESSIVITY ratchet (the crate-local `tests/el_suite.rs` runner). OPT-IN and OFF
+# by default so the bare `cargo test -p sparq-conformance`, the inference BINARY, and
+# the default `--workspace` shards neither link the `sparq-reason-el` consequence-based
+# classifier nor go red on a fresh checkout — the lean opt-in posture. Pattern follows
+# `d-entail` / `rif-core`: forwards to the OPT-IN `sparq-reason-el` crate (whose
+# `classify_graph` materializes the complete rdfs:subClassOf subsumption lattice in
+# place, CR1–CR6). When OFF the lane compiles to a single self-SKIP `#[test]`; when ON
+# it drives each W3C OWL 2 EL (test:EL ∧ test:RDF-BASED) test case through the REAL
+# classifier + the shared bnode-homomorphism entailment check and asserts the pinned
+# floor. HONESTLY a sparq EXTENSION-shaped expressivity ratchet over the EL fragment the
+# classifier implements — NOT a full OWL 2 EL conformance claim (CR7–CR9 concrete domains
+# + ABox-inconsistency reasoning are deferred). Pure-Rust, no new third-party deps.
+el-suite = ["dep:sparq-reason-el"]
+
 # [OPUS-4.8] sq-ushvx (epic sq-my8wd) — the in-process SERVICE-federation test harness.
 # OPT-IN and OFF by default: it stands up a REAL `sparq_server::serve` endpoint on an
 # ephemeral `127.0.0.1:0` loopback port and drives a federated SERVICE query through the
@@ -165,6 +180,11 @@ sparq-reason = { path = "../sparq-reason" }
 # query into a certain-answer UCQ. OFF by default (optional, behind `ql-experimental`)
 # so the default harness build links zero QL code — the lean opt-in posture.
 sparq-reason-ql = { path = "../sparq-reason-ql", optional = true }
+# [SONNET-4.6] sq-pbz04.2.4 — the OPT-IN OWL 2 EL consequence-based classifier, used ONLY
+# by the `el-suite` arm to materialize the subsumption lattice (`classify_graph`) of each
+# EL-profiled OWL 2 test case. OFF by default (optional, behind `el-suite`) so the default
+# harness build links zero EL code — the lean opt-in posture.
+sparq-reason-el = { path = "../sparq-reason-el", optional = true }
 oxrdf.workspace = true
 oxttl.workspace = true
 spargebra.workspace = true

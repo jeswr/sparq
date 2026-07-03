@@ -4,12 +4,18 @@
 //! See the crate README (rendered above) for the capability overview. The load-bearing
 //! entry points are [`classify_graph`] (emit the complete subsumption lattice into a
 //! `(Dict, triples)` pair) and [`Classifier`] (the typed [`ClassHierarchy`] API). The
-//! algorithm lives in three private modules: `normal` (Baader–Brandt–Lutz normalization),
-//! `classify` (CR1–CR6 saturation), and `extract` (RDF → EL+⊥ axioms).
+//! algorithm lives in private modules: `normal` (Baader–Brandt–Lutz normalization),
+//! `classify` (CR1–CR6 saturation), `extract` (RDF → EL+⊥ axioms), and — under the
+//! `cdomain` feature — `cdomain` (CR7–CR9 concrete-domain facet satisfiability on the
+//! shared `sparq_substrate::numeric` value tower).
 
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{Dict, Id};
 
+// [FABLE-5] sq-pbz04.2.2: CR7–CR9 (concrete domains) — only under `cdomain`, so the
+// default build carries zero concrete-domain code and no sparq-substrate dependency.
+#[cfg(feature = "cdomain")]
+mod cdomain;
 mod classify;
 mod extract;
 #[cfg(feature = "hasse")]
@@ -38,11 +44,16 @@ const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
 /// - **Outside EL entirely** — `owl:unionOf`, `owl:complementOf`, `owl:allValuesFrom`, cardinality,
 ///   `owl:hasSelf`, and a MULTI-individual `owl:oneOf` (the profile's `ObjectOneOf` admits exactly
 ///   one individual; more is a disjunction): these need ALC / Horn-SHIQ expressivity.
-/// - **Deliberately-deferred EL fragment** — OWL 2 EL itself admits **concrete domains**
-///   (`owl:onDataRange` / `owl:withRestrictions` / `owl:onDatatype`, **CR7–CR9**), which this
-///   classifier still defers — including the literal-valued `owl:hasValue`/`owl:oneOf` forms
-///   (`DataHasValue`/`DataOneOf`); every occurrence is surfaced via `skipped_axioms` so a user
-///   sees the gap. See the crate README and `skills/inference/SKILL.md` for the fragment table.
+/// - **Concrete domains (CR7–CR9)** — gated behind the `cdomain` feature (sq-pbz04.2.2).
+///   WITHOUT it, every concrete-domain occurrence (`owl:onDataRange` / `owl:withRestrictions` /
+///   `owl:onDatatype` and the literal-valued `owl:hasValue`/`owl:oneOf` forms, i.e.
+///   `DataHasValue`/`DataOneOf`) is deferred into `skipped_axioms`. WITH it, the EXACT-tier
+///   slice is applied on the shared `sparq_substrate::numeric` value tower — faceted
+///   min/max{In,Ex}clusive restrictions over `xsd:decimal`/`xsd:integer`(+ the derived integer
+///   types) and exact-numeric `DataHasValue`/singleton-`DataOneOf` points — while everything
+///   else (pattern/length/digit facets, float/double or non-numeric bases and values,
+///   `owl:onDataRange`, `owl:datatypeComplementOf`) STAYS skipped: honest deferral, never a
+///   guessed sat/unsat verdict. See `src/cdomain.rs` for the full supported/deferred matrix.
 ///
 /// Nominal honesty notes (sq-pbz04.2.1): CR6 uses the classic reachability side-condition — every
 /// derived subsumption is sound, but completeness is claimed only for the typical "safe" nominal
@@ -60,12 +71,14 @@ pub struct Report {
     /// Class-axioms (`subClassOf`/`equivalentClass`/`disjointWith`) whose class expression
     /// used a construct OUTSIDE the recognised fragment, and were therefore IGNORED. This
     /// includes constructs outside EL entirely (union/complement/universal/cardinality/
-    /// multi-individual `oneOf`) AND the deliberately-deferred EL fragment — concrete domains
-    /// (`owl:onDataRange`/`owl:withRestrictions`/`owl:onDatatype` and the literal-valued
-    /// `hasValue`/`oneOf` forms, CR7–CR9). Safe nominals (singleton `owl:oneOf`, object-valued
-    /// `owl:hasValue`) are APPLIED since sq-pbz04.2.1 (CR6), no longer skipped. A non-zero
-    /// count is the honest signal that the input used a construct this classifier does not
-    /// reason over, so the emitted lattice may be incomplete for those axioms.
+    /// multi-individual `oneOf`) AND the still-deferred concrete-domain shapes (CR7–CR9):
+    /// ALL of them without the `cdomain` feature; with it, only the unsupported remainder
+    /// (see [`Report`]'s fragment notes — the supported exact-numeric faceted ranges and
+    /// point forms are then APPLIED, not skipped). Safe nominals (singleton `owl:oneOf`,
+    /// object-valued `owl:hasValue`) are APPLIED since sq-pbz04.2.1 (CR6), no longer
+    /// skipped. A non-zero count is the honest signal that the input used a construct this
+    /// classifier does not reason over, so the emitted lattice may be incomplete for those
+    /// axioms.
     pub skipped_axioms: usize,
     /// New `rdfs:subClassOf` triples emitted by [`classify_graph`].
     pub emitted_subsumptions: usize,
@@ -363,10 +376,14 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let h = Classifier::classify(&dict, &triples);
+        // [FABLE-5] sq-pbz04.2.2: under `cdomain` the literal `owl:hasValue 5`
+        // (DataHasValue over an exact integer) is APPLIED, so only the multi-individual
+        // oneOf remains a skip; without it both shapes are skipped as before.
+        let want = if cfg!(feature = "cdomain") { 1 } else { 2 };
         assert_eq!(
             h.report().skipped_axioms,
-            2,
-            "the multi-individual oneOf + the literal hasValue must both be skipped"
+            want,
+            "out-of-fragment shapes must be skipped (feature-state-dependent count)"
         );
         // The plain-EL part must still classify, and the skipped axioms derive nothing.
         let (e, f) = (iri(&dict, "http://ex/E"), iri(&dict, "http://ex/F"));
@@ -396,9 +413,11 @@ mod tests {
 
     #[test]
     fn deferred_concrete_domains_are_surfaced_as_skipped() {
-        // CR7–CR9 (concrete domains) are deferred: a qualified data-range / faceted-datatype
-        // restriction must be counted in `skipped_axioms` rather than treating the datatype node
-        // as an opaque named class (which would silently drop the concrete-domain semantics).
+        // CR7–CR9 (concrete domains): WITHOUT `cdomain` a faceted-datatype restriction must
+        // be counted in `skipped_axioms` rather than treating the datatype node as an opaque
+        // named class (which would silently drop the concrete-domain semantics). WITH
+        // `cdomain` (sq-pbz04.2.2) this supported shape is APPLIED — zero skips, and the
+        // satisfiable range derives no clash (tests/cdomain.rs carries the full matrix).
         let ttl = format!(
             "{PRE}
              @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -411,11 +430,24 @@ mod tests {
         );
         let (dict, triples) = parse(&ttl);
         let h = Classifier::classify(&dict, &triples);
+        #[cfg(not(feature = "cdomain"))]
         assert!(
             h.report().skipped_axioms >= 1,
             "the concrete-domain (onDatatype/withRestrictions) axiom must be recorded as skipped (CR7–CR9 deferred), got {}",
             h.report().skipped_axioms
         );
+        #[cfg(feature = "cdomain")]
+        {
+            assert_eq!(
+                h.report().skipped_axioms,
+                0,
+                "a supported faceted range is applied under `cdomain`, not skipped"
+            );
+            assert!(
+                h.unsatisfiable_classes().is_empty(),
+                "the SATISFIABLE range [18, ∞) must not clash"
+            );
+        }
         let (g, hh) = (iri(&dict, "http://ex/G"), iri(&dict, "http://ex/H"));
         assert!(h.is_subclass_of(g, hh), "the EL part (G ⊑ H) must still classify");
     }

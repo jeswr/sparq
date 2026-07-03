@@ -54,9 +54,11 @@ let g = Graph::from_parts(dict, triples);
 - **Proof trees** (`explain` feature) — `why(triple)` returns which rule fired from which
   premises, recursively down to asserted facts (a flat, ZK-witness-friendly shape).
 - **Shared join kernels** (opt-in `substrate-join`) — the RDFS predicate join (rdfs2/3/7)
-  drives the *same* `sparq-substrate::join` hash-join body the SPARQL engine drives, supplying
-  the reasoner's own key projection + budget monomorphically. Behaviour-neutral: the same
-  closure, only the join machinery is shared. Off by default; byte/bundle ratchets unchanged.
+  and the rdfs9 type join drive the *same* `sparq-substrate::join` hash-join body the SPARQL
+  engine drives, supplying the reasoner's own key projection + budget monomorphically.
+  Behaviour-neutral: the same closure, only the join machinery is shared (only the PropExpand
+  orientation-swap branch stays hand-rolled — documented disposition in `substrate_join.rs`).
+  Off by default; byte/bundle ratchets unchanged.
 
 ## 📚 Learn more
 

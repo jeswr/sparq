@@ -84,7 +84,12 @@ name: feature-matrix
 on:
   push:
     branches: [main]
+  # [FABLE-5] sq-fmx4u.5: react to labeled/unlabeled too so toggling the `ci-full`
+  # label re-evaluates change-based selection for the opt-in leg set as well (the
+  # `setup` assembler filters legs by the selection outputs). Default types are
+  # listed explicitly so adding the label events does not drop `synchronize`.
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   # Merge queue: mirror the PR check-set onto the merge_group ref so the required
   # ci-summary gate finds the same legs it finds on a PR (matches ci.yml/ci-summary.yml).
   merge_group:
@@ -99,6 +104,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # [SONNET-4.6] sq-6vshe.1: CI build-profile speedup (mirrors ci.yml). See ci.yml's
+  # global env comment for the full rationale. lld is pre-installed on ubuntu-24.04
+  # runners and also provided via the Rust toolchain's rust-lld, so no per-job install
+  # step is needed.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
 jobs:
   # [OPUS-4.8] merge-throughput: path-filtered gate (same pattern as ci.yml's `changes`).
@@ -145,6 +157,27 @@ jobs:
             echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }}"
           fi
 
+  # [FABLE-5] sq-fmx4u.3: change-based test-selection pre-job (reusable — doctrine
+  # in .github/workflows/ci-select.yml; same instance shape as ci.yml's). The
+  # `setup` job below consumes its outputs to FILTER the assembled leg list when
+  # selection is ENFORCED (mode == 'selected'); shadow/full/missing outputs
+  # fail-close to the full leg set inside scripts/assemble-feature-matrix.py.
+  # UNCONDITIONAL (no needs/if): the ci-summary gate requires every selection
+  # check-run to conclude success before any skipped sibling counts as satisfied.
+  # NOTE (why assembly-time filtering, not the per-leg job-level `if:` guard the
+  # design sketched): the `matrix` context is NOT available in jobs.<job_id>.if
+  # (GitHub contexts-availability), where a `matrix.crate` reference silently
+  # evaluates EMPTY — under enforcement that would skip EVERY leg unconditionally.
+  # Filtering in the (unit-tested) assembler keeps the per-leg decision in Python;
+  # an unassembled leg spawns no check-run, which the polling aggregator simply
+  # never waits on (requiredness flows through `ci-summary / gate`, not per-leg
+  # names — bead sq-fmx4u.4 verifies this against live branch protection).
+  select:
+    name: select
+    uses: ./.github/workflows/ci-select.yml
+    permissions:
+      contents: read
+
   # [OPUS-4.8] sq-ibrze: assemble the dynamic matrix from the per-crate fragment files.
   # This decouples adding a leg (edit one `.github/feature-matrix.d/<crate>.yml`) from
   # this shared workflow file, killing the recurring adjacent-append merge conflict. The
@@ -155,7 +188,7 @@ jobs:
   # behind the same `changes` gate as the legs, so a non-Rust PR skips it (and the legs
   # below `need` it, so they skip too — the aggregator treats both as non-failing).
   setup:
-    needs: changes
+    needs: [changes, select]
     if: needs.changes.outputs.rust_changed == 'true'
     name: assemble feature matrix
     runs-on: ubuntu-latest
@@ -163,6 +196,9 @@ jobs:
       contents: read
     outputs:
       matrix: ${{ steps.assemble.outputs.matrix }}
+      # [FABLE-5] sq-fmx4u.3: leg COUNT, so `opt-in-features` can skip (instead of
+      # exploding on an empty matrix) when enforced selection filters every leg out.
+      legs: ${{ steps.assemble.outputs.legs }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -188,16 +224,30 @@ jobs:
         # assembler validates every fragment (required keys, non-empty features, no
         # duplicate leg names) and exits non-zero on any malformed fragment, so a bad
         # fragment fails THIS gating job instead of producing a silently-truncated matrix.
+        # [FABLE-5] sq-fmx4u.3: --select-mode/--affected filter the legs to the
+        # affected closure ONLY when the selection pre-job says mode == 'selected';
+        # shadow/full/empty/malformed inputs fail-close to the FULL leg set inside
+        # the assembler (unit-tested). `legs` is the post-filter count.
+        env:
+          SELECT_MODE: ${{ needs.select.outputs.mode }}
+          SELECT_AFFECTED: ${{ needs.select.outputs.affected }}
         run: |
           set -euo pipefail
-          MATRIX="$(python3 scripts/assemble-feature-matrix.py)"
+          MATRIX="$(python3 scripts/assemble-feature-matrix.py --select-mode "${SELECT_MODE:-}" --affected "${SELECT_AFFECTED:-}")"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "Assembled $(echo "$MATRIX" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))') opt-in leg(s):"
+          LEGS="$(echo "$MATRIX" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')"
+          echo "legs=$LEGS" >> "$GITHUB_OUTPUT"
+          echo "Assembled $LEGS opt-in leg(s) (select mode: ${SELECT_MODE:-<unset>}). Full leg-name set:"
           python3 scripts/assemble-feature-matrix.py --names
 
   opt-in-features:
     needs: [changes, setup]
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: `legs != '0'` skips this job when enforced selection
+    # filtered EVERY leg out (an empty `include` would otherwise be a matrix
+    # error, i.e. a false RED). Fail-closed: a missing/empty `legs` output is
+    # != '0' => run; and if `setup` itself failed, this job skips via `needs`
+    # while the gate REDs on setup's failure.
+    if: needs.changes.outputs.rust_changed == 'true' && needs.setup.outputs.legs != '0'
     # One matrix leg per crate + opt-in feature(group). Coexisting opt-in features of a
     # single crate are combined into ONE `--features a,b,c` leg (e.g. the sparq-server
     # federation/persistence/test seams) so the crate is compiled once per leg, not once
@@ -299,8 +349,14 @@ jobs:
   # required `ci-summary / gate` aggregator auto-discovers it as REQUIRED (no edit to
   # ci-summary.yml).
   server-no-default-features:
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: single-crate lane (`-p sparq-server` only) — skip when
+    # ENFORCED selection proves sparq-server unaffected (fail-closed guard: empty/
+    # missing outputs or shadow/full mode => run).
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-server"'))
     name: sparq-server pure-serialiser (--no-default-features)
     runs-on: ubuntu-latest
     permissions:

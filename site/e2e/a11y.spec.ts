@@ -13,13 +13,17 @@
 // fall). Non-vacuity: the last test injects an unlabelled icon-button and asserts axe CATCHES it,
 // so a green run proves the scanner is live, not silently disabled.
 //
-// The harness itself found + this PR FIXED three serious findings (WCAG 1.4.1 inline-link underline
-// on home + /download → both /download states are ZERO-gated; keyboard access to the /try error
-// <pre>; and the Sonner rich-colours error-toast color-contrast — #e60000 on #fff0f0 = 4.34:1,
-// darkened to ~5.8:1 in globals.css, so the "Engine failed to load"/"Query failed" toast the /try
-// REPL raises clears AA and the wasm-free /try states stay ZERO-gated even when the engine can't
-// load). The remaining structural color-contrast gaps are beaded (sq-ymr2e.13 home hero table +
-// button; sq-ymr2e.14 command-palette --success badge) and their surfaces run in the KNOWN-GAP tier.
+// FIXED FINDINGS (sq-ymr2e.4 + sq-ymr2e.13 + sq-ymr2e.14):
+//   • WCAG 1.4.1 inline-link underline on home + /download (sq-ymr2e.4) — /download ZERO-gated.
+//   • Keyboard access to the /try error <pre> (sq-ymr2e.4) — ZERO-gated.
+//   • Sonner richColors error-toast: #e60000 on #fff0f0 = 4.34:1 (sq-ymr2e.4/14) — darkened to
+//     ~5.8:1 in globals.css (--error-text override); /try states ZERO-gated.
+//   • Home hero syntax-token + Run-button contrast (sq-ymr2e.13) — chart-3/chart-4 darkened,
+//     opacity-45 removed from PreviewTable, Run button inline style fix; home ZERO-gated.
+//   • Command-palette --success badge: ~4.09:1 on 15%-tinted success bg (sq-ymr2e.14) — fixed by
+//     --success-on-tint token (oklch 0.46 0.12 155 → ~6.1:1) in badge.tsx; try:palette-open
+//     promoted from KNOWN-GAP to ZERO tier.
+// All P1 interactive surfaces are now ZERO-tier: any serious/critical violation is a hard fail.
 //
 // Design of record: research/web-gui-test-program.md §3.1. Determinism doctrine §1 (frozen clock,
 // seeded random, hermetic network, web-first waiters — inherited from the shared `test`).
@@ -39,26 +43,32 @@ import { assertA11y, writeSeedBaseline, WCAG_TAGS } from "./support/a11y";
 const WASM_BUNDLE = fileURLToPath(new URL("../public/wasm/sparq_wasm_bg.wasm", import.meta.url));
 const WASM_PRESENT = existsSync(WASM_BUNDLE);
 
-// The beaded, structural color-contrast gaps this harness surfaced but did not fix here (§3.1).
-const GAP_HOME = {
-  bead: "sq-ymr2e.13",
-  reason: "hero preview-table syntax tokens + primary th + gradient Run button need a design-token AA pass",
-};
-const GAP_PALETTE = {
-  bead: "sq-ymr2e.14",
-  reason: "command-palette --success badge is ~4.09:1 (need 4.5); a global token nudge",
-};
+// [SONNET-4.6] sq-ymr2e.13 — home-hero contrast gap fixed: the home hero surfaces are now ZERO-tier.
+// The three failing pairs were: (a) sq-tok-string / sq-tok-number / text-primary th on the
+// opacity-45 PreviewTable (removed opacity — axe scans aria-hidden visual content; at α=0.45
+// even black text only reaches ~3.3:1 on white, so no token colour could clear 4.5:1 AA);
+// (b) chart-3 (number token, oklch(0.62 0.14 95) → ~3.6:1) darkened to oklch(0.54 0.14 95)
+// → ~5.0:1 and chart-4 (string token, oklch(0.58 0.16 30) → borderline) to oklch(0.55 0.16 30)
+// → ~5.2:1 in globals.css :root; (c) the gradient Run button: tailwind-merge drops bg-primary
+// when bg-[var(--hero-grad)] is appended, leaving background-color: transparent, so axe sees
+// near-white text on the near-white muted/15 parent (≈1.1:1) — fixed by style.backgroundColor:
+// var(--primary) on the Button, giving axe a computable 5.3:1 teal-on-near-white ratio.
+//
+// [SONNET-4.6] sq-ymr2e.14 — command-palette --success badge gap fixed: the badge "success"
+// variant now uses --success-on-tint (oklch(0.46 0.12 155), ~6.1:1 on the 15%-tinted success
+// bg) instead of --success (oklch(0.55 0.11 155), ~4.09:1). GAP_PALETTE constant removed;
+// try:palette-open promoted to the ZERO tier.
 
 // In A11Y_SEED mode, rewrite the ratchet baseline from the measured counts (no-op otherwise).
 test.afterAll(() => writeSeedBaseline());
 
-// ── Home — the hero runner is the product claim (§2.1 / §3.1). KNOWN-GAP: color-contrast (.13). ──
+// ── Home — the hero runner is the product claim (§2.1 / §3.1). ZERO-tier after sq-ymr2e.13. ──
 test.describe("a11y · home", () => {
   test("idle-preview state — WCAG 2.1 AA", async ({ page }) => {
     const home = new BasePage(page);
     await home.goto("");
     await home.expectRunnerState("home", "idle-preview");
-    await assertA11y(page, "home:idle", { knownGap: GAP_HOME });
+    await assertA11y(page, "home:idle"); // ZERO tier: sq-ymr2e.13 fixed.
   });
 
   test("results state — WCAG 2.1 AA", async ({ page }) => {
@@ -69,7 +79,7 @@ test.describe("a11y · home", () => {
     // Run the shipped sample; the results table is the wasm-computed state a11y must also cover.
     await page.getByRole("button", { name: /Run/ }).first().click();
     await home.expectRunnerState("home", "results");
-    await assertA11y(page, "home:results", { knownGap: GAP_HOME });
+    await assertA11y(page, "home:results"); // ZERO tier: sq-ymr2e.13 fixed.
   });
 });
 
@@ -91,7 +101,8 @@ test.describe("a11y · /try", () => {
   test("command palette open — WCAG 2.1 AA", async ({ page }) => {
     const p = await gotoTry(page);
     await p.openCommandPalette();
-    await assertA11y(page, "try:palette-open", { knownGap: GAP_PALETTE });
+    // ZERO tier: sq-ymr2e.14 fixed the --success badge contrast (4.09:1 → ~6.1:1).
+    await assertA11y(page, "try:palette-open");
   });
 
   test("connect drawer expanded — WCAG 2.1 AA", async ({ page }) => {

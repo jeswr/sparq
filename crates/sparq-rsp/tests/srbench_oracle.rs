@@ -45,9 +45,11 @@
 //! sparq-rsp does not implement the whole RSP-QL surface; the bead scopes those
 //! as DOCUMENTED gaps, never inflated into passes (see `NOT_RATCHETED` below and
 //! the crate's `RspqlQuery` scope docs): named-window VARIABLES (`WINDOW ?w`),
-//! `ROWS` count windows in the TEXTUAL surface grammar, relative `NOW-PT…TO…`
-//! window bounds, and ISTREAM/DSTREAM over a multi-window join. The floor counts
-//! only what is actually executed and checked.
+//! `ROWS` count windows in the TEXTUAL surface grammar, and relative `NOW-PT…TO…`
+//! window bounds. ISTREAM/DSTREAM over a multi-window join was a documented gap
+//! but is now implemented ([SONNET-4.6] sq-2n1q3.3) and ratcheted in
+//! `axis_multi_window_r2s`. The floor counts only what is actually executed and
+//! checked.
 //!
 //! The floor const `RSP_EXPRESSIVITY_FLOOR` is read TEXTUALLY by the conformance
 //! crate's `tests/scoreboard_floors.rs` guard (the same hermetic mechanism the
@@ -78,7 +80,11 @@ use sparq_rsp::{
 ///   +76 sliding_narrow_sum scenario (RANGE 10 STEP 5, 9 windows × 4 EvalModes)
 ///   +24 count-window EvalMode crosscheck (4 modes × 6 assertions each)
 ///   +54 R2S EvalMode crosscheck (RSTREAM/ISTREAM/DSTREAM × 3 extra modes × 6 assertions)
-const RSP_EXPRESSIVITY_FLOOR: usize = 303;
+/// [SONNET-4.6] sq-2n1q3.3 — raised from 303 by:
+///   +10 ISTREAM/DSTREAM over the SRBench multi-window join (axis_multi_window_r2s)
+///   +4  3-window join correctness + no-output-until-all-windows-populated property
+///       (axis_three_window_joins)
+const RSP_EXPRESSIVITY_FLOOR: usize = 317;
 
 /// Documented RSP-QL surface that sparq-rsp does NOT execute, so it is NOT
 /// ratcheted here (the honest move: a lower floor reflecting reality + a recorded
@@ -86,11 +92,12 @@ const RSP_EXPRESSIVITY_FLOOR: usize = 303;
 /// docs. Kept as data so the gaps are legible in one place; the runner asserts
 /// each is genuinely rejected/unsupported rather than silently producing a wrong
 /// answer.
+/// [SONNET-4.6] sq-2n1q3.3: removed "ISTREAM/DSTREAM over a multi-window join"
+/// — that gap is now implemented and ratcheted in `axis_multi_window_r2s`.
 const NOT_RATCHETED: &[&str] = &[
     "named-window VARIABLES in the textual grammar (FROM NAMED WINDOW ?w / WINDOW ?w {…})",
     "ROWS (count) windows in the TEXTUAL RSP-QL surface grammar (programmatic WindowSpec::count only)",
     "relative NOW-PT…TO… window bounds",
-    "ISTREAM/DSTREAM over a multi-window join (RSTREAM only on ContinuousMultiQuery)",
 ];
 
 // ------------------------------------------------------------- term helpers
@@ -772,9 +779,148 @@ FROM NAMED WINDOW <http://ex/w1> ON <http://ex/obs> RANGE 10 STEP 10";
 
     // The NOT_RATCHETED list is non-empty + legible (the gaps are recorded, not
     // hidden): one assertion that the documented-gap register is populated.
+    // [SONNET-4.6] sq-2n1q3.3: updated from >= 4 to >= 3 after the
+    // ISTREAM/DSTREAM-over-join gap was implemented and removed from the list.
     tally.ok(
-        NOT_RATCHETED.len() >= 4,
+        NOT_RATCHETED.len() >= 3,
         "documented gaps register is populated",
+    );
+}
+
+// ======================== AXIS 6: ISTREAM/DSTREAM over a multi-window join
+//
+// [SONNET-4.6] sq-2n1q3.3 — The SRBench join script (obs ⋈ meta, 4 synchronized
+// ticks) run with ISTREAM and DSTREAM R2S operators. Each tick's diff is
+// hand-derived from the RSTREAM row sets (already verified in axis_multi_window_joins)
+// independently of the diff implementation. Proves the multiset diff is applied
+// correctly to a multi-window join result.
+//
+// RSTREAM row sets (from axis_multi_window_joins):
+//   w0 [0,10):  {(stA,NY,12),(stB,NY,15),(stC,CA,20)}  — 3 rows
+//   w1 [10,20): {(stA,NY,11),(stC,CA,25)}              — 2 rows
+//   w2 [20,30): {(stA,NY,9),(stC,CA,30)}               — 2 rows
+//   w3 [30,40): {}                                      — 0 rows (trailing empty)
+//
+// ISTREAM (cur ∖ prev, multiset hash diff):
+//   w0: prev={} → emit all 3 rows                      = 3
+//   w1: prev=w0 ∖ w1 matches = none (every value changed) → emit 2 rows = 2
+//   w2: prev=w1 ∖ w2 matches = none (every value changed) → emit 2 rows = 2
+//   w3: cur={}  ∖ prev={stA,stC} = {}                  = 0
+//
+// DSTREAM (prev ∖ cur):
+//   w0: prev={} → nothing disappears                   = 0
+//   w1: prev=w0 ∖ w1 match = {} → all 3 of w0 disappear = 3
+//   w2: prev=w1 ∖ w2 match = {} → both of w1 disappear = 2
+//   w3: prev=w2 ∖ {} = both of w2 disappear            = 2
+
+fn axis_multi_window_r2s(tally: &mut Tally) {
+    let script = srbench_join_script();
+
+    // --- ISTREAM ---
+    let q_istream = "\
+REGISTER ISTREAM <http://ex/out> AS
+SELECT ?st ?state ?v WHERE {
+  WINDOW <http://ex/wo> { ?st <http://ex/value> ?v }
+  WINDOW <http://ex/wm> { ?st <http://ex/state> ?state }
+}
+FROM NAMED WINDOW <http://ex/wo> ON <http://ex/obs>  RANGE 10 STEP 10
+FROM NAMED WINDOW <http://ex/wm> ON <http://ex/meta> RANGE 10 STEP 10";
+    let r_i = run_multi(q_istream, &script);
+    // [SONNET-4.6] sq-2n1q3.3 — positional format args (CodeQL guard).
+    tally.eq(r_i.len(), 4, "multi-window ISTREAM: four synchronized ticks");
+    // w0: first tick — prev empty, so cur ∖ prev = all 3 joined rows.
+    tally.eq(r_i[0].rows.len(), 3, "multi-window ISTREAM w0: 3 new rows (prev empty)");
+    // w1: every row has a different value than w0, so all are "new".
+    tally.eq(r_i[1].rows.len(), 2, "multi-window ISTREAM w1: 2 new rows (values changed)");
+    // w2: same — every row differs from w1.
+    tally.eq(r_i[2].rows.len(), 2, "multi-window ISTREAM w2: 2 new rows (values changed)");
+    // w3: cur={} → nothing new.
+    tally.eq(r_i[3].rows.len(), 0, "multi-window ISTREAM w3: 0 new rows (empty tick)");
+
+    // --- DSTREAM ---
+    let q_dstream = "\
+REGISTER DSTREAM <http://ex/out> AS
+SELECT ?st ?state ?v WHERE {
+  WINDOW <http://ex/wo> { ?st <http://ex/value> ?v }
+  WINDOW <http://ex/wm> { ?st <http://ex/state> ?state }
+}
+FROM NAMED WINDOW <http://ex/wo> ON <http://ex/obs>  RANGE 10 STEP 10
+FROM NAMED WINDOW <http://ex/wm> ON <http://ex/meta> RANGE 10 STEP 10";
+    let r_d = run_multi(q_dstream, &script);
+    tally.eq(r_d.len(), 4, "multi-window DSTREAM: four synchronized ticks");
+    // w0: prev={} → nothing disappears.
+    tally.eq(r_d[0].rows.len(), 0, "multi-window DSTREAM w0: 0 removed (prev empty)");
+    // w1: prev=w0's 3 rows; none of them appear in w1's 2 rows (values all changed).
+    tally.eq(r_d[1].rows.len(), 3, "multi-window DSTREAM w1: all 3 of w0 disappeared");
+    // w2: prev=w1's 2 rows; none appear in w2's 2 rows (values changed again).
+    tally.eq(r_d[2].rows.len(), 2, "multi-window DSTREAM w2: both of w1 disappeared");
+    // w3: cur={}; prev=w2's 2 rows → both disappeared.
+    tally.eq(r_d[3].rows.len(), 2, "multi-window DSTREAM w3: both of w2 disappeared (empty tick)");
+}
+
+// ======================== AXIS 7: 3-window join correctness
+//
+// [SONNET-4.6] sq-2n1q3.3 — Three windows over three distinct streams, all with
+// the same tumbling RANGE 10 STEP 10.  Pins the correct join rows for a window
+// where all three streams contribute, and asserts the no-output-until-all-windows-
+// populated property (the authoritative oracle for the invariant).
+
+fn axis_three_window_joins(tally: &mut Tally) {
+    let q_three = "\
+REGISTER STREAM <http://ex/out> AS
+SELECT ?type ?loc ?v WHERE {
+  WINDOW <http://ex/w1> { ?s <http://ex/value> ?v }
+  WINDOW <http://ex/w2> { ?s <http://ex/type>  ?type }
+  WINDOW <http://ex/w3> { ?s <http://ex/loc>   ?loc }
+}
+FROM NAMED WINDOW <http://ex/w1> ON <http://ex/obs>   RANGE 10 STEP 10
+FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta1> RANGE 10 STEP 10
+FROM NAMED WINDOW <http://ex/w3> ON <http://ex/meta2> RANGE 10 STEP 10";
+
+    let obs   = nn("obs");
+    let meta1 = nn("meta1");
+    let meta2 = nn("meta2");
+
+    // --- All three windows populated: 2 sensors, one row each. ---
+    let script_full: Vec<(NamedNode, [Term; 3], u64)> = vec![
+        (obs.clone(),   t("stA", "value", "v12"), 1),
+        (obs.clone(),   t("stB", "value", "v99"), 2),
+        (meta1.clone(), t("stA", "type",  "cat"), 3),
+        (meta1.clone(), t("stB", "type",  "dog"), 4),
+        (meta2.clone(), t("stA", "loc",   "NY"),  5),
+        (meta2.clone(), t("stB", "loc",   "CA"),  6),
+        // Heartbeat advancing the shared clock to 12, closing [0,10).
+        (obs.clone(),   t("stA", "value", "v0"),  12),
+    ];
+    let r = run_multi(q_three, &script_full);
+    // Two ticks: [0,10) with 2 joined rows, then [10,20) with 0 rows (flush
+    // closes [10,20) but w2/w3 have no content there — same invariant).
+    tally.eq(r.len(), 2, "3-window join: two ticks ([0,10) populated + [10,20) empty via flush)");
+    tally.eq(r[0].rows.len(), 2, "3-window join: 2 joined rows in [0,10) (one per sensor)");
+
+    // --- Only w1 and w2 populated (no meta2 push): the join must be empty. ---
+    // NON-VACUOUS: if the empty w3 were treated as "unconstrained" (no GRAPH
+    // restriction), stA and stB would still join with their type and the result
+    // would be 2 rows.  The 0 assertion below would then fail.
+    let script_no_w3: Vec<(NamedNode, [Term; 3], u64)> = vec![
+        (obs.clone(),   t("stA", "value", "v12"), 1),
+        (meta1.clone(), t("stA", "type",  "cat"), 2),
+        // Heartbeat from obs advances the shared clock, closing [0,10).
+        (obs.clone(),   t("stA", "value", "v0"),  12),
+    ];
+    let r_nw3 = run_multi(q_three, &script_no_w3);
+    // Two ticks: the [0,10) window close plus a [10,20) flush-close; w3 is
+    // unpopulated in both, so the join is empty in both ticks.
+    tally.eq(r_nw3.len(), 2, "3-window join/no-w3: two ticks");
+    // The TOTAL rows across all ticks must be 0 — empty w3 collapses the join.
+    // NON-VACUOUS: if the empty w3 were "unconstrained", the join of stA's
+    // value with its type would produce rows here, causing this assertion to fail.
+    let total_no_w3: usize = r_nw3.iter().map(|r| r.rows.len()).sum();
+    tally.eq(
+        total_no_w3,
+        0,
+        "3-window join/no-w3: 0 total rows — empty w3 collapses the join \
+         (nonzero = no-output-until-all-windows-populated invariant broken)",
     );
 }
 
@@ -792,6 +938,8 @@ fn rsp_srbench_expressivity_ratchet() {
     axis_count_windows(&mut tally);
     axis_count_window_evalmode_crosscheck(&mut tally); // [SONNET-4.6] sq-2n1q3.1
     axis_multi_window_joins(&mut tally);
+    axis_multi_window_r2s(&mut tally);       // [SONNET-4.6] sq-2n1q3.3
+    axis_three_window_joins(&mut tally);     // [SONNET-4.6] sq-2n1q3.3
     axis_documented_gaps(&mut tally);
 
     // The line CI re-checks (mirrors the BM25 oracle's `assertions N (floor F)`).

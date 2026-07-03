@@ -3791,6 +3791,7 @@ dependencies = [
  "sparq-core",
  "sparq-engine",
  "sparq-reason",
+ "sparq-reason-el",
  "sparq-reason-ql",
  "sparq-server",
  "tokio",
@@ -3859,6 +3860,8 @@ dependencies = [
  "sparq-core",
  "sparq-engine",
  "sparq-fedplan",
+ "sparq-server",
+ "tokio",
  "ureq",
 ]
 
@@ -4065,6 +4068,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "rustc-hash 2.1.2",
  "sparq-core",
+ "sparq-substrate",
 ]
 
 [[package]]
@@ -4100,6 +4104,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+ "sparq-substrate",
 ]
 
 [[package]]

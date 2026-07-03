@@ -37,25 +37,15 @@
     },
     "home:idle": {
       "critical": 0,
-      "serious": 1,
+      "serious": 0,
       "moderate": 0,
-      "minor": 0,
-      "allowedSeriousRules": [
-        "color-contrast"
-      ],
-      "bead": "sq-ymr2e.13",
-      "reason": "hero preview-table syntax tokens + primary th + gradient Run button need a design-token AA pass"
+      "minor": 0
     },
     "home:results": {
       "critical": 0,
       "serious": 0,
       "moderate": 0,
-      "minor": 0,
-      "allowedSeriousRules": [
-        "color-contrast"
-      ],
-      "bead": "sq-ymr2e.13",
-      "reason": "same hero gradient Run button as home:idle (bead sq-ymr2e.13); axe evaluates the --hero-grad gradient bg nondeterministically, so color-contrast is tolerated here to prevent flake — a NEW serious rule still fails the guard"
+      "minor": 0
     },
     "try:connect-drawer-open": {
       "critical": 0,
@@ -77,14 +67,9 @@
     },
     "try:palette-open": {
       "critical": 0,
-      "serious": 1,
+      "serious": 0,
       "moderate": 0,
-      "minor": 0,
-      "allowedSeriousRules": [
-        "color-contrast"
-      ],
-      "bead": "sq-ymr2e.14",
-      "reason": "command-palette --success badge is ~4.09:1 (need 4.5); a global token nudge"
+      "minor": 0
     }
   }
 }
