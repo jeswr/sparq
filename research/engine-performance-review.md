@@ -311,17 +311,17 @@ structural program (source-level + coverage levers its record scoped out or defe
 
 | # | Bead | Dim | What (one line) | Impact | Risk | Tier |
 |---|---|---|---|---|---|---|
-| 1 | sq-7d3dj radix-sort child | runtime | radix-sort permutation indexes + pre-sized perm vecs + derived/lazy cold perms | largest single ingest bucket | low (output-equivalence testable) | sonnet |
-| 2 | sq-6vshe changed-cone coverage child | coverage | measure only the changed-crate reverse-closure; inherit main baselines outside it | whole-lane, every PR | low-medium (fmx4u closure reuse, fail-safe) | sonnet |
-| 3 | sq-6vshe test-consolidation child | build | ~27 engine test crates → ~5 harnesses (source topology) | dominant test-profile CPU + link tail + coverage shard | low-medium (mechanical) | sonnet |
-| 4 | sq-7d3dj IRI fast-path child | runtime | prefix-memo + ASCII pre-scan in front of oxiri, differential-fuzz equivalence gate | largest aggregate ingest cost | medium (conformance-critical; fuzz-gated) | opus |
-| 5 | sq-6vshe release-profile child | build | `release-fast` (CGU16/thin-LTO) for non-shipping lanes; fat LTO reserved for ship/bench | every non-shipping release build; dev iteration | low (honesty guard on measured lanes) | sonnet |
-| 6 | sq-7d3dj hash-join child | runtime | single-hash `raw_entry` probe + batch row emission designed as the M4 contract | alloc+hash per output row on fanout joins | medium (M4 coordination) | sonnet |
-| 7 | sq-6vshe instrumentation-diet child | coverage | `except-unused-generics` A/B + instrumented-profile knobs + governed floor re-baseline | coverage build/link weight, engine shard most | medium (nightly flag + re-baseline governance) | sonnet |
-| 8 | sq-7d3dj LFTJ child | runtime | branchless wrap + hoisted iters + `k==3` fast path in `Leapfrog::search` | hottest query-eval loop on WCO shapes | low (contained) | sonnet |
-| 9 | sq-6vshe monomorph-diet child | build | `cargo llvm-lines` audit + cold-site outlining; feeds the sq-6vshe.3 split RFC | engine codegen in every profile; de-risks the split | medium (runtime coupling; measure-first) | opus |
-| 10 | sq-7d3dj utf8/memcmp child | runtime | `from_utf8_unchecked` on parser-proved spans + hash-before-memcmp, full unsafe-register discipline | small steady ingest win | low perf / real attestation cost | opus |
-| 11 | sq-6vshe dep-trim child | build | scope `serde_json` dev-dep, audit zerocopy; do NOT flip regex/digest defaults | small constant test-profile CPU | near-zero | haiku |
+| 1 | sq-7d3dj.17 | runtime | radix-sort permutation indexes + pre-sized perm vecs + derived/lazy cold perms | largest single ingest bucket | low (output-equivalence testable) | sonnet |
+| 2 | sq-6vshe.8 | coverage | measure only the changed-crate reverse-closure; inherit main baselines outside it | whole-lane, every PR | low-medium (fmx4u closure reuse, fail-safe) | sonnet |
+| 3 | sq-6vshe.9 | build | ~27 engine test crates → ~5 harnesses (source topology) | dominant test-profile CPU + link tail + coverage shard | low-medium (mechanical) | sonnet |
+| 4 | sq-7d3dj.18 | runtime | prefix-memo + ASCII pre-scan in front of oxiri, differential-fuzz equivalence gate | largest aggregate ingest cost | medium (conformance-critical; fuzz-gated) | opus |
+| 5 | sq-6vshe.10 | build | `release-fast` (CGU16/thin-LTO) for non-shipping lanes; fat LTO reserved for ship/bench | every non-shipping release build; dev iteration | low (honesty guard on measured lanes) | sonnet |
+| 6 | sq-7d3dj.19 | runtime | single-hash `raw_entry` probe + batch row emission designed as the M4 contract | alloc+hash per output row on fanout joins | medium (M4 coordination) | sonnet |
+| 7 | sq-6vshe.11 | coverage | `except-unused-generics` A/B + instrumented-profile knobs + governed floor re-baseline | coverage build/link weight, engine shard most | medium (nightly flag + re-baseline governance) | sonnet |
+| 8 | sq-7d3dj.20 | runtime | branchless wrap + hoisted iters + `k==3` fast path in `Leapfrog::search` | hottest query-eval loop on WCO shapes | low (contained) | sonnet |
+| 9 | sq-6vshe.12 | build | `cargo llvm-lines` audit + cold-site outlining; feeds the sq-6vshe.3 split RFC | engine codegen in every profile; de-risks the split | medium (runtime coupling; measure-first) | opus |
+| 10 | sq-7d3dj.21 | runtime | `from_utf8_unchecked` on parser-proved spans + hash-before-memcmp, full unsafe-register discipline | small steady ingest win | low perf / real attestation cost | opus |
+| 11 | sq-6vshe.13 | build | scope `serde_json` dev-dep, audit zerocopy; do NOT flip regex/digest defaults | small constant test-profile CPU | near-zero | haiku |
 
 Maintainer-decision flags: the engine **crate split** stays gated at sq-6vshe.3/.4
 (endorsed, not re-beaded; #9 feeds it). #7's floor **re-baseline** is a
