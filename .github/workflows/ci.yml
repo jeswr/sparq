@@ -2139,11 +2139,15 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || 'HEAD' }}
         run: |
           set -euo pipefail
+          # [SONNET-4.6] SHADOW-MODE: the `|| true` on BOTH branches keeps this pre-step
+          # strictly gate-neutral — a cone.json write error or a ci_select.py import error
+          # must NEVER fail the coverage shard (that would cascade to the gate). The full
+          # coverage.sh run below is the sole source of truth until the enforce flip.
           if [ -n "${BASE:-}" ]; then
             python3 scripts/cone_coverage.py \
               --mode compute-cone \
               --base "$BASE" --head "$HEAD" \
-              --output cone.json
+              --output cone.json || true
           else
             # Non-PR event (push/schedule) → full run; emit a placeholder cone.json.
             python3 scripts/cone_coverage.py \
