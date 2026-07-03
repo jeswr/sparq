@@ -659,6 +659,11 @@ fn expand_property_value(
         let index_key = td.and_then(|t| t.index()).unwrap_or("@index").to_string();
         let mut arr = Vec::new();
         for (index, index_value) in sorted_obj(value, ctx.ordered) {
+            // step 13.8.3: "Initialize expanded index to the result of IRI expanding index"
+            // (vocab) — every @none guard below compares against THIS expanded form, so a
+            // term aliased to `@none` (`"none": "@none"`, W3C expand/m012) is recognised.
+            let expanded_index = active_context.expand_iri(&index, false, true);
+            let index_is_none = expanded_index.as_deref() == Some("@none");
             // Map context selection for @id / @type maps.
             let mut map_context = if has("@id") || has("@type") {
                 active_context
@@ -701,22 +706,39 @@ fn expand_property_value(
                 }
                 if has("@index") {
                     if index_key != "@index" {
-                        // A property-scoped index: the index becomes a value of that property.
-                        let reexpanded = expand_value(active_context, &index_key, &Json::Str(index.clone()));
-                        let prop = active_context
-                            .expand_iri(&index_key, false, true)
-                            .unwrap_or_else(|| index_key.clone());
-                        if let Json::Obj(m) = &mut item {
-                            add_value(m, &prop, reexpanded);
+                        // step 13.8.3.7: a property-valued index — only when the expanded
+                        // index is not @none (W3C expand/pi10: an @none key adds no property).
+                        if !index_is_none {
+                            // 13.8.3.7.1: re-expand the index via Value Expansion against the
+                            // ACTIVE context, with the index key as active property.
+                            let reexpanded =
+                                expand_value(active_context, &index_key, &Json::Str(index.clone()));
+                            // 13.8.3.7.2: IRI-expand the index key.
+                            let prop = active_context
+                                .expand_iri(&index_key, false, true)
+                                .unwrap_or_else(|| index_key.clone());
+                            if let Json::Obj(m) = &mut item {
+                                // 13.8.3.7.3–4: "an array consisting of re-expanded index
+                                // FOLLOWED BY the existing values" (W3C expand/pi07, pi09).
+                                prepend_value(m, &prop, reexpanded);
+                                // 13.8.3.7.5: a value object MUST NOT gain an extra property
+                                // (W3C expand/pi05).
+                                if obj_get(m, "@value").is_some() {
+                                    return Err(JsonLdError::new(E::InvalidValueObject));
+                                }
+                            }
                         }
-                    } else if index != "@none" {
+                    } else if !index_is_none {
+                        // step 13.8.3.8: a plain @index map entry.
                         if let Json::Obj(m) = &mut item {
                             if obj_get(m, "@index").is_none() {
                                 set_obj(m, "@index", Json::Str(index.clone()));
                             }
                         }
                     }
-                } else if has("@id") && index != "@none" {
+                } else if has("@id") && !index_is_none {
+                    // step 13.8.3.9: @id map — the guard is on the vocab-EXPANDED index; the
+                    // @id value itself expands document-relatively.
                     if let Json::Obj(m) = &mut item {
                         if obj_get(m, "@id").is_none() {
                             let id = active_context
@@ -725,12 +747,13 @@ fn expand_property_value(
                             set_obj(m, "@id", Json::Str(id));
                         }
                     }
-                } else if has("@type") && index != "@none" {
-                    let ti = active_context
-                        .expand_iri(&index, false, true)
-                        .unwrap_or_else(|| index.clone());
+                } else if has("@type") && !index_is_none {
+                    // step 13.8.3.10: @type map — "types … consisting of expanded index
+                    // FOLLOWED BY any existing values of @type" (W3C expand/m004), guarded
+                    // against an @none alias (W3C expand/m012).
+                    let ti = expanded_index.clone().unwrap_or_else(|| index.clone());
                     if let Json::Obj(m) = &mut item {
-                        add_value(m, "@type", Json::Str(ti));
+                        prepend_value(m, "@type", Json::Str(ti));
                     }
                 }
                 arr.push(item);
@@ -757,24 +780,22 @@ fn expand_value(active_context: &ActiveContext, active_property: &str, value: &J
     let td = active_context.term_definition(active_property);
     let type_mapping = td.and_then(|t| t.type_mapping());
 
-    // @id / @vocab coercion of a string value → a node reference. When IRI expansion returns
-    // `None` (the value expands to null — a keyword-shaped token, or a `@vocab` term bound to
-    // null), the value has no valid `@id`, so the entry is dropped rather than emitted as an
-    // invalid empty-string `@id` (mirrors the `@id`-keyword handling in `expand_property`).
+    // @id / @vocab coercion of a string value → a node reference (§5.3.2 steps 1–2): "return
+    // a new map containing a single entry where the key is @id and the value is the result of
+    // IRI expanding value". When IRI Expansion returns `None` (a keyword-shaped token, or a
+    // `@vocab` term bound to null) the spec-literal result is therefore `{"@id": null}` — the
+    // entry is KEPT with a JSON null, never emitted as an empty-string `@id` and never as an
+    // empty `{}`. This matches the suite's `@id`-keyword precedent (expand/0122-out retains
+    // `"@id": null`, its manifest noting the result "will not be valid JSON-LD") and the
+    // reference processors.
     if let Json::Str(s) = value {
         if type_mapping == Some("@id") {
-            let mut node = Vec::new();
-            if let Some(id) = active_context.expand_iri(s, true, false) {
-                node.push(("@id".to_string(), Json::Str(id)));
-            }
-            return Json::Obj(node);
+            let id = active_context.expand_iri(s, true, false).map_or_else(json_null, Json::Str);
+            return Json::Obj(vec![("@id".to_string(), id)]);
         }
         if type_mapping == Some("@vocab") {
-            let mut node = Vec::new();
-            if let Some(id) = active_context.expand_iri(s, true, true) {
-                node.push(("@id".to_string(), Json::Str(id)));
-            }
-            return Json::Obj(node);
+            let id = active_context.expand_iri(s, true, true).map_or_else(json_null, Json::Str);
+            return Json::Obj(vec![("@id".to_string(), id)]);
         }
     }
 
@@ -1064,6 +1085,23 @@ fn add_value(members: &mut Vec<(String, Json)>, key: &str, value: Json) {
     }
 }
 
+/// Prepends `value` to the array stored at `key`: the index-map steps place the (re-)expanded
+/// index BEFORE any existing values ("an array consisting of re-expanded index followed by the
+/// existing values", §5.1.2 step 13.8.3.7.3; likewise the @type-map step 13.8.3.10).
+fn prepend_value(members: &mut Vec<(String, Json)>, key: &str, value: Json) {
+    match members.iter_mut().find(|(k, _)| k == key) {
+        Some((_, Json::Arr(a))) => a.insert(0, value),
+        Some((_, other)) => {
+            let old = std::mem::replace(other, Json::Arr(Vec::new()));
+            if let Json::Arr(a) = other {
+                a.push(value);
+                a.push(old);
+            }
+        }
+        None => members.push((key.to_string(), Json::Arr(vec![value]))),
+    }
+}
+
 /// Gets or inserts the `@reverse` sub-map of an ordered map and returns its members.
 fn reverse_map(members: &mut Vec<(String, Json)>) -> &mut Vec<(String, Json)> {
     if !members.iter().any(|(k, _)| k == "@reverse") {
@@ -1127,6 +1165,27 @@ mod tests {
         assert_eq!(array_of(Json::Str("x".into())), Json::Arr(vec![Json::Str("x".into())]));
         // Already an array: array_of is the identity.
         assert_eq!(array_of(Json::Arr(vec![raw("1")])), Json::Arr(vec![raw("1")]));
+    }
+
+    #[test]
+    fn prepend_value_inserts_before_existing_values() {
+        let mut m = Vec::new();
+        // Absent key → a fresh single-item array.
+        prepend_value(&mut m, "p", Json::Str("b".into()));
+        assert_eq!(obj_get(&m, "p"), Some(&Json::Arr(vec![Json::Str("b".into())])));
+        // Present key → the new value goes FIRST (§5.1.2 step 13.8.3.7.3 ordering).
+        prepend_value(&mut m, "p", Json::Str("a".into()));
+        assert_eq!(
+            obj_get(&m, "p"),
+            Some(&Json::Arr(vec![Json::Str("a".into()), Json::Str("b".into())]))
+        );
+        // A non-array existing value is array-wrapped with the new value first.
+        let mut m2 = vec![("q".to_string(), Json::Str("old".into()))];
+        prepend_value(&mut m2, "q", Json::Str("new".into()));
+        assert_eq!(
+            obj_get(&m2, "q"),
+            Some(&Json::Arr(vec![Json::Str("new".into()), Json::Str("old".into())]))
+        );
     }
 
     #[test]
@@ -1205,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_value_id_coercion_expands_and_drops_null() {
+    fn expand_value_id_coercion_null_expansion_yields_null_id() {
         let ac = coercion_context();
         // A resolvable absolute IRI under `@id` coercion → a `{"@id": <iri>}` node reference.
         assert_eq!(
@@ -1213,29 +1272,36 @@ mod tests {
             Json::Obj(vec![("@id".to_string(), Json::Str("http://ex/target".into()))]),
         );
         // A keyword-shaped token IRI-expands to null under `@id` coercion (document-relative,
-        // no vocab); the fix drops the entry rather than emitting an invalid empty-string
-        // `@id` (regression guard for the Copilot review on the old `unwrap_or_default()`).
-        let dropped = expand_value(&ac, "id_term", &Json::Str("@notakeyword".into()));
-        assert_eq!(dropped, Json::Obj(vec![]), "null @id must be dropped, never emitted as \"\"");
+        // no vocab). §5.3.2 step 1 is literal: the result is `{"@id": null}` — the `@id`
+        // entry is KEPT with a JSON null (the W3C expand/0122 precedent), never an
+        // empty-string `@id` (the original `unwrap_or_default()` bug) and never an empty
+        // `{}` (the follow-up Copilot review).
+        let expanded = expand_value(&ac, "id_term", &Json::Str("@notakeyword".into()));
+        assert_eq!(
+            expanded,
+            Json::Obj(vec![("@id".to_string(), json_null())]),
+            "a null IRI expansion must yield the spec-literal {{\"@id\": null}}",
+        );
         assert!(
-            !matches!(&dropped, Json::Obj(m) if m.iter().any(|(k, v)| k == "@id"
+            !matches!(&expanded, Json::Obj(m) if m.iter().any(|(k, v)| k == "@id"
                 && matches!(v, Json::Str(s) if s.is_empty()))),
             "must never produce an empty-string @id",
         );
     }
 
     #[test]
-    fn expand_value_vocab_coercion_expands_and_drops_null() {
+    fn expand_value_vocab_coercion_null_expansion_yields_null_id() {
         let ac = coercion_context();
         // A plain term under `@vocab` coercion resolves against `@vocab`.
         assert_eq!(
             expand_value(&ac, "vocab_term", &Json::Str("thing".into())),
             Json::Obj(vec![("@id".to_string(), Json::Str("http://ex/v#thing".into()))]),
         );
-        // A keyword-shaped token still expands to null under `@vocab` coercion → dropped.
+        // A keyword-shaped token still expands to null under `@vocab` coercion → the
+        // spec-literal `{"@id": null}` (§5.3.2 step 2).
         assert_eq!(
             expand_value(&ac, "vocab_term", &Json::Str("@notakeyword".into())),
-            Json::Obj(vec![]),
+            Json::Obj(vec![("@id".to_string(), json_null())]),
         );
     }
 }

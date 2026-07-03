@@ -335,6 +335,149 @@ fn language_map() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Property-valued index containers (`@container: @index` + `"@index": <prop>`) and the
+// expanded-index @none guards — mirrors of W3C expand suite cases pi05/pi06/pi07/pi10/m012
+// (§5.1.2 steps 13.8.3.7–13.8.3.10).
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn property_valued_index_becomes_property_value() {
+    // W3C expand/pi06: the index of a property-valued index map re-expands (Value
+    // Expansion, with the index key as active property) as a value of that property,
+    // instead of `@index`.
+    assert_expands(
+        r#"{
+            "@context": {
+                "@base": "http://example.com/",
+                "@vocab": "http://example.com/",
+                "author": {"@type": "@id", "@container": "@index", "@index": "prop"}
+            },
+            "@id": "article",
+            "author": {"regular": "person/1", "guest": ["person/2", "person/3"]}
+        }"#,
+        r#"[{
+            "@id": "http://example.com/article",
+            "http://example.com/author": [
+                {"@id": "http://example.com/person/1", "http://example.com/prop": [{"@value": "regular"}]},
+                {"@id": "http://example.com/person/2", "http://example.com/prop": [{"@value": "guest"}]},
+                {"@id": "http://example.com/person/3", "http://example.com/prop": [{"@value": "guest"}]}
+            ]
+        }]"#,
+    );
+}
+
+#[test]
+fn property_valued_index_precedes_existing_values() {
+    // §5.1.2 step 13.8.3.7.3: index property values are "an array consisting of re-expanded
+    // index FOLLOWED BY the existing values" — the suite's pi07 expected output shows the
+    // same ordering. The shared `canon` comparison is order-insensitive, so this asserts on
+    // the serialised property array directly.
+    let got = exp(r#"{
+        "@context": {
+            "@base": "http://example.com/",
+            "@vocab": "http://example.com/",
+            "author": {"@type": "@id", "@container": "@index", "@index": "prop"}
+        },
+        "@id": "article",
+        "author": {"regular": {"@id": "person/1", "prop": "foo"}}
+    }"#);
+    let s = serialize(&got);
+    assert!(
+        s.contains(r#""http://example.com/prop":[{"@value":"regular"},{"@value":"foo"}]"#),
+        "re-expanded index must precede the item's existing values, got: {s}",
+    );
+}
+
+#[test]
+fn property_valued_index_none_key_adds_no_property() {
+    // W3C expand/pi10: an `@none` index adds NO property (step 13.8.3.7 requires "expanded
+    // index is not @none"). The `guest` entry also pins the `@type: @vocab` re-expansion of
+    // the index into a vocab-IRI node reference.
+    assert_expands(
+        r#"{
+            "@context": {
+                "@base": "http://example.com/",
+                "@vocab": "http://example.com/",
+                "author": {"@type": "@id", "@container": "@index", "@index": "prop"},
+                "prop": {"@type": "@vocab"}
+            },
+            "@id": "http://example.com/article",
+            "author": {"@none": {"@id": "person/1"}, "guest": [{"@id": "person/2"}]}
+        }"#,
+        r#"[{
+            "@id": "http://example.com/article",
+            "http://example.com/author": [
+                {"@id": "http://example.com/person/1"},
+                {"@id": "http://example.com/person/2",
+                 "http://example.com/prop": [{"@id": "http://example.com/guest"}]}
+            ]
+        }]"#,
+    );
+}
+
+#[test]
+fn property_valued_index_on_value_object_errors() {
+    // W3C expand/pi05: adding the index property to a value object is an
+    // "invalid value object" error (§5.1.2 step 13.8.3.7.5).
+    assert_error(
+        r#"{
+            "@context": {
+                "@vocab": "http://example.com/",
+                "container": {"@id": "http://example.com/container", "@container": "@index", "@index": "prop"}
+            },
+            "@id": "http://example.com/annotationsTest",
+            "container": {"en": "The Queen"}
+        }"#,
+        JsonLdErrorCode::InvalidValueObject,
+    );
+}
+
+#[test]
+fn type_map_none_alias_adds_no_type() {
+    // W3C expand/m012: the @none guards compare the EXPANDED index, so a term aliased to
+    // `@none` used as a type-map key adds no `@type` (step 13.8.3.10).
+    assert_expands(
+        r#"{
+            "@context": {"@vocab": "http://example/", "typemap": {"@container": "@type"}, "none": "@none"},
+            "typemap": {"@none": {"label": "a"}, "none": {"label": "b"}}
+        }"#,
+        r#"[{
+            "http://example/typemap": [
+                {"http://example/label": [{"@value": "a"}]},
+                {"http://example/label": [{"@value": "b"}]}
+            ]
+        }]"#,
+    );
+}
+
+#[test]
+fn type_map_key_precedes_existing_types() {
+    // §5.1.2 step 13.8.3.10: "types … consisting of expanded index FOLLOWED BY any existing
+    // values of @type" — the suite's m004 expected output shows the same ordering.
+    let got = exp(r#"{
+        "@context": {"@vocab": "http://example/", "typemap": {"@container": "@type"}},
+        "typemap": {"_:bar": {"@type": "_:foo", "label": "x"}}
+    }"#);
+    let s = serialize(&got);
+    assert!(
+        s.contains(r#""@type":["_:bar","_:foo"]"#),
+        "the type-map key must precede the item's own @type values, got: {s}",
+    );
+}
+
+#[test]
+fn id_coercion_keyword_shaped_value_yields_null_id() {
+    // Value Expansion (§5.3.2 step 1) is literal: a keyword-shaped token under `@type: @id`
+    // IRI-expands to null, so the value expands to `{"@id": null}` — retained with a JSON
+    // null exactly as the W3C expand/0122 expected output retains `"@id": null` on the
+    // `@id`-keyword path (its manifest notes the result "will not be valid JSON-LD").
+    assert_expands(
+        r#"{"@context": {"p": {"@id": "http://ex/p", "@type": "@id"}}, "p": "@kw"}"#,
+        r#"[{"http://ex/p": [{"@id": null}]}]"#,
+    );
+}
+
+// ---------------------------------------------------------------------------------------
 // @json literals.
 // ---------------------------------------------------------------------------------------
 
