@@ -475,43 +475,49 @@ fn float_to_i64_rejects_below_min() {
 	let _ = f64::new(0xc3e0000000000001 as u64).to_i64();
 }
 
-// ── sq-3x7dl.1 soundness: negative / forge tests ─────────────────────────────
+// -- sq-3x7dl.1 soundness: negative / forge tests ----------------------------
 //
 // Each test constructs the NON-CANONICAL witness that the audit showed re-encodes
-// to the same bit pattern as the canonical decode, then asserts the added
-// `assert_max_bit_size` constraint in new() REJECTS it.
+// to the same bit pattern as the canonical decode, then calls assert_canonical_fields
+// on the malicious struct to verify the range check REJECTS it.
 //
 // Pattern for each width: {exp-1, mantissa+2^mant_size} gives the same bits()
 // as canonical {exp, mantissa} because:
 //   (exp-1)*2^mant_size + (mantissa+2^mant_size) = exp*2^mant_size + mantissa
 //
-// `should_fail` means the test PASSES only when the circuit panics — i.e.
+// `should_fail` means the test PASSES only when the circuit panics -- i.e.
 // only when the range check correctly rejects the over-wide witness.
+//
+// The tests call assert_canonical_fields (not assert_max_bit_size inline) so that
+// deleting the assertions from the helper body turns these tests RED -- pinning the
+// helper's logic against regression.  True circuit-level pinning of the new()
+// call-site (a malicious witness fed through the prover) is a forge/proving-level
+// obligation tracked under sq-l9ulg / sq-qhy4.
 // [SONNET-4.6] sq-3x7dl.1
 
-// ── f32: primary counterexample from the audit ───────────────────────────────
+// -- f32: primary counterexample from the audit -------------------------------
 // bits=0x3F800001 (1.0 + 2^-23). Canonical: {sign:0, exp:127, mant:1}.
 // Malicious:       {sign:0, exp:126, mant:0x800001=8388609}.
 // 126*2^23 + 8388609 = 127*2^23 + 1 = 0x3F800001.
-// 8388609 > 2^23-1=8388607 so assert_max_bit_size::<23> rejects it.
+// 8388609 > 2^23-1=8388607 so assert_canonical_fields rejects it.
 #[test(should_fail)]
 fn f32_new_rejects_malicious_mantissa_overlap() {
 	let malicious = f32 { sign: false, exponent: 126 as u8, mantissa: 0x800001 as u32 };
 	assert_eq(malicious.bits(), 0x3F800001 as u32);
-	(malicious.mantissa as Field).assert_max_bit_size::<23>();
+	f32::assert_canonical_fields(malicious.exponent, malicious.mantissa);
 }
 
-// ── f16: mantissa-overlap attack ─────────────────────────────────────────────
+// -- f16: mantissa-overlap attack ---------------------------------------------
 // bits=0x1400. Canonical: {exp:5, mant:0}.
 // Malicious {exp:4, mant:1024=2^10}: 4*2^10+1024=5*2^10=0x1400. 1024>2^10-1=1023.
 #[test(should_fail)]
 fn f16_new_rejects_malicious_mantissa_overlap() {
 	let malicious = f16 { sign: false, exponent: 4 as u8, mantissa: 1024 as u16 };
 	assert_eq(malicious.bits(), 0x1400 as u16);
-	(malicious.mantissa as Field).assert_max_bit_size::<10>();
+	f16::assert_canonical_fields(malicious.exponent, malicious.mantissa);
 }
 
-// ── f16: exponent-overflow attack ────────────────────────────────────────────
+// -- f16: exponent-overflow attack --------------------------------------------
 // bits=0x8000 (-0). Canonical: {sign:1, exp:0, mant:0}.
 // Malicious {sign:0, exp:32, mant:0}: 32*2^10=0x8000 (same bits).
 // exp=32 overflows the 5-bit IEEE exponent field (max 31).
@@ -519,10 +525,10 @@ fn f16_new_rejects_malicious_mantissa_overlap() {
 fn f16_new_rejects_malicious_exponent_overflow() {
 	let malicious = f16 { sign: false, exponent: 32 as u8, mantissa: 0 as u16 };
 	assert_eq(malicious.bits(), 0x8000 as u16);
-	(malicious.exponent as Field).assert_max_bit_size::<5>();
+	f16::assert_canonical_fields(malicious.exponent, malicious.mantissa);
 }
 
-// ── f64: mantissa-overlap attack ─────────────────────────────────────────────
+// -- f64: mantissa-overlap attack ---------------------------------------------
 // bits=0x3FF0000000000001 (1.0 + ulp). Canonical: {exp:1023, mant:1}.
 // Malicious {exp:1022, mant:2^52+1=4503599627370497}:
 //   1022*2^52 + (2^52+1) = 1023*2^52 + 1 = 0x3FF0000000000001.
@@ -532,10 +538,10 @@ fn f64_new_rejects_malicious_mantissa_overlap() {
 	let two_pow_52_plus_1: u64 = (1 as u64 << 52) + 1;
 	let malicious = f64 { sign: false, exponent: 1022 as u16, mantissa: two_pow_52_plus_1 };
 	assert_eq(malicious.bits(), 0x3FF0000000000001 as u64);
-	(malicious.mantissa as Field).assert_max_bit_size::<52>();
+	f64::assert_canonical_fields(malicious.exponent, malicious.mantissa);
 }
 
-// ── f128: mantissa-overlap attack ────────────────────────────────────────────
+// -- f128: mantissa-overlap attack --------------------------------------------
 // bits=0x3FFF0000000000000000000000000001 (canonical: {exp:16383, mant:1}).
 // Malicious {exp:16382, mant:2^112+1}:
 //   16382*2^112 + (2^112+1) = 16383*2^112 + 1 = bits.
@@ -549,10 +555,10 @@ fn f128_new_rejects_malicious_mantissa_overlap() {
 		mantissa: two_pow_112 + 1,
 	};
 	assert_eq(malicious.bits(), 0x3FFF0000000000000000000000000001 as u128);
-	(malicious.mantissa as Field).assert_max_bit_size::<112>();
+	f128::assert_canonical_fields(malicious.exponent, malicious.mantissa);
 }
 
-// ── positive: canonical boundary values still accepted ───────────────────────
+// -- positive: canonical boundary values still accepted -----------------------
 // Confirms the fix does NOT break canonical decodes at the max-field boundary.
 #[test]
 fn new_accepts_canonical_boundary_values() {
