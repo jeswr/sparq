@@ -71,6 +71,7 @@ const LIST: &str = "http://www.w3.org/2000/10/swap/list#";
 /// monotone Horn subset, so the nonmonotonic / production / non-Core items here
 /// are not even *in* the dialect; the rest are larger-dialect surface tracked for
 /// honesty. Cross-referenced by the expressivity suite so the gaps are legible.
+// [SONNET-4.6] sq-pbz04.5.2 — deferral ledger (§3.2) added below.
 pub const UNIMPLEMENTED: &[&str] = &[
     // NONMONOTONIC / NON-CORE by dialect (would break monotonicity — excluded by design):
     "negation-as-failure (Naf) — RIF-Core is monotone; NAF is not in the dialect",
@@ -81,6 +82,33 @@ pub const UNIMPLEMENTED: &[&str] = &[
     "uninterpreted function symbols / nested function terms (RIF-BLD)",
     "disjunction (Or) in rule bodies",
     "the RIF/XML presentation-syntax importer (this front-end takes the in-engine model)",
+    // DEFERRED BUILTINS — soundly not mapped, each with its precise reason (§3.2):
+    // [SONNET-4.6] sq-pbz04.5.2
+    "func:numeric-integer-divide DEFERRED: F&O op:numeric-integer-divide truncates \
+     toward zero; EYE/N3 math:integerQuotient is floor division. They diverge on any \
+     negative operand (−7 idiv 2 = −3 vs floor(−3.5) = −4). A truncating N3-side \
+     builtin or RIF-side compilation is needed — deferred.",
+    "func:numeric-mod DEFERRED: F&O op:numeric-mod result follows dividend sign; \
+     math:remainder is integer-only with divisor-sign semantics. Mixed-sign operands \
+     diverge — deferred.",
+    "pred:matches DEFERRED: XPath/XSD regex dialect ≠ Rust regex crate dialect \
+     (e.g. XSD character-class subtraction is not supported). A mapping cannot fail \
+     closed on dialect-divergent patterns without a real XSD-regex front-end — deferred.",
+    "pred:boolean-equal / pred:literal-not-identical / equality of distinct value-equal \
+     constants DEFERRED: need value-space equality beyond the numeric tower (sq-v5evr \
+     comparator, a named consumer) — deferred pending that seam.",
+    "guard predicates (pred:is-literal-integer etc.) DEFERRED: would require inventing \
+     non-EYE N3 builtins, polluting the chainer's EYE-differential story — deferred.",
+    "func:substring / func:substring-before / func:substring-after / func:string-join / \
+     func:compare DEFERRED: no semantically-matching N3 target exists today \
+     (string:scrape is regex capture, not substring) — deferred.",
+    "list utility builtins (func:get/sublist/reverse/index-of/insert-before/remove/\
+     union/distinct-values/except / pred:is-list) DEFERRED: no 1:1 N3 target; \
+     multi-triple lowerings change the producer/consumer shape and its safety analysis \
+     — deferred.",
+    "date/time/duration builtins DEFERRED: no shared temporal tower exists (the \
+     chainer's time: support is partial/EYE-shaped; sparq-substrate has no temporal \
+     module) — deferred wholesale; a temporal seam is its own future design record.",
 ];
 
 /// A RIF-Core term: a constant (IRI or typed literal), a universally-quantified
@@ -190,6 +218,31 @@ pub enum Builtin {
     ListContains,
     /// list length (function: n = length(list)).
     ListLength,
+    // [SONNET-4.6] sq-pbz04.5.2 — 5 soundly-mapped builtins (§3.1 equivalences):
+    /// `pred:numeric-not-equal` (a ≠ b) — N3 target: `math:notEqualTo`.
+    /// §3.1 equivalence: both are numeric value-space inequality over the same
+    /// promotion tower; the chainer's `MathNe` exists and is exercised by the N3
+    /// suites.
+    NumericNotEqual,
+    /// `func:upper-case` (maps string to upper case) — N3 target: `string:upperCase`.
+    /// §3.1 equivalence: XPath `fn:upper-case` uses default Unicode case mapping ≙
+    /// Rust `str::to_uppercase` (same default, no locale/tailored mappings on either
+    /// side).
+    StringUpperCase,
+    /// `func:lower-case` (maps string to lower case) — N3 target: `string:lowerCase`.
+    /// §3.1 equivalence: symmetric to upper-case.
+    StringLowerCase,
+    /// `func:encode-for-uri` (RFC 3986 percent-encoding) — N3 target: `string:encodeForUri`.
+    /// §3.1 equivalence: the chainer's builtin is documented as exactly XPath
+    /// `fn:encode-for-uri` (RFC 3986 unreserved-set, uppercase hex) — definitionally
+    /// the same function.
+    StringEncodeForUri,
+    /// `func:concatenate` (list concatenation) — N3 target: `list:append`.
+    /// §3.1 equivalence: both concatenate a sequence of lists into one list,
+    /// order-preserving; the chainer's `Append` takes `( list… )` which matches
+    /// DTB's variadic signature. Variadic: `arity()` returns the MINIMUM (2 = at
+    /// least one input list + one output); validate uses `>=` for this variant.
+    ListConcatenate,
 }
 
 impl Builtin {
@@ -204,6 +257,7 @@ impl Builtin {
                 | Builtin::NumericGreaterThan
                 | Builtin::NumericNotLessThan
                 | Builtin::NumericNotGreaterThan
+                | Builtin::NumericNotEqual // [SONNET-4.6] sq-pbz04.5.2
                 | Builtin::StringContains
                 | Builtin::StringStartsWith
                 | Builtin::StringEndsWith
@@ -212,6 +266,8 @@ impl Builtin {
     }
 
     /// Exact argument arity (including the result arg for function builtins).
+    /// For variadic builtins (`is_variadic()` is true) this is the MINIMUM arity;
+    /// validation uses `>=` instead of `==`.
     fn arity(self) -> usize {
         match self {
             // binary predicates
@@ -220,6 +276,7 @@ impl Builtin {
             | Builtin::NumericGreaterThan
             | Builtin::NumericNotLessThan
             | Builtin::NumericNotGreaterThan
+            | Builtin::NumericNotEqual // [SONNET-4.6] sq-pbz04.5.2
             | Builtin::StringContains
             | Builtin::StringStartsWith
             | Builtin::StringEndsWith
@@ -231,8 +288,23 @@ impl Builtin {
             | Builtin::NumericDivide
             | Builtin::StringConcat => 3,
             // unary-input functions producing one result
-            Builtin::StringLength | Builtin::ListLength => 2,
+            Builtin::StringLength
+            | Builtin::ListLength
+            | Builtin::StringUpperCase  // [SONNET-4.6] sq-pbz04.5.2
+            | Builtin::StringLowerCase
+            | Builtin::StringEncodeForUri => 2,
+            // variadic list concat: MINIMUM arity (1 input + 1 output = 2)
+            // [SONNET-4.6] sq-pbz04.5.2
+            Builtin::ListConcatenate => 2,
         }
+    }
+
+    /// `true` only for the variadic-arity builtins (`func:concatenate`), where
+    /// `arity()` returns the **minimum** accepted argument count and `validate`
+    /// uses a `>=` check. All other builtins have a fixed arity (`==` check).
+    // [SONNET-4.6] sq-pbz04.5.2
+    pub fn is_variadic(self) -> bool {
+        matches!(self, Builtin::ListConcatenate)
     }
 }
 
@@ -485,7 +557,13 @@ impl Document {
             for atom in &rule.body {
                 match atom {
                     Atom::Builtin { op, args } => {
-                        if args.len() != op.arity() {
+                        // [SONNET-4.6] sq-pbz04.5.2 — variadic builtins use >= check.
+                        let arity_ok = if op.is_variadic() {
+                            args.len() >= op.arity()
+                        } else {
+                            args.len() == op.arity()
+                        };
+                        if !arity_ok {
                             return Err(RifError::BadBuiltinArity {
                                 op: *op,
                                 got: args.len(),
@@ -640,6 +718,21 @@ fn lower_builtin(op: Builtin, args: &[Term]) -> String {
         Builtin::StringLength => bin(&n3(&args[0]), STRING, "length", &n3(&args[1])),
         // list function: list list:length out
         Builtin::ListLength => bin(&n3(&args[0]), LIST, "length", &n3(&args[1])),
+        // [SONNET-4.6] sq-pbz04.5.2 — 5 new soundly-mapped builtins:
+        // pred:numeric-not-equal: a math:notEqualTo b
+        Builtin::NumericNotEqual => bin(&n3(&args[0]), MATH, "notEqualTo", &n3(&args[1])),
+        // func:upper-case: s string:upperCase out
+        Builtin::StringUpperCase => bin(&n3(&args[0]), STRING, "upperCase", &n3(&args[1])),
+        // func:lower-case: s string:lowerCase out
+        Builtin::StringLowerCase => bin(&n3(&args[0]), STRING, "lowerCase", &n3(&args[1])),
+        // func:encode-for-uri: s string:encodeForUri out
+        Builtin::StringEncodeForUri => bin(&n3(&args[0]), STRING, "encodeForUri", &n3(&args[1])),
+        // func:concatenate (variadic lists): ( L1 L2 ... ) list:append out
+        Builtin::ListConcatenate => {
+            let n_inputs = args.len() - 1;
+            let input_terms: Vec<String> = args[..n_inputs].iter().map(n3).collect();
+            format!("( {} ) <{}append> {}", input_terms.join(" "), LIST, n3(&args[n_inputs]))
+        }
     }
 }
 

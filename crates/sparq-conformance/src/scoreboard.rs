@@ -775,7 +775,10 @@ pub const SUITES: &[Suite] = &[
             feature: "rif-core",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 47,
+        // [SONNET-4.6] sq-pbz04.5.2 — raised 47 → 58: 11 new assertions for the 5
+        // new soundly-mapped builtins (NumericNotEqual, StringUpperCase, StringLowerCase,
+        // StringEncodeForUri, ListConcatenate).
+        ratchet_floor: 58,
         floor_basis: "expressivity assertions (sparq EXTENSION over the RIF-Core subset, \
                       NOT the normative W3C SPARQL-RIF conformance suite)",
         note: "EXTENSION ratchet — sparq's own faithful expressivity battery over the \
