@@ -149,10 +149,14 @@ pub struct Suite {
 ///   `FRAME_FLOOR = 61` (sq-oy1f.19; opt-in `jsonld-suite` feature; RDF → framed
 ///   JSON-LD via the native Framing Algorithm over the SEPARATE w3c/json-ld-framing
 ///   suite, compared by re-parse RDF-equivalence to the normative expected output).
-/// * JSON-LD expand 247 — `sparq-conformance` `tests/jsonld_suite.rs`
-///   `EXPAND_FLOOR = 247` (sq-oy1f; opt-in `jsonld-suite` feature; RDF → expanded
-///   JSON-LD via the shipping `graph_to_jsonld(JsonLdForm::Expanded)` writer,
-///   compared by re-parse RDF-equivalence to the normative expected document).
+/// * JSON-LD expand 240 — `sparq-conformance` `tests/jsonld_suite.rs`
+///   `EXPAND_FLOOR = 240` (sq-kk1mq oracle-correction re-baseline; opt-in
+///   `jsonld-suite` feature; the expand lane now calls `sparq_jsonld::expand()`
+///   directly and compares the result to the expected document via `json_ld_equal`
+///   — a document-level JSON comparator; object key order insignificant, array
+///   order significant only inside `@list`, numbers as f64.  OLD floor was 247
+///   under the RDF-equivalence oracle (sq-oy1f); the rebase reveals 7 cases that
+///   over-passed via coincidental RDF equivalence and 26 new honest fails).
 /// * JSON-LD flatten 50 — `sparq-conformance` `tests/jsonld_suite.rs`
 ///   `FLATTEN_FLOOR = 50` (sq-oy1f; opt-in `jsonld-suite` feature; RDF → flattened
 ///   JSON-LD via the shipping `graph_to_jsonld(JsonLdForm::Flattened)` writer,
@@ -477,17 +481,16 @@ pub const SUITES: &[Suite] = &[
     },
     // [OPUS-4.8] sq-oy1f — the W3C JSON-LD 1.1 `expand` + `flatten` ratchets (epic
     // sq-oy1f). Each `jld:ExpandTest` / `jld:FlattenTest` input is parsed to RDF (the
-    // real oxjsonld path), then driven through the ALREADY-SHIPPING native writer
-    // `graph_to_jsonld(JsonLdForm::Expanded|Flattened)` (serialize-rdf), and the
-    // produced document is re-parsed and required to reconstruct the SAME RDF dataset
-    // as the suite's NORMATIVE expected document (`reparse(write(D, form)) ≡
-    // reparse(expected)` — expand/flatten are the JSON-LD normal forms, so the oracle
-    // anchors on the expected document, NOT the input). The floors are the MEASURED
-    // pass counts at the pinned revision (expand 247/385, flatten 50/58); the
-    // remaining cases are honest writer divergences (below the floor, to RISE) or
-    // documented SKIP buckets (negatives sparq's TOTAL writer does not raise,
-    // JSON-LD-1.0-only, empty-RDF inputs). These GRADUATED out of the runner's
-    // NOT_IMPLEMENTED bucket. Floors kept in lock-step by `tests/scoreboard_floors.rs`.
+    // [SONNET-4.6] sq-kk1mq oracle-correction re-baseline: the expand lane now calls
+    // sparq_jsonld::expand() directly and compares the result to the suite's expected
+    // document via json_ld_equal (document-level JSON comparator; object key order
+    // insignificant; array order significant only inside @list; numbers as f64).
+    // The old floor was 247 under the RDF-equivalence oracle (sq-oy1f); the rebase
+    // reveals 7 over-passes (oracle artefacts) and 26 new honest failures.  The new
+    // floor 240 is the MEASURED pass count with the corrected oracle at the pinned suite
+    // revision (sq-kk1mq).  The flatten lane keeps the old RDF-equivalence oracle
+    // (native flatten algorithm deferred; writer path is the correct oracle there).
+    // Floors kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C JSON-LD 1.1 expand",
         family: "W3C JSON-LD",
@@ -497,11 +500,11 @@ pub const SUITES: &[Suite] = &[
             feature: "jsonld-suite",
         },
         ci_job: "jsonld-conformance",
-        ratchet_floor: 247,
+        ratchet_floor: 240,
         floor_basis: "pass",
-        note: "RDF → expanded JSON-LD through the shipping graph_to_jsonld(Expanded) \
-               writer (serialize-rdf), compared by a re-parse RDF-equivalence to the \
-               normative expected document",
+        note: "native sparq_jsonld::expand() + json_ld_equal document-level comparator \
+               (sq-kk1mq oracle-correction re-baseline from 247 under RDF-equivalence \
+               oracle sq-oy1f); options forwarded (base, expandContext, processingMode)",
     },
     Suite {
         label: "W3C JSON-LD 1.1 flatten",

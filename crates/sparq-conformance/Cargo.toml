@@ -41,7 +41,9 @@ path = "src/bin/scoreboard.rs"
 # sparq-engine) paths and asserts the pinned floors. Forwards to both upstream
 # features and links `oxjsonld` directly (to re-parse the writer's JSON-LD output
 # back to RDF for the fromRdf semantic-equivalence comparison).
-jsonld-suite = ["sparq-core/jsonld", "sparq-engine/serialize-rdf", "dep:oxjsonld"]
+# [SONNET-4.6] sq-kk1mq — also enables dep:sparq-jsonld so the expand lane can call
+# the native expand() algorithm directly instead of going through the RDF writer.
+jsonld-suite = ["sparq-core/jsonld", "sparq-engine/serialize-rdf", "dep:oxjsonld", "dep:sparq-jsonld"]
 # [OPUS-4.8] sq-e5atd (epic sq-pbz04) — the D-entailment (datatype / value-space)
 # conformance lane (the crate-local `tests/d_entail_suite.rs` runner + the `Regime::D`
 # arm in `inference::entail`). OPT-IN and OFF by default so the default
@@ -199,3 +201,9 @@ serde_json = "1"
 # default (optional, behind `jsonld-suite`) so the default harness build never
 # links it.
 oxjsonld = { workspace = true, optional = true }
+# [SONNET-4.6] sq-kk1mq — native JSON-LD expander, used ONLY by the expand lane of
+# the `jsonld-suite` to call the document-level expand() algorithm directly
+# (document-level JSON comparator oracle). OFF by default (optional, behind
+# `jsonld-suite`) so the default harness build never links it — the lean opt-in
+# posture.
+sparq-jsonld = { path = "../sparq-jsonld", optional = true }
