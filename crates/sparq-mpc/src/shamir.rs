@@ -2170,8 +2170,8 @@ mod tests {
     fn mac_session_debug_labels_struct_and_redacts_alpha() {
         // The MacSession Debug must stay a non-empty, labelled struct that
         // REDACTS the cleartext session key α (a Debug body replaced by an empty
-        // `Ok(())` would silently drop the redaction). The two `contains` checks
-        // are absent in an empty-output mutant, so this kills the fmt default-body.
+        // `Ok(())` would silently drop the redaction). The `contains` checks are
+        // absent in an empty-output mutant, so this kills the fmt default-body.
         let b = ShamirBackend::new_seeded(5, 0xD00D).unwrap();
         let mut dealer = b.dealer();
         let session = dealer.new_mac_session();
@@ -2180,6 +2180,17 @@ mod tests {
         assert!(
             dbg.contains("<secret session MAC key"),
             "Debug must carry the α redaction label: {dbg}"
+        );
+        // The POINT of the redaction is that the cleartext α VALUE is absent, not merely
+        // that a label is present: a future Debug impl could print α *and* the label and
+        // still pass a label-only check. Capture α's own Debug rendering and assert it is
+        // NOT a substring of the session Debug output, so the redaction property is pinned.
+        let alpha_dbg = format!("{:?}", session.alpha_for_test());
+        assert!(
+            !dbg.contains(&alpha_dbg),
+            "Debug must NOT leak the cleartext α value {}: {}",
+            alpha_dbg,
+            dbg
         );
     }
 
