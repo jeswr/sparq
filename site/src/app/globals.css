@@ -117,9 +117,13 @@
   --destructive-foreground: oklch(0.96 0.006 210);
 
   --success: oklch(0.72 0.12 155);
-  /* [SONNET-4.6] sq-ymr2e.14 — dark mode: light success text on a 15%-tinted dark card bg
-     is ~5.7:1 already; keep --success-on-tint equal to --success in dark mode. */
-  --success-on-tint: oklch(0.72 0.12 155);
+  /* [SONNET-4.6] sq-ymr2e.14 — dark mode fix (CI revision): axe gamma-composites 15%
+     of success on the selected-item sidebar-accent background (oklch 0.32 0.045 205 =
+     #11393e), giving effective bg #1d4c48 (lum≈0.059). The original oklch(0.72 0.12 155)
+     = #60bb83 yielded only 4.09:1 against that selected-item bg (confirmed by CI axe run).
+     oklch(0.80 0.12 155) = #7ad59c gives ~5.4:1 against the selected bg and ~7.6:1
+     against the non-selected (card-dark) bg — both clear WCAG AA 4.5:1. [SONNET-4.6] */
+  --success-on-tint: oklch(0.80 0.12 155);
   --warning: oklch(0.8 0.13 80);
 
   --border: oklch(1 0 0 / 10%);
