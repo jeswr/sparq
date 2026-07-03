@@ -10,11 +10,32 @@
 // This is a CORRECTNESS test (DOM + which chunks were requested), never a timing threshold —
 // wall-clock here is non-canonical (work-box / CI runner).
 import { test, expect, type Page } from "@playwright/test";
+// [OPUS-4.8] sq-ymr2e.1 — the shared deterministic navigation barrier (SW-reload absorption +
+// app-shell hydration), replacing the fixed 500ms sleeps with web-first signals
+// (research/web-gui-test-program.md §1.1; no-timeout grep gate).
+import { gotoAppReady } from "./support/app-ready";
 
 async function gotoSettled(page: Page, route: string): Promise<void> {
-  await page.goto(route, { waitUntil: "domcontentloaded" });
-  await page.waitForLoadState("networkidle").catch(() => {});
-  await page.waitForTimeout(500);
+  await gotoAppReady(page, route);
+}
+
+// [OPUS-4.8] sq-ymr2e.1 — resolve once no NEW tracked request has arrived for one poll interval.
+// A deterministic "the interaction's async loads have all landed" settle (the first expand fires a
+// code-split chunk AND the demo's async text-search wasm load, which can land late) — used before
+// snapshotting so a straggler never pollutes the re-expand delta. Bounded; NOT a fixed sleep.
+async function waitForRequestsSettled(count: () => number): Promise<void> {
+  let previous = -1;
+  await expect
+    .poll(
+      () => {
+        const now = count();
+        const settled = now === previous;
+        previous = now;
+        return settled;
+      },
+      { timeout: 8_000, intervals: [250] },
+    )
+    .toBe(true);
 }
 
 test("no demo body or demo chunk loads on /capabilities entry", async ({ page }) => {
@@ -22,7 +43,19 @@ test("no demo body or demo chunk loads on /capabilities entry", async ({ page })
   const jsRequests: string[] = [];
   page.on("request", (req) => {
     const url = req.url();
-    if (url.endsWith(".js") || url.includes(".js?")) jsRequests.push(url);
+    // [OPUS-4.8] sq-ymr2e.1 — count Next.js code-split CHUNKS only. Exclude two classes of
+    // dev-runtime `.js` noise that are NOT the demo's code-split chunk and would false-positive the
+    // "no chunk re-fetch on re-expand" invariant: (1) `/wasm/` loader assets (the full-text demo
+    // lazily loads its text-search wasm on show — a runtime asset, surfaces only when the wasm
+    // bundle is present locally), and (2) `next dev` HMR `hot-update` chunks (the ±1 Fast-Refresh
+    // drift the test comment below warns about). The real demo chunk is `_next/static/chunks/*.js`.
+    if (
+      (url.endsWith(".js") || url.includes(".js?")) &&
+      !url.includes("/wasm/") &&
+      !url.includes("hot-update")
+    ) {
+      jsRequests.push(url);
+    }
   });
 
   await gotoSettled(page, "capabilities/");
@@ -59,14 +92,28 @@ test("re-collapsing then re-expanding a demo does not re-fetch its chunk", async
   const jsRequests: string[] = [];
   page.on("request", (req) => {
     const url = req.url();
-    if (url.endsWith(".js") || url.includes(".js?")) jsRequests.push(url);
+    // [OPUS-4.8] sq-ymr2e.1 — count Next.js code-split CHUNKS only. Exclude two classes of
+    // dev-runtime `.js` noise that are NOT the demo's code-split chunk and would false-positive the
+    // "no chunk re-fetch on re-expand" invariant: (1) `/wasm/` loader assets (the full-text demo
+    // lazily loads its text-search wasm on show — a runtime asset, surfaces only when the wasm
+    // bundle is present locally), and (2) `next dev` HMR `hot-update` chunks (the ±1 Fast-Refresh
+    // drift the test comment below warns about). The real demo chunk is `_next/static/chunks/*.js`.
+    if (
+      (url.endsWith(".js") || url.includes(".js?")) &&
+      !url.includes("/wasm/") &&
+      !url.includes("hot-update")
+    ) {
+      jsRequests.push(url);
+    }
   });
   await gotoSettled(page, "capabilities/");
 
   const toggle = page.getByRole("button", { name: /Full-text/i });
   await toggle.click();
   await expect(page.locator('[data-demo-body="full-text"]')).toBeVisible();
-  await page.waitForTimeout(500);
+  // Wait until the first expand's async loads (its code-split chunk + the demo's text-search wasm)
+  // have all landed before snapshotting — deterministic request-settle, not a fixed sleep.
+  await waitForRequestsSettled(() => jsRequests.length);
   // [OPUS-4.8] sq-rclb8 — snapshot the chunk set AFTER the first expand, then assert that the
   // re-collapse/re-expand cycle fires NO new .js request. We compare the request set DELTA, not
   // the total count: under `next dev` a stray Next.js <Link> prefetch / HMR chunk can land at any
@@ -80,7 +127,8 @@ test("re-collapsing then re-expanding a demo does not re-fetch its chunk", async
   await expect(page.locator('[data-demo-body="full-text"]')).toBeHidden();
   await toggle.click();
   await expect(page.locator('[data-demo-body="full-text"]')).toBeVisible();
-  await page.waitForTimeout(500);
+  // Deterministic settle so a late request would be observed — not a fixed sleep.
+  await waitForRequestsSettled(() => jsRequests.length);
   // No request fired during the re-collapse/re-expand cycle — the demo chunk was not re-fetched.
   expect(jsRequests.slice(afterFirstExpand)).toEqual([]);
 });

@@ -8,27 +8,22 @@
 // entry is dropped; /gui now client-redirects to /app. This test asserts the slim bar's six
 // destinations route correctly, that the old full sidebar tree is GONE, that Try (/try) and App
 // (/app) are both reachable, and that the legacy /gui path redirects to /app.
-import { test, expect, type Page } from "@playwright/test";
+// [OPUS-4.8] sq-ymr2e.1 — migrated onto the shared E2E foundation: the hermetic + deterministic
+// `test` (e2e/support) and the shared `gotoAppReady` barrier, which absorbs the coi-serviceworker
+// one-time reload via the SW-controller signal and waits for the app-shell hydration — replacing
+// the fixed 500ms sleep with deterministic signals (research/web-gui-test-program.md §1).
+import { test, expect, gotoAppReady } from "./support";
+import { type Page } from "@playwright/test";
 
 const MOD = "Control";
 
 // The site ships the coi-serviceworker shim which reloads the tab ONCE on a fresh visit to take
 // effect. That reload tears down any pending client-side navigation, so a click-then-navigate
-// test can race it (the click fires, then the SW reload bounces the tab back to where it was).
-// Wait until the SW is CONTROLLING the page — the deterministic signal that the one-time reload
-// has already happened and won't fire again — before interacting. This is the reliable form of
-// the "absorb the one-time reload" pattern the /try specs do via an explicit page.reload().
+// test can race it. `gotoAppReady` waits until the SW is CONTROLLING the page — the deterministic
+// signal that the one-time reload has already happened and won't fire again — plus the app-shell
+// hydration barrier, before returning.
 async function gotoSettled(page: Page, route: string): Promise<void> {
-  await page.goto(route, { waitUntil: "domcontentloaded" });
-  await page.waitForLoadState("networkidle").catch(() => {});
-  // The coi-serviceworker reloads once, after which navigator.serviceWorker.controller is set.
-  // (Wrapped in a try so the test still proceeds if the SW never registers, e.g. unsupported.)
-  await page
-    .waitForFunction(() => navigator.serviceWorker?.controller != null, undefined, {
-      timeout: 10_000,
-    })
-    .catch(() => {});
-  await page.waitForTimeout(500);
+  await gotoAppReady(page, route);
 }
 
 test("the slim top bar shows the 6 destinations (Try + App distinct) and no full sidebar tree", async ({
