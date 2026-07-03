@@ -70,10 +70,22 @@ dict-spill = ["mmap", "parallel", "dep:libc"]
 # dependency — it is `std::sync` only — and is OFF by default so the lean default / wasm build
 # pays nothing. See the `shared` module docs.
 shared = []
+# [OPUS-4.8] sq-7d3dj.18: prefix-memoized IRI-validation fast path in FRONT of the full
+# `oxiri` RFC-3987 automaton (see the `iri` module). OFF by default so the lean default / wasm
+# build never NAMES `oxiri` as a direct dep (it is already in-tree transitively via oxttl, so
+# enabling this adds ZERO new compilation) and the parser keeps its current unvalidated-fast
+# behaviour. When ON, the byte-level N-Triples / N-Quads loader validates each IRI through the
+# fast path (accepting EXACTLY what `oxiri` accepts — a mandatory differential-fuzz gate), so
+# the parallel loader reaches conformance parity with the serial oxttl path at fast-path cost.
+iri-fast = ["dep:oxiri"]
 
 [dependencies]
 oxrdf.workspace = true
 oxttl.workspace = true
+# [OPUS-4.8] sq-7d3dj.18: RFC-3987 IRI automaton, OPT-IN behind `iri-fast` (OFF by default).
+# Already present in-tree transitively (oxttl depends on oxiri), so naming it as a direct dep
+# under the feature adds no new compiled crate; the default build never references it.
+oxiri = { version = "0.2", optional = true }
 # [OPUS-4.8] sq-dvyi: JSON-LD ingest for the in-memory loaders (`load_str` /
 # `load_dataset` / `load_reader`). Pure-Rust + wasm-portable, but OPT-IN behind the
 # `jsonld` feature (OFF by default) so the tracked lean wasm bundle never links it and
