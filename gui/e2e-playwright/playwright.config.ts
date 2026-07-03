@@ -52,8 +52,10 @@ export default defineConfig({
 
   // Serves gui/app/out (the Tauri-target static export).  -s = SPA mode so every route
   // resolves to index.html (required for Next.js static export with client-side routing).
+  // [SONNET-4.6] serve is a pinned devDependency (14.2.6) so npm ci installs it offline;
+  // the local binary is used directly to avoid any npx network fetch in CI.
   webServer: {
-    command: "npx serve -l 3007 -s ../app/out",
+    command: "./node_modules/.bin/serve -l 3007 -s ../app/out",
     url: "http://127.0.0.1:3007",
     reuseExistingServer: !process.env.CI,
     timeout: 15_000,
