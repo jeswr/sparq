@@ -402,8 +402,8 @@ def run_self_test() -> int:
 
     # ----- Tripwire 2: Leg 2 must reject a perturbed wasm bundle size -----
     # [OPUS-4.8] Uses feature_off_exact (NOT floor) — mirrors the live check_leg2() logic.
-    # 1399110 = CI x86_64 feature-OFF wasm bytes. Re-pin from a CI run, never from aarch64.
-    pinned_exact = 1399110
+    # 1399868 = CI x86_64 feature-OFF wasm bytes. Re-pin from a CI run, never from aarch64.
+    pinned_exact = 1399868
     perturbed = pinned_exact + 1  # 1 byte off — must be caught
     bad_results = [{"name": "wasm_bundle_bytes", "unit": "bytes", "value": perturbed}]
     bad_floor = {
