@@ -195,6 +195,13 @@ struct Idx {
     cd_has_value_lit: FxHashMap<Id, Id>, // restriction node -> LITERAL owl:hasValue object
     #[cfg(feature = "cdomain")]
     cd_one_of_lit: FxHashMap<Id, Id>, // enumeration node -> its SINGLETON literal member
+    // [FABLE-5] soundness guard (PR #1434 adversarial-verify fix): nodes carrying a non-EL
+    // marker OTHER than onDatatype/withRestrictions (unionOf, complementOf, allValuesFrom,
+    // cardinality, hasSelf, onDataRange, datatypeComplementOf). Such a node must NEVER be
+    // rescued as a concrete-domain range/point — decoding just its range half would DROP the
+    // foreign structure and STRENGTHEN an LHS axiom. `resolve_cdomain` refuses these.
+    #[cfg(feature = "cdomain")]
+    cd_foreign_marker: FxHashSet<Id>,
     // The RESOLVED supported nodes (filled by `resolve_cdomain` before axiom decoding):
     #[cfg(feature = "cdomain")]
     cd_range: FxHashMap<Id, Concept>, // supported range / DataOneOf node -> range concept
@@ -262,6 +269,12 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
                 idx.cd_on_datatype.insert(s, o);
             } else if p == v.with_restrictions {
                 idx.cd_with_restrictions.insert(s, o);
+            } else {
+                // [FABLE-5] soundness (PR #1434 adversarial-verify fix): ANY other non-EL
+                // marker (unionOf / complementOf / allValuesFrom / cardinality / hasSelf /
+                // onDataRange / datatypeComplementOf) POISONS the node as a concrete-domain
+                // candidate — rescuing its range half would silently drop this structure.
+                idx.cd_foreign_marker.insert(s);
             }
         } else {
             #[cfg(feature = "rbox")]
@@ -376,10 +389,13 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
 /// `idx` for [`decode`] and returning the CR7/CR8 axioms.
 ///
 /// STRICTNESS GUARD (soundness): a candidate node carrying ANY other class-expression
-/// structure (a restriction part, an intersection, an object enumeration, or a mixed
-/// range/enumeration/hasValue shape) is REFUSED here and falls back to the ordinary
-/// non-EL skip — decoding just its range half would STRENGTHEN the asserted axiom in a
-/// subclass (LHS) position, which is unsound.
+/// structure — a restriction part, an intersection, an object enumeration, a mixed
+/// range/enumeration/hasValue shape, or ([FABLE-5] PR #1434 adversarial-verify fix) any
+/// OTHER non-EL marker (`owl:unionOf`, `owl:complementOf`, `owl:allValuesFrom`,
+/// cardinality, `owl:hasSelf`, `owl:onDataRange`, `owl:datatypeComplementOf`, tracked in
+/// `cd_foreign_marker`) — is REFUSED here and falls back to the ordinary non-EL skip.
+/// Decoding just its range half would DROP that structure and STRENGTHEN the asserted
+/// axiom in a subclass (LHS) position, which is unsound.
 #[cfg(feature = "cdomain")]
 fn resolve_cdomain(
     dict: &Dict,
@@ -393,6 +409,7 @@ fn resolve_cdomain(
             || idx.svf.contains_key(&n)
             || idx.has_value.contains_key(&n)
             || idx.inter_head.contains_key(&n)
+            || idx.cd_foreign_marker.contains(&n)
     };
     // Faceted ranges: need BOTH onDatatype and withRestrictions, and nothing else.
     let mut ranges: Vec<(Id, Id, Id)> = idx
@@ -431,6 +448,7 @@ fn resolve_cdomain(
                 && !idx.one_of_head.contains_key(&n)
                 && !idx.cd_on_datatype.contains_key(&n)
                 && !idx.cd_with_restrictions.contains_key(&n)
+                && !idx.cd_foreign_marker.contains(&n) // [FABLE-5] PR #1434 soundness fix
         })
         .map(|(&n, &l)| (n, l))
         .collect();

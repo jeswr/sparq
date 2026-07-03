@@ -361,3 +361,100 @@ fn mixed_structure_nodes_are_refused_not_strengthened() {
     assert_eq!(h.report().skipped_axioms, 1, "the mixed node's axiom is refused");
     assert_closure(&ttl, &["A", "C", "D"], &[]);
 }
+
+// [FABLE-5] sq-pbz04.2.2 soundness fix (Opus adversarial verify on PR #1434): the strictness
+// guard originally only refused the intersectionOf-family structure (on_prop/svf/hasValue/
+// intersectionOf/oneOf), NOT the other NON_EL markers — a range node ALSO carrying
+// owl:unionOf / owl:allValuesFrom / owl:datatypeComplementOf / … was rescued as range-ONLY,
+// dropping that structure and STRENGTHENING an LHS axiom. The three analogue tests below plus
+// the threaded G ⋢ H regression pin the completed guard (cd_foreign_marker).
+
+#[test]
+fn union_marked_range_nodes_are_refused_not_strengthened() {
+    // owl:unionOf analogue of the intersectionOf case above: the mixed node must be
+    // refused (skip), and the LEGITIMATE pure range node in the second axiom must
+    // still resolve (so skipped_axioms is exactly 1, not 2).
+    let ttl = format!(
+        "{PRE}
+         [ owl:onDatatype xsd:integer ;
+           owl:withRestrictions ( [ xsd:minInclusive 5 ] ) ;
+           owl:unionOf ( :C :D ) ] rdfs:subClassOf :E .
+         :A rdfs:subClassOf
+           [ owl:onProperty :p ; owl:someValuesFrom
+             [ owl:onDatatype xsd:integer ;
+               owl:withRestrictions ( [ xsd:minInclusive 5 ] ) ] ] ."
+    );
+    let (dict, triples) = classify(&ttl);
+    let h = Classifier::classify(&dict, &triples);
+    assert_eq!(h.report().skipped_axioms, 1, "the union-marked node's axiom is refused");
+    assert_closure(&ttl, &["A", "C", "D", "E"], &[]);
+}
+
+#[test]
+fn all_values_marked_range_nodes_are_refused_not_strengthened() {
+    // owl:allValuesFrom analogue. No owl:onProperty on the node, so the original
+    // on_prop-based structure check never saw it — only the NON_EL marker does.
+    let ttl = format!(
+        "{PRE}
+         [ owl:onDatatype xsd:integer ;
+           owl:withRestrictions ( [ xsd:minInclusive 5 ] ) ;
+           owl:allValuesFrom :C ] rdfs:subClassOf :E .
+         :A rdfs:subClassOf
+           [ owl:onProperty :p ; owl:someValuesFrom
+             [ owl:onDatatype xsd:integer ;
+               owl:withRestrictions ( [ xsd:minInclusive 5 ] ) ] ] ."
+    );
+    let (dict, triples) = classify(&ttl);
+    let h = Classifier::classify(&dict, &triples);
+    assert_eq!(h.report().skipped_axioms, 1, "the allValuesFrom-marked node's axiom is refused");
+    assert_closure(&ttl, &["A", "C", "E"], &[]);
+}
+
+#[test]
+fn datatype_complement_marked_range_nodes_are_refused_not_strengthened() {
+    // owl:datatypeComplementOf analogue: the node asserts a datatype NEGATION alongside
+    // the facets; decoding the facet half alone would drop the complement.
+    let ttl = format!(
+        "{PRE}
+         [ owl:onDatatype xsd:integer ;
+           owl:withRestrictions ( [ xsd:minInclusive 5 ] ) ;
+           owl:datatypeComplementOf xsd:integer ] rdfs:subClassOf :E .
+         :A rdfs:subClassOf
+           [ owl:onProperty :p ; owl:someValuesFrom
+             [ owl:onDatatype xsd:integer ;
+               owl:withRestrictions ( [ xsd:minInclusive 5 ] ) ] ] ."
+    );
+    let (dict, triples) = classify(&ttl);
+    let h = Classifier::classify(&dict, &triples);
+    assert_eq!(h.report().skipped_axioms, 1, "the complement-marked node's axiom is refused");
+    assert_closure(&ttl, &["A", "E"], &[]);
+}
+
+#[test]
+fn union_marked_range_is_not_strengthened_through_an_existential() {
+    // LOAD-BEARING regression (empirically confirmed UNSOUND before the cd_foreign_marker
+    // guard): the union+range node was rescued as its range half, so the pure range in G's
+    // existential chained through value-space containment (CR8) into E and derived G ⊑ H.
+    // COUNTERMODEL showing G ⊑ H must NOT hold: take C = D = ∅ ⟹ the union node denotes ∅
+    // ⟹ the first axiom is satisfied with E = ∅; put p(g) = 5 so g ∈ G's existential; then
+    // ∃p.E is empty and g ∉ H. Deriving G ⊑ H strengthens the mixed LHS node — UNSOUND.
+    let ttl = format!(
+        "{PRE}
+         [ owl:onDatatype xsd:integer ;
+           owl:withRestrictions ( [ xsd:minInclusive 5 ] ) ;
+           owl:unionOf ( :C :D ) ] rdfs:subClassOf :E .
+         :G rdfs:subClassOf
+           [ owl:onProperty :p ; owl:someValuesFrom
+             [ owl:onDatatype xsd:integer ;
+               owl:withRestrictions ( [ xsd:minInclusive 5 ] ) ] ] .
+         [ owl:onProperty :p ; owl:someValuesFrom :E ] rdfs:subClassOf :H ."
+    );
+    let (dict, triples) = classify(&ttl);
+    let h = Classifier::classify(&dict, &triples);
+    assert!(
+        !h.is_subclass_of(iri(&dict, "G"), iri(&dict, "H")),
+        "G ⊑ H must NOT be derived (countermodel: C = D = ∅, E = ∅, p(g) = 5, g ∉ H)"
+    );
+    assert_eq!(h.report().skipped_axioms, 1, "exactly the union+range axiom is refused");
+    assert_closure(&ttl, &["C", "D", "E", "G", "H"], &[]);
+}
