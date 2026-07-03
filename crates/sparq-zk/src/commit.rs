@@ -436,4 +436,94 @@ mod tests {
         );
         assert_eq!(c.leaf_index(&absent), None);
     }
+
+    // [OPUS-4.8] sq-qcnn.25: DETERMINISM + resolution value pins. Assert exact
+    // VALUES (not just no-panic) over the commitment/leaf-resolution surface.
+    // NO soundness claim (sq-qhy4).
+
+    #[test]
+    fn leaf_index_map_maps_every_canonical_triple_to_its_position() {
+        // Direct test of `leaf_index_map`: the bulk map must agree exactly with the
+        // per-triple `leaf_index`, be complete (one entry per canonical triple), and
+        // omit absent triples. (Kills `leaf_index_map -> HashMap::new()`.)
+        let salt = salt_from_bytes(&[7u8; 32]);
+        let c = commit_triples(&bnode_graph("x", "v"), salt).unwrap();
+        let map = c.leaf_index_map();
+        assert_eq!(map.len(), c.canonical.triples.len());
+        assert!(!map.is_empty());
+        for (i, t) in c.canonical.triples.iter().enumerate() {
+            assert_eq!(map.get(t), Some(&i), "map must resolve triple {} to leaf {}", i, i);
+            assert_eq!(c.leaf_index(t), Some(i), "map must agree with leaf_index");
+        }
+        let absent = Triple::new(
+            NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/absent").unwrap()),
+            NamedNode::new("http://ex/p").unwrap(),
+            Term::Literal(Literal::new_simple_literal("v")),
+        );
+        assert!(!map.contains_key(&absent));
+    }
+
+    #[test]
+    fn commit_error_display_is_exact() {
+        // `From<CanonError>` wraps a canonicalization failure, and Display passes the
+        // inner message through verbatim (covers the `From` + `Canon` Display arms;
+        // kills `fmt -> Ok(Default::default())`).
+        let inner = CanonError::Bridge("boom".to_string());
+        let inner_msg = inner.to_string();
+        let wrapped: CommitError = inner.into();
+        assert!(matches!(wrapped, CommitError::Canon(_)));
+        assert_eq!(wrapped.to_string(), inner_msg);
+        // The `UncommittableTerm` Display is the exact "uncommittable term: {t}" form.
+        let ut = CommitError::UncommittableTerm("http://ex/quoted".to_string());
+        assert_eq!(ut.to_string(), "uncommittable term: http://ex/quoted");
+    }
+
+    #[test]
+    fn commitment_pins_poseidon2_sponge_over_encoded_leaves() {
+        // The whole-pipeline determinism contract: C(G) is EXACTLY the Poseidon2
+        // sponge over the ordered leaves, and each leaf is EXACTLY `encode_triple`
+        // of the canonical triple at that index. Recomputed independently from the
+        // public primitives so a mutation of the leaf loop or the final sponge is
+        // caught (not merely a "commit twice is equal" tautology).
+        let salt = salt_from_bytes(&[7u8; 32]);
+        let c = commit_triples(&bnode_graph("x", "v"), salt).unwrap();
+        let recomputed_leaves: Vec<Fr> = c
+            .canonical
+            .triples
+            .iter()
+            .map(|t| crate::encode::encode_triple(t, &salt).unwrap())
+            .collect();
+        assert_eq!(c.leaves, recomputed_leaves, "leaves must be encode_triple per canonical triple");
+        assert_eq!(
+            c.commitment,
+            poseidon2::hash(&recomputed_leaves),
+            "commitment must be the Poseidon2 sponge over the leaf sequence"
+        );
+        // Byte-level determinism: same input -> same commitment bytes.
+        let c2 = commit_triples(&bnode_graph("x", "v"), salt).unwrap();
+        assert_eq!(
+            crate::field::field_to_be_bytes_32(&c.commitment),
+            crate::field::field_to_be_bytes_32(&c2.commitment),
+        );
+    }
+
+    #[test]
+    fn commit_graph_content_matches_commit_triples_over_materialized_triples() {
+        use sparq_core::Graph;
+        // `commit_graph_content` must equal `commit_triples` over the graph's
+        // materialized triples under the same salt (covers the graph-content entry
+        // point; asserts the two commit doors agree by construction).
+        let salt = salt_from_bytes(&[5u8; 32]);
+        let g = Graph::load_str(
+            "<http://ex/s> <http://ex/p> \"o\" .\n<http://ex/s> <http://ex/q> <http://ex/o2> .",
+            "turtle",
+        )
+        .unwrap();
+        let from_store = commit_graph_content(&g, salt).unwrap();
+        let triples = crate::canon::graph_triples(&g).unwrap();
+        let from_triples = commit_triples(&triples, salt).unwrap();
+        assert_eq!(from_store.commitment, from_triples.commitment);
+        assert_eq!(from_store.leaves, from_triples.leaves);
+        assert_eq!(from_store.canonical.lines, from_triples.canonical.lines);
+    }
 }

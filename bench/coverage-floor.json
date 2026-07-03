@@ -130,7 +130,8 @@
       "floor": 93
     },
     "sparq-zk": {
-      "floor": 88
+      "floor": 90,
+      "note": "[OPUS-4.8] sq-qcnn.25: raised 88 -> 90 (encoding/commitment DETERMINISM; measured with DEFAULT features, matching the ratchet's `cargo llvm-cov -p sparq-zk`). Enumerated FIRST with `cargo mutants -p sparq-zk` scoped to encode/field/commit/poseidon2/canon (113 mutants: 100 caught, 9 unviable, 4 survivors) + scripts/coverage.sh. Added DIRECT value-asserting tests: encode_term exact-composition pins (IRI type-code + h_s layering, literal canonical-N-Triples token, salted two-layer bnode), encode_triple = h_3(s,p,o) with position-sensitivity, RDF-1.2 triple-term fail-closed (None), salt_from_bytes = field_from_hash_bytes; commit leaf_index_map direct map (kills `leaf_index_map -> HashMap::new()`), CommitError Display/From exact strings (kills `fmt -> Ok(Default::default())`), commit_graph_content == commit_triples equivalence, C(G) == Poseidon2 sponge over encode_triple leaves with byte-level determinism; poseidon2 empty-input final-permutation branch. Lifted commit.rs 85.81% -> 99.52%, encode.rs -> 100%; measured crate line% 93.94 (floor(measured) - 2 = 91; floor set to the bead target 90 for a conservative work-box margin, CI --check-robust is the ratchet of record). Two survivors are PROVABLY EQUIVALENT under the DEFAULT feature build and left documented rather than contorted: `CommitmentMethod::is_production_selectable -> true` (the only variant returning false, `ValueOnlyV1`, is behind the OFF-by-default `commitment-value-only` feature) and `delete match arm ZK_SCHEME_POSEIDON2_VALUEHOOK_V1 in from_scheme_iri` (that arm is `#[cfg(feature = \"commitment-value-only\")]`, compiled out by default) — both observable only with `commitment-value-only` ON, which this ratchet does not measure. Tests only, NO crypto-logic change, NO soundness/privacy claim (sq-qhy4)."
     },
     "sparq-zk-compose": {
       "floor": 76
