@@ -2996,7 +2996,7 @@ mod tests {
         // The elision marker "…\n" costs 2 chars. With limit=1 no line can ever fit
         // (min cost = 1 char + 1 newline = 2 > 1), so used stays 0 but truncated=true.
         // finish: 0+2=2 > 1=limit → the elision marker has no room and is not emitted.
-        // [SONNET-4.6] sq-v411r
+        // [OPUS-4.8] sq-qcnn.21
         let mut w3 = BudgetWriter::new(1);
         assert!(!w3.line("x"), "no line fits when limit=1");
         assert_eq!(w3.finish(), "", "no marker emitted when limit=1 (no room for the marker)");
@@ -3180,7 +3180,7 @@ mod tests {
              :b rdf:type :T ; :name \"Bob\" ; :worksAt :z .",
         );
         let ix = Introspection::build(&g);
-        // All three subjects are in one characteristic set {type, name, worksAt}.
+        // Both subjects (:a, :b) are in one characteristic set {type, name, worksAt}.
         // Wait — :a worksAt 2, :b worksAt 1. Different multiplicity but same CS.
         // predicate_triples for :worksAt = 3 (2+1), subjects = 2 → 3 != 2.
         // predicate_triples for :name = 2, subjects = 2 → 2 == 2 → maxCount 1 for name.
