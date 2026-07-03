@@ -87,8 +87,8 @@ mod gated {
     /// SPARQL-RIF-entailment conformance claim. [OPUS-4.8] sq-rh4gu
     // [SONNET-4.6] sq-pbz04.5.2 — raised 47 → 58: 11 new assertions for the 5 new
     // soundly-mapped builtins (NumericNotEqual, StringUpperCase, StringLowerCase,
-    // StringEncodeForUri, ListConcatenate), 2 positive + 1 negative each (except
-    // NumericNotEqual with 2 positive) = 11 net new assertions.
+    // StringEncodeForUri, ListConcatenate): 1 positive + 1 negative per builtin
+    // (10 total) + 1 extra positive for NumericNotEqual = 11 net new assertions.
     pub const RIF_CORE_FLOOR: usize = 58;
 
     /// RIF surface DOCUMENTED out-of-scope for this front-end (the honest move: a
