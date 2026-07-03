@@ -18,8 +18,10 @@
 //!   (no ambient network — a remote fetch raises `loading document failed`), plus the
 //!   local-fixture [`FsLoader`].
 //! - [`context`] — the **Context Processing** foundation (bead `sq-oy1f.24`): the
-//!   [`ActiveContext`], Create Term Definition, and IRI Expansion. The compaction-side
-//!   companions (inverse context, IRI compaction) are deferred to a follow-on bead.
+//!   `ActiveContext`, Create Term Definition, and IRI Expansion. Bead `sq-90mu3` adds the
+//!   compaction-side companions: Inverse Context Creation (§4.3), IRI Compaction (§7.1),
+//!   and Term Selection (§7.2), exposed as `ActiveContext::inverse_context` and
+//!   `compact_iri`.
 //! - [`expand`](mod@expand) — the document-level **Expansion Algorithm** + Value Expansion
 //!   (bead `sq-oy1f.25`): [`expand`](expand::expand) turns a compact document into its
 //!   canonical expanded form (scoped contexts, container maps, `@nest`, `@reverse`,
@@ -48,6 +50,7 @@ pub mod from_rdf;
 pub mod node_map;
 pub mod to_rdf;
 
+pub use context::inverse::{compact_iri, InverseContext};
 pub use context::{ActiveContext, Direction, Override, TermDefinition};
 pub use error::{JsonLdError, JsonLdErrorCode};
 pub use expand::expand;

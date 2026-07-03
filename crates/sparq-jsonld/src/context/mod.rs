@@ -1,21 +1,17 @@
 //! Context processing — the active context, term definitions, and the inverse context.
 //!
-//! [OPUS-4.8] (sq-oy1f.24) The document-level **Context Processing** layer of the W3C
-//! JSON-LD 1.1 pipeline (design record `research/jsonld-1.1-design.md` §3.1). The public
-//! surface is:
+//! [OPUS-4.8] (sq-oy1f.24) / [SONNET-4.6] (sq-90mu3) The document-level **Context
+//! Processing** layer of the W3C JSON-LD 1.1 pipeline (design record
+//! `research/jsonld-1.1-design.md` §3.1). The public surface is:
 //!
-//! - [`ActiveContext`] — the processed result of folding a chain of `@context` definitions
+//! - `ActiveContext` — the processed result of folding a chain of `@context` definitions
 //!   (JSON-LD 1.1 API §3.1), with its default base/vocab/language/direction and its map of
-//!   [`TermDefinition`]s.
-//! - [`Direction`] — a base direction (`ltr` / `rtl`).
-//! - [`process`] — the Context Processing Algorithm (§4) and Create Term Definition (§4.2).
-//! - [`iri`] — IRI Expansion (§5.2), plus RFC 3986 reference resolution.
-//!
-//! This bead (`sq-oy1f.24`) implements the **expansion foundation** — the hinge every
-//! other algorithm depends on. The compaction-side companions (inverse-context
-//! construction §4.3 and IRI Compaction / Term Selection §7.1–7.2) are deferred to a
-//! follow-on bead so this slice stays reviewable and can be verified offline against the
-//! spec's worked expansion examples; see the crate README.
+//!   `TermDefinition`s.
+//! - `Direction` — a base direction (`ltr` / `rtl`).
+//! - `process` — the Context Processing Algorithm (§4) and Create Term Definition (§4.2).
+//! - `iri` — IRI Expansion (§5.2), plus RFC 3986 reference resolution.
+//! - `inverse` — Inverse Context Creation (§4.3), IRI Compaction (§7.1), and Term
+//!   Selection (§7.2) — the compaction-side companions of IRI Expansion (bead `sq-90mu3`).
 //!
 //! Spec: <https://www.w3.org/TR/json-ld11-api/#context-processing-algorithms>.
 
@@ -23,6 +19,7 @@ use std::collections::BTreeMap;
 
 use crate::json::Json;
 
+pub mod inverse;
 pub mod iri;
 pub mod process;
 
