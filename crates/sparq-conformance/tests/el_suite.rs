@@ -100,6 +100,12 @@ mod gated {
     /// classifier's fragment coverage grows). This is the ACTUAL current pass count, not
     /// an aspirational target. HONESTLY a sparq EXTENSION-shaped ratchet over the EL
     /// fragment the classifier implements, NOT a full-OWL-2-EL-conformance claim.
+    ///
+    /// FLOOR COMPOSITION (50 total): 45 consistency / 0 inconsistency /
+    /// 2 positive-entailment / 3 negative-entailment. Only 2 W3C rows exercise actual
+    /// derivation (WebOnt-equivalentClass-002: trivial equivalentClass → 2 subClassOf).
+    /// The lane-local `el_cr4_derivation_canary` test below closes the gap for CR4
+    /// existential/conjunction derivation — it is NOT counted into this floor.
     /// [SONNET-4.6] sq-pbz04.2.4
     pub const EL_SUITE_FLOOR: usize = 50;
 
@@ -364,6 +370,12 @@ mod gated {
 
         // Accounting buckets.
         let mut pass = 0usize;
+        // [SONNET-4.6] Sub-floor: how many of the `pass` rows are positive-entailment
+        // checks. A neutered classifier (empty saturation) cannot derive the W3C
+        // equivalentClass conclusions, so this drops to 0 and the sub-floor fires
+        // BEFORE `fails.is_empty()` — guaranteeing the derivation gap is caught even
+        // when all checked rows become undocumented fails at once.
+        let mut positive_entailment_passes = 0usize;
         let mut divergences: Vec<(String, String, String)> = Vec::new(); // (test, rationale, observed)
         let mut fails: Vec<(String, String)> = Vec::new(); // (test/kind, reason)
         let mut deferred: Vec<String> = Vec::new(); // reason strings (histogrammed)
@@ -440,7 +452,12 @@ mod gated {
             selected_cases += 1;
             for (kind, outcome) in run_case(case) {
                 match outcome {
-                    Outcome::Pass => pass += 1,
+                    Outcome::Pass => {
+                        pass += 1;
+                        if kind.contains("positive-entailment") {
+                            positive_entailment_passes += 1;
+                        }
+                    }
                     Outcome::Divergence(rationale, observed) => {
                         divergences.push((kind, rationale.to_string(), observed))
                     }
@@ -492,6 +509,20 @@ mod gated {
             }
         }
 
+        // [SONNET-4.6] Positive-entailment sub-floor: at least 2 of the counted passes
+        // must be positive-entailment checks. A neutered classifier (empty saturation)
+        // loses the 2 W3C positive-entailment passes, dropping this to 0 and turning
+        // THIS assert RED before `fails.is_empty()` gets a chance to fire — so the
+        // derivation gap is caught even if all new undocumented fails are added to the
+        // divergence list first. See FLOOR COMPOSITION note on EL_SUITE_FLOOR.
+        assert!(
+            positive_entailment_passes >= 2,
+            "OWL 2 EL positive-entailment sub-floor: expected >= 2 positive-entailment \
+             passes, got {} — floor composition (45 consistency / 0 inconsistency / \
+             2 positive-entailment / 3 negative-entailment) has shifted; a neutered \
+             classifier scores 0 here",
+            positive_entailment_passes
+        );
         // No silent fails: every failure must be an audited documented divergence.
         assert!(
             fails.is_empty(),
@@ -659,9 +690,19 @@ mod gated {
     }
 
     /// Runs `classify_graph` on a watchdog thread, catching panics + capping runtime.
+    ///
+    /// [SONNET-4.6] Thread-lifecycle note: the JoinHandle is stored and then
+    /// EXPLICITLY dropped after `recv_timeout` returns. On the normal path the worker
+    /// has already sent its result and will exit momentarily; dropping the handle
+    /// detaches it (matching the pre-existing implicit-drop behaviour). On the 20 s
+    /// TIMEOUT path the worker may still be running — Rust's JoinHandle drop detaches
+    /// the thread and lets it run to completion or panic on its own; we have no
+    /// cancellation channel so this is the least-harmful option for a test-harness
+    /// thread. The explicit drop here (rather than the previous implicit statement-end
+    /// drop) makes the intentional detach visible to reviewers.
     fn classify_under_watchdog(premise: Vec<Row>) -> Result<Classified, String> {
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let result = std::panic::catch_unwind(move || {
                 let mut dict = Dict::new();
                 let mut ids: Vec<[Id; 3]> = premise
@@ -680,14 +721,17 @@ mod gated {
             });
             let _ = tx.send(result);
         });
-        match rx.recv_timeout(TEST_TIMEOUT) {
+        let out = match rx.recv_timeout(TEST_TIMEOUT) {
             Ok(Ok(c)) => Ok(c),
             Ok(Err(_)) => Err("EL classifier panicked".into()),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 Err("timeout (20s) in EL classification".into())
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err("EL classifier panicked".into()),
-        }
+        };
+        // Intentional detach: see the function-level comment above.
+        drop(handle);
+        out
     }
 
     /// Finite-restriction datatype axioms: every recognized datatype is an
@@ -734,6 +778,72 @@ mod gated {
             !(is_imports || (is_type && is_ontology))
         });
         Ok(rows)
+    }
+
+    /// [SONNET-4.6] EL derivation canary — lane-local guard, NOT a W3C test case and
+    /// NOT counted into the W3C pass total or `EL_SUITE_FLOOR`.
+    ///
+    /// Verifies the CR4 existential-traversal rule through the SAME
+    /// `classify_under_watchdog` → `classify_graph` path the W3C suite uses:
+    ///
+    ///   TBox: A ⊑ ∃r.B,  B ⊑ C,  ∃r.C ⊑ D  ⊨  A ⊑ D
+    ///
+    /// This chain requires CR3 (emit the r-successor link (A, B)) then CR4 (pull D into
+    /// S(A) via the (A,B)∈R(r) link and B⊑C and ∃r.C⊑D) — the exact derivation OWL 2
+    /// RL cannot perform. A neutered classifier (empty saturation) leaves A⊑D absent
+    /// from the closure and turns this test RED, proving the ratchet exercises real
+    /// existential reasoning.
+    #[test]
+    fn el_cr4_derivation_canary() {
+        // Inline RDF/XML — does NOT require the OWL WG export file; always runs when
+        // the `el-suite` feature is ON.
+        let premise_xml = r#"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:owl="http://www.w3.org/2002/07/owl#"
+         xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#">
+  <owl:Ontology rdf:about="http://ex/canary-cr4"/>
+  <owl:Class rdf:about="http://ex/A">
+    <rdfs:subClassOf>
+      <owl:Restriction>
+        <owl:onProperty rdf:resource="http://ex/r"/>
+        <owl:someValuesFrom rdf:resource="http://ex/B"/>
+      </owl:Restriction>
+    </rdfs:subClassOf>
+  </owl:Class>
+  <owl:Class rdf:about="http://ex/B">
+    <rdfs:subClassOf rdf:resource="http://ex/C"/>
+  </owl:Class>
+  <owl:Class rdf:about="http://ex/D"/>
+  <owl:Restriction>
+    <owl:onProperty rdf:resource="http://ex/r"/>
+    <owl:someValuesFrom rdf:resource="http://ex/C"/>
+    <rdfs:subClassOf rdf:resource="http://ex/D"/>
+  </owl:Restriction>
+</rdf:RDF>"#;
+        let base = "http://ex/canary-cr4";
+        let premise =
+            parse_ontology(premise_xml, base).expect("canary premise RDF/XML must parse cleanly");
+        let classified =
+            classify_under_watchdog(premise).expect("canary: classify_graph must not panic/timeout");
+        // A ⊑ D must appear in the derived closure as a plain rdfs:subClassOf triple.
+        // [SONNET-4.6] CodeQL positional format! args used throughout (rust/unused-variable guard).
+        let a = Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+            "http://ex/A".to_string(),
+        ));
+        let sub_class_of = Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+            "http://www.w3.org/2000/01/rdf-schema#subClassOf".to_string(),
+        ));
+        let d = Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+            "http://ex/D".to_string(),
+        ));
+        let expected: Row = [a, sub_class_of, d];
+        assert!(
+            classified.closure.contains(&expected),
+            "EL CR4 derivation canary FAILED: A ⊑ D not found in the classify_graph \
+             closure for TBox {{A ⊑ ∃r.B, B ⊑ C, ∃r.C ⊑ D}}. \
+             A neutered (empty-saturation) classifier produces this failure — \
+             restore CR1–CR6 saturation in sparq-reason-el::classify_graph."
+        );
     }
 
     /// The export's internal DTD uses single-quoted ENTITY values, which oxrdfxml

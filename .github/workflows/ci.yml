@@ -2016,7 +2016,15 @@ jobs:
             echo "::error::OWL 2 EL lane produced no 'OWL 2 EL ratchet pass' line — infra/build issue, not a conformance change. Re-run the job."
             exit 1
           fi
-          FLOOR=50
+          # [SONNET-4.6] Read EL_SUITE_FLOOR from source so the CI step cannot drift
+          # from the in-runner const (Fix 4 — Copilot thread).
+          FLOOR=$(grep -E '^\s+pub const EL_SUITE_FLOOR\s*:\s*usize\s*=' \
+            crates/sparq-conformance/tests/el_suite.rs \
+            | grep -oE '[0-9]+' | head -1)
+          if [ -z "$FLOOR" ]; then
+            echo "::error::Could not parse EL_SUITE_FLOOR from el_suite.rs — check the const declaration"
+            exit 1
+          fi
           PASS=$(grep -E '^OWL 2 EL ratchet pass ' el-suite-conformance.out | awk '{print $6}' | head -1)
           echo "OWL 2 EL classification pass: ${PASS:-unknown} (floor: $FLOOR)"
           [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::OWL 2 EL classification regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
