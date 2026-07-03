@@ -10,16 +10,11 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
-# [OPUS-4.8] sq-ev41x (epic sq-qonbz): the numeric value tower (`numeric::{Num, Dec,
-# as_numeric, ...}`) has now MOVED here from sparq-engine and is consumed by the engine via
-# the in-workspace `path` dep (which works regardless of `publish`). The crate stays an
-# intentional `publish = false` stub for now — it is NOT yet a standalone publishable public
-# surface because the JOIN KERNELS (Phase 3) and reasoner adoption (Phase 5) are still
-# pending, so there is no user-facing API to register a SKILL.md / micro-bench against yet.
-# `publish = false` keeps it exempt from the new-crate-completeness gate (G1)
-# bench/SKILL requirements until those phases land. FLIP this to publishable — and add the
-# micro-bench + SKILL surface — when the join kernels arrive (tracked: sq-ev41x follow-up).
-publish = false
+# [SONNET-4.6] sq-qonbz.4: The Phase-3 join kernels (sq-hknqs) have landed — all four
+# join kernels + the numeric value tower + the compare module are now in place. The
+# stub-escape trigger noted above is satisfied. Flipping to publishable, adding the
+# criterion micro-bench and the SKILL.md surface (G1 new-crate-completeness gate).
+publish = true
 
 # [OPUS-4.8] Render README.md as the docs.rs front page (lib.rs uses include_str!).
 [package.metadata.docs.rs]
@@ -88,3 +83,16 @@ rustc-hash = { workspace = true, optional = true }
 # by the `numeric` feature (`dep:oxrdf`), so the default / `rows`-only build never pulls it.
 # `oxrdf` is already in the workspace dep tree (via sparq-core), so this adds no new crate.
 oxrdf = { workspace = true, optional = true }
+
+# [SONNET-4.6] sq-qonbz.4: criterion for the join/numeric micro-bench (dev-only, never
+# reaches the lean default or wasm build). Pinned at "0.5" to match the bench/zk pattern.
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+oxrdf = { workspace = true }
+
+# [SONNET-4.6] sq-qonbz.4: The micro-bench exercises merge_join + hash build/probe + Num
+# arithmetic. Feature-gated at bench time on `join` + `numeric` (which imply `rows`).
+[[bench]]
+name = "substrate"
+harness = false
+required-features = ["join", "numeric"]
