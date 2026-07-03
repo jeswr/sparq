@@ -67,14 +67,9 @@
     },
     "try:palette-open": {
       "critical": 0,
-      "serious": 1,
+      "serious": 0,
       "moderate": 0,
-      "minor": 0,
-      "allowedSeriousRules": [
-        "color-contrast"
-      ],
-      "bead": "sq-ymr2e.14",
-      "reason": "command-palette --success badge is ~4.09:1 (need 4.5); a global token nudge"
+      "minor": 0
     }
   }
 }

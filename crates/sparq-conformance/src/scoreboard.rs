@@ -217,6 +217,15 @@ pub struct Suite {
 ///   UCQ evaluated over the unmodified ABox returns EXACTLY the hand-derived certain
 ///   answers; the broader `pr:QL` entailment-arm intensional gap stays
 ///   experimental/OutOfScope, never summed in).
+/// * OWL 2 EL classification 50 — `sparq-conformance` `tests/el_suite.rs`
+///   `EL_SUITE_FLOOR = 50` (sq-pbz04.2.4; opt-in `el-suite` feature; a sparq EXTENSION
+///   ratchet, NOT a full-OWL-2-EL-conformance claim — CR7–CR9 concrete domains + ABox
+///   inconsistency are deferred; floor = the MEASURED count of W3C OWL 2 EL
+///   (test:EL ∧ test:RDF-BASED, Approved) check rows on which `sparq_reason_el`'s
+///   consequence-based classifier computes the expected outcome via `classify_graph` +
+///   the shared bnode-homomorphism entailment check; 28 audited PERMANENT divergences
+///   (ABox / RBox / owl:unionOf / owl:equivalentClass-form) are reported separately,
+///   never summed in). [SONNET-4.6]
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
@@ -775,7 +784,10 @@ pub const SUITES: &[Suite] = &[
             feature: "rif-core",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 47,
+        // [SONNET-4.6] sq-pbz04.5.2 — raised 47 → 58: 11 new assertions for the 5
+        // new soundly-mapped builtins (NumericNotEqual, StringUpperCase, StringLowerCase,
+        // StringEncodeForUri, ListConcatenate).
+        ratchet_floor: 58,
         floor_basis: "expressivity assertions (sparq EXTENSION over the RIF-Core subset, \
                       NOT the normative W3C SPARQL-RIF conformance suite)",
         note: "EXTENSION ratchet — sparq's own faithful expressivity battery over the \
@@ -829,6 +841,46 @@ pub const SUITES: &[Suite] = &[
                the UNMODIFIED ABox, asserting EXACTLY the hand-derived certain answers — \
                sound AND complete case by case; the broader pr:QL entailment-arm \
                intensional gap stays experimental/OutOfScope, never faked as a pass",
+    },
+    // [SONNET-4.6] sq-pbz04.2.4 (epic sq-pbz04) — the OWL 2 EL classification ratchet
+    // (runner lives crate-local in `sparq-conformance/tests/el_suite.rs`, behind the
+    // opt-in `el-suite` feature). HONESTLY tallied as a sparq EXTENSION ratchet, NOT
+    // folded into the conformance total — even though OWL 2 EL is a real W3C profile,
+    // this lane compares each W3C OWL 2 EL test (test:EL ∧ test:RDF-BASED, Approved,
+    // no-imports) against what `sparq-reason-el`'s consequence-based classifier
+    // (CR1–CR6 + safe nominals; `rbox`/`cdomain` are SEPARATELY gated) genuinely
+    // computes over the EL fragment it implements — it is NOT a full OWL 2 EL
+    // conformance claim. The runner classifies each premise through the REAL
+    // `sparq_reason_el::classify_graph` (materializing the complete rdfs:subClassOf
+    // subsumption lattice IN PLACE) and checks: consistency (no unsatisfiable named
+    // class), inconsistency (some unsatisfiable named class — the TBox clash it can
+    // see), positive-entailment (the materialized lattice ENTAILS the conclusion under
+    // the shared bnode-homomorphism `entail::entails`), and negative-entailment (the
+    // non-conclusion is NOT entailed). The floor is the MEASURED PASS count; the 28
+    // audited PERMANENT divergences (ABox-only inconsistency / individual facts, RBox
+    // property reasoning, owl:unionOf, or the owl:equivalentClass output-form) are
+    // reported separately and NEVER summed into the floor. `EL_SUITE_FLOOR` is mirrored
+    // here and kept in lock-step by `tests/scoreboard_floors.rs` (read textually).
+    Suite {
+        label: "OWL 2 EL classification (sparq-reason-el)",
+        family: "sparq extension",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "el_suite",
+            feature: "el-suite",
+        },
+        ci_job: "inference-conformance",
+        ratchet_floor: 50,
+        floor_basis: "pass — classifier computes the expected outcome (sparq EXTENSION over \
+                      the EL fragment the classifier implements, NOT a full-OWL-2-EL-conformance \
+                      claim; CR7–CR9 concrete domains + ABox inconsistency deferred)",
+        note: "EXTENSION ratchet — the W3C OWL 2 EL suite checks classification/subsumption \
+               semantics and this runner compares against what sparq-reason-el's classifier \
+               computes over the EL fragment it implements (CR1–CR6 + safe nominals): each \
+               premise classified through the REAL classify_graph, then consistency / \
+               inconsistency / positive- / negative-entailment via the shared \
+               bnode-homomorphism check; the 28 audited ABox / RBox / owl:unionOf / \
+               equivalentClass-form divergences are reported separately, never faked as passes",
     },
 ];
 

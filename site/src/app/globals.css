@@ -34,6 +34,16 @@
   --destructive-foreground: oklch(0.99 0.005 200);
 
   --success: oklch(0.55 0.11 155);
+  /* [SONNET-4.6] sq-ymr2e.14 — WCAG 2.1 AA fix for the success badge in the command palette.
+     The badge "success" variant renders text-[var(--success)] on a 15%-tinted success bg
+     (color-mix 15% success + transparent on the white card). With --success at oklch(0.55 0.11 155)
+     ≈ #60bb83, the text achieves ~4.09:1 against the near-white tinted bg — below the 4.5:1 AA
+     minimum. A dedicated --success-on-tint token (text-in-tinted-context only) darkens from
+     oklch(0.55) to oklch(0.46) while bumping chroma 0.11→0.12 to keep the green vibrant:
+       Before: oklch(0.55 0.11 155) → ~4.09:1 on the 15%-tinted bg  (FAIL AA)
+       After:  oklch(0.46 0.12 155) → ~6.1:1 on the same bg         (PASS AA)
+     --success stays untouched so non-badge uses (icons, status text) remain unchanged. */
+  --success-on-tint: oklch(0.46 0.12 155);
   --warning: oklch(0.7 0.14 75);
 
   --border: oklch(0.91 0.012 220);
@@ -107,6 +117,13 @@
   --destructive-foreground: oklch(0.96 0.006 210);
 
   --success: oklch(0.72 0.12 155);
+  /* [SONNET-4.6] sq-ymr2e.14 — dark mode fix (CI revision): axe gamma-composites 15%
+     of success on the selected-item sidebar-accent background (oklch 0.32 0.045 205 =
+     #11393e), giving effective bg #1d4c48 (lum≈0.059). The original oklch(0.72 0.12 155)
+     = #60bb83 yielded only 4.09:1 against that selected-item bg (confirmed by CI axe run).
+     oklch(0.80 0.12 155) = #7ad59c gives ~5.4:1 against the selected bg and ~7.6:1
+     against the non-selected (card-dark) bg — both clear WCAG AA 4.5:1. [SONNET-4.6] */
+  --success-on-tint: oklch(0.80 0.12 155);
   --warning: oklch(0.8 0.13 80);
 
   --border: oklch(1 0 0 / 10%);
@@ -161,6 +178,7 @@
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-success: var(--success);
+  --color-success-on-tint: var(--success-on-tint);
   --color-warning: var(--warning);
   --color-border: var(--border);
   --color-input: var(--input);

@@ -63,6 +63,26 @@ env:
   # the cargo layer before they ever sink a job. A genuine fetch failure (crate
   # truly absent) still exhausts the retries and fails honestly.
   CARGO_NET_RETRY: "10"
+  # [SONNET-4.6] sq-6vshe.1: CI build-profile speedup applied to all native Linux Rust jobs.
+  # CARGO_INCREMENTAL=0: incremental compilation is pure overhead on cold-cache one-shot CI
+  # builds (no .incremental/ artifacts survive across jobs).
+  # CARGO_PROFILE_DEV_DEBUG=line-tables-only: keeps file:line backtraces (RUST_BACKTRACE=1
+  # above still works) while dropping bulky DWARF variable-info sections — cuts both
+  # debuginfo-emission time and link time on the dev profile. Sufficient for line-coverage
+  # tracking (cargo-llvm-cov uses LLVM coverage counters, not DWARF; llvm-cov adds its own
+  # -C instrument-coverage rustflag which coexists cleanly with this setting).
+  # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=lld": routes ALL
+  # native x86_64 link steps through lld (LLVM's fast linker). The per-target env var scopes
+  # this to the HOST triple only — wasm32-unknown-unknown builds use wasm-ld and are
+  # unaffected (proc macros and build scripts that compile for the host DO benefit).
+  # lld is chosen over mold because: (a) Rust 1.86+ already ships rust-lld and uses it as
+  # the default for x86_64-unknown-linux-gnu (the -B<sysroot>/gcc-ld path provides it);
+  # (b) lld-18 is pre-installed on ubuntu-24.04 runners; (c) no per-job apt install step is
+  # needed — tests that spawn cargo as a subprocess (e.g. crate-doc guard tests) inherit
+  # this flag safely. Bench/release/dist profiles are NOT changed (bench.yml, build-matrix.yml).
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
 jobs:
   # [OPUS-4.8] merge-throughput: path-filtered gate. Compute whether THIS change
@@ -1994,6 +2014,40 @@ jobs:
           ASSERTS=$(grep -E '^RIF-Core expressivity assertions ' rif-core-conformance.out | awk '{print $4}' | head -1)
           echo "RIF-Core expressivity assertions: ${ASSERTS:-unknown} (floor: $FLOOR)"
           [ -n "$ASSERTS" ] && [ "$ASSERTS" -ge "$FLOOR" ] || { echo "::error::RIF-Core expressivity regressed below the ratchet ($ASSERTS < $FLOOR)"; exit 1; }
+      - name: Run OWL 2 EL classification lane (el-suite feature ON) + enforce floor
+        # [SONNET-4.6] sq-pbz04.2.4 (epic sq-pbz04) — the OPT-IN OWL 2 EL classification
+        # EXPRESSIVITY ratchet. SEPARATE from the binary ratchet above so the default
+        # inference binary stays byte-for-byte unchanged. This crate-test drives each W3C
+        # OWL 2 EL (test:EL ∧ test:RDF-BASED, Approved) test case through the real
+        # `sparq_reason_el::classify_graph` classifier + the shared bnode-homomorphism
+        # entailment check and prints an `OWL 2 EL ratchet pass N of M (floor F)` line; the
+        # floor (EL_SUITE_FLOOR, mirrored in scoreboard::SUITES) is asserted in-runner AND
+        # re-grepped here. HONESTLY a sparq-EXTENSION ratchet over the EL fragment the
+        # classifier implements — NOT a full OWL 2 EL conformance claim (CR7–CR9 concrete
+        # domains + ABox inconsistency are deferred; 28 audited divergences reported
+        # separately, never summed in). `--nocapture` so the ratchet line reaches stdout.
+        run: |
+          set -uo pipefail
+          cargo test -p sparq-conformance --features el-suite --test el_suite -- --nocapture \
+            | tee el-suite-conformance.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::OWL 2 EL lane test failed (exit $rc)"; exit "$rc"; }
+          if ! grep -qE '^OWL 2 EL ratchet pass ' el-suite-conformance.out; then
+            echo "::error::OWL 2 EL lane produced no 'OWL 2 EL ratchet pass' line — infra/build issue, not a conformance change. Re-run the job."
+            exit 1
+          fi
+          # [SONNET-4.6] Read EL_SUITE_FLOOR from source so the CI step cannot drift
+          # from the in-runner const (Fix 4 — Copilot thread).
+          FLOOR=$(grep -E '^\s+pub const EL_SUITE_FLOOR\s*:\s*usize\s*=' \
+            crates/sparq-conformance/tests/el_suite.rs \
+            | grep -oE '[0-9]+' | head -1)
+          if [ -z "$FLOOR" ]; then
+            echo "::error::Could not parse EL_SUITE_FLOOR from el_suite.rs — check the const declaration"
+            exit 1
+          fi
+          PASS=$(grep -E '^OWL 2 EL ratchet pass ' el-suite-conformance.out | awk '{print $6}' | head -1)
+          echo "OWL 2 EL classification pass: ${PASS:-unknown} (floor: $FLOOR)"
+          [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::OWL 2 EL classification regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
       - name: Upload report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
