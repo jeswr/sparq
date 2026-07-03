@@ -33,6 +33,11 @@ criteria = "safe-to-deploy"
 version = "1.1.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.anstyle]]
+version = "1.0.14"
+criteria = "safe-to-run"
+notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+
 [[exemptions.anyhow]]
 version = "1.0.102"
 criteria = "safe-to-deploy"
@@ -181,6 +186,21 @@ criteria = "safe-to-deploy"
 version = "0.4.45"
 criteria = "safe-to-deploy"
 
+[[exemptions.clap]]
+version = "4.6.1"
+criteria = "safe-to-run"
+notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+
+[[exemptions.clap_builder]]
+version = "4.6.0"
+criteria = "safe-to-run"
+notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+
+[[exemptions.clap_lex]]
+version = "1.1.0"
+criteria = "safe-to-run"
+notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+
 [[exemptions.cmake]]
 version = "0.1.58"
 criteria = "safe-to-deploy"
@@ -232,6 +252,16 @@ criteria = "safe-to-deploy"
 [[exemptions.crc32fast]]
 version = "1.5.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.criterion]]
+version = "0.5.1"
+criteria = "safe-to-run"
+notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+
+[[exemptions.criterion-plot]]
+version = "0.5.0"
+criteria = "safe-to-run"
+notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
 
 [[exemptions.crossbeam-deque]]
 version = "0.8.6"
@@ -557,6 +587,11 @@ criteria = "safe-to-deploy"
 version = "2.12.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.is-terminal]]
+version = "0.4.17"
+criteria = "safe-to-run"
+notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+
 [[exemptions.itertools]]
 version = "0.14.0"
 criteria = "safe-to-deploy"
@@ -816,6 +851,21 @@ criteria = "safe-to-deploy"
 [[exemptions.pkg-config]]
 version = "0.3.33"
 criteria = "safe-to-deploy"
+
+[[exemptions.plotters]]
+version = "0.3.7"
+criteria = "safe-to-run"
+notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+
+[[exemptions.plotters-backend]]
+version = "0.3.7"
+criteria = "safe-to-run"
+notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+
+[[exemptions.plotters-svg]]
+version = "0.3.7"
+criteria = "safe-to-run"
+notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
 
 [[exemptions.pollster]]
 version = "0.4.0"
