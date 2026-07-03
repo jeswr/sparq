@@ -327,3 +327,37 @@ fn datetime_literal_truncates_subsecond_precision() {
     );
     assert_eq!(datetime_literal(base).value(), "2023-11-14T22:13:20Z");
 }
+
+// ── sq-qcnn.20: mutation-kill tests — assert EXACT provenance CONTENTS, not counts. [OPUS-4.8]
+
+/// The FNV-1a hash driving `mint()` must use XOR-then-multiply (`h ^= b`), not bit-OR
+/// (`h |= b`). The two operations produce different hash values because XOR can CLEAR bits
+/// that were previously set, whereas OR can only set them. A mutation replacing `^=` with
+/// `|=` produces a completely different 64-bit hash, yielding a different minted IRI.
+/// This test pins the EXACT minted activity/entity IRI for a known (fixed-clock) derivation
+/// so any change to the hash constant or operation is immediately caught. [OPUS-4.8]
+#[test]
+fn minted_iri_has_exact_known_value() {
+    // Fixed clock: UNIX_EPOCH + 1_700_000_000 s = 2023-11-14T22:13:20Z.
+    // Nanos = 1_700_000_000 * 1_000_000_000 = 0x17979cfe362a0000.
+    // FNV-1a (offset 0xcbf29ce484222325, prime 0x00000100000001b3) of the query below:
+    // → 0xc95c64ae92bd3485.
+    // Minted IRI = urn:sparq:prov:{role}:17979cfe362a0000-17979cfe362a0000-c95c64ae92bd3485.
+    let q = "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }";
+    let d = derive_construct(&g(), q, cfg()).unwrap();
+
+    // Exact activity IRI (role = "activity").
+    assert_eq!(
+        d.activity().as_str(),
+        "urn:sparq:prov:activity:17979cfe362a0000-17979cfe362a0000-c95c64ae92bd3485",
+        "activity IRI must match the FNV-1a XOR hash of the query + fixed-clock nanos"
+    );
+    // Exact entity IRI (role = "entity").
+    assert_eq!(
+        d.entity().as_str(),
+        "urn:sparq:prov:entity:17979cfe362a0000-17979cfe362a0000-c95c64ae92bd3485",
+        "entity IRI must match the FNV-1a XOR hash of the query + fixed-clock nanos"
+    );
+    // Confirm the derived triples are the expected two age-renamed triples.
+    assert_eq!(d.triples().len(), 2, "CONSTRUCT should produce two triples");
+}

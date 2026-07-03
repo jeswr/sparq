@@ -1063,3 +1063,83 @@ fn sha384_relabels_differently_from_sha256_on_symmetric_cycle() {
     assert_eq!(labels256, expected);
     assert_eq!(labels384, expected);
 }
+
+// ---------------------------------------------------------------------------
+// 6) Direct tests for `canonicalize_graph_content_rdf12` and the `*_with`
+//    generic — the `sparq_core::Graph`-level entry points. [OPUS-4.8] sq-qcnn.14:
+//    these were the only public rdf12 functions without any test coverage.
+// ---------------------------------------------------------------------------
+
+/// Direct test for `canonicalize_graph_content_rdf12` — the Graph-level entry
+/// point for the non-standard triple-term profile. Verifies that a bnode in a
+/// loaded Graph is relabelled to `c14n0` and the canonical line is well-formed.
+/// Kills "return empty CanonicalGraph" and "skip graph_triples extraction" mutants.
+#[test]
+fn canonicalize_graph_content_rdf12_relabels_bnode() {
+    use sparq_core::Graph;
+    let g = Graph::load_str(
+        "_:b0 <http://ex/p> <http://ex/o> .\n",
+        "ntriples",
+    )
+    .expect("load_str");
+    let c = sparq_canon::canonicalize_graph_content_rdf12(&g).unwrap();
+    assert_eq!(c.lines.len(), 1, "one stored triple -> one canonical line");
+    assert!(
+        c.lines[0].contains("_:c14n0"),
+        "bnode must be relabelled to c14n0: {:?}",
+        c.lines[0]
+    );
+    assert!(
+        c.lines[0].contains("<http://ex/p>"),
+        "predicate must be preserved: {:?}",
+        c.lines[0]
+    );
+    assert_eq!(c.triples.len(), 1, "one line -> one canonical triple");
+    // The to_nquads join must produce the canonical doc.
+    let doc = c.to_nquads();
+    assert_eq!(doc, format!("{}\n", c.lines[0]));
+}
+
+/// `canonicalize_graph_content_rdf12` on an EMPTY graph must succeed and return
+/// an empty CanonicalGraph (mirrors the standard path's empty-dataset behaviour).
+#[test]
+fn canonicalize_graph_content_rdf12_empty_graph() {
+    use sparq_core::Graph;
+    let g = Graph::load_str("", "ntriples").expect("load_str");
+    let c = sparq_canon::canonicalize_graph_content_rdf12(&g).unwrap();
+    assert!(c.lines.is_empty(), "empty graph -> empty canonical form");
+    assert!(c.triples.is_empty());
+    assert_eq!(c.to_nquads(), "");
+}
+
+/// Direct test for `canonicalize_graph_content_rdf12_with::<D>` (hash-generic).
+/// Uses SHA-384. Asserts bnode relabelling and exact line count so mutations to
+/// the hash dispatch or the triples extraction are killed.
+#[test]
+fn canonicalize_graph_content_rdf12_with_sha384_relabels_bnode() {
+    use sparq_core::Graph;
+    let g = Graph::load_str(
+        "_:x <http://ex/q> <http://ex/r> .\n",
+        "ntriples",
+    )
+    .expect("load_str");
+    let c = sparq_canon::canonicalize_graph_content_rdf12_with::<Sha384>(&g).unwrap();
+    assert_eq!(c.lines.len(), 1, "one stored triple -> one canonical line");
+    assert!(
+        c.lines[0].contains("_:c14n0"),
+        "bnode must be relabelled to c14n0 under SHA-384: {:?}",
+        c.lines[0]
+    );
+    assert!(
+        c.lines[0].contains("<http://ex/q>"),
+        "predicate must be preserved: {:?}",
+        c.lines[0]
+    );
+    // SHA-256 (default) and SHA-384 agree on a single-bnode, single-triple graph
+    // because there is no shared-hash disambiguation (exactly one bnode).
+    let c256 = sparq_canon::canonicalize_graph_content_rdf12(&g).unwrap();
+    assert_eq!(
+        c.lines, c256.lines,
+        "single-bnode graph must canonicalize identically under any hash"
+    );
+}

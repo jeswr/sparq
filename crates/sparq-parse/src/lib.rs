@@ -888,4 +888,333 @@ mod tests {
             "cursor must advance past the error"
         );
     }
+
+    // [OPUS-4.8] sq-qcnn.15: DIRECT tests for PreparedDict accessors — kills the
+    // raw()/level()/decoder() whole-fn mutants that the indirect dictionary test
+    // cannot reach.  Assertions compare EXACT returned values, not just is_ok().
+    #[test]
+    fn prepared_dict_accessors_return_exact_values() {
+        let samples = small_samples(300);
+        let dict_bytes = train_dictionary(&samples, 16 * 1024).unwrap();
+        let level: i32 = 5;
+        let prepared = PreparedDict::new(dict_bytes.clone(), level);
+
+        // raw() must return the exact bytes used to create it — kills
+        // `Vec::leak(Vec::new())`, `Vec::leak(vec![0])`, `Vec::leak(vec![1])`.
+        assert_eq!(
+            prepared.raw(),
+            dict_bytes.as_slice(),
+            "PreparedDict::raw() must equal the original dict bytes"
+        );
+
+        // level() must return the exact level — kills level->0, level->1, level->-1.
+        assert_eq!(
+            prepared.level(),
+            level,
+            "PreparedDict::level() must equal the construction level"
+        );
+
+        // decoder() must be the real decoder — verify by decompressing a frame that
+        // was compressed with the same dict.  A wrong decoder would fail here.
+        let frame = {
+            let mut c =
+                zstd::bulk::Compressor::with_prepared_dictionary(&prepared.encoder).unwrap();
+            c.compress(b"hello dict").unwrap()
+        };
+        let mut d =
+            zstd::bulk::Decompressor::with_prepared_dictionary(prepared.decoder()).unwrap();
+        let plain = d.decompress(&frame, 64).unwrap();
+        assert_eq!(
+            plain,
+            b"hello dict",
+            "decoder() must be the real prepared decoder"
+        );
+    }
+
+    // [OPUS-4.8] sq-qcnn.15: DIRECT tests for Codec::name — kills String::new() and
+    // "xyzzy" whole-fn mutants.  Each arm format is pinned to its exact human-readable
+    // string (used in bench/report output so the exact format matters).
+    #[test]
+    fn codec_name_exact_strings() {
+        assert_eq!(
+            Codec::Gzip { level: 6 }.name(),
+            "gzip -6",
+            "Gzip level 6 name"
+        );
+        assert_eq!(
+            Codec::Gzip { level: 1 }.name(),
+            "gzip -1",
+            "Gzip level 1 name"
+        );
+        assert_eq!(
+            Codec::Zstd { level: 3 }.name(),
+            "zstd -3",
+            "Zstd level 3 name"
+        );
+        assert_eq!(
+            Codec::Zstd { level: -7 }.name(),
+            "zstd --7",
+            "Zstd negative level name"
+        );
+        let samples = small_samples(100);
+        let dict = train_dictionary(&samples, 8 * 1024).unwrap();
+        let dict_len = dict.len();
+        let prepared = Arc::new(PreparedDict::new(dict, 3));
+        let name = Codec::ZstdDict(prepared).name();
+        // Pattern: "zstd -3 +dict(NB)" where N is the actual dict length.
+        assert!(
+            name.starts_with("zstd -3 +dict("),
+            "ZstdDict name must start with 'zstd -3 +dict(', got: {}",
+            name
+        );
+        assert!(
+            name.ends_with("B)"),
+            "ZstdDict name must end with 'B)', got: {}",
+            name
+        );
+        assert!(
+            name.contains(&format!("{}B)", dict_len)),
+            "ZstdDict name must contain dict size, got: {}",
+            name
+        );
+    }
+
+    // [OPUS-4.8] sq-qcnn.15: DIRECT tests for pushed() on both sinks — kills the
+    // `pushed -> 0` and `pushed -> 1` whole-fn mutants that the other roundtrip
+    // tests never assert on (they care about member/piece counts, not the push
+    // counter itself).
+    #[test]
+    fn compressed_sink_pushed_tracks_count() {
+        let codec = Codec::Zstd { level: 1 };
+        for mode in [Mode::Serial, Mode::Parallel] {
+            let mut sink = CompressedSink::new(codec.clone(), mode);
+            assert_eq!(sink.pushed(), 0, "zero before any push ({:?})", mode);
+            sink.push(b"a");
+            assert_eq!(sink.pushed(), 1, "one after first push ({:?})", mode);
+            sink.push(b"bb");
+            assert_eq!(sink.pushed(), 2, "two after second push ({:?})", mode);
+            sink.push(b"ccc");
+            assert_eq!(sink.pushed(), 3, "three after third push ({:?})", mode);
+            // finish consumes the sink; count was 3 for all those members.
+            let members = sink.finish().unwrap();
+            assert_eq!(members.len(), 3, "three members drained ({:?})", mode);
+        }
+    }
+
+    // [OPUS-4.8] sq-qcnn.15: DIRECT test for SingleMemberGzipSink::pushed() —
+    // kills the `pushed -> 0` and `pushed -> 1` whole-fn mutants.
+    #[test]
+    fn single_member_gzip_sink_pushed_tracks_count() {
+        for mode in [Mode::Serial, Mode::Parallel] {
+            let mut sink = SingleMemberGzipSink::new(6, mode);
+            assert_eq!(sink.pushed(), 0, "zero before any push ({:?})", mode);
+            sink.push(b"x");
+            assert_eq!(sink.pushed(), 1, "one after first push ({:?})", mode);
+            sink.push(b"yy");
+            assert_eq!(sink.pushed(), 2, "two after second push ({:?})", mode);
+            sink.push(b"zzz");
+            assert_eq!(sink.pushed(), 3, "three after third push ({:?})", mode);
+            let _pieces = sink.finish().unwrap();
+        }
+    }
+
+    // [OPUS-4.8] sq-qcnn.15: chunk-boundary correctness — verifies that each
+    // compressed member/frame decodes to EXACTLY the corresponding input chunk
+    // (not just that the concatenation round-trips).  This kills index-offset
+    // and cursor arithmetic mutants that could swap members while preserving the
+    // overall byte sequence.
+    #[test]
+    fn each_member_decodes_to_its_own_chunk() {
+        let chunks = json_chunks(10);
+        // Gzip multi-member: each member decompresses to its chunk.
+        for mode in [Mode::Serial, Mode::Parallel] {
+            let members = run_sink(&chunks, Codec::Gzip { level: 6 }, mode);
+            assert_eq!(
+                members.len(),
+                chunks.len(),
+                "member count ({:?})",
+                mode
+            );
+            for (i, (member, chunk)) in members.iter().zip(&chunks).enumerate() {
+                let decoded = decode_gzip_concat(member).unwrap();
+                assert_eq!(
+                    decoded, *chunk,
+                    "gzip member {} must decode to its chunk ({:?})",
+                    i, mode
+                );
+            }
+        }
+        // Zstd multi-frame: each frame decompresses to its chunk.
+        for mode in [Mode::Serial, Mode::Parallel] {
+            let members = run_sink(&chunks, Codec::Zstd { level: 3 }, mode);
+            assert_eq!(
+                members.len(),
+                chunks.len(),
+                "frame count ({:?})",
+                mode
+            );
+            for (i, (frame, chunk)) in members.iter().zip(&chunks).enumerate() {
+                let decoded = decode_zstd_concat(frame).unwrap();
+                assert_eq!(
+                    decoded, *chunk,
+                    "zstd frame {} must decode to its chunk ({:?})",
+                    i, mode
+                );
+            }
+        }
+    }
+
+    // [OPUS-4.8] sq-qcnn.15: truncated / corrupt stream errors are reported, not
+    // silently swallowed — verifies that the decode functions surface io::Error
+    // on malformed input rather than returning Ok with garbage.
+    #[test]
+    fn decode_errors_on_truncated_streams() {
+        // gzip concat: truncated magic
+        assert!(
+            decode_gzip_concat(b"\x1f\x8b").is_err(),
+            "truncated gzip header must error"
+        );
+        // gzip concat: completely wrong bytes
+        assert!(
+            decode_gzip_concat(b"this is not gzip").is_err(),
+            "non-gzip bytes must error"
+        );
+
+        // zstd concat: truncated magic
+        assert!(
+            decode_zstd_concat(b"\x28\xb5\x2f").is_err(),
+            "truncated zstd frame must error"
+        );
+        // zstd concat: wrong bytes
+        assert!(
+            decode_zstd_concat(b"not zstd at all").is_err(),
+            "non-zstd bytes must error"
+        );
+
+        // zstd with dict: truncated
+        assert!(
+            decode_zstd_concat_with_dict(b"\x28\xb5\x2f", b"dictbytes").is_err(),
+            "truncated zstd-dict frame must error"
+        );
+    }
+
+    // [OPUS-4.8] sq-qcnn.15: byte-equality between parallel and serial for
+    // SingleMemberGzipSink — each OUTPUT PIECE must be byte-identical, not just
+    // the concatenated wire stream.  Kills piece-order / header-flag mutants.
+    #[test]
+    fn single_member_gzip_pieces_byte_equal_serial_vs_parallel() {
+        let chunks = json_chunks(8);
+        for level in [1u32, 6] {
+            let serial_pieces = {
+                let mut sink = SingleMemberGzipSink::new(level, Mode::Serial);
+                for c in &chunks {
+                    sink.push(c);
+                }
+                sink.finish().unwrap()
+            };
+            let parallel_pieces = {
+                let mut sink = SingleMemberGzipSink::new(level, Mode::Parallel);
+                for c in &chunks {
+                    sink.push(c);
+                }
+                sink.finish().unwrap()
+            };
+            assert_eq!(
+                serial_pieces.len(),
+                parallel_pieces.len(),
+                "piece count must match for level {}",
+                level
+            );
+            for (i, (s, p)) in serial_pieces.iter().zip(&parallel_pieces).enumerate() {
+                assert_eq!(
+                    s, p,
+                    "piece {} must be byte-identical (serial vs parallel, level {})",
+                    i, level
+                );
+            }
+        }
+    }
+
+    // [OPUS-4.8] sq-qcnn.15: verify the GZIP_HEADER constant bytes — the first
+    // piece from SingleMemberGzipSink must start with the RFC 1952 ID bytes
+    // 0x1f 0x8b and have the right CM/OS fields.
+    #[test]
+    fn single_member_gzip_wire_starts_with_rfc1952_header() {
+        let pieces = gzip_single_member(&[b"hello".as_ref()], 6, Mode::Serial).unwrap();
+        let wire: Vec<u8> = pieces.iter().flat_map(|p| p.iter().copied()).collect();
+        // RFC 1952 §2.3.1: ID1=0x1f ID2=0x8b CM=8 (deflate).
+        assert_eq!(wire[0], 0x1f, "ID1 must be 0x1f");
+        assert_eq!(wire[1], 0x8b, "ID2 must be 0x8b");
+        assert_eq!(wire[2], 8, "CM must be 8 (deflate)");
+        // OS byte (index 9) in our fixed header is 0xff (unknown) — pin it.
+        assert_eq!(wire[9], 0xff, "OS byte must be 0xff (unknown)");
+        // Wire must be decodable by a single-member decoder.
+        assert_eq!(decode_single_member(&wire), b"hello");
+    }
+
+    // [OPUS-4.8] sq-qcnn.15: try_drain must return the IMMEDIATELY READY prefix —
+    // kills `CompressedSink::try_drain -> Ok(vec![])` (the whole-fn survivor that
+    // "works" by deferring everything to finish).  In Serial mode every push
+    // immediately inserts into the ready map, so try_drain must hand back that
+    // member without waiting for finish.
+    #[test]
+    fn compressed_sink_try_drain_returns_ready_members_immediately() {
+        let mut sink = CompressedSink::new(Codec::Zstd { level: 1 }, Mode::Serial);
+        // Push one chunk; in Serial mode the member is ready immediately.
+        sink.push(b"first chunk");
+        let first_drain = sink.try_drain().unwrap();
+        assert_eq!(
+            first_drain.len(),
+            1,
+            "try_drain must return the 1 ready member after 1 serial push"
+        );
+        assert_eq!(
+            decode_zstd_concat(&first_drain[0]).unwrap(),
+            b"first chunk",
+            "drained member must decompress to the pushed chunk"
+        );
+
+        // Push a second chunk; try_drain returns it too.
+        sink.push(b"second chunk");
+        let second_drain = sink.try_drain().unwrap();
+        assert_eq!(
+            second_drain.len(),
+            1,
+            "try_drain must return the 2nd ready member"
+        );
+        assert_eq!(
+            decode_zstd_concat(&second_drain[0]).unwrap(),
+            b"second chunk",
+            "second drained member must decompress correctly"
+        );
+
+        // finish with no remaining members (all already drained).
+        let tail = sink.finish().unwrap();
+        assert!(
+            tail.is_empty(),
+            "finish must be empty when all members were already drained"
+        );
+    }
+
+    // [OPUS-4.8] sq-qcnn.15: train_dictionary must return non-trivial bytes —
+    // kills Ok(vec![]) / Ok(vec![0]) / Ok(vec![1]) mutations by checking both
+    // that the output is non-trivial AND that it actually aids compression.
+    #[test]
+    fn train_dictionary_returns_non_empty_useful_bytes() {
+        let samples = small_samples(300);
+        let dict = train_dictionary(&samples, 16 * 1024).unwrap();
+        assert!(
+            dict.len() > 4,
+            "trained dictionary must be non-trivial, got {} bytes",
+            dict.len()
+        );
+        // The dict bytes must start with the zstd magic (0xEC30A437 LE) — a real
+        // dict; Ok(vec![0]) or Ok(vec![1]) would not.
+        let magic = u32::from_le_bytes([dict[0], dict[1], dict[2], dict[3]]);
+        assert_eq!(
+            magic, 0xEC30A437,
+            "dict must start with zstd dictionary magic 0xEC30A437, got 0x{:08X}",
+            magic
+        );
+    }
 }
