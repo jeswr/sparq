@@ -28,3 +28,13 @@
   crate: "sparq-reason"
   features: "substrate-join"
   test: true
+
+# [FABLE-5] sq-pbz04.1.2: the shared substrate-compare seam (substrate seam 3 — the
+# reasoner-side CompareTerm adoption for dictionary ids). This leg builds + tests +
+# clippies the feature-ON state: the comparator unit tests AND tests/compare_parity.rs
+# (the REAL-engine `ORDER BY` byte-identity oracle — a `required-features` target that
+# would otherwise run in NO CI lane, the exact gap the substrate-join leg above closed).
+- name: "sparq-reason (substrate-compare)"
+  crate: "sparq-reason"
+  features: "substrate-compare"
+  test: true

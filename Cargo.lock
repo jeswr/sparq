@@ -4057,6 +4057,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "smallvec",
  "sparq-core",
+ "sparq-engine",
  "sparq-substrate",
 ]
 
