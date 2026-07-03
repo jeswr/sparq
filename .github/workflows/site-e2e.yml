@@ -133,5 +133,12 @@ jobs:
       - name: Build spec fragments (Typst → src/generated/specs)
         run: npm run build-specs
 
+      # [SONNET-4.6] sq-ymr2e.8 — pre-bake paper HTML fragments so e2e/surface-sweep.spec.ts
+      # sees the REAL in-site paper render (src/generated/papers/<slug>.html) rather than the
+      # "not built yet" placeholder. Mirrors the build-specs step above. The paper HTML uses
+      # the same paper-evidence.json evidence injection as the PDF build.
+      - name: Build paper fragments (Typst → src/generated/papers)
+        run: npm run build-papers
+
       - name: ZK prover pre-warm smoke test + site e2e (headless Chromium)
         run: npm run test:e2e
