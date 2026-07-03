@@ -1,0 +1,101 @@
+# ci-select — the change-based test-selection pre-job (bead sq-fmx4u.3, epic
+# sq-fmx4u). [FABLE-5]
+#
+# WHAT: one cheap reusable job that computes the AFFECTED CRATE CLOSURE for this
+# revision pair (scripts/ci_select.py — design research/change-based-test-selection.md
+# §3/§4) and exposes it as outputs, so the wide per-crate lanes in ci.yml and the
+# opt-in legs in feature-matrix.yml can be skipped/narrowed when neither their crate
+# nor its transitive dependency closure changed. `needs:` cannot span workflows, so
+# each consuming workflow calls this file as a local reusable workflow (`uses:`) —
+# ONE selector definition, one job instance per calling workflow.
+#
+# OUTPUTS (all produced by scripts/ci_select.py; empty/missing => downstream guards
+# RUN, never skip — design §4.3 fail-closed):
+#   mode      — "selected" | "full" | "shadow". Guards skip ONLY on "selected".
+#   affected  — JSON array of affected workspace-member names. Guards test
+#               membership with contains(affected, '"<crate>"') — the quote
+#               delimiters prevent `sparq-core` matching inside `sparq-core-foo`.
+#   filterset — nextest filterset ("package(a) + package(b)") for NARROWING the
+#               cross-crate bulk shards (they are never skipped, design §5.2).
+#
+# SHADOW MODE (design §6.4 — the sq-fmx4u.5 rollout): DEFAULT-ON. Until the repo
+# variable CI_SELECT_MODE is set to the literal string "enforce", the selector runs
+# with --shadow: it computes + reports the would-be selection in the step summary
+# but emits mode=shadow, so every guard's `mode != 'selected'` disjunct is true and
+# NOTHING is skipped. Fail-safe by construction: an unset/typo'd variable means
+# shadow (full matrix). Bead sq-fmx4u.5 flips enforcement after the shadow window.
+#
+# FAIL-CLOSED CONTRACT (design §4.3):
+#   * the selector traps ALL internal errors => mode=full, exit 0 (this job stays
+#     green and the full matrix runs — a selector bug degrades to the status quo);
+#   * if THIS JOB hard-fails anyway (checkout/runner infrastructure), its needs-
+#     dependents in the calling workflow are SKIPPED and the ci-summary gate goes
+#     RED — scripts/ci_summary_gate.py requires every "change-based test selection"
+#     check-run to conclude success before any skipped sibling counts as satisfied;
+#   * an empty/missing output satisfies every guard's `mode != 'selected'` first
+#     disjunct => RUN.
+#
+# The job name below carries the phrase "change-based test selection" — that is the
+# detection contract with scripts/ci_summary_gate.py (SELECT_RE); the wiring test
+# scripts/tests/test_ci_select_wiring.py pins the two together. Do NOT add the words
+# "advisory"/"informational" to any name here (they would un-gate the check).
+name: ci-select
+
+on:
+  workflow_call:
+    outputs:
+      mode:
+        description: "selected | full | shadow (skip only on 'selected')"
+        value: ${{ jobs.select.outputs.mode }}
+      affected:
+        description: "JSON array of affected workspace-member names"
+        value: ${{ jobs.select.outputs.affected }}
+      filterset:
+        description: "nextest filterset over the affected members (bulk-shard narrowing)"
+        value: ${{ jobs.select.outputs.filterset }}
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    name: select (change-based test selection)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.sel.outputs.mode }}
+      affected: ${{ steps.sel.outputs.affected }}
+      filterset: ${{ steps.sel.outputs.filterset }}
+    steps:
+      # Full history so the merge-base for the three-dot diff (base...head) is
+      # always resolvable; an unfetchable base fail-closes to mode=full anyway.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Compute the affected crate closure (scripts/ci_select.py)
+        id: sel
+        env:
+          # cargo metadata resolves the registry index; same transient-network
+          # hardening as every other lane (ci.yml header note).
+          CARGO_NET_RETRY: "10"
+          EVENT: ${{ github.event_name }}
+          # pull_request: PR base/head. merge_group: the queue entry's target-tip
+          # base_sha/head_sha (the diff is then the union of queued content — sound
+          # per design §3.1/P8). Exactly one pair is non-empty per event.
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          # The sq-fmx4u.5 enforcement flip: shadow (report-only) unless the repo
+          # variable CI_SELECT_MODE is exactly "enforce".
+          CI_SELECT_MODE: ${{ vars.CI_SELECT_MODE }}
+        run: |
+          set -euo pipefail
+          args=(--event "$EVENT")
+          case "$EVENT" in
+            pull_request|merge_group) args+=(--base "$BASE" --head "$HEAD") ;;
+          esac
+          if [ "${CI_SELECT_MODE:-}" != "enforce" ]; then
+            args+=(--shadow)
+          fi
+          python3 scripts/ci_select.py "${args[@]}"
