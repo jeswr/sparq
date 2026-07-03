@@ -123,8 +123,11 @@ pub struct Suite {
 /// * inference 1967 — `ci.yml` job `inference-conformance` (`RATCHET=1967`).
 /// * SHACL core 98 — `sparq-shacl` `w3c_core.rs` `BASELINE_PASS = 98`.
 /// * SHACL-SPARQL 5 — `sparq-shacl` `w3c_sparql.rs` `SHACL_SPARQL_FLOOR = 5`.
-/// * OGC GeoSPARQL 158 — `sparq-geo` `ogc_compliance_ratchet.rs`
-///   `OGC_RATCHET_FLOOR = 158` (sq-cbe4t raised it 119 -> 158).
+/// * OGC GeoSPARQL 197 — `sparq-geo` `ogc_compliance_ratchet.rs`
+///   `OGC_RATCHET_FLOOR = 197` (sq-cbe4t raised it 119 -> 158;
+///   sq-lk3aw.1 raised it 158 -> 197: 39 net-new assertions covering
+///   edge-adjacent polygons / disjoint line+polygon / parallel lines /
+///   point-on-line / and multi-pair rcc8/eh disjoint cells).
 /// * OGC GeoSPARQL query-rewrite 38 — `sparq-geo` `ogc_query_rewrite_ratchet.rs`
 ///   `OGC_QUERY_REWRITE_FLOOR = 38` (sq-wf9qg; opt-in `geosparql_rewrite` feature;
 ///   topology PROPERTY forms answered via the rewrite, MEASURED pass count).
@@ -255,7 +258,10 @@ pub const SUITES: &[Suite] = &[
         // assertions (reverse-order/symmetry coverage + MULTI* operands). The
         // crate-local `OGC_RATCHET_FLOOR` const moved in lock-step; the floor-sync
         // guard (`tests/scoreboard_floors.rs`) pins the two together.
-        ratchet_floor: 158,
+        // [SONNET-4.6] sq-lk3aw.1 — raised 158 -> 197: 39 more net-new assertions
+        // (edge-adjacent polygons / disjoint line+polygon / parallel lines /
+        // point-on-line / multi-pair rcc8/eh disjoint cells).
+        ratchet_floor: 197,
         floor_basis: "pass",
         // [OPUS-4.8] sq-cbe4t — DISTANCE-APPROXIMATION HONESTY NOTE. This topology
         // ratchet is exact DE-9IM (no approximation). The `geof:distance` METRIC
