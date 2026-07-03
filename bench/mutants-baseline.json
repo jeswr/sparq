@@ -33,12 +33,12 @@
       "unviable": 5
     },
     "sparq-parse": {
-      "caught": 25,
-      "caught_pct": 72.09,
-      "ceiling": 14,
-      "measured_surviving": 12,
-      "timeout": 6,
-      "unviable": 0
+      "caught": 73,
+      "caught_pct": 83.17,
+      "ceiling": 19,
+      "measured_surviving": 17,
+      "timeout": 11,
+      "unviable": 1
     },
     "sparq-prov": {
       "caught": 155,
