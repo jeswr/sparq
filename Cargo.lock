@@ -3859,6 +3859,8 @@ dependencies = [
  "sparq-core",
  "sparq-engine",
  "sparq-fedplan",
+ "sparq-server",
+ "tokio",
  "ureq",
 ]
 
