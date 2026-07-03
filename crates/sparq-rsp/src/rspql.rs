@@ -59,6 +59,9 @@
 //!   `"NOW-relative window bounds … are not supported; use RANGE/STEP"`.
 //! * **`SLIDING RANGE r` without a `STEP`** — rejected with
 //!   `"SLIDING window declaration requires a STEP duration"`.
+//! * **`TUMBLING RANGE r STEP s`** — rejected with a clear error: `TUMBLING`
+//!   implies `step == range`; a contradictory `STEP` clause is not allowed.
+//!   Use `SLIDING RANGE r STEP s` for an explicit sliding step. [SONNET-4.6]
 //! * **Named-window *variables*** (`FROM NAMED WINDOW ?w …`, `WINDOW ?w { … }`)
 //!   — RSP-QL permits a window variable ranging over declared windows; we
 //!   require a concrete window IRI (the common case). A `WINDOW ?w` is rejected
@@ -309,6 +312,9 @@ fn parse_one_window_decl<'a>(
 ///   `WindowSpec::count` builder instead.
 /// - `NOW …` — NOW-relative window bounds; use `RANGE/STEP`.
 /// - `SLIDING RANGE r` without `STEP` — `STEP` is required for `SLIDING`.
+/// - `TUMBLING RANGE r STEP s` — `STEP` is contradictory with `TUMBLING`
+///   (tumbling implies `step == range`); use `SLIDING RANGE r STEP s` instead.
+///   [SONNET-4.6]
 ///
 /// Returns the parsed [`WindowSpec`] and the text after the operator.
 fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
@@ -340,14 +346,16 @@ fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
 
     // TUMBLING RANGE r — explicit tumbling keyword (step == range).
     // SLIDING RANGE r STEP s — explicit sliding keyword (STEP required).
-    let (explicit_sliding, text) = if let Some(after) = keyword_prefix(text, "TUMBLING") {
+    // [SONNET-4.6] Track both flags: explicit_tumbling lets us reject TUMBLING + STEP.
+    let (explicit_tumbling, explicit_sliding, text) = if let Some(after) = keyword_prefix(text, "TUMBLING") {
         // TUMBLING: semantically identical to plain RANGE r (step = range).
-        (false, after.trim_start())
+        // An explicit STEP is contradictory and must be rejected (see below).
+        (true, false, after.trim_start())
     } else if let Some(after) = keyword_prefix(text, "SLIDING") {
         // SLIDING: a STEP is mandatory — reject without it (see below).
-        (true, after.trim_start())
+        (false, true, after.trim_start())
     } else {
-        (false, text)
+        (false, false, text)
     };
 
     let rest = keyword_prefix(text, "RANGE").ok_or(
@@ -357,6 +365,17 @@ fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
     let (range, rest) = take_duration(rest.trim_start())?;
     let rest_ws = rest.trim_start();
     let (spec, rest) = if let Some(after_step) = keyword_prefix(rest_ws, "STEP") {
+        // [SONNET-4.6] TUMBLING with an explicit STEP is contradictory: tumbling
+        // means step == range by definition. Reject rather than silently accepting
+        // an inconsistent spec.
+        if explicit_tumbling {
+            return Err(
+                "TUMBLING windows have step == range implicitly; \
+                 a STEP clause is not allowed with TUMBLING — \
+                 use SLIDING RANGE <dur> STEP <dur> for an explicit step"
+                    .into(),
+            );
+        }
         let (step, rest) = take_duration(after_step.trim_start())?;
         (WindowSpec::time(range, step), rest)
     } else if explicit_sliding {
@@ -367,7 +386,7 @@ fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
                 .into(),
         );
     } else {
-        // No STEP and no SLIDING keyword: tumbling (step == range).
+        // No STEP and not a SLIDING keyword: tumbling (step == range).
         (WindowSpec::time(range, range), rest_ws)
     };
     // Consume the matching closing bracket if we opened one.

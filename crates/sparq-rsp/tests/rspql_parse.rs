@@ -287,6 +287,44 @@ fn rejects_now_relative_bounds() {
     );
 }
 
+/// `TUMBLING RANGE r STEP s` must fail CLOSED with a clear error mentioning
+/// "TUMBLING" and "STEP" — a `STEP` clause is contradictory with `TUMBLING`
+/// (which already implies `step == range`). Silently accepting it would produce
+/// an inconsistent window spec. [SONNET-4.6]
+#[test]
+fn rejects_tumbling_with_explicit_step() {
+    let tumbling_step = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                         FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> \
+                         TUMBLING RANGE PT10S STEP PT5S";
+    let err = RspqlQuery::parse(tumbling_step).unwrap_err();
+    assert!(
+        err.to_lowercase().contains("tumbling"),
+        "expected error mentioning TUMBLING, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("step"),
+        "expected error mentioning STEP, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("sliding"),
+        "expected error hinting SLIDING alternative, got: {err}"
+    );
+
+    // Also rejected inside brackets.
+    let tumbling_step_br = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                            FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> \
+                            [TUMBLING RANGE 30 STEP 10]";
+    let err2 = RspqlQuery::parse(tumbling_step_br).unwrap_err();
+    assert!(
+        err2.to_lowercase().contains("tumbling"),
+        "expected error mentioning TUMBLING (bracketed), got: {err2}"
+    );
+    assert!(
+        err2.to_lowercase().contains("step"),
+        "expected error mentioning STEP (bracketed), got: {err2}"
+    );
+}
+
 /// `SLIDING RANGE r` without a following `STEP` must fail CLOSED with a clear
 /// error — a bare `SLIDING RANGE r` is ambiguous (what is the slide cadence?).
 #[test]
