@@ -239,10 +239,29 @@ pub fn d_value_key(lex: &str, dt: &str) -> Option<DValue> {
     if dt == RDF_LANG_STRING {
         return None; // language-tagged: keyed by (lex, lang) elsewhere, not here
     }
-    if dt == format!("{XSD}string")
-        || dt == format!("{XSD}normalizedString")
-        || dt == format!("{XSD}token")
-    {
+    if dt == format!("{XSD}string") {
+        // xsd:string: any Unicode string is in the lexical space (no restriction).
+        return Some(DValue::Str(lex.to_string()));
+    }
+    if dt == format!("{XSD}normalizedString") {
+        // [SONNET-4.6] sq-pbz04.6.1: normalizedString forbids TAB/LF/CR (XSD 1.1
+        // §3.3.2). A lexical form containing one is ill-formed → no D-value.
+        if lex.contains(['\t', '\n', '\r']) {
+            return None;
+        }
+        return Some(DValue::Str(lex.to_string()));
+    }
+    if dt == format!("{XSD}token") {
+        // [SONNET-4.6] sq-pbz04.6.1: token is the COLLAPSED form of
+        // normalizedString (XSD 1.1 §3.3.3): no TAB/LF/CR, no leading or trailing
+        // space, and no internal run of 2+ spaces. Anything else is ill-formed.
+        if lex.contains(['\t', '\n', '\r'])
+            || lex.starts_with(' ')
+            || lex.ends_with(' ')
+            || lex.contains("  ")
+        {
+            return None;
+        }
         return Some(DValue::Str(lex.to_string()));
     }
     if dt == format!("{XSD}boolean") {
@@ -343,19 +362,34 @@ fn parse_xsd_double(lex: &str) -> Option<f64> {
 }
 
 /// The integer-subtype range facet check: the value must be inside the bounded
-/// derived type's value space (e.g. `xsd:byte` is [-128, 127]). `xsd:long`/`int`/
-/// `short`/`byte` past i128 already failed to parse; the bounded ones below add the
-/// sign facets the XSD spec fixes for the un/signed derived integer types.
+/// derived type's value space (e.g. `xsd:byte` is [-128, 127]). [SONNET-4.6]
+/// sq-pbz04.6.1: every derived integer type carries BOTH its sign facet AND its
+/// magnitude bounds. A value like `"200"^^xsd:byte` parses fine as `i128` but is
+/// outside the `byte` value space, so it is ill-formed and must NOT be typed by
+/// rdfD1; likewise `"4294967296"^^xsd:unsignedInt` exceeds the `unsignedInt` upper
+/// bound. Only genuinely-unbounded `xsd:integer` (and any unrecognized-shaped IRI)
+/// falls through to the permissive `_` arm. Ranges use `RangeInclusive::contains`
+/// so the two-sided bound stays `clippy::manual_range_contains`-clean.
 fn integer_subtype_ok(dt: &str, v: i128) -> bool {
     let Some(local) = dt.strip_prefix(XSD) else {
         return true;
     };
     match local {
-        "nonNegativeInteger" | "unsignedLong" | "unsignedInt" | "unsignedShort"
-        | "unsignedByte" => v >= 0,
+        // Sign-only facets (no magnitude bound in the value space). [SONNET-4.6]
+        "nonNegativeInteger" => v >= 0,
         "positiveInteger" => v > 0,
         "nonPositiveInteger" => v <= 0,
         "negativeInteger" => v < 0,
+        // Bounded signed derived integers. [SONNET-4.6]
+        "long" => (i64::MIN as i128..=i64::MAX as i128).contains(&v),
+        "int" => (i32::MIN as i128..=i32::MAX as i128).contains(&v),
+        "short" => (-32768..=32767).contains(&v),
+        "byte" => (-128..=127).contains(&v),
+        // Bounded unsigned derived integers (lower bound 0 AND an upper bound). [SONNET-4.6]
+        "unsignedLong" => (0..=18446744073709551615_i128).contains(&v),
+        "unsignedInt" => (0..=4294967295).contains(&v),
+        "unsignedShort" => (0..=65535).contains(&v),
+        "unsignedByte" => (0..=255).contains(&v),
         _ => true,
     }
 }
@@ -513,6 +547,122 @@ mod tests {
         assert_eq!(
             added, 0,
             "ill-typed literal is not typed by rdfD1 (it is a clash, not a typing)"
+        );
+    }
+
+    // [SONNET-4.6] sq-pbz04.6.1: derived-integer magnitude facets. Each of these
+    // fails on the pre-fix `_ => true` / grouped-sign-only code (non-vacuous).
+    #[test]
+    fn byte_out_of_range_not_typed() {
+        // "200"^^xsd:byte is ill-formed: byte is [-128, 127]
+        // Bug: pre-fix code returns Some (wrongly typed)
+        assert!(d_value_key("200", &format!("{XSD}byte")).is_none(), "200 is outside xsd:byte");
+        assert!(d_value_key("-129", &format!("{XSD}byte")).is_none(), "-129 is outside xsd:byte");
+        // In-range values are well-formed
+        assert!(d_value_key("127", &format!("{XSD}byte")).is_some(), "127 is xsd:byte max");
+        assert!(d_value_key("-128", &format!("{XSD}byte")).is_some(), "-128 is xsd:byte min");
+        assert!(d_value_key("0", &format!("{XSD}byte")).is_some(), "0 is valid xsd:byte");
+    }
+
+    #[test]
+    fn short_out_of_range_not_typed() {
+        assert!(d_value_key("70000", &format!("{XSD}short")).is_none(), "70000 is outside xsd:short");
+        assert!(d_value_key("32767", &format!("{XSD}short")).is_some(), "32767 is xsd:short max");
+        assert!(d_value_key("-32768", &format!("{XSD}short")).is_some(), "-32768 is xsd:short min");
+    }
+
+    #[test]
+    fn unsigned_int_out_of_range_not_typed() {
+        assert!(
+            d_value_key("4294967296", &format!("{XSD}unsignedInt")).is_none(),
+            "4294967296 exceeds xsd:unsignedInt max"
+        );
+        assert!(
+            d_value_key("4294967295", &format!("{XSD}unsignedInt")).is_some(),
+            "4294967295 is xsd:unsignedInt max"
+        );
+        assert!(
+            d_value_key("-1", &format!("{XSD}unsignedInt")).is_none(),
+            "negative is outside xsd:unsignedInt"
+        );
+    }
+
+    #[test]
+    fn unsigned_byte_out_of_range_not_typed() {
+        assert!(
+            d_value_key("256", &format!("{XSD}unsignedByte")).is_none(),
+            "256 exceeds xsd:unsignedByte max"
+        );
+        assert!(
+            d_value_key("255", &format!("{XSD}unsignedByte")).is_some(),
+            "255 is xsd:unsignedByte max"
+        );
+        assert!(
+            d_value_key("0", &format!("{XSD}unsignedByte")).is_some(),
+            "0 is xsd:unsignedByte min"
+        );
+    }
+
+    // [SONNET-4.6] sq-pbz04.6.1: string-family lexical-space validation.
+    #[test]
+    fn token_lexical_space_validated() {
+        // " a"^^xsd:token has a leading space — illegal for token
+        // Bug: pre-fix code returns Some (wrongly typed)
+        assert!(
+            d_value_key(" a", &format!("{XSD}token")).is_none(),
+            "leading space is illegal for xsd:token"
+        );
+        assert!(
+            d_value_key("a ", &format!("{XSD}token")).is_none(),
+            "trailing space is illegal for xsd:token"
+        );
+        assert!(
+            d_value_key("a  b", &format!("{XSD}token")).is_none(),
+            "double space is illegal for xsd:token"
+        );
+        assert!(
+            d_value_key("a\tb", &format!("{XSD}token")).is_none(),
+            "tab is illegal for xsd:token"
+        );
+        // Valid tokens
+        assert!(
+            d_value_key("a", &format!("{XSD}token")).is_some(),
+            "simple word is valid xsd:token"
+        );
+        assert!(
+            d_value_key("a b", &format!("{XSD}token")).is_some(),
+            "two words with single space is valid xsd:token"
+        );
+        assert!(
+            d_value_key("", &format!("{XSD}token")).is_some(),
+            "empty string is valid xsd:token"
+        );
+    }
+
+    #[test]
+    fn normalized_string_lexical_space_validated() {
+        // normalizedString forbids \t, \n, \r
+        // Bug: pre-fix code returns Some (wrongly typed)
+        assert!(
+            d_value_key("a\tb", &format!("{XSD}normalizedString")).is_none(),
+            "tab is illegal for xsd:normalizedString"
+        );
+        assert!(
+            d_value_key("a\nb", &format!("{XSD}normalizedString")).is_none(),
+            "newline is illegal for xsd:normalizedString"
+        );
+        assert!(
+            d_value_key("a\rb", &format!("{XSD}normalizedString")).is_none(),
+            "carriage-return is illegal for xsd:normalizedString"
+        );
+        // Valid normalizedString: leading/trailing spaces and double spaces ARE allowed
+        assert!(
+            d_value_key(" a", &format!("{XSD}normalizedString")).is_some(),
+            "leading space is valid for xsd:normalizedString"
+        );
+        assert!(
+            d_value_key("a  b", &format!("{XSD}normalizedString")).is_some(),
+            "double space is valid for xsd:normalizedString (only forbidden by token)"
         );
     }
 }
