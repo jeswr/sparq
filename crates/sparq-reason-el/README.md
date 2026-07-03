@@ -58,19 +58,27 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   reduces the full closure to the **direct (immediate) subsumers**, collapses **equivalence
   cliques**, and `classify_hasse_graph` emits the COMPACT taxonomy (direct `rdfs:subClassOf` +
   `owl:equivalentClass`) — O(N) Hasse edges on a deep chain instead of the O(N²) full closure.
+- **Concrete domains — CR7–CR9** *(opt-in `cdomain` feature)* — faceted datatype restrictions
+  (`owl:onDatatype` + `owl:withRestrictions` with min/max{In,Ex}clusive) over `xsd:decimal` /
+  `xsd:integer` and its derived types (implicit bounds included), plus exact-numeric
+  `DataHasValue` / singleton `DataOneOf` points — decided EXACTLY on the shared
+  `sparq_substrate::numeric` value tower (never lossy f64). An **empty** range makes the class
+  unsatisfiable (clash via CR5); a **proven** value-space containment threads subsumptions
+  through data-property existentials. Anything not exactly decidable (pattern/length/digit
+  facets, float/double or non-numeric bases/values, `owl:onDataRange`, complement) is
+  **deferred, never guessed** — a wrong sat/unsat verdict would be an unsound entailment.
 - **Honest fragment reporting** — class axioms outside the active fragment are counted in
-  `Report::skipped_axioms`, never silently misapplied. This includes the **deliberately-deferred
-  EL fragment**: *concrete domains* (`owl:onDataRange` / `owl:withRestrictions` /
-  `owl:onDatatype`, and the literal-valued `hasValue`/`oneOf` = `DataHasValue`/`DataOneOf`,
-  **CR7–CR9**) are NOT applied — so a user sees the gap rather than a silent wrong answer.
+  `Report::skipped_axioms`, never silently misapplied. Without `cdomain` that includes ALL
+  concrete-domain shapes; with it, only the unsupported remainder above.
 
 **Scope:** EL+⊥ + safe nominals/CR6 (E1, default), EL+ role reasoning (E2, `rbox`), transitive
-reduction (E3, `hasse`). **Deferred** (surfaced in `skipped_axioms`): concrete domains (CR7–CR9);
-concurrency is **E4**. Constructs outside EL entirely (union / complement / `allValuesFrom` /
-cardinality / multi-individual `oneOf`) are also skipped. The classifier is **single-threaded**. Enable with
-`sparq-reason-el = { version = "0.1", features = ["rbox", "hasse"] }`. The `snomed_go_scale_bench`
-example (`--features rbox,hasse`) is a *relative* (dimensionless, no hard-coded ms) end-to-end
-scaling check confirming normalise + RBox + Hasse compose with no hidden quadratic.
+reduction (E3, `hasse`), exact-numeric concrete domains (CR7–CR9, `cdomain`); concurrency is
+**E4**. Constructs outside EL entirely (union / complement / `allValuesFrom` / cardinality /
+multi-individual `oneOf`) are always skipped. The classifier is **single-threaded**. Enable with
+`sparq-reason-el = { version = "0.1", features = ["rbox", "hasse", "cdomain"] }`. The
+`snomed_go_scale_bench` example (`--features rbox,hasse`) is a *relative* (dimensionless, no
+hard-coded ms) end-to-end scaling check confirming normalise + RBox + Hasse compose with no
+hidden quadratic.
 
 ## 📚 Learn more
 

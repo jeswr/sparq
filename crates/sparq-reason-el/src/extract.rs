@@ -23,6 +23,8 @@
 // ignored" count.
 
 use crate::normal::{Expr, Names, Normal, Normalizer, BOTTOM, TOP};
+#[cfg(feature = "cdomain")]
+use crate::normal::Concept;
 #[cfg(feature = "rbox")]
 use crate::normal::{Role, RoleAxiom};
 use crate::Report;
@@ -51,13 +53,17 @@ const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
 /// `None` so the enclosing axiom is recorded as a skip rather than the node being mistaken for
 /// an opaque named class.
 ///
-/// One family marks the still-DEFERRED EL fragment (spike §"Hard parts" / the EL track of
-/// `research/owl2-el-ql-reasoning-spike.md`): OWL 2 EL admits **concrete domains** (CR7–CR9),
-/// which this classifier does NOT yet apply. Rather than silently treat those nodes as opaque
-/// classes (which would drop their real semantics and risk a wrong answer), we route them to
-/// `skipped_axioms`:
+/// One family marks the concrete-domain fragment (CR7–CR9, spike §"Hard parts" / the EL
+/// track of `research/owl2-el-ql-reasoning-spike.md`). Rather than silently treat those
+/// nodes as opaque classes (which would drop their real semantics and risk a wrong
+/// answer), we route them to `skipped_axioms`:
 ///   * `onDataRange` / `withRestrictions` / `onDatatype` / `datatypeComplementOf` — CONCRETE
-///     DOMAINS (datatype restrictions / faceted ranges); the deferred CR7–CR9 surface.
+///     DOMAINS (datatype restrictions / faceted ranges). [FABLE-5] sq-pbz04.2.2: these STAY
+///     markers even under `cdomain` — the feature does not weaken the skip default; it
+///     RESCUES exactly the nodes `resolve_cdomain` proves supported (an exact-numeric
+///     faceted `onDatatype`/`withRestrictions` range) via the `decode` interception, while
+///     `onDataRange` (qualified-cardinality vocabulary, outside EL) and
+///     `datatypeComplementOf` (negation) are never rescued.
 ///
 /// [FABLE-5] sq-pbz04.2.1: `oneOf`/`hasValue` are NO LONGER blanket markers — the safe-nominal
 /// slice (a SINGLETON object `owl:oneOf` and an object-valued `owl:hasValue`) is now decoded
@@ -104,6 +110,13 @@ struct Vocab {
     rdf_nil: Id,
     thing: Id,
     nothing: Id,
+    /// [FABLE-5] sq-pbz04.2.2: the concrete-domain (CR7–CR9) vocabulary. Both predicates
+    /// STAY in [`NON_EL_MARKERS`] (so the default skip path is untouched); under `cdomain`
+    /// their structure is ALSO collected and supported ranges are rescued in [`decode`].
+    #[cfg(feature = "cdomain")]
+    on_datatype: Id,
+    #[cfg(feature = "cdomain")]
+    with_restrictions: Id,
     /// Predicate ids whose presence on a class node makes it non-EL (see [`NON_EL_MARKERS`]).
     non_el: FxHashSet<Id>,
     /// RBox vocabulary — only consulted under the `rbox` feature (E2).
@@ -135,6 +148,10 @@ impl Vocab {
             rdf_nil: look(format!("{}nil", RDF)),
             thing: look(format!("{}Thing", OWL)),
             nothing: look(format!("{}Nothing", OWL)),
+            #[cfg(feature = "cdomain")]
+            on_datatype: look(format!("{}onDatatype", OWL)),
+            #[cfg(feature = "cdomain")]
+            with_restrictions: look(format!("{}withRestrictions", OWL)),
             non_el: NON_EL_MARKERS
                 .iter()
                 .map(|m| look(format!("{}{}", OWL, m)))
@@ -167,6 +184,29 @@ struct Idx {
     one_of_head: FxHashMap<Id, Id>, // class node -> owl:oneOf list head (resolved after the pass)
     one_of: FxHashMap<Id, Option<Id>>, // class node -> the SINGLETON individual (None = skip)
     has_value: FxHashMap<Id, Id>,   // restriction node -> owl:hasValue INDIVIDUAL (never a literal)
+    // [FABLE-5] sq-pbz04.2.2 — concrete domains (CR7–CR9), collected only under `cdomain`.
+    // The RAW structure (filled during the pass; candidate nodes stay non_el-marked so an
+    // UNSUPPORTED shape keeps the exact pre-cdomain skip):
+    #[cfg(feature = "cdomain")]
+    cd_on_datatype: FxHashMap<Id, Id>, // range node -> owl:onDatatype base datatype
+    #[cfg(feature = "cdomain")]
+    cd_with_restrictions: FxHashMap<Id, Id>, // range node -> owl:withRestrictions list head
+    #[cfg(feature = "cdomain")]
+    cd_has_value_lit: FxHashMap<Id, Id>, // restriction node -> LITERAL owl:hasValue object
+    #[cfg(feature = "cdomain")]
+    cd_one_of_lit: FxHashMap<Id, Id>, // enumeration node -> its SINGLETON literal member
+    // [FABLE-5] soundness guard (PR #1434 adversarial-verify fix): nodes carrying a non-EL
+    // marker OTHER than onDatatype/withRestrictions (unionOf, complementOf, allValuesFrom,
+    // cardinality, hasSelf, onDataRange, datatypeComplementOf). Such a node must NEVER be
+    // rescued as a concrete-domain range/point — decoding just its range half would DROP the
+    // foreign structure and STRENGTHEN an LHS axiom. `resolve_cdomain` refuses these.
+    #[cfg(feature = "cdomain")]
+    cd_foreign_marker: FxHashSet<Id>,
+    // The RESOLVED supported nodes (filled by `resolve_cdomain` before axiom decoding):
+    #[cfg(feature = "cdomain")]
+    cd_range: FxHashMap<Id, Concept>, // supported range / DataOneOf node -> range concept
+    #[cfg(feature = "cdomain")]
+    cd_exists: FxHashMap<Id, Concept>, // supported DataHasValue restriction node -> point concept
     #[cfg(feature = "rbox")]
     sub_property: Vec<(Id, Id)>, // (r, s) from rdfs:subPropertyOf — a role inclusion r ⊑ s
     #[cfg(feature = "rbox")]
@@ -213,9 +253,29 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
                 idx.has_value.insert(s, o);
             } else {
                 idx.non_el_node.insert(s);
+                // [FABLE-5] sq-pbz04.2.2: under `cdomain` a SUPPORTED exact-numeric
+                // literal value (DataHasValue = ∃p.{v}, a point range) is rescued by
+                // `resolve_cdomain`/`decode`; anything else keeps the skip above.
+                #[cfg(feature = "cdomain")]
+                idx.cd_has_value_lit.insert(s, o);
             }
         } else if v.non_el.contains(&p) {
             idx.non_el_node.insert(s);
+            // [FABLE-5] sq-pbz04.2.2: under `cdomain` ALSO record the faceted-datatype
+            // structure; nodes resolving to a SUPPORTED range are rescued in `decode`
+            // (unsupported ones keep the exact pre-cdomain skip path above).
+            #[cfg(feature = "cdomain")]
+            if p == v.on_datatype {
+                idx.cd_on_datatype.insert(s, o);
+            } else if p == v.with_restrictions {
+                idx.cd_with_restrictions.insert(s, o);
+            } else {
+                // [FABLE-5] soundness (PR #1434 adversarial-verify fix): ANY other non-EL
+                // marker (unionOf / complementOf / allValuesFrom / cardinality / hasSelf /
+                // onDataRange / datatypeComplementOf) POISONS the node as a concrete-domain
+                // candidate — rescuing its range half would silently drop this structure.
+                idx.cd_foreign_marker.insert(s);
+            }
         } else {
             #[cfg(feature = "rbox")]
             extract_rbox_triple(&mut idx, &v, s, p, o);
@@ -227,21 +287,36 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
     // nominal {a}; an empty/multi-member list (a disjunction — outside EL) or a literal member
     // (DataOneOf — a concrete-domain range, deferred CR7–CR9) resolves to None so the enclosing
     // axiom is recorded as a skip, never misapplied.
-    let resolved: Vec<(Id, Option<Id>)> = idx
+    let resolved: Vec<(Id, Option<Id>, Option<Id>)> = idx
         .one_of_head
         .iter()
         .map(|(&node, &head)| {
             let members = decode_list(head, &idx, &v);
-            let single = match members[..] {
-                [m] if is_individual(dict, m) => Some(m),
-                _ => None,
+            // [FABLE-5] sq-pbz04.2.2: a singleton NON-individual member (third slot) is
+            // DataOneOf — a concrete-domain point range, resolvable under `cdomain` when
+            // it is a supported exact-numeric literal; it stays a skip otherwise.
+            let (single, lit) = match members[..] {
+                [m] if is_individual(dict, m) => (Some(m), None),
+                [m] => (None, Some(m)),
+                _ => (None, None),
             };
-            (node, single)
+            (node, single, lit)
         })
         .collect();
-    idx.one_of.extend(resolved);
+    for (node, single, _lit) in resolved {
+        idx.one_of.insert(node, single);
+        #[cfg(feature = "cdomain")]
+        if let Some(l) = _lit {
+            idx.cd_one_of_lit.insert(node, l);
+        }
+    }
 
     let mut names = Names::new();
+    // [FABLE-5] sq-pbz04.2.2 (CR7–CR9): resolve the concrete-domain candidates BEFORE
+    // decoding axioms, so `decode` can route supported faceted-range / point nodes to
+    // their minted concepts. Returns the CR7/CR8 axioms appended after normalization.
+    #[cfg(feature = "cdomain")]
+    let cd_axioms = resolve_cdomain(dict, triples, &mut idx, &v, &mut names);
     // Pre-seed ⊤/⊥ so the recognisers route owl:Thing/owl:Nothing dict ids to TOP/BOTTOM.
     let mut report = Report::default();
     let mut norm = Normalizer::new(&mut names);
@@ -282,6 +357,16 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
     }
 
     let axioms = norm.finish();
+    // [FABLE-5] sq-pbz04.2.2: append the concrete-domain axioms — `d ⊑ ⊥` for an EMPTY
+    // value space (CR7; the clash then reaches classes with an `∃p.d` obligation via CR5)
+    // and `d1 ⊑ d2` for every PROVEN value-space containment (CR8/CR9, threaded through
+    // data-property existentials by the ordinary CR1/CR3/CR4 machinery).
+    #[cfg(feature = "cdomain")]
+    let axioms = {
+        let mut axioms = axioms;
+        axioms.extend(cd_axioms);
+        axioms
+    };
 
     // RBox normalization (E2): role inclusions + property chains + transitive roles into
     // [`RoleAxiom`] forms. Done here while `names` is still borrowable so role ids agree with
@@ -297,6 +382,83 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Extracted {
         #[cfg(feature = "rbox")]
         role_axioms,
     }
+}
+
+/// [FABLE-5] sq-pbz04.2.2 (CR7–CR9): pre-screens the concrete-domain candidates and hands
+/// the CLEAN sets to [`crate::cdomain::resolve`], storing the node → concept maps back into
+/// `idx` for [`decode`] and returning the CR7/CR8 axioms.
+///
+/// STRICTNESS GUARD (soundness): a candidate node carrying ANY other class-expression
+/// structure — a restriction part, an intersection, an object enumeration, a mixed
+/// range/enumeration/hasValue shape, or ([FABLE-5] PR #1434 adversarial-verify fix) any
+/// OTHER non-EL marker (`owl:unionOf`, `owl:complementOf`, `owl:allValuesFrom`,
+/// cardinality, `owl:hasSelf`, `owl:onDataRange`, `owl:datatypeComplementOf`, tracked in
+/// `cd_foreign_marker`) — is REFUSED here and falls back to the ordinary non-EL skip.
+/// Decoding just its range half would DROP that structure and STRENGTHEN the asserted
+/// axiom in a subclass (LHS) position, which is unsound.
+#[cfg(feature = "cdomain")]
+fn resolve_cdomain(
+    dict: &Dict,
+    triples: &[[Id; 3]],
+    idx: &mut Idx,
+    v: &Vocab,
+    names: &mut Names,
+) -> Vec<Normal> {
+    let structure = |n: Id| {
+        idx.on_prop.contains_key(&n)
+            || idx.svf.contains_key(&n)
+            || idx.has_value.contains_key(&n)
+            || idx.inter_head.contains_key(&n)
+            || idx.cd_foreign_marker.contains(&n)
+    };
+    // Faceted ranges: need BOTH onDatatype and withRestrictions, and nothing else.
+    let mut ranges: Vec<(Id, Id, Id)> = idx
+        .cd_on_datatype
+        .iter()
+        .filter(|&(&n, _)| {
+            !structure(n)
+                && !idx.one_of_head.contains_key(&n)
+                && !idx.cd_has_value_lit.contains_key(&n)
+        })
+        .filter_map(|(&n, &dt)| idx.cd_with_restrictions.get(&n).map(|&h| (n, dt, h)))
+        .collect();
+    ranges.sort_unstable(); // deterministic mint order (concept ids per run)
+    // Singleton-literal enumerations (DataOneOf): a PURE enumeration node only.
+    let mut points: Vec<(Id, Id)> = idx
+        .cd_one_of_lit
+        .iter()
+        .filter(|&(&n, _)| {
+            !structure(n)
+                && !idx.cd_on_datatype.contains_key(&n)
+                && !idx.cd_with_restrictions.contains_key(&n)
+                && !idx.cd_has_value_lit.contains_key(&n)
+        })
+        .map(|(&n, &l)| (n, l))
+        .collect();
+    points.sort_unstable();
+    // Literal-hasValue restrictions (DataHasValue): need onProperty and nothing else.
+    let mut exists_points: Vec<(Id, Id)> = idx
+        .cd_has_value_lit
+        .iter()
+        .filter(|&(&n, _)| {
+            idx.on_prop.contains_key(&n)
+                && !idx.svf.contains_key(&n)
+                && !idx.has_value.contains_key(&n)
+                && !idx.inter_head.contains_key(&n)
+                && !idx.one_of_head.contains_key(&n)
+                && !idx.cd_on_datatype.contains_key(&n)
+                && !idx.cd_with_restrictions.contains_key(&n)
+                && !idx.cd_foreign_marker.contains(&n) // [FABLE-5] PR #1434 soundness fix
+        })
+        .map(|(&n, &l)| (n, l))
+        .collect();
+    exists_points.sort_unstable();
+    let out = crate::cdomain::resolve(dict, triples, names, &ranges, &points, &exists_points, |h| {
+        decode_list(h, idx, v)
+    });
+    idx.cd_range = out.node_range;
+    idx.cd_exists = out.node_exists;
+    out.axioms
 }
 
 /// Routes one RBox triple into the structural index: `rdfs:subPropertyOf` (role inclusion),
@@ -389,6 +551,27 @@ fn decode(
     }
     if let Some(hit) = cache.get(&node) {
         return hit.clone();
+    }
+
+    // [FABLE-5] sq-pbz04.2.2 (CR7–CR9): a node RESOLVED as a SUPPORTED concrete-domain
+    // range (faceted onDatatype/withRestrictions or singleton-literal oneOf = DataOneOf)
+    // decodes to its range concept, and a resolved literal-hasValue restriction
+    // (DataHasValue) to ∃p.{point}. This runs BEFORE the non-EL check below because the
+    // candidates stay non_el-marked: an UNSUPPORTED concrete-domain node is absent from
+    // these maps and falls through to the skip — exactly the pre-cdomain behaviour.
+    #[cfg(feature = "cdomain")]
+    {
+        if let Some(&c) = idx.cd_range.get(&node) {
+            let result = Some(Expr::Atom(c));
+            cache.insert(node, result.clone());
+            return result;
+        }
+        if let (Some(&c), Some(&p)) = (idx.cd_exists.get(&node), idx.on_prop.get(&node)) {
+            let role = names.role(p);
+            let result = Some(Expr::Exists(role, Box::new(Expr::Atom(c))));
+            cache.insert(node, result.clone());
+            return result;
+        }
     }
 
     // A node carrying a non-EL class-expression marker (unionOf / complementOf / cardinality /

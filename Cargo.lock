@@ -4067,6 +4067,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "rustc-hash 2.1.2",
  "sparq-core",
+ "sparq-substrate",
 ]
 
 [[package]]

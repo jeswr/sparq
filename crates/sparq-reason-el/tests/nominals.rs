@@ -195,8 +195,8 @@ fn has_value_role_mismatch_derives_nothing() {
 fn out_of_fragment_nominal_shapes_stay_skipped() {
     // The fragment boundary, pinned exactly:
     //   [oneOf (a b)] ⊑ C      — multi-individual enumeration = disjunction, OUTSIDE EL; skip.
-    //   [oneOf ("lex")] ⊑ D    — literal member = DataOneOf (concrete domain, CR7–CR9); skip.
-    //   E ⊑ [hasValue "5"^^xsd] — literal value = DataHasValue (concrete domain); skip.
+    //   [oneOf ("lex")] ⊑ D    — STRING DataOneOf (non-numeric concrete domain); skip.
+    //   E ⊑ [hasValue "5"^^xsd] — DataHasValue; skipped WITHOUT `cdomain`, APPLIED with it.
     // None may fabricate a subsumption; the in-fragment F ⊑ G still classifies.
     let ttl = format!(
         "{PRE}
@@ -208,10 +208,14 @@ fn out_of_fragment_nominal_shapes_stay_skipped() {
     );
     let (dict, triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
     let h = Classifier::classify(&dict, &triples);
+    // [FABLE-5] sq-pbz04.2.2: under `cdomain` the exact-numeric DataHasValue
+    // ("5"^^xsd:integer) is APPLIED; the multi-oneOf (disjunction) and the STRING
+    // DataOneOf ("lex" — a non-numeric datatype, deferred) stay skipped in both states.
+    let want = if cfg!(feature = "cdomain") { 2 } else { 3 };
     assert_eq!(
         h.report().skipped_axioms,
-        3,
-        "multi-oneOf + DataOneOf + DataHasValue are each recorded as a skip"
+        want,
+        "out-of-fragment shapes are recorded as skips (feature-state-dependent count)"
     );
     assert_closure(&ttl, &["C", "D", "E", "F", "G"], &[("F", "G")]);
 }
