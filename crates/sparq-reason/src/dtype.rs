@@ -178,9 +178,17 @@ impl Recognized {
     /// the binary types).
     ///
     /// Derived from `DTYPE_TABLE` — the single source of truth.
+    /// Only entries with `has_value_mapping = true` are included (behaviour is
+    /// identical today — all entries are true — but the filter enforces the API
+    /// contract so a future fail-closed entry cannot silently slip through).
     /// [SONNET-4.6] sq-pbz04.6.2.
     pub fn standard() -> Recognized {
-        Recognized::new(DTYPE_TABLE.iter().map(|&(l, _)| format!("{}{}", XSD, l)))
+        Recognized::new(
+            DTYPE_TABLE
+                .iter()
+                .filter(|&&(_, has_map)| has_map)
+                .map(|&(l, _)| format!("{}{}", XSD, l)),
+        )
     }
 
     /// Is `dt` in the recognized set?
@@ -432,6 +440,10 @@ pub fn d_value_key(lex: &str, dt: &str) -> Option<DValue> {
         // DISJOINT from DValue::Str (conservative per design record §3.1): anyURI is
         // defined as its own primitive in XSD 1.1; cross-type key-equality with
         // xsd:string is not sanctioned.
+        // NOTE (incomplete-but-sound): anyURI carries a whiteSpace=collapse facet;
+        // whitespace-variant forms (e.g. "a  b" vs "a b") get DISTINCT keys here —
+        // they are never incorrectly equated, but two canonically-collapsed-equal
+        // values may not merge. This is deliberate: collapse is not applied.
         // [SONNET-4.6] sq-pbz04.6.2.
         return Some(DValue::Uri(lex.to_string()));
     }
@@ -714,6 +726,11 @@ fn decode_base64_binary(lex: &str) -> Option<Vec<u8>> {
             if d_byte != b'=' {
                 return None;
             }
+            // XSD 1.1 §3.3.16: the low 4 bits of `b` are discarded bits and MUST
+            // be zero in a canonical lexical form; reject non-canonical encoding.
+            if (b & 0x0f) != 0 {
+                return None;
+            }
             bytes.push((a << 2) | (b >> 4));
             if i + 4 != cleaned.len() {
                 return None; // padding must be at the end
@@ -722,6 +739,11 @@ fn decode_base64_binary(lex: &str) -> Option<Vec<u8>> {
             let c = b64_val(c_byte)?;
             if d_byte == b'=' {
                 // One padding byte: "abc=" encodes 2 octets.
+                // XSD 1.1 §3.3.16: the low 2 bits of `c` are discarded bits and
+                // MUST be zero in a canonical lexical form; reject non-canonical.
+                if (c & 0x03) != 0 {
+                    return None;
+                }
                 bytes.push((a << 2) | (b >> 4));
                 bytes.push(((b & 0x0f) << 4) | (c >> 2));
                 if i + 4 != cleaned.len() {
@@ -1214,6 +1236,37 @@ mod tests {
         assert!(
             d_value_key("Y@==", &format!("{}base64Binary", XSD)).is_none(),
             "'@' is not a base64 char"
+        );
+    }
+
+    /// XSD 1.1 §3.3.16: discarded bits in padded base64 MUST be zero.
+    /// Non-canonical padding (non-zero discarded bits) must be rejected so that
+    /// two distinct lexical forms for the same octet sequence cannot slip through.
+    ///
+    /// MUTATION CHECK: removing either guard (`(b & 0x0f) != 0` or `(c & 0x03) != 0`)
+    /// from `decode_base64_binary` causes the corresponding `is_none()` assertion to
+    /// fail because the non-canonical form gets accepted and produces `Some(...)`.
+    /// Verified by reverting each guard in isolation → test RED → restoring → GREEN.
+    /// [SONNET-4.6] sq-pbz04.6.2 fix.
+    #[test]
+    fn base64_non_canonical_padding_rejected() {
+        let b64 = format!("{}base64Binary", XSD);
+        // Positive control: "YQ==" IS the canonical two-pad encoding of octet 0x61 (b'a').
+        // Y=24, Q=16; b & 0x0f = 16 & 0x0f = 0 → discarded bits are zero → canonical.
+        assert_eq!(
+            d_value_key("YQ==", &b64),
+            Some(DValue::Octets(vec![0x61])),
+            "\"YQ==\" is the canonical base64 encoding of octet 0x61"
+        );
+        // "YR==": Y=24, R=17 (0b010001); b & 0x0f = 0x01 ≠ 0 → non-canonical two-pad.
+        assert!(
+            d_value_key("YR==", &b64).is_none(),
+            "\"YR==\" has non-zero discarded bits in two-pad branch (XSD 1.1 §3.3.16)"
+        );
+        // "YWJ=": Y=24, W=22, J=9 (0b001001); c & 0x03 = 0x01 ≠ 0 → non-canonical one-pad.
+        assert!(
+            d_value_key("YWJ=", &b64).is_none(),
+            "\"YWJ=\" has non-zero discarded bits in one-pad branch (XSD 1.1 §3.3.16)"
         );
     }
 
