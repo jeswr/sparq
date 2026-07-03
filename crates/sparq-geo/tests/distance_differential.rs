@@ -91,10 +91,14 @@ fn extended_distance_resolves_equirectangular_distortion() {
 
 /// Short (≈ 15-km) E-W linestrings near London/Heathrow and New York/JFK.
 ///
-/// The nearest pair in both coordinate-space and haversine-space for these nearly-horizontal
-/// segments is the east end of the London line (closer in longitude to NYC) and the east
-/// end of the NYC line (closer in longitude to London). The Geodesic (WGS84 Karney) oracle
-/// measures the exact ellipsoidal distance between those two endpoints.
+/// The oracle is computed robustly as the geodesic (WGS84 Karney) minimum over **all
+/// four** vertex pairs; an explicit precondition assertion verifies which pair is the
+/// nearest for this fixture, so the test fails loudly if the geometry is ever changed.
+///
+/// For this specific fixture the nearest vertex pair is **west London → east NYC**:
+/// the west London endpoint (−0.50°) has a smaller longitude gap to east NYC (−73.75°)
+/// of 73.25°, versus east London (−0.30°) → east NYC at 73.45°. Great-circle distance
+/// grows with longitude gap at these latitudes, so the smaller-gap pair wins. [SONNET-4.6]
 ///
 /// Documented bound ≤ 1 %:
 /// - Haversine-sphere vs WGS84-ellipsoid: ≤ 0.3 %
@@ -110,11 +114,36 @@ fn extended_distance_continent_spanning_geodesic_oracle() {
     let computed = geof::distance_meters(&london, &nyc)
         .expect("distance_meters must succeed for non-empty linestrings");
 
-    // The nearest vertex pair (east end of London, east end of NYC) — the great circle
-    // path London→NYC goes primarily westward, so the eastern London endpoint is closer
-    // to NYC and the eastern NYC endpoint is closer to London.
-    // Geodesic oracle (WGS84 exact) on those two vertices:
-    let oracle = geodesic_m(-0.30, 51.48, -73.75, 40.64);
+    // Robust oracle: geodesic (WGS84 Karney) minimum over all 4 vertex–vertex pairs.
+    // Computing the minimum over all combinations avoids a fragile hard-coded pair
+    // assumption — if the fixture geometry ever shifts so a different pair becomes
+    // nearest, the oracle adapts automatically. [SONNET-4.6]
+    let (lon_w, lat_lon) = (-0.50_f64, 51.48_f64);
+    let (lon_e, _) = (-0.30_f64, 51.48_f64);
+    let (nyc_w, lat_nyc) = (-74.00_f64, 40.64_f64);
+    let (nyc_e, _) = (-73.75_f64, 40.64_f64);
+    let pair_dists = [
+        geodesic_m(lon_w, lat_lon, nyc_w, lat_nyc),
+        geodesic_m(lon_w, lat_lon, nyc_e, lat_nyc),
+        geodesic_m(lon_e, lat_lon, nyc_w, lat_nyc),
+        geodesic_m(lon_e, lat_lon, nyc_e, lat_nyc),
+    ];
+    let oracle = pair_dists.iter().copied().fold(f64::INFINITY, f64::min);
+
+    // Precondition: verify that west London → east NYC (pair index 1) is the nearest
+    // vertex pair for this fixture. If this assertion fires, the fixture has changed
+    // and the pair index and comment in this function need updating. [SONNET-4.6]
+    assert!(
+        pair_dists[1] <= pair_dists[0]
+            && pair_dists[1] <= pair_dists[2]
+            && pair_dists[1] <= pair_dists[3],
+        "fixture precondition: west-London→east-NYC ({:.0} m) should be the nearest vertex \
+         pair (others: {:.0}, {:.0}, {:.0} m)",
+        pair_dists[1],
+        pair_dists[0],
+        pair_dists[2],
+        pair_dists[3],
+    );
 
     // Bound: ≤ 1 % (Haversine-sphere + vertex-spacing effects, see doc above).
     let rel_err = (computed - oracle).abs() / oracle;
