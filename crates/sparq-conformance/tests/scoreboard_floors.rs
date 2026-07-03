@@ -70,12 +70,13 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-geo/tests/ogc_compliance_ratchet.rs",
         "OGC_RATCHET_FLOOR",
     ),
-    // [OPUS-4.8] sq-wf9qg — the OGC GeoSPARQL QUERY-REWRITE extension ratchet. The
-    // floor const (`const OGC_QUERY_REWRITE_FLOOR: usize = 38;`) lives in
-    // `sparq-geo`'s `tests/ogc_query_rewrite_ratchet.rs` (behind the opt-in
-    // `geosparql_rewrite` feature); the guard reads it textually — exactly like the
-    // sibling OGC topology floor — so the central scoreboard's `ratchet_floor` can
-    // never drift from what the runner asserts.
+    // [OPUS-4.8] sq-wf9qg / [SONNET-4.6] sq-lk3aw.2 — the OGC GeoSPARQL
+    // QUERY-REWRITE extension ratchet. The floor const
+    // (`const OGC_QUERY_REWRITE_FLOOR: usize = 48;`) lives in `sparq-geo`'s
+    // `tests/ogc_query_rewrite_ratchet.rs` (behind the opt-in `geosparql_rewrite`
+    // feature); the guard reads it textually — exactly like the sibling OGC topology
+    // floor — so the central scoreboard's `ratchet_floor` can never drift from what
+    // the runner asserts.
     (
         "OGC GeoSPARQL query-rewrite extension",
         "crates/sparq-geo/tests/ogc_query_rewrite_ratchet.rs",
