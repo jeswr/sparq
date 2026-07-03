@@ -53,7 +53,7 @@ def _load_ci_select():
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load ci_select.py from {ci_select_path}")
     mod = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("ci_select", mod)
+    sys.modules["ci_select"] = mod  # [SONNET-4.6] assign unconditionally to avoid stale-entry cross-test leakage
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     return mod
 
@@ -164,10 +164,20 @@ def shadow_report(
 
     summary_crates = coverage_summary.get("crates", {})
 
+    # [SONNET-4.6] Operate on the INTERSECTION of workspace members and crates
+    # actually present in this shard's coverage-summary.json. In the CI matrix
+    # each shard measures only its own subset; iterating all_members would include
+    # crates with no measured data, making divergence detection meaningless and
+    # inflating counts. Crates absent from the shard summary are omitted from rows;
+    # a single compact count is emitted instead (not_measured_in_shard).
+    measured_in_shard = set(summary_crates.keys())
+    reported_members = sorted(all_members & measured_in_shard)
+    not_measured_count = len(all_members - measured_in_shard)
+
     rows: list[dict] = []
     divergences: list[dict] = []
 
-    for crate in sorted(all_members):
+    for crate in reported_members:
         row_summary = summary_crates.get(crate, {})
         measured = row_summary.get("measured", False)
         lines_pct = row_summary.get("lines_pct") if measured else None
@@ -212,12 +222,23 @@ def shadow_report(
                     ),
                 })
 
+    # [SONNET-4.6] All derived counts are over the REPORTED set (intersection)
+    # so that counts always match the row set. The workspace-level cone size is
+    # also retained under a distinct key for context.
+    reported_cone_set = (
+        cone_crates & measured_in_shard if mode != "full"
+        else set(reported_members)
+    )
     report = {
         "mode": mode,
         "shadow": True,
         "cone_crates": sorted(cone_crates),
-        "total_crates": len(all_members),
-        "cone_size": len(cone_crates) if mode != "full" else len(all_members),
+        "total_crates": len(reported_members),           # crates in this shard's summary
+        "cone_size": len(reported_cone_set),             # cone crates measured in this shard
+        "cone_size_workspace": (                         # workspace-level cone size for context
+            len(cone_crates) if mode != "full" else len(all_members)
+        ),
+        "not_measured_in_shard": not_measured_count,     # compact count; no per-crate row emitted
         "inherited_count": sum(1 for r in rows if r["status"] == "inherited"),
         "divergences": divergences,
         "rows": rows,
@@ -246,18 +267,25 @@ def _render_report(report: dict) -> str:
         "",
     ]
     mode = report.get("mode", "full")
+    not_in_shard = report.get("not_measured_in_shard", 0)
     if mode == "cone":
         total = report.get("total_crates", 0)
         cone_size = report.get("cone_size", 0)
         inherited = report.get("inherited_count", 0)
         lines += [
-            f"**Cone size:** {cone_size} of {total} crates measured fresh "
+            f"**Cone size:** {cone_size} of {total} shard-measured crates measured fresh "
             f"({inherited} inherited from main — unchanged, no re-measurement needed)",
             "",
         ]
     else:
         lines += [
             "**Full run:** all crates measured (diff triggered full-run fail-safe).",
+            "",
+        ]
+    if not_in_shard:
+        lines += [
+            f"_not-measured-in-this-shard: {not_in_shard} workspace crate(s) "
+            f"(measured in other shards or not applicable here — omitted from rows)_",
             "",
         ]
 

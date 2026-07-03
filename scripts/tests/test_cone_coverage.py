@@ -419,5 +419,111 @@ class TestShadowReportFullMode(unittest.TestCase):
         self.assertEqual(report["inherited_count"], 0)
 
 
+class TestShadowReportShardFiltering(unittest.TestCase):
+    """(j) [SONNET-4.6] Crates in all_members but absent from shard summary are omitted from rows.
+
+    In the CI matrix each coverage-measure shard writes coverage-summary.json only
+    for the crates it measured. shadow_report() must operate on the INTERSECTION of
+    cone_doc["all_members"] and coverage_summary["crates"] so that:
+      - unmeasured crates produce no row (avoiding misleading divergence output),
+      - all derived counts (total_crates, cone_size) match the row set,
+      - a compact not_measured_in_shard count is reported instead.
+    """
+
+    def _make_cone(self, all_members, cone_crates):
+        return {
+            "mode": "cone",
+            "cone_crates": sorted(cone_crates),
+            "changed_crates": sorted(cone_crates),
+            "all_members": sorted(all_members),
+            "reason": "test cone",
+            "shadow": True,
+        }
+
+    def test_unmeasured_crates_omitted_from_rows(self):
+        """lib-c is in all_members but NOT in the shard summary → no row emitted."""
+        cone_doc = self._make_cone(
+            all_members=["lib-a", "lib-b", "lib-c"],
+            cone_crates=["lib-a"],
+        )
+        coverage_summary = {
+            "crates": {
+                "lib-a": {"measured": True, "lines_pct": 85.0, "lines_covered": 85, "lines_total": 100, "seconds": 1},
+                "lib-b": {"measured": True, "lines_pct": 90.0, "lines_covered": 90, "lines_total": 100, "seconds": 1},
+                # lib-c intentionally absent — not measured in this shard
+            }
+        }
+        report = cc.shadow_report(cone_doc, coverage_summary, None)
+
+        row_crates = {r["crate"] for r in report["rows"]}
+        self.assertNotIn("lib-c", row_crates,
+                         "unmeasured-in-shard crate must not appear as a row")
+
+    def test_compact_count_reflects_omitted_crates(self):
+        """not_measured_in_shard count equals the number of omitted all_members crates."""
+        cone_doc = self._make_cone(
+            all_members=["lib-a", "lib-b", "lib-c", "lib-d"],
+            cone_crates=["lib-a"],
+        )
+        coverage_summary = {
+            "crates": {
+                "lib-a": {"measured": True, "lines_pct": 85.0, "lines_covered": 85, "lines_total": 100, "seconds": 1},
+                "lib-b": {"measured": True, "lines_pct": 90.0, "lines_covered": 90, "lines_total": 100, "seconds": 1},
+                # lib-c, lib-d absent
+            }
+        }
+        report = cc.shadow_report(cone_doc, coverage_summary, None)
+
+        self.assertEqual(report["not_measured_in_shard"], 2,
+                         "compact count must equal number of all_members crates absent from shard summary")
+
+    def test_counts_match_row_set(self):
+        """total_crates and cone_size must match rows, not workspace totals."""
+        cone_doc = self._make_cone(
+            all_members=["lib-a", "lib-b", "lib-c"],  # 3 workspace crates
+            cone_crates=["lib-a"],
+        )
+        coverage_summary = {
+            "crates": {
+                # Only 2 of 3 measured in this shard; lib-a is in cone
+                "lib-a": {"measured": True, "lines_pct": 85.0, "lines_covered": 85, "lines_total": 100, "seconds": 1},
+                "lib-b": {"measured": True, "lines_pct": 90.0, "lines_covered": 90, "lines_total": 100, "seconds": 1},
+            }
+        }
+        report = cc.shadow_report(cone_doc, coverage_summary, None)
+
+        # total_crates must be 2 (shard-measured), not 3 (workspace)
+        self.assertEqual(report["total_crates"], 2,
+                         "total_crates must reflect shard-measured count, not workspace total")
+        # cone_size: lib-a is in cone AND in shard summary → 1
+        self.assertEqual(report["cone_size"], 1,
+                         "cone_size must be over the shard-measured set")
+        # Rows must have exactly 2 entries
+        self.assertEqual(len(report["rows"]), 2,
+                         "row count must match total_crates")
+        # not_measured_in_shard accounts for the gap
+        self.assertEqual(report["not_measured_in_shard"], 1)
+
+    def test_no_false_divergences_for_unmeasured_crates(self):
+        """A crate absent from the shard summary must NOT produce a divergence entry,
+        even if it would be below-floor (it was simply not measured in this shard)."""
+        cone_doc = self._make_cone(
+            all_members=["lib-a", "lib-b"],
+            cone_crates=["lib-a"],
+        )
+        # lib-b is outside the cone but also NOT in this shard's summary
+        coverage_summary = {
+            "crates": {
+                "lib-a": {"measured": True, "lines_pct": 85.0, "lines_covered": 85, "lines_total": 100, "seconds": 1},
+                # lib-b absent
+            }
+        }
+        floor_doc = {"crates": {"lib-b": {"floor": 99}}}  # impossibly high floor
+        report = cc.shadow_report(cone_doc, coverage_summary, floor_doc)
+
+        self.assertEqual(report["divergences"], [],
+                         "an unmeasured-in-shard crate must not produce a false divergence")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
