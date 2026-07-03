@@ -19,7 +19,7 @@
 //     && npx playwright install chromium && npm run test:e2e -- home-runner.spec.ts
 import { test, expect, BasePage } from "./support";
 import { HERO_DEFAULT_QUERY } from "../src/data/hero-sample";
-import { type Locator, type Page } from "@playwright/test";
+import { type Locator } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 

@@ -74,7 +74,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
+            ${{ github.workspace }}/target
           key: site-e2e-hero-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: site-e2e-hero-wasm-${{ runner.os }}-
 
@@ -90,7 +90,7 @@ jobs:
       # Cache Playwright browsers keyed on the resolved @playwright/test version.
       - name: Resolve Playwright version
         id: pw
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(node -p 'require("@playwright/test/package.json").version')" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
