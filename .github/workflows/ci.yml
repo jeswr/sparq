@@ -71,15 +71,18 @@ env:
   # debuginfo-emission time and link time on the dev profile. Sufficient for line-coverage
   # tracking (cargo-llvm-cov uses LLVM coverage counters, not DWARF; llvm-cov adds its own
   # -C instrument-coverage rustflag which coexists cleanly with this setting).
-  # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=mold": routes ALL
-  # native x86_64 link steps through the mold fast linker. The per-target env var scopes
+  # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=lld": routes ALL
+  # native x86_64 link steps through lld (LLVM's fast linker). The per-target env var scopes
   # this to the HOST triple only — wasm32-unknown-unknown builds use wasm-ld and are
-  # unaffected (proc macros and build scripts that compile for the host DO benefit). mold
-  # must be installed in each job that runs native Rust compilation (see Install mold steps
-  # below). Bench/release/dist profiles are NOT changed (bench.yml, build-matrix.yml).
+  # unaffected (proc macros and build scripts that compile for the host DO benefit).
+  # lld is chosen over mold because: (a) Rust 1.86+ already ships rust-lld and uses it as
+  # the default for x86_64-unknown-linux-gnu (the -B<sysroot>/gcc-ld path provides it);
+  # (b) lld-18 is pre-installed on ubuntu-24.04 runners; (c) no per-job apt install step is
+  # needed — tests that spawn cargo as a subprocess (e.g. crate-doc guard tests) inherit
+  # this flag safely. Bench/release/dist profiles are NOT changed (bench.yml, build-matrix.yml).
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
-  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
 jobs:
   # [OPUS-4.8] merge-throughput: path-filtered gate. Compute whether THIS change
@@ -256,10 +259,6 @@ jobs:
       # scripts/ci-free-disk.sh.
       - name: Free runner disk before build + archive
         run: ./scripts/ci-free-disk.sh
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: mold is the fast linker activated by
-        # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS in the global env.
-        run: sudo apt-get install -y --no-install-recommends mold
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Cache cargo + target
@@ -591,11 +590,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: mold is used for host-side (proc macro / build script)
-        # compilations even in wasm cross-compile jobs. CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS
-        # scopes it to the host triple; wasm-ld handles the wasm32 target.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
@@ -801,9 +795,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for clippy + rustdoc compilation steps.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: rustfmt, clippy
@@ -903,9 +894,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for the MSRV cargo check step.
-        run: sudo apt-get install -y --no-install-recommends mold
       - name: Install Rust (pinned MSRV)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.88
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -934,9 +922,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo run --release conformance steps.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch W3C test suites (pinned)
@@ -1047,9 +1032,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo test compilation steps.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch W3C SHACL test suite (pinned)
@@ -1175,9 +1157,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo test compilation steps.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run OGC GeoSPARQL topology compliance ratchet
@@ -1312,9 +1291,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo test compilation steps.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run Solid WAC + ACP decision-parity suites
@@ -1412,9 +1388,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo test compilation steps.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch SolidLab ODRL Test Suite (pinned)
@@ -1509,9 +1482,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo test compilation steps.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run sparq-text BM25 differential oracle
@@ -1609,9 +1579,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo test compilation steps.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run sparq-rsp RSP expressivity / SRBench correctness oracle
@@ -1711,9 +1678,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo test compilation steps.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch W3C JSON-LD 1.1 API test suite (toRdf/fromRdf/compact, pinned)
@@ -1832,9 +1796,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo clippy/test compilation steps.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Clippy the gated harness surface (service-loopback feature ON)
@@ -1948,9 +1909,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo run/test compilation steps.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch inference test suites (pinned)
@@ -2152,12 +2110,6 @@ jobs:
       # no-op). See scripts/ci-free-disk.sh.
       - name: Free runner disk before build + instrumented test
         run: ./scripts/ci-free-disk.sh
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo-llvm-cov instrumented builds.
-        # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS (-C link-arg=-fuse-ld=mold) and
-        # llvm-cov's own -C instrument-coverage rustflag are concatenated by cargo, not
-        # conflicting — line-tables-only debuginfo is sufficient for line coverage tracking.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: llvm-tools-preview
@@ -2294,9 +2246,6 @@ jobs:
       # no-op). See scripts/ci-free-disk.sh.
       - name: Free runner disk before build + instrumented test
         run: ./scripts/ci-free-disk.sh
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for the nightly full-tier llvm-cov build.
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: llvm-tools-preview
@@ -2460,11 +2409,6 @@ jobs:
         # cargo-mutants builds the workspace many times (one rebuild per mutant); reclaim
         # space first like coverage-nightly. Best-effort, no-ops on absent paths.
         run: ./scripts/ci-free-disk.sh
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for the many rebuild-per-mutant cycle.
-        # Mold's fast link time is especially beneficial here (cargo-mutants does one full
-        # rebuild per mutant — O(mutant_count) link steps per crate).
-        run: sudo apt-get install -y --no-install-recommends mold
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-mutants
@@ -2562,10 +2506,6 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install mold linker
-        # [SONNET-4.6] sq-6vshe.1: fast linker for cargo-geiger's compilation pass.
-        run: sudo apt-get install -y --no-install-recommends mold
-        continue-on-error: true
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-geiger
