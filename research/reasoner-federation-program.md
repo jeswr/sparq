@@ -94,10 +94,13 @@ consumer or an honest reasoned non-adoption.
 ### Phase R — Per-profile reasoners (epic sq-pbz04, sub-epics sq-pbz04.1–.6)
 Each profile advances on two axes, kept honest per profile:
 **(a) substrate adoption** where the profile genuinely evaluates
-(RL: delta-seam fixpoint; EL: saturation joins + concrete-domain numerics;
+(RL: delta-seam fixpoint; EL: concrete-domain numerics only — saturation joins
+are a documented non-adoption, see `crates/sparq-reason-el/src/classify.rs`
+section "Substrate adoption evaluation" [SONNET-4.6] sq-pbz04.2.3;
 D: shared value comparator; RIF: builtins over the shared tower) — with QL as
-the documented counter-example: it is a query-rewriter reusing the engine path
-and by design **not** a join-substrate consumer; and
+one documented counter-example (query-rewriter reusing the engine path, not a
+join-substrate consumer) and EL's worklist fixpoint as a second: it is **not** a
+join-substrate consumer by structural incompatibility, not by omission; and
 **(b) profile completion** (RL: the 13 divergences; EL: CR6–CR9; QL: CQ-gate
 broadening + de-experimentalisation where sound; RIF: a conformance arm;
 D: datatype-map broadening; Direct: a research-first fragment-scoping record
@@ -186,6 +189,12 @@ Conflict discipline: the only shared-file overlap in the wave is
 - **Geo conformance is OGC-shaped, not W3C**, via the sanctioned hand-curated
   probe (CITE not MIT-vendorable); the distance-approximation note stands.
 - **QL is not a join-substrate consumer** — by design, not by omission.
+- **EL's CR1-CR5 saturation joins are not join-substrate consumers** — by
+  structural incompatibility (worklist-event shape, simultaneous read+write on
+  S-sets, 3-way triangle join in CR4), not by omission. Concrete-domain numerics
+  (`cdomain` feature, sq-pbz04.2.2) ARE adopted. Full non-adoption rationale:
+  `crates/sparq-reason-el/src/classify.rs` § "Substrate adoption evaluation"
+  [SONNET-4.6] sq-pbz04.2.3.
 - **`sparq-fedplan-mpc` is out of scope** for this program (unaudited research
   scaffold; the MPC/ZK program owns it).
 - **sq-v5evr's un-park is consumer-justified**, not speculative: D-entailment and
