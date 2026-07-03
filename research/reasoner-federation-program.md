@@ -46,7 +46,12 @@ Four seams define the shared surface:
 yet in consumption*. The engine has migrated onto all four (it pulls
 `numeric`+`join`+`compare` and implements `CompareTerm` for its `Value`); the
 reasoners have adopted almost none — the only reasoner consumer today is the
-RDFS static predicate join (`sparq-reason/src/substrate_join.rs`, rdfs2/3/7).
+RDFS static predicate join (`sparq-reason/src/substrate_join.rs`, rdfs2/3/7);
+on the stream side, `sparq-rsp` now drives `join::delta::DeltaTable` + `rows`
+for its `EvalMode::Delta`/`Snapshot` consecutive-window diff
+(`sparq-rsp/src/eval.rs`, sq-2n1q3.4 [FABLE-5] — the windowed ISTREAM/DSTREAM
+slide is the same semi-naive Δ-vs-full probe shape, with the previous window
+as the persisted build side).
 Divergence is concentrated on the reasoner side of every seam, and the single
 largest divergence is that `owl_rl_closure` still runs its own hand-rolled
 adjacency + UnionFind even though the `join::delta::DeltaTable` seam purpose-built
