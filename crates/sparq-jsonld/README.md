@@ -59,14 +59,16 @@ anywhere.
 ### Build-out status
 
 The `Json` AST, error registry, options, and loader trait ship today, alongside the
-**Context Processing** foundation (`context`): the `ActiveContext`, Create Term
-Definition, and IRI Expansion — the hinge every other algorithm builds on — with
-RFC 3986 reference resolution and deny-by-default remote-context loading. The
-remaining modules (`expand`, `flatten`, `compact`, `frame`, `from_rdf`, `to_rdf`,
-`api`) are documented stubs, filled by dependency-ordered follow-on beads. The
-compaction-side companions of context processing (inverse context, IRI compaction)
-are also deferred to a follow-on bead. The crate is `publish = false` until the
-pipeline is real.
+**Context Processing** foundation (`context`) and the document-level **Expansion
+Algorithm** (`expand::expand`) — Value Expansion, scoped (property/type) contexts,
+`@index`/`@id`/`@type`/`@language`/`@graph` container maps, `@nest`, `@reverse`,
+`@included`, `@json` literals, keyword aliases, and the drop-null + array-normalisation
+rules — raising the exact spec error codes and threading `frameExpansion`. The
+remaining modules (`flatten`, `compact`, `frame`, `from_rdf`, `to_rdf`, `api`) are
+documented stubs, filled by dependency-ordered follow-on beads; so are the
+compaction-side companions of context processing (inverse context, IRI compaction) and
+the conformance-lane switch to the normative document-level expand oracle. The crate is
+`publish = false` until the pipeline is real.
 
 ## 📚 Learn more
 

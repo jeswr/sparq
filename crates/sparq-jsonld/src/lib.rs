@@ -20,11 +20,16 @@
 //! - [`context`] — the **Context Processing** foundation (bead `sq-oy1f.24`): the
 //!   [`ActiveContext`], Create Term Definition, and IRI Expansion. The compaction-side
 //!   companions (inverse context, IRI compaction) are deferred to a follow-on bead.
+//! - [`expand`](mod@expand) — the document-level **Expansion Algorithm** + Value Expansion
+//!   (bead `sq-oy1f.25`): [`expand`](expand::expand) turns a compact document into its
+//!   canonical expanded form (scoped contexts, container maps, `@nest`, `@reverse`,
+//!   `@included`, `@json`, keyword aliases), threading `frameExpansion` for the framing
+//!   pipeline.
 //!
-//! The remaining algorithm modules ([`expand`], [`node_map`], [`flatten`], [`compact`],
-//! [`frame`], [`from_rdf`], [`to_rdf`], [`api`]) are **stubs**: they carry the spec
-//! references and the public shape only, filled by the dependency-ordered follow-on beads.
-//! Nothing panics: the crate is `todo!()`-free.
+//! The remaining algorithm modules ([`node_map`], [`flatten`], [`compact`], [`frame`],
+//! [`from_rdf`], [`to_rdf`], [`api`]) are **stubs**: they carry the spec references and the
+//! public shape only, filled by the dependency-ordered follow-on beads. Nothing panics: the
+//! crate is `todo!()`-free.
 
 // Real, shipped surfaces.
 pub mod context;
@@ -45,6 +50,7 @@ pub mod to_rdf;
 
 pub use context::{ActiveContext, Direction, Override, TermDefinition};
 pub use error::{JsonLdError, JsonLdErrorCode};
+pub use expand::expand;
 pub use json::{Json, JsonParseError};
 pub use loader::{DocumentLoader, FsLoader, NoopLoader, RemoteDocument};
 pub use options::{EmbedFlag, JsonLdOptions, ProcessingMode, RdfDirection};
