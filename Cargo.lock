@@ -4063,6 +4063,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-reason-dl"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "rustc-hash 2.1.2",
+ "sparq-core",
+]
+
+[[package]]
 name = "sparq-reason-el"
 version = "0.1.0"
 dependencies = [
