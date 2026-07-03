@@ -540,16 +540,19 @@ jobs:
         working-directory: gui/e2e
         env:
           APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
-          ARTIFACTS_DIR: ${{ github.workspace }}/gui/e2e/artifacts
         run: |
-          if ! xvfb-run --auto-servernum npm run test:e2e; then
-            echo "[tauri-e2e-ci] first attempt failed; retrying once (xvfb startup flake check)…"
+          # [SONNET-4.6] Give each attempt its own artifacts subdir so a second failure does
+          # not overwrite the first attempt's screenshot/driver-log evidence.
+          ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-1" \
+            xvfb-run --auto-servernum npm run test:e2e && exit 0
+          echo "[tauri-e2e-ci] first attempt failed; retrying once (xvfb startup flake check)…"
+          ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-2" \
             xvfb-run --auto-servernum npm run test:e2e
-          fi
 
       # Upload failure artifacts (screenshot + driver log) even if the step above succeeded on
       # the retry — the artifacts are only written by the harness when an assertion fails, so
       # uploading unconditionally is safe (the action no-ops when the directory is empty).
+      # Both attempt-1/ and attempt-2/ subdirs are captured by the glob below.
       - name: Upload failure artifacts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -635,19 +638,20 @@ jobs:
         run: npm ci
 
       # Run the smoke N times, counting greens. A pass-on-N/N means the lane is stable.
-      # Failures write artifacts/ entries; the upload step collects all of them.
+      # [SONNET-4.6] Each iteration writes to its own artifacts/probe-run-$i subdir so earlier
+      # failure evidence is not overwritten by later runs; all subdirs are uploaded below.
       - name: Run flake probe (${{ inputs.probe_runs }} consecutive runs)
         working-directory: gui/e2e
         env:
           APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
-          ARTIFACTS_DIR: ${{ github.workspace }}/gui/e2e/artifacts
         run: |
           RUNS=${{ inputs.probe_runs }}
           GREENS=0
           FAILS=0
           for i in $(seq 1 "$RUNS"); do
             echo "--- probe run $i / $RUNS ---"
-            if xvfb-run --auto-servernum npm run test:e2e; then
+            if ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/probe-run-$i" \
+                xvfb-run --auto-servernum npm run test:e2e; then
               GREENS=$((GREENS + 1))
             else
               FAILS=$((FAILS + 1))
