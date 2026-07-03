@@ -90,7 +90,11 @@ const BASELINE_COMMENT = [
 /** Load + validate the committed baseline (throws if a serious/critical rule was excluded). */
 export function loadBaseline(): Baseline {
   const raw = JSON.parse(readFileSync(BASELINE_PATH, "utf8")) as Baseline & { _comment?: unknown };
-  const excluded = Object.keys(raw.ruleExclusions ?? {});
+  // Safe defaults so a baseline that omits these keys (e.g. a hand-edited or freshly-seeded file
+  // that hasn't yet committed both sections) can't crash the harness at runtime. [SONNET-4.6]
+  raw.ruleExclusions ??= {};
+  raw.surfaces ??= {};
+  const excluded = Object.keys(raw.ruleExclusions);
   for (const rule of NEVER_EXCLUDABLE) {
     if (excluded.includes(rule)) {
       throw new Error(
@@ -140,7 +144,7 @@ export function formatViolations(violations: AxeViolation[]): string {
         .slice(0, 4)
         .map((n) => `      ${Array.isArray(n.target) ? n.target.join(" ") : String(n.target)}`)
         .join("\n");
-      return `  • [${v.impact}] ${v.id}: ${v.help}\n    ${v.helpUrl}\n${targets}`;
+      return `  • [${v.impact ?? "minor"}] ${v.id}: ${v.help}\n    ${v.helpUrl}\n${targets}`;
     })
     .join("\n");
 }
