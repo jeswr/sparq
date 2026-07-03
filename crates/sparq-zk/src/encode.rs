@@ -115,4 +115,108 @@ mod tests {
         assert_ne!(e[0], e[2]);
         assert_ne!(e[1], e[2]);
     }
+
+    // [OPUS-4.8] sq-qcnn.25: DETERMINISM value pins. These recompute the exact
+    // `Enc_t` composition from the public primitives (independent of `encode_term`'s
+    // body) and assert the encoder reproduces it EXACTLY — so a mutation of the
+    // type-code, the `h_s`/`h_2` layering, or the argument order is caught, not just
+    // a panic. They are the "same input -> same field element" determinism contract
+    // (sq-qcnn.25). `blake3_field` is the module's own `h_s` helper (in scope via
+    // `super::*`), so the recomputation stays byte-for-byte faithful to the encoder.
+    // NO soundness claim is made (sq-qhy4).
+
+    #[test]
+    fn encode_term_iri_pins_type_code_and_hs_layering() {
+        let salt = salt_from_bytes(&[7u8; 32]);
+        let iri = Term::NamedNode(NamedNode::new("http://ex/a").unwrap());
+        // Enc_t(IRI) = h_2(TYPE_CODE_IRI, blake3(iri-string, no <> delimiters)).
+        let expected = crate::poseidon2::hash(&[
+            Fr::from(TYPE_CODE_IRI),
+            blake3_field(b"http://ex/a"),
+        ]);
+        let got = encode_term(&iri, &salt).unwrap();
+        assert_eq!(got, expected);
+        // Byte-stable: the same input yields the same 32-byte field word every call.
+        assert_eq!(
+            crate::field::field_to_be_bytes_32(&got),
+            crate::field::field_to_be_bytes_32(&encode_term(&iri, &salt).unwrap()),
+        );
+    }
+
+    #[test]
+    fn encode_term_literal_pins_canonical_ntriples_token() {
+        let salt = salt_from_bytes(&[7u8; 32]);
+        let lit = Literal::new_language_tagged_literal("x", "en").unwrap();
+        let term = Term::Literal(lit.clone());
+        // Enc_t(literal) = h_2(TYPE_CODE_LITERAL, blake3(canonical N-Triples token)).
+        // The token folds datatype/language: it is `Literal::to_string()`.
+        let expected = crate::poseidon2::hash(&[
+            Fr::from(TYPE_CODE_LITERAL),
+            blake3_field(lit.to_string().as_bytes()),
+        ]);
+        assert_eq!(encode_term(&term, &salt).unwrap(), expected);
+    }
+
+    #[test]
+    fn encode_term_bnode_pins_salted_two_layer_composition() {
+        let salt = salt_from_bytes(&[7u8; 32]);
+        let b = Term::BlankNode(BlankNode::new("c14n0").unwrap());
+        // Enc_t(bnode) = h_2(BLANK_NODE, h_2(salt, blake3(canonical-label, no _:))).
+        let inner = crate::poseidon2::hash(&[salt, blake3_field(b"c14n0")]);
+        let expected = crate::poseidon2::hash(&[Fr::from(TYPE_CODE_BLANK_NODE), inner]);
+        assert_eq!(encode_term(&b, &salt).unwrap(), expected);
+    }
+
+    #[test]
+    fn encode_triple_pins_h3_of_s_p_o_and_is_position_sensitive() {
+        let salt = salt_from_bytes(&[9u8; 32]);
+        let s = NamedNode::new("http://ex/s").unwrap();
+        let p = NamedNode::new("http://ex/p").unwrap();
+        let o = NamedNode::new("http://ex/o").unwrap();
+        let t = Triple::new(
+            NamedOrBlankNode::NamedNode(s.clone()),
+            p.clone(),
+            Term::NamedNode(o.clone()),
+        );
+        // Leaf = h_3(Enc(s), Enc(p), Enc(o)) in exactly that argument order.
+        let expected = crate::poseidon2::hash(&[
+            encode_term(&Term::NamedNode(s.clone()), &salt).unwrap(),
+            encode_term(&Term::NamedNode(p.clone()), &salt).unwrap(),
+            encode_term(&Term::NamedNode(o.clone()), &salt).unwrap(),
+        ]);
+        assert_eq!(encode_triple(&t, &salt).unwrap(), expected);
+        // Swapping predicate<->object roles must change the leaf: the position is
+        // load-bearing (kills an s/p/o argument-swap in the sponge input).
+        let swapped = Triple::new(
+            NamedOrBlankNode::NamedNode(s),
+            o, // predicate slot now holds what was the object IRI
+            Term::NamedNode(p),
+        );
+        assert_ne!(encode_triple(&t, &salt).unwrap(), encode_triple(&swapped, &salt).unwrap());
+    }
+
+    #[test]
+    fn encode_term_rejects_rdf12_triple_term_fail_closed() {
+        // RDF 1.2 triple terms are outside the committed data model: encode_term
+        // returns None so callers fail closed (covers the `Term::Triple(_) => None`
+        // arm). No soundness claim (sq-qhy4).
+        let salt = salt_from_bytes(&[1u8; 32]);
+        let inner = Triple::new(
+            NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/s").unwrap()),
+            NamedNode::new("http://ex/p").unwrap(),
+            Term::NamedNode(NamedNode::new("http://ex/o").unwrap()),
+        );
+        let quoted = Term::Triple(Box::new(inner));
+        assert_eq!(encode_term(&quoted, &salt), None);
+    }
+
+    #[test]
+    fn salt_from_bytes_pins_field_from_hash_bytes() {
+        // salt_from_bytes is exactly field_from_hash_bytes over the entropy word.
+        let bytes = [3u8; 32];
+        assert_eq!(salt_from_bytes(&bytes), crate::field::field_from_hash_bytes(&bytes));
+        // Deterministic + entropy-sensitive.
+        assert_eq!(salt_from_bytes(&bytes), salt_from_bytes(&bytes));
+        assert_ne!(salt_from_bytes(&[3u8; 32]), salt_from_bytes(&[4u8; 32]));
+    }
 }
