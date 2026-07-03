@@ -64,7 +64,16 @@
     "the historical arch relationship has aarch64 reading ABOVE x86_64 (old bundle 1687481 aarch64 vs 1686907",
     "x86_64, +0.034%), so the x86_64 CI build is expected at-or-just-below 1399703 and passes the strict gate;",
     "the +2% band (=1427697) covers any residual cross-arch codegen delta. On the next push to main the auto-",
-    "ratchet-down step re-floors this to the exact x86_64 CI value. threshold 0.02 + mode auto UNCHANGED."
+    "ratchet-down step re-floors this to the exact x86_64 CI value. threshold 0.02 + mode auto UNCHANGED.",
+    "[OPUS-4.8] (sq-pntvh.8 fix) 2026-07-02: feature_off_exact field ADDED. The ratchet floor (1399703) is the",
+    "2%-band lower bound used by bench.yml — NOT the same as the artifact-byte-determinism pin. Main drifted",
+    "+127 bytes (within-band) after the floor was set, making the original exact-equality check against the",
+    "floor fail. feature_off_exact=1399110 is the CI x86_64 runner measurement of the feature-OFF wasm build",
+    "(ubuntu-latest, cargo build --profile release-wasm -p sparq-wasm --target wasm32-unknown-unknown,",
+    "no --features vectorized). MUST be re-pinned from a CI run — NEVER a local aarch64 measurement.",
+    "The vectorized-feature-off gate leg 2 compares against this field, NOT",
+    "the floor. A legitimate wasm change (feature add, size opt) MUST update both floor AND feature_off_exact",
+    "in the same PR diff — the script rejects a missing feature_off_exact to prevent silent drift."
   ],
   "metrics": {
     "store_bytes_per_triple": {
@@ -85,7 +94,8 @@
     "wasm_bundle_bytes": {
       "floor": 1399703,
       "threshold": 0.02,
-      "mode": "auto"
+      "mode": "auto",
+      "feature_off_exact": 1399110
     },
     "parse_ns_per_byte": {
       "floor": 4.9721,
