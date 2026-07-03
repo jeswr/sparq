@@ -97,6 +97,9 @@ smallvec = { workspace = true, optional = true }
 # ([OPUS-4.8] sq-6qw3) — regex compiles to wasm32-unknown-unknown.
 regex = "1"
 # [SONNET-4.6] sq-pbz04.5.3 — RIF/XML importer; OPTIONAL, linked only by `rif-xml`.
-# Same version and flags as sparq-engine's SERVICE XML parser (Cargo.toml line ~282).
-# `encoding` feature: let the reader handle non-UTF-8 byte streams.
-quick-xml = { version = "0.41", default-features = false, features = ["encoding"], optional = true }
+# No `encoding` feature: RIF/XML from the W3C test suite is UTF-8; non-UTF-8 XML will
+# fail at parse with EncodingError::Utf8 (acceptable fail-closed posture).  Dropping
+# the feature avoids pulling in unvetted `encoding_rs 0.8.35` (cargo-vet gating failure
+# sq-pbz04.5.3 fix-3).  If non-UTF-8 RIF/XML support is ever needed, re-enable the
+# feature AND add a cargo-vet exemption per supply-chain/config.toml precedent.
+quick-xml = { version = "0.41", default-features = false, optional = true }

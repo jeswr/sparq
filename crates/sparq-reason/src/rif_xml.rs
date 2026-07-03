@@ -300,6 +300,19 @@ fn parse_xml_tree(xml_bytes: &[u8]) -> Result<XmlNode, ImportError> {
                     parent.children.push(node);
                 }
             }
+            // Entity references (&amp;, &lt;, &#x26;, &#38;, etc.) are surfaced as
+            // Event::GeneralRef in quick-xml 0.40+.  Resolve the five predefined XML
+            // entities and numeric character references (decimal + hex); unknown general
+            // entities are fail-closed (MalformedXml) — we never silently drop bytes.
+            // [SONNET-4.6]
+            Event::GeneralRef(r) => {
+                let name =
+                    r.decode().map_err(|e| ImportError::MalformedXml(format!("{}", e)))?;
+                let resolved = resolve_xml_entity(&name)?;
+                if let Some(top) = stack.last_mut() {
+                    top.text.push_str(&resolved);
+                }
+            }
             Event::Eof => {
                 break;
             }
@@ -315,14 +328,64 @@ fn local_name_str(bytes: &[u8]) -> String {
     std::str::from_utf8(bytes).unwrap_or("").to_string()
 }
 
+/// Resolve one XML entity reference name (as quick-xml 0.40+ hands it out in
+/// `Event::GeneralRef`, WITHOUT the surrounding `&`/`;`) to its replacement text.
+///
+/// Handles:
+/// - Five predefined named entities: `amp` → `&`, `lt` → `<`, `gt` → `>`,
+///   `quot` → `"`, `apos` → `'`.
+/// - Decimal numeric character references: `#38` → `&`.
+/// - Hexadecimal numeric character references: `#x26` / `#X26` → `&`.
+///
+/// Unknown general entities (e.g. `foo` for `&foo;`) → `MalformedXml` (fail-closed;
+/// we never silently drop a character). [SONNET-4.6]
+fn resolve_xml_entity(name: &str) -> Result<String, ImportError> {
+    if let Some(rep) = quick_xml::escape::resolve_predefined_entity(name) {
+        return Ok(rep.to_string());
+    }
+    if let Some(rest) = name.strip_prefix('#') {
+        let cp = if let Some(hex) = rest.strip_prefix(['x', 'X']) {
+            u32::from_str_radix(hex, 16)
+        } else {
+            rest.parse::<u32>()
+        }
+        .map_err(|_| {
+            ImportError::MalformedXml(format!(
+                "bad numeric character reference &{};",
+                name
+            ))
+        })?;
+        return char::from_u32(cp)
+            .map(|c| c.to_string())
+            .ok_or_else(|| {
+                ImportError::MalformedXml(format!(
+                    "numeric character reference &{}; out of Unicode range",
+                    name
+                ))
+            });
+    }
+    Err(ImportError::MalformedXml(format!(
+        "unknown XML entity reference &{};  (RIF/XML fail-closed: only predefined entities \
+         and numeric character references are supported)",
+        name
+    )))
+}
+
 fn read_attrs(e: &quick_xml::events::BytesStart<'_>) -> Result<Vec<(String, String)>, ImportError> {
     let mut out = Vec::new();
     for a in e.attributes() {
         let a = a.map_err(|err| ImportError::MalformedXml(format!("{}", err)))?;
         let key = local_name_str(a.key.local_name().as_ref());
-        let val = std::str::from_utf8(&a.value)
-            .map_err(|err| ImportError::MalformedXml(format!("{}", err)))?
-            .to_string();
+        // Unescape the attribute value so that e.g. `type="http://ex/?a=1&amp;b=2"`
+        // produces `"http://ex/?a=1&b=2"` rather than the literal `"&amp;"` text.
+        // quick_xml::escape::unescape resolves the five predefined XML entities +
+        // numeric character references, and returns Err for unknown entities.
+        // [SONNET-4.6]
+        let raw = std::str::from_utf8(&a.value)
+            .map_err(|err| ImportError::MalformedXml(format!("{}", err)))?;
+        let val = quick_xml::escape::unescape(raw)
+            .map(|c| c.into_owned())
+            .map_err(|err| ImportError::MalformedXml(format!("{}", err)))?;
         out.push((key, val));
     }
     Ok(out)
@@ -2468,6 +2531,161 @@ mod tests {
             2,
             "the two declared vars must produce TWO distinct fresh names; got {:?}",
             fresh_vals
+        );
+    }
+
+    // ---- Entity-reference round-trip tests (Fix: GeneralRef + attr unescape) ----
+    //
+    // These tests cover the three blockers identified by the Opus re-verify:
+    //
+    //  A. Text entity references in element content:
+    //     quick-xml 0.40+ emits &amp;/&lt;/&gt;/&#x26; as Event::GeneralRef, not
+    //     part of the adjacent Event::Text.  Before this fix they were silently
+    //     dropped (caught by the wildcard `_ => {}` arm), corrupting literal values.
+    //
+    //  B. Attribute values containing entity references:
+    //     `type="http://ex/?a=1&amp;b=2"` kept the literal `"&amp;"` text instead of
+    //     the decoded `"&"` because the old read_attrs used `str::from_utf8(&a.value)`
+    //     without calling `quick_xml::escape::unescape`.
+    //
+    //  C. Unknown general entities (&undefined;) must be fail-closed (MalformedXml),
+    //     not silently dropped.
+    //
+    // [SONNET-4.6]
+
+    /// Entity references in text content must be decoded correctly.
+    ///
+    /// Input XML contains `a&amp;b &lt;c&gt; &#x26;d` as the lexical value of an
+    /// xsd:string Const.  The decoded value must be exactly `a&b <c> &d`.
+    ///
+    /// Mutation check annotation: if the `Event::GeneralRef` arm is removed (reverted
+    /// to the wildcard `_ => {}`), the GeneralRef events are silently discarded and
+    /// the text node accumulates only the adjacent text (`a`, `b `, `c`, ` `, `d`),
+    /// producing `"ab c d"` instead of `"a&b <c> &d"`.  The `assert_eq!` below then
+    /// fails, turning this test RED.  Restore the `Event::GeneralRef` arm to make it
+    /// GREEN again. [SONNET-4.6]
+    #[test]
+    fn test_entity_text_roundtrip() {
+        // RIF Document with a bare Frame fact whose val Const is an xsd:string
+        // containing &amp;, &lt;, &gt;, and &#x26; (numeric hex char ref).
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const>
+        <Const type="http://www.w3.org/2001/XMLSchema#string">a&amp;b &lt;c&gt; &#x26;d</Const>
+      </slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("valid doc with entity references in xsd:string");
+        assert_eq!(doc.rules.len(), 1, "one fact rule");
+        let atom = &doc.rules[0].head[0];
+        if let Atom::Frame { val, .. } = atom {
+            assert_eq!(
+                val,
+                &Term::Lit {
+                    lex: "a&b <c> &d".to_string(),
+                    datatype: "http://www.w3.org/2001/XMLSchema#string".to_string(),
+                },
+                "entity references must be decoded: &amp;→& &lt;→< &gt;→> &#x26;→& (Fix: GeneralRef)"
+            );
+        } else {
+            panic!("expected Frame atom, got {:?}", atom);
+        }
+    }
+
+    /// Attribute values containing entity references must be unescaped.
+    ///
+    /// A Const with `type="http://ex/dt?a=1&amp;b=2"` (the `&amp;` is an XML entity
+    /// reference in the attribute value) must import with datatype IRI
+    /// `"http://ex/dt?a=1&b=2"`, not the literal `"&amp;"` text.
+    ///
+    /// Mutation check annotation: if `read_attrs` is reverted to use
+    /// `str::from_utf8(&a.value).to_string()` (without `quick_xml::escape::unescape`),
+    /// the datatype will contain the literal `"&amp;"` and the `assert_eq!` will fail.
+    /// [SONNET-4.6]
+    #[test]
+    fn test_entity_attr_roundtrip() {
+        // Bare Frame fact with a typed literal whose datatype IRI contains &amp; in the
+        // XML attribute (a query-string separator: `?a=1&amp;b=2`).
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const>
+        <Const type="http://ex/dt?a=1&amp;b=2">val</Const>
+      </slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("valid doc with entity in type attribute");
+        assert_eq!(doc.rules.len(), 1, "one fact rule");
+        let atom = &doc.rules[0].head[0];
+        if let Atom::Frame { val, .. } = atom {
+            assert_eq!(
+                val,
+                &Term::Lit {
+                    lex: "val".to_string(),
+                    datatype: "http://ex/dt?a=1&b=2".to_string(),
+                },
+                "entity in type attribute must be unescaped: &amp; → & (Fix: attr unescape)"
+            );
+        } else {
+            panic!("expected Frame atom, got {:?}", atom);
+        }
+    }
+
+    /// An unknown general entity reference (&undefined;) must produce MalformedXml,
+    /// never silently drop the reference text. [SONNET-4.6]
+    #[test]
+    fn test_reject_unknown_entity() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const>
+        <Const type="http://www.w3.org/2001/XMLSchema#string">a&undefined;b</Const>
+      </slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml).expect_err("unknown entity &undefined; must be rejected (fail-closed)");
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml for unknown entity, got: {}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("undefined") || msg.contains("entity"),
+            "error message must name the bad entity: {}",
+            msg
+        );
+    }
+
+    /// resolve_xml_entity unit tests — covers predefined entities and numeric refs.
+    #[test]
+    fn test_resolve_xml_entity_predefined() {
+        // Five predefined XML entities.
+        assert_eq!(resolve_xml_entity("amp").unwrap(), "&");
+        assert_eq!(resolve_xml_entity("lt").unwrap(), "<");
+        assert_eq!(resolve_xml_entity("gt").unwrap(), ">");
+        assert_eq!(resolve_xml_entity("quot").unwrap(), "\"");
+        assert_eq!(resolve_xml_entity("apos").unwrap(), "'");
+        // Decimal numeric character reference: &#38; = '&'.
+        assert_eq!(resolve_xml_entity("#38").unwrap(), "&");
+        // Hexadecimal numeric character reference: &#x26; = '&' (0x26).
+        assert_eq!(resolve_xml_entity("#x26").unwrap(), "&");
+        // Upper-case X prefix (non-standard but handled defensively).
+        assert_eq!(resolve_xml_entity("#X26").unwrap(), "&");
+        // Unknown general entity → fail-closed.
+        assert!(
+            matches!(resolve_xml_entity("undefined"), Err(ImportError::MalformedXml(_))),
+            "unknown entity must produce MalformedXml"
         );
     }
 }
