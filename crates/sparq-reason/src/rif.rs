@@ -730,7 +730,7 @@ fn lower_builtin(op: Builtin, args: &[Term]) -> String {
         // func:concatenate (variadic lists): ( L1 L2 ... ) list:append out
         Builtin::ListConcatenate => {
             let n_inputs = args.len() - 1;
-            let input_terms: Vec<String> = args[..n_inputs].iter().map(|a| n3(a)).collect();
+            let input_terms: Vec<String> = args[..n_inputs].iter().map(n3).collect();
             format!("( {} ) <{}append> {}", input_terms.join(" "), LIST, n3(&args[n_inputs]))
         }
     }
