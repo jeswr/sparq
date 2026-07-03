@@ -74,8 +74,11 @@ use sparq_rsp::{
 /// in lock-step by that crate's `tests/scoreboard_floors.rs` guard (read
 /// textually — no cross-crate dep). HONESTLY a sparq EXTENSION ratchet, NOT a
 /// standards conformance claim (no normative RSP / SRBench test suite exists).
-/// [OPUS-4.8] sq-mcb3q
-const RSP_EXPRESSIVITY_FLOOR: usize = 149;
+/// [SONNET-4.6] sq-2n1q3.1 — raised from 149 (sq-mcb3q baseline) by:
+///   +76 sliding_narrow_sum scenario (RANGE 10 STEP 5, 9 windows × 4 EvalModes)
+///   +24 count-window EvalMode crosscheck (4 modes × 6 assertions each)
+///   +54 R2S EvalMode crosscheck (RSTREAM/ISTREAM/DSTREAM × 3 extra modes × 6 assertions)
+const RSP_EXPRESSIVITY_FLOOR: usize = 303;
 
 /// Documented RSP-QL surface that sparq-rsp does NOT execute, so it is NOT
 /// ratcheted here (the honest move: a lower floor reflecting reality + a recorded
@@ -241,6 +244,14 @@ fn scenarios() -> Vec<(&'static str, WindowSpec, &'static str)> {
             "SELECT ?room (AVG(?v) AS ?avg) (COUNT(?v) AS ?n) \
              WHERE { ?s <http://ex/in> ?room . ?s <http://ex/value> ?v } \
              GROUP BY ?room ORDER BY ?room",
+        ),
+        // Sliding narrow SUM (RANGE 10 STEP 5 → 50%-overlap, shorter window than
+        // step < range): 9 windows over the weather_script, exercises the DENSER
+        // sliding case with a global SUM aggregate. [SONNET-4.6] sq-2n1q3.1
+        (
+            "sliding_narrow_sum",
+            WindowSpec::time(10, 5),
+            "SELECT (SUM(?v) AS ?sum) WHERE { ?s <http://ex/value> ?v }",
         ),
     ]
 }
@@ -419,6 +430,47 @@ fn intern_name(iri: &str) -> Option<&'static str> {
     }
 }
 
+// ================================== AXIS 2b: R2S × all EvalModes consistency
+//
+// Cross-check that Rebuild, Delta, Snapshot each produce the same RSTREAM /
+// ISTREAM / DSTREAM window sequence as PersistentDict on the active_script.
+// Proves the R2S diff is EvalMode-agnostic (the diff is applied at the query
+// layer, after graph materialisation, so all four modes must agree).
+// [SONNET-4.6] sq-2n1q3.1
+
+fn axis_r2s_evalmode_crosscheck(tally: &mut Tally) {
+    let script = active_script();
+    let sparql = "SELECT ?s WHERE { ?s <http://ex/active> ?o }";
+    let spec = WindowSpec::time(10, 10);
+
+    for r2s in [R2S::RStream, R2S::IStream, R2S::DStream] {
+        // PersistentDict is the reference (already fully checked in axis_r2s_operators).
+        let reference =
+            run_single(sparql, spec, EvalMode::PersistentDict, r2s, &script);
+        for mode in [EvalMode::Rebuild, EvalMode::Delta, EvalMode::Snapshot] {
+            let result = run_single(sparql, spec, mode, r2s, &script);
+            tally.eq(
+                result.len(),
+                reference.len(),
+                &format!(
+                    "r2s {:?}/{:?}: window count matches PersistentDict reference",
+                    r2s, mode
+                ),
+            );
+            for i in 0..reference.len() {
+                tally.eq(
+                    subjects(&result[i]),
+                    subjects(&reference[i]),
+                    &format!(
+                        "r2s {:?}/{:?} w{}: rows match PersistentDict reference",
+                        r2s, mode, i
+                    ),
+                );
+            }
+        }
+    }
+}
+
 // =============================================== AXIS 3: CQL count (ROWS) windows
 //
 // SRBench expressivity over the programmatic count window: last-N arrivals,
@@ -454,6 +506,54 @@ fn count_val(cell: &Option<Term>) -> Option<i64> {
     match cell {
         Some(Term::Literal(l)) => l.value().parse::<i64>().ok(),
         _ => None,
+    }
+}
+
+// ================================= AXIS 3b: count-window × all EvalModes
+//
+// Assert the per-slot COUNT(*) values (ramp-up then plateau at capacity) and
+// cross-check all four EvalModes agree on every slot — proves the count-window
+// eviction policy (CQL last-N semantics) is EvalMode-agnostic.
+// [SONNET-4.6] sq-2n1q3.1
+
+fn axis_count_window_evalmode_crosscheck(tally: &mut Tally) {
+    let spec = WindowSpec::count(3);
+    let sparql = "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/value> ?v }";
+    let script: Vec<([Term; 3], u64)> = vec![
+        (val("s1", 1), 0),
+        (val("s2", 2), 1),
+        (val("s3", 3), 2),
+        (val("s4", 4), 3),
+        (val("s5", 5), 4),
+    ];
+    // Expected per-slot count(*): ramp up to capacity then plateau.
+    //   slot 0 (s1 only):         COUNT = 1
+    //   slot 1 (s1,s2):           COUNT = 2
+    //   slot 2 (s1,s2,s3 — full): COUNT = 3
+    //   slot 3 (s2,s3,s4):        COUNT = 3
+    //   slot 4 (s3,s4,s5):        COUNT = 3
+    let expected_counts: &[i64] = &[1, 2, 3, 3, 3];
+    for mode in [
+        EvalMode::Rebuild,
+        EvalMode::PersistentDict,
+        EvalMode::Delta,
+        EvalMode::Snapshot,
+    ] {
+        let r = run_single(sparql, spec, mode, R2S::RStream, &script);
+        tally.eq(
+            r.len(),
+            expected_counts.len(),
+            &format!("count window/{:?}: exactly {} slots reported", mode, expected_counts.len()),
+        );
+        for (i, &want) in expected_counts.iter().enumerate() {
+            let got =
+                r[i].rows.first().and_then(|row| row.first()).and_then(count_val).unwrap_or(-1);
+            tally.eq(
+                got,
+                want,
+                &format!("count window/{:?} slot {}: COUNT(*) = {}", mode, i, want),
+            );
+        }
     }
 }
 
@@ -678,12 +778,14 @@ fn rsp_srbench_expressivity_ratchet() {
     let mut tally = Tally::default();
     axis_window_types_x_evalmode(&mut tally);
     axis_r2s_operators(&mut tally);
+    axis_r2s_evalmode_crosscheck(&mut tally); // [SONNET-4.6] sq-2n1q3.1
     axis_count_windows(&mut tally);
+    axis_count_window_evalmode_crosscheck(&mut tally); // [SONNET-4.6] sq-2n1q3.1
     axis_multi_window_joins(&mut tally);
     axis_documented_gaps(&mut tally);
 
     // The line CI re-checks (mirrors the BM25 oracle's `assertions N (floor F)`).
-    // [OPUS-4.8] sq-mcb3q — positional format args (CodeQL rust/unused-variable).
+    // [OPUS-4.8] sq-mcb3q / [SONNET-4.6] sq-2n1q3.1 — positional format args (CodeQL).
     println!(
         "RSP expressivity / SRBench correctness assertions {} (floor {})",
         tally.n, RSP_EXPRESSIVITY_FLOOR

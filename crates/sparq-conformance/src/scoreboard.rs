@@ -191,15 +191,15 @@ pub struct Suite {
 ///   / BM25 suite exists; floor = the MEASURED count of bit-exact BM25 score
 ///   assertions the fixed-seed corpus battery makes against a from-scratch
 ///   independent reference scorer; default-on, no opt-in feature required).
-/// * RSP expressivity / SRBench correctness 149 — `sparq-rsp`
-///   `tests/srbench_oracle.rs` `RSP_EXPRESSIVITY_FLOOR = 149` (sq-mcb3q; a sparq
-///   EXTENSION ratchet, NOT standards conformance — RSP-QL is a W3C-COMMUNITY spec
-///   and SRBench is a benchmark, so there is NO normative RDF-Stream-Processing
-///   Recommendation or its conformance suite; floor = the MEASURED count of
-///   deterministic per-window correctness assertions the fixed SRBench-shaped
-///   battery makes across window types / R2S operators / EvalModes / multi-window
-///   joins against an INDEPENDENT batch-rebuild + closed-form oracle; default-on,
-///   no opt-in feature required).
+/// * RSP expressivity / SRBench correctness 303 — `sparq-rsp`
+///   `tests/srbench_oracle.rs` `RSP_EXPRESSIVITY_FLOOR = 303` (sq-2n1q3.1; raised
+///   from 149 sq-mcb3q baseline; a sparq EXTENSION ratchet, NOT standards conformance
+///   — RSP-QL is a W3C-COMMUNITY spec and SRBench is a benchmark, so there is NO
+///   normative RDF-Stream-Processing Recommendation or its conformance suite; floor =
+///   the MEASURED count of deterministic per-window correctness assertions the fixed
+///   SRBench-shaped battery makes across window types / R2S operators / EvalModes /
+///   multi-window joins against an INDEPENDENT batch-rebuild + closed-form oracle;
+///   default-on, no opt-in feature required). [SONNET-4.6]
 /// * OWL 2 QL (DL-Lite_R) certain-answer oracle 11 — `sparq-conformance`
 ///   `tests/ql_dllite_suite.rs` `QL_DLLITE_FLOOR = 11` (sq-qo1a9; opt-in
 ///   `ql-experimental` feature; a sparq EXTENSION ratchet, NOT a
@@ -724,7 +724,7 @@ pub const SUITES: &[Suite] = &[
         family: "sparq extension",
         runner: Runner::CrateTest { krate: "sparq-rsp", target: "srbench_oracle" },
         ci_job: "rsp-oracle",
-        ratchet_floor: 149,
+        ratchet_floor: 303, // [SONNET-4.6] sq-2n1q3.1 raised from 149 (sq-mcb3q baseline)
         floor_basis: "per-window correctness assertions (sparq EXTENSION, NOT standards conformance)",
         note: "EXTENSION ratchet — no normative RDF-Stream-Processing standard / RSP \
                conformance suite exists (RSP-QL is a W3C-community spec; SRBench a \
