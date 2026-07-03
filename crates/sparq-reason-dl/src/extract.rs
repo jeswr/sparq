@@ -411,9 +411,20 @@ fn decode_class_inner(
         )));
     }
     if shape_count == 0 {
-        // A bare IRI/blank with no recognised shape is a NAMED class (an anonymous blank with
-        // no class predicates is still a leaf; it carries meaning only through a referencing
-        // axiom, which is where soundness is enforced).
+        // [SONNET-4.6] sq-pbz04.4.1 bare-blank fix (Copilot thread 4): blank nodes in a
+        // class-expression position with no backbone predicates have no sound OWL mapping.
+        // Per the W3C OWL 2 RDF Mapping tables, blank nodes denote *structured* anonymous
+        // class expressions; a bare blank node has no recoverable class expression to decode.
+        // Taxonomy arm: MalformedClassExpression — the node IS in a class-expression position
+        // but is structurally incomplete (no intersection/union/complement/restriction backbone).
+        // Refuse fail-closed rather than returning an opaque Class(blank) that the downstream
+        // checker would treat as a real class constant. Named-class IRIs are valid leaves.
+        if !is_inline(id) && matches!(dict.term_parts(id), TermParts::Blank(_)) {
+            return Err(ExtractError::MalformedClassExpression(format!(
+                "bare blank node {} in class-expression position (no class-expression backbone)",
+                term_iri(dict, id)
+            )));
+        }
         return Ok(ClassExpression::Class(id));
     }
 
@@ -878,6 +889,15 @@ impl Index {
                     }
                 }
                 idx.structural_nodes.insert(s);
+                // [SONNET-4.6] sq-pbz04.4.1 order-asymmetry fix: when usage-typing would
+                // add `o` to object_props, check whether `o` is already in annotation_props
+                // or data_props (a declaration that arrived earlier in the triples slice).
+                // Symmetric to the declaration arms: records the pun so the verdict is
+                // order-independent (RDF graphs are sets; declaration before usage must
+                // produce the same Unclassifiable refusal as usage before declaration).
+                if idx.annotation_props.contains(&o) || idx.data_props.contains(&o) {
+                    idx.punned_props.insert(o);
+                }
                 idx.object_props.insert(o); // usage-based typing
             } else if p == v.some_values_from {
                 if let Some(prev) = idx.some_values_from.insert(s, o) {
@@ -983,10 +1003,21 @@ impl Index {
             } else if p == v.sub_property_of || p == v.domain || p == v.range {
                 // A property used in an object-property axiom position is known to be an
                 // object property (usage-based typing) — but only the subject/relevant operand.
+                // [SONNET-4.6] sq-pbz04.4.1 order-asymmetry fix: symmetric pun-check for
+                // each IRI being typed as object property via usage, matching the on_property arm.
                 if p == v.sub_property_of {
+                    if idx.annotation_props.contains(&s) || idx.data_props.contains(&s) {
+                        idx.punned_props.insert(s);
+                    }
                     idx.object_props.insert(s);
+                    if idx.annotation_props.contains(&o) || idx.data_props.contains(&o) {
+                        idx.punned_props.insert(o);
+                    }
                     idx.object_props.insert(o);
                 } else {
+                    if idx.annotation_props.contains(&s) || idx.data_props.contains(&s) {
+                        idx.punned_props.insert(s);
+                    }
                     idx.object_props.insert(s);
                 }
             }

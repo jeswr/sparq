@@ -751,6 +751,138 @@ fn reject_structural_node_used_as_individual() {
     );
 }
 
+// ============================== REJECT (order-asymmetry in punning detection) ==============================
+// [SONNET-4.6] sq-pbz04.4.1: Index::build usage-typing arms must detect a pun regardless of
+// whether the conflicting declaration appears BEFORE or AFTER the usage triple (RDF graphs are
+// sets — triple ordering must not affect the verdict).
+
+/// ORDER: AnnotationProperty declaration FIRST, then owl:onProperty use (the formerly-broken
+/// order). Before the order-asymmetry fix, annotation_props got the IRI and the later usage arm
+/// added it to object_props without checking annotation_props → pun undetected → ACCEPTED. [SONNET-4.6]
+#[test]
+fn reject_pun_declare_annotation_then_use_on_property() {
+    let (d, t) = parse(
+        ":p a owl:AnnotationProperty .\n\
+         :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :p ; owl:someValuesFrom :C ] .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "pun (declare-annotation-then-use) must be refused regardless of triple order"
+    );
+}
+
+/// ORDER: owl:onProperty use FIRST, then AnnotationProperty declaration (direction already
+/// caught by the declaration arm). Pinned as the symmetric pair. [SONNET-4.6]
+#[test]
+fn reject_pun_use_then_declare_annotation_on_property() {
+    let (d, t) = parse(
+        ":A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :p ; owl:someValuesFrom :C ] .\n\
+         :p a owl:AnnotationProperty .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "pun (use-then-declare-annotation) must be refused regardless of triple order"
+    );
+}
+
+/// Same two-order test with DatatypeProperty (F2). [SONNET-4.6]
+#[test]
+fn reject_pun_declare_datatype_then_use_on_property() {
+    let (d, t) = parse(
+        ":p a owl:DatatypeProperty .\n\
+         :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :p ; owl:someValuesFrom :C ] .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "pun (declare-datatype-then-use) must be refused regardless of triple order"
+    );
+}
+
+#[test]
+fn reject_pun_use_then_declare_datatype_on_property() {
+    let (d, t) = parse(
+        ":A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :p ; owl:someValuesFrom :C ] .\n\
+         :p a owl:DatatypeProperty .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
+        "pun (use-then-declare-datatype) must be refused regardless of triple order"
+    );
+}
+
+/// Triple-order permutation test: a punned AnnotationProperty used in owl:onProperty must be
+/// refused with Unclassifiable under at least 3 orderings of the triples slice. [SONNET-4.6]
+#[test]
+fn extract_verdict_order_independent_pun_permutation() {
+    let (d, mut t) = parse(
+        ":p a owl:AnnotationProperty .\n\
+         :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :p ; owl:someValuesFrom :C ] .",
+    );
+    let kind = |r: Result<Ontology, ExtractError>| match r {
+        Err(ExtractError::Unclassifiable(_)) => "unclassifiable",
+        Err(_) => "other_err",
+        Ok(_) => "ok",
+    };
+    let v0 = kind(extract(&d, &t));
+    t.sort();
+    let v1 = kind(extract(&d, &t));
+    t.sort_by(|a, b| b.cmp(a));
+    let v2 = kind(extract(&d, &t));
+    assert_eq!("unclassifiable", v0, "original order must refuse as Unclassifiable");
+    assert_eq!("unclassifiable", v1, "sorted-asc order must refuse as Unclassifiable");
+    assert_eq!("unclassifiable", v2, "sorted-desc order must refuse as Unclassifiable");
+}
+
+// ============================== REJECT (bare blank in class-expression position) ==============================
+// [SONNET-4.6] sq-pbz04.4.1 (Copilot thread 4): a blank node in a class-expression position
+// with no class-expression backbone predicates has no sound OWL mapping and must be refused.
+
+/// :A rdfs:subClassOf _:b with NO triples about _:b previously yielded Ok(Class(_:b)) — an
+/// opaque blank that the downstream checker would treat as a real class constant. Now refused. [SONNET-4.6]
+#[test]
+fn reject_bare_blank_in_class_expression_position() {
+    // _:b carries no backbone predicates — no owl:intersectionOf / owl:unionOf /
+    // owl:complementOf / owl:Restriction typing. A bare blank in subClassOf object position.
+    let (d, t) = parse(":A rdfs:subClassOf _:b .");
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedClassExpression(_))),
+        "bare blank node in class-expression position must be refused as MalformedClassExpression"
+    );
+}
+
+/// Control: a blank node WITH a proper backbone (owl:complementOf) still decodes. [SONNET-4.6]
+#[test]
+fn accept_blank_with_backbone_in_class_expression_position() {
+    let (d, t) = parse(":A rdfs:subClassOf [ owl:complementOf :B ] .");
+    assert!(
+        extract(&d, &t).is_ok(),
+        "blank node with owl:complementOf backbone must still decode"
+    );
+}
+
+// ============================== REJECT (inverse-property-expression pin) ==============================
+// [SONNET-4.6] sq-pbz04.4.1 (Copilot threads 2/3): owl:onProperty [ owl:inverseOf :r ] is
+// refused as OutOfFragment. The owl:inverseOf :r triple's PREDICATE fires in classify_triple's
+// out_of_fragment arm before any restriction decoding is attempted, so the check order inside
+// decode_object_property (blank-before-inverseOf) does not affect the overall verdict.
+
+/// Pin test: owl:onProperty [ owl:inverseOf :r ] → OutOfFragment. The owl:inverseOf predicate
+/// is in classify_triple's out_of_fragment map; it fires before decode_restriction is reached.
+/// This makes the blank-before-inverseOf concern in decode_object_property moot for this graph
+/// shape (Copilot threads 2/3 empirically refuted). [SONNET-4.6]
+#[test]
+fn reject_inverse_property_expression_in_on_property_pin() {
+    let (d, t) = parse(
+        ":A rdfs:subClassOf [ a owl:Restriction ; \
+         owl:onProperty [ owl:inverseOf :r ] ; \
+         owl:someValuesFrom :C ] .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::OutOfFragment(_))),
+        "owl:onProperty [ owl:inverseOf :r ] must be refused as OutOfFragment (via classify_triple)"
+    );
+}
+
 // ============================== FAIL-CLOSED INVARIANT ==============================
 
 #[test]
