@@ -165,7 +165,7 @@ RL rules.)
 
 **sq-pbz04.1.3 disposition pass (2026-07) [FABLE-5]:** an independent re-audit from the
 raw export premises/conclusions (all 13 extracted and checked term-by-term against the
-Profiles §4.3 rule HEADS, the §4.2 grammar, and PR1's scope) CONFIRMS the verdict above —
+Profiles §4.3 rule HEADS, the §4.1 grammar, and PR1's scope) CONFIRMS the verdict above —
 **13/13 PERMANENT, zero in-profile fixes, ratchet unchanged at 1967** — and carries the
 disposition into the report-facing rationales: each `owl_suite.rs::DOCUMENTED_DIVERGENCES`
 entry now opens `PERMANENT — …` with its specific rule-level grounding, pinned by an
