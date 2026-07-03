@@ -25,6 +25,7 @@
 use std::collections::BTreeMap;
 
 use super::{is_keyword, ActiveContext, Direction, Override, TermDefinition};
+use super::iri::relativize_iri;
 use crate::json::Json;
 
 // ---------------------------------------------------------------------------
@@ -390,17 +391,34 @@ pub fn compact_iri(
                 let dir_val = if is_map { v.get("@direction") } else { None };
 
                 if has_index && !containers.contains(&"@index".to_string()) {
-                    // §7.1 step 3.3: value has @index and the context doesn't
-                    // already capture it via a container.
-                    let ctx_containers: Vec<&str> = ctx
-                        .term_definitions
-                        .get(iri)
-                        .map(|d| d.container.iter().map(String::as_str).collect())
-                        .unwrap_or_default();
-                    if !ctx_containers.contains(&"@index") {
-                        containers.push("@index".to_string());
-                        containers.push("@index@set".to_string());
-                    }
+                    // §7.1 step 3.3: value has @index — add @index and
+                    // @index@set to the container search list so that
+                    // select_term can find terms whose container mapping
+                    // includes @index.
+                    //
+                    // [SONNET-4.6] sq-90mu3 defect fix: the prior code
+                    // called `ctx.term_definitions.get(iri)` using the
+                    // expanded IRI as a key.  `term_definitions` is keyed
+                    // by TERM NAME (e.g. "label"), so that lookup always
+                    // returned `None`, making the guard vacuously permissive
+                    // (containers were always extended regardless).
+                    //
+                    // The spec (§7.1 step 3.3) conditions on whether the
+                    // *outer* active property (the caller's current term, not
+                    // the IRI being compacted here) has @index in its
+                    // container.  `compact_iri` does not receive the outer
+                    // active-property term name, so the guard is not locally
+                    // implementable.  The unconditional push is the correct
+                    // local behaviour: an @index-container term for `iri` is
+                    // stored ONLY in the `"@index"` slot of the inverse
+                    // context and is unreachable without searching that slot;
+                    // adding `"@index"` when no such term exists is harmless
+                    // (select_term just finds nothing there and falls
+                    // through).  This matches the effective behaviour of the
+                    // reference jsonld.js implementation when the outer
+                    // activeProperty is not threaded through. [SONNET-4.6]
+                    containers.push("@index".to_string());
+                    containers.push("@index@set".to_string());
                 }
 
                 if is_list {
@@ -605,11 +623,17 @@ pub fn compact_iri(
         }
     }
 
-    // §7.1 step 6: base-relative IRI (vocab=false path).
+    // §7.1 step 6: base-relative IRI (vocab=false path). RFC 3986 §5.3-style
+    // relative-reference generation via `relativize_iri` (the inverse of
+    // `context::iri::resolve_iri`). This supersedes the prior
+    // `iri.strip_prefix(base)` which only handled the literal-prefix case
+    // and missed same-directory ("http://ex/a/b" + "http://ex/a/c" → "c"),
+    // parent-traversal ("../c"), and query/fragment preservation.
+    // [SONNET-4.6] sq-90mu3 defect fix.
     if !vocab {
         if let Some(base) = ctx.base_iri.as_deref() {
-            if let Some(relative) = iri.strip_prefix(base) {
-                return relative.to_string();
+            if let Some(relative) = relativize_iri(base, iri) {
+                return relative;
             }
         }
     }
@@ -1006,6 +1030,138 @@ mod tests {
             result.as_deref(),
             Some("parentOf"),
             "reverse term should be found under '@reverse' key"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 1 regression: §7.1 step 3.3 wrong-key lookup
+    // [SONNET-4.6] sq-90mu3 — old code: ctx.term_definitions.get(iri) where
+    // iri is the expanded IRI; term_definitions keyed by term NAME, so the
+    // lookup returned None when iri ≠ any term name, making the guard vacuous
+    // (always extended containers).  The old code is ALSO broken in the
+    // opposite direction when a term happens to be NAMED with the IRI being
+    // compacted: it returns the wrong term definition (one that maps to a
+    // DIFFERENT IRI) and incorrectly suppresses the @index search, causing
+    // compact_iri to miss the correct @index-container term.
+    //
+    // Verify by reverting the fix: the old code returns "http://ex/p"
+    // (absolute IRI, step 7 fallback) instead of "idx_term".
+    // -----------------------------------------------------------------------
+
+    /// §7.1 step 3.3 — wrong-key lookup regression.
+    ///
+    /// The old code called `ctx.term_definitions.get(iri)` using the
+    /// EXPANDED IRI as a key.  `term_definitions` is keyed by TERM NAME, so
+    /// the lookup only succeeds when a term happens to be NAMED with the same
+    /// string as the expanded IRI (an "IRI-named term").  When that term also
+    /// has `@index` in its container, the old code incorrectly suppressed the
+    /// `@index` container search — causing `select_term` to miss a
+    /// shorter-named term that also maps to the same IRI via `@index`, and
+    /// falling back to returning the full IRI at §7.1 step 7.
+    ///
+    /// The fixed code (unconditionally add `@index`/`@index@set` when value
+    /// has `@index`) finds the shorter-named term and returns it.
+    #[test]
+    fn compact_iri_index_guard_iri_keyed_term_regression() {
+        // Context:
+        //   "http://ex/p"  — IRI-named term; maps to itself with @index
+        //                    container (no @id needed: the term name is the IRI).
+        //   "idx_term"     — shorter normal term; also maps to "http://ex/p"
+        //                    with @index container.
+        //
+        // compact_iri("http://ex/p", value_with_@index, vocab=true):
+        //
+        //   Old code: ctx.term_definitions.get("http://ex/p") returns the
+        //   IRI-named term definition (iri="http://ex/p", container=["@index"]).
+        //   Its container has @index → !ctx_containers.contains("@index") = false
+        //   → DOES NOT push @index to containers → select_term searches
+        //   "@set"/"@none" but both terms are stored under "@index" in the
+        //   inverse context → nothing found → falls through to §7.1 step 7
+        //   → returns "http://ex/p" (full IRI). WRONG.
+        //
+        //   New code: unconditionally pushes @index → select_term finds the
+        //   SHORTER term "idx_term" (8 chars < 12 chars) in the "@index" slot
+        //   → returns "idx_term". CORRECT.
+        let ac = ctx_of(
+            r#"{
+                "http://ex/p": {"@container": "@index"},
+                "idx_term":    {"@id": "http://ex/p", "@container": "@index"}
+            }"#,
+        );
+        let inv = ac.inverse_context();
+        let value = json(r#"{"@index": "key", "@value": "hello"}"#);
+        let result = compact_iri(&ac, &inv, "http://ex/p", Some(&value), true, false);
+        assert_eq!(
+            result, "idx_term",
+            "compact_iri must find the shorter @index-container term via the @index \
+             slot; the old wrong-key lookup suppressed that search and returned the \
+             full IRI"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 2: §7.1 step 6 base-relative IRI via relativize_iri
+    // [SONNET-4.6] sq-90mu3 — old code: iri.strip_prefix(base) only worked
+    // for literal-prefix cases.  The new code uses the full RFC 3986
+    // relativization that handles same-directory, parent-traversal,
+    // query/fragment preservation.
+    // -----------------------------------------------------------------------
+
+    /// §7.1 step 6 — same-directory base-relative compaction.
+    ///
+    /// base = "http://example.org/" (= BASE const)
+    /// compact_iri("http://example.org/a/c", vocab=false) should yield a
+    /// relative ref.  With strip_prefix the literal-prefix case works only
+    /// when the base itself is a literal prefix (which it is here: "a/c").
+    /// The relativize_iri path also covers same-directory siblings.
+    #[test]
+    fn compact_iri_base_relative_same_directory() {
+        // BASE = "http://example.org/" — parent of "a/b" and "a/c".
+        // A fresh context with just a base IRI set.
+        let ac = ActiveContext::new(Some("http://example.org/a/b"));
+        let inv = ac.inverse_context();
+        let result = compact_iri(&ac, &inv, "http://example.org/a/c", None, false, false);
+        // With RFC 3986 relativization: "http://example.org/a/b" + "c" → "http://example.org/a/c"
+        assert_eq!(result, "c", "same-directory relative compaction");
+    }
+
+    /// §7.1 step 6 — parent-traversal relative compaction.
+    ///
+    /// old `strip_prefix("http://example.org/a/b/c")` cannot produce "../d";
+    /// `relativize_iri` correctly generates "../../d".
+    #[test]
+    fn compact_iri_base_relative_parent_traversal() {
+        let ac = ActiveContext::new(Some("http://example.org/a/b/c"));
+        let inv = ac.inverse_context();
+        let result = compact_iri(&ac, &inv, "http://example.org/a/d", None, false, false);
+        assert_eq!(result, "../d", "parent-traversal relative compaction");
+    }
+
+    /// §7.1 step 6 — query and fragment are preserved in the relative ref.
+    #[test]
+    fn compact_iri_base_relative_query_fragment() {
+        let ac = ActiveContext::new(Some("http://example.org/a/b"));
+        let inv = ac.inverse_context();
+        let result = compact_iri(
+            &ac,
+            &inv,
+            "http://example.org/a/c?q=1#sec",
+            None,
+            false,
+            false,
+        );
+        assert_eq!(result, "c?q=1#sec", "query and fragment preserved in relative ref");
+    }
+
+    /// §7.1 step 6 — cross-scheme IRI is returned unchanged (relativize returns None).
+    #[test]
+    fn compact_iri_cross_scheme_returned_unchanged() {
+        let ac = ActiveContext::new(Some("http://example.org/a/b"));
+        let inv = ac.inverse_context();
+        let result = compact_iri(&ac, &inv, "https://example.org/a/c", None, false, false);
+        assert_eq!(
+            result, "https://example.org/a/c",
+            "cross-scheme IRI must be returned unchanged"
         );
     }
 }

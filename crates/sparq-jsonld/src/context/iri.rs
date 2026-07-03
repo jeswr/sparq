@@ -334,6 +334,91 @@ pub(crate) fn resolve_iri(base: &str, reference: &str) -> String {
     recompose(t_scheme, t_authority, &t_path, t_query, r.fragment)
 }
 
+/// Generates a relative-reference from `base` to `iri` — the inverse of
+/// [`resolve_iri`] (RFC 3986 §5.3 recomposition in reverse).
+///
+/// Used by IRI Compaction (JSON-LD 1.1 API §7.1 step 6) to produce a
+/// base-relative compact form instead of the literal `strip_prefix` fallback.
+/// The output satisfies the round-trip property:
+/// `resolve_iri(base, relativize_iri(base, iri).unwrap()) == iri`.
+///
+/// Returns `None` when `iri` cannot be expressed relative to `base`:
+/// - different URI scheme
+/// - different authority (host/port)
+///
+/// [SONNET-4.6] (sq-90mu3) §7.1 step 6 defect fix: the prior
+/// `iri.strip_prefix(base)` only handled the literal-prefix case
+/// (`http://ex/a/b` → `c` when base is `http://ex/a/b` → ∅); this helper
+/// covers same-directory, child-path, parent-traversal, and
+/// query/fragment preservation.
+pub(crate) fn relativize_iri(base: &str, iri: &str) -> Option<String> {
+    let b = split_uri(base);
+    let r = split_uri(iri);
+
+    // Scheme and authority must agree — otherwise the IRI cannot be expressed
+    // as a relative reference and the caller should fall through to the
+    // absolute form.
+    if b.scheme != r.scheme || b.authority != r.authority {
+        return None;
+    }
+
+    // Base "directory": path up to and including the last '/'.
+    // e.g. "/a/b" → "/a/"   "/a/" → "/a/"   "/" → "/"
+    let base_dir_end = b.path.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let base_dir = &b.path[..base_dir_end];
+    let base_segs: Vec<&str> = base_dir.split('/').filter(|s| !s.is_empty()).collect();
+
+    // IRI directory and filename:
+    // "/a/c"  → dir="/a/"  file="c"
+    // "/a/c/" → dir="/a/c/" file="" (directory IRI)
+    let iri_dir_end = r.path.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let iri_dir = &r.path[..iri_dir_end];
+    let iri_file = &r.path[iri_dir_end..];
+    let iri_dir_segs: Vec<&str> = iri_dir.split('/').filter(|s| !s.is_empty()).collect();
+
+    // Common directory-segment prefix length.
+    let common = base_segs
+        .iter()
+        .zip(iri_dir_segs.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    // Number of `../` hops needed to reach the common ancestor.
+    let up = base_segs.len() - common;
+    // IRI-unique directory segments after the common prefix.
+    let tail_dir = &iri_dir_segs[common..];
+
+    // Build the relative path.
+    let mut rel = String::new();
+    for _ in 0..up {
+        rel.push_str("../");
+    }
+    for seg in tail_dir {
+        rel.push_str(seg);
+        rel.push('/');
+    }
+    // If iri ends with '/' and the relative path so far is empty, we need
+    // "./" so it resolves to the directory rather than the current document.
+    if iri_file.is_empty() && rel.is_empty() {
+        rel.push_str("./");
+    } else {
+        rel.push_str(iri_file);
+    }
+
+    // Preserve query and fragment from the target IRI.
+    let mut result = rel;
+    if let Some(q) = r.query {
+        result.push('?');
+        result.push_str(q);
+    }
+    if let Some(f) = r.fragment {
+        result.push('#');
+        result.push_str(f);
+    }
+
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +474,98 @@ mod tests {
             resolve_iri("http://a/b", "https://c/d?x#y"),
             "https://c/d?x#y"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // relativize_iri — round-trip correctness matrix
+    // [SONNET-4.6] (sq-90mu3) Fix for §7.1 step 6 base-relative compaction.
+    // Each case asserts: resolve_iri(base, relativize_iri(base, iri)) == iri
+    // -----------------------------------------------------------------------
+
+    fn round_trip(base: &str, iri: &str) -> String {
+        let rel = relativize_iri(base, iri)
+            .unwrap_or_else(|| panic!("expected Some for base={base:?} iri={iri:?}"));
+        let resolved = resolve_iri(base, &rel);
+        assert_eq!(
+            resolved, iri,
+            "round-trip failed: base={base:?} iri={iri:?} rel={rel:?}"
+        );
+        rel
+    }
+
+    /// Same directory: shared parent, different filename.
+    #[test]
+    fn relativize_same_directory() {
+        let rel = round_trip("http://ex/a/b", "http://ex/a/c");
+        assert_eq!(rel, "c");
+    }
+
+    /// Child path: iri is deeper than base.
+    #[test]
+    fn relativize_child_path() {
+        let rel = round_trip("http://ex/a/b", "http://ex/a/b/c/d");
+        assert_eq!(rel, "b/c/d");
+    }
+
+    /// Parent traversal: iri is in a sibling directory.
+    #[test]
+    fn relativize_parent_traversal() {
+        let rel = round_trip("http://ex/a/b/c", "http://ex/a/d");
+        assert_eq!(rel, "../d");
+    }
+
+    /// Query preservation: relative reference keeps the query string.
+    #[test]
+    fn relativize_query_preservation() {
+        let rel = round_trip("http://ex/a/b", "http://ex/a/c?q=1");
+        assert_eq!(rel, "c?q=1");
+    }
+
+    /// Fragment preservation: relative reference keeps the fragment.
+    #[test]
+    fn relativize_fragment_preservation() {
+        let rel = round_trip("http://ex/a/b", "http://ex/a/c#sec");
+        assert_eq!(rel, "c#sec");
+    }
+
+    /// Query and fragment together.
+    #[test]
+    fn relativize_query_and_fragment() {
+        let rel = round_trip("http://ex/a/b", "http://ex/a/c?q=1#sec");
+        assert_eq!(rel, "c?q=1#sec");
+    }
+
+    /// Same-file reference (iri == base): resolves back to the same resource.
+    #[test]
+    fn relativize_same_file() {
+        let rel = round_trip("http://ex/a/b", "http://ex/a/b");
+        // The relative ref must resolve back; "b" is the canonical form here.
+        assert_eq!(rel, "b");
+    }
+
+    /// Scheme mismatch: returns None (cannot relativize across schemes).
+    #[test]
+    fn relativize_scheme_mismatch_returns_none() {
+        assert!(relativize_iri("http://ex/a", "https://ex/a").is_none());
+    }
+
+    /// Authority mismatch: returns None (cannot relativize across hosts).
+    #[test]
+    fn relativize_authority_mismatch_returns_none() {
+        assert!(relativize_iri("http://ex/a", "http://other.ex/a").is_none());
+    }
+
+    /// Root-relative base: iri one level deep from the server root.
+    #[test]
+    fn relativize_root_base() {
+        let rel = round_trip("http://ex/", "http://ex/foo");
+        assert_eq!(rel, "foo");
+    }
+
+    /// Deep parent traversal: two levels up.
+    #[test]
+    fn relativize_two_levels_up() {
+        let rel = round_trip("http://ex/a/b/c/d", "http://ex/e");
+        assert_eq!(rel, "../../../e");
     }
 }
