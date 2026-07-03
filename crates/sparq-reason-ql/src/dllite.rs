@@ -1,4 +1,6 @@
 // [OPUS-4.8] sq-t5bne (epic sq-pbz04): the DL-Lite_R (OWL 2 QL) TBox model + extraction.
+// [SONNET-4.6] sq-pbz04.3.3: total TBox-capture accounting — equivalentClass/equivalentProperty
+// captured as inclusion pairs; consistency_relevant + unrecognised_schema tallies; fully_captured().
 //
 // OWL 2 QL is the syntactic restriction of OWL 2 whose DL counterpart is DL-Lite_R (Artale et
 // al., JAIR 2009; W3C OWL 2 Profiles §3). The POSITIVE inclusions PerfectRef rewrites with are:
@@ -14,8 +16,14 @@
 // consistency (a documented boundary — see the crate README / the deferred-path note).
 //
 // Extraction reads OWL axioms out of an RDF graph given as oxrdf triples. Only the QL fragment
-// is recognised; an axiom using a non-QL construct is COUNTED in [`TBox::skipped`] (honest "n
+// is recognised; an axiom using a non-QL construct is COUNTED in `TBox::skipped` (honest "n
 // axioms outside the QL fragment were ignored"), never misapplied.
+//
+// INVARIANT (sq-pbz04.3.3): NO silently-ignored rdfs:/owl: triple — every schema predicate in
+// the rdfs:/owl: vocabulary is EITHER captured (positive inclusion), counted in `skipped` (non-QL
+// axiom), counted in `consistency_relevant` (negative/disjointness axiom), OR classified as a
+// known restriction sub-predicate or annotation predicate. Anything else goes to
+// `unrecognised_schema`, which makes `fully_captured()` return false.
 
 #[cfg(feature = "experimental")]
 use oxrdf::NamedNode;
@@ -102,8 +110,15 @@ pub struct ConceptInclusion {
     pub sup: String,
 }
 
-/// The extracted DL-Lite_R TBox: just the positive inclusions PerfectRef needs, plus an honest
-/// tally of what was outside the QL fragment.
+/// The extracted DL-Lite_R TBox: positive inclusions PerfectRef needs, plus an honest tally of
+/// what was outside the QL fragment, what was consistency-relevant, and what was unrecognised.
+///
+/// INVARIANT (sq-pbz04.3.3): every `rdfs:`/`owl:` predicate triple is classified into one of:
+/// captured (adds to `concept_incl` / `exists_super` / `role_incl`), `skipped` (non-QL axiom),
+/// `consistency_relevant` (negative/disjointness axiom), or a known restriction sub-predicate /
+/// annotation predicate (silently ignored). Anything else increments `unrecognised_schema`.
+/// Callers can therefore trust that `skipped == 0 && unrecognised_schema == 0` (i.e.
+/// `fully_captured()`) is a decisive "nothing was missed" signal. [SONNET-4.6]
 #[derive(Clone, Debug, Default)]
 pub struct TBox {
     /// `B ⊑ A` with `A` a named class.
@@ -115,9 +130,25 @@ pub struct TBox {
     pub role_incl: Vec<(Role, Role)>,
     /// Count of axioms that used a construct OUTSIDE DL-Lite_R (and were therefore IGNORED for
     /// rewriting): qualified existentials, unionOf/intersection on the wrong side, cardinality,
-    /// nominals, datatype constructs, negative inclusions used positively, … Surfaced so a
-    /// caller can report "n axioms outside the QL fragment were ignored".
+    /// nominals, datatype constructs, `owl:equivalentClass` / `owl:equivalentProperty` with a
+    /// complex-expression object (not a named class/property), … Surfaced so a caller can report
+    /// "n axioms outside the QL fragment were ignored". Never counts annotation triples or
+    /// restriction sub-predicate triples (those are silently ignored as expected). See also
+    /// `consistency_relevant` and `unrecognised_schema`.
     pub skipped: usize,
+    /// Count of triples whose predicate is `owl:disjointWith`, `owl:propertyDisjointWith`, or
+    /// `owl:complementOf` — QL-legal negative axioms that do NOT contribute to the
+    /// certain-answer rewriting but ARE consistency-relevant. This crate does not check
+    /// consistency (a documented boundary); a non-zero count signals that the UCQ answers may
+    /// under-approximate the certain answers when the KB is inconsistent (an inconsistent KB
+    /// certain-answers everything). Surfaced SEPARATELY from `skipped` so callers can reason
+    /// about the consistency gap independently of the "axiom outside QL" gap. [SONNET-4.6]
+    pub consistency_relevant: usize,
+    /// Count of `rdfs:`/`owl:`-vocabulary triples whose predicate this extractor does not
+    /// recognise as captured, skipped, consistency-relevant, or annotation-classified. A
+    /// non-zero count means the TBox uses OWL/RDFS constructs beyond what this implementation
+    /// models; `fully_captured()` returns `false` in that case. [SONNET-4.6]
+    pub unrecognised_schema: usize,
 }
 
 impl TBox {
@@ -128,14 +159,22 @@ impl TBox {
     /// - `R rdfs:domain A` → `∃R ⊑ A`;
     /// - `R rdfs:range A` → `∃R⁻ ⊑ A`;
     /// - `R owl:inverseOf S` → `R ⊑ S⁻` and `S⁻ ⊑ R` (bi-directional, as DL-Lite_R inverses);
+    /// - `A owl:equivalentClass B` with both named classes → `A ⊑ B` AND `B ⊑ A` (inclusion
+    ///   pair); a complex-expression (blank-node) side goes to `skipped`;
+    /// - `R owl:equivalentProperty S` with both named properties → `R ⊑ S` AND `S ⊑ R`;
     /// - `A rdfs:subClassOf [ owl:onProperty R ; owl:someValuesFrom owl:Thing ]` → `A ⊑ ∃R`
     ///   (UNqualified existential — a QL-legal range generator);
     /// - `[ owl:onProperty R ; owl:someValuesFrom owl:Thing ] rdfs:subClassOf A` → `∃R ⊑ A`.
     ///
+    /// `owl:disjointWith`, `owl:propertyDisjointWith`, and `owl:complementOf` are counted in
+    /// `consistency_relevant` (QL-legal but not used for rewriting — see `TBox::consistency_relevant`).
+    ///
     /// A QUALIFIED `owl:someValuesFrom` (filler other than `owl:Thing`) on the LEFT is QL-legal
     /// (`∃R.C ⊑ A` is in QL via `∃R ⊑ A` weakening? — NO: that would be unsound), so it is
-    /// conservatively SKIPPED. Anything else (unionOf, complementOf, allValuesFrom, cardinality,
-    /// hasValue, oneOf, qualified RHS existentials) is skipped and counted.
+    /// conservatively SKIPPED. Anything else (unionOf, allValuesFrom, cardinality, hasValue,
+    /// oneOf, qualified RHS existentials) is skipped and counted. Any `rdfs:`/`owl:`-vocabulary
+    /// predicate not handled above and not a known restriction sub-predicate or annotation goes
+    /// to `unrecognised_schema`. [SONNET-4.6]
     pub fn extract(triples: &[Triple]) -> TBox {
         let mut tbox = TBox::default();
         // Index restriction blank-nodes: subject -> (onProperty, someValuesFrom-filler).
@@ -193,10 +232,63 @@ impl TBox {
                         tbox.skipped += 1;
                     }
                 }
-                _ => { /* not a TBox-shaping predicate; ignored (ABox / annotation) */ }
+                // [SONNET-4.6] sq-pbz04.3.3 — equivalentClass: A ≡ B decomposes to A ⊑ B AND
+                // B ⊑ A (both directions). QL-legal with named-class operands only; a blank-node
+                // complex expression on either side → skipped (outside QL rewriting scope).
+                _ if p == equivalent_class() => {
+                    match (NodeKind::from_subject(&t.subject), NodeKind::from_object(&t.object)) {
+                        (NodeKind::Iri(a), Some(NodeKind::Iri(b))) => {
+                            tbox.concept_incl.push(ConceptInclusion {
+                                sub: Basic::Class(a.clone()),
+                                sup: b.clone(),
+                            });
+                            tbox.concept_incl.push(ConceptInclusion {
+                                sub: Basic::Class(b),
+                                sup: a,
+                            });
+                        }
+                        _ => tbox.skipped += 1,
+                    }
+                }
+                // [SONNET-4.6] sq-pbz04.3.3 — equivalentProperty: R ≡ S decomposes to R ⊑ S
+                // AND S ⊑ R. Named roles only; blank-node or non-role → skipped.
+                _ if p == equivalent_property() => {
+                    match (role_of_subject(&t.subject), role_of_object(&t.object)) {
+                        (Some(r), Some(s)) => {
+                            tbox.role_incl.push((r.clone(), s.clone()));
+                            tbox.role_incl.push((s, r));
+                        }
+                        _ => tbox.skipped += 1,
+                    }
+                }
+                // [SONNET-4.6] sq-pbz04.3.3 — negative/disjointness axioms: QL-legal but
+                // consistency-relevant. Counted separately (never applied to the rewrite).
+                _ if p == disjoint_with() => tbox.consistency_relevant += 1,
+                _ if p == property_disjoint_with() => tbox.consistency_relevant += 1,
+                _ if p == complement_of() => tbox.consistency_relevant += 1,
+                _ => {
+                    // Not a TBox-shaping predicate recognised above. If the predicate is in the
+                    // rdfs:/owl: vocabulary namespace and is NOT a known restriction sub-predicate
+                    // or annotation predicate, count it as unrecognised schema vocabulary.
+                    // [SONNET-4.6] sq-pbz04.3.3
+                    if is_unrecognised_schema(p) {
+                        tbox.unrecognised_schema += 1;
+                    }
+                    // Otherwise: ABox triple, rdf: predicate, or known annotation — silently
+                    // ignored (expected, not a gap in TBox accounting).
+                }
             }
         }
         tbox
+    }
+
+    /// Returns `true` if and only if the TBox was FULLY captured by this extractor: zero axioms
+    /// were skipped (outside QL fragment) AND zero `rdfs:`/`owl:` vocabulary predicates were
+    /// unrecognised. Consistency-relevant axioms (`owl:disjointWith` etc.) are NOT counted
+    /// against full capture — they are QL-legal; the crate's documented boundary is that it
+    /// does not CHECK consistency, not that it misses their presence. [SONNET-4.6]
+    pub fn fully_captured(&self) -> bool {
+        self.skipped == 0 && self.unrecognised_schema == 0
     }
 
     /// Add an `A ⊑ B`-derived inclusion, resolving restriction blank-nodes on either side into
@@ -337,6 +429,79 @@ const NON_QL_RESTRICTION: &[&str] = &[
     "onClass",
 ];
 
+/// `owl:` restriction sub-predicates handled by `index_restrictions`: their triples contribute
+/// to the restriction-indexing machinery and are accounted for via `add_subclass`; they are NOT
+/// unrecognised schema vocabulary. [SONNET-4.6] sq-pbz04.3.3
+const RESTRICTION_SUB_PREDICATES: &[&str] = &[
+    "onProperty",
+    "someValuesFrom",
+    "onDatatype",
+    "withRestrictions",
+    // All NON_QL_RESTRICTION entries (those poison the blank node via index_restrictions):
+    "allValuesFrom",
+    "hasValue",
+    "minCardinality",
+    "maxCardinality",
+    "cardinality",
+    "minQualifiedCardinality",
+    "maxQualifiedCardinality",
+    "qualifiedCardinality",
+    "hasSelf",
+    "onClass",
+];
+
+/// OWL 2 built-in annotation-property local names. Triples whose predicate is `{OWL}{name}`
+/// carry human-readable / versioning metadata and are NOT TBox axioms — silently ignored, not
+/// counted in `unrecognised_schema`. [SONNET-4.6] sq-pbz04.3.3
+const ANNOTATION_OWL: &[&str] = &[
+    "deprecated",
+    "versionInfo",
+    "priorVersion",
+    "backwardCompatibleWith",
+    "incompatibleWith",
+    "annotatedSource",
+    "annotatedProperty",
+    "annotatedTarget",
+];
+
+/// RDFS built-in annotation-property local names. Triples whose predicate is `{RDFS}{name}`
+/// are not TBox axioms — silently ignored, not counted in `unrecognised_schema`.
+/// [SONNET-4.6] sq-pbz04.3.3
+const ANNOTATION_RDFS: &[&str] = &["comment", "label", "isDefinedBy", "seeAlso"];
+
+/// Returns `true` if the predicate `p` — which has ALREADY failed to match every explicit TBox
+/// extraction arm — is in the `rdfs:`/`owl:` vocabulary namespace AND is NOT a restriction
+/// sub-predicate (handled by `index_restrictions`) or a known annotation predicate. These are
+/// the triples that contribute to `TBox::unrecognised_schema`. [SONNET-4.6] sq-pbz04.3.3
+fn is_unrecognised_schema(p: &str) -> bool {
+    // Fast path: most ABox predicates are NOT in the rdfs:/owl: namespace.
+    if !p.starts_with(RDFS) && !p.starts_with(OWL) {
+        return false;
+    }
+    // Restriction sub-predicates: handled via index_restrictions, not unrecognised.
+    if RESTRICTION_SUB_PREDICATES
+        .iter()
+        .any(|s| p == format!("{OWL}{s}"))
+    {
+        return false;
+    }
+    // Known rdfs: annotation predicates — not schema axioms.
+    if ANNOTATION_RDFS
+        .iter()
+        .any(|s| p == format!("{RDFS}{s}"))
+    {
+        return false;
+    }
+    // Known owl: annotation predicates — not schema axioms.
+    if ANNOTATION_OWL
+        .iter()
+        .any(|s| p == format!("{OWL}{s}"))
+    {
+        return false;
+    }
+    true
+}
+
 fn role_of_subject(t: &NamedOrBlankNode) -> Option<Role> {
     match t {
         NamedOrBlankNode::NamedNode(n) => Some(Role::named(n.as_str())),
@@ -367,6 +532,21 @@ fn range() -> String {
 fn inverse_of() -> String {
     format!("{OWL}inverseOf")
 }
+fn equivalent_class() -> String {
+    format!("{OWL}equivalentClass")
+}
+fn equivalent_property() -> String {
+    format!("{OWL}equivalentProperty")
+}
+fn disjoint_with() -> String {
+    format!("{OWL}disjointWith")
+}
+fn property_disjoint_with() -> String {
+    format!("{OWL}propertyDisjointWith")
+}
+fn complement_of() -> String {
+    format!("{OWL}complementOf")
+}
 
 /// The `rdf:type` IRI (a role-atom predicate that means "class membership", handled specially by
 /// the query atom mapper, never as an ordinary role). Only the experimental rewriter needs it.
@@ -384,5 +564,31 @@ mod tests {
         let r = Role::named("http://ex/r");
         assert_eq!(r.inv().inv(), r);
         assert!(r.inv().inverse);
+    }
+
+    // [SONNET-4.6] sq-pbz04.3.3 — direct unit test for fully_captured() covering both the
+    // true-case (clean simple TBox) and false-case (skipped or unrecognised_schema > 0).
+    // Required for the per-crate coverage floor (reference-coverage-ratchet-direct-tests).
+    #[test]
+    fn fully_captured_true_iff_no_skipped_and_no_unrecognised() {
+        let mut tbox = TBox::default();
+        assert!(tbox.fully_captured(), "empty TBox is fully captured");
+
+        tbox.skipped = 1;
+        assert!(!tbox.fully_captured(), "skipped > 0 => not fully captured");
+
+        tbox.skipped = 0;
+        tbox.unrecognised_schema = 1;
+        assert!(
+            !tbox.fully_captured(),
+            "unrecognised_schema > 0 => not fully captured"
+        );
+
+        tbox.unrecognised_schema = 0;
+        tbox.consistency_relevant = 99;
+        assert!(
+            tbox.fully_captured(),
+            "consistency_relevant alone does NOT block fully_captured"
+        );
     }
 }
