@@ -193,9 +193,11 @@ i.e. the **Rust** forge/anchor suite. Consequences confirmed by both audits:
   `xpath/src`) **never execute in CI**. A correctness/soundness regression in `kernels.nr` or
   `string.nr` that still *compiles* merges green — including the `new()` under-constraint
   (`sq-3x7dl.1`), which passes every existing check.
-- Each library's **own** workflows are nested under `zk/<lib>/.github/workflows/` (`nargo test`,
-  `nargo fmt`, gate-count). GitHub Actions only runs workflows from the repo-root
-  `.github/workflows/`, so all of these are **inert** in the monorepo.
+- `zk/xpath` has library-local workflows under `zk/xpath/.github/workflows/` (`nargo test`,
+  `nargo fmt`, gate-count); `zk/ieee754` has no `.github/` directory and no library-local
+  workflows. GitHub Actions only runs workflows from the repo-root `.github/workflows/`, so
+  `zk/xpath`'s library-local workflows are **inert** in the monorepo — and neither library's
+  Noir tests currently run in CI, which `sq-3x7dl.13` addresses.
 - The `zk-toolchain` path filter *does* include `zk/**`, so an xpath/ieee754 change surfaces a
   green `zk forge + anchor suite` check — a **false** sense of coverage: that job never compiles
   or tests the changed Noir.
