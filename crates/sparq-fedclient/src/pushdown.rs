@@ -1028,7 +1028,7 @@ mod tests {
         };
         let cap = Capability::endpoint();
         // output_vars includes both s (cross-group join key) and o1 (final projection var).
-        // push_group projects exactly the group vars present in output_vars. [SONNET-4.6] sq-v411r
+        // push_group projects exactly the group vars present in output_vars. [OPUS-4.8] sq-qcnn.22
         let pushed = push_group(
             &group,
             &bgp,

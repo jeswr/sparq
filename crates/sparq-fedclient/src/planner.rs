@@ -155,6 +155,11 @@ impl<'a> SourceResolver<'a> {
 /// pushable FILTERs, VALUES bind-join blocks, ORDER/LIMIT) is Phase 4's `pushdown` module;
 /// `lower_leaf` is the seam it narrows. [OPUS-4.8] sq-j27p.
 pub fn lower_leaf(tp: &TriplePattern) -> SubQuery {
+    debug_assert!(
+        !matches!(tp.subject, Term::Literal(_)),
+        "lower_leaf: literal in subject position is not valid RDF/SPARQL 1.1; \
+         sparq-fedplan must never produce such a pattern"
+    );
     let project = pattern_vars(tp);
     let s = render_term(&tp.subject);
     let p = render_term(&tp.predicate);
@@ -455,19 +460,16 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "literal in subject position is not valid RDF/SPARQL 1.1")]
     fn lower_leaf_literal_in_subject() {
-        // A literal in subject position (rare but valid in fedplan): rendered as a bare quoted string.
-        let tp = TriplePattern::new(
+        // A literal in subject position is invalid in RDF/SPARQL 1.1; lower_leaf debug-asserts
+        // this never happens. sparq-fedplan must never produce such a pattern — this test
+        // documents the rejection path. [OPUS-4.8] sq-qcnn.22
+        lower_leaf(&TriplePattern::new(
             Term::Literal("hello".to_string()),
             iri("http://ex/prop"),
             var("o"),
-        );
-        let sub = lower_leaf(&tp);
-        assert_eq!(sub.project, vec!["o".to_string()]);
-        assert_eq!(
-            sub.sparql,
-            "SELECT ?o WHERE { \"hello\" <http://ex/prop> ?o }"
-        );
+        ));
     }
 
     #[test]

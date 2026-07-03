@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn solution_sink_clone_multiple_emits() {
-        // Cloned sink can emit independently.
+        // Cloned sink can emit independently; solutions arrive in emission order. [OPUS-4.8] sq-qcnn.22
         let (sink, stream) = SolutionStream::bounded(2);
         let sink2 = sink.clone();
         let ok1 = sink.emit(sol("http://ex/a"));
@@ -331,5 +331,7 @@ mod tests {
         assert!(ok2);
         let got: Vec<_> = stream.map(|i| i.unwrap()).collect();
         assert_eq!(got.len(), 2);
+        assert_eq!(got[0].get("s"), Some(&nn("http://ex/a")));
+        assert_eq!(got[1].get("s"), Some(&nn("http://ex/b")));
     }
 }
