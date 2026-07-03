@@ -42,8 +42,13 @@
 
   --chart-1: oklch(0.55 0.11 205);
   --chart-2: oklch(0.6 0.12 160);
-  --chart-3: oklch(0.62 0.14 95);
-  --chart-4: oklch(0.58 0.16 30);
+  /* [SONNET-4.6] sq-ymr2e.13 — WCAG 2.1 AA light-mode fix: darken chart-3 (number token) and
+     chart-4 (string token) so .sq-tok-number / .sq-tok-string clear ≥4.5:1 on white card bg.
+     Before: chart-3=oklch(0.62 0.14 95) → ~3.6:1 (FAIL); chart-4=oklch(0.58 0.16 30) → ~4.6:1
+     (borderline). After: chart-3=oklch(0.54 0.14 95) → ~5.0:1; chart-4=oklch(0.55 0.16 30)
+     → ~5.2:1. Dark-mode values in .dark below are unchanged (they already clear AA on dark card). */
+  --chart-3: oklch(0.54 0.14 95);
+  --chart-4: oklch(0.55 0.16 30);
   --chart-5: oklch(0.55 0.15 290);
 
   --sidebar: oklch(0.985 0.004 210);

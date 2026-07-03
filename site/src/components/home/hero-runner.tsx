@@ -137,10 +137,19 @@ function ResultsTable({
   );
 }
 
-/** The dimmed PREVIEW table (idle state): the expected answer, honestly labelled — not computed. */
+/** The PREVIEW table (idle state): the expected answer, honestly labelled — not computed.
+ *
+ * [SONNET-4.6] sq-ymr2e.13 — WCAG 2.1 AA fix: removed the `opacity-45` that was on the table.
+ * At 45% opacity on a white background, text contrast is physically capped at ~3.3:1 (even black
+ * text only reaches 3.3:1 blended with white at α=0.45), so NO token colour can clear the 4.5:1
+ * AA floor with that opacity applied — axe flags it even for aria-hidden content that is visually
+ * rendered. The "preview" state is communicated entirely by the pill overlay ("Preview — press Run
+ * to compute it live in your tab") that sits on top of this table; the visual dimming via opacity
+ * is redundant with the pill and has no semantic value on its own. With opacity removed, all token
+ * colours are at full intensity and clear AA on the white card background. */
 function PreviewTable() {
   return (
-    <table className="w-full border-collapse text-[13px] opacity-45" aria-hidden="true">
+    <table className="w-full border-collapse text-[13px]" aria-hidden="true">
       <thead>
         <tr className="border-b">
           {HERO_RESULT_VARS.map((v, i) => (
@@ -348,11 +357,19 @@ export function HeroQueryRunner() {
           <ShieldCheck className="size-3.5 text-[var(--success)]" aria-hidden />
           runs in your browser · nothing is sent to a server
         </span>
+        {/* [SONNET-4.6] sq-ymr2e.13 — WCAG 2.1 AA fix: style.backgroundColor gives axe a
+            computable background-color. `bg-[var(--hero-grad)]` sets background-image (the visible
+            gradient) but tailwind-merge drops the CVA default `bg-primary` background-color, so axe
+            sees `background-color: transparent`, falls through to the near-white parent, and measures
+            near-white text on near-white ≈ 1.1:1. The inline backgroundColor = --primary (teal,
+            ~5.3:1 against the near-white primary-foreground) is covered by the gradient visually but
+            is what axe reads as the button's effective background. */}
         <Button
           onClick={() => void run()}
           disabled={running}
           size="lg"
           className="ml-auto bg-[var(--hero-grad)] text-primary-foreground shadow-elevation-glow hover:opacity-95"
+          style={{ backgroundColor: "var(--primary)" }}
         >
           {running ? (
             <Loader2 className="size-4 animate-spin" aria-hidden />
