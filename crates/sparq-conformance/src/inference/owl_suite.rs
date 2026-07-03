@@ -35,78 +35,113 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Documented divergences: selected tests whose expected entailments are
-/// PROVABLY outside what the OWL 2 RL/RDF rules can derive (or whose RL tag in
-/// the export contradicts the RL profile grammar). The OWL 2 Conformance REC
-/// §2.3 scopes rules-based completeness (theorem PR1) to assertion-style
-/// conclusions; these conclusions are TBox axioms, invented class expressions,
-/// reified structures, or contrapositives — no pure RL/RDF-rules reasoner can
-/// pass them. Reported distinctly (counts as pass+divergence), never silently.
+/// Documented divergences — the per-divergence DISPOSITION pass (sq-pbz04.1.3).
+///
+/// Each entry was audited from its raw export premise/conclusion against the
+/// OWL 2 Profiles REC: the §4.2 RL grammar, every rule HEAD in the §4.3 RL/RDF
+/// rule tables, and theorem PR1, whose completeness guarantee (Conformance REC
+/// §2.3) covers only assertion conclusions — ClassAssertion /
+/// ObjectPropertyAssertion / DataPropertyAssertion / SameIndividual
+/// (DifferentIndividuals conclusions are outside PR1 entirely). Criterion: if
+/// the RL/RDF rules genuinely derive the expected conclusion, FIX the reasoner
+/// and drop the entry; otherwise the divergence is PERMANENT with its
+/// rule-level grounding below. Result: 13/13 PERMANENT — no rule head emits
+/// owl:TransitiveProperty, owl:complementOf, owl:unionOf, list cells, or a
+/// reified owl:AllDifferent; the only differentFrom-emitting rule is dt-diff
+/// (unequal-value LITERAL pairs, never individuals); ReflexiveObjectProperty
+/// is excluded from the RL grammar. Forcing any of these would be an UNSOUND
+/// beyond-RL extension — worse than an honest divergence; the owl.rs
+/// soundness guards pin the non-derivations (sq-350ms), and
+/// research/inference-completeness-audit.md §2b carries the audit record.
+/// Reported distinctly (counts as pass+divergence), never silently. [FABLE-5]
 const DOCUMENTED_DIVERGENCES: &[(&str, &str)] = &[
     (
         "chain2trans1",
-        "conclusion is a TBox axiom (owl:TransitiveProperty) that no RL/RDF rule derives — \
-         PR1 completeness covers assertions only",
+        "PERMANENT — conclusion is the TBox axiom `p rdf:type owl:TransitiveProperty` (from \
+         the self-chain p∘p ⊑ p); prp-spo2 consumes owl:propertyChainAxiom only in its BODY \
+         to derive chained assertions, no rule head emits owl:TransitiveProperty, and PR1 \
+         completeness is assertion-only",
     ),
     (
         "DisjointClasses-001",
-        "conclusion invents an owl:complementOf class expression; the RL/RDF rules derive no \
-         new class expressions (PR1 assertion-only completeness)",
+        "PERMANENT — conclusion types Stewie into an INVENTED anonymous owl:complementOf \
+         class; complementOf occurs only in the BODY of the clash rule cls-com — no RL/RDF \
+         rule head constructs a class expression (PR1 covers named-class assertions only)",
     ),
     (
         "DisjointClasses-003",
-        "conclusion invents an owl:complementOf class expression; the RL/RDF rules derive no \
-         new class expressions (PR1 assertion-only completeness)",
+        "PERMANENT — as DisjointClasses-001 via owl:AllDisjointClasses: the conclusion \
+         invents TWO anonymous owl:complementOf classes; cax-adc consumes the members list \
+         to derive `false` only, and no rule head constructs a class expression",
     ),
     (
         "New-Feature-ObjectQCR-002",
-        "conclusion invents an owl:complementOf class expression; the RL/RDF rules derive no \
-         new class expressions (PR1 assertion-only completeness)",
+        "PERMANENT — needs the CONTRAPOSITIVE of cls-maxqc3: were Stewie a Woman, Peter's \
+         maxQC-1-on-Woman restriction would force `Stewie sameAs Meg` against their \
+         differentFrom, so full semantics types Stewie into the complement of Woman; \
+         cls-maxqc3/4 derive sameAs only from ALREADY-co-typed fillers, and no rule head \
+         constructs the required owl:complementOf class",
     ),
     (
         "WebOnt-I5.5-005",
-        "conclusion invents an owl:unionOf class expression; the RL/RDF rules derive no new \
-         class expressions (PR1 assertion-only completeness)",
+        "PERMANENT — conclusion asserts the EXISTENCE of an anonymous class \
+         `[ owl:unionOf (a) ]`; no RL/RDF rule head emits owl:unionOf or rdf:first/rdf:rest \
+         list cells (cls-uni/scm-uni consume unionOf in bodies), so the closure can never \
+         contain the required structure",
     ),
     (
         "New-Feature-DisjointDataProperties-002",
-        "conclusion is a reified owl:AllDifferent structure; the RL/RDF rules derive \
-         inconsistency from AllDifferent (eq-diff2/3) but never construct one",
+        "PERMANENT — conclusion is a REIFIED owl:AllDifferent/owl:distinctMembers structure; \
+         eq-diff2/3 and prp-adp consume these structures in rule BODIES (clash detection) \
+         and no rule head constructs one — and differentFrom between individuals is \
+         underivable anyway (dt-diff emits it only between unequal-value literals)",
     ),
     (
         "New-Feature-DisjointObjectProperties-001",
-        "conclusion needs the CONTRAPOSITIVE of prp-pdw (property disjointness ⊢ \
-         owl:differentFrom of the fillers), which is not an RL/RDF rule",
+        "PERMANENT — needs the CONTRAPOSITIVE of prp-pdw: were Peter = Lois, one pair would \
+         lie in BOTH disjoint properties, so full semantics entails `Peter differentFrom \
+         Lois`; prp-pdw derives only `false` from an actual shared pair, no rule emits \
+         differentFrom between individuals (dt-diff covers literals only), and \
+         DifferentIndividuals conclusions are outside PR1's assertion scope",
     ),
     (
         "New-Feature-DisjointObjectProperties-002",
-        "conclusion needs the CONTRAPOSITIVE of prp-pdw (property disjointness ⊢ \
-         owl:differentFrom of the fillers), which is not an RL/RDF rule",
+        "PERMANENT — the prp-adp/prp-pdw contrapositive exactly as in \
+         New-Feature-DisjointObjectProperties-001, PLUS the conclusion is a reified \
+         owl:AllDifferent/owl:distinctMembers structure that no rule head constructs",
     ),
     (
         "owl2-rl-rules-fp-differentFrom",
-        "conclusion needs the CONTRAPOSITIVE of prp-fp (functionality + differentFrom fillers \
-         ⊢ differentFrom subjects), which is not an RL/RDF rule",
+        "PERMANENT — needs the CONTRAPOSITIVE of prp-fp: were Y1 = Y2, prp-fp would merge \
+         X1/X2 against their differentFrom, so full semantics entails `Y1 differentFrom \
+         Y2`; prp-fp requires the SAME subject and derives only sameAs, and no rule emits \
+         differentFrom between individuals (dt-diff covers literals only)",
     ),
     (
         "owl2-rl-rules-ifp-differentFrom",
-        "conclusion needs the CONTRAPOSITIVE of prp-ifp, which is not an RL/RDF rule",
+        "PERMANENT — the prp-ifp CONTRAPOSITIVE, symmetric to the fp case: were X1 = X2, \
+         prp-ifp would merge Y1/Y2 against their differentFrom; prp-ifp derives only \
+         sameAs, and differentFrom between individuals has no producing rule",
     ),
     (
         "New-Feature-ReflexiveProperty-001",
-        "premise uses ReflexiveObjectProperty, which the OWL 2 RL profile grammar excludes — \
-         the export's RL tag contradicts the profile, and prp-rfx is accordingly absent from \
-         the RL/RDF rules table",
+        "PERMANENT — the premise's ReflexiveObjectProperty is EXCLUDED from the RL grammar \
+         (Profiles §4.2: all OWL 2 axioms 'apart from disjoint unions of classes and \
+         reflexive object property axioms'), the export's RL tag notwithstanding; \
+         accordingly no prp-rfx rule exists, so `Peter knows Peter` is underivable",
     ),
     (
         "WebOnt-I5.8-008",
-        "needs datatype-range INTERSECTION reasoning (xsd:short ∩ xsd:unsignedInt ⊑ \
-         xsd:unsignedShort), beyond the RL/RDF rules' datatype support",
+        "PERMANENT — a TBox rdfs:range conclusion needing value-space INTERSECTION \
+         (xsd:short ∩ xsd:unsignedInt ⊑ xsd:unsignedShort); scm-rng1 only propagates a \
+         range UP existing subClassOf edges, no dt-*/scm-* rule intersects datatype \
+         ranges, and PR1 is assertion-only",
     ),
     (
         "WebOnt-I5.8-009",
-        "needs datatype-range INTERSECTION reasoning (xsd:nonNegativeInteger ∩ \
-         xsd:nonPositiveInteger = {0} ⊑ xsd:short), beyond the RL/RDF rules' datatype support",
+        "PERMANENT — as WebOnt-I5.8-008 with xsd:nonNegativeInteger ∩ \
+         xsd:nonPositiveInteger = {0} ⊑ xsd:short: datatype-range intersection is beyond \
+         the RL/RDF dt-* rules, and the rdfs:range conclusion is a TBox axiom outside PR1",
     ),
 ];
 
@@ -438,4 +473,43 @@ fn fix_doctype_quotes(text: &str) -> String {
     fixed.push_str(&text[start..end].replace('\'', "\""));
     fixed.push_str(&text[end..]);
     fixed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DOCUMENTED_DIVERGENCES;
+
+    /// [FABLE-5] sq-pbz04.1.3 — the per-divergence disposition pass. Every
+    /// documented divergence must carry an explicit PERMANENT disposition
+    /// grounded in the OWL 2 Profiles REC (a named rule from the §4.3 tables,
+    /// the §4.2 grammar exclusion, or theorem PR1's assertion-only completeness
+    /// scope). Growing the list, or replacing a grounding with a hand-wave,
+    /// must be a conscious reviewed act: the count, uniqueness, and grounding
+    /// are pinned here so a divergence can never be added (hiding a real fail)
+    /// or reworded into vagueness silently.
+    #[test]
+    fn divergence_dispositions_are_permanent_and_rule_grounded() {
+        assert_eq!(
+            DOCUMENTED_DIVERGENCES.len(),
+            13,
+            "the divergence list changes only via a reviewed disposition pass"
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for (name, rationale) in DOCUMENTED_DIVERGENCES {
+            assert!(seen.insert(*name), "duplicate divergence entry: {}", name);
+            assert!(
+                rationale.starts_with("PERMANENT — "),
+                "{}: rationale must open with its disposition tag",
+                name
+            );
+            // A checkable spec anchor: a rule-table rule name, the RL-grammar
+            // section, or the PR1 completeness theorem.
+            let anchors = ["prp-", "cls-", "cax-", "scm-", "eq-diff", "dt-", "§4.2", "PR1"];
+            assert!(
+                anchors.iter().any(|tok| rationale.contains(tok)),
+                "{}: rationale must cite a rule-table / grammar / PR1 grounding",
+                name
+            );
+        }
+    }
 }
