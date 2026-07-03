@@ -140,6 +140,26 @@ jobs:
             echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }} docker=${{ steps.filter.outputs.docker }}"
           fi
 
+  # [FABLE-5] sq-fmx4u.3: change-based test-selection pre-job (reusable — see the
+  # doctrine in .github/workflows/ci-select.yml). Computes the affected crate
+  # closure once per run; the wide per-crate lanes below guard on it with the
+  # fail-closed disjunction  `mode != 'selected' || contains(affected, '"<crate>"')`
+  # (empty/missing outputs => RUN), and the cross-crate bulk test shards NARROW
+  # (never skip) via the filterset output. UNCONDITIONAL (no needs/if): the
+  # ci-summary gate REQUIRES every selection check-run to conclude success before
+  # any skipped sibling counts as satisfied, so this job must exist and be green
+  # on every run — including doc-only PRs where `changes` skips the Rust matrix.
+  # Relationship to `changes` (dorny paths-filter) is layered, both directions
+  # preserved: rust_changed==false skips a lane regardless of selection (the
+  # existing doc-PR fast path), and selection can only skip WITHIN
+  # rust_changed==true. SHADOW default-ON until the CI_SELECT_MODE repo variable
+  # says "enforce" (bead sq-fmx4u.5).
+  select:
+    name: select
+    uses: ./.github/workflows/ci-select.yml
+    permissions:
+      contents: read
+
   # [OPUS-4.8] BUILD-ONCE for the sharded test suite (sq-vyxy folded in). The old
   # design had every shard run `cargo build --workspace --all-targets` itself — the
   # 131s build FLOOR that rust-cache makes cheap for *deps* but cannot remove for
@@ -153,8 +173,16 @@ jobs:
   # once, off the warm build this job already has (was a guarded shard-1 step before).
   build-archive:
     name: build + archive test binaries (+ doctests once)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: the workspace archive runs whenever the affected
+    # closure is NON-EMPTY (design §5.2) — the bulk shards it feeds are narrowed,
+    # not skipped, so they need the archive for any non-empty selection. Only a
+    # provably-empty closure (every changed path SAFE-listed/non-crate) skips it;
+    # the shards then skip too via `needs`. Fail-closed: an empty/missing `mode`
+    # or `affected` output satisfies a disjunct => RUN.
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -284,7 +312,10 @@ jobs:
     # build-archive `if:`-skipped on a doc-only PR, this job is skipped too (a needed job
     # was skipped) — exactly the intent. Keep the explicit `changes` need + `if:` so the
     # skip is driven by the filter, not an incidental artifact-missing failure.
-    needs: [changes, build-archive]
+    # [FABLE-5] sq-fmx4u.3: + `select` for the change-based narrowing below. An
+    # empty-affected selection skips build-archive, which skips every shard here
+    # via `needs` — no shard ever runs against a missing archive.
+    needs: [changes, build-archive, select]
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     env:
@@ -310,20 +341,35 @@ jobs:
           # Floors are UNCHANGED (HNSW >= 0.95, DiskANN >= 0.90) — this removes variance, it
           # does not move the bar. Only the heavy shards set this; the bulk shards keep
           # default parallelism (their ~1827 tiny tests want the threads).
+          # [FABLE-5] sq-fmx4u.3: `crate` marks a shard that exercises exactly ONE
+          # crate's tests (both heavies live in crates/sparq-vectors/tests/). When
+          # selection is ENFORCED (mode == 'selected') and that crate is not in the
+          # affected closure, the run step below exits 0 without running the shard
+          # ("skipped by selection"). This cannot be a job-level `if:` — the
+          # `matrix` context is NOT available there (GitHub contexts-availability:
+          # jobs.<job_id>.if sees only github/needs/vars/inputs; a matrix reference
+          # silently evaluates EMPTY, which would skip every leg unconditionally) —
+          # so the guard lives in the step, where `matrix` is available. `crate: ""`
+          # on the bulk shards = cross-crate: NEVER skipped, only narrowed.
           - name: heavy-diskann
             filter: "test(=diskann_recall_at_10_vs_brute_force_on_50k)"
             rayon_threads: "1"
+            crate: "sparq-vectors"
           # Dedicated shard for the 61.2s hnsw recall test — SPLIT from diskann.
           - name: heavy-hnsw
             filter: "test(=hnsw_recall_at_10_vs_brute_force_on_50k)"
             rayon_threads: "1"
+            crate: "sparq-vectors"
           # The uniform remainder (~222s), evenly count-partitioned 3 ways.
           - name: bulk 1/3
             partition: "count:1/3"
+            crate: ""
           - name: bulk 2/3
             partition: "count:2/3"
+            crate: ""
           - name: bulk 3/3
             partition: "count:3/3"
+            crate: ""
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # [OPUS-4.8] sq-c76x: reclaim ~20-30 GB BEFORE downloading/extracting the nextest
@@ -396,8 +442,30 @@ jobs:
         # value leaves RAYON_NUM_THREADS unset, so the bulk shards keep default parallelism.
         env:
           RAYON_NUM_THREADS: ${{ matrix.rayon_threads }}
+          # [FABLE-5] sq-fmx4u.3: selection inputs, passed via env (not inline
+          # `${{ }}` in the script) so the shell sees literal values — no
+          # template-injection surface, and shellcheck-friendly.
+          SELECT_MODE: ${{ needs.select.outputs.mode }}
+          SELECT_AFFECTED: ${{ needs.select.outputs.affected }}
+          SELECT_FILTERSET: ${{ needs.select.outputs.filterset }}
+          SHARD_CRATE: ${{ matrix.crate }}
         run: |
           set -euo pipefail
+          # [FABLE-5] sq-fmx4u.3 (design §5.2): single-crate shard skip guard.
+          # FAIL-CLOSED: only the exact mode 'selected' AND a non-empty SHARD_CRATE
+          # AND a definite non-membership ('"<crate>"' absent from the affected
+          # JSON — the quote delimiters prevent substring-crate collisions) can
+          # skip; empty/missing selection outputs always fall through to a run.
+          if [ "$SELECT_MODE" = "selected" ] && [ -n "$SHARD_CRATE" ]; then
+            case "$SELECT_AFFECTED" in
+              *"\"$SHARD_CRATE\""*) : ;;  # in the affected closure -> run the shard
+              *)
+                echo "shard '${{ matrix.name }}' SKIPPED by change-based selection:"
+                echo "  $SHARD_CRATE is not in the affected closure $SELECT_AFFECTED"
+                exit 0
+                ;;
+            esac
+          fi
           common=(--archive-file nextest.tar.zst --workspace-remap . \
                   --extract-to . --extract-overwrite --retries 2)
           if [ -n "${{ matrix.filter }}" ]; then
@@ -406,6 +474,19 @@ jobs:
             # test is ever renamed in only one place, the shard runs empty rather than
             # silently re-including it in bulk).
             args=("${common[@]}" -E '( ${{ env.HEAVY }} ) & ( ${{ matrix.filter }} )')
+          elif [ "$SELECT_MODE" = "selected" ] && [ -n "$SELECT_FILTERSET" ]; then
+            # [FABLE-5] sq-fmx4u.3: bulk shard under ENFORCED selection — NARROW
+            # (never skip) the cross-crate partition to the affected closure
+            # (design §5.2): intersect the not-heavy set with the package()
+            # filterset. The count partition applies AFTER filtering, so the three
+            # bulk shards still partition the narrowed set exactly. A package()
+            # naming no archived package fails loud (nextest errors), so a stale
+            # filterset cannot silently select nothing; --no-tests=pass is needed
+            # because a legitimately-narrowed shard CAN match zero tests (e.g. an
+            # affected crate whose only tests are heavy/feature-gated) — full and
+            # shadow runs keep the strict no-tests-is-an-error behaviour.
+            args=("${common[@]}" --no-tests=pass --partition ${{ matrix.partition }} \
+                  -E "( not ( $HEAVY ) ) & ( $SELECT_FILTERSET )")
           else
             # Bulk shard: everything that is NOT a known-heavy test, count-partitioned.
             args=("${common[@]}" --partition ${{ matrix.partition }} -E 'not ( ${{ env.HEAVY }} )')
@@ -765,8 +846,14 @@ jobs:
     # drop below the ratchet count is a conformance regression and fails CI. Never
     # lower the ratchet.
     name: W3C SPARQL conformance (ratchet >= 1229 pass+divergence)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: this lane runs `-p sparq-conformance` bins; skip only
+    # when ENFORCED selection proves sparq-conformance unaffected (fail-closed:
+    # empty/missing outputs or shadow/full mode => run).
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -870,8 +957,13 @@ jobs:
     # their own ratchet floor and run in BOTH feature states (default + shacl-af).
     # See research/shacl12-conformance-gap.md for the per-category gap map.
     name: W3C SHACL conformance (ratchet — core >= 98, sparql >= 5; full 1.2 ratchets in-runner)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: this lane runs only `cargo test -p sparq-shacl`; skip
+    # when ENFORCED selection proves sparq-shacl unaffected (fail-closed guard).
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-shacl"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -989,8 +1081,14 @@ jobs:
     # same belt-and-braces `>= floor` gate the SHACL/SPARQL jobs use. Never lower
     # the floor (raise OGC_RATCHET_FLOOR as the corpus grows).
     name: W3C/OGC GeoSPARQL conformance (ratchet — topology >= 119, query-rewrite >= 38)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: runs `cargo test -p sparq-geo` AND the sparq-conformance
+    # scoreboard bin — skip only when ENFORCED selection proves BOTH unaffected.
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-geo"') ||
+       contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1117,8 +1215,14 @@ jobs:
     # belt-and-braces `>= floor` gate the SHACL/geo jobs use. Never lower the floor
     # (raise WAC_SCENARIO_FLOOR / ACP_SCENARIO_FLOOR as the corpus grows).
     name: Solid WAC/ACP conformance (ratchet — wac >= 12, acp >= 12)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: runs `cargo test -p sparq-solid` AND the
+    # sparq-conformance scoreboard bin — skip only when BOTH are unaffected.
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-solid"') ||
+       contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1208,8 +1312,14 @@ jobs:
     # umbrella-action divergence, duty-unknown) that never fails the gate. Never
     # lower the ratchet (raise ODRL_SUITE_FLOOR as the fragment grows).
     name: SolidLab ODRL conformance (ratchet — pass >= 59)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: runs `cargo test -p sparq-policy` AND the
+    # sparq-conformance scoreboard bin — skip only when BOTH are unaffected.
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-policy"') ||
+       contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1296,8 +1406,14 @@ jobs:
     # belt-and-braces `>= floor` gate the other ratchet jobs use. Never lower the
     # floor (raise TEXT_ORACLE_FLOOR as the battery grows).
     name: sparq-text BM25 differential oracle (extension ratchet — assertions >= 18750)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: runs `cargo test -p sparq-text` AND the
+    # sparq-conformance scoreboard bin — skip only when BOTH are unaffected.
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-text"') ||
+       contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1387,8 +1503,14 @@ jobs:
     # other ratchet jobs use. Never lower the floor (raise RSP_EXPRESSIVITY_FLOOR as
     # the battery grows).
     name: sparq-rsp RSP expressivity / SRBench correctness (extension ratchet — assertions >= 149)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: runs `cargo test -p sparq-rsp` AND the
+    # sparq-conformance scoreboard bin — skip only when BOTH are unaffected.
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-rsp"') ||
+       contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1481,8 +1603,13 @@ jobs:
     # ratchet (raise TORDF_FLOOR / FROMRDF_FLOOR / COMPACT_FLOOR / FRAME_FLOOR as
     # oxjsonld + the native writer/compactor/framer improve).
     name: W3C JSON-LD 1.1 conformance (ratchet — toRdf >= 413, fromRdf >= 51, compact >= 186, frame >= 61)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: runs `-p sparq-conformance` (jsonld-suite) — skip only
+    # when ENFORCED selection proves sparq-conformance unaffected (fail-closed).
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1594,8 +1721,13 @@ jobs:
     # suites wire onto it in later beads. NO conformance floor is graduated yet — this lane
     # proves the harness + the end-to-end path + the fail-closed SSRF egress scoping.
     name: SERVICE-federation harness (in-process loopback smoke + egress scoping)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: runs `-p sparq-conformance` (service/http-protocol/
+    # federation-descriptors features) — skip only when it is unaffected.
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1702,8 +1834,13 @@ jobs:
     # GATES exactly like the SPARQL ratchet above: a drop below the count is a
     # conformance regression and fails CI. Never lower the ratchet.
     name: Inference conformance (ratchet >= 1967 pass+divergence)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [FABLE-5] sq-fmx4u.3: runs `-p sparq-conformance` (inference bin + d-entail/
+    # rif-core suites) — skip only when ENFORCED selection proves it unaffected.
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

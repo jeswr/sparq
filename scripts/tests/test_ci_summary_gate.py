@@ -282,6 +282,84 @@ class TestAdvisoryRule(unittest.TestCase):
         self.assertFalse(g.is_advisory("gate"))
 
 
+# [FABLE-5] sq-fmx4u.3: change-based test-selection semantics (design §5.3).
+# The three load-bearing safety invariants, exactly as the bead states them:
+#   (1) skipped-not-affected + select SUCCESS      => gate SUCCESS (no hang, no RED)
+#   (2) a job that FAILED                          => gate FAILURE (selection never
+#       masks a real failure, with or without skips present)
+#   (3) select present-but-not-success             => gate FAILURE even if every
+#       other sibling is green/skipped (a skip is only trustworthy under a
+#       successful selection — fail-closed, design §4.3)
+# plus the transition guarantee: select ABSENT (a pre-selection sibling set)
+# preserves the previous semantics byte-for-byte (skipped is non-failing).
+SELECT_NAME = "select / select (change-based test selection)"
+SEL_OK = R(SELECT_NAME)
+
+
+class TestSelectionSemantics(unittest.TestCase):
+    def test_skipped_not_affected_with_select_success_passes(self):
+        # Invariant 1: an enforced-selection run — wide lanes skipped, select green.
+        runs = [SEL_OK,
+                R("W3C/OGC GeoSPARQL conformance (ratchet)", conclusion="skipped"),
+                R("opt-in sparq-rsp (rsp)", conclusion="skipped"),
+                GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+        # The bead's transparency line: N of M ran, K skipped, select healthy.
+        self.assertIn("2 skipped", out)
+        self.assertIn("selection pre-job succeeded", out)
+
+    def test_real_failure_still_fails_under_selection(self):
+        # Invariant 2: selection must never mask a genuine failure.
+        runs = [SEL_OK, RED, R("docs", conclusion="skipped")]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED", out)
+        self.assertIn("clippy", out)
+
+    def test_select_failure_reds_even_when_all_siblings_green(self):
+        # Invariant 3: an unobservable selection blocks the merge outright.
+        runs = [R(SELECT_NAME, conclusion="failure"), GREEN, GREEN2]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1)
+        self.assertIn("selection pre-job", out)
+
+    def test_select_skipped_or_neutral_is_not_success(self):
+        # "did not succeed" is anything but success — a skipped/neutral select
+        # would otherwise sneak through the generic skipped/neutral tolerance.
+        for concl in ("skipped", "neutral", "cancelled", None):
+            runs = [R(SELECT_NAME, conclusion=concl),
+                    R("x", conclusion="skipped"), GREEN]
+            code, out = run(tiny_cfg(), [runs])
+            self.assertEqual(code, 1, f"select conclusion={concl!r} must RED the gate")
+            self.assertIn("selection pre-job", out)
+
+    def test_select_absent_preserves_legacy_skip_semantics(self):
+        # Transition guarantee: no selection check-run on the commit (old sibling
+        # sets / other repos' shapes) => skipped stays non-failing, as before.
+        runs = [R("docs", conclusion="skipped"), GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0)
+        self.assertNotIn("selection pre-job", out)
+
+    def test_multiple_select_runs_all_must_succeed(self):
+        # ci.yml AND feature-matrix.yml each call the reusable select job — the
+        # gate sees two same-named runs; ONE failing must RED the gate.
+        runs = [SEL_OK, R(SELECT_NAME, conclusion="failure"), GREEN]
+        code, _ = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1)
+
+    def test_select_name_detection_contract(self):
+        # The name-detection contract with .github/workflows/ci-select.yml (also
+        # pinned cross-file by scripts/tests/test_ci_select_wiring.py).
+        self.assertTrue(g.is_select(SELECT_NAME))
+        self.assertFalse(g.is_select("build + test"))
+        self.assertFalse(g.is_select("gate"))
+        # And the select job must never be advisory-excluded.
+        self.assertFalse(g.is_advisory(SELECT_NAME))
+
+
 # [SONNET-4.6] Robustness-hardening tests (sq-90cv4 follow-up: Copilot gaps).
 # Covers:
 #   (a) _gh_json_lines converts subprocess raises (FileNotFoundError, TimeoutExpired)

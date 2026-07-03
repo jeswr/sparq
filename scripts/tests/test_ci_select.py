@@ -313,6 +313,84 @@ class FailClosedMainTests(unittest.TestCase):
         self.assertEqual(obj["affected"], ["app"])
 
 
+class WiringHookTests(unittest.TestCase):
+    """[FABLE-5] sq-fmx4u.3: the hooks the CI wiring consumes — the shadow rollout
+    mode, the nextest filterset output, and clean full-mode on non-PR events."""
+
+    def _run_main(self, argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cs.main(argv)
+        return code, json.loads(buf.getvalue())
+
+    def _write(self, text, suffix=".json"):
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_push_event_is_clean_full(self):
+        # Any event without a PR diff (push, or a future event name) => full by
+        # construction, not via the error trap.
+        meta_path = self._write(json.dumps(_synthetic_meta()))
+        code, obj = self._run_main(["--event", "push", "--metadata-file", meta_path,
+                                    "--repo-root", ROOT])
+        self.assertEqual(code, 0)
+        self.assertEqual(obj["mode"], "full")
+        self.assertNotIn("selector error", obj["reason"])
+        self.assertEqual(obj["affected"], ALL_MEMBERS)
+
+    def test_shadow_wraps_selected(self):
+        # --shadow: the selection is COMPUTED (affected preserved for the report)
+        # but the emitted mode is 'shadow', so no guard's `mode == 'selected'`
+        # branch can ever fire => nothing skips.
+        meta_path = self._write(json.dumps(_synthetic_meta()))
+        changed = self._write("crates/app/src/lib.rs\n", suffix=".txt")
+        code, obj = self._run_main(["--shadow", "--metadata-file", meta_path,
+                                    "--changed-file", changed, "--repo-root", ROOT])
+        self.assertEqual(code, 0)
+        self.assertEqual(obj["mode"], "shadow")
+        self.assertIn("SHADOW (computed mode=selected", obj["reason"])
+        self.assertEqual(obj["affected"], ["app"])
+
+    def test_shadow_wraps_full_and_error_uniformly(self):
+        # The wrap is uniform: even a computed full / a selector error emits
+        # mode=shadow — one downstream rule (shadow is never 'selected').
+        meta_path = self._write(json.dumps(_synthetic_meta()))
+        code, obj = self._run_main(["--shadow", "--event", "schedule",
+                                    "--metadata-file", meta_path, "--repo-root", ROOT])
+        self.assertEqual(obj["mode"], "shadow")
+        self.assertIn("computed mode=full", obj["reason"])
+        code, obj = self._run_main(["--shadow", "--metadata-file", "/no/such/meta.json",
+                                    "--changed-file", self._write("x\n", suffix=".txt"),
+                                    "--repo-root", ROOT])
+        self.assertEqual(code, 0)
+        self.assertEqual(obj["mode"], "shadow")
+        self.assertIn("selector error", obj["reason"])
+
+    def test_output_file_carries_mode_affected_filterset(self):
+        # The $GITHUB_OUTPUT contract the guards + bulk shards consume.
+        meta_path = self._write(json.dumps(_synthetic_meta()))
+        changed = self._write("crates/app/src/lib.rs\n", suffix=".txt")
+        out_path = self._write("", suffix=".out")
+        code, obj = self._run_main(["--metadata-file", meta_path, "--changed-file", changed,
+                                    "--repo-root", ROOT, "--output-file", out_path])
+        self.assertEqual(code, 0)
+        with open(out_path, encoding="utf-8") as fh:
+            lines = dict(ln.split("=", 1) for ln in fh.read().splitlines() if "=" in ln)
+        self.assertEqual(lines["mode"], "selected")
+        self.assertEqual(json.loads(lines["affected"]), ["app"])
+        self.assertEqual(lines["filterset"], "package(app)")
+
+    def test_filterset_joins_members_with_plus(self):
+        self.assertEqual(
+            cs.filterset(cs.Selection(mode="selected", reason="", affected=["a", "b"])),
+            "package(a) + package(b)",
+        )
+        self.assertEqual(cs.filterset(cs.Selection(mode="full", reason="", affected=[])), "")
+
+
 class RealMetadataShapeTests(unittest.TestCase):
     """(i) Pinned against the REAL workspace metadata: core is root-like, geo is
     leaf-like, and closure(geo) is a subset of closure(core) (structural: geo

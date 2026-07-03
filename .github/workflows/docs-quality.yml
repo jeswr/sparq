@@ -491,6 +491,36 @@ jobs:
       # before every merge depends on it.
       - name: Self-test ci-summary gate loop (verdict semantics + adaptive saturation budget — sq-90cv4)
         run: python3 scripts/tests/test_ci_summary_gate.py
+      # [FABLE-5] sq-fmx4u.3: the change-based test-selection stack is now
+      # LOAD-BEARING (the select pre-job feeds every wide lane's skip guard and
+      # the ci-summary gate's skipped-only-under-successful-selection rule), so
+      # its whole test surface gates HERE on every PR:
+      #   * test_ci_select.py       — the affected-set selector (sq-fmx4u.1):
+      #     closure math, §4.1 full-run triggers, fail-closed error paths, the
+      #     shadow/filterset wiring hooks. Hermetic (synthetic metadata; the one
+      #     real-metadata case self-skips without cargo).
+      #   * test_path_ownership.py  — the ownership map + out-of-crate-input
+      #     audit (sq-fmx4u.2): map validity, trigger-mirror drift guard.
+      #   * test_ci_select_wiring.py — cross-file INSPECTION of the wiring
+      #     itself: every selection-consuming `if:` carries the fail-closed
+      #     `mode != 'selected'` disjunct (empty outputs => run), every literal
+      #     '"<crate>"' guard needle is a REAL workspace member (a typo would
+      #     skip a lane exactly when it should run), the ci-select.yml job name
+      #     matches the gate's SELECT_RE, select callers are unconditional, and
+      #     shadow stays default-ON until CI_SELECT_MODE == 'enforce'.
+      # The wiring test needs PyYAML to parse the workflows — same hash-pinned
+      # install the skill-frontmatter/setup jobs use (complete closure, no deps).
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML (pinned) for the selection wiring inspection test
+        run: pip install --require-hashes -r .github/requirements/docs-quality.txt
+      - name: Self-test ci_select.py (affected-set selector — sq-fmx4u.1/.3)
+        run: python3 scripts/tests/test_ci_select.py
+      - name: Self-test path-ownership map + out-of-crate-input audit (sq-fmx4u.2)
+        run: python3 scripts/tests/test_path_ownership.py
+      - name: Selection wiring inspection (fail-closed guards + real crate needles — sq-fmx4u.3)
+        run: python3 scripts/tests/test_ci_select_wiring.py
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:

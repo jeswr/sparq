@@ -72,6 +72,20 @@
 # line, and THIS name-rule is the load-bearing backstop that makes advisory failures
 # strictly non-gating regardless of how the job concludes.
 #
+# CHANGE-BASED TEST-SELECTION semantics (bead sq-fmx4u.3). [FABLE-5] The wide
+# per-crate lanes in ci.yml / feature-matrix.yml may now be SKIPPED (or, for the
+# cross-crate bulk shards, narrowed) when the `select (change-based test
+# selection)` pre-job (.github/workflows/ci-select.yml, reused by both workflows)
+# proves their crate outside the affected closure. The gate's rule (design §5.3):
+# a `skipped` conclusion is satisfied ONLY when every selection check-run on the
+# commit concluded SUCCESS — a present-but-not-success select REDs the gate
+# outright even if all other siblings are green, because the thing that decided
+# the skips was never soundly observed. With select green (or absent — a
+# pre-selection sibling set), `skipped` stays non-failing exactly as before, and
+# a job that FAILED still fails the gate regardless (selection can never mask a
+# real failure). Selection ships SHADOW-first (report-only; enforcement flip is
+# bead sq-fmx4u.5 via the CI_SELECT_MODE repo variable).
+#
 # IMPLEMENTATION (sq-90cv4). [FABLE-5] The poll loop + verdict live in
 # scripts/ci_summary_gate.py (extracted from the previous inline bash so the
 # semantics are UNIT-TESTED — scripts/tests/test_ci_summary_gate.py, run as a HARD
