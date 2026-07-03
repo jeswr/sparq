@@ -44,3 +44,17 @@
   crate: "sparq-reason-el"
   features: "hasse"
   test: true
+
+# [FABLE-5] sq-pbz04.2.2: sparq-reason-el's `cdomain` feature — concrete domains
+# (CR7–CR9): faceted `owl:onDatatype`/`owl:withRestrictions` satisfiability +
+# `DataHasValue`/singleton-`DataOneOf` point ranges on the shared
+# `sparq_substrate::numeric` exact tier. Same gap as the rbox/hasse legs above:
+# tests/cdomain.rs is `#![cfg(feature = "cdomain")]` (the CR7 unsat / CR8 containment /
+# deferral-boundary closure oracles) and the whole cdomain.rs module + the extract.rs
+# hooks are `#[cfg(feature = "cdomain")]`, so the default build compiles them EMPTY and
+# runs ZERO of them — this leg is the only thing that executes them. New OPTIONAL dep:
+# sparq-substrate (numeric slice only), linked ONLY by this feature.
+- name: "sparq-reason-el (cdomain — CR7–CR9 concrete domains)"
+  crate: "sparq-reason-el"
+  features: "cdomain"
+  test: true
