@@ -19,6 +19,12 @@ mod rdfs;
 // module is cfg'd out (the lean-core posture, like `dtype` / `explain`).
 #[cfg(feature = "rif-core")]
 pub mod rif;
+// [SONNET-4.6] sq-pbz04.5.3 — OPT-IN RIF/XML importer: parse the W3C RIF-Core
+// XML presentation syntax into `rif::Document` with Or-split / Exists-flatten
+// desugaring and a fail-closed taxonomy. Requires the `rif-core` feature (wired by
+// the `rif-xml` feature below). When off, zero rif_xml code is compiled.
+#[cfg(feature = "rif-xml")]
+pub mod rif_xml;
 #[cfg(feature = "d-entail")]
 pub use dtype::{d_value_eq, d_value_key, materialize_d, DValue, Recognized};
 #[cfg(feature = "explain")]
