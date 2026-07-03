@@ -288,9 +288,13 @@ mod tests {
 
     #[test]
     fn bounded_zero_capacity_promoted_to_one() {
-        // Capacity 0 → promoted to 1 (rendezvous → 1 item slack).
+        // Capacity 0 → promoted to 1 (rendezvous → 1 item slack), so a single `emit` on this
+        // thread does not block on the bound. Drop the sink before draining so the channel
+        // closes and `next()` terminates (same discipline as `error_item_short_circuits_collect`);
+        // otherwise the live sender keeps the receiver blocking after the last item. [OPUS-4.8] sq-qcnn.22
         let (sink, stream) = SolutionStream::bounded(0);
-        sink.emit(sol("http://ex/a"));
+        assert!(sink.emit(sol("http://ex/a")), "promoted-to-1 slack accepts one item without blocking");
+        drop(sink);
         let items: Vec<_> = stream.collect();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].as_ref().unwrap().get("s"), Some(&nn("http://ex/a")));
