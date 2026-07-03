@@ -18,6 +18,15 @@
   features: "explain"
   test: true
 
+# [SONNET-4.6] sq-pbz04.5.3: RIF/XML presentation-syntax importer. rif-xml is opt-in
+# (off by default); enables `sparq_reason::rif_xml::import` and pulls in quick-xml.
+# Wired here post-Opus adversarial-verify so CI covers capture-avoidance + fail-closed
+# + xsd:string whitespace tests in the feature-ON state.
+- name: "sparq-reason (rif-xml)"
+  crate: "sparq-reason"
+  features: "rif-xml"
+  test: true
+
 # [FABLE-5] sq-pbz04.1.1: the shared substrate-join sweep (the rdfs2/3/7 predicate join,
 # sq-yk6or, + the rdfs9 type join). DISCOVERED GAP closed here: sq-yk6or (#1301) landed the
 # feature and its behaviour-neutrality equivalence tests but wired NO matrix leg, so

@@ -2,11 +2,25 @@
 // XML presentation syntax into `rif::Document` with Or-split / Exists-flatten
 // desugaring and a fail-closed taxonomy. Requires the `rif-core` feature (wired by
 // the `rif-xml` feature below). When off, zero rif_xml code is compiled.
+//
+// Opus adversarial-verify fixes applied (sq-pbz04.5.3 post-verify):
+// Fix-1: unconditional alpha-renaming of Exists-declared vars prevents variable
+//        capture in both shadow (Forall ?x … Exists ?x) and sibling (Exists ?y …
+//        Exists ?y) patterns. [SONNET-4.6]
+// Fix-2: fail-closed on non-<formula> children in And/Or/head-And + duplicate
+//        single-cardinality wrappers (<if>, <then>) now abort the import. [SONNET-4.6]
+// Fix-3: per-type whitespace handling — xsd:string lexical values preserve exact
+//        whitespace; IRI/numeric/boolean types trim (XSD whitespace-collapse facet).
+//        Removes the global trim_text(true) that was corrupting string literals. [SONNET-4.6]
+// Fix-4: func:count → Builtin::ListLength added to iri_to_builtin (was wrongly
+//        rejected as UnknownExternal). [SONNET-4.6]
+// Fix-5: honesty claims in module docs updated to match final behaviour. [SONNET-4.6]
+// Beads for deferred low-priority items: see bead notes inline.
 
 //! # `rif_xml` — W3C RIF-Core XML importer
 //!
 //! Parses the **W3C RIF/XML presentation syntax** for the RIF-Core dialect into a
-//! `rif::Document` AST that the existing `rif-core` forward chainer can run.
+//! [`crate::rif::Document`] AST that the existing `rif-core` forward chainer can run.
 //!
 //! ## Entry point
 //!
@@ -49,17 +63,24 @@
 //!    `"disjunction (Or) in rule bodies"` — Or IS in the RIF-Core condition language;
 //!    the desugaring here resolves it at import time. That entry is owned by sq-pbz04.5.4.
 //!
-//! 2. **Body `Exists` → existential-flatten:** existentially-quantified variables in
-//!    a body `Exists(z…, C)` become ordinary rule variables. Under Horn semantics,
-//!    existential body variables are implicitly existential (the fact that satisfies
-//!    them is found by the chainer's pattern matching). `Document::validate()` enforces
-//!    the range-restriction invariant, so every such variable appears in at least one
-//!    positive body atom — the flatten is safe.
+//! 2. **Body `Exists` → existential-flatten with capture-avoidance:** existentially-
+//!    quantified variables in a body `Exists(z…, C)` are *unconditionally alpha-renamed*
+//!    to fresh names in the `__ex{N}` reserved namespace before the `Exists` wrapper is
+//!    dropped. Freshness is verified against the complete variable set of the enclosing
+//!    rule (universally-declared vars + all Exists-declared vars + previously generated
+//!    fresh names). Renaming is applied innermost-first (innermost binder wins when the
+//!    same name is redeclared in nested `Exists` nodes). Unconditional renaming (not just
+//!    on collision) uniformly fixes both confirmed capture patterns: quantifier shadowing
+//!    (`Forall ?x … Exists ?x`) and sibling reuse (`Exists ?y … Exists ?y`).
+//!    `Document::validate()` enforces the range-restriction invariant on every imported
+//!    document, so every renamed variable appears in at least one positive body atom.
 //!
 //! ## Fail-closed taxonomy
 //!
 //! Every element or construct outside the supported Core subset returns a named error
-//! variant; nothing is silently skipped.
+//! variant. Every unexpected child element — including non-`<formula>` children inside
+//! `<And>` or `<Or>` conditions or a conjunctive head — returns an error; nothing is
+//! silently skipped or dropped.
 //!
 //! 1. `ImportError::ImportDirective` — any `Import` element (remote imports: fail-closed).
 //! 2. `ImportError::NonCoreElement { element, reason }` — non-Core dialect elements:
@@ -72,13 +93,14 @@
 //!    `func:substring*` / `func:string-join` / `func:compare`.
 //! 4. `ImportError::NamedArgUniterm { name }` — named-argument uniterms (not in Core).
 //! 5. `ImportError::UnrecognizedElement { tag }` — XML elements not in the supported grammar.
-//! 6. `ImportError::MalformedXml(String)` — quick-xml parse errors.
+//! 6. `ImportError::MalformedXml(String)` — quick-xml parse errors or malformed structure.
 //! 7. `ImportError::ValidationFailed(RifError)` — documents that parse but fail
 //!    `Document::validate()` (range-restriction / builtin-safety invariant).
 
 use crate::rif::{Atom, Builtin, Document, RifError, Rule, Term};
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use std::collections::{BTreeSet, HashMap};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -91,7 +113,8 @@ use quick_xml::Reader;
 /// taxonomy documented in the module doc comment.
 #[derive(Debug)]
 pub enum ImportError {
-    /// Malformed or invalid XML that quick-xml could not parse.
+    /// Malformed or invalid XML that quick-xml could not parse, or structural
+    /// violations (duplicate single-cardinality wrappers, missing required children).
     MalformedXml(String),
     /// An `Import` directive was found — remote imports are not supported (fail-closed).
     ImportDirective {
@@ -115,7 +138,8 @@ pub enum ImportError {
         /// The named slot name that triggered this error.
         name: String,
     },
-    /// An unrecognized XML element that is not in the supported Core grammar.
+    /// An unrecognized XML element that is not in the supported Core grammar, or an
+    /// unexpected child element where only `<formula>` is permitted.
     UnrecognizedElement {
         /// The tag name.
         tag: String,
@@ -183,7 +207,9 @@ impl std::error::Error for ImportError {}
 struct XmlNode {
     /// The local name (no namespace prefix).
     tag: String,
-    /// Accumulated character data content (trimmed).
+    /// Accumulated character data content. NOT globally trimmed — whitespace
+    /// may be semantically significant (e.g. xsd:string lexical values).
+    /// Callers (primarily `parse_term`) apply per-type trimming.
     text: String,
     /// Attributes as `(local_key, value)` pairs.
     attrs: Vec<(String, String)>,
@@ -213,9 +239,16 @@ impl XmlNode {
 // ---------------------------------------------------------------------------
 
 /// Parse `xml_bytes` into a tree of `XmlNode`s.
+///
+/// # Whitespace handling
+///
+/// `trim_text` is NOT enabled globally — whitespace in `<Const>` string literals
+/// is semantically significant. Per-type trimming is applied in `parse_term`
+/// based on the XSD whitespace facet of each datatype.
 fn parse_xml_tree(xml_bytes: &[u8]) -> Result<XmlNode, ImportError> {
     let mut reader = Reader::from_reader(xml_bytes);
-    reader.config_mut().trim_text(true);
+    // Do NOT set trim_text(true): whitespace in xsd:string Consts is preserved.
+    // parse_term applies per-type trimming (IRI/numeric → trim; string → preserve).
 
     let mut stack: Vec<XmlNode> = Vec::new();
 
@@ -241,7 +274,9 @@ fn parse_xml_tree(xml_bytes: &[u8]) -> Result<XmlNode, ImportError> {
             Event::Text(t) => {
                 let s = t.decode().map_err(|e| ImportError::MalformedXml(format!("{}", e)));
                 if let Some(top) = stack.last_mut() {
-                    top.text.push_str(s?.trim());
+                    // Preserve text exactly — do NOT trim here.
+                    // parse_term applies per-type trimming (IRI → trim; xsd:string → preserve).
+                    top.text.push_str(&s?);
                 }
             }
             Event::CData(t) => {
@@ -356,6 +391,12 @@ fn iri_to_builtin(iri: &str) -> Result<Builtin, ImportError> {
     if iri == concat_strs(FUNC, "concatenate") {
         return Ok(Builtin::ListConcatenate);
     }
+    // [SONNET-4.6] Fix-4: func:count (list-member count) → Builtin::ListLength.
+    // The downstream lowering (list:length) IS implemented; the importer was wrongly
+    // rejecting this IRI as UnknownExternal (Opus adversarial-verify finding).
+    if iri == concat_strs(FUNC, "count") {
+        return Ok(Builtin::ListLength);
+    }
     // Numeric predicates
     if iri == concat_strs(PRED, "numeric-equal") {
         return Ok(Builtin::NumericEqual);
@@ -399,6 +440,53 @@ fn concat_strs(a: &str, b: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// XSD whitespace-facet helper
+// ---------------------------------------------------------------------------
+
+/// Returns `true` for XSD types whose whitespace facet is `collapse`
+/// (leading/trailing/internal whitespace is not semantically significant in their
+/// lexical space). For these types, `parse_term` trims the text value.
+///
+/// - `rif:iri` is handled separately upstream (→ `Term::Iri`, always trimmed).
+/// - `xsd:string` and all string-derived types NOT listed here are **not** collapse
+///   types — their lexical whitespace is preserved.
+///
+/// Per XSD Datatype specification (§4.3.6 whitespace): numeric, boolean, date/time,
+/// `anyURI` use collapse; string uses preserve.
+fn is_whitespace_collapse_type(ty: &str) -> bool {
+    let prefix = "http://www.w3.org/2001/XMLSchema#";
+    if !ty.starts_with(prefix) {
+        return false;
+    }
+    let local = &ty[prefix.len()..];
+    matches!(
+        local,
+        "integer"
+            | "decimal"
+            | "float"
+            | "double"
+            | "nonNegativeInteger"
+            | "positiveInteger"
+            | "negativeInteger"
+            | "nonPositiveInteger"
+            | "long"
+            | "int"
+            | "short"
+            | "byte"
+            | "unsignedLong"
+            | "unsignedInt"
+            | "unsignedShort"
+            | "unsignedByte"
+            | "boolean"
+            | "date"
+            | "dateTime"
+            | "time"
+            | "anyURI"
+            | "duration"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Term parsing
 // ---------------------------------------------------------------------------
 
@@ -406,24 +494,43 @@ fn concat_strs(a: &str, b: &str) -> String {
 const RIF_IRI_TYPE: &str = "http://www.w3.org/2007/rif#iri";
 
 /// Parse a `<Const>` or `<Var>` node into a `Term`.
+///
+/// # Whitespace handling (Fix-3)
+///
+/// - `rif:iri` Consts: trim (IRIs never contain meaningful leading/trailing whitespace).
+/// - `xsd:string` Consts (empty `type` attr or explicit `xsd:string`) and all other
+///   non-collapse-type literals: **preserve exact whitespace** (semantically significant
+///   in lexical value space).
+/// - Known XSD collapse types (numeric, boolean, date/time, anyURI): trim.
+/// - `<Var>` text: trim (variable names do not contain meaningful whitespace).
 fn parse_term(node: &XmlNode) -> Result<Term, ImportError> {
     match node.tag.as_str() {
         "Const" => {
             let ty = node.attr("type").unwrap_or("");
             if ty == RIF_IRI_TYPE {
-                Ok(Term::Iri(node.text.clone()))
+                // IRI: XSD whitespace-collapse; trim for safety.
+                Ok(Term::Iri(node.text.trim().to_string()))
             } else if ty.is_empty() {
-                // Plain string constant with no type = xsd:string
+                // No type attribute → plain xsd:string; preserve whitespace exactly.
                 Ok(Term::Lit {
                     lex: node.text.clone(),
                     datatype: "http://www.w3.org/2001/XMLSchema#string".to_string(),
                 })
+            } else if is_whitespace_collapse_type(ty) {
+                // Known XSD collapse types: trim.
+                Ok(Term::Lit { lex: node.text.trim().to_string(), datatype: ty.to_string() })
             } else {
-                // Typed literal: type attr is the datatype IRI
+                // All other types (including explicit xsd:string and unrecognized types):
+                // preserve exact whitespace — the lexical form belongs to the value space
+                // of the declared datatype, which may be whitespace-sensitive.
                 Ok(Term::Lit { lex: node.text.clone(), datatype: ty.to_string() })
             }
         }
-        "Var" => Ok(Term::Var(node.text.clone())),
+        "Var" => {
+            // Variable names are whitespace-insensitive; trim surrounding whitespace
+            // that may appear from XML indentation.
+            Ok(Term::Var(node.text.trim().to_string()))
+        }
         "List" => {
             // <List><items><...term...><...term...></items></List>
             let items_node = node.child("items");
@@ -450,18 +557,27 @@ fn parse_term(node: &XmlNode) -> Result<Term, ImportError> {
 
 /// Intermediate representation for a body condition parsed from RIF/XML.
 /// Converted to `Vec<Vec<Atom>>` (list of disjuncts, each a conjunction) by
-/// `expand_body`.
+/// `expand_body` after `alpha_rename_cond` has processed all `Exists` nodes.
 enum BodyCond {
     Atom(Atom),
     And(Vec<BodyCond>),
     Or(Vec<BodyCond>),
-    /// Exists(declared_var_names_ignored_here, sub_condition).
-    /// The declared vars become ordinary body vars; we just keep the sub-condition.
-    Exists(Box<BodyCond>),
+    /// Exists(declared_var_names, sub_condition).
+    ///
+    /// The declared vars are alpha-renamed to fresh names by `alpha_rename_cond`
+    /// (which simultaneously drops this wrapper). The `expand_body` Exists arm is
+    /// a safe fallback but should not be reached in the normal import path.
+    Exists(Vec<String>, Box<BodyCond>),
 }
 
 /// Expand `BodyCond` into a list of disjuncts (each disjunct is a conjunction of atoms).
 /// Or-split (Lloyd–Topor) and Exists-flatten are applied here.
+///
+/// In the normal import path `alpha_rename_cond` is called before `expand_body`, so
+/// all `Exists` wrappers have already been dropped and their declared vars renamed.
+/// The `Exists` arm below is a safe fallback used by mutation-check tests that call
+/// `expand_body` without prior renaming to demonstrate the variable-capture behaviour
+/// that alpha-renaming fixes.
 fn expand_body(cond: BodyCond) -> Vec<Vec<Atom>> {
     match cond {
         BodyCond::Atom(a) => vec![vec![a]],
@@ -478,8 +594,8 @@ fn expand_body(cond: BodyCond) -> Vec<Vec<Atom>> {
             // Union: each disjunct becomes a separate rule body.
             conds.into_iter().flat_map(expand_body).collect()
         }
-        BodyCond::Exists(sub) => {
-            // Existential vars are already present in the atoms — just flatten.
+        BodyCond::Exists(_, sub) => {
+            // Fallback flatten (alpha_rename_cond should have removed this wrapper).
             expand_body(*sub)
         }
     }
@@ -498,6 +614,202 @@ fn cross_product(a: Vec<Vec<Atom>>, b: Vec<Vec<Atom>>) -> Vec<Vec<Atom>> {
         a
     } else {
         result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Alpha-renaming (Fix-1: variable capture)
+// ---------------------------------------------------------------------------
+
+/// Collect all variable names occurring in a `BodyCond` tree (including those
+/// declared in `Exists` nodes) into `out`.
+fn collect_vars_in_cond(cond: &BodyCond, out: &mut BTreeSet<String>) {
+    match cond {
+        BodyCond::Atom(a) => collect_vars_in_atom(a, out),
+        BodyCond::And(subs) | BodyCond::Or(subs) => {
+            for s in subs {
+                collect_vars_in_cond(s, out);
+            }
+        }
+        BodyCond::Exists(declared_vars, sub) => {
+            for v in declared_vars {
+                out.insert(v.clone());
+            }
+            collect_vars_in_cond(sub, out);
+        }
+    }
+}
+
+fn collect_vars_in_atom(a: &Atom, out: &mut BTreeSet<String>) {
+    match a {
+        Atom::Frame { obj, pred, val } => {
+            collect_var_in_term(obj, out);
+            collect_var_in_term(pred, out);
+            collect_var_in_term(val, out);
+        }
+        Atom::Member { obj, class } => {
+            collect_var_in_term(obj, out);
+            collect_var_in_term(class, out);
+        }
+        Atom::Subclass { sub, sup } => {
+            collect_var_in_term(sub, out);
+            collect_var_in_term(sup, out);
+        }
+        Atom::Equal { left, right } => {
+            collect_var_in_term(left, out);
+            collect_var_in_term(right, out);
+        }
+        Atom::Builtin { args, .. } => {
+            for t in args {
+                collect_var_in_term(t, out);
+            }
+        }
+    }
+}
+
+fn collect_var_in_term(t: &Term, out: &mut BTreeSet<String>) {
+    match t {
+        Term::Var(v) => {
+            out.insert(v.clone());
+        }
+        Term::List(items) => {
+            for item in items {
+                collect_var_in_term(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Generate a fresh variable name not already in `universe`.
+///
+/// Names are drawn from the reserved `__ex{N}` namespace. The counter is
+/// incremented past any names already in `universe` (so if a user document
+/// improbably uses `__ex0`, we skip to `__ex1`).
+fn fresh_name(counter: &mut u32, universe: &BTreeSet<String>) -> String {
+    loop {
+        let name = format!("__ex{}", counter);
+        *counter += 1;
+        if !universe.contains(&name) {
+            return name;
+        }
+    }
+}
+
+/// Apply a variable substitution to a `Term`.
+fn sub_term(t: Term, map: &HashMap<String, String>) -> Term {
+    match t {
+        Term::Var(v) => {
+            if let Some(fresh) = map.get(&v) {
+                Term::Var(fresh.clone())
+            } else {
+                Term::Var(v)
+            }
+        }
+        Term::List(items) => Term::List(items.into_iter().map(|i| sub_term(i, map)).collect()),
+        other => other,
+    }
+}
+
+/// Apply a variable substitution to an `Atom`.
+fn substitute_in_atom(a: Atom, map: &HashMap<String, String>) -> Atom {
+    match a {
+        Atom::Frame { obj, pred, val } => Atom::Frame {
+            obj: sub_term(obj, map),
+            pred: sub_term(pred, map),
+            val: sub_term(val, map),
+        },
+        Atom::Member { obj, class } => Atom::Member {
+            obj: sub_term(obj, map),
+            class: sub_term(class, map),
+        },
+        Atom::Subclass { sub, sup } => Atom::Subclass {
+            sub: sub_term(sub, map),
+            sup: sub_term(sup, map),
+        },
+        Atom::Equal { left, right } => Atom::Equal {
+            left: sub_term(left, map),
+            right: sub_term(right, map),
+        },
+        Atom::Builtin { op, args } => Atom::Builtin {
+            op,
+            args: args.into_iter().map(|t| sub_term(t, map)).collect(),
+        },
+    }
+}
+
+/// Apply a variable substitution to a `BodyCond` tree.
+fn substitute_in_cond(cond: BodyCond, map: &HashMap<String, String>) -> BodyCond {
+    match cond {
+        BodyCond::Atom(a) => BodyCond::Atom(substitute_in_atom(a, map)),
+        BodyCond::And(subs) => {
+            BodyCond::And(subs.into_iter().map(|s| substitute_in_cond(s, map)).collect())
+        }
+        BodyCond::Or(subs) => {
+            BodyCond::Or(subs.into_iter().map(|s| substitute_in_cond(s, map)).collect())
+        }
+        BodyCond::Exists(vars, sub) => {
+            // Defensive: substitute through any Exists nodes not yet processed.
+            // In the normal alpha_rename_cond path (innermost-first), inner Exists
+            // have already been replaced by their renamed subs — this arm is only
+            // reached in unusual calling sequences.
+            BodyCond::Exists(vars, Box::new(substitute_in_cond(*sub, map)))
+        }
+    }
+}
+
+/// Alpha-rename all `Exists`-declared variables to globally fresh names.
+///
+/// # Scope discipline — innermost binder wins
+///
+/// Processing is innermost-first (DFS pre-order on sub-conditions before the
+/// enclosing `Exists`). By the time an outer `Exists` generates its substitution,
+/// every inner `Exists` has already renamed its own vars to fresh names, so the
+/// outer map finds no occurrences of inner vars — the innermost binder wins.
+///
+/// # Exists wrapper removal
+///
+/// Each `Exists` arm returns the **renamed sub-condition WITHOUT the `Exists`
+/// wrapper** — the renaming simultaneously performs the Exists-flatten step.
+/// After this call the returned `BodyCond` tree contains no `Exists` nodes.
+///
+/// # Arguments
+///
+/// * `counter` — monotonically incremented across all `Exists` nodes in the
+///   rule; ensures global freshness even across sibling `Exists` nodes.
+/// * `universe` — the complete set of already-known names; extended with each
+///   generated fresh name so siblings cannot collide with earlier siblings.
+fn alpha_rename_cond(
+    cond: BodyCond,
+    counter: &mut u32,
+    universe: &mut BTreeSet<String>,
+) -> BodyCond {
+    match cond {
+        BodyCond::Atom(a) => BodyCond::Atom(a),
+        BodyCond::And(subs) => BodyCond::And(
+            subs.into_iter()
+                .map(|s| alpha_rename_cond(s, counter, universe))
+                .collect(),
+        ),
+        BodyCond::Or(subs) => BodyCond::Or(
+            subs.into_iter()
+                .map(|s| alpha_rename_cond(s, counter, universe))
+                .collect(),
+        ),
+        BodyCond::Exists(declared_vars, sub) => {
+            // Step 1: rename any nested Exists first (innermost-first).
+            let renamed_sub = alpha_rename_cond(*sub, counter, universe);
+            // Step 2: build a substitution map — each declared var → a fresh name.
+            let mut map: HashMap<String, String> = HashMap::new();
+            for var in &declared_vars {
+                let fresh = fresh_name(counter, universe);
+                universe.insert(fresh.clone());
+                map.insert(var.clone(), fresh);
+            }
+            // Step 3: apply the substitution to the (already innermost-renamed) sub.
+            // The Exists wrapper is dropped here — this IS the flatten step.
+            substitute_in_cond(renamed_sub, &map)
+        }
     }
 }
 
@@ -623,7 +935,7 @@ fn parse_external(node: &XmlNode) -> Result<Atom, ImportError> {
         "External <op> has no child".to_string(),
     ))?;
     let op_iri = if op_const.tag == "Const" {
-        op_const.text.clone()
+        op_const.text.trim().to_string()
     } else {
         return Err(ImportError::MalformedXml("External <op> child is not <Const>".to_string()));
     };
@@ -649,29 +961,54 @@ fn parse_external(node: &XmlNode) -> Result<Atom, ImportError> {
 
 /// Parse a condition element (what can appear inside `<if>`, `<formula>`,
 /// `<And>`, `<Or>`, `<Exists>`'s body, etc.) into a `BodyCond`.
+///
+/// # Fail-closed children check (Fix-2)
+///
+/// `<And>` and `<Or>` now reject any non-`<formula>` child element with
+/// `ImportError::UnrecognizedElement`, instead of silently dropping them.
 fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
     match node.tag.as_str() {
         "And" => {
-            let subs: Result<Vec<_>, _> =
-                node.children_named("formula").map(parse_formula_child).collect();
-            Ok(BodyCond::And(subs?))
+            // Fail-closed: every child of <And> MUST be <formula>.
+            let mut subs = Vec::new();
+            for c in &node.children {
+                if c.tag != "formula" {
+                    check_non_core(&c.tag)?;
+                    return Err(ImportError::UnrecognizedElement { tag: c.tag.clone() });
+                }
+                subs.push(parse_formula_child(c)?);
+            }
+            Ok(BodyCond::And(subs))
         }
         "Or" => {
-            let subs: Result<Vec<_>, _> =
-                node.children_named("formula").map(parse_formula_child).collect();
-            Ok(BodyCond::Or(subs?))
+            // Fail-closed: every child of <Or> MUST be <formula>.
+            let mut subs = Vec::new();
+            for c in &node.children {
+                if c.tag != "formula" {
+                    check_non_core(&c.tag)?;
+                    return Err(ImportError::UnrecognizedElement { tag: c.tag.clone() });
+                }
+                subs.push(parse_formula_child(c)?);
+            }
+            Ok(BodyCond::Or(subs))
         }
         "Exists" => {
             // <Exists>
             //   <declare><Var>z</Var></declare>  (one or more)
             //   <formula>CONDITION</formula>
             // </Exists>
-            // We discard the declared vars (they become ordinary body vars).
+            // Collect declared variable names (used by alpha_rename_cond in parse_implies).
+            let declared_vars: Vec<String> = node
+                .children_named("declare")
+                .filter_map(|d| d.children.first())
+                .filter(|c| c.tag == "Var")
+                .map(|c| c.text.trim().to_string())
+                .collect();
             let formula = node.child("formula").ok_or_else(|| ImportError::MalformedXml(
                 "Exists missing <formula>".to_string(),
             ))?;
             let sub = parse_formula_child(formula)?;
-            Ok(BodyCond::Exists(Box::new(sub)))
+            Ok(BodyCond::Exists(declared_vars, Box::new(sub)))
         }
         "Frame" => Ok(BodyCond::Atom(parse_frame(node)?)),
         "Member" => Ok(BodyCond::Atom(parse_member(node)?)),
@@ -699,13 +1036,21 @@ fn parse_formula_child(formula: &XmlNode) -> Result<BodyCond, ImportError> {
 
 /// Parse the head of an `<Implies>` (the `<then>` child). Head may be a single
 /// positive atom or an `<And>` of positive atoms.
+///
+/// # Fail-closed children check (Fix-2)
+///
+/// The `<And>` case now rejects any non-`<formula>` child element.
 fn parse_head(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
     match node.tag.as_str() {
         "And" => {
-            // Conjunctive head.
+            // Conjunctive head — fail-closed: every child MUST be <formula>.
             let mut head = Vec::new();
-            for formula in node.children_named("formula") {
-                let child = formula.children.first().ok_or_else(|| {
+            for c in &node.children {
+                if c.tag != "formula" {
+                    check_non_core(&c.tag)?;
+                    return Err(ImportError::UnrecognizedElement { tag: c.tag.clone() });
+                }
+                let child = c.children.first().ok_or_else(|| {
                     ImportError::MalformedXml("<formula> in head And has no child".to_string())
                 })?;
                 head.push(parse_positive_atom(child)?);
@@ -728,10 +1073,16 @@ fn parse_head(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
 fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
     match node.tag.as_str() {
         "Forall" => {
-            // <Forall>
-            //   <declare><Var>x</Var></declare>*
-            //   <formula>IMPLIES_OR_ATOM</formula>
-            // </Forall>
+            // Collect universally declared variable names.
+            // These seed the alpha-rename universe so generated fresh names cannot
+            // collide with universally-declared vars.
+            let forall_vars: BTreeSet<String> = node
+                .children_named("declare")
+                .filter_map(|d| d.children.first())
+                .filter(|c| c.tag == "Var")
+                .map(|c| c.text.trim().to_string())
+                .collect();
+
             let formula = node.child("formula").ok_or_else(|| ImportError::MalformedXml(
                 "Forall missing <formula>".to_string(),
             ))?;
@@ -739,7 +1090,7 @@ fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
                 "Forall <formula> has no child".to_string(),
             ))?;
             match body_node.tag.as_str() {
-                "Implies" => parse_implies(body_node),
+                "Implies" => parse_implies(body_node, &forall_vars),
                 other => {
                     // A bare atom as a Forall formula = universally closed fact.
                     check_non_core(other)?;
@@ -748,7 +1099,7 @@ fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
                 }
             }
         }
-        // Bare fact (no Forall wrapper).
+        // Bare fact (no Forall wrapper) — no existentials are possible.
         "Frame" | "Member" | "Subclass" | "Equal" => {
             let atom = parse_positive_atom(node)?;
             Ok(vec![Rule::fact(atom)])
@@ -760,11 +1111,20 @@ fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
     }
 }
 
-fn parse_implies(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
-    // <Implies>
-    //   <if>CONDITION</if>
-    //   <then>HEAD</then>
-    // </Implies>
+fn parse_implies(node: &XmlNode, forall_vars: &BTreeSet<String>) -> Result<Vec<Rule>, ImportError> {
+    // Fail-closed: duplicate single-cardinality wrappers are rejected (Fix-2).
+    // The old `.child("if")` was first-wins; now we check for duplicates explicitly.
+    if node.children_named("if").count() > 1 {
+        return Err(ImportError::MalformedXml(
+            "Implies has duplicate <if> elements (expected exactly one)".to_string(),
+        ));
+    }
+    if node.children_named("then").count() > 1 {
+        return Err(ImportError::MalformedXml(
+            "Implies has duplicate <then> elements (expected exactly one)".to_string(),
+        ));
+    }
+
     let if_node = node.child("if").ok_or_else(|| ImportError::MalformedXml(
         "Implies missing <if>".to_string(),
     ))?;
@@ -777,6 +1137,14 @@ fn parse_implies(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
         "<if> has no child condition".to_string(),
     ))?;
     let body_cond = parse_condition(body_child)?;
+
+    // Alpha-rename all Exists-declared vars to globally fresh names (Fix-1).
+    // Universe: Forall-declared vars + all var names in the body condition tree.
+    // This prevents fresh names from colliding with universals or other body vars.
+    let mut universe: BTreeSet<String> = forall_vars.clone();
+    collect_vars_in_cond(&body_cond, &mut universe);
+    let mut counter = 0u32;
+    let body_cond = alpha_rename_cond(body_cond, &mut counter, &mut universe);
 
     // Parse the head.
     let then_child = then_node.children.first().ok_or_else(|| ImportError::MalformedXml(
@@ -813,7 +1181,7 @@ fn interpret_document(root: &XmlNode) -> Result<Document, ImportError> {
                         let location = item
                             .child("location")
                             .and_then(|n| n.children.first())
-                            .map(|n| n.text.clone())
+                            .map(|n| n.text.trim().to_string())
                             .unwrap_or_default();
                         return Err(ImportError::ImportDirective { location });
                     }
@@ -862,8 +1230,15 @@ fn interpret_group(group: &XmlNode, doc: &mut Document) -> Result<(), ImportErro
                 }
             }
             "sentence" => {
-                // Alternative: direct <sentence> children.
-                let rules = parse_sentence(child)?;
+                // <sentence> is a structural wrapper in some RIF/XML serializations;
+                // descend into its actual sentence child (Fix-2 / Copilot thread #4).
+                // The old code called parse_sentence(child) where child.tag=="sentence",
+                // which always errored with UnrecognizedElement since parse_sentence only
+                // handles Forall/Frame/Member/Subclass/Equal at the top level.
+                let actual = child.children.first().ok_or_else(|| ImportError::MalformedXml(
+                    "<sentence> wrapper has no child sentence element".to_string(),
+                ))?;
+                let rules = parse_sentence(actual)?;
                 for rule in rules {
                     doc.push(rule);
                 }
@@ -885,13 +1260,16 @@ fn interpret_group(group: &XmlNode, doc: &mut Document) -> Result<(), ImportErro
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Parse a RIF-Core XML document from `xml_bytes` into a `rif::Document`.
+/// Parse a RIF-Core XML document from `xml_bytes` into a [`crate::rif::Document`].
 ///
 /// Applies two sound desugarings at import time:
 /// - Body `Or`: split into multiple rules (one rule per disjunct — Lloyd-Topor step,
 ///   monotone-Horn-preserving).
-/// - Body `Exists`: existential variables become ordinary rule variables under the
-///   existing range-restriction validation (`Document::validate` still runs on every import).
+/// - Body `Exists`: existential variables are **unconditionally alpha-renamed** to
+///   fresh names in the `__ex{N}` reserved namespace, then the `Exists` wrapper is
+///   dropped. This prevents variable capture in shadow (`Forall ?x … Exists ?x`) and
+///   sibling (`Exists ?y … Exists ?y`) patterns. See `alpha_rename_cond`
+///   (the crate-internal renaming pass; documented in the module doc).
 ///
 /// Everything outside the supported Core subset yields a named `ImportError` variant
 /// (fail-closed, never silent skipping). The returned `Document` has already been
@@ -980,6 +1358,7 @@ mod tests {
   </payload>
 </Document>"#;
 
+    // EXISTS_FLATTEN_XML — used by test_exists_flatten (updated for alpha-rename behavior).
     const EXISTS_FLATTEN_XML: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
   <payload>
     <Group>
@@ -1091,6 +1470,193 @@ mod tests {
   </payload>
 </Document>"#;
 
+    // ---- Alpha-rename test fixtures (Fix-1) ---------------------------------
+
+    /// Shadow: Forall ?x: head(?x) :- And(p(?x, v), Exists ?x(q(?x, v)))
+    /// The existential ?x shadows the universal ?x — must produce distinct body vars.
+    const SHADOW_XML: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <And>
+              <formula>
+                <Frame>
+                  <object><Var>x</Var></object>
+                  <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+                </Frame>
+              </formula>
+              <formula>
+                <Exists>
+                  <declare><Var>x</Var></declare>
+                  <formula>
+                    <Frame>
+                      <object><Var>x</Var></object>
+                      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+                    </Frame>
+                  </formula>
+                </Exists>
+              </formula>
+            </And>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/h</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+
+    /// Sibling Exists: Forall ?x: head(?x) :- And(Exists ?y(p(?x,?y)), Exists ?y(q(?x,?y)))
+    /// Two sibling Exists nodes each declare ?y — must produce TWO distinct fresh vars.
+    const SIBLING_EXISTS_XML: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <And>
+              <formula>
+                <Exists>
+                  <declare><Var>y</Var></declare>
+                  <formula>
+                    <Frame>
+                      <object><Var>x</Var></object>
+                      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Var>y</Var></slot>
+                    </Frame>
+                  </formula>
+                </Exists>
+              </formula>
+              <formula>
+                <Exists>
+                  <declare><Var>y</Var></declare>
+                  <formula>
+                    <Frame>
+                      <object><Var>x</Var></object>
+                      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Var>y</Var></slot>
+                    </Frame>
+                  </formula>
+                </Exists>
+              </formula>
+            </And>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+
+    /// Nested Exists: Forall ?x: head(?x) :- Exists ?z(Exists ?z(p(?x,?z)))
+    /// Inner Exists ?z must win; outer Exists ?z has no remaining ?z occurrences to rename.
+    const NESTED_EXISTS_XML: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Exists>
+              <declare><Var>z</Var></declare>
+              <formula>
+                <Exists>
+                  <declare><Var>z</Var></declare>
+                  <formula>
+                    <Frame>
+                      <object><Var>x</Var></object>
+                      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Var>z</Var></slot>
+                    </Frame>
+                  </formula>
+                </Exists>
+              </formula>
+            </Exists>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+
+    /// Non-colliding Exists: Forall ?x: head(?x) :- Exists ?w(p(?x,?w))
+    /// ?w does not collide with any other var, but MUST still be renamed unconditionally.
+    const NON_COLLIDING_EXISTS_XML: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Exists>
+              <declare><Var>w</Var></declare>
+              <formula>
+                <Frame>
+                  <object><Var>x</Var></object>
+                  <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Var>w</Var></slot>
+                </Frame>
+              </formula>
+            </Exists>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+
+    /// Duplicate <if>: Implies with two <if> children — must be rejected (Fix-2).
+    const DUPLICATE_IF_XML: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </if>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+
     // ---- Tests --------------------------------------------------------------
 
     /// Minimal document: one rule (Frame body → Frame head). Parse succeeds.
@@ -1124,31 +1690,53 @@ mod tests {
         assert_eq!(head0, head1, "both split rules share the same head");
     }
 
-    /// Exists in body: existential vars become ordinary body vars; validation passes.
+    /// Exists in body: existential var is alpha-renamed to a fresh name; validation passes.
+    ///
+    /// After Fix-1 the original var name "z" does NOT appear in the body — it has been
+    /// unconditionally renamed to a fresh `__ex` name.
     #[test]
     fn test_exists_flatten() {
-        let doc = import(EXISTS_FLATTEN_XML).expect("Exists-flatten should succeed");
+        let doc = import(EXISTS_FLATTEN_XML).expect("Exists-flatten with alpha-rename should succeed");
         assert_eq!(doc.rules.len(), 1);
         let rule = &doc.rules[0];
         // Body should have 2 atoms (the And inside the Exists was flattened).
         assert_eq!(rule.body.len(), 2, "both atoms from the Exists body are present");
-        // The existential variable z should appear in the body atoms as Term::Var("z").
+
+        // The original existential variable name "z" must NOT appear — it was alpha-renamed.
         let z_var = Term::Var("z".to_string());
-        let has_z = rule.body.iter().any(|a| match a {
+        let has_original_z = rule.body.iter().any(|a| match a {
             Atom::Frame { obj, pred, val } => obj == &z_var || pred == &z_var || val == &z_var,
             Atom::Member { obj, class } => obj == &z_var || class == &z_var,
             Atom::Subclass { sub, sup } => sub == &z_var || sup == &z_var,
             Atom::Equal { left, right } => left == &z_var || right == &z_var,
             Atom::Builtin { args, .. } => args.iter().any(|t| t == &z_var),
         });
-        assert!(has_z, "existential var z is in body");
+        assert!(
+            !has_original_z,
+            "existential var 'z' must be alpha-renamed (must not appear under original name)"
+        );
+
+        // A fresh var (starting with __ex) must appear in the body atoms instead.
+        let has_fresh = rule.body.iter().any(|a| match a {
+            Atom::Frame { obj, pred, val } => [obj, pred, val]
+                .iter()
+                .any(|t| matches!(t, Term::Var(v) if v.starts_with("__ex"))),
+            Atom::Member { obj, class } => [obj, class]
+                .iter()
+                .any(|t| matches!(t, Term::Var(v) if v.starts_with("__ex"))),
+            Atom::Builtin { args, .. } => args
+                .iter()
+                .any(|t| matches!(t, Term::Var(v) if v.starts_with("__ex"))),
+            _ => false,
+        });
+        assert!(has_fresh, "a fresh alpha-renamed existential var must appear in body");
     }
 
     /// Round-trip: parse minimal XML and verify structural equality with hand-built Document.
     #[test]
     fn test_round_trip_structural_equality() {
         let doc = import(MINIMAL_RULE_XML).expect("minimal doc parses");
-        // Compare against hand-built rule.
+        // Compare against hand-built rule. The body has no Exists so alpha-rename is a no-op.
         let expected_head = Atom::Frame {
             obj: Term::Var("y".to_string()),
             pred: Term::Iri("http://example.org/q".to_string()),
@@ -1338,5 +1926,298 @@ mod tests {
         )
         .expect("numeric-add must map to Builtin::NumericAdd");
         assert_eq!(b, Builtin::NumericAdd);
+    }
+
+    // ---- Alpha-rename tests (Fix-1 mandatory) --------------------------------
+
+    /// Test (a): shadow document — Forall ?x: h(?x) :- And(p(?x), Exists ?x(q(?x))).
+    /// The existential ?x must be renamed to a fresh name; body vars must be DISTINCT
+    /// (NOT [x, x]).
+    #[test]
+    fn test_alpha_rename_shadow() {
+        let doc = import(SHADOW_XML).expect("shadow doc must import with alpha-rename");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        assert_eq!(rule.body.len(), 2, "body has two atoms");
+
+        // Collect all variable names from body object positions.
+        let body_obj_vars: Vec<String> = rule.body.iter().filter_map(|a| {
+            if let Atom::Frame { obj: Term::Var(v), .. } = a { Some(v.clone()) } else { None }
+        }).collect();
+        assert_eq!(body_obj_vars.len(), 2, "both body atoms have a Var object");
+
+        // The two object vars must be DISTINCT (not both "x").
+        let distinct: BTreeSet<_> = body_obj_vars.iter().cloned().collect();
+        assert_eq!(distinct.len(), 2,
+            "Fix-1: shadow capture — body vars must be distinct after alpha-rename; \
+             got {:?} (both are the same var, indicating capture)", body_obj_vars);
+
+        // One must be the universal "x", the other a fresh __ex name.
+        assert!(distinct.contains("x"), "universal ?x must still appear in body");
+        let has_fresh = distinct.iter().any(|v| v.starts_with("__ex"));
+        assert!(has_fresh, "existential ?x must be renamed to a __ex fresh var");
+    }
+
+    /// Test (b): sibling Exists — Forall ?x: head :- And(Exists ?y(p(?x,?y)), Exists ?y(q(?x,?y))).
+    /// Two sibling Exists each declare ?y — must produce TWO DISTINCT fresh vars.
+    #[test]
+    fn test_alpha_rename_sibling() {
+        let doc = import(SIBLING_EXISTS_XML).expect("sibling exists doc must import");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        assert_eq!(rule.body.len(), 2, "body has two atoms (one per sibling Exists)");
+
+        // The val of each body Frame should be a distinct fresh var.
+        let fresh_vals: Vec<String> = rule.body.iter().filter_map(|a| {
+            if let Atom::Frame { val: Term::Var(v), .. } = a { Some(v.clone()) } else { None }
+        }).collect();
+        assert_eq!(fresh_vals.len(), 2, "both body atoms have a Var value");
+
+        let distinct: BTreeSet<_> = fresh_vals.iter().cloned().collect();
+        assert_eq!(distinct.len(), 2,
+            "Fix-1: sibling reuse — two sibling Exists ?y must produce TWO distinct fresh vars; \
+             got {:?}", fresh_vals);
+
+        // Both must be fresh __ex names.
+        assert!(fresh_vals.iter().all(|v| v.starts_with("__ex")),
+            "all existential vars from sibling Exists must be renamed to __ex names");
+    }
+
+    /// Test (c): nested Exists — the innermost binder wins.
+    /// Exists ?z(Exists ?z(p(?x,?z))): inner Exists ?z is renamed; outer rename has no effect.
+    #[test]
+    fn test_alpha_rename_nested() {
+        let doc = import(NESTED_EXISTS_XML).expect("nested exists doc must import");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        // Only one body atom (the And has been flattened; the nested Exists both removed).
+        assert_eq!(rule.body.len(), 1, "single body atom from innermost Exists");
+
+        // The body atom must use a fresh var (not the original "z").
+        let z_var = Term::Var("z".to_string());
+        let has_z = matches!(&rule.body[0], Atom::Frame { val, .. } if val == &z_var);
+        assert!(!has_z, "original 'z' must not appear — innermost Exists renamed it");
+
+        let has_fresh = matches!(&rule.body[0],
+            Atom::Frame { val: Term::Var(v), .. } if v.starts_with("__ex"));
+        assert!(has_fresh, "innermost ?z must be renamed to a __ex fresh var");
+    }
+
+    /// Test (d): non-colliding existential var is UNCONDITIONALLY renamed; validate() passes.
+    /// The original ?w does not collide with any other var, but must still be renamed.
+    #[test]
+    fn test_alpha_rename_non_colliding() {
+        let doc = import(NON_COLLIDING_EXISTS_XML)
+            .expect("non-colliding exists must import and pass validation");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        assert_eq!(rule.body.len(), 1);
+
+        // ?w must NOT appear under its original name.
+        let w_var = Term::Var("w".to_string());
+        let has_original_w = matches!(&rule.body[0], Atom::Frame { val, .. } if val == &w_var);
+        assert!(!has_original_w,
+            "non-colliding existential ?w must be renamed unconditionally (Fix-1)");
+
+        // A fresh __ex var must appear instead.
+        let has_fresh = matches!(&rule.body[0],
+            Atom::Frame { val: Term::Var(v), .. } if v.starts_with("__ex"));
+        assert!(has_fresh, "renamed ?w must appear as a __ex fresh var");
+
+        // Document must still validate (range-restriction holds: head ?x bound by body).
+        // The import() call itself called validate(); the fact it returned Ok proves this.
+    }
+
+    /// Mutation check: disabling alpha_rename_cond produces duplicate body vars for
+    /// both the shadow and sibling patterns. This proves that alpha-renaming is the
+    /// load-bearing mechanism that fixes capture; tests (a) and (b) would be RED without it.
+    #[test]
+    fn test_capture_mutation_check() {
+        // Helper: collect all Term::Var object-position names from a flat disjunct.
+        fn body_obj_var_names(body: &[Atom]) -> Vec<String> {
+            body.iter().filter_map(|a| {
+                if let Atom::Frame { obj: Term::Var(v), .. } = a { Some(v.clone()) } else { None }
+            }).collect()
+        }
+
+        // --- Shadow pattern WITHOUT alpha_rename_cond ---
+        // Construct: And(Frame{obj:Var("x"),...}, Exists(["x"], Frame{obj:Var("x"),...}))
+        let make_shadow = || BodyCond::And(vec![
+            BodyCond::Atom(Atom::Frame {
+                obj: Term::Var("x".to_string()),
+                pred: Term::Iri("http://ex/p".to_string()),
+                val: Term::Iri("http://ex/v".to_string()),
+            }),
+            BodyCond::Exists(
+                vec!["x".to_string()],
+                Box::new(BodyCond::Atom(Atom::Frame {
+                    obj: Term::Var("x".to_string()),
+                    pred: Term::Iri("http://ex/q".to_string()),
+                    val: Term::Iri("http://ex/v".to_string()),
+                })),
+            ),
+        ]);
+
+        // Without alpha_rename_cond: expand_body drops the Exists wrapper → both atoms
+        // use obj=Var("x") → body_obj_var_names returns ["x", "x"].
+        let raw_disjuncts = expand_body(make_shadow());
+        assert_eq!(raw_disjuncts.len(), 1);
+        let raw_vars = body_obj_var_names(&raw_disjuncts[0]);
+        let raw_distinct: BTreeSet<_> = raw_vars.iter().cloned().collect();
+        // Mutation check (RED without rename): without alpha-rename, duplicate var detected.
+        assert_eq!(raw_distinct.len(), 1,
+            "mutation check: without alpha_rename_cond, shadow produces duplicate 'x' — \
+             capture confirmed (this assertion verifies the mutation FAILS; \
+             disable alpha_rename_cond in parse_implies and tests (a)/(b) go RED)");
+
+        // With alpha_rename_cond: distinct vars.
+        let mut counter = 0u32;
+        let mut universe: BTreeSet<String> = ["x".to_string()].into_iter().collect();
+        let renamed = alpha_rename_cond(make_shadow(), &mut counter, &mut universe);
+        let renamed_disjuncts = expand_body(renamed);
+        assert_eq!(renamed_disjuncts.len(), 1);
+        let renamed_vars = body_obj_var_names(&renamed_disjuncts[0]);
+        let renamed_distinct: BTreeSet<_> = renamed_vars.iter().cloned().collect();
+        assert_eq!(renamed_distinct.len(), 2,
+            "with alpha_rename_cond, shadow body vars are distinct (capture fixed)");
+
+        // --- Sibling pattern WITHOUT alpha_rename_cond ---
+        // Construct: And(Exists(["y"], Frame{val:Var("y")}), Exists(["y"], Frame{val:Var("y")}))
+        fn body_val_var_names(body: &[Atom]) -> Vec<String> {
+            body.iter().filter_map(|a| {
+                if let Atom::Frame { val: Term::Var(v), .. } = a { Some(v.clone()) } else { None }
+            }).collect()
+        }
+        let make_sibling = || BodyCond::And(vec![
+            BodyCond::Exists(
+                vec!["y".to_string()],
+                Box::new(BodyCond::Atom(Atom::Frame {
+                    obj: Term::Iri("http://ex/s".to_string()),
+                    pred: Term::Iri("http://ex/p".to_string()),
+                    val: Term::Var("y".to_string()),
+                })),
+            ),
+            BodyCond::Exists(
+                vec!["y".to_string()],
+                Box::new(BodyCond::Atom(Atom::Frame {
+                    obj: Term::Iri("http://ex/s".to_string()),
+                    pred: Term::Iri("http://ex/q".to_string()),
+                    val: Term::Var("y".to_string()),
+                })),
+            ),
+        ]);
+        let sib_raw_disjuncts = expand_body(make_sibling());
+        let sib_raw_vars = body_val_var_names(&sib_raw_disjuncts[0]);
+        let sib_raw_distinct: BTreeSet<_> = sib_raw_vars.iter().cloned().collect();
+        assert_eq!(sib_raw_distinct.len(), 1,
+            "mutation check: without alpha_rename_cond, sibling produces duplicate 'y'");
+
+        // With alpha_rename_cond → distinct.
+        let mut counter2 = 0u32;
+        let mut universe2: BTreeSet<String> = ["y".to_string()].into_iter().collect();
+        let sib_renamed = alpha_rename_cond(make_sibling(), &mut counter2, &mut universe2);
+        let sib_renamed_disjuncts = expand_body(sib_renamed);
+        let sib_renamed_vars = body_val_var_names(&sib_renamed_disjuncts[0]);
+        let sib_renamed_distinct: BTreeSet<_> = sib_renamed_vars.iter().cloned().collect();
+        assert_eq!(sib_renamed_distinct.len(), 2,
+            "with alpha_rename_cond, sibling body vars are distinct");
+    }
+
+    // ---- Silent-drop / fail-closed tests (Fix-2) ----------------------------
+
+    /// <And> with a non-<formula> child → UnrecognizedElement (not silent drop).
+    #[test]
+    fn test_silent_drop_stray_child_and() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <And>
+              <formula>
+                <Frame>
+                  <object><Var>x</Var></object>
+                  <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+                </Frame>
+              </formula>
+              <StrayChild/>
+            </And>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml).expect_err("stray non-formula child in And must be rejected");
+        assert!(
+            matches!(err, ImportError::UnrecognizedElement { ref tag } if tag == "StrayChild"),
+            "expected UnrecognizedElement(StrayChild), got: {}",
+            err
+        );
+    }
+
+    /// Duplicate <if> in Implies → MalformedXml (fail-closed for single-cardinality).
+    #[test]
+    fn test_duplicate_if_rejected() {
+        let err = import(DUPLICATE_IF_XML).expect_err("duplicate <if> must be rejected");
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml for duplicate <if>, got: {}",
+            err
+        );
+    }
+
+    // ---- Const whitespace round-trip (Fix-3) ---------------------------------
+
+    /// xsd:string lexical value with surrounding whitespace must round-trip exactly.
+    /// The old trim_text(true) was stripping leading/trailing spaces from string literals.
+    #[test]
+    fn test_const_string_whitespace_roundtrip() {
+        // Bare Frame fact: object, slot pred (IRI), slot val (xsd:string with whitespace).
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const>
+        <Const type="http://www.w3.org/2001/XMLSchema#string"> a  b </Const>
+      </slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("valid doc with xsd:string whitespace value");
+        assert_eq!(doc.rules.len(), 1);
+        // The fact's head atom contains the string Const in the val position.
+        let atom = &doc.rules[0].head[0];
+        if let Atom::Frame { val, .. } = atom {
+            assert_eq!(
+                val,
+                &Term::Lit {
+                    lex: " a  b ".to_string(),
+                    datatype: "http://www.w3.org/2001/XMLSchema#string".to_string(),
+                },
+                "xsd:string lexical value must be preserved exactly (Fix-3)"
+            );
+        } else {
+            panic!("expected Frame atom, got {:?}", atom);
+        }
+    }
+
+    // ---- func:count (ListLength) mapping (Fix-4) ----------------------------
+
+    /// func:count → Builtin::ListLength (was wrongly rejected as UnknownExternal).
+    #[test]
+    fn test_list_length_func_count_parses() {
+        let b = iri_to_builtin("http://www.w3.org/2007/rif-builtin-function#count")
+            .expect("func:count must map to Builtin::ListLength (Fix-4)");
+        assert_eq!(b, Builtin::ListLength);
     }
 }
