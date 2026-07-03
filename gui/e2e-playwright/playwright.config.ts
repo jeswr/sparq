@@ -52,10 +52,14 @@ export default defineConfig({
 
   // Serves gui/app/out (the Tauri-target static export).  -s = SPA mode so every route
   // resolves to index.html (required for Next.js static export with client-side routing).
-  // [SONNET-4.6] serve is a pinned devDependency (14.2.6) so npm ci installs it offline;
-  // the local binary is used directly to avoid any npx network fetch in CI.
+  // [SONNET-4.6] serve is a pinned devDependency (14.2.6) in this workspace member.
+  // gui/e2e-playwright is an npm workspace member so `serve` is HOISTED to the repo-root
+  // node_modules/.bin — it does NOT exist at ./node_modules/.bin/serve. `npx serve` resolves
+  // the hoisted binary via npm's node_modules hierarchy walk with NO network fetch (the dep is
+  // already installed). Using `npm run serve` via a package.json script would also work; npx
+  // is simpler (single config change, no extra script entry). [SONNET-4.6] sq-ymr2e.5 fix.
   webServer: {
-    command: "./node_modules/.bin/serve -l 3007 -s ../app/out",
+    command: "npx serve -l 3007 -s ../app/out",
     url: "http://127.0.0.1:3007",
     reuseExistingServer: !process.env.CI,
     timeout: 15_000,
