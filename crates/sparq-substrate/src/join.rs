@@ -1038,7 +1038,9 @@ pub mod delta {
             assert_eq!(
                 budgeted_output.len(),
                 2,
-                "Cap(2) must truncate after 2 emits (at second probe row's budget check)"
+                "Cap(2) must truncate after 2 emits: budget.exhausted fires at the START of \
+                 the third probe row (third budget check; emitted=2 >= 2), so that row is \
+                 never processed"
             );
             let expected_budgeted = vec![row(&[1, 100]), row(&[2, 200])];
             assert_eq!(
