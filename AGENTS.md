@@ -59,7 +59,7 @@ The engine's `compare_values` total order **now lives in `compare` here** (bead 
 
 **In sparq-substrate (generic, consumer-agnostic, monomorphised, shared):**
 - `rows` — Row/Key/Posting id-tuple vocabulary.
-- `numeric` — XSD numeric value tower + arithmetic ops (monomorphic over concrete u32 ids and SmallVec).
+- `numeric` — XSD numeric value tower + arithmetic ops (monomorphic over the concrete numeric tiers `i64`/`i128`/`f32`/`f64`; `#[inline]` accessors, no `Box<dyn>`/`&dyn`/vtable anywhere).
 - `join` — four id-tuple join kernels (merge-join, hash-join, bind-join, trie-join) + `join::delta` (persistent extendable hash table for semi-naive Δ⋈full join). All generic over JoinKeys descriptor and Budget cooperative-cancel hook; no vtable on the hot path.
 - `compare` — SPARQL term total order (compare_terms over CompareTerm trait). Generic over the trait; concrete consumer implements it for its term type; no vtable on the per-comparison hot loop.
 
@@ -72,7 +72,7 @@ The engine's `compare_values` total order **now lives in `compare` here** (bead 
 - `service.rs` (SPARQL SERVICE federation).
 - Serializers and EXISTS/aggregation (engine executor details).
 
-The seam is **clean and intentional**: generic algorithms flow outward to sparq-substrate; engine-private types and optimizations stay inward. This is verified structurally by the perf-neutrality gate (scripts/check-no-dyn-dispatch.py enumerates all four hot-loop modules — rows/numeric/join/join::delta/compare — and fails if any Box<dyn> / &dyn enters a hot path).
+The seam is **clean and intentional**: generic algorithms flow outward to sparq-substrate; engine-private types and optimizations stay inward. This is verified structurally by the perf-neutrality gate (scripts/check-no-dyn-dispatch.py enumerates the four hot-loop modules — rows/numeric/join (including the join::delta submodule)/compare — and fails if any Box<dyn> / &dyn enters a hot path).
 
 ## MAINTENANCE RULE (REQUIRED — read before changing any public surface)
 

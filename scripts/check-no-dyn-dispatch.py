@@ -50,11 +50,14 @@ import sys
 #     zero-overhead doc-contract but is included so a future hot helper added there is
 #     also covered. Adding a new hot-path module to the substrate? Add it here.
 #
-#     [HAIKU-4.5] sq-qonbz.7: EXPLICIT enumeration of ALL FOUR substrate hot-loop modules:
+#     [HAIKU-4.5] sq-qonbz.7: EXPLICIT enumeration of the FOUR substrate hot-loop modules
+#     (join::delta is a SUBMODULE of join, not a fifth top-level module — the count and the
+#     list agree at four):
 #     - rows (shared Row/Key/Posting id-tuple vocabulary)
 #     - numeric (XSD numeric value tower + arithmetic + lexical helpers)
-#     - join (four id-tuple join kernels: merge-join, hash-join, bind-join, trie-join/WCOJ)
-#     - join::delta (persistent extendable build-side hash table for semi-naive Δ⋈full join)
+#     - join (four id-tuple join kernels: merge-join, hash-join, bind-join, trie-join/WCOJ;
+#       INCLUDES the join::delta submodule — persistent extendable build-side hash table for
+#       semi-naive Δ⋈full join)
 #     - compare (SPARQL term total order over a generic CompareTerm trait)
 #     This enumeration makes the perf-neutrality boundary structurally explicit and auditable.
 SUBSTRATE_HOT_PATHS = [
