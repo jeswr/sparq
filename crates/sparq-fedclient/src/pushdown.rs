@@ -1027,7 +1027,8 @@ mod tests {
             patterns: vec![0, 1],
         };
         let cap = Capability::endpoint();
-        // Output requests only o1, but s is needed as a join variable (cross-group join key).
+        // output_vars includes both s (cross-group join key) and o1 (final projection var).
+        // push_group projects exactly the group vars present in output_vars. [SONNET-4.6] sq-v411r
         let pushed = push_group(
             &group,
             &bgp,
