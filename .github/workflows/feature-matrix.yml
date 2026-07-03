@@ -224,9 +224,24 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # Per-leg cache key so each crate+feature combination keeps its own warm
-          # target dir (the feature set changes the compiled artifacts).
-          shared-key: feature-matrix-${{ matrix.crate }}-${{ matrix.features }}
+          # [OPUS-4.8] sq-3sbrr — PER-CRATE (not per-leg) cache key + save-only-on-main.
+          # WHY: rust-cache stores the DEPENDENCY build only (never sparq's own crates —
+          # they recompile per leg regardless, see ci.yml's build-once note), so the prior
+          # per-leg `…-${{ matrix.crate }}-${{ matrix.features }}` key produced 68
+          # near-identical dependency caches (one per matrix leg). At ~0.2 GB each that is
+          # ~14 GB of demand against the repo's 10 GB Actions-cache budget, so GitHub
+          # LRU-evicted them AND the ci.yml caches (test-workspace / coverage / lint /
+          # wasm) on essentially every run — caching was present but self-defeating and
+          # most jobs restored COLD (recompiling the ~131 s dep floor from scratch).
+          # Keying by CRATE collapses the 68 legs to ONE dependency cache per crate (the
+          # 15 sparq-engine legs now share a single warm dep dir); cargo fingerprinting
+          # still recompiles each feature-varying crate itself, so there is no
+          # stale-artifact risk (the rust-cache key already embeds Cargo.lock + the rustc
+          # version + Cargo.toml hashes). `save-if` makes PR and ephemeral merge_group
+          # runs RESTORE-ONLY so they stop writing branch-scoped caches that churn the
+          # shared budget; the post-merge push-to-main run is what seeds/refreshes them.
+          shared-key: feature-matrix-${{ matrix.crate }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch dependencies (retry transient crates.io fetch)
         # [OPUS-4.8] sq-hhxc: these `opt-in <crate>` legs were failing ~8s in with exit 101
         # — i.e. in EARLY SETUP (registry resolve/fetch), BEFORE any real compile (8s is far
@@ -299,6 +314,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: feature-matrix-sparq-server-no-default-features
+          # [OPUS-4.8] sq-3sbrr: restore-only off main so PR/merge_group runs don't
+          # write branch-scoped caches that churn the shared 10 GB budget.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch dependencies (retry transient crates.io fetch)
         run: |
           set -euo pipefail
@@ -340,5 +358,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: fedclient-boundary
+          # [OPUS-4.8] sq-3sbrr: restore-only off main (see the opt-in-features note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Assert sparq-core/sparq-engine have no edge to sparq-fedclient
         run: scripts/fedclient-boundary-guard.sh
