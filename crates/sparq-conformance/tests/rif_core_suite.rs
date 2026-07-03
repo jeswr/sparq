@@ -634,6 +634,43 @@ mod gated {
             Some("3"),
             "func:concatenate: [10,20]++[30] → length 3",
         );
+        // Variadic (3+ inputs): [1,2] ++ [3] ++ [4,5] → [1,2,3,4,5]; length = 5
+        // [SONNET-4.6] sq-pbz04.5.2 — exercises the args[..n_inputs] join path in
+        // lower_builtin (ListConcatenate) with n_inputs=3.
+        let list_x = Term::List(vec![Term::int(1), Term::int(2)]);
+        let list_y = Term::List(vec![Term::int(3)]);
+        let list_z = Term::List(vec![Term::int(4), Term::int(5)]);
+        let mut doc3 = Document::new();
+        doc3.push(Rule::fact(Atom::Frame { obj: iri("r"), pred: iri("lx"), val: list_x }));
+        doc3.push(Rule::fact(Atom::Frame { obj: iri("r"), pred: iri("ly"), val: list_y }));
+        doc3.push(Rule::fact(Atom::Frame { obj: iri("r"), pred: iri("lz"), val: list_z }));
+        // func:concatenate(?lx, ?ly, ?lz, ?out) — variadic 3-input form
+        doc3.push(Rule::implies(
+            vec![Atom::Frame { obj: var("r"), pred: iri("cat3_out"), val: var("out") }],
+            vec![
+                Atom::Frame { obj: var("r"), pred: iri("lx"), val: var("lx") },
+                Atom::Frame { obj: var("r"), pred: iri("ly"), val: var("ly") },
+                Atom::Frame { obj: var("r"), pred: iri("lz"), val: var("lz") },
+                Atom::Builtin {
+                    op: Builtin::ListConcatenate,
+                    args: vec![var("lx"), var("ly"), var("lz"), var("out")],
+                },
+            ],
+        ));
+        doc3.push(Rule::implies(
+            vec![Atom::Frame { obj: var("r"), pred: iri("cat3_len"), val: var("n") }],
+            vec![
+                Atom::Frame { obj: var("r"), pred: iri("cat3_out"), val: var("out") },
+                Atom::Builtin { op: Builtin::ListLength, args: vec![var("out"), var("n")] },
+            ],
+        ));
+        let mut dict3 = Dict::new();
+        let c3 = doc3.closure(&mut dict3).expect("safe 3-input concatenate doc");
+        t.eq(
+            int_obj(&dict3, &c3, &ns("r"), &ns("cat3_len")).as_deref(),
+            Some("5"),
+            "func:concatenate variadic: [1,2]++[3]++[4,5] → length 5",
+        );
         // Negative: too few args (1 < min 2) → rejected
         let list_c = Term::List(vec![Term::int(1)]);
         let mut d = Document::new();
