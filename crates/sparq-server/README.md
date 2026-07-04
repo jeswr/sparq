@@ -106,8 +106,8 @@ every update is WAL-fsync'd **before the `204` ack** (restart replays the WAL, n
   status code, the full auth × bind matrix, each hardening cap's honest semantics, CORS, audit
   sinks, TPF/brTPF, SHACL, federation discovery, the container image) and
   [`SUBSCRIPTIONS.md`](SUBSCRIPTIONS.md) (the subscription protocol).
-- **API reference** — [docs.rs/sparq-server](https://docs.rs/sparq-server) (incl. the versioned
-  `status_contract` retry doc).
+- **Wire contract** — [`docs/http-wire-contract.md`](../../docs/http-wire-contract.md): the versioned v1
+  HTTP surface + wire-semver policy, pinned by `tests/wire_contract.rs` (ratification pending, gh-1416). **API reference** — [docs.rs/sparq-server](https://docs.rs/sparq-server).
 - **Design** — [`research/concurrent-serving.md`](../../research/concurrent-serving.md)
   (generation-ring + sequenced-writer) and
   [`research/adr-horizontal-scaling.md`](../../research/adr-horizontal-scaling.md) (the non-goal).

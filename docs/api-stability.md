@@ -56,6 +56,12 @@ every other crate in the workspace (`sparq-core`, `sparq-engine`, `sparq-server`
 router and types, and the opt-in capability crates). A consumer may still use tier-2
 surfaces; it just does so without the stability guarantee, and should pin an exact revision.
 
+Note that `sparq-server`'s **Rust** surface being tier-2 is distinct from its **HTTP wire**
+surface: what the server speaks over the network to an HTTP-only consumer has its own
+proposed-frozen contract — [`docs/http-wire-contract.md`](http-wire-contract.md)
+([#1416](https://github.com/jeswr/sparq/issues/1416)) — with the same
+proposed-until-ratified status as this document.
+
 Opt-in, feature-gated capability crates remain tier-2 regardless of this policy: keeping the
 core lean and the capability surfaces free to evolve is a deliberate architecture choice.
 
@@ -170,6 +176,8 @@ Until step 3, the tier-1 guarantee is **not** in force.
 
 ## Related
 
+- [`docs/http-wire-contract.md`](http-wire-contract.md) — the HTTP wire counterpart of this
+  policy: the v1 served-surface contract for HTTP-only consumers (#1416).
 - [`docs/release.md`](release.md) — how a release is cut (maintainer-triggered).
 - [`docs/branch-protection.md`](branch-protection.md) — the `main` protection doc-of-record.
 - `crates/sparq-serve/README.md` — the `embed` seam narrative.

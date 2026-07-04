@@ -1397,6 +1397,15 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   truncation. **Classify on the status code, not the body text** (bodies are sanitised generic
   classes — see the next bullet). There is **no `Retry-After`** header today. Full contract +
   rationale: the `sparq_server::status_contract` crate doc, asserted by `tests/status_contract.rs`.
+- **The versioned HTTP wire contract ([FABLE-5] sq-fdurb / gh-1416, PSS ask).** The endpoints,
+  params, media types, negotiation rules, status codes and error-body shape an **HTTP-only
+  consumer** may rely on are enumerated as the **v1 wire contract** in
+  [`docs/http-wire-contract.md`](../../docs/http-wire-contract.md) — frozen-vs-unstable
+  partition, plus the wire-semver policy (breaking vs additive). Pinned end-to-end by the
+  served-surface snapshot suite `tests/wire_contract.rs` (one direct test per documented
+  endpoint behaviour / error class), so an accidental wire break fails CI. Status: **PROPOSED**
+  — the freeze ratification is the maintainer's call, like the embedding freeze in
+  [`docs/api-stability.md`](../../docs/api-stability.md).
 - **Error bodies are sanitized — no information leak (sq-cz89 / sq-j9zs).** On the
   no-auth-by-default path an error body carries only a **stable, generic CLASS message**
   (e.g. `malformed query`, `malformed RDF body`, `malformed gzip body`,
