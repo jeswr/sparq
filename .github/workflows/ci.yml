@@ -2050,6 +2050,45 @@ jobs:
           PASS=$(grep -E '^OWL 2 EL ratchet pass ' el-suite-conformance.out | awk '{print $6}' | head -1)
           echo "OWL 2 EL classification pass: ${PASS:-unknown} (floor: $FLOOR)"
           [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::OWL 2 EL classification regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
+      - name: Run OWL 2 QL lanes (ql-experimental feature ON) + enforce the pinned floor
+        # [FABLE-5] sq-pbz04.3.4 (epic sq-pbz04.3) — the OPT-IN OWL 2 QL lanes.
+        # SEPARATE from the binary ratchet above so the default inference binary stays
+        # byte-for-byte unchanged (every QL row remains OutOfScope there). Runs the
+        # THREE ql-experimental suites: (a) ql_entailment_floor — the PINNED NAMED-CASE
+        # floor of the six-condition-sound pr:QL subset (exact set equality asserted
+        # in-runner: a regressing pinned case AND an unpinned newly-eligible case both
+        # fail; QL_ENTAILMENT_FLOOR mirrored in scoreboard::SUITES); (b) ql_dllite_suite
+        # — the sq-qo1a9 DL-Lite_R certain-answer oracle ratchet (QL_DLLITE_FLOOR),
+        # previously wired into NO CI lane (a discovered gap this step also closes);
+        # (c) ql_experimental_arm — the taxonomy/no-binary-graduation invariants.
+        # The pinned floor is asserted in-runner AND re-grepped here, read from source
+        # so this step cannot drift from the in-runner const. HONESTLY sparq-EXTENSION
+        # ratchets — NOT an OWL 2 QL / entailment-regime conformance claim.
+        # `--nocapture` so the ratchet lines reach stdout.
+        run: |
+          set -uo pipefail
+          cargo test -p sparq-conformance --features ql-experimental --test ql_entailment_floor --test ql_dllite_suite --test ql_experimental_arm -- --nocapture \
+            | tee ql-conformance.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::OWL 2 QL lane tests failed (exit $rc)"; exit "$rc"; }
+          if ! grep -qE '^QL entailment graduated floor ' ql-conformance.out; then
+            echo "::error::QL lane produced no 'QL entailment graduated floor' line — the pinned-floor runner self-skipped or did not run. This job fetches the fixtures, so that is an infra issue, not a conformance change."
+            exit 1
+          fi
+          FLOOR=$(grep -E '^\s+pub const QL_ENTAILMENT_FLOOR\s*:\s*usize\s*=' \
+            crates/sparq-conformance/tests/ql_entailment_floor.rs \
+            | grep -oE '[0-9]+' | head -1)
+          if [ -z "$FLOOR" ]; then
+            echo "::error::Could not parse QL_ENTAILMENT_FLOOR from ql_entailment_floor.rs — check the const declaration"
+            exit 1
+          fi
+          GRADUATED=$(grep -E '^QL entailment graduated floor ' ql-conformance.out | awk '{print $5}' | head -1)
+          echo "OWL 2 QL entailment graduated subset: ${GRADUATED:-unknown} (pinned floor: $FLOOR)"
+          [ -n "$GRADUATED" ] && [ "$GRADUATED" -ge "$FLOOR" ] || { echo "::error::OWL 2 QL graduated subset regressed below the pinned floor ($GRADUATED < $FLOOR)"; exit 1; }
+          if ! grep -qE '^QL DL-Lite_R sound-and-complete ' ql-conformance.out; then
+            echo "::error::QL lane produced no 'QL DL-Lite_R sound-and-complete' line — the sq-qo1a9 oracle ratchet did not run."
+            exit 1
+          fi
       - name: Upload report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
