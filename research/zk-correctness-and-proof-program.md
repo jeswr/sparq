@@ -183,7 +183,7 @@ asked for it explicitly.
 `.github/workflows/zk-toolchain.yml` is the *only* ZK lane. It installs the pinned Noir/`bb`
 toolchain but its load-bearing step is:
 
-```
+```sh
 cargo test -p sparq-zk-compose -p sparq-zk -- --ignored --test-threads=1
 ```
 
