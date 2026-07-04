@@ -423,8 +423,8 @@ jobs:
   # xpath_test_fnminutes_from_time asserts minutes_from_time() values;
   # xpath_test_opdaytimeduration_greater_than asserts duration_greater_than() booleans).
   # These are gated below via DYNAMIC DETECTION.  The remaining ~250 are stub-wired: each
-  # imports a `dep::xpath::stub_fnXXX` function whose body is `assert(false, "not available
-  # in ZK")`, so running them on valid code would produce a permanently-RED lane — a
+  # has a `stub_`-prefixed import (e.g. `stub_prodaxisstep_preceding`) whose body is
+  # `assert(false, "not available in ZK")`, so running them on valid code would produce a permanently-RED lane — a
   # gate-discipline violation.  Detection greps for the "stub_" import marker in each
   # package's src/*.nr files.  As sq-3x7dl.15 retires stubs (converts them to real
   # implementations), the grep detects the change automatically and the newly-real package
@@ -559,8 +559,8 @@ jobs:
       # real test_packages — dynamically detected subset of the 360 generated packages.
       #
       # [SONNET-4.6] DETECTION: a test_package is a STUB if any .nr file in its src/
-      # directory contains the string "stub_", indicating it imports a
-      # `dep::xpath::stub_fnXXX` function whose body is `assert(false, "not available in
+      # directory contains the string "stub_", indicating it has a `stub_`-prefixed import
+      # (e.g. `stub_prodaxisstep_preceding`) whose body is `assert(false, "not available in
       # ZK")`.  All other packages have genuine #[test] assertions against implemented
       # library functions and are gated here.  Current partition (verified by local grep):
       # 110 real | 250 stub-wired.
@@ -593,7 +593,7 @@ jobs:
           done
           echo "Partition: ${real_count} real test_packages | ${stub_count} stub-wired (excluded)"
           echo "Gates on ${real_count} implemented-function test_packages;" \
-            "${stub_count} stub-wired packages (dep::xpath::stub_fn*, assert(false))" \
+            "${stub_count} stub-wired packages (stub_* prefix imports, assert(false))" \
             "excluded, tracked by sq-3x7dl.15 for retirement."
           printf 'Partition: **%d real** (gated) | %d stub-wired (excluded)\n' \
             "${real_count}" "${stub_count}" >> "$GITHUB_STEP_SUMMARY"
