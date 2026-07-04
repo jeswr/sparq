@@ -10,8 +10,10 @@ use dep::xpath::{
     compare_float_int_ge, compare_float_int_gt, compare_float_int_le, compare_float_int_lt,
     compare_int_double_eq, compare_int_double_ge, compare_int_double_gt, compare_int_double_le,
     compare_int_double_lt, compare_int_float_eq, compare_int_float_ge, compare_int_float_gt,
-    compare_int_float_le, compare_int_float_lt, floor_int, get_common_type, max_int, min_int,
+    compare_int_float_le, compare_int_float_lt, floor_int, fn_number_from_string, get_common_type,
+    max_int, min_int,
     numeric_add_double, numeric_add_float, numeric_add_int, numeric_divide_int,
+    numeric_divide_int_as_double,
     numeric_equal_double, numeric_equal_float, numeric_equal_int, numeric_ge_int,
     numeric_greater_than_double, numeric_greater_than_float, numeric_greater_than_int,
     numeric_le_int, numeric_less_than_double, numeric_less_than_float, numeric_less_than_int,
@@ -48,9 +50,81 @@ fn test_numeric_multiply_int() {
 
 #[test]
 fn test_numeric_divide_int() {
+    // op:numeric-integer-divide (idiv) -- truncates TOWARD ZERO.
+    // op:numeric-divide over integers is numeric_divide_int_as_double below.
     assert(numeric_divide_int(6, 3) == 2);
-    assert(numeric_divide_int(7, 3) == 2); // Integer division truncates
+    assert(numeric_divide_int(7, 3) == 2); // idiv truncates
     assert(numeric_divide_int(-6, 3) == -2);
+    assert(numeric_divide_int(7, 2) == 3); // 7 idiv 2 = 3 (7 div 2 = 3.5)
+    assert(numeric_divide_int(-7, 2) == -3); // toward zero, not floor (-4)
+}
+
+// ============================================================================
+// op:numeric-divide over xs:integer operands (decimal semantics, never
+// truncating). Expected bit patterns are from an independent Python/IEEE 754
+// hardware oracle: struct.unpack('<Q', struct.pack('<d', a/b)). [FABLE-5]
+// ============================================================================
+
+#[test]
+fn test_numeric_divide_int_as_double_non_exact() {
+    // 7/2 = 3.5 -- THE case the qt3 corpus never exercises (exact quotients only)
+    assert(numeric_divide_int_as_double(7, 2) == XsdDouble::from_bits(0x400C000000000000));
+    // -7/2 = -3.5
+    assert(numeric_divide_int_as_double(-7, 2) == XsdDouble::from_bits(0xC00C000000000000));
+    // 10/4 = 2.5
+    assert(numeric_divide_int_as_double(10, 4) == XsdDouble::from_bits(0x4004000000000000));
+    // 1/2 = 0.5
+    assert(numeric_divide_int_as_double(1, 2) == XsdDouble::from_bits(0x3FE0000000000000));
+}
+
+#[test]
+fn test_numeric_divide_int_as_double_repeating() {
+    // Non-terminating decimal quotients: correctly-rounded doubles.
+    // 1/3 = 0.3333333333333333 (0x3FD5555555555555)
+    assert(numeric_divide_int_as_double(1, 3) == XsdDouble::from_bits(0x3FD5555555555555));
+    // 2/3 = 0.6666666666666666 (0x3FE5555555555555)
+    assert(numeric_divide_int_as_double(2, 3) == XsdDouble::from_bits(0x3FE5555555555555));
+    // 10/3 = 3.3333333333333335 (0x400AAAAAAAAAAAAB)
+    assert(numeric_divide_int_as_double(10, 3) == XsdDouble::from_bits(0x400AAAAAAAAAAAAB));
+    // -10/3 = -3.3333333333333335 (0xC00AAAAAAAAAAAAB)
+    assert(numeric_divide_int_as_double(-10, 3) == XsdDouble::from_bits(0xC00AAAAAAAAAAAAB));
+    // 22/7 = 3.142857142857143 (0x4009249249249249)
+    assert(numeric_divide_int_as_double(22, 7) == XsdDouble::from_bits(0x4009249249249249));
+}
+
+#[test]
+fn test_numeric_divide_int_as_double_exact() {
+    // Exact quotients agree with idiv promoted to double
+    assert(numeric_divide_int_as_double(6, 3) == XsdDouble::from_bits(0x4000000000000000)); // 2.0
+    assert(numeric_divide_int_as_double(0, 5) == XsdDouble::from_bits(0x0000000000000000)); // 0.0
+}
+
+#[test]
+fn test_numeric_divide_int_as_double_beyond_2_53() {
+    // Operand above 2^53: the i64->f64 conversion itself rounds (documented
+    // approximation). Oracle: float(999999999999999999)/float(3)
+    // = 3.333333333333333e+17 (0x439280F39A348555).
+    assert(
+        numeric_divide_int_as_double(999999999999999999, 3)
+            == XsdDouble::from_bits(0x439280F39A348555),
+    );
+}
+
+#[test]
+fn test_divide_and_integer_divide_are_distinct() {
+    // The two XPath operators must give DIFFERENT answers on 7/2:
+    // op:numeric-integer-divide -> 3, op:numeric-divide -> 3.5.
+    assert(numeric_divide_int(7, 2) == 3);
+    let q = numeric_divide_int_as_double(7, 2);
+    assert(q == XsdDouble::from_bits(0x400C000000000000)); // 3.5
+    // and 3.5 != 3.0 (0x4008000000000000)
+    assert(!(q == XsdDouble::from_bits(0x4008000000000000)));
+}
+
+#[test(should_fail_with = "Division by zero")]
+fn test_numeric_divide_int_as_double_by_zero_fails() {
+    // xs:decimal division by zero is err:FOAR0001 -- fail-closed, no Infinity
+    let _ = numeric_divide_int_as_double(1, 0);
 }
 
 #[test]
@@ -939,4 +1013,71 @@ fn test_from_float_denorm_k20() {
     let promoted = XsdDouble::from_float(f32_denorm);
     let expected = XsdDouble::from_bits(0x37E0000100000000);
     assert(numeric_equal_double(promoted, expected));
+}
+
+// ============================================================================
+// fn:number string parsing -- whitespace handling (xsd whiteSpace="collapse":
+// leading/trailing #x20/#x9/#xA/#xD stripped; INTERIOR whitespace is not in
+// the xs:double lexical space, so it must yield the NaN indicator). [FABLE-5]
+// ============================================================================
+
+#[test]
+fn test_fn_number_from_string_basic() {
+    let (v, ok) = fn_number_from_string("42");
+    assert(ok);
+    assert(v == 42);
+    let (v2, ok2) = fn_number_from_string("-13");
+    assert(ok2);
+    assert(v2 == -13);
+    let (v3, ok3) = fn_number_from_string("+7");
+    assert(ok3);
+    assert(v3 == 7);
+}
+
+#[test]
+fn test_fn_number_from_string_leading_trailing_whitespace() {
+    // Leading + trailing whitespace is stripped (collapse facet)
+    let (v, ok) = fn_number_from_string(" 42 ");
+    assert(ok);
+    assert(v == 42);
+    let (v2, ok2) = fn_number_from_string("\t-13\n");
+    assert(ok2);
+    assert(v2 == -13);
+    let (v3, ok3) = fn_number_from_string("  99  ");
+    assert(ok3);
+    assert(v3 == 99);
+}
+
+#[test]
+fn test_fn_number_from_string_interior_whitespace_is_nan() {
+    // fn:number('1 2') must be NaN -- NOT 12 (the pre-fix bug folded digits
+    // across interior whitespace)
+    let (_, ok) = fn_number_from_string("1 2");
+    assert(!ok);
+    let (_, ok2) = fn_number_from_string("4 2 ");
+    assert(!ok2);
+    // whitespace between sign and digits is interior too
+    let (_, ok3) = fn_number_from_string("- 5");
+    assert(!ok3);
+}
+
+#[test]
+fn test_fn_number_from_string_junk_after_trailing_whitespace_is_nan() {
+    // Once the trailing-whitespace run starts, any non-whitespace is invalid
+    let (_, ok) = fn_number_from_string("7 x");
+    assert(!ok);
+    let (_, ok2) = fn_number_from_string("12 .");
+    assert(!ok2);
+}
+
+#[test]
+fn test_fn_number_from_string_malformed_is_nan() {
+    let (_, ok) = fn_number_from_string("12x");
+    assert(!ok);
+    let (_, ok2) = fn_number_from_string("x12");
+    assert(!ok2);
+    let (_, ok3) = fn_number_from_string("   ");
+    assert(!ok3);
+    let (_, ok4) = fn_number_from_string("-");
+    assert(!ok4);
 }

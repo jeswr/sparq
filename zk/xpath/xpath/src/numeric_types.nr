@@ -509,6 +509,37 @@ pub fn abs_double(a: XsdDouble) -> XsdDouble {
 }
 
 // ============================================================================
+// Integer Division with Decimal Semantics (op:numeric-divide on xs:integer)
+// ============================================================================
+
+/// op:numeric-divide for two xs:integer operands.
+///
+/// XPath F&O 4.2.6: when both operands are xs:integer (a subtype of
+/// xs:decimal), `op:numeric-divide` returns their xs:decimal quotient and
+/// NEVER truncates: `7 div 2 = 3.5`. Truncating division is the DISTINCT
+/// operator `op:numeric-integer-divide` (`idiv`) -- `numeric_divide_int` in
+/// `numeric.nr`. SPARQL 1.1 section 17.4 maps `/` to op:numeric-divide, so a
+/// truncating `/` silently corrupts query answers (`?x / 2` off by up to 0.5).
+///
+/// DOCUMENTED APPROXIMATION (not silent truncation): this module has no
+/// arbitrary-precision xs:decimal type -- decimals are modelled as IEEE 754
+/// doubles throughout (see the module doc). The quotient is therefore
+/// computed in double precision: each operand is converted with
+/// `XsdDouble::from_i64` (exact for |n| <= 2^53, round-to-nearest-ties-even
+/// beyond) and divided with `numeric_divide_double` (correctly rounded per
+/// IEEE 754). For operands within +/-2^53 the result is the correctly-rounded
+/// double of the true rational quotient; beyond that the operand conversion
+/// itself may round first (at most two roundings total).
+///
+/// Division by zero: xs:decimal division raises err:FOAR0001 in XPath (the
+/// Infinity/NaN escape hatch exists only for float/double operands), so this
+/// asserts `b != 0` -- fail-closed, matching `numeric_divide_int`. [FABLE-5]
+pub fn numeric_divide_int_as_double(a: i64, b: i64) -> XsdDouble {
+    assert(b != 0, "Division by zero");
+    numeric_divide_double(XsdDouble::from_i64(a), XsdDouble::from_i64(b))
+}
+
+// ============================================================================
 // Mixed Type Comparison Functions
 // ============================================================================
 

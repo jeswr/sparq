@@ -123,6 +123,8 @@ pub use numeric_types::{
     // Double arithmetic
     numeric_add_double, numeric_subtract_double, numeric_multiply_double, numeric_divide_double,
     abs_double,
+    // op:numeric-divide on two xs:integer operands (decimal semantics via double)
+    numeric_divide_int_as_double,
     // Float rounding functions
     round_float, ceil_float, floor_float,
     // Double rounding functions
