@@ -9,7 +9,10 @@
 /// Using two Fields: one for UTC instant, one for timezone offset.
 /// This allows comparison using UTC while extracting local components.
 pub struct XsdDateTime {
-    /// Microseconds since Unix epoch (UTC)
+    /// Microseconds since Unix epoch (UTC), as a SIGNED i64 stored in its
+    /// two's-complement 64-bit pattern (encode `(e as u64) as Field`, decode
+    /// `f as i64`). Pre-1970 instants are negative i64 values; consumers must
+    /// decode before dividing or comparing (sq-3x7dl.7). [FABLE-5]
     pub epoch_microseconds: Field,
     /// Timezone offset in minutes from UTC (e.g., -300 for EST, 0 for UTC)
     /// Stored as signed value: positive = east of UTC, negative = west of UTC
@@ -35,7 +38,9 @@ impl XsdDateTime {
         let offset_micros: i64 = (self.tz_offset_minutes as i64) * 60_000_000;
         let utc_micros: i64 = self.epoch_microseconds as i64;
         let local: i64 = utc_micros + offset_micros;
-        // Safe cast: we ensure the result is non-negative in valid use cases
+        // Re-encode the signed result as its two's-complement pattern; a
+        // pre-1970 local time is a valid NEGATIVE value that callers recover
+        // with `as i64` (sq-3x7dl.7). [FABLE-5]
         let local_u64: u64 = local as u64;
         local_u64 as Field
     }

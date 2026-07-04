@@ -81,8 +81,10 @@ noir_XPath/
 // Stores microseconds since Unix epoch (1970-01-01T00:00:00Z) as UTC
 // This minimizes constraints while allowing all component extraction
 struct XsdDateTime {
-    /// Microseconds since Unix epoch (UTC)
-    /// Range: supports dates from ~290,000 BCE to ~290,000 CE with microsecond precision
+    /// Microseconds since Unix epoch (UTC), as a SIGNED i64 stored in its
+    /// two's-complement 64-bit pattern (encode `(e as u64) as Field`, decode
+    /// `f as i64`); pre-1970 instants are negative (sq-3x7dl.7)
+    /// Range: supports dates from ~292,000 BCE to ~292,000 CE with microsecond precision
     epoch_microseconds: Field,
 }
 
