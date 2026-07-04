@@ -158,6 +158,36 @@ fn cyclic_tbox_with_universal_contradiction_is_unsatisfiable() {
     assert_eq!(consistency(&o, Budget::default()), Verdict::Unsatisfiable);
 }
 
+/// Blocking must not mask an inconsistency that only becomes visible BEYOND depth 1:
+/// `A ⊑ ∃R.B`, `B ⊑ ∃R.Q`, `Q ⊑ ⊥` with `A(a)` clashes only when the depth-1 node is
+/// expanded to depth 2 — an implementation that wrongly blocks non-root nodes (whose
+/// labels are NOT subsets of an ancestor's) would report Satisfiable. (Mutation-derived
+/// canary: an over-eager `is_blocked` passed every other unsat test in this suite.)
+#[test]
+fn unsat_beyond_depth_one_is_not_masked_by_blocking() {
+    let o = onto(vec![
+        subclass(named(A), CE::some(R, named(B))),
+        subclass(named(B), CE::some(R, named(C))),
+        subclass(named(C), CE::Nothing),
+        is_a(IA, named(A)),
+    ]);
+    assert_eq!(consistency(&o, Budget::default()), Verdict::Unsatisfiable);
+}
+
+/// The blocking test must be `L(descendant) ⊆ L(ancestor)` and not the REVERSE: with
+/// `⊤ ⊑ ∃R.(∃S.Q)` and `Q ⊑ ⊥`, the depth-1 node's label is a STRICT SUPERSET of the
+/// root's (it carries the extra `∃S.Q`), so superset-"blocking" would freeze it and
+/// wrongly report Satisfiable; correct subset blocking must expand it and find the `Q`
+/// clash on every branch.
+#[test]
+fn strict_superset_of_ancestor_must_not_block() {
+    let o = onto(vec![
+        subclass(CE::Thing, CE::some(R, CE::some(S, named(C)))),
+        subclass(named(C), CE::Nothing),
+    ]);
+    assert_eq!(consistency(&o, Budget::default()), Verdict::Unsatisfiable);
+}
+
 // -------------------------------------------------------------------------------------------
 // (b) sat/unsat pairs — ⊔-branching with backtracking
 // -------------------------------------------------------------------------------------------
