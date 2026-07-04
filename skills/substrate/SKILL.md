@@ -127,6 +127,24 @@ monomorphisation seam, never a `dyn` object. Pure-`std`; pulls nothing new.
 sparq-substrate = { version = "0.1.0", features = ["compare"] }
 ```
 
+**Machine-checked order laws (Kani, sq-sqtk2.4).** `src/compare.rs` hosts a `#[cfg(kani)]`
+bounded-proof module proving, over an adversarial model `CompareTerm` impl whose numeric
+domain straddles the 2^53 f64-collapse boundary (2^53−1 / 2^53 / 2^53+1 / 2^53+2 and their
+shared f64 images, ±0.0, NaN): reflexivity (NaN-free), antisymmetry-consistency (full domain,
+`Some(o)` iff mirrored `Some(o.reverse())`, `None` iff `None`), within-class totality
+(NaN-free), per-literal-kind transitivity (exact ints across the collapse, doubles, strings,
+strict/temporal, a collapse-free exact/inexact mix, recursive triple terms), and exact-order
+agreement on the exact tier (the `exact_cmp` recheck's guarantee — delete the recheck and it
+goes red). Run `cargo kani -p sparq-substrate --features compare` (Kani injects the `kani`
+cfg; the normal build strips the module). Honest boundary: this proves the shared ALGORITHM
+over the bounded model, NOT the engine's `Value` impl (`sparq-engine/src/exec.rs` — covered
+by unit + W3C conformance tests; next-wave in `research/mechanized-proof-program.md` §6).
+Known, machine-checked LAW GAPS (witness harnesses, engine-reachable): mixed exact/inexact
+numerics are intransitive AT the collapse boundary; numeric-vs-plain-string pairs fall to the
+lexical form and are intransitive against the numeric order; NaN makes the comparator partial
+(`None`, mapped to `Equal` by callers). Do not build sort invariants on mixed literal-kind
+columns without consulting those witnesses.
+
 ## Cargo feature summary
 
 | Feature | Enables | Extra deps |

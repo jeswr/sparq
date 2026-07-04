@@ -96,3 +96,10 @@ oxrdf = { workspace = true }
 name = "substrate"
 harness = false
 required-features = ["join", "numeric"]
+
+# [FABLE-5] sq-sqtk2.4: `compare.rs` hosts `#[cfg(kani)]` bounded-proof harnesses for the
+# term-total-order laws (run: `cargo kani -p sparq-substrate --features compare`). The Kani
+# model checker injects the `kani` cfg; register it so the normal `-D warnings` build does
+# not trip `unexpected_cfgs` (same pattern as sparq-vectors / sparq-core).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
