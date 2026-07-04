@@ -154,6 +154,28 @@ export const PAPERS: Paper[] = [
     evidence:
       "Systematization — asserts NO proven security/privacy/soundness/attestation property and cites no wall-clock measurement. The only build-injected counts are the deterministic structural facts already gated as canonical for the C-family estate (fail-closed collaborative entry points, re-audit lenses all RE-OPEN, witness-validation obligation clauses, prior single-prover audit findings under the open gate sq-qhy4). Capability tiers are documentary (spec corpus + reconciled capability review), stated as such in the paper's limitations.",
   },
+  {
+    // [SONNET-4.6] sq-gum8.9 — Register the SPARQL logic-bug testing paper. Status is
+    // `draft`: the merged harness (sq-gum8.6, crates/sparq-metamorph) is the committed
+    // instrument, but the cross-engine bug-hunting campaign (bead sq-gum8.11) has NOT run
+    // yet. No third-party bug is claimed anywhere; every campaign table in the .typ is an
+    // explicitly marked PLACEHOLDER. Evidence keys wired: metamorph.selftest_oracles,
+    // metamorph.selftest_seeds, metamorph.grammar_exclusion_seeds (all deterministic, canonical).
+    // Campaign keys (confirmed/reported/rejected) are pending sq-gum8.11 and NOT wired here.
+    slug: "sparql-logic-bugs",
+    source: "sparql-logic-bugs.typ",
+    title:
+      "Reifying the Error: Metamorphic and Differential Logic-Bug Testing for SPARQL Engines",
+    blurb:
+      "SPARQL has no dedicated logic-bug testing work. We re-derive TLP and NoREC for SPARQL by reifying its third evaluation outcome — a type error, not a value — with the language's only error-absorbing forms, yielding a partition that provably recomposes the unpartitioned query under the SPARQL 1.1 spec. The merged instrument (crates/sparq-metamorph) includes a TLP + NoREC + differential oracle suite whose self-tests assert non-vacuity against a seeded wrong-result mutant on the real engine. This is a first draft against the merged instrument only; the cross-engine bug-hunting campaign has not run, every campaign table is an explicit placeholder, and the paper's honest publishability condition — previously-unknown, developer-confirmed bugs in third-party engines — is not yet met.",
+    authors: "Jesse Wright · the sparq project",
+    venue:
+      "ISSTA 2027 (testing track) — first choice; PVLDB Vol 20 rolling or FSE 2027 — second choice. Draft; not submittable until the campaign (bead sq-gum8.11) yields confirmed third-party bugs",
+    status: "draft",
+    family: "A",
+    evidence:
+      "Deterministic instrument self-tests only (no campaign results yet): 3 oracle types (TLP, NoREC, differential) each asserting non-vacuity against a seeded wrong-result mutant on the real sparq engine; oracle correctness verified across 50 generated seeds on the pristine engine; grammar exclusion list verified across 200 seeds (no banned non-deterministic construct). Campaign-dependent evidence (bugs confirmed/reported/rejected) is pending bead sq-gum8.11 and is shown as an explicit PLACEHOLDER in the paper. No third-party bug is claimed.",
+  },
 ];
 
 export function paperBySlug(slug: string): Paper | undefined {
