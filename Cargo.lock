@@ -3976,6 +3976,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-metamorph"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sparq-core",
+ "sparq-difftest",
+ "sparq-engine",
+ "ureq",
+]
+
+[[package]]
 name = "sparq-mpc"
 version = "0.1.0"
 dependencies = [
