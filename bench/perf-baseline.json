@@ -90,6 +90,7 @@
     "ON vs OFF) is PRESERVED, only the absolute baseline moved. 1404910 is the CI x86_64 runner measurement",
     "(run 28722406953, artifact-exact-equality leg2). The ratchet floor (1399703) is UNCHANGED: 1404910 sits",
     "within its +2% band (top 1427697), so bench.yml stays green."
+  ],
   "metrics": {
     "store_bytes_per_triple": {
       "floor": 92,
