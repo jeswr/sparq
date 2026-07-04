@@ -138,7 +138,9 @@ pub fn date_ge(a: XsdDate, b: XsdDate) -> bool {
 
 /// Integer floor division for positive divisors.
 /// Noir division truncates toward zero; for negative numerators we need floor.
-fn floor_div_i64(a: i64, b: i64) -> i64 {
+/// pub(crate): shared with datetime.nr so the signed-epoch dateTime path uses
+/// the same floor-division idiom as the date path (sq-3x7dl.7). [FABLE-5]
+pub(crate) fn floor_div_i64(a: i64, b: i64) -> i64 {
     assert(b > 0, "floor_div_i64 requires positive divisor");
     let q = a / b;
     let r = a % b;
@@ -153,7 +155,8 @@ fn floor_div_i64(a: i64, b: i64) -> i64 {
 /// Proleptic Gregorian calendar, ISO-8601 compatible (allows year 0).
 ///
 /// Based on Howard Hinnant's `days_from_civil` (public domain).
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+/// pub(crate): the single Hinnant implementation, shared with datetime.nr (sq-3x7dl.7).
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     // Shift March to be month 0.
     let y = year - if month <= 2 { 1 } else { 0 };
     let era = floor_div_i64(if y >= 0 { y } else { y - 399 }, 400);
@@ -168,7 +171,8 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 /// Proleptic Gregorian calendar, ISO-8601 compatible (allows year 0).
 ///
 /// Based on Howard Hinnant's `civil_from_days` (public domain).
-fn civil_from_days(epoch_days: i64) -> (i64, i64, i64) {
+/// pub(crate): the single Hinnant implementation, shared with datetime.nr (sq-3x7dl.7).
+pub(crate) fn civil_from_days(epoch_days: i64) -> (i64, i64, i64) {
     let z = epoch_days + 719468;
     let era = floor_div_i64(if z >= 0 { z } else { z - 146096 }, 146097);
     let doe = z - era * 146097; // [0, 146096]
