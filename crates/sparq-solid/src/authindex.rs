@@ -833,3 +833,294 @@ mod window_tests {
         }
     }
 }
+
+/// [FABLE-5] sq-sqtk2.1 — HARNESS-ONLY construction seam for the Kani proofs (compiled
+/// exclusively under `cargo kani`; a normal `cargo build`/`clippy`/`test` never sees it,
+/// so the runtime authorization logic is byte-unchanged).
+///
+/// Builds an [`AuthIndex`] holding exactly the given simple `(principal, mode, is_allow,
+/// graph)` grants, with the SAME map shape [`AuthIndex::from_graph`] produces for plain
+/// `auth:<mode>` / `auth:deny<Mode>` triples (`entry().or_default().push()`), so the
+/// harnesses prove properties of [`AuthIndex::accessible`] over the index state space
+/// directly, without dragging RDF parsing / graph loading into the model checker.
+#[cfg(kani)]
+pub(crate) mod kani_support {
+    use super::*;
+
+    pub(crate) fn index_with_grants(grants: &[(&str, Mode, bool, &str)]) -> AuthIndex {
+        let mut ix = AuthIndex::default();
+        for (principal, mode, is_allow, graph) in grants {
+            let map = if *is_allow { &mut ix.allow } else { &mut ix.deny };
+            map.entry(((*principal).to_owned(), *mode))
+                .or_default()
+                .push(NamedNode::new_unchecked(*graph));
+        }
+        ix
+    }
+}
+
+// [FABLE-5] sq-sqtk2.1 (epic sq-sqtk2; research/mechanized-proof-program.md §3.1 property
+// A-3, §5 bead 1) — Kani bounded-model-checking proofs of the DENY-WINS set algebra of
+// `AuthIndex::accessible`. `#[cfg(kani)]`: compiled only under `cargo kani -p sparq-solid`,
+// stripped from every normal build (proof-only diff — the decision semantics are unchanged).
+//
+// CLAIM TIER — **PROVED (bounded)**, per the program's assurance ladder. Every harness
+// states its exact bounds; nothing here claims "proved for all inputs". The bounded domain,
+// shared by the three set-algebra harnesses:
+//   • grant vectors: up to 3 (2 for the monotonicity pair) OPTIONAL simple grants, each
+//     symbolic over principal ∈ {auth:Public, auth:Authenticated, alice} × all 4 modes ×
+//     effect ∈ {allow, deny} × graph ∈ {g0, g1} — every combination, checked symbolically;
+//   • sessions: anonymous and agent-only alice (client/issuer/now = None). The pair/triple
+//     principal minting, exception matchers, and time windows are OUTSIDE these bounds —
+//     they stay covered by the unit tests above + the WAC/ACP conformance corpora and the
+//     in-repo differential oracle (`tests/differential_oracle.rs`), which remain the tier
+//     of record for full-spec semantics (A-4 in the design record);
+//   • the conditional-grant harness adds ONE ACP-style conditional grant with no
+//     `exceptMatcher` and no time window (`auth:AnyClient`/`auth:AnyIssuer` heads).
+//
+// The reference ("the spec") is computed in-harness with plain array loops over the raw
+// grant vector — no hash maps, no principal-expansion code shared with the implementation —
+// so the proof cannot be a tautology of the code under test. TCB: Kani/CBMC + these bounds
+// + the reference-as-spec.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::kani_support::index_with_grants;
+    use super::*;
+
+    const AGENT: &str = "https://alice.ex/card#me";
+    /// Principal universe: index 0 matches every session; 1 and 2 match iff the session
+    /// carries an agent. Order is load-bearing for `session_matches`.
+    const PRINCIPALS: [&str; 3] = [PUBLIC, AUTHENTICATED, AGENT];
+    const GRAPHS: [&str; 2] = ["https://pod.ex/g0", "https://pod.ex/g1"];
+
+    fn any_mode() -> Mode {
+        match kani::any::<u8>() % 4 {
+            0 => Mode::Read,
+            1 => Mode::Write,
+            2 => Mode::Append,
+            _ => Mode::Control,
+        }
+    }
+
+    /// One symbolic grant slot: absent, or a simple grant over the bounded universe.
+    #[derive(Clone, Copy)]
+    struct GrantSpec {
+        principal: usize, // < PRINCIPALS.len()
+        mode: Mode,
+        is_allow: bool,
+        graph: usize, // < GRAPHS.len()
+    }
+
+    fn any_grant_slot() -> Option<GrantSpec> {
+        if !kani::any::<bool>() {
+            return None;
+        }
+        Some(GrantSpec {
+            principal: (kani::any::<u8>() % 3) as usize,
+            mode: any_mode(),
+            is_allow: kani::any(),
+            graph: (kani::any::<u8>() % 2) as usize,
+        })
+    }
+
+    fn build_index(slots: &[Option<GrantSpec>]) -> AuthIndex {
+        let mut grants: Vec<(&str, Mode, bool, &str)> = Vec::new();
+        for s in slots.iter().flatten() {
+            grants.push((PRINCIPALS[s.principal], s.mode, s.is_allow, GRAPHS[s.graph]));
+        }
+        index_with_grants(&grants)
+    }
+
+    fn session(has_agent: bool) -> Session<'static> {
+        if has_agent {
+            Session { agent: Some(AGENT), client: None, issuer: None, now: None }
+        } else {
+            Session::default()
+        }
+    }
+
+    /// The SPEC's principal matching (independent of `agent_principals`): `auth:Public`
+    /// matches every session; `auth:Authenticated` and the concrete WebID match exactly
+    /// the sessions that carry an agent.
+    fn session_matches(has_agent: bool, principal: usize) -> bool {
+        principal == 0 || has_agent
+    }
+
+    /// The SPEC: `∪ allows ∖ ∪ denies` over the raw grant vector, as per-graph membership
+    /// flags — plain loops, no shared code with `accessible`.
+    fn reference(slots: &[Option<GrantSpec>], has_agent: bool, qmode: Mode) -> [bool; 2] {
+        let mut out = [false; 2];
+        for (gi, o) in out.iter_mut().enumerate() {
+            let mut allowed = false;
+            let mut denied = false;
+            for s in slots.iter().flatten() {
+                if s.graph == gi && s.mode == qmode && session_matches(has_agent, s.principal) {
+                    if s.is_allow {
+                        allowed = true;
+                    } else {
+                        denied = true;
+                    }
+                }
+            }
+            *o = allowed && !denied;
+        }
+        out
+    }
+
+    /// The result set as per-graph membership flags over the bounded graph universe.
+    fn membership(result: &[NamedNode]) -> [bool; 2] {
+        [
+            result.iter().any(|g| g.as_str() == GRAPHS[0]),
+            result.iter().any(|g| g.as_str() == GRAPHS[1]),
+        ]
+    }
+
+    /// PROPERTY (A-3 core): for EVERY grant vector and session in the bounded domain,
+    /// `accessible(s, mode)` equals the reference `∪ allows ∖ ∪ denies` — deny wins over
+    /// any matching allow — and the returned vector is strictly sorted (hence duplicate-
+    /// free; with membership equality this pins the result to EXACTLY the reference set).
+    #[kani::proof]
+    #[kani::unwind(64)]
+    fn accessible_equals_deny_wins_reference() {
+        let slots = [any_grant_slot(), any_grant_slot(), any_grant_slot()];
+        let has_agent: bool = kani::any();
+        let qmode = any_mode();
+        let got = build_index(&slots).accessible(&session(has_agent), qmode);
+        assert!(membership(&got) == reference(&slots, has_agent, qmode));
+        assert!(got.windows(2).all(|w| w[0].as_str() < w[1].as_str()));
+        // Non-vacuity: both a granted and a fully-granted outcome are reachable.
+        kani::cover!(membership(&got) == [true, false]);
+        kani::cover!(membership(&got) == [true, true]);
+    }
+
+    /// PROPERTY (A-3 monotone): adding one ALLOW grant never revokes — the accessible set
+    /// under the extended index contains the accessible set under the base index, for
+    /// every base vector (2 slots), extra allow grant, session, and mode in the bounds.
+    #[kani::proof]
+    #[kani::unwind(64)]
+    fn accessible_monotone_in_allows() {
+        let slots = [any_grant_slot(), any_grant_slot()];
+        let extra = GrantSpec {
+            principal: (kani::any::<u8>() % 3) as usize,
+            mode: any_mode(),
+            is_allow: true,
+            graph: (kani::any::<u8>() % 2) as usize,
+        };
+        let has_agent: bool = kani::any();
+        let qmode = any_mode();
+        let s = session(has_agent);
+        let base = build_index(&slots).accessible(&s, qmode);
+        let more =
+            build_index(&[slots[0], slots[1], Some(extra)]).accessible(&s, qmode);
+        for g in &base {
+            assert!(more.iter().any(|x| x == g));
+        }
+        kani::cover!(more.len() > base.len()); // the extra allow really can widen
+    }
+
+    /// PROPERTY (A-3 antitone): adding one DENY grant never widens — the accessible set
+    /// under the extended index is contained in the base one, same bounds as above.
+    #[kani::proof]
+    #[kani::unwind(64)]
+    fn accessible_antitone_in_denies() {
+        let slots = [any_grant_slot(), any_grant_slot()];
+        let extra = GrantSpec {
+            principal: (kani::any::<u8>() % 3) as usize,
+            mode: any_mode(),
+            is_allow: false,
+            graph: (kani::any::<u8>() % 2) as usize,
+        };
+        let has_agent: bool = kani::any();
+        let qmode = any_mode();
+        let s = session(has_agent);
+        let base = build_index(&slots).accessible(&s, qmode);
+        let fewer =
+            build_index(&[slots[0], slots[1], Some(extra)]).accessible(&s, qmode);
+        for g in &fewer {
+            assert!(base.iter().any(|x| x == g));
+        }
+        kani::cover!(fewer.len() < base.len()); // the extra deny really can narrow
+    }
+
+    /// PROPERTY (A-3, conditional path): ONE ACP-style conditional grant — symbolic
+    /// effect/agent/mode/graph, `auth:AnyClient`/`auth:AnyIssuer` heads, NO exception
+    /// matcher, NO time window — composes into the same `∪ allows ∖ ∪ denies` algebra:
+    /// it applies iff its agent head matches the session AND its mode equals the query
+    /// mode AND it names a graph; a mode-less or graph-less conditional grants nothing.
+    /// (Exception matchers and time windows are OUTSIDE this harness's bounds — see the
+    /// module header.)
+    ///
+    /// UNWIND BOUND — `#[kani::unwind(24)]` (tightened from 64 by [SONNET-4.6] on
+    /// 2026-07-04; the prior 64 was conservative and caused solver blowup on the
+    /// ConditionalGrant String-field symbolic heap). Justification: the deepest loop in
+    /// the bounded domain is `for p in &principals` (≤3) and `for c in &self.cond` (≤1);
+    /// HashMap probe on a ≤1-entry table is ≤4 probes; Vec/HashSet operations add ≤4 more
+    /// steps. 24 fully covers all in-bounds paths with a comfortable margin.
+    // [SONNET-4.6] bound-tighten for solver tractability.
+    #[kani::proof]
+    #[kani::unwind(24)]
+    fn conditional_grant_deny_wins() {
+        let slot = any_grant_slot();
+        let c_agent = (kani::any::<u8>() % 3) as usize;
+        let c_allow: bool = kani::any();
+        let c_mode_present: bool = kani::any();
+        let c_mode = any_mode();
+        let c_graph_present: bool = kani::any();
+        let c_graph = (kani::any::<u8>() % 2) as usize;
+
+        let mut ix = build_index(&[slot]);
+        ix.cond.push(ConditionalGrant {
+            allow: c_allow,
+            agent: PRINCIPALS[c_agent].to_owned(),
+            client: ANY_CLIENT.to_owned(),
+            issuer: ANY_ISSUER.to_owned(),
+            mode: if c_mode_present { Some(c_mode) } else { None },
+            graph: if c_graph_present {
+                Some(NamedNode::new_unchecked(GRAPHS[c_graph]))
+            } else {
+                None
+            },
+            except: Vec::new(),
+            not_before: None,
+            not_after: None,
+        });
+
+        let has_agent: bool = kani::any();
+        let qmode = any_mode();
+        let got = ix.accessible(&session(has_agent), qmode);
+
+        // The spec, with the conditional folded into the same set algebra when it applies.
+        let mut allowed = [false; 2];
+        let mut denied = [false; 2];
+        if let Some(s) = slot {
+            if s.mode == qmode && session_matches(has_agent, s.principal) {
+                if s.is_allow {
+                    allowed[s.graph] = true;
+                } else {
+                    denied[s.graph] = true;
+                }
+            }
+        }
+        let c_applies = c_mode_present
+            && c_mode == qmode
+            && c_graph_present
+            && session_matches(has_agent, c_agent);
+        if c_applies {
+            if c_allow {
+                allowed[c_graph] = true;
+            } else {
+                denied[c_graph] = true;
+            }
+        }
+        let expect = [allowed[0] && !denied[0], allowed[1] && !denied[1]];
+        assert!(membership(&got) == expect);
+        // Non-vacuity: a conditional ALLOW really grants; a conditional DENY really
+        // suppresses a matching simple allow.
+        let simple_allow_matched = matches!(
+            slot,
+            Some(s) if s.is_allow && s.mode == qmode && session_matches(has_agent, s.principal)
+        );
+        kani::cover!(c_applies && c_allow && !got.is_empty());
+        kani::cover!(simple_allow_matched && c_applies && !c_allow && got.is_empty());
+    }
+}

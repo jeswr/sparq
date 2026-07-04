@@ -454,6 +454,36 @@ recognise fails closed → a divergence). Pure in-crate Rust — no JS toolchain
 clock, no Docker. A JS-reference differential twin (vs. `@solidlab/policy-engine` /
 `@solid/acl-check`) is a separate research-open follow-up (`sq-t58w.9`), NOT built here.
 
+## Bounded Kani proofs of the decision core — [FABLE-5] sq-sqtk2.1
+
+`cargo kani -p sparq-solid` model-checks the pure decision structure (the
+mechanized-proof program, `research/mechanized-proof-program.md` §3.1). All harnesses are
+`#[cfg(kani)]` — **proof-only diff**: a normal build/test/clippy never compiles them and
+the runtime authorization logic is unchanged. Claim tier: **PROVED (bounded)** — every
+harness doc-comment states its exact bounds; none claims "proved for all inputs".
+
+- **Fail-closed decision structure** (`src/decide.rs::kani_proofs::decide_one_is_fail_closed`):
+  over a bounded product domain (3 concrete resources incl. a malformed IRI × all 8
+  control-doc subsets × materialized-or-not × 3 session shapes incl. a reserved-encoding
+  impostor × 3 grant states × all modes), every `decide_one` path with
+  `status != Resolved` yields `allow == false` + empty `granted_modes`; on `Resolved`,
+  `allow == granted_modes.contains(mode)`; provenance (`scope`/`governing_acl`) is coherent.
+- **Deny-wins set algebra** (`src/authindex.rs::kani_proofs`): `accessible` equals an
+  independent in-harness `∪ allows ∖ ∪ denies` reference over symbolic grant vectors
+  (≤ 3 grants × 3 principals × 4 modes × 2 graphs × allow/deny), is monotone in allows,
+  antitone in denies; one windowless/matcher-less ACP conditional grant composes into the
+  same algebra. Pair/triple minting, matchers, and time windows are OUTSIDE the proof
+  bounds — the conformance corpora + differential oracle stay the tier of record there.
+- **Container-walk termination** (`src/decide.rs::kani_proofs::parent_iri_strictly_shortens`):
+  for every ASCII string ≤ 24 bytes, `parent_iri` returns a strictly-shorter `/`-terminated
+  prefix or `None` — the domain is closed under the step, so the `resolve_acl` walk
+  terminates within it. Nearest-ancestor **selection** is exhaustively enumerated (1551
+  datasets, generator-derived reference) in `tests/container_walk_exhaustive.rs`.
+
+The CI lane is `.github/workflows/kani.yml` (nightly, informational); wiring these
+harnesses into it is bead `sq-sqtk2.5`. Run locally: `cargo install --locked kani-verifier
+&& cargo kani setup && cargo kani -p sparq-solid`.
+
 ## Security posture — fail-closed
 
 Absence of a grant means a graph is **invisible**, and a non-authorized graph is

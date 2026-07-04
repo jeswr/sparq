@@ -77,29 +77,29 @@ asymmetric (fail-OPEN risk):** an `auth:deny*` is retracted **only** on a *defin
 `wasm32-unknown-unknown`** (no native-only deps — rayon off, `sparq-reason`'s parallel path gated). Its
 transitive `oxrdf 0.3.3 → rand → getrandom` needs the host bundle to select a wasm RNG backend as
 `sparq-wasm` does (`getrandom`'s `wasm_js` feature + the `getrandom_backend` cfg; see the
-[migration guide](../../docs/migrating-from-oxigraph.md#wasm-compilation)). **Timing on wasm32:**
-`std::time::Instant` is unavailable there (no monotonic clock — `Instant::now()` panics), so
-`materialize_wac`/`materialize_acp` `cfg`-gate the wall-clock plumbing off and report `stats.millis == 0.0`
-rather than trapping (rest of `MaterializeStats` unchanged); a wasm32 runtime smoke test
-(`tests/wasm_materialize.rs`, `wasm-pack test --node`) guards it. Deno-wasm / Workers are run-feasible.
+[migration guide](../../docs/migrating-from-oxigraph.md#wasm-compilation)). **Timing on wasm32:** with no
+monotonic clock (`Instant::now()` panics), `materialize_wac`/`materialize_acp` `cfg`-gate the wall-clock
+plumbing off and report `stats.millis == 0.0` rather than trapping (rest of `MaterializeStats` unchanged);
+`tests/wasm_materialize.rs` (`wasm-pack test --node`) guards it. Deno-wasm / Workers are run-feasible.
 
 ## Conformance, security & containment
 
-- **WAC + ACP conformance harnesses** (`sparq_solid::wac_conformance` / `conformance`) assert the
-  engine against the [WAC](https://solidproject.org/TR/wac) / [ACP](https://solidproject.org/TR/acp)
-  specs at the *library* level (data-declared `(agent, client, mode, resource) → allow|deny`). **Scope
-  (honest):** the realistic library-level oracle, **not** the Solid CTH-over-HTTP (no HTTP surface here)
-  — see `research/sparq-solid-scope.md` §4.
+- **WAC + ACP conformance harnesses** (`sparq_solid::wac_conformance` / `conformance`) assert the engine
+  against the [WAC](https://solidproject.org/TR/wac) / [ACP](https://solidproject.org/TR/acp) specs at the
+  *library* level (data-declared `(agent, client, mode, resource) → allow|deny`); the realistic
+  library-level oracle, **not** the Solid CTH-over-HTTP (no HTTP surface) — `research/sparq-solid-scope.md` §4.
 - **In-repo differential oracle** (`tests/differential_oracle.rs`) runs the shared corpus through THREE
-  deciders — the engine (N3 rules), an **independent procedural reference evaluator** (`tests/reference/`,
-  no shared code) and the hand `Expect` table — asserting **zero divergence**. A correctness oracle,
-  **not** a security audit.
+  deciders — the N3-rules engine, an **independent procedural reference evaluator** (`tests/reference/`, no
+  shared code) and the hand `Expect` table — asserting **zero divergence**. An oracle, **not** an audit.
+- **Bounded machine-checked proofs (Kani)** — `cargo kani -p sparq-solid` proves fail-closed decision
+  structure, deny-wins set algebra, and container-walk termination **within the bounds stated in the harness
+  docs** (`decide.rs`/`authindex.rs`), plus exhaustive nearest-ancestor enumeration
+  (`tests/container_walk_exhaustive.rs`). Bounded *functional* proofs — **not** a security audit.
 - **Security posture — fail-closed.** Absence of a grant makes a graph **invisible**. The reasoner is fed
-  only ACL/ACR + structural facts — **never pod content** — so no writable document can grant itself
-  access; the reserved `urn:sparq:` namespace is rejected on input and forged `<urn:sparq:auth>` graphs
-  are stripped at load. `ldp:contains` is PSS-written opaque content, **never** derived from IRI structure
-  or read into the reasoner; containment *ancestry* drives ACL inheritance only (pinned by
-  `tests/containment_view_ownership.rs`).
+  only ACL/ACR + structural facts — **never pod content** — so no writable document can grant itself access;
+  the reserved `urn:sparq:` namespace is rejected on input and forged `<urn:sparq:auth>` graphs are stripped
+  at load. `ldp:contains` is PSS-written opaque content, never derived from IRI structure or read into the
+  reasoner; containment *ancestry* drives ACL inheritance only (`tests/containment_view_ownership.rs`).
 
 ## 📚 Learn more
 
