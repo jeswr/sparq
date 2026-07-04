@@ -110,7 +110,7 @@ pub fn validate_entry(bug: &FoundBug) -> Result<(), LedgerError> {
             return Err(LedgerError(format!("entry {:?}: empty field `{field}`", bug.id)));
         }
     }
-    if !(bug.upstream_issue.starts_with("https://") || bug.upstream_issue.starts_with("http://")) {
+    if !(bug.upstream_issue.trim().starts_with("https://") || bug.upstream_issue.trim().starts_with("http://")) {
         return Err(LedgerError(format!(
             "entry {:?}: `upstream_issue` must be an http(s) URL to the filed upstream issue, got {:?}",
             bug.id, bug.upstream_issue

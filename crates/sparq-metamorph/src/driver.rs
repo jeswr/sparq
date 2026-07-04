@@ -63,6 +63,11 @@ pub struct EndpointConfig {
     pub headers: Vec<(String, String)>,
     /// Per-request timeout.
     pub timeout: Duration,
+    /// Maximum response body size in bytes. Requests returning more data are truncated
+    /// via `ureq`'s body-read limiter and treated as a transport error. Defaults to
+    /// 64 MiB — sufficient for any sane SPARQL result set; raise for unusually large
+    /// results in a campaign run (e.g. full-graph dumps). [SONNET-4.6]
+    pub max_body_bytes: u64,
 }
 
 impl EndpointConfig {
@@ -75,6 +80,7 @@ impl EndpointConfig {
             extra_params: Vec::new(),
             headers: Vec::new(),
             timeout: Duration::from_secs(60),
+            max_body_bytes: 64 * 1024 * 1024,
         }
     }
 
@@ -138,6 +144,17 @@ pub fn form_urlencode(value: &str) -> String {
     out
 }
 
+/// Append an already-encoded query-string `params` to `base_url`, using `?` when
+/// `base_url` has no query string yet and `&` when it already has one.  A pre-existing
+/// trailing `?` is treated the same as having a query string (we just append). [SONNET-4.6]
+fn append_query_string(base_url: &str, params: &str) -> String {
+    if base_url.contains('?') {
+        format!("{}&{}", base_url, params)
+    } else {
+        format!("{}?{}", base_url, params)
+    }
+}
+
 fn encode_params(pairs: &[(String, String)]) -> String {
     pairs
         .iter()
@@ -154,7 +171,7 @@ pub fn build_request_parts(config: &EndpointConfig, sparql: &str) -> RequestPart
             let url = if config.extra_params.is_empty() {
                 config.query_url.clone()
             } else {
-                format!("{}?{}", config.query_url, encode_params(&config.extra_params))
+                append_query_string(&config.query_url, &encode_params(&config.extra_params))
             };
             RequestParts {
                 url,
@@ -179,7 +196,7 @@ pub fn build_request_parts(config: &EndpointConfig, sparql: &str) -> RequestPart
             let mut pairs = vec![("query".to_string(), sparql.to_string())];
             pairs.extend(config.extra_params.iter().cloned());
             RequestParts {
-                url: format!("{}?{}", config.query_url, encode_params(&pairs)),
+                url: append_query_string(&config.query_url, &encode_params(&pairs)),
                 http_method: "GET",
                 content_type: None,
                 body: None,
@@ -188,10 +205,6 @@ pub fn build_request_parts(config: &EndpointConfig, sparql: &str) -> RequestPart
         }
     }
 }
-
-/// Cap on a response body read: finite, generously above any sane result size, so a
-/// runaway endpoint cannot exhaust memory.
-const MAX_BODY_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// A live SPARQL-protocol engine. Campaign use only — CI self-tests never construct a
 /// request over the network (the pure layer above carries the tested logic).
@@ -252,7 +265,7 @@ impl SparqlEngine for HttpSparqlEngine {
             Ok(mut r) => r
                 .body_mut()
                 .with_config()
-                .limit(MAX_BODY_BYTES)
+                .limit(self.config.max_body_bytes)
                 .read_to_string()
                 .map_err(|e| {
                     self.failure(sparql, FailureKind::Transport, format!("reading response: {e}"))
@@ -318,6 +331,29 @@ mod tests {
         assert!(parts.url.starts_with("http://localhost:1234/sparql?query=ASK"));
         assert_eq!(parts.body, None);
         assert_eq!(parts.content_type, None);
+    }
+
+    /// A `query_url` that already carries a query string must get `&` not a second `?`.
+    /// [SONNET-4.6]
+    #[test]
+    fn build_request_parts_no_double_question_mark_on_pre_existing_query_string() {
+        // PostSparqlQuery arm: extra_params appended to a URL that already has '?'
+        let mut config = EndpointConfig::generic("g", "http://localhost:1234/sparql?default-graph-uri=urn:x");
+        config.method = QueryMethod::PostSparqlQuery;
+        config.extra_params.push(("format".to_string(), "json".to_string()));
+        let parts = build_request_parts(&config, "ASK { }");
+        let url = &parts.url;
+        assert!(!url.contains("??"), "double '?' in URL: {url}");
+        assert!(url.contains("default-graph-uri=urn%3Ax&format=json") || url.contains("default-graph-uri=urn:x&format=json"),
+            "expected '&' separator, got: {url}");
+
+        // Get arm: query string appended to a URL that already has '?'
+        let mut config2 = EndpointConfig::generic("g", "http://localhost:1234/sparql?service=default");
+        config2.method = QueryMethod::Get;
+        let parts2 = build_request_parts(&config2, "ASK { }");
+        let url2 = &parts2.url;
+        assert!(!url2.contains("??"), "double '?' in URL: {url2}");
+        assert!(url2.contains("service=default&query="), "expected '&' separator, got: {url2}");
     }
 
     #[test]
