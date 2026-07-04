@@ -351,7 +351,11 @@ function Sha256Line({ digest }: { digest: string }) {
         Verify the download (sha256)
       </div>
       <div className="flex items-start gap-2">
-        <code className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted px-2 py-1 font-mono text-[11px] leading-relaxed break-all">
+        {/* [FABLE-5] sq-ymr2e.10 — data-vr-mask: the checksum hex is release-specific. */}
+        <code
+          data-vr-mask
+          className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted px-2 py-1 font-mono text-[11px] leading-relaxed break-all"
+        >
           {hex}
         </code>
         <Button
@@ -427,7 +431,14 @@ function DownloadButton({
         )}
         <span className="truncate">
           {children}
-          {meta ? <span className="opacity-80"> · {meta}</span> : null}
+          {/* [FABLE-5] sq-ymr2e.10 — data-vr-mask: version + byte-size churn with every
+              release, so the visual-regression baselines mask them (mask, don't chase). */}
+          {meta ? (
+            <span data-vr-mask className="opacity-80">
+              {" "}
+              · {meta}
+            </span>
+          ) : null}
         </span>
       </a>
     </Button>
@@ -563,7 +574,8 @@ export function DownloadClient() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-xl font-semibold">Desktop app</h2>
           {release.kind === "ready" && (
-            <Badge variant="muted" className="h-6 font-mono">
+            // [FABLE-5] sq-ymr2e.10 — data-vr-mask: the version tag churns per release.
+            <Badge variant="muted" className="h-6 font-mono" data-vr-mask>
               {release.version}
             </Badge>
           )}

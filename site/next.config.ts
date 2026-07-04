@@ -44,6 +44,11 @@ const nextConfig: NextConfig = {
   trailingSlash: true,
   // Static export cannot run the Next.js image optimiser.
   images: { unoptimized: true },
+  // [FABLE-5] sq-ymr2e.10 — the visual-regression suite (SPARQ_VR=1, set only by scripts/vr.sh
+  // inside the pinned Playwright container) screenshots pages served by `next dev`, and the dev
+  // indicator badge would otherwise appear in — and destabilise — every baseline. Scoped to the
+  // VR run only; normal `next dev` keeps the indicators.
+  ...(process.env.SPARQ_VR ? { devIndicators: false as const } : {}),
   // The @jeswr/sparq wrapper ships ESM with `.js` import specifiers that resolve
   // to `.ts`/`.tsx` sources in dev; mirror solid-pod-manager's webpack alias so the
   // bundler follows them.

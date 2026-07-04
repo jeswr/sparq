@@ -1183,8 +1183,11 @@ export function Repl() {
             endpointUrl={endpointConfig.url}
             onDisconnect={() => setEndpointActive(false)}
           />
+          {/* [FABLE-5] sq-ymr2e.10 — data-vr-mask: the status line carries a measured wall-clock
+              `ms` figure after a run, so the visual-regression rig masks it (mask, don't chase). */}
           <p
             aria-live="polite"
+            data-vr-mask
             className="ml-auto font-mono text-xs text-muted-foreground tabular"
           >
             {statusLine}
@@ -1534,7 +1537,12 @@ function ResultPanel({
 // answer so the results pane reads independently of the run toolbar.
 function ResultFooter({ statusLine }: { statusLine: React.ReactNode }) {
   return (
-    <div className="mt-3 border-t pt-2.5 font-mono text-[11.5px] text-muted-foreground tabular">
+    // [FABLE-5] sq-ymr2e.10 — data-vr-mask: repeats the measured-ms status line (see the run
+    // toolbar) so the visual-regression baselines mask it rather than chase timing churn.
+    <div
+      data-vr-mask
+      className="mt-3 border-t pt-2.5 font-mono text-[11.5px] text-muted-foreground tabular"
+    >
       {statusLine}
     </div>
   );
