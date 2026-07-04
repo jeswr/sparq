@@ -525,5 +525,129 @@ class TestShadowReportShardFiltering(unittest.TestCase):
                          "an unmeasured-in-shard crate must not produce a false divergence")
 
 
+class TestEmptyAllMembersFallback(unittest.TestCase):
+    """(k) [SONNET-4.6] When cone.json is produced via the error path, all_members
+    may be empty. shadow_report() must fall back to the shard summary keys so the
+    report still surfaces measured crates and any divergences.
+
+    This guards against the silent-monitoring-blindness path: without the fallback,
+    the intersection of {} and measured_in_shard is {} and no rows are emitted at
+    all, hiding real below-floor crates from the shadow report.
+    """
+
+    def _make_error_cone(self):
+        """Cone doc that mirrors compute_cone()'s error-path output (all_members=[])."""
+        return {
+            "mode": "full",
+            "cone_crates": [],
+            "changed_crates": [],
+            "all_members": [],   # error path: empty
+            "reason": "cone-coverage selector error, failing to full run: <exc>",
+            "shadow": True,
+        }
+
+    def test_empty_all_members_falls_back_to_shard_summary(self):
+        """Rows are produced for shard-measured crates even when all_members is empty."""
+        cone_doc = self._make_error_cone()
+        coverage_summary = {
+            "crates": {
+                "lib-a": {"measured": True, "lines_pct": 85.0, "lines_covered": 85, "lines_total": 100, "seconds": 1},
+                "lib-b": {"measured": True, "lines_pct": 90.0, "lines_covered": 90, "lines_total": 100, "seconds": 1},
+            }
+        }
+        report = cc.shadow_report(cone_doc, coverage_summary, None)
+
+        row_crates = {r["crate"] for r in report["rows"]}
+        self.assertIn("lib-a", row_crates,
+                      "shard-measured crate must appear in rows when all_members is empty")
+        self.assertIn("lib-b", row_crates,
+                      "shard-measured crate must appear in rows when all_members is empty")
+        self.assertEqual(len(report["rows"]), 2,
+                         "all shard-measured crates must produce rows via the fallback")
+
+    def test_empty_all_members_all_rows_cone_measured(self):
+        """When all_members is empty and mode=full (the error path), all shard
+        crates are treated as in-cone (cone-measured) — consistent with full-mode
+        semantics — and no spurious divergences are produced."""
+        cone_doc = self._make_error_cone()
+        coverage_summary = {
+            "crates": {
+                "lib-a": {"measured": True, "lines_pct": 85.0, "lines_covered": 85, "lines_total": 100, "seconds": 1},
+                "lib-b": {"measured": True, "lines_pct": 90.0, "lines_covered": 90, "lines_total": 100, "seconds": 1},
+            }
+        }
+        floor_doc = {"crates": {"lib-a": {"floor": 80.0}, "lib-b": {"floor": 80.0}}}
+        report = cc.shadow_report(cone_doc, coverage_summary, floor_doc)
+
+        # In full mode every crate is in-cone; divergence detection is for outside-cone
+        # crates only, so no divergences must fire.
+        self.assertEqual(report["divergences"], [],
+                         "full-mode error-path fallback must not produce spurious divergences")
+        # But rows must be present — the monitoring is NOT blind.
+        labels = {r["label"] for r in report["rows"]}
+        self.assertEqual(labels, {"cone-measured"},
+                         "all fallback rows must be labelled cone-measured in full mode")
+
+    def test_empty_all_members_not_measured_count_is_zero(self):
+        """When falling back to shard summary, not_measured_in_shard must be 0
+        (effective_members == measured_in_shard, so their difference is empty)."""
+        cone_doc = self._make_error_cone()
+        coverage_summary = {
+            "crates": {
+                "lib-a": {"measured": True, "lines_pct": 85.0, "lines_covered": 85, "lines_total": 100, "seconds": 1},
+            }
+        }
+        report = cc.shadow_report(cone_doc, coverage_summary, None)
+
+        self.assertEqual(report["not_measured_in_shard"], 0,
+                         "no crates are missing from the shard when falling back to its keys")
+
+
+class TestGetChangedPathsStrip(unittest.TestCase):
+    """(l) [SONNET-4.6] _get_changed_paths() strips leading/trailing whitespace
+    from each line in a hermetic --changed-file so callers receive clean paths."""
+
+    def test_leading_trailing_whitespace_stripped(self):
+        """Lines with leading/trailing spaces or \\r are returned stripped."""
+        import tempfile
+
+        content = "  crates/lib-a/src/lib.rs  \n\r\ncrates/lib-b/src/lib.rs\r\n  \n"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as fh:
+            fh.write(content)
+            tmp_path = fh.name
+
+        try:
+            import argparse
+            args = argparse.Namespace(changed_file=tmp_path, base=None, head="HEAD")
+            paths = cc._get_changed_paths(args, None)
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+        self.assertEqual(paths, [
+            "crates/lib-a/src/lib.rs",
+            "crates/lib-b/src/lib.rs",
+        ], "returned paths must have no leading/trailing whitespace")
+
+    def test_blank_lines_excluded(self):
+        """Blank lines (including whitespace-only) are excluded from output."""
+        import tempfile
+
+        content = "crates/lib-a/src/lib.rs\n   \n\ncrates/lib-b/src/lib.rs\n"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as fh:
+            fh.write(content)
+            tmp_path = fh.name
+
+        try:
+            import argparse
+            args = argparse.Namespace(changed_file=tmp_path, base=None, head="HEAD")
+            paths = cc._get_changed_paths(args, None)
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+        self.assertEqual(len(paths), 2, "whitespace-only lines must be excluded")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -170,9 +170,17 @@ def shadow_report(
     # crates with no measured data, making divergence detection meaningless and
     # inflating counts. Crates absent from the shard summary are omitted from rows;
     # a single compact count is emitted instead (not_measured_in_shard).
+    #
+    # [SONNET-4.6] Empty-all_members fallback: when cone.json was produced via the
+    # error path, all_members may be empty (compute_cone() catches selector errors
+    # and emits all_members=[] as a fail-safe). In that case the intersection would
+    # be empty and the report would render no rows even though the shard summary has
+    # measured crates — silent monitoring blindness. Fall back to the shard summary
+    # keys as the effective member universe so divergences still surface.
     measured_in_shard = set(summary_crates.keys())
-    reported_members = sorted(all_members & measured_in_shard)
-    not_measured_count = len(all_members - measured_in_shard)
+    effective_members = all_members if all_members else measured_in_shard
+    reported_members = sorted(effective_members & measured_in_shard)
+    not_measured_count = len(effective_members - measured_in_shard)
 
     rows: list[dict] = []
     divergences: list[dict] = []
@@ -337,7 +345,10 @@ def _get_changed_paths(args: argparse.Namespace, repo_root: str | None) -> list[
     """Get changed paths from hermetic file or live git diff."""
     if args.changed_file:
         with open(args.changed_file, encoding="utf-8") as fh:
-            return [ln for ln in fh.read().splitlines() if ln.strip()]
+            # [SONNET-4.6] Strip leading/trailing whitespace from each line so
+            # behavior is consistent regardless of how the caller wrote the file
+            # (trailing \r on Windows-style line endings, leading spaces, etc.).
+            return [ln.strip() for ln in fh.read().splitlines() if ln.strip()]
     base = getattr(args, "base", None)
     head = getattr(args, "head", "HEAD")
     if base:
