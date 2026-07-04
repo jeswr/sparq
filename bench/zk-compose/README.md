@@ -26,14 +26,54 @@ returns). Numbers below were measured by Opus 4.8.
 | `family_cost_curve.json`          | sq-pn2 full-family (k,n,r,d) prove/verify/size curve |
 | `family_curve/`                   | sq-pn2 standalone timing harness (own cargo project) |
 | `sparql_feature_catalog.json`     | sq-1s2.1.2 SPARQL 1.1 feature → ZK coverage + gate-cost catalog |
+| `eval_pack.json`                  | sq-gum8.5 zkSPARQL submission-support constraint-count manifest (see below) |
+| `RELATED-WORK-DELTA.md`           | sq-gum8.5 related-work hardening note for the zkSPARQL submission |
 | `scripts/gate_counts.sh`          | regenerate the gate-count JSON |
 | `scripts/prove_verify.sh`         | time prove+verify for one member |
 | `scripts/sparql_catalog.py`       | regenerate the SPARQL feature catalog (joins the snapshot) |
+| `scripts/eval_pack.py`            | regenerate `eval_pack.json`; `--check` fails if the committed manifest is stale |
 
 > The gate-count JSON is also the source the in-crate **regression gate**
 > (`crates/sparq-zk-compose/tests/gate_count.rs`, sq-c5f) baselines against —
 > re-run `scripts/gate_counts.sh` after an intentional circuit change and update
 > both that JSON and `crates/sparq-zk-compose/tests/gate_count_snapshot.json`.
+
+## sq-gum8.5: zkSPARQL submission-support evaluation pack
+
+`eval_pack.json` is the single per-circuit **constraint-count manifest** backing
+the zkSPARQL submission's evaluation ([zksparql.org](https://zksparql.org/); spec
+source `site/specs/zksparql.typ`). It is a **deterministic join** — the generator
+re-measures nothing and needs no `nargo`/`bb` — of the repo's committed,
+regression-gated count sources:
+
+- `crates/sparq-zk-compose/tests/gate_count_snapshot.json` (the zk/compose
+  family; cross-checked member-for-member against `gate_counts_latest.json`, so
+  a half-done re-baseline fails generation);
+- `zk/ieee754/bench/float_ops_latest.json` + `float_conversions_latest.json`
+  (the IEEE-754 library's amortised per-operation gate measurements).
+
+Guards (all fail-closed, exit 2):
+
+- **toolchain drift** — the nargo/bb versions recorded in each measured source
+  must equal the pins in `.github/workflows/zk-toolchain.yml`;
+- **freshness chain** — snapshot and latest must agree exactly;
+- **byte-identity** — `scripts/eval_pack.py --check` regenerates in memory and
+  fails if the committed `eval_pack.json` differs, so a source re-baseline that
+  forgets to regenerate the pack is a visible failure. Run `--check` as part of
+  every zk re-baseline (CI wiring for `--check` is follow-up bead sq-yfhho;
+  workflow files were outside sq-gum8.5's file set).
+
+External systems' figures (ZKLP) appear only under `cited_external` with
+`cited_not_remeasured: true` — reported by their authors, never re-measured
+here, and **not** directly comparable to the ultra_honk `circuit_size` numbers
+(different proof systems and arithmetisations). The circuits measured here are
+pre-external-audit (sq-qhy4): a gate count is a size fact, not a soundness or
+privacy claim.
+
+```sh
+bench/zk-compose/scripts/eval_pack.py > bench/zk-compose/eval_pack.json  # regenerate
+bench/zk-compose/scripts/eval_pack.py --check                            # drift guard
+```
 
 ## sq-1s2.1.2: SPARQL feature → ZK gate-cost catalog
 
