@@ -580,6 +580,9 @@ jobs:
         working-directory: zk/xpath
         run: |
           set -euo pipefail
+          # nullglob: a missing/empty test_packages/ must not iterate the literal
+          # glob string; the count guard below turns that case into a loud failure.
+          shopt -s nullglob
           # Partition pass: count real vs stub-wired packages.
           # A package is a stub if any .nr file in its src/ contains 'stub_'.
           real_count=0
@@ -591,6 +594,10 @@ jobs:
               real_count=$((real_count + 1))
             fi
           done
+          if [ $((real_count + stub_count)) -eq 0 ]; then
+            echo "::error::no test_packages/*/ directories found — broken checkout or layout change; failing closed."
+            exit 1
+          fi
           echo "Partition: ${real_count} real test_packages | ${stub_count} stub-wired (excluded)"
           echo "Gates on ${real_count} implemented-function test_packages;" \
             "${stub_count} stub-wired packages (stub_* prefix imports, assert(false))" \
