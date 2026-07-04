@@ -81,7 +81,13 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   for its own term type — a **monomorphisation seam**, never a `dyn` object. `exact_cmp` is the
   f64-collapse recheck: when the lenient `as_f64` arm ties, it recovers the exact order of
   distinct integers beyond 2^53 / high-precision decimals so `ORDER BY` / `MIN` / `MAX` agree
-  with the relational `=`/`<`. Pure-`std`: links nothing new.
+  with the relational `=`/`<`. Pure-`std`: links nothing new. The order laws (reflexivity,
+  antisymmetry-consistency, per-literal-kind transitivity incl. the 2^53 collapse, within-class
+  totality) are machine-checked by Kani bounded-proof harnesses over a model `CompareTerm` impl
+  — `cargo kani -p sparq-substrate --features compare` (sq-sqtk2.4). Honest boundary: the
+  proofs cover the shared ALGORITHM over the bounded model, not the engine's `Value` impl, and
+  mixed literal-KIND literal pairs are NOT transitive (machine-checked witnesses in the
+  harness module document exactly where the law breaks).
 
 All features are **off by default**. The crate is `forbid(unsafe_code)`.
 
@@ -98,6 +104,8 @@ its join hot loops identical to pre-move codegen. This crate introduces no dynam
 
 - `research/shared-eval-substrate.md` — the design record: what is shareable vs
   engine-private, the options considered, and the layered perf-neutrality proof.
+- `research/mechanized-proof-program.md` — the proof program the `compare` Kani harnesses
+  belong to (property B-1), incl. the claim-tier vocabulary and the not-tractable-now ledger.
 - `crates/sparq-core` — the storage substrate this crate's `Id` / dictionary types come from.
 - `crates/sparq-engine` — the consumer that keeps its planner private and calls the shared
   numeric + join kernels through a thin `Bindings`-side adapter.
