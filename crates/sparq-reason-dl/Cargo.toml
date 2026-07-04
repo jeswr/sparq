@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Opt-in OWL 2 Direct-Semantics support for the sparq RDF engine — L1: a structural OWL model for the ALCH fragment + a FAIL-CLOSED reverse RDF mapping (no reasoning yet)"
+description = "Opt-in OWL 2 Direct-Semantics support for the sparq RDF engine — a layered FAIL-CLOSED checker for the scoped ALCH fragment (structural model + reverse RDF mapping, profile checker, tableau, and the opt-in `dispatch` fragment-dispatch checker); NOT full OWL 2 DL"
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -32,6 +32,15 @@ publish = false
 # the sole bead in its wave, so its Cargo.toml edits do not collide with the L2/L3 beads.
 default = []
 
+# [FABLE-5] sq-pbz04.4.4: the L4 fragment-dispatch Direct-Semantics checker (`check` module,
+# design record §4/§6) — OFF by default so the L1–L3 layers stay dependency-light. Pulls the
+# EXISTING profile reasoners as optional deps: sparq-reason (OWL 2 RL materialization + clash
+# scan) and sparq-reason-el (EL consequence-based classification). sparq-reason-el is used
+# with its DEFAULT features (no rbox/cdomain); the dispatch guards conservatively treat
+# rdfs:subPropertyOf as unapplied by the EL classifier either way (fail-closed under
+# workspace feature unification).
+dispatch = ["dep:sparq-reason", "dep:sparq-reason-el"]
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io.
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
@@ -39,3 +48,8 @@ sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = fal
 # (the same use as sparq-reason-el). rustc-hash: the structural index maps/sets.
 oxrdf.workspace = true
 rustc-hash.workspace = true
+# [FABLE-5] sq-pbz04.4.4: optional profile-reasoner deps, pulled ONLY by the `dispatch`
+# feature (L4). `version` alongside `path`: cargo uses the path locally, the version on
+# crates.io.
+sparq-reason = { path = "../sparq-reason", version = "0.1.0", optional = true }
+sparq-reason-el = { path = "../sparq-reason-el", version = "0.1.0", optional = true }
