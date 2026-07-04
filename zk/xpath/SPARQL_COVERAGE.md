@@ -80,7 +80,7 @@ This document details the implementation status of SPARQL 1.1 functions in noir_
 | `+` (addition) | op:numeric-add | ⚠️ | Implemented for integers; floats require noir_IEEE754 |
 | `-` (subtraction) | op:numeric-subtract | ⚠️ | Implemented for integers; floats require noir_IEEE754 |
 | `*` (multiplication) | op:numeric-multiply | ⚠️ | Implemented for integers; floats require noir_IEEE754 |
-| `/` (division) | op:numeric-divide | ⚠️ | Implemented for integers; floats require noir_IEEE754 |
+| `/` (division) | op:numeric-divide | ⚠️ | Two xs:integer operands yield the xs:decimal quotient (7/2 = 3.5, never truncating), computed in IEEE 754 double precision (`numeric_divide_int_as_double`; documented approximation — no arbitrary-precision decimal type). Distinct from `idiv`/op:numeric-integer-divide (`numeric_divide_int`, truncates toward zero). Float/double operand lanes require noir_IEEE754 |
 | unary `+` | op:numeric-unary-plus | ⚠️ | Implemented for integers; floats require noir_IEEE754 |
 | unary `-` | op:numeric-unary-minus | ⚠️ | Implemented for integers; floats require noir_IEEE754 |
 | `=` (equal) | op:numeric-equal | ⚠️ | Implemented for integers; floats require noir_IEEE754 |

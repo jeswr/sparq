@@ -4,7 +4,10 @@
 //! Float operations require the ieee754 dependency (future).
 //!
 //! XPath operators implemented:
-//! - op:numeric-add, op:numeric-subtract, op:numeric-multiply, op:numeric-divide
+//! - op:numeric-add, op:numeric-subtract, op:numeric-multiply
+//! - op:numeric-integer-divide (`idiv`, truncating -- `numeric_divide_int`;
+//!   `op:numeric-divide` over integers returns the xs:decimal quotient and
+//!   lives in `numeric_types` as `numeric_divide_int_as_double`)
 //! - op:numeric-unary-plus, op:numeric-unary-minus
 //! - op:numeric-equal, op:numeric-less-than, op:numeric-greater-than
 //! - fn:abs
@@ -28,8 +31,16 @@ pub fn numeric_multiply_int(a: i64, b: i64) -> i64 {
     a * b
 }
 
-/// op:numeric-integer-divide for integers
-/// Note: Division by zero will cause an assertion failure
+/// op:numeric-integer-divide (`idiv`) for integers -- truncating division,
+/// rounding toward zero: `7 idiv 2 = 3`, `-7 idiv 2 = -3` (Noir's i64 `/`
+/// truncates toward zero, matching XPath F&O 4.2.7).
+///
+/// This is NOT `op:numeric-divide`: on two xs:integer operands `div` returns
+/// the xs:decimal quotient (`7 div 2 = 3.5`) -- see
+/// `numeric_types::numeric_divide_int_as_double`, which `xpath_op::numeric_divide`
+/// wires to. The two operators are distinct code paths. [FABLE-5]
+///
+/// Note: Division by zero will cause an assertion failure (err:FOAR0001)
 pub fn numeric_divide_int(a: i64, b: i64) -> i64 {
     assert(b != 0, "Division by zero");
     a / b
@@ -208,8 +219,20 @@ pub fn fn_number_from_integer(value: i64) -> i64 {
 }
 
 /// fn:number from string - Parses an integer from a string
-/// Returns (value, is_valid) - is_valid is false if parsing fails
-/// Handles optional leading whitespace, optional sign, and digits
+/// Returns (value, is_valid) - is_valid is false if parsing fails (fn:number
+/// maps a failed cast to NaN; the boolean is that NaN indicator).
+///
+/// Whitespace rule (documented): fn:number delegates to the xs:double cast,
+/// and xs:double carries the XSD `whiteSpace="collapse"` facet -- LEADING and
+/// TRAILING whitespace (#x20, #x9, #xA, #xD) is stripped before the numeral
+/// is matched, but INTERIOR whitespace is not in the lexical space. So
+/// `fn:number(' 12 ')` is 12 while `fn:number('1 2')` is NaN -- the numeral
+/// ends at the first whitespace after it starts, and any later
+/// non-whitespace byte invalidates the parse. Trailing NUL bytes are also
+/// accepted as padding (fixed-width `str<N>` values). [FABLE-5]
+///
+/// Scope limitation (pre-existing, unchanged here): only integer numerals are
+/// parsed -- no decimal point or exponent forms yet.
 pub fn fn_number_from_string<let N: u32>(s: str<N>) -> (i64, bool) {
     let bytes = s.as_bytes();
     let mut index: u32 = 0;
@@ -244,17 +267,26 @@ pub fn fn_number_from_string<let N: u32>(s: str<N>) -> (i64, bool) {
         }
     }
 
-    // Parse digits
+    // Parse digits. Once a whitespace/NUL byte is seen after this point the
+    // numeral has ENDED: only more whitespace/NUL may follow. A digit (or any
+    // other byte) after that is interior junk and invalidates the parse --
+    // fn:number('1 2') must be NaN, not 12 (xsd whiteSpace="collapse" strips
+    // only leading/trailing whitespace). [FABLE-5]
+    let mut ended = false;
     for i in 0..N {
         if ((i as u32) >= index) & is_valid {
             let b = bytes[i];
-            if (b >= 0x30) & (b <= 0x39) {
+            let is_ws = (b == 0x20) | (b == 0x09) | (b == 0x0A) | (b == 0x0D) | (b == 0x00);
+            if is_ws {
+                // Trailing whitespace or NUL padding - the numeral is over
+                ended = true;
+            } else if ended {
+                // Non-whitespace after the numeral ended (interior junk)
+                is_valid = false;
+            } else if (b >= 0x30) & (b <= 0x39) {
                 // '0'-'9'
                 has_digits = true;
                 value = value * 10 + ((b - 0x30) as i64);
-            } else if (b == 0x20) | (b == 0x09) | (b == 0x0A) | (b == 0x0D) | (b == 0x00) {
-                // Trailing whitespace or null - stop parsing
-                // We'll check that the rest is only whitespace/null below
             } else {
                 // Invalid character
                 is_valid = false;

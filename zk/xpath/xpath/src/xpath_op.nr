@@ -35,10 +35,13 @@ pub use crate::numeric::numeric_subtract_int as numeric_subtract;
 // op:numeric-multiply
 pub use crate::numeric::numeric_multiply_int as numeric_multiply;
 
-// op:numeric-divide (integer division)
-pub use crate::numeric::numeric_divide_int as numeric_divide;
+// op:numeric-divide -- two xs:integer operands yield the xs:decimal quotient
+// (7 div 2 = 3.5), computed in IEEE 754 double precision (see the doc on
+// numeric_divide_int_as_double). NOT an alias of op:numeric-integer-divide.
+pub use crate::numeric_types::numeric_divide_int_as_double as numeric_divide;
 
-// op:numeric-integer-divide
+// op:numeric-integer-divide (idiv) -- truncating division toward zero.
+// Deliberately a DISTINCT code path from op:numeric-divide above.
 pub use crate::numeric::numeric_divide_int as numeric_integer_divide;
 
 // op:numeric-mod

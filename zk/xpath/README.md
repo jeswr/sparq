@@ -50,7 +50,7 @@ xpath = { git = "https://github.com/jeswr/noir_XPath", tag = "v0.1.0", directory
 
 - **Boolean Operations**: `fn:not`, `op:boolean-equal`, `op:boolean-less-than`, `op:boolean-greater-than`, logical AND/OR
 - **Numeric Operations**:
-  - Integer: add, subtract, multiply, divide, mod, abs, round, ceil, floor, min, max
+  - Integer: add, subtract, multiply, divide (`div` yields the xs:decimal quotient as a double, `idiv` truncates -- distinct ops), mod, abs, round, ceil, floor, min, max
   - Comparisons: equal, less-than, greater-than
 - **String Operations**:
   - Basic: string-length, substring, upper-case, lower-case
