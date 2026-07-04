@@ -6,25 +6,52 @@
 //! ## Working Functions
 //!
 //! The following functions work correctly and are exported:
-//! - `string_length` - Returns the length as a number
+//! - `string_length` - Returns the length in Unicode codepoints as a number
 //! - `starts_with` - Returns boolean
 //! - `ends_with` - Returns boolean
 //! - `contains` - Returns boolean
 //!
+//! ## Conventions
+//!
+//! A `str<N>` in this crate is a fixed-CAPACITY buffer: the logical string is
+//! the bytes up to the first NUL terminator (or all N bytes if none), matching
+//! `hash.nr`. Comparison and equality functions operate on that logical
+//! content, so the same string stored in `str<10>` and `str<3>` compares
+//! equal. NUL is a terminator, never U+0000 content.
+//!
 //! ## Limitations
 //!
-//! **IMPORTANT**: Functions that need to create new strings from byte arrays
-//! (substring, upper-case, lower-case, concat, etc.) cannot be implemented in Noir
-//! because Noir doesn't provide a way to convert byte arrays back to strings at runtime.
-//! These functions have been removed from this implementation.
+//! Functions that need to create new strings (substring, upper-case,
+//! lower-case, concat, etc.) cannot return `str<_>` values because Noir
+//! doesn't provide a way to convert byte arrays back to strings at runtime.
+//! They instead return a `([u8; _], u32)` (bytes, logical length) pair.
 
-/// fn:string-length - Returns the length of a string
+/// Logical length of a NUL-padded byte buffer: bytes up to the first NUL
+/// terminator (the capacity convention used across this crate; mirrors the
+/// private helper in hash.nr). [FABLE-5]
+fn logical_len_bytes<let N: u32>(bytes: [u8; N]) -> u32 {
+    let mut len: u32 = 0;
+    let mut ended = false;
+    for i in 0..N {
+        let is_zero = bytes[i] == 0;
+        if (!ended) & (!is_zero) {
+            len += 1;
+        }
+        ended = ended | is_zero;
+    }
+    len
+}
+
+/// fn:string-length - Returns the length of a string in Unicode CODEPOINTS
 /// XPath: fn:string-length($arg as xs:string?) as xs:integer
 /// SPARQL: STRLEN(?str)
 ///
-/// For fixed-size strings in Noir, this returns the actual length by counting
-/// non-null bytes. If your strings always fill their capacity (no trailing nulls),
-/// this will equal N.
+/// Counts UTF-8 lead bytes (bytes with (b & 0xC0) != 0x80) in the logical
+/// content (up to the first NUL / capacity). For well-formed UTF-8 this is
+/// exactly the codepoint count that fn:string-length requires; for pure-ASCII
+/// content it equals the byte count. Counts codepoints, not grapheme
+/// clusters, per the F&O definition. Ill-formed UTF-8 is not detected: every
+/// non-continuation byte counts as one codepoint. [FABLE-5]
 pub fn string_length<let N: u32>(s: str<N>) -> u64 {
     let s_bytes = s.as_bytes();
     let mut len: u64 = 0;
@@ -33,7 +60,8 @@ pub fn string_length<let N: u32>(s: str<N>) -> u64 {
     for i in 0..N {
         let byte = s_bytes[i];
         let is_zero = byte == 0;
-        let increment = (!ended) & (!is_zero);
+        let is_continuation = (byte & 0xC0) == 0x80;
+        let increment = (!ended) & (!is_zero) & (!is_continuation);
         len = len + (increment as u64);
         ended = ended | is_zero;
     }
@@ -65,23 +93,40 @@ pub fn starts_with<let N: u32, let M: u32>(s: str<N>, prefix: str<M>) -> bool {
 /// fn:ends-with - Returns true if a string ends with a given suffix
 /// XPath: fn:ends-with($arg1 as xs:string?, $arg2 as xs:string?) as xs:boolean
 /// SPARQL: STRENDS(?str, ?suffix)
+///
+/// Anchored at the LOGICAL end of the string (bytes before the first NUL),
+/// not the buffer capacity, so STRENDS("hello" in str<10>, "llo") is true.
+/// An empty suffix always matches. [FABLE-5] sq-3x7dl.6
 pub fn ends_with<let N: u32, let M: u32>(s: str<N>, suffix: str<M>) -> bool {
-    if M > N {
-        false
-    } else {
-        let s_bytes = s.as_bytes();
-        let suffix_bytes = suffix.as_bytes();
-        let start_pos = N - M;
-        let mut matches = true;
+    let s_bytes = s.as_bytes();
+    let suffix_bytes = suffix.as_bytes();
+    let s_len = logical_len_bytes(s_bytes);
+    let suffix_len = logical_len_bytes(suffix_bytes);
 
+    // A suffix longer than the logical content never matches; the same
+    // flag doubles as the underflow guard for the offset below.
+    let fits = suffix_len <= s_len;
+    let mut matches = fits;
+    let offset: u32 = if fits { s_len - suffix_len } else { 0 };
+
+    // Comptime guard: for N == 0 the whole loop folds away, so the size-0
+    // byte array is never indexed.
+    if N > 0 {
         for i in 0..M {
-            if s_bytes[start_pos + i] != suffix_bytes[i] {
-                matches = false;
+            if i < suffix_len {
+                let s_idx = offset + i;
+                // Clamp for the (always executed, post-flatten) dynamic
+                // read; when the clamp fires, fits is false and matches is
+                // already pinned false, so the spurious compare is inert.
+                let safe_idx = if s_idx < N { s_idx } else { 0 };
+                if s_bytes[safe_idx] != suffix_bytes[i] {
+                    matches = false;
+                }
             }
         }
-
-        matches
     }
+
+    matches
 }
 
 /// Helper function to find index of substring
@@ -136,19 +181,28 @@ pub fn contains<let N: u32, let M: u32>(s: str<N>, substring: str<M>) -> bool {
 /// fn:compare - Compares two strings lexicographically
 /// Returns -1 if s1 < s2, 0 if s1 == s2, 1 if s1 > s2
 /// XPath: fn:compare($comparand1 as xs:string?, $comparand2 as xs:string?) as xs:integer?
+///
+/// Operates on the LOGICAL content (bytes before the first NUL); trailing
+/// capacity NULs are terminators, not U+0000 content, so equal content in
+/// str<10> and str<3> compares equal. Byte-wise comparison of well-formed
+/// UTF-8 coincides with Unicode codepoint order, matching the codepoint
+/// collation. [FABLE-5] sq-3x7dl.6
 pub fn compare<let N: u32, let M: u32>(s1: str<N>, s2: str<M>) -> i64 {
     let s1_bytes = s1.as_bytes();
     let s2_bytes = s2.as_bytes();
+    let l1 = logical_len_bytes(s1_bytes);
+    let l2 = logical_len_bytes(s2_bytes);
 
-    // Determine the minimum length for comparison
-    let min_len = if N < M { N } else { M };
+    // Comptime bound; the logical lengths never exceed the capacities.
+    let min_cap = if N < M { N } else { M };
 
     let mut result: i64 = 0;
     let mut determined = false;
 
-    // Compare byte by byte
-    for i in 0..min_len {
-        if !determined {
+    // Compare byte by byte within the shared logical prefix
+    for i in 0..min_cap {
+        let in_content = (i < l1) & (i < l2);
+        if (!determined) & in_content {
             if s1_bytes[i] < s2_bytes[i] {
                 result = -1;
                 determined = true;
@@ -159,11 +213,11 @@ pub fn compare<let N: u32, let M: u32>(s1: str<N>, s2: str<M>) -> i64 {
         }
     }
 
-    // If all compared bytes are equal, shorter string comes first
+    // If the shared prefix is equal, the shorter LOGICAL string comes first
     if !determined {
-        if N < M {
+        if l1 < l2 {
             result = -1;
-        } else if N > M {
+        } else if l1 > l2 {
             result = 1;
         }
         // else result stays 0 (strings are equal)
@@ -174,21 +228,29 @@ pub fn compare<let N: u32, let M: u32>(s1: str<N>, s2: str<M>) -> i64 {
 
 /// fn:codepoint-equal - Returns true if two strings are equal codepoint by codepoint
 /// XPath: fn:codepoint-equal($comparand1 as xs:string?, $comparand2 as xs:string?) as xs:boolean?
-/// This is equivalent to string equality for ASCII strings
+///
+/// Gated on the LOGICAL lengths (bytes before the first NUL), not the buffer
+/// capacities, so equal content in str<10> and str<3> is codepoint-equal.
+/// Byte equality of the logical content is exactly codepoint equality for
+/// (well-formed) UTF-8. [FABLE-5] sq-3x7dl.6
 pub fn codepoint_equal<let N: u32, let M: u32>(s1: str<N>, s2: str<M>) -> bool {
-    if N != M {
-        false
-    } else {
-        let s1_bytes = s1.as_bytes();
-        let s2_bytes = s2.as_bytes();
-        let mut equal = true;
-        for i in 0..N {
+    let s1_bytes = s1.as_bytes();
+    let s2_bytes = s2.as_bytes();
+    let l1 = logical_len_bytes(s1_bytes);
+    let l2 = logical_len_bytes(s2_bytes);
+
+    let mut equal = l1 == l2;
+
+    // Comptime bound; when l1 == l2 every content index is below it.
+    let min_cap = if N < M { N } else { M };
+    for i in 0..min_cap {
+        if (i < l1) & (i < l2) {
             if s1_bytes[i] != s2_bytes[i] {
                 equal = false;
             }
         }
-        equal
     }
+    equal
 }
 
 /// op:string-equal - Returns true if both strings are equal
@@ -493,21 +555,57 @@ pub fn string_join_two<let N: u32, let M: u32, let S: u32, let R: u32>(
 /// fn:substring - Returns a substring starting at position (1-indexed)
 /// XPath: fn:substring($sourceString as xs:string?, $start as xs:double) as xs:string
 /// XPath: fn:substring($sourceString as xs:string?, $start as xs:double, $length as xs:double) as xs:string
+///
+/// F&O 5.4.3: the result is the characters at 1-based positions p with
+/// round(start) <= p < round(start) + round(length). The window is NOT
+/// shifted when start < 1 -- positions below 1 simply fall outside the
+/// string, so a start below 1 consumes part of the length budget:
+///   substring("12345",  0, 3) == "12"  (window [0,3)  -> positions 1,2)
+///   substring("12345", -3, 5) == "1"   (window [-3,2) -> position 1)
+///
+/// This signature takes the already-rounded integer window: callers wiring
+/// the xs:double form must apply the F&O round() first and map a NaN start
+/// or length to an empty result (round() of NaN has no integer image).
+/// [FABLE-5] sq-3x7dl.6
 pub fn substring<let N: u32, let R: u32>(s: str<N>, start_pos: i64, length: u32) -> ([u8; R], u32) {
     let s_bytes = s.as_bytes();
     let mut result: [u8; R] = [0; R];
     let mut result_len: u32 = 0;
 
-    // XPath uses 1-based indexing
-    let start_idx: u32 = if start_pos < 1 {
-        0
+    let s_cap: i64 = N as i64;
+    // Clamp the raw start into [-(2^32), N + 1] so the window arithmetic
+    // below cannot overflow i64. Both clamps preserve the result: a start
+    // beyond N + 1 is past any content (empty result), and a start at or
+    // below -(2^32) keeps start + length (length < 2^32) at or below 0 < 1
+    // (empty result) on both sides of the clamp.
+    let lo: i64 = -4294967296;
+    let clamped_start: i64 = if start_pos > s_cap + 1 {
+        s_cap + 1
+    } else if start_pos < lo {
+        lo
     } else {
-        (start_pos - 1) as u32
+        start_pos
     };
 
+    // Window end (exclusive) and effective 1-based start position.
+    let end_pos: i64 = clamped_start + (length as i64);
+    let eff_start: i64 = if clamped_start < 1 { 1 } else { clamped_start };
+
+    // Number of positions in [eff_start, end_pos), clamped to the capacity.
+    let window: i64 = end_pos - eff_start;
+    let count: u32 = if window <= 0 {
+        0
+    } else if window > s_cap {
+        N
+    } else {
+        window as u32
+    };
+
+    // eff_start is in [1, N + 1], so this cast is exact.
+    let start_idx: u32 = (eff_start - 1) as u32;
+
     for i in 0..N {
-        let idx = i as u32;
-        if (idx >= start_idx) & (result_len < length) & (result_len < R) {
+        if (i >= start_idx) & (result_len < count) & (result_len < R) {
             let byte = s_bytes[i];
             if byte != 0 {
                 result[result_len] = byte;
@@ -934,16 +1032,186 @@ fn test_substring_with_length() {
     }
 }
 
+// [FABLE-5] sq-3x7dl.6: the old test_substring_start_clamped enshrined the
+// wrong answer (asserted substring("hello", -2, 4) == "hell"). Per F&O 5.4.3
+// the window [-2, 2) intersected with the string positions [1, 5] is just
+// position 1, so the result is "h". Oracle (Python, F&O window definition):
+// substring('hello',-2,4) = 'h'.
 #[test]
-fn test_substring_start_clamped() {
-    // fn:substring("hello", -2, 4) clamps start to 1 (idx 0).
+fn test_substring_start_below_one_consumes_length() {
+    // fn:substring("hello", -2, 4) -> "h" (window [-2,2) -> position 1 only)
     let s: str<5> = "hello";
     let (out, len) = substring::<5, 5>(s, -2, 4);
-    assert(len == 4);
-    let expected = "hell".as_bytes();
-    for i in 0..4 {
+    assert(len == 1);
+    let expected = "h".as_bytes();
+    assert(out[0] == expected[0]);
+}
+
+#[test]
+fn test_substring_start_zero() {
+    // fn:substring("12345", 0, 3) -> "12" (window [0,3) -> positions 1,2)
+    let s: str<5> = "12345";
+    let (out, len) = substring::<5, 5>(s, 0, 3);
+    assert(len == 2);
+    let expected = "12".as_bytes();
+    for i in 0..2 {
         assert(out[i] == expected[i]);
     }
+}
+
+#[test]
+fn test_substring_start_negative() {
+    // fn:substring("12345", -3, 5) -> "1" (window [-3,2) -> position 1 only)
+    let s: str<5> = "12345";
+    let (out, len) = substring::<5, 5>(s, -3, 5);
+    assert(len == 1);
+    let expected = "1".as_bytes();
+    assert(out[0] == expected[0]);
+}
+
+#[test]
+fn test_substring_window_entirely_before_string() {
+    // fn:substring("hello", -100, 3) -> "" (window ends before position 1)
+    let s: str<5> = "hello";
+    let (_out, len) = substring::<5, 5>(s, -100, 3);
+    assert(len == 0);
+}
+
+#[test]
+fn test_substring_start_past_end() {
+    // fn:substring("hello", 7, 3) -> ""
+    let s: str<5> = "hello";
+    let (_out, len) = substring::<5, 5>(s, 7, 3);
+    assert(len == 0);
+}
+
+#[test]
+fn test_substring_zero_length() {
+    // fn:substring("hello", 3, 0) -> ""
+    let s: str<5> = "hello";
+    let (_out, len) = substring::<5, 5>(s, 3, 0);
+    assert(len == 0);
+}
+
+#[test]
+fn test_substring_length_exceeds_string() {
+    // fn:substring("hello", 1, 10) -> "hello" (window clamped to content)
+    let s: str<5> = "hello";
+    let (out, len) = substring::<5, 5>(s, 1, 10);
+    assert(len == 5);
+    let expected = "hello".as_bytes();
+    for i in 0..5 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_substring_extreme_start_no_overflow() {
+    // Far-out-of-range starts must yield empty results, not overflow.
+    let s: str<5> = "hello";
+    let (_out1, len1) = substring::<5, 5>(s, 0x7FFFFFFFFFFFFFFF, 3);
+    assert(len1 == 0);
+    let (_out2, len2) = substring::<5, 5>(s, -0x7FFFFFFFFFFFFFFF, 0);
+    assert(len2 == 0);
+}
+
+// ============================================================================
+// [FABLE-5] sq-3x7dl.6: logical-length (NUL-padding) semantics + codepoint
+// STRLEN. Expected values from an independent Python oracle over the F&O
+// definitions (see the bead / PR).
+// ============================================================================
+
+#[test]
+fn test_ends_with_nul_padded() {
+    // STRENDS("hello" stored in str<10>, "llo") must be true: the anchor is
+    // the logical end (before the NUL padding), not the buffer capacity.
+    let s: str<10> = "hello\0\0\0\0\0";
+    let suffix: str<3> = "llo";
+    assert(ends_with::<10, 3>(s, suffix));
+}
+
+#[test]
+fn test_ends_with_nul_padded_suffix() {
+    // Suffix itself NUL-padded: logical "llo" in str<6>.
+    let s: str<5> = "hello";
+    let suffix: str<6> = "llo\0\0\0";
+    assert(ends_with::<5, 6>(s, suffix));
+}
+
+#[test]
+fn test_ends_with_nul_padded_negative() {
+    // "hell" is a prefix, not a suffix, of the logical content.
+    let s: str<10> = "hello\0\0\0\0\0";
+    let suffix: str<4> = "hell";
+    assert(!ends_with::<10, 4>(s, suffix));
+}
+
+#[test]
+fn test_ends_with_empty_suffix() {
+    // fn:ends-with(x, "") is always true.
+    let s: str<5> = "hello";
+    let suffix: str<0> = "";
+    assert(ends_with::<5, 0>(s, suffix));
+}
+
+#[test]
+fn test_ends_with_suffix_longer_than_content() {
+    // Logical suffix longer than the logical string never matches, even
+    // when the string BUFFER is wider than the suffix buffer.
+    let s: str<10> = "lo\0\0\0\0\0\0\0\0";
+    let suffix: str<5> = "hello";
+    assert(!ends_with::<10, 5>(s, suffix));
+}
+
+#[test]
+fn test_compare_ignores_nul_padding() {
+    // Equal logical content in different capacities compares equal.
+    let a: str<10> = "ab\0\0\0\0\0\0\0\0";
+    let b: str<2> = "ab";
+    assert(compare::<10, 2>(a, b) == 0);
+    assert(string_equal::<10, 2>(a, b));
+    // Logical prefix still sorts first regardless of capacities.
+    let c: str<3> = "abc";
+    assert(compare::<10, 3>(a, c) == -1);
+    assert(compare::<3, 10>(c, a) == 1);
+}
+
+#[test]
+fn test_codepoint_equal_ignores_nul_padding() {
+    // Equal logical content in different capacities is codepoint-equal.
+    let a: str<10> = "abc\0\0\0\0\0\0\0";
+    let b: str<3> = "abc";
+    assert(codepoint_equal::<10, 3>(a, b));
+    // Different logical content is not, even at equal capacity.
+    let c: str<10> = "abd\0\0\0\0\0\0\0";
+    assert(!codepoint_equal::<10, 10>(a, c));
+    // Same bytes, different logical length is not equal.
+    let d: str<10> = "ab\0\0\0\0\0\0\0\0";
+    assert(!codepoint_equal::<10, 10>(a, d));
+}
+
+#[test]
+fn test_string_length_counts_codepoints() {
+    // STRLEN("e-acute") == 1: U+00E9 is two UTF-8 bytes (0xC3 0xA9) but one
+    // codepoint. Oracle: len('\u{e9}') == 1, UTF-8 bytes [195, 169].
+    let s: str<2> = "é";
+    assert(s.as_bytes()[0] == 195);
+    assert(s.as_bytes()[1] == 169);
+    assert(string_length::<2>(s) == 1);
+}
+
+#[test]
+fn test_string_length_mixed_ascii_multibyte() {
+    // STRLEN("a" + e-acute) == 2 (3 UTF-8 bytes). Oracle: bytes [97,195,169].
+    let s: str<3> = "aé";
+    assert(string_length::<3>(s) == 2);
+}
+
+#[test]
+fn test_string_length_nul_padded() {
+    // Logical length stops at the first NUL terminator.
+    let s: str<10> = "hello\0\0\0\0\0";
+    assert(string_length::<10>(s) == 5);
 }
 
 #[test]

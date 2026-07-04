@@ -76,6 +76,23 @@ fn test_ends_with_partial() {
     assert(ends_with::<7, 3>(s, suffix));
 }
 
+// [FABLE-5] sq-3x7dl.6: STRENDS anchors at the logical (pre-NUL) end of the
+// string, not the buffer capacity.
+#[test]
+fn test_ends_with_nul_padded_buffer() {
+    let s: str<10> = "hello\0\0\0\0\0";
+    let suffix: str<3> = "llo";
+    assert(ends_with::<10, 3>(s, suffix));
+}
+
+// [FABLE-5] sq-3x7dl.6: STRLEN counts Unicode codepoints, not UTF-8 bytes.
+// U+00E9 (e-acute) is two UTF-8 bytes but one codepoint.
+#[test]
+fn test_string_length_codepoints_multibyte() {
+    let s: str<2> = "é";
+    assert(string_length::<2>(s) == 1);
+}
+
 // Tests for contains (fn:contains / CONTAINS)
 // This works because it returns a boolean
 #[test]
