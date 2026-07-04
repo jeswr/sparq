@@ -4,16 +4,19 @@
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-**Opt-in OWL 2 Direct-Semantics support** for the [sparq](../../README.md) RDF engine. This is
-**layer L1** of a layered, fail-closed Direct-Semantics checker: a purely **structural OWL
-model** for the **ALCH** fragment plus a **fail-closed reverse RDF mapping** (RDF graph → typed
-model). It is a **separate crate** — `sparq-core`, `sparq-engine`, and the wasm build carry zero
-Direct-Semantics code, deps, or cost by default; DL is engaged only by depending on this crate.
+**Opt-in OWL 2 Direct-Semantics support** for the [sparq](../../README.md) RDF engine — a
+layered, fail-closed Direct-Semantics checker. **Built: L1** (structural **ALCH** model +
+fail-closed reverse RDF mapping), **L2** (syntactic EL/QL/RL profile checker), and **L3** (the
+terminating **ALCH tableau** — consistency + class satisfiability). It is a **separate crate** —
+`sparq-core`, `sparq-engine`, and the wasm build carry zero Direct-Semantics code, deps, or cost
+by default; DL is engaged only by depending on this crate.
 
-> **Honest scope.** This crate does **not** implement OWL 2 DL. L1 is a **scoped ALCH-fragment
-> structural layer with no reasoning at all** — it turns an RDF graph into a model it understood
-> *in full*, or refuses it. The profile checker, ALCH tableau, and dispatch checker land in later
-> beads (sq-pbz04.4.2 / .3 / .4). See the design record for the full scope and deferral ledger.
+> **Honest scope.** This crate does **not** implement OWL 2 DL. The tableau is sound and
+> complete **only for the exact ALCH fragment** (named classes, ⊤/⊥, ⊓/⊔/¬, ∃/∀ over named
+> object properties, GCIs, `rdfs:subPropertyOf`, ground ABox) — anything else is refused
+> fail-closed as `Unknown(OutOfFragment)` BEFORE reasoning, and deterministic count-budget
+> exhaustion is `Unknown(ResourceBudget)`, never a verdict. The fragment-dispatch checker (L4)
+> lands in bead sq-pbz04.4.4. See the design record for the full scope and deferral ledger.
 
 ## 🚀 Quickstart
 
@@ -61,16 +64,24 @@ match extract(&dict, &triples) {
   test; annotations, declarations, and ontology headers are recognised and ignored (they carry
   no ALCH-logical import).
 
-**Profile checker (L2, bead sq-pbz04.4.2):** the `profile` module is NOW BUILT. Call
-`profile::profiles(onto)` to check OWL 2 EL/QL/RL profile membership of a structural ontology
-via a purely syntactic grammar walk (W3C OWL 2 Profiles §2/§3/§4). Returns a `ProfileSet` with
-`el`, `ql`, and `rl` fields each holding `Membership::In`, `Membership::NotIn(reason)`, or
-`Membership::Unknown(err)` (only from `profile::profiles_from_extraction` on an extraction
-failure). An empty ontology is `In` all three profiles. Terminating by construction, no semantic
-reasoning.
+**Profile checker (L2, bead sq-pbz04.4.2):** `profile::profiles(onto)` checks OWL 2 EL/QL/RL
+profile membership via a purely syntactic grammar walk (W3C OWL 2 Profiles §2/§3/§4), returning
+a `ProfileSet` of `Membership::In` / `NotIn(reason)` / `Unknown(err)` (the latter only from
+`profile::profiles_from_extraction` on an extraction failure). Terminating by construction, no
+semantic reasoning.
 
-**Reserved (empty stubs):** `nnf`/`tableau` (L3) and `check` (L4) modules are pre-declared
-stubs with no logic — they are populated by the later beads without touching `lib.rs`.
+**ALCH tableau (L3, bead sq-pbz04.4.3):** `tableau::consistency(&Ontology, Budget)` and
+`tableau::class_satisfiability(&ClassExpression, &Ontology, Budget)` decide
+consistency / class satisfiability for the ALCH fragment via a completion-forest tableau —
+GCI internalisation, rules matched modulo the `subPropertyOf` closure, **ancestor subset
+blocking** (sufficient precisely because ALCH has no inverse roles), backtracking over
+⊔-branches. `tableau::consistency_from_extraction` is the fail-closed RDF-level entry. Verdicts
+are tri-state (`Satisfiable` / `Unsatisfiable` / `Unknown`); budgets are deterministic COUNTS
+(`max_nodes` / `max_rule_applications` — wall-clock banned). The termination + soundness +
+completeness argument (Baader–Sattler 2001) is reproduced in the `tableau` module docs. `nnf`
+supplies negation normal form and the finite subexpression closure the argument rests on.
+
+**Reserved (empty stub):** `check` (L4 fragment dispatch + entailment-by-refutation).
 **Deferred** (each rejected, never mis-mapped): inverse roles, cardinality/functionality,
 nominals (`owl:oneOf`/`owl:hasValue`), transitivity, `sameAs`/`differentFrom`, datatypes, keys —
 with a named reason and unlock path in the design record's deferral ledger.
