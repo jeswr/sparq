@@ -94,13 +94,20 @@ test("showcase — MPC £100k secure threshold (pre-interaction)", async ({ page
   await expect(page).toHaveScreenshot("showcase-mpc-100k.png", { mask: vrMasks(page) });
 });
 
-test("nav + command-palette-open overlay", async ({ page }) => {
+test("nav + command-palette-open overlay", async ({ page }, testInfo) => {
   await gotoAppReady(page, ".");
   await expect(runnerStateLocator(page, "home", "idle-preview")).toBeVisible();
-  // Open the palette via the header search button (role-based, deterministic). The ⌘K keyboard
-  // binding itself is behavioural coverage owned by the functional palette spec — this test
-  // only needs the OPEN overlay's pixels, and a keypress can race focus on the hero editor.
-  await page.getByRole("button", { name: /Search \(Command-K\)/ }).click();
+  // DESKTOP: open the palette via the header search button (role-based, deterministic). The
+  // trigger is `hidden lg:inline-flex` (app-shell.tsx), so at the 390px MOBILE viewport it does
+  // not exist — there the global Control+K binding (registered before the app-ready barrier
+  // resolves) is the only open path, same as the functional palette spec. The keybinding
+  // BEHAVIOUR is owned by e2e/command-palette.spec.ts; this test only needs the OPEN overlay's
+  // pixels. Focus is on <body> straight after load, so the keypress cannot land in an editor.
+  if (testInfo.project.name === "visual-mobile") {
+    await page.keyboard.press("Control+KeyK");
+  } else {
+    await page.getByRole("button", { name: /Search \(Command-K\)/ }).click();
+  }
   await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
   await fontsReady(page);
   await expect(page).toHaveScreenshot("nav-palette-open.png", { mask: vrMasks(page) });
