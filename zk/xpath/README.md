@@ -87,8 +87,8 @@ xpath = { git = "https://github.com/jeswr/noir_XPath", tag = "v0.1.0", directory
 This library implements XPath 2.0 functions and operators required by SPARQL 1.1.
 
 **Quick Summary:**
-- ✅ **56+ functions fully implemented** (boolean, integer numeric, datetime, duration, aggregates)
-- ⚠️ **String operations partial** (4 functions work: string-length, starts-with, ends-with, contains)
+- ✅ **60+ functions fully implemented** (boolean, integer numeric, datetime, duration, aggregates, string functions)
+- ✅ **String operations fully implemented** (string-length, starts-with, ends-with, contains, substring, substring-before, substring-after, upper-case, lower-case, concat, normalize-space, translate, encode-for-uri, etc. — all return byte array tuples)
 - ⚠️ **Float support partial** (requires noir_IEEE754 integration)
 - 🔮 **Regex/hash deferred** (complex in ZK circuits)
 - ❌ **RAND/NOW not feasible** (non-deterministic in ZK)
@@ -98,7 +98,7 @@ For complete function mapping, see **[SPARQL_COVERAGE.md](./SPARQL_COVERAGE.md)*
 ### ✅ Fully Implemented
 - **Boolean operations**: All boolean functions and operators (fn:not, logical-and, logical-or, comparisons)
 - **Integer numeric operations**: All arithmetic and comparison operators for integers
-- **String operations (partial)**: Functions returning boolean/numeric values work correctly (string-length, starts-with, ends-with, contains); functions returning strings have severe limitations due to Noir constraints
+- **String operations**: All XPath string functions including substring extraction (substring, substring-before, substring-after), case conversion (upper-case, lower-case), comparison (starts-with, ends-with, contains), and manipulation (concat, normalize-space, translate, encode-for-uri). All return byte array tuples `([u8; N], u32)` instead of string types.
 - **DateTime operations**: Component extraction (year, month, day, hours, minutes, seconds, timezone), comparisons, and arithmetic
 - **Duration operations**: All dayTimeDuration operations including arithmetic and comparisons
 - **Aggregate functions**: COUNT, SUM, AVG, MIN, MAX for integer sequences
@@ -162,7 +162,7 @@ fn example() {
 }
 ```
 
-**Note**: Functions that need to create new strings (substring, upper_case, lower_case, concat, etc.) are not exported in the public API due to Noir's limitation in converting byte arrays back to strings at runtime. Only functions returning boolean or numeric values are available.
+**Note**: All string functions that create new strings — substring, substring-before, substring-after, upper_case, lower_case, concat, normalize_space, translate, etc. — are exported and return `([u8; N], u32)` byte array tuples. **Substring byte-position caveat**: `substring()` uses BYTE positions in logical content, exact vs XPath F&O spec only for ASCII. For multi-byte UTF-8, codepoint-positional variant is not implemented (tracked in sq-hjvte). Comparison functions (starts-with, ends-with, contains) operate on logical string content (bytes before first NUL terminator), not buffer capacity.
 
 ### Numeric Operations
 
