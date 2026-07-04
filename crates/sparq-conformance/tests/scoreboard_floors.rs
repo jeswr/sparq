@@ -269,6 +269,20 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/ql_dllite_suite.rs",
         "QL_DLLITE_FLOOR",
     ),
+    // [FABLE-5] sq-pbz04.3.4 (epic sq-pbz04.3) — the OWL 2 QL ENTAILMENT-REGIME
+    // GRADUATED-SUBSET ratchet. The floor const (`pub const QL_ENTAILMENT_FLOOR`)
+    // lives in THIS crate's `tests/ql_entailment_floor.rs` (behind the opt-in
+    // `ql-experimental` feature, inside the `gated` module — the guard reads it
+    // TEXTUALLY, so the `#[cfg]`/module nesting do not affect the match); the guard
+    // pins the central scoreboard's `ratchet_floor` to it so the two can never
+    // silently drift. The floor equals the length of the PINNED NAMED-CASE list
+    // (asserted in-runner), a sparq EXTENSION-shaped ratchet over the six-condition
+    // sound `pr:QL` subset, NOT an OWL 2 QL / entailment-regime conformance claim.
+    (
+        "OWL 2 QL entailment-regime graduated subset",
+        "crates/sparq-conformance/tests/ql_entailment_floor.rs",
+        "QL_ENTAILMENT_FLOOR",
+    ),
     // [SONNET-4.6] sq-pbz04.2.4 (epic sq-pbz04) — the OWL 2 EL classification ratchet.
     // The floor const (`pub const EL_SUITE_FLOOR`) lives in THIS crate's
     // `tests/el_suite.rs` (behind the opt-in `el-suite` feature, inside the `gated`
@@ -393,12 +407,16 @@ fn scoreboard_renders_all_suites() {
     // [OPUS-4.8] sq-qo1a9 — the GRADUATED OWL 2 QL (DL-Lite_R) certain-answer oracle,
     // HONESTLY rendered as a sparq EXTENSION (NOT folded into the conformance total).
     assert!(md.contains("OWL 2 QL (DL-Lite_R) certain-answer oracle"));
+    // [FABLE-5] sq-pbz04.3.4 — the OWL 2 QL entailment-regime graduated-subset
+    // ratchet (the pinned named-case floor), HONESTLY rendered as a sparq EXTENSION
+    // (NOT folded into the conformance total).
+    assert!(md.contains("OWL 2 QL entailment-regime graduated subset"));
     // [SONNET-4.6] sq-pbz04.2.4 — the OWL 2 EL classification ratchet, HONESTLY rendered
-    // as a sparq EXTENSION (the FIFTH extension row — so the total line still pluralises
-    // to "rows", and it is NOT folded into the conformance total).
+    // as a sparq EXTENSION (the total line pluralises to "rows", and it is NOT folded
+    // into the conformance total).
     assert!(md.contains("OWL 2 EL classification (sparq-reason-el)"));
     assert!(
-        md.contains("sparq-extension (5 rows, NOT conformance)"),
-        "five extension rows should be tallied separately and pluralised"
+        md.contains("sparq-extension (6 rows, NOT conformance)"),
+        "six extension rows should be tallied separately and pluralised"
     );
 }

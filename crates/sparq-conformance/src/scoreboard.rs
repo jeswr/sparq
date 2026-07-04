@@ -224,6 +224,13 @@ pub struct Suite {
 ///   UCQ evaluated over the unmodified ABox returns EXACTLY the hand-derived certain
 ///   answers; the broader `pr:QL` entailment-arm intensional gap stays
 ///   experimental/OutOfScope, never summed in).
+/// * OWL 2 QL entailment-regime graduated subset 9 — `sparq-conformance`
+///   `tests/ql_entailment_floor.rs` `QL_ENTAILMENT_FLOOR = 9` (sq-pbz04.3.4; opt-in
+///   `ql-experimental` feature; a sparq EXTENSION ratchet, NOT an OWL 2 QL /
+///   entailment-regime conformance claim — the floor is the PINNED NAMED-CASE list
+///   of `pr:QL` `sparql11/entailment` cases passing ALL SIX graduation conditions,
+///   exact set equality: regressions AND unpinned additions both fail CI; every
+///   non-graduated case carries an exhaustive hold-reason taxonomy).
 /// * OWL 2 EL classification 50 — `sparq-conformance` `tests/el_suite.rs`
 ///   `EL_SUITE_FLOOR = 50` (sq-pbz04.2.4; opt-in `el-suite` feature; a sparq EXTENSION
 ///   ratchet, NOT a full-OWL-2-EL-conformance claim — CR7–CR9 concrete domains + ABox
@@ -853,6 +860,52 @@ pub const SUITES: &[Suite] = &[
                the UNMODIFIED ABox, asserting EXACTLY the hand-derived certain answers — \
                sound AND complete case by case; the broader pr:QL entailment-arm \
                intensional gap stays experimental/OutOfScope, never faked as a pass",
+    },
+    // [FABLE-5] sq-pbz04.3.4 (epic sq-pbz04.3) — the OWL 2 QL ENTAILMENT-REGIME
+    // GRADUATED-SUBSET ratchet (runner lives crate-local in
+    // `sparq-conformance/tests/ql_entailment_floor.rs`, behind the opt-in
+    // `ql-experimental` feature). HONESTLY tallied as a sparq EXTENSION ratchet, NOT
+    // folded into the conformance total: sparq implements a FRAGMENT of the W3C
+    // SPARQL 1.1 QL entailment regime (holding everything else with an exhaustive
+    // reason taxonomy), so no full-regime / full-profile OWL 2 QL conformance claim
+    // is made anywhere. A `pr:QL` `sparql11/entailment` case is in the floor iff ALL
+    // SIX graduation conditions pass — each CHECKED in code by
+    // `inference::sparql_entail::run_ql_graduation`: (1) the fail-closed CQ-shape
+    // gate accepts it and it carries no intensional schema-vocabulary atom; (2) the
+    // DL-Lite_R TBox is totally captured (`fully_captured()`, sq-pbz04.3.3); (3)
+    // zero consistency-relevant (negative/disjointness) axioms; (4) default-graph
+    // dataset only; (5) the regime-coincidence guard (certain-answer vs
+    // solution-mapping semantics provably coincide: all body terms distinguished, or
+    // no existential-generating inclusions); (6) the rewritten UCQ evaluated over
+    // the UNMODIFIED data is result-equivalent to the W3C oracle. The floor is a
+    // PINNED NAMED-CASE list (exact set equality): a pinned case regressing fails
+    // CI, and a newly-eligible case fails CI until pinned deliberately with
+    // evidence. Distinct from the DL-Lite_R certain-answer oracle row above (the
+    // hand-derived sq-g19x0 corpus, untouched); the inference BINARY keeps every QL
+    // row OutOfScope so this floor can never leak into a conformance number.
+    // `QL_ENTAILMENT_FLOOR` is mirrored here and kept in lock-step by
+    // `tests/scoreboard_floors.rs` (read textually).
+    Suite {
+        label: "OWL 2 QL entailment-regime graduated subset",
+        family: "sparq extension",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "ql_entailment_floor",
+            feature: "ql-experimental",
+        },
+        ci_job: "inference-conformance",
+        ratchet_floor: 9,
+        floor_basis: "graduated named pr:QL cases — six-condition soundness predicate (sparq \
+                      EXTENSION over the QL fragment sparq rewrites, NOT an OWL 2 QL / \
+                      entailment-regime conformance claim)",
+        note: "EXTENSION ratchet — the pr:QL sparql11/entailment cases that pass ALL SIX \
+               graduation conditions (CQ-shape gate + intensional guard, total TBox capture, \
+               zero consistency-relevant axioms, default-graph dataset, the regime-coincidence \
+               guard, and empirical result-equivalence to the W3C oracle through the REAL \
+               rewrite_production + engine), pinned as an exact named-case list; every \
+               non-graduated case is held with an exhaustive reason taxonomy \
+               (permanently-outside / pending-gate / pending-capture / pending-consistency / \
+               pending-coincidence / oracle-divergent), never faked as a pass",
     },
     // [SONNET-4.6] sq-pbz04.2.4 (epic sq-pbz04) — the OWL 2 EL classification ratchet
     // (runner lives crate-local in `sparq-conformance/tests/el_suite.rs`, behind the
