@@ -249,8 +249,9 @@ mod tests {
 // STATED BOUNDS (document honestly; "proved beyond bound" means extrapolated by induction
 // on the loop body, not model-checked):
 //   * Slice length: 0..=MAX_SLICE = 8 (the same element count per probe, not per-group row
-//     count at query time — production groups can be larger; this bound covers every
-//     distinct execution path through the reducer loop body).
+//     count at query time — production groups can be larger; 8 is a pragmatic Kani bound,
+//     not a completeness claim: behavior beyond this length is not model-checked — for
+//     example, reduce_sum's i128 accumulation can exceed i64::MAX at large cardinality). [SONNET-4.6]
 //   * reduce_sum / reduce_min_id / reduce_max_id: each element value is fully symbolic in
 //     [0, INLINE_MAX_I64] (= [0, 2^30 - 1]); the id encoding is id = INLINE_BASE + value.
 //   * reduce_count: each element is fully symbolic over the entire u32 domain (no assume on
@@ -274,8 +275,9 @@ mod kani_proofs {
     use sparq_core::dict::{is_inline, Id, INLINE_BASE, NO_ID};
 
     /// Maximum slice length for the bounded proofs. CBMC symbolic exploration is exponential
-    /// in slice length, so a small bound (8) is picked; every distinct execution path through
-    /// a single-element reducer loop body is covered — no new branches appear beyond length 1.
+    /// in slice length, so 8 is chosen as a pragmatic bound; properties are verified
+    /// exhaustively up to this length and extrapolated by induction beyond it, but
+    /// behavior beyond MAX_SLICE is not model-checked. [SONNET-4.6]
     const MAX_SLICE: usize = 8;
 
     /// Build a symbolic Vec of `len` inline ids, each constrained to
