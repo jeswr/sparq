@@ -171,10 +171,13 @@ pub struct TBox {
     /// certain-answers everything). Surfaced SEPARATELY from `skipped` so callers can reason
     /// about the consistency gap independently of the "axiom outside QL" gap. [SONNET-4.6]
     pub consistency_relevant: usize,
-    /// Count of `rdfs:`/`owl:`-vocabulary triples whose predicate this extractor does not
-    /// recognise as captured, skipped, consistency-relevant, or annotation-classified. A
-    /// non-zero count means the TBox uses OWL/RDFS constructs beyond what this implementation
-    /// models; `fully_captured()` returns `false` in that case. [SONNET-4.6]
+    /// Count of OWL/RDFS constructs this extractor does not recognise, tallied through two
+    /// distinct paths: (1) triples whose *predicate* is in the `rdfs:`/`owl:` namespace and is
+    /// not captured, skipped, consistency-relevant, or annotation-classified; and (2) `rdf:type`
+    /// triples whose *object* is schema vocabulary this implementation does not model (e.g.
+    /// `:p rdf:type owl:FunctionalProperty` — a non-QL characteristic-property axiom). A
+    /// non-zero count means the TBox carries OWL/RDFS constructs beyond what this
+    /// implementation models; `fully_captured()` returns `false` in that case. [SONNET-4.6]
     pub unrecognised_schema: usize,
 }
 
@@ -352,11 +355,14 @@ impl TBox {
         tbox
     }
 
-    /// Returns `true` if and only if the TBox was FULLY captured by this extractor: zero axioms
-    /// were skipped (outside QL fragment) AND zero `rdfs:`/`owl:` vocabulary predicates were
-    /// unrecognised. Consistency-relevant axioms (`owl:disjointWith` etc.) are NOT counted
-    /// against full capture — they are QL-legal; the crate's documented boundary is that it
-    /// does not CHECK consistency, not that it misses their presence. [SONNET-4.6]
+    /// Returns `true` if and only if `self.skipped == 0 && self.unrecognised_schema == 0`.
+    /// `skipped` counts axioms outside the QL fragment; `unrecognised_schema` counts any
+    /// OWL/RDFS construct the extractor did not classify — whether expressed as an
+    /// `rdfs:`/`owl:`-predicate triple or as an `rdf:type` declaration of unmodelled schema
+    /// vocabulary (e.g. `:p rdf:type owl:FunctionalProperty`). Consistency-relevant axioms
+    /// (`owl:disjointWith` etc.) are NOT counted against full capture — they are QL-legal;
+    /// the crate's documented boundary is that it does not CHECK consistency, not that it
+    /// misses their presence. [SONNET-4.6]
     pub fn fully_captured(&self) -> bool {
         self.skipped == 0 && self.unrecognised_schema == 0
     }
