@@ -81,8 +81,15 @@
     "1399868 is the CI x86_64 runner measurement (run 28634216610, artifact-exact-equality leg: cargo build",
     "--profile release-wasm -p sparq-wasm --target wasm32-unknown-unknown, no --features vectorized) — NEVER a",
     "local aarch64 build. The ratchet floor (1399703) is UNCHANGED: 1399868 sits within its +2% band (top 1427697),",
-    "so bench.yml stays green; the floor only ratchets DOWN on improvement, never up on a within-band drift."
-  ],
+    "so bench.yml stays green; the floor only ratchets DOWN on improvement, never up on a within-band drift.",
+    "[OPUS-4.8] (sq-wjl8i) 2026-07-04: feature_off_exact RE-PINNED 1399868 -> 1404910 (+5042 bytes, +0.360%).",
+    "The kind-first total-order fix for compare_terms (PR #1502) adds real engine code the feature-OFF wasm links",
+    "in — cmp_exact_lex_f64 / f64_exact_decimal / Num::cmp_total decimal-string arithmetic + NaN totalisation —",
+    "so the bundle legitimately grew. This is SCALAR string/int arithmetic, NOT accidental vectorization (the",
+    "invariant the zero-delta gate exists to protect); the feature-OFF INVARIANT (bundle identical with vectorized",
+    "ON vs OFF) is PRESERVED, only the absolute baseline moved. 1404910 is the CI x86_64 runner measurement",
+    "(run 28722406953, artifact-exact-equality leg2). The ratchet floor (1399703) is UNCHANGED: 1404910 sits",
+    "within its +2% band (top 1427697), so bench.yml stays green."
   "metrics": {
     "store_bytes_per_triple": {
       "floor": 92,
@@ -103,7 +110,7 @@
       "floor": 1399703,
       "threshold": 0.02,
       "mode": "auto",
-      "feature_off_exact": 1399868
+      "feature_off_exact": 1404910
     },
     "parse_ns_per_byte": {
       "floor": 4.9721,
