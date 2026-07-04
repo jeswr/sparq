@@ -545,3 +545,20 @@ fn end_to_end_turtle_range_through_subproperty() {
     );
     assert_eq!(sat, Verdict::Satisfiable);
 }
+
+/// Adversarial-verify canary (PR #1475 round-2): blocking must gate ONLY the generating
+/// (∃) rule — the ∀-rule must keep firing into an already-blocked node. The unsound
+/// mutant that gates the ∀-rule on blocked targets passes every earlier test but returns
+/// a wrong `Satisfiable` here: with `A(a)` seeded, the ∃-child of the root is blocked
+/// (its label is a subset of the root's) exactly when the ∀-propagation of `¬A` into it
+/// is what exposes the clash. Truly Unsatisfiable: A ⊑ ∃R.A forces an R-successor in A,
+/// while A ⊑ ∀R.¬A forces every R-successor out of A.
+#[test]
+fn forall_must_fire_into_already_blocked_node() {
+    let o = onto(vec![
+        subclass(named(A), CE::some(R, named(A))),
+        subclass(named(A), CE::only(R, not(named(A)))),
+        is_a(IA, named(A)),
+    ]);
+    assert_eq!(consistency(&o, Budget::default()), Verdict::Unsatisfiable);
+}

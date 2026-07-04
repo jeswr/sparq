@@ -263,7 +263,9 @@ use std::collections::BTreeSet;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Budget {
     /// Maximum total number of forest nodes ever created (roots included). If the ABox
-    /// alone needs more roots than this, the run returns `Unknown` immediately.
+    /// alone needs more roots than this, the run returns `Unknown` immediately — unless
+    /// the asserted facts already clash while seeding, in which case `Unsatisfiable` is
+    /// returned first (the verdict is sound: a seed clash needs no further expansion).
     pub max_nodes: usize,
     /// Maximum total number of completion-rule applications, counting each concept
     /// addition, each ⊔-disjunct trial, and each ∃-expansion — including work re-done
