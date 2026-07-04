@@ -1737,10 +1737,12 @@ jobs:
           # [OPUS-4.8] sq-oy1f.19 — the frame ratchet (RDF → framed JSON-LD over the
           # w3c/json-ld-framing suite; normative-answer-equivalence). Same grep shape.
           FRAME_FLOOR=61
-          # [OPUS-4.8] sq-oy1f — the expand + flatten ratchets (RDF → expanded/flattened
-          # JSON-LD via the shipping graph_to_jsonld writer; normative-answer-equivalence).
-          # Same grep shape. MEASURED pass counts at the pinned revision.
-          EXPAND_FLOOR=247
+          # [OPUS-4.8] sq-kk1mq — the expand ratchet uses the document-level oracle
+          # (sparq_jsonld::expand() compared with json_ld_equal; NOT the RDF-writer path).
+          # Oracle-correction re-baseline: 247→240 (7 over-passes removed by switching
+          # from RDF-equivalence to JSON-level comparison; see sq-kk1mq). Same grep shape.
+          # MEASURED pass count at the pinned revision.
+          EXPAND_FLOOR=240
           FLATTEN_FLOOR=50
           # runner prints: "TOTAL toRdf <pass> <fail> <skip> (floor F)"
           TORDF_PASS=$(grep -E '^TOTAL toRdf ' jsonld-conformance.out | awk '{print $3}' | head -1)

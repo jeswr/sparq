@@ -3790,6 +3790,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+ "sparq-jsonld",
  "sparq-reason",
  "sparq-reason-el",
  "sparq-reason-ql",
