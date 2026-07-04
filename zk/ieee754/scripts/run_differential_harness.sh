@@ -10,8 +10,14 @@
 #      This proves the harness is non-vacuous (wired to the real Noir circuit).
 #
 # Usage:
-#   ./scripts/run_differential_harness.sh            # normal (oracle + self-test)
-#   ./scripts/run_differential_harness.sh --oracle-only  # skip self-test (debug)
+#   ./scripts/run_differential_harness.sh                  # oracle + self-test (normal CI)
+#   ./scripts/run_differential_harness.sh --oracle-only    # skip fault self-test (debug)
+#   ./scripts/run_differential_harness.sh --update-committed  # regenerate committed oracle file
+#
+# The --update-committed flag writes the generated oracle to
+#   zk/ieee754/tests/differential_oracle/src/lib.nr
+# Run this after any change to the corpus (main.rs fixes 1-3, etc.) to keep the
+# committed copy current.  CI diffs against this path to detect drift.
 #
 # Requirements: cargo and nargo on PATH (see .github/workflows/zk-toolchain.yml
 # for the pinned toolchain install -- NARGO_VERSION=1.0.0-beta.21).
@@ -22,11 +28,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IEEE754_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 HARNESS_DIR="${IEEE754_DIR}/differential"
+COMMITTED_ORACLE="${IEEE754_DIR}/tests/differential_oracle/src/lib.nr"
 
 ORACLE_ONLY=false
+UPDATE_COMMITTED=false
 for arg in "$@"; do
     case "$arg" in
         --oracle-only) ORACLE_ONLY=true ;;
+        --update-committed) UPDATE_COMMITTED=true ;;
     esac
 done
 
@@ -41,7 +50,7 @@ if ! command -v nargo &> /dev/null; then
 fi
 
 echo "[differential-harness] Building Rust harness..."
-cargo build --manifest-path "${HARNESS_DIR}/Cargo.toml" --release 2>&1
+cargo build --manifest-path "${HARNESS_DIR}/Cargo.toml" --release --locked 2>&1
 HARNESS_BIN="${HARNESS_DIR}/target/release/sparq-ieee754-differential"
 
 # Temporary directory for oracle and fault Nargo packages; cleaned on exit.
@@ -75,6 +84,12 @@ write_nargo_toml "${ORACLE_DIR}" "sparq_ieee754_differential_oracle"
 
 echo "[differential-harness] Generating oracle Noir test file..."
 "${HARNESS_BIN}" --output "${ORACLE_DIR}/src/lib.nr"
+
+if [ "${UPDATE_COMMITTED}" = "true" ]; then
+    echo "[differential-harness] Updating committed oracle: ${COMMITTED_ORACLE}"
+    "${HARNESS_BIN}" --output "${COMMITTED_ORACLE}"
+    echo "[differential-harness] Committed oracle updated (stage and commit the change)."
+fi
 
 echo "[differential-harness] Running nargo test (oracle mode)..."
 cd "${ORACLE_DIR}"

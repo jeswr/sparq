@@ -372,6 +372,25 @@ jobs:
           noirup --version "${NARGO_VERSION}"
           nargo --version
 
+      # Drift guard: the generator (main.rs) must match the committed oracle file.
+      # Regenerate: cd zk/ieee754 && bash scripts/run_differential_harness.sh --update-committed
+      - name: Drift guard -- committed oracle matches generator
+        if: steps.changes.outputs.zk == 'true'
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path zk/ieee754/differential/Cargo.toml --release --locked
+          HARNESS_BIN="zk/ieee754/differential/target/release/sparq-ieee754-differential"
+          COMMITTED="zk/ieee754/tests/differential_oracle/src/lib.nr"
+          TMPF="$(mktemp)"
+          trap 'rm -f "${TMPF}"' EXIT
+          "${HARNESS_BIN}" --output "${TMPF}"
+          diff "${TMPF}" "${COMMITTED}" || {
+            echo "ERROR: committed oracle is stale; regenerate with:" >&2
+            echo "  cd zk/ieee754 && bash scripts/run_differential_harness.sh --update-committed" >&2
+            exit 1
+          }
+          echo "[drift-guard] committed oracle is current."
+
       # Run the full differential harness including the inject-fault self-test.
       # The script exits non-zero if:
       #   a) the oracle nargo test fails (circuit diverges from oracle), or

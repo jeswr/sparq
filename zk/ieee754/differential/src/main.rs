@@ -295,7 +295,9 @@ fn f64_corners() -> Vec<u64> {
     ]
 }
 
-/// Non-NaN f16 bit patterns (corner cases only, for comparison tests).
+/// f16 bit patterns for comparison tests (NaN included).
+/// IEEE 754: any ordered comparison (eq/lt/le) with NaN is deterministically false;
+/// the output is a bool so NaN payload is irrelevant to the result.
 fn f16_cmp_corners() -> Vec<u16> {
     vec![
         0x0000, // +0
@@ -308,6 +310,8 @@ fn f16_cmp_corners() -> Vec<u16> {
         0x7BFF, // max normal
         0x3C00, // 1.0
         0xBC00, // -1.0
+        0x7E00, // quiet NaN (canonical) -- eq/lt/le with NaN always false
+        0x7C01, // signaling NaN -- same IEEE 754 ordered-comparison rule
     ]
 }
 
@@ -323,6 +327,8 @@ fn f32_cmp_corners() -> Vec<u32> {
         0x7F7FFFFF, // max normal
         0x3F800000, // 1.0
         0xBF800000, // -1.0
+        0x7FC00000, // quiet NaN (canonical) -- eq/lt/le with NaN always false
+        0x7F800001, // signaling NaN -- same IEEE 754 ordered-comparison rule
     ]
 }
 
@@ -338,6 +344,8 @@ fn f64_cmp_corners() -> Vec<u64> {
         0x7FEFFFFFFFFFFFFF, // max normal
         0x3FF0000000000000, // 1.0
         0xBFF0000000000000, // -1.0
+        0x7FF8000000000000, // quiet NaN (canonical) -- eq/lt/le with NaN always false
+        0x7FF0000000000001, // signaling NaN -- same IEEE 754 ordered-comparison rule
     ]
 }
 
@@ -370,7 +378,7 @@ fn write_header(out: &mut String, inject_fault: bool) {
         writeln!(out, "// INJECT-FAULT: one expected value has been bit-flipped for self-test.").unwrap();
         writeln!(out, "// nargo test on this file MUST fail -- that is the point.").unwrap();
     }
-    writeln!(out, "// DO NOT EDIT BY HAND.  Regenerate via scripts/run_differential_harness.sh.").unwrap();
+    writeln!(out, "// DO NOT EDIT BY HAND.  Regenerate: cd zk/ieee754 && bash scripts/run_differential_harness.sh --update-committed").unwrap();
     writeln!(out, "//").unwrap();
     writeln!(out, "// TCB: oracle is INDEPENDENT of sparq_ieee754 (native CPU hardware / half crate).").unwrap();
     writeln!(out, "// Sample coverage: {} random pairs per arithmetic op, {} per comparison op.", RANDOM_ARITH_PER_OP, RANDOM_CMP_PER_OP).unwrap();
@@ -516,6 +524,10 @@ fn gen_f32_sqrt(out: &mut String, rng: &mut Xorshift64) {
         0x00000001, // sqrt(min subnormal)
         0x00800000, // sqrt(min normal)
         0x7F7FFFFF, // sqrt(max normal)
+        // Negative real inputs: sparq_ieee754 codegen.nr:237 contract -- sqrt(x<0) = canonical NaN.
+        0xBF800000, // sqrt(-1.0) = canonical NaN
+        0x80800000, // sqrt(-min_normal) = canonical NaN
+        0xFF7FFFFF, // sqrt(-max_normal) = canonical NaN
     ];
 
     for (i, &a) in sqrt_inputs.iter().enumerate() {
@@ -538,7 +550,9 @@ fn gen_f32_sqrt(out: &mut String, rng: &mut Xorshift64) {
 }
 
 // ---------------------------------------------------------------------------
-// f32 comparison tests (no NaN inputs -- avoid NaN payload uncertainty)
+// Comparison tests (f32, f64, f16).
+// IEEE 754: any ordered comparison (eq/lt/le) with NaN is deterministically false;
+// comparison outputs are bools so NaN payload is irrelevant.  NaN corners included.
 // ---------------------------------------------------------------------------
 
 fn gen_f32_cmps(out: &mut String, rng: &mut Xorshift64) {
@@ -635,6 +649,10 @@ fn gen_f64_sqrt(out: &mut String, rng: &mut Xorshift64) {
         0x0000000000000001, // sqrt(min subnormal)
         0x0010000000000000, // sqrt(min normal)
         0x7FEFFFFFFFFFFFFF, // sqrt(max normal)
+        // Negative real inputs: sparq_ieee754 codegen.nr:237 contract -- sqrt(x<0) = canonical NaN.
+        0xBFF0000000000000, // sqrt(-1.0) = canonical NaN
+        0x8010000000000000, // sqrt(-min_normal) = canonical NaN
+        0xFFEFFFFFFFFFFFFF, // sqrt(-max_normal) = canonical NaN
     ];
 
     for (i, &a) in sqrt_inputs.iter().enumerate() {
@@ -745,6 +763,10 @@ fn gen_f16_sqrt(out: &mut String, rng: &mut Xorshift64) {
         0x0001, // sqrt(min subnormal)
         0x0400, // sqrt(min normal)
         0x7BFF, // sqrt(max normal)
+        // Negative real inputs: sparq_ieee754 codegen.nr:237 contract -- sqrt(x<0) = canonical NaN.
+        0xBC00, // sqrt(-1.0_f16) = canonical NaN
+        0x8400, // sqrt(-min_normal_f16) = canonical NaN
+        0xFBFF, // sqrt(-max_normal_f16) = canonical NaN
     ];
 
     for (i, &a) in sqrt_inputs.iter().enumerate() {
@@ -786,9 +808,11 @@ fn gen_f16_cmps(out: &mut String, rng: &mut Xorshift64) {
             }
         }
 
+        // Random inputs: mask clears exponent-LSB (bit 10) to avoid inf/NaN;
+        // sign bit (bit 15) is preserved so negative values are included.
         for i in 0..RANDOM_CMP_PER_OP {
-            let a = rng.next_u16() & 0x7BFF;
-            let b = rng.next_u16() & 0x7BFF;
+            let a = rng.next_u16() & 0xFBFF;
+            let b = rng.next_u16() & 0xFBFF;
             let expected = oracle_fn(a, b);
             writeln!(out, "    // random:{}", i).unwrap();
             writeln!(out, "{}", f16_cmp_line(a, b, expected, method)).unwrap();
@@ -1062,5 +1086,87 @@ mod tests {
     #[test]
     fn test_oracle_f64_sqrt_neg() {
         assert_eq!(oracle_f64_sqrt(0xBFF0000000000000), CANONICAL_NAN_F64);
+    }
+
+    // ---- Fix 1: f16 cmp random mask allows negative values ----
+
+    /// Verify the f16 cmp random mask 0xFBFF only clears the exponent-LSB (bit 10)
+    /// and preserves the sign bit (bit 15), so the corpus can include negative values.
+    /// The old (incorrect) mask 0x7BFF also cleared the sign bit -- positive-only corpus.
+    #[test]
+    fn test_f16_cmp_mask_preserves_sign() {
+        // 0xFBFF must preserve bit 15 (sign).
+        assert_eq!(0xFBFF_u16 & 0x8000, 0x8000, "mask 0xFBFF must preserve sign bit");
+        // 0xFBFF must clear bit 10 (exponent LSB -- prevents inf/NaN when all exp bits set).
+        assert_eq!(0xFBFF_u16 & 0x0400, 0x0000, "mask 0xFBFF must clear exponent LSB (bit 10)");
+        // Mirrors f32 mask 0xFF7FFFFF (clears f32 exponent LSB, bit 23).
+        assert_eq!(0xFF7FFFFF_u32 & 0x00800000, 0x0000_0000, "f32 mask clears bit 23");
+        // Mirrors f64 mask 0xFFEFFFFFFFFFFFFF (clears f64 exponent LSB, bit 52).
+        assert_eq!(0xFFEFFFFFFFFFFFFF_u64 & 0x0010000000000000, 0_u64, "f64 mask clears bit 52");
+        // Old mask would have cleared sign bit.
+        assert_eq!(0x7BFF_u16 & 0x8000, 0x0000, "old mask 0x7BFF incorrectly cleared sign bit");
+    }
+
+    // ---- Fix 2: cmp corners include NaN vectors ----
+
+    /// Comparison corner sets for all widths must include qNaN and sNaN.
+    /// IEEE 754: ordered comparisons (eq/lt/le) with NaN are deterministically false.
+    #[test]
+    fn test_cmp_corners_include_nan() {
+        let f16_c = f16_cmp_corners();
+        assert!(f16_c.contains(&0x7E00), "f16 cmp corners must include qNaN (0x7E00)");
+        assert!(f16_c.contains(&0x7C01), "f16 cmp corners must include sNaN (0x7C01)");
+
+        let f32_c = f32_cmp_corners();
+        assert!(f32_c.contains(&0x7FC00000_u32), "f32 cmp corners must include qNaN (0x7FC00000)");
+        assert!(f32_c.contains(&0x7F800001_u32), "f32 cmp corners must include sNaN (0x7F800001)");
+
+        let f64_c = f64_cmp_corners();
+        assert!(f64_c.contains(&0x7FF8000000000000_u64), "f64 cmp corners must include qNaN");
+        assert!(f64_c.contains(&0x7FF0000000000001_u64), "f64 cmp corners must include sNaN");
+    }
+
+    /// NaN comparisons (all ops) must return false per IEEE 754.
+    #[test]
+    fn test_nan_cmp_always_false() {
+        // f32 qNaN
+        assert!(!oracle_f32_eq(0x7FC00000, 0x3F800000), "qNaN eq normal must be false");
+        assert!(!oracle_f32_eq(0x3F800000, 0x7FC00000), "normal eq qNaN must be false");
+        assert!(!oracle_f32_eq(0x7FC00000, 0x7FC00000), "qNaN eq qNaN must be false");
+        assert!(!oracle_f32_lt(0x7FC00000, 0x3F800000), "qNaN lt normal must be false");
+        assert!(!oracle_f32_le(0x7FC00000, 0x3F800000), "qNaN le normal must be false");
+        // f32 sNaN
+        assert!(!oracle_f32_eq(0x7F800001, 0x3F800000), "sNaN eq normal must be false");
+        assert!(!oracle_f32_lt(0x7F800001, 0x7F800001), "sNaN lt sNaN must be false");
+        // f64 qNaN
+        assert!(!oracle_f64_eq(0x7FF8000000000000, 0x3FF0000000000000), "f64 qNaN eq normal must be false");
+        assert!(!oracle_f64_le(0x7FF8000000000000, 0x7FF8000000000000), "f64 qNaN le qNaN must be false");
+        // f16 qNaN via oracle
+        assert!(!oracle_f16_eq(0x7E00, 0x3C00), "f16 qNaN eq 1.0 must be false");
+        assert!(!oracle_f16_lt(0x7E00, 0x7E00), "f16 qNaN lt qNaN must be false");
+    }
+
+    // ---- Fix 3: sqrt corners include negative real inputs ----
+
+    /// Sqrt of negative real numbers must yield canonical NaN per the codegen.nr:237 contract.
+    #[test]
+    fn test_f32_sqrt_neg_corners() {
+        assert_eq!(oracle_f32_sqrt(0xBF800000), CANONICAL_NAN_F32, "sqrt(-1.0_f32) must be canonical NaN");
+        assert_eq!(oracle_f32_sqrt(0x80800000), CANONICAL_NAN_F32, "sqrt(-min_normal_f32) must be canonical NaN");
+        assert_eq!(oracle_f32_sqrt(0xFF7FFFFF), CANONICAL_NAN_F32, "sqrt(-max_normal_f32) must be canonical NaN");
+    }
+
+    #[test]
+    fn test_f64_sqrt_neg_corners() {
+        assert_eq!(oracle_f64_sqrt(0xBFF0000000000000), CANONICAL_NAN_F64, "sqrt(-1.0_f64) must be canonical NaN");
+        assert_eq!(oracle_f64_sqrt(0x8010000000000000), CANONICAL_NAN_F64, "sqrt(-min_normal_f64) must be canonical NaN");
+        assert_eq!(oracle_f64_sqrt(0xFFEFFFFFFFFFFFFF), CANONICAL_NAN_F64, "sqrt(-max_normal_f64) must be canonical NaN");
+    }
+
+    #[test]
+    fn test_f16_sqrt_neg_corners() {
+        assert_eq!(oracle_f16_sqrt(0xBC00), CANONICAL_NAN_F16, "sqrt(-1.0_f16) must be canonical NaN");
+        assert_eq!(oracle_f16_sqrt(0x8400), CANONICAL_NAN_F16, "sqrt(-min_normal_f16) must be canonical NaN");
+        assert_eq!(oracle_f16_sqrt(0xFBFF), CANONICAL_NAN_F16, "sqrt(-max_normal_f16) must be canonical NaN");
     }
 }
