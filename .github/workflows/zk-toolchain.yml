@@ -610,12 +610,14 @@ jobs:
             "xpath_test_fnyears_from_duration"
           )
           # Partition pass: count real vs stub-wired packages.
-          # A package is a stub if any .nr file in its src/ contains 'stub_'.
+          # A package is a stub if any .nr file in its src/ contains 'stub_' (stub-prefixed
+          # imports, assert(false) bodies) OR the generated-placeholder marker
+          # 'No qt3tests cases could be converted' (unconditional assert(false), no stub_).
           real_count=0
           stub_count=0
           known_failing_count=0
           for pkg_dir in test_packages/*/; do
-            if grep -r "stub_" "${pkg_dir}src/" --include="*.nr" -q 2>/dev/null; then
+            if grep -rE "stub_|No qt3tests cases could be converted" "${pkg_dir}src/" --include="*.nr" -q 2>/dev/null; then
               stub_count=$((stub_count + 1))
             else
               real_count=$((real_count + 1))
@@ -627,15 +629,15 @@ jobs:
           fi
           echo "Partition: ${real_count} real test_packages | ${stub_count} stub-wired (excluded)"
           echo "Gates on ${real_count} implemented-function test_packages;" \
-            "${stub_count} stub-wired packages (stub_* prefix imports, assert(false))" \
+            "${stub_count} stub-wired/placeholder packages (stub_* imports or unconvertible-qt3tests placeholders)" \
             "excluded, tracked by sq-3x7dl.15 for retirement."
           printf 'Partition: **%d real** (gated) | %d stub-wired (excluded)\n' \
             "${real_count}" "${stub_count}" >> "$GITHUB_STEP_SUMMARY"
           # Test pass: run nargo test in each real package directory.
           # set -e causes fail-fast exit on the first test failure.
           for pkg_dir in test_packages/*/; do
-            if grep -r "stub_" "${pkg_dir}src/" --include="*.nr" -q 2>/dev/null; then
-              continue  # stub-wired, excluded
+            if grep -rE "stub_|No qt3tests cases could be converted" "${pkg_dir}src/" --include="*.nr" -q 2>/dev/null; then
+              continue  # stub-wired or generated placeholder, excluded
             fi
             pkg_name=$(basename "${pkg_dir}")
             # Check KNOWN_FAILING list — skip with ::warning, never silently.
