@@ -71,6 +71,7 @@ iy3p = "iy3p"            # [OPUS-4.8] bead id `sq-iy3p` — typos splits on `-`,
 "1gir" = "1gir"           # [OPUS-4.8] bead id `sq-1gir` — typos splits on `-`, flags "gir"->"git"
 # Author surnames + tool/library identifiers flagged as typos.
 Hendler = "Hendler"      # Jim Hendler (BitMat paper author)
+hax = "hax"              # [FABLE] Cryspen's `hax` Rust→F*/Coq verification toolchain (research/mechanized-proof-program.md §4.1) — a real tool name, not "hex"
 
 [default.extend-words]
 ND = "ND"                # [OPUS-4.8] "NDAs" (Non-Disclosure Agreements) — typos splits camelCase NDAs into ND+As
