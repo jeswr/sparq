@@ -283,10 +283,18 @@ pub fn subtract_dates(a: XsdDate, b: XsdDate) -> XsdDayTimeDuration {
 /// fn:adjust-date-to-timezone - Adjust a date to a different timezone
 /// Since dates represent calendar dates (not instants), changing the timezone
 /// may change the date by one day if the timezone offset crosses midnight.
+///
+/// XPath F&O spec: treat the date as midnight in the source timezone, convert
+/// that instant to the target timezone, then take the date component.
+/// Formula: new_epoch_days = old_epoch_days + floor((new_tz - old_tz) / 1440)
+/// Example: 1983-11-17+00:00 adjusted to -10:00 gives 1983-11-16-10:00 because
+/// 1983-11-17T00:00+00:00 = 1983-11-16T14:00-10:00 (date shifts back). [SONNET-4.6]
 pub fn adjust_date_to_timezone(date: XsdDate, new_tz_offset_minutes: i16) -> XsdDate {
-    // For simplicity, we just update the timezone without adjusting the calendar date
-    // This is a simplified implementation - full XPath semantics involve more complex rules
-    XsdDate::new_with_tz(date.epoch_days, new_tz_offset_minutes)
+    // Compute the timezone difference in minutes and floor-divide by 1440 (minutes/day)
+    // to get the calendar-date shift. floor_div_i64 handles negative diffs correctly.
+    let tz_diff: i64 = (new_tz_offset_minutes as i64) - (date.tz_offset_minutes as i64);
+    let day_shift: i64 = floor_div_i64(tz_diff, 1440);
+    XsdDate::new_with_tz((date.epoch_days as i64 + day_shift) as i32, new_tz_offset_minutes)
 }
 
 /// fn:adjust-date-to-timezone with no argument - removes timezone
