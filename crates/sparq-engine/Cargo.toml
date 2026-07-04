@@ -313,3 +313,11 @@ sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
 # (the native writer emits JSON by hand and pulls in nothing). serde_json is already in
 # the workspace tree (sparq-server / the `service` feature).
 serde_json = "1"
+
+# [SONNET-4.6] sq-sqtk2.3 — register the `kani` cfg so the `#[cfg(all(kani, feature =
+# "vectorized"))]` bounded-proof harnesses in `reduce.rs` do not trip `-D warnings`
+# (unexpected_cfgs) on the normal build. `cargo kani` sets this cfg itself when it
+# model-checks; under a normal build the harness module is stripped. Mirrors
+# crates/sparq-core/Cargo.toml and crates/sparq-vectors/Cargo.toml.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
