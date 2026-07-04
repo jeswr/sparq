@@ -71,8 +71,27 @@ rif-xml = ["rif-core", "dep:quick-xml"]
 # NON-DEFAULT by design so the byte/bundle ratchets stay exactly as the hand-rolled path, and
 # the shared-join cost is measurable by toggling the flag. Pulls `sparq-substrate` (path dep,
 # `rows` + `join` features) ONLY when enabled — `sparq-core` + `smallvec` + `rustc-hash` are
-# already in this crate's tree, so it adds NO new transitive crate.
-substrate-join = ["dep:sparq-substrate", "dep:smallvec"]
+# already in this crate's tree, so it adds NO new transitive crate. ([FABLE-5] sq-pbz04.1.2:
+# the substrate slice features moved from the dep declaration into this entry so each
+# substrate-* feature pulls ONLY its own slice — `substrate-compare` alone does not drag the
+# join kernels in, and vice versa. Same net feature set as before when this flag is on.)
+substrate-join = ["dep:sparq-substrate", "dep:smallvec", "sparq-substrate/rows", "sparq-substrate/join"]
+# [FABLE-5] sq-pbz04.1.2 (epic sq-pbz04.1, substrate seam 3) — OPT-IN: the reasoner-side
+# adoption of the SHARED SPARQL term total order. The `compare` module implements
+# `sparq_substrate::compare::CompareTerm` for the reasoner's term representation (a
+# dictionary `Id` resolved against its `Dict`), so ordering ENTAILED solutions
+# (`compare::sort_ids` / `compare_ids`) is parity-identical to the SPARQL engine's
+# `ORDER BY` total order — pinned byte-for-byte against a REAL engine query by
+# tests/compare_parity.rs. Adopted MONOMORPHICALLY (no `Box<dyn>`/`&dyn` between the sort
+# loop and the comparator; scripts/check-no-dyn-dispatch.py guards the module) and purely
+# ADDITIVE — no materialiser calls it, so the entailed closure and its emission order are
+# byte-identical in both feature states. NON-DEFAULT by design (the substrate-join
+# posture): when off the module is cfg'd out entirely — the lean default build carries
+# zero of it, the byte/bundle ratchets are unchanged, and sparq-reason is never in the
+# wasm dependency graph anyway. Pulls the substrate `compare` (total order + trait) and
+# `numeric` (the exact Num/Dec tower the f64-collapse recheck needs) slices ONLY when
+# enabled — NO new transitive crate.
+substrate-compare = ["dep:sparq-substrate", "sparq-substrate/compare", "sparq-substrate/numeric"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -81,13 +100,15 @@ sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = fal
 oxrdf.workspace = true
 rustc-hash.workspace = true
 rayon = { workspace = true, optional = true }
-# [OPUS-4.8] sq-yk6or: the SHARED id-tuple join kernels (epic sq-qonbz Phase 3, merged #1300).
-# OPTIONAL: linked ONLY by the `substrate-join` feature, so the default / lean build never pulls
-# it. `rows` (the Row/Key/Posting aliases) + `join` (the four kernels + JoinKeys + Budget); NO
-# `default` (no `numeric`/`oxrdf` slice — the reasoner join needs only the id-tuple machinery).
-# It depends only on `sparq-core` (NOT `sparq-engine`), so there is no dependency cycle and the
-# reasoner does NOT pull the planner/serializers/service into its (tier-b wasm) bundle.
-sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-features = false, features = ["rows", "join"], optional = true }
+# [OPUS-4.8] sq-yk6or: the SHARED evaluation substrate (epic sq-qonbz, merged #1300).
+# OPTIONAL: linked ONLY by the `substrate-join` / `substrate-compare` features, so the
+# default / lean build never pulls it. NO `default`, and NO slice features here — each
+# consumer feature above names exactly the slices it needs (`substrate-join` -> rows+join;
+# `substrate-compare` -> compare+numeric; [FABLE-5] sq-pbz04.1.2), so enabling one does not
+# drag the other's machinery in. It depends only on `sparq-core` (NOT `sparq-engine`), so
+# there is no dependency cycle and the reasoner does NOT pull the planner/serializers/
+# service into its (tier-b wasm) bundle.
+sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-features = false, optional = true }
 # [OPUS-4.8] sq-yk6or: the `Row`/`Key` SmallVec aliases the substrate join kernels operate on.
 # OPTIONAL: linked ONLY by `substrate-join`. Same crate sparq-substrate uses, so the row
 # representation is byte-identical across the engine, the substrate and this reasoner.
@@ -103,3 +124,19 @@ regex = "1"
 # sq-pbz04.5.3 fix-3).  If non-UTF-8 RIF/XML support is ever needed, re-enable the
 # feature AND add a cargo-vet exemption per supply-chain/config.toml precedent.
 quick-xml = { version = "0.41", default-features = false, optional = true }
+
+[dev-dependencies]
+# [FABLE-5] sq-pbz04.1.2 / [SONNET-4.6]: the ordering-parity ORACLE for the
+# `substrate-compare` seam — tests/compare_parity.rs runs a REAL engine `ORDER BY`
+# over the same materialised closure and asserts the reasoner-side sort is
+# byte-identical. `sparq-reason` is publishable (no `publish = false`), so the
+# dev-dep MUST carry a `version` alongside `path` (crates.io cannot resolve
+# path-only dev-deps; same pattern as sparq-cli/nlq/mcp). NO cycle: sparq-engine
+# does not depend on sparq-reason.
+sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
+
+# [FABLE-5] sq-pbz04.1.2: the engine-vs-reasoner ordering-parity test — compiled only with
+# the feature it exercises, so default-feature `--all-targets` builds stay engine-light.
+[[test]]
+name = "compare_parity"
+required-features = ["substrate-compare"]

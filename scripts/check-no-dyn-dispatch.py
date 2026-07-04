@@ -84,6 +84,12 @@ SUBSTRATE_HOT_PATHS = [
     # probe's emit hook is a monomorphised closure and its budget the NoBudget ZST — never
     # a trait object between the probe loop and its comparison.
     "crates/sparq-rsp/src/eval.rs",
+    # [FABLE-5] sq-pbz04.1.2: the reasoner-side CompareTerm adoption (substrate seam 3) —
+    # sparq-reason's `compare` module orders entailed solutions through the shared
+    # compare_terms total order. The consumer-side invariant applies here too: IdTerm is a
+    # generic CompareTerm impl monomorphised into the sort loop — never a trait object
+    # between a comparison and the term observations it makes.
+    "crates/sparq-reason/src/compare.rs",
 ]
 
 # --- The dynamic-dispatch patterns. We match the three trait-OBJECT spellings; a

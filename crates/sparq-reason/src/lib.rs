@@ -5,6 +5,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
 mod incremental;
+// [FABLE-5] sq-pbz04.1.2 (epic sq-pbz04.1) — the opt-in substrate seam-3 adoption: the
+// SHARED SPARQL term total order (`sparq_substrate::compare`) implemented for the
+// reasoner's dictionary-id term representation, so entailed-solution ordering is
+// parity-identical to the engine's ORDER BY. Behind the `substrate-compare` feature; when
+// off the whole module is cfg'd out (the lean-core posture, like `substrate_join`/`dtype`).
+#[cfg(feature = "substrate-compare")]
+pub mod compare;
 #[cfg(feature = "substrate-join")]
 pub(crate) mod substrate_join;
 #[cfg(feature = "d-entail")]
