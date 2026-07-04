@@ -947,6 +947,64 @@ pub const SUITES: &[Suite] = &[
                bnode-homomorphism check; the 28 audited ABox / RBox / owl:unionOf / \
                equivalentClass-form divergences are reported separately, never faked as passes",
     },
+    // [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OWL 2 DIRECT-SEMANTICS arm's two
+    // ratchets (runner: `inference::dl_suite` + the crate-local `tests/dl_suite.rs`,
+    // behind the opt-in `dl-direct` feature → `sparq-reason-dl/dispatch`). HONESTLY
+    // tallied as sparq EXTENSION rows over the SCOPED FRAGMENT the layered
+    // `sparq-reason-dl` checker implements — **scoped fragment, NOT full OWL 2 DL** —
+    // and never folded into the standards-conformance total. TRI-STATE accounting
+    // {Pass, Fail, OutOfFragment(reason)}: an ABSTENTION IS NEVER A PASS, every
+    // divergent definitive verdict is pinned BY NAME with an audited mechanism in the
+    // runner (exact set equality), and the floors are EXACT-pinned in-runner (`==`,
+    // not `>=`, so abstention-inflation and regression BOTH fail CI). The
+    // profile-identification row checks POSITIVE `test:profile` tags only (the design
+    // record §4 fallback — L2's `In` is fragment-grammar membership and cannot refute
+    // full-profile membership, a limit the lane MEASURED); the Direct row runs
+    // consistency / inconsistency / positive- / negative-entailment through the L4
+    // `DirectChecker` dispatch under a PINNED deterministic count budget (wall-clock
+    // budgets banned). The dual-tagged tests' RDF-Based runs stay in the inference
+    // binary's RL `owl_suite` / the `el-suite` lane — one test may appear in both
+    // tallies because the two runs test DIFFERENT semantics (record §4). Floors read
+    // TEXTUALLY by `tests/scoreboard_floors.rs`.
+    Suite {
+        label: "OWL 2 DL profile identification (Direct arm)",
+        family: "sparq extension",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "dl_suite",
+            feature: "dl-direct",
+        },
+        ci_job: "inference-conformance",
+        ratchet_floor: 68,
+        floor_basis: "positive-tag membership passes, EXACT-pinned (sparq EXTENSION over the \
+                      L1/L2 ALCH-fragment checker — scoped fragment, NOT full OWL 2 DL and NOT \
+                      a W3C ProfileIdentificationTest conformance claim)",
+        note: "EXTENSION ratchet — the DIRECT-arm ProfileIdentificationTest cases whose \
+               POSITIVE test:profile tags the L2 syntactic checker reproduces through the \
+               REAL fail-closed L1 extraction + grammar walk; explicit-negative and species \
+               assertions are not checked (documented), abstentions are never passes, and \
+               the 30 singleton-intersection divergences are pinned by name",
+    },
+    Suite {
+        label: "OWL 2 Direct-Semantics consistency + entailment (scoped fragment)",
+        family: "sparq extension",
+        runner: Runner::FeatureGatedCrateTest {
+            krate: "sparq-conformance",
+            target: "dl_suite",
+            feature: "dl-direct",
+        },
+        ci_job: "inference-conformance",
+        ratchet_floor: 184,
+        floor_basis: "definitive expected verdicts through the L4 dispatch, EXACT-pinned \
+                      (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL)",
+        note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
+               negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
+               (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \
+               deterministic count budget; fail-closed abstentions are reported, never \
+               passes, and all 23 wrong-verdict divergences are pinned by name with audited \
+               mechanisms (incl. the L1 named-composite + orphan-list fidelity gaps this \
+               arm discovered, held open by follow-up beads)",
+    },
 ];
 
 /// Render the registry as one markdown scoreboard. This is a STATIC view of what
