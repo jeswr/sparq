@@ -79,33 +79,57 @@ pub fn timezone_from_date(date: XsdDate) -> XsdDayTimeDuration {
 // Date Comparison Functions
 // ============================================================================
 
-/// Compare two dates for equality
+/// Compare two dates for equality.
 ///
-/// This compares the epoch_days directly, which means dates are equal if they have
-/// the same calendar date representation (same year/month/day), regardless of timezone.
-/// This follows XPath date semantics where dates represent calendar dates, not instants.
+/// XPath F&O 3.1 op:date-equal: equivalent to comparing the dateTime values obtained
+/// by promoting each xs:date to xs:dateTime at midnight (fn:dateTime($d, 00:00:00)).
+/// When both operands carry timezone designators the midnight instant is compared in
+/// UTC, i.e. a_utc = epoch_days * 86400s - tz_offset.  Two dates with the same
+/// calendar day but different timezone offsets represent different UTC instants and are
+/// therefore NOT equal (e.g. 2008-01-20Z != 2008-01-20+09:00).
+/// Oracle: Python datetime(..., tzinfo=...) UTC-midnight comparison. [SONNET-4.6]
 pub fn date_equal(a: XsdDate, b: XsdDate) -> bool {
-    a.epoch_days == b.epoch_days
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    a_utc == b_utc
 }
 
-/// Check if first date is less than second
+/// Check if first date is less than second (UTC midnight comparison). [SONNET-4.6]
 pub fn date_less_than(a: XsdDate, b: XsdDate) -> bool {
-    a.epoch_days < b.epoch_days
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    a_utc < b_utc
 }
 
-/// Check if first date is greater than second
+/// Check if first date is greater than second (UTC midnight comparison). [SONNET-4.6]
 pub fn date_greater_than(a: XsdDate, b: XsdDate) -> bool {
-    a.epoch_days > b.epoch_days
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    a_utc > b_utc
 }
 
-/// Check if first date is less than or equal to second
+/// Check if first date is less than or equal to second (UTC midnight comparison). [SONNET-4.6]
 pub fn date_le(a: XsdDate, b: XsdDate) -> bool {
-    a.epoch_days <= b.epoch_days
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    a_utc <= b_utc
 }
 
-/// Check if first date is greater than or equal to second
+/// Check if first date is greater than or equal to second (UTC midnight comparison). [SONNET-4.6]
 pub fn date_ge(a: XsdDate, b: XsdDate) -> bool {
-    a.epoch_days >= b.epoch_days
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    a_utc >= b_utc
 }
 
 // ============================================================================
@@ -270,10 +294,19 @@ pub fn date_subtract_duration(date: XsdDate, dur: XsdDayTimeDuration) -> XsdDate
 
 /// op:subtract-dates
 /// Returns the dayTimeDuration between two dates (a - b)
+/// op:subtract-dates - XPath F&O 3.1
+///
+/// The result is the signed duration between the two UTC-midnight instants.
+/// UTC midnight of a date = epoch_days * 86400s - tz_offset_minutes * 60s.
+/// Simply subtracting epoch_days is wrong when tz offsets differ; we must
+/// convert both to UTC microseconds first.
+/// Oracle (Python datetime): verified test vectors 2 and 3. [SONNET-4.6]
 pub fn subtract_dates(a: XsdDate, b: XsdDate) -> XsdDayTimeDuration {
-    let day_diff = a.epoch_days - b.epoch_days;
-    let micros: i64 = (day_diff as i64) * 86_400_000_000;
-    XsdDayTimeDuration::from_signed_micros(micros)
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    XsdDayTimeDuration::from_signed_micros(a_utc - b_utc)
 }
 
 // ============================================================================
