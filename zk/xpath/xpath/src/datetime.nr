@@ -319,7 +319,19 @@ pub fn adjust_datetime_to_timezone(dt: XsdDateTime, new_tz_offset_minutes: i16) 
 }
 
 /// fn:adjust-dateTime-to-timezone with no argument - removes timezone
+///
+/// XPath F&O spec: "returns the xs:dateTime that is the value of $arg without any
+/// timezone information."  The LOCAL date-time representation is kept unchanged;
+/// only the timezone tag is stripped.
+///
+/// Representation invariant: epoch_microseconds is UTC, local = UTC + tz_offset.
+/// After stripping the timezone we want local_microseconds() to equal the *original*
+/// local time.  Since local_microseconds() = epoch + tz*60e6 on the new tz=0 result,
+/// we set epoch = original_local = dt.epoch_microseconds + dt.tz_offset_minutes*60e6.
+/// [SONNET-4.6]
 pub fn adjust_datetime_to_timezone_none(dt: XsdDateTime) -> XsdDateTime {
-    // Remove timezone but keep the same instant
-    XsdDateTime::new(dt.epoch_microseconds)
+    // Compute the original local representation (UTC epoch + timezone shift).
+    let local_micros: i64 =
+        dt.epoch_microseconds as i64 + (dt.tz_offset_minutes as i64) * 60_000_000;
+    XsdDateTime::new(local_micros as u64 as Field)
 }

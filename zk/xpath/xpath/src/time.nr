@@ -161,14 +161,19 @@ pub fn time_subtract_duration(time: XsdTime, dur: XsdDayTimeDuration) -> XsdTime
 // ============================================================================
 
 /// fn:adjust-time-to-timezone - Adjust a time to a different timezone
-/// The instant in time remains the same, only the local representation changes
+///
+/// The instant in time remains the same; only the local clock representation changes.
+/// Invariant: microseconds_since_midnight is the LOCAL time, utc = local - tz_offset.
+/// New local = utc + new_tz = (local - old_tz) + new_tz.
+/// Bug fixed: the previous code added only the *diff* (new_tz - old_tz) to utc_micros
+/// but utc_micros is already the UTC value, so it must add the FULL new offset, not
+/// the difference.  Correct formula: new_local = utc + new_tz_offset_minutes * 60e6.
+/// Oracle (Python datetime.timezone arithmetic) verifies each test vector. [SONNET-4.6]
 pub fn adjust_time_to_timezone(time: XsdTime, new_tz_offset_minutes: i16) -> XsdTime {
-    // Calculate the UTC microseconds
+    // UTC = local - old_tz; new_local = UTC + new_tz
     let utc_micros = time.utc_microseconds();
-    // Create a new time with the new timezone, adjusting for the offset difference
-    let offset_diff = new_tz_offset_minutes as i64 - time.tz_offset_minutes as i64;
-    let new_local_micros = utc_micros + offset_diff * 60_000_000;
-    // Normalize to 0-24 hour range
+    let new_local_micros = utc_micros + (new_tz_offset_minutes as i64) * 60_000_000;
+    // Normalize to 0-24 hour range (time-of-day wraps across midnight)
     let day_micros: i64 = 86_400_000_000;
     let normalized = ((new_local_micros % day_micros) + day_micros) % day_micros;
     XsdTime::new_with_tz(normalized as u64, new_tz_offset_minutes)

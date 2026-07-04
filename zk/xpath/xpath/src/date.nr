@@ -79,33 +79,57 @@ pub fn timezone_from_date(date: XsdDate) -> XsdDayTimeDuration {
 // Date Comparison Functions
 // ============================================================================
 
-/// Compare two dates for equality
+/// Compare two dates for equality.
 ///
-/// This compares the epoch_days directly, which means dates are equal if they have
-/// the same calendar date representation (same year/month/day), regardless of timezone.
-/// This follows XPath date semantics where dates represent calendar dates, not instants.
+/// XPath F&O 3.1 op:date-equal: equivalent to comparing the dateTime values obtained
+/// by promoting each xs:date to xs:dateTime at midnight (fn:dateTime($d, 00:00:00)).
+/// When both operands carry timezone designators the midnight instant is compared in
+/// UTC, i.e. a_utc = epoch_days * 86400s - tz_offset.  Two dates with the same
+/// calendar day but different timezone offsets represent different UTC instants and are
+/// therefore NOT equal (e.g. 2008-01-20Z != 2008-01-20+09:00).
+/// Oracle: Python datetime(..., tzinfo=...) UTC-midnight comparison. [SONNET-4.6]
 pub fn date_equal(a: XsdDate, b: XsdDate) -> bool {
-    a.epoch_days == b.epoch_days
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    a_utc == b_utc
 }
 
-/// Check if first date is less than second
+/// Check if first date is less than second (UTC midnight comparison). [SONNET-4.6]
 pub fn date_less_than(a: XsdDate, b: XsdDate) -> bool {
-    a.epoch_days < b.epoch_days
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    a_utc < b_utc
 }
 
-/// Check if first date is greater than second
+/// Check if first date is greater than second (UTC midnight comparison). [SONNET-4.6]
 pub fn date_greater_than(a: XsdDate, b: XsdDate) -> bool {
-    a.epoch_days > b.epoch_days
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    a_utc > b_utc
 }
 
-/// Check if first date is less than or equal to second
+/// Check if first date is less than or equal to second (UTC midnight comparison). [SONNET-4.6]
 pub fn date_le(a: XsdDate, b: XsdDate) -> bool {
-    a.epoch_days <= b.epoch_days
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    a_utc <= b_utc
 }
 
-/// Check if first date is greater than or equal to second
+/// Check if first date is greater than or equal to second (UTC midnight comparison). [SONNET-4.6]
 pub fn date_ge(a: XsdDate, b: XsdDate) -> bool {
-    a.epoch_days >= b.epoch_days
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    a_utc >= b_utc
 }
 
 // ============================================================================
@@ -270,10 +294,19 @@ pub fn date_subtract_duration(date: XsdDate, dur: XsdDayTimeDuration) -> XsdDate
 
 /// op:subtract-dates
 /// Returns the dayTimeDuration between two dates (a - b)
+/// op:subtract-dates - XPath F&O 3.1
+///
+/// The result is the signed duration between the two UTC-midnight instants.
+/// UTC midnight of a date = epoch_days * 86400s - tz_offset_minutes * 60s.
+/// Simply subtracting epoch_days is wrong when tz offsets differ; we must
+/// convert both to UTC microseconds first.
+/// Oracle (Python datetime): verified test vectors 2 and 3. [SONNET-4.6]
 pub fn subtract_dates(a: XsdDate, b: XsdDate) -> XsdDayTimeDuration {
-    let day_diff = a.epoch_days - b.epoch_days;
-    let micros: i64 = (day_diff as i64) * 86_400_000_000;
-    XsdDayTimeDuration::from_signed_micros(micros)
+    let a_utc: i64 =
+        (a.epoch_days as i64) * 86_400_000_000 - (a.tz_offset_minutes as i64) * 60_000_000;
+    let b_utc: i64 =
+        (b.epoch_days as i64) * 86_400_000_000 - (b.tz_offset_minutes as i64) * 60_000_000;
+    XsdDayTimeDuration::from_signed_micros(a_utc - b_utc)
 }
 
 // ============================================================================
@@ -283,10 +316,18 @@ pub fn subtract_dates(a: XsdDate, b: XsdDate) -> XsdDayTimeDuration {
 /// fn:adjust-date-to-timezone - Adjust a date to a different timezone
 /// Since dates represent calendar dates (not instants), changing the timezone
 /// may change the date by one day if the timezone offset crosses midnight.
+///
+/// XPath F&O spec: treat the date as midnight in the source timezone, convert
+/// that instant to the target timezone, then take the date component.
+/// Formula: new_epoch_days = old_epoch_days + floor((new_tz - old_tz) / 1440)
+/// Example: 1983-11-17+00:00 adjusted to -10:00 gives 1983-11-16-10:00 because
+/// 1983-11-17T00:00+00:00 = 1983-11-16T14:00-10:00 (date shifts back). [SONNET-4.6]
 pub fn adjust_date_to_timezone(date: XsdDate, new_tz_offset_minutes: i16) -> XsdDate {
-    // For simplicity, we just update the timezone without adjusting the calendar date
-    // This is a simplified implementation - full XPath semantics involve more complex rules
-    XsdDate::new_with_tz(date.epoch_days, new_tz_offset_minutes)
+    // Compute the timezone difference in minutes and floor-divide by 1440 (minutes/day)
+    // to get the calendar-date shift. floor_div_i64 handles negative diffs correctly.
+    let tz_diff: i64 = (new_tz_offset_minutes as i64) - (date.tz_offset_minutes as i64);
+    let day_shift: i64 = floor_div_i64(tz_diff, 1440);
+    XsdDate::new_with_tz((date.epoch_days as i64 + day_shift) as i32, new_tz_offset_minutes)
 }
 
 /// fn:adjust-date-to-timezone with no argument - removes timezone
