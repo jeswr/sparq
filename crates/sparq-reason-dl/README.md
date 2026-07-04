@@ -6,17 +6,19 @@
 
 **Opt-in OWL 2 Direct-Semantics support** for the [sparq](../../README.md) RDF engine — a
 layered, fail-closed Direct-Semantics checker. **Built: L1** (structural **ALCH** model +
-fail-closed reverse RDF mapping), **L2** (syntactic EL/QL/RL profile checker), and **L3** (the
-terminating **ALCH tableau** — consistency + class satisfiability). It is a **separate crate** —
-`sparq-core`, `sparq-engine`, and the wasm build carry zero Direct-Semantics code, deps, or cost
-by default; DL is engaged only by depending on this crate.
+fail-closed reverse RDF mapping), **L2** (syntactic EL/QL/RL profile checker), **L3** (the
+terminating **ALCH tableau** — consistency + class satisfiability), and **L4** (the
+fragment-dispatch checker + entailment-by-refutation, behind the opt-in `dispatch` feature).
+It is a **separate crate** — `sparq-core`, `sparq-engine`, and the wasm build carry zero
+Direct-Semantics code, deps, or cost by default; DL is engaged only by depending on this crate.
 
 > **Honest scope.** This crate does **not** implement OWL 2 DL. The tableau is sound and
 > complete **only for the exact ALCH fragment** (named classes, ⊤/⊥, ⊓/⊔/¬, ∃/∀ over named
 > object properties, GCIs, `rdfs:subPropertyOf`, ground ABox) — anything else is refused
 > fail-closed as `Unknown(OutOfFragment)` BEFORE reasoning, and deterministic count-budget
-> exhaustion is `Unknown(ResourceBudget)`, never a verdict. The fragment-dispatch checker (L4)
-> lands in bead sq-pbz04.4.4. See the design record for the full scope and deferral ledger.
+> exhaustion is `Unknown(ResourceBudget)`, never a verdict. The L4 dispatch narrows its RL/EL
+> verdicts further behind explicit completeness guards (see the `check` module docs for the
+> per-branch table). See the design record for the full scope and deferral ledger.
 
 ## 🚀 Quickstart
 
@@ -81,7 +83,20 @@ are tri-state (`Satisfiable` / `Unsatisfiable` / `Unknown`); budgets are determi
 completeness argument (Baader–Sattler 2001) is reproduced in the `tableau` module docs. `nnf`
 supplies negation normal form and the finite subexpression closure the argument rests on.
 
-**Reserved (empty stub):** `check` (L4 fragment dispatch + entailment-by-refutation).
+**Fragment dispatch (L4, bead sq-pbz04.4.4, feature `dispatch`):**
+`check::DirectChecker::consistency` dispatches an extracted ontology to the first matching
+branch — **RL** (`sparq-reason` materialization + clash scan; `Inconsistent` sound via
+*checked* Theorem PR1 preconditions, `Consistent` only past a divergence guard over the
+constructs implicated in the documented RL rule-set divergences), **EL** (`sparq-reason-el`
+classification; verdicts only for a pure ⊤-free EL+⊥ TBox with zero skipped axioms), **QL**
+(always `Unknown` — DL-Lite_R consistency is the QL workstream's, not duplicated), or the
+**ALCH tableau** (complete for the fragment). `check::DirectChecker::entailment` decides
+premise ⊨ conclusion per conclusion-axiom by sound refutation encodings on the tableau
+(GCI / class-assertion / the fresh-class role-assertion trick + the record's desugarings);
+unencoded kinds abstain. Every verdict carries its producing `Branch`; every guard fails
+closed (`Unknown(reason)`, never a guess). The `dispatch` feature pulls `sparq-reason` +
+`sparq-reason-el` as optional deps — **off by default**, so L1–L3 stay dependency-light.
+
 **Deferred** (each rejected, never mis-mapped): inverse roles, cardinality/functionality,
 nominals (`owl:oneOf`/`owl:hasValue`), transitivity, `sameAs`/`differentFrom`, datatypes, keys —
 with a named reason and unlock path in the design record's deferral ledger.
