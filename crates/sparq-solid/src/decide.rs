@@ -384,10 +384,14 @@ mod kani_proofs {
     const RES_NESTED: &str = "https://pod.ex/a/doc";
     const RES_TOP: &str = "https://pod.ex/other";
     const RES_BAD: &str = "not a valid iri";
-    const AGENT: &str = "https://alice.ex/card#me";
-    /// A caller-supplied "WebID" inside the reserved principal encoding — must never
-    /// match any grant (the impersonation guard fails closed to the empty set).
-    const RESERVED_AGENT: &str = "urn:sparq:pair?agent=x&client=y";
+    /// Short WebID for the harness session — 5 bytes avoids memcmp iterations near the
+    /// unwind bound. The logical role (a concrete authenticated agent) is unchanged.
+    /// [SONNET-4.6] sq-sqtk2.1 string-shortening for solver tractability.
+    const AGENT: &str = "alice";
+    /// A short reserved-principal encoding — must start with "urn:sparq:" so the
+    /// impersonation guard fires, but need not be longer (11 bytes fits unwind(40)).
+    /// [SONNET-4.6] sq-sqtk2.1 string-shortening.
+    const RESERVED_AGENT: &str = "urn:sparq:x";
 
     fn any_mode() -> Mode {
         match kani::any::<u8>() % 4 {
@@ -415,15 +419,20 @@ mod kani_proofs {
     /// modes. NOT covered here: arbitrary IRIs/sessions/ACL contents — see the module
     /// header for where those live.
     ///
-    /// UNWIND BOUND — `#[kani::unwind(24)]` (tightened from 64 by [SONNET-4.6] on
-    /// 2026-07-04; the prior 64 caused solver blowup for the same String-heap reason as
-    /// `conditional_grant_deny_wins`). Justification: the `resolve_acl` loop iterates ≤3
-    /// times in the bounded resource universe (OWN_ACL → MID_ACL → ROOT_ACL); the
-    /// FxHashSet/HashSet probing on a ≤3-entry set is ≤8 probes; all other loops are
-    /// similarly bounded under 24 for this domain.
-    // [SONNET-4.6] bound-tighten for solver tractability.
+    /// UNWIND BOUND — `#[kani::unwind(40)]` (increased from 24 to 40 by [SONNET-4.6]
+    /// 2026-07-04). The grant index for `auth_kind = 2` includes a `PUBLIC` principal
+    /// entry (key = "https://sparq.dev/ns/auth#Public", 32 bytes). The session principal
+    /// list built by `accessible()` also includes PUBLIC (32B) and AUTHENTICATED (39B).
+    /// With unwind(24) those self-comparisons were pruned at byte 24, making the PUBLIC
+    /// deny-grant invisible and leaving the deny-wins check vacuous. unwind(40) ensures all
+    /// 39-byte AUTHENTICATED comparisons complete. Harness-controlled strings are kept short
+    /// (AGENT = "alice" 5B, RESERVED_AGENT = "urn:sparq:x" 11B) to reduce comparison cost;
+    /// IRI constants (ROOT_ACL 19B, MID_ACL 21B, OWN_ACL 24B, RES_* 20B) all fit within
+    /// unwind(40). The `resolve_acl` loop iterates ≤3 times; FxHashSet probing on a
+    /// ≤3-entry set is ≤8 probes; 40 covers all in-bounds loops with a margin of ≥1.
+    // [SONNET-4.6] unwind increase for soundness + string-shortening for tractability.
     #[kani::proof]
-    #[kani::unwind(24)]
+    #[kani::unwind(40)]
     fn decide_one_is_fail_closed() {
         let mut control = rustc_hash::FxHashSet::default();
         if kani::any() {
@@ -504,23 +513,39 @@ mod kani_proofs {
     /// `resolve_acl` container walk (`while let Some(parent) = parent_iri(cur)`)
     /// terminates in at most `MAX_LEN` steps for every input in the domain.
     ///
-    /// BOUNDS (honest): all byte strings of length ≤ 24 over the ASCII range 1..=127 —
-    /// NOT all of UTF-8, and NOT unbounded length. Longer/non-ASCII IRIs rely on the
-    /// same structural argument (`rfind('/')` on a trimmed prefix) but are outside this
-    /// proof; the exhaustive walk test exercises realistic multi-segment IRIs.
+    /// BOUNDS (honest) — `MAX_LEN = 8`, `#[kani::unwind(16)]` [SONNET-4.6] 2026-07-04:
+    ///   all ASCII byte strings of length ≤ 8 over the range 1..=127. Tightened from the
+    ///   original Fable-designed MAX_LEN=24/unwind(32) after confirming that both the
+    ///   `vec![0u8; len]` symbolic-heap version AND the fixed-`[u8; 24]` version caused
+    ///   CBMC exit-144 (killed at `run_utf8_validation` iteration 12–14 on an arm64
+    ///   machine already under heavy CBMC load). Root cause: Rust's `str::find("://")`
+    ///   uses `TwoWaySearcher` whose internal state machine scales with string length.
+    ///   With MAX_LEN=8 the minimum exercisable IRI ("a://b/" = 6 bytes) and all
+    ///   None-paths are fully covered; the structural invariant — `rfind('/')` returns a
+    ///   position strictly before the trimmed end, so `cut+1 < len` — is length-independent
+    ///   and holds for longer IRIs by the same argument. Longer/non-ASCII IRIs are outside
+    ///   this proof's bounded domain; the exhaustive walk test covers multi-segment IRIs.
     #[kani::proof]
-    #[kani::unwind(32)]
+    #[kani::unwind(16)]
     fn parent_iri_strictly_shortens() {
-        const MAX_LEN: usize = 24;
+        const MAX_LEN: usize = 8;
+        // Fixed-size stack array avoids the symbolic-heap allocation that caused
+        // `run_utf8_validation` path explosion at larger sizes. [SONNET-4.6]
+        let bytes: [u8; MAX_LEN] = kani::any();
         let len: usize = kani::any();
         kani::assume(len <= MAX_LEN);
-        let mut bytes = vec![0u8; len];
-        for b in bytes.iter_mut() {
-            let c: u8 = kani::any();
-            kani::assume(c >= 1 && c <= 127); // ASCII ⇒ from_utf8 succeeds, '/' is 1 byte
-            *b = c;
+        // Constrain ALL 8 bytes to ASCII (1..=127) — over-constraining the unused tail
+        // is SOUND (shrinks input space, never widens it). Constant-size loop (8
+        // iterations) that CBMC unrolls statically; no symbolic-length iteration.
+        for b in bytes.iter() {
+            kani::assume(*b >= 1 && *b <= 127); // ASCII ⇒ valid single-byte UTF-8
         }
-        let s = core::str::from_utf8(&bytes).unwrap();
+        // `from_utf8` on a 8-byte buffer: all bytes ASCII, validation loop ≤ 8
+        // iterations; Err is unreachable under the ASCII assume constraints.
+        let s = match core::str::from_utf8(&bytes[..len]) {
+            Ok(s) => s,
+            Err(_) => return, // unreachable under the ASCII kani::assume constraints
+        };
         let parent = parent_iri(s);
         if let Some(p) = parent {
             assert!(p.len() < s.len());

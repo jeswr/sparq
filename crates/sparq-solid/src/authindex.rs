@@ -887,11 +887,16 @@ mod kani_proofs {
     use super::kani_support::index_with_grants;
     use super::*;
 
-    const AGENT: &str = "https://alice.ex/card#me";
+    /// Short WebID for the harness session — 5 bytes avoids memcmp iterations near the
+    /// unwind bound. The logical role (a concrete authenticated agent) is unchanged.
+    /// [SONNET-4.6] sq-sqtk2.1 string-shortening for solver tractability.
+    const AGENT: &str = "alice";
     /// Principal universe: index 0 matches every session; 1 and 2 match iff the session
     /// carries an agent. Order is load-bearing for `session_matches`.
     const PRINCIPALS: [&str; 3] = [PUBLIC, AUTHENTICATED, AGENT];
-    const GRAPHS: [&str; 2] = ["https://pod.ex/g0", "https://pod.ex/g1"];
+    /// Short graph names — 2 bytes each. Graph values are LABELS in the deny-wins algebra;
+    /// their string content is irrelevant to the property. [SONNET-4.6] sq-sqtk2.1.
+    const GRAPHS: [&str; 2] = ["g0", "g1"];
 
     fn any_mode() -> Mode {
         match kani::any::<u8>() % 4 {
@@ -925,8 +930,14 @@ mod kani_proofs {
 
     fn build_index(slots: &[Option<GrantSpec>]) -> AuthIndex {
         let mut grants: Vec<(&str, Mode, bool, &str)> = Vec::new();
-        for s in slots.iter().flatten() {
-            grants.push((PRINCIPALS[s.principal], s.mode, s.is_allow, GRAPHS[s.graph]));
+        // Explicit if-let: avoids `FlattenCompat`'s symbolic-state explosion in CBMC.
+        // `slots.iter().flatten()` generates a `FlattenCompat<SliceIter<Option<_>>, OptionIter<_>>`
+        // state machine that CBMC must unwind symbolically, causing exit-144 at unwind(64).
+        // Plain `if let Some` is O(N) concrete branching with no adapter state. [SONNET-4.6]
+        for s in slots {
+            if let Some(s) = s {
+                grants.push((PRINCIPALS[s.principal], s.mode, s.is_allow, GRAPHS[s.graph]));
+            }
         }
         index_with_grants(&grants)
     }
@@ -948,23 +959,26 @@ mod kani_proofs {
 
     /// The SPEC: `∪ allows ∖ ∪ denies` over the raw grant vector, as per-graph membership
     /// flags — plain loops, no shared code with `accessible`.
+    ///
+    /// [SONNET-4.6] 2026-07-04 — Rewritten to eliminate TWO iterator adapters: the outer
+    /// `iter_mut().enumerate()` (adds `Enumerate` state) and the inner `iter().flatten()`
+    /// (`FlattenCompat`). Both caused CBMC exit-144. Replaced with direct array indexing +
+    /// plain `if let Some` loops — O(N) concrete branching, no adapter state, same semantics.
     fn reference(slots: &[Option<GrantSpec>], has_agent: bool, qmode: Mode) -> [bool; 2] {
-        let mut out = [false; 2];
-        for (gi, o) in out.iter_mut().enumerate() {
-            let mut allowed = false;
-            let mut denied = false;
-            for s in slots.iter().flatten() {
-                if s.graph == gi && s.mode == qmode && session_matches(has_agent, s.principal) {
+        let mut allowed = [false; 2];
+        let mut denied = [false; 2];
+        for s in slots {
+            if let Some(s) = s {
+                if s.mode == qmode && session_matches(has_agent, s.principal) {
                     if s.is_allow {
-                        allowed = true;
+                        allowed[s.graph] = true;
                     } else {
-                        denied = true;
+                        denied[s.graph] = true;
                     }
                 }
             }
-            *o = allowed && !denied;
         }
-        out
+        [allowed[0] && !denied[0], allowed[1] && !denied[1]]
     }
 
     /// The result set as per-graph membership flags over the bounded graph universe.
@@ -979,8 +993,21 @@ mod kani_proofs {
     /// `accessible(s, mode)` equals the reference `∪ allows ∖ ∪ denies` — deny wins over
     /// any matching allow — and the returned vector is strictly sorted (hence duplicate-
     /// free; with membership equality this pins the result to EXACTLY the reference set).
+    ///
+    /// UNWIND BOUND — `#[kani::unwind(40)]` (increased from 24 to 40 by [SONNET-4.6] on
+    /// 2026-07-04 to cover the production constants `PUBLIC` (32 bytes) and
+    /// `AUTHENTICATED` (39 bytes) that `accessible()` uses when building the session
+    /// principal list. With unwind(24) those comparisons were cut at byte 24, causing
+    /// `assume(false)` to prune the PUBLIC-grant and AUTHENTICATED-grant paths entirely —
+    /// a vacuity hole for those two principals. unwind(40) ensures all 39-byte comparisons
+    /// complete before the bound is reached. Harness-controlled strings are kept short
+    /// (AGENT = "alice" 5 bytes, GRAPHS = "g0"/"g1" 2 bytes) so their comparisons are
+    /// a small constant. After the FlattenCompat → `if let` fix the deepest other loops
+    /// are `for p in &principals` (≤3) + FxHashMap probe (≤4) + `extend` (≤2); 40 covers
+    /// all in-bounds paths with a margin of ≥1 beyond the 39-byte AUTHENTICATED constant.
+    // [SONNET-4.6] unwind increase + string-shortening for soundness + tractability.
     #[kani::proof]
-    #[kani::unwind(64)]
+    #[kani::unwind(40)]
     fn accessible_equals_deny_wins_reference() {
         let slots = [any_grant_slot(), any_grant_slot(), any_grant_slot()];
         let has_agent: bool = kani::any();
@@ -996,8 +1023,13 @@ mod kani_proofs {
     /// PROPERTY (A-3 monotone): adding one ALLOW grant never revokes — the accessible set
     /// under the extended index contains the accessible set under the base index, for
     /// every base vector (2 slots), extra allow grant, session, and mode in the bounds.
+    ///
+    /// UNWIND BOUND — `#[kani::unwind(40)]` (same rationale as
+    /// `accessible_equals_deny_wins_reference`: covers PUBLIC (32B) and AUTHENTICATED
+    /// (39B) production constants; see that harness for the full justification).
+    // [SONNET-4.6] unwind increase for soundness (covers PUBLIC/AUTHENTICATED).
     #[kani::proof]
-    #[kani::unwind(64)]
+    #[kani::unwind(40)]
     fn accessible_monotone_in_allows() {
         let slots = [any_grant_slot(), any_grant_slot()];
         let extra = GrantSpec {
@@ -1020,8 +1052,13 @@ mod kani_proofs {
 
     /// PROPERTY (A-3 antitone): adding one DENY grant never widens — the accessible set
     /// under the extended index is contained in the base one, same bounds as above.
+    ///
+    /// UNWIND BOUND — `#[kani::unwind(40)]` (same rationale as
+    /// `accessible_equals_deny_wins_reference`: covers PUBLIC (32B) and AUTHENTICATED
+    /// (39B) production constants; see that harness for the full justification).
+    // [SONNET-4.6] unwind increase for soundness (covers PUBLIC/AUTHENTICATED).
     #[kani::proof]
-    #[kani::unwind(64)]
+    #[kani::unwind(40)]
     fn accessible_antitone_in_denies() {
         let slots = [any_grant_slot(), any_grant_slot()];
         let extra = GrantSpec {
@@ -1050,15 +1087,17 @@ mod kani_proofs {
     /// (Exception matchers and time windows are OUTSIDE this harness's bounds — see the
     /// module header.)
     ///
-    /// UNWIND BOUND — `#[kani::unwind(24)]` (tightened from 64 by [SONNET-4.6] on
-    /// 2026-07-04; the prior 64 was conservative and caused solver blowup on the
-    /// ConditionalGrant String-field symbolic heap). Justification: the deepest loop in
-    /// the bounded domain is `for p in &principals` (≤3) and `for c in &self.cond` (≤1);
-    /// HashMap probe on a ≤1-entry table is ≤4 probes; Vec/HashSet operations add ≤4 more
-    /// steps. 24 fully covers all in-bounds paths with a comfortable margin.
-    // [SONNET-4.6] bound-tighten for solver tractability.
+    /// UNWIND BOUND — `#[kani::unwind(40)]` (increased from 24 to 40 by [SONNET-4.6]
+    /// 2026-07-04). In addition to the PUBLIC/AUTHENTICATED rationale (see
+    /// `accessible_equals_deny_wins_reference`), the conditional grant path calls
+    /// `client_ok = g.client == ANY_CLIENT` where `ANY_CLIENT` = "https://sparq.dev/ns/
+    /// auth#AnyClient" (35 bytes) and `g.client = ANY_CLIENT.to_owned()` (35 bytes).
+    /// The self-comparison needs 35 memcmp iterations; unwind(40) covers it with a
+    /// margin of 5. `ANY_ISSUER` (35 bytes) has the same cost. The deepest other loops
+    /// remain ≤4 (table probe, principal list, cond list); 40 covers all in-bounds paths.
+    // [SONNET-4.6] unwind increase for soundness (covers PUBLIC/AUTHENTICATED/ANY_CLIENT).
     #[kani::proof]
-    #[kani::unwind(24)]
+    #[kani::unwind(40)]
     fn conditional_grant_deny_wins() {
         let slot = any_grant_slot();
         let c_agent = (kani::any::<u8>() % 3) as usize;
