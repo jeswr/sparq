@@ -207,9 +207,9 @@ match as_conjunctive_query(&q) { Ok(_cq) => {}, Err(CqError::OutOfScope(why)) =>
 - **Oracle-tested; the FORMAL DL-Lite_R suite GRADUATED to a pinned floor (sq-qo1a9).** Validated against a hand-checked DL-Lite_R oracle (`sparq-reason-ql/tests/oracle.rs`, incl. tree-witness + minimisation cases), because no Rust PerfectRef reference exists to diff against. There is **no consistency checking**. On the **formal DL-Lite_R suite** — the hand-derived certain-answer oracle from `sq-g19x0`, every case a conjunctive query within sound rewriting — the rewrite is **sound AND complete case by case**: `rewrite_production`'s UCQ, evaluated over the **unmodified ABox** through the real engine, returns **exactly** the hand-derived certain answers. That is now a **pinned floor** (`sparq-conformance`'s `tests/ql_dllite_suite.rs`, opt-in `ql-experimental`; `QL_DLLITE_FLOOR = 11` sound-and-complete cases), registered as a **`sparq extension`** row in the central scoreboard (`scoreboard::SUITES`) and tallied **separately** — **NOT folded into the standards-conformance total**, and **NOT a full-OWL-2-QL-conformance claim** (there is no runnable normative W3C QL certain-answer suite; the W3C QL material is structural). Like the RIF-Core / RSP / BM25 extension rows, it pins a faithful sparq-OWN oracle. `QL_DLLITE_FLOOR` is read textually by `tests/scoreboard_floors.rs`, so the mirrored scoreboard value cannot drift.
 - **The BROADER `pr:QL` `sparql11/entailment` arm stays EXPERIMENTAL / OutOfScope (sq-kuvu3, opt-in `sparq-conformance/ql-experimental`).** That set is **not** the formal DL-Lite_R suite: it mixes intensional / non-DL-Lite certain-answer cases the sound rewriting fragment cannot answer. The rewriter runs over every `sd:EntailmentProfile pr:QL` case — each conjunctive query rewritten by `rewrite_production` and evaluated over the **unmodified data**, then compared to the suite oracle — and the harness reports **HONESTLY as experimental / OutOfScope, NEVER a graduated conformance pass** (NO floor `const` for this arm, NO row summed into any total). Outcomes (all OutOfScope): an **ABSTAIN** when the fail-closed CQ-shape gate rejects a non-conjunctive / non-DL-Lite query (never a guess), a **computed result-equivalent** evidence row when the rewritten UCQ genuinely matches the oracle, a **computed-DIVERGENT** row when it does not (an honest gap — e.g. an intensional `?c rdfs:subClassOf …` TBox query a certain-ABox-answer rewriter cannot answer), or an **inconclusive** setup-failure row. The runner is `sparq-conformance`'s `tests/ql_experimental_arm.rs` (asserts the honesty invariants — every row OutOfScope, at least one fail-closed abstain — NOT a pass-count floor); the inference binary prints the experimental QL section only with the feature on.
 
-## OWL 2 Direct Semantics (`sparq-reason-dl`, separate opt-in crate — L1 structural model + L2 profile checker built)
+## OWL 2 Direct Semantics (`sparq-reason-dl`, separate opt-in crate — L1 structural model + L2 profile checker + L3 ALCH tableau built)
 
-The three profile reasoners above (RL / EL / QL) each cover a *tractable* OWL fragment; **OWL 2 Direct Semantics** (the model-theoretic DL semantics) covers the boolean heart of DL — arbitrary `⊔` / `¬` / `∀` — that none of them can reach. `sparq-reason-dl` is a **separate opt-in crate** building a **layered, fail-closed Direct-Semantics checker**; **layers L1 (structural model + extractor) and L2 (syntactic EL/QL/RL profile checker) are built**; it does **NO semantic reasoning**. HONEST SCOPE: this is **not** full OWL 2 DL (SROIQ(D) satisfiability is 2NEXPTIME-complete and deliberately out of scope) — it is a scoped **ALCH-fragment** effort whose L1 delivers only:
+The three profile reasoners above (RL / EL / QL) each cover a *tractable* OWL fragment; **OWL 2 Direct Semantics** (the model-theoretic DL semantics) covers the boolean heart of DL — arbitrary `⊔` / `¬` / `∀` — that none of them can reach. `sparq-reason-dl` is a **separate opt-in crate** building a **layered, fail-closed Direct-Semantics checker**; **layers L1 (structural model + extractor), L2 (syntactic EL/QL/RL profile checker), and L3 (ALCH tableau — the first layer that does semantic reasoning) are built**. HONEST SCOPE: this is **not** full OWL 2 DL (SROIQ(D) satisfiability is 2NEXPTIME-complete and deliberately out of scope) — it is a scoped **ALCH-fragment** effort, sound/complete only within the argued fragment. L1 delivers:
 
 - **A structural OWL model** (`sparq_reason_dl::model`) — `Axiom` / `ClassExpression` / `ObjectPropertyExpression` typed enums for the ALCH fragment: named classes, `owl:Thing`/`owl:Nothing`, `owl:intersectionOf` (⊓), `owl:unionOf` (⊔), `owl:complementOf` (¬), `owl:someValuesFrom` (∃R.C) and `owl:allValuesFrom` (∀R.C) over **named object properties**; GCIs, `owl:equivalentClass`, `owl:disjointWith`, `rdfs:subPropertyOf`, `rdfs:domain`/`rdfs:range`, and a ground ABox. Purely structural — **no semantics attached at L1**.
 - **A FAIL-CLOSED reverse RDF mapping** — `extract(&Dict, &[[Id; 3]]) -> Result<Ontology, ExtractError>` maps the `(Dict, triples)` substrate into the model per the W3C *Mapping to RDF Graphs* tables restricted to ALCH. **A single out-of-fragment or malformed triple aborts the WHOLE extraction** with a typed `ExtractError`, rather than being silently dropped: the (future) checker must never reason over a graph it only *partially* understood — a dropped axiom can flip a consistency verdict. Understood in full, or refused. The rejection taxonomy has five arms — `OutOfFragment` (cardinality / nominals / inverses / `owl:sameAs` / property characteristics / chains / keys), `DataConstruct` (datatypes / data properties — no concrete domain in L1), `MalformedList`, `MalformedClassExpression`, `Unclassifiable` (an undeclared predicate that cannot be mapped soundly) — while annotations, declarations, and ontology headers are recognised and ignored.
@@ -224,12 +224,33 @@ Convenience methods: `Membership::is_in()` / `is_not_in()` / `is_unknown()`;
 `ProfileSet::in_all()` / `in_any()`. An empty ontology is `In` all three profiles. Terminating
 by construction — no semantic reasoning, just a grammar walk over the finite acyclic structural model.
 
-**Not yet built (reserved stubs, later beads):** the terminating ALCH tableau (L3,
-`nnf`/`tableau`), the fragment-dispatch checker + entailment-by-refutation (L4, `check`), and
-the `sparq-conformance` DIRECT-arm (L5). Deferred constructs — inverse roles,
-cardinality/functionality, nominals, transitivity, `sameAs`/`differentFrom`, datatypes, keys —
-are each **rejected, never mis-mapped**, with a named reason and unlock path in the design
-record's deferral ledger. See `research/owl2-direct-semantics-scoping.md`.
+**L3 — terminating ALCH tableau (`nnf` + `tableau`, bead sq-pbz04.4.3):** NOW BUILT — the
+consistency / class-satisfiability core. `tableau::consistency(&Ontology, Budget)` and
+`tableau::class_satisfiability(&ClassExpression, &Ontology, Budget)` return a tri-state
+`Verdict` — `Satisfiable`, `Unsatisfiable`, or `Unknown(UnknownReason)` — and
+`tableau::consistency_from_extraction(&Result<Ontology, ExtractError>, Budget)` is the
+fail-closed RDF-level entry: ANY extraction failure yields `Unknown(OutOfFragment)` BEFORE the
+tableau starts (the checker never reasons over a partially-understood graph). The engine is a
+completion-forest tableau with GCI internalisation, `⊓`/`⊔`/`∃`/`∀`/GCI rules matched modulo
+the `rdfs:subPropertyOf` closure, **ancestor subset blocking** (sufficient precisely because
+ALCH has no inverse roles), and chronological backtracking over `⊔`-branches. The full
+termination / soundness / completeness argument — citing Baader–Sattler 2001, including why
+subset blocking would be insufficient with inverses — is reproduced in the `tableau` module
+docs (§3–§5). Budgets are **deterministic counts only** (`Budget { max_nodes,
+max_rule_applications }`; wall-clock budgets banned); exhaustion yields
+`Unknown(ResourceBudget)`, **never a verdict**. `nnf` provides the negation-normal-form
+rewrite (`nnf` / `nnf_complement` / `is_nnf`) and the finite `subexpression_closure` the
+termination argument rests on. HONEST BOUNDARY: verdicts are sound/complete ONLY for the exact
+ALCH fragment (named classes, ⊤/⊥, ⊓/⊔/¬, ∃/∀ over named properties, GCIs, `subPropertyOf`,
+ground ABox) — never beyond it; the implementation is not claimed worst-case optimal (ALC+GCI
+satisfiability is EXPTIME-complete).
+
+**Not yet built (reserved stubs, later beads):** the fragment-dispatch checker +
+entailment-by-refutation (L4, `check`) and the `sparq-conformance` DIRECT-arm (L5). Deferred
+constructs — inverse roles, cardinality/functionality, nominals, transitivity,
+`sameAs`/`differentFrom`, datatypes, keys — are each **rejected, never mis-mapped**, with a
+named reason and unlock path in the design record's deferral ledger. See
+`research/owl2-direct-semantics-scoping.md`.
 
 ## Common recipes
 
