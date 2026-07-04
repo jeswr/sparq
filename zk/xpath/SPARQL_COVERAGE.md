@@ -49,16 +49,16 @@ This document details the implementation status of SPARQL 1.1 functions in noir_
 | SPARQL Function | XPath Function | Status | Notes |
 |----------------|----------------|--------|-------|
 | STRLEN | fn:string-length | ✅ | Implemented as `string_length` |
-| SUBSTR | fn:substring | ❌ | Not possible in Noir - requires byte-to-string conversion |
-| UCASE | fn:upper-case | ❌ | Not possible in Noir - requires byte-to-string conversion |
-| LCASE | fn:lower-case | ❌ | Not possible in Noir - requires byte-to-string conversion |
+| SUBSTR | fn:substring | ✅ | Implemented as `substring` - returns `([u8; N], u32)` byte array tuple. **Caveat**: uses BYTE positions (not codepoint positions as in XPath spec), exact parity with F&O only for ASCII content. For multi-byte UTF-8, position-based composition (e.g. `substring(s, i, string_length(s))`) is incorrect (sq-hjvte tracks codepoint-positional variant). |
+| UCASE | fn:upper-case | ✅ | Implemented as `upper_case` - returns `([u8; N], u32)` byte array tuple. |
+| LCASE | fn:lower-case | ✅ | Implemented as `lower_case` - returns `([u8; N], u32)` byte array tuple. |
 | STRSTARTS | fn:starts-with | ✅ | Implemented as `starts_with` |
-| STRENDS | fn:ends-with | ✅ | Implemented as `ends_with` |
+| STRENDS | fn:ends-with | ✅ | Implemented as `ends_with` - anchored to logical string length (pre-NUL), not buffer capacity. |
 | CONTAINS | fn:contains | ✅ | Implemented as `contains` |
-| STRBEFORE | fn:substring-before | ❌ | Not possible in Noir - requires byte-to-string conversion |
-| STRAFTER | fn:substring-after | ❌ | Not possible in Noir - requires byte-to-string conversion |
-| ENCODE_FOR_URI | fn:encode-for-uri | 🔮 | Deferred - requires URI encoding logic |
-| CONCAT | fn:concat | ❌ | Not possible in Noir - requires byte-to-string conversion |
+| STRBEFORE | fn:substring-before | ✅ | Implemented as `substring_before` - returns `([u8; N], u32)` byte array tuple. |
+| STRAFTER | fn:substring-after | ✅ | Implemented as `substring_after` - returns `([u8; N], u32)` byte array tuple. |
+| ENCODE_FOR_URI | fn:encode-for-uri | ✅ | Implemented as `encode_for_uri` - returns `([u8; R], u32)` byte array tuple. |
+| CONCAT | fn:concat | ✅ | Implemented as `concat_bytes` - returns `([u8; R], u32)` byte array tuple. Joins two byte arrays with separator support via `string_join_two`. |
 | langMatches | fn:lang-matches | 🔮 | Deferred - language matching complex |
 | REGEX | fn:matches | 🔮 | Deferred - regex complex in ZK |
 | REPLACE | fn:replace | 🔮 | Deferred - regex complex in ZK |
