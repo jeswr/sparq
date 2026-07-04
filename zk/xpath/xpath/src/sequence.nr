@@ -56,31 +56,38 @@ pub fn avg_int<let N: u32>(arr: [i64; N]) -> i64 {
 }
 
 /// fn:min for integer arrays
-/// Returns the minimum value
-/// Panics if array is empty
-pub fn min_int_seq<let N: u32>(arr: [i64; N]) -> i64 {
-    assert(N > 0, "Cannot compute minimum of empty sequence");
-    let mut result = arr[0];
-    for i in 1..N {
-        if arr[i] < result {
+/// Returns (value, present). XPath F&O: fn:min(()) is the EMPTY SEQUENCE,
+/// not an error, so an empty input must stay provable: present == false
+/// models the empty result (value is 0 in that case) and the caller
+/// branches on it. An assert here would make any circuit containing an
+/// empty-sequence min unsatisfiable. The (value, bool) tuple follows this
+/// crate's emptiness convention (cf. string_to_integer, fn_number_from_string).
+pub fn min_int_seq<let N: u32>(arr: [i64; N]) -> (i64, bool) {
+    let mut result: i64 = 0;
+    let mut present: bool = false;
+    for i in 0..N {
+        if (!present) | (arr[i] < result) {
             result = arr[i];
         }
+        present = true;
     }
-    result
+    (result, present)
 }
 
 /// fn:max for integer arrays
-/// Returns the maximum value
-/// Panics if array is empty
-pub fn max_int_seq<let N: u32>(arr: [i64; N]) -> i64 {
-    assert(N > 0, "Cannot compute maximum of empty sequence");
-    let mut result = arr[0];
-    for i in 1..N {
-        if arr[i] > result {
+/// Returns (value, present). XPath F&O: fn:max(()) is the EMPTY SEQUENCE,
+/// not an error; present == false models the empty result (value is 0).
+/// See min_int_seq for the rationale.
+pub fn max_int_seq<let N: u32>(arr: [i64; N]) -> (i64, bool) {
+    let mut result: i64 = 0;
+    let mut present: bool = false;
+    for i in 0..N {
+        if (!present) | (arr[i] > result) {
             result = arr[i];
         }
+        present = true;
     }
-    result
+    (result, present)
 }
 
 // ============================================================================
@@ -108,29 +115,43 @@ pub fn avg_int_partial<let N: u32>(arr: [i64; N], len: u32) -> i64 {
 }
 
 /// Minimum for arrays with explicit length
-pub fn min_int_partial<let N: u32>(arr: [i64; N], len: u32) -> i64 {
-    assert(len > 0, "Cannot compute minimum of empty sequence");
+/// Returns (value, present): fn:min(()) is the empty sequence per XPath F&O,
+/// so len == 0 yields present == false (value 0) instead of an unsatisfiable
+/// assert. len is a runtime witness here, so this is the load-bearing case:
+/// an assert(len > 0) would make provability data-dependent.
+/// The len <= N assert stays: exceeding the array is a caller-contract
+/// violation (a genuine error), not an empty sequence.
+pub fn min_int_partial<let N: u32>(arr: [i64; N], len: u32) -> (i64, bool) {
     assert(len <= N, "Length exceeds array size");
-    let mut result = arr[0];
-    for i in 1..N {
-        if (i < len) & (arr[i] < result) {
-            result = arr[i];
+    let mut result: i64 = 0;
+    let mut present: bool = false;
+    for i in 0..N {
+        if i < len {
+            if (!present) | (arr[i] < result) {
+                result = arr[i];
+            }
+            present = true;
         }
     }
-    result
+    (result, present)
 }
 
 /// Maximum for arrays with explicit length
-pub fn max_int_partial<let N: u32>(arr: [i64; N], len: u32) -> i64 {
-    assert(len > 0, "Cannot compute maximum of empty sequence");
+/// Returns (value, present); len == 0 yields present == false (value 0).
+/// See min_int_partial for the rationale.
+pub fn max_int_partial<let N: u32>(arr: [i64; N], len: u32) -> (i64, bool) {
     assert(len <= N, "Length exceeds array size");
-    let mut result = arr[0];
-    for i in 1..N {
-        if (i < len) & (arr[i] > result) {
-            result = arr[i];
+    let mut result: i64 = 0;
+    let mut present: bool = false;
+    for i in 0..N {
+        if i < len {
+            if (!present) | (arr[i] > result) {
+                result = arr[i];
+            }
+            present = true;
         }
     }
-    result
+    (result, present)
 }
 
 // ============================================================================
@@ -769,12 +790,49 @@ fn test_avg_int() {
 #[test]
 fn test_min_max_int_seq() {
     let arr: [i64; 5] = [3, 1, 4, 1, 5];
-    assert(min_int_seq(arr) == 1);
-    assert(max_int_seq(arr) == 5);
+    assert(min_int_seq(arr) == (1, true));
+    assert(max_int_seq(arr) == (5, true));
 
     let negative: [i64; 3] = [-5, 0, 5];
-    assert(min_int_seq(negative) == -5);
-    assert(max_int_seq(negative) == 5);
+    assert(min_int_seq(negative) == (-5, true));
+    assert(max_int_seq(negative) == (5, true));
+
+    // Single-element sequence: the element itself, present
+    let single: [i64; 1] = [42];
+    assert(min_int_seq(single) == (42, true));
+    assert(max_int_seq(single) == (42, true));
+}
+
+#[test]
+fn test_min_max_int_seq_empty() {
+    // fn:min(()) / fn:max(()) = () per XPath F&O: this test EXECUTES
+    // min/max on an empty sequence, so the circuit stays satisfiable
+    // (with the old assert this test would abort, i.e. be unprovable).
+    let empty: [i64; 0] = [];
+    let (min_val, min_present) = min_int_seq(empty);
+    assert(!min_present);
+    assert(min_val == 0);
+    let (max_val, max_present) = max_int_seq(empty);
+    assert(!max_present);
+    assert(max_val == 0);
+}
+
+#[test]
+fn test_min_max_int_partial_empty() {
+    // len == 0 (a runtime witness, the load-bearing circuit case):
+    // empty in -> present == false out, no unsatisfiable assert.
+    let arr: [i64; 4] = [7, 8, 9, 10];
+    assert(min_int_partial(arr, 0) == (0, false));
+    assert(max_int_partial(arr, 0) == (0, false));
+}
+
+#[test(should_fail_with = "Cannot compute average of empty sequence")]
+fn test_avg_int_partial_empty_still_errors() {
+    // fn:avg over an empty group deliberately stays an error in this
+    // library (see avg_int_partial); the empty-sequence fix is scoped
+    // to min/max only.
+    let arr: [i64; 3] = [1, 2, 3];
+    let _ = avg_int_partial(arr, 0);
 }
 
 #[test]
@@ -788,8 +846,8 @@ fn test_partial_aggregates() {
     assert(avg_int_partial(arr, 2) == 15);
 
     // Min/max of first 3
-    assert(min_int_partial(arr, 3) == 10);
-    assert(max_int_partial(arr, 3) == 30);
+    assert(min_int_partial(arr, 3) == (10, true));
+    assert(max_int_partial(arr, 3) == (30, true));
 }
 
 #[test]

@@ -160,8 +160,8 @@ This document details the implementation status of SPARQL 1.1 functions in noir_
 |----------------|--------|-------|
 | COUNT | ✅ | Implemented as `count` |
 | SUM | ⚠️ | Implemented as `sum_int` for integers only |
-| MIN | ⚠️ | Implemented as `min_int_seq` for integers only |
-| MAX | ⚠️ | Implemented as `max_int_seq` for integers only |
+| MIN | ⚠️ | Implemented as `min_int_seq` for integers only; returns `(value, present)` — empty input yields `present == false` (fn:min(()) = ()), not an error |
+| MAX | ⚠️ | Implemented as `max_int_seq` for integers only; returns `(value, present)` — empty input yields `present == false` (fn:max(()) = ()), not an error |
 | AVG | ⚠️ | Implemented as `avg_int` for integers only |
 | GROUP_CONCAT | 🔮 | Requires string support |
 | SAMPLE | 🔮 | Requires more complex logic |

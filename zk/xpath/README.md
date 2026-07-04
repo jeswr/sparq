@@ -256,8 +256,14 @@ fn example() {
     assert(count(values) == 5);
     assert(sum_int(values) == 150);
     assert(avg_int(values) == 30);
-    assert(min_int_seq(values) == 10);
-    assert(max_int_seq(values) == 50);
+    // fn:min/fn:max return (value, present); present == false is the
+    // empty sequence (fn:min(()) = () per F&O -- never an assert, so an
+    // empty input keeps the circuit satisfiable). fn:avg over an empty
+    // sequence remains an error in this library.
+    assert(min_int_seq(values) == (10, true));
+    assert(max_int_seq(values) == (50, true));
+    let empty: [i64; 0] = [];
+    assert(min_int_seq(empty) == (0, false));
 }
 ```
 
