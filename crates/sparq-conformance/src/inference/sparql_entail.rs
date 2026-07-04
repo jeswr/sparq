@@ -542,7 +542,10 @@ pub enum QlHoldReason {
         negative_axioms: usize,
     },
     /// Condition (4) failed: the test uses a named-graph (`qt:graphData`)
-    /// dataset; per-graph rewriting semantics are not wired (design record §8).
+    /// dataset, or the query carries its own `FROM`/`FROM NAMED` dataset clause
+    /// (which the CQ-shape gate DROPS rather than honours — so it must be held
+    /// here, never silently ignored); per-graph rewriting semantics are not
+    /// wired (design record §8).
     NamedGraphDataset,
     /// Condition (5) failed: the regime-coincidence guard — the crate computes
     /// CERTAIN ANSWERS (an anonymous existential witness can support an answer)
@@ -611,7 +614,8 @@ impl QlHoldReason {
                 negative_axioms
             ),
             QlHoldReason::NamedGraphDataset => {
-                "named-graph QL dataset not wired (per-graph rewriting semantics unsettled)"
+                "named-graph or query-carried (FROM) QL dataset not wired (per-graph \
+                 rewriting semantics unsettled)"
                     .to_string()
             }
             QlHoldReason::PendingCoincidence(why) => format!(
@@ -836,6 +840,15 @@ fn ql_graduation_one(entry: &TestEntry) -> QlGraduationVerdict {
         Ok(q) => q,
         Err(e) => return Held(QlHoldReason::Inconclusive(format!("query parse error: {}", e))),
     };
+    // CONDITION (4, continued) — the query must not carry its own `FROM`/`FROM
+    // NAMED` dataset clause either: the CQ-shape gate DROPS `dataset` rather
+    // than rejecting it, so an overriding dataset would otherwise be silently
+    // ignored and the rewrite evaluated over the wrong graph. No current
+    // `pr:QL` case carries one (verified over the pinned rdf-tests revision);
+    // this keeps condition (4) complete against future re-pins. [FABLE-5]
+    if query_carries_dataset(&query) {
+        return Held(QlHoldReason::NamedGraphDataset);
+    }
 
     // CONDITION (1a) — the REAL fail-closed CQ-shape gate (never re-implemented
     // here: graduation calls the same `as_conjunctive_query` every rewriting
@@ -1137,6 +1150,20 @@ fn classify_rewrite_abstain(reason: &str) -> QlHoldReason {
         return QlHoldReason::PermanentlyOutside(reason.to_string());
     }
     QlHoldReason::UnclassifiedAbstain(reason.to_string())
+}
+
+/// True iff the query carries its own `FROM`/`FROM NAMED` dataset clause
+/// (condition (4): the CQ-shape gate drops `dataset` rather than honouring it,
+/// so a dataset-carrying query must be HELD, never rewritten over the wrong
+/// graph). [FABLE-5] sq-pbz04.3.4
+#[cfg(feature = "ql-experimental")]
+fn query_carries_dataset(query: &Query) -> bool {
+    match query {
+        Query::Select { dataset, .. }
+        | Query::Construct { dataset, .. }
+        | Query::Describe { dataset, .. }
+        | Query::Ask { dataset, .. } => dataset.is_some(),
+    }
 }
 
 /// True iff every property path in the query uses only the NON-recursive forms
@@ -1817,6 +1844,26 @@ mod ql_tests {
         assert_eq!(r.label(), "permanently-outside");
         let r = classify_rewrite_abstain("something the taxonomy has never seen");
         assert_eq!(r.label(), "unclassified-abstain");
+    }
+
+    #[test]
+    fn query_carried_dataset_clauses_are_held_not_dropped() {
+        // Condition (4, continued): the CQ-shape gate DROPS a query's own
+        // FROM/FROM NAMED dataset, so the graduation predicate must detect and
+        // hold it — a dataset-carrying query must never be rewritten over the
+        // default graph as if the clause were not there.
+        assert!(query_carries_dataset(&parse(&format!(
+            "{PRE} SELECT ?x FROM <http://ex/g> WHERE {{ ?x rdf:type :A }}"
+        ))));
+        assert!(query_carries_dataset(&parse(&format!(
+            "{PRE} SELECT ?x FROM NAMED <http://ex/g> WHERE {{ ?x rdf:type :A }}"
+        ))));
+        assert!(query_carries_dataset(&parse(&format!(
+            "{PRE} ASK FROM <http://ex/g> {{ ?x rdf:type :A }}"
+        ))));
+        assert!(!query_carries_dataset(&parse(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A }}"
+        ))));
     }
 
     #[test]
