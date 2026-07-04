@@ -65,7 +65,7 @@ let g = Graph::from_parts(dict, triples);
   Off by default; byte/bundle ratchets unchanged.
 - **Shared term total order** (opt-in `substrate-compare`) — `compare::IdTerm` implements the
   substrate's `CompareTerm` for dictionary ids, so ordering entailed solutions
-  (`compare::sort_ids` / `compare_ids`) is parity-identical to the SPARQL engine's `ORDER BY`
+  (`compare::sort_ids` / `compare::compare_ids`) is parity-identical to the SPARQL engine's `ORDER BY`
   total order (pinned byte-for-byte against a real engine query by `tests/compare_parity.rs`).
   Monomorphic (no trait object on the sort loop) and purely additive — no materialiser calls
   it, so the entailed closure and its emission order are unchanged. Off by default.
