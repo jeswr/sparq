@@ -81,13 +81,15 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   for its own term type — a **monomorphisation seam**, never a `dyn` object. `exact_cmp` is the
   f64-collapse recheck: when the lenient `as_f64` arm ties, it recovers the exact order of
   distinct integers beyond 2^53 / high-precision decimals so `ORDER BY` / `MIN` / `MAX` agree
-  with the relational `=`/`<`. Pure-`std`: links nothing new. The order laws (reflexivity,
-  antisymmetry-consistency, per-literal-kind transitivity incl. the 2^53 collapse, within-class
-  totality) are machine-checked by Kani bounded-proof harnesses over a model `CompareTerm` impl
-  — `cargo kani -p sparq-substrate --features compare` (sq-sqtk2.4). Honest boundary: the
-  proofs cover the shared ALGORITHM over the bounded model, not the engine's `Value` impl, and
-  mixed literal-KIND literal pairs are NOT transitive (machine-checked witnesses in the
-  harness module document exactly where the law breaks).
+  with the relational `=`/`<`. Pure-`std`: links nothing new. The order laws — reflexivity and
+  within-class totality (both over the **NaN-free** domain only: an `xsd:double NaN` makes the
+  comparator partial, bead sq-wjl8i), antisymmetry-consistency (NaN included), and
+  per-literal-kind transitivity incl. the 2^53 collapse — are machine-checked by Kani
+  bounded-proof harnesses over a model `CompareTerm` impl — `cargo kani -p sparq-substrate
+  --features compare` (sq-sqtk2.4). Honest boundary: the proofs cover the shared ALGORITHM
+  over the bounded model (per-harness domains documented in the module), not the engine's
+  `Value` impl, and mixed literal-KIND literal pairs are NOT transitive (machine-checked
+  witnesses in the harness module document exactly where the law breaks).
 
 All features are **off by default**. The crate is `forbid(unsafe_code)`.
 
