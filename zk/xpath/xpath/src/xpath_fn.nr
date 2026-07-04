@@ -121,10 +121,12 @@ pub use crate::sequence::sum_int as sum;
 // fn:avg (integer version)
 pub use crate::sequence::avg_int as avg;
 
-// fn:min (integer sequence version)
+// fn:min (integer sequence version) - returns (value, present);
+// present == false is the empty sequence (fn:min(()) = () per F&O)
 pub use crate::sequence::min_int_seq as min;
 
-// fn:max (integer sequence version)
+// fn:max (integer sequence version) - returns (value, present);
+// present == false is the empty sequence (fn:max(()) = () per F&O)
 pub use crate::sequence::max_int_seq as max;
 
 // fn:head
