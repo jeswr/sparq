@@ -2094,8 +2094,8 @@ jobs:
         # arm. SEPARATE from the binary ratchet above so the default inference binary
         # stays byte-for-byte unchanged. Drives the DIRECT-sanctioned arm of the OWL WG
         # export through the REAL sparq-reason-dl pipeline: the L2 syntactic profile
-        # checker (vs the export's EXPLICIT positive test:profile tags + explicit
-        # owl:NegativePropertyAssertion negatives) and the L4 fragment-dispatch
+        # checker (vs the export's POSITIVE test:profile tags ONLY — the explicit-negative
+        # direction was measured and not adopted, runner module docs) and the L4 fragment-dispatch
         # DirectChecker (consistency / inconsistency / positive- / negative-entailment)
         # under a PINNED deterministic count budget. TRI-STATE accounting — an
         # ABSTENTION IS NEVER A PASS — with the two floors EXACT-pinned in-runner

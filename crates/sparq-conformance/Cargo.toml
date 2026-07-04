@@ -108,9 +108,11 @@ el-suite = ["dep:sparq-reason-el"]
 # `sparq-reason-dl/dispatch` (the L4 fragment-dispatch DirectChecker; depending on the
 # crate alone gives only L1–L3). Two lanes with TRI-STATE accounting
 # {Pass, Fail, OutOfFragment(reason)} — an ABSTENTION IS NEVER A PASS: the
-# profile-identification lane (the L2 syntactic checker vs the export's EXPLICIT positive
-# `test:profile` tags + explicit `owl:NegativePropertyAssertion` negatives — nothing is
-# inferred from a MISSING tag) and the Direct consistency/entailment lane (the L4
+# profile-identification lane (the L2 syntactic checker vs the export's POSITIVE
+# `test:profile` tags ONLY — the explicit-negative direction was MEASURED and not adopted,
+# because L2's `In` is fragment-grammar membership and cannot refute full-profile
+# membership (runner module docs); nothing is inferred from a MISSING tag) and the
+# Direct consistency/entailment lane (the L4
 # dispatch under a PINNED deterministic count budget). HONESTLY a sparq EXTENSION ratchet
 # over the SCOPED FRAGMENT the layered checker implements — NOT full OWL 2 DL, and never
 # folded into standards-conformance totals; the dual-tagged tests' RDF-Based runs stay in

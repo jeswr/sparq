@@ -262,9 +262,11 @@ typed `UnknownReason`, never a guessed verdict.
 sq-pbz04.4.5):** NOW BUILT. `inference::dl_suite::run_direct_arm` runs the DIRECT-sanctioned
 arm of the OWL WG export (`tests/w3c/owl2/all.rdf`) with **tri-state accounting
 `{Pass, Fail, OutOfFragment(reason)}` — an abstention is NEVER a pass**: a
-profile-identification lane (the L2 checker vs the export's EXPLICIT positive `test:profile`
-tags + explicit `owl:NegativePropertyAssertion` negatives; nothing inferred from a missing
-tag; the `test:species` DL/FULL check stays deferred) and a Direct
+profile-identification lane (the L2 checker vs the export's POSITIVE `test:profile` tags
+ONLY — the explicit-negative `owl:NegativePropertyAssertion` direction was MEASURED and not
+adopted, because L2's `In` is fragment-grammar membership and cannot refute full-profile
+membership (runner module docs); nothing inferred from a missing tag; the `test:species`
+DL/FULL check stays deferred) and a Direct
 consistency/inconsistency/entailment lane (the L4 `DirectChecker` under a PINNED
 deterministic count budget). Floors are EXACT-pinned in `tests/dl_suite.rs`
 (`DL_PROFILE_FLOOR` / `DL_DIRECT_FLOOR`, `==` not `>=`, so abstention-inflation and
