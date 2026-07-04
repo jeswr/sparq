@@ -215,9 +215,28 @@ function PaletteItem({
 }
 
 export function CommandPalette({ children }: { children: React.ReactNode }) {
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpenState] = React.useState(false);
   const router = useRouter();
   const { theme, setTheme, resolvedTheme } = useTheme();
+
+  // [FABLE-5] sq-ymr2e.9 — ESC must RESTORE focus to the INVOKER (WAI-ARIA dialog focus
+  // contract; asserted by e2e/a11y-keyboard.spec.ts). The palette has no Radix
+  // <Dialog.Trigger> (it opens from a global ⌘K/Ctrl-K listener or the header button), and
+  // without one the close left focus on <body> — invisible to a keyboard/AT user. So every
+  // open path records document.activeElement and onCloseAutoFocus returns focus there.
+  const invokerRef = React.useRef<HTMLElement | null>(null);
+  const setOpen = React.useCallback((next: boolean | ((v: boolean) => boolean)) => {
+    setOpenState((v) => {
+      const n = typeof next === "function" ? next(v) : next;
+      if (n && !v) {
+        // Capturing inside the updater keeps the ⌘K toggle race-free; it is idempotent, so a
+        // StrictMode double-invoke is harmless.
+        invokerRef.current =
+          document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      }
+      return n;
+    });
+  }, []);
 
   // [OPUS-4.8] sq-ixc3.10 — the live operational commands the mounted workbench contributes,
   // bucketed into their fixed-order groups. Empty off the workbench (pure navigation then).
@@ -227,7 +246,7 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
     [operationalCommands],
   );
 
-  const ctx = React.useMemo(() => ({ open, setOpen }), [open]);
+  const ctx = React.useMemo(() => ({ open, setOpen }), [open, setOpen]);
 
   // Global ⌘K (macOS) / Ctrl-K (Windows/Linux) toggles the palette. We also let the platform
   // browser-search shortcut stay free: only K with the platform modifier is intercepted.
@@ -240,7 +259,7 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [setOpen]);
 
   // Navigate (or run an action), then close. next/navigation's router.push respects the
   // configured basePath, so "/surface/zk" resolves under /sparq on Pages and at root under
@@ -250,13 +269,16 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
       setOpen(false);
       router.push(href);
     },
-    [router],
+    [router, setOpen],
   );
 
-  const runAction = React.useCallback((fn: () => void) => {
-    setOpen(false);
-    fn();
-  }, []);
+  const runAction = React.useCallback(
+    (fn: () => void) => {
+      setOpen(false);
+      fn();
+    },
+    [setOpen],
+  );
 
   const isDark = (resolvedTheme ?? theme) === "dark";
 
@@ -272,6 +294,16 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
           )}
         />
         <DialogPrimitive.Content
+          // [FABLE-5] sq-ymr2e.9 — return focus to the recorded invoker (fall back to the
+          // Radix default only when it is gone, e.g. after a palette navigation unmounted it).
+          onCloseAutoFocus={(event) => {
+            const invoker = invokerRef.current;
+            invokerRef.current = null;
+            if (invoker?.isConnected) {
+              event.preventDefault();
+              invoker.focus();
+            }
+          }}
           className={cn(
             "bg-card text-card-foreground fixed left-1/2 top-[12vh] z-50 w-[min(38rem,calc(100vw-2rem))] -translate-x-1/2",
             "overflow-hidden rounded-xl p-0 shadow-2xl ring-1 ring-foreground/10",

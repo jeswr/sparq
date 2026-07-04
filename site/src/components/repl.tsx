@@ -27,6 +27,7 @@ import { toast } from "sonner";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { rovingTabIndex, useRovingTablist } from "@/lib/use-roving-tablist";
 // [OPUS-4.8] sq-vw3ax (bold /try redesign) — the local IDE-workbench panel chrome + the
 // data-tool result rendering (typed-value cells + the live-derived aggregate mini-viz).
 import { ReplPanel } from "@/components/repl-panel";
@@ -1758,11 +1759,14 @@ function GraphFormatTabs({
   format: GraphFormat;
   onChange: (f: GraphFormat) => void;
 }) {
+  // [FABLE-5] sq-ymr2e.9 — APG tabs keyboard contract (arrow-key roving focus).
+  const tablistKeys = useRovingTablist();
   return (
     <div
       role="tablist"
       aria-label="Graph output format"
       className="inline-flex flex-wrap gap-0.5 rounded-lg border bg-muted/40 p-0.5"
+      {...tablistKeys}
     >
       {GRAPH_FORMAT_TABS.map((t) => (
         <button
@@ -1770,6 +1774,7 @@ function GraphFormatTabs({
           type="button"
           role="tab"
           aria-selected={format === t.value}
+          tabIndex={rovingTabIndex(format === t.value)}
           title={t.title}
           onClick={() => onChange(t.value)}
           className={cn(
@@ -1980,11 +1985,14 @@ function ResultViewTabs({
         : "No numeric column to chart — run an aggregate query",
     },
   ];
+  // [FABLE-5] sq-ymr2e.9 — APG tabs keyboard contract (arrow-key roving focus).
+  const tablistKeys = useRovingTablist();
   return (
     <div
       role="tablist"
       aria-label="Result view"
       className="inline-flex rounded-lg border bg-muted/40 p-0.5"
+      {...tablistKeys}
     >
       {tabs.map((t) => (
         <button
@@ -1994,6 +2002,7 @@ function ResultViewTabs({
           aria-selected={view === t.value}
           aria-disabled={t.disabled}
           disabled={t.disabled}
+          tabIndex={rovingTabIndex(view === t.value)}
           title={t.title}
           onClick={() => onChange(t.value)}
           className={cn(

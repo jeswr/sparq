@@ -25,6 +25,7 @@ import { Play, Loader2, ArrowRight, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { rovingTabIndex, useRovingTablist } from "@/lib/use-roving-tablist";
 import { SparqlEditor } from "@/components/sparql-editor";
 import { RdfEditor } from "@/components/rdf-editor";
 import { ResultCell } from "@/components/repl-result-cells";
@@ -185,6 +186,8 @@ function PreviewTable() {
 export function HeroQueryRunner() {
   const router = useRouter();
   const [tab, setTab] = React.useState<"query" | "data">("query");
+  // [FABLE-5] sq-ymr2e.9 — APG tabs keyboard contract (arrow-key roving focus).
+  const tablistKeys = useRovingTablist();
   const [query, setQuery] = React.useState(HERO_DEFAULT_QUERY);
   const [data, setData] = React.useState(HERO_SAMPLE_TURTLE);
 
@@ -283,11 +286,14 @@ export function HeroQueryRunner() {
       className="overflow-hidden rounded-xl border border-primary/25 bg-card shadow-elevation-2"
       style={{ boxShadow: "var(--elevation-2), 0 0 0 1px var(--teal-glow)" }}
     >
-      {/* Tabs: Query (default) | Data — both editable, so the sample is inspectable. */}
+      {/* Tabs: Query (default) | Data — both editable, so the sample is inspectable.
+          [FABLE-5] sq-ymr2e.9 — APG tabs keyboard contract: roving tabindex + arrow-key
+          focus movement via the shared hook (asserted by e2e/a11y-keyboard.spec.ts). */}
       <div
         role="tablist"
         aria-label="Runner editor"
         className="flex items-center gap-1 border-b bg-muted/25 px-2 py-1.5"
+        {...tablistKeys}
       >
         {(["query", "data"] as const).map((t) => (
           <button
@@ -297,6 +303,7 @@ export function HeroQueryRunner() {
             role="tab"
             aria-selected={tab === t}
             aria-controls={`hero-panel-${t}`}
+            tabIndex={rovingTabIndex(tab === t)}
             onClick={() => setTab(t)}
             className={cn(
               "rounded-md px-3 py-1 text-xs font-medium capitalize transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40",

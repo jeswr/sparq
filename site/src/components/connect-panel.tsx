@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { rovingTabIndex, useRovingTablist } from "@/lib/use-roving-tablist";
 import { Button } from "@/components/ui/button";
 import {
   type EndpointConfig,
@@ -208,11 +209,14 @@ function ModeSwitch({
   disabled: boolean;
   onChange: (active: boolean) => void;
 }) {
+  // [FABLE-5] sq-ymr2e.9 — APG tabs keyboard contract (arrow-key roving focus).
+  const tablistKeys = useRovingTablist();
   return (
     <div
       role="tablist"
       aria-label="Execution target"
       className="inline-flex rounded-lg border bg-background p-0.5"
+      {...tablistKeys}
     >
       <SwitchTab
         label="In-tab WASM"
@@ -254,6 +258,7 @@ function SwitchTab({
       role="tab"
       aria-selected={selected}
       disabled={disabled}
+      tabIndex={rovingTabIndex(selected)}
       title={title}
       onClick={onClick}
       className={cn(
