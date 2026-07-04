@@ -1,0 +1,27 @@
+# [SONNET-4.6] IEEE 754 differential harness — PROOF M1 (sq-3x7dl.14.1).
+# Standalone binary crate — intentionally NOT a member of the root workspace so the
+# nargo-only `zk/ieee754` domain does not drag `half` into the lean sparq-core build.
+# Build via `cargo build --manifest-path zk/ieee754/differential/Cargo.toml`.
+[package]
+name = "sparq-ieee754-differential"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "IEEE 754 differential harness — PROOF M1: compare sparq_ieee754 Noir primitives against native Rust f32/f64 oracle and half::f16 for f16."
+license = "MIT"
+
+# Stand-alone workspace declaration so `cargo build` in this directory works without
+# the root workspace (which does not list this crate as a member).
+[workspace]
+
+[[bin]]
+name = "sparq-ieee754-differential"
+path = "src/main.rs"
+
+[dependencies]
+# IEEE 754 half-precision reference for f16 oracle.
+# Uses f32-widening arithmetic (IEEE-754 correctly-rounded via wider intermediate).
+half = "2"
+
+[profile.release]
+opt-level = 3
