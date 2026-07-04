@@ -243,6 +243,74 @@ pub fn split_decimal(s: &str) -> Option<(bool, &str, &str)> {
     Some((neg, int.trim_start_matches('0'), frac.trim_end_matches('0')))
 }
 
+/// Exact comparison of two plain decimal lexicals (`[+-]?digits(.digits)?`) of ANY
+/// length — pure string arithmetic, no `f64` and no `i128` bound. `None` if either
+/// lexical is not a well-formed decimal. Signed zeros (`-0`, `-0.0`) compare equal to
+/// zero. This is the string-exact tier [`Num::cmp_total`]'s f64-tie disambiguation
+/// rides on. [FABLE-5] sq-wjl8i
+pub fn cmp_plain_decimal(a: &str, b: &str) -> Option<Ordering> {
+    let (na, ia, fa) = split_decimal(a)?;
+    let (nb, ib, fb) = split_decimal(b)?;
+    let a_zero = ia.is_empty() && fa.is_empty();
+    let b_zero = ib.is_empty() && fb.is_empty();
+    if a_zero && b_zero {
+        return Some(Ordering::Equal);
+    }
+    // Magnitude: longer (normalised) integer part wins, then integer digits, then
+    // fraction digits with implicit trailing-zero padding.
+    let mag = ia.len().cmp(&ib.len()).then_with(|| ia.cmp(ib)).then_with(|| {
+        let n = fa.len().max(fb.len());
+        (0..n)
+            .map(|i| {
+                (
+                    fa.as_bytes().get(i).copied().unwrap_or(b'0'),
+                    fb.as_bytes().get(i).copied().unwrap_or(b'0'),
+                )
+            })
+            .find_map(|(x, y)| if x != y { Some(x.cmp(&y)) } else { None })
+            .unwrap_or(Ordering::Equal)
+    });
+    let neg_a = na && !a_zero;
+    let neg_b = nb && !b_zero;
+    Some(match (neg_a, neg_b) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => mag,
+        (true, true) => mag.reverse(),
+    })
+}
+
+/// The EXACT plain-decimal expansion of a finite `f64` (every finite `f64` is an exact
+/// decimal rational; the longest needs 1074 fraction digits). `None` for `NaN` / `±INF`.
+/// Cold-path helper for the f64-tie disambiguation in [`Num::cmp_total`] and the
+/// engine's numeric sort cells. [FABLE-5] sq-wjl8i
+pub fn f64_exact_decimal(f: f64) -> Option<String> {
+    if !f.is_finite() {
+        return None;
+    }
+    // With precision >= the maximum exact digit count, Rust's correctly-rounded
+    // formatting IS the exact expansion.
+    Some(format!("{:.1074}", f))
+}
+
+/// Exact order of an exact fixed-point decimal against a (non-NaN) `f64`'s exact
+/// rational value: the decimal's lexical against the double's exact decimal expansion,
+/// pure string arithmetic throughout. Deliberately NO `f64` fast path: `Dec::f64` is a
+/// two-rounding image (mantissa conversion then a division), so a strict `f64` verdict
+/// here is not boundary-trustworthy — and this helper is only reached on the cold
+/// f64-tie path of the total order. [FABLE-5] sq-wjl8i
+fn cmp_dec_f64(d: Dec, f: f64) -> Ordering {
+    if f == f64::INFINITY {
+        return Ordering::Less;
+    }
+    if f == f64::NEG_INFINITY {
+        return Ordering::Greater;
+    }
+    f64_exact_decimal(f)
+        .and_then(|exp| cmp_plain_decimal(&d.lexical(), &exp))
+        .unwrap_or(Ordering::Equal)
+}
+
 /// The arithmetic operator for [`Num::binop`]: `+ - * /` under XPath operand promotion.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ArithOp {
@@ -318,6 +386,45 @@ impl Num {
             Num::Int(i) => Some(Dec { mant: i as i128, scale: 0 }),
             Num::Dec(d) => Some(d),
             _ => None,
+        }
+    }
+
+    /// The TOTAL order over numeric values used by the SPARQL `ORDER BY` extension
+    /// (the `CompareTerm::exact_cmp` hook of `sparq_substrate::compare`) — [FABLE-5]
+    /// sq-wjl8i. Unlike the relational comparison (XPath `op:numeric-*`, where a
+    /// float/double operand PROMOTES the pair to a possibly-collapsing `f64` and `NaN`
+    /// is incomparable), this is the **exact-rational** order over the values,
+    /// totalised:
+    ///
+    /// - `NaN` sorts FIRST (before `-INF`), and `NaN == NaN` — the fixed position that
+    ///   makes the order total (the choice XPath 3.1's `fn:sort` makes: "NaN least");
+    /// - an exact-tier operand (`Int` / `Dec`) against a float/double compares against
+    ///   the float/double's EXACT rational value (every finite `f64` is one), so the
+    ///   2^53 collapse cannot make two distinct values tie with a third
+    ///   (the machine-checked intransitivity witness of bead sq-wjl8i);
+    /// - the order REFINES the promoted (`f64`) comparison: `f64` rounding is monotonic,
+    ///   so every strict promoted verdict is preserved — only promoted TIES are refined.
+    ///
+    /// Honest boundary: two `Dec`s whose scale alignment overflows `i128` fall back to
+    /// the `f64` image (as `Dec::cmp` documents); values whose lexicals exceed the
+    /// `i128` tower never reach this type (`as_numeric` classifies them out).
+    pub fn cmp_total(self, o: Num) -> Ordering {
+        let (fa, fb) = (self.f64(), o.f64());
+        match (fa.is_nan(), fb.is_nan()) {
+            (true, true) => return Ordering::Equal,
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            (false, false) => {}
+        }
+        match (self.to_dec(), o.to_dec()) {
+            (Some(a), Some(b)) => a
+                .cmp(b)
+                .unwrap_or_else(|| fa.partial_cmp(&fb).unwrap_or(Ordering::Equal)),
+            (Some(a), None) => cmp_dec_f64(a, fb),
+            (None, Some(b)) => cmp_dec_f64(b, fa).reverse(),
+            // Both inexact: the value IS the f64 (an `f32` widens exactly); both are
+            // non-NaN here, so `partial_cmp` always decides.
+            (None, None) => fa.partial_cmp(&fb).unwrap_or(Ordering::Equal),
         }
     }
 
@@ -1233,5 +1340,83 @@ mod tests {
         assert_eq!(fmt_xsd_double(f64::NEG_INFINITY), "-INF");
         assert_eq!(fmt_xsd_double(-6.0), "-6");
         assert_eq!(fmt_xsd_double(1.5), "1.5E0");
+    }
+
+    // --- Num::cmp_total — the ORDER BY total order over numeric values (sq-wjl8i) ---
+
+    const TWO53: i64 = 9_007_199_254_740_992;
+
+    /// NaN takes a FIXED position: before -INF, equal to itself — the totalisation.
+    #[test]
+    fn cmp_total_nan_sorts_first_and_equals_itself() {
+        use Ordering::*;
+        let nan = Num::Double(f64::NAN);
+        assert_eq!(nan.cmp_total(Num::Double(f64::NEG_INFINITY)), Less);
+        assert_eq!(nan.cmp_total(Num::Int(0)), Less);
+        assert_eq!(Num::Int(0).cmp_total(nan), Greater);
+        assert_eq!(nan.cmp_total(Num::Float(f32::NAN)), Equal);
+        assert_eq!(nan.cmp_total(nan), Equal);
+    }
+
+    /// The mixed exact/inexact tier at the 2^53 collapse: the double equal to the shared
+    /// f64 image is EQUAL to the integer it exactly is, and strictly BELOW the collapsed
+    /// neighbour 2^53+1 — the intransitivity witness of bead sq-wjl8i, now decided
+    /// exactly instead of collapsing to a three-way tie.
+    #[test]
+    fn cmp_total_mixed_tier_is_exact_at_the_2p53_collapse() {
+        use Ordering::*;
+        let dbl = Num::Double(TWO53 as f64);
+        let int_lo = Num::Int(TWO53);
+        let int_hi = Num::Dec(Dec { mant: TWO53 as i128 + 1, scale: 0 });
+        assert_eq!(int_lo.cmp_total(dbl), Equal, "2^53 IS the double exactly");
+        assert_eq!(dbl.cmp_total(int_hi), Less, "the collapsed neighbour still orders");
+        assert_eq!(int_hi.cmp_total(dbl), Greater);
+        assert_eq!(int_lo.cmp_total(int_hi), Less);
+    }
+
+    /// A decimal against the double it rounds to is NOT equal: `0.1` (exact) is below
+    /// the double `0.1` (exactly 0.1000000000000000055511151231257827…). And ±INF /
+    /// exact pairs order by sign of the infinity.
+    #[test]
+    fn cmp_total_decimal_vs_double_refines_the_f64_tie() {
+        use Ordering::*;
+        let dec = Num::Dec(Dec { mant: 1, scale: 1 });
+        let dbl = Num::Double(0.1);
+        assert_eq!(dec.cmp_total(dbl), Less);
+        assert_eq!(dbl.cmp_total(dec), Greater);
+        assert_eq!(Num::Int(1).cmp_total(Num::Double(f64::INFINITY)), Less);
+        assert_eq!(Num::Int(1).cmp_total(Num::Double(f64::NEG_INFINITY)), Greater);
+        // Both-inexact: the value IS the f64; a float widens exactly.
+        assert_eq!(Num::Float(0.5).cmp_total(Num::Double(0.5)), Equal);
+        assert_eq!(Num::Double(-0.0).cmp_total(Num::Double(0.0)), Equal);
+    }
+
+    /// Direct pin of `cmp_plain_decimal`: arbitrary-length string-exact decimals,
+    /// signed-zero equality, malformed inputs.
+    #[test]
+    fn cmp_plain_decimal_is_exact_and_total_on_decimals() {
+        use Ordering::*;
+        assert_eq!(cmp_plain_decimal("9007199254740992", "9007199254740993"), Some(Less));
+        assert_eq!(cmp_plain_decimal("0.123456789012345678", "0.123456789012345679"), Some(Less));
+        assert_eq!(cmp_plain_decimal("1.50", "1.5"), Some(Equal));
+        assert_eq!(cmp_plain_decimal("-0.0", "0"), Some(Equal));
+        assert_eq!(cmp_plain_decimal("-2", "-10"), Some(Greater));
+        assert_eq!(cmp_plain_decimal("10", "9"), Some(Greater));
+        assert_eq!(cmp_plain_decimal("abc", "1"), None);
+    }
+
+    /// Direct pin of `f64_exact_decimal`: exact expansions (not shortest round-trips),
+    /// and `None` on the non-finite values.
+    #[test]
+    fn f64_exact_decimal_is_the_exact_expansion() {
+        let exp = f64_exact_decimal(0.1).expect("finite");
+        assert!(exp.starts_with("0.1000000000000000055511151231257827"), "got {}", exp);
+        assert_eq!(
+            cmp_plain_decimal(&f64_exact_decimal(TWO53 as f64).unwrap(), "9007199254740992"),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(f64_exact_decimal(f64::NAN), None);
+        assert_eq!(f64_exact_decimal(f64::INFINITY), None);
+        assert_eq!(f64_exact_decimal(f64::NEG_INFINITY), None);
     }
 }

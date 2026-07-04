@@ -74,22 +74,24 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   `Budget` cooperative-cancel hook (both monomorphised, never a trait object). Pulls only
   `rustc-hash` when enabled; implies `rows`.
 - **`compare`** — the SPARQL **term total order** `compare_terms` (the engine's `compare_values`):
-  the class precedence error/unbound < blank < IRI < literal < triple, the numeric-aware /
-  strict typed-temporal / lexical-string arms within the literal class, and the recursive
-  component-wise triple-term order. Generic over a tiny `CompareTerm` trait (`term_class` /
+  the spec-fixed class precedence error/unbound < blank < IRI < literal < triple, then a
+  **kind-first** literal order (sq-wjl8i): a fixed `LiteralKind` rank BETWEEN literal kinds
+  (numeric < boolean < dateTime < date < string < lang < other — a documented extension where
+  the spec leaves cross-kind order undefined), value order only WITHIN a kind — numerics by
+  exact rational value (`NaN` totalised FIRST, before `-INF`; an f64 tie rechecked exactly via
+  `exact_cmp`, incl. the MIXED int/decimal-vs-float/double tie — `Num::cmp_total` under
+  `numeric`), dateTimes by timeline, else lexically — and the recursive component-wise
+  triple-term order. Generic over a tiny `CompareTerm` trait (`term_class` / `literal_kind` /
   `value_str` / `as_f64` / `exact_cmp` / `strict_cmp` / `triple_parts`) the consumer implements
-  for its own term type — a **monomorphisation seam**, never a `dyn` object. `exact_cmp` is the
-  f64-collapse recheck: when the lenient `as_f64` arm ties, it recovers the exact order of
-  distinct integers beyond 2^53 / high-precision decimals so `ORDER BY` / `MIN` / `MAX` agree
-  with the relational `=`/`<`. Pure-`std`: links nothing new. The order laws — reflexivity and
-  within-class totality (both over the **NaN-free** domain only: an `xsd:double NaN` makes the
-  comparator partial, bead sq-wjl8i), antisymmetry-consistency (NaN included), and
-  per-literal-kind transitivity incl. the 2^53 collapse — are machine-checked by Kani
-  bounded-proof harnesses over a model `CompareTerm` impl — `cargo kani -p sparq-substrate
-  --features compare` (sq-sqtk2.4). Honest boundary: the proofs cover the shared ALGORITHM
-  over the bounded model (per-harness domains documented in the module), not the engine's
-  `Value` impl, and mixed literal-KIND literal pairs are NOT transitive (machine-checked
-  witnesses in the harness module document exactly where the law breaks).
+  for its own term type — a **monomorphisation seam**, never a `dyn` object. Pure-`std`. The
+  order laws — reflexivity, within-class totality, antisymmetry-consistency and transitivity
+  (per kind AND across mixed kinds, all NaN INCLUDED, incl. the 2^53 collapse) — are
+  machine-checked by Kani bounded-proof harnesses over a model `CompareTerm` impl —
+  `cargo kani -p sparq-substrate --features compare` (sq-sqtk2.4 + sq-wjl8i; the three former
+  intransitivity witnesses are pinned FIXED). Honest boundaries: the proofs cover the shared
+  ALGORITHM over the bounded model (per-harness domains in the module), not the engine's
+  `Value` impl; and within the dateTime kind the indeterminate mixed-timezone window still
+  falls back lexically (a residual partial-order seam, tracked separately).
 
 All features are **off by default**. The crate is `forbid(unsafe_code)`.
 

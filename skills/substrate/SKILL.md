@@ -116,34 +116,41 @@ hash_probe_serial(&right, &keys, &left, std::slice::from_ref(&table), &[1], &NoB
 
 ### `compare` — `#[cfg(feature = "compare")]`
 
-The SPARQL term total order `compare_terms`: the class precedence error/unbound < blank < IRI
-< literal < triple, numeric-aware within the literal class, strict typed-temporal, string
-fallback, and recursive component-wise triple-term order. Generic over a `CompareTerm` trait
-(`term_class`/`value_str`/`as_f64`/`exact_cmp`/`strict_cmp`/`triple_parts`) — a
-monomorphisation seam, never a `dyn` object. Pure-`std`; pulls nothing new.
+The SPARQL term total order `compare_terms`: the spec-fixed class precedence error/unbound <
+blank < IRI < literal < triple, then KIND-FIRST within the literal class (sq-wjl8i): a fixed
+`LiteralKind` rank between literal kinds — numeric < boolean < dateTime < date < string < lang
+< other, a documented extension where the spec leaves cross-kind order undefined — and value
+order only WITHIN a kind (numerics by exact rational value with NaN totalised FIRST before
+-INF and f64 ties rechecked exactly via `exact_cmp`, incl. the mixed int/decimal-vs-double tie
+— `Num::cmp_total`; dateTimes by timeline; else lexical), plus the recursive component-wise
+triple-term order. Generic over a `CompareTerm` trait
+(`term_class`/`literal_kind`/`value_str`/`as_f64`/`exact_cmp`/`strict_cmp`/`triple_parts`) — a
+monomorphisation seam, never a `dyn` object. Pure-`std`; pulls nothing new. The engine's
+relational `<`/`=` are deliberately untouched (XPath promotion, NaN type errors): only the
+ORDER BY total order refines promoted ties and positions NaN.
 
 ```toml
 [dependencies]
 sparq-substrate = { version = "0.1.0", features = ["compare"] }
 ```
 
-**Machine-checked order laws (Kani, sq-sqtk2.4).** `src/compare.rs` hosts a `#[cfg(kani)]`
-bounded-proof module proving, over an adversarial model `CompareTerm` impl whose numeric
-domain straddles the 2^53 f64-collapse boundary (2^53−1 / 2^53 / 2^53+1 / 2^53+2 and their
-shared f64 images, ±0.0, NaN): reflexivity (NaN-free), antisymmetry-consistency (full domain,
-`Some(o)` iff mirrored `Some(o.reverse())`, `None` iff `None`), within-class totality
-(NaN-free), per-literal-kind transitivity (exact ints across the collapse, doubles, strings,
-strict/temporal, a collapse-free exact/inexact mix, recursive triple terms), and exact-order
+**Machine-checked order laws (Kani, sq-sqtk2.4 + sq-wjl8i).** `src/compare.rs` hosts a
+`#[cfg(kani)]` bounded-proof module proving, over an adversarial model `CompareTerm` impl
+whose numeric domain straddles the 2^53 f64-collapse boundary (2^53−1 / 2^53 / 2^53+1 /
+2^53+2 and their shared f64 images, ±0.0, NaN): reflexivity, antisymmetry-consistency,
+within-class totality and transitivity — per literal kind AND across MIXED literal kinds
+(`transitivity_mixed_literal_kinds_incl_nan`), ALL with NaN included — and exact-order
 agreement on the exact tier (the `exact_cmp` recheck's guarantee — delete the recheck and it
-goes red). Run `cargo kani -p sparq-substrate --features compare` (Kani injects the `kani`
-cfg; the normal build strips the module). Honest boundary: this proves the shared ALGORITHM
-over the bounded model, NOT the engine's `Value` impl (`sparq-engine/src/exec.rs` — covered
-by unit + W3C conformance tests; next-wave in `research/mechanized-proof-program.md` §6).
-Known, machine-checked LAW GAPS (witness harnesses, engine-reachable): mixed exact/inexact
-numerics are intransitive AT the collapse boundary; numeric-vs-plain-string pairs fall to the
-lexical form and are intransitive against the numeric order; NaN makes the comparator partial
-(`None`, mapped to `Equal` by callers). Do not build sort invariants on mixed literal-kind
-columns without consulting those witnesses.
+goes red). The three sq-sqtk2.4 intransitivity findings (mixed-tier collapse, numeric-vs-
+string lexical fallback, NaN partiality) are FIXED and pinned by `witness_*` harnesses that
+go red on regression. Run `cargo kani -p sparq-substrate --features compare` (Kani injects
+the `kani` cfg; the normal build strips the module). Honest boundaries: this proves the
+shared ALGORITHM over the bounded model, NOT the engine's `Value` impl
+(`sparq-engine/src/exec.rs` — covered by unit tests, the sparq-reason engine-parity suite and
+W3C conformance; next-wave in `research/mechanized-proof-program.md` §6); within the dateTime
+kind the indeterminate mixed-timezone window still falls back lexically (residual seam,
+beaded); and `exact_cmp` impls bounded by the i128 tower keep collapsed ties for lexicals
+beyond ~38 significant digits (beaded).
 
 ## Cargo feature summary
 
