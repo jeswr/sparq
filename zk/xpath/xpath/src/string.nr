@@ -565,7 +565,14 @@ pub fn string_join_two<let N: u32, let M: u32, let S: u32, let R: u32>(
 ///
 /// This signature takes the already-rounded integer window: callers wiring
 /// the xs:double form must apply the F&O round() first and map a NaN start
-/// or length to an empty result (round() of NaN has no integer image).
+/// or length to an empty result (round() of NaN has no integer image); a
+/// rounded length <= 0 maps to the empty result (carried by the u32 type).
+///
+/// POSITION UNIT CAVEAT: start/length index BYTE positions in the logical
+/// content -- exact vs F&O only for single-byte (ASCII) content. Since
+/// string_length() counts CODEPOINTS, composing them (e.g.
+/// substring(s, i, string_length(s))) is wrong for multi-byte UTF-8;
+/// codepoint-positional substring is not implemented (bead sq-hjvte).
 /// [FABLE-5] sq-3x7dl.6
 pub fn substring<let N: u32, let R: u32>(s: str<N>, start_pos: i64, length: u32) -> ([u8; R], u32) {
     let s_bytes = s.as_bytes();
