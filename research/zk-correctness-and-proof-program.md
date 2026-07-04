@@ -43,7 +43,7 @@ delta (§2).
    near-term must-do): today neither library's Noir tests run in the monorepo at all, so both
    correctness *and* soundness regressions merge green.
 3. **Remediate the XPath silent-wrong-value bugs** (`sq-3x7dl.4`–`.9`): truncating integer
-   divide, i8-truncated mixed comparisons, `substring` start&lt;1, NUL-vs-capacity length
+   divide, i8-truncated mixed comparisons, `substring` start < 1, NUL-vs-capacity length
    confusion, pre-1970 dateTime, `min`/`max` over empty.
 4. **Treat "proof" as a phased escalation** (`sq-3x7dl.14`): a trusted reference oracle +
    differential harness in CI is the cheap high-value foundation; mechanized proof is
@@ -122,7 +122,7 @@ class in a proof system: the circuit accepts and "proves" a wrong answer. One be
 |------|-----|------|------|----------------|
 | `sq-3x7dl.4` | **HIGH** | `src/numeric.nr` | sonnet | `op:numeric-divide` truncates + aliased to `idiv`; `fn:number` whitespace |
 | `sq-3x7dl.5` | **HIGH** | `src/numeric_types.nr` | **fable** | mixed int↔float/double compare truncates i64→**i8** |
-| `sq-3x7dl.6` | HIGH/MED | `src/string.nr` | sonnet | `substring` start&lt;1 length; NUL-vs-capacity length; byte-vs-codepoint STRLEN |
+| `sq-3x7dl.6` | HIGH/MED | `src/string.nr` | sonnet | `substring` start < 1 length; NUL-vs-capacity length; byte-vs-codepoint STRLEN |
 | `sq-3x7dl.7` | MED | `src/datetime.nr` | sonnet | pre-1970 dateTime corrupted by `u64` casts |
 | `sq-3x7dl.8` | MED | `src/sequence.nr` | sonnet | `min`/`max` over empty asserts (unprovable) |
 | `sq-3x7dl.9` | low | `src/duration.nr` | haiku | duration/duration truncates to integer |
