@@ -244,8 +244,10 @@ pub struct ConsistencyOutcome {
 pub struct EntailmentOutcome {
     /// The tri-state verdict.
     pub verdict: EntailmentVerdict,
-    /// The branch that owned the decision ([`Branch::AlchTableau`] for every refutation
-    /// that ran; [`Branch::Extraction`] when an input graph was refused).
+    /// The branch that owned the decision — an ATTRIBUTION, not a claim that a tableau
+    /// ran: [`Branch::AlchTableau`] covers both executed refutations and pre-tableau
+    /// abstentions (e.g. `UnencodedConclusion`, where the verdict is `Unknown` and no
+    /// refutation was attempted); [`Branch::Extraction`] when an input graph was refused.
     pub branch: Branch,
 }
 
