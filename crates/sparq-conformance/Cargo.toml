@@ -206,4 +206,4 @@ oxjsonld = { workspace = true, optional = true }
 # (document-level JSON comparator oracle). OFF by default (optional, behind
 # `jsonld-suite`) so the default harness build never links it — the lean opt-in
 # posture.
-sparq-jsonld = { path = "../sparq-jsonld", optional = true }
+sparq-jsonld = { path = "../sparq-jsonld", optional = true, default-features = false }

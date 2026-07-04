@@ -1336,7 +1336,7 @@ mod gated {
     fn sparq_json_to_serde(j: &sparq_jsonld::Json) -> Result<Value, String> {
         let mut buf = String::new();
         j.write(&mut buf);
-        serde_json::from_str(&buf).map_err(|e| format!("re-serialise to serde_json: {}", e))
+        serde_json::from_str(&buf).map_err(|e| format!("parse serialized JSON as serde_json::Value: {}", e))
     }
 
     /// [SONNET-4.6] sq-kk1mq — run the W3C JSON-LD `expand` category with the
@@ -1489,15 +1489,28 @@ mod gated {
             };
 
             // 6. Document-level JSON-LD equality (oracle pinned per sq-kk1mq).
+            // Report the JSON kind (with size for array/object) so a mismatch on
+            // a non-array structure is immediately diagnosable rather than always
+            // showing "0 nodes".
+            fn json_kind_desc(v: &Value) -> String {
+                match v {
+                    Value::Array(a) => format!("array({} items)", a.len()),
+                    Value::Object(o) => format!("object({} keys)", o.len()),
+                    Value::String(_) => "string".to_owned(),
+                    Value::Null => "null".to_owned(),
+                    Value::Bool(b) => format!("bool({})", b),
+                    Value::Number(n) => format!("number({})", n),
+                }
+            }
             if json_ld_equal(&got, &want) {
                 s.pass();
             } else {
                 s.fail(
                     &e.id,
                     format!(
-                        "expand JSON mismatch: got {} nodes, want {} nodes",
-                        got.as_array().map(|a| a.len()).unwrap_or(0),
-                        want.as_array().map(|a| a.len()).unwrap_or(0),
+                        "expand JSON mismatch: got {}, want {}",
+                        json_kind_desc(&got),
+                        json_kind_desc(&want),
                     ),
                 );
             }
