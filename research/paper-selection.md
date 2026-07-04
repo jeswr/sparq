@@ -94,10 +94,8 @@ search surfaced (§3.7) — the brief explicitly allowed extending the set.
 ### 3.1 zkSPARQL — ZK proofs of SPARQL result correctness over signed RDF — SELECT (re-scoped)
 
 **Corrected premise (important).** This is NOT a paper to be written from scratch.
-The paper already exists publicly at [zksparql.org](https://zksparql.org/) — *"Zero-
-Knowledge Proof of Correct SPARQL Evaluation over Verifiable Credentials"* (Wright,
-Shadbolt, J. Zhao, R. Zhao, Braun), labeled an **ISWC 2026 submission** (research-
-track notification is 2026-07-16 per the ISWC 2026 CFP). The factory's job is
+The paper already exists publicly at [zksparql.org](https://zksparql.org/) — *"Zero-Knowledge Proof of Correct SPARQL Evaluation over Verifiable Credentials"* (Wright,
+Shadbolt, J. Zhao, R. Zhao, Braun), labeled an **ISWC 2026 submission** (research-track notification is 2026-07-16 per the ISWC 2026 CFP). The factory's job is
 therefore **submission support** — the evaluation artifacts and related-work
 hardening a hostile reviewer will demand — for the camera-ready if accepted, or the
 fast resubmission if not.
@@ -164,8 +162,7 @@ MPC-over-federated-**SPARQL** work was found — the gap is real but thin.
 benchmarks vs Secrecy/SECYAN/GORAM is below table stakes; (2) "public IRIs as join
 keys" needs a formal leakage profile (SMCQL/Conclave formalized public/private
 hybrid annotations in 2017/2019); (3) the capability registry is policy engineering,
-not a crypto contribution; (4) the unbounded-path negative result is oblivious-
-algorithm folklore (Blanton & Steele, ASIACCS 2013: pad to a public bound) unless
+not a crypto contribution; (4) the unbounded-path negative result is oblivious-algorithm folklore (Blanton & Steele, ASIACCS 2013: pad to a public bound) unless
 proven as an impossibility under stated constraints; (5) the designed-not-built
 attestation layer draws a "vaporware" note. The SoK already covers the
 systematization value. Today's delta is workshop-sized.
@@ -190,8 +187,7 @@ bugs across production DBMSs (PQS ≥121, NoREC 51, TLP 77). Datalog: QueryFuzz
 bugs). Mechanized: HoTTSQL/Cosette/Q\*cert, Coq SQL semantics (CPP 2019), DBCert
 (OOPSLA 2022) — all *completed* proofs.
 
-**Why KILL (as framed).** Testing venues require previously-unknown, developer-
-confirmed bugs in third-party systems (field norm 13–196); CAV-industrial requires
+**Why KILL (as framed).** Testing venues require previously-unknown, developer-confirmed bugs in third-party systems (field norm 13–196); CAV-industrial requires
 completed proofs of a deployed artifact. Differentially testing your own engine
 against Oxigraph is QA, not a publishable result; planned proofs count for zero.
 The candidate is premature on both halves — but the search exposed a genuinely open
