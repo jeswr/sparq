@@ -109,7 +109,7 @@ Grounding: the shared eval substrate is real and small — `sparq-substrate` shi
 (418 LOC, `compare_terms<T: CompareTerm>(x, y) -> Option<Ordering>` over the minimal
 `CompareTerm` observation trait, with cross-class precedence `ErrorOrUnbound < Blank < Iri <
 Literal < Triple`, an f64-collapse `exact_cmp` recheck tier for exact numerics around the
-2^53 boundary, and RDF 1.2 quoted-triple recursion), `join` (1339 LOC: merge / hash / bind /
+2^53 boundary, and RDF 1.2 triple-term recursion), `join` (1339 LOC: merge / hash / bind /
 leapfrog-trie kernels, generic over `Budget`), `numeric` (the XSD value tower), `rows` — all
 default-off features, all pure. The engine implements `CompareTerm` for its private `Value`
 in `exec.rs`; join ordering is greedy GOO (`exec.rs`) or opt-in DPccp (`dp.rs`), both pure
