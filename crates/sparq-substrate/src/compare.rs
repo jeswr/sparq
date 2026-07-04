@@ -240,6 +240,16 @@ pub fn compare_terms<T: CompareTerm>(x: &T, y: &T) -> Option<Ordering> {
 // which inflates the formula when set high). Under-bounding is LOUD: Kani's unwinding
 // assertion fails, so a too-small bound cannot silently weaken a proof.
 //
+// DOMAIN-COVERAGE SELF-CHECKS (the sq-og8u8 pattern): a re-scoped (shrunk) domain can
+// silently drop the very inputs that make a harness adversarial, so each shrunk domain's
+// interesting inputs are PINNED by a proof: `domain_exhibits_the_2p53_collapse` pins the
+// collapse straddle used by the full `INTS` table, the reduced int-with-non-literal
+// domain, and the triple-object domain;
+// `domain_cf_numeric_is_collapse_free_with_signed_zero_pair` pins the collapse-free
+// mixed range (exact images only) and its ±0.0 equal-but-lexically-distinct pair. If a
+// future re-scope silences an interesting input, one of these goes red rather than the
+// law harness silently proving less.
+//
 // HONESTY BOUNDARY (per the bead): this machine-checks the `compare_terms` ALGORITHM over
 // the model observation surface `M` below. It is explicitly NOT a claim about the engine's
 // `Value` impl of `CompareTerm` in `sparq-engine/src/exec.rs` (that instance stays covered
@@ -808,6 +818,35 @@ mod kani_proofs {
                 for_each_cf_numeric(|z| assert_transitive_at(x, y, z));
             });
         });
+    }
+
+    /// Domain self-check for the collapse-free mixed-numeric domain (companion to
+    /// `domain_exhibits_the_2p53_collapse`, which pins the straddle domains): every `Int`
+    /// the `for_each_cf_numeric` combinator can emit has an EXACT f64 image (the range is
+    /// genuinely collapse-free — an index drift onto the straddle would surface here), and
+    /// the `Dbl` table's `±0.0` entries (indices 1/2, inside the combinator's `1..=3`
+    /// range) are the equal-but-lexically-distinct pair the double-transitivity harness
+    /// relies on to catch a ties-fall-to-string-form mutation. If this fails, a re-scope
+    /// has silenced the domain's interesting inputs and the harnesses above it are weaker
+    /// than documented. [FABLE-5] sq-sqtk2.4
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn domain_cf_numeric_is_collapse_free_with_signed_zero_pair() {
+        for_each_cf_numeric(|x| match x {
+            M::Int(i) => {
+                // Exact image: the f64 roundtrips to the same integer (deliberate exact
+                // comparison — exactness IS the property).
+                assert!(
+                    INT_F64S[usize::from(*i)] as i128 == INTS[usize::from(*i)],
+                    "cf domain: Int range must be collapse-free"
+                );
+            }
+            M::Dbl(i) => assert!(usize::from(*i) < DBLS.len(), "cf domain: Dbl index in-table"),
+            _ => unreachable!("for_each_cf_numeric emits only Int/Dbl"),
+        });
+        // The signed-zero pair: numerically equal, lexically distinct.
+        assert!(DBLS[1] == DBLS[2], "signed zeros compare numerically equal");
+        assert!(DBL_STRS[1] != DBL_STRS[2], "signed zeros are lexically distinct");
     }
 
     /// TRANSITIVITY: plain-string literals (lexical order; includes the empty string and a
