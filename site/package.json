@@ -21,6 +21,8 @@
     "test:e2e": "playwright test",
     "test:e2e:stress": "playwright test --repeat-each=5 --retries=0",
     "test:e2e:grep-gate": "bash e2e/support/no-timeout-gate.sh",
+    "vr": "bash scripts/vr.sh",
+    "vr:update": "bash scripts/vr.sh --update-snapshots=all",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

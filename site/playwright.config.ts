@@ -16,7 +16,26 @@
 // artifacts. Driving dev directly keeps the smoke test self-contained and fast.
 //
 // Run locally:  npx playwright install chromium && npm run test:e2e
+import { existsSync } from "node:fs";
+
 import { defineConfig, devices } from "@playwright/test";
+
+// [FABLE-5] sq-ymr2e.10 — the VISUAL-REGRESSION projects (e2e/visual/**) run ONLY inside the
+// digest-pinned official Playwright container (research/web-gui-test-program.md §4): font
+// rasterizing + antialiasing are container-stable, so the committed baselines are Linux-only by
+// policy. The projects are DEFINED only when SPARQ_VR=1 (set by scripts/vr.sh, which wraps
+// `docker run` on the pinned image) so a plain `npm run test:e2e` on a dev laptop never runs
+// them (and can never mint an accidental macOS/Windows baseline). The guard below refuses a
+// bare-host run even with SPARQ_VR=1 unless explicitly overridden — screenshots minted outside
+// the container are NOT comparable to the committed baselines.
+const SPARQ_VR = !!process.env.SPARQ_VR;
+if (SPARQ_VR && !existsSync("/ms-playwright") && !process.env.SPARQ_VR_ALLOW_HOST) {
+  throw new Error(
+    "SPARQ_VR=1 outside the pinned Playwright container (/ms-playwright not found). " +
+      "Run the visual suite via `npm run vr` / `npm run vr:update` (scripts/vr.sh), or set " +
+      "SPARQ_VR_ALLOW_HOST=1 to bypass (the screenshots will NOT match the committed baselines).",
+  );
+}
 
 const PORT = Number(process.env.PORT ?? 3210);
 // basePath "/sparq" (next.config.ts) prefixes every route, so the demo lives under it.
@@ -31,7 +50,6 @@ export default defineConfig({
   // assertion is correctness (cold-start count), never a timing threshold — wall-clock
   // here is non-canonical (work-box / CI-runner), so we never gate on a duration.
   timeout: 120_000,
-  expect: { timeout: 90_000 },
   // A flaky network/instantiate cold start is the prover's documented self-reset path,
   // not a product bug; one retry absorbs that without masking a real regression (a true
   // second cold start fails deterministically on every attempt).
@@ -58,12 +76,45 @@ export default defineConfig({
     // reducedMotion is a browser-context option in the test runner (not a top-level `use` key).
     contextOptions: { reducedMotion: "reduce" },
   },
+  // [FABLE-5] sq-ymr2e.10 — snapshot layout for the visual projects: baselines live under
+  // e2e/visual/baselines/<project>/<name>.png with NO platform suffix — the platform is pinned
+  // by the container policy above (Linux-only baselines), so a suffix would only invite a
+  // per-OS baseline zoo. Only the visual specs call toHaveScreenshot, so this template is inert
+  // for every functional spec.
+  snapshotPathTemplate: "{testDir}/visual/baselines/{projectName}/{arg}{ext}",
+  expect: {
+    timeout: 90_000,
+    // Belt-and-suspenders stability for screenshot capture (the harness already injects an
+    // animations-off stylesheet + reducedMotion): freeze CSS animations at a deterministic
+    // state, hide the text caret, and snapshot at CSS pixels regardless of device scale.
+    toHaveScreenshot: { animations: "disabled", caret: "hide", scale: "css" },
+  },
   projects: [
     {
       name: "chromium",
       // Keep the pinned viewport at the project level too (device presets carry their own).
       use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 720 } },
+      // The visual specs run only in the container-scoped visual-* projects below.
+      testIgnore: /e2e[\\/]visual[\\/]/,
     },
+    // [FABLE-5] sq-ymr2e.10 — container-only visual projects (see the SPARQ_VR guard above).
+    // Two pinned viewports per §4: 1280×720 desktop + 390×844 mobile. Plain viewports (no
+    // isMobile/deviceScaleFactor emulation): the site is responsive via CSS breakpoints, and
+    // DSF=1 keeps baselines small + byte-stable.
+    ...(SPARQ_VR
+      ? [
+          {
+            name: "visual-desktop",
+            testMatch: /e2e[\\/]visual[\\/].*\.spec\.ts/,
+            use: { viewport: { width: 1280, height: 720 } },
+          },
+          {
+            name: "visual-mobile",
+            testMatch: /e2e[\\/]visual[\\/].*\.spec\.ts/,
+            use: { viewport: { width: 390, height: 844 } },
+          },
+        ]
+      : []),
   ],
   webServer: {
     // The local Next 15 binary serves the dev route under /sparq; bypass the `dev` npm

@@ -428,7 +428,12 @@ export function HeroQueryRunner() {
 
       {/* Proof footer — only in the results state (the real, measured proof line). */}
       {phase === "done" && ms !== null && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t bg-muted/15 px-3 py-2 font-mono text-[11px] text-muted-foreground">
+        // [FABLE-5] sq-ymr2e.10 — data-vr-mask: the measured "N results · <t> ms" proof line is
+        // real wall-clock data, so the visual-regression rig masks it (mask, don't chase).
+        <div
+          data-vr-mask
+          className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t bg-muted/15 px-3 py-2 font-mono text-[11px] text-muted-foreground"
+        >
           <span aria-live="polite">
             {rowCount} result{rowCount === 1 ? "" : "s"} · {ms.toFixed(1)} ms · in-browser · 0
             network requests
