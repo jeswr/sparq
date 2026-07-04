@@ -297,7 +297,7 @@ A leg leaves the per-PR set only when **all** of:
 
 1. T1 checks the *same crate × feature set* with `-D warnings` on every PR the
    leg would have run on (class A retained, per-PR);
-2. the detector proves no feature-gated test code and no `cfg(not(feature)))`
+2. the detector proves no feature-gated test code and no `cfg(not(feature = …))`
    dependence — or a human keep-reason pins it in T2 anyway (class B retained,
    per-PR, ratcheted);
 3. the push-to-main run still executes the full build+test leg per merge
