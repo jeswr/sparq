@@ -7,8 +7,10 @@
 //! `<https://www.w3.org/TR/owl2-profiles/>`.
 //!
 //! # Design
-//! The check is a linear scan over the axiom list: each axiom is routed to a per-profile
-//! grammar predicate that recursively validates the class-expression tree. Termination is
+//! Each profile is checked by its own linear scan over the axiom list (up to three
+//! independent passes — `check_el`/`check_ql`/`check_rl`): each axiom is routed to that
+//! profile's grammar predicate, which recursively validates the class-expression tree.
+//! Termination is
 //! guaranteed by the structural finiteness of [`crate::model::ClassExpression`]; no
 //! memoization or cycle guard is needed (L1 extraction already rejects cyclic
 //! class-expression encodings). The checker returns `Membership::NotIn` on the FIRST
