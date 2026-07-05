@@ -72,22 +72,37 @@ pub fn string_length<let N: u32>(s: str<N>) -> u64 {
 /// fn:starts-with - Returns true if a string starts with a given prefix
 /// XPath: fn:starts-with($arg1 as xs:string?, $arg2 as xs:string?) as xs:boolean
 /// SPARQL: STRSTARTS(?str, ?prefix)
+///
+/// Matches on the LOGICAL content of the prefix (bytes before the first NUL),
+/// not the buffer capacity, so a prefix stored in a wider NUL-padded buffer
+/// compares only its meaningful bytes against the haystack. Per F&O sec.7.5.1:
+/// fn:starts-with($arg1, "") is true for any $arg1 (empty prefix always
+/// matches). [SONNET-4.6] sq-0ylr9
 pub fn starts_with<let N: u32, let M: u32>(s: str<N>, prefix: str<M>) -> bool {
-    if M > N {
-        false
-    } else {
-        let s_bytes = s.as_bytes();
-        let prefix_bytes = prefix.as_bytes();
-        let mut matches = true;
+    let s_bytes = s.as_bytes();
+    let prefix_bytes = prefix.as_bytes();
+    let s_len = logical_len_bytes(s_bytes);
+    let prefix_len = logical_len_bytes(prefix_bytes);
 
-        for i in 0..M {
-            if s_bytes[i] != prefix_bytes[i] {
-                matches = false;
-            }
+    // F&O sec.7.5.1: fn:starts-with($arg1, "") = true for any $arg1.
+    // A logically-empty prefix always matches; a prefix whose logical length
+    // exceeds the logical haystack never matches.
+    let fits = prefix_len <= s_len;
+    let mut matches = fits;
+
+    // Compare only the logical bytes of the prefix; NUL padding in the
+    // prefix buffer must not require NULs in the haystack.
+    for i in 0..M {
+        let in_range = ((i as u32) < prefix_len) & fits;
+        // Clamp for the (always-executed, post-flatten) static read; when
+        // in_range is true, i < prefix_len <= s_len <= N, so safe_s_idx == i.
+        let safe_s_idx = if i < N { i } else { 0 };
+        if in_range & (s_bytes[safe_s_idx] != prefix_bytes[i]) {
+            matches = false;
         }
-
-        matches
     }
+
+    matches
 }
 
 /// fn:ends-with - Returns true if a string ends with a given suffix
@@ -129,36 +144,59 @@ pub fn ends_with<let N: u32, let M: u32>(s: str<N>, suffix: str<M>) -> bool {
     matches
 }
 
-/// Helper function to find index of substring
+/// Helper function to find the byte-index of the first occurrence of
+/// `substring` within `s`, operating on LOGICAL lengths (bytes before the
+/// first NUL) for both arguments.
 ///
-/// **Performance Note**: This function has O(N*M) time complexity and, due to Noir's
-/// lack of early return/break, continues checking all positions even after finding a
-/// match. For large strings, this could significantly impact proof generation time.
+/// Returns the 0-based start index of the first match, or -1 if not found.
+/// Returns 0 for an empty needle (F&O sec.7.5.3: contains(X, "") = true).
+///
+/// **Performance Note**: O(N*M) time; due to Noir's lack of early-exit the
+/// scan continues past the first match. For large strings this increases
+/// proof-generation cost. [SONNET-4.6] sq-0ylr9
 fn index_of<let N: u32, let M: u32>(s: str<N>, substring: str<M>) -> i64 {
+    let s_bytes = s.as_bytes();
+    let sub_bytes = substring.as_bytes();
+    let s_len = logical_len_bytes(s_bytes);
+    let sub_len = logical_len_bytes(sub_bytes);
+
     let mut result: i64 = -1;
 
-    // Handle edge cases without early return
-    let size_ok = M <= N;
-    let empty_substring = M == 0;
+    // F&O sec.7.5.3: fn:contains($arg1, "") = true; by convention index_of
+    // returns 0 for an empty needle (found at position 0 of any string).
+    let empty_needle = sub_len == 0;
 
-    if empty_substring {
+    if empty_needle {
         result = 0;
-    } else if size_ok {
-        let s_bytes = s.as_bytes();
-        let sub_bytes = substring.as_bytes();
+    } else if sub_len <= s_len {
         let mut found_index: i64 = -1;
 
-        // Can't use break, so we iterate through all positions
-        for i in 0..(N - M + 1) {
-            let mut matches = true;
-            for j in 0..M {
-                if s_bytes[i + j] != sub_bytes[j] {
-                    matches = false;
+        // Iterate all possible start positions within the logical haystack.
+        // Comptime loop bound is N (buffer capacity); the runtime guard
+        // `(i as u32) + sub_len <= s_len` restricts to valid positions.
+        // Can't use break, so the scan continues past the first match.
+        for i in 0..N {
+            let start_valid = ((i as u32) + sub_len) <= s_len;
+            if start_valid {
+                let mut matches = true;
+                for j in 0..M {
+                    // Compare only the logical bytes of the needle; NUL
+                    // padding in the needle buffer must not require NULs in
+                    // the haystack.
+                    if (j as u32) < sub_len {
+                        let s_idx = i + j;
+                        // Clamp for the (always-executed, post-flatten) read;
+                        // within start_valid & j < sub_len, s_idx < s_len <=
+                        // N, so the clamp fires only on inert dead paths.
+                        let safe_s_idx = if s_idx < N { s_idx } else { 0 };
+                        if s_bytes[safe_s_idx] != sub_bytes[j] {
+                            matches = false;
+                        }
+                    }
                 }
-            }
-            // Only update if this is the first match
-            if matches & (found_index == -1) {
-                found_index = i as i64;
+                if matches & (found_index == -1) {
+                    found_index = i as i64;
+                }
             }
         }
         result = found_index;
@@ -653,7 +691,11 @@ pub fn substring_after<let N: u32, let M: u32>(s: str<N>, substr: str<M>) -> ([u
         // Substring not found, return empty
         (result, 0)
     } else {
-        let start_idx = (idx as u32) + (M as u32);
+        // Use the LOGICAL length of the needle (bytes before the first NUL),
+        // not the buffer capacity M.  With NUL-padded needles M > sub_len, so
+        // using M caused over-skipping (sq-0ylr9). [SONNET-4.6]
+        let sub_len = logical_len_bytes(substr.as_bytes());
+        let start_idx = (idx as u32) + sub_len;
         let mut result_len: u32 = 0;
 
         for i in 0..N {
@@ -1247,6 +1289,62 @@ fn test_substring_after() {
     }
 }
 
+// ============================================================================
+// [SONNET-4.6] sq-0ylr9: substring_after / substring_before with NUL-padded
+// needles: regression tests added after fixing the M-vs-sub_len over-skip bug.
+// Expected values from Python:
+//   >>> import re
+//   >>> def substring_after(s, needle): i=s.find(needle); return s[i+len(needle):] if i>=0 else ""
+//   >>> def substring_before(s, needle): i=s.find(needle); return s[:i] if i>=0 else ""
+// ============================================================================
+
+#[test]
+fn test_substring_after_padded_needle() {
+    // Python oracle: substring_after("abcdefgh", "cd") -> "efgh"
+    // "cd" stored in str<4> as "cd\0\0"; M=4 but logical needle length=2.
+    // Pre-fix this returned "gh" (over-skipped by 2 bytes). (sq-0ylr9)
+    let s: str<8> = "abcdefgh";
+    let needle: str<4> = "cd\0\0";
+    let (out, len) = substring_after::<8, 4>(s, needle);
+    assert(len == 4);
+    let expected = "efgh".as_bytes();
+    for i in 0..4 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_substring_after_empty_needle_in_wider_buf() {
+    // F&O 7.5.5: fn:substring-after($arg1, "") = $arg1 for any $arg1.
+    // Python oracle: substring_after("hello", "") -> "hello"
+    // Logically-empty needle in a wider buffer (str<3> = "\0\0\0") must not
+    // drop M bytes; the whole string must be returned.
+    let s: str<5> = "hello";
+    let needle: str<3> = "\0\0\0";
+    let (out, len) = substring_after::<5, 3>(s, needle);
+    assert(len == 5);
+    let expected = "hello".as_bytes();
+    for i in 0..5 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_substring_before_padded_needle() {
+    // Python oracle: substring_before("abcdefgh", "cd") -> "ab"
+    // "cd" stored in str<4> as "cd\0\0"; logical needle length=2.
+    // Locks the behavior: substring_before already used index_of which now
+    // computes the match position logically, so the result must stay "ab".
+    let s: str<8> = "abcdefgh";
+    let needle: str<4> = "cd\0\0";
+    let (out, len) = substring_before::<8, 4>(s, needle);
+    assert(len == 2);
+    let expected = "ab".as_bytes();
+    for i in 0..2 {
+        assert(out[i] == expected[i]);
+    }
+}
+
 #[test]
 fn test_upper_case() {
     let s: str<5> = "aBc12";
@@ -1378,4 +1476,140 @@ fn test_codepoint_equal() {
     let c: str<3> = "abd";
     assert(codepoint_equal::<3, 3>(a, b));
     assert(!codepoint_equal::<3, 3>(a, c));
+}
+
+// ============================================================================
+// [SONNET-4.6] sq-0ylr9: logical-length (NUL-padded NEEDLE) handling for
+// starts_with, contains, and the private index_of helper.
+// Bug class: a needle stored in a wider NUL-padded buffer compared all M
+// buffer bytes (including NULs) against the haystack, yielding false negatives.
+// Fix: derive needle logical length with logical_len_bytes; compare only the
+// meaningful bytes; empty needle = true per F&O sec.7.5.1/sec.7.5.3.
+// Expected values from an independent Python oracle over the F&O definitions.
+// ============================================================================
+
+// --- starts_with: NUL-padded prefix ---
+
+#[test]
+fn test_starts_with_padded_prefix_at_start() {
+    // Python oracle: "hello".startswith("he") == True
+    // prefix "he" stored in str<6>; NUL padding must not require NULs in s.
+    let s: str<5> = "hello";
+    let prefix: str<6> = "he\0\0\0\0";
+    assert(starts_with::<5, 6>(s, prefix));
+}
+
+#[test]
+fn test_starts_with_padded_prefix_full_content() {
+    // Python oracle: "hello".startswith("hello") == True
+    // prefix logical length == haystack logical length; both stored at exact
+    // and widened capacities.
+    let s: str<5> = "hello";
+    let prefix: str<8> = "hello\0\0\0";
+    assert(starts_with::<5, 8>(s, prefix));
+}
+
+#[test]
+fn test_starts_with_empty_needle() {
+    // F&O sec.7.5.1: fn:starts-with($arg1, "") = true for any $arg1.
+    // Python oracle: "hello".startswith("") == True
+    let s: str<5> = "hello";
+    let prefix: str<0> = "";
+    assert(starts_with::<5, 0>(s, prefix));
+}
+
+#[test]
+fn test_starts_with_padded_prefix_empty_needle_in_wider_buf() {
+    // A logically-empty prefix in a non-zero-capacity buffer also matches.
+    // Python oracle: "hello".startswith("") == True (NUL prefix = empty)
+    let s: str<5> = "hello";
+    let prefix: str<4> = "\0\0\0\0";
+    assert(starts_with::<5, 4>(s, prefix));
+}
+
+#[test]
+fn test_starts_with_padded_prefix_needle_longer_than_haystack() {
+    // Python oracle: "hi".startswith("hello") == False
+    // Logical needle (5) > logical haystack (2): never matches.
+    let s: str<2> = "hi";
+    let prefix: str<6> = "hello\0";
+    assert(!starts_with::<2, 6>(s, prefix));
+}
+
+#[test]
+fn test_starts_with_padded_prefix_mismatch() {
+    // Python oracle: "hello".startswith("world") == False
+    let s: str<5> = "hello";
+    let prefix: str<6> = "world\0";
+    assert(!starts_with::<5, 6>(s, prefix));
+}
+
+// --- contains / index_of: NUL-padded needle ---
+
+#[test]
+fn test_contains_padded_needle_at_end() {
+    // Python oracle: "llo" in "hello" == True
+    // needle "llo" stored in str<6>; NUL padding must not require NULs in s.
+    let s: str<5> = "hello";
+    let needle: str<6> = "llo\0\0\0";
+    assert(contains::<5, 6>(s, needle));
+}
+
+#[test]
+fn test_contains_padded_needle_in_middle() {
+    // Python oracle: "ell" in "hello" == True
+    let s: str<5> = "hello";
+    let needle: str<5> = "ell\0\0";
+    assert(contains::<5, 5>(s, needle));
+}
+
+#[test]
+fn test_contains_padded_needle_at_start() {
+    // Python oracle: "hel" in "hello" == True
+    let s: str<5> = "hello";
+    let needle: str<5> = "hel\0\0";
+    assert(contains::<5, 5>(s, needle));
+}
+
+#[test]
+fn test_contains_padded_needle_full_content() {
+    // Python oracle: "hello" in "hello" == True
+    // needle logical length == haystack logical length in a wider buffer.
+    let s: str<5> = "hello";
+    let needle: str<7> = "hello\0\0";
+    assert(contains::<5, 7>(s, needle));
+}
+
+#[test]
+fn test_contains_empty_needle() {
+    // F&O sec.7.5.3: fn:contains($arg1, "") = true for any $arg1.
+    // Python oracle: "" in "hello" == True (Python / XPath agree here)
+    let s: str<5> = "hello";
+    let needle: str<0> = "";
+    assert(contains::<5, 0>(s, needle));
+}
+
+#[test]
+fn test_contains_empty_needle_in_wider_buf() {
+    // Logically-empty needle in a non-zero-capacity buffer also matches.
+    let s: str<5> = "hello";
+    let needle: str<3> = "\0\0\0";
+    assert(contains::<5, 3>(s, needle));
+}
+
+#[test]
+fn test_contains_padded_needle_longer_than_haystack() {
+    // Python oracle: "hello" in "hi" == False
+    // Logical needle (5) > logical haystack (2): never matches.
+    let s: str<2> = "hi";
+    let needle: str<6> = "hello\0";
+    assert(!contains::<2, 6>(s, needle));
+}
+
+#[test]
+fn test_contains_padded_needle_no_match() {
+    // Python oracle: "xyz" in "hello" == False
+    let s: str<5> = "hello";
+    let needle: str<5> = "xyz\0\0";
+    assert(!contains::<5, 5>(s, needle));
 }
