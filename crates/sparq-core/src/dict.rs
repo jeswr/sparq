@@ -1047,6 +1047,46 @@ mod kani_proofs {
         );
     }
 
+    /// DOMAIN-COVERAGE SELF-CHECK (the sq-og8u8 anti-vacuity pattern). Lesson of sq-sqtk2.1
+    /// (2026-07-04): a bound can SILENTLY prune the very inputs a harness means to cover, so
+    /// it passes VACUOUSLY. The three id harnesses above `assume`-restrict a symbolic id/value
+    /// to ONE partition sub-domain; a disjointness or round-trip proof over a sub-domain that
+    /// turned out EMPTY (or collapsed to fewer than four regions) would be vacuously true. This
+    /// self-check pins that every region is genuinely NON-EMPTY and the boundaries are sharp —
+    /// concrete arithmetic over the partition constants (no loop, no unwind, so nothing here
+    /// can itself be pruned) — plus two `kani::cover!`s proving the `inline_id_round_trip`
+    /// assume-domain (`v <= INLINE_MAX`) actually REACHES both its adversarial boundary
+    /// (`INLINE_MAX`) and zero. Runs in BOTH feature states (no `mmap`). [OPUS-4.8] sq-og8u8
+    #[kani::proof]
+    fn domain_id_partition_regions_are_all_nonempty() {
+        // Every one of the four regions has at least one member — else a "four-region"
+        // disjointness/exhaustiveness proof is secretly a three- or two-region one.
+        assert!(NO_ID == 0, "the NO_ID region is the singleton {0}");
+        assert!(INLINE_BASE > 1, "the dict region [1, INLINE_BASE) is non-empty");
+        assert!(INLINE_MAX > 0, "the inline region [INLINE_BASE, INLINE_BASE + INLINE_MAX] is non-empty");
+        // The local-vocab region (INLINE_BASE + INLINE_MAX, u32::MAX] is non-empty: its low
+        // bound is strictly below u32::MAX. Widen to u64 so the sum cannot wrap.
+        assert!(
+            u64::from(INLINE_BASE) + u64::from(INLINE_MAX) < u64::from(u32::MAX),
+            "the local-vocab region above the inline range is non-empty"
+        );
+        // Sharp boundaries: the ends of the inline region are inline; the ids just outside
+        // it (the last dict id, the first local-vocab id) are NOT.
+        assert!(is_inline(INLINE_BASE) && is_inline(INLINE_BASE + INLINE_MAX));
+        assert!(!is_inline(INLINE_BASE - 1), "the last dict id must not be classed inline");
+        assert!(
+            !is_inline(INLINE_BASE + INLINE_MAX + 1),
+            "the first local-vocab id must not be classed inline"
+        );
+
+        // The `inline_id_round_trip` assume-domain reaches BOTH ends — its adversarial
+        // boundary `INLINE_MAX` is not silently excluded by the `assume`.
+        let v: u32 = kani::any();
+        kani::assume(v <= INLINE_MAX);
+        kani::cover!(v == INLINE_MAX, "the round-trip domain reaches its inline boundary");
+        kani::cover!(v == 0, "the round-trip domain reaches zero");
+    }
+
     // ---- [OPUS-4.8] sq-ueuk — mmap dict validator bounded proofs ----
     //
     // These harnesses require the `mmap` feature (they call `validate_dict_bytes`, which
@@ -1121,6 +1161,29 @@ mod kani_proofs {
         let prefixes: [Box<str>; 1] = [Box::from("p")];
         let datatypes = [NamedNode::new_unchecked("http://example.org/dt")];
         let _ = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, LEN, &prefixes, &datatypes);
+    }
+
+    /// DOMAIN-COVERAGE SELF-CHECK (the sq-og8u8 anti-vacuity pattern) for the two mmap
+    /// validator totality harnesses above. `..._never_panics` proves `validate_dict_bytes`
+    /// is TOTAL (returns `Ok`/`Err`, never panics/OOB/UB) over the bounded symbolic domain —
+    /// but that is worthless if the ACCEPT path is never reachable within the bounds and every
+    /// symbolic input trips a size check before any record is parsed (a VACUOUS "never panics
+    /// on the tail"). This pins that the bounded domain genuinely CONTAINS an accepted dict:
+    /// the empty dict (`len == 0`, empty tables — in the harnesses' `len <= MAX_LEN` domain)
+    /// validates `Ok`. Concrete, so it cannot itself be pruned. The DEEPER accept path (a
+    /// `>= 1`-record dict that exercises the record-parse / triple-kind / hashid-range loops
+    /// to an `Ok`) is pinned by the unit test
+    /// [`validate_dict_bytes_seam_accepts_valid_and_rejects_corruption`], which builds a REAL
+    /// valid dict and asserts `Ok` — so the symbolic totality proof is non-vacuous on both the
+    /// shallow (here) and the deep (that unit test) accept paths. [OPUS-4.8] sq-og8u8
+    #[cfg(feature = "mmap")]
+    #[kani::proof]
+    fn domain_dict_validator_accepts_the_empty_dict() {
+        // len == 0 lies in the harnesses' `len <= MAX_LEN` domain and every table is empty.
+        assert!(
+            validate_dict_bytes(&[], &[], &[], &[], 0, &[], &[]).is_ok(),
+            "the empty dict must validate — else the accept path is vacuous"
+        );
     }
 }
 

@@ -407,4 +407,52 @@ mod kani_proofs {
             assert_eq!(result, None);
         }
     }
+
+    /// DOMAIN-COVERAGE SELF-CHECK (the sq-og8u8 anti-vacuity pattern). Lesson of sq-sqtk2.1
+    /// (2026-07-04): a too-tight `#[kani::unwind]` on an `assume`-bounded generator can
+    /// SILENTLY `assume(false)`-prune the very inputs a harness means to cover, so the harness
+    /// passes VACUOUSLY while reporting nothing wrong (there, the 32–39-byte security-relevant
+    /// principals were pruned; a mutation spot-check cannot catch it — the mutant is pruned
+    /// too). Every harness suite must therefore ship a self-check proving its interesting
+    /// inputs genuinely survive the bounds. Two obligations here:
+    ///
+    ///   1. **The reducer value domain is genuinely ADVERSARIAL** — `MAX_SLICE >= 2` (a
+    ///      multi-element fold, not a degenerate singleton), `INLINE_MAX_I64 > 0` (a
+    ///      non-trivial value range, so `min != max` and a multi-term sum are reachable), and
+    ///      the id encoding classes correctly at BOTH ends of the inline range (`is_inline`
+    ///      on `INLINE_BASE` and on `INLINE_BASE + INLINE_MAX_I64`) but NOT on the `NO_ID`
+    ///      sentinel (`reduce_count` keys on `id != NO_ID`). These are concrete assertions
+    ///      over the domain constants — no loop, no unwind, so nothing here can itself be
+    ///      pruned; they go red if a future re-scope collapses the value/id domain.
+    ///
+    ///   2. **The MAXIMAL-length slice SURVIVES the `unwind(12)` bound** — a `kani::cover!`
+    ///      that a full `len == MAX_SLICE` slice with two DISTINCT endpoint values is
+    ///      reachable. If a future bound tightening pruned the full-length varied slice (the
+    ///      sq-sqtk2.1 failure mode), this cover becomes UNREACHABLE and goes red, rather than
+    ///      the equivalence harnesses silently proving the reducers ≡ a reference over only
+    ///      the short slices the bound still admits.
+    ///
+    /// Cost: one small harness at the same `unwind(12)` the reducer harnesses use. [OPUS-4.8]
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn domain_reducer_slice_is_adversarial_and_survives_the_bound() {
+        // (1) The domain constants are adversarial (concrete — cannot be unwind-pruned).
+        assert!(MAX_SLICE >= 2, "a singleton domain would not exercise the multi-element fold");
+        assert!(INLINE_MAX_I64 > 0, "a zero-width value range makes min == max == sum trivial");
+        assert!(INLINE_BASE > NO_ID, "the inline region must sit above the NO_ID sentinel");
+        assert!(is_inline(INLINE_BASE), "INLINE_BASE is the low end of the inline region");
+        assert!(
+            is_inline(INLINE_BASE + INLINE_MAX_I64 as u32),
+            "INLINE_BASE + INLINE_MAX_I64 is the high end of the inline region"
+        );
+        assert!(!is_inline(NO_ID), "NO_ID must not be classed inline (reduce_count keys on it)");
+
+        // (2) The maximal-length, value-varied slice SURVIVES unwind(12): a full MAX_SLICE
+        // slice whose endpoints can differ is reachable, i.e. NOT assume(false)-pruned.
+        let ids = symbolic_inline_ids(MAX_SLICE);
+        kani::cover!(
+            ids[0] != ids[MAX_SLICE - 1],
+            "a full-length slice with distinct endpoint values survives the unwind bound"
+        );
+    }
 }
