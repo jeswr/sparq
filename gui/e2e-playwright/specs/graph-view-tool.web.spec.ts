@@ -23,6 +23,23 @@ import { webTest as test, webExpect as expect } from "../support/index.ts";
 test.describe("graph-view-tool (web persona)", () => {
   // The webPersona auto-fixture navigates to "/" and waits for engine ready before each test.
 
+  // (sq-plqfs) [SONNET-4.6] — WorkbenchSparqlEditor renders highlighted tokens in the
+  // aria-hidden <pre> layer.  The default CONSTRUCT query contains "CONSTRUCT" and "WHERE"
+  // which are tokenised as SPARQL keywords, producing <span class="sq-tok-keyword"> elements.
+  test("graph-view editor renders SPARQL keyword highlighting tokens (web persona)", async ({
+    page,
+  }) => {
+    await page.locator('[data-tool="graph-view"]').click();
+    await expect(page.locator('[data-tool-panel="graph-view"]')).toBeVisible();
+
+    // WorkbenchSparqlEditor renders highlighted tokens in the aria-hidden <pre> layer.
+    // The default CONSTRUCT query contains "CONSTRUCT" and "WHERE" — both are SPARQL keywords.
+    const kwSpan = page.locator(".sq-tok-keyword").first();
+    await expect(kwSpan).toBeAttached();
+    const count = await page.locator(".sq-tok-keyword").count();
+    expect(count).toBeGreaterThan(0);
+  });
+
   test("Graph View tab runs CONSTRUCT and renders SVG nodes in the browser persona", async ({
     page,
   }) => {

@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useEngine, type QueryOutcome } from "@/lib/engine-context";
 import { GraphView } from "@/components/workbench/graph-view";
+import { WorkbenchSparqlEditor } from "@/components/workbench/sparql-editor";
 import type { ToolOverride } from "@/data/tools";
 
 /** The default CONSTRUCT query the tool opens with — broad enough to show the sample graph. */
@@ -59,6 +60,17 @@ export function GraphViewTool() {
     }
   }, [run, query]);
 
+  // (sq-plqfs) [SONNET-4.6] ⌘/Ctrl-Enter fires Run from within the editor.
+  const onKeyDown = React.useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        void onRun();
+      }
+    },
+    [onRun],
+  );
+
   const ready = status.kind === "ready";
 
   return (
@@ -84,23 +96,18 @@ export function GraphViewTool() {
         </div>
       </div>
 
-      {/* Compact query textarea */}
-      <div className="border-b bg-background px-3 py-2">
-        <textarea
+      {/* (sq-plqfs) Syntax-highlighting SPARQL editor — replaces the plain <textarea>.
+          The id="graph-view-query" hook is preserved on the inner <textarea>
+          (WorkbenchSparqlEditor passes it through). Fixed-height wrapper keeps the editor
+          compact so the result graph fills most of the panel. */}
+      <div className="flex h-28 flex-col border-b">
+        <WorkbenchSparqlEditor
           id="graph-view-query"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          rows={3}
-          spellCheck={false}
-          className="w-full resize-y rounded border bg-muted/30 px-2 py-1.5 font-mono text-xs leading-relaxed focus:outline-none focus:ring-1 focus:ring-primary"
-          aria-label="CONSTRUCT or DESCRIBE query"
-          placeholder="CONSTRUCT WHERE { ?s ?p ?o } LIMIT 100"
+          onChange={setQuery}
+          onKeyDown={onKeyDown}
+          ariaLabel="CONSTRUCT or DESCRIBE query"
         />
-        <p className="mt-1 text-[11px] text-muted-foreground">
-          Enter a <code className="rounded bg-muted px-1 py-0.5">CONSTRUCT</code> or{" "}
-          <code className="rounded bg-muted px-1 py-0.5">DESCRIBE</code> query — the result is
-          rendered as a node-link graph over the live store.
-        </p>
       </div>
 
       {/* Result area */}

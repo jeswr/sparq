@@ -59,6 +59,21 @@ test.describe("graph-view-tool", () => {
     await expect(circles.first()).toBeVisible();
   });
 
+  // (sq-plqfs) [SONNET-4.6] — WorkbenchSparqlEditor renders highlighted tokens in the
+  // aria-hidden <pre> layer.  The default CONSTRUCT query contains "CONSTRUCT" and "WHERE"
+  // which are tokenised as SPARQL keywords, producing <span class="sq-tok-keyword"> elements.
+  test("graph-view editor renders SPARQL keyword highlighting tokens", async ({ page }) => {
+    await page.locator('[data-tool="graph-view"]').click();
+    await expect(page.locator('[data-tool-panel="graph-view"]')).toBeVisible();
+
+    // WorkbenchSparqlEditor renders highlighted tokens in the aria-hidden <pre> layer.
+    // The default CONSTRUCT query contains "CONSTRUCT" and "WHERE" — both are SPARQL keywords.
+    const kwSpan = page.locator(".sq-tok-keyword").first();
+    await expect(kwSpan).toBeAttached();
+    const count = await page.locator(".sq-tok-keyword").count();
+    expect(count).toBeGreaterThan(0);
+  });
+
   test("error result on invalid SPARQL", async ({ page }) => {
     await page.locator('[data-tool="graph-view"]').click();
     await expect(page.locator('[data-tool-panel="graph-view"]')).toBeVisible();
