@@ -1926,7 +1926,9 @@ jobs:
           SPARQ_CONFORMANCE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -o pipefail
-          cargo run --release -p sparq-conformance \
+          # Debug (no --release): reuses the both-features artifacts the clippy step above already
+          # compiled; the report is a quick in-process run, so optimisation buys nothing here.
+          cargo run -p sparq-conformance \
             --features http-protocol,federation-descriptors \
             --bin served-conformance-report -- --out served-conformance.json 2>&1 \
             | tee served-conformance.log

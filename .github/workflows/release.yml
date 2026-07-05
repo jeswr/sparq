@@ -186,7 +186,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p conformance
-          cargo run --release -p sparq-conformance \
+          # Debug (no --release): the report is a quick in-process run against the loopback server,
+          # so optimisation buys nothing and a debug compile is faster to produce the artifact.
+          cargo run -p sparq-conformance \
             --features http-protocol,federation-descriptors \
             --bin served-conformance-report -- \
             --out "conformance/served-conformance-${VERSION}.json"
