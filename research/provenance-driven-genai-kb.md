@@ -476,21 +476,54 @@ P3/P5/P6 (`sparq-kb`), and P4 (`sparq-vectors`) parallelise without merge conten
 
 ---
 
-## 6. Open questions that genuinely need the maintainer
+## 6. Open questions — 2026-07-05 rulings
 
-1. **DQV's W3C-Note status vs the verified-stable-namespace discipline.** DQV is the right
-   model for the quality axis but is a Note, not a Recommendation. Adopt it as the model
-   (recommended), or keep `pkg:` bespoke terms and only *align* to DQV via `skos:closeMatch`?
-2. **Research-verdict enum.** Should `pkg:verdict` gain a `pkg:`-specific research subclass
-   ({holds/refuted/uncertain/superseded}) before bulk ingestion, or is `{yes,no,partial}`
-   plus assurance enough? Literature ingestion is where the strain shows.
+**Authority & ruling origin:** The maintainer's 2026-07-05 decision on #1111
+(PR #1589) decomposed the neurosymbolic re-attempt as phased work under existing epics
+with explicit grant to proceed without waiting for greenlight on phases B/C. The rulings
+below close the three open design questions; the two-ladder decision (§1 + calibration)
+is recorded in that PR's body (issue #1111 comment by @jeswr).
+
+1. **DQV's W3C-Note status vs the verified-stable-namespace discipline — DECIDED: Adopt.**
+   **Ruling (sq-2489d.3, merged):** DQV is the right model and is RATIFIED. The adoption
+   stands: `pkg:confidence` is now `rdfs:subPropertyOf dqv:value` of a named
+   `dqv:QualityMeasurement`, `pkg:assurance` is a `dqv:Metric`, and the technique-relation
+   graph leans on `cito:extends`/`cito:usesMethodIn` — the §3 gap is closed. DQV's W3C-Note
+   status (not a Rec) is flagged in `PROVENANCE.md` as a caveat, consistent with the
+   verified-stable-namespace discipline (use the right model; acknowledge normative weight).
+   No breaking change to the codebase; the reuse-first principle is preserved.
+
+2. **Research-verdict enum — DECIDED: Keep `{yes,no,partial}` + assurance; defer richer
+   enum until measured ingestion strain.** **Ruling (sq-2489d / #1111 2026-07-05):** The
+   {yes,no,partial} verdict paired with the categorical assurance axis (Proven/Claimed/
+   Conjectured) is sufficient for launch. The enum-mapping convention is: a Finding with
+   `pkg:verdict pkg:yes` + `pkg:assurance secx:Proven` is high-confidence asserted truth;
+   `pkg:verdict pkg:yes` + `pkg:assurance secx:Claimed` is a claimed fact (the claim is
+   true; the assurance is lower); `pkg:verdict pkg:no` + `pkg:assurance` reverses the
+   polarity (the claim is false, with assurance level modulating how sure we are the
+   negation is true); `pkg:verdict pkg:partial` signals a mixed or nuanced result (e.g.,
+   "this technique is faster on graphs <100K triples, slower beyond"). A research-verdict
+   subclass ({holds/refuted/uncertain/superseded}) is deferred until literature ingestion
+   produces measured evidence of strain on the generic enum (sq-2489d.6 / Phase 5).
+
 3. **`[needs-access]` for the live pilot (Phase 6).** S2 API key; OpenAlex/Crossref
    polite-pool `mailto`; egress + S3/requester-pays creds; Anthropic Haiku budget. An agent
    cannot mint these — Phases 1–5 are fully buildable + testable on fixtures without them.
-4. **Confidence calibration source.** Today `pkg:confidence` numbers are hand-authored
-   estimates. Any "calibrated confidence" claim (Phase 2) needs a calibration source +
-   reliability measurement. Acceptable to ship hedging as "reflects asserted assurance"
-   until then?
+   (No ruling needed; this is a credential block, not a design choice.)
+
+4. **Confidence calibration source — DECIDED: Ship hedging as "reflects asserted assurance"
+   until rung C (sq-2489d.10).** **Ruling (sq-2489d / #1111 / sq-tzars.5 2026-07-05):**
+   Today `pkg:confidence` numbers are hand-authored estimates. The calibration ladder is:
+   - **Rung A (now, sq-2489d.9 in flight):** asserted-assurance hedging over hand-authored
+     confidences, with an explicit **UNCALIBRATED** disclaimer in outputs (the hedge
+     "reflects asserted assurance" only; any verbal band is a tool's subjective rendering).
+   - **Rung B (sq-2489d.9):** explicit UNCALIBRATED disclaimer message surfaced in
+     `sparq-nlq` outputs, warning users that confidences are hand-authored, not empirically
+     calibrated.
+   - **Rung C (blocked by sq-tzars.9, sq-2489d.10):** a reliability-diagram harness
+     measuring how well the asserted confidences actually predict accuracy. Only after rung
+     C passes a pre-registered bar should any "calibrated confidence" claim be shipped; until
+     then, the honest framing is "asserted epistemic weight, unvalidated".
 
 ---
 
