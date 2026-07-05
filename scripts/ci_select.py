@@ -83,10 +83,11 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 ]
 
 
-# --- phase-2 singleton-lane -> seed crates (design §5.2; bead sq-fmx4u.6) -----
+# --- phase-2 singleton-lane -> seed crates (design §5.2; beads sq-fmx4u.6, sq-mel85)
 # [OPUS-4.8] A "lane" is a SINGLETON CI job (not a per-crate matrix leg) that
-# always exercises a FIXED set of crates: the fuzz smoke (fuzz.yml) and the wasm
-# bundle build (ci.yml `wasm`). Phase 1 left these always-run (design P7); phase 2
+# always exercises a FIXED set of crates: the fuzz smoke (fuzz.yml), the wasm
+# bundle build (ci.yml `wasm`), and the perf-gate benchmark (bench.yml `bench` —
+# added by sq-mel85 [SONNET-4.6]). Phase 1 left these always-run (design P7); phase 2
 # maps each to the crate closure it exercises and skips it when that closure is
 # provably unaffected. A lane is affected iff any SEED crate is in the affected
 # closure — and because `affected` is the REVERSE-dependency closure of the diff,
@@ -95,8 +96,8 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 # §3.3). So the forward-dependency reasoning is captured by a membership test on
 # the reverse closure — no separate forward walk is needed here.
 #
-# SEEDS (single source of truth; the fuzz.yml + ci.yml `wasm` job `if:` guards
-# MUST reference exactly these crate names — pinned by
+# SEEDS (single source of truth; the fuzz.yml + ci.yml `wasm` + bench.yml `bench`
+# job `if:` guards MUST reference exactly these crate names — pinned by
 # scripts/tests/test_ci_select_wiring.py, mirrored informationally in
 # ci/path-ownership.toml `[lanes]`):
 #   * fuzz — the cargo-fuzz targets. The out-of-workspace fuzz crate
@@ -104,6 +105,23 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 #     mmap loader), sparq-engine (SPARQL parse), sparq-shacl (SHACL validation).
 #   * wasm — the ci.yml `wasm` job builds every browser bundle it names; each seed
 #     pulls its own engine/core wasm32 graph, so the seed set is the bundle crates.
+#   * bench — [SONNET-4.6] sq-mel85: the perf-gate benchmark (bench.yml). Seeds are
+#     the benchmarked-crate closure of the HARD-GATED (merge-blocking) metrics that
+#     scripts/perf-gate.py enforces on PRs: the store/dict byte-layout + parse
+#     metrics come from sparq-core (exercised via the release binaries the bench job
+#     builds — sparq-cli + sparq-bench — which both depend on sparq-core, so a core
+#     change lands in this reverse closure), and the wasm_bundle_bytes floor comes
+#     from the sparq-wasm browser bundle ci-bench.sh builds + measures. sparq-wasm
+#     is a DIRECT seed on purpose: that floor is enforced ONLY in bench.yml and a
+#     wasm-only diff does NOT flow up into engine/cli/bench (they do not depend on
+#     sparq-wasm), so omitting it would silently drop the bundle gate for a wasm-only
+#     PR — exactly the unsound skip §2 forbids. sparq-engine is the headline
+#     benchmarked crate (and is embedded in the wasm bundle). The many trend-ONLY
+#     latency metrics (geo/text/vectors/rsp/hdt/solid/nlq/zk) are advisory comments,
+#     not merge-blocking, so they are deliberately NOT seeds — skipping their comment
+#     on an unrelated PR loses no gate. On push-to-main the selector returns mode=full
+#     (push is not a pull_request/merge_group event), so the FULL suite always runs on
+#     main and the auto-ratchet + benchmark-data history stay continuous (design §6.1).
 # FAIL-CLOSED (design §2/§4.3): `lane_runs` runs the lane whenever mode != selected
 # (full/shadow/error) OR any seed is not a current workspace member (a typo'd or
 # renamed seed can never silently skip a lane — it forces the lane to run). The
@@ -119,6 +137,13 @@ _LANE_SEEDS: dict[str, list[str]] = {
         "sparq-shacl-wasm",
         "sparq-introspect",
         "sparq-solid",
+    ],
+    # [SONNET-4.6] sq-mel85: perf-gate bench closure (see the `bench` bullet above).
+    "bench": [
+        "sparq-engine",
+        "sparq-cli",
+        "sparq-bench",
+        "sparq-wasm",
     ],
 }
 
@@ -238,9 +263,10 @@ def reverse_closure(crate: str, reverse_adj: dict[str, set[str]]) -> set[str]:
 
 
 def lane_runs(sel: "Selection", seeds: list[str]) -> bool:
-    """[OPUS-4.8] sq-fmx4u.6: does a singleton lane (fuzz / wasm) need to run for
-    this Selection? This is the EXECUTABLE SPEC of the fuzz.yml + ci.yml `wasm`
-    job `if:` guards — the YAML expresses the identical rule inline
+    """[OPUS-4.8] sq-fmx4u.6 / sq-mel85: does a singleton lane (fuzz / wasm /
+    bench) need to run for this Selection? This is the EXECUTABLE SPEC of the
+    fuzz.yml + ci.yml `wasm` + bench.yml `bench` job `if:` guards — the YAML
+    expresses the identical rule inline
     (`mode != 'selected' || contains(affected, '"<seed>"') || ...`), and
     scripts/tests/test_ci_select_wiring.py pins the guards' seed set against
     `_LANE_SEEDS` so the two cannot drift.

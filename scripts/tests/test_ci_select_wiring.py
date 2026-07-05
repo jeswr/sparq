@@ -52,6 +52,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 FM_YML = REPO_ROOT / ".github" / "workflows" / "feature-matrix.yml"
 FUZZ_YML = REPO_ROOT / ".github" / "workflows" / "fuzz.yml"  # [OPUS-4.8] sq-fmx4u.6
+BENCH_YML = REPO_ROOT / ".github" / "workflows" / "bench.yml"  # [SONNET-4.6] sq-mel85
 SELECT_YML = REPO_ROOT / ".github" / "workflows" / "ci-select.yml"
 GATE_PY = REPO_ROOT / "scripts" / "ci_summary_gate.py"
 CI_SELECT_PY = REPO_ROOT / "scripts" / "ci_select.py"  # [OPUS-4.8] sq-fmx4u.6
@@ -110,6 +111,7 @@ class TestWiring(unittest.TestCase):
         cls.ci = _load(CI_YML)
         cls.fm = _load(FM_YML)
         cls.fuzz = _load(FUZZ_YML)  # [OPUS-4.8] sq-fmx4u.6
+        cls.bench = _load(BENCH_YML)  # [SONNET-4.6] sq-mel85
         cls.sel = _load(SELECT_YML)
         cls.members = _workspace_members()
         cls.gate = _gate_module()
@@ -120,7 +122,7 @@ class TestWiring(unittest.TestCase):
         """Any job-level `if:` mentioning the selection outputs must include the
         `mode != 'selected'` disjunct, so empty/missing outputs mean RUN."""
         for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz)):
+                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
             for job_id, job in wf["jobs"].items():
                 cond = job.get("if", "")
                 if "needs.select.outputs" in str(cond):
@@ -133,7 +135,7 @@ class TestWiring(unittest.TestCase):
     def test_selection_guarded_jobs_need_select(self):
         """A guard reading needs.select.* only resolves if `select` is in needs."""
         for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz)):
+                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
             for job_id, job in wf["jobs"].items():
                 if "needs.select.outputs" in str(job.get("if", "")):
                     needs = job.get("needs", [])
@@ -148,7 +150,8 @@ class TestWiring(unittest.TestCase):
     # ---- crate needles are real --------------------------------------------------
     def test_every_affected_needle_is_a_workspace_member(self):
         text = (CI_YML.read_text(encoding="utf-8") + FM_YML.read_text(encoding="utf-8")
-                + FUZZ_YML.read_text(encoding="utf-8"))  # [OPUS-4.8] sq-fmx4u.6
+                + FUZZ_YML.read_text(encoding="utf-8")  # [OPUS-4.8] sq-fmx4u.6
+                + BENCH_YML.read_text(encoding="utf-8"))  # [SONNET-4.6] sq-mel85
         needles = NEEDLE_RE.findall(text)
         self.assertTrue(needles, "expected contains(affected, ...) guards to exist")
         unknown = sorted({n for n in needles if n not in self.members})
@@ -177,7 +180,7 @@ class TestWiring(unittest.TestCase):
         evaluates empty, which under enforcement would skip every leg. The
         per-shard guard must live in a STEP (env/run), never the job `if:`."""
         for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz)):
+                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
             for job_id, job in wf["jobs"].items():
                 self.assertNotIn(
                     "matrix.", str(job.get("if", "")),
@@ -187,7 +190,7 @@ class TestWiring(unittest.TestCase):
     # ---- select job shape ----------------------------------------------------------
     def test_select_caller_jobs_are_unconditional_and_use_the_reusable_workflow(self):
         for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz)):
+                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
             job = wf["jobs"].get("select")
             self.assertIsNotNone(job, f"{wf_name}: missing the select job")
             self.assertEqual(job.get("uses"), "./.github/workflows/ci-select.yml", wf_name)
@@ -247,7 +250,7 @@ class TestWiring(unittest.TestCase):
         both selection-consuming workflows react to labeled/unlabeled — and must NOT
         drop the default `synchronize` (push-to-PR) trigger while doing so."""
         for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz)):
+                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
             on = _on_block(wf)
             pr = on.get("pull_request") or {}
             self.assertIsInstance(
@@ -329,6 +332,7 @@ class TestPhase2LaneScoping(unittest.TestCase):
     def setUpClass(cls):
         cls.ci = _load(CI_YML)
         cls.fuzz = _load(FUZZ_YML)
+        cls.bench = _load(BENCH_YML)  # [SONNET-4.6] sq-mel85
         cls.members = _workspace_members()
         cls.lane_seeds = _ci_select_module()._LANE_SEEDS
 
@@ -366,6 +370,60 @@ class TestPhase2LaneScoping(unittest.TestCase):
         on = _on_block(self.fuzz)
         self.assertIn("schedule", on, "fuzz.yml must keep its nightly schedule backstop")
         self.assertIn("merge_group", on, "fuzz.yml must run on merge_group for the gate")
+
+    # ---- bench (perf-gate) lane (bench.yml) — [SONNET-4.6] sq-mel85 ----------------
+    def test_bench_job_guarded_by_its_seed_closure(self):
+        job = self.bench["jobs"]["bench"]
+        cond = str(job.get("if", ""))
+        self.assertIn(FAIL_CLOSED_DISJUNCT, cond,
+                      "bench guard must be fail-closed (empty output => RUN)")
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        self.assertIn("select", needs, "bench job must need the select pre-job")
+        self.assertEqual(self._guard_needles(cond), self.lane_seeds["bench"],
+                         "bench guard needles must equal ci_select.py _LANE_SEEDS['bench']")
+
+    def test_bench_has_unconditional_select_caller(self):
+        job = self.bench["jobs"].get("select")
+        self.assertIsNotNone(job, "bench.yml must carry the select pre-job")
+        self.assertEqual(job.get("uses"), "./.github/workflows/ci-select.yml")
+        self.assertNotIn("if", job, "select must be unconditional (gate needs it green)")
+        self.assertNotIn("needs", job)
+
+    def test_bench_runs_on_schedule_backstop(self):
+        # sq-mel85 added a nightly schedule to bench.yml as the full-run backstop: a
+        # schedule event carries no PR diff => selector mode=full => the fail-closed
+        # disjunct RUNS the whole suite. merge_group is retained for the perf gate.
+        on = _on_block(self.bench)
+        self.assertIn("schedule", on, "bench.yml must have the nightly schedule backstop")
+        self.assertIn("merge_group", on, "bench.yml must run on merge_group for the gate")
+
+    def test_bench_main_history_and_ratchet_exclude_schedule(self):
+        # CRITICAL (design §6.1 continuity, criterion (d)): the auto-ratchet + history +
+        # dashboard writes must stay on the push-to-main path and NOT fire on the new
+        # nightly `schedule` backstop (a scheduled run shares the last main commit's SHA,
+        # so writing history would append a duplicate point + ratchet off a non-landing
+        # run). Every such step's guard must exclude schedule.
+        steps = self.bench["jobs"]["bench"]["steps"]
+        names = [
+            "Auto-ratchet the perf floor (commit improvements back to main)",
+            "Ensure benchmark-data history branch exists",
+            "Seed Pages dashboard onto benchmark-data (if absent)",
+        ]
+        by_name = {s.get("name"): s for s in steps}
+        for n in names:
+            self.assertIn(n, by_name, f"bench.yml lost the '{n}' step")
+            cond = str(by_name[n].get("if", ""))
+            self.assertIn("github.event_name != 'schedule'", cond,
+                          f"'{n}' must exclude the schedule backstop (main continuity)")
+            self.assertIn("refs/heads/main", cond,
+                          f"'{n}' must stay push-to-main scoped")
+        # The github-action-benchmark auto-push must also be schedule-excluded.
+        store = by_name.get("Store + compare against history")
+        self.assertIsNotNone(store, "bench.yml lost the history Store step")
+        self.assertIn("github.event_name != 'schedule'",
+                      str(store.get("with", {}).get("auto-push", "")),
+                      "history auto-push must not fire on the schedule backstop")
 
     # ---- wasm lane (ci.yml) --------------------------------------------------------
     def test_wasm_job_guarded_by_its_seed_closure(self):

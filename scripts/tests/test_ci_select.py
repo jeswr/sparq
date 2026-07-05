@@ -469,6 +469,66 @@ class RealMetadataShapeTests(unittest.TestCase):
         self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["wasm"]),
                         "sparq-core PR must RUN the wasm lane")
 
+    # ---- bench (perf-gate) lane acceptance, real metadata (bead sq-mel85) ------
+    def test_engine_pr_runs_bench(self):
+        # ACCEPTANCE (sq-mel85): an engine-touching PR runs the perf gate — sparq-engine
+        # is a direct bench seed (and the store/dict/parse hard-gated metrics could move).
+        sel = cs.select(["crates/sparq-engine/src/lib.rs"], self.meta)
+        self.assertEqual(sel.mode, "selected")
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                        "engine-touching PR must RUN the bench lane")
+
+    def test_core_pr_runs_bench(self):
+        # A sparq-core change moves the HARD-GATED store/dict/parse byte metrics; core is
+        # a dep of every bench seed's release binary, so it lands in the affected closure.
+        sel = cs.select(["crates/sparq-core/src/dict.rs"], self.meta)
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                        "sparq-core PR must RUN the bench lane (store/dict/parse floors)")
+
+    def test_wasm_only_pr_runs_bench(self):
+        # SOUNDNESS (sq-mel85): the wasm_bundle_bytes floor is enforced ONLY in bench.yml,
+        # and a wasm-only diff does NOT flow up into engine/cli/bench — so sparq-wasm is a
+        # DIRECT bench seed and a wasm-only PR must still RUN the perf gate.
+        sel = cs.select(["crates/sparq-wasm/src/lib.rs"], self.meta)
+        self.assertEqual(sel.mode, "selected")
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                        "wasm-only PR must RUN the bench lane (wasm_bundle_bytes floor)")
+
+    def test_isolated_crate_pr_skips_bench(self):
+        # ACCEPTANCE (sq-mel85): a PR to a crate that NO bench seed depends on skips the
+        # perf gate. sparq-rsp is isolated (its bench is a standalone example, and neither
+        # sparq-engine/-cli/-bench/-wasm depends on it), so the bench closure is unaffected
+        # => skipped-green. Its trend-only latency comment is informational, not a gate.
+        sel = cs.select(["crates/sparq-rsp/src/lib.rs"], self.meta)
+        self.assertEqual(sel.mode, "selected")
+        self.assertFalse(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                         "isolated-crate PR (sparq-rsp) must SKIP the bench lane")
+
+    def test_cli_linked_crate_runs_bench_conservatively(self):
+        # HONEST over-run (sq-mel85): the seed set is "sparq-engine + the release binaries"
+        # (bead spec). sparq-cli transitively depends on sparq-geo (sparq-cli -> sparq-server
+        # -> sparq-geo), so a geo change rebuilds a benchmarked release binary and the bench
+        # lane RUNS. This is a conservative over-run (a geo change cannot move a HARD-GATED
+        # metric — store/dict/parse are sparq-core, wasm_bundle is sparq-wasm), never an
+        # unsound skip. Pinned so the behaviour is a documented decision, not a surprise.
+        ws = cs.parse_workspace(self.meta)
+        self.assertIn("sparq-cli", cs.reverse_closure("sparq-geo", ws.reverse_adj),
+                      "test premise: sparq-cli depends transitively on sparq-geo")
+        sel = cs.select(["crates/sparq-geo/src/lib.rs"], self.meta)
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                        "geo change rebuilds the sparq-cli release binary => bench RUNS")
+
+    def test_docs_only_pr_skips_bench(self):
+        # ACCEPTANCE (sq-mel85): a docs-only PR (SAFE-listed research/**) selects an
+        # EMPTY closure, so the perf gate is inert => skipped-green. Real metadata (so the
+        # bench seeds are known members) + the research SAFE map entry.
+        m = [{"pattern": "research/**", "safe": True}]
+        sel = cs.select(["research/change-based-test-selection.md"], self.meta, m)
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertFalse(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                         "docs-only PR must SKIP the bench lane")
+
 
 class LaneMappingTests(unittest.TestCase):
     """[OPUS-4.8] sq-fmx4u.6 (design §5.2, phase 2): hermetic tests of
@@ -507,12 +567,17 @@ class LaneMappingTests(unittest.TestCase):
         self.assertTrue(cs.lane_runs(sel, ["sparq-core-TYPO"]),
                         "an unknown seed must fail-closed to RUN")
 
-    def test_lane_seeds_are_the_expected_two_lanes(self):
-        self.assertEqual(set(cs._LANE_SEEDS), {"fuzz", "wasm"})
+    def test_lane_seeds_are_the_expected_three_lanes(self):
+        # [SONNET-4.6] sq-mel85 added the `bench` lane to the fuzz + wasm phase-2 set.
+        self.assertEqual(set(cs._LANE_SEEDS), {"fuzz", "wasm", "bench"})
         self.assertEqual(cs._LANE_SEEDS["fuzz"],
                          ["sparq-core", "sparq-engine", "sparq-shacl"])
         self.assertIn("sparq-wasm", cs._LANE_SEEDS["wasm"])
         self.assertIn("sparq-solid", cs._LANE_SEEDS["wasm"])
+        # bench (perf gate): sparq-engine + the release binaries + sparq-wasm (the
+        # wasm_bundle_bytes floor is enforced only in bench.yml — a direct seed).
+        self.assertEqual(cs._LANE_SEEDS["bench"],
+                         ["sparq-engine", "sparq-cli", "sparq-bench", "sparq-wasm"])
 
     # ---- SAFE-only coverage-ratchet skip (acceptance) -------------------------
     @staticmethod

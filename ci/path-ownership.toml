@@ -51,15 +51,17 @@ patterns = [
 
 # ---------------------------------------------------------------------------
 # [lanes] — INFORMATIONAL MIRROR of ci_select.py `_LANE_SEEDS` (design §5.2,
-# bead sq-fmx4u.6, phase 2). The selector does NOT read this table; it documents,
-# in the policy file, which SINGLETON CI lane maps to which SEED crates. A lane is
-# a whole-job that always exercises a FIXED crate set (the fuzz smoke; the wasm
-# bundle build); it is skipped only when NONE of its seeds is in the affected
-# reverse-dependency closure. `test_path_ownership.py` asserts this table equals
-# ci_select.py `_LANE_SEEDS` so the doc + the code cannot diverge; the fuzz.yml +
-# ci.yml `wasm` job `if:` guards reference exactly these crate names, pinned by
-# scripts/tests/test_ci_select_wiring.py. Under-listing a seed would be a silent
-# unsound skip; over-listing merely over-runs the lane (fail-safe).
+# beads sq-fmx4u.6 phase 2 + sq-mel85 phase 2b). The selector does NOT read this
+# table; it documents, in the policy file, which SINGLETON CI lane maps to which
+# SEED crates. A lane is a whole-job that always exercises a FIXED crate set (the
+# fuzz smoke; the wasm bundle build; the perf-gate bench); it is skipped only when
+# NONE of its seeds is in the affected reverse-dependency closure.
+# `test_ci_select_wiring.py::test_ownership_toml_lanes_mirror_matches_lane_seeds`
+# asserts this table equals ci_select.py `_LANE_SEEDS` so the doc + the code cannot
+# diverge; the fuzz.yml + ci.yml `wasm` + bench.yml `bench` job `if:` guards
+# reference exactly these crate names, also pinned by that test. Under-listing a
+# seed would be a silent unsound skip; over-listing merely over-runs the lane
+# (fail-safe).
 # ---------------------------------------------------------------------------
 [lanes]
 # fuzz.yml — the cargo-fuzz targets; the out-of-workspace fuzz crate depends on:
@@ -74,6 +76,14 @@ wasm = [
   "sparq-introspect",
   "sparq-solid",
 ]
+# [SONNET-4.6] sq-mel85: bench.yml `bench` job — the perf regression gate. Seeds =
+# the closure of the HARD-GATED (merge-blocking) perf metrics: sparq-engine (headline
+# benchmarked crate) + the release binaries the job builds (sparq-cli + sparq-bench,
+# which pull in sparq-core, whose store/dict/parse byte metrics are gated) + sparq-wasm
+# (the wasm_bundle_bytes floor, enforced ONLY here; a wasm-only diff does not flow up
+# into engine/cli/bench, so sparq-wasm must be a DIRECT seed — omitting it would be an
+# unsound skip). Push-to-main runs mode=full, so the FULL suite + auto-ratchet always run.
+bench = ["sparq-engine", "sparq-cli", "sparq-bench", "sparq-wasm"]
 
 # ---------------------------------------------------------------------------
 # [[map]] — attribution of OUT-OF-CRATE inputs to the crates that read them.
