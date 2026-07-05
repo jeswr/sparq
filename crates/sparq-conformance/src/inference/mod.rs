@@ -16,6 +16,13 @@
 //! scoreboard: pass / fail / documented divergence / out-of-scope-with-reason).
 
 pub mod entail;
+// [FABLE-5] sq-pbz04.4.5 — the OWL 2 Direct-Semantics arm of the OWL WG export
+// (`sparq-reason-dl` L2 profile checker + L4 dispatch checker), compiled ONLY under the
+// opt-in `dl-direct` feature so the default build links zero Direct-Semantics code. NOT
+// run by the inference binary: its floors are a sparq EXTENSION ratchet (scoped fragment
+// — NOT full OWL 2 DL), gated by the crate-local `tests/dl_suite.rs`.
+#[cfg(feature = "dl-direct")]
+pub mod dl_suite;
 pub mod n3_suite;
 pub mod owl_suite;
 pub mod rdfmt;

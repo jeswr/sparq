@@ -2089,6 +2089,46 @@ jobs:
             echo "::error::QL lane produced no 'QL DL-Lite_R sound-and-complete' line — the sq-qo1a9 oracle ratchet did not run."
             exit 1
           fi
+      - name: Run OWL 2 Direct-Semantics arm (dl-direct feature ON) + enforce the pinned floors
+        # [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OPT-IN OWL 2 DIRECT-SEMANTICS
+        # arm. SEPARATE from the binary ratchet above so the default inference binary
+        # stays byte-for-byte unchanged. Drives the DIRECT-sanctioned arm of the OWL WG
+        # export through the REAL sparq-reason-dl pipeline: the L2 syntactic profile
+        # checker (vs the export's POSITIVE test:profile tags ONLY — the explicit-negative
+        # direction was measured and not adopted, runner module docs) and the L4 fragment-dispatch
+        # DirectChecker (consistency / inconsistency / positive- / negative-entailment)
+        # under a PINNED deterministic count budget. TRI-STATE accounting — an
+        # ABSTENTION IS NEVER A PASS — with the two floors EXACT-pinned in-runner
+        # (`==`, not `>=`, so abstention-inflation and regression BOTH fail) and
+        # re-grepped here from source so this step cannot drift from the in-runner
+        # consts. HONESTLY sparq-EXTENSION ratchets over the SCOPED FRAGMENT the
+        # layered checker implements — NOT full OWL 2 DL, never summed into a
+        # conformance number. `--nocapture` so the ratchet lines reach stdout.
+        run: |
+          set -uo pipefail
+          cargo test -p sparq-conformance --features dl-direct --test dl_suite -- --nocapture \
+            | tee dl-direct-conformance.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::OWL 2 Direct-Semantics arm test failed (exit $rc)"; exit "$rc"; }
+          for lane in "profile-identification" "direct"; do
+            if ! grep -qE "^OWL 2 DL ${lane} ratchet pass " dl-direct-conformance.out; then
+              echo "::error::DL arm produced no 'OWL 2 DL ${lane} ratchet pass' line — the runner self-skipped or did not run. This job fetches the fixtures, so that is an infra issue, not a conformance change."
+              exit 1
+            fi
+          done
+          PROFILE_FLOOR=$(grep -E '^\s+pub const DL_PROFILE_FLOOR\s*:\s*usize\s*=' \
+            crates/sparq-conformance/tests/dl_suite.rs | grep -oE '[0-9]+' | head -1)
+          DIRECT_FLOOR=$(grep -E '^\s+pub const DL_DIRECT_FLOOR\s*:\s*usize\s*=' \
+            crates/sparq-conformance/tests/dl_suite.rs | grep -oE '[0-9]+' | head -1)
+          if [ -z "$PROFILE_FLOOR" ] || [ -z "$DIRECT_FLOOR" ]; then
+            echo "::error::Could not parse DL_PROFILE_FLOOR / DL_DIRECT_FLOOR from dl_suite.rs — check the const declarations"
+            exit 1
+          fi
+          PROFILE_PASS=$(grep -E '^OWL 2 DL profile-identification ratchet pass ' dl-direct-conformance.out | awk '{print $7}' | head -1)
+          DIRECT_PASS=$(grep -E '^OWL 2 DL direct ratchet pass ' dl-direct-conformance.out | awk '{print $7}' | head -1)
+          echo "OWL 2 DL profile-identification pass: ${PROFILE_PASS:-unknown} (pinned: $PROFILE_FLOOR); direct pass: ${DIRECT_PASS:-unknown} (pinned: $DIRECT_FLOOR)"
+          [ -n "$PROFILE_PASS" ] && [ "$PROFILE_PASS" -ge "$PROFILE_FLOOR" ] || { echo "::error::OWL 2 DL profile-identification regressed below the pinned floor ($PROFILE_PASS < $PROFILE_FLOOR)"; exit 1; }
+          [ -n "$DIRECT_PASS" ] && [ "$DIRECT_PASS" -ge "$DIRECT_FLOOR" ] || { echo "::error::OWL 2 DL direct lane regressed below the pinned floor ($DIRECT_PASS < $DIRECT_FLOOR)"; exit 1; }
       - name: Upload report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()

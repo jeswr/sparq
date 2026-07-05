@@ -296,6 +296,26 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
         "crates/sparq-conformance/tests/el_suite.rs",
         "EL_SUITE_FLOOR",
     ),
+    // [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OWL 2 DIRECT-SEMANTICS arm's two
+    // ratchets. The floor consts (`pub const DL_PROFILE_FLOOR` / `DL_DIRECT_FLOOR`)
+    // live in THIS crate's `tests/dl_suite.rs` (behind the opt-in `dl-direct` feature,
+    // inside the `gated` module — the guard reads them TEXTUALLY, so the
+    // `#[cfg]`/module nesting do not affect the match); the guard pins the central
+    // scoreboard's `ratchet_floor`s to them so they can never silently drift. Both are
+    // sparq EXTENSION measurements over the SCOPED FRAGMENT the layered
+    // `sparq-reason-dl` checker implements — NOT full OWL 2 DL — and are EXACT-pinned
+    // in-runner (`==`, not `>=`: the tri-state invariant "an abstention is NEVER a
+    // pass" needs the inflation direction caught too).
+    (
+        "OWL 2 DL profile identification (Direct arm)",
+        "crates/sparq-conformance/tests/dl_suite.rs",
+        "DL_PROFILE_FLOOR",
+    ),
+    (
+        "OWL 2 Direct-Semantics consistency + entailment (scoped fragment)",
+        "crates/sparq-conformance/tests/dl_suite.rs",
+        "DL_DIRECT_FLOOR",
+    ),
 ];
 
 #[test]
@@ -415,8 +435,14 @@ fn scoreboard_renders_all_suites() {
     // as a sparq EXTENSION (the total line pluralises to "rows", and it is NOT folded
     // into the conformance total).
     assert!(md.contains("OWL 2 EL classification (sparq-reason-el)"));
+    // [FABLE-5] sq-pbz04.4.5 — the two OWL 2 Direct-Semantics arm rows, HONESTLY
+    // rendered as sparq EXTENSIONS over the scoped fragment (NOT full OWL 2 DL, NOT
+    // folded into the conformance total).
+    assert!(md.contains("OWL 2 DL profile identification (Direct arm)"));
+    assert!(md.contains("OWL 2 Direct-Semantics consistency + entailment (scoped fragment)"));
+    assert!(md.contains("NOT full OWL 2 DL"));
     assert!(
-        md.contains("sparq-extension (6 rows, NOT conformance)"),
-        "six extension rows should be tallied separately and pluralised"
+        md.contains("sparq-extension (8 rows, NOT conformance)"),
+        "eight extension rows should be tallied separately and pluralised"
     );
 }
