@@ -176,6 +176,26 @@ export const PAPERS: Paper[] = [
     evidence:
       "Deterministic instrument self-tests only (no campaign results yet): 3 oracle types (TLP, NoREC, differential) each asserting non-vacuity against a seeded wrong-result mutant on the real sparq engine; oracle correctness verified across 50 generated seeds on the pristine engine; grammar exclusion list verified across 200 seeds (no banned non-deterministic construct). Campaign-dependent evidence (bugs confirmed/reported/rejected) is pending bead sq-gum8.11 and is shown as an explicit PLACEHOLDER in the paper. No third-party bug is claimed.",
   },
+  {
+    // [HAIKU-4.5] sq-gum8.9 — Register the engine systems paper. Status is `draft`:
+    // the architecture + substrate extraction + conformance breadth are traceable to the
+    // codebase today; the submission-gating evaluation (bead sq-vw3ax.12) has NOT run, so
+    // all competitive performance/memory figures are at-risk. Evidence records will be wired
+    // when those measurements land; no records are added here.
+    slug: "sparq-engine-systems",
+    source: "sparq-engine-systems.typ",
+    title:
+      "One Substrate, Many Standards: An Out-of-Core SPARQL Engine and a Measured Zero-Overhead Evaluation Core Across the W3C/OGC Spec Families",
+    blurb:
+      "RDF triple stores historically force a speed/breadth/frugality three-way trade-off. This paper describes an out-of-core engine reaching for all three: it stores triples memory-mapped in six permutations with inline-tagged ids, evaluates queries via mixed binary/worst-case-optimal/bind joins, and extracts its evaluation core into a single substrate shared unchanged across SPARQL, OWL profiles, RIF, stream processing, GeoSPARQL, and SHACL — validated as behaviour-neutral by deterministic layout ratchets and a cross-family conformance scoreboard. Competitive performance and memory claims are gated on a canonical-host evaluation (not yet run) and are not asserted.",
+    authors: "Jesse Wright · the sparq project",
+    venue:
+      "PVLDB Vol 20 rolling (monthly deadline through 2027-03-01); ICDE 2027 R2 (2026-11-11) or EDBT 2027 cycle 3 (2026-10-07) as alternatives. Draft; not submittable until the canonical-host evaluation (bead sq-vw3ax.12) yields the gated performance/memory results",
+    status: "draft",
+    family: "A",
+    evidence:
+      "The architecture (six permutation indexes, inline-tagged ids, mixed join families), the substrate extraction (single leaf crate consumed by all standards), and the conformance breadth (OWL RL/EL/QL, RIF, RSP, GeoSPARQL, SHACL, each pinned with a ratchet floor) are real and traceable to crates/sparq-core, crates/sparq-engine, crates/sparq-substrate, crates/sparq-reason*, crates/sparq-rsp, crates/sparq-geo, crates/sparq-shacl. Competitive performance and memory figures (latency vs native QLever/Virtuoso, bytes-per-triple vs HDT/qEndpoint, substrate zero-overhead delta, Sparqloscope and qEndpoint comparisons) are deterministic gating measurements on bead sq-vw3ax.12 and carry environment=canonical; they are pending and not claimed here.",
+  },
 ];
 
 export function paperBySlug(slug: string): Paper | undefined {
