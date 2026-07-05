@@ -14,6 +14,8 @@
     "build-specs": "node scripts/build-specs.mjs",
     "prebuild": "node scripts/sync-wasm.mjs && node scripts/bundle-wasm-esm.mjs && node scripts/sync-benchmarks.mjs && node scripts/sync-zk-catalog.mjs && node scripts/build-papers.mjs && node scripts/build-specs.mjs",
     "build": "next build",
+    "postbuild": "node scripts/check-bundle.mjs",
+    "check:bundle": "node scripts/check-bundle.mjs",
     "build:tauri": "cross-env NEXT_PUBLIC_BASE_PATH= npm run build",
     "start": "npx --yes serve out",
     "lint": "next lint",
