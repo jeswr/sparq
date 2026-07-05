@@ -1,0 +1,66 @@
+GenAI-KB Phase 6 (sq-tzars.6) RECORDED sub-agent transcript. This is a FROZEN, FABRICATED
+example of the raw stdout a cheap-model sub-agent (e.g. claude-haiku-4-5, invoked via the
+`extract_live::CommandRunner` subprocess seam) WOULD have produced for the three
+`openalex-batch.json` fixture papers -- committed so the `extract_live` tests replay it and
+make ZERO live model calls. The candidate JSON below is DELIBERATELY adversarial so the
+tests prove the DEFENSIVE machine-tier caps at the extraction boundary:
+
+  * paper 1 candidate 2 over-claims `confidence: 0.95` + `assurance: "Proven"` on a real
+    span -> the boundary CLAMPS confidence to 0.7 and MAPS Proven down to Claimed;
+  * paper 2's only candidate fabricates a "fully machine-checked soundness theorem" that is
+    NOT a span of the abstract (the abstract says the proof is left as FUTURE WORK) -> the
+    boundary REJECTS it (a likely hallucination; grounding independently re-checks survivors);
+  * papers 1 (candidate 1) and 3 carry honest spans within caps -> they SURVIVE.
+
+The extracted JSON object is ALSO a valid record/replay tape: `RecordedExtractor::from_tape`
+parses the raw (pre-cap) block unchanged, so a live run regenerates fixtures honestly.
+
+```json
+{
+  "extractions": [
+    {
+      "source_doi": "https://doi.org/10.5555/example.rdf-parallel-parse",
+      "candidates": [
+        {
+          "verdict": "partial",
+          "confidence": 0.62,
+          "assurance": "Conjectured",
+          "justification": "We present a chunk-parallel scanner for N-Triples that splits the input on record boundaries and parses each chunk independently.",
+          "cited_dois": ["https://doi.org/10.5555/example.rdf-parallel-parse"]
+        },
+        {
+          "verdict": "yes",
+          "confidence": 0.95,
+          "assurance": "Proven",
+          "justification": "Blank-node and prefix scope is handled per chunk.",
+          "cited_dois": ["https://doi.org/10.5555/example.rdf-parallel-parse"]
+        }
+      ]
+    },
+    {
+      "source_doi": "https://doi.org/10.5555/example.zk-sparql-soundness",
+      "candidates": [
+        {
+          "verdict": "yes",
+          "confidence": 0.5,
+          "assurance": "Proven",
+          "justification": "This paper proves a fully machine-checked soundness theorem with tight security bounds.",
+          "cited_dois": ["https://doi.org/10.5555/example.zk-sparql-soundness"]
+        }
+      ]
+    },
+    {
+      "source_doi": "https://doi.org/10.5555/example.semi-honest-mpc-join",
+      "candidates": [
+        {
+          "verdict": "yes",
+          "confidence": 0.6,
+          "assurance": "Conjectured",
+          "justification": "The protocol is secure in the semi-honest model; malicious security is not addressed.",
+          "cited_dois": ["https://doi.org/10.5555/example.semi-honest-mpc-join"]
+        }
+      ]
+    }
+  ]
+}
+```
