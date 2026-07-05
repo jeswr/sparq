@@ -81,13 +81,15 @@ test("the home route renders the hero headline and the primary nav with no conso
     page.getByRole("heading", { name: /full SPARQL engine/i, level: 1 }),
   ).toBeVisible();
 
-  // The slim top bar (the AppShell "Primary" navigation landmark) carries the five content
+  // The slim top bar (the AppShell "Primary" navigation landmark) carries the six content
   // destinations. Asserting the landmark + its core links proves the nav booted, not just copy.
-  // [SONNET-4.6] sq-4hiqe — "Try" was removed from the nav (the /try playground is gone);
-  // the bar is now Home · Capabilities · App · Benchmarks · Download (no Try item).
+  // [SONNET-4.6] sq-4hiqe — "Try" was removed from the nav (the /try playground is gone).
+  // [OPUS-4.8] sq-1scgk — "Papers" was promoted INTO the bar (maintainer 2026-07-04 item 9b:
+  // make the paper-factory output prominently findable); the bar is now
+  // Home · Capabilities · App · Benchmarks · Papers · Download (no Try item).
   const primary = page.getByRole("navigation", { name: "Primary" }).first();
   await expect(primary).toBeVisible();
-  for (const label of ["Home", "Capabilities", "App", "Benchmarks", "Download"]) {
+  for (const label of ["Home", "Capabilities", "App", "Benchmarks", "Papers", "Download"]) {
     await expect(primary.getByRole("link", { name: label, exact: true })).toBeVisible();
   }
 

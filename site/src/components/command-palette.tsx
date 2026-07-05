@@ -102,9 +102,11 @@ const TOP_PAGES: { href: string; title: string; blurb: string }[] = [
   { href: "/capabilities", title: "Capabilities", blurb: "Every surface in one gallery, by theme." },
   { href: "/app", title: "App", blurb: "The live operational GUI (hosted web app coming soon)." },
   { href: "/benchmarks", title: "Benchmarks", blurb: "Per-commit, same-box benchmark dashboard." },
+  // [OPUS-4.8] sq-1scgk — /papers is now a top-bar destination (maintainer 2026-07-04 item
+  // 9b); it stays indexed here too, exactly like the other bar pages above.
   { href: "/papers", title: "Papers", blurb: "The research papers behind sparq." },
   // [OPUS-4.8] sq-rvgr2.1 — the /specs section: W3C ReSpec-style Unofficial Proposal Drafts.
-  // Cmd-K only (like /papers) so the slim top bar stays at 6 destinations.
+  // Cmd-K only (unlike /papers, which is now in the bar) so the slim top bar stays lean.
   { href: "/specs", title: "Specs", blurb: "W3C ReSpec-style Unofficial Proposal Drafts (no W3C standing)." },
   // (sq-gk9lq) [SONNET-4.6] — how sparq stores and queries its own project knowledge as RDF.
   // Cmd-K only (like /papers, /specs) so the slim top bar stays at 6 destinations.

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Download } from "lucide-react";
+import { ArrowLeft, Download, FileCode } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -77,6 +77,14 @@ function pdfHref(slug: string): string {
   return withBasePath(`/papers/${slug}.pdf`);
 }
 
+// [OPUS-4.8] sq-1scgk — the paper's single Typst source on GitHub: the authoring artifact the
+// PDF AND the in-site HTML both compile from (build-papers.mjs), so it is the real repro anchor.
+// Matches the site's existing source-link convention (jeswr/sparq blob/main — see the /surface/*
+// readmeHref/skillHref links). An absolute external link, so no basePath prefix.
+function sourceHref(source: string): string {
+  return `https://github.com/jeswr/sparq/blob/main/site/papers/${source}`;
+}
+
 export default async function PaperPage({
   params,
 }: {
@@ -116,6 +124,44 @@ export default async function PaperPage({
           </Button>
         </div>
       </header>
+
+      {/* [OPUS-4.8] sq-1scgk — Artifacts & reproduction. Surfaces the paper's real artifacts:
+          the downloadable PDF and the single Typst source the PDF + in-site render both compile
+          from (the repro anchor). Only existing artifacts are linked — no invented metadata; the
+          per-number evidence provenance is stamped by <PaperProvenance> below. */}
+      <section
+        aria-labelledby="artifacts-heading"
+        className="rounded-lg border bg-muted/30 p-4"
+      >
+        <h2 id="artifacts-heading" className="text-sm font-semibold">
+          Artifacts &amp; reproduction
+        </h2>
+        <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+          <a
+            href={pdfHref(paper.slug)}
+            download
+            className="inline-flex items-center gap-1.5 text-primary"
+          >
+            <Download className="size-3.5" aria-hidden />
+            PDF
+          </a>
+          <a
+            href={sourceHref(paper.source)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
+          >
+            <FileCode className="size-3.5" aria-hidden />
+            Typst source
+          </a>
+        </div>
+        <p className="mt-3 text-xs text-muted-foreground">
+          The PDF and the in-site render below compile from the same single Typst source, fed the
+          same paper-bound evidence, so the two cannot disagree. Every headline number traces to a
+          named test or dataset, gated to deterministic, machine-independent evidence — see the
+          provenance stamp at the foot of the page.
+        </p>
+      </section>
 
       <PaperHtml html={html} />
 
