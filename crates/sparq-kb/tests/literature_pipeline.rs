@@ -15,10 +15,15 @@
 //! Run: `cargo test -p sparq-kb --features literature,validate -- --nocapture`
 #![cfg(all(feature = "literature", feature = "validate"))]
 
-use sparq_kb::literature::extract::RecordedExtractor;
-use sparq_kb::literature::{pipeline, FIXTURE_OPENALEX_BATCH, LITERATURE_SHAPES};
-use sparq_kb::validate::{graph_from_turtle_docs, validate_instances};
+use sparq_kb::literature::connector::SourceStub;
+use sparq_kb::literature::extract::{CandidateFinding, Extractor, RecordedExtractor};
+use sparq_kb::literature::pipeline::{self, BatchCompleteness, Tier, MACHINE_AGENT_IRI};
+use sparq_kb::literature::{FIXTURE_OPENALEX_BATCH, LITERATURE_SHAPES};
+use sparq_kb::validate::{graph_from_turtle_docs, parse_turtle, validate_instances};
+use sparq_kb::vocab::GRAPH_NS;
 use sparq_kb::{PKG_ONTOLOGY, PKG_SHAPES};
+
+use std::collections::HashSet;
 
 /// Validate a Turtle data document against BOTH the base PKG shapes and the literature-
 /// tier shapes (the real write-gate the design specifies). Returns conformance + the text
@@ -261,4 +266,310 @@ fn base_example_still_conforms_under_the_combined_shapes() {
     // (validate_instances uses only the base shapes; this asserts the ontology + base
     // shapes still load cleanly after the pkg.ttl MachineAgent addition.)
     assert!(report.conforms, "empty-instance base graph must conform");
+}
+
+// ===========================================================================
+// sq-tzars.7 — tier partition (hand-authored / machine / license-restricted)
+// [SONNET-4.6] 🤖 SPARQ agent — provenance-driven GenAI KB. Fail-closed license
+// routing; exactly one tier per emitted statement; metadata-only public projection.
+// ===========================================================================
+
+/// A grounding-guaranteed test extractor: for each stub it proposes one candidate whose
+/// justification is a span of that stub's abstract (a prefix, so it always grounds) and
+/// which cites the stub's own DOI (an in-batch Source). Lets a MIXED-licence batch exercise
+/// real routing of grounded findings — no live model, no committed tape.
+struct GroundingExtractor;
+impl Extractor for GroundingExtractor {
+    fn extract(&self, stubs: &[SourceStub]) -> Result<Vec<CandidateFinding>, String> {
+        Ok(stubs
+            .iter()
+            .map(|s| CandidateFinding {
+                source_doi: s.doi.clone(),
+                verdict: "yes".to_string(),
+                confidence: 0.6,
+                assurance: "Conjectured".to_string(),
+                justification: s.abstract_text.chars().take(48).collect(),
+                cited_dois: vec![s.doi.clone()],
+            })
+            .collect())
+    }
+}
+
+/// A mixed-licence batch: one `cc-by` (redistributable ⇒ machine tier) source and one
+/// unknown-licence (⇒ restricted tier) source, each with a groundable abstract.
+const MIXED_BATCH: &str = r#"{ "results": [
+  { "doi": "https://doi.org/10.5555/mixed.ccby",
+    "title": "An Open-Licensed Work on Parallel Scanning",
+    "abstract": "This open work reports a reproducible parallel-scanning result over graphs.",
+    "publication_year": 2024,
+    "primary_location": { "license": "cc-by" } },
+  { "doi": "https://doi.org/10.5555/mixed.unknown",
+    "title": "A Work With No Recorded Redistribution Licence",
+    "abstract": "This work has no redistribution licence recorded anywhere in its metadata.",
+    "publication_year": 2023 }
+] }"#;
+
+/// The N-Triples subject token of a serialized triple (`<iri>` or `_:b`), for disjointness
+/// checks without pulling `oxrdf` into the integration crate.
+fn subject_token(ntriple: &str) -> &str {
+    ntriple.split_whitespace().next().unwrap_or("")
+}
+
+fn ntriples_set(ttl: &str) -> HashSet<String> {
+    let base = "https://sparq.dev/ns/pkg/example#";
+    parse_turtle(ttl, base)
+        .expect("tier artifact parses")
+        .iter()
+        .map(|t| t.to_string())
+        .collect()
+}
+
+#[test]
+fn no_statement_is_emitted_into_more_than_one_tier() {
+    // The load-bearing partition invariant: no Source/Finding PAYLOAD triple appears in
+    // both the machine and the license-restricted artifacts. (Each artifact independently
+    // repeats the shared machine-agent declaration boilerplate so it stands alone; the
+    // tier-graph node subjects differ per tier, so only the agent decl can overlap — and
+    // that is asserted to be the ONLY overlap.)
+    let out = pipeline::run_tiered(
+        MIXED_BATCH,
+        &GroundingExtractor,
+        Some("2026-07-05T00:00:00Z".to_string()),
+        BatchCompleteness::Complete,
+    )
+    .expect("tiered run");
+
+    let machine = ntriples_set(&out.machine_tier);
+    let restricted = ntriples_set(&out.license_restricted_tier);
+    let agent_subject = format!("<{}>", MACHINE_AGENT_IRI);
+    let graph_prefix = format!("<{}", GRAPH_NS);
+
+    let shared: Vec<&String> = machine.intersection(&restricted).collect();
+    for line in &shared {
+        let subj = subject_token(line);
+        assert!(
+            subj == agent_subject || subj.starts_with(&graph_prefix),
+            "machine and restricted tiers share a PAYLOAD statement (not boilerplate): {}",
+            line
+        );
+    }
+
+    // Non-vacuous: each tier really does carry its own source's finding, and NOT the other's.
+    assert!(out.machine_tier.contains("10.5555/mixed.ccby"));
+    assert!(!out.machine_tier.contains("10.5555/mixed.unknown"));
+    assert!(out.license_restricted_tier.contains("10.5555/mixed.unknown"));
+    assert!(!out.license_restricted_tier.contains("10.5555/mixed.ccby"));
+    // Each tier carries exactly one grounded finding here.
+    assert_eq!(out.machine_tier.matches("a pkg:Finding").count(), 1);
+    assert_eq!(out.license_restricted_tier.matches("a pkg:Finding").count(), 1);
+}
+
+#[test]
+fn unknown_licence_source_findings_land_restricted_only() {
+    // Negative test (REQUIRED): the committed fixture carries NO licence metadata, so every
+    // source is fail-closed to the restricted tier. Its findings must appear ONLY in the
+    // restricted artifact, never in the (publishable) machine artifact.
+    let out = pipeline::run_tiered(
+        FIXTURE_OPENALEX_BATCH,
+        &RecordedExtractor::from_fixture().unwrap(),
+        Some("2026-07-05T00:00:00Z".to_string()),
+        BatchCompleteness::Complete,
+    )
+    .expect("tiered run");
+
+    // Every source routes restricted ⇒ machine tier holds zero findings and zero sources.
+    assert!(!out.machine_tier.contains("a pkg:Finding"));
+    assert!(!out.machine_tier.contains("a pkg:Source"));
+    // All four grounded findings are in the restricted tier.
+    assert_eq!(out.license_restricted_tier.matches("a pkg:Finding").count(), 4);
+    assert!(out.license_restricted_tier.contains("a pkg:Source"));
+    // The classifier agrees on the None-licence fixture sources.
+    assert_eq!(pipeline::source_tier(None), Tier::LicenseRestricted);
+}
+
+#[test]
+fn restricted_public_projection_carries_no_abstract_derived_text() {
+    // The metadata-only public projection must exclude ALL abstract-derived text — no
+    // justification (a span of the abstract), no dcterms:abstract, no pkg:Finding — while
+    // still carrying the source metadata (title + licence status).
+    let out = pipeline::run_tiered(
+        FIXTURE_OPENALEX_BATCH,
+        &RecordedExtractor::from_fixture().unwrap(),
+        Some("2026-07-05T00:00:00Z".to_string()),
+        BatchCompleteness::Complete,
+    )
+    .expect("tiered run");
+
+    let proj = &out.restricted_public_projection;
+    // Non-vacuous baseline: the FULL restricted artifact DOES carry the abstract-derived
+    // justification text, so the projection genuinely stripped it (not merely empty).
+    assert!(
+        out.license_restricted_tier.contains("sigimpl:justification"),
+        "restricted FULL tier must carry the justification (else the test is vacuous)"
+    );
+    assert!(out.license_restricted_tier.contains("We present a chunk-parallel"));
+
+    // The projection carries NONE of it.
+    assert!(!proj.contains("sigimpl:justification"), "projection leaks a justification");
+    assert!(!proj.contains("dcterms:abstract"), "projection leaks an abstract");
+    assert!(!proj.contains("a pkg:Finding"), "projection leaks a Finding");
+    assert!(!proj.contains("We present a chunk-parallel"), "projection leaks abstract text");
+    assert!(!proj.contains("prov:wasGeneratedBy"), "projection leaks finding provenance");
+
+    // But it DOES carry the permitted source metadata + licence status.
+    assert!(proj.contains("Chunk-Parallel Scanning of Line-Delimited RDF"));
+    assert!(proj.contains("dcterms:license \"unknown\""));
+    assert!(proj.contains("a pkg:Source"));
+    // The projection is valid, parseable Turtle.
+    assert!(parse_turtle(proj, "https://sparq.dev/ns/pkg/example#").is_ok());
+}
+
+#[test]
+fn cap_truncated_batch_is_marked_incomplete_in_every_artifact() {
+    // Truncation invariant (the #1527 consumer note): if the input batch was cut short by a
+    // pagination hard cap, EVERY emitted artifact must carry an explicit incompleteness
+    // marker and never be presented as complete.
+    let truncated = BatchCompleteness::from_pagination(20, 20);
+    assert!(!truncated.is_complete());
+    let out = pipeline::run_tiered(
+        FIXTURE_OPENALEX_BATCH,
+        &RecordedExtractor::from_fixture().unwrap(),
+        Some("2026-07-05T00:00:00Z".to_string()),
+        truncated,
+    )
+    .expect("tiered run");
+
+    for (name, art) in [
+        ("machine", &out.machine_tier),
+        ("restricted", &out.license_restricted_tier),
+        ("projection", &out.restricted_public_projection),
+    ] {
+        assert!(
+            art.contains("INCOMPLETE") && art.contains("cap-truncated"),
+            "{} artifact must carry the incompleteness marker",
+            name
+        );
+        assert!(
+            art.contains("rdfs:comment"),
+            "{} artifact must carry a machine-readable incompleteness marker",
+            name
+        );
+        // Still valid Turtle (the banner is a comment; the marker is an rdfs:comment).
+        assert!(
+            parse_turtle(art, "https://sparq.dev/ns/pkg/example#").is_ok(),
+            "{} artifact must remain parseable Turtle",
+            name
+        );
+    }
+
+    // A COMPLETE run carries NO marker.
+    let complete = pipeline::run_tiered(
+        FIXTURE_OPENALEX_BATCH,
+        &RecordedExtractor::from_fixture().unwrap(),
+        Some("2026-07-05T00:00:00Z".to_string()),
+        BatchCompleteness::Complete,
+    )
+    .expect("tiered run");
+    assert!(!complete.machine_tier.contains("INCOMPLETE"));
+    assert!(!complete.license_restricted_tier.contains("INCOMPLETE"));
+    assert!(!complete.restricted_public_projection.contains("INCOMPLETE"));
+}
+
+/// A dup-DOI mixed batch: the SAME DOI appears TWICE in one connector batch — once with a
+/// "cc-by" licence and once with no licence recorded. Simulates the real OpenAlex case where
+/// two indexing records represent the same work with conflicting licence metadata. The
+/// DOI-granularity fail-closed rule must route the WHOLE DOI restricted.
+const DUP_DOI_MIXED_BATCH: &str = r#"{ "results": [
+  { "doi": "https://doi.org/10.5555/dup.conflict",
+    "title": "A Conflicted Work — open copy",
+    "abstract": "This conflicted work has two indexing records and mentions parallel scanning.",
+    "publication_year": 2024,
+    "primary_location": { "license": "cc-by" } },
+  { "doi": "https://doi.org/10.5555/dup.conflict",
+    "title": "A Conflicted Work — no-licence copy",
+    "abstract": "This conflicted work has two indexing records and mentions parallel scanning.",
+    "publication_year": 2024 }
+] }"#;
+
+#[test]
+fn dup_doi_mixed_licence_fails_closed_whole_doi_restricted() {
+    // DOI-granularity fail-closed (sq-tzars.7): when a batch contains two stubs for the same
+    // DOI — one "cc-by" and one licence-absent — the WHOLE DOI must be routed RESTRICTED.
+    // No abstract-derived content (source node, pkg:Finding, sigimpl:justification) for that
+    // DOI may appear in the machine (publishable) artifact.
+    let out = pipeline::run_tiered(
+        DUP_DOI_MIXED_BATCH,
+        &GroundingExtractor,
+        Some("2026-07-05T00:00:00Z".to_string()),
+        BatchCompleteness::Complete,
+    )
+    .expect("tiered run on dup-DOI batch");
+
+    // Machine artifact must carry NONE of the dup-DOI source content (the invariant).
+    assert!(
+        !out.machine_tier.contains("10.5555/dup.conflict"),
+        "machine tier must not carry any source node from the dup-DOI (fail-closed)"
+    );
+    assert!(
+        !out.machine_tier.contains("a pkg:Finding"),
+        "machine tier must not carry any Finding from the dup-DOI"
+    );
+    assert!(
+        !out.machine_tier.contains("sigimpl:justification"),
+        "machine tier must not carry any justification (abstract-derived text) from the dup-DOI"
+    );
+
+    // Restricted artifact MUST contain the full content (non-vacuousness).
+    assert!(
+        out.license_restricted_tier.contains("10.5555/dup.conflict"),
+        "restricted tier must carry the dup-DOI source"
+    );
+    assert!(
+        out.license_restricted_tier.contains("a pkg:Finding"),
+        "restricted tier must carry at least one Finding for the dup-DOI"
+    );
+    assert!(
+        out.license_restricted_tier.contains("sigimpl:justification"),
+        "restricted tier must carry the abstract-derived justification"
+    );
+
+    // Restricted public projection must carry the DOI metadata but NO abstract-derived text.
+    assert!(
+        out.restricted_public_projection.contains("10.5555/dup.conflict"),
+        "restricted public projection must carry the dup-DOI metadata"
+    );
+    assert!(
+        !out.restricted_public_projection.contains("sigimpl:justification"),
+        "projection must not carry abstract-derived text"
+    );
+    assert!(
+        !out.restricted_public_projection.contains("a pkg:Finding"),
+        "projection must not carry any Finding"
+    );
+
+    // The sidecar must account for all candidates (none silently dropped).
+    assert_eq!(
+        out.sidecar.grounded + out.sidecar.quarantined.len(),
+        out.sidecar.candidates_total,
+        "all candidates must be accounted for in the sidecar"
+    );
+}
+
+#[test]
+fn machine_and_restricted_full_tiers_conform_to_the_shacl_gate() {
+    // The REAL path: each full tier artifact (machine + restricted) must independently
+    // conform to pkg.shapes.ttl + literature.shapes.ttl — the tier split must not produce a
+    // non-conformant graph.
+    let out = pipeline::run_tiered(
+        MIXED_BATCH,
+        &GroundingExtractor,
+        Some("2026-07-05T00:00:00Z".to_string()),
+        BatchCompleteness::Complete,
+    )
+    .expect("tiered run");
+
+    let (m_conforms, m_report) = gate(&out.machine_tier);
+    assert!(m_conforms, "machine-tier artifact must conform:\n{m_report}");
+    let (r_conforms, r_report) = gate(&out.license_restricted_tier);
+    assert!(r_conforms, "restricted-tier artifact must conform:\n{r_report}");
 }

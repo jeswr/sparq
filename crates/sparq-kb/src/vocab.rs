@@ -169,6 +169,43 @@ pub const CONFIDENCE_MEASUREMENT: &str = "https://sparq.dev/ns/pkg#ConfidenceMea
 pub const SOURCE_RELIABILITY_MEASUREMENT: &str =
     "https://sparq.dev/ns/pkg#SourceReliabilityMeasurement";
 
+// --- tier named-graph IRIs (sq-tzars.7) ------------------------------------
+// The named-graph IRIs for the tiered KB emission (`research/research-kb-program.md`
+// decisions 5–6). Tier separation v1 = per-tier Turtle ARTIFACTS, NOT in-store named
+// graphs (`sparq-kb` loads one in-memory Graph per query today; in-store separation is
+// future work and is NOT claimed). These IRIs NAME each tier's artifact so a downstream
+// loader/exporter (sq-tzars.8) keeps the tiers queryable-apart. They live in the
+// `pkg/graph#` sub-namespace (mirroring the `pkg/agent#` MachineAgent IRI and the
+// `pkg/kb#` instance namespace) — they are GRAPH identifiers, NOT `pkg:` vocabulary
+// terms, so they are byte-pinned by `tier_graph_iris_are_pinned` below and are
+// deliberately NOT in `ALL` (which pins the `pkg:` vocabulary against `pkg.ttl`).
+// [SONNET-4.6] sq-tzars.7 🤖 SPARQ agent — provenance-driven GenAI KB.
+
+/// The `pkg/graph#` sub-namespace holding the per-tier named-graph IRIs.
+pub const GRAPH_NS: &str = "https://sparq.dev/ns/pkg/graph#";
+
+/// Tier graph IRI: the HAND-AUTHORED tier — the `ingest_pkg.py` projector output (the
+/// high-accuracy, human-curated PKG). Stamped on that output so it is queryable-apart.
+pub const TIER_HAND_AUTHORED_GRAPH: &str = "https://sparq.dev/ns/pkg/graph#hand-authored";
+
+/// Tier graph IRI: the MACHINE tier — the literature pipeline output for sources whose
+/// licence is KNOWN and redistributable (full findings + PROV-O lineage; publishable).
+pub const TIER_MACHINE_GRAPH: &str = "https://sparq.dev/ns/pkg/graph#machine";
+
+/// Tier graph IRI: the LICENSE-RESTRICTED tier — machine findings whose source licence is
+/// unknown/absent/non-redistributable (**fail-closed**). The full findings stay in this
+/// PRIVATE artifact; only a metadata-only projection (no abstract-derived text) is public.
+pub const TIER_LICENSE_RESTRICTED_GRAPH: &str =
+    "https://sparq.dev/ns/pkg/graph#license-restricted";
+
+/// Every tier named-graph IRI, in a stable order. Byte-pinned by
+/// `tier_graph_iris_are_pinned`; deliberately disjoint from [`ALL`].
+pub const TIER_GRAPHS: &[&str] = &[
+    TIER_HAND_AUTHORED_GRAPH,
+    TIER_MACHINE_GRAPH,
+    TIER_LICENSE_RESTRICTED_GRAPH,
+];
+
 /// Every `pkg:` IRI this module names — the full set the drift guard pins against
 /// `pkg.ttl`. Keep in sync when adding/removing a constant.
 pub const ALL: &[&str] = &[
@@ -281,6 +318,45 @@ mod tests {
                 ALL.contains(&full.as_str()),
                 "pkg.ttl declares `pkg:{local}` but no Rust constant names it — \
                  add the constant to vocab.rs or remove the term (sq-2m6zm.1)",
+            );
+        }
+    }
+
+    /// Byte-pin the tier named-graph IRIs (sq-tzars.7). The per-tier ARTIFACTS and the
+    /// tier-aware export script (sq-tzars.8) key off these EXACT strings, so a rename must
+    /// be a conscious, test-breaking change. The tier graph IRIs are graph identifiers,
+    /// NOT `pkg:` vocabulary terms, so they must stay OUT of [`ALL`] (which is pinned
+    /// against `pkg.ttl`) — that separation is asserted here too. [SONNET-4.6]
+    #[test]
+    fn tier_graph_iris_are_pinned() {
+        assert_eq!(GRAPH_NS, "https://sparq.dev/ns/pkg/graph#");
+        assert_eq!(
+            TIER_HAND_AUTHORED_GRAPH,
+            "https://sparq.dev/ns/pkg/graph#hand-authored"
+        );
+        assert_eq!(TIER_MACHINE_GRAPH, "https://sparq.dev/ns/pkg/graph#machine");
+        assert_eq!(
+            TIER_LICENSE_RESTRICTED_GRAPH,
+            "https://sparq.dev/ns/pkg/graph#license-restricted"
+        );
+        // Every tier graph IRI is in the `pkg/graph#` namespace.
+        for &g in TIER_GRAPHS {
+            assert!(
+                g.starts_with(GRAPH_NS),
+                "tier graph IRI must be in the pkg/graph# namespace: {}",
+                g
+            );
+        }
+        // The three tier graph IRIs are distinct.
+        let set: std::collections::HashSet<&str> = TIER_GRAPHS.iter().copied().collect();
+        assert_eq!(set.len(), TIER_GRAPHS.len(), "tier graph IRIs must be distinct");
+        // Exactly one tier per emitted statement starts here: the tier graph IRIs are NOT
+        // `pkg:` vocabulary terms, so none may leak into the pkg.ttl-pinned ALL set.
+        for &g in TIER_GRAPHS {
+            assert!(
+                !ALL.contains(&g),
+                "a tier graph IRI must not be in the pkg: vocab set ALL: {}",
+                g
             );
         }
     }
