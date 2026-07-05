@@ -404,3 +404,6 @@ pub use crate::sequence::range_to as to;
 
 // op:QName-equal
 pub use crate::qname::qname_equal as QName_equal;
+
+// op:NOTATION-equal (F&O sec. 9.1: equality by expanded name, same as QName)
+pub use crate::qname::notation_equal as NOTATION_equal;

@@ -80,7 +80,7 @@ pub use year_month_duration::{
 // Re-export QName type and functions
 pub use qname::{
     fn_qname, fn_qname_from_strings, local_name_from_qname, namespace_uri_from_qname,
-    prefix_from_qname, qname_equal, XsdQName,
+    notation_equal, prefix_from_qname, qname_equal, XsdQName,
 };
 
 // Re-export Gregorian types
