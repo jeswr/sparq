@@ -1115,7 +1115,21 @@ mod kani_proofs {
     /// of `open_from_bytes` does an aligned-copy + the full validation; the failure path is a
     /// plain `Err`. Neither may abort.
     #[kani::proof]
-    #[kani::unwind(40)] // > MAX_LEN so every bounded slice/index loop fully unrolls.
+    // (sq-kycq5) [SONNET-4.6] Loop census for this harness: the setup loop `for b in
+    // bytes.iter_mut()` runs up to `len` times where `len <= MAX_LEN`; the
+    // `AlignedBytes::from_vec` aligned copy covers the same `len` bytes; the fingerprint
+    // scan in `Fingerprint::from_bytes_opt` covers FINGERPRINT_LEN = 24 bytes; and the
+    // index-validation loop `for i in 0..count` runs at most 2 times within MAX_LEN = 88
+    // (a dim=1 count=2 store needs 56 + 8 + 16 = 80 bytes; count=3 needs 92 > 88).
+    // All loops are bounded by MAX_LEN = HEADER_LEN + 32 = 56 + 32 = 88.
+    // Therefore the required unwind bound is MAX_LEN + 1 = 89. The previous bound of 40
+    // was LESS than MAX_LEN (40 < 88) and its comment "// > MAX_LEN" was factually wrong;
+    // that bound fired an unwinding assertion in the nightly Kani lane (an INCOMPLETE proof,
+    // not a counterexample). See the sq-gnvfc fix for the sibling harness for the same
+    // pattern. NOTE: raising the bound may make this harness slower (more unwinding steps);
+    // that is acceptable — the lane's per-harness timeout keeps it visible, and an honest
+    // timeout beats a false incomplete proof.
+    #[kani::unwind(89)] // MAX_LEN + 1 = 88 + 1; bounds every loop in the harness cone
     fn open_from_bytes_never_panics() {
         // A symbolic length in `0..=MAX_LEN`, then a symbolic buffer of that length.
         let len: usize = kani::any();
