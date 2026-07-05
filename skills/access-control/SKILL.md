@@ -164,6 +164,15 @@ Materialize the authorization view from the access-control documents, then enfor
   authorization** — the server authorizes the request itself (e.g. `decide(.., Mode::Control)`)
   and `update_as` remains the session-checked write path. Always-present API (no cargo gate;
   mirrors `update_as`/`decide` — adds no dependency).
+  **Scale ([OPUS-4.8] issue #1571, sq-b7k7u):** an atomic single-`.acl`/`.acr` write still
+  re-materializes the whole auth view (the incremental materializer is deferred), but its
+  session-cache invalidation is **scoped to that ACL's ORIGIN** (`scheme://authority`), so a
+  write to one pod does **not** cold-start every other pod's cached view — untouched pods keep
+  their warm slices and the written pod re-derives at most its own slice. This is sound because
+  a WAC/ACP grant is confined to its ACL's origin (`acl:accessTo`/`acl:default`,
+  `appliesToResource`), and a differential property test asserts the scoped-cache state equals
+  a from-scratch rebuild after every write (incl. the fail-open-critical revoke direction).
+  The same origin-partitioned index makes `decide` cost one pod's grants, not the whole store.
 - `store.accessible(&Session, Mode) -> Arc<Vec<NamedNode>>` /
   `store.accessible_set(...)` / `store.view_for(...) -> DatasetView` /
   `store.auth() -> &AuthIndex` — inspect the authorized graph set or the materialized
