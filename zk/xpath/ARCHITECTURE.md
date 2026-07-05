@@ -14,20 +14,23 @@ Following the pattern established by [noir_IEEE754](https://github.com/jeswr/noi
 noir_XPath/
 ├── Nargo.toml                          # Workspace configuration
 ├── ARCHITECTURE.md                     # This file
-├── IMPLEMENTATION_PLAN.md              # Phased implementation plan
+├── SPARQL_COVERAGE.md                  # Per-function implementation status
 ├── README.md                           # User documentation
-├── CONTRIBUTING.md                     # Development guidelines
 │
 ├── xpath/                              # Main library package
 │   ├── Nargo.toml
 │   └── src/
 │       ├── lib.nr                      # Module exports
 │       ├── numeric.nr                  # Numeric functions & operators
+│       ├── numeric_types.nr            # Float/double (via noir_IEEE754)
 │       ├── boolean.nr                  # Boolean functions & operators
 │       ├── datetime.nr                 # DateTime functions
+│       ├── date.nr / time.nr           # Date / Time types & functions
+│       ├── duration.nr                 # Duration functions
+│       ├── string.nr                   # String functions (byte-array tuples)
+│       ├── regex.nr / hash.nr          # Bounded regex subset / circuit-native hash
 │       ├── comparison.nr               # Comparison operators
 │       └── types.nr                    # Type definitions & conversions
-│       # 🔮 Future: string.nr, hash.nr
 │
 ├── xpath_unit_tests/                   # Manual unit tests
 │   ├── Nargo.toml
@@ -70,7 +73,7 @@ noir_XPath/
 | `xsd:decimal` | - | 🔮 Future | Deferred for complexity |
 | `xsd:float` | `u32` (IEEE 754 bits) | ✅ Supported | Via noir_IEEE754 |
 | `xsd:double` | `u64` (IEEE 754 bits) | ✅ Supported | Via noir_IEEE754 |
-| `xsd:string` | - | 🔮 Future | Deferred for complexity |
+| `xsd:string` | `([u8; N], u32)` byte-array tuple | ✅ Supported | See `string.nr`; codepoint-vs-byte substring caveat tracked in sq-hjvte |
 | `xsd:boolean` | `bool` | ✅ Supported | Native Noir bool |
 | `xsd:dateTime` | `Field` (epoch microseconds) | ✅ Supported | Single Field for efficiency |
 
@@ -140,17 +143,25 @@ fn floor<T>(value: T) -> T
 fn rand() -> u64  // Returns bits of xsd:double in [0, 1)
 ```
 
-### 2. String Module (`string.nr`) — 🔮 Future
+### 2. String Module (`string.nr`) — ✅ Implemented
 
-> **Status**: Deferred. String operations in ZK circuits are complex due to variable-length data and UTF-8 encoding. Will be implemented in a future phase.
+Strings are represented as `([u8; N], u32)` byte-array tuples (buffer + logical
+length) rather than Noir's `str<N>`, because Noir cannot reconstruct a `str` from
+bytes at runtime. Functions that produce new strings return this tuple; predicate
+functions return `bool`/numeric values.
 
-Planned functions when implemented:
+Implemented (see [SPARQL_COVERAGE.md](./SPARQL_COVERAGE.md) for the authoritative
+per-function status):
 - `fn:string-length`, `fn:substring`, `fn:concat`
 - `fn:upper-case`, `fn:lower-case`
 - `fn:starts-with`, `fn:ends-with`, `fn:contains`
 - `fn:substring-before`, `fn:substring-after`
-- `fn:matches`, `fn:replace` (regex)
-- `fn:encode-for-uri`
+- `fn:normalize-space`, `fn:translate`, `fn:encode-for-uri`
+
+> **Caveat**: `fn:substring` windows BYTE positions in the logical content — exact
+> parity with the F&O spec only for ASCII. A codepoint-positional variant for
+> multi-byte UTF-8 is tracked in sq-hjvte. A bounded, circuit-friendly `fn:matches`
+> / `fn:replace` subset lives in `regex.nr` (sq-y73); full XPath regex is deferred.
 
 ### 3. Boolean Module (`boolean.nr`)
 
@@ -211,13 +222,13 @@ fn datetime_greater_than(a: XsdDateTime, b: XsdDateTime) -> bool {
 
 > **Note**: The XPath `fn:seconds-from-dateTime` returns a decimal including fractional seconds. Since decimals are deferred, we provide integer seconds + separate microseconds accessor.
 
-### 5. Hash Module (`hash.nr`) — 🔮 Future
+### 5. Hash Module (`hash.nr`) — partial
 
-> **Status**: Deferred. Hash functions depend on string handling for input/output. Will be implemented after string support.
-
-Planned functions when implemented:
-- `fn:md5`, `fn:sha1`, `fn:sha256`, `fn:sha384`, `fn:sha512`
-- Will leverage Noir's stdlib hash primitives with hex string output
+`hash.nr` provides a circuit-native content hash (`string_pedersen_hash`) plus a
+`bytes_to_lower_hex` hex formatter (sq-y73). The SPARQL-named cryptographic digest
+functions (`MD5`, `SHA1`, `SHA256`, `SHA384`, `SHA512`) with their canonical
+hex-string output are **deferred** — see SPARQL_COVERAGE.md. When added they will
+leverage Noir's stdlib hash primitives over the byte-array string representation.
 
 ### 6. Comparison Module (`comparison.nr`)
 

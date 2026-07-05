@@ -176,15 +176,19 @@ This document details the implementation status of SPARQL 1.1 functions in noir_
 - Integer aggregate functions (COUNT, SUM, MIN, MAX, AVG)
 - Sequence operations (is_empty, exists, count)
 - Generic comparison utilities (5 operators including `<=` and `>=`)
+- String functions returning byte-array tuples (STRLEN, SUBSTR, UCASE, LCASE, STRSTARTS, STRENDS, CONTAINS, STRBEFORE, STRAFTER, CONCAT, ENCODE_FOR_URI — see §17.4.3; substring byte-vs-codepoint caveat tracked in sq-hjvte)
 
 ### Partial Implementation (⚠️)
 - Aggregates: integers only (floats/doubles not yet supported)
+- Hash / regex: a circuit-native content hash + bounded regex subset exist (sq-y73); the SPARQL-named MD5/SHA digests and full XPath `fn:matches`/`fn:replace` are deferred
 
 ### Deferred/Future (🔮)
-- All string functions (complex in ZK)
-- All regex functions (complex in ZK)
-- Hash functions (require string output)
-- TZ() function (requires string formatting)
+- Cryptographic hash digests MD5/SHA1/SHA256/SHA384/SHA512 (canonical hex-string output)
+- Full regex `fn:matches` / `fn:replace` (beyond the bounded subset)
+- TZ() function (requires timezone string formatting)
+- GROUP_CONCAT / SAMPLE aggregates
+- langMatches
+- `xsd:decimal` arbitrary-precision fixed-point type
 
 ### Not Feasible (❌)
 - RAND() - not meaningful in deterministic ZK proofs
@@ -199,7 +203,7 @@ This document details the implementation status of SPARQL 1.1 functions in noir_
 When using this library for SPARQL 1.1 query verification in zero-knowledge:
 
 1. **Determinism**: Functions like RAND() and NOW() must be provided as public/private inputs rather than computed
-2. **String Operations**: All string-based operations must be performed outside the circuit or deferred to future versions
+2. **String Operations**: Implemented over a `([u8; N], u32)` byte-array representation (buffer + logical length); functions that build new strings return this tuple. A handful of string-dependent SPARQL functions (hash digests, GROUP_CONCAT, TZ()) remain deferred
 3. **Numeric Types**: Float and double operations will be added when noir_IEEE754 integration is complete
 4. **RDF Terms**: RDF-specific functionality is outside the scope of this XPath function library and should be implemented separately
 

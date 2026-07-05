@@ -6,9 +6,10 @@ A Noir library implementing XPath 2.0 functions and operators required by SPARQL
 
 - **[SPARQL_COVERAGE.md](./SPARQL_COVERAGE.md)** - Complete mapping of SPARQL 1.1 functions to implementation status
 - **[TESTING.md](./TESTING.md)** - Testing strategy, how to run tests, and coverage details
-- **[IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)** - Phased implementation roadmap
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Technical architecture and design decisions
 - **[scripts/README.md](./scripts/README.md)** - Test generation from qt3tests
+
+*Roadmap / future-feature work is tracked as issues, not an in-repo plan document.*
 
 > [!CAUTION]
 > **Under Development**: This library is still under active development. APIs may change without notice and some features may be incomplete or missing.
@@ -124,9 +125,7 @@ The following SPARQL 1.1 functions are deferred due to complexity in zero-knowle
 - **Advanced aggregates**: GROUP_CONCAT, SAMPLE
   - Reason: Require string support or more complex logic
 
-See [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) for detailed planning of future features.
-
-For a complete mapping of all SPARQL 1.1 functions to their implementation status, see [SPARQL_COVERAGE.md](./SPARQL_COVERAGE.md).
+For a complete mapping of all SPARQL 1.1 functions to their implementation status, see [SPARQL_COVERAGE.md](./SPARQL_COVERAGE.md). Remaining deferred features are tracked as issues rather than an in-repo roadmap document.
 
 ## Usage
 
