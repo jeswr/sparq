@@ -269,10 +269,26 @@ struct ConditionalGrant {
 /// ```
 #[derive(Debug, Default)]
 pub struct AuthIndex {
-    /// (principal IRI, mode) → graphs, for simple allow / deny triples.
-    allow: FxHashMap<(String, Mode), Vec<NamedNode>>,
-    deny: FxHashMap<(String, Mode), Vec<NamedNode>>,
-    cond: Vec<ConditionalGrant>,
+    /// (principal IRI, mode) → per-graph-ORIGIN → graphs, for simple allow / deny triples.
+    ///
+    /// [OPUS-4.8] sq-b7k7u: the graph set of each (principal, mode) is bucketed by the
+    /// GRAPH's origin (`scheme://authority`, [`crate::loader::iri_origin`]). The flat set
+    /// the audited walk used before is exactly the union of these buckets, so
+    /// [`AuthIndex::accessible`] is byte-for-byte unchanged; the buckets additionally let
+    /// [`AuthIndex::accessible_in_origin`] answer a decision restricted to one origin
+    /// without touching the others — the substrate for `PodStore`'s per-origin decide and
+    /// its **diff-based** session-cache invalidation on an ACL write (issue #1571,
+    /// sq-b7k7u fix). Sound by construction: `reindex_with` diffs old vs new `AuthIndex`
+    /// per-origin and invalidates exactly the origins whose buckets changed — no
+    /// confinement lemma assumed (WAC agentGroup membership, foreign-subject triples, and
+    /// ACP cross-document indirection can all let a write at origin A affect origin B's
+    /// grants; the diff catches every such case automatically).
+    allow: FxHashMap<(String, Mode), FxHashMap<String, Vec<NamedNode>>>,
+    deny: FxHashMap<(String, Mode), FxHashMap<String, Vec<NamedNode>>>,
+    /// Conditional (ACP `noneOf`) grants, bucketed by their target graph's origin. A grant
+    /// with no target graph (inert — it inserts nothing) is bucketed under the empty-origin
+    /// key; it is still visited by the all-origins walk, so the union stays exact.
+    cond: FxHashMap<String, Vec<ConditionalGrant>>,
     /// matcher IRI → accept-sets (principal space), for exceptMatcher evaluation.
     matcher_agents: FxHashMap<String, FxHashSet<String>>,
     matcher_clients: FxHashMap<String, FxHashSet<String>>,
@@ -303,7 +319,9 @@ impl AuthIndex {
             if let Some((mode, is_allow)) = Mode::from_pred(p.as_str()) {
                 if let Term::NamedNode(g) = &t[2] {
                     let map = if is_allow { &mut ix.allow } else { &mut ix.deny };
-                    map.entry((subj, mode)).or_default().push(g.clone());
+                    // [OPUS-4.8] sq-b7k7u: bucket the grant under its graph's origin.
+                    let origin = crate::loader::iri_origin(g.as_str()).to_owned();
+                    map.entry((subj, mode)).or_default().entry(origin).or_default().push(g.clone());
                 }
                 continue;
             }
@@ -347,7 +365,12 @@ impl AuthIndex {
                 _ => {}
             }
         }
-        ix.cond = cond.into_values().collect();
+        // [OPUS-4.8] sq-b7k7u: bucket each conditional grant under its target graph's
+        // origin (empty-origin key when it has no target graph — such a grant is inert).
+        for g in cond.into_values() {
+            let origin = g.graph.as_ref().map(|n| crate::loader::iri_origin(n.as_str()).to_owned()).unwrap_or_default();
+            ix.cond.entry(origin).or_default().push(g);
+        }
         ix
     }
 
@@ -454,6 +477,101 @@ impl AuthIndex {
     /// Prefer [`crate::PodStore::accessible`], which memoizes this walk per
     /// (agent, client, issuer, mode) until the next re-materialization.
     pub fn accessible(&self, s: &Session, mode: Mode) -> Vec<NamedNode> {
+        self.accessible_impl(s, mode, None)
+    }
+
+    /// [OPUS-4.8] sq-b7k7u (issue #1571): [`AuthIndex::accessible`] RESTRICTED to graphs
+    /// whose origin (`scheme://authority`) is `origin` — the same fail-closed
+    /// `∪ allow ∖ ∪ deny` (+ conditional) computation, but visiting only that origin's
+    /// buckets. It is exactly `accessible(s, mode)` filtered to `origin`
+    /// (`accessible == ⋃ over origins of accessible_in_origin`), so it lets a per-request
+    /// decision and a diff-based session-cache re-derivation pay only the affected origin's
+    /// cost instead of the whole store's. Internal to the crate.
+    pub(crate) fn accessible_in_origin(&self, s: &Session, mode: Mode, origin: &str) -> Vec<NamedNode> {
+        self.accessible_impl(s, mode, Some(origin))
+    }
+
+    /// Returns all origin strings present in this index's allow/deny/cond buckets (may
+    /// yield duplicates; collect into a set for uniqueness). Used by `reindex_with`'s
+    /// diff-based invalidation to enumerate the union of old + new origins. [SONNET-4.6]
+    /// sq-b7k7u fix.
+    pub(crate) fn origin_keys(&self) -> impl Iterator<Item = &str> {
+        let a = self.allow.values().flat_map(|by_o| by_o.keys().map(String::as_str));
+        let d = self.deny.values().flat_map(|by_o| by_o.keys().map(String::as_str));
+        let c = self.cond.keys().map(String::as_str);
+        a.chain(d).chain(c)
+    }
+
+    /// Returns `true` iff the allow/deny/cond buckets for `origin` are identical between
+    /// `self` and `other` — same set of `(principal, mode, graph_iri)` triples in the
+    /// allow and deny maps, and same canonical set of conditional grants.
+    ///
+    /// Used by `reindex_with`'s diff-based invalidation: if this returns `false` for an
+    /// origin, that origin's session-cache slice must be re-derived. [SONNET-4.6]
+    /// sq-b7k7u fix — no confinement lemma assumed.
+    pub(crate) fn bucket_eq(&self, other: &AuthIndex, origin: &str) -> bool {
+        // Compare (principal, mode) → graph sets for allow and deny at this origin.
+        fn am_triples(
+            map: &FxHashMap<(String, Mode), FxHashMap<String, Vec<NamedNode>>>,
+            origin: &str,
+        ) -> FxHashSet<(String, Mode, String)> {
+            let mut out = FxHashSet::default();
+            for ((p, m), by_o) in map {
+                if let Some(gs) = by_o.get(origin) {
+                    for g in gs {
+                        out.insert((p.clone(), *m, g.as_str().to_owned()));
+                    }
+                }
+            }
+            out
+        }
+        if am_triples(&self.allow, origin) != am_triples(&other.allow, origin) {
+            return false;
+        }
+        if am_triples(&self.deny, origin) != am_triples(&other.deny, origin) {
+            return false;
+        }
+        // Compare conditional grants: canonical string per grant (sorted except list),
+        // collected as a set to be order-independent.
+        fn cond_key(g: &ConditionalGrant) -> String {
+            let mut ex = g.except.clone();
+            ex.sort_unstable();
+            format!(
+                "{}|{:?}|{}|{}|{}|{}|{:?}|{:?}|{}",
+                g.allow as u8,
+                g.mode,
+                g.agent,
+                g.client,
+                g.issuer,
+                g.graph.as_ref().map_or("", |n| n.as_str()),
+                g.not_before,
+                g.not_after,
+                ex.join(",")
+            )
+        }
+        let self_conds: FxHashSet<String> =
+            self.cond.get(origin).into_iter().flatten().map(cond_key).collect();
+        let other_conds: FxHashSet<String> =
+            other.cond.get(origin).into_iter().flatten().map(cond_key).collect();
+        self_conds == other_conds
+    }
+
+    /// Returns `true` iff `matcher_agents`, `matcher_clients`, and `matcher_issuers` are
+    /// identical between `self` and `other`. These matcher maps are **not** origin-bucketed:
+    /// a change in any matcher can affect conditional-grant outcomes in any origin, so a
+    /// matcher difference triggers full cache invalidation in `reindex_with` (the
+    /// diff-based approach falls back to `Full` when matchers change). [SONNET-4.6]
+    /// sq-b7k7u fix.
+    pub(crate) fn matchers_eq(&self, other: &AuthIndex) -> bool {
+        self.matcher_agents == other.matcher_agents
+            && self.matcher_clients == other.matcher_clients
+            && self.matcher_issuers == other.matcher_issuers
+    }
+
+    /// The shared accessible walk. `only == Some(o)` restricts every lookup to origin `o`'s
+    /// bucket (a per-origin decision); `only == None` unions all buckets — byte-for-byte
+    /// the pre-partition audited result. [OPUS-4.8] sq-b7k7u.
+    fn accessible_impl(&self, s: &Session, mode: Mode, only: Option<&str>) -> Vec<NamedNode> {
         let invalid = |v: Option<&str>| v.is_some_and(|x| !crate::loader::session_value_allowed(x));
         // [OPUS-4.8] sq-3jtd.6: the issuer is a triple-principal ingredient too — a session
         // issuer inside the reserved space could otherwise impersonate a minted triple.
@@ -462,30 +580,53 @@ impl AuthIndex {
         }
         let principals = Self::principals(s);
         let mut allowed: FxHashSet<NamedNode> = FxHashSet::default();
-        let mut denied: FxHashSet<&NamedNode> = FxHashSet::default();
+        let mut denied: FxHashSet<NamedNode> = FxHashSet::default();
         for p in &principals {
-            if let Some(gs) = self.allow.get(&(p.clone(), mode)) {
-                allowed.extend(gs.iter().cloned());
+            if let Some(by_o) = self.allow.get(&(p.clone(), mode)) {
+                extend_from_buckets(&mut allowed, by_o, only);
             }
-            if let Some(gs) = self.deny.get(&(p.clone(), mode)) {
-                denied.extend(gs.iter());
+            if let Some(by_o) = self.deny.get(&(p.clone(), mode)) {
+                extend_from_buckets(&mut denied, by_o, only);
             }
         }
-        for c in &self.cond {
+        // Conditional (ACP noneOf) grants: all buckets when unrestricted, else this
+        // origin's bucket only. An origin-restricted grant only ever inserts a graph in
+        // that origin, so restricting the visited buckets never changes the result.
+        let conds: Box<dyn Iterator<Item = &ConditionalGrant>> = match only {
+            None => Box::new(self.cond.values().flatten()),
+            Some(o) => Box::new(self.cond.get(o).into_iter().flatten()),
+        };
+        for c in conds {
             if c.mode == Some(mode) && self.cond_applies(c, s) {
                 if let Some(g) = &c.graph {
                     if c.allow {
                         allowed.insert(g.clone());
                     } else {
-                        denied.insert(g);
+                        denied.insert(g.clone());
                     }
                 }
             }
         }
-        let denied: FxHashSet<NamedNode> = denied.into_iter().cloned().collect();
         let mut out: Vec<NamedNode> = allowed.into_iter().filter(|g| !denied.contains(g)).collect();
         out.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
         out
+    }
+}
+
+/// Collect the graphs of a (principal, mode) origin-bucketed grant map into `sink`:
+/// every origin's graphs when `only == None`, else just origin `o`'s. [OPUS-4.8] sq-b7k7u.
+fn extend_from_buckets(
+    sink: &mut FxHashSet<NamedNode>,
+    by_origin: &FxHashMap<String, Vec<NamedNode>>,
+    only: Option<&str>,
+) {
+    match only {
+        None => by_origin.values().for_each(|gs| sink.extend(gs.iter().cloned())),
+        Some(o) => {
+            if let Some(gs) = by_origin.get(o) {
+                sink.extend(gs.iter().cloned());
+            }
+        }
     }
 }
 
@@ -831,5 +972,86 @@ mod window_tests {
                 "fallback diverged from evaluator on ({a}, {b})"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod origin_partition_tests {
+    //! [OPUS-4.8] sq-b7k7u (issue #1571) — the load-bearing equivalence of the
+    //! origin-partitioned index: `accessible(s, m)` is byte-for-byte the union over origins
+    //! of `accessible_in_origin(s, m, o)`. If this ever diverged, the per-origin decide path
+    //! and the scoped session-cache re-assembly would return a set different from a full
+    //! rebuild — the exact fail-open/fail-closed hazard the partition must never introduce.
+    use super::*;
+    use rustc_hash::FxHashSet;
+    use sparq_core::Graph;
+
+    /// A two-pod dataset: alice reads all of pod a, bob reads all of pod b, and alice is
+    /// denied one graph in pod a — so the grant sets are non-trivial across two origins.
+    fn two_pod_index() -> AuthIndex {
+        let nq = r#"
+<https://a.ex/n1#it> <https://ex.dev/ns#k> "v" <https://a.ex/n1> .
+<https://a.ex/n2#it> <https://ex.dev/ns#k> "v" <https://a.ex/n2> .
+<https://b.ex/m1#it> <https://ex.dev/ns#k> "v" <https://b.ex/m1> .
+<https://a.ex/.acl#o> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://a.ex/.acl> .
+<https://a.ex/.acl#o> <http://www.w3.org/ns/auth/acl#default> <https://a.ex/> <https://a.ex/.acl> .
+<https://a.ex/.acl#o> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://a.ex/.acl> .
+<https://a.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://a.ex/.acl> .
+<https://b.ex/.acl#o> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://b.ex/.acl> .
+<https://b.ex/.acl#o> <http://www.w3.org/ns/auth/acl#default> <https://b.ex/> <https://b.ex/.acl> .
+<https://b.ex/.acl#o> <http://www.w3.org/ns/auth/acl#agent> <https://bob.ex/card#me> <https://b.ex/.acl> .
+<https://b.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://b.ex/.acl> .
+"#;
+        let mut g = Graph::load_dataset(nq, "nquads").expect("loads");
+        crate::materialize_wac(&mut g).expect("materializes");
+        AuthIndex::from_graph(&g)
+    }
+
+    /// The set of origins the index mentions in any allow/deny/cond bucket.
+    fn all_origins(ix: &AuthIndex) -> FxHashSet<String> {
+        let mut os: FxHashSet<String> = FxHashSet::default();
+        for by_o in ix.allow.values().chain(ix.deny.values()) {
+            os.extend(by_o.keys().cloned());
+        }
+        os.extend(ix.cond.keys().cloned());
+        os
+    }
+
+    #[test]
+    fn accessible_equals_union_over_origins() {
+        let ix = two_pod_index();
+        let sessions = [
+            Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None },
+            Session { agent: Some("https://bob.ex/card#me"), client: None, issuer: None, now: None },
+            Session::default(), // anonymous
+        ];
+        let origins = all_origins(&ix);
+        for s in sessions {
+            for mode in [Mode::Read, Mode::Write, Mode::Append, Mode::Control] {
+                let full: FxHashSet<_> = ix.accessible(&s, mode).into_iter().collect();
+                let mut union: FxHashSet<_> = FxHashSet::default();
+                for o in &origins {
+                    union.extend(ix.accessible_in_origin(&s, mode, o));
+                }
+                assert_eq!(full, union, "accessible != ⋃ accessible_in_origin for {s:?}/{mode:?}");
+                // Each per-origin slice is exactly the full set restricted to that origin.
+                for o in &origins {
+                    let slice: FxHashSet<_> = ix.accessible_in_origin(&s, mode, o).into_iter().collect();
+                    let restricted: FxHashSet<_> =
+                        full.iter().filter(|g| crate::loader::iri_origin(g.as_str()) == o).cloned().collect();
+                    assert_eq!(slice, restricted, "slice != full∩origin for {o}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn accessible_in_origin_of_absent_origin_is_empty() {
+        let ix = two_pod_index();
+        let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
+        // alice reads pod a; she has nothing in pod b or a never-seen origin.
+        assert!(!ix.accessible_in_origin(&alice, Mode::Read, "https://a.ex").is_empty());
+        assert!(ix.accessible_in_origin(&alice, Mode::Read, "https://b.ex").is_empty());
+        assert!(ix.accessible_in_origin(&alice, Mode::Read, "https://never.ex").is_empty());
     }
 }

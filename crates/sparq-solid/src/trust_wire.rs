@@ -118,7 +118,7 @@ impl PodStore {
         let grants = derive_grants(&admitted, abac_rule_n3_for(self))?;
         if !grants.is_empty() {
             install_auth_grants(&mut self.graph, &grants);
-            self.reindex();
+            self.reindex_with(crate::ReindexScope::Full);
         }
         Ok(TrustAdmissionOutcome {
             admitted,
@@ -148,7 +148,7 @@ impl PodStore {
         let grants = derive_grants(&admitted, abac_rule_n3)?;
         if !grants.is_empty() {
             install_auth_grants(&mut self.graph, &grants);
-            self.reindex();
+            self.reindex_with(crate::ReindexScope::Full);
         }
         Ok(TrustAdmissionOutcome {
             admitted,
@@ -203,7 +203,7 @@ impl PodStore {
             installed_count += 1;
         }
         if installed_count > 0 {
-            self.reindex();
+            self.reindex_with(crate::ReindexScope::Full);
         }
         Ok(TrustStaticOutcome {
             conditional_grants,

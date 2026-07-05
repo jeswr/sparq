@@ -344,14 +344,22 @@ pub(crate) fn decide_one(
     }
 }
 
-/// The sorted set of modes `session` holds on `resource`, via the fail-closed oracle
-/// ([`AuthIndex::accessible`]). The point-query analogue of `PodStore::modes_held`, over
-/// the index directly (no per-session cache here — `decide` is a single index walk).
+/// The sorted set of modes `session` holds on `resource`, via the fail-closed oracle.
+/// The point-query analogue of `PodStore::modes_held`, over the index directly (no
+/// per-session cache here — `decide` is a single index walk).
+///
+/// [OPUS-4.8] sq-b7k7u (issue #1571): the accessibility check is restricted to
+/// `resource`'s OWN origin ([`AuthIndex::accessible_in_origin`]) instead of building the
+/// whole-store accessible set four times. Since `resource` has exactly that origin,
+/// membership is identical to the full [`AuthIndex::accessible`] check, but a per-request
+/// decision now pays only that origin's grants — not every tenant's — so post-write
+/// decision latency no longer scales with the whole store.
 fn held_modes(auth: &AuthIndex, session: &Session, resource: &NamedNode) -> Vec<Mode> {
     const MODES: [Mode; 4] = [Mode::Read, Mode::Write, Mode::Append, Mode::Control];
+    let origin = crate::loader::iri_origin(resource.as_str());
     MODES
         .into_iter()
-        .filter(|&m| auth.accessible(session, m).iter().any(|g| g == resource))
+        .filter(|&m| auth.accessible_in_origin(session, m, origin).iter().any(|g| g == resource))
         .collect()
 }
 

@@ -164,6 +164,19 @@ Materialize the authorization view from the access-control documents, then enfor
   authorization** — the server authorizes the request itself (e.g. `decide(.., Mode::Control)`)
   and `update_as` remains the session-checked write path. Always-present API (no cargo gate;
   mirrors `update_as`/`decide` — adds no dependency).
+  **Scale ([OPUS-4.8] issue #1571, sq-b7k7u):** an atomic single-`.acl`/`.acr` write still
+  re-materializes the whole auth view (the incremental materializer is deferred), but the
+  session-cache invalidation is **diff-based** ([SONNET-4.6] sq-b7k7u fix): `reindex_with`
+  diffs old vs new `AuthIndex` per-origin and invalidates exactly the origins whose (allow,
+  deny, cond) buckets changed — so a write to one pod does **not** cold-start every other
+  pod's cached view, and cross-origin dependencies (WAC `acl:agentGroup` membership hosted on
+  a different pod, foreign-subject grant triples, ACP cross-document policy/matcher
+  indirection) are caught automatically: if a write at origin A changes B's effective grants,
+  B's new index buckets differ → B is invalidated too. If the matcher maps change (not
+  origin-bucketed), it falls back to a full cache clear. A differential property test asserts
+  the scoped-cache state equals a from-scratch rebuild after every write (incl. the
+  fail-open-critical revoke direction and cross-origin agentGroup revoke).
+  The same origin-partitioned index makes `decide` cost one pod's grants, not the whole store.
 - `store.accessible(&Session, Mode) -> Arc<Vec<NamedNode>>` /
   `store.accessible_set(...)` / `store.view_for(...) -> DatasetView` /
   `store.auth() -> &AuthIndex` — inspect the authorized graph set or the materialized

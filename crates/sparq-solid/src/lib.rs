@@ -215,7 +215,12 @@ pub struct PodStore {
     // dimensions — agent, client, AND issuer — so two sessions differing only by issuer
     // (e.g. the same WebID vouched for by a trusted vs an untrusted IdP) never collide on
     // a cached graph set.
-    cache: FxHashMap<SessionKey, SessionSets>,
+    // [OPUS-4.8] sq-b7k7u (issue #1571): each entry holds the session's accessible set
+    // BUCKETED by origin plus the assembled full memo, so a scoped ACL write invalidates
+    // only the affected origin's slice ([`PodStore::invalidate_cache_origin`]) — a session
+    // untouched by the written pod keeps its warm slices and re-derives at most the one
+    // changed origin, instead of every session cold-starting on every ACL write.
+    cache: FxHashMap<SessionKey, SessionEntry>,
     /// [OPUS-4.8] sq-dpk4 — the bridged-ODRL-grant ledger: what was bridged from which
     /// `(policy, request)`, plus the static-baseline auth view to rebuild from on a
     /// refresh. Only present when the `odrl-bridge` feature is enabled (the core build
@@ -239,6 +244,60 @@ type SessionKey = (Option<String>, Option<String>, Option<String>, Option<String
 struct SessionSets {
     sorted: Arc<Vec<NamedNode>>,
     set: Arc<FxHashSet<Term>>,
+}
+
+/// [OPUS-4.8] sq-b7k7u (issue #1571) — one session's cache entry, partitioned by origin so
+/// an ACL write to one pod does not cold-start every other pod's cached view.
+///
+/// `per_origin` holds the session's accessible graphs bucketed by origin
+/// (`scheme://authority`); `memo` is the assembled + sorted full [`SessionSets`] the query
+/// path returns (rebuilt from `per_origin` when dropped). `dirty` names origins whose slice
+/// was invalidated by a scoped ACL write and must be re-derived on the next read; `computed`
+/// records that `per_origin` has been fully populated at least once (a fresh entry does one
+/// whole-store [`AuthIndex::accessible`] to seed all its buckets).
+///
+/// # Invariant (equivalence to a from-scratch rebuild)
+///
+/// Whenever `memo` is `Some`, it equals `AuthIndex::accessible(session, mode)` for the
+/// current auth view: a scoped invalidation drops exactly the changed origins' slices + the
+/// `memo` and marks those origins `dirty`; the next read re-derives only the dirty origins
+/// via [`AuthIndex::accessible_in_origin`] and re-assembles. **Sound by construction —
+/// diff-based** ([SONNET-4.6] sq-b7k7u fix): `reindex_with` diffs old vs new `AuthIndex`
+/// per-origin and invalidates exactly the origins whose (allow, deny, cond) buckets changed.
+/// No confinement lemma assumed: WAC agentGroup membership, foreign-subject triples, and
+/// ACP cross-document indirection can all route a write at origin A through grants that
+/// affect origin B; the diff catches every such case, because if B's grants changed, B's
+/// index buckets changed. A FULL re-materialization drops the whole entry (the entry is
+/// transient index state, never storage), so no stale grant can outlive a revocation.
+#[derive(Default)]
+struct SessionEntry {
+    per_origin: FxHashMap<String, Vec<NamedNode>>,
+    dirty: FxHashSet<String>,
+    memo: Option<SessionSets>,
+    computed: bool,
+}
+
+impl SessionEntry {
+    /// Assemble a sorted full [`SessionSets`] from `sorted_full` (already ascending by IRI).
+    fn sets_from(sorted_full: Vec<NamedNode>) -> SessionSets {
+        let set = sorted_full.iter().map(|n| Term::NamedNode(n.clone())).collect();
+        SessionSets { sorted: Arc::new(sorted_full), set: Arc::new(set) }
+    }
+}
+
+/// [OPUS-4.8] sq-b7k7u (issue #1571) — how far a re-materialization must invalidate the
+/// per-session cache. `Full` (the default for any change whose blast radius is the whole
+/// store) clears every entry; `Origin` (an atomic single-`.acl`/`.acr` `put_acl`/`delete_acl`)
+/// triggers diff-based invalidation: `reindex_with` diffs old vs new `AuthIndex` per-origin
+/// and invalidates exactly the origins whose buckets changed — which may include origins
+/// beyond the ACL's own when a cross-origin dependency (agentGroup, foreign-subject grant,
+/// ACP cross-document indirection) is involved. Falls back to `Full` when the matcher maps
+/// change (they are not origin-bucketed). [SONNET-4.6] sq-b7k7u fix: the origin hint is no
+/// longer carried — the actual changed origins are derived entirely from the index diff.
+#[derive(Clone, Copy)]
+enum ReindexScope {
+    Full,
+    Origin,
 }
 
 impl PodStore {
@@ -291,9 +350,18 @@ impl PodStore {
     /// `urn:sparq:` or contains the literal `&client=`), or if the N3 reasoner fails.
     /// On error the previous auth view (if any) is left in place.
     pub fn materialize_wac(&mut self) -> Result<MaterializeStats, String> {
+        self.materialize_wac_scoped(ReindexScope::Full)
+    }
+
+    /// [`PodStore::materialize_wac`] re-materializing the whole WAC view but invalidating the
+    /// session cache only at `scope` — the internal seam an atomic single-`.acl` `put_acl`
+    /// uses with [`ReindexScope::Origin`] so an ACL write to one pod does not cold-start every
+    /// other pod's cached view (issue #1571). The public method keeps the full-clear default.
+    /// [OPUS-4.8] sq-b7k7u.
+    fn materialize_wac_scoped(&mut self, scope: ReindexScope) -> Result<MaterializeStats, String> {
         let stats = materialize_wac(&mut self.graph)?;
         self.reconcile_bridged_after_static();
-        self.reindex();
+        self.reindex_with(scope);
         Ok(stats)
     }
 
@@ -378,22 +446,93 @@ impl PodStore {
         &mut self,
         provenance: &AccessProvenance,
     ) -> Result<MaterializeStats, String> {
+        self.materialize_acp_with_scoped(provenance, ReindexScope::Full)
+    }
+
+    /// [`PodStore::materialize_acp_with`] invalidating the session cache only at `scope` — the
+    /// ACP twin of [`PodStore::materialize_wac_scoped`], used by an atomic `.acr` `put_acl_acp`
+    /// (issue #1571). [OPUS-4.8] sq-b7k7u.
+    fn materialize_acp_with_scoped(
+        &mut self,
+        provenance: &AccessProvenance,
+        scope: ReindexScope,
+    ) -> Result<MaterializeStats, String> {
         let stats = materialize_acp_with(&mut self.graph, provenance)?;
         self.reconcile_bridged_after_static();
-        self.reindex();
+        self.reindex_with(scope);
         Ok(stats)
     }
 
-    fn reindex(&mut self) {
-        self.auth = Arc::new(AuthIndex::from_graph(&self.graph));
+    /// The single re-index seam (`self.auth` is assigned NOWHERE else — the #1577 sweep).
+    /// Rebuilds the auth view + drops the persistent structural ACL index in lock-step, and
+    /// invalidates the session cache at `scope`:
+    ///
+    /// - [`ReindexScope::Full`] clears every session's cached set (a change that could touch
+    ///   any pod — a wholesale re-materialization, a bridge/trust grant, a wildcard update);
+    /// - [`ReindexScope::Origin`] (an atomic `put_acl`/`delete_acl` to one `.acl`/`.acr`)
+    ///   uses **diff-based** invalidation ([SONNET-4.6] sq-b7k7u fix): the old and new
+    ///   `AuthIndex` are compared per-origin, and exactly the origins whose (allow, deny,
+    ///   cond) buckets changed are invalidated via [`PodStore::invalidate_cache_origin`]. If
+    ///   the matcher maps (`matcher_agents`/`matcher_clients`/`matcher_issuers`) differ — they
+    ///   are not origin-bucketed and feed conditional-grant outcomes in any origin — the
+    ///   fallback is a full cache clear. Correctness follows from index equality: if a
+    ///   cross-origin dependency (agentGroup membership, foreign-subject grant, ACP cross-doc
+    ///   indirection) causes a write at A to change B's grants, B's new index buckets differ
+    ///   from B's old ones → B is invalidated automatically; no semantic confinement argument
+    ///   needed.
+    ///
+    /// The structural `acl_index` is dropped either way — it can never be more stale than
+    /// `auth`, so a rule change (put_acl/delete_acl/materialize_*/bridge/trust) is reflected
+    /// by the next decision and no stale ACL discovery survives.
+    fn reindex_with(&mut self, scope: ReindexScope) {
+        let old_auth = Arc::clone(&self.auth);
+        let new_auth = Arc::new(AuthIndex::from_graph(&self.graph));
+        self.auth = Arc::clone(&new_auth);
         self.epoch += 1;
-        self.cache.clear(); // D3: the cache is transient; the triples are the storage
+        match scope {
+            // D3: the cache is transient; the triples are the storage.
+            ReindexScope::Full => self.cache.clear(),
+            ReindexScope::Origin => {
+                // [SONNET-4.6] sq-b7k7u fix: diff-based invalidation.
+                // If the matcher maps changed, they are not origin-bucketed → full fallback.
+                if !old_auth.matchers_eq(&new_auth) {
+                    self.cache.clear();
+                } else {
+                    // Collect the union of all origins in old + new; invalidate exactly those
+                    // whose per-origin buckets (allow/deny/cond) changed.
+                    let all_origins: FxHashSet<String> = old_auth
+                        .origin_keys()
+                        .chain(new_auth.origin_keys())
+                        .map(str::to_owned)
+                        .collect();
+                    let changed: Vec<String> = all_origins
+                        .into_iter()
+                        .filter(|o| !old_auth.bucket_eq(&new_auth, o))
+                        .collect();
+                    for origin in changed {
+                        self.invalidate_cache_origin(&origin);
+                    }
+                }
+            }
+        }
         // [OPUS-4.8] sq-j8qtt: drop the persistent structural ACL index in lock-step with
-        // the auth rebuild — the SAME seam that clears the session cache — so a rule change
-        // (put_acl/delete_acl/materialize_*/bridge/trust) is reflected by the next decision
-        // and no stale ACL discovery can survive it. `take` empties the cell; the next
-        // `decide`/`resolve_acl` rebuilds from the just-re-materialized graph.
+        // the auth rebuild. `take` empties the cell; the next `decide`/`resolve_acl` rebuilds
+        // from the just-re-materialized graph.
         self.acl_index.take();
+    }
+
+    /// [OPUS-4.8] sq-b7k7u (issue #1571) — per-origin session-cache invalidation: drop the
+    /// `origin` slice of every cached session and force its full memo to be re-assembled,
+    /// leaving all OTHER origins' slices warm. Called by `reindex_with`'s diff-based
+    /// approach for EACH origin whose index buckets actually changed — so a session that
+    /// previously had NO grant on `origin` still re-checks it (the origin is marked `dirty`
+    /// on every entry), picking up newly-granted access. [SONNET-4.6] sq-b7k7u fix.
+    fn invalidate_cache_origin(&mut self, origin: &str) {
+        for entry in self.cache.values_mut() {
+            entry.per_origin.remove(origin);
+            entry.dirty.insert(origin.to_owned());
+            entry.memo = None;
+        }
     }
 
     /// The persistent structural ACL index for the current generation, built lazily on the
@@ -632,6 +771,17 @@ impl PodStore {
         self.acl_index().resolve_acl(resource)
     }
 
+    /// The memoized [`SessionSets`] for this session+mode, re-derived at most the
+    /// diff-invalidated origins since the last read ([OPUS-4.8] sq-b7k7u, issue #1571;
+    /// [SONNET-4.6] sq-b7k7u fix).
+    ///
+    /// A warm entry (`memo` present) is an `Arc`-clone-cheap hit; otherwise the full set is
+    /// re-assembled from `per_origin` — a cold entry does ONE whole-store
+    /// [`AuthIndex::accessible`] to seed all buckets, while a diff-invalidated entry
+    /// re-derives ONLY its `dirty` origins via [`AuthIndex::accessible_in_origin`] and reuses
+    /// every untouched origin's slice. The assembled set is byte-for-byte
+    /// `AuthIndex::accessible(s, mode)` for the current auth view — sound by construction
+    /// because `reindex_with` marks dirty exactly the origins whose index buckets changed.
     fn session_sets(&mut self, s: &Session, mode: Mode) -> &SessionSets {
         let key = (
             s.agent.map(str::to_owned),
@@ -641,11 +791,40 @@ impl PodStore {
             mode,
         );
         let auth = Arc::clone(&self.auth);
-        self.cache.entry(key).or_insert_with(|| {
-            let sorted = auth.accessible(s, mode);
-            let set = sorted.iter().map(|n| Term::NamedNode(n.clone())).collect();
-            SessionSets { sorted: Arc::new(sorted), set: Arc::new(set) }
-        })
+        let entry = self.cache.entry(key).or_default();
+        if entry.memo.is_none() {
+            if !entry.computed {
+                // Cold: one whole-store walk, split into origin buckets to seed the entry.
+                let full = auth.accessible(s, mode);
+                entry.per_origin.clear();
+                for g in &full {
+                    entry
+                        .per_origin
+                        .entry(loader::iri_origin(g.as_str()).to_owned())
+                        .or_default()
+                        .push(g.clone());
+                }
+                entry.dirty.clear();
+                entry.computed = true;
+                entry.memo = Some(SessionEntry::sets_from(full));
+            } else {
+                // Scoped-invalidated: re-derive only the dirty origins, reuse the rest.
+                let dirty: Vec<String> = entry.dirty.drain().collect();
+                for origin in dirty {
+                    let slice = auth.accessible_in_origin(s, mode, &origin);
+                    if slice.is_empty() {
+                        entry.per_origin.remove(&origin);
+                    } else {
+                        entry.per_origin.insert(origin, slice);
+                    }
+                }
+                let mut full: Vec<NamedNode> =
+                    entry.per_origin.values().flatten().cloned().collect();
+                full.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+                entry.memo = Some(SessionEntry::sets_from(full));
+            }
+        }
+        entry.memo.as_ref().expect("memo populated above")
     }
 
     /// The session's zero-copy [`DatasetView`] over this store (mode-checked graph
@@ -897,7 +1076,7 @@ impl PodStore {
         if outcome.granted {
             // Track for refresh/retraction (sq-dpk4), then rebuild index + drop cache.
             self.bridge_ledger.record(policy, request, odrl_bridge::BridgeKind::Permission);
-            self.reindex();
+            self.reindex_with(ReindexScope::Full);
         }
         outcome
     }
@@ -925,7 +1104,7 @@ impl PodStore {
         let outcome = odrl_bridge::materialize_prohibition(&mut self.graph, policy, request);
         if outcome.prohibited {
             self.bridge_ledger.record(policy, request, odrl_bridge::BridgeKind::Prohibition);
-            self.reindex();
+            self.reindex_with(ReindexScope::Full);
         }
         outcome
     }
@@ -948,7 +1127,7 @@ impl PodStore {
         let outcome = odrl_bridge::materialize_policy(&mut self.graph, policy, request);
         if outcome.granted || outcome.prohibited {
             self.bridge_ledger.record(policy, request, odrl_bridge::BridgeKind::Policy);
-            self.reindex();
+            self.reindex_with(ReindexScope::Full);
         }
         outcome
     }
@@ -979,7 +1158,7 @@ impl PodStore {
                 request,
                 odrl_bridge::BridgeKind::PermissionConditional,
             );
-            self.reindex();
+            self.reindex_with(ReindexScope::Full);
         }
         outcome
     }
@@ -1010,7 +1189,7 @@ impl PodStore {
                 request,
                 odrl_bridge::BridgeKind::ProhibitionConditional,
             );
-            self.reindex();
+            self.reindex_with(ReindexScope::Full);
         }
         outcome
     }
@@ -1067,7 +1246,7 @@ impl PodStore {
                 request,
                 odrl_bridge::BridgeKind::PermissionCounted,
             );
-            self.reindex();
+            self.reindex_with(ReindexScope::Full);
         }
         outcome
     }
@@ -1109,7 +1288,7 @@ impl PodStore {
     #[cfg(feature = "odrl-bridge")]
     pub fn refresh_odrl_grants(&mut self) -> usize {
         let retracted = self.bridge_ledger.refresh(&mut self.graph);
-        self.reindex();
+        self.reindex_with(ReindexScope::Full);
         retracted
     }
 
@@ -1140,7 +1319,7 @@ impl PodStore {
     ) -> (bool, usize) {
         let matched = self.bridge_ledger.update(policy, request, kind);
         let retracted = self.bridge_ledger.refresh(&mut self.graph);
-        self.reindex();
+        self.reindex_with(ReindexScope::Full);
         (matched, retracted)
     }
 
@@ -1153,9 +1332,110 @@ impl PodStore {
 
     /// The current auth index (for direct inspection/tests).
     ///
-    /// Rebuilt (and the session cache cleared) on every re-materialization; an
-    /// un-materialized store exposes an empty index.
+    /// Rebuilt on every re-materialization (the session cache is invalidated alongside —
+    /// fully for a wholesale re-materialization, or scoped to the written pod's origin for an
+    /// atomic `put_acl`/`delete_acl`, [OPUS-4.8] sq-b7k7u); an un-materialized store exposes an
+    /// empty index.
     pub fn auth(&self) -> &AuthIndex {
         &self.auth
+    }
+}
+
+#[cfg(test)]
+mod scoped_cache_tests {
+    //! [OPUS-4.8] sq-b7k7u (issue #1571) — WHITE-BOX proof that a scoped ACL write invalidates
+    //! ONLY the written pod's session-cache slice, keeping every other pod's slice warm, and
+    //! that the re-assembled set still equals a from-scratch rebuild (no stale grant survives).
+    use super::*;
+
+    const ALICE: &str = "https://alice.ex/card#me";
+
+    fn sess(agent: &str) -> Session<'_> {
+        Session { agent: Some(agent), client: None, issuer: None, now: None }
+    }
+
+    /// Two pods (origins a.ex, b.ex), each with a root `.acl` granting alice Read.
+    fn two_pod_store() -> PodStore {
+        let nq = r#"
+<https://a.ex/n1#it> <https://ex.dev/ns#k> "v" <https://a.ex/n1> .
+<https://b.ex/m1#it> <https://ex.dev/ns#k> "v" <https://b.ex/m1> .
+<https://a.ex/.acl#o> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://a.ex/.acl> .
+<https://a.ex/.acl#o> <http://www.w3.org/ns/auth/acl#default> <https://a.ex/> <https://a.ex/.acl> .
+<https://a.ex/.acl#o> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://a.ex/.acl> .
+<https://a.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://a.ex/.acl> .
+<https://b.ex/.acl#o> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://b.ex/.acl> .
+<https://b.ex/.acl#o> <http://www.w3.org/ns/auth/acl#default> <https://b.ex/> <https://b.ex/.acl> .
+<https://b.ex/.acl#o> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://b.ex/.acl> .
+<https://b.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://b.ex/.acl> .
+"#;
+        let mut store = PodStore::new(Graph::load_dataset(nq, "nquads").expect("loads"));
+        store.materialize_wac().expect("materializes");
+        store
+    }
+
+    fn entry_for<'a>(store: &'a PodStore, s: &Session) -> &'a SessionEntry {
+        let key = (s.agent.map(str::to_owned), s.client.map(str::to_owned), s.issuer.map(str::to_owned), s.now.map(str::to_owned), Mode::Read);
+        store.cache.get(&key).expect("entry warmed")
+    }
+
+    #[test]
+    fn scoped_write_keeps_other_pod_slice_warm() {
+        let mut store = two_pod_store();
+        let alice = sess(ALICE);
+
+        // Warm alice's cache: she reads one graph in each pod.
+        assert_eq!(store.accessible(&alice, Mode::Read).len(), 2);
+        {
+            let e = entry_for(&store, &alice);
+            assert!(e.memo.is_some(), "warm memo present");
+            assert!(e.per_origin.contains_key("https://a.ex"));
+            assert!(e.per_origin.contains_key("https://b.ex"));
+            assert!(e.dirty.is_empty());
+        }
+        // Capture the exact Arc identity of the b.ex slice contribution by snapshotting it.
+        let b_before: Vec<String> =
+            entry_for(&store, &alice).per_origin["https://b.ex"].iter().map(|n| n.as_str().to_owned()).collect();
+
+        // Scoped write to pod a: REVOKE alice on pod a (empty .acl body).
+        store.put_acl("https://a.ex/.acl", "", "ntriples").expect("put");
+
+        // Immediately after the write (before any read): a.ex slice dropped + marked dirty,
+        // b.ex slice UNTOUCHED (kept warm), memo dropped (must reassemble).
+        {
+            let e = entry_for(&store, &alice);
+            assert!(!e.per_origin.contains_key("https://a.ex"), "a.ex slice evicted");
+            assert!(e.per_origin.contains_key("https://b.ex"), "b.ex slice kept warm");
+            assert!(e.dirty.contains("https://a.ex"), "a.ex marked dirty");
+            assert!(!e.dirty.contains("https://b.ex"), "b.ex NOT dirty");
+            assert!(e.memo.is_none(), "memo invalidated");
+            let b_now: Vec<String> = e.per_origin["https://b.ex"].iter().map(|n| n.as_str().to_owned()).collect();
+            assert_eq!(b_now, b_before, "b.ex slice byte-identical (never recomputed)");
+        }
+
+        // Next read: alice lost pod a, still reads pod b — equals a from-scratch rebuild.
+        let got: Vec<String> = store.accessible(&alice, Mode::Read).iter().map(|n| n.as_str().to_owned()).collect();
+        assert_eq!(got, vec!["https://b.ex/m1".to_owned()], "only pod b survives the revoke");
+        let fresh: Vec<String> = AuthIndex::from_graph(&store.graph).accessible(&alice, Mode::Read).iter().map(|n| n.as_str().to_owned()).collect();
+        assert_eq!(got, fresh, "scoped-cache set == from-scratch rebuild");
+    }
+
+    #[test]
+    fn scoped_write_grants_new_pod_access_to_uninvolved_session() {
+        // A session cached with NO pod-a grant must still PICK UP a newly-granted pod-a
+        // resource after a scoped write to pod a (the gain-access direction).
+        let mut store = two_pod_store();
+        let bob = sess("https://bob.ex/card#me");
+        // bob has nothing yet; warm his (empty) cache.
+        assert_eq!(store.accessible(&bob, Mode::Read).len(), 0);
+        assert!(entry_for(&store, &bob).memo.is_some());
+        // Scoped write to pod a granting bob Read.
+        let acl = "<https://a.ex/.acl#o> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> .\n\
+                   <https://a.ex/.acl#o> <http://www.w3.org/ns/auth/acl#default> <https://a.ex/> .\n\
+                   <https://a.ex/.acl#o> <http://www.w3.org/ns/auth/acl#agent> <https://bob.ex/card#me> .\n\
+                   <https://a.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> .\n";
+        store.put_acl("https://a.ex/.acl", acl, "ntriples").expect("put");
+        // bob's stale (empty) memo was invalidated; next read re-checks pod a and gains it.
+        let got: Vec<String> = store.accessible(&bob, Mode::Read).iter().map(|n| n.as_str().to_owned()).collect();
+        assert_eq!(got, vec!["https://a.ex/n1".to_owned()], "gain-access picked up after scoped write");
     }
 }
