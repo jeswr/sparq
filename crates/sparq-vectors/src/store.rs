@@ -1147,6 +1147,36 @@ mod kani_proofs {
         }
         let _ = VectorStore::open_from_bytes(bytes);
     }
+
+    /// DOMAIN-COVERAGE SELF-CHECK (the sq-og8u8 anti-vacuity pattern). Lesson of sq-sqtk2.1
+    /// (2026-07-04): a bound can SILENTLY prune the very inputs a harness means to cover, so
+    /// it passes VACUOUSLY while reporting nothing wrong. The two totality harnesses above
+    /// prove `open_from_bytes` NEVER panics over a bounded symbolic byte domain — but that is
+    /// worthless if the ACCEPT path (the aligned copy + the full header / version / size /
+    /// fingerprint validation) is unreachable within `MAX_LEN` and every in-domain buffer is
+    /// rejected at the first size check. This pins that the bounded domain genuinely CONTAINS
+    /// a buffer the validator ACCEPTS: a minimal well-formed version-2 store is exactly
+    /// `HEADER_LEN` (= 56) bytes — magic + version 2 + `dim = 1` + `count = 0` (no data, no
+    /// index) + an all-zero fingerprint (decodes to `None`/unverifiable, still valid) — and
+    /// `HEADER_LEN <= MAX_LEN`, so it lies inside the fuzzed domain. The buffer is fully
+    /// CONCRETE, so it cannot itself be pruned. If a re-scope shrank `MAX_LEN` below
+    /// `HEADER_LEN`, or a format change made every in-domain buffer rejectable, the `Ok` arm
+    /// would become unreachable and this harness goes red rather than the totality proofs
+    /// silently covering only the reject path. [OPUS-4.8] sq-og8u8
+    #[kani::proof]
+    fn domain_bounded_buffer_contains_an_accepted_store() {
+        let mut bytes = vec![0u8; HEADER_LEN];
+        bytes[0..4].copy_from_slice(&SPQV_MAGIC);
+        bytes[4..8].copy_from_slice(&SPQV_VERSION.to_le_bytes());
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes()); // dim = 1 (dim == 0 is rejected)
+        // count = 0 (bytes 12..20 stay zero) ⇒ no data + no index; reserved + fingerprint
+        // stay all-zero (a valid v2 store finalized without `with_fingerprint`).
+        const _: () = assert!(HEADER_LEN <= MAX_LEN, "the accepted store must fit the fuzzed domain");
+        assert!(
+            VectorStore::open_from_bytes(bytes).is_ok(),
+            "a minimal well-formed v2 store must validate — else the accept path is vacuous"
+        );
+    }
 }
 
 #[cfg(test)]
