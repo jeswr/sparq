@@ -63,12 +63,15 @@ pub use service::with_service_bound_join_block_size;
 // DEFAULT is uncapped, so normal SERVICE queries are unchanged. [OPUS-4.8] (sq-b93pv)
 #[cfg(feature = "service")]
 pub use service::{with_service_remote_request_cap, SERVICE_REMOTE_CAP_MARKER};
-// [OPUS-4.8] (sq-678h) RDF serializer matrix (Turtle / TriG / N-Quads writers). NON-DEFAULT
-// `serialize-rdf` feature — when off, zero serializer code compiles and the default build's
-// dependency graph is unchanged (the writers add no new deps). The always-on N-Triples writer
-// stays in `construct::triples_to_ntriples`.
+// [OPUS-4.8] (sq-678h, sq-6vshe.4) RDF serializer matrix (Turtle / TriG / N-Quads / JSON-LD
+// writers). NON-DEFAULT `serialize-rdf` feature — when off, zero serializer code compiles and
+// the default build's dependency graph is unchanged. Seam 1 of the facade split (RFC
+// research/engine-split-rfc.md §4 Option A / §7 Phase A1): the module moved to the internal
+// `sparq-engine-serialize` sub-crate and is re-exported VERBATIM here, so every existing public
+// path (`sparq_engine::serialize::write_turtle`, `…::graph_to_jsonld`, `…::JsonLdForm`, …) is
+// preserved. The always-on N-Triples writer stays in `construct::triples_to_ntriples`.
 #[cfg(feature = "serialize-rdf")]
-pub mod serialize;
+pub use sparq_engine_serialize::serialize;
 mod update;
 // zk-trace seam (NON-DEFAULT `zk` feature; consumed only by `sparq-zk`).
 // When off, zero zk code is compiled — default builds and wasm are untouched.

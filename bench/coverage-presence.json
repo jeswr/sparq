@@ -35,6 +35,11 @@
       "had_integration_dir": true,
       "min_tests": 238
     },
+    "sparq-engine-serialize": {
+      "had_integration_dir": false,
+      "min_tests": 103,
+      "note": "[OPUS-4.8] sq-6vshe.4: seam 1 of the sparq-engine facade split — the RDF writer matrix moved here with its 105 inline #[test]s (all in the src `serialize` module `mod tests`; the crate has no tests/ integration dir). Floor 103 leaves a small margin (mirrors the sparq-substrate style). Brought under the presence gate so the moved writer tests cannot silently vanish."
+    },
     "sparq-fedclient": {
       "had_integration_dir": true,
       "min_tests": 150

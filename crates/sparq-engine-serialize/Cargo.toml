@@ -1,0 +1,59 @@
+# [OPUS-4.8] (sq-6vshe.4) Seam 1 of the sparq-engine facade split (RFC
+# research/engine-split-rfc.md §4 Option A / §7 Phase A1). This crate holds the RDF
+# writer matrix (Turtle / TriG / N-Quads / JSON-LD, buffered + streaming) peeled out of
+# `sparq-engine`. `sparq-engine` re-exports it verbatim as `sparq_engine::serialize`, so
+# the public API + the `serialize-rdf` / `streaming-serialization` feature names are
+# unchanged for external users. `publish = false` marks it an INTERNAL, unstable crate
+# (RFC §5): it is exempt from the new-crate bench + SKILL governance gate (G1,
+# scripts/gate-new-crate.py) exactly like the sibling sparq-jsonld / sparq-substrate
+# extractions — depend on the `sparq-engine` facade, never on this crate directly.
+[package]
+name = "sparq-engine-serialize"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Internal RDF serializer matrix (Turtle / TriG / N-Quads / JSON-LD, buffered + streaming) for sparq-engine — re-exported as sparq_engine::serialize"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# INTERNAL facade sub-crate: not published to crates.io. See the header note + RFC §5.
+publish = false
+
+# Render the README as the docs.rs front page and document with all features so the
+# `serialize-rdf` writer surface appears (mirrors sparq-engine).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+# The whole writer matrix is behind `serialize-rdf`, mirroring the gating this code had
+# inside sparq-engine (`#[cfg(feature = "serialize-rdf")] pub mod serialize;`). When off
+# (the default), the crate compiles EMPTY and pulls in ZERO dependencies (`sparq-jsonld`
+# is optional and only enters via this feature) — the byte-identical feature-off contract.
+serialize-rdf = ["dep:sparq-jsonld"]
+# Streaming Turtle / TriG serialisation (the `#[cfg(feature = "streaming-serialization")]`
+# sites in serialize.rs). IMPLIES `serialize-rdf` (it reuses the shared writer helpers),
+# exactly like the original sparq-engine feature.
+streaming-serialization = ["serialize-rdf"]
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (kept for parity even though this crate is publish = false).
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+oxrdf.workspace = true
+# [OPUS-4.8] The JSON-LD writer's `Json` AST lives in the zero-dependency `sparq-jsonld`
+# crate; the writer re-exports it. OPTIONAL + pulled in ONLY by `serialize-rdf`, so an
+# empty (feature-off) build never compiles it — preserving the writer's dep-free contract.
+sparq-jsonld = { path = "../sparq-jsonld", version = "0.1.0", optional = true, default-features = false }
+
+[dev-dependencies]
+# The round-trip / isomorphism tests parse the emitted document back to RDF, so they need
+# sparq-core's parser (`Graph::load_str` / `load_dataset`) with default features on.
+sparq-core = { path = "../sparq-core", version = "0.1.0" }
+# The JSON-LD writer's round-trip tests parse the emitted JSON DOM with serde_json — a
+# DEV-only dependency, so the opt-in `serialize-rdf` feature itself stays dependency-free
+# (the native writer emits JSON by hand). serde_json is already in the workspace tree.
+serde_json = "1"

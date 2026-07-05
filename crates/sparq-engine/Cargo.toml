@@ -63,13 +63,15 @@ service = ["dep:serde", "dep:serde_json", "dep:ureq", "dep:quick-xml"]
 # nothing — the writers reuse the existing oxrdf term/IRI/literal infrastructure and
 # pull in ZERO new dependencies (oxrdf is already a direct dep), so the default build's
 # dependency graph is byte-for-byte unchanged when this is off.
-# [OPUS-4.8] sq-oy1f.23: the hand-rolled JSON-LD writer's `Json` AST now lives in the new
-# `sparq-jsonld` crate (Phase A of the document-level JSON-LD 1.1 pipeline). The writer
-# re-exports it (public API preserved, byte-identical output), so this feature — and only
-# this feature — pulls the (zero-dependency) `sparq-jsonld` crate in. The DEFAULT build has
-# `serialize-rdf` OFF, so it never compiles `sparq-jsonld`: the lean default + wasm bundles
-# are unchanged.
-serialize-rdf = ["dep:sparq-jsonld"]
+# [OPUS-4.8] (sq-6vshe.4) Seam 1 of the facade split (RFC research/engine-split-rfc.md §4
+# Option A / §7 Phase A1): the `serialize` module moved to the internal `sparq-engine-serialize`
+# sub-crate, re-exported here verbatim as `sparq_engine::serialize`. This feature now FORWARDS
+# to that crate's own `serialize-rdf` (which pulls the zero-dependency `sparq-jsonld` crate for
+# the JSON-LD writer's `Json` AST). `sparq-engine-serialize` is an OPTIONAL dependency, so the
+# DEFAULT + wasm builds — with `serialize-rdf` OFF — never compile it or `sparq-jsonld`: the lean
+# bundles + the byte-identical feature-off dependency graph are unchanged, and every public path
+# (`sparq_engine::serialize::*`) + this feature NAME are preserved for external users.
+serialize-rdf = ["dep:sparq-engine-serialize", "sparq-engine-serialize/serialize-rdf"]
 # [OPUS-4.8] (sq-townn, survey §A7) Streaming Turtle / TriG serialisation. The buffered
 # `write_turtle` / `write_trig` build a FULL in-memory `String` for the whole graph, so a
 # CONSTRUCT/DESCRIBE over a large graph holds BOTH the materialised triples AND the fully
@@ -82,8 +84,9 @@ serialize-rdf = ["dep:sparq-jsonld"]
 # (the whole writer matrix, incl. the shared rendering helpers it reuses, lives there). OPT-IN
 # and OFF by default: when off, zero streaming code compiles and the existing buffered path is
 # byte-identical to before. Pulls in ZERO new dependencies (std `io::Write` only) and contains
-# no `unsafe`.
-streaming-serialization = ["serialize-rdf"]
+# no `unsafe`. [OPUS-4.8] (sq-6vshe.4) now also FORWARDS to the moved sub-crate's own
+# `streaming-serialization` (see the `serialize-rdf` note above).
+streaming-serialization = ["serialize-rdf", "sparq-engine-serialize/streaming-serialization"]
 # [OPUS-4.8] (sq-5qz9) SPARQL window functions + custom aggregate registry.
 # Two extension surfaces, OFF by default:
 #   * a `CustomAggregateRegistry` whose named (IRI) user aggregates are callable in
@@ -253,11 +256,13 @@ oxiri = "0.2"
 rustc-hash.workspace = true
 smallvec.workspace = true
 rayon = { workspace = true, optional = true }
-# [OPUS-4.8] sq-oy1f.23: the JSON-LD writer's `Json` AST moved here (Phase A of the
-# document-level JSON-LD 1.1 pipeline). OPTIONAL + pulled in ONLY by `serialize-rdf`
-# (see the feature note above), so the default build never compiles it. Zero-dependency +
-# `forbid(unsafe_code)`, so it adds no dependency to the writer's dep-free contract.
-sparq-jsonld = { path = "../sparq-jsonld", version = "0.1.0", optional = true, default-features = false }
+# [OPUS-4.8] (sq-6vshe.4) Seam 1 of the facade split: the RDF `serialize` module (Turtle /
+# TriG / N-Quads / JSON-LD writers) moved to this internal sub-crate, re-exported verbatim as
+# `sparq_engine::serialize` (see src/lib.rs). OPTIONAL + pulled in ONLY by `serialize-rdf`
+# (which forwards to its own `serialize-rdf`/`streaming-serialization`), so the default + wasm
+# builds never compile it or its transitive `sparq-jsonld` dependency — the byte-identical
+# feature-off contract is preserved. `default-features = false`: an empty (feature-off) build.
+sparq-engine-serialize = { path = "../sparq-engine-serialize", version = "0.1.0", optional = true, default-features = false }
 regex = { version = "1", optional = true }
 md-5 = { version = "0.11", optional = true }
 sha1 = { version = "0.11", optional = true }
@@ -307,11 +312,12 @@ rayon.workspace = true
 # The cs-planner q-error gate builds its characteristic-set tables through the
 # dict-id accessor (dev-only; the library never depends on introspection).
 sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
-# [OPUS-4.8] (sq-e3pj) The JSON-LD writer's round-trip tests parse the emitted document
-# back to RDF to assert isomorphism. serde_json reads the JSON DOM in the test only — it
-# is a DEV dependency, so the opt-in `serialize-rdf` feature itself stays dependency-free
-# (the native writer emits JSON by hand and pulls in nothing). serde_json is already in
-# the workspace tree (sparq-server / the `service` feature).
+# [OPUS-4.8] (sq-e3pj, sq-6vshe.4) DEV-only serde_json: the `explain_json` structured-EXPLAIN
+# tests parse the hand-emitted JSON DOM back to assert every field round-trips (and `chunk`'s
+# `impl PartialEq<serde_json::Value>` test helper), so the opt-in `explain-json` feature itself
+# stays dependency-free (the production writer emits JSON by hand). NB: the JSON-LD writer's own
+# round-trip tests moved WITH the writer to `sparq-engine-serialize` in seam 1 of the facade
+# split. serde_json is already in the workspace tree (sparq-server / the `service` feature).
 serde_json = "1"
 
 # [SONNET-4.6] sq-sqtk2.3 — register the `kani` cfg so the `#[cfg(all(kani, feature =

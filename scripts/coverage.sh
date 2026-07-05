@@ -135,6 +135,12 @@ PER_COMMIT_CRATES=(
   # here brings the correctness core under the line-coverage ratchet ("no crate silently
   # dropped").
   sparq-substrate
+  # [OPUS-4.8] sq-6vshe.4: seam 1 of the sparq-engine facade split — the RDF writer matrix
+  # (Turtle/TriG/N-Quads/JSON-LD, buffered + streaming) peeled into an internal sub-crate. Its
+  # whole surface is behind DEFAULT-OFF `serialize-rdf`, so it MUST be measured WITH
+  # `serialize-rdf,streaming-serialization` (the `case` in measure() below names them). Bringing
+  # the moved writer + its ~2.9k test LOC under the ratchet keeps "no crate silently dropped".
+  sparq-engine-serialize
 )
 # Crates whose HEAVY tests are only run in the nightly tier.
 NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nightly tier"
@@ -169,8 +175,8 @@ SHARD_GROUPS=(
   "sparq-core sparq-mpc sparq-fedclient sparq-geo sparq-cli sparq-conformance sparq-text sparq-policy sparq-nlq sparq-sim"
   # shard 3 (~336s measured)
   "sparq-vectors sparq-zk-compose sparq-gpu sparq-serve sparq-reason sparq-hdt sparq-shacl sparq-fedplan sparq-zk sparq-substrate sparq-introspect"
-  # shard 4 (~336s measured)
-  "sparq-solid sparq-server sparq-wasm sparq-canon sparq-rsp sparq-prov sparq-parse sparq-algos"
+  # shard 4 (~336s measured; + sparq-engine-serialize, the seam-1 writer sub-crate, sq-6vshe.4)
+  "sparq-solid sparq-server sparq-wasm sparq-canon sparq-rsp sparq-prov sparq-parse sparq-algos sparq-engine-serialize"
 )
 SHARD_TOTAL=${#SHARD_GROUPS[@]}
 
@@ -467,6 +473,16 @@ measure() {
     sparq-substrate)
       cargo_args+=(--features numeric,join,compare,rows)
       features+=("numeric" "join" "compare" "rows") ;;
+    # [OPUS-4.8] sq-6vshe.4: seam 1 of the sparq-engine facade split — the RDF writer matrix
+    # (Turtle/TriG/N-Quads/JSON-LD) peeled into this internal sub-crate. Its WHOLE surface is
+    # behind DEFAULT-OFF `serialize-rdf` (mirroring the gating it had inside sparq-engine), so a
+    # default-feature `cargo llvm-cov -p sparq-engine-serialize` builds an EMPTY crate — measure
+    # it WITH `serialize-rdf,streaming-serialization` (the maximal surface, incl. the streaming
+    # writers + their tests), exactly as sparq-substrate/-fedplan above name their whole-surface
+    # features. Brings the moved writer + its ~2.9k test LOC under the line-coverage ratchet.
+    sparq-engine-serialize)
+      cargo_args+=(--features serialize-rdf,streaming-serialization)
+      features+=("serialize-rdf" "streaming-serialization") ;;
   esac
 
   local start end rc=0 json="$WORK/$crate.json"

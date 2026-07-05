@@ -1,7 +1,7 @@
 //! [OPUS-4.8] (sq-678h) RDF serializer matrix — Turtle / TriG / N-Quads writers.
 //!
 //! sparq could *parse* Turtle / TriG / N-Quads / N-Triples but could only *write*
-//! N-Triples (via [`crate::triples_to_ntriples`], which leans on oxrdf's canonical
+//! N-Triples (via `sparq_engine::triples_to_ntriples`, which leans on oxrdf's canonical
 //! `Display`). Every peer round-trips, so this closes that baseline gap.
 //!
 //! ## Opt-in
