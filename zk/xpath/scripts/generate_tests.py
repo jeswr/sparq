@@ -1937,7 +1937,8 @@ def convert_xpath_expr(
                         setup = f"let dur = XsdYearMonthDuration::new({months});"
                         return (setup, f"{noir_func}(dur, {divisor})", None)
 
-            # yearMonthDuration div yearMonthDuration -> i32 ratio
+            # yearMonthDuration div yearMonthDuration -> xs:decimal ratio (IEEE 754 double,
+            # F&O 3.1 sec. 8.4.5; sq-3x7dl.19)
             if symbol == "div" and noir_func == "ym_duration_divide_by_duration":
                 if (
                     arg1_symbol == "yearMonthDuration"
@@ -2889,6 +2890,9 @@ def generate_noir_test(test: TestCase, function_name: str) -> Optional[str]:
         # op:divide-dayTimeDuration-by-dayTimeDuration returns the xs:decimal
         # ratio, modelled as an IEEE 754 double (F&O 3.1 sec. 8.4.10; sq-3x7dl.9)
         "duration_divide_by_duration",
+        # op:divide-yearMonthDuration-by-yearMonthDuration returns the xs:decimal
+        # ratio, modelled as an IEEE 754 double (F&O 3.1 sec. 8.4.5; sq-3x7dl.19)
+        "ym_duration_divide_by_duration",
     ]
 
     # Functions that return Option<i64>
