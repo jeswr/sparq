@@ -11,10 +11,9 @@
 // This spec then proves:
 //   1. the Query tool renders AND executes the default query against the in-tab engine
 //      (a tool demonstrably *works*, not merely mounts, without a native backend);
-//   2. the Import drawer is honest about the browser persona: it defaults to the Paste tab and
-//      the File tab shows the "Desktop app only" notice INSTEAD of the native file picker —
-//      today's honest browser state. (Sibling bead sq-eydh9 adds real browser upload; its spec
-//      will supersede assertion 2 with a positive one.)
+//   2. the Import drawer's File tab shows a browser multi-file uploader (sq-eydh9) in the
+//      browser persona, NOT the old "Desktop app only" notice — and the uploader renders
+//      the Dropzone + the stable data-web-file-input the sq-eydh9 Playwright spec targets.
 //
 // Stable selectors (all declared E2E hooks — role / data-* only):
 //   #repl-query                 — the SPARQL editor textarea (query-workbench.tsx contract)
@@ -23,6 +22,7 @@
 //   [data-import-trigger="rail"]— the left rail's "+ Import data…" entry point
 //   [data-import-drawer]        — the Import drawer dialog content
 //   [data-import-tab="file"] / ["paste"] — the drawer's tab buttons (role="tab", aria-selected)
+//   [data-web-file-input]       — the stable hidden <input type="file"> for browser upload
 //
 // Determinism rules: NO waitForTimeout; NO exact numeric assertions; web-first assertions only.
 
@@ -49,7 +49,9 @@ test.describe("web-persona", () => {
     await expect(selectResult.getByText("Alice").first()).toBeVisible();
   });
 
-  test("import drawer offers no native disk path in the browser persona", async ({ page }) => {
+  test("import drawer File tab shows web uploader (not desktop-only notice) in the browser persona", async ({
+    page,
+  }) => {
     // Open the Import drawer from the left rail.
     await page.locator('[data-import-trigger="rail"]').click();
     const drawer = page.locator("[data-import-drawer]");
@@ -62,11 +64,20 @@ test.describe("web-persona", () => {
       "true",
     );
 
-    // The File tab exists but is honest: it shows the "Desktop app only" notice and does NOT
-    // offer the native file picker.
+    // (sq-eydh9) The File tab now shows the web multi-file uploader, NOT the old "Desktop app
+    // only" notice.  Confirm: the old warning is gone, and the web upload affordances are present.
     await drawer.locator('[data-import-tab="file"]').click();
-    await expect(drawer.getByText("Desktop app only")).toBeVisible();
-    await expect(drawer.getByRole("button", { name: /Choose a file/ })).not.toBeAttached();
+    await expect(drawer.getByText("Desktop app only")).not.toBeAttached();
+
+    // The Dropzone "Browse files…" button is present (keyboard-accessible picker path).
+    await expect(drawer.getByRole("button", { name: /Browse files/i })).toBeVisible();
+
+    // The stable hidden input for Playwright setInputFiles() is in the DOM.
+    await expect(drawer.locator("[data-web-file-input]")).toBeAttached();
+
+    // An honest note about what the web path CANNOT do (compressed / HDT) is present so the
+    // capability boundary is never silently misrepresented.
+    await expect(drawer.getByText(/HDT/).first()).toBeVisible();
 
     // Close the drawer to leave the page in its initial state.
     await page.getByRole("button", { name: "Close import drawer" }).click();
