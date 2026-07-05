@@ -51,7 +51,8 @@ import {
 } from "@/components/workbench/import-drawer";
 // [OPUS-4.8] sq-tp1m (#757) — keeps the engine's inference regime in lockstep with the active
 // workspace's persisted choice (restores it on load), mounted once regardless of the active tab.
-import { InferenceModeBridge } from "@/components/workbench/inference-control";
+// [sq-glo5r] — N3RulesBridge keeps the engine's N3 rules cache in lockstep with the workspace.
+import { InferenceModeBridge, N3RulesBridge } from "@/components/workbench/inference-control";
 // [OPUS-4.8] sq-xvj9 — the Cmd-K counterpart to the rail's "Export data…": serialise + download the
 // whole store as pretty Turtle / TriG / JSON-LD from the keyboard-first spine.
 import { downloadText } from "@/lib/download";
@@ -116,6 +117,8 @@ export function Workbench() {
         />
         {/* [OPUS-4.8] sq-tp1m — sync the persisted per-workspace inference regime into the engine. */}
         <InferenceModeBridge />
+        {/* [sq-glo5r] — sync the per-workspace N3 rules into the engine's closure cache. */}
+        <N3RulesBridge />
         {/* (sq-eydh9) [SONNET-4.6] — global RDF file drop overlay, mounted once here. */}
         <GlobalDropOverlay />
         {/* [OPUS-4.8] sq-vw3ax (#820 redesign) — a native-feeling dark workspace. The ambient teal

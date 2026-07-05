@@ -26,6 +26,7 @@ import {
   type Workspace,
   type WorkspaceBackend,
   type WorkspaceInferenceMode,
+  type WorkspaceRulesDoc,
   type WorkspaceSourceMeta,
   type WorkspaceStore,
   type WorkspaceSummary,
@@ -96,6 +97,26 @@ export interface WorkspaceContextValue {
    * mirroring {@link recordImport}: a write failure never breaks the in-memory selection).
    */
   setInference: (mode: WorkspaceInferenceMode) => Promise<void>;
+  /**
+   * [sq-glo5r] The active workspace's persisted N3 rule documents (empty when none). Drives the
+   * Inference tool's N3 rules panel and the engine's N3 closure cache.
+   */
+  rulesDocs: WorkspaceRulesDoc[];
+  /**
+   * [sq-glo5r] Bulk-add N3 rule documents to the active workspace (each gets a unique `addedAt`
+   * timestamp; enabled by default). Persists + pushes to the engine immediately.
+   */
+  addRulesDocs: (docs: Array<{ name: string; text: string }>) => Promise<void>;
+  /**
+   * [sq-glo5r] Remove an N3 rule document by its `addedAt` timestamp (the stable unique key).
+   * Persists + pushes the updated list to the engine.
+   */
+  removeRulesDoc: (addedAt: number) => Promise<void>;
+  /**
+   * [sq-glo5r] Toggle the `enabled` state of an N3 rule document by `addedAt`. A disabled rule
+   * is excluded from the N3 closure (its cache-key hash changes, triggering a rebuild).
+   */
+  setRulesDocEnabled: (addedAt: number, enabled: boolean) => Promise<void>;
 }
 
 const WorkspaceContext = React.createContext<WorkspaceContextValue | null>(null);
@@ -235,6 +256,54 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     [applyWorkspace, persist],
   );
 
+  // [sq-glo5r] — bulk-add N3 rule documents; each gets a unique addedAt (now + index offset so
+  // rapid bulk adds never collide). Pushes the updated list to the engine immediately.
+  const addRulesDocs = React.useCallback(
+    async (docs: Array<{ name: string; text: string }>): Promise<void> => {
+      const base = workspaceRef.current ?? newWorkspace("default workspace", STARTER_QUERY);
+      const now = Date.now();
+      const newDocs: WorkspaceRulesDoc[] = docs.map((d, i) => ({
+        name: d.name,
+        text: d.text,
+        addedAt: now + i, // +i keeps addedAt unique within a single bulk add
+      }));
+      const nextDocs = [...(base.rulesDocs ?? []), ...newDocs];
+      const next: Workspace = { ...base, rulesDocs: nextDocs, updatedAt: Date.now() };
+      applyWorkspace(next);
+      engineRef.current.setN3Rules(nextDocs);
+      persist(next);
+    },
+    [applyWorkspace, persist],
+  );
+
+  // [sq-glo5r] — remove an N3 rule document by addedAt (the stable unique key).
+  const removeRulesDoc = React.useCallback(
+    async (addedAt: number): Promise<void> => {
+      const base = workspaceRef.current ?? newWorkspace("default workspace", STARTER_QUERY);
+      const nextDocs = (base.rulesDocs ?? []).filter((d) => d.addedAt !== addedAt);
+      const next: Workspace = { ...base, rulesDocs: nextDocs, updatedAt: Date.now() };
+      applyWorkspace(next);
+      engineRef.current.setN3Rules(nextDocs);
+      persist(next);
+    },
+    [applyWorkspace, persist],
+  );
+
+  // [sq-glo5r] — toggle the enabled state of an N3 rule document by addedAt.
+  const setRulesDocEnabled = React.useCallback(
+    async (addedAt: number, enabled: boolean): Promise<void> => {
+      const base = workspaceRef.current ?? newWorkspace("default workspace", STARTER_QUERY);
+      const nextDocs = (base.rulesDocs ?? []).map((d) =>
+        d.addedAt === addedAt ? { ...d, enabled } : d,
+      );
+      const next: Workspace = { ...base, rulesDocs: nextDocs, updatedAt: Date.now() };
+      applyWorkspace(next);
+      engineRef.current.setN3Rules(nextDocs);
+      persist(next);
+    },
+    [applyWorkspace, persist],
+  );
+
   const createWorkspace = React.useCallback(
     async (name: string): Promise<Workspace> => {
       // 1. SAVE the current workspace's live snapshot first — no data loss on leaving it.
@@ -288,15 +357,18 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     [applyWorkspace, persist, refreshList],
   );
 
-  // Load `id` and make it active: hydrate the engine from its snapshot + re-apply its inference.
+  // Load `id` and make it active: hydrate the engine from its snapshot + re-apply its inference
+  // regime and N3 rules (belt-and-suspenders alongside the bridges — ensures lockstep even before
+  // the bridge effects fire).
   const activate = React.useCallback((ws: Workspace) => {
     applyWorkspace(ws);
     engineRef.current.hydrateFromSnapshot(ws.dataSnapshot ?? null, {
       seedSampleWhenEmpty: false,
     });
-    // Re-apply the target's inference regime (the InferenceModeBridge also reacts to the state
-    // change; setting it here keeps the engine in lockstep even before that effect runs).
+    // Re-apply the target's inference regime.
     engineRef.current.setInferenceMode(ws.inference ?? "off");
+    // [sq-glo5r] — push the target workspace's N3 rules so the engine rebuilds the N3 closure.
+    engineRef.current.setN3Rules(ws.rulesDocs ?? []);
   }, [applyWorkspace]);
 
   const switchWorkspace = React.useCallback(
@@ -398,6 +470,10 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       switchWorkspace,
       inference: workspace?.inference ?? "off",
       setInference,
+      rulesDocs: workspace?.rulesDocs ?? [],
+      addRulesDocs,
+      removeRulesDoc,
+      setRulesDocEnabled,
     }),
     [
       workspace,
@@ -410,6 +486,9 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       deleteWorkspace,
       switchWorkspace,
       setInference,
+      addRulesDocs,
+      removeRulesDoc,
+      setRulesDocEnabled,
     ],
   );
 
