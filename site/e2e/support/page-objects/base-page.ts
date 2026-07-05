@@ -4,7 +4,7 @@
 // data-testid, never Tailwind classes). This centralises the app-shell affordances every surface
 // shares (the slim top-bar nav, the ⌘K command palette) so a restyle updates ONE place, and the
 // nav/palette locators stay role-based and churn-proof. Surface-specific page objects
-// (HomeRunnerPage for sq-ymr2e.3, TryWorkbenchPage for sq-ymr2e.2) subclass this.
+// (e.g. HomeRunnerPage for sq-ymr2e.3) subclass this.
 import { expect, type Locator, type Page } from "@playwright/test";
 import { waitForAppReady } from "../app-ready";
 import {

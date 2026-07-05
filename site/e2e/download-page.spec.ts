@@ -103,8 +103,10 @@ test("no-release state: buttons degrade to a Releases link and the unsigned bann
   await expect(watch).toBeVisible();
   await expect(watch).toHaveAttribute("href", RELEASES_URL);
 
-  // The no-install closer still points at the in-browser playground.
-  await expect(page.getByRole("link", { name: /Open the playground/i })).toBeVisible();
+  // The no-install closer still offers a working no-install entry point — it now links to /app
+  // ("Open the workbench") since /try was removed and /app is the single workbench (sq-4hiqe).
+  // [SONNET-4.6] sq-4hiqe — text was "Open the playground"; the /try REPL removal renamed it.
+  await expect(page.getByRole("link", { name: /Open the workbench/i })).toBeVisible();
 
   expect(consoleErrors, `console errors: ${consoleErrors.join("\n")}`).toEqual([]);
 });

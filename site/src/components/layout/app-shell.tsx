@@ -9,19 +9,19 @@
 // is the Cmd-K palette (sq-vw3ax.1), which is WHY removing the sidebar is now safe — Cmd-K
 // shipped first. A mobile Sheet drawer mirrors the same slim links (no full tree).
 //
-// OPTION-B (the maintainer's decision after #1004 opened, sq-rclb8 / sq-vnd0i). Two DISTINCT
-// destinations, not one "Try the GUI": "Try" → /try is the lightweight in-browser SPARQL REPL
-// playground (kept unchanged); "App" → /app is the LIVE operational GUI. That GUI is a SEPARATE
-// Next.js app (gui/app), overlaid at /app/ by the Pages deploy (pages.yml) — it is NOT a
-// route of this site. The old single "Try the GUI" → /gui slot is dropped (/gui now redirects to
-// /app).
+// OPTION-B (the maintainer's decision after #1004 opened, sq-rclb8 / sq-vnd0i). The single
+// operational destination is "App" → /app, the LIVE GUI. That GUI is a SEPARATE Next.js app
+// (gui/app), overlaid at /app/ by the Pages deploy (pages.yml) — it is NOT a route of this site.
+// The old single "Try the GUI" → /gui slot, and the in-tab /try REPL playground, both redirect
+// to /app (sq-4hiqe, maintainer directive 2026-07-05: /try was "very broken" and the app has
+// everything you need — /app is now the ONE workbench).
 //
 // [OPUS-4.8] sq-vw3ax.11 — the "App" slot is therefore a HARD (full-page) link, not a next/link
 // soft navigation: soft-navigating across two distinct Next builds fetches the WRONG app's RSC
 // Flight payload (/app/index.txt) and lands on a raw .txt instead of the GUI. See NavLink.
 //
 // Destinations (research §2 + the maintainer's discoverability gaps), slim at 6:
-//   Home · Capabilities · Try · App · Benchmarks · Download
+//   Home · Capabilities · App · Benchmarks · Download
 //   utility cluster: { Cmd-K · GitHub · theme }
 // Papers stays a real route but lives in Cmd-K (overflow) to keep the bar slim, not bloated.
 // (/examples and the deep-page rebuild are sequenced in sq-vw3ax.6 / .4 — not this PR.)
@@ -47,15 +47,16 @@ import {
   CommandPaletteTrigger,
 } from "@/components/command-palette";
 // [OPUS-4.8] sq-ixc3.10 — the operational-command registry. Mounted once inside the palette so
-// the workbench (the REPL) can contribute live run / EXPLAIN / connect / export / import /
-// switch-workspace / named-graph / recent-query commands to the keyboard-first spine.
+// interactive surfaces can contribute live commands to the keyboard-first spine. On this
+// marketing site the registry now degrades to pure navigation (the in-tab REPL that used to
+// register run / EXPLAIN / connect verbs was removed with /try, sq-4hiqe — /app owns them).
 import { PaletteCommandsProvider } from "@/components/palette-commands";
 
 const REPO_URL = "https://github.com/jeswr/sparq";
 
 // The slim top bar's content destinations. Capabilities is the single gallery that replaces
-// the collapsed /surface/* tree; Try is the lightweight in-browser SPARQL REPL playground; App
-// is the live operational GUI destination; Download surfaces the desktop GUI + CLI binaries (the
+// the collapsed /surface/* tree; App is the live operational GUI destination (the single
+// workbench — /try redirects here); Download surfaces the desktop GUI + CLI binaries (the
 // maintainer's discoverability ask). Each is a real, built route. Papers is intentionally NOT in
 // the bar (it stays a route, reachable via Cmd-K) so the bar stays slim at 6, not bloated.
 // `external: true` marks a destination that is served by a SEPARATE deployed app at the same
@@ -64,7 +65,6 @@ const REPO_URL = "https://github.com/jeswr/sparq";
 const NAV_ITEMS: { href: string; label: string; external?: boolean }[] = [
   { href: "/", label: "Home" },
   { href: "/capabilities", label: "Capabilities" },
-  { href: "/try", label: "Try" },
   { href: "/app", label: "App", external: true },
   { href: "/benchmarks", label: "Benchmarks" },
   { href: "/download", label: "Download" },

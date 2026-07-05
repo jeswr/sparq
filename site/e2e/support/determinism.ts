@@ -9,7 +9,7 @@
 //   * Frozen Date via `page.clock.setFixedTime`: `Date.now()`/`new Date()` return a fixed instant,
 //     so any date-dependent render (and any leaked wall-clock string) is stable. Crucially we use
 //     setFixedTime, NOT `clock.install()`: install() also PAUSES setTimeout/rAF, which would
-//     deadlock the WASM prewarm/REPL flows that await real timers. setFixedTime keeps every timer
+//     deadlock the WASM prewarm/runner flows that await real timers. setFixedTime keeps every timer
 //     running on real time — safe for the wasm surfaces — while still fixing the calendar clock.
 //   * Seeded Math.random (mulberry32): deterministic PRNG so any Math.random-derived value is
 //     reproducible across reloads. The ZK/crypto paths use WebCrypto (crypto.getRandomValues),

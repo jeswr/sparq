@@ -19,13 +19,14 @@
 //     are identical) plus the config-level `animations: "disabled"` / `caret: "hide"`.
 //
 // SCOPE is the flake-control (§4): per-PR shoots ONLY the key layouts — home first fold (idle
-// state, dark + one light), the /try workbench shell (engine-ready), the /download cards
-// (release-fixture state), one showcase page (mpc-100k: the only flagship with no auto-start
-// effect, so its pre-interaction render is static), and the nav + palette-open overlay. The
-// full-surface sweep is the nightly lane (sq-ymr2e.11).
+// state, dark + one light), the /download cards (release-fixture state), one showcase page
+// (mpc-100k: the only flagship with no auto-start effect, so its pre-interaction render is
+// static), and the nav + palette-open overlay. The full-surface sweep is the nightly lane
+// (sq-ymr2e.11).
+// [OPUS-4.8] sq-4hiqe — the /try workbench-shell shot was removed with the /try playground.
 import type { Page } from "@playwright/test";
 
-import { test, expect, gotoAppReady, runnerStateLocator, RUNNER_STATE_TIMEOUT } from "../support";
+import { test, expect, gotoAppReady, runnerStateLocator } from "../support";
 
 /** Every dynamic region opted into the mask convention (one locator masks all matches). */
 function vrMasks(page: Page) {
@@ -58,17 +59,6 @@ test("home first fold — the one light-theme shot", async ({ page }, testInfo) 
   await expect(page.locator("html")).toHaveClass(/light/);
   await fontsReady(page);
   await expect(page).toHaveScreenshot("home-first-fold-light.png", { mask: vrMasks(page) });
-});
-
-test("try — workbench shell at engine-ready", async ({ page }) => {
-  await gotoAppReady(page, "try/");
-  // The workbench pre-warms the wasm engine on mount; "Engine ready" is its deterministic
-  // settled state (§4: wait on the runner's idle/results UI state before capture).
-  await expect(runnerStateLocator(page, "try", "engine-ready")).toBeVisible({
-    timeout: RUNNER_STATE_TIMEOUT,
-  });
-  await fontsReady(page);
-  await expect(page).toHaveScreenshot("try-workbench.png", { mask: vrMasks(page) });
 });
 
 test("download — cards in the release-fixture state", async ({ page }) => {

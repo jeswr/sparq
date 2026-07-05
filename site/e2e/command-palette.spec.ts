@@ -8,7 +8,7 @@
 // the /sparq basePath). It also asserts ESC closes the dialog.
 //
 // The palette is pure UI wired to the single GROUPS source — it needs no wasm bundle — so this
-// runs on the light site-e2e lane unconditionally (unlike the REPL/ZK specs that gate on wasm).
+// runs on the light site-e2e lane unconditionally (unlike the runner/ZK specs that gate on wasm).
 //
 // DOM anchors: the cmdk dialog exposes its accessible name "Command palette"; items are real
 // listbox options reachable by role + accessible name. No copy-scraping of layout text.

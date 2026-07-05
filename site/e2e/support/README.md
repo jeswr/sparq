@@ -68,7 +68,7 @@ Importing this `test` gives you, with no boilerplate:
 | `runner-state.ts` | `RunnerState` × surface → stable-locator map; `expectRunnerState` |
 | `page-objects/base-page.ts` | `BasePage` (nav + ⌘K palette + runner-state); subclass per surface |
 | `test-data/github.ts` + `fixtures/*.json` | the checked-in releases/latest fixtures + matcher |
-| `test-data/rdf.ts` | small deterministic RDF/SPARQL fixtures for the `/try` + home journeys |
+| `test-data/rdf.ts` | small deterministic RDF/SPARQL fixtures for the home + runner journeys |
 | `index.ts` | the barrel spec authors import |
 | `foundation.smoke.spec.ts` | the runner-state demo + determinism/hermetic proof (the stress-bar spec) |
 

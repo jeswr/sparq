@@ -8,7 +8,7 @@ import type { Metadata } from "next";
 // route is REAL; every hero figure is DERIVED from that data (hero-stats.ts), never hardcoded.
 // Structure (mockup order):
 //   1. HERO — display heading + brand gradient + derived stat strip + theme jump-rail + the
-//      REAL prefilled REPL query (→ run it live in /try).
+//      REAL prefilled query (→ run it live in the /app workbench; sq-4hiqe: /try was removed).
 //   2. FLAGSHIP band — the three flagships promoted to "start here" depth cards.
 //   3. LEGEND — the tier honesty contract, first-class.
 //   4. five LANES — each a sticky numbered spine + a per-theme accent + a tile grid; the

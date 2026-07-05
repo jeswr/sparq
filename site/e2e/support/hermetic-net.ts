@@ -2,7 +2,7 @@
 //
 // Design of record: research/web-gui-test-program.md §1.2 — "Block all non-localhost requests by
 // default; external APIs are fixture-routed. A test that touches the real network is a bug." The
-// site is static-exported and the /try + home runners execute in-browser WASM (sq-vw3ax.11), so a
+// site is static-exported and the home hero runner executes in-browser WASM (sq-vw3ax.11), so a
 // correct run makes ZERO external requests during a journey; this layer turns that design promise
 // into an enforced invariant AND records what was blocked so the sibling zero-network journeys
 // (§2.1) can assert on it.

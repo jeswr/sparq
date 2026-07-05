@@ -35,7 +35,6 @@
 // KEY ARTIFACTS (per-surface, presence-only — no numbers asserted):
 //   home        → hero h1 "In this tab"
 //   capabilities→ h1 heading
-//   try         → h1 "SPARQL workbench"
 //   app         → h1 "App"
 //   download    → h1 heading
 //   examples    → h1 "Examples"
@@ -176,16 +175,6 @@ const STATIC_ROUTES: RouteEntry[] = [
     name: "/capabilities",
     artifact: async (page) => {
       await expect(page.getByRole("heading", { level: 1 }).first()).toBeVisible();
-    },
-  },
-  {
-    path: "try/",
-    name: "/try",
-    artifact: async (page) => {
-      // Server-rendered h1 added by sq-vw3ax — present before WASM loads.
-      await expect(
-        page.getByRole("heading", { name: /SPARQL workbench/i }),
-      ).toBeVisible();
     },
   },
   {

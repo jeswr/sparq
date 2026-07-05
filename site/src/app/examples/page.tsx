@@ -1,13 +1,15 @@
 import type { Metadata } from "next";
+import * as React from "react";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 
 // [OPUS-4.8] sq-vw3ax.6 — /examples: the curated "show me it working" gallery.
 //
 // A one-line lede + a 2-col grid of LARGE demo cards = the 3 flagships (zk-car-hire,
-// mpc-100k, solid-pairs) + a "Live REPL" card (research/website-redesign.md §4). Each card:
-// title, one-line OUTCOME, tier badge, a decorative still, [Open demo]. No prose walls — the
-// /showcase/* pages (rebuilt demo-first) and /try are the detail targets the cards open.
+// mpc-100k, solid-pairs) + a "Live SPARQL workbench" card (research/website-redesign.md §4). Each
+// card: title, one-line OUTCOME, tier badge, a decorative still, [Open demo]. No prose walls — the
+// /showcase/* pages (rebuilt demo-first) and /app (the workbench, sq-4hiqe) are the detail targets
+// the cards open. A card whose destination is the separate overlaid /app is a hard anchor.
 //
 // Design judgment (no thumbnail image assets exist in site/public): the "still/thumbnail" is a
 // dependency-free, theme-token CSS panel (the surface icon over a soft gradient), not a raster
@@ -23,6 +25,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EXAMPLE_CARDS, type ExampleCard } from "@/data/examples";
+import { withBasePath } from "@/lib/base-path";
 import { TIER_LABEL, TIER_VARIANT } from "@/data/surfaces";
 
 export const metadata: Metadata = {
@@ -54,12 +57,29 @@ export default function ExamplesPage() {
 /** A large demo card: a decorative still over title · outcome · tier badge · [Open demo]. */
 function ExampleCardItem({ card }: { card: ExampleCard }) {
   const Icon = card.icon;
+  // [OPUS-4.8] sq-4hiqe — a card targeting the separate overlaid /app must be a HARD full-page
+  // anchor (withBasePath + trailing slash); a next/link soft nav would fetch /app/index.txt.
+  const Wrapper = card.external
+    ? ({ children }: { children: React.ReactNode }) => (
+        <a
+          href={withBasePath(card.href.endsWith("/") ? card.href : `${card.href}/`)}
+          className="group block focus-visible:outline-none"
+          aria-label={`Open demo: ${card.title}`}
+        >
+          {children}
+        </a>
+      )
+    : ({ children }: { children: React.ReactNode }) => (
+        <Link
+          href={card.href}
+          className="group block focus-visible:outline-none"
+          aria-label={`Open demo: ${card.title}`}
+        >
+          {children}
+        </Link>
+      );
   return (
-    <Link
-      href={card.href}
-      className="group block focus-visible:outline-none"
-      aria-label={`Open demo: ${card.title}`}
-    >
+    <Wrapper>
       <Card className="h-full overflow-hidden pt-0 transition-colors group-hover:ring-primary/40 group-focus-visible:ring-3 group-focus-visible:ring-ring/50">
         {/* The "still" — a dependency-free token gradient with the surface icon. */}
         <div
@@ -91,6 +111,6 @@ function ExampleCardItem({ card }: { card: ExampleCard }) {
           </span>
         </CardContent>
       </Card>
-    </Link>
+    </Wrapper>
   );
 }

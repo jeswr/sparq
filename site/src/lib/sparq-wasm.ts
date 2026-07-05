@@ -123,7 +123,7 @@ export function datasetSize(store: WasmStore): number {
 }
 
 /**
- * [OPUS-4.8] sq-oy1f.7 — the JSON-LD output modes the /try REPL offers for a CONSTRUCT /
+ * [OPUS-4.8] sq-oy1f.7 — the JSON-LD output modes offered for a CONSTRUCT /
  * DESCRIBE result graph. The three left-hand modes drive the wasm `Store.serialize`
  * binding's JSON-LD document forms (expanded / flattened / prefix-`@context`-compacted —
  * #900/#923); `"compact"` drives the SEPARATE `Store.serializeCompact` binding — the full

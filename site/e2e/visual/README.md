@@ -1,8 +1,8 @@
 # Visual-regression suite (sq-ymr2e.10)
 
 Design of record: `research/web-gui-test-program.md` §4. Playwright `toHaveScreenshot`
-over the per-PR **key layouts** (home first fold dark + one light shot, `/try` workbench
-at engine-ready, `/download` in the release-fixture state, the mpc-100k showcase,
+over the per-PR **key layouts** (home first fold dark + one light shot,
+`/download` in the release-fixture state, the mpc-100k showcase,
 nav + palette-open overlay), at two pinned viewports (1280×720 `visual-desktop`,
 390×844 `visual-mobile`). The full-surface sweep is the nightly lane (sq-ymr2e.11).
 

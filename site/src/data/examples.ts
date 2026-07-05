@@ -1,11 +1,12 @@
 // [OPUS-4.8] sq-vw3ax.6 — the /examples gallery model: the curated "show me it working"
-// set, derived from the single FLAGSHIPS source (data/surfaces.ts) plus the live REPL.
+// set, derived from the single FLAGSHIPS source (data/surfaces.ts) plus the live workbench.
 //
 // /examples is the curated "show me it working" gallery (research/website-redesign.md §4):
 // a 2-col grid of LARGE demo cards = the 3 flagships (zk-car-hire, mpc-100k, solid-pairs) +
-// a "Live REPL" card. Each card carries a one-line OUTCOME (what you walk away having proven),
-// a tier badge, and an [Open demo] CTA. The /showcase/<slug> pages are the detail targets
-// (rebuilt demo-first); the REPL card targets /try.
+// a "Live SPARQL workbench" card. Each card carries a one-line OUTCOME (what you walk away
+// having proven), a tier badge, and an [Open demo] CTA. The /showcase/<slug> pages are the
+// detail targets (rebuilt demo-first); the workbench card targets /app (sq-4hiqe: the /try
+// REPL was removed — /app is the single workbench).
 //
 // Keeping the three flagship items derived from FLAGSHIPS (rather than re-listed) means a
 // re-word of a flagship's title/blurb/tier in surfaces.ts flows straight into this gallery, the
@@ -23,8 +24,14 @@ export interface ExampleCard {
   outcome: string;
   tier: Tier;
   icon: LucideIcon;
-  /** Flagships carry the ★ marker; the REPL card does not. */
+  /** Flagships carry the ★ marker; the workbench card does not. */
   flagship: boolean;
+  /**
+   * [OPUS-4.8] sq-4hiqe — the card's destination is served by a SEPARATE deployed app at the
+   * same origin (the /app workbench, overlaid at /app/). Such a card must be a HARD full-page
+   * anchor, not a next/link soft nav (which would fetch the foreign /app/index.txt RSC payload).
+   */
+  external?: boolean;
 }
 
 // A per-flagship one-line OUTCOME (the "you walk away having proven X" line), keyed by slug.
@@ -47,16 +54,18 @@ const FLAGSHIP_CARDS: ExampleCard[] = FLAGSHIPS.map((f) => ({
   flagship: true,
 }));
 
-// The live REPL card — the single best proof artifact (the killer demo), opened as a large
-// card alongside the flagships, targeting its own /try route.
+// The workbench card — the single best proof artifact (the killer demo), opened as a large card
+// alongside the flagships. [OPUS-4.8] sq-4hiqe — retargeted from the removed /try REPL to the
+// /app workbench (external: a separate overlaid app, so a hard full-page anchor).
 const REPL_CARD: ExampleCard = {
-  href: "/try",
-  title: "Live SPARQL REPL",
+  href: "/app",
+  title: "Live SPARQL workbench",
   outcome:
     "Run real SPARQL against a sample graph — the Rust engine compiled to wasm, in your tab.",
   tier: "live",
   icon: PlayCircle,
   flagship: false,
+  external: true,
 };
 
 // [OPUS-4.8] sq-3p0z (#822) — the Verifiable-Credentials import-and-query demo. A `live`
