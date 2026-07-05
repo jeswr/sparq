@@ -101,8 +101,11 @@
 //! `<sentence>`, plus a `<declare>` carrying anything other than exactly one `<Var>`)
 //! returns `MalformedXml` rather than being silently dropped by a `.first()`-style read.
 //! This is a soundness property, not merely a diagnostic: dropping a second `<if>`
-//! conjunct would WEAKEN the rule body → over-derivation (sq-anuo9). Nothing is silently
-//! skipped or dropped.
+//! conjunct would WEAKEN the rule body → over-derivation (sq-anuo9). Nothing within a
+//! wrapper is silently skipped or dropped; one known residual class — a duplicate
+//! single-cardinality wrapper under a parent (first-wins via `child()`, e.g. two
+//! `<object>` under a `<Frame>`; the `<if>`/`<then>` subset is already rejected) — is
+//! tracked in sq-4l1fj.
 //!
 //! 1. `ImportError::ImportDirective` — any `Import` element (remote imports: fail-closed).
 //! 2. `ImportError::NonCoreElement { element, reason }` — non-Core dialect elements:
