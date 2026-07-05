@@ -111,6 +111,10 @@ const TOP_PAGES: { href: string; title: string; blurb: string }[] = [
   // (sq-gk9lq) [SONNET-4.6] — how sparq stores and queries its own project knowledge as RDF.
   // Cmd-K only (like /papers, /specs) so the slim top bar stays at 6 destinations.
   { href: "/dogfooding", title: "Dogfooding sparq", blurb: "How sparq uses itself as a knowledge-management system — the PKG loop, ingest workflow, NL query tool, and measured cost benefit." },
+  // (sq-0hv3o) [SONNET-4.6] — the web front door to the proof + testing estate (root
+  // ASSURANCE.md, PR #1562). Cmd-K only (like /papers, /specs, /dogfooding) so the slim
+  // top bar stays at 6 destinations; the maintainer asked to surface it, not to grow the bar.
+  { href: "/assurance", title: "Assurance", blurb: "How to check that sparq works in 15 minutes — the 5-minute health check, the layer-by-layer proof + testing estate, and what green does not mean." },
   { href: "/download", title: "Download", blurb: "Desktop GUI + CLI/server binaries (latest release)." },
   { href: "/#how-it-runs", title: "How it runs", blurb: "The honest \"what runs where\" tier model." },
 ];
