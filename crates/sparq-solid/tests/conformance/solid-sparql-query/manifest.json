@@ -1,0 +1,207 @@
+{
+  "name": "solid-sparql-query — query-semantics conformance suite",
+  "spec": "https://github.com/jeswr/solid-sparql-query",
+  "conformanceClass": "query-semantics",
+  "description": "Machine-readable conformance cases for the QUERY-SEMANTICS conformance class of the Access-Controlled SPARQL Query over a Solid Pod Editor's Draft: the pod-content-to-dataset mapping, the empty standing default graph, the per-query union-default-graph opt-in, and the non-disclosure invariants that a query engine (given a WAC-authorized dataset) must satisfy. Each case restates a normative requirement of a spec section as an executable query + expected result over the shared fixture. HTTP-protocol-class scenarios (protocol bindings, service description, SPARQL Update refusal, cache privacy) and content-mapping-class scenarios (JSON-LD flattening / no-raw-preservation) belong to their own conformance classes and implementations (the Solid HTTP server / the RDF parser) and are listed under outOfClassScenarios below, not here.",
+  "fixture": "fixture.nq",
+  "unionDefaultGraphIri": "http://www.w3.org/ns/solid/sparql#union-default-graph",
+  "requesters": {
+    "R": "https://r.example/card#me",
+    "public": null
+  },
+  "graphs": {
+    "card": "https://alice.pod.example/profile/card",
+    "bob": "https://alice.pod.example/contacts/bob",
+    "journal": "https://alice.pod.example/private/journal",
+    "cardAcl": "https://alice.pod.example/profile/card.acl",
+    "bobAcl": "https://alice.pod.example/contacts/bob.acl",
+    "missing": "https://alice.pod.example/no-such"
+  },
+  "cases": [
+    {
+      "id": "empty-standing-default-graph",
+      "scenario": 2,
+      "section": "The default graph is empty",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "SELECT * WHERE { ?s ?p ?o }",
+      "expect": { "type": "rowCount", "value": 0 },
+      "comment": "A bare BGP matches the empty standing default graph: zero solutions whatever the storage contains."
+    },
+    {
+      "id": "graph-name-mapping-and-no-unreadable-enumeration",
+      "scenario": [3, 4, 8],
+      "section": "Resource graphs; Non-disclosure invariants; Read visibility",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }",
+      "expect": {
+        "type": "graphBindings",
+        "var": "g",
+        "includes": ["https://alice.pod.example/profile/card", "https://alice.pod.example/contacts/bob"],
+        "excludes": [
+          "https://alice.pod.example/private/journal",
+          "https://alice.pod.example/profile/card.acl",
+          "https://alice.pod.example/contacts/bob.acl"
+        ]
+      },
+      "comment": "Every ?g is a readable resource IRI; the unreadable /private/journal and the ACL auxiliary graphs (R has Read but not Control) are absent — indistinguishable from not existing."
+    },
+    {
+      "id": "from-unreadable-is-absent-no-error",
+      "scenario": 5,
+      "section": "Dataset clauses; Non-disclosure invariants",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "SELECT * FROM <https://alice.pod.example/private/journal> WHERE { ?s ?p ?o }",
+      "expect": { "type": "rowCount", "value": 0 },
+      "comment": "A FROM clause naming an unreadable graph resolves to absent: zero solutions, no error."
+    },
+    {
+      "id": "from-missing-is-absent-no-error",
+      "scenario": 5,
+      "section": "Dataset clauses; Non-disclosure invariants",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "SELECT * FROM <https://alice.pod.example/no-such> WHERE { ?s ?p ?o }",
+      "expect": { "type": "rowCount", "value": 0 },
+      "comment": "A FROM clause naming a non-existent graph resolves to absent identically to the unreadable case: zero solutions, no error (unreadable is observationally equivalent to non-existent)."
+    },
+    {
+      "id": "ask-unreadable-is-false",
+      "scenario": 6,
+      "section": "Non-disclosure invariants",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "ASK { GRAPH <https://alice.pod.example/private/journal> { ?s ?p ?o } }",
+      "expect": { "type": "ask", "value": false }
+    },
+    {
+      "id": "ask-missing-is-false",
+      "scenario": 6,
+      "section": "Non-disclosure invariants",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "ASK { GRAPH <https://alice.pod.example/no-such> { ?s ?p ?o } }",
+      "expect": { "type": "ask", "value": false },
+      "comment": "ASK over the unreadable and the non-existent graph both answer false — no oracle via ASK."
+    },
+    {
+      "id": "aggregate-non-disclosure",
+      "scenario": 7,
+      "section": "Non-disclosure invariants",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } }",
+      "expect": { "type": "count", "var": "n", "value": 3 },
+      "comment": "The count is over exactly R's readable triples (2 in /profile/card + 1 in /contacts/bob); it is not inflated by the existing-but-unreadable /private/journal."
+    },
+    {
+      "id": "intra-graph-join-fails-across-documents",
+      "scenario": 11,
+      "section": "Cross-graph join semantics",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "SELECT ?f ?n WHERE { GRAPH ?g { ?p <http://xmlns.com/foaf/0.1/knows> ?f . ?f <http://xmlns.com/foaf/0.1/name> ?n } }",
+      "expect": { "type": "rowCount", "value": 0 },
+      "comment": "A join inside a single GRAPH block requires both triples in the same graph; alice's foaf:knows lives in /profile/card, Bob's foaf:name in /contacts/bob, so it fails."
+    },
+    {
+      "id": "cross-graph-join-succeeds",
+      "scenario": 11,
+      "section": "Cross-graph join semantics",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "SELECT ?f ?n WHERE { GRAPH ?g1 { ?p <http://xmlns.com/foaf/0.1/knows> ?f } GRAPH ?g2 { ?f <http://xmlns.com/foaf/0.1/name> ?n } }",
+      "expect": { "type": "rowCount", "value": 1 },
+      "comment": "Separate GRAPH blocks with distinct graph variables join across documents on the shared ?f: exactly one solution (?n = \"Bob\")."
+    },
+    {
+      "id": "union-default-graph-mode-off-by-default",
+      "scenario": 12,
+      "section": "Union default graph mode",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "SELECT * WHERE { ?s ?p ?o }",
+      "expect": { "type": "rowCount", "value": 0 },
+      "comment": "Union default graph mode MUST NOT apply to a query that did not request it: the standing default graph remains empty (the same assertion as empty-standing-default-graph, restated in the union-mode context)."
+    },
+    {
+      "id": "union-default-graph-mode-opt-in",
+      "scenario": 12,
+      "section": "Union default graph mode",
+      "requirement": "MAY",
+      "requester": "R",
+      "query": "SELECT * FROM <http://www.w3.org/ns/solid/sparql#union-default-graph> WHERE { ?s ?p ?o }",
+      "expect": { "type": "rowCount", "value": 3 },
+      "comment": "With the reserved IRI in a FROM clause, the default graph for this query is the RDF merge of R's authorized named graphs (2 triples from /profile/card + 1 from /contacts/bob = 3); the unreadable /private/journal contributes nothing."
+    },
+    {
+      "id": "union-iri-inert-in-from-named",
+      "scenario": 13,
+      "section": "Union default graph mode",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "SELECT ?g FROM NAMED <http://www.w3.org/ns/solid/sparql#union-default-graph> WHERE { GRAPH ?g { ?s ?p ?o } }",
+      "expect": {
+        "type": "graphBindings",
+        "var": "g",
+        "includes": ["https://alice.pod.example/profile/card", "https://alice.pod.example/contacts/bob"],
+        "excludes": ["http://www.w3.org/ns/solid/sparql#union-default-graph"]
+      },
+      "comment": "In FROM NAMED position the reserved IRI names nothing (treated as absent) and MUST NOT restrict the authorized named-graph set: ?g still ranges over the full readable set and never binds the reserved IRI."
+    },
+    {
+      "id": "union-iri-never-binds-graph-var-under-opt-in",
+      "scenario": 13,
+      "section": "Union default graph mode",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "SELECT ?g FROM <http://www.w3.org/ns/solid/sparql#union-default-graph> WHERE { GRAPH ?g { ?s ?p ?o } }",
+      "expect": {
+        "type": "graphBindings",
+        "var": "g",
+        "includes": ["https://alice.pod.example/profile/card", "https://alice.pod.example/contacts/bob"],
+        "excludes": ["http://www.w3.org/ns/solid/sparql#union-default-graph"]
+      },
+      "comment": "Even when the query opts into union default graph mode, GRAPH ?g never binds the reserved IRI — it affects only the default graph."
+    },
+    {
+      "id": "near-miss-union-iri-fails-closed",
+      "scenario": 12,
+      "section": "Union default graph mode",
+      "requirement": "MUST",
+      "requester": "R",
+      "query": "SELECT * FROM <http://www.w3.org/ns/solid/sparql#union-default-graphX> WHERE { ?s ?p ?o }",
+      "expect": { "type": "rowCount", "value": 0 },
+      "comment": "Exact-match discipline: a near-miss IRI is an ordinary (absent) FROM target, NOT the opt-in signal; it MUST NOT silently enable the union default graph, so the bare BGP stays empty."
+    },
+    {
+      "id": "anonymous-reads-nothing-fail-closed",
+      "scenario": [3, 4],
+      "section": "Read visibility; Non-disclosure invariants",
+      "requirement": "MUST",
+      "requester": "public",
+      "query": "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }",
+      "expect": {
+        "type": "graphBindings",
+        "var": "g",
+        "includes": [],
+        "excludes": [
+          "https://alice.pod.example/profile/card",
+          "https://alice.pod.example/contacts/bob",
+          "https://alice.pod.example/private/journal"
+        ]
+      },
+      "comment": "An unauthenticated requester holds no acl:Read grant in this storage, so its authorized dataset is empty and GRAPH ?g enumerates nothing (fail-closed)."
+    }
+  ],
+  "outOfClassScenarios": [
+    { "scenario": 1, "section": "Protocol operations", "conformanceClass": "protocol", "implementedBy": "solid HTTP server (jeswr/solid-server-rs)", "reason": "Protocol-binding equivalence (GET / URL-encoded POST / direct POST) is an HTTP-transport property, not a query-engine property; sparq-solid is the query-engine seam and has no HTTP surface." },
+    { "scenario": 9, "section": "Concrete syntaxes and the flattening rule", "conformanceClass": "content-mapping", "implementedBy": "RDF parser / LDP content layer", "reason": "JSON-LD inner-named-graph flattening happens at resource-parse time (a resource deserializing to a dataset collapses to one graph); sparq-solid consumes an already-mapped one-graph-per-resource dataset." },
+    { "scenario": 10, "section": "No raw preservation of inner graph names", "conformanceClass": "content-mapping", "implementedBy": "RDF parser / LDP content layer", "reason": "Same as scenario 9: whether an inner @id can surface as a first-class graph name is decided by the parse/flatten step, upstream of the query seam." },
+    { "scenario": 14, "section": "Service description", "conformanceClass": "protocol", "implementedBy": "solid HTTP server", "reason": "The Service Description document is emitted by the HTTP endpoint, not the query engine." },
+    { "scenario": 15, "section": "SPARQL Update refusal", "conformanceClass": "protocol", "implementedBy": "solid HTTP server", "reason": "415/400 refusal of Update payloads is an HTTP-request-handling property; the read-only query seam is never handed an Update." },
+    { "scenario": 16, "section": "Caching", "conformanceClass": "protocol", "implementedBy": "solid HTTP server", "reason": "Cache-control response headers are set by the HTTP endpoint." }
+  ]
+}

@@ -108,22 +108,21 @@ Materialize the authorization view from the access-control documents, then enfor
   `store.query_json_as(...)` → JSON string; `store.ask_as(...)` → `bool`. These evaluate
   through the engine's **zero-copy `DatasetView`** filtered to the session's authorized
   graphs (the default, fast path).
-- **Union-default-graph opt-in** ([OPUS-4.8] sq-bq7m9, issue #992 item 4) — **opt-in
-  `solid-sparql-query` feature, OFF by default**. Implements the *Access-Controlled SPARQL
-  Query over a Solid Pod* [Editor's Draft](https://github.com/jeswr/solid-sparql-query) §4
-  "empty-default + explicit-union" in the read path (`query_as`/`query_json_as`/`ask_as`).
-  **With the feature OFF the read path is byte-identical to today** — a bare default-graph
-  pattern (`{ ?s ?p ?o }`) ranges over the union of the session's authorized named graphs
-  (the always-on per-pattern `GRAPH` wrap). **With it ON** the default graph is **empty**
-  (a bare pattern matches nothing) UNLESS the query opts in with
+- **Empty default graph + union-default-graph opt-in — SPEC-COMPLIANT BY DEFAULT**
+  ([OPUS-4.8] sq-gq28y, issue #1546; maintainer decision "spec compliant - empty by default").
+  The read path (`query_as`/`query_json_as`/`ask_as`) implements the *Access-Controlled SPARQL
+  Query over a Solid Pod* [Editor's Draft](https://github.com/jeswr/solid-sparql-query)
+  empty-default + explicit-union semantics **out of the box**. The standing default graph is
+  **empty** (a bare `{ ?s ?p ?o }` matches nothing) UNLESS the query opts in with
   `FROM <http://www.w3.org/ns/solid/sparql#union-default-graph>` (the spec-minted
-  `UNION_DEFAULT_GRAPH_IRI`), which makes the default graph the union of the authorized
-  named graphs **for that request only** (a pure function of the query's dataset clause — no
-  cross-request state leak). Semantics + honest scope:
+  `UNION_DEFAULT_GRAPH_IRI`), which makes the default graph the union of the authorized named
+  graphs **for that request only** (a pure function of the query's dataset clause — no
+  cross-request state leak). An explicit `GRAPH ?g` / `GRAPH <g>` pattern is unaffected either
+  way. Semantics + honest scope:
   - the reserved IRI is a **signal, never a graph name**: it is stripped from BOTH `FROM`
     and `FROM NAMED` positions before evaluation and never binds `GRAPH ?g`. In `FROM NAMED`
     position it is treated as **absent** (stripped, not intersected) so `GRAPH ?g` keeps
-    ranging over the full authorized set (draft §4: "when only the reserved IRI is given, the
+    ranging over the full authorized set (draft: "when only the reserved IRI is given, the
     named-graph set remains the authorized set");
   - **fail-closed, exact-match**: a near-miss IRI is a normal (absent, per-pod-model) dataset
     reference that contributes nothing and never widens — it does NOT silently enable the
@@ -131,23 +130,31 @@ Materialize the authorization view from the access-control documents, then enfor
     is one exact IRI, present-or-absent); the `default-graph-uri` **protocol-parameter**
     equivalent and its fail-closed validation are the Solid HTTP layer's responsibility
     (`solid-server-rs`), not sparq;
-  - emulated at the **query layer** (the reserved IRI triggers the existing per-pattern
-    `GRAPH` wrap; the engine view keeps its `Empty` default graph — no `UnionOfVisible`
-    engine mode is added, design record §5.4(a)). Public surface: `UNION_DEFAULT_GRAPH_IRI`
-    (const) + `wrap_for_view_opt_in(sparql) -> Result<String, _>` (the feature-gated read-path
-    rewrite, the differential oracle for the enforcement path).
-  - **honest boundary:** the empty-default default-graph flip is a behaviour change to a
-    pervasive query idiom (a bare pattern is the natural "search my readable resources"
-    probe), so it is feature-gated **OFF pending maintainer ratification** rather than made
-    the default — the #992 compliance table's "empty default already implemented" reflected
-    the engine view's `DefaultGraphMode::Empty`, but the read path's always-on `GRAPH` wrap
-    means today's OBSERVABLE default is union-always. See the #992 follow-up.
+  - emulated at the **query layer** (the opt-in triggers the existing per-pattern `GRAPH`
+    wrap; the engine view keeps its `Empty` default graph — no `UnionOfVisible` engine mode
+    is added, design record §5.4(a)). Default public surface: `UNION_DEFAULT_GRAPH_IRI`
+    (const) + `wrap_for_view_opt_in(sparql) -> Result<String, _>` (the spec-conformant
+    read-path rewrite, the differential oracle for the enforcement path).
+  - **security invariant (preserved by the flip):** empty-by-default is strictly MORE
+    conservative than union-always — it can only ever REMOVE a bare pattern's default-graph
+    solutions, never add graphs. Both variants evaluate over exactly the session's authorized
+    named-graph set (the view enforces that at the graph-name layer before evaluation); the
+    default-graph choice changes what the *default graph* sees, never *which* graphs are
+    readable, so it cannot widen the readable set.
+  - **legacy escape hatch:** the opt-in `legacy-union-default-graph` feature (OFF by default)
+    reinstates the pre-flip union-always default (a bare pattern ranges over the authorized
+    union) for downstream deployments that relied on that idiom and need to migrate on their
+    own schedule; new code should use `GRAPH ?g` or the spec-minted opt-in.
+  - **conformance:** the query-semantics conformance class of the spec is vendored + run in
+    `crates/sparq-solid/tests/conformance_solid_sparql_query.rs` (upstream suite in
+    `jeswr/solid-sparql-query:test-suite/query-semantics/`) and passes all 15 cases.
 - `store.query_as_rewrite(&Session, Mode, sparql)` — the v1 **`FROM NAMED` rewrite**
   portability path: enforces the same policy on any standard SPARQL 1.1 engine (one
   deliberate semantic difference noted in-source: a caller `FROM <g>` can only restrict
-  the view, never widen it). **NB the `solid-sparql-query` union-default opt-in applies to
-  the view path (`query_as`) only** — this v1 portability path keeps its union-always
-  emulation regardless of the feature (it predates the draft).
+  the view, never widen it). **NB the spec empty-default flip applies to the view path
+  (`query_as`) only** — this v1 portability path keeps its union-always default-graph
+  emulation (it predates the draft and is a standard-SPARQL-portability oracle, not the
+  spec-conformant surface).
 - `store.update_as(&Session, sparql)` / `store.update_as_acp(...)` — **write-path
   gating**: check every graph an update could mutate *before* applying, and
   auto-re-materialize on `.acl`/`.acr` writes.
