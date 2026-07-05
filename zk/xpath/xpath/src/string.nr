@@ -691,7 +691,11 @@ pub fn substring_after<let N: u32, let M: u32>(s: str<N>, substr: str<M>) -> ([u
         // Substring not found, return empty
         (result, 0)
     } else {
-        let start_idx = (idx as u32) + (M as u32);
+        // Use the LOGICAL length of the needle (bytes before the first NUL),
+        // not the buffer capacity M.  With NUL-padded needles M > sub_len, so
+        // using M caused over-skipping (sq-0ylr9). [SONNET-4.6]
+        let sub_len = logical_len_bytes(substr.as_bytes());
+        let start_idx = (idx as u32) + sub_len;
         let mut result_len: u32 = 0;
 
         for i in 0..N {
@@ -1281,6 +1285,62 @@ fn test_substring_after() {
     assert(len == 5);
     let expected = "04/01".as_bytes();
     for i in 0..5 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+// ============================================================================
+// [SONNET-4.6] sq-0ylr9: substring_after / substring_before with NUL-padded
+// needles: regression tests added after fixing the M-vs-sub_len over-skip bug.
+// Expected values from Python:
+//   >>> import re
+//   >>> def substring_after(s, needle): i=s.find(needle); return s[i+len(needle):] if i>=0 else ""
+//   >>> def substring_before(s, needle): i=s.find(needle); return s[:i] if i>=0 else ""
+// ============================================================================
+
+#[test]
+fn test_substring_after_padded_needle() {
+    // Python oracle: substring_after("abcdefgh", "cd") -> "efgh"
+    // "cd" stored in str<4> as "cd\0\0"; M=4 but logical needle length=2.
+    // Pre-fix this returned "gh" (over-skipped by 2 bytes). (sq-0ylr9)
+    let s: str<8> = "abcdefgh";
+    let needle: str<4> = "cd\0\0";
+    let (out, len) = substring_after::<8, 4>(s, needle);
+    assert(len == 4);
+    let expected = "efgh".as_bytes();
+    for i in 0..4 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_substring_after_empty_needle_in_wider_buf() {
+    // F&O 7.5.5: fn:substring-after($arg1, "") = $arg1 for any $arg1.
+    // Python oracle: substring_after("hello", "") -> "hello"
+    // Logically-empty needle in a wider buffer (str<3> = "\0\0\0") must not
+    // drop M bytes; the whole string must be returned.
+    let s: str<5> = "hello";
+    let needle: str<3> = "\0\0\0";
+    let (out, len) = substring_after::<5, 3>(s, needle);
+    assert(len == 5);
+    let expected = "hello".as_bytes();
+    for i in 0..5 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_substring_before_padded_needle() {
+    // Python oracle: substring_before("abcdefgh", "cd") -> "ab"
+    // "cd" stored in str<4> as "cd\0\0"; logical needle length=2.
+    // Locks the behavior: substring_before already used index_of which now
+    // computes the match position logically, so the result must stay "ab".
+    let s: str<8> = "abcdefgh";
+    let needle: str<4> = "cd\0\0";
+    let (out, len) = substring_before::<8, 4>(s, needle);
+    assert(len == 2);
+    let expected = "ab".as_bytes();
+    for i in 0..2 {
         assert(out[i] == expected[i]);
     }
 }
