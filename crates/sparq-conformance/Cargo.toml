@@ -29,6 +29,17 @@ path = "src/bin/inference.rs"
 name = "sparq-conformance-scoreboard"
 path = "src/bin/scoreboard.rs"
 
+# [OPUS-4.8] sq-ro6if (PSS #1415/#1478) — the MACHINE-READABLE served-surface SPARQL
+# 1.1 Protocol conformance report emitter. Re-runs the EXISTING served-surface lanes
+# (sq-jaj38 http-protocol + sq-1uuxz Service-Description/GSP) in-process and serialises
+# their per-assertion outcomes + counts + provenance to JSON, for the per-release
+# conformance artifact + the site dashboard. Requires BOTH `http-protocol` and
+# `federation-descriptors`; with either off it compiles to a fail-closed stub `main`
+# (so the default + `--workspace` builds link no async stack — the lean opt-in posture).
+[[bin]]
+name = "served-conformance-report"
+path = "src/bin/served-conformance-report.rs"
+
 [features]
 # [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 conformance lane (toRdf + fromRdf
 # ratchets, the crate-local `tests/jsonld_suite.rs` runner). OPT-IN and OFF by

@@ -1906,6 +1906,40 @@ jobs:
           FLOOR=39
           echo "SD + Graph Store Protocol pass: ${PASS:-unknown} (floor: $FLOOR)"
           [ -n "$PASS" ] && [ "$PASS" -ge "$FLOOR" ] || { echo "::error::SD/GSP lane regressed below the ratchet ($PASS < $FLOOR)"; exit 1; }
+      # [OPUS-4.8] sq-ro6if (PSS #1415/#1478) — PUBLISH the served-surface conformance as a
+      # MACHINE-READABLE per-build artifact. The `served-conformance-report` binary re-runs the
+      # SAME two served-surface lanes above (sq-jaj38 http-protocol + sq-1uuxz SD/GSP) in-process
+      # and serialises their per-assertion outcomes + counts + provenance to JSON, pulling each
+      # suite's ratchet floor from the central scoreboard registry so the report can never drift
+      # from the enforcer. It is FAIL-CLOSED: it exits non-zero (failing this step) if a lane
+      # produced zero assertions (the vacuous-artifact class), has any genuine failure, or
+      # regressed below its floor — so a bad report can never be uploaded. NO new conformance
+      # tests; publication only. Requires BOTH served-surface features, so clippy the combined
+      # build first (the -D-warnings gate: the single-feature clippy steps above never compile the
+      # emitter's both-features module).
+      - name: Clippy the served-conformance report emitter (both served-surface features ON)
+        run: cargo clippy -p sparq-conformance --all-targets --features http-protocol,federation-descriptors -- -D warnings
+      - name: Emit served-surface conformance report (JSON, fail-closed)
+        env:
+          SPARQ_CONFORMANCE_COMMIT: ${{ github.sha }}
+          SPARQ_CONFORMANCE_VERSION: ${{ github.ref_name }}
+          SPARQ_CONFORMANCE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -o pipefail
+          cargo run --release -p sparq-conformance \
+            --features http-protocol,federation-descriptors \
+            --bin served-conformance-report -- --out served-conformance.json 2>&1 \
+            | tee served-conformance.log
+          {
+            echo "### Served-surface SPARQL 1.1 Protocol conformance report"
+            grep -E 'pass /' served-conformance.log || true
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload served-surface conformance report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: served-conformance-report
+          path: served-conformance.json
+          if-no-files-found: error
 
   inference-conformance:
     # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL
