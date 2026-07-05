@@ -56,7 +56,14 @@ type Status = "loading" | "ready" | "unavailable" | "error";
 export function StreamingTool() {
   const [status, setStatus] = React.useState<Status>("loading");
   const [errorMsg, setErrorMsg] = React.useState<string>("");
-  const [rspModule, setRspModule] = React.useState<WasmRsp | null>(null);
+  // A push/flush rejection (e.g. a mistyped Turtle term) is INLINE and recoverable — it must
+  // never flip `status` away from "ready", or the whole panel (incl. the form + Reset)
+  // unmounts and the tab dead-ends on a typo.
+  const [actionError, setActionError] = React.useState<string>("");
+  // The wasm module handle lives in a REF, not state: `Rsp` is a CLASS (a function), and
+  // `setState(Rsp)` would invoke it as a functional updater — `Rsp(prev)` without `new`
+  // throws and crashes the whole app. It is not render-relevant anyway.
+  const rspModuleRef = React.useRef<WasmRsp | null>(null);
   const queryRef = React.useRef<WasmRspQuery | null>(null);
   const [windows, setWindows] = React.useState<ClosedWindow[]>([]);
   const [lateDropped, setLateDropped] = React.useState<number>(0);
@@ -75,7 +82,7 @@ export function StreamingTool() {
   React.useEffect(() => {
     loadRspModule()
       .then((mod) => {
-        setRspModule(mod);
+        rspModuleRef.current = mod;
         queryRef.current = mod.select(
           DEFAULT_SPARQL,
           DEFAULT_RANGE,
@@ -107,8 +114,8 @@ export function StreamingTool() {
 
   /** (Re-)create the query handle and clear accumulated window output. */
   function handleReset() {
-    if (!rspModule) return;
-    queryRef.current = rspModule.select(
+    if (!rspModuleRef.current) return;
+    queryRef.current = rspModuleRef.current.select(
       DEFAULT_SPARQL,
       DEFAULT_RANGE,
       DEFAULT_STEP,
@@ -117,6 +124,7 @@ export function StreamingTool() {
     );
     setWindows([]);
     setLateDropped(0);
+    setActionError("");
   }
 
   function handlePush() {
@@ -129,9 +137,11 @@ export function StreamingTool() {
         setWindows((prev) => [...prev, ...closed]);
       }
       setLateDropped(queryRef.current.lateDropped());
+      setActionError("");
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-      setStatus("error");
+      // Recoverable input error (bad Turtle term / timestamp): keep the panel READY and
+      // surface the engine's message inline next to the form.
+      setActionError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -144,9 +154,9 @@ export function StreamingTool() {
         setWindows((prev) => [...prev, ...closed]);
       }
       setLateDropped(queryRef.current.lateDropped());
+      setActionError("");
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-      setStatus("error");
+      setActionError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -272,6 +282,14 @@ export function StreamingTool() {
                     <RefreshCw className="size-3" aria-hidden /> Reset
                   </button>
                 </div>
+                {actionError ? (
+                  <p
+                    data-rsp-push-error=""
+                    className="rounded border border-destructive/40 bg-destructive/5 p-2 text-[11px] text-muted-foreground"
+                  >
+                    {actionError}
+                  </p>
+                ) : null}
                 {lateDropped > 0 && (
                   <p className="text-[11px] text-muted-foreground">
                     Late-dropped arrivals: {lateDropped}
