@@ -14,7 +14,7 @@
 //! Phase 5 ships the *scaffolding* and proves it on fixtures; bulk ingestion of real
 //! literature is gated behind the Phase-6 live pilot's per-topic recommend-adopt verdict.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use super::connector::{parse_openalex_batch, SourceStub};
@@ -631,6 +631,24 @@ fn tier_header(
     Ok(t)
 }
 
+/// Compute the DOI-granularity effective tier for every normalised DOI across the full stub
+/// batch (`sq-tzars.7` DOI-granularity fix). A DOI routes to [`Tier::Machine`] ONLY if EVERY
+/// stub sharing that DOI carries an allowlisted licence — any absent, blank, or non-allowlisted
+/// licence forces the WHOLE DOI to [`Tier::LicenseRestricted`] (fail-closed). This prevents a
+/// dup-DOI batch with conflicting licence metadata from emitting the same abstract-derived
+/// finding content into both tiers (violating the one-tier-per-statement invariant).
+fn doi_tier_map(stubs: &[SourceStub]) -> HashMap<String, Tier> {
+    let mut map: HashMap<String, Tier> = HashMap::new();
+    for stub in stubs {
+        let entry = map.entry(stub.doi.clone()).or_insert(Tier::Machine);
+        // Once restricted, it stays restricted (fail-closed).
+        if *entry == Tier::Machine && source_tier(stub.license.as_deref()) != Tier::Machine {
+            *entry = Tier::LicenseRestricted;
+        }
+    }
+    map
+}
+
 /// Emit ONE tier artifact ([`Tier::Machine`] or [`Tier::LicenseRestricted`]) — the full
 /// Sources and Findings for the sources routed to that tier by [`source_tier`]. The global
 /// `finding_n` counter is advanced for EVERY grounded finding (whether or not it is in this
@@ -655,9 +673,25 @@ fn emit_tier(
     };
     let mut t = tier_header(tier.graph_iri(), label, true, completeness)?;
 
+    // DOI-granularity routing (sq-tzars.7): compute the effective tier for each DOI across
+    // ALL stubs before iterating — a dup-DOI batch with one cc-by stub and one licence-absent
+    // stub routes the WHOLE DOI restricted (fail-closed). Then process each DOI exactly once
+    // (first-occurrence representative) to keep `finding_n` stable across both tier runs.
+    let doi_tiers = doi_tier_map(&p.stubs);
+    let mut seen_dois: HashSet<&str> = HashSet::new();
     let mut finding_n = 0usize;
     for stub in &p.stubs {
-        let in_tier = source_tier(stub.license.as_deref()) == tier;
+        // Use the DOI-granularity effective tier, not the per-stub source_tier.
+        let effective_tier = doi_tiers
+            .get(&stub.doi)
+            .copied()
+            .unwrap_or(Tier::LicenseRestricted);
+        let in_tier = effective_tier == tier;
+        // Process each DOI exactly once: the first stub encountered is the representative
+        // (subsequent stubs for the same DOI are skipped; finding_n stays consistent).
+        if !seen_dois.insert(stub.doi.as_str()) {
+            continue;
+        }
         let grounded = p.grounded_by_doi.get(&stub.doi);
         if in_tier {
             let explored = grounded.is_some_and(|v| !v.is_empty());
@@ -691,8 +725,20 @@ fn emit_restricted_projection(
         false,
         completeness,
     )?;
+    // DOI-granularity routing (sq-tzars.7): same effective-tier map used in emit_tier;
+    // emit each restricted DOI's metadata exactly once (first-occurrence representative).
+    let doi_tiers = doi_tier_map(&p.stubs);
+    let mut seen_dois: HashSet<&str> = HashSet::new();
     for stub in &p.stubs {
-        if source_tier(stub.license.as_deref()) != Tier::LicenseRestricted {
+        let effective_tier = doi_tiers
+            .get(&stub.doi)
+            .copied()
+            .unwrap_or(Tier::LicenseRestricted);
+        if effective_tier != Tier::LicenseRestricted {
+            continue;
+        }
+        // Emit each DOI's metadata exactly once.
+        if !seen_dois.insert(stub.doi.as_str()) {
             continue;
         }
         let src = stub.source_iri();

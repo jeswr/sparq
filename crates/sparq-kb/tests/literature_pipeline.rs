@@ -475,6 +475,86 @@ fn cap_truncated_batch_is_marked_incomplete_in_every_artifact() {
     assert!(!complete.restricted_public_projection.contains("INCOMPLETE"));
 }
 
+/// A dup-DOI mixed batch: the SAME DOI appears TWICE in one connector batch — once with a
+/// "cc-by" licence and once with no licence recorded. Simulates the real OpenAlex case where
+/// two indexing records represent the same work with conflicting licence metadata. The
+/// DOI-granularity fail-closed rule must route the WHOLE DOI restricted.
+const DUP_DOI_MIXED_BATCH: &str = r#"{ "results": [
+  { "doi": "https://doi.org/10.5555/dup.conflict",
+    "title": "A Conflicted Work — open copy",
+    "abstract": "This conflicted work has two indexing records and mentions parallel scanning.",
+    "publication_year": 2024,
+    "primary_location": { "license": "cc-by" } },
+  { "doi": "https://doi.org/10.5555/dup.conflict",
+    "title": "A Conflicted Work — no-licence copy",
+    "abstract": "This conflicted work has two indexing records and mentions parallel scanning.",
+    "publication_year": 2024 }
+] }"#;
+
+#[test]
+fn dup_doi_mixed_licence_fails_closed_whole_doi_restricted() {
+    // DOI-granularity fail-closed (sq-tzars.7): when a batch contains two stubs for the same
+    // DOI — one "cc-by" and one licence-absent — the WHOLE DOI must be routed RESTRICTED.
+    // No abstract-derived content (source node, pkg:Finding, sigimpl:justification) for that
+    // DOI may appear in the machine (publishable) artifact.
+    let out = pipeline::run_tiered(
+        DUP_DOI_MIXED_BATCH,
+        &GroundingExtractor,
+        Some("2026-07-05T00:00:00Z".to_string()),
+        BatchCompleteness::Complete,
+    )
+    .expect("tiered run on dup-DOI batch");
+
+    // Machine artifact must carry NONE of the dup-DOI source content (the invariant).
+    assert!(
+        !out.machine_tier.contains("10.5555/dup.conflict"),
+        "machine tier must not carry any source node from the dup-DOI (fail-closed)"
+    );
+    assert!(
+        !out.machine_tier.contains("a pkg:Finding"),
+        "machine tier must not carry any Finding from the dup-DOI"
+    );
+    assert!(
+        !out.machine_tier.contains("sigimpl:justification"),
+        "machine tier must not carry any justification (abstract-derived text) from the dup-DOI"
+    );
+
+    // Restricted artifact MUST contain the full content (non-vacuousness).
+    assert!(
+        out.license_restricted_tier.contains("10.5555/dup.conflict"),
+        "restricted tier must carry the dup-DOI source"
+    );
+    assert!(
+        out.license_restricted_tier.contains("a pkg:Finding"),
+        "restricted tier must carry at least one Finding for the dup-DOI"
+    );
+    assert!(
+        out.license_restricted_tier.contains("sigimpl:justification"),
+        "restricted tier must carry the abstract-derived justification"
+    );
+
+    // Restricted public projection must carry the DOI metadata but NO abstract-derived text.
+    assert!(
+        out.restricted_public_projection.contains("10.5555/dup.conflict"),
+        "restricted public projection must carry the dup-DOI metadata"
+    );
+    assert!(
+        !out.restricted_public_projection.contains("sigimpl:justification"),
+        "projection must not carry abstract-derived text"
+    );
+    assert!(
+        !out.restricted_public_projection.contains("a pkg:Finding"),
+        "projection must not carry any Finding"
+    );
+
+    // The sidecar must account for all candidates (none silently dropped).
+    assert_eq!(
+        out.sidecar.grounded + out.sidecar.quarantined.len(),
+        out.sidecar.candidates_total,
+        "all candidates must be accounted for in the sidecar"
+    );
+}
+
 #[test]
 fn machine_and_restricted_full_tiers_conform_to_the_shacl_gate() {
     // The REAL path: each full tier artifact (machine + restricted) must independently
