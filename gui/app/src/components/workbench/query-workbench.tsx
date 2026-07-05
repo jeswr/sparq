@@ -61,6 +61,7 @@ import { GraphView } from "@/components/workbench/graph-view";
 // [OPUS-4.8] sq-tp1m (#757) — the per-workspace inference (RDFS / OWL 2 RL) selector, in the
 // action row so the active entailment regime is visible + controllable while querying.
 import { InferenceControl } from "@/components/workbench/inference-control";
+import { useWorkspace } from "@/lib/workspace-context";
 import { DEFAULT_QUERY } from "@/data/sample-graph";
 // [OPUS-4.8] sq-ixc3.10 — the Query tool contributes its operational verbs (run / EXPLAIN /
 // EXPLAIN ANALYZE / re-run a recent query) to the Cmd-K spine while it is mounted.
@@ -460,7 +461,15 @@ export function QueryWorkbench() {
   // explain() method); the Cmd-K verbs and the EXPLAIN/ANALYZE buttons both drive it.
   const { run, status } = useEngine();
   const workbench = useWorkbench();
+  // [OPUS-4.8] sq-lcd6e — the editor text round-trips through the active workspace so a saved
+  // query survives a reload / workspace switch (the persisted editor state was never restored
+  // before). `workspace` starts null (restore is async); we seed the editor from it once, on the
+  // first restore AND on every workspace-id change, and write the text back (debounced) below.
+  const { workspace, setEditorQuery } = useWorkspace();
   const [query, setQuery] = React.useState(DEFAULT_QUERY);
+  // The id of the workspace whose editor text is currently loaded — guards the write-back from
+  // firing (and clobbering the saved query) before the restore has hydrated the editor.
+  const loadedWsRef = React.useRef<string | null>(null);
   const [outcome, setOutcome] = React.useState<QueryOutcome | null>(null);
   const [view, setView] = React.useState<ResultView>("table");
   const [running, setRunning] = React.useState(false);
@@ -472,6 +481,26 @@ export function QueryWorkbench() {
   const recordRecent = React.useCallback((q: string) => {
     setRecentQueries((prev) => pushRecentQuery(prev, q, Date.now()));
   }, []);
+
+  // [OPUS-4.8] sq-lcd6e — hydrate the editor from the restored / switched workspace's saved query.
+  // Runs once per workspace id (never re-clobbering the user's in-progress edits within a session).
+  React.useEffect(() => {
+    if (!workspace) return;
+    if (loadedWsRef.current === workspace.id) return;
+    loadedWsRef.current = workspace.id;
+    setQuery(workspace.editor.query);
+  }, [workspace]);
+
+  // [OPUS-4.8] sq-lcd6e — write the editor text back to the workspace (debounced) so it persists.
+  // Guarded on `loadedWsRef` so the initial DEFAULT_QUERY never overwrites a saved query before
+  // the restore above has run.
+  React.useEffect(() => {
+    if (loadedWsRef.current === null) return;
+    const handle = setTimeout(() => {
+      void setEditorQuery(query);
+    }, 400);
+    return () => clearTimeout(handle);
+  }, [query, setEditorQuery]);
 
   // [OPUS-4.8] sq-ixc3.10/.12 — the SINGLE run path: plain run, EXPLAIN (plan only), or EXPLAIN
   // ANALYZE (plan + run), each surfaced as a { kind } outcome through the same RunResult pipeline.

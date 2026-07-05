@@ -327,6 +327,24 @@ export interface EngineContextValue {
    * and it agrees byte-for-byte with the "add to current" merge path. `null` before warm.
    */
   snapshotStore: () => string | null;
+  /**
+   * [OPUS-4.8] sq-lcd6e — REPLACE the live store with a restored workspace's persisted SNAPSHOT
+   * (its whole-dataset N-Quads). This is the fix for the silent data-loss-on-relaunch: the warm
+   * path no longer unconditionally seeds the sample graph — the store's INITIAL content comes
+   * from the workspace being restored.
+   *   * `nquads` non-empty → the store is rebuilt from it (the imported data survives a reload);
+   *   * empty / `null` + `seedSampleWhenEmpty` → seed the SAMPLE graph (a genuinely-fresh
+   *     first-run default workspace, so a new user has something to query);
+   *   * empty / `null` without the flag → an EXPLICITLY-empty workspace stays empty.
+   * Bumps the store epoch so an active inference closure rematerialises over the restored data
+   * (sq-tp1m), refreshes the datasets summary + footprint, and marks the engine ready. If the
+   * wasm ctor has not warmed yet the request is QUEUED and applied the moment warm-up finishes,
+   * so a restore that races the cold-start is never dropped.
+   */
+  hydrateFromSnapshot: (
+    nquads: string | null,
+    opts?: { seedSampleWhenEmpty?: boolean },
+  ) => void;
 }
 
 const EngineContext = React.createContext<EngineContextValue | null>(null);
@@ -543,7 +561,85 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   // land in the wrong state (e.g. mode Off but status Ready/Error). Only the latest generation writes.
   const inferenceGenRef = React.useRef(0);
 
-  // Warm the engine once on mount: load wasm, seed the sample graph, compute the summary.
+  // [OPUS-4.8] sq-lcd6e — a hydration request that arrived BEFORE the wasm ctor warmed (the
+  // workspace-restore bridge can call hydrateFromSnapshot while the engine is still cold). It is
+  // applied by the warm effect the moment the ctor is ready, so a restore never races the
+  // cold-start and gets dropped (which would silently fall back to an empty / sample store).
+  const pendingHydrationRef = React.useRef<{
+    nquads: string | null;
+    seedSampleWhenEmpty: boolean;
+  } | null>(null);
+
+  // [OPUS-4.8] sq-lcd6e — (re)build the live store from a restored snapshot, then publish the
+  // summary + ready status. The SINGLE place the store's content is (re)seeded, whether on the
+  // initial warm (fresh default → sample) or a workspace switch (target's snapshot). Bumps the
+  // store epoch + drops the cached closure so an active inference regime rematerialises over the
+  // restored data (the sq-tp1m epoch discipline).
+  const applyHydration = React.useCallback(
+    (
+      Store: WasmStoreCtor,
+      req: { nquads: string | null; seedSampleWhenEmpty: boolean },
+    ) => {
+      const content = (req.nquads ?? "").trim();
+      let store: WasmStore;
+      try {
+        if (content !== "") {
+          // A restored workspace snapshot (whole dataset, N-Quads) — the imported data survives.
+          store = Store.loadDataset(req.nquads as string, "nquads");
+        } else if (req.seedSampleWhenEmpty) {
+          // A genuinely-fresh first-run default workspace: seed the sample so there is something
+          // to query. (An explicitly-empty workspace, below, stays empty.)
+          store = Store.load(SAMPLE_TURTLE, SAMPLE_FORMAT);
+        } else {
+          // An explicitly-empty workspace: an empty store (an empty N-Quads document — the same
+          // loader the merge path uses, so an empty parse is unambiguously zero quads).
+          store = Store.loadDataset("", "nquads");
+        }
+      } catch (err: unknown) {
+        setStatus({
+          kind: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      storeRef.current = store;
+      // The base store was replaced: drop any cached closure + in-flight build so an active
+      // inference regime rematerialises over the RESTORED data rather than a stale prior store.
+      reasonedStoreRef.current = null;
+      reasonedKeyRef.current = null;
+      reasonedBuildRef.current = null;
+      storeEpochRef.current += 1;
+      setStoreEpoch(storeEpochRef.current);
+      const { size, graphs: gs } = summariseGraphs(store);
+      setStoreSize(size);
+      setStoreBytes(snapshotBytes(store));
+      setGraphs(gs);
+      setStatus({ kind: "ready" });
+    },
+    [],
+  );
+  // Keep a stable ref so the warm effect (deps []) can apply a queued request without re-running.
+  const applyHydrationRef = React.useRef(applyHydration);
+  applyHydrationRef.current = applyHydration;
+
+  const hydrateFromSnapshot = React.useCallback(
+    (nquads: string | null, opts?: { seedSampleWhenEmpty?: boolean }) => {
+      const req = { nquads, seedSampleWhenEmpty: opts?.seedSampleWhenEmpty ?? false };
+      const Store = ctorRef.current;
+      if (!Store) {
+        // Cold engine: queue the request — the warm effect applies it once the ctor is ready.
+        pendingHydrationRef.current = req;
+        return;
+      }
+      applyHydration(Store, req);
+    },
+    [applyHydration],
+  );
+
+  // Warm the engine once on mount: load wasm, then HYDRATE the store from the restored workspace
+  // (a queued request, or — if the restore bridge has not called yet — wait for it). The store's
+  // initial content is NO LONGER an unconditional sample seed (sq-lcd6e: that silently replaced a
+  // user's imported data on every relaunch); status stays `warming` until the first hydration.
   React.useEffect(() => {
     let cancelled = false;
     const opts = { basePath: basePath() };
@@ -553,16 +649,11 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       .then((Store) => {
         if (cancelled) return;
         ctorRef.current = Store;
-        const store = Store.load(SAMPLE_TURTLE, SAMPLE_FORMAT);
-        storeRef.current = store;
-        // [OPUS-4.8] sq-tp1m — first content ready: bump the epoch so any active regime materialises.
-        storeEpochRef.current += 1;
-        setStoreEpoch(storeEpochRef.current);
-        const { size, graphs: gs } = summariseGraphs(store);
-        setStoreSize(size);
-        setStoreBytes(snapshotBytes(store));
-        setGraphs(gs);
-        setStatus({ kind: "ready" });
+        const pending = pendingHydrationRef.current;
+        if (pending) {
+          pendingHydrationRef.current = null;
+          applyHydrationRef.current(Store, pending);
+        }
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -1025,6 +1116,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       importRdf,
       nativeLoaderAvailable,
       snapshotStore,
+      hydrateFromSnapshot,
       inferenceMode,
       inferenceStatus,
       setInferenceMode,
@@ -1045,6 +1137,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       importRdf,
       nativeLoaderAvailable,
       snapshotStore,
+      hydrateFromSnapshot,
       inferenceMode,
       inferenceStatus,
       setInferenceMode,
