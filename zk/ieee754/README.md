@@ -4,9 +4,10 @@
 > 2026-06-12. At vendoring time that tree was 76 commits ahead of its remote
 > (HEAD `8a6fe4b`), plus uncommitted `src/ops/kernels.nr` edits that contain
 > the newest kernel work; the working tree was copied as-is. The package was
-> renamed from `test_lib` to `sparq_ieee754`. This subfolder is a temporary
-> home: the library is to be broken out into its own repository and upstreamed
-> later.
+> renamed from `test_lib` to `sparq_ieee754`. The in-tree version is canonical;
+> a published face is maintained at [sparq-org/noir_IEEE754](https://github.com/sparq-org/noir_IEEE754)
+> and synced in lockstep with this source. The face's README is face-specific
+> and is not synchronized back to this file.
 >
 > Verified on vendoring: `nargo 1.0.0-beta.21` + `bb 5.0.0-nightly.20260324`;
 > all tests pass and a fresh gate benchmark
