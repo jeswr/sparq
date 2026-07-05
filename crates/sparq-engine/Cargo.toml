@@ -49,13 +49,21 @@ cs-planner = []
 zk = []
 # SPARQL 1.1 federated query (SERVICE): evaluate `SERVICE <iri> { pattern }` by
 # sending the inner pattern as a SPARQL SELECT to the remote endpoint over HTTP and
-# joining the parsed SPARQL-Results-JSON solutions back into the surrounding query.
-# OPT-IN and OFF by default: SERVICE makes no sense in the browser (no arbitrary
-# cross-origin HTTP, no blocking I/O) so the `service` deps (ureq + serde_json) are
-# additionally `cfg(not(wasm32))`-gated and never enter the wasm bundle even if the
-# feature were turned on for a wasm target. When off, zero federation/HTTP code
-# compiles. [OPUS-4.8]
-service = ["dep:serde", "dep:serde_json", "dep:ureq", "dep:quick-xml"]
+# joining the parsed SPARQL-Results solutions back into the surrounding query. OPT-IN
+# and OFF by default. [OPUS-4.8]
+# [OPUS-4.8] (sq-6vshe.4) Seam A2 of the facade split (RFC research/engine-split-rfc.md §4
+# Option A / §7 Phase A2): the `service` module (federation SERVICE client — HTTP transport,
+# SPARQL-Results JSON/XML parse, bound-join batching, SSRF egress policy) moved to the internal
+# `sparq-engine-service` sub-crate. This feature now FORWARDS to that crate's own `service`
+# feature (which pulls serde / serde_json / quick-xml + the native-only ureq client, all
+# `cfg(not(wasm32))`-safe: SERVICE makes no sense in the browser). `sparq-engine-service` is an
+# OPTIONAL dependency, so the DEFAULT + wasm builds — with `service` OFF — never compile it or
+# its HTTP/TLS stack: the lean bundles + the byte-identical feature-off dependency graph are
+# unchanged, and every public path (`sparq_engine::with_service_egress_allow`, …) + this feature
+# NAME are preserved for external users. The executor references the client as
+# `sparq_engine_service::service::*` (src/exec.rs), keeping the one allowlisted per-SERVICE-call
+# `Box<dyn Transport>` install point — never a per-row crossing (#1303 / RFC §D4).
+service = ["dep:sparq-engine-service", "sparq-engine-service/service"]
 # [OPUS-4.8] (sq-678h) RDF serializer matrix: Turtle / TriG / N-Quads writers
 # (`serialize` module). The base build can already *parse* every format but only
 # *write* N-Triples (`triples_to_ntriples`, always on). This feature adds the missing
@@ -263,44 +271,25 @@ rayon = { workspace = true, optional = true }
 # builds never compile it or its transitive `sparq-jsonld` dependency — the byte-identical
 # feature-off contract is preserved. `default-features = false`: an empty (feature-off) build.
 sparq-engine-serialize = { path = "../sparq-engine-serialize", version = "0.1.0", optional = true, default-features = false }
+# [OPUS-4.8] (sq-6vshe.4) Seam A2 of the facade split: the SPARQL 1.1 federated-SERVICE client
+# (`service` module — HTTP transport, SPARQL-Results JSON/XML parse, bound-join batching, SSRF
+# egress policy) moved to this internal sub-crate, re-exported through the facade (src/lib.rs + the
+# `service` feature above). OPTIONAL + pulled in ONLY by `service` (which forwards to its own
+# `service` feature), so the default + wasm builds never compile it or its ureq/serde/serde_json/
+# quick-xml stack — the byte-identical feature-off contract is preserved. `default-features = false`.
+sparq-engine-service = { path = "../sparq-engine-service", version = "0.1.0", optional = true, default-features = false }
 regex = { version = "1", optional = true }
 md-5 = { version = "0.11", optional = true }
 sha1 = { version = "0.11", optional = true }
 sha2 = { version = "0.11", optional = true }
-# SPARQL-Results-JSON parsing for the `service` (federation) feature. serde_json is
-# already in the workspace tree (sparq-conformance, sparq-server) and is
-# platform-independent, but it is only ever pulled in when `service` is on.
-serde_json = { version = "1", optional = true }
-# [FABLE-5] (sq-my8wd.4) The streaming SPARQL-Results-JSON consumption drives serde's
-# `DeserializeSeed`/`Visitor` traits directly (walking `results.bindings` one binding
-# object at a time instead of building a whole-document DOM). serde is ALREADY in the
-# tree as serde_json's own dependency — no new supply-chain surface — but the trait
-# machinery lives in `serde::de`, which serde_json does not re-export. `service`-only,
-# no derive, default-features off (only the core traits are needed).
-serde = { version = "1", default-features = false, optional = true }
-# [OPUS-4.8] (sq-ycu) SPARQL-Results-XML (SRX) parsing for the `service` feature. Some
-# endpoints ignore the `Accept: …+json` header and return XML; without an SRX parser the
-# whole SERVICE call fails. quick-xml is platform-independent (it carries no HTTP/TLS, so
-# it is safe in the main dep block, like serde_json) and is already in the workspace tree
-# (sparq-conformance, sparq-geo). Pulled in only when `service` is on. `default-features =
-# false` drops its (unused) serde derive support.
-quick-xml = { version = "0.41", default-features = false, optional = true }
 
 # UUID()/STRUUID() need an OS RNG; depending on uuid from the wasm build would drag
 # getrandom into the browser dependency graph, so the functions are native-only.
-# `ureq` (the SERVICE feature's blocking HTTP client) lives here too: a tiny,
-# synchronous client (no async runtime) gated off wasm so the browser bundle never
-# pulls an HTTP/TLS stack. `tls-native-root` reuses the OS trust store for https
-# endpoints without bundling webpki-roots. [OPUS-4.8]
+# [OPUS-4.8] (sq-6vshe.4) The SERVICE feature's blocking HTTP client (ureq) moved with
+# the `service` module to the `sparq-engine-service` sub-crate (seam A2), where it keeps
+# the same `cfg(not(wasm32))` gating so no HTTP/TLS stack ever enters the browser bundle.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 uuid = { version = "1", features = ["v4"] }
-# [OPUS-4.8] sq-g2xs: ureq 3 (was 2) to migrate off the archived/unmaintained `rustls-pemfile`
-# (RUSTSEC-2025-0134). ureq 2 pulled it transitively via `rustls-native-certs 0.7`; ureq 3 uses
-# `rustls-native-certs 0.8` (which dropped `rustls-pemfile` in favour of `rustls-pki-types`'
-# `PemObject`). `rustls,platform-verifier` is the faithful successor of ureq 2's
-# `tls,native-certs`: TLS via rustls, server-cert validation against the OS trust store (via
-# `rustls-platform-verifier`) rather than a bundled CA set — same runtime trust behaviour as before.
-ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
 
 [dev-dependencies]
 # The dict-consolidation differential test compares the serial, sharded-parallel and

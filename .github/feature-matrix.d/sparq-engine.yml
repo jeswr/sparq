@@ -28,6 +28,13 @@
   features: "zk"
   test: true
 
+# [OPUS-4.8] (sq-6vshe.4) Seam A2: the `service` MODULE + its in-src unit tests moved to the
+# internal sparq-engine-service sub-crate (see .github/feature-matrix.d/sparq-engine-service.yml).
+# This engine leg STAYS (unlike the serialize legs, which fully moved) because it still runs the
+# END-TO-END integration tests that exercise `exec::eval_service` through the facade —
+# tests/federation_features/* (loopback ureq path) + the exec `service_exec_tests` canned-transport
+# module — which did NOT move. So `cargo test -p sparq-engine --features service` still runs real
+# federated tests; the moved in-src parser/egress/transport unit tests run in the new-crate leg.
 - name: "sparq-engine (service)"
   crate: "sparq-engine"
   features: "service"

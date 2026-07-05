@@ -2460,7 +2460,7 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
 /// SPARQL 1.1 federated query (`SERVICE`) — the VERBATIM path. [OPUS-4.8]
 ///
 /// Forwards `SELECT * WHERE { <inner> }` to the remote `endpoint`, parses the
-/// SPARQL-Results-JSON response (see [`crate::service`]) and turns it into a
+/// SPARQL-Results-JSON response (see the `sparq-engine-service` crate) and turns it into a
 /// [`Bindings`] relation interned against this query's dictionaries — exactly as
 /// `VALUES` does — so the caller joins it with the surrounding group via the normal
 /// `join_bindings` path.
@@ -2529,7 +2529,7 @@ fn eval_service(
     let vocab_mark = local.savepoint();
     let byte_mark = budget::byte_savepoint();
     let fetched = service_transport::with(|t| {
-        crate::service::eval_remote_into(t, &endpoint, &query, &mut |row| {
+        sparq_engine_service::service::eval_remote_into(t, &endpoint, &query, &mut |row| {
             id_rows.push(intern_remote_row(graph, local, &row));
             Ok(())
         })
@@ -2686,7 +2686,7 @@ fn bound_join_to_endpoint(
         let mut terms: Vec<Term> = Vec::with_capacity(key.len());
         for &id in &key {
             match term_of(graph, local, id) {
-                Some(t) if crate::service::pushable_term(&t) => terms.push(t),
+                Some(t) if sparq_engine_service::service::pushable_term(&t) => terms.push(t),
                 _ => return Ok(None), // blank node / triple term / missing — fall back.
             }
         }
@@ -2698,7 +2698,7 @@ fn bound_join_to_endpoint(
 
     // Render the inner pattern once; each block re-uses it with a fresh VALUES head.
     let inner_sparql = format!("{inner}");
-    let block = crate::service::bind_block_size();
+    let block = sparq_engine_service::service::bind_block_size();
 
     // Accumulate the union of the per-block remote relations, interning each row to the
     // id level AS IT ARRIVES from the streaming parser ([FABLE-5] sq-my8wd.4) — no
@@ -2717,12 +2717,12 @@ fn bound_join_to_endpoint(
     let byte_mark = budget::byte_savepoint();
 
     for chunk in tuples.chunks(block) {
-        let values = crate::service::render_values_block(&join_vars, chunk);
+        let values = sparq_engine_service::service::render_values_block(&join_vars, chunk);
         // Inject the VALUES inside the SELECT * group, alongside the inner pattern, so
         // the remote inner-joins the pushed bindings with its pattern.
         let query = format!("SELECT * WHERE {{ {values} {inner_sparql} }}");
         let fetched = service_transport::with(|t| {
-            crate::service::eval_remote_into(t, endpoint, &query, &mut |row| {
+            sparq_engine_service::service::eval_remote_into(t, endpoint, &query, &mut |row| {
                 acc_rows.push(intern_remote_row(graph, local, &row));
                 Ok(())
             })
@@ -2845,11 +2845,11 @@ fn bound_join_variable_endpoint(
     // NOT swallowed by SILENT: SILENT masks an endpoint being unreachable, not a
     // deliberate resource-policy refusal (the same stance `budget::check` takes). When no
     // cap is installed (the default) this is a single thread-local read and a no-op.
-    if let Some(cap) = crate::service::remote_request_cap() {
+    if let Some(cap) = sparq_engine_service::service::remote_request_cap() {
         if order.len() > cap {
             return Err(format!(
                 "{}: SERVICE ?{} would dispatch to {} distinct endpoints (cap {})",
-                crate::service::SERVICE_REMOTE_CAP_MARKER,
+                sparq_engine_service::service::SERVICE_REMOTE_CAP_MARKER,
                 ep_var.as_str(),
                 order.len(),
                 cap,
@@ -2925,12 +2925,12 @@ fn bound_join_variable_endpoint(
 }
 
 /// Test/embedder seam for the SERVICE HTTP transport. By default `with` runs the
-/// closure against the production [`crate::service::HttpTransport`]; tests install a
+/// closure against the production `sparq_engine_service::service::HttpTransport`; tests install a
 /// fake (loopback / canned) transport for the duration of a scope so SERVICE can be
 /// exercised without a public-network dependency. [OPUS-4.8]
 #[cfg(feature = "service")]
 pub(crate) mod service_transport {
-    use crate::service::Transport;
+    use sparq_engine_service::service::Transport;
     use std::cell::RefCell;
 
     thread_local! {
@@ -2969,7 +2969,7 @@ pub(crate) mod service_transport {
                         // for the transport's fixed 30s default on an unresponsive
                         // endpoint. `remaining_timeout()` is `None` when no deadline is
                         // installed, in which case the transport keeps its own default.
-                        f(&crate::service::HttpTransport::with_budget(
+                        f(&sparq_engine_service::service::HttpTransport::with_budget(
                             super::budget::remaining_timeout(),
                         ))
                     }
@@ -10898,7 +10898,7 @@ mod path_pushdown_tests {
 #[cfg(all(test, feature = "service"))]
 mod service_exec_tests {
     use super::*;
-    use crate::service::Transport;
+    use sparq_engine_service::service::Transport;
 
     /// Parse a query to its top-level `GraphPattern` (Select), ready for `eval_select`.
     fn pattern(sparql: &str) -> spargebra::algebra::GraphPattern {
@@ -11144,7 +11144,7 @@ mod service_exec_tests {
         }));
         let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
                  { ?s a ex:Person . SERVICE <http://r/> { ?s ex:name ?name } }";
-        let res = crate::service::with_service_bound_join_block_size(1, || {
+        let res = sparq_engine_service::service::with_service_bound_join_block_size(1, || {
             eval_select(&three_persons(), &pattern(q)).unwrap()
         });
         assert_eq!(res.rows.len(), 2);
@@ -11398,13 +11398,13 @@ mod service_exec_tests {
         let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
                  { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
         let p = pattern(q);
-        let err = crate::service::with_service_remote_request_cap(3, || {
+        let err = sparq_engine_service::service::with_service_remote_request_cap(3, || {
             eval_select(&persons_with_distinct_endpoints(5), &p)
         })
         .unwrap_err();
         // Typed refusal: carries the stable marker the server classifies on.
         assert!(
-            err.contains(crate::service::SERVICE_REMOTE_CAP_MARKER),
+            err.contains(sparq_engine_service::service::SERVICE_REMOTE_CAP_MARKER),
             "cap error must carry the marker, got: {err}"
         );
         // PRE-DISPATCH: not one remote request was made.
@@ -11427,12 +11427,12 @@ mod service_exec_tests {
         let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
                  { ?s ex:ep ?e . SERVICE SILENT ?e { ?s ex:name ?name } }";
         let p = pattern(q);
-        let err = crate::service::with_service_remote_request_cap(2, || {
+        let err = sparq_engine_service::service::with_service_remote_request_cap(2, || {
             eval_select(&persons_with_distinct_endpoints(5), &p)
         })
         .unwrap_err();
         assert!(
-            err.contains(crate::service::SERVICE_REMOTE_CAP_MARKER),
+            err.contains(sparq_engine_service::service::SERVICE_REMOTE_CAP_MARKER),
             "SILENT must not swallow the cap refusal, got: {err}"
         );
         assert!(seen.borrow().is_empty(), "cap fires before dispatch even under SILENT");
@@ -11463,7 +11463,7 @@ mod service_exec_tests {
         let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
                  { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
         let p = pattern(q);
-        let res = crate::service::with_service_remote_request_cap(2, || {
+        let res = sparq_engine_service::service::with_service_remote_request_cap(2, || {
             eval_select(&persons_with_distinct_endpoints(2), &p)
         })
         .expect("at-cap query is allowed");
@@ -11517,7 +11517,7 @@ mod service_exec_tests {
         }));
         let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
                  { ?s a ex:Person . SERVICE <http://r/> { ?s ex:name ?name } }";
-        let res = crate::service::with_service_remote_request_cap(0, || {
+        let res = sparq_engine_service::service::with_service_remote_request_cap(0, || {
             eval_select(&g, &pattern(q))
         })
         .expect("concrete-IRI SERVICE is unaffected by the variable-endpoint cap");
@@ -11526,29 +11526,11 @@ mod service_exec_tests {
 
     // ---------------------------------------------------------------------
     // Per-query timeout wired to the QueryBudget deadline. [OPUS-4.8] (sq-d4p)
+    // (The HttpTransport timeout-math test `http_transport_timeout_tracks_budget`
+    // MOVED with the transport to `sparq-engine-service`, seam A2 / sq-6vshe.4 — its
+    // `timeout_for_test` accessor is `#[cfg(test)]` there. The caller side —
+    // `budget::remaining_timeout` feeding `with_budget` — stays tested below.)
     // ---------------------------------------------------------------------
-
-    #[test]
-    fn http_transport_timeout_tracks_budget() {
-        use crate::service::{HttpTransport, DEFAULT_SERVICE_TIMEOUT, MIN_SERVICE_TIMEOUT};
-        use std::time::Duration;
-        // No deadline -> the built-in default in full.
-        assert_eq!(HttpTransport::with_budget(None).timeout_for_test(), DEFAULT_SERVICE_TIMEOUT);
-        // A deadline tighter than the default caps the round-trip to the remaining time.
-        let tight = Duration::from_secs(5);
-        assert_eq!(HttpTransport::with_budget(Some(tight)).timeout_for_test(), tight);
-        // A deadline looser than the default never RAISES the timeout above the default.
-        let loose = Duration::from_secs(120);
-        assert_eq!(
-            HttpTransport::with_budget(Some(loose)).timeout_for_test(),
-            DEFAULT_SERVICE_TIMEOUT
-        );
-        // An already-expired (zero) deadline still gets the small non-zero floor.
-        assert_eq!(
-            HttpTransport::with_budget(Some(Duration::ZERO)).timeout_for_test(),
-            MIN_SERVICE_TIMEOUT
-        );
-    }
 
     #[test]
     fn budget_remaining_timeout_reflects_deadline() {

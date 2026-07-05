@@ -3832,11 +3832,9 @@ dependencies = [
  "md-5 0.11.0",
  "oxiri",
  "oxrdf 0.3.3",
- "quick-xml 0.41.0",
  "rayon",
  "regex",
  "rustc-hash 2.1.2",
- "serde",
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
@@ -3844,9 +3842,9 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine-serialize",
+ "sparq-engine-service",
  "sparq-introspect",
  "sparq-substrate",
- "ureq",
  "uuid",
 ]
 
@@ -3858,6 +3856,19 @@ dependencies = [
  "serde_json",
  "sparq-core",
  "sparq-jsonld",
+]
+
+[[package]]
+name = "sparq-engine-service"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "quick-xml 0.41.0",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "sparq-core",
+ "ureq",
 ]
 
 [[package]]

@@ -141,6 +141,12 @@ PER_COMMIT_CRATES=(
   # `serialize-rdf,streaming-serialization` (the `case` in measure() below names them). Bringing
   # the moved writer + its ~2.9k test LOC under the ratchet keeps "no crate silently dropped".
   sparq-engine-serialize
+  # [OPUS-4.8] sq-6vshe.4: seam A2 of the sparq-engine facade split — the SPARQL 1.1 federated-
+  # SERVICE client (HTTP transport, SPARQL-Results JSON/XML parse, bound-join batching, SSRF
+  # egress policy) peeled into an internal sub-crate. Its whole surface is behind DEFAULT-OFF
+  # `service`, so it MUST be measured WITH `service` (the `case` in measure() below names it).
+  # Brings the moved client + its ~1.3k test LOC under the ratchet ("no crate silently dropped").
+  sparq-engine-service
 )
 # Crates whose HEAVY tests are only run in the nightly tier.
 NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nightly tier"
@@ -175,8 +181,8 @@ SHARD_GROUPS=(
   "sparq-core sparq-mpc sparq-fedclient sparq-geo sparq-cli sparq-conformance sparq-text sparq-policy sparq-nlq sparq-sim"
   # shard 3 (~336s measured)
   "sparq-vectors sparq-zk-compose sparq-gpu sparq-serve sparq-reason sparq-hdt sparq-shacl sparq-fedplan sparq-zk sparq-substrate sparq-introspect"
-  # shard 4 (~336s measured; + sparq-engine-serialize, the seam-1 writer sub-crate, sq-6vshe.4)
-  "sparq-solid sparq-server sparq-wasm sparq-canon sparq-rsp sparq-prov sparq-parse sparq-algos sparq-engine-serialize"
+  # shard 4 (~336s measured; + sparq-engine-serialize [seam 1] + sparq-engine-service [seam A2], sq-6vshe.4)
+  "sparq-solid sparq-server sparq-wasm sparq-canon sparq-rsp sparq-prov sparq-parse sparq-algos sparq-engine-serialize sparq-engine-service"
 )
 SHARD_TOTAL=${#SHARD_GROUPS[@]}
 
@@ -483,6 +489,15 @@ measure() {
     sparq-engine-serialize)
       cargo_args+=(--features serialize-rdf,streaming-serialization)
       features+=("serialize-rdf" "streaming-serialization") ;;
+    # [OPUS-4.8] sq-6vshe.4: seam A2 of the sparq-engine facade split — the SPARQL 1.1 federated-
+    # SERVICE client peeled into this internal sub-crate. Its WHOLE surface is behind DEFAULT-OFF
+    # `service` (mirroring the gating it had inside sparq-engine), so a default-feature
+    # `cargo llvm-cov -p sparq-engine-service` builds an EMPTY crate — measure it WITH `service`
+    # (the maximal surface: HTTP transport + SRJ/SRX parse + bound-join + SSRF egress policy + their
+    # ~1.3k test LOC), exactly as the sibling extractions above name their whole-surface features.
+    sparq-engine-service)
+      cargo_args+=(--features service)
+      features+=("service") ;;
   esac
 
   local start end rc=0 json="$WORK/$crate.json"

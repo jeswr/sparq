@@ -386,7 +386,13 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   forks-and-seals so an in-place mutation is all-or-nothing. `LOAD` only resolves `file://`; set the
   base dir with `with_load_base(path, || update(...))`.
 - **SPARQL `SERVICE` federation** is the non-default `service` cargo feature (pulls `ureq`; off on
-  wasm). When enabled, outbound `SERVICE` fetches go through a **default-deny SSRF egress filter**:
+  wasm). Internally the SERVICE client (HTTP transport, SPARQL-Results JSON/XML parse, bound-join
+  batching, SSRF egress policy) is housed in the `sparq-engine-service` sub-crate (`publish = false`,
+  [OPUS-4.8] sq-6vshe.4, seam A2 of the facade split) and re-exported through the facade — the
+  `service` feature name and the `sparq_engine::with_service_egress_allow` / `…egress_policy` /
+  `…SERVICE_EGRESS_REFUSED_MARKER` / `…allowlist_entry_permits` paths below are unchanged and remain
+  the supported surface.
+  When enabled, outbound `SERVICE` fetches go through a **default-deny SSRF egress filter**:
   an endpoint that resolves to a loopback / RFC1918 / link-local (incl. the `169.254.169.254`
   cloud-metadata IP) / unique-local / unspecified address is refused (checked on the *resolved* IP,
   so DNS rebinding can't bypass it). To federate to a trusted internal endpoint, allowlist its host
