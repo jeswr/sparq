@@ -237,6 +237,24 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
 
   const createWorkspace = React.useCallback(
     async (name: string): Promise<Workspace> => {
+      // 1. SAVE the current workspace's live snapshot first — no data loss on leaving it.
+      //    Mirrors switchWorkspace step 1: any SPARQL UPDATE (engine-context updateInPlace)
+      //    applied since the last import/switch snapshot is otherwise silently discarded on create.
+      const store = storeRef.current;
+      const current = workspaceRef.current;
+      if (store && current) {
+        const snapshot = engineRef.current.snapshotStore();
+        const saved: Workspace =
+          snapshot !== null
+            ? { ...current, dataSnapshot: snapshot, updatedAt: Date.now() }
+            : current;
+        try {
+          await store.save(saved);
+        } catch {
+          /* best-effort — a save failure must not block the create */
+        }
+      }
+      // 2. Create the new workspace and activate it.
       const ws = newWorkspace(name, STARTER_QUERY);
       applyWorkspace(ws);
       // A brand-new workspace is EMPTY (no sample) — an explicitly-created workspace stays empty.

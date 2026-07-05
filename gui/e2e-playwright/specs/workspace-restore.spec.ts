@@ -78,13 +78,39 @@ test.describe("workspace-restore", () => {
     await expect(drawer).toBeHidden();
     const restoredQuery = `ASK { <${IMPORTED_SUBJECT}> ?p ?o }`;
     await setEditorValue(page, restoredQuery);
-    // Give the debounced editor write-back time to flush by asserting the pre-reload result first.
-    await runQuery(page, "ask");
-    await expect(page.locator('[data-result-kind="ask"]')).toContainText("true");
+    // Deterministic flush: poll the persisted localStorage workspace record until it contains the
+    // new query text — guarantees the debounced editor write-back has committed before we reload.
+    // (Running a query alone is non-deterministic: the 400 ms debounce may not have flushed yet.)
+    await expect
+      .poll(
+        () =>
+          page.evaluate((q: string) => {
+            const prefix = "sparq.workspace.v1.";
+            for (let i = 0; i < localStorage.length; i++) {
+              const k = localStorage.key(i);
+              if (!k || !k.startsWith(prefix)) continue;
+              if (k.endsWith("__index__") || k.endsWith("__last__")) continue;
+              const val = localStorage.getItem(k);
+              if (!val) continue;
+              try {
+                const ws = JSON.parse(val) as { editor?: { query?: string } };
+                if (ws?.editor?.query === q) return true;
+              } catch {
+                /* skip corrupt entries */
+              }
+            }
+            return false;
+          }, restoredQuery),
+        { timeout: 5_000 },
+      )
+      .toBe(true);
 
     // ── RELOAD — the moment the old code silently replaced the imported data with the sample. ────
     await page.reload();
     await waitForEngineReady(page, { timeout: 90_000 });
+
+    // ── Editor text survived the reload: assert the restored value BEFORE any overwrite. ─────────
+    await expect(page.locator("#repl-query")).toHaveValue(restoredQuery);
 
     // ── The imported triple is STILL there (restored from the snapshot, not the sample graph). ──
     await setEditorValue(page, `ASK { <${IMPORTED_SUBJECT}> ?p ?o }`);
