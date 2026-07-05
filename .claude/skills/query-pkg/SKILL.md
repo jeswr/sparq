@@ -334,6 +334,19 @@ batch — no hard-coded number. NOT appended to `pkg-instances.ttl`: bulk ingest
 on the Phase-6 per-topic recommend-adopt verdict. Run:
 `cargo test -p sparq-kb --features literature,validate --test literature_pipeline`.
 
+**CORE API v3 live connector** (`sq-tzars.1`, `connector_core`): a second connector
+(`parse_core_batch` → the same DOI-keyed `SourceStub`s as `parse_openalex_batch`) plus a
+live HTTP client behind the default-OFF **`literature-live`** feature (implies `literature`,
+pulls only `ureq`). The pure parse + paging/retry discipline (`fetch_paginated`,
+`backoff_delay`, the `Transport` trait) is under `literature` and runs over a **fake
+transport** + the committed `fixtures/literature/core-batch.json` (a REAL, SANITIZED CORE
+response — no key, no full-text) so CI stays **network-free**; only `CoreClient` (from the
+`CORE_API_KEY` env var, **never** committed/logged) touches sockets. `SourceStub` now carries
+`license: Option<String>`, captured **fail-closed** by both connectors — `None` (unknown) is
+treated as NON-REDISTRIBUTABLE by the downstream dump tiering (`sq-tzars.7`). Rate-limit
+discipline honours `429`/`Retry-After` with bounded backoff + a HARD per-run request cap.
+Run: `cargo test -p sparq-kb --features literature,literature-live --test core_connector`.
+
 ## When NOT to use this
 
 - The fact is **not in the head slice** (PKG is a Phase-1 subset) → an empty/partial
@@ -369,3 +382,7 @@ on the Phase-6 per-topic recommend-adopt verdict. Run:
   shapes `crates/sparq-kb/shapes/literature.shapes.ttl`, fixtures
   `crates/sparq-kb/fixtures/literature/`, gate
   `crates/sparq-kb/tests/literature_pipeline.rs`.
+- CORE v3 live connector (`literature`/`literature-live`, `sq-tzars.1`):
+  `crates/sparq-kb/src/literature/connector_core.rs`, fixture
+  `crates/sparq-kb/fixtures/literature/core-batch.json`, gate
+  `crates/sparq-kb/tests/core_connector.rs`.

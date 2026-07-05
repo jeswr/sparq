@@ -26,6 +26,17 @@ pub struct SourceStub {
     pub abstract_text: String,
     /// The publication year, when present.
     pub year: Option<i64>,
+    /// The source's redistribution licence, captured verbatim from the record when it
+    /// carries one (e.g. `cc-by`, `cc-by-nc`), else `None` for an UNKNOWN/absent licence.
+    ///
+    /// This field drives the downstream dump tiering and is **fail-closed**: `None`
+    /// (unknown) is treated as NON-REDISTRIBUTABLE by the tier partition (`sq-tzars.7`),
+    /// so a public projection of an unknown-licence source is metadata-only. Captured by
+    /// both connectors — `parse_openalex_batch` here and `parse_core_batch` in the
+    /// `connector_core` module. Many bibliographic APIs omit licence metadata (CORE v3's
+    /// search schema does), so `None` is the common — and deliberately safe — default.
+    /// [SONNET-4.6] sq-tzars.1
+    pub license: Option<String>,
 }
 
 impl SourceStub {
@@ -89,14 +100,37 @@ pub fn parse_openalex_batch(json: &str) -> Result<(Vec<SourceStub>, usize), Stri
             .unwrap_or("")
             .to_string();
         let year = rec.get("publication_year").and_then(Value::as_i64);
+        let license = openalex_license(rec);
         stubs.push(SourceStub {
             doi,
             title,
             abstract_text,
             year,
+            license,
         });
     }
     Ok((stubs, skipped))
+}
+
+/// Extract the OpenAlex licence for a `/works` record, fail-closed to `None` when absent.
+///
+/// OpenAlex records the licence per open-access LOCATION, not once per work, so we read the
+/// `primary_location.license` (the canonical host copy), falling back to
+/// `best_oa_location.license` and finally a top-level `license`. A blank string is treated
+/// as absent. `None` (the common case) is captured as an UNKNOWN licence and treated as
+/// non-redistributable downstream. [SONNET-4.6] sq-tzars.1
+fn openalex_license(rec: &Value) -> Option<String> {
+    let from = |key: &str| {
+        rec.get(key)
+            .and_then(|loc| loc.get("license"))
+            .and_then(Value::as_str)
+    };
+    from("primary_location")
+        .or_else(|| from("best_oa_location"))
+        .or_else(|| rec.get("license").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -134,6 +168,30 @@ mod tests {
             zk.source_iri(),
             "https://doi.org/10.5555/example.zk-sparql-soundness"
         );
+        // The fabricated OpenAlex fixture carries no licence metadata, so every stub is
+        // captured with an UNKNOWN licence (fail-closed = non-redistributable downstream).
+        assert!(
+            stubs.iter().all(|s| s.license.is_none()),
+            "unknown licence is captured as None (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn openalex_license_is_read_from_primary_location_when_present() {
+        let json = r#"{ "results": [
+            { "doi": "10.1/a", "title": "cc-by work", "abstract": "x",
+              "primary_location": { "license": "cc-by" } },
+            { "doi": "10.1/b", "title": "best-oa fallback", "abstract": "y",
+              "best_oa_location": { "license": "cc-by-nc" } },
+            { "doi": "10.1/c", "title": "blank licence is unknown", "abstract": "z",
+              "primary_location": { "license": "  " } }
+        ] }"#;
+        let (stubs, _) = parse_openalex_batch(json).expect("parses");
+        let by_doi = |d: &str| stubs.iter().find(|s| s.doi == d).unwrap();
+        assert_eq!(by_doi("10.1/a").license.as_deref(), Some("cc-by"));
+        assert_eq!(by_doi("10.1/b").license.as_deref(), Some("cc-by-nc"));
+        // A blank licence string is treated as absent (fail-closed), not the empty string.
+        assert_eq!(by_doi("10.1/c").license, None);
     }
 
     #[test]

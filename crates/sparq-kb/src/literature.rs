@@ -57,6 +57,11 @@
 
 #[cfg(feature = "literature")]
 pub mod connector;
+/// The live CORE API v3 connector (`parse_core_batch` + the `literature-live` HTTP client).
+/// Pure parse + retry discipline is available under `literature`; the networked socket layer
+/// (`CoreClient`) is behind `literature-live`. [SONNET-4.6] sq-tzars.1
+#[cfg(feature = "literature")]
+pub mod connector_core;
 #[cfg(feature = "literature")]
 pub mod extract;
 #[cfg(feature = "literature")]
@@ -74,6 +79,13 @@ pub const FIXTURE_OPENALEX_BATCH: &str = include_str!("../fixtures/literature/op
 /// model call).
 #[cfg(feature = "literature")]
 pub const FIXTURE_EXTRACTIONS: &str = include_str!("../fixtures/literature/extractions.json");
+
+/// The committed CORE API v3 connector fixture — a REAL, SANITIZED `/v3/search/works`
+/// response recorded once locally and scrubbed (no key, no copyrighted full-text; see the
+/// file's `_comment`). The CORE-path tests parse this so CI replays real data with ZERO
+/// network. Consumed by `connector_core::parse_core_batch`.
+#[cfg(feature = "literature")]
+pub const FIXTURE_CORE_BATCH: &str = include_str!("../fixtures/literature/core-batch.json");
 
 /// The literature-tier SHACL guardrails (`shapes/literature.shapes.ttl`) — the extra
 /// write-gate constraints on the machine-extraction tier (assurance ≠ `secx:Proven`,
