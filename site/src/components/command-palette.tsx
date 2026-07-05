@@ -106,6 +106,9 @@ const TOP_PAGES: { href: string; title: string; blurb: string }[] = [
   // [OPUS-4.8] sq-rvgr2.1 — the /specs section: W3C ReSpec-style Unofficial Proposal Drafts.
   // Cmd-K only (like /papers) so the slim top bar stays at 6 destinations.
   { href: "/specs", title: "Specs", blurb: "W3C ReSpec-style Unofficial Proposal Drafts (no W3C standing)." },
+  // (sq-gk9lq) [SONNET-4.6] — how sparq stores and queries its own project knowledge as RDF.
+  // Cmd-K only (like /papers, /specs) so the slim top bar stays at 6 destinations.
+  { href: "/dogfooding", title: "Dogfooding sparq", blurb: "How sparq uses itself as a knowledge-management system — the PKG loop, ingest workflow, NL query tool, and measured cost benefit." },
   { href: "/download", title: "Download", blurb: "Desktop GUI + CLI/server binaries (latest release)." },
   { href: "/#how-it-runs", title: "How it runs", blurb: "The honest \"what runs where\" tier model." },
 ];
