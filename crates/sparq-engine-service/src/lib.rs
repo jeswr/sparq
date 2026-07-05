@@ -9,8 +9,8 @@
 //! / … re-exports are unchanged by the split) instead of on this crate directly.
 //!
 //! It holds the `SERVICE <endpoint> { pattern }` client that used to live in
-//! `sparq-engine`'s `service` module — the [`service::Transport`] HTTP seam and the
-//! production ureq [`service::HttpTransport`], the streaming SPARQL-Results JSON/XML
+//! `sparq-engine`'s `service` module — the `service::Transport` HTTP seam and the
+//! production ureq `service::HttpTransport`, the streaming SPARQL-Results JSON/XML
 //! parsers, the bound-join `VALUES` batching, and the SSRF egress-policy allowlist. The
 //! executor (`sparq-engine`) drives it per-SERVICE-call through the one allowlisted
 //! `Box<dyn Transport>` install point — never on a per-row path (RFC §3.4-#, §D4).
