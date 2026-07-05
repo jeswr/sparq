@@ -1,5 +1,7 @@
 # zkSPARQL fragment extension: the greatest reasonable OWA-conforming, federation-free SPARQL subset
 
+<!-- [OPUS-4.8] sq-5reoy (#1599): the in-tree `zk/ieee754` and `zk/xpath` Noir trees were externalized to the `sparq-org/noir_IEEE754` (v0.10.0) and `sparq-org/noir_XPath` (v0.2.0) face repos and REMOVED from this repo. Child bead `sq-3kd2g.4` (estate gap-fill) and the `SPARQL_COVERAGE.md` reference now target the `sparq-org/noir_XPath` face repo rather than an in-tree `zk/xpath/` path. Any `zk/xpath/…` / `zk/ieee754/…` path below is a HISTORICAL in-tree reference — the live source is the corresponding face repo. -->
+
 <!-- [FABLE-5] Design record for epic sq-3kd2g / GitHub issue #1591 (maintainer directive
      2026-07-05). Decomposition-only: this record defines the extended fragment and cuts
      the implementation into disjoint child beads; it changes no code. -->

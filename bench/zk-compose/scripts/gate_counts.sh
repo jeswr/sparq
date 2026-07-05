@@ -3,7 +3,15 @@
 #
 # Gate counts for the zk/compose circuit family (bb gates is ground truth,
 # noir-optimisation SKILL §). Compiles every member and emits the
-# `circuit_size` ultra_honk gate count in the zk/ieee754 JSON convention.
+# `circuit_size` ultra_honk gate count in the sparq_ieee754 JSON convention
+# (the `{circuit_size}` shape originated in the ieee754 lineage, now the
+# sparq-org/noir_IEEE754 face repo — sq-5reoy/#1599).
+#
+# [OPUS-4.8] sq-5reoy: `nargo compile` of zk/compose now fetches the
+# sparq_ieee754 dependency from the sparq-org/noir_IEEE754 git tag (v0.10.0),
+# so this script needs network access to GitHub on first run of a fresh
+# ~/.nargo cache (same as the existing poseidon v0.3.0 git dep it already
+# fetches).
 #
 # The member list is read from the regression-gate snapshot
 # (crates/sparq-zk-compose/tests/gate_count_snapshot.json) — the SAME source the

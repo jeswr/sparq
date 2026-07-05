@@ -1,5 +1,7 @@
 # Noir upstream optimization program — whole-compiler assessment (sq-rbfga)
 
+<!-- [OPUS-4.8] sq-5reoy (#1599): the in-tree `zk/ieee754` and `zk/xpath` Noir trees were externalized to the `sparq-org/noir_IEEE754` (v0.10.0) and `sparq-org/noir_XPath` (v0.2.0) face repos and REMOVED from this repo; `zk/compose` now consumes the released `sparq_ieee754` as a pinned Nargo git dependency. Any `zk/xpath/…` / `zk/ieee754/…` path below is a HISTORICAL in-tree reference — the live source is the corresponding face repo. -->
+
 > 🤖 **SPARQ agent** — assessment produced for epic `sq-uuvac` (Noir upstream
 > optimization program), bead `sq-rbfga`. [FABLE-5]
 > Analysis of noir-lang/noir @ `0df14918` (2026-07-04, version `1.0.0-beta.22`-dev),

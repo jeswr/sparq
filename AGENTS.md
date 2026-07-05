@@ -235,6 +235,9 @@ A `zk/compose/` **member** is a `bin`-type Noir package directory under `zk/comp
 
 This is **Gate G5** territory for top-level `zk/` `bin` circuits (`snapshot_covers_top_level_circuits`); the `zk/compose/`-family coverage is enforced by `snapshot_covers_every_member` in the same test file.
 
+<!-- [OPUS-4.8] sq-5reoy (#1599): externalized Noir libs + toolchain-pin alignment. -->
+**Externalized Noir dependencies (sq-5reoy / #1599).** The former in-tree `zk/ieee754` and `zk/xpath` trees were split out to the [`sparq-org/noir_IEEE754`](https://github.com/sparq-org/noir_IEEE754) (`v0.10.0`) and [`sparq-org/noir_XPath`](https://github.com/sparq-org/noir_XPath) (`v0.2.0`) face repos and removed from this repo. `zk/compose` is the only in-tree Noir tree left; `zk/compose/compose_core/Nargo.toml` now consumes `sparq_ieee754` as a **pinned Nargo git dependency** (`{ git = "…/noir_IEEE754", tag = "v0.10.0" }`), exactly like its existing `poseidon` git dep. Two consequences for agents: (1) any `nargo compile` of `zk/compose` (the forge suite, `bench/zk-compose/scripts/gate_counts.sh`, the `sparq-zk-compose` test estate) now **fetches that git dep from GitHub** — a cold `~/.nargo` cache needs network access; a network-restricted runner must warm `~/.nargo` first. (2) **Toolchain-pin drift:** the `NARGO_VERSION`/`BB_VERSION` pins in `zk-toolchain.yml` and the face repos' pins are now maintained independently — when you bump the Noir toolchain here, confirm the released `sparq_ieee754` tag was cut on a compatible `nargo` (and re-run the forge suite, which compiles the git dep). Their nargo tests + the ieee754 differential oracle now run in the face repos' own CI, not in `zk-toolchain.yml`.
+
 ## Documents must stay current — research records become architecture docs
 
 A document must never describe the code as it ISN'T. Concretely:

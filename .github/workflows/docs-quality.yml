@@ -550,10 +550,13 @@ jobs:
           set -uo pipefail
           # The advisory config (same tuned rules) must be named with a supported
           # prefix so it's accepted by --config. Pass whole-repo globs explicitly.
+          # [OPUS-4.8] sq-5reoy: dropped the "#zk/xpath/vendor" exclude — the zk/xpath
+          # tree (and its vendored ieee754 copy) was externalized to sparq-org/noir_XPath
+          # (#1599); the generic "#**/vendor" glob still covers any remaining vendor dir.
           npx --yes markdownlint-cli2@0.18.1 \
             --config advisory.markdownlint-cli2.jsonc \
             "**/*.md" "#node_modules" "#**/node_modules" "#target" "#**/target" \
-            "#vendor" "#**/vendor" "#zk/xpath/vendor" \
+            "#vendor" "#**/vendor" \
             > md-advisory.txt 2>&1 || true
           n=$(grep -cE ' MD[0-9]+/' md-advisory.txt || true)
           {

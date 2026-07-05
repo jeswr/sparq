@@ -95,20 +95,23 @@ random shapes + data and validates through sparq **and** independent reference e
 (pySHACL, Jena SHACL, Zazuko); any disagreement is a candidate bug. (b) *Solid WAC/ACP*: the
 scoreboard carries a differential-oracle row whose floor is **zero divergences**. (c) *XPath
 functions inside the ZK toolchain*: the Noir circuits are tested against the W3C **qt3** suite,
-but every expected value is **re-derived by an independent oracle** —
-[`zk/xpath/scripts/generate_tests.py`](zk/xpath/scripts/generate_tests.py) evaluates each
+but every expected value is **re-derived by an independent oracle** — the `scripts/generate_tests.py`
+generator in the [`sparq-org/noir_XPath`](https://github.com/sparq-org/noir_XPath) face repo
+(externalized from the in-tree `zk/xpath/` tree, bead sq-5reoy / #1599) evaluates each
 expression with the Python `elementpath` engine and (for floats) pins the IEEE-754 **bit
 pattern**, so circuits are checked bit-exactly against a second implementation, not against
 hand-copied strings.
 
-- **See it run:** [`shacl-diff-fuzz.yml`](.github/workflows/shacl-diff-fuzz.yml) (nightly);
-  the `nargo` unit-test job in [`zk-toolchain.yml`](.github/workflows/zk-toolchain.yml), which
-  dynamically detects the generated real test packages under
-  [`zk/xpath/test_packages/`](zk/xpath/test_packages/) and fails closed if it finds none.
-- **Green means:** no cross-engine disagreement; every real qt3-derived package passes. The
-  workflow's `KNOWN_FAILING` skip-list mechanism exists for beaded latent failures and is
-  **currently empty** — no real package is being skipped.
-- **Limits:** these are nightly lanes (see qualifier above); oracle scope is bounded by what
+- **See it run:** [`shacl-diff-fuzz.yml`](.github/workflows/shacl-diff-fuzz.yml) (nightly); the
+  `nargo` unit-test lane now lives in the [`sparq-org/noir_XPath`](https://github.com/sparq-org/noir_XPath)
+  face repo's CI (`scripts/run_real_tests.sh`), which dynamically detects the generated real test
+  packages under its `test_packages/` and fails closed if it finds none. (Until sq-5reoy this ran
+  in sparq's `zk-toolchain.yml`; the harness moved upstream with the tree.)
+- **Green means:** no cross-engine disagreement; every real qt3-derived package passes. The face
+  repo's `KNOWN_FAILING` skip-list mechanism (the single source post-split — the former sparq
+  `zk-toolchain.yml` array is retired) exists for beaded latent failures and is **currently
+  empty** — no real package is being skipped.
+- **Limits:** the sparq lane is nightly (see qualifier above); oracle scope is bounded by what
   the reference engines implement.
 
 ## 3. Metamorphic self-checks (TLP / NoREC)
