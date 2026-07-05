@@ -229,6 +229,27 @@ under-delivers and the RFC should say so.
 
 **Risk:** medium — runtime-perf coupling; strictly measure-first, small PRs per site.
 
+**Measured outcome (sq-6vshe.12, indicative workbox `cargo llvm-lines -p sparq-engine
+--release`; raw numbers live in the bead per repo hygiene).** The measure-first step
+returned a NO-CHANGE verdict for the diet *as an intervention*, and a NOT-A-BLOCKER
+verdict for the split. Engine-defined monomorphization is a low-single-digit fraction of
+engine IR: `exec.rs` has only two generic fns, the substrate `JoinKeys` is a concrete
+struct and `compare_terms` monomorphizes once (to `Value`), and the crate exports ~zero
+generic surface. Engine's own codegen is dominated by large *non-generic* function bodies
+(`eval_function`, `eval_cast`, `path_pairs`, `eval_expr`, `single_pattern_scan_json`,
+plus `explain`/`update`); the majority-of-IR monomorphization is std/rayon/hashbrown
+library generics triggered at call sites, which are not "engine generics to diet." The
+few engine multi-copy families (`digest_hex` ×5 hash builtins, `cmp_expr` ×4 ORDER BY,
+scan/group closures) all sit on per-call FILTER/BIND, sort, or scan eval paths, so
+de-monomorphizing them (e.g. `DynDigest`) would add runtime dispatch and is **rejected
+under #1303 regardless of the build win**. The only strictly-cold engine generics
+(`explain::render_*` closures) are sub-0.3% and not worth a change. Net: no safe cold
+outlining candidate with a material build win exists → deliver measurement + verdict, no
+code PR. Sequencing payoff instead flows to Option A (the opt-in periphery — serialize,
+window, service, params, zk, txn — roughly *doubles* engine IR when fully on; peeling it
+removes real feature-on codegen) and to Option C (in-crate `exec.rs` modularization),
+per the split RFC's re-scored D2.
+
 ### 2.4 Dev-dep / proc-macro trim
 
 **Mechanism.** (a) `serde_derive` enters the test profile only via the `serde_json`
