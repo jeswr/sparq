@@ -1,6 +1,6 @@
 //! Simple validation binary for PKG instances against SHACL shapes.
 //!
-//! Usage: cargo run --bin validate-pkg --features validate -- <ttl-file>
+//! Usage: `cargo run --bin validate-pkg --features validate -- <ttl-file>`
 //!
 //! Reads a Turtle file, validates it against the PKG SHACL shapes, and reports
 //! the validation result. Exits with 0 if valid, 1 if invalid.
