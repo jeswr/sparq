@@ -116,12 +116,20 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 #     wasm-only diff does NOT flow up into engine/cli/bench (they do not depend on
 #     sparq-wasm), so omitting it would silently drop the bundle gate for a wasm-only
 #     PR — exactly the unsound skip §2 forbids. sparq-engine is the headline
-#     benchmarked crate (and is embedded in the wasm bundle). The many trend-ONLY
-#     latency metrics (geo/text/vectors/rsp/hdt/solid/nlq/zk) are advisory comments,
-#     not merge-blocking, so they are deliberately NOT seeds — skipping their comment
-#     on an unrelated PR loses no gate. On push-to-main the selector returns mode=full
-#     (push is not a pull_request/merge_group event), so the FULL suite always runs on
-#     main and the auto-ratchet + benchmark-data history stay continuous (design §6.1).
+#     benchmarked crate (and is embedded in the wasm bundle).
+#     TRUE INVARIANT FOR SEED SOUNDNESS: every hard-gated metric measured on the
+#     PR/merge_group tier must have its source crate reach a bench seed (store/dict/parse
+#     ← sparq-core via the release binaries; wasm_bundle ← sparq-wasm). The four
+#     additional mode:auto ratchets in bench/perf-baseline.json — fts_bytes_per_doc
+#     (sparq-text), vectors_diskann_recall_at10 / vectors_pq_recall_at10 (sparq-vectors),
+#     geo_compliance_deficit (sparq-geo) — need NO bench seed because scripts/ci-bench.sh
+#     measures them on the MAIN tier only (GITHUB_REF guards skip them on any non-main
+#     ref); every main-tier event is mode=full by construction. vectors/geo additionally
+#     reach the sparq-cli seed transitively, but the soundness rests on the main-tier-only
+#     measurement, not on that incidental reachability. On push-to-main the selector
+#     returns mode=full (push is not a pull_request/merge_group event), so the FULL suite
+#     always runs on main and the auto-ratchet + benchmark-data history stay continuous
+#     (design §6.1).
 # FAIL-CLOSED (design §2/§4.3): `lane_runs` runs the lane whenever mode != selected
 # (full/shadow/error) OR any seed is not a current workspace member (a typo'd or
 # renamed seed can never silently skip a lane — it forces the lane to run). The

@@ -508,9 +508,11 @@ class RealMetadataShapeTests(unittest.TestCase):
         # HONEST over-run (sq-mel85): the seed set is "sparq-engine + the release binaries"
         # (bead spec). sparq-cli transitively depends on sparq-geo (sparq-cli -> sparq-server
         # -> sparq-geo), so a geo change rebuilds a benchmarked release binary and the bench
-        # lane RUNS. This is a conservative over-run (a geo change cannot move a HARD-GATED
-        # metric — store/dict/parse are sparq-core, wasm_bundle is sparq-wasm), never an
-        # unsound skip. Pinned so the behaviour is a documented decision, not a surprise.
+        # lane RUNS. This is a conservative over-run (a geo change cannot move a
+        # PR-tier-measured hard-gated metric — store/dict/parse are sparq-core, wasm_bundle
+        # is sparq-wasm; geo_compliance_deficit is mode:auto but main-tier-only in ci-bench.sh,
+        # where mode=full always), never an unsound skip. Pinned so the behaviour is a
+        # documented decision, not a surprise.
         ws = cs.parse_workspace(self.meta)
         self.assertIn("sparq-cli", cs.reverse_closure("sparq-geo", ws.reverse_adj),
                       "test premise: sparq-cli depends transitively on sparq-geo")
