@@ -83,6 +83,46 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 ]
 
 
+# --- phase-2 singleton-lane -> seed crates (design §5.2; bead sq-fmx4u.6) -----
+# [OPUS-4.8] A "lane" is a SINGLETON CI job (not a per-crate matrix leg) that
+# always exercises a FIXED set of crates: the fuzz smoke (fuzz.yml) and the wasm
+# bundle build (ci.yml `wasm`). Phase 1 left these always-run (design P7); phase 2
+# maps each to the crate closure it exercises and skips it when that closure is
+# provably unaffected. A lane is affected iff any SEED crate is in the affected
+# closure — and because `affected` is the REVERSE-dependency closure of the diff,
+# a seed is in it iff the seed itself OR anything it transitively depends on
+# changed, which is exactly "could this lane's build/behaviour differ" (design
+# §3.3). So the forward-dependency reasoning is captured by a membership test on
+# the reverse closure — no separate forward walk is needed here.
+#
+# SEEDS (single source of truth; the fuzz.yml + ci.yml `wasm` job `if:` guards
+# MUST reference exactly these crate names — pinned by
+# scripts/tests/test_ci_select_wiring.py, mirrored informationally in
+# ci/path-ownership.toml `[lanes]`):
+#   * fuzz — the cargo-fuzz targets. The out-of-workspace fuzz crate
+#     (fuzz/Cargo.toml) depends on exactly these three: sparq-core (RDF parsers +
+#     mmap loader), sparq-engine (SPARQL parse), sparq-shacl (SHACL validation).
+#   * wasm — the ci.yml `wasm` job builds every browser bundle it names; each seed
+#     pulls its own engine/core wasm32 graph, so the seed set is the bundle crates.
+# FAIL-CLOSED (design §2/§4.3): `lane_runs` runs the lane whenever mode != selected
+# (full/shadow/error) OR any seed is not a current workspace member (a typo'd or
+# renamed seed can never silently skip a lane — it forces the lane to run). The
+# YAML guards inherit the same posture: an empty/missing `mode`/`affected` output
+# satisfies the `mode != 'selected'` disjunct => RUN.
+_LANE_SEEDS: dict[str, list[str]] = {
+    "fuzz": ["sparq-core", "sparq-engine", "sparq-shacl"],
+    "wasm": [
+        "sparq-wasm",
+        "sparq-reason-wasm",
+        "sparq-rsp-wasm",
+        "sparq-text-wasm",
+        "sparq-shacl-wasm",
+        "sparq-introspect",
+        "sparq-solid",
+    ],
+}
+
+
 class SelectorError(Exception):
     """Any internal failure. main() traps this => mode=full, exit 0 (§4.3)."""
 
@@ -195,6 +235,29 @@ def reverse_closure(crate: str, reverse_adj: dict[str, set[str]]) -> set[str]:
                 seen.add(dependent)
                 stack.append(dependent)
     return seen
+
+
+def lane_runs(sel: "Selection", seeds: list[str]) -> bool:
+    """[OPUS-4.8] sq-fmx4u.6: does a singleton lane (fuzz / wasm) need to run for
+    this Selection? This is the EXECUTABLE SPEC of the fuzz.yml + ci.yml `wasm`
+    job `if:` guards — the YAML expresses the identical rule inline
+    (`mode != 'selected' || contains(affected, '"<seed>"') || ...`), and
+    scripts/tests/test_ci_select_wiring.py pins the guards' seed set against
+    `_LANE_SEEDS` so the two cannot drift.
+
+    Runs (returns True) unless the lane is PROVABLY inert (design §2):
+      * mode != "selected" (full / shadow / error path) => run everything;
+      * any seed is not a current workspace member => run (fail-closed: a
+        typo'd/renamed seed must never silently skip its lane);
+      * otherwise run iff some seed is in the affected reverse-dep closure.
+    """
+    if sel.mode != "selected":
+        return True
+    members = set(sel.all_members)
+    if any(s not in members for s in seeds):
+        return True  # unknown seed: cannot prove inert => run (fail-closed)
+    affected = set(sel.affected)
+    return any(s in affected for s in seeds)
 
 
 # --- ownership matching ------------------------------------------------------

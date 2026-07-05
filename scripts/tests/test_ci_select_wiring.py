@@ -51,8 +51,11 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 FM_YML = REPO_ROOT / ".github" / "workflows" / "feature-matrix.yml"
+FUZZ_YML = REPO_ROOT / ".github" / "workflows" / "fuzz.yml"  # [OPUS-4.8] sq-fmx4u.6
 SELECT_YML = REPO_ROOT / ".github" / "workflows" / "ci-select.yml"
 GATE_PY = REPO_ROOT / "scripts" / "ci_summary_gate.py"
+CI_SELECT_PY = REPO_ROOT / "scripts" / "ci_select.py"  # [OPUS-4.8] sq-fmx4u.6
+OWNERSHIP_TOML = REPO_ROOT / "ci" / "path-ownership.toml"  # [OPUS-4.8] sq-fmx4u.6
 
 FAIL_CLOSED_DISJUNCT = "needs.select.outputs.mode != 'selected'"
 NEEDLE_RE = re.compile(
@@ -78,6 +81,16 @@ def _gate_module():
     return mod
 
 
+def _ci_select_module():
+    # [OPUS-4.8] sq-fmx4u.6: import the selector to read `_LANE_SEEDS` — the single
+    # source of truth the fuzz.yml + ci.yml `wasm` guards must mirror.
+    spec = importlib.util.spec_from_file_location("ci_select", CI_SELECT_PY)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["ci_select"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _workspace_members() -> set[str]:
     """Crate names from crates/*/Cargo.toml — hermetic (no cargo invocation)."""
     assert tomllib is not None, "Python >= 3.11 required (tomllib)"
@@ -96,15 +109,18 @@ class TestWiring(unittest.TestCase):
     def setUpClass(cls):
         cls.ci = _load(CI_YML)
         cls.fm = _load(FM_YML)
+        cls.fuzz = _load(FUZZ_YML)  # [OPUS-4.8] sq-fmx4u.6
         cls.sel = _load(SELECT_YML)
         cls.members = _workspace_members()
         cls.gate = _gate_module()
+        cls.lane_seeds = _ci_select_module()._LANE_SEEDS  # [OPUS-4.8] sq-fmx4u.6
 
     # ---- fail-closed guard shape -------------------------------------------------
     def test_every_selection_consuming_if_carries_the_fail_closed_disjunct(self):
         """Any job-level `if:` mentioning the selection outputs must include the
         `mode != 'selected'` disjunct, so empty/missing outputs mean RUN."""
-        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm)):
+        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
+                            ("fuzz.yml", self.fuzz)):
             for job_id, job in wf["jobs"].items():
                 cond = job.get("if", "")
                 if "needs.select.outputs" in str(cond):
@@ -116,7 +132,8 @@ class TestWiring(unittest.TestCase):
 
     def test_selection_guarded_jobs_need_select(self):
         """A guard reading needs.select.* only resolves if `select` is in needs."""
-        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm)):
+        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
+                            ("fuzz.yml", self.fuzz)):
             for job_id, job in wf["jobs"].items():
                 if "needs.select.outputs" in str(job.get("if", "")):
                     needs = job.get("needs", [])
@@ -130,7 +147,8 @@ class TestWiring(unittest.TestCase):
 
     # ---- crate needles are real --------------------------------------------------
     def test_every_affected_needle_is_a_workspace_member(self):
-        text = CI_YML.read_text(encoding="utf-8") + FM_YML.read_text(encoding="utf-8")
+        text = (CI_YML.read_text(encoding="utf-8") + FM_YML.read_text(encoding="utf-8")
+                + FUZZ_YML.read_text(encoding="utf-8"))  # [OPUS-4.8] sq-fmx4u.6
         needles = NEEDLE_RE.findall(text)
         self.assertTrue(needles, "expected contains(affected, ...) guards to exist")
         unknown = sorted({n for n in needles if n not in self.members})
@@ -158,7 +176,8 @@ class TestWiring(unittest.TestCase):
         """`matrix` is NOT available in jobs.<job_id>.if — a reference silently
         evaluates empty, which under enforcement would skip every leg. The
         per-shard guard must live in a STEP (env/run), never the job `if:`."""
-        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm)):
+        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
+                            ("fuzz.yml", self.fuzz)):
             for job_id, job in wf["jobs"].items():
                 self.assertNotIn(
                     "matrix.", str(job.get("if", "")),
@@ -167,7 +186,8 @@ class TestWiring(unittest.TestCase):
 
     # ---- select job shape ----------------------------------------------------------
     def test_select_caller_jobs_are_unconditional_and_use_the_reusable_workflow(self):
-        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm)):
+        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
+                            ("fuzz.yml", self.fuzz)):
             job = wf["jobs"].get("select")
             self.assertIsNotNone(job, f"{wf_name}: missing the select job")
             self.assertEqual(job.get("uses"), "./.github/workflows/ci-select.yml", wf_name)
@@ -226,7 +246,8 @@ class TestWiring(unittest.TestCase):
         """[FABLE-5] sq-fmx4u.5. Toggling the ci-full label must re-run selection, so
         both selection-consuming workflows react to labeled/unlabeled — and must NOT
         drop the default `synchronize` (push-to-PR) trigger while doing so."""
-        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm)):
+        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
+                            ("fuzz.yml", self.fuzz)):
             on = _on_block(wf)
             pr = on.get("pull_request") or {}
             self.assertIsInstance(
@@ -293,6 +314,104 @@ class TestWiring(unittest.TestCase):
     def test_members_parse_sanity(self):
         self.assertIn("sparq-core", self.members)
         self.assertGreater(len(self.members), 30)
+
+
+class TestPhase2LaneScoping(unittest.TestCase):
+    """[OPUS-4.8] sq-fmx4u.6 (design §5.2, phase 2): the fuzz + wasm singleton
+    lanes are scoped by their crate closure, and the coverage ratchet skips only
+    on an empty affected set. Pins the guards' SHAPE + the seed sets against the
+    selector's `_LANE_SEEDS` single source of truth so YAML and code cannot drift.
+
+    The seed set a `mode != 'selected' || contains(affected, '"X"') || ...` guard
+    references is exactly the set of quoted needles in the job `if:` expression."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ci = _load(CI_YML)
+        cls.fuzz = _load(FUZZ_YML)
+        cls.members = _workspace_members()
+        cls.lane_seeds = _ci_select_module()._LANE_SEEDS
+
+    @staticmethod
+    def _guard_needles(cond: str) -> list[str]:
+        """Ordered, de-duplicated crate needles in a job `if:` expression."""
+        seen: list[str] = []
+        for n in NEEDLE_RE.findall(str(cond)):
+            if n not in seen:
+                seen.append(n)
+        return seen
+
+    # ---- fuzz lane (fuzz.yml) ------------------------------------------------------
+    def test_fuzz_job_guarded_by_its_seed_closure(self):
+        job = self.fuzz["jobs"]["fuzz"]
+        cond = str(job.get("if", ""))
+        self.assertIn(FAIL_CLOSED_DISJUNCT, cond,
+                      "fuzz guard must be fail-closed (empty output => RUN)")
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        self.assertIn("select", needs, "fuzz job must need the select pre-job")
+        self.assertEqual(self._guard_needles(cond), self.lane_seeds["fuzz"],
+                         "fuzz guard needles must equal ci_select.py _LANE_SEEDS['fuzz']")
+
+    def test_fuzz_has_unconditional_select_caller(self):
+        job = self.fuzz["jobs"].get("select")
+        self.assertIsNotNone(job, "fuzz.yml must carry the select pre-job")
+        self.assertEqual(job.get("uses"), "./.github/workflows/ci-select.yml")
+        self.assertNotIn("if", job, "select must be unconditional (gate needs it green)")
+        self.assertNotIn("needs", job)
+
+    def test_fuzz_runs_on_schedule_backstop(self):
+        # The nightly heavy fuzz soak is the full-matrix backstop: a schedule event
+        # carries no PR diff => selector mode=full => the fail-closed disjunct RUNS.
+        on = _on_block(self.fuzz)
+        self.assertIn("schedule", on, "fuzz.yml must keep its nightly schedule backstop")
+        self.assertIn("merge_group", on, "fuzz.yml must run on merge_group for the gate")
+
+    # ---- wasm lane (ci.yml) --------------------------------------------------------
+    def test_wasm_job_guarded_by_its_seed_closure(self):
+        job = self.ci["jobs"]["wasm"]
+        cond = str(job.get("if", ""))
+        self.assertIn(FAIL_CLOSED_DISJUNCT, cond)
+        self.assertIn("needs.changes.outputs.rust_changed == 'true'", cond,
+                      "wasm must keep the rust_changed path-filter guard")
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        self.assertIn("select", needs)
+        self.assertIn("changes", needs)
+        self.assertEqual(self._guard_needles(cond), self.lane_seeds["wasm"],
+                         "wasm guard needles must equal ci_select.py _LANE_SEEDS['wasm']")
+
+    # ---- coverage ratchet empty-affected skip (ci.yml) ----------------------------
+    def test_coverage_ratchet_skips_only_on_empty_affected(self):
+        job = self.ci["jobs"]["coverage-measure"]
+        cond = str(job.get("if", ""))
+        self.assertIn(FAIL_CLOSED_DISJUNCT, cond)
+        self.assertIn("needs.select.outputs.affected != '[]'", cond,
+                      "coverage ratchet may skip ONLY when affected == [] (design §5.2)")
+        # It stays off the nightly path and behind rust_changed, unchanged.
+        self.assertIn("github.event_name != 'schedule'", cond)
+        self.assertIn("needs.changes.outputs.rust_changed == 'true'", cond)
+        needs = job.get("needs", [])
+        self.assertIn("select", needs)
+        # Must NOT reference matrix.* in the job-level if (contexts-availability trap).
+        self.assertNotIn("matrix.", cond)
+
+    # ---- seed sets are real + mirrored ---------------------------------------------
+    def test_lane_seeds_are_real_workspace_members(self):
+        for lane, seeds in self.lane_seeds.items():
+            for seed in seeds:
+                self.assertIn(seed, self.members,
+                              f"{lane} seed {seed!r} is not a workspace member")
+
+    def test_ownership_toml_lanes_mirror_matches_lane_seeds(self):
+        # The informational [lanes] table in ci/path-ownership.toml must equal the
+        # selector's _LANE_SEEDS (same drift-guard idiom as [triggers]).
+        self.assertIsNotNone(tomllib, "Python >= 3.11 required (tomllib)")
+        with open(OWNERSHIP_TOML, "rb") as fh:
+            data = tomllib.load(fh)
+        mirror = data.get("lanes", {})
+        self.assertEqual(mirror, self.lane_seeds,
+                         "ci/path-ownership.toml [lanes] mirror drifted from _LANE_SEEDS")
 
 
 # [SONNET-4.6] sq-fmx4u.4: required-check anchor tests.

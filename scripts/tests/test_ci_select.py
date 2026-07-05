@@ -437,6 +437,111 @@ class RealMetadataShapeTests(unittest.TestCase):
         self.assertIn("sparq-geo", sel.affected)
         self.assertNotIn("sparq-parse", sel.affected)  # parse does not depend on geo
 
+    # ---- phase-2 lane mapping against REAL metadata (bead sq-fmx4u.6) ----------
+    def test_lane_seed_crates_are_real_workspace_members(self):
+        # A seed that is not a current member would make its lane skip exactly when
+        # it should run (`lane_runs` fail-closes it to RUN, but the intent is that
+        # the list stays real). Pin every fuzz/wasm seed against the live metadata.
+        ws = cs.parse_workspace(self.meta)
+        for lane, seeds in cs._LANE_SEEDS.items():
+            for seed in seeds:
+                self.assertIn(seed, ws.members,
+                              f"{lane} seed {seed!r} is not a workspace member")
+
+    def test_geo_only_pr_skips_fuzz_and_wasm(self):
+        # ACCEPTANCE: a geo-only PR skips the sparq-core fuzz smoke + wasm builds.
+        # sparq-geo is a reverse-graph leaf; none of the fuzz/wasm seeds depend on
+        # it, so neither lane is affected (skipped-green).
+        sel = cs.select(["crates/sparq-geo/src/lib.rs"], self.meta)
+        self.assertEqual(sel.mode, "selected")
+        self.assertFalse(cs.lane_runs(sel, cs._LANE_SEEDS["fuzz"]),
+                         "geo-only PR must SKIP the fuzz lane")
+        self.assertFalse(cs.lane_runs(sel, cs._LANE_SEEDS["wasm"]),
+                         "geo-only PR must SKIP the wasm lane")
+
+    def test_core_pr_runs_fuzz_and_wasm(self):
+        # ACCEPTANCE: a sparq-core PR still runs both — every fuzz seed and every
+        # wasm bundle depends (transitively) on sparq-core, so both are affected.
+        sel = cs.select(["crates/sparq-core/src/dict.rs"], self.meta)
+        self.assertEqual(sel.mode, "selected")
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["fuzz"]),
+                        "sparq-core PR must RUN the fuzz lane")
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["wasm"]),
+                        "sparq-core PR must RUN the wasm lane")
+
+
+class LaneMappingTests(unittest.TestCase):
+    """[OPUS-4.8] sq-fmx4u.6 (design §5.2, phase 2): hermetic tests of
+    `lane_runs` — the executable spec of the fuzz.yml + ci.yml `wasm` job `if:`
+    guards — and the SAFE-only coverage-ratchet skip. All synthetic (no cargo)."""
+
+    def _sel(self, mode, affected, members):
+        return cs.Selection(mode=mode, reason="", affected=list(affected),
+                            all_members=list(members))
+
+    def test_lane_runs_when_a_seed_is_affected(self):
+        sel = self._sel("selected", ["sparq-core", "sparq-geo"],
+                        ["sparq-core", "sparq-geo", "sparq-wasm"])
+        self.assertTrue(cs.lane_runs(sel, ["sparq-core"]))
+
+    def test_lane_skips_when_no_seed_is_affected(self):
+        sel = self._sel("selected", ["sparq-geo"],
+                        ["sparq-core", "sparq-geo", "sparq-wasm"])
+        self.assertFalse(cs.lane_runs(sel, ["sparq-core", "sparq-wasm"]))
+
+    def test_full_and_shadow_modes_always_run_the_lane(self):
+        # full (nightly backstop / ci-full / error) + shadow (report-only) => RUN.
+        for mode in ("full", "shadow"):
+            sel = self._sel(mode, [], ["sparq-core"])
+            self.assertTrue(cs.lane_runs(sel, ["sparq-core"]),
+                            f"mode={mode} must always run the lane")
+
+    def test_selected_empty_affected_skips_the_lane(self):
+        # SAFE-only change: mode=selected, affected=[] => the lane is inert => skip.
+        sel = self._sel("selected", [], ["sparq-core"])
+        self.assertFalse(cs.lane_runs(sel, ["sparq-core"]))
+
+    def test_unknown_seed_forces_run_fail_closed(self):
+        # A typo'd/renamed seed cannot silently skip its lane: lane_runs RUNS it.
+        sel = self._sel("selected", ["sparq-geo"], ["sparq-core", "sparq-geo"])
+        self.assertTrue(cs.lane_runs(sel, ["sparq-core-TYPO"]),
+                        "an unknown seed must fail-closed to RUN")
+
+    def test_lane_seeds_are_the_expected_two_lanes(self):
+        self.assertEqual(set(cs._LANE_SEEDS), {"fuzz", "wasm"})
+        self.assertEqual(cs._LANE_SEEDS["fuzz"],
+                         ["sparq-core", "sparq-engine", "sparq-shacl"])
+        self.assertIn("sparq-wasm", cs._LANE_SEEDS["wasm"])
+        self.assertIn("sparq-solid", cs._LANE_SEEDS["wasm"])
+
+    # ---- SAFE-only coverage-ratchet skip (acceptance) -------------------------
+    @staticmethod
+    def _coverage_ratchet_skips(sel):
+        """Mirror the ci.yml `coverage-measure` job `if:` disjunction:
+            mode != 'selected' || affected != '[]'   (RUN when either holds)
+        so the ratchet is SKIPPED iff mode == 'selected' AND affected == []."""
+        return sel.mode == "selected" and json.dumps(sel.affected) == "[]"
+
+    def test_safe_only_pr_skips_coverage_ratchet(self):
+        # ACCEPTANCE: an affected-empty (SAFE-only) PR skips the coverage ratchet.
+        m = [{"pattern": "research/**", "safe": True}]
+        sel = cs.select(["research/x.md"], _synthetic_meta(), m)
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertTrue(self._coverage_ratchet_skips(sel))
+
+    def test_nonempty_affected_keeps_coverage_ratchet_running(self):
+        # A non-empty closure keeps coverage always-run (a dep change can shift
+        # executed lines in dependents — design §5.2).
+        sel = cs.select(["crates/app/src/lib.rs"], _synthetic_meta())
+        self.assertEqual(sel.mode, "selected")
+        self.assertFalse(self._coverage_ratchet_skips(sel))
+
+    def test_full_mode_keeps_coverage_ratchet_running(self):
+        sel = cs.select(["Cargo.lock"], _synthetic_meta())
+        self.assertEqual(sel.mode, "full")
+        self.assertFalse(self._coverage_ratchet_skips(sel))
+
 
 class EnforceRolloutTests(unittest.TestCase):
     """[FABLE-5] sq-fmx4u.5: the ENFORCE-mode rollout invariants — the selector

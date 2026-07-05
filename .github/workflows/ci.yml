@@ -585,8 +585,29 @@ jobs:
 
   wasm:
     name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm + sparq-text-wasm + sparq-shacl-wasm + sparq-solid)
-    needs: changes
-    if: needs.changes.outputs.rust_changed == 'true'
+    # [OPUS-4.8] sq-fmx4u.6 (design §5.2, phase 2): scope the wasm bundle build by
+    # the crate closure it exercises. The job builds every browser bundle it names
+    # (sparq-wasm/-reason-wasm/-rsp-wasm/-text-wasm/-shacl-wasm + sparq-introspect +
+    # sparq-solid); it is affected iff any of those is in the affected reverse-dep
+    # closure (single source of truth: `_LANE_SEEDS["wasm"]` in scripts/ci_select.py,
+    # pinned by scripts/tests/test_ci_select_wiring.py). Non-matrix job => the
+    # job-level `if:` can read needs.select.outputs. FAIL-CLOSED: the existing
+    # rust_changed path-filter still gates first, then the `mode != 'selected'`
+    # disjunct means an empty/missing selection output RUNS the lane; a
+    # selection-skipped job reports `skipped` (= gate-satisfied, no per-leg name is
+    # required — bead sq-fmx4u.4). Schedule/push carry no PR diff => mode=full =>
+    # the lane runs (nightly full-matrix backstop, design §6.1).
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-wasm"') ||
+       contains(needs.select.outputs.affected, '"sparq-reason-wasm"') ||
+       contains(needs.select.outputs.affected, '"sparq-rsp-wasm"') ||
+       contains(needs.select.outputs.affected, '"sparq-text-wasm"') ||
+       contains(needs.select.outputs.affected, '"sparq-shacl-wasm"') ||
+       contains(needs.select.outputs.affected, '"sparq-introspect"') ||
+       contains(needs.select.outputs.affected, '"sparq-solid"'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -2208,8 +2229,22 @@ jobs:
     # that shard — it is gated by the shard that DOES measure it). The `coverage-floors`
     # shard-partition guard proves every per-commit crate is measured by exactly one shard.
     name: coverage ratchet (shard ${{ matrix.shard }}/4)
-    needs: [changes, coverage-floors]
-    if: github.event_name != 'schedule' && needs.changes.outputs.rust_changed == 'true'
+    # [OPUS-4.8] sq-fmx4u.6 (design §5.2, phase 2): coverage is a function of
+    # compiled code + tests, so it stays ALWAYS-RUN with ONE exception — skip only
+    # when the affected closure is PROVABLY EMPTY (every changed path SAFE-listed /
+    # non-crate, so mode=selected AND affected==[]). Any NON-empty closure keeps it
+    # running, because a dependency change can shift executed lines in dependents.
+    # Same fail-closed guard shape build-archive uses: `mode != 'selected'` (full/
+    # shadow/empty output) => RUN, and `affected != '[]'` => RUN; both false (the
+    # SAFE-only case) => skip (the shard reports `skipped`, which the `coverage`
+    # aggregator counts as satisfied). This references only github/needs contexts —
+    # no `matrix.*` — so it is safe as a job-level `if:` on this matrix job. The
+    # nightly full coverage backstop is `coverage-nightly` (schedule), unaffected.
+    needs: [changes, coverage-floors, select]
+    if: >-
+      github.event_name != 'schedule' &&
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false   # one failing shard must NOT cancel the others (want all verdicts)
