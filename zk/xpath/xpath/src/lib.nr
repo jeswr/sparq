@@ -67,13 +67,14 @@ pub mod xpath_xs;
 pub use types::{XsdDate, XsdDateTime, XsdDayTimeDuration, XsdTime};
 
 // Re-export YearMonthDuration type and functions
+// (months_from_duration / years_from_duration are exported from `duration` below:
+// the generic YearMonthComponents dispatch covers BOTH duration subtypes, sq-u91ki)
 pub use year_month_duration::{
     date_add_ym_duration, date_subtract_ym_duration, datetime_add_ym_duration,
-    datetime_subtract_ym_duration, fn_string_from_ym_duration, months_from_duration,
-    XsdYearMonthDuration, years_from_duration, ym_duration_add, ym_duration_divide,
-    ym_duration_divide_by_duration, ym_duration_equal, ym_duration_from_string, ym_duration_ge,
-    ym_duration_greater_than, ym_duration_le, ym_duration_less_than, ym_duration_multiply,
-    ym_duration_negate, ym_duration_subtract,
+    datetime_subtract_ym_duration, fn_string_from_ym_duration, XsdYearMonthDuration,
+    ym_duration_add, ym_duration_divide, ym_duration_divide_by_duration, ym_duration_equal,
+    ym_duration_from_string, ym_duration_ge, ym_duration_greater_than, ym_duration_le,
+    ym_duration_less_than, ym_duration_multiply, ym_duration_negate, ym_duration_subtract,
 };
 
 // Re-export QName type and functions
@@ -160,7 +161,8 @@ pub use duration::{
     duration_from_components, duration_from_microseconds, duration_ge, duration_greater_than,
     duration_is_negative, duration_le, duration_less_than, duration_multiply, duration_negate,
     duration_subtract, duration_to_microseconds, duration_zero, hours_from_duration,
-    minutes_from_duration, seconds_from_duration,
+    minutes_from_duration, months_from_duration, seconds_from_duration, YearMonthComponents,
+    years_from_duration,
 };
 
 // Re-export date functions

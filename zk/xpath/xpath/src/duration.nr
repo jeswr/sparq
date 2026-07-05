@@ -8,8 +8,14 @@
 //! - op:multiply-dayTimeDuration, op:divide-dayTimeDuration
 //! - op:add-dayTimeDuration-to-dateTime, op:subtract-dayTimeDuration-from-dateTime
 //! - op:dayTimeDuration-equal, op:dayTimeDuration-less-than, op:dayTimeDuration-greater-than
+//! XPath functions implemented (generic dispatch on the duration subtype):
+//! - fn:years-from-duration (xs:dayTimeDuration -> 0 per F&O sec. 8.4.3,
+//!   xs:yearMonthDuration -> real years)
+//! - fn:months-from-duration (xs:dayTimeDuration -> 0 per F&O sec. 8.4.4,
+//!   xs:yearMonthDuration -> real months)
 
 use crate::types::{XsdDateTime, XsdDayTimeDuration};
+use crate::year_month_duration::XsdYearMonthDuration;
 
 // ============================================================================
 // Time Constants (as i64 for signed arithmetic)
@@ -104,6 +110,61 @@ pub fn seconds_from_duration(dur: XsdDayTimeDuration) -> u8 {
     let abs_micros: i64 = if micros < 0 { -micros } else { micros };
     let minute_remainder = abs_micros % MICROS_PER_MINUTE;
     (minute_remainder / MICROS_PER_SECOND) as u8
+}
+
+/// Dispatch trait for fn:years-from-duration / fn:months-from-duration across
+/// the two XSD duration subtypes (F&O sec. 8.4.3 / sec. 8.4.4). The generated
+/// qt3tests packages call the accessors under their canonical XPath names with
+/// either subtype, so dispatch follows the codebase's generic trait-bound
+/// pattern (see comparison.nr). [SONNET-4.6] (sq-u91ki)
+pub trait YearMonthComponents {
+    /// Years component of the duration (F&O sec. 8.4.3)
+    fn years_component(self) -> i32;
+    /// Months component of the duration (F&O sec. 8.4.4)
+    fn months_component(self) -> i32;
+}
+
+/// F&O sec. 8.4.3 / sec. 8.4.4: an xs:dayTimeDuration carries no years or
+/// months component, so both accessors return the xs:integer 0.
+/// [SONNET-4.6] (sq-u91ki)
+impl YearMonthComponents for XsdDayTimeDuration {
+    fn years_component(self) -> i32 {
+        let _ = self;
+        0
+    }
+    fn months_component(self) -> i32 {
+        let _ = self;
+        0
+    }
+}
+
+/// xs:yearMonthDuration keeps its real component values -- delegates to the
+/// concrete accessors in year_month_duration.nr. [SONNET-4.6] (sq-u91ki)
+impl YearMonthComponents for XsdYearMonthDuration {
+    fn years_component(self) -> i32 {
+        crate::year_month_duration::years_from_duration(self)
+    }
+    fn months_component(self) -> i32 {
+        crate::year_month_duration::months_from_duration(self)
+    }
+}
+
+/// fn:years-from-duration -- dispatches on the duration subtype:
+/// xs:dayTimeDuration -> 0 (F&O sec. 8.4.3), xs:yearMonthDuration -> real years.
+pub fn years_from_duration<T>(dur: T) -> i32
+where
+    T: YearMonthComponents,
+{
+    dur.years_component()
+}
+
+/// fn:months-from-duration -- dispatches on the duration subtype:
+/// xs:dayTimeDuration -> 0 (F&O sec. 8.4.4), xs:yearMonthDuration -> real months.
+pub fn months_from_duration<T>(dur: T) -> i32
+where
+    T: YearMonthComponents,
+{
+    dur.months_component()
 }
 
 // ============================================================================
@@ -374,4 +435,73 @@ fn test_datetime_negative_epoch_crosses_back_over_1970() {
     assert((crossed.epoch_microseconds as i64) == 43_200_000_000);
     // The positive result's raw Field equals the plain unsigned value too.
     assert(crossed.epoch_microseconds == 43_200_000_000);
+}
+
+// ============================================================================
+// DayTimeDuration overloads for fn:years-from-duration / fn:months-from-duration
+// (sq-u91ki) [SONNET-4.6]
+//
+// F&O sec. 8.4.3 (fn:years-from-duration) and sec. 8.4.4 (fn:months-from-duration):
+// when the argument is xs:dayTimeDuration, both accessors return the xs:integer 0
+// because a dayTimeDuration carries no months or years component.
+//
+// Oracle: Python reference
+//   import isodate; d = isodate.parse_duration("P1D")
+//   # d is datetime.timedelta(days=1); no years/months attribute -> 0
+// ============================================================================
+
+#[test]
+fn test_years_from_duration_dt_positive() {
+    // Oracle: xs:dayTimeDuration("P1D") has no years component -> fn:years-from-duration = 0
+    // (F&O sec. 8.4.3)
+    let one_day = duration_from_components(false, 1, 0, 0, 0, 0);
+    assert(years_from_duration(one_day) == 0);
+}
+
+#[test]
+fn test_years_from_duration_dt_negative() {
+    // Oracle: xs:dayTimeDuration("-P365D") has no years component -> fn:years-from-duration = 0
+    // (F&O sec. 8.4.3)
+    let neg_year = duration_from_components(true, 365, 0, 0, 0, 0);
+    assert(years_from_duration(neg_year) == 0);
+}
+
+#[test]
+fn test_months_from_duration_dt_positive() {
+    // Oracle: xs:dayTimeDuration("P30D") has no months component -> fn:months-from-duration = 0
+    // (F&O sec. 8.4.4)
+    let thirty_days = duration_from_components(false, 30, 0, 0, 0, 0);
+    assert(months_from_duration(thirty_days) == 0);
+}
+
+#[test]
+fn test_months_from_duration_dt_negative() {
+    // Oracle: xs:dayTimeDuration("-P30D") has no months component -> fn:months-from-duration = 0
+    // (F&O sec. 8.4.4)
+    let neg_thirty_days = duration_from_components(true, 30, 0, 0, 0, 0);
+    assert(months_from_duration(neg_thirty_days) == 0);
+}
+
+#[test]
+fn test_years_months_dt_zero_duration() {
+    // Regression: zero dayTimeDuration -> both return 0 (degenerate case, F&O sec. 8.4.3/8.4.4)
+    let zero = duration_zero();
+    assert(years_from_duration(zero) == 0);
+    assert(months_from_duration(zero) == 0);
+}
+
+#[test]
+fn test_years_months_from_duration_ym_regression() {
+    // Regression guard: the yearMonthDuration path through the SAME generic
+    // accessors must still return real component values (not the dayTimeDuration 0).
+    // Oracle: P2Y3M = 27 months -> years 2, months 3; -P1Y6M = -18 months ->
+    // years -1, months -6 (i32 truncating division, matching
+    // year_month_duration.nr::test_ym_duration_components).
+    let ym = XsdYearMonthDuration::new(27);
+    assert(years_from_duration(ym) == 2);
+    assert(months_from_duration(ym) == 3);
+
+    let ym_neg = XsdYearMonthDuration::new(-18);
+    assert(years_from_duration(ym_neg) == -1);
+    assert(months_from_duration(ym_neg) == -6);
 }

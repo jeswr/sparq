@@ -281,11 +281,14 @@ pub use crate::time::adjust_time_to_timezone as adjust_time_to_timezone;
 pub use crate::numeric::round_half_to_even_int as round_half_to_even;
 
 // ============================================================================
-// YearMonthDuration Component Extraction
+// Duration Component Extraction (sq-u91ki) [SONNET-4.6]
+// Generic dispatch on the duration subtype via the YearMonthComponents trait:
+// xs:dayTimeDuration -> 0 (F&O sec. 8.4.3 / sec. 8.4.4),
+// xs:yearMonthDuration -> real component values.
 // ============================================================================
 
-// fn:years-from-duration (for yearMonthDuration)
-pub use crate::year_month_duration::years_from_duration as years_from_duration;
+// fn:years-from-duration (dayTimeDuration -> 0, yearMonthDuration -> real years)
+pub use crate::duration::years_from_duration as years_from_duration;
 
-// fn:months-from-duration (for yearMonthDuration)
-pub use crate::year_month_duration::months_from_duration as months_from_duration;
+// fn:months-from-duration (dayTimeDuration -> 0, yearMonthDuration -> real months)
+pub use crate::duration::months_from_duration as months_from_duration;
