@@ -107,3 +107,8 @@ ureq = { version = "3", default-features = false, features = ["rustls", "platfor
 name = "pkg-query"
 path = "src/bin/pkg_query.rs"
 required-features = ["query"]
+
+[[bin]]
+name = "validate-pkg"
+path = "src/bin/validate_pkg.rs"
+required-features = ["validate"]
