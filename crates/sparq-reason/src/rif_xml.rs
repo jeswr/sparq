@@ -22,6 +22,15 @@
 //        <declare>?a ?b</declare> conflated universal ?b with existential ?b).
 //        Fail-closed beats guessing; multi-Var-per-declare is not schema-valid
 //        RIF-XML. [SONNET-4.6]
+// sq-anuo9: residual silent-drop class (adversarial re-verify of #1461). Single-cardinality
+//        wrappers read via `.children.first()` dropped surplus siblings on non-schema-valid
+//        input — <if> dropping its 2nd conjunct WEAKENS the body -> OVER-derivation (the
+//        soundness-relevant case), and <then>/<formula>/<object>/<instance>/<class>/<sub>/
+//        <sup>/<left>/<right>/<content>/<op>/<sentence> dropped surplus terms/atoms. <declare>
+//        also TOLERATED a stray non-<Var> sibling. Fix: the `only_child` helper enforces
+//        exactly-one-child fail-closed (MalformedXml) on every such wrapper, and <declare>
+//        now requires exactly one child that is a <Var>. Conformant RIF-XML is unaffected by
+//        design. [SONNET-4.6]
 // Beads for deferred low-priority items: see bead notes inline.
 
 //! # `rif_xml` — W3C RIF-Core XML importer
@@ -86,8 +95,14 @@
 //!
 //! Every element or construct outside the supported Core subset returns a named error
 //! variant. Every unexpected child element — including non-`<formula>` children inside
-//! `<And>` or `<Or>` conditions or a conjunctive head — returns an error; nothing is
-//! silently skipped or dropped.
+//! `<And>` or `<Or>` conditions or a conjunctive head — returns an error, and a **surplus
+//! child of a single-cardinality wrapper** (`<if>`, `<then>`, `<formula>`, `<object>`,
+//! `<instance>`, `<class>`, `<sub>`, `<sup>`, `<left>`, `<right>`, `<content>`, `<op>`,
+//! `<sentence>`, plus a `<declare>` carrying anything other than exactly one `<Var>`)
+//! returns `MalformedXml` rather than being silently dropped by a `.first()`-style read.
+//! This is a soundness property, not merely a diagnostic: dropping a second `<if>`
+//! conjunct would WEAKEN the rule body → over-derivation (sq-anuo9). Nothing is silently
+//! skipped or dropped.
 //!
 //! 1. `ImportError::ImportDirective` — any `Import` element (remote imports: fail-closed).
 //! 2. `ImportError::NonCoreElement { element, reason }` — non-Core dialect elements:
@@ -238,6 +253,31 @@ impl XmlNode {
     /// Return all children with the given tag name.
     fn children_named<'a>(&'a self, tag: &'a str) -> impl Iterator<Item = &'a XmlNode> {
         self.children.iter().filter(move |c| c.tag == tag)
+    }
+
+    /// Return this node's single element child, failing closed if it has zero **or
+    /// more than one**. RIF-XML single-cardinality wrappers — `<if>`, `<then>`,
+    /// `<formula>`, `<object>`, `<instance>`, `<class>`, `<sub>`, `<sup>`, `<left>`,
+    /// `<right>`, `<content>`, `<op>`, `<sentence>` — admit exactly one child element.
+    ///
+    /// The old `.children.first()` silently DROPPED surplus siblings on non-schema-valid
+    /// input: an `<if>` holding two condition children lost the second conjunct, which
+    /// WEAKENS the rule body → OVER-derivation (unsound); a `<then>`/`<formula>` holding
+    /// two head/term children lost the second → under-derivation. Enforcing exactly-one
+    /// here keeps the module's fail-closed "nothing is silently skipped or dropped"
+    /// contract honest. Conformant RIF-XML always has exactly one child in these
+    /// wrappers, so this rejects only malformed input. `ctx` names the wrapper for the
+    /// diagnostic. [SONNET-4.6] sq-anuo9
+    fn only_child(&self, ctx: &str) -> Result<&XmlNode, ImportError> {
+        match self.children.as_slice() {
+            [one] => Ok(one),
+            [] => Err(ImportError::MalformedXml(format!("{} has no child element", ctx))),
+            _ => Err(ImportError::MalformedXml(format!(
+                "{} must have exactly one child element (single-cardinality wrapper), found {}",
+                ctx,
+                self.children.len()
+            ))),
+        }
     }
 }
 
@@ -974,11 +1014,12 @@ fn parse_equal(node: &XmlNode) -> Result<Atom, ImportError> {
     Ok(Atom::Equal { left: parse_first_term(left)?, right: parse_first_term(right)? })
 }
 
-/// Parse the first term child of a wrapper element (e.g. `<object>TERM</object>`).
+/// Parse the single term child of a single-cardinality wrapper element (e.g.
+/// `<object>TERM</object>`, `<instance>`, `<class>`, `<sub>`, `<sup>`, `<left>`,
+/// `<right>`). Surplus term siblings are rejected (fail-closed, sq-anuo9) rather
+/// than silently dropped by the old `.children.first()`. [SONNET-4.6]
 fn parse_first_term(wrapper: &XmlNode) -> Result<Term, ImportError> {
-    let child = wrapper.children.first().ok_or_else(|| ImportError::MalformedXml(
-        format!("<{}> has no term child", wrapper.tag),
-    ))?;
+    let child = wrapper.only_child(&format!("term wrapper <{}>", wrapper.tag))?;
     parse_term(child)
 }
 
@@ -989,9 +1030,8 @@ fn parse_external(node: &XmlNode) -> Result<Atom, ImportError> {
         "External missing <content>".to_string(),
     ))?;
     // The child of <content> should be <Atom> (for predicates) or <Expr> (for functions).
-    let inner = content.children.first().ok_or_else(|| ImportError::MalformedXml(
-        "External <content> has no child".to_string(),
-    ))?;
+    // Single-cardinality: surplus siblings are rejected, not dropped (sq-anuo9).
+    let inner = content.only_child("External <content>")?;
     if inner.tag != "Atom" && inner.tag != "Expr" {
         check_non_core(&inner.tag)?;
         return Err(ImportError::UnrecognizedElement { tag: inner.tag.clone() });
@@ -1001,9 +1041,8 @@ fn parse_external(node: &XmlNode) -> Result<Atom, ImportError> {
     let op_node = inner.child("op").ok_or_else(|| ImportError::MalformedXml(
         "External Atom/Expr missing <op>".to_string(),
     ))?;
-    let op_const = op_node.children.first().ok_or_else(|| ImportError::MalformedXml(
-        "External <op> has no child".to_string(),
-    ))?;
+    // Single-cardinality: the <op> wrapper holds exactly one <Const> (sq-anuo9).
+    let op_const = op_node.only_child("External <op>")?;
     let op_iri = if op_const.tag == "Const" {
         op_const.text.trim().to_string()
     } else {
@@ -1069,22 +1108,26 @@ fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
             // </Exists>
             // Collect declared variable names (used by alpha_rename_cond in parse_implies).
             //
-            // [SONNET-4.6] Fix-6: fail-closed on <declare> with != 1 <Var> child.
-            // The old filter_map(.first()) silently dropped all but the first <Var>,
-            // leaving extras unrenamed (demonstrated capture: Exists <declare>?a ?b</declare>
-            // conflated universal ?b with existential ?b). Multi-Var-per-declare is
-            // not schema-valid RIF-XML; we reject rather than guess the intent.
+            // [SONNET-4.6] Fix-6 + sq-anuo9: fail-closed on <declare> with != 1 child, or a
+            // single non-<Var> child. The old filter_map(.first()) silently dropped all but
+            // the first <Var> (demonstrated capture: Exists <declare>?a ?b</declare> conflated
+            // universal ?b with existential ?b); the earlier Fix-6 filter-to-<Var> still
+            // TOLERATED a stray non-<Var> sibling (e.g. <declare><Var>a</Var><Const>…</Const>)
+            // by ignoring it. A <declare> admits exactly ONE child and it MUST be a <Var>; any
+            // other shape is not schema-valid RIF-XML, so we reject rather than guess intent.
             let mut declared_vars: Vec<String> = Vec::new();
             for d in node.children_named("declare") {
-                let var_children: Vec<&XmlNode> =
-                    d.children.iter().filter(|c| c.tag == "Var").collect();
-                if var_children.len() != 1 {
-                    return Err(ImportError::MalformedXml(format!(
-                        "<declare> must contain exactly one <Var> child, found {} (in <Exists>)",
-                        var_children.len()
-                    )));
+                match d.children.as_slice() {
+                    [only] if only.tag == "Var" => {
+                        declared_vars.push(only.text.trim().to_string());
+                    }
+                    _ => {
+                        return Err(ImportError::MalformedXml(format!(
+                            "<declare> must contain exactly one <Var> child, found {} child element(s) (in <Exists>)",
+                            d.children.len()
+                        )));
+                    }
                 }
-                declared_vars.push(var_children[0].text.trim().to_string());
             }
             let formula = node.child("formula").ok_or_else(|| ImportError::MalformedXml(
                 "Exists missing <formula>".to_string(),
@@ -1104,11 +1147,11 @@ fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
     }
 }
 
-/// Parse the child of a `<formula>` wrapper (descend into the wrapper's first child).
+/// Parse the child of a `<formula>` wrapper (descend into the wrapper's single child).
+/// A `<formula>` holds exactly one condition; a surplus sibling is rejected rather than
+/// silently dropped (sq-anuo9 — a dropped conjunct weakens the body → over-derivation).
 fn parse_formula_child(formula: &XmlNode) -> Result<BodyCond, ImportError> {
-    let child = formula.children.first().ok_or_else(|| ImportError::MalformedXml(
-        "<formula> has no child condition".to_string(),
-    ))?;
+    let child = formula.only_child("<formula>")?;
     parse_condition(child)
 }
 
@@ -1132,9 +1175,9 @@ fn parse_head(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
                     check_non_core(&c.tag)?;
                     return Err(ImportError::UnrecognizedElement { tag: c.tag.clone() });
                 }
-                let child = c.children.first().ok_or_else(|| {
-                    ImportError::MalformedXml("<formula> in head And has no child".to_string())
-                })?;
+                // Single-cardinality: each head-<formula> holds exactly one atom;
+                // a surplus sibling head atom is rejected, not dropped (sq-anuo9).
+                let child = c.only_child("<formula> in head And")?;
                 head.push(parse_positive_atom(child)?);
             }
             Ok(head)
@@ -1159,28 +1202,31 @@ fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
             // These seed the alpha-rename universe so generated fresh names cannot
             // collide with universally-declared vars.
             //
-            // [SONNET-4.6] Fix-6: identical guard to Exists arm — reject <declare>
-            // with != 1 <Var> child instead of silently dropping extras.
+            // [SONNET-4.6] Fix-6 + sq-anuo9: identical guard to the Exists arm — reject a
+            // <declare> whose sole child is not a <Var>, or that has != 1 child, instead of
+            // silently dropping extras or tolerating a stray non-<Var> sibling.
             let mut forall_vars_vec: Vec<String> = Vec::new();
             for d in node.children_named("declare") {
-                let var_children: Vec<&XmlNode> =
-                    d.children.iter().filter(|c| c.tag == "Var").collect();
-                if var_children.len() != 1 {
-                    return Err(ImportError::MalformedXml(format!(
-                        "<declare> must contain exactly one <Var> child, found {} (in <Forall>)",
-                        var_children.len()
-                    )));
+                match d.children.as_slice() {
+                    [only] if only.tag == "Var" => {
+                        forall_vars_vec.push(only.text.trim().to_string());
+                    }
+                    _ => {
+                        return Err(ImportError::MalformedXml(format!(
+                            "<declare> must contain exactly one <Var> child, found {} child element(s) (in <Forall>)",
+                            d.children.len()
+                        )));
+                    }
                 }
-                forall_vars_vec.push(var_children[0].text.trim().to_string());
             }
             let forall_vars: BTreeSet<String> = forall_vars_vec.into_iter().collect();
 
             let formula = node.child("formula").ok_or_else(|| ImportError::MalformedXml(
                 "Forall missing <formula>".to_string(),
             ))?;
-            let body_node = formula.children.first().ok_or_else(|| ImportError::MalformedXml(
-                "Forall <formula> has no child".to_string(),
-            ))?;
+            // Single-cardinality: the Forall <formula> holds exactly one body element
+            // (an <Implies> or a bare atom); a surplus sibling is rejected (sq-anuo9).
+            let body_node = formula.only_child("Forall <formula>")?;
             match body_node.tag.as_str() {
                 "Implies" => parse_implies(body_node, &forall_vars),
                 other => {
@@ -1224,10 +1270,11 @@ fn parse_implies(node: &XmlNode, forall_vars: &BTreeSet<String>) -> Result<Vec<R
         "Implies missing <then>".to_string(),
     ))?;
 
-    // Parse the body condition.
-    let body_child = if_node.children.first().ok_or_else(|| ImportError::MalformedXml(
-        "<if> has no child condition".to_string(),
-    ))?;
+    // Parse the body condition. Single-cardinality: the <if> holds exactly one condition.
+    // A surplus condition sibling used to be silently dropped by `.children.first()` — for
+    // `<if>` that drops a CONJUNCT, weakening the guard → OVER-derivation (unsound). This is
+    // the soundness-relevant site; reject surplus fail-closed (sq-anuo9). [SONNET-4.6]
+    let body_child = if_node.only_child("<if>")?;
     let body_cond = parse_condition(body_child)?;
 
     // Alpha-rename all Exists-declared vars to globally fresh names (Fix-1).
@@ -1238,10 +1285,10 @@ fn parse_implies(node: &XmlNode, forall_vars: &BTreeSet<String>) -> Result<Vec<R
     let mut counter = 0u32;
     let body_cond = alpha_rename_cond(body_cond, &mut counter, &mut universe);
 
-    // Parse the head.
-    let then_child = then_node.children.first().ok_or_else(|| ImportError::MalformedXml(
-        "<then> has no child".to_string(),
-    ))?;
+    // Parse the head. Single-cardinality: the <then> holds exactly one head element (a
+    // positive atom or a conjunctive <And>). A surplus head sibling used to be silently
+    // dropped → under-derivation; reject it fail-closed (sq-anuo9). [SONNET-4.6]
+    let then_child = then_node.only_child("<then>")?;
     let head = parse_head(then_child)?;
 
     // Or-split / Exists-flatten → one rule per body disjunct.
@@ -1327,9 +1374,9 @@ fn interpret_group(group: &XmlNode, doc: &mut Document) -> Result<(), ImportErro
                 // The old code called parse_sentence(child) where child.tag=="sentence",
                 // which always errored with UnrecognizedElement since parse_sentence only
                 // handles Forall/Frame/Member/Subclass/Equal at the top level.
-                let actual = child.children.first().ok_or_else(|| ImportError::MalformedXml(
-                    "<sentence> wrapper has no child sentence element".to_string(),
-                ))?;
+                // Single-cardinality: the <sentence> wrapper holds exactly one sentence
+                // element; a surplus sibling sentence is rejected, not dropped (sq-anuo9).
+                let actual = child.only_child("<sentence> wrapper")?;
                 let rules = parse_sentence(actual)?;
                 for rule in rules {
                     doc.push(rule);
@@ -2387,6 +2434,316 @@ mod tests {
             "expected MalformedXml for duplicate <if>, got: {}",
             err
         );
+    }
+
+    // ---- sq-anuo9: surplus-child rejection on single-cardinality wrappers ----
+    //
+    // On NON-schema-valid input, single-cardinality wrappers reached via the old
+    // `.children.first()` silently DROPPED surplus siblings, contradicting the module
+    // doc's universal "nothing is silently skipped or dropped". The `<if>` case is the
+    // soundness-relevant one — a dropped conjunct WEAKENS the guard → OVER-derivation.
+    // Each test is a mutation-check: reverting the corresponding `only_child` call to
+    // `.children.first()` makes `import` return `Ok` (silently dropping the surplus),
+    // turning the `expect_err`/`unwrap_err` RED. Conformant RIF-XML (exactly one child
+    // per wrapper) is unaffected: the paired control in the `<if>` test imports fine, and
+    // the full existing suite (MINIMAL_RULE_XML, OR_SPLIT_XML, EXISTS_FLATTEN_XML, …)
+    // stays green. [SONNET-4.6]
+
+    /// Assert `xml` is rejected with `MalformedXml` whose message mentions `needle`.
+    fn assert_surplus_rejected(xml: &[u8], needle: &str) {
+        let err = import(xml).unwrap_err();
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml (surplus single-cardinality child), got: {}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(needle),
+            "MalformedXml message must mention {}: {}",
+            needle,
+            msg
+        );
+    }
+
+    /// SOUNDNESS (over-derivation): an `<if>` holding TWO condition children must be
+    /// rejected. The old `.children.first()` kept only the first `<Frame>` and dropped
+    /// the second conjunct, so the imported rule had a strictly WEAKER body (fires on
+    /// more inputs) → unsound over-derivation. Fail-closed rejection is correct. The
+    /// paired control proves the surplus sibling is the SOLE cause of the rejection.
+    #[test]
+    fn test_surplus_if_child_rejected_over_derivation() {
+        // Malformed: <if> directly contains TWO <Frame> conjuncts (no <And> wrapper).
+        let malformed = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w</Const></slot></Frame>
+      </if>
+      <then>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+      </then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(malformed, "<if>");
+
+        // Control: the SAME rule with a single <if> child imports cleanly — the surplus
+        // sibling above is the sole cause of the rejection, not some unrelated defect.
+        let control = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+      </if>
+      <then>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+      </then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        let doc = import(control).expect("single-child <if> is conformant and must import");
+        assert_eq!(doc.rules.len(), 1, "control rule must import as exactly one rule");
+    }
+
+    /// `<then>` holding TWO head atoms drops the second (under-derivation) → rejected.
+    /// A conjunctive head must be expressed as `<then><And>…</And></then>`, so two bare
+    /// `<Frame>` children directly under `<then>` are malformed.
+    #[test]
+    fn test_surplus_then_child_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+      </then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<then>");
+    }
+
+    /// A body `<formula>` inside `<And>` holding TWO condition children → rejected
+    /// (`parse_formula_child`).
+    #[test]
+    fn test_surplus_formula_child_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><And>
+        <formula>
+          <Frame><object><Var>x</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+          <Frame><object><Var>x</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w</Const></slot></Frame>
+        </formula>
+      </And></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<formula>");
+    }
+
+    /// The `<formula>` directly under a `<Forall>` holding a surplus sibling (an
+    /// `<Implies>` plus a stray `<Frame>`) → rejected (`parse_sentence` Forall arm).
+    #[test]
+    fn test_surplus_forall_formula_child_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula>
+      <Implies>
+        <if><Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+        <then><Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+      </Implies>
+      <Frame><object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/t</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/u</Const></slot></Frame>
+    </formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<formula>");
+    }
+
+    /// A `<formula>` inside a conjunctive HEAD `<And>` holding two head atoms → rejected
+    /// (`parse_head`).
+    #[test]
+    fn test_surplus_head_formula_child_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then><And>
+        <formula>
+          <Frame><object><Var>x</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+          <Frame><object><Var>x</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+        </formula>
+      </And></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<formula>");
+    }
+
+    /// A term wrapper `<object>` holding TWO term children → rejected (`parse_first_term`).
+    /// Representative of the `<object>/<instance>/<class>/<sub>/<sup>/<left>/<right>` class.
+    #[test]
+    fn test_surplus_object_term_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/extra</Const>
+      </object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<object>");
+    }
+
+    /// A term wrapper `<instance>` (Member) holding TWO term children → rejected. Confirms
+    /// `parse_first_term` names the ACTUAL wrapper tag, not a hard-coded one.
+    #[test]
+    fn test_surplus_instance_term_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Member>
+      <instance>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/i</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/extra</Const>
+      </instance>
+      <class><Const type="http://www.w3.org/2007/rif#iri">http://ex/C</Const></class>
+    </Member>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<instance>");
+    }
+
+    /// An `<External><content>` holding TWO children → rejected (`parse_external`).
+    #[test]
+    fn test_surplus_external_content_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><External>
+        <content>
+          <Atom><op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#is-literal-integer</Const></op>
+            <args><Var>x</Var></args></Atom>
+          <Atom><op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#is-literal-integer</Const></op>
+            <args><Var>x</Var></args></Atom>
+        </content>
+      </External></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<content>");
+    }
+
+    /// An `<External>` `<op>` wrapper holding TWO `<Const>` children → rejected
+    /// (`parse_external`).
+    #[test]
+    fn test_surplus_external_op_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><External>
+        <content><Atom>
+          <op>
+            <Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#is-literal-integer</Const>
+            <Const type="http://www.w3.org/2007/rif#iri">http://ex/extra</Const>
+          </op>
+          <args><Var>x</Var></args>
+        </Atom></content>
+      </External></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<op>");
+    }
+
+    /// A `<sentence>` wrapper holding TWO sentence elements → rejected (`interpret_group`).
+    #[test]
+    fn test_surplus_sentence_wrapper_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group>
+    <sentence>
+      <Frame><object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s1</Const></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+      <Frame><object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s2</Const></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+    </sentence>
+  </Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<sentence>");
+    }
+
+    /// A `<declare>` holding a stray NON-`<Var>` sibling → rejected. The earlier Fix-6
+    /// filter-to-`<Var>` guard TOLERATED this (it silently ignored the stray `<Const>`);
+    /// sq-anuo9 tightens it to "exactly one child, and it must be a `<Var>`". (Forall arm.)
+    #[test]
+    fn test_declare_stray_nonvar_child_rejected_forall() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var><Const type="http://www.w3.org/2007/rif#iri">http://ex/junk</Const></declare>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "declare");
+    }
+
+    /// Same stray-non-`<Var>` tolerance fix in the `<Exists>` (`parse_condition`) arm.
+    #[test]
+    fn test_declare_stray_nonvar_child_rejected_exists() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Exists>
+        <declare><Var>a</Var><Const type="http://www.w3.org/2007/rif#iri">http://ex/junk</Const></declare>
+        <formula><Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Var>a</Var></slot></Frame></formula>
+      </Exists></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "declare");
     }
 
     // ---- Const whitespace round-trip (Fix-3) ---------------------------------
