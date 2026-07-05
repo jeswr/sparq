@@ -259,13 +259,16 @@ struct SessionSets {
 /// # Invariant (equivalence to a from-scratch rebuild)
 ///
 /// Whenever `memo` is `Some`, it equals `AuthIndex::accessible(session, mode)` for the
-/// current auth view: a scoped invalidation drops exactly the written origin's slice + the
-/// `memo` and marks the origin `dirty`; the next read re-derives only the dirty origins via
-/// [`AuthIndex::accessible_in_origin`] and re-assembles. Because a WAC/ACP grant is confined
-/// to its ACL's origin, the untouched origins' slices stay exactly what a full rebuild would
-/// produce — so the reassembled set is byte-for-byte the from-scratch `accessible` set. A
-/// FULL re-materialization drops the whole entry (the entry is transient index state, never
-/// storage), so no stale grant can outlive a revocation.
+/// current auth view: a scoped invalidation drops exactly the changed origins' slices + the
+/// `memo` and marks those origins `dirty`; the next read re-derives only the dirty origins
+/// via [`AuthIndex::accessible_in_origin`] and re-assembles. **Sound by construction —
+/// diff-based** ([SONNET-4.6] sq-b7k7u fix): `reindex_with` diffs old vs new `AuthIndex`
+/// per-origin and invalidates exactly the origins whose (allow, deny, cond) buckets changed.
+/// No confinement lemma assumed: WAC agentGroup membership, foreign-subject triples, and
+/// ACP cross-document indirection can all route a write at origin A through grants that
+/// affect origin B; the diff catches every such case, because if B's grants changed, B's
+/// index buckets changed. A FULL re-materialization drops the whole entry (the entry is
+/// transient index state, never storage), so no stale grant can outlive a revocation.
 #[derive(Default)]
 struct SessionEntry {
     per_origin: FxHashMap<String, Vec<NamedNode>>,
@@ -285,11 +288,16 @@ impl SessionEntry {
 /// [OPUS-4.8] sq-b7k7u (issue #1571) — how far a re-materialization must invalidate the
 /// per-session cache. `Full` (the default for any change whose blast radius is the whole
 /// store) clears every entry; `Origin` (an atomic single-`.acl`/`.acr` `put_acl`/`delete_acl`)
-/// invalidates only the written pod's origin, keeping every other pod's cached view warm.
+/// triggers diff-based invalidation: `reindex_with` diffs old vs new `AuthIndex` per-origin
+/// and invalidates exactly the origins whose buckets changed — which may include origins
+/// beyond the ACL's own when a cross-origin dependency (agentGroup, foreign-subject grant,
+/// ACP cross-document indirection) is involved. Falls back to `Full` when the matcher maps
+/// change (they are not origin-bucketed). [SONNET-4.6] sq-b7k7u fix: the origin hint is no
+/// longer carried — the actual changed origins are derived entirely from the index diff.
 #[derive(Clone, Copy)]
-enum ReindexScope<'a> {
+enum ReindexScope {
     Full,
-    Origin(&'a str),
+    Origin,
 }
 
 impl PodStore {
@@ -350,7 +358,7 @@ impl PodStore {
     /// uses with [`ReindexScope::Origin`] so an ACL write to one pod does not cold-start every
     /// other pod's cached view (issue #1571). The public method keeps the full-clear default.
     /// [OPUS-4.8] sq-b7k7u.
-    fn materialize_wac_scoped(&mut self, scope: ReindexScope<'_>) -> Result<MaterializeStats, String> {
+    fn materialize_wac_scoped(&mut self, scope: ReindexScope) -> Result<MaterializeStats, String> {
         let stats = materialize_wac(&mut self.graph)?;
         self.reconcile_bridged_after_static();
         self.reindex_with(scope);
@@ -447,7 +455,7 @@ impl PodStore {
     fn materialize_acp_with_scoped(
         &mut self,
         provenance: &AccessProvenance,
-        scope: ReindexScope<'_>,
+        scope: ReindexScope,
     ) -> Result<MaterializeStats, String> {
         let stats = materialize_acp_with(&mut self.graph, provenance)?;
         self.reconcile_bridged_after_static();
@@ -462,20 +470,50 @@ impl PodStore {
     /// - [`ReindexScope::Full`] clears every session's cached set (a change that could touch
     ///   any pod — a wholesale re-materialization, a bridge/trust grant, a wildcard update);
     /// - [`ReindexScope::Origin`] (an atomic `put_acl`/`delete_acl` to one `.acl`/`.acr`)
-    ///   invalidates ONLY the written origin's slice in each entry, because grant confinement
-    ///   guarantees that write changed no other origin's grants (see
-    ///   [`PodStore::invalidate_cache_origin`]).
+    ///   uses **diff-based** invalidation ([SONNET-4.6] sq-b7k7u fix): the old and new
+    ///   `AuthIndex` are compared per-origin, and exactly the origins whose (allow, deny,
+    ///   cond) buckets changed are invalidated via [`PodStore::invalidate_cache_origin`]. If
+    ///   the matcher maps (`matcher_agents`/`matcher_clients`/`matcher_issuers`) differ — they
+    ///   are not origin-bucketed and feed conditional-grant outcomes in any origin — the
+    ///   fallback is a full cache clear. Correctness follows from index equality: if a
+    ///   cross-origin dependency (agentGroup membership, foreign-subject grant, ACP cross-doc
+    ///   indirection) causes a write at A to change B's grants, B's new index buckets differ
+    ///   from B's old ones → B is invalidated automatically; no semantic confinement argument
+    ///   needed.
     ///
     /// The structural `acl_index` is dropped either way — it can never be more stale than
     /// `auth`, so a rule change (put_acl/delete_acl/materialize_*/bridge/trust) is reflected
     /// by the next decision and no stale ACL discovery survives.
-    fn reindex_with(&mut self, scope: ReindexScope<'_>) {
-        self.auth = Arc::new(AuthIndex::from_graph(&self.graph));
+    fn reindex_with(&mut self, scope: ReindexScope) {
+        let old_auth = Arc::clone(&self.auth);
+        let new_auth = Arc::new(AuthIndex::from_graph(&self.graph));
+        self.auth = Arc::clone(&new_auth);
         self.epoch += 1;
         match scope {
             // D3: the cache is transient; the triples are the storage.
             ReindexScope::Full => self.cache.clear(),
-            ReindexScope::Origin(origin) => self.invalidate_cache_origin(origin),
+            ReindexScope::Origin => {
+                // [SONNET-4.6] sq-b7k7u fix: diff-based invalidation.
+                // If the matcher maps changed, they are not origin-bucketed → full fallback.
+                if !old_auth.matchers_eq(&new_auth) {
+                    self.cache.clear();
+                } else {
+                    // Collect the union of all origins in old + new; invalidate exactly those
+                    // whose per-origin buckets (allow/deny/cond) changed.
+                    let all_origins: FxHashSet<String> = old_auth
+                        .origin_keys()
+                        .chain(new_auth.origin_keys())
+                        .map(str::to_owned)
+                        .collect();
+                    let changed: Vec<String> = all_origins
+                        .into_iter()
+                        .filter(|o| !old_auth.bucket_eq(&new_auth, o))
+                        .collect();
+                    for origin in changed {
+                        self.invalidate_cache_origin(&origin);
+                    }
+                }
+            }
         }
         // [OPUS-4.8] sq-j8qtt: drop the persistent structural ACL index in lock-step with
         // the auth rebuild. `take` empties the cell; the next `decide`/`resolve_acl` rebuilds
@@ -483,12 +521,12 @@ impl PodStore {
         self.acl_index.take();
     }
 
-    /// [OPUS-4.8] sq-b7k7u (issue #1571) — scoped session-cache invalidation: drop only the
+    /// [OPUS-4.8] sq-b7k7u (issue #1571) — per-origin session-cache invalidation: drop the
     /// `origin` slice of every cached session and force its full memo to be re-assembled,
-    /// leaving all OTHER origins' slices warm. Sound because a WAC/ACP grant is confined to
-    /// its ACL's origin, so an ACL write at `origin` changed no other origin's accessible
-    /// set — and a session that previously had NO grant on `origin` still re-checks it (the
-    /// origin is marked `dirty` on every entry), so a newly-granted pod is picked up too.
+    /// leaving all OTHER origins' slices warm. Called by `reindex_with`'s diff-based
+    /// approach for EACH origin whose index buckets actually changed — so a session that
+    /// previously had NO grant on `origin` still re-checks it (the origin is marked `dirty`
+    /// on every entry), picking up newly-granted access. [SONNET-4.6] sq-b7k7u fix.
     fn invalidate_cache_origin(&mut self, origin: &str) {
         for entry in self.cache.values_mut() {
             entry.per_origin.remove(origin);
@@ -734,15 +772,16 @@ impl PodStore {
     }
 
     /// The memoized [`SessionSets`] for this session+mode, re-derived at most the
-    /// scoped-invalidated origins since the last read ([OPUS-4.8] sq-b7k7u, issue #1571).
+    /// diff-invalidated origins since the last read ([OPUS-4.8] sq-b7k7u, issue #1571;
+    /// [SONNET-4.6] sq-b7k7u fix).
     ///
     /// A warm entry (`memo` present) is an `Arc`-clone-cheap hit; otherwise the full set is
     /// re-assembled from `per_origin` — a cold entry does ONE whole-store
-    /// [`AuthIndex::accessible`] to seed all buckets, while a scoped-invalidated entry
+    /// [`AuthIndex::accessible`] to seed all buckets, while a diff-invalidated entry
     /// re-derives ONLY its `dirty` origins via [`AuthIndex::accessible_in_origin`] and reuses
     /// every untouched origin's slice. The assembled set is byte-for-byte
-    /// `AuthIndex::accessible(s, mode)` for the current auth view (grant confinement keeps the
-    /// reused slices exact).
+    /// `AuthIndex::accessible(s, mode)` for the current auth view — sound by construction
+    /// because `reindex_with` marks dirty exactly the origins whose index buckets changed.
     fn session_sets(&mut self, s: &Session, mode: Mode) -> &SessionSets {
         let key = (
             s.agent.map(str::to_owned),

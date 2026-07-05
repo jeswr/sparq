@@ -251,11 +251,12 @@ impl PodStore {
         self.graph.named.push((term.clone(), new_graph));
 
         // Re-materialize; roll back to the prior content on any error. [OPUS-4.8] sq-b7k7u
-        // (issue #1571): the whole WAC/ACP view is still re-derived, but the session cache is
-        // invalidated only at this ACL's ORIGIN — grant confinement (rules/wac.n3,
-        // rules/acp-a.n3) proves this write changed no other pod's grants, so every other
-        // pod's cached view stays warm. The rollback path stays a full clear (conservative).
-        let scope = crate::ReindexScope::Origin(crate::loader::iri_origin(acl_iri));
+        // (issue #1571): the whole WAC/ACP view is still re-derived, but the session cache
+        // uses diff-based invalidation — `reindex_with` diffs old vs new AuthIndex per-origin
+        // and invalidates exactly the origins whose buckets changed ([SONNET-4.6] sq-b7k7u
+        // fix). Every other pod's cached view stays warm if its grants are unaffected.
+        // The rollback path stays a full clear (conservative).
+        let scope = crate::ReindexScope::Origin;
         if let Err(e) = self.rematerialize_scoped(acp, scope) {
             self.restore_named_slot(&term, prior, acp);
             return Err(e);
@@ -278,9 +279,9 @@ impl PodStore {
         let prior = self.take_named_slot(&term);
         let existed = prior.is_some();
 
-        // [OPUS-4.8] sq-b7k7u: scope the session-cache invalidation to this ACL's origin —
-        // deleting an ACL can only narrow grants under its own subtree (same origin).
-        let scope = crate::ReindexScope::Origin(crate::loader::iri_origin(acl_iri));
+        // [OPUS-4.8] sq-b7k7u: use diff-based invalidation — reindex_with diffs old vs new
+        // AuthIndex per-origin and invalidates exactly the origins whose buckets changed.
+        let scope = crate::ReindexScope::Origin;
         if let Err(e) = self.rematerialize_scoped(acp, scope) {
             self.restore_named_slot(&term, prior, acp);
             return Err(e);
@@ -330,7 +331,7 @@ impl PodStore {
     /// the session cache only at `scope` (the successful `put_acl`/`delete_acl` path scopes to
     /// the written ACL's origin). ACP re-materializes with no provenance, exactly as the
     /// non-scoped `materialize_acp()` the write path used before.
-    fn rematerialize_scoped(&mut self, acp: bool, scope: crate::ReindexScope<'_>) -> Result<(), String> {
+    fn rematerialize_scoped(&mut self, acp: bool, scope: crate::ReindexScope) -> Result<(), String> {
         if acp {
             self.materialize_acp_with_scoped(&crate::AccessProvenance::new(), scope).map(|_| ())
         } else {

@@ -318,17 +318,17 @@ fn collect_agents(
 }
 
 /// The origin (`scheme://authority`) of an IRI — the coarse pod boundary used to bucket
-/// the auth index + session cache and to scope an ACL-write invalidation ([OPUS-4.8]
-/// sq-b7k7u). `https://pod.ex/a/b` → `https://pod.ex`; an authority with no path
-/// (`https://pod.ex`) is its own origin. An IRI with no `://` (e.g. `urn:…`) returns the
-/// whole IRI — a self-contained fallback bucket that no slash-hierarchy `.acl` governs, so
-/// it is only ever invalidated by a FULL re-materialization (never a scoped ACL write).
+/// the auth index + session cache for an ACL-write invalidation ([OPUS-4.8] sq-b7k7u).
+/// `https://pod.ex/a/b` → `https://pod.ex`; an authority with no path (`https://pod.ex`)
+/// is its own origin. An IRI with no `://` (e.g. `urn:…`) returns the whole IRI — a
+/// self-contained fallback bucket only ever invalidated by a FULL re-materialization.
 ///
-/// Soundness of scoping on this key: a WAC/ACP grant can only name the ACL's own resource
-/// or a same-origin slash-descendant (`rules/wac.n3` `acl:accessTo`/`acl:default`,
-/// `rules/acp-a.n3` `appliesToResource`), so every graph a `.acl`/`.acr` at origin `O`
-/// governs has origin `O` — invalidating `O` covers exactly (a conservative superset of)
-/// the graphs that ACL write could have changed.
+/// Soundness of scoping on this key: `reindex_with`'s **diff-based** invalidation
+/// ([SONNET-4.6] sq-b7k7u fix) diffs old vs new `AuthIndex` per-origin and invalidates
+/// exactly the origins whose buckets changed — so a cross-origin dependency (WAC
+/// agentGroup membership, foreign-subject grant, ACP cross-document indirection) is
+/// caught automatically, without relying on any confinement argument about where grants
+/// can originate.
 pub(crate) fn iri_origin(iri: &str) -> &str {
     match iri.find("://") {
         Some(i) => {

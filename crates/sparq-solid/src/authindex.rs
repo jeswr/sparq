@@ -276,12 +276,13 @@ pub struct AuthIndex {
     /// the audited walk used before is exactly the union of these buckets, so
     /// [`AuthIndex::accessible`] is byte-for-byte unchanged; the buckets additionally let
     /// [`AuthIndex::accessible_in_origin`] answer a decision restricted to one origin
-    /// without touching the others — the substrate for `PodStore`'s per-origin decide
-    /// and its scoped session-cache invalidation on an ACL write (issue #1571). Grant
-    /// confinement makes the origin key sound: a WAC `acl:accessTo`/`acl:default` (resp.
-    /// ACP `appliesToResource`) can only name the ACL's own resource or a same-origin
-    /// slash-descendant, so every graph a given `.acl`/`.acr` governs shares that ACL's
-    /// origin (see `rules/wac.n3` / `rules/acp-a.n3`).
+    /// without touching the others — the substrate for `PodStore`'s per-origin decide and
+    /// its **diff-based** session-cache invalidation on an ACL write (issue #1571,
+    /// sq-b7k7u fix). Sound by construction: `reindex_with` diffs old vs new `AuthIndex`
+    /// per-origin and invalidates exactly the origins whose buckets changed — no
+    /// confinement lemma assumed (WAC agentGroup membership, foreign-subject triples, and
+    /// ACP cross-document indirection can all let a write at origin A affect origin B's
+    /// grants; the diff catches every such case automatically).
     allow: FxHashMap<(String, Mode), FxHashMap<String, Vec<NamedNode>>>,
     deny: FxHashMap<(String, Mode), FxHashMap<String, Vec<NamedNode>>>,
     /// Conditional (ACP `noneOf`) grants, bucketed by their target graph's origin. A grant
@@ -483,12 +484,88 @@ impl AuthIndex {
     /// whose origin (`scheme://authority`) is `origin` — the same fail-closed
     /// `∪ allow ∖ ∪ deny` (+ conditional) computation, but visiting only that origin's
     /// buckets. It is exactly `accessible(s, mode)` filtered to `origin`
-    /// (`accessible == ⋃ over origins of accessible_in_origin`, since grant confinement
-    /// keeps every governed graph in its ACL's origin), so it lets a per-request decision
-    /// and a scoped session-cache re-derivation pay only the affected origin's cost
-    /// instead of the whole store's. Internal to the crate.
+    /// (`accessible == ⋃ over origins of accessible_in_origin`), so it lets a per-request
+    /// decision and a diff-based session-cache re-derivation pay only the affected origin's
+    /// cost instead of the whole store's. Internal to the crate.
     pub(crate) fn accessible_in_origin(&self, s: &Session, mode: Mode, origin: &str) -> Vec<NamedNode> {
         self.accessible_impl(s, mode, Some(origin))
+    }
+
+    /// Returns all origin strings present in this index's allow/deny/cond buckets (may
+    /// yield duplicates; collect into a set for uniqueness). Used by `reindex_with`'s
+    /// diff-based invalidation to enumerate the union of old + new origins. [SONNET-4.6]
+    /// sq-b7k7u fix.
+    pub(crate) fn origin_keys(&self) -> impl Iterator<Item = &str> {
+        let a = self.allow.values().flat_map(|by_o| by_o.keys().map(String::as_str));
+        let d = self.deny.values().flat_map(|by_o| by_o.keys().map(String::as_str));
+        let c = self.cond.keys().map(String::as_str);
+        a.chain(d).chain(c)
+    }
+
+    /// Returns `true` iff the allow/deny/cond buckets for `origin` are identical between
+    /// `self` and `other` — same set of `(principal, mode, graph_iri)` triples in the
+    /// allow and deny maps, and same canonical set of conditional grants.
+    ///
+    /// Used by `reindex_with`'s diff-based invalidation: if this returns `false` for an
+    /// origin, that origin's session-cache slice must be re-derived. [SONNET-4.6]
+    /// sq-b7k7u fix — no confinement lemma assumed.
+    pub(crate) fn bucket_eq(&self, other: &AuthIndex, origin: &str) -> bool {
+        // Compare (principal, mode) → graph sets for allow and deny at this origin.
+        fn am_triples(
+            map: &FxHashMap<(String, Mode), FxHashMap<String, Vec<NamedNode>>>,
+            origin: &str,
+        ) -> FxHashSet<(String, Mode, String)> {
+            let mut out = FxHashSet::default();
+            for ((p, m), by_o) in map {
+                if let Some(gs) = by_o.get(origin) {
+                    for g in gs {
+                        out.insert((p.clone(), *m, g.as_str().to_owned()));
+                    }
+                }
+            }
+            out
+        }
+        if am_triples(&self.allow, origin) != am_triples(&other.allow, origin) {
+            return false;
+        }
+        if am_triples(&self.deny, origin) != am_triples(&other.deny, origin) {
+            return false;
+        }
+        // Compare conditional grants: canonical string per grant (sorted except list),
+        // collected as a set to be order-independent.
+        fn cond_key(g: &ConditionalGrant) -> String {
+            let mut ex = g.except.clone();
+            ex.sort_unstable();
+            format!(
+                "{}|{:?}|{}|{}|{}|{}|{:?}|{:?}|{}",
+                g.allow as u8,
+                g.mode,
+                g.agent,
+                g.client,
+                g.issuer,
+                g.graph.as_ref().map_or("", |n| n.as_str()),
+                g.not_before,
+                g.not_after,
+                ex.join(",")
+            )
+        }
+        let self_conds: FxHashSet<String> =
+            self.cond.get(origin).into_iter().flatten().map(cond_key).collect();
+        let other_conds: FxHashSet<String> =
+            other.cond.get(origin).into_iter().flatten().map(cond_key).collect();
+        self_conds == other_conds
+    }
+
+    /// Returns `true` iff `matcher_agents`, `matcher_clients`, and `matcher_issuers` are
+    /// identical between `self` and `other`. These matcher maps are **not** origin-bucketed:
+    /// a change in any matcher can affect conditional-grant outcomes in any origin, so a
+    /// matcher difference triggers full cache invalidation in `reindex_with` (the
+    /// diff-based approach falls back to `Full` when matchers change). [SONNET-4.6]
+    /// sq-b7k7u fix.
+    pub(crate) fn matchers_eq(&self, other: &AuthIndex) -> bool {
+        self.matcher_agents == other.matcher_agents
+            && self.matcher_clients == other.matcher_clients
+            && self.matcher_issuers == other.matcher_issuers
     }
 
     /// The shared accessible walk. `only == Some(o)` restricts every lookup to origin `o`'s
