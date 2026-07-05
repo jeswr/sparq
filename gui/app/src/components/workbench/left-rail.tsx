@@ -10,7 +10,7 @@
 //   (3) TOOLS list — each a VERB opened as a tab with an honesty-tier dot (NOT a page).
 
 import * as React from "react";
-import { ChevronDown, ChevronRight, Plus, Circle, Database, FolderTree, FileUp, Link2 } from "lucide-react";
+import { ChevronRight, Plus, Database, FolderTree, FileUp, Link2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useEngine } from "@/lib/engine-context";
@@ -19,6 +19,8 @@ import { useImportDrawer } from "@/components/workbench/import-drawer";
 import { ExportDataMenu } from "@/components/workbench/store-export";
 import { TIER_META, type ToolDef } from "@/data/tools";
 import { resolveTool } from "@/components/workbench/tool-panel";
+// [SONNET-4.6] sq-lmlch — the real workspace switcher UI (replaces the dead stub).
+import { WorkspaceSwitcher } from "@/components/workbench/workspace-switcher";
 
 interface LeftRailProps {
   tools: ToolDef[];
@@ -187,16 +189,9 @@ export function LeftRail({ tools, activeId, onOpenTool }: LeftRailProps) {
 
   return (
     <nav className="flex w-56 shrink-0 flex-col overflow-y-auto border-r bg-sidebar text-sidebar-foreground">
-      {/* (1) Workspace switcher — the persistent model is sq-atb0; foundation = default. */}
+      {/* (1) Workspace switcher — [SONNET-4.6] sq-lmlch: replaced stub with real switcher. */}
       <div className="border-b px-2 py-2">
-        <button
-          className="flex w-full items-center gap-1.5 rounded-md border bg-background px-2 py-1.5 text-left text-xs hover:bg-sidebar-accent/40"
-          title="Workspace switcher — persistent workspaces are a later phase (sq-atb0)"
-        >
-          <Circle className="size-2.5 fill-[var(--success)] text-[var(--success)] drop-shadow-[0_0_5px_var(--success)]" />
-          <span className="flex-1 truncate font-medium">default workspace</span>
-          <ChevronDown className="size-3 text-muted-foreground" />
-        </button>
+        <WorkspaceSwitcher />
       </div>
 
       {/* (2) Datasets tree of the LIVE store. */}
