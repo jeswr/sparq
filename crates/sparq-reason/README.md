@@ -67,6 +67,8 @@ let g = Graph::from_parts(dict, triples);
   substrate's `CompareTerm` for dictionary ids, so ordering entailed solutions
   (`compare::sort_ids` / `compare::compare_ids`) is parity-identical to the SPARQL engine's `ORDER BY`
   total order (pinned byte-for-byte against a real engine query by `tests/compare_parity.rs`).
+  Since sq-wjl8i this is a genuine TOTAL order across mixed literal kinds — kind-first rank,
+  exact mixed-tier numeric ties, NaN totalised first (see the substrate `compare` docs).
   Monomorphic (no trait object on the sort loop) and purely additive — no materialiser calls
   it, so the entailed closure and its emission order are unchanged. Off by default.
 

@@ -19,7 +19,7 @@ use sparq_core::Graph;
 // hot path (research/shared-eval-substrate.md, Option C, Phase 2). This is a behaviour-neutral
 // code-move: the engine re-imports the same items here under the same names, so every call
 // site below is unchanged and the W3C conformance / ORDER BY / numeric tests are bit-identical.
-use sparq_substrate::numeric::{parse_xsd_f32, parse_xsd_f64, split_decimal, ArithOp, Dec, Num};
+use sparq_substrate::numeric::{f64_exact_decimal, parse_xsd_f32, parse_xsd_f64, split_decimal, ArithOp, Dec, Num};
 // [OPUS-4.8] sq-hknqs (epic sq-qonbz, Phase 3): the four id-tuple join kernels live in the
 // shared substrate now (merge / hash / bind / leapfrog-trie). The engine's planner, `Bindings`,
 // `LocalVocab` interning and `ScanCmp` pushdown stay private here; the thin adapters below build
@@ -36,7 +36,7 @@ use sparq_substrate::join as sjoin;
 // `Value` / `LitKind` / `value_compare_strict` stay engine-private (they also drive the
 // relational operators); only the algorithm moved. Behaviour-neutral: the W3C SPARQL / ORDER BY
 // / FILTER conformance is bit-identical.
-use sparq_substrate::compare::{compare_terms, CompareTerm, TermClass};
+use sparq_substrate::compare::{compare_terms, CompareTerm, LiteralKind, TermClass};
 use rustc_hash::FxHashSet;
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression, PropertyPathExpression,
@@ -6548,7 +6548,19 @@ fn minmax_temporal(
         best = Some(match best {
             None => (t, id),
             Some((bt, bid)) => {
-                let ord = Temporal::cmp_t(t, bt).unwrap_or_else(|| lex(id).cmp(lex(bid)));
+                // [FABLE-5] sq-wjl8i: KIND-FIRST, mirroring `compare_values` — a
+                // cross-kind (dateTime vs date) pair ranks by `LiteralKind`
+                // (DateTime < Date), never lexically; the timeline order (with the
+                // lexical fallback for the indeterminate window) applies within a kind.
+                let ord = if t.kind != bt.kind {
+                    if t.kind == sparq_core::temporal::TemporalKind::DateTime {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                } else {
+                    Temporal::cmp_t(t, bt).unwrap_or_else(|| lex(id).cmp(lex(bid)))
+                };
                 let replace = if is_min { ord == Ordering::Less } else { ord != Ordering::Less };
                 if replace {
                     (t, id)
@@ -6642,6 +6654,18 @@ enum SortCell {
 fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell) -> Ordering {
     match (a, c) {
         (SortCell::Temp { t: ta, id: ia }, SortCell::Temp { t: tb, id: ib }) => {
+            // [FABLE-5] sq-wjl8i: KIND-FIRST, mirroring `compare_values` — a dateTime
+            // never value-compares against a date (`LiteralKind::DateTime < Date`); the
+            // timeline comparison (then the lexical fallback for the indeterminate
+            // mixed-timezone window) applies only within one temporal kind. Ill-formed
+            // temporals never enter the cache, so both cells here are well-formed.
+            if ta.kind != tb.kind {
+                return if ta.kind == sparq_core::temporal::TemporalKind::DateTime {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+            }
             match Temporal::cmp_t(*ta, *tb) {
                 Some(o) => o,
                 None => cmp_sort_cells_lex(graph, *ia, *ib),
@@ -6681,9 +6705,12 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
 /// [OPUS-4.8] sq-rikm7: f64 rounding is MONOTONIC, so it only ever collapses distinct
 /// numeric values to Equal — so on (and only on) an f64 tie, disambiguate via the ids'
 /// exact lexicals (`exact_numeric_lexical` + `cmp_decimal_str`, the SAME exact path the
-/// relational `cmp_expr` uses). Integers beyond 2^53 and high-precision decimals then
-/// order by value; float/double ids have no exact lexical and stay Equal (their value IS
-/// the f64). Perf-neutral: the allocation happens only on a tie, never on the fast path.
+/// relational `cmp_expr` uses). [FABLE-5] sq-wjl8i extends the recheck to the MIXED
+/// exact/inexact tie: a float/double id has no exact lexical but its VALUE is exactly
+/// the tied f64, so the exact side compares against the f64's exact decimal expansion —
+/// mirroring `compare_values`' `Num::cmp_total` recheck, so the numeric fast path and
+/// the general path order identically. Perf-neutral: the allocations happen only on a
+/// tie, never on the fast path.
 #[inline]
 fn cmp_sort_num(graph: &Graph, fa: f64, ia: Id, fb: f64, ib: Id) -> Ordering {
     match fa.partial_cmp(&fb) {
@@ -6696,11 +6723,41 @@ fn cmp_sort_num(graph: &Graph, fa: f64, ia: Id, fb: f64, ib: Id) -> Ordering {
             }
             match (graph.exact_numeric_lexical(ia), graph.exact_numeric_lexical(ib)) {
                 (Some(la), Some(lb)) => cmp_decimal_str(&la, &lb).unwrap_or(Ordering::Equal),
-                _ => Ordering::Equal,
+                (Some(la), None) => cmp_exact_lex_f64(&la, fb),
+                (None, Some(lb)) => cmp_exact_lex_f64(&lb, fa).reverse(),
+                // Both float/double: the value IS the tied f64 — a true tie.
+                (None, None) => Ordering::Equal,
             }
         }
         Some(o) => o,
-        None => Ordering::Equal, // NaN: unordered, an incomparable tie (as pre-change).
+        // NaN. Unreachable from ORDER BY sort cells today (the numerics cache uses NaN
+        // as its "not numeric" sentinel, so a NaN literal never becomes a `SortCell::Num`
+        // and routes through `compare_values` instead) — kept in lock-step with the
+        // total order's NaN-first rule so the fast path can never diverge. [FABLE-5] sq-wjl8i
+        None => match (fa.is_nan(), fb.is_nan()) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => Ordering::Equal,
+        },
+    }
+}
+
+/// The mixed exact/inexact leg of the f64-tie recheck: an exact int/decimal LEXICAL
+/// against a (finite, non-NaN) f64's exact decimal expansion — string arithmetic
+/// throughout, arbitrary precision. An infinite f64 image (a numeric lexical beyond
+/// f64's finite range collapsed onto ±INF) bounds every finite exact value directly.
+/// [FABLE-5] sq-wjl8i
+#[cold]
+fn cmp_exact_lex_f64(lex: &str, f: f64) -> Ordering {
+    if f == f64::INFINITY {
+        return Ordering::Less;
+    }
+    if f == f64::NEG_INFINITY {
+        return Ordering::Greater;
+    }
+    match f64_exact_decimal(f) {
+        Some(exp) => cmp_decimal_str(lex, &exp).unwrap_or(Ordering::Equal),
+        None => Ordering::Equal, // NaN: handled by the caller's NaN rule
     }
 }
 
@@ -7924,6 +7981,29 @@ impl CompareTerm for Value {
         }
     }
     #[inline]
+    fn literal_kind(&self) -> LiteralKind {
+        // [FABLE-5] sq-wjl8i: the kind-first rank of the total order. Numeric tracks the
+        // LENIENT `as_num` membership (the same set the numeric arm compares), so a
+        // lexical the exact classifier rejects but `parse_xsd_f64` accepts (e.g.
+        // "1.5"^^xsd:integer) still sorts numerically, exactly as it did pre-fix — with
+        // one exception: a computed boolean (whose lenient f64 view is 0.0/1.0)
+        // classifies as Boolean, keeping it in one kind with boolean LITERALS (both
+        // order `false < true` via `strict_cmp`). ILL-FORMED numeric/temporal lexicals
+        // classify as Other (lexical order): a kind mixing value-ordered and
+        // lexical-fallback pairs is intransitive — the very bug this rank removes.
+        match lit_kind(self) {
+            LitKind::Bool(_) => LiteralKind::Boolean,
+            LitKind::Num(_) if as_num(self).is_some() => LiteralKind::Numeric,
+            LitKind::Str(_) => LiteralKind::String,
+            LitKind::Lang(..) => LiteralKind::Lang,
+            LitKind::DateTime(Some(_)) => LiteralKind::DateTime,
+            LitKind::Date(Some(_)) => LiteralKind::Date,
+            // Ill-formed numerics/temporals, other-XSD, unknown datatypes (and the
+            // unreachable non-literal case — `compare_terms` gates on the class).
+            _ => LiteralKind::Other,
+        }
+    }
+    #[inline]
     fn value_str(&self) -> Option<String> {
         value_str(self)
     }
@@ -7933,14 +8013,18 @@ impl CompareTerm for Value {
     }
     #[inline]
     fn exact_cmp(&self, other: &Self) -> Option<Ordering> {
-        // [OPUS-4.8] sq-rikm7: f64-collapse recheck — when the lenient `as_num` arm reports
-        // two numeric literals EQUAL, distinct integers beyond 2^53 or high-precision
-        // decimals that share one f64 must still order. This is the SAME value-exact numeric
-        // comparison the relational `<`/`=` (`cmp_expr`) and MIN/MAX (`minmax_values`) use —
-        // `num_compare` is exact via the decimal tower for the int/decimal tiers and falls
-        // back to f64 for float/double (whose value IS the f64, so the collapse is correct).
+        // [OPUS-4.8] sq-rikm7 / [FABLE-5] sq-wjl8i: f64-collapse recheck — when the
+        // lenient `as_num` arm reports two numeric literals EQUAL, the pair rechecks
+        // under `Num::cmp_total`, the EXACT-RATIONAL total order: exact via the decimal
+        // tower for int/decimal pairs, exact against the double's exact decimal
+        // expansion for the MIXED exact/inexact pair (the pre-fix `num_compare`
+        // fallback kept the collapsed f64 verdict there, which made the order
+        // intransitive at the 2^53 collapse — witness 1 of sq-wjl8i). The relational
+        // `<`/`=` (`cmp_expr`) and MIN/MAX (`minmax_values`) deliberately KEEP the
+        // XPath promoted semantics via `num_compare`; this total order refines only
+        // their ties. `None` (a lexical beyond the exact tower) keeps the tie.
         match (as_numeric(self), as_numeric(other)) {
-            (Some(a), Some(b)) => num_compare(a, b),
+            (Some(a), Some(b)) => Some(a.cmp_total(b)),
             _ => None,
         }
     }
@@ -7968,14 +8052,19 @@ impl CompareTerm for Value {
     }
 }
 
-/// LENIENT total order for ORDER BY (and the MIN/MAX fallback): SPARQL orders
-/// unbound < blank nodes < IRIs < literals, then by value within each class
-/// (numerics by value; everything else by string form, which keeps the order
-/// deterministic across mixed literal types).
+/// The TOTAL order for ORDER BY (and the MIN/MAX fallback): SPARQL orders
+/// unbound < blank nodes < IRIs < literals (< triple terms), then literals KIND-FIRST —
+/// a fixed `LiteralKind` rank between literal kinds (numeric < boolean < dateTime <
+/// date < string < language-tagged < other), value order only WITHIN a kind (numerics
+/// by exact value with NaN first, dateTimes by timeline, else lexically).
 ///
-/// [OPUS-4.8] sq-vezew: the algorithm now lives in `sparq_substrate::compare::compare_terms`,
-/// generic over the `CompareTerm` trait the engine implements for `Value` above. This is a thin
-/// monomorphised call into the shared substrate — behaviour-identical to the pre-move inline body.
+/// [OPUS-4.8] sq-vezew: the algorithm lives in `sparq_substrate::compare::compare_terms`,
+/// generic over the `CompareTerm` trait the engine implements for `Value` above — a thin
+/// monomorphised call into the shared substrate. [FABLE-5] sq-wjl8i: the order is
+/// deliberately NOT the pre-move lexical-fallback body — cross-kind lexical fallback,
+/// collapsed mixed-tier f64 ties and NaN partiality made it intransitive (three
+/// machine-checked witnesses; see the substrate module docs for what is spec-mandated
+/// vs a documented extension). Relational `<` / `=` semantics are UNTOUCHED.
 #[inline]
 fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
     compare_terms(x, y)
@@ -12144,38 +12233,47 @@ mod f64_collapse_order_agreement {
     #[test]
     fn compare_orders_double_infinities_and_isolates_nan() {
         // [OPUS-4.8] sq-rkzhr: with `as_num` routed through `parse_xsd_f64`, the lenient
-        // compare seam orders the XSD floating specials by value (-INF < finite < +INF),
-        // and NaN is numerically incomparable (the f64 arm's `partial_cmp` -> None, and an
-        // f64 tie is required before any exact recheck, so NaN never reaches one).
+        // compare seam orders the XSD floating specials by value (-INF < finite < +INF).
+        // [FABLE-5] sq-wjl8i: NaN is TOTALISED into the order — it sorts FIRST (before
+        // -INF) and ties with itself, instead of the former `None` (which callers mapped
+        // to Equal, making NaN "equal" to every numeric — the partiality witness).
+        // Relational `<` / `=` keep their NaN type-error semantics untouched.
         let d = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::DOUBLE)));
         let (neg_inf, inf, five, nan) = (d("-INF"), d("INF"), d("5.0E0"), d("NaN"));
         assert_eq!(compare_values(&neg_inf, &five), Some(Ordering::Less));
         assert_eq!(compare_values(&five, &inf), Some(Ordering::Less));
         assert_eq!(compare_values(&neg_inf, &inf), Some(Ordering::Less));
         assert_eq!(compare_values(&inf, &inf), Some(Ordering::Equal));
-        assert_eq!(compare_values(&nan, &five), None);
-        assert_eq!(compare_values(&nan, &nan), None);
+        assert_eq!(compare_values(&nan, &five), Some(Ordering::Less));
+        assert_eq!(compare_values(&five, &nan), Some(Ordering::Greater));
+        assert_eq!(compare_values(&nan, &neg_inf), Some(Ordering::Less));
+        assert_eq!(compare_values(&nan, &nan), Some(Ordering::Equal));
 
-        // End-to-end ORDER BY over stored double specials exercises the REAL query path.
+        // End-to-end ORDER BY over stored double specials exercises the REAL query path
+        // (NaN routes through the general sort cell: the numerics cache uses NaN as its
+        // not-numeric sentinel, so the fast numeric cell never sees it).
         let g = Graph::load_str(
             "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
              ex:a ex:v \"-INF\"^^xsd:double .\n\
              ex:b ex:v \"5.0E0\"^^xsd:double .\n\
-             ex:c ex:v \"INF\"^^xsd:double .\n",
+             ex:c ex:v \"INF\"^^xsd:double .\n\
+             ex:d ex:v \"NaN\"^^xsd:double .\n",
             "turtle",
         )
         .unwrap();
-        assert_eq!(order_by(&g, "ASC(?v)"), vec!["-INF", "5.0E0", "INF"]);
-        assert_eq!(order_by(&g, "DESC(?v)"), vec!["INF", "5.0E0", "-INF"]);
+        assert_eq!(order_by(&g, "ASC(?v)"), vec!["NaN", "-INF", "5.0E0", "INF"]);
+        assert_eq!(order_by(&g, "DESC(?v)"), vec!["INF", "5.0E0", "-INF", "NaN"]);
     }
 
     #[test]
-    fn order_by_mixed_numeric_string_temporal_column_is_unchanged() {
+    fn order_by_mixed_numeric_string_temporal_column_is_deterministic() {
         // A single ORDER BY column mixing a numeric graph term, a plain-string literal and an
-        // xsd:dateTime exercises the new `Num`-vs-`Val` / `Num`-vs-`Temp` sort-cell cross arms
-        // (which reconstruct the pre-change `Val(Num::Double)` representation, so the mixed
-        // order stays byte-identical). SPARQL orders literals: numerics first (by value), then
-        // the deterministic string-form fallback across the remaining literal datatypes.
+        // xsd:dateTime exercises the `Num`-vs-`Val` / `Num`-vs-`Temp` sort-cell cross arms
+        // (which reconstruct the `Val(Num::Double)` representation and defer to the shared
+        // `compare_values`). [FABLE-5] sq-wjl8i: cross-KIND literal pairs rank by
+        // `LiteralKind` (numeric < dateTime < string) — the exact order is additionally
+        // pinned end-to-end by `order_by_cross_kind_ranks_and_collapse_is_exact`; this test
+        // keeps the permutation/reversibility shape claims.
         let g = Graph::load_str(
             "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
              ex:n ex:v 5 .\n\
@@ -12199,6 +12297,55 @@ mod f64_collapse_order_agreement {
         let mut rev = asc.clone();
         rev.reverse();
         assert_eq!(rev, desc, "DESC(?v) is ASC(?v) reversed");
+    }
+
+    /// [FABLE-5] sq-wjl8i end-to-end: the kind-first rank and the exact mixed-tier
+    /// collapse recheck through the REAL query path (both the numeric sort-cell fast
+    /// path — all-numeric column — and the mixed-kind `compare_values` path).
+    #[test]
+    fn order_by_cross_kind_ranks_and_collapse_is_exact() {
+        // All-NUMERIC column at the 2^53 collapse: int 2^53, int 2^53+1 and the double
+        // carrying their shared f64 image. The exact order is 2^53 = 2^53E0 < 2^53+1
+        // (the former three-way collapsed tie was intransitive against the exact
+        // int/int order). The int/int and int/double ties are decided by
+        // `cmp_sort_num`'s exact recheck (the fast numeric sort cells).
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             ex:a ex:v \"9007199254740993\"^^xsd:integer .\n\
+             ex:b ex:v \"9007199254740992E0\"^^xsd:double .\n\
+             ex:c ex:v \"9007199254740992\"^^xsd:integer .\n",
+            "turtle",
+        )
+        .unwrap();
+        let asc = order_by(&g, "ASC(?v)");
+        // The equal pair (2^53, 2^53E0) keeps input order (stable sort); both precede 2^53+1.
+        assert_eq!(asc[2], "9007199254740993", "the collapsed neighbour sorts strictly last");
+        assert!(asc[..2].contains(&"9007199254740992E0".to_string()));
+        assert!(asc[..2].contains(&"9007199254740992".to_string()));
+
+        // MIXED-KIND column: every numeric (NaN included) sorts before the boolean,
+        // the dateTime before the date, both before the plain string, the string
+        // before the language-tagged literal, and the unknown-datatype literal last —
+        // the documented LiteralKind rank; the digit-string "11" can no longer
+        // interleave lexically between numerics 10 and 2 (the sq-wjl8i witness).
+        let g2 = Graph::load_str(
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             ex:s ex:v \"11\" .\n\
+             ex:n1 ex:v 10 .\n\
+             ex:n2 ex:v 2 .\n\
+             ex:nan ex:v \"NaN\"^^xsd:double .\n\
+             ex:bt ex:v true .\n\
+             ex:dt ex:v \"2024-03-15T13:00:00Z\"^^xsd:dateTime .\n\
+             ex:d ex:v \"2020-01-01\"^^xsd:date .\n\
+             ex:lang ex:v \"chat\"@fr .\n\
+             ex:odd ex:v \"weird\"^^ex:custom .\n",
+            "turtle",
+        )
+        .unwrap();
+        assert_eq!(
+            order_by(&g2, "ASC(?v)"),
+            vec!["NaN", "2", "10", "true", "2024-03-15T13:00:00Z", "2020-01-01", "11", "chat", "weird"]
+        );
     }
 }
 
