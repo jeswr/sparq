@@ -2,9 +2,19 @@
 //! results — enforced by the engine's zero-copy dataset view (the default path),
 //! with the v1 FROM-NAMED rewrite path kept as a differential oracle: both paths
 //! must return byte-identical JSON for every fixture session.
+//!
+//! [OPUS-4.8] sq-bq7m9: the tests here that probe pod content with a BARE default-graph
+//! pattern assert the DEFAULT-build (union-always) semantics, so they are gated
+//! `#[cfg(not(feature = "solid-sparql-query"))]`. Under the opt-in `solid-sparql-query`
+//! feature a bare pattern matches nothing without the union-default opt-in (Editor's Draft
+//! §4) — that behaviour is covered by `tests/union_default_graph.rs`. Tests that use an
+//! explicit `GRAPH` pattern are unaffected by the feature and stay ungated.
 
 use sparq_core::Graph;
-use sparq_solid::fixture::{wac_fixture, ALICE, APP, BOB, CAROL};
+use sparq_solid::fixture::{wac_fixture, ALICE};
+// [OPUS-4.8] sq-bq7m9: only the bare-pattern tests (gated to the default build) use these.
+#[cfg(not(feature = "solid-sparql-query"))]
+use sparq_solid::fixture::{APP, BOB, CAROL};
 use sparq_solid::{rewrite_for, Mode, PodStore, Session};
 
 fn store() -> PodStore {
@@ -26,6 +36,8 @@ fn store() -> PodStore {
 ///   anon   = pub1 144
 const TITLES: &str = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }";
 
+// [OPUS-4.8] sq-bq7m9: bare-pattern (union-always) — default-build semantics only.
+#[cfg(not(feature = "solid-sparql-query"))]
 #[test]
 fn same_query_different_agents_different_results() {
     let mut s = store();
@@ -40,6 +52,10 @@ fn same_query_different_agents_different_results() {
     assert_eq!(v1.rows.len(), 599);
 }
 
+// [OPUS-4.8] sq-bq7m9: exercises bare-pattern cross-document joins (union-always) —
+// default-build semantics only; the feature-ON GRAPH/join coverage is in
+// tests/union_default_graph.rs.
+#[cfg(not(feature = "solid-sparql-query"))]
 #[test]
 fn graph_patterns_and_cross_document_joins_stay_inside_the_sandbox() {
     let mut s = store();
@@ -86,6 +102,12 @@ fn explicit_named_graph_query_cannot_escape() {
 /// (both paths produce the same duplicate-row multiset; identical rows serialize
 /// identically regardless of their relative order — a full sort makes the whole
 /// serialization canonical).
+// [OPUS-4.8] sq-bq7m9: the v1↔v2 differential oracle uses bare patterns and the
+// UNCHANGED (union-always) `rewrite_for` path, so under the `solid-sparql-query` feature
+// the view path (spec empty-default) and the v1 rewrite path (v1 portability, union) are
+// intentionally different — gate to the default build. tests/union_default_graph.rs adds
+// the opt-in-scoped oracle for the feature.
+#[cfg(not(feature = "solid-sparql-query"))]
 #[test]
 fn view_path_and_rewrite_path_return_identical_json() {
     let mut s = store();

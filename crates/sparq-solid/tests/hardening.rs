@@ -2,7 +2,11 @@
 //! graph stripping, pair-principal delimiter injection, rewrite variable capture.
 
 use sparq_core::Graph;
-use sparq_solid::fixture::{wac_fixture, ALICE};
+use sparq_solid::fixture::wac_fixture;
+// [OPUS-4.8] sq-bq7m9: ALICE is only used by the bare-pattern `normal_path` test below,
+// which asserts the DEFAULT-build (union-always) count and is gated to the default build.
+#[cfg(not(feature = "solid-sparql-query"))]
+use sparq_solid::fixture::ALICE;
 use sparq_solid::{rewrite_for, Mode, PodStore, Session};
 
 /// A dataset smuggling in the rewrite sentinel graph must not make it visible to a
@@ -90,6 +94,9 @@ fn reserved_session_values_fail_closed() {
 }
 
 /// End-to-end sanity after hardening: the normal path still works.
+// [OPUS-4.8] sq-bq7m9: bare-pattern union-always count — default-build semantics only;
+// the feature-ON normal path is covered by tests/union_default_graph.rs.
+#[cfg(not(feature = "solid-sparql-query"))]
 #[test]
 fn normal_path_still_green_after_hardening() {
     let mut s = PodStore::new(Graph::load_dataset(&wac_fixture(), "nquads").unwrap());

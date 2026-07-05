@@ -30,3 +30,17 @@
   crate: "sparq-solid"
   features: "count-enforcement"
   test: true
+
+# [OPUS-4.8] sq-bq7m9 (issue #992 item 4): the solid-sparql-query Editor's Draft §4
+# union-default-graph opt-in in the read path. This feature CHANGES a `not(feature=…)`
+# code path (query_as/query_json_as/ask_as default-graph semantics: empty-default +
+# explicit-union instead of union-always), and the whole tests/union_default_graph.rs
+# file is `#![cfg(feature = "solid-sparql-query")]` — so per this workflow's GUARD rule
+# (b) it needs its OWN ISOLATED leg (NOT combined with odrl-bridge/trust-graph, whose
+# bare-pattern probe tests assume the union-always default and would break under this
+# feature's empty-default). No new dependency (a pure query-rewrite change). Without this
+# leg the opt-in tests never run.
+- name: "sparq-solid (solid-sparql-query)"
+  crate: "sparq-solid"
+  features: "solid-sparql-query"
+  test: true
