@@ -43,12 +43,12 @@ jobs:
         shell: bash
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1482605baf623a1be434c2297f1ccf42f4271c6c # master
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
 
       - name: Cache Rust
-        uses: Swatinem/rust-cache@82a92a6e8fbeee090b81b47073ec8925ba6ecf63 # v2.7.5
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build validate-pkg
         run: |
@@ -62,7 +62,7 @@ jobs:
 
       - name: Upload quarantine sidecar
         if: always()
-        uses: actions/upload-artifact@3cea5372237819ed907bc075d0a19be3688a5be3 # v4.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pkg-ingest-quarantine
           path: crates/sparq-kb/ingest/pkg-instances.ttl.stale-edges.tsv
@@ -70,7 +70,7 @@ jobs:
 
       - name: Upload ingested PKG
         if: success()
-        uses: actions/upload-artifact@3cea5372237819ed907bc075d0a19be3688a5be3 # v4.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pkg-ingested
           path: crates/sparq-kb/ingest/pkg-instances.ttl
