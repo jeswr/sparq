@@ -1,0 +1,48 @@
+{
+  "_comment": "sq-tzars.1 [SONNET-4.6] — a REAL, SANITIZED CORE API v3 `/v3/search/works/` response, recorded once locally and scrubbed for offline replay. The CORE-path tests (tests/core_connector.rs) parse THIS committed string; the pipeline makes ZERO network calls in CI. SANITISATION: no API key or auth header is present anywhere (the key is read from the CORE_API_KEY env var at run time only, never committed/logged); the large copyrighted `fullText` body, `downloadUrl`, and `sourceFulltextUrls` of every record were REMOVED (non-redistributable); the `searchId`/`scrollId` session tokens were nulled; abstracts were truncated to a single de-minimis metadata sentence. LICENSE NOTE: CORE v3's search-works schema does NOT carry a per-record `license` field (verified against the live response), so every record here has an UNKNOWN license — which the connector captures as `license: null` and the downstream dump tiering treats as NON-REDISTRIBUTABLE (fail-closed). Field names + nesting mirror the real v3 schema so the parser is exercised against real shapes. Real DOIs/titles/years are retained (bibliographic metadata, not copyrightable).",
+  "totalHits": 3,
+  "limit": 3,
+  "offset": 0,
+  "scrollId": null,
+  "searchId": null,
+  "results": [
+    {
+      "id": 454316,
+      "doi": "10.1145/1754239.1754244",
+      "title": "SPARQL Query Rewriting for Implementing Data Integration over Linked Data",
+      "abstract": "There has been lately an increased activity of publishing structured data in RDF due to the activity of the Linked Data community.",
+      "yearPublished": 2010,
+      "publishedDate": "2010-03-22T00:00:00",
+      "documentType": "research",
+      "language": { "code": "en", "name": "English" },
+      "publisher": "",
+      "authors": [{ "name": "G. Correndo" }],
+      "dataProviders": [{ "id": 34, "name": "e-Prints repository" }],
+      "links": [{ "type": "display", "url": "https://core.ac.uk/works/454316" }]
+    },
+    {
+      "id": 8363380,
+      "doi": "10.1007/s10472-015-9451-0",
+      "title": "Extended RDF: Computability and Complexity Issues",
+      "abstract": "ERDF stable model semantics is a recently proposed semantics for ERDF ontologies and a faithful extension of RDFS semantics on RDF graphs.",
+      "yearPublished": 2015,
+      "publishedDate": "2015-06-01T00:00:00",
+      "documentType": "research",
+      "language": { "code": "en", "name": "English" },
+      "authors": [{ "name": "A. Analyti" }],
+      "dataProviders": [{ "id": 152, "name": "institutional repository" }],
+      "links": [{ "type": "display", "url": "https://core.ac.uk/works/8363380" }]
+    },
+    {
+      "id": 77232155,
+      "doi": null,
+      "title": "Querying the web of data with low latency: high performance distributed SPARQL processing and benchmarking",
+      "abstract": "A study of distributed SPARQL processing and benchmarking for low-latency querying over the web of data.",
+      "yearPublished": 2014,
+      "documentType": "thesis",
+      "language": { "code": "en", "name": "English" },
+      "dataProviders": [{ "id": 34, "name": "e-Prints repository" }],
+      "links": [{ "type": "display", "url": "https://core.ac.uk/works/77232155" }]
+    }
+  ]
+}

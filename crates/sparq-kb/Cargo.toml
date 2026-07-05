@@ -56,6 +56,16 @@ close = ["query", "dep:sparq-reason"]
 # is run by the `literature_pipeline` integration test, which additionally enables
 # `validate`. [OPUS-4.8] sq-2489d.5
 literature = ["dep:serde_json"]
+# OPT-IN (default-OFF, implies `literature`). Enables the LIVE CORE API v3 connector
+# (sq-tzars.1): the networked socket layer of `connector_core` — `UreqTransport` +
+# `CoreClient` (paged search with rate-limit + retry discipline + fail-closed license
+# capture). The pure parse + retry logic + the fake-transport tests live under `literature`
+# and make ZERO network calls; ONLY this feature pulls the blocking HTTP client (`ureq`,
+# already vendored for the engine's SERVICE transport, so no new lockfile entry) and it is
+# NEVER driven in CI (tests replay the committed `core-batch.json` fixture). The CORE key is
+# read from the `CORE_API_KEY` env var at run time only — never committed or logged.
+# [SONNET-4.6] sq-tzars.1
+literature-live = ["literature", "dep:ureq"]
 
 [dependencies]
 # Engine graph type (only behind `validate`). default-features=false keeps it lean.
@@ -82,6 +92,11 @@ spargebra = { workspace = true, optional = true }
 # [OPUS-4.8] sq-ve5dy
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+# Blocking HTTP client for the LIVE CORE connector (only behind `literature-live`).
+# ureq 3 + rustls, mirroring sparq-engine's SERVICE transport EXACTLY (same version +
+# feature set), so it reuses the already-vendored dependency and adds no new lockfile
+# entry; default build stays socket-free. [SONNET-4.6] sq-tzars.1
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
 
 # The `pkg-query` helper binary (sq-2m6zm.3): one command to introspect → ground →
 # ask over the ingested PKG. It needs the `query` module (engine), so it is only
