@@ -33,8 +33,8 @@
 
 #intro-section("abstract", "Abstract")[
   zkSPARQL is a proposal for proving, in zero knowledge, that the answer to a SPARQL query is
-  correct with respect to one or more committed RDF graphs, without revealing the graphs
-  themselves. This document describes the interfaces realised by the sparq reference
+  correct against one or more committed RDF graphs, without revealing them. This document
+  describes the interfaces realised by the sparq reference
   implementation, read directly from its source: the committed data model (RDF Dataset
   Canonicalization with a Poseidon2 sponge commitment over the BN254 scalar field, and issuer
   attestation signatures over the Baby Jubjub curve); the supported SPARQL fragment, its
@@ -43,8 +43,8 @@
   the verifier-nonce challenge–response; the verifier's fail-closed obligation set and its four
   audit gates; the external trust anchors a relying party supplies; and the layered
   security-properties vocabulary with its ODRL admissibility profile. Parts that do not yet
-  exist — a registered media type, a JSON-LD context, and a wire protocol — are named as
-  explicit proposals. The entire scheme is research-grade: it has not been externally audited,
+  exist — a registered media type, a JSON-LD context, and a wire protocol — are marked as
+  proposals. The entire scheme is research-grade: it has not been externally audited,
   and no production guarantee is claimed (see the Security and Privacy Considerations,
   section 17).
 ]
@@ -88,10 +88,10 @@ The flow is challenge–response:
 + The verifier checks the manifest against its own #dfn[trust anchors] (trusted issuer keys,
   an authoritative revocation snapshot, a holder registry, and its nonce store), enforcing a
   fixed, fail-closed obligation set (section 10).
-+ Optionally, a policy engine decides whether the *method* used is admissible for the purpose
-  at hand, by reasoning over the security-properties vocabulary (sections 12 and 13).
++ Optionally, a policy engine decides whether the *method* used is admissible for the purpose,
+  by reasoning over the security-properties vocabulary (sections 12 and 13).
 
-This document describes the interfaces of that pipeline as they exist in the sparq reference
+This document describes the interfaces of that pipeline as realised in the sparq reference
 implementation, so they can be reviewed, critiqued, and cited. It is an Unofficial Proposal
 Draft; see the Status of This Document.
 
@@ -104,8 +104,8 @@ pipeline, transcribed from the reference implementation and published in specifi
 the design can be reviewed and cited. It is #strong[not] a specification from which an
 independent party could build a provably-sound prover or verifier — soundness rests on the  // privacy-claims-allow: explicit anti-overclaim — negated usage ("NOT a spec from which a provably-sound verifier could be built"), not a settled soundness claim (sq-qhy4)
 Noir circuits and the proving backend, neither of which is externally audited (section 17.1),
-and a handful of security-load-bearing encodings are pinned to a specific proving toolchain
-(section 8.4). A reader who needs a conformance target should read section 2.2 for the exact
+and several security-load-bearing encodings are pinned to a specific proving toolchain
+(section 8.4). A reader needing a conformance target should read section 2.2 for the exact
 clauses this draft fixes normatively, and section 4.3 for what may — and may not — be claimed
 against it.
 
@@ -247,7 +247,7 @@ capability listed here. The properties themselves are *claims* — none is exter
   verifier extends it *no* integrity trust: everything the prover sends is adversarial input
   until checked — including the manifest's own declared `key_set`, `query`, and
   `status_snapshots` (section 8.2). Conversely the prover extends the verifier no privacy
-  trust: the scheme's hiding goals exist precisely because the verifier is assumed curious.
+  trust: the scheme's hiding goals exist because the verifier is assumed curious.
 - The #dfn[verifier] acts for a #dfn[relying party], which supplies every trust anchor
   (section 11). The verifier is trusted by the relying party to enforce the full obligation
   set; a verifier that skips checks voids all guarantees silently, which is why the
@@ -268,7 +268,7 @@ capability listed here. The properties themselves are *claims* — none is exter
   the public inputs (hiding break), or to link two presentations by the same holder
   (unlinkability break — tracked as a vocabulary dimension, section 12.1, not a settled
   property).
-+ *Colluding holder and issuer.* Can mint attestations for any content they like. The scheme
++ *Colluding holder and issuer.* Can mint attestations for arbitrary content. The scheme
   does not defend the relying party against attested-but-false real-world content
   (garbage-in); it defends only the binding between what was attested and what is proven.
   Collusion confers no capability against *other* holders' privacy or other issuers' keys.
@@ -498,7 +498,7 @@ and proved with the Barretenberg backend (see section 16 on toolchain pinning). 
 
 The prover derives the compiled shape bucket from the data; the verifier *re-derives* the
 circuit identifier from the statement each sub-proof is bound to (section 10.3), and a manifest
-#strong[MUST NOT] be accepted on the strength of its self-declared identifier alone. An
+#strong[MUST NOT] be accepted on its self-declared identifier alone. An
 out-of-bucket shape is a clean rejection, never a silently unprovable member.
 
 == Entailment regimes
@@ -523,8 +523,8 @@ A proof manifest is a JSON object (`sparq-zk-compose` `manifest::ProofManifest`,
 Every hash of a manifest — for nonce binding, deduplication, or audit — is defined over the
 manifest's *canonical serialised form* (`ProofManifest::canonicalize`, which sorts the
 self-contained `binding_edges` and `join_edges` into their derived total order before
-serialising), and the reference implementation canonicalises before hashing. This draft records
-that the reference implementation does so, but does #strong[not] standardise the
+serialising). This draft records that the reference implementation canonicalises before hashing,
+but does #strong[not] standardise the
 canonicalisation algorithm; two independent implementations cannot yet be expected to agree on
 a manifest hash, and manifest-hash interoperability is expressly *not* offered by this draft
 (section 2.3).
@@ -572,7 +572,7 @@ codified (section 11).
   [`join_edges` / `hidden_revocation` / `hidden_issuer_attestations` / `holder_pok_proofs` /
     `holder_set_proofs`], [Optional privacy-upgrade layers (hidden join / hidden-index
     revocation / hidden issuer / hidden-key holder proof-of-possession / hidden-holder set).],
-    [Additive; the clear-path checks always still run (section 17.2).],
+    [Additive; the clear-path checks always run (section 17.2).],
 )
 
 == Sub-proof encoding
@@ -687,7 +687,7 @@ The reference verifier exposes two entry points:
   of section 10.3, the binding obligations of section 10.4, and the cryptographic checks of
   section 10.5, in a fail-closed pipeline.
 
-Only full verification confers the (unaudited — section 17.1) checking this document describes.
+Only full verification performs the (unaudited — section 17.1) checking this document describes.
 
 == Structural re-checks
 
@@ -785,7 +785,7 @@ partial results, and #strong[MUST NOT] downgrade any error to a warning.
 
 = External trust anchors
 
-All trust roots are inputs from the relying party, passed to `verify_manifest`. A conforming
+All trust anchors are inputs from the relying party, passed to `verify_manifest`. A conforming
 verifier #strong[MUST] obtain each of the following out of band and #strong[MUST NOT] accept
 any of them from the manifest:
 
@@ -914,7 +914,7 @@ manifest submission are out of band.
 A registered media type is proposed for the proof manifest — candidate
 `application/vc+zksparql+json`, with a `+ld` variant once a JSON-LD context exists — and a
 companion type for the nonce challenge. Until registration, implementations exchanging
-manifests over HTTP have no content-type contract at all.
+manifests over HTTP have no content-type contract.
 
 == JSON-LD context (proposal)
 
