@@ -18,6 +18,7 @@ import { Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { handleEditorKeyDown } from "@/lib/editor-keys";
 import {
   type SparqlToken,
   tokenizeSparql,
@@ -82,6 +83,17 @@ export function WorkbenchSparqlEditor({
     }
   }, []);
 
+  // (sq-rcuvq) Merge editor hotkeys (Ctrl+/, Tab, Shift+Tab) with any parent-provided handler.
+  // The hotkeys handler calls e.preventDefault() for its keys; the parent handler (e.g.
+  // Ctrl+Enter → run query) is always called after so its own keys still fire.
+  const mergedKeyDown = React.useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      handleEditorKeyDown(e, "#", onChange);
+      onKeyDown?.(e);
+    },
+    [onChange, onKeyDown],
+  );
+
   const tokens = React.useMemo(() => tokenizeSparql(value), [value]);
 
   // The well-known prefixes the query USES but does not DECLARE — the one-click "add prefixes"
@@ -131,7 +143,7 @@ export function WorkbenchSparqlEditor({
           autoCapitalize="off"
           autoCorrect="off"
           onChange={(e) => onChange(e.target.value)}
-          onKeyDown={onKeyDown}
+          onKeyDown={mergedKeyDown}
           onScroll={(e) => syncScroll(e.currentTarget)}
           className={cn(
             "absolute inset-0 block h-full w-full resize-none bg-transparent text-transparent caret-foreground outline-none",
