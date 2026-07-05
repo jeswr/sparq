@@ -42,9 +42,26 @@ export default defineConfig({
     contextOptions: { reducedMotion: "reduce" },
   },
 
+  // [FABLE-5] sq-u0my5 — TWO personas over the SAME served export:
+  //   chromium-mock-ipc — desktop persona: support/fixtures.ts injects window.__TAURI__ via
+  //                       addInitScript, so isTauriRuntime() === true (the original lane).
+  //   chromium-web      — browser persona: support/web-fixtures.ts installs NO Tauri globals,
+  //                       so isTauriRuntime() === false and the pure-browser code paths (the
+  //                       deployed /app) are exercised in CI for the first time.
+  // The split is by filename: *.web.spec.ts → chromium-web; everything else → chromium-mock-ipc.
+  // Existing specs are untouched and keep their exact prior behavior.
   projects: [
     {
       name: "chromium-mock-ipc",
+      testIgnore: /.*\.web\.spec\.ts$/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1280, height: 720 },
+      },
+    },
+    {
+      name: "chromium-web",
+      testMatch: /.*\.web\.spec\.ts$/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1280, height: 720 },
