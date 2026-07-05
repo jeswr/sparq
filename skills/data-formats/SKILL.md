@@ -248,7 +248,10 @@ LIBRARY embedder it is opt-in (the engine library default stays lean): enable wi
 `sparq-engine = { version = "0.1", features = ["serialize-rdf"] }`. The `sparq-cli` and
 `sparq-server` BINARIES pull it into their default build via the default-on `jsonld` feature
 ([OPUS-4.8] sq-oy1f.4), so `dump …` and the server's `application/ld+json` work out of the box.
-The N-Triples writer (`triples_to_ntriples`) is always on.
+The N-Triples writer (`triples_to_ntriples`) is always on. Internally the writer matrix is
+housed in the `sparq-engine-serialize` sub-crate (`publish = false`, [FABLE-5] sq-6vshe.4) and
+re-exported verbatim — the `sparq_engine::serialize::*` paths and feature names above are
+unchanged and remain the supported surface.
 
 ```rust
 use sparq_engine::serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads,
