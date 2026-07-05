@@ -15,7 +15,7 @@ what happens next and in what order.
 The first KB dump was saved to **`sparq-org/research-kb`** (private repo) on 2026-07-05.
 Path layout inside that repo:
 
-```
+```text
 dumps/
   2026-07-05/
     pkg-hand-authored.ttl.gz   — hand-authored PKG tier
