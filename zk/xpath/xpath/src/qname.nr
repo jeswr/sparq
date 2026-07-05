@@ -175,6 +175,19 @@ pub fn prefix_from_qname<let NS_LEN: u32, let LOCAL_LEN: u32, let PREFIX_LEN: u3
     ([0; PREFIX_LEN], 0)
 }
 
+/// op:NOTATION-equal
+/// Two xs:NOTATION values are equal iff they have the same expanded name
+/// (namespace URI + local name), exactly like xs:QName equality.
+/// F&O sec. 9.1: op:NOTATION-equal($value1 as xs:NOTATION, $value2 as xs:NOTATION) as xs:boolean
+/// Oracle: XPath F&O 3.2 section 9.1; NOTATION comparison is by expanded name.
+/// [SONNET-4.6] (sq-rcpdz)
+pub fn notation_equal<let NS1: u32, let LOCAL1: u32, let NS2: u32, let LOCAL2: u32>(
+    a: XsdQName<NS1, LOCAL1>,
+    b: XsdQName<NS2, LOCAL2>,
+) -> bool {
+    qname_equal(a, b)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

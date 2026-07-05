@@ -589,20 +589,7 @@ jobs:
           # with a ::warning annotation rather than masking them silently.  Remove an
           # entry here once the corresponding bead is closed and the tests pass.
           #
-          # sq-rcpdz -- fn:contains / fn:ends-with / fn:starts-with / fn:string-length /
-          #            op:NOTATION-equal / op:add-dayTimeDuration-to-dateTime /
-          #            op:subtract-dayTimeDuration-from-dateTime: auto-generated packages
-          #            have a single assert(false) placeholder because no qt3tests
-          #            cases could be converted; real test vectors needed.
-          KNOWN_FAILING=(
-            "xpath_test_fncontains"
-            "xpath_test_fnends_with"
-            "xpath_test_fnstarts_with"
-            "xpath_test_fnstring_length"
-            "xpath_test_opadd_daytimeduration_to_datetime"
-            "xpath_test_opnotation_equal"
-            "xpath_test_opsubtract_daytimeduration_from_datetime"
-          )
+          KNOWN_FAILING=()
           # Partition pass: count real vs stub-wired packages.
           # A package is a stub if any .nr file in its src/ contains 'stub_' (stub-prefixed
           # imports, assert(false) bodies) OR the generated-placeholder marker
