@@ -4019,26 +4019,41 @@ fn explain_mode(
 }
 
 // ---------------------------------------------------------------------------
-// Time-travel pinning (opt-in `time-travel` cargo feature)
+// Generation pinning: the `Sparq-Generation` response header + the `?generation=N`
+// request pin. DEFAULT build (sq-ci2d6): the mechanics are unconditional, bounded
+// to the generation ring's EXISTING concurrency-retention window (`RingConfig::retain`
+// = the last K generations older than current, always kept — see
+// `sparq_serve::ring`). The opt-in `time-travel` feature only WIDENS how far back a
+// pin can reach (its extended-retention config + `--time-travel-*` CLI flags stay
+// feature-gated); the header/pin surface here is byte-identical in both feature
+// states. [SONNET-4.6] (sq-ci2d6)
 // ---------------------------------------------------------------------------
 
-/// Resolves the generation a query request is pinned to (opt-in `time-travel`
-/// feature). `generation=N` — URL query string, or the url-encoded POST body,
-/// the body winning (same precedence as `explain`) — pins the retained
-/// generation N for the whole request: the response is the store *as of* that
-/// generation. Chosen over an `As-Of` timestamp header because it fits the
-/// endpoint's existing parameter contract (`query=`, `explain=`) and the number
-/// is the exact token the server itself hands out in `Sparq-Generation` (the
-/// read-your-writes / shard_seq concept — no clock resolution or skew
-/// ambiguity); callers that track timestamps resolve them via the library's
-/// `GenerationRing::as_of`.
+/// Resolves the generation a query request is pinned to. `generation=N` — URL query
+/// string, or the url-encoded POST body, the body winning (same precedence as
+/// `explain`) — pins the retained generation N for the whole request: the response is
+/// the store *as of* that generation (an immutable snapshot — the load-bearing property
+/// for snapshot-consistent multi-request `LIMIT`/`OFFSET` pagination). N is the exact
+/// token the server itself hands out in `Sparq-Generation` (the read-your-writes /
+/// shard_seq concept — no clock resolution or skew ambiguity); callers that track
+/// timestamps resolve them via the library's `GenerationRing::as_of`.
+///
+/// **Retention window (the honest bound).** The ring ALWAYS retains the last K
+/// generations older than current (the concurrency-retention floor `RingConfig::retain`,
+/// default K = 4 — `sparq_serve::ring::DEFAULT_RETAIN`), so a pin within
+/// `[current - K, current]` resolves in the DEFAULT build with no feature enabled. The
+/// opt-in `time-travel` feature EXTENDS that window (count/age bounds via
+/// `--time-travel-generations` / `--time-travel-max-age`); it does not change the
+/// pin/header mechanics here. Retention is publish-driven and never extended by this
+/// function — a pin outside the window is a clean typed error, never a silent fallback
+/// to a different generation.
 ///
 /// Errors per the endpoint's status semantics: unparsable number → 400; not yet
-/// published → 400 (the client cannot have obtained that token from this
-/// server); published but no longer retained → **410 Gone** (it aged out of the
-/// retention window — gone permanently, retrying cannot help).
-#[cfg(feature = "time-travel")]
-#[allow(clippy::result_large_err)] // Err is axum's Response; boxing would desync the cfg variants
+/// published → 400 (the client cannot have obtained that token from this server);
+/// published but no longer retained → **410 Gone** (it aged out of the retention window —
+/// gone permanently, retrying that pin cannot help; re-read the current generation and
+/// restart pagination).
+#[allow(clippy::result_large_err)] // Err is axum's Response; boxing would desync the call-site match
 fn resolve_pin(
     state: &AppState,
     url_params: &HashMap<String, String>,
@@ -4051,15 +4066,19 @@ fn resolve_pin(
         Some(raw) => raw,
         None => return Ok(state.current()),
     };
+    // [SONNET-4.6] (sq-ci2d6) Positional format args throughout (CodeQL `rust/unused-variable`
+    // false-positive on inline captures — this path is now compiled into the DEFAULT build).
     let number: u64 = raw.parse().map_err(|_| {
         bad_request(&format!(
-            "invalid 'generation' parameter '{raw}': expected a generation number"
+            "invalid 'generation' parameter '{}': expected a generation number",
+            raw
         ))
     })?;
     let current = state.current();
     if number > current.number() {
         return Err(bad_request(&format!(
-            "generation {number} has not been published yet (current generation: {})",
+            "generation {} has not been published yet (current generation: {})",
+            number,
             current.number()
         )));
     }
@@ -4071,53 +4090,42 @@ fn resolve_pin(
     // the swappable serving core. Binding it locally keeps `at` + `oldest_retained` on one ring.
     let ring = state.ring();
     ring.at(number).ok_or_else(|| {
+        // [SONNET-4.6] (sq-ci2d6) The 410 + "aged out … oldest retained" prefix is byte-identical
+        // in both feature states (the `time-travel` suite is unchanged); only the closing HINT
+        // differs — the default build's window is the ring's concurrency-retention floor, the
+        // `time-travel` build's is the extended retention the CLI flags size.
+        let hint = if cfg!(feature = "time-travel") {
+            "raise --time-travel-generations / --time-travel-max-age to keep more history"
+        } else {
+            "only the ring's concurrency-retention window (the last K generations older than \
+             current) is kept in the default build; re-read the current generation and restart, \
+             or build with the `time-travel` feature to widen the window"
+        };
         json_error(
             StatusCode::GONE,
             &format!(
-                "generation {number} has aged out of the retention window (oldest retained: {}, current: {}); \
-                 raise --time-travel-generations / --time-travel-max-age to keep more history",
+                "generation {} has aged out of the retention window (oldest retained: {}, current: {}); {}",
+                number,
                 ring.oldest_retained(),
-                current.number()
+                current.number(),
+                hint
             ),
         )
     })
 }
 
-/// Without the `time-travel` feature the parameter handling is compiled out:
-/// every query runs against the current generation and a `generation` parameter
-/// is just an ignored unknown parameter (like any other).
-#[cfg(not(feature = "time-travel"))]
-#[inline(always)]
-// clippy: Err is axum's `Response` (the idiomatic handler error); boxing it would
-// only desync this signature from the `time-travel` variant and every call-site match.
-#[allow(clippy::result_large_err)]
-fn resolve_pin(
-    state: &AppState,
-    _url_params: &HashMap<String, String>,
-    _body_params: Option<&HashMap<String, String>>,
-) -> Result<PinnedGen, Response> {
-    Ok(state.current())
-}
-
-/// Stamps the `Sparq-Generation` response header (opt-in `time-travel` feature):
-/// the generation number the response was produced against — the current
-/// generation for unpinned queries (capture it as the time-travel /
-/// read-your-writes token; the same generation-number concept as the
-/// horizontal-scaling ADR's `shard_seq`), the pin for pinned queries, and the
-/// generation containing the update for a 204 update ack.
-#[cfg(feature = "time-travel")]
+/// Stamps the `Sparq-Generation` response header: the generation number the response was
+/// produced against — the current generation for unpinned queries (capture it as the
+/// read-your-writes / snapshot-pin token; the same generation-number concept as the
+/// horizontal-scaling ADR's `shard_seq`), the pin for pinned queries, and the generation
+/// containing the update for a 204 update ack. [SONNET-4.6] (sq-ci2d6) Present in the
+/// DEFAULT build — the pin/header mechanics are bounded to the ring's concurrency-retention
+/// window; the opt-in `time-travel` feature only widens how far back `?generation=N` reaches.
 fn with_generation_header(mut resp: Response, number: u64) -> Response {
     resp.headers_mut().insert(
         header::HeaderName::from_static("sparq-generation"),
         header::HeaderValue::from(number),
     );
-    resp
-}
-
-/// Without the `time-travel` feature there is no generation header (identity).
-#[cfg(not(feature = "time-travel"))]
-#[inline(always)]
-fn with_generation_header(resp: Response, _number: u64) -> Response {
     resp
 }
 
@@ -4417,7 +4425,9 @@ async fn handle_post(
         // The SPARQL 1.1 Protocol url-encoded UPDATE operation (`update=` form) submits through
         // the same sequenced writer as `application/sparql-update`.
         if let Some(u) = params.get("update") {
-            #[cfg(feature = "time-travel")]
+            // [SONNET-4.6] (sq-ci2d6) `?generation` is a READ pin (default build, bounded to the
+            // ring's concurrency-retention window); an update always applies to the current
+            // generation, so pinning one is an HONEST refusal, never a silent ignore.
             if url_params.contains_key("generation") {
                 let resp = bad_request(
                     "the 'generation' parameter pins queries to a retained generation; \
@@ -4519,10 +4529,9 @@ async fn handle_post(
         }
         // `apply_update` blocks for the writer's group-commit ack (window + batch
         // application, which includes an O(graph) fork), so it runs off the async workers.
-        // Time travel is a READ concept: an update can only apply to the current
-        // generation, so a `generation` pin on an update is an honest refusal, not
-        // a silent ignore.
-        #[cfg(feature = "time-travel")]
+        // [SONNET-4.6] (sq-ci2d6) A `generation` pin is a READ concept (default build, bounded to
+        // the ring's concurrency-retention window): an update can only apply to the current
+        // generation, so a `generation` pin on an update is an honest refusal, not a silent ignore.
         if url_params.contains_key("generation") {
             let resp = bad_request(
                 "the 'generation' parameter pins queries to a retained generation; \

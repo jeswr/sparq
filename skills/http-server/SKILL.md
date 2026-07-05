@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST (plus the query-only HTTP QUERY method, w3c/sparql-protocol#40, for Oxigraph interop), content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST (plus the query-only HTTP QUERY method, w3c/sparql-protocol#40, for Oxigraph interop), content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and generation-pinned snapshot reads (a Sparq-Generation header + ?generation=N pin in the DEFAULT build, bounded to the ring's concurrency-retention window; opt-in time-travel widens it). Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -147,7 +147,9 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   generation is published; returns that generation number (read-your-writes token). Call
   off the async workers (`spawn_blocking`).
 - `AppState::at(&self, number: u64) -> Option<PinnedGen>` — pin a retained generation
-  (**`time-travel` feature only**).
+  (**`time-travel` feature only**; the HTTP `?generation=N` pin does NOT need this — it
+  resolves against the ring's concurrency-retention window directly, so it works in the
+  default build via `sq-ci2d6`).
 - `struct ServerConfig { query_timeout: Option<Duration>, update_where_timeout: Option<Duration>,
   max_body_bytes: usize,
   max_concurrent: usize, header_read_timeout: Option<Duration>, body_read_timeout: Option<Duration>, max_results: Option<usize>, max_query_rows: Option<usize>,
@@ -388,23 +390,44 @@ curl -G 'http://127.0.0.1:3030/sparql?explain=true' \
      --data-urlencode 'query=SELECT * WHERE { ?a <http://ex/knows> ?b . ?b <http://ex/age> ?age }'
 ```
 
-**3. Time-travel reads (opt-in feature).** Build with `--features time-travel`. Every
-`/sparql` response carries the `Sparq-Generation` header; capture it and pin a later read
-with `?generation=N` (URL param or url-encoded body — body wins). Updates' 204 carries the
-generation containing the write:
+**3. Generation-pinned snapshot reads (DEFAULT build — `sq-ci2d6`).** Every `/sparql` response
+carries the `Sparq-Generation` header (the generation the response was produced against; an
+update's `204` carries the generation *containing* the write — the read-your-writes token).
+Capture it and pin a later read with `?generation=N` (URL param or url-encoded body — body wins)
+to get an **immutable snapshot** of the store as of that generation. This is available with **no
+feature enabled**: the pin is bounded to the generation ring's **concurrency-retention window** —
+the last **K = 4** generations older than current are always kept (`sparq_serve::ring::DEFAULT_RETAIN`;
+`RingConfig::retain`). That is exactly the window that makes **multi-request `LIMIT`/`OFFSET`
+pagination snapshot-consistent**: pin one generation, page it, and the pages union to the
+single-shot result at that generation even if writes interleave (with a deterministic order —
+add `ORDER BY`, or rely on the stable order over the immutable snapshot):
 
 ```sh
-cargo run -p sparq-server --features time-travel -- data.ttl --time-travel-generations 32
-# read-your-writes: capture the generation an update lands in
+# read-your-writes: capture the generation an update lands in (default build — no feature)
 G=$(curl -si http://127.0.0.1:3030/sparql -H 'content-type: application/sparql-update' \
       --data 'INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> }' \
       | grep -i sparq-generation | tr -d '\r' | awk '{print $2}')
-# later, read the store AS OF that generation (old data even after more updates)
-curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s ?p ?o }' \
-     --data-urlencode "generation=$G"
+# page a large read pinned to that generation — page 1, then page 2, still consistent
+# even if another client writes between the two requests:
+curl -G http://127.0.0.1:3030/sparql --data-urlencode "generation=$G" \
+     --data-urlencode 'query=SELECT ?child WHERE { <c> <member> ?child } ORDER BY ?child LIMIT 1000 OFFSET 0'
+curl -G http://127.0.0.1:3030/sparql --data-urlencode "generation=$G" \
+     --data-urlencode 'query=SELECT ?child WHERE { <c> <member> ?child } ORDER BY ?child LIMIT 1000 OFFSET 1000'
+```
+**Honest boundary (the retention contract).** The default window is bounded by the ring's
+*concurrency* retention (K = 4), **not** a durable history: a pin more than K generations behind
+current has **aged out** → `410 Gone` (the snapshot is gone; re-read the current generation and
+restart pagination — the server **never** silently substitutes a different generation). If a
+pagination sweep must survive more than K interleaved writes, build with the opt-in **`time-travel`**
+feature, which EXTENDS retention (`--time-travel-generations N`, `--time-travel-max-age SECS`) so
+`?generation=N` reaches far older snapshots — same header/pin mechanics, wider window:
+
+```sh
+cargo run -p sparq-server --features time-travel -- data.ttl --time-travel-generations 32
 ```
 Status: aged-out generation → `410 Gone`; never-published / unparsable / pinning an
-*update* → `400`.
+*update* (an update always applies to current) → `400`. All identical in both feature states —
+`time-travel` only changes how far back a pin can reach.
 
 **4. WebSocket subscriptions (SEPA-style live SELECT).** Connect to
 `ws://127.0.0.1:3030/subscriptions`, send `subscribe`, get `subscribed` + an initial
@@ -650,8 +673,8 @@ stream is on. The `ChangeSink` broker trait stays a separate later opt-in (`sq-l
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
 `application/sparql-update` operation uses — so they share its atomicity, snapshot
-consistency, blocking-on-commit semantics, the `Sparq-Generation` header (time-travel
-feature), AND its **auth gate** (a GSP write is as powerful as an UPDATE, so `PUT`/`POST`/
+consistency, blocking-on-commit semantics, the `Sparq-Generation` header (default build,
+`sq-ci2d6`), AND its **auth gate** (a GSP write is as powerful as an UPDATE, so `PUT`/`POST`/
 `DELETE`/`PATCH` are gated by `--auth-token` exactly like an UPDATE; `GET`/`HEAD` are reads). A
 malformed body → `400`; an unsupported body Content-Type → `415`.
 
@@ -1290,9 +1313,11 @@ identities and resource IRIs by design (see the privacy-boundary note above).
     tokens), so federated `INSERT … WHERE` updates continue to use the operator's static
     `service_allow`.
 - **Feature flags.** `server` (default-on) pulls axum/tokio/tower — the binary needs it
-  (`required-features = ["server"]`). `time-travel` (default **off**) enables
-  `?generation=N` pinning, the `Sparq-Generation` header, `AppState::at`, and the
-  retention flags. `geo` (default **off**) installs sparq-geo's `geof:` GeoSPARQL
+  (`required-features = ["server"]`). `?generation=N` pinning + the `Sparq-Generation`
+  header are in the **default build** (bounded to the ring's concurrency-retention window —
+  `sq-ci2d6`); `time-travel` (default **off**) only EXTENDS the retention window (the
+  `--time-travel-generations` / `--time-travel-max-age` flags, `AppState::at`, and the wider
+  `?generation=N` reach). `geo` (default **off**) installs sparq-geo's `geof:` GeoSPARQL
   functions on query/update/subscription paths; without it an unknown `geof:` IRI is a
   `500`. `federation-descriptors` (default **off**, `sq-d3d8`) pulls the light
   `sparq-introspect` crate and serves the OPT-IN VoID + Service-Description discovery
