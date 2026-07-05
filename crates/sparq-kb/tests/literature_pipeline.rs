@@ -475,6 +475,36 @@ fn cap_truncated_batch_is_marked_incomplete_in_every_artifact() {
     assert!(!complete.restricted_public_projection.contains("INCOMPLETE"));
 }
 
+/// Generate the golden TTL output for the standard fixture pipeline.
+///
+/// # Generated Golden File
+///
+/// This test is `#[ignore]`d by default. To regenerate the golden file:
+///
+/// ```sh
+/// cd /home/ubuntu/sparq  # or your working repo
+/// cargo test -p sparq-kb --features literature,validate \
+///   --test literature_pipeline -- generate_golden_turtle_output --nocapture --ignored \
+///   | sed -n '/^@prefix/,/^test generate/p' | head -n -1 \
+///   > crates/sparq-kb/tests/golden/openalex-fixture-combined.ttl
+/// # Then manually review and commit the new file.
+/// ```
+///
+/// This is a deliberate (and audited) regeneration path — changes to the golden file are
+/// NEVER silent. The primary golden-pin test is [`emitted_turtle_matches_golden_byte_for_byte`],
+/// which fails loudly if the output drifts.
+#[test]
+#[ignore]
+fn generate_golden_turtle_output() {
+    let extractor = RecordedExtractor::from_fixture().expect("replay extractor builds");
+    // Use a FIXED timestamp (same as the pin test) so golden generation is deterministic.
+    let fixed_time = Some("-4656-05-28T09:28:20.459270Z".to_string());
+    let out = pipeline::run_with_time(FIXTURE_OPENALEX_BATCH, &extractor, fixed_time)
+        .expect("pipeline runs with fixed time");
+    eprintln!("=== Golden Turtle Output (copy to tests/golden/openalex-fixture-combined.ttl) ===");
+    println!("{}", out.turtle);
+}
+
 /// A dup-DOI mixed batch: the SAME DOI appears TWICE in one connector batch — once with a
 /// "cc-by" licence and once with no licence recorded. Simulates the real OpenAlex case where
 /// two indexing records represent the same work with conflicting licence metadata. The
@@ -572,4 +602,58 @@ fn machine_and_restricted_full_tiers_conform_to_the_shacl_gate() {
     assert!(m_conforms, "machine-tier artifact must conform:\n{m_report}");
     let (r_conforms, r_report) = gate(&out.license_restricted_tier);
     assert!(r_conforms, "restricted-tier artifact must conform:\n{r_report}");
+}
+
+// ===========================================================================
+// sq-9m3rn — Golden/byte-pin test: PipelineOutput::turtle byte-compatibility
+// [HAIKU-4.5] 🤖 SPARQ agent — golden-file pin for #1540 refactor.
+// ===========================================================================
+
+/// The committed golden file for the fixture pipeline's combined TTL output. This test
+/// pins the byte-exact output to catch silent drift in the emission logic — the #1540
+/// refactor's "byte-for-byte unchanged" claim is now enforced, not just inspected.
+///
+/// If this test fails, the emission logic has drifted. Review the diff carefully:
+/// - Is the change intended (e.g., a deliberate format refactor)?
+/// - If YES: run the `generate_golden_turtle_output` ignored test to regenerate the golden
+///   and commit the new file.
+/// - If NO: revert the emission code and re-pin the test.
+///
+/// The golden file is at: `crates/sparq-kb/tests/golden/openalex-fixture-combined.ttl`
+#[test]
+fn emitted_turtle_matches_golden_byte_for_byte() {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let extractor = RecordedExtractor::from_fixture().expect("replay extractor builds");
+    // Deterministic timestamp (sq-tzars.2 [HAIKU-4.5]): use the same fixed instant
+    // that was used to generate the golden file. This ensures byte-exact reproducibility.
+    let fixed_time = Some("-4656-05-28T09:28:20.459270Z".to_string());
+    let out = pipeline::run_with_time(FIXTURE_OPENALEX_BATCH, &extractor, fixed_time)
+        .expect("pipeline runs with fixed time");
+
+    // Load the committed golden file from the repo (resolved relative to the crate root).
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let golden_path = manifest_dir.join("tests/golden/openalex-fixture-combined.ttl");
+    let golden = fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+        panic!(
+            "Failed to read golden file at {}: {}. \
+             If regenerating, run: cargo test -p sparq-kb --features literature,validate \
+             --test literature_pipeline -- generate_golden_turtle_output --nocapture --ignored",
+            golden_path.display(),
+            e
+        )
+    });
+
+    // Byte-for-byte comparison: the emission logic must not drift.
+    assert_eq!(
+        out.turtle, golden,
+        "PipelineOutput::turtle has drifted from the golden file (byte-for-byte mismatch). \
+         This indicates a change to the emission logic or the fixture. \
+         \n\nTo deliberately regenerate the golden file (e.g., after an intended refactor): \
+         \n  cargo test -p sparq-kb --features literature,validate --test literature_pipeline \
+         \n  -- generate_golden_turtle_output --nocapture --ignored \
+         \n  > /tmp/golden.ttl \
+         \nThen review the diff carefully and commit the new golden file.\n"
+    );
 }
