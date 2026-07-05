@@ -3843,11 +3843,21 @@ dependencies = [
  "smallvec",
  "spargebra",
  "sparq-core",
+ "sparq-engine-serialize",
  "sparq-introspect",
- "sparq-jsonld",
  "sparq-substrate",
  "ureq",
  "uuid",
+]
+
+[[package]]
+name = "sparq-engine-serialize"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "serde_json",
+ "sparq-core",
+ "sparq-jsonld",
 ]
 
 [[package]]

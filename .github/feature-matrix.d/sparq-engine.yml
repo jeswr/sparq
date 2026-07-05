@@ -12,13 +12,12 @@
 # Fields: name (required -> check-run name), crate (required), features (required,
 # non-empty comma list), test (bool — run `cargo test` for the leg).
 
-# sparq-engine: RDF serializer matrix, CS-table star-join planner, zk-trace
-# seam, and SPARQL 1.1 federated SERVICE (tests use loopback only — no net).
-- name: "sparq-engine (serialize-rdf)"
-  crate: "sparq-engine"
-  features: "serialize-rdf"
-  test: true
-
+# sparq-engine: CS-table star-join planner, zk-trace seam, and SPARQL 1.1 federated
+# SERVICE (tests use loopback only — no net).
+# [OPUS-4.8] (sq-6vshe.4) The `serialize-rdf` + `streaming-serialization` legs MOVED to
+# .github/feature-matrix.d/sparq-engine-serialize.yml with the RDF writer matrix they exercise
+# (seam 1 of the facade split) — a `sparq-engine --features serialize-rdf` leg would now run
+# ZERO writer tests, so the tests are re-targeted to their new crate there.
 - name: "sparq-engine (cs-planner)"
   crate: "sparq-engine"
   features: "cs-planner"
@@ -195,27 +194,6 @@
 - name: "sparq-engine (yannakakis)"
   crate: "sparq-engine"
   features: "yannakakis"
-  test: true
-
-# [OPUS-4.8] sq-townn (survey §A7): streaming Turtle / TriG serialisation. The whole
-# streaming surface (`write_turtle_streaming` / `write_trig_streaming` + the
-# `graph_to_*_streaming` wrappers, the per-subject-buffered `write_turtle_body_streaming`,
-# and the `accumulate_pred_object` helper in `src/serialize.rs`) is gated
-# `#[cfg(feature = "streaming-serialization")]`, AND its 10 in-src unit tests
-# (`serialize::tests::streaming::*` — the streamed==buffered byte-equality contracts over
-# multiple subjects / predicates / blank nodes / typed+lang literals / empty graph / TriG)
-# are likewise gated, so the default build (and ci.yml's `--workspace --all-targets`
-# archive, which passes NO `--features`) compiled them EMPTY and ran ZERO of the 10 — the
-# silent "compiled EMPTY ... tests never ran" gap this lane closes. The feature IMPLIES
-# `serialize-rdf` (the shared rendering helpers live there); the off path is byte-identical.
-# No new dep (`streaming-serialization = ["serialize-rdf"]`, std `io::Write` only) and no
-# `not(feature=…)` divergence, so a single isolated leg covers it; verified `cargo test -p
-# sparq-engine --features streaming-serialization` runs the 10 streaming tests and `cargo
-# clippy -p sparq-engine --all-targets --features streaming-serialization -- -D warnings`
-# is clean.
-- name: "sparq-engine (streaming-serialization)"
-  crate: "sparq-engine"
-  features: "streaming-serialization"
   test: true
 
 # [OPUS-4.8] sq-iywur: opt-in DPccp dynamic-programming join-order enumerator. The whole
