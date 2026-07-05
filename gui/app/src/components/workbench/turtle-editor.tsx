@@ -19,6 +19,7 @@
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
+import { handleEditorKeyDown } from "@/lib/editor-keys";
 import { type SparqlToken, tokenizeTurtle } from "@sparq/client";
 
 // The shared text-metrics: the highlight `<pre>` and the `<textarea>` MUST use identical font,
@@ -86,6 +87,17 @@ export function WorkbenchTurtleEditor({
     }
   }, []);
 
+  // (sq-rcuvq) Merge editor hotkeys (Ctrl+/, Tab, Shift+Tab) with any parent-provided handler.
+  // Turtle/SHACL/N3 comments also use '#'. The parent handler (e.g. Ctrl+Enter → validate) is
+  // always called after so its own keys still fire.
+  const mergedKeyDown = React.useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      handleEditorKeyDown(e, "#", onChange);
+      onKeyDown?.(e);
+    },
+    [onChange, onKeyDown],
+  );
+
   const tokens = React.useMemo(() => tokenizeTurtle(value), [value]);
 
   return (
@@ -126,7 +138,7 @@ export function WorkbenchTurtleEditor({
           autoCapitalize="off"
           autoCorrect="off"
           onChange={(e) => onChange(e.target.value)}
-          onKeyDown={onKeyDown}
+          onKeyDown={mergedKeyDown}
           onScroll={(e) => syncScroll(e.currentTarget)}
           className={cn(
             "absolute inset-0 block h-full w-full resize-none bg-transparent text-transparent caret-foreground outline-none",
