@@ -79,6 +79,22 @@ trust-graph = ["dep:sparq-trust"]
 # only as strong as host/TLS control; no privacy).
 trust-graph-did = ["trust-graph", "sparq-trust/did"]
 
+# [OPUS-4.8] sq-bq7m9 (issue #992 item 4): honour the *Access-Controlled SPARQL Query
+# over a Solid Pod* Editor's Draft (jeswr/solid-sparql-query) §4 union-default-graph
+# opt-in in the read path (`query_as`/`query_json_as`/`ask_as`). Adds NO dependency — it
+# is a pure query-rewrite change on the existing zero-copy view path (no engine change).
+# OFF by default: with the feature OFF, the read path is BYTE-IDENTICAL to today (a bare
+# default-graph pattern ranges over the union of the session's authorized named graphs via
+# the always-on per-pattern GRAPH wrap). With it ON, the read path implements the draft's
+# empty-default + explicit-union semantics: the default graph is EMPTY (a bare pattern
+# matches nothing) UNLESS the query opts in with
+# `FROM <http://www.w3.org/ns/solid/sparql#union-default-graph>`, which makes the default
+# graph the union of the authorized named graphs FOR THAT REQUEST ONLY (no cross-request
+# leak). NB the default flip is a behaviour change to a pervasive query idiom and is
+# therefore feature-gated pending maintainer ratification (issue #992 follow-up) — the
+# `byte-identical to today` regression is proved by the default-build test suite.
+solid-sparql-query = []
+
 # [OPUS-4.8] sq-pfae PoC: the trust-graph end-to-end test (tests/trust_graph.rs, fully
 # `#![cfg(feature = "trust-graph")]`) drives the admission gate through the real
 # PodStore. These are dev-only — they do not touch the default build or publish. Scoped

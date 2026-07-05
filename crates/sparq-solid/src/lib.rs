@@ -67,6 +67,12 @@ pub use odrl_bridge::{BridgeEntry, BridgeKind, BridgeLedger};
 #[cfg(feature = "trust-graph")]
 pub use trust_wire::{TrustAdmissionOutcome, TrustStaticOutcome};
 pub use rewrite::{rewrite_for, wrap_for_view};
+// [OPUS-4.8] sq-bq7m9 (issue #992 item 4): the opt-in union-default-graph read-path rewrite
+// + the spec-minted reserved IRI, per the solid-sparql-query Editor's Draft §4. Gated behind
+// the default-OFF `solid-sparql-query` feature (with it off the read path is byte-identical
+// to today); see the crate README and the access-control SKILL for the honest scope.
+#[cfg(feature = "solid-sparql-query")]
+pub use rewrite::{wrap_for_view_opt_in, UNION_DEFAULT_GRAPH_IRI};
 // [OPUS-4.8] issue #992 FR-3 (sq-snopa.5): the authoritative ACL write-through outcome type
 // (the `put_acl`/`delete_acl` methods live on `PodStore` in `write_through`).
 pub use write_through::AclWriteOutcome;
@@ -127,6 +133,24 @@ pub const AUTH_NS: &str = "https://sparq.dev/ns/auth#";
 /// Namespace of derivation-internal predicates (kept out of the auth view except for
 /// the matcher accept-set facts that conditional grants reference).
 pub const SOLIDX_NS: &str = "https://sparq.dev/ns/solidx#";
+
+/// [OPUS-4.8] sq-bq7m9. Wrap a read query for the zero-copy view path, honouring the
+/// *Access-Controlled SPARQL Query over a Solid Pod* Editor's Draft §4 union-default-graph
+/// opt-in when the `solid-sparql-query` feature is on (`rewrite::wrap_for_view_opt_in`).
+/// With the feature OFF this is exactly `rewrite::wrap_for_view` — byte-identical to the
+/// pre-feature read path (a bare default-graph pattern ranges over the authorized union).
+/// The single `cfg` seam that all three read entry points
+/// ([`PodStore::query_as`]/[`PodStore::query_json_as`]/[`PodStore::ask_as`]) share.
+fn wrap_read(sparql: &str) -> Result<String, String> {
+    #[cfg(feature = "solid-sparql-query")]
+    {
+        rewrite::wrap_for_view_opt_in(sparql)
+    }
+    #[cfg(not(feature = "solid-sparql-query"))]
+    {
+        rewrite::wrap_for_view(sparql)
+    }
+}
 
 /// A pod dataset + its materialized auth view + the per-session graph-set cache.
 ///
@@ -615,6 +639,18 @@ impl PodStore {
     /// a view API), at the measured cost of copying every authorized graph per
     /// query. Measured before/after: see "Measured" in this crate's README.
     ///
+    /// **Default-graph semantics.** With the default build, a bare default-graph pattern
+    /// (`{ ?s ?p ?o }`) ranges over the union of the session's authorized named graphs
+    /// (the always-on per-pattern GRAPH wrap). With the opt-in **`solid-sparql-query`**
+    /// feature (OFF by default), this method instead follows the *Access-Controlled SPARQL
+    /// Query over a Solid Pod* Editor's Draft §4: the default graph is **empty** (a bare
+    /// pattern matches nothing) UNLESS the query opts in with
+    /// `FROM <http://www.w3.org/ns/solid/sparql#union-default-graph>` (the reserved
+    /// `union_default_graph_iri` — a code span here to avoid a feature-gated intra-doc
+    /// link), which makes the default graph the union of the authorized named graphs FOR
+    /// THAT REQUEST ONLY. Either way an explicit `GRAPH` pattern is unaffected. See the
+    /// crate README + the access-control SKILL for the honest scope.
+    ///
     /// # Errors
     ///
     /// Returns `Err` if `sparql` does not parse, or if the engine fails on the
@@ -634,30 +670,35 @@ impl PodStore {
     /// # "#;
     /// # let mut store = PodStore::new(sparq_core::Graph::load_dataset(nquads, "nquads")?);
     /// # store.materialize_wac()?;
-    /// let q = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }";
+    /// // An explicit GRAPH pattern ranges over the session's authorized named graphs in
+    /// // either feature state (a bare default-graph pattern needs the `solid-sparql-query`
+    /// // union-default opt-in — see "Default-graph semantics" above).
+    /// let q = "SELECT ?title WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?title } }";
     /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
     /// assert_eq!(store.query_as(&alice, Mode::Read, q)?.rows.len(), 1);
     /// assert_eq!(store.query_as(&Session::default(), Mode::Read, q)?.rows.len(), 0);
     /// # Ok::<(), String>(())
     /// ```
     pub fn query_as(&mut self, s: &Session, mode: Mode, sparql: &str) -> Result<QueryResult, String> {
-        let wrapped = wrap_for_view(sparql)?;
+        let wrapped = wrap_read(sparql)?;
         sparq_engine::query_view(&self.view_for(s, mode), &wrapped)
     }
 
     /// [`PodStore::query_as`], returning the SPARQL 1.1 JSON results serialization
     /// (via [`sparq_engine::query_json_view`]) instead of a materialized
-    /// [`QueryResult`]. Same view path, same fail-closed semantics.
+    /// [`QueryResult`]. Same view path, same fail-closed semantics (incl. the
+    /// `solid-sparql-query` union-default opt-in — see [`PodStore::query_as`]).
     pub fn query_json_as(&mut self, s: &Session, mode: Mode, sparql: &str) -> Result<String, String> {
-        let wrapped = wrap_for_view(sparql)?;
+        let wrapped = wrap_read(sparql)?;
         sparq_engine::query_json_view(&self.view_for(s, mode), &wrapped)
     }
 
     /// ASK as `session` through the view path ([`sparq_engine::ask_view`]): `true`
     /// iff the pattern is satisfiable inside the session's authorized graph set.
-    /// Fail-closed: a grant-less session always gets `false` (empty view).
+    /// Fail-closed: a grant-less session always gets `false` (empty view). Honours the
+    /// `solid-sparql-query` union-default opt-in like [`PodStore::query_as`].
     pub fn ask_as(&mut self, s: &Session, mode: Mode, sparql: &str) -> Result<bool, String> {
-        let wrapped = wrap_for_view(sparql)?;
+        let wrapped = wrap_read(sparql)?;
         sparq_engine::ask_view(&self.view_for(s, mode), &wrapped)
     }
 
