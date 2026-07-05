@@ -164,7 +164,7 @@ jobs:
             --offline
             --include-fragments
             --no-progress
-            README.md AGENTS.md CONTRIBUTING.md SECURITY.md CHANGELOG.md CLAUDE.md
+            README.md AGENTS.md ASSURANCE.md CONTRIBUTING.md SECURITY.md CHANGELOG.md CLAUDE.md
             './skills/**/*.md' './docs/**/*.md' './crates/**/*.md'
           fail: true
           # Don't post a tracking issue (read-only token; gating is enough).

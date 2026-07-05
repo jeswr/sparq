@@ -166,6 +166,9 @@ See [`AGENTS.md`](AGENTS.md) for the full crate map and what each one does.
   [`bench/CATALOG.md`](bench/CATALOG.md). The QLever comparison methodology is in
   [`bench/qlever-baselines.md`](bench/qlever-baselines.md) and the continuous Oxigraph
   differential harness in [`research/BENCHMARKS.md`](research/BENCHMARKS.md).
+- **Trust it** — [`ASSURANCE.md`](ASSURANCE.md): the 15-minute walkthrough of the assurance
+  estate (conformance ratchets, independent oracles, fuzzing, bounded proofs, honesty gates) —
+  how to check sparq works as claimed without reading the codebase.
 - **Contribute** — [`CONTRIBUTING.md`](CONTRIBUTING.md) (the build/test/lint gate, the
   conformance ratchets, and the crate-README conventions) and [`SECURITY.md`](SECURITY.md).
 
