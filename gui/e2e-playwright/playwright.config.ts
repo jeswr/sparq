@@ -15,6 +15,11 @@
 
 import { defineConfig, devices } from "@playwright/test";
 
+// (sq-eydh9) [SONNET-4.6] Allow overriding the dev-server port so concurrent worktree test runs
+// don't collide.  Default is 3007 (the canonical CI port); set PLAYWRIGHT_PORT=<n> locally when
+// another worktree already holds 3007.
+const SERVE_PORT = process.env.PLAYWRIGHT_PORT ?? "3007";
+
 export default defineConfig({
   testDir: "./specs",
 
@@ -31,7 +36,7 @@ export default defineConfig({
   reporter: process.env.CI ? [["github"], ["list"]] : [["list"]],
 
   use: {
-    baseURL: "http://127.0.0.1:3007",
+    baseURL: `http://127.0.0.1:${SERVE_PORT}`,
     // [SONNET-4.6] retain-on-failure: with retries=0, "on-first-retry" never fires → no trace
     // ever captured. retain-on-failure emits a trace for every failed test regardless of retries.
     trace: "retain-on-failure",
@@ -81,8 +86,8 @@ export default defineConfig({
     // [SONNET-4.6] --no-install: fails CLOSED if serve is not already installed rather than
     // fetching from the registry. serve is a pinned devDependency so it WILL be present after
     // `npm install`; --no-install makes the dependency on that being true explicit + hermetic.
-    command: "npx --no-install serve -l 3007 -s ../app/out",
-    url: "http://127.0.0.1:3007",
+    command: `npx --no-install serve -l ${SERVE_PORT} -s ../app/out`,
+    url: `http://127.0.0.1:${SERVE_PORT}`,
     reuseExistingServer: !process.env.CI,
     timeout: 15_000,
   },
