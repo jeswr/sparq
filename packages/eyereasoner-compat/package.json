@@ -1,0 +1,66 @@
+{
+  "name": "@sparq-org/eyereasoner-compat",
+  "version": "0.1.0",
+  "description": "Drop-in migration package for eye-js (eyereasoner): the same n3reasoner API, backed by sparq's native Notation3 forward-chaining reasoner compiled to WebAssembly. Lighter browser payload, no SWI-Prolog.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sparq-org/sparq.git",
+    "directory": "packages/eyereasoner-compat"
+  },
+  "homepage": "https://github.com/sparq-org/sparq/tree/main/packages/eyereasoner-compat#readme",
+  "bugs": {
+    "url": "https://github.com/sparq-org/sparq/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "wasm",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "_copy:wasm": "node scripts/copy-wasm.mjs",
+    "build:wasm": "wasm-pack build ../../crates/sparq-reason-wasm --target web --release && npm run _copy:wasm",
+    "build:ts": "tsc",
+    "build": "npm run build:wasm && npm run build:ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "check:package": "node guardrails/check-package.mjs",
+    "prepack": "npm run build",
+    "prepare": "node guardrails/prepare-build.mjs"
+  },
+  "keywords": [
+    "rdf",
+    "n3",
+    "notation3",
+    "reasoner",
+    "eye",
+    "eyereasoner",
+    "eye-js",
+    "n3reasoner",
+    "wasm",
+    "sparql",
+    "inference"
+  ],
+  "devDependencies": {
+    "@rdfjs/types": "^2.0.1",
+    "@types/node": "^22.10.0",
+    "typescript": "^6.0.3"
+  }
+}
