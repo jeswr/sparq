@@ -340,6 +340,16 @@ def gather_failed_jobs(run_id: str, repo: str) -> list[str]:
         name, _, conclusion = line.partition("\t")
         if conclusion.strip() in FAILED_CONCLUSIONS:
             failed.append(name)
+    # The workflow only fires on a failure-concluded run, so an empty failed-job
+    # set is always anomalous (jobs-API filter=latest re-run race, shape surprise,
+    # etc.).  Distinguish this from "no correlation found" to prevent silent exit 0
+    # masking a real failure.
+    if not failed:
+        raise AlarmError(
+            "gather_failed_jobs: empty failed-job set on a failure-concluded run "
+            f"(run_id={run_id}); jobs-API shape surprise or filter=latest re-run "
+            "race — cannot correlate, refusing to exit 0"
+        )
     return failed
 
 
@@ -353,7 +363,7 @@ def last_green_nightly_sha(repo: str, workflow_file: str, event: str) -> str | N
             f"?event={event}&status=success&per_page=1",
             "--jq", ".workflow_runs[0].head_sha // \"\"",
         ],
-        check=False,
+        check=True,
     )
     sha = out.strip()
     return sha or None
@@ -540,6 +550,16 @@ def run_alarm(args: argparse.Namespace) -> tuple[list[Finding], list[str], str]:
         if not repo:
             raise AlarmError("--repo (or $GITHUB_REPOSITORY) required for the gh path")
         failed_jobs = gather_failed_jobs(args.run_id, repo)
+    # The workflow only fires on a failure-concluded run, so an empty failed-job
+    # set (from either the file path or the gh path) is always anomalous — an
+    # empty correlation must be distinguishable from anomalous-empty to prevent a
+    # silent exit 0 masking a real failure.
+    if not failed_jobs:
+        raise AlarmError(
+            "run_alarm: empty failed-jobs set; workflow fires on failure-concluded "
+            "runs only, so this is anomalous (jobs-API shape surprise, re-run race, "
+            "or empty --failed-jobs-file). Refusing to exit 0."
+        )
 
     # cargo metadata (member set + reverse closure for the replay).
     meta = ci_select.load_metadata(args.metadata_file, repo_root)

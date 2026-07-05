@@ -226,6 +226,25 @@ class TestCliFailLoud(unittest.TestCase):
                 ])
             self.assertEqual(rc, 1)
 
+    def test_empty_failed_jobs_file_exits_nonzero(self):
+        # An empty --failed-jobs-file on a failure-concluded run is anomalous
+        # (jobs-API filter=latest re-run race or shape surprise) — must exit
+        # NON-ZERO, not silently "no alarm" exit 0.  Covers the fix at the
+        # run_alarm call site (sq-va7at reviewer concern 1).
+        mod = _load_module()
+        with tempfile.TemporaryDirectory() as d:
+            meta_f = Path(d) / "meta.json"
+            meta_f.write_text(json.dumps(self._meta()))
+            jobs_f = Path(d) / "jobs.txt"
+            jobs_f.write_text("")  # empty — simulates API race / shape surprise
+            rc = mod.main([
+                "--run-id", "1", "--head-sha", "f" * 40, "--repo", "o/r",
+                "--repo-root", d, "--failed-jobs-file", str(jobs_f),
+                "--metadata-file", str(meta_f), "--dry-run",
+            ])
+            self.assertEqual(rc, 1,
+                             "empty failed-jobs on failure-concluded run must exit non-zero")
+
     def test_dry_run_reports_finding_without_gh(self):
         # End-to-end via the CLI dry-run path (no gh writes), exercising the REAL
         # ci_select replay. The landed commit touches only crates/sparq-geo/src
