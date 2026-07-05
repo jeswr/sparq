@@ -229,6 +229,76 @@ parallelize; bead 5 lands last.
 2^53 boundary — the harness must go red). A proof harness that cannot fail is worse than no
 harness: it launders confidence.
 
+### 5.1 Mandatory domain-coverage self-checks (the anti-vacuity program — sq-og8u8)
+
+The mutation spot-check above is **necessary but NOT sufficient**. It catches a harness whose
+*assertion* is too weak; it does **not** catch a harness whose *input domain* has been silently
+emptied of the interesting inputs — because the mutant is pruned on exactly the same paths as
+the property, so it stays green too.
+
+**The failure class (sq-sqtk2.1, 2026-07-04).** The `sparq-solid` decision harnesses bounded
+their symbolic principals with an `assume` and an `#[kani::unwind(24)]`. Under that unwind the
+`PUBLIC` / `AUTHENTICATED` / `ANY_CLIENT` / `ANY_ISSUER` principal identities — 32–39-byte
+strings — needed more loop iterations than the bound admitted, so CBMC pruned those paths via
+`assume(false)`. The deny-wins / fail-closed harnesses were therefore **VACUOUS for exactly the
+security-relevant identities**, and reported nothing wrong. A mutation spot-check could not
+catch it: the mutant that would have broken deny-wins for `PUBLIC` was pruned alongside the
+input. The hole was found only by re-scoping the harness (sq-sqtk2.7: `FlattenCompat`
+elimination, shorter symbolic strings, `unwind 24 → 40`) and noticing the newly-reachable
+paths — i.e. by luck, not by construction. **This must never depend on luck again.**
+
+**The requirement.** Every harness *suite* (every `#[cfg(kani)]` module in the program) MUST
+ship at least one **domain-coverage self-check** — a dedicated `#[kani::proof]` harness that
+proves the suite's *interesting* inputs genuinely survive the bounds and are genuinely
+adversarial. Two complementary shapes, use whichever the suite needs (usually both):
+
+- **Exact-image / domain pinning** — plain `assert!`s over the domain CONSTANTS (tables,
+  partition bounds, generator ranges) proving the interesting input is present and has the
+  adversarial property. These use no symbolic loop, so they **cannot themselves be pruned**;
+  they go red if a future re-scope collapses the domain. *Exemplar:*
+  `domain_exhibits_the_2p53_collapse` and `domain_cf_numeric_is_collapse_free_with_signed_zero_pair`
+  in `sparq-substrate/src/compare.rs` (PR #1477), documented there under
+  "DOMAIN-COVERAGE SELF-CHECKS".
+- **Witness survival** — a `kani::cover!` (Kani's SAT-reachability primitive) asserting that a
+  MAXIMAL / most-interesting input is reachable under the suite's own `unwind` bound. If a bound
+  tightening `assume(false)`-prunes that input (the sq-sqtk2.1 mode), the cover becomes
+  UNREACHABLE and goes **red** — the direct, mechanical guard against silent pruning. For a
+  no-panic *totality* harness the analogous check is that the ACCEPT / deep-validation path is
+  reachable within the bound (a concrete accepted input, or a `cover!(result.is_ok())`), so the
+  proof is non-vacuous on the code that does the work, not only the early-reject branches.
+
+**Applied to the merged suites (sq-og8u8 audit).**
+
+| Suite | Structure | Self-check shipped |
+|-------|-----------|--------------------|
+| `sparq-substrate/src/compare.rs` (#1477/#1502) | model `M`, per-kind `unwind`; strings compared are the short `STRS` (≤2 chars) only — after the sq-wjl8i kind-first fix, cross-kind pairs rank by enum and same-kind numerics by f64/exact, so the long `INT_STRS`/`DBL_STRS` forms are never byte-compared and cannot be unwind-pruned | **exemplar** — `domain_exhibits_the_2p53_collapse`, `domain_cf_numeric_is_collapse_free_with_signed_zero_pair`, `domain_x2_doubles_are_exact` (no change needed) |
+| `sparq-engine/src/reduce.rs` (#1476) | bounded slice generator (`len ≤ MAX_SLICE = 8`, `unwind(12)`) | `domain_reducer_slice_is_adversarial_and_survives_the_bound` — adversarial value/id domain + `cover!` that the full-length varied slice survives `unwind(12)` |
+| `sparq-core/src/dict.rs` (#1480 id harnesses) | `assume`-restricted, complete-domain, no loop | `domain_id_partition_regions_are_all_nonempty` — four-region non-emptiness + `cover!`s that the round-trip assume-domain reaches its `INLINE_MAX` boundary and zero |
+| `sparq-core/src/dict.rs` (mmap validators, sq-ueuk) | bounded symbolic byte buffer, `unwind(28)` | `domain_dict_validator_accepts_the_empty_dict` — accept path reachable in-domain; deep-record accept path pinned by the existing `validate_dict_bytes_seam_accepts_valid_and_rejects_corruption` unit test |
+| `sparq-vectors/src/store.rs` | bounded symbolic byte buffer, `unwind(40)` | `domain_bounded_buffer_contains_an_accepted_store` — a concrete minimal well-formed `.spqv` inside `MAX_LEN` validates `Ok` |
+
+### 5.2 STANDING HARNESS-BRIEF TEMPLATE (every future proof-program bead inherits this)
+
+A proof-program bead's `bd` body carries `{crate, model_tier, invariant, acceptance_test}`
+plus these standing clauses — copy them verbatim; downstream `verify` is mechanical against
+them:
+
+1. **Harness-only diff.** Runtime logic is byte-unchanged; the whole change lives in a
+   `#[cfg(kani)]` module. (Keeps the fleet's mechanical verify objective and merge risk ~0.)
+2. **State the tier and the bounds.** PROVED (complete-domain) vs PROVED (bounded) with the
+   explicit `unwind` / length / alphabet bounds, per §1. No "proved" without its bounds.
+3. **Mutation spot-check.** Name one local perturbation of the runtime code that makes the
+   harness go RED (documented in the PR body). A harness that cannot fail launders confidence.
+4. **Domain-coverage self-check (MANDATORY — §5.1).** Ship at least one `#[kani::proof]`
+   self-check proving the suite's interesting inputs (a) are genuinely adversarial (exact-image
+   / domain pinning over the constants) and (b) survive the bounds (`kani::cover!` witness
+   survival, or a concrete accepted input for a totality harness). Keep it CHEAP — the smallest
+   `unwind` its loops need — so it does not inflate the nightly lane.
+5. **Acceptance.** `cargo kani -p <crate> [--features <f>] --harness <name>` green for every
+   harness INCLUDING the self-check, plus `clippy -D warnings` and the crate's `cargo test`
+   green in both feature states (the `#[cfg(kani)]` module is stripped from those, so they only
+   confirm no runtime-code drift).
+
 ## 6. NOT-TRACTABLE-NOW ledger (honesty over ambition)
 
 | Deferred item | Why not now | Tier of record meanwhile |
