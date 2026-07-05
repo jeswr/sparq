@@ -522,6 +522,16 @@ jobs:
         run: python3 scripts/tests/test_path_ownership.py
       - name: Selection wiring inspection (fail-closed guards + real crate needles — sq-fmx4u.3)
         run: python3 scripts/tests/test_ci_select_wiring.py
+      # [OPUS-4.8] sq-va7at: the nightly selection-bug ALARM
+      # (scripts/ci_selection_alarm.py, .github/workflows/selection-alarm.yml,
+      # design §6.1). Hermetic stdlib-unittest suite (NO gh, NO git, NO cargo,
+      # NO network): the pure correlation core (precise per-crate hit, fail-safe
+      # triage for narrowed shards, the non-spam empty-skip-set property), the
+      # TRIAGE_LANE_RE pin against the real ci.yml shard job name, and the
+      # fail-loud exits (replay error / total blocker => non-zero). HARD (no
+      # "advisory" token): the detector's own logic must red CI if it regresses.
+      - name: Self-test the nightly selection-bug alarm (correlation + fail-loud — sq-va7at)
+        run: python3 scripts/tests/test_ci_selection_alarm.py
 
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
