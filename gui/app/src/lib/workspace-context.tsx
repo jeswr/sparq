@@ -7,9 +7,11 @@
 // selected backends (Tauri on-disk when the fs capability is granted, browser localStorage on
 // the web target, in-memory fallback). This context is the GUI's host glue around it: it holds
 // the active workspace + its imported-source list (drives the left rail's Imports subgroup),
-// persists a workspace SNAPSHOT (the save/open cache) after each import, and — the load-bearing
-// fix (sq-lcd6e) — RESTORES that snapshot into the live engine on launch so a user's imported
-// data + editor state survive a reload instead of being silently replaced by the sample graph.
+// persists a workspace SNAPSHOT (the save/open cache) after each import AND after each
+// successful SPARQL UPDATE (sq-7gdfp — INSERT/DELETE-applied data is covered too, plus a
+// best-effort beforeunload flush), and — the load-bearing fix (sq-lcd6e) — RESTORES that
+// snapshot into the live engine on launch so a user's imported + updated data and editor state
+// survive a reload instead of being silently replaced by the sample graph.
 //
 // [OPUS-4.8] sq-lcd6e — this context is the workspace⇄engine HYDRATION bridge. Because
 // <WorkspaceProvider> is rendered UNDER <EngineProvider> (see app/layout.tsx), it can call
