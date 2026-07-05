@@ -25,6 +25,7 @@ import {
   type WasmStore,
   type WasmStoreCtor,
   type WorkspaceInferenceMode,
+  type WorkspaceRulesDoc,
 } from "@sparq/client";
 
 import { basePath } from "@/lib/base-path";
@@ -321,6 +322,14 @@ export interface EngineContextValue {
    */
   setInferenceMode: (mode: WorkspaceInferenceMode) => void;
   /**
+   * [sq-glo5r] Push the active workspace's N3 rules docs to the engine so the N3 closure is
+   * rebuilt when rules change. Called by `N3RulesBridge` (on workspace rule mutations) and
+   * directly by workspace lifecycle actions (workspace switch, initial restore) as belt-and-
+   * suspenders in lockstep with `setInferenceMode`. A no-op when inference is not `"n3"` — the
+   * rules are cached by content hash so a no-change push is free.
+   */
+  setN3Rules: (docs: WorkspaceRulesDoc[]) => void;
+  /**
    * [OPUS-4.8] sq-ixc3.13 — the whole-dataset N-QUADS snapshot of the live store (default graph +
    * every named graph), the save/open cache a workspace persists as its `dataSnapshot` (sq-atb0).
    * N-Quads (not the TriG `serializeStore` emits) because that is the workspace snapshot format,
@@ -425,6 +434,41 @@ function storeToNQuads(store: WasmStore): string {
     const g = b["g"];
     const tail = g ? ` ${termToNT(g)}` : "";
     lines.push(`${termToNT(s)} ${termToNT(p)} ${termToNT(o)}${tail} .`);
+  }
+  return lines.join("\n");
+}
+
+/** [sq-glo5r] FNV-1a hash for a string — non-crypto, fast; used for the N3 rules cache key. */
+function fnv1aHash(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+// [sq-glo5r] — SELECT DISTINCT to fold named graphs into the default graph and deduplicate
+// s/p/o. Used as the base data input for N3 rule reasoning (N3 does not accept N-Quads; named
+// graphs are folded exactly as the RDFS/OWL-RL reasoner folds them).
+const ALL_TRIPLES_QUERY =
+  "SELECT DISTINCT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }";
+
+/**
+ * [sq-glo5r] Serialise the whole dataset as N-TRIPLES, folding named graphs into the default
+ * graph and deduplicating s/p/o (via DISTINCT). Returns `""` for an empty store. Used as the
+ * base for N3 rule reasoning — N3 is a superset of Turtle which accepts full-IRI N-Triple lines.
+ */
+function storeToNTriples(store: WasmStore): string {
+  const json = store.query(ALL_TRIPLES_QUERY);
+  const parsed = JSON.parse(json) as SparqlResults;
+  const lines: string[] = [];
+  for (const b of parsed.results?.bindings ?? []) {
+    const s = b["s"];
+    const p = b["p"];
+    const o = b["o"];
+    if (!s || !p || !o) continue;
+    lines.push(`${termToNT(s)} ${termToNT(p)} ${termToNT(o)} .`);
   }
   return lines.join("\n");
 }
@@ -560,6 +604,14 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   // or the store epoch bumped mid-build) is stale and must NOT publish its status, or the UI could
   // land in the wrong state (e.g. mode Off but status Ready/Error). Only the latest generation writes.
   const inferenceGenRef = React.useRef(0);
+
+  // [sq-glo5r] — the active workspace's N3 rule documents (pushed by setN3Rules / N3RulesBridge).
+  // Held in a ref so buildReasonedStore always reads the latest docs without adding them to its
+  // useCallback deps; `rulesEpoch` bumps on every setN3Rules call to trigger the applyInferenceMode
+  // effect and rebuild the N3 closure when rules change while N3 is active.
+  const n3RulesRef = React.useRef<WorkspaceRulesDoc[]>([]);
+  const rulesEpochRef = React.useRef(0);
+  const [rulesEpoch, setRulesEpoch] = React.useState(0);
 
   // [OPUS-4.8] sq-lcd6e — a hydration request that arrived BEFORE the wasm ctor warmed (the
   // workspace-restore bridge can call hydrateFromSnapshot while the engine is still cold). It is
@@ -701,10 +753,10 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   }, [refreshDiskUsage]);
 
   // [OPUS-4.8] sq-tp1m (#757) — build (or reuse) the reasoned CLOSURE store for `mode` over the
-  // current base store: serialise the whole dataset to N-Quads, forward-chain the RDFS / OWL 2 RL
-  // closure with the real W-reason bundle, and load the closure N-Triples into a fresh in-tab
-  // store queries can run against. Cached by `mode:epoch`, so every query while the mode + store
-  // are unchanged reuses the same closure (the materialisation cost is paid once per change).
+  // current base store. For RDFS / OWL-RL: serialise to N-Quads + materialize with the W-reason
+  // bundle. For N3 (sq-glo5r): fold named graphs to N-Triples, concatenate with enabled rules docs,
+  // call reasonN3 for derived ground triples, load base + derived as the closure. Cached by a
+  // `mode:epoch[:rulesHash]` key — the materialisation cost is paid once per change.
   // Throws if the bundle is unavailable or the closure fails — the caller surfaces that honestly.
   const buildReasonedStore = React.useCallback(
     async (mode: Exclude<WorkspaceInferenceMode, "off">): Promise<WasmStore> => {
@@ -713,6 +765,47 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       if (!Store || !base) {
         throw new Error("The engine is not ready yet — wait for the store to warm.");
       }
+
+      // [sq-glo5r] — N3 rules mode: base is folded to N-Triples (same as RDFS/OWL-RL folding),
+      // concatenated with enabled rules texts, then reasonN3 forward-chains the custom rules.
+      // The cache key includes a content hash of the enabled rules so a rules change invalidates
+      // the prior closure even if the store epoch is unchanged.
+      if (mode === "n3") {
+        const enabledRules = n3RulesRef.current.filter((d) => d.enabled !== false);
+        const rulesText = enabledRules.map((d) => d.text).join("\n");
+        const rulesHash = fnv1aHash(rulesText);
+        const key = `n3:${storeEpochRef.current}:${rulesHash}`;
+        if (reasonedKeyRef.current === key && reasonedStoreRef.current) {
+          return reasonedStoreRef.current;
+        }
+        const n3Inflight = reasonedBuildRef.current;
+        if (n3Inflight && n3Inflight.key === key) {
+          return n3Inflight.promise;
+        }
+        const n3Promise = (async () => {
+          const reasoner = await loadReasoner();
+          const baseNTriples = storeToNTriples(base);
+          // Combine rules (N3 Turtle) with base facts (N-Triple lines are valid N3/Turtle syntax).
+          const combined = rulesText + "\n" + baseNTriples;
+          // reasonN3 returns ONLY the newly entailed ground N-Triple lines (not the base triples).
+          const derived = reasoner.reasonN3(combined);
+          // Closure = base triples + derived (so queries over the closure see both).
+          const closure = baseNTriples + (derived.trim() ? "\n" + derived : "");
+          const reasoned = Store.load(closure || " ", "ntriples");
+          reasonedStoreRef.current = reasoned;
+          reasonedKeyRef.current = key;
+          return reasoned;
+        })();
+        reasonedBuildRef.current = { key, promise: n3Promise };
+        try {
+          return await n3Promise;
+        } finally {
+          if (reasonedBuildRef.current?.key === key) reasonedBuildRef.current = null;
+        }
+      }
+
+      // RDFS / OWL-RL: N-Quads snapshot → materialize → N-Triples closure.
+      // TypeScript narrows `mode` to `"rdfs" | "owl-rl"` here after the `=== "n3"` branch above.
       const key = `${mode}:${storeEpochRef.current}`;
       // Completed-closure cache hit: reuse the already-materialised store.
       if (reasonedKeyRef.current === key && reasonedStoreRef.current) {
@@ -770,9 +863,17 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         setInferenceStatus({ kind: "loading" });
         return;
       }
-      const cachedKey = `${mode}:${storeEpochRef.current}`;
+      // Check if the closure for this mode + store epoch (+ rules hash for N3) is already built.
+      const cachedKeyPrefix =
+        mode === "n3"
+          ? `n3:${storeEpochRef.current}:`
+          : `${mode}:${storeEpochRef.current}`;
       const alreadyBuilt =
-        reasonedKeyRef.current === cachedKey && reasonedStoreRef.current !== null;
+        reasonedKeyRef.current !== null &&
+        reasonedStoreRef.current !== null &&
+        (mode === "n3"
+          ? reasonedKeyRef.current.startsWith(cachedKeyPrefix)
+          : reasonedKeyRef.current === cachedKeyPrefix);
       if (!alreadyBuilt) setInferenceStatus({ kind: "loading" });
       try {
         const reasoned = await buildReasonedStore(mode);
@@ -804,11 +905,20 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     setInferenceModeState(mode);
   }, []);
 
-  // [OPUS-4.8] sq-tp1m — whenever the mode OR the base store content changes, reconcile the
-  // closure + status. The SINGLE place reasoning is applied.
+  // [sq-glo5r] — push updated N3 rules to the engine; bumps rulesEpoch so the
+  // applyInferenceMode effect fires and rebuilds the N3 closure when rules change.
+  const setN3Rules = React.useCallback((docs: WorkspaceRulesDoc[]) => {
+    n3RulesRef.current = docs;
+    rulesEpochRef.current += 1;
+    setRulesEpoch(rulesEpochRef.current);
+  }, []);
+
+  // [OPUS-4.8] sq-tp1m — whenever the mode OR the base store content OR the N3 rules change,
+  // reconcile the closure + status. The SINGLE place reasoning is applied. `rulesEpoch` is in
+  // deps so a rules change (via setN3Rules) re-fires this effect when N3 is active.
   React.useEffect(() => {
     void applyInferenceMode(inferenceMode);
-  }, [inferenceMode, storeEpoch, applyInferenceMode]);
+  }, [inferenceMode, storeEpoch, rulesEpoch, applyInferenceMode]);
 
   // [OPUS-4.8] sq-ixc3.13 — the Import drawer's ingest. A `file` import (a disk path) goes
   // through the NATIVE loader IPC (`load_path`: compressed + native-only HDT, no wasm-tab
@@ -1120,6 +1230,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       inferenceMode,
       inferenceStatus,
       setInferenceMode,
+      setN3Rules,
     }),
     [
       status,
@@ -1141,6 +1252,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       inferenceMode,
       inferenceStatus,
       setInferenceMode,
+      setN3Rules,
     ],
   );
 

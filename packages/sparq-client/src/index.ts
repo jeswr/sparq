@@ -706,6 +706,8 @@ export {
   type WorkspaceEditorState,
   type WorkspaceRunMode,
   type WorkspaceInferenceMode,
+  // [sq-glo5r] — N3 per-workspace rule documents.
+  type WorkspaceRulesDoc,
   type WorkspaceBackend,
   type WorkspaceStore,
   type WorkspaceStoreOptions,
