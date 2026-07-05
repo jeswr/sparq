@@ -120,6 +120,58 @@ fn arithmetic_scales_across_generated_float_widths() {
 	assert_eq((quad_two / quad_two).bits(), 0x3fff0000000000000000000000000000 as u128);
 }
 
+// Regression: binary128 mul/div on deep-underflow inputs must return a
+// correctly-signed zero per IEEE 754-2019 section 7.5, NOT abort the circuit on
+// an unsigned exponent underflow (sq-25mgo). Oracle: exact-rational binary128
+// soft-float (round-nearest-even), cross-checked with an exact-fraction script -
+// a power-of-two / clearly-below-half-ULP product rounds to +/-0 with the XOR sign.
+//   smallest_subnormal = 2^-16494  (0x...0001)
+//   max_finite         = (2 - 2^-112) * 2^16383  (exponent 0x7ffe, mantissa all-ones)
+#[test]
+fn f128_mul_deep_underflow_returns_signed_zero() {
+	let smallest_subnormal = f128::new(0x00000000000000000000000000000001 as u128);
+	let neg_smallest_subnormal = f128::new(0x80000000000000000000000000000001 as u128);
+
+	// smallest_subnormal^2 = 2^-32988 << half-ULP(2^-16494) -> +0 (repro case 1).
+	assert_eq((smallest_subnormal * smallest_subnormal).bits(), 0x00000000000000000000000000000000 as u128);
+	// Sign is the XOR of operand signs even when the magnitude underflows to zero.
+	assert_eq((smallest_subnormal * neg_smallest_subnormal).bits(), 0x80000000000000000000000000000000 as u128);
+	assert_eq((neg_smallest_subnormal * smallest_subnormal).bits(), 0x80000000000000000000000000000000 as u128);
+	assert_eq((neg_smallest_subnormal * neg_smallest_subnormal).bits(), 0x00000000000000000000000000000000 as u128);
+}
+
+#[test]
+fn f128_div_deep_underflow_returns_signed_zero() {
+	let min_sub = f128::new(0x00000000000000000000000000000001 as u128);
+	let neg_min_sub = f128::new(0x80000000000000000000000000000001 as u128);
+	let max_finite = f128::new(0x7ffeffffffffffffffffffffffffffff as u128);
+	let neg_max_finite = f128::new(0xfffeffffffffffffffffffffffffffff as u128);
+
+	// min_sub / max_finite = 2^-16494 / ~2^16384 = 2^-32878 << half-ULP -> +0 (repro case 2).
+	assert_eq((min_sub / max_finite).bits(), 0x00000000000000000000000000000000 as u128);
+	assert_eq((neg_min_sub / max_finite).bits(), 0x80000000000000000000000000000000 as u128);
+	assert_eq((min_sub / neg_max_finite).bits(), 0x80000000000000000000000000000000 as u128);
+	assert_eq((neg_min_sub / neg_max_finite).bits(), 0x00000000000000000000000000000000 as u128);
+}
+
+// Anti-over-saturation guard: results that are genuine subnormals must stay
+// subnormal, not be flushed to zero by the underflow-safe exponent clamp.
+// Oracle (exact rational): 2^-16382 * 2^-112 = 2^-16494 = smallest subnormal;
+// 2^-16382 / 2 = 2^-16383 = subnormal with mantissa 2^111.
+#[test]
+fn f128_arithmetic_preserves_gradual_underflow_subnormals() {
+	let smallest_normal = f128::new(0x00010000000000000000000000000000 as u128); // 2^-16382
+	let pow2_neg_112 = f128::new(0x3f8f0000000000000000000000000000 as u128);     // 2^-112
+	let two = f128::new(0x40000000000000000000000000000000 as u128);
+	let half = f128::new(0x3ffe0000000000000000000000000000 as u128);            // 2^-1
+
+	// Multiplying down to the exact smallest subnormal (one ULP above zero).
+	assert_eq((smallest_normal * pow2_neg_112).bits(), 0x00000000000000000000000000000001 as u128);
+	// Dividing into the subnormal range (2^-16383, mantissa bit 2^111 set).
+	assert_eq((smallest_normal / two).bits(), 0x00008000000000000000000000000000 as u128);
+	assert_eq((smallest_normal * half).bits(), 0x00008000000000000000000000000000 as u128);
+}
+
 #[test]
 fn unsigned_integer_conversions_follow_ieee_rounding() {
 	assert_eq(f16::from(0 as u8).bits(), 0x0000 as u16);
