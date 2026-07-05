@@ -6,7 +6,7 @@
 //!
 //! ## How it works
 //!
-//! 1. The inner [`GraphPattern`] is wrapped as `SELECT * WHERE { <inner> }` using
+//! 1. The inner `GraphPattern` is wrapped as `SELECT * WHERE { <inner> }` using
 //!    spargebra's `Display` impl (which round-trips algebra → SPARQL syntax), so the
 //!    full pattern (BGPs, OPTIONAL, FILTER, sub-SELECT, …) is forwarded.
 //!
@@ -20,18 +20,18 @@
 //!    when it does not apply (variable endpoint, no bound join var, a join key bound to
 //!    a blank node, …). The block size is the one OPT-IN tuning knob
 //!    ([`with_service_bound_join_block_size`] / `SPARQ_SERVICE_BIND_BLOCK`,
-//!    default [`DEFAULT_BIND_BLOCK`]). The remote relation that is NOT bound-joined is
+//!    default `DEFAULT_BIND_BLOCK`). The remote relation that is NOT bound-joined is
 //!    still fetched in full and consumed row-by-row into the caller's id-level join
 //!    input (see *Bounded result consumption* below).
 //! 2. The query is sent over HTTP (form-encoded POST, `Accept:
 //!    application/sparql-results+json, application/sparql-results+xml;q=0.9` — JSON is
 //!    preferred but XML is accepted as a fallback).
-//! 3. The response is parsed INCREMENTALLY ([`parse_results_into`], bead sq-my8wd.4):
+//! 3. The response is parsed INCREMENTALLY (`parse_results_into`, bead sq-my8wd.4):
 //!    each solution row (`Vec<Option<Term>>`, `None` = unbound) is handed to the
 //!    caller's row sink AS IT IS PARSED — the parser never materialises the whole
 //!    remote relation, and a sink error aborts the parse. The body is content-sniffed:
-//!    a leading `{` is parsed as SPARQL-Results-JSON ([`parse_srj_into`]); a leading
-//!    `<` as SPARQL-Results-XML ([`parse_srx_into`]). The XML path matters because
+//!    a leading `{` is parsed as SPARQL-Results-JSON (`parse_srj_into`); a leading
+//!    `<` as SPARQL-Results-XML (`parse_srx_into`). The XML path matters because
 //!    some endpoints ignore `Accept` and always return XML — without it the whole
 //!    SERVICE call would fail (bead sq-ycu).
 //! 4. The caller (`exec::eval_service`) interns each row into the local/graph
@@ -89,9 +89,9 @@
 //!
 //! ## Timeout
 //!
-//! The remote round-trip is bounded by the active [`QueryBudget`](crate::QueryBudget)
+//! The remote round-trip is bounded by the active `QueryBudget`
 //! deadline (bead sq-d4p): [`HttpTransport::with_budget`] caps its socket timeout at the
-//! budget's remaining time (never above the built-in [`DEFAULT_SERVICE_TIMEOUT`]), so a
+//! budget's remaining time (never above the built-in `DEFAULT_SERVICE_TIMEOUT`), so a
 //! query under a tight deadline does not block for the full default on an unresponsive
 //! endpoint. With no deadline installed the built-in default applies.
 
@@ -117,13 +117,13 @@ pub(crate) struct ServiceRelation {
 ///
 /// A closure bound rather than a trait object: every call site is monomorphised, so
 /// the per-row delivery adds no dynamic dispatch (the #1303 perf-neutrality stance).
-pub(crate) trait RowSink: FnMut(Vec<Option<Term>>) -> Result<(), String> {}
+pub trait RowSink: FnMut(Vec<Option<Term>>) -> Result<(), String> {}
 impl<F: FnMut(Vec<Option<Term>>) -> Result<(), String>> RowSink for F {}
 
 /// Abstracts the HTTP round-trip so tests can inject a fake endpoint. `query` is the
 /// SPARQL query string; the return is the raw response body (expected to be
 /// SPARQL-Results-JSON) or a transport error string.
-pub(crate) trait Transport {
+pub trait Transport {
     fn fetch(&self, endpoint: &str, query: &str) -> Result<String, String>;
 }
 
@@ -133,7 +133,7 @@ pub(crate) trait Transport {
 /// variable list. SILENT handling is the caller's responsibility (it owns the
 /// join-identity fallback, and must discard whatever the sink accumulated when this
 /// returns `Err`). [FABLE-5]
-pub(crate) fn eval_remote_into<F: RowSink>(
+pub fn eval_remote_into<F: RowSink>(
     transport: &dyn Transport,
     endpoint: &str,
     query: &str,
@@ -188,7 +188,7 @@ pub(crate) fn parse_results_into<F: RowSink>(
     }
 }
 
-/// Collecting wrapper over [`parse_results_into`] (tests / small-result callers).
+/// Collecting wrapper over `parse_results_into` (tests / small-result callers).
 #[cfg(feature = "service")]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_results(text: &str) -> Result<ServiceRelation, String> {
@@ -272,7 +272,7 @@ mod bind_block {
 
 /// The bind-join block size in force for the current scope. [OPUS-4.8] (sq-sjkj)
 #[cfg(feature = "service")]
-pub(crate) fn bind_block_size() -> usize {
+pub fn bind_block_size() -> usize {
     bind_block::current()
 }
 
@@ -288,7 +288,7 @@ pub(crate) fn bind_block_size() -> usize {
 ///
 /// ```no_run
 /// # #[cfg(feature = "service")] {
-/// sparq_engine::with_service_bound_join_block_size(200, || {
+/// sparq_engine_service::service::with_service_bound_join_block_size(200, || {
 ///     // ... run a federated query with large bound-join blocks
 /// });
 /// # }
@@ -380,7 +380,7 @@ mod remote_cap {
 /// The per-query SERVICE remote-request cap in force for the current scope, or `None`
 /// when no cap is active (the default). [OPUS-4.8] (sq-b93pv)
 #[cfg(feature = "service")]
-pub(crate) fn remote_request_cap() -> Option<usize> {
+pub fn remote_request_cap() -> Option<usize> {
     remote_cap::current()
 }
 
@@ -408,7 +408,7 @@ pub(crate) fn remote_request_cap() -> Option<usize> {
 /// ```no_run
 /// # #[cfg(feature = "service")] {
 /// // Allow a high-cardinality SERVICE ?ep to dial at most 8 distinct endpoints.
-/// sparq_engine::with_service_remote_request_cap(8, || {
+/// sparq_engine_service::service::with_service_remote_request_cap(8, || {
 ///     // ... run a federated query containing `SERVICE ?ep { ... }`
 /// });
 /// # }
@@ -430,7 +430,7 @@ pub fn with_service_remote_request_cap<R>(n: usize, f: impl FnOnce() -> R) -> R 
 /// only pushes fully-bound tuples (a tuple with an unbound join var falls back to
 /// the verbatim path), so every cell is a concrete term.
 #[cfg(feature = "service")]
-pub(crate) fn render_values_block(vars: &[Variable], tuples: &[Vec<Term>]) -> String {
+pub fn render_values_block(vars: &[Variable], tuples: &[Vec<Term>]) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
     if vars.len() == 1 {
@@ -475,7 +475,7 @@ pub(crate) fn render_values_block(vars: &[Variable], tuples: &[Vec<Term>]) -> St
 /// any non-pushable term the caller abandons the bound-join for the verbatim path,
 /// preserving exact semantics.
 #[cfg(feature = "service")]
-pub(crate) fn pushable_term(t: &Term) -> bool {
+pub fn pushable_term(t: &Term) -> bool {
     matches!(t, Term::NamedNode(_) | Term::Literal(_))
 }
 
@@ -521,7 +521,7 @@ pub(crate) fn parse_srj_into<F: RowSink>(
     st.finish()
 }
 
-/// Collecting wrapper over [`parse_srj_into`] (tests / small-result callers).
+/// Collecting wrapper over `parse_srj_into` (tests / small-result callers).
 #[cfg(feature = "service")]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_srj(text: &str) -> Result<ServiceRelation, String> {
@@ -1190,7 +1190,7 @@ pub(crate) fn parse_srx_into<F: RowSink>(
     Ok(vars)
 }
 
-/// Collecting wrapper over [`parse_srx_into`] (tests / small-result callers).
+/// Collecting wrapper over `parse_srx_into` (tests / small-result callers).
 #[cfg(feature = "service")]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_srx(text: &str) -> Result<ServiceRelation, String> {
@@ -1520,13 +1520,13 @@ pub fn allowlist_entry_host_matches(entry: &str, host: &str) -> bool {
 ///
 /// Without an installed allowlist, every SERVICE endpoint that resolves to a
 /// loopback / RFC1918 / link-local / unique-local / unspecified address is
-/// REJECTED — the secure default. This mirrors [`crate::with_load_base`], which
+/// REJECTED — the secure default. This mirrors `with_load_base`, which
 /// gates `LOAD file://` the same way. Only effective with the `service` feature.
 ///
 /// ```no_run
 /// # #[cfg(feature = "service")] {
 /// // Permit federation to a trusted internal endpoint that resolves privately.
-/// sparq_engine::with_service_egress_allow(["sparql.internal".to_string()], || {
+/// sparq_engine_service::service::with_service_egress_allow(["sparql.internal".to_string()], || {
 ///     // ... run a query containing `SERVICE <http://sparql.internal/> { ... }`
 /// });
 /// # }
@@ -1557,11 +1557,11 @@ pub fn with_service_egress_allow<R>(
 /// ```no_run
 /// # #[cfg(feature = "service")] {
 /// // Restrict SERVICE to a single trusted endpoint; anything else is refused.
-/// sparq_engine::with_service_egress_policy(true, ["sparql.example.org".to_string()], || {
+/// sparq_engine_service::service::with_service_egress_policy(true, ["sparql.example.org".to_string()], || {
 ///     // ... run a query that may contain `SERVICE <…> { ... }`
 /// });
 /// // Strict + empty list = federation fully disabled (deny ALL SERVICE).
-/// sparq_engine::with_service_egress_policy(true, std::iter::empty(), || { /* ... */ });
+/// sparq_engine_service::service::with_service_egress_policy(true, std::iter::empty(), || { /* ... */ });
 /// # }
 /// ```
 #[cfg(feature = "service")]
@@ -1590,7 +1590,7 @@ pub fn with_service_egress_policy<R>(
 /// Gated to `cfg(not(wasm32))` AND the `service` feature so neither ureq nor any of
 /// its TLS stack ever enters the wasm bundle.
 #[cfg(all(feature = "service", not(target_arch = "wasm32")))]
-pub(crate) struct HttpTransport {
+pub struct HttpTransport {
     timeout: std::time::Duration,
 }
 
@@ -1611,20 +1611,20 @@ pub(crate) const MIN_SERVICE_TIMEOUT: std::time::Duration = std::time::Duration:
 #[cfg(all(feature = "service", not(target_arch = "wasm32")))]
 impl HttpTransport {
     /// Construct a transport whose per-request timeout is the active query budget's
-    /// remaining time, capped by the built-in [`DEFAULT_SERVICE_TIMEOUT`]. [OPUS-4.8] (sq-d4p)
+    /// remaining time, capped by the built-in `DEFAULT_SERVICE_TIMEOUT`. [OPUS-4.8] (sq-d4p)
     ///
-    /// `remaining` is the time left until the [`QueryBudget`](crate::QueryBudget)
+    /// `remaining` is the time left until the `QueryBudget`
     /// deadline (from `exec::budget::remaining_timeout`):
     /// * `None` — no deadline installed → use the built-in default in full.
     /// * `Some(d)` — bound the remote round-trip by `min(d, default)`, so a query under
     ///   a tight deadline does not block for the full default on an unresponsive
     ///   endpoint. (The budget's *local* cooperative check only fires AFTER the blocking
     ///   HTTP call returns, so without this cap the deadline would not bite the remote
-    ///   call.) A non-zero floor ([`MIN_SERVICE_TIMEOUT`]) is applied so a nearly- or
+    ///   call.) A non-zero floor (`MIN_SERVICE_TIMEOUT`) is applied so a nearly- or
     ///   just-expired deadline still attempts a quick round-trip rather than a
     ///   guaranteed-instant failure; the local budget check then converts an
     ///   over-deadline query into the timeout error.
-    pub(crate) fn with_budget(remaining: Option<std::time::Duration>) -> Self {
+    pub fn with_budget(remaining: Option<std::time::Duration>) -> Self {
         let timeout = match remaining {
             None => DEFAULT_SERVICE_TIMEOUT,
             Some(d) => d.min(DEFAULT_SERVICE_TIMEOUT).max(MIN_SERVICE_TIMEOUT),
@@ -1822,6 +1822,35 @@ const SERVICE_MAX_BODY_BYTES: u64 = 1024 * 1024 * 1024;
 #[cfg(all(test, feature = "service"))]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------------
+    // [OPUS-4.8] (sq-6vshe.4 / sq-d4p) Per-request timeout wired to the QueryBudget
+    // deadline. MOVED here from sparq-engine's exec.rs WITH the `HttpTransport` it
+    // exercises (seam A2): `timeout_for_test` is `#[cfg(test)]`, so this test only
+    // compiles in THIS crate's own test build. The caller side (`budget::remaining_timeout`
+    // feeding `with_budget`) stays tested in exec.rs.
+    // ---------------------------------------------------------------------
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn http_transport_timeout_tracks_budget() {
+        use std::time::Duration;
+        // No deadline -> the built-in default in full.
+        assert_eq!(HttpTransport::with_budget(None).timeout_for_test(), DEFAULT_SERVICE_TIMEOUT);
+        // A deadline tighter than the default caps the round-trip to the remaining time.
+        let tight = Duration::from_secs(5);
+        assert_eq!(HttpTransport::with_budget(Some(tight)).timeout_for_test(), tight);
+        // A deadline looser than the default never RAISES the timeout above the default.
+        let loose = Duration::from_secs(120);
+        assert_eq!(
+            HttpTransport::with_budget(Some(loose)).timeout_for_test(),
+            DEFAULT_SERVICE_TIMEOUT
+        );
+        // An already-expired (zero) deadline still gets the small non-zero floor.
+        assert_eq!(
+            HttpTransport::with_budget(Some(Duration::ZERO)).timeout_for_test(),
+            MIN_SERVICE_TIMEOUT
+        );
+    }
 
     #[test]
     fn parses_uri_and_literal_bindings() {

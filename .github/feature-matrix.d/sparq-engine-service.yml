@@ -1,0 +1,27 @@
+# Feature-matrix fragment for `sparq-engine-service`.
+#
+# [OPUS-4.8] (sq-6vshe.4) Seam A2 of the sparq-engine facade split (RFC
+# research/engine-split-rfc.md §4 Option A / §7 Phase A2): the SPARQL 1.1 federated-query
+# (`SERVICE`) CLIENT — the HTTP `Transport` seam + ureq `HttpTransport`, the streaming
+# SPARQL-Results JSON/XML parsers, the bound-join `VALUES` batching, and the SSRF egress-policy
+# allowlist — and its in-src unit tests moved OUT of `sparq-engine` into this internal sub-crate.
+# The engine's `sparq-engine (service)` leg (in sparq-engine.yml) STAYS: it still runs the
+# end-to-end integration tests that exercise `exec::eval_service` through the facade
+# (tests/federation_features/*, the exec `service_exec_tests` module) which did NOT move. This
+# leg additionally runs the ~64 moved in-src tests (SRJ/SRX parse, streaming-equivalence, egress
+# policy, bound-join rendering, HttpTransport timeout math) at their new home so they keep RUNNING
+# every PR. `sparq-engine` forwards its `service` feature here and re-exports the public fns
+# verbatim, so the public API + the `service` feature NAME are unchanged.
+#
+# CONTRACT (gate-critical, see sparq-engine.yml header): each leg's emitted check-run NAME is
+# `opt-in <name>`, discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME
+# and pinned in scripts/tests/feature-matrix-legnames.golden.txt. Keep `name` free of the whole
+# words "advisory"/"informational" or the leg stops gating.
+
+# The whole SERVICE client is behind `service`; `cargo test -p sparq-engine-service --features
+# service` runs the moved SRJ/SRX parse, streaming-equivalence, egress-policy, bound-join and
+# HttpTransport-timeout unit tests (loopback / canned only — no network).
+- name: "sparq-engine-service (service)"
+  crate: "sparq-engine-service"
+  features: "service"
+  test: true

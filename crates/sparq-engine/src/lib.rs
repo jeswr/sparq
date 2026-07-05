@@ -30,39 +30,42 @@ pub mod params;
 // SPARQL 1.1 federated query (SERVICE). NON-DEFAULT `service` feature; pulls a
 // blocking HTTP client (ureq) + serde_json, both gated off wasm. When off, zero
 // federation code compiles. [OPUS-4.8]
-#[cfg(feature = "service")]
-mod service;
+// [OPUS-4.8] (sq-6vshe.4) Seam A2 of the facade split (RFC research/engine-split-rfc.md §4
+// Option A / §7 Phase A2): the `service` module moved to the internal `sparq-engine-service`
+// sub-crate. The executor references it as `sparq_engine_service::service::*`; the facade
+// re-exports its public fns verbatim below, so every public path (`sparq_engine::
+// with_service_egress_allow`, …) + the `service` feature NAME are preserved for external users.
 // SSRF default-deny egress filter + opt-in allowlist for SERVICE federation
 // (threat-model B4 / sq-2v6f). [OPUS-4.8]
 #[cfg(feature = "service")]
-pub use service::with_service_egress_allow;
+pub use sparq_engine_service::service::with_service_egress_allow;
 // [OPUS-4.8] (sq-iu0c) Stable marker substring in every SERVICE egress-refusal engine
 // error, so a network-exposed host (sparq-server) can classify a blocked SERVICE as a
 // policy refusal (403-style) rather than a server fault (500), mirroring the existing
 // `"query budget exceeded (timeout)"` → 503 pattern.
 #[cfg(feature = "service")]
-pub use service::SERVICE_EGRESS_REFUSED_MARKER;
+pub use sparq_engine_service::service::SERVICE_EGRESS_REFUSED_MARKER;
 // Strict allowlist-only egress policy: only listed hosts reachable (even public ones
 // off the list are refused). The network-exposed server wires this to --service-allow
 // so federation is restricted to operator-configured endpoints. [OPUS-4.8] (sq-4w18)
 #[cfg(feature = "service")]
-pub use service::with_service_egress_policy;
+pub use sparq_engine_service::service::with_service_egress_policy;
 // [OPUS-4.8] (sq-vbnyc) The SERVICE-egress per-entry host:port matching rule, exposed as a
 // pure function so `sparq-fedclient`'s independent egress guard adopts the SAME port-scoping
 // semantics (port-0/overflow/IPv6-bracket/trailing-colon all handled identically) instead of
 // keeping a second, divergent copy of the allowlist-matching logic — one source of truth.
 #[cfg(feature = "service")]
-pub use service::{allowlist_entry_host_matches, allowlist_entry_permits};
+pub use sparq_engine_service::service::{allowlist_entry_host_matches, allowlist_entry_permits};
 // Bind-join (VALUES pushdown) block-size knob — the only OPT-IN tunable for the
 // SERVICE bound-join pushdown (on-by-default, correctness-preserving). [OPUS-4.8] (sq-sjkj)
 #[cfg(feature = "service")]
-pub use service::with_service_bound_join_block_size;
+pub use sparq_engine_service::service::with_service_bound_join_block_size;
 // Per-query remote-request cap for a high-cardinality `SERVICE ?ep` (endpoint var bound
 // to many distinct IRIs): an OPT-IN ceiling on the distinct endpoints one SERVICE ?ep
 // evaluation may dial, enforced PRE-HTTP (a typed refusal, not post-hoc cancellation).
 // DEFAULT is uncapped, so normal SERVICE queries are unchanged. [OPUS-4.8] (sq-b93pv)
 #[cfg(feature = "service")]
-pub use service::{with_service_remote_request_cap, SERVICE_REMOTE_CAP_MARKER};
+pub use sparq_engine_service::service::{with_service_remote_request_cap, SERVICE_REMOTE_CAP_MARKER};
 // [OPUS-4.8] (sq-678h, sq-6vshe.4) RDF serializer matrix (Turtle / TriG / N-Quads / JSON-LD
 // writers). NON-DEFAULT `serialize-rdf` feature — when off, zero serializer code compiles and
 // the default build's dependency graph is unchanged. Seam 1 of the facade split (RFC
