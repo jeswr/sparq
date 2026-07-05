@@ -1259,11 +1259,13 @@ def convert_xpath_expr(
                 return (setup, f"({expr_left}) & ({expr_right})")
             return (setup, f"({expr_left}) | ({expr_right})")
 
-        # fn:true() / fn:false()
+        # fn:true() / fn:false() — always call the real library functions so
+        # tests are non-vacuous (a literal `true`/`false` would never exercise
+        # the implementations and would survive semantic mutation undetected).
         if sym == "true":
-            return ("", "true")
+            return ("", "fn_true()")
         if sym == "false":
-            return ("", "false")
+            return ("", "fn_false()")
 
         # fn:string(<ymd>) -> Actually call fn_string_from_ym_duration and check string length > 0
         # In Noir, we compute the string and use fn_boolean_from_string_len for EBV
@@ -3411,6 +3413,15 @@ xpath = {{ path = "../../xpath" }}
 
             if "fn_boolean_from_string_len(" in all_test_code:
                 imports.append("    fn_boolean_from_string_len,")
+
+            # fn_false()/fn_true() may appear in tests for fn:false/fn:true themselves
+            # (as the primary noir_func — dedup below handles any double-add) or in
+            # boolean sub-expressions of other suites (e.g. YMD ops using fn:false()
+            # as a known-false operand).
+            if "fn_false(" in all_test_code:
+                imports.append("    fn_false,")
+            if "fn_true(" in all_test_code:
+                imports.append("    fn_true,")
 
             # Add datetime imports if needed
             if "datetime" in function_name.lower():
