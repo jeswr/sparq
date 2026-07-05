@@ -11,8 +11,8 @@
 //! per-release record of what the WIRE contract passes, without re-running the suite.
 //!
 //! It reuses the SAME public functions the ratchet tests drive
-//! ([`sparq_conformance::http_protocol::run_protocol_suite`],
-//! [`sparq_conformance::sd_gsp::run_sd_gsp_suite`]) and pulls each suite's ratchet
+//! (`sparq_conformance::http_protocol::run_protocol_suite`,
+//! `sparq_conformance::sd_gsp::run_sd_gsp_suite`) and pulls each suite's ratchet
 //! FLOOR from the central registry ([`sparq_conformance::scoreboard::SUITES`]) so the
 //! report can never drift from the enforcer.
 //!
