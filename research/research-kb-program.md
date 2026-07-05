@@ -2,12 +2,41 @@
 
 <!-- 🤖 SPARQ agent (Claude Fable 5) — front-decomposition design record for epic sq-tzars. [FABLE-5] -->
 
-**Status:** decomposition record (this stage implements nothing — the child beads do).
+**Status:** decomposition record — automated-dump plan ABORTED per #1552 (sq-yfh5d, 2026-07-05).
+See "Dump location" below.
 **Epic:** `sq-tzars` · **Maintainer directive:** 2026-07-05 · **GitHub:** #1110, #1111.
 **Builds on (does not duplicate):** `research/provenance-driven-genai-kb.md` (the master
 GenAI-KB record; "master record" below) and `research/dogfooding-sparq-knowledge-graph.md`
 (the PKG provenance/ontology brief). Read those for the substrate design; read this for
 what happens next and in what order.
+
+## Dump location
+
+The first KB dump was saved to **`sparq-org/research-kb`** (private repo) on 2026-07-05.
+Path layout inside that repo:
+
+```text
+dumps/
+  2026-07-05/
+    pkg-hand-authored.ttl.gz   — hand-authored PKG tier
+    pkg-ontology.ttl.gz        — PKG ontology export
+    manifest.json              — per-tier statement counts, SHACL conformance, tool versions
+    dump-provenance.ttl        — prov:Activity with generatedAtTime + prov:used
+```
+
+Browse at: https://github.com/sparq-org/research-kb/tree/main/dumps
+
+**Automated-push plan status (aborted, #1552 / sq-yfh5d):** The maintainer confirmed
+(2026-07-05) that because the dump is already saved in this repo, the recurring
+automated-push plan is aborted. The `kb-dump.yml` workflow has been updated to:
+- trigger only on `workflow_dispatch` (push-to-main trigger removed);
+- skip gracefully when `KB_DUMP_TOKEN` is absent, printing a notice with the manual-refresh
+  path, rather than hard-failing.
+
+To refresh the dump in the future: run `.github/workflows/kb-dump.yml` manually via
+the GitHub Actions UI, supplying a PAT with `Contents:write` on `sparq-org/research-kb`.
+
+---
 
 ## 0. What this record is
 

@@ -1,34 +1,34 @@
 name: kb-dump
 
-# Assemble and push a tier-aware KB dump to sparq-org/research-kb (sq-tzars.8).
+# KB dump workflow — sparq-org/research-kb (sq-tzars.8).
 #
-# Trigger: manual dispatch (workflow_dispatch) OR push to main on KB-relevant paths
-# (same path set as pkg-ingest.yml so a KB content change triggers both ingest + dump).
+# DUMPS ALREADY SAVED: sparq-org/research-kb (PRIVATE repo).
+#   Layout: dumps/YYYY-MM-DD/ per run, each containing:
+#     pkg-hand-authored.ttl.gz   — hand-authored PKG tier
+#     pkg-ontology.ttl.gz        — PKG ontology export
+#     manifest.json              — per-tier counts + tool versions
+#     dump-provenance.ttl        — prov:Activity with generatedAtTime + prov:used
+#   First dump: dumps/2026-07-05/ (committed 2026-07-05T08:06:16Z,
+#   fixed 2026-07-05T08:29:30Z — see sparq-org/research-kb commit history).
 #
-# SECRET REQUIRED: KB_DUMP_TOKEN
-#   A GitHub Personal Access Token (classic or fine-grained) with Contents: write
-#   permission on the sparq-org/research-kb repository.
-#   Setup steps for the maintainer:
-#     1. Create a PAT at https://github.com/settings/tokens
-#        - Classic PAT scope: repo (for private repo push)
-#        - Fine-grained (recommended): repository=sparq-org/research-kb, Contents=write
-#     2. Add the PAT as a repository secret named KB_DUMP_TOKEN at
-#        https://github.com/sparq-org/sparq/settings/secrets/actions
-#   Without this secret the job will fail loudly (exit 1) to prevent silent skips.
+# AUTOMATION STATUS: The automated-push plan (push-to-main trigger + KB_DUMP_TOKEN
+#   secret requirement) is ABORTED per maintainer decision on issue #1552 (sq-yfh5d).
+#   Rationale: the first dump already exists in sparq-org/research-kb; recurring
+#   automated pushes are not needed until the maintainer explicitly re-enables them.
+#   To refresh the dump manually: run this workflow via workflow_dispatch from the
+#   GitHub Actions UI and supply a KB_DUMP_TOKEN secret at that time.
 #
-# (sq-tzars.8) [SONNET-4.6] 🤖 SPARQ agent — sparq-org/research-kb dump workflow.
+# SECRET: KB_DUMP_TOKEN
+#   A GitHub PAT (classic scope 'repo', or fine-grained Contents:write) on
+#   sparq-org/research-kb. Not required to exist as a persistent repo secret —
+#   the job skips gracefully when absent (see "Check KB_DUMP_TOKEN" step).
+#
+# (sq-tzars.8 / sq-yfh5d) [SONNET-4.6] 🤖 SPARQ agent — sparq-org/research-kb dump workflow.
 
 on:
+  # workflow_dispatch-only: automation aborted per #1552.  Run manually when a
+  # fresh dump is needed.
   workflow_dispatch: {}
-  push:
-    branches: [main]
-    paths:
-      - 'crates/sparq-kb/ingest/**'
-      - 'crates/sparq-kb/ontology/**'
-      - '.beads/**'
-      - 'skills/**'
-      - 'AGENTS.md'
-      - 'scripts/export-kb-dump.py'
 
 concurrency:
   group: kb-dump
@@ -47,35 +47,39 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Check KB_DUMP_TOKEN
+        # Skip gracefully when the secret is absent — the caller can supply it at
+        # dispatch time.  Existing dumps are at sparq-org/research-kb/dumps/.
+        id: token_check
+        env:
+          KB_DUMP_TOKEN: ${{ secrets.KB_DUMP_TOKEN }}
+        run: |
+          if [ -z "${KB_DUMP_TOKEN}" ]; then
+            echo "::notice::KB_DUMP_TOKEN is not set — skipping push to sparq-org/research-kb."
+            echo ""
+            echo "To refresh the dump, re-run this workflow with a PAT that has"
+            echo "Contents:write permission on sparq-org/research-kb, set as"
+            echo "repository secret KB_DUMP_TOKEN or supplied at dispatch time."
+            echo ""
+            echo "Existing dumps: https://github.com/sparq-org/research-kb/tree/main/dumps"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "KB_DUMP_TOKEN is set (length=${#KB_DUMP_TOKEN})."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Python
+        if: steps.token_check.outputs.skip == 'false'
         uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.0.0
         with:
           python-version: '3.11'
 
       - name: Install Python deps
+        if: steps.token_check.outputs.skip == 'false'
         run: pip install --quiet rdflib
 
-      - name: Verify KB_DUMP_TOKEN secret is configured
-        # Fail loudly if the secret is absent rather than silently producing a
-        # zero-push run.  The token is required for the 'Push dump to research-kb'
-        # step below; if that step is reached without the token the git-push will
-        # fail with a cryptic auth error — better to surface the root cause here.
-        env:
-          KB_DUMP_TOKEN: ${{ secrets.KB_DUMP_TOKEN }}
-        run: |
-          if [ -z "${KB_DUMP_TOKEN}" ]; then
-            echo "::error::KB_DUMP_TOKEN secret is not set on this repository."
-            echo ""
-            echo "Setup steps:"
-            echo "  1. Create a GitHub PAT with Contents:write on sparq-org/research-kb"
-            echo "     (classic scope 'repo', or fine-grained Contents=write)."
-            echo "  2. Add it as repository secret KB_DUMP_TOKEN at"
-            echo "     https://github.com/sparq-org/sparq/settings/secrets/actions"
-            exit 1
-          fi
-          echo "KB_DUMP_TOKEN is set (length=${#KB_DUMP_TOKEN})."
-
       - name: Run PKG ingest (refresh hand-authored tier)
+        if: steps.token_check.outputs.skip == 'false'
         run: |
           python3 crates/sparq-kb/ingest/ingest_pkg.py \
               --beads .beads/issues.jsonl \
@@ -84,15 +88,18 @@ jobs:
               --out crates/sparq-kb/ingest/pkg-instances.ttl
 
       - name: Export-KB self-test (dry-run)
+        if: steps.token_check.outputs.skip == 'false'
         run: python3 scripts/export-kb-dump.py --dry-run
 
       - name: Assemble KB dump
+        if: steps.token_check.outputs.skip == 'false'
         run: |
           python3 scripts/export-kb-dump.py \
               --out-dir /tmp/kb-dump-out \
               --commit "${{ github.sha }}"
 
       - name: Verify dump (no restricted content or secrets)
+        if: steps.token_check.outputs.skip == 'false'
         # Belt-and-suspenders grep over the compressed artifacts to confirm the
         # mandatory leak check in the export script was not bypassed.
         run: |
@@ -113,6 +120,7 @@ jobs:
           echo "Verification passed."
 
       - name: Push dump to research-kb
+        if: steps.token_check.outputs.skip == 'false'
         env:
           KB_DUMP_TOKEN: ${{ secrets.KB_DUMP_TOKEN }}
         run: |
