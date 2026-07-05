@@ -11,7 +11,7 @@ A **W3C-conformant HTTP server** exposing the [sparq](../../README.md) query eng
 **SPARQL 1.1 Protocol** (`query` + `update` at `/sparql`) and the **Graph Store HTTP Protocol**
 over a `Graph`. **In-memory by default** (updates lost on restart) or **durable** with
 `--persist <DIR>`. Adds content negotiation, EXPLAIN, `/metrics`, WebSocket/SSE subscriptions, and
-opt-in time-travel. Reads and writes never share a lock, so queries never wait on the writer.
+generation-pinned snapshot reads. Reads and writes never share a lock, so queries never wait on the writer.
 
 ## 🚀 Quickstart
 
@@ -40,7 +40,7 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   GSP read in N-Triples / prefix-Turtle / RDF-XML / **JSON-LD** (`application/ld+json` — the
   `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); streamed
   SELECT bodies; a present-but-unsatisfiable `Accept` is **406** (Oxigraph parity), absent/`*/*`
-  keeps the default. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, **WebSocket + SSE**.
+  keeps the default. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, **WebSocket + SSE**, and a **`Sparq-Generation`** header + **`?generation=N`** snapshot pin (default build, bounded to the ring's concurrency-retention window; aged-out → `410`).
 - **Durable persistence** — `--persist <DIR>` makes the on-disk index the source of truth (off by
   default, in-memory). See "Durable persistence".
 - **Authentication** — optional `--auth-token <TOKEN>` Bearer write gate (constant-time; mirrors
@@ -50,7 +50,7 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   read timeouts, row/byte memory caps, gzip zip-bomb ratio cap, and the SERVICE egress allowlist,
   each with a `SPARQ_*` env override (honest per-cap semantics in the SKILL's "Server hardening").
 - **Opt-in features** (a build without a feature carries zero code for it) — `time-travel`
-  (`?generation=N` snapshot pinning), `geo` (`geof:` functions), `service` (SERVICE federation,
+  (EXTENDS `?generation=N` retention past the default concurrency window), `geo` (`geof:` functions), `service` (SERVICE federation,
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
   `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
   (`POST /shacl/validate`), `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic
