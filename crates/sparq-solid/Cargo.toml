@@ -79,21 +79,35 @@ trust-graph = ["dep:sparq-trust"]
 # only as strong as host/TLS control; no privacy).
 trust-graph-did = ["trust-graph", "sparq-trust/did"]
 
-# [OPUS-4.8] sq-bq7m9 (issue #992 item 4): honour the *Access-Controlled SPARQL Query
-# over a Solid Pod* Editor's Draft (jeswr/solid-sparql-query) §4 union-default-graph
-# opt-in in the read path (`query_as`/`query_json_as`/`ask_as`). Adds NO dependency — it
-# is a pure query-rewrite change on the existing zero-copy view path (no engine change).
-# OFF by default: with the feature OFF, the read path is BYTE-IDENTICAL to today (a bare
-# default-graph pattern ranges over the union of the session's authorized named graphs via
-# the always-on per-pattern GRAPH wrap). With it ON, the read path implements the draft's
-# empty-default + explicit-union semantics: the default graph is EMPTY (a bare pattern
-# matches nothing) UNLESS the query opts in with
-# `FROM <http://www.w3.org/ns/solid/sparql#union-default-graph>`, which makes the default
-# graph the union of the authorized named graphs FOR THAT REQUEST ONLY (no cross-request
-# leak). NB the default flip is a behaviour change to a pervasive query idiom and is
-# therefore feature-gated pending maintainer ratification (issue #992 follow-up) — the
-# `byte-identical to today` regression is proved by the default-build test suite.
-solid-sparql-query = []
+# [OPUS-4.8] sq-gq28y (issue #1546, maintainer decision "spec compliant - empty by default"):
+# a LEGACY escape hatch that restores the pre-flip union-always default-graph semantics.
+#
+# The DEFAULT read path (`query_as`/`query_json_as`/`ask_as`) is now SPEC-COMPLIANT per the
+# *Access-Controlled SPARQL Query over a Solid Pod* Editor's Draft (jeswr/solid-sparql-query)
+# §"The default graph is empty" + §"Union default graph mode": the standing default graph is
+# EMPTY (a bare `{ ?s ?p ?o }` matches nothing) UNLESS the query opts in per-request with
+# `FROM <http://www.w3.org/ns/solid/sparql#union-default-graph>` (the reserved IRI exposed as
+# `UNION_DEFAULT_GRAPH_IRI`), which makes the default graph the RDF merge of the authorized
+# named graphs FOR THAT REQUEST ONLY (no cross-request leak). The empty-default + explicit-union
+# surface is ALWAYS ON (no feature needed) — it is the spec-conformant default.
+#
+# This feature is a CHEAP, OPT-IN migration escape hatch (OFF by default; adds NO dependency —
+# a pure query-rewrite change). With it ON, `wrap_read` reverts to the always-on per-pattern
+# GRAPH wrap (`wrap_for_view`) so a bare default-graph pattern once again ranges over the union
+# of the session's authorized named graphs — byte-identical to the pre-flip default. It exists
+# only so a downstream deployment that relied on the old union-always idiom can migrate on its
+# own schedule instead of at once; new code should use `GRAPH ?g` or the spec-minted opt-in.
+# SECURITY: both variants stay STRICTLY within the session's authorized named graphs — the
+# escape hatch does NOT widen the readable set, it only reinstates the (more permissive-looking
+# but equi-authorized) bare-pattern-scans-the-union convenience.
+legacy-union-default-graph = []
+
+# [OPUS-4.8] sq-gq28y (issue #1546): the vendored solid-sparql-query query-semantics
+# conformance suite runner (tests/conformance_solid_sparql_query.rs) parses the pinned
+# upstream manifest.json. serde_json is a DEV-only dependency — it does not enter the
+# runtime or published graph (the default sparq-solid build stays dependency-light).
+[dev-dependencies]
+serde_json = "1"
 
 # [OPUS-4.8] sq-pfae PoC: the trust-graph end-to-end test (tests/trust_graph.rs, fully
 # `#![cfg(feature = "trust-graph")]`) drives the admission gate through the real

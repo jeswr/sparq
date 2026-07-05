@@ -116,7 +116,9 @@ fn round_trip_through_enforcement() {
     assert!(store.accessible(&Session::default(), Mode::Read).is_empty());
 
     // End-to-end: alice's authorized query returns the content; others see nothing.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 1);
     assert_eq!(store.query_as(&mallory, Mode::Read, sel).unwrap().rows.len(), 0);
     assert_eq!(store.query_as(&Session::default(), Mode::Read, sel).unwrap().rows.len(), 0);
@@ -562,7 +564,9 @@ fn recipient_constraint_persists_as_rechecked_condition() {
     assert!(store.accessible(&Session::default(), Mode::Read).is_empty(), "anonymous denied");
 
     // End-to-end through query_as: only carol sees the content.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let carol = Session { agent: Some(CAROL), client: None, issuer: None, now: None };
     let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 1);
@@ -889,7 +893,9 @@ fn withdrawn_permission_loses_access_after_refresh() {
         store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1),
         "bridged grant is live before withdrawal",
     );
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 1);
 
     // The policy WITHDRAWS the permission → refresh against the new (empty) policy.
@@ -1483,7 +1489,9 @@ fn reads_n1(store: &mut PodStore, agent: &str) -> bool {
 #[test]
 fn purpose_match_grants_through_enforcement() {
     let pol = purpose_read_policy();
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
 
     // (a) Matching purpose → grant → alice reads through accessible AND query_as.
@@ -1516,7 +1524,9 @@ fn missing_purpose_fails_closed_through_enforcement() {
     let out = store.materialize_odrl_permission(&purpose_read_policy(), &no_purpose);
     assert!(!out.granted, "missing purpose must NOT grant: {out:?}");
     assert!(!reads_n1(&mut store, ALICE), "no access when purpose is unstated");
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 0);
 }
@@ -1683,7 +1693,9 @@ fn recipient_neq_grants_everyone_except_named_party() {
     );
 
     // End-to-end via query_as: bob sees nothing, carol sees the content.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
     let carol = Session { agent: Some(CAROL), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 0);
@@ -1840,7 +1852,9 @@ fn refresh_noneof_grant_replays_changed_exclusion_set() {
     assert!(!ms[0].1.contains("bob.ex"), "no residual bob carve-out: {ms:?}");
 
     // End-to-end through query_as confirms the flip at the query layer.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
     let dave = Session { agent: Some(DAVE), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 1, "bob now reads");
@@ -1951,7 +1965,9 @@ fn recipient_eq_and_neq_grants_only_carol() {
     assert!(store.accessible(&Session::default(), Mode::Read).is_empty(), "anonymous denied");
 
     // End-to-end via query_as: only carol sees the content.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let carol = Session { agent: Some(CAROL), client: None, issuer: None, now: None };
     let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 1);
@@ -2039,7 +2055,9 @@ fn conditional_deny_overrides_allow_for_carved_party() {
     assert!(!reads(&mut store, CAROL), "DENY-OVERRIDES: carol loses access");
     assert!(reads(&mut store, BOB), "bob keeps the allow (only carol is denied)");
     // End-to-end query_as: carol sees nothing, bob sees the content.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let carol = Session { agent: Some(CAROL), client: None, issuer: None, now: None };
     let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 0);

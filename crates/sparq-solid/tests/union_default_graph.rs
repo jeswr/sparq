@@ -1,13 +1,12 @@
-//! [OPUS-4.8] sq-bq7m9 (issue #992 item 4): end-to-end enforcement of the
-//! **union-default-graph opt-in** through the REAL `PodStore` read path, per the
-//! *Access-Controlled SPARQL Query over a Solid Pod* Editor's Draft §4 (`jeswr/solid-sparql-query`).
+//! [OPUS-4.8] sq-gq28y (issue #1546): end-to-end enforcement of the **spec-conformant
+//! empty-default + union-default-graph opt-in** through the REAL `PodStore` read path, per
+//! the *Access-Controlled SPARQL Query over a Solid Pod* Editor's Draft (`jeswr/solid-sparql-query`).
 //!
-//! Whole file gated on the opt-in `solid-sparql-query` feature (default-OFF). Wired into
-//! CI by the `sparq-solid (solid-sparql-query)` feature-matrix leg — without that leg this
-//! suite is compiled EMPTY and never runs. The mirror-image default-build (union-always,
-//! byte-identical-to-today) behaviour is asserted by the gated tests in `tests/e2e.rs` and
-//! `tests/hardening.rs`.
-#![cfg(feature = "solid-sparql-query")]
+//! This is the DEFAULT behaviour (issue #1546: "spec compliant - empty by default"), so this
+//! suite runs on the default build. It is gated OFF only under the `legacy-union-default-graph`
+//! escape hatch, whose mirror-image union-always behaviour is asserted by the legacy-gated
+//! tests in `tests/e2e.rs` and `tests/hardening.rs`.
+#![cfg(not(feature = "legacy-union-default-graph"))]
 
 use sparq_core::Graph;
 use sparq_solid::fixture::{wac_fixture, ALICE, CAROL};

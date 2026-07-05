@@ -117,40 +117,38 @@ pub fn wrap_for_view(sparql: &str) -> Result<String, String> {
     Ok(q.to_string())
 }
 
-/// [OPUS-4.8] sq-bq7m9 (issue #992 item 4). The spec-minted reserved IRI a client uses to
-/// opt a query into **union-default-graph** semantics, per the *Access-Controlled SPARQL
-/// Query over a Solid Pod* Editor's Draft, §4 "Empty-default + explicit-union semantics"
-/// (`jeswr/solid-sparql-query`). When it appears among a query's default-graph IRIs — a
-/// `FROM` clause here (the `default-graph-uri` protocol parameter is the equivalent signal
-/// at the HTTP layer, handled by the Solid server, not this string API) — the default graph
-/// FOR THAT QUERY becomes the RDF merge of the session's authorized named graphs. In
-/// `FROM NAMED` position it "names nothing" (treated as absent) and never binds `GRAPH ?g`.
+/// [OPUS-4.8] sq-gq28y (issue #1546). The spec-minted reserved IRI a client uses to opt a
+/// query into **union default graph mode**, per the *Access-Controlled SPARQL Query over a
+/// Solid Pod* Editor's Draft §"Union default graph mode" (`jeswr/solid-sparql-query`). When
+/// it appears among a query's default-graph IRIs — a `FROM` clause here (the
+/// `default-graph-uri` protocol parameter is the equivalent signal at the HTTP layer, handled
+/// by the Solid server, not this string API) — the default graph FOR THAT QUERY becomes the
+/// RDF merge of the session's authorized named graphs. In `FROM NAMED` position it "names
+/// nothing" (treated as absent) and never binds `GRAPH ?g`.
 ///
-/// Gated behind the default-OFF `solid-sparql-query` feature (see the crate README and
-/// `Cargo.toml`): only under that feature does the read path implement the empty-default
-/// rule that makes this opt-in observable.
-#[cfg(feature = "solid-sparql-query")]
+/// This is DEFAULT public surface: the spec-conformant empty-default + explicit-union read
+/// path ([`wrap_for_view_opt_in`]) is always on. The opt-in is the ONLY way a bare
+/// default-graph pattern sees anything; without it the standing default graph is empty.
 pub const UNION_DEFAULT_GRAPH_IRI: &str = "http://www.w3.org/ns/solid/sparql#union-default-graph";
 
 /// Detect the union-default-graph opt-in and STRIP the reserved IRI from the query's
 /// dataset clause. Returns `true` iff the reserved IRI was present in a **default-graph**
-/// (`FROM`) position (the opt-in signal per Editor's Draft §4).
+/// (`FROM`) position (the opt-in signal per the Editor's Draft §"Union default graph mode").
 ///
 /// The reserved IRI is a *signal*, never a real graph name, so it is removed from BOTH the
 /// default and named dataset positions before evaluation:
-/// - in `FROM NAMED` position it must be treated as **absent** (draft §4: "names nothing …
+/// - in `FROM NAMED` position it must be treated as **absent** (draft: "names nothing …
 ///   `GRAPH ?g` never binds to it") — leaving it would intersect the view's authorized
 ///   named-graph set down to the empty set and wrongly collapse `GRAPH ?g` to zero solutions;
 /// - when stripping empties the whole dataset clause (e.g. the query carried ONLY
 ///   `FROM <reserved>`), the clause is dropped so the query round-trips as "no dataset
-///   clause" and the view applies the FULL authorized named-graph set (draft §4: "when only
+///   clause" and the view applies the FULL authorized named-graph set (draft: "when only
 ///   the reserved IRI is given, the named-graph set remains the authorized set, so `GRAPH`
 ///   patterns stay usable alongside the union default graph").
 ///
 /// Matching is EXACT (a near-miss IRI is a normal, absent, per-pod-model dataset reference
 /// that contributes nothing and never widens): an unrecognised value therefore fails
 /// **closed** — it does NOT silently enable the union default graph.
-#[cfg(feature = "solid-sparql-query")]
 fn take_union_default_opt_in(q: &mut Query) -> bool {
     let dataset = match q {
         Query::Select { dataset, .. }
@@ -172,8 +170,11 @@ fn take_union_default_opt_in(q: &mut Query) -> bool {
     opt_in
 }
 
-/// [OPUS-4.8] sq-bq7m9. The **`solid-sparql-query`-feature** read-path rewrite: the
-/// Editor's Draft §4 union-default-graph opt-in on top of [`wrap_for_view`].
+/// [OPUS-4.8] sq-gq28y (issue #1546). The **spec-conformant default** read-path rewrite: the
+/// *Access-Controlled SPARQL Query over a Solid Pod* Editor's Draft empty-default +
+/// explicit-union semantics, layered on top of [`wrap_for_view`]. This is the rewrite
+/// [`crate::PodStore::query_as`] uses by default (the `legacy-union-default-graph` feature
+/// swaps it back to [`wrap_for_view`] for a union-always escape hatch).
 ///
 /// Detects + strips the reserved [`UNION_DEFAULT_GRAPH_IRI`] from the dataset clause, then:
 /// - **opt-in present** (reserved IRI in a `FROM` clause) → apply the per-pattern GRAPH
@@ -182,14 +183,11 @@ fn take_union_default_opt_in(q: &mut Query) -> bool {
 ///   query layer (the engine's view keeps its `Empty` default graph; no `UnionOfVisible`
 ///   engine mode is needed — design record §5.4(a));
 /// - **opt-in absent** → leave default-graph patterns UNWRAPPED, so they evaluate against
-///   the view's **empty** default graph and yield zero solutions (draft §4: "default graph:
-///   empty, always, unless the query explicitly requests otherwise").
+///   the view's **empty** default graph and yield zero solutions (draft: "The standing
+///   default graph of the queried dataset MUST be empty").
 ///
 /// Per-request only: the choice is a pure function of THIS query's dataset clause, so it
 /// cannot leak across requests (the store/session carry no union-default state).
-///
-/// With the feature OFF this function does not exist and the read path uses
-/// [`wrap_for_view`] unconditionally (byte-identical to pre-feature behaviour).
 ///
 /// # Errors
 ///
@@ -198,7 +196,6 @@ fn take_union_default_opt_in(q: &mut Query) -> bool {
 /// # Examples
 ///
 /// ```
-/// # #[cfg(feature = "solid-sparql-query")] {
 /// use sparq_solid::{wrap_for_view_opt_in, UNION_DEFAULT_GRAPH_IRI};
 ///
 /// // No opt-in: the bare default-graph pattern is left unwrapped (empty default graph).
@@ -213,9 +210,7 @@ fn take_union_default_opt_in(q: &mut Query) -> bool {
 /// .unwrap();
 /// assert!(opted.contains("GRAPH"));
 /// assert!(!opted.contains(UNION_DEFAULT_GRAPH_IRI));
-/// # }
 /// ```
-#[cfg(feature = "solid-sparql-query")]
 pub fn wrap_for_view_opt_in(sparql: &str) -> Result<String, String> {
     let mut q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     if take_union_default_opt_in(&mut q) {
@@ -362,10 +357,10 @@ fn wrap_expr(e: &mut Expression, fresh: &mut Fresh, in_graph: bool) {
     }
 }
 
-// [OPUS-4.8] sq-bq7m9: direct unit tests for the `solid-sparql-query` opt-in rewrite
+// [OPUS-4.8] sq-gq28y: direct unit tests for the spec-conformant default opt-in rewrite
 // (`wrap_for_view_opt_in`). End-to-end enforcement (row counts through `PodStore`) is in
 // `tests/union_default_graph.rs`; these pin the STRING-rewrite contract directly.
-#[cfg(all(test, feature = "solid-sparql-query"))]
+#[cfg(test)]
 mod opt_in_tests {
     use super::{wrap_for_view_opt_in, UNION_DEFAULT_GRAPH_IRI};
 

@@ -67,11 +67,12 @@ pub use odrl_bridge::{BridgeEntry, BridgeKind, BridgeLedger};
 #[cfg(feature = "trust-graph")]
 pub use trust_wire::{TrustAdmissionOutcome, TrustStaticOutcome};
 pub use rewrite::{rewrite_for, wrap_for_view};
-// [OPUS-4.8] sq-bq7m9 (issue #992 item 4): the opt-in union-default-graph read-path rewrite
-// + the spec-minted reserved IRI, per the solid-sparql-query Editor's Draft §4. Gated behind
-// the default-OFF `solid-sparql-query` feature (with it off the read path is byte-identical
-// to today); see the crate README and the access-control SKILL for the honest scope.
-#[cfg(feature = "solid-sparql-query")]
+// [OPUS-4.8] sq-gq28y (issue #1546): the spec-conformant empty-default + explicit-union
+// read-path rewrite + the spec-minted reserved IRI, per the *Access-Controlled SPARQL Query
+// over a Solid Pod* Editor's Draft. This is DEFAULT public surface (always compiled): it is
+// the default `query_as` semantics. The `legacy-union-default-graph` feature only swaps the
+// internal `wrap_read` seam back to the union-always `wrap_for_view` — it does not remove
+// this surface. See the crate README and the access-control SKILL for the honest scope.
 pub use rewrite::{wrap_for_view_opt_in, UNION_DEFAULT_GRAPH_IRI};
 // [OPUS-4.8] issue #992 FR-3 (sq-snopa.5): the authoritative ACL write-through outcome type
 // (the `put_acl`/`delete_acl` methods live on `PodStore` in `write_through`).
@@ -134,19 +135,23 @@ pub const AUTH_NS: &str = "https://sparq.dev/ns/auth#";
 /// the matcher accept-set facts that conditional grants reference).
 pub const SOLIDX_NS: &str = "https://sparq.dev/ns/solidx#";
 
-/// [OPUS-4.8] sq-bq7m9. Wrap a read query for the zero-copy view path, honouring the
-/// *Access-Controlled SPARQL Query over a Solid Pod* Editor's Draft §4 union-default-graph
-/// opt-in when the `solid-sparql-query` feature is on (`rewrite::wrap_for_view_opt_in`).
-/// With the feature OFF this is exactly `rewrite::wrap_for_view` — byte-identical to the
-/// pre-feature read path (a bare default-graph pattern ranges over the authorized union).
+/// [OPUS-4.8] sq-gq28y (issue #1546). Wrap a read query for the zero-copy view path. By
+/// default this honours the *Access-Controlled SPARQL Query over a Solid Pod* Editor's Draft
+/// empty-default + explicit-union semantics (`rewrite::wrap_for_view_opt_in`): the standing
+/// default graph is empty, and a bare default-graph pattern sees the authorized union only
+/// when the query opts in with `FROM <`[`UNION_DEFAULT_GRAPH_IRI`]`>`. With the OPT-IN
+/// `legacy-union-default-graph` escape hatch this is instead `rewrite::wrap_for_view` — the
+/// pre-flip union-always behaviour (a bare pattern always ranges over the authorized union).
+/// EITHER way the query only ever ranges over the session's authorized named graphs (the view
+/// enforces that); the seam changes what the *default graph* sees, never the readable set.
 /// The single `cfg` seam that all three read entry points
 /// ([`PodStore::query_as`]/[`PodStore::query_json_as`]/[`PodStore::ask_as`]) share.
 fn wrap_read(sparql: &str) -> Result<String, String> {
-    #[cfg(feature = "solid-sparql-query")]
+    #[cfg(not(feature = "legacy-union-default-graph"))]
     {
         rewrite::wrap_for_view_opt_in(sparql)
     }
-    #[cfg(not(feature = "solid-sparql-query"))]
+    #[cfg(feature = "legacy-union-default-graph")]
     {
         rewrite::wrap_for_view(sparql)
     }
@@ -840,11 +845,11 @@ impl PodStore {
         DatasetView { base: &self.graph, named, default: DefaultGraphMode::Empty }
     }
 
-    /// Evaluate `sparql` as `session`: wrap default-graph patterns to range over
-    /// named graphs ([`wrap_for_view`]) and run through the engine's **zero-copy
-    /// dataset view** ([`sparq_engine::query_view`]) restricted to the session's
-    /// authorized graph set. Two sessions running the same query see different
-    /// results — the end-to-end contract.
+    /// Evaluate `sparql` as `session`: apply the spec-conformant read-path rewrite
+    /// ([`wrap_for_view_opt_in`]) and run through the engine's **zero-copy dataset
+    /// view** ([`sparq_engine::query_view`]) restricted to the session's authorized
+    /// graph set. Two sessions running the same query see different results — the
+    /// end-to-end contract.
     ///
     /// This is the default (v2) path: graph visibility is one O(1) hash check per
     /// graph name, evaluation runs in place on the existing sub-graphs (zero
@@ -857,17 +862,17 @@ impl PodStore {
     /// a view API), at the measured cost of copying every authorized graph per
     /// query. Measured before/after: see "Measured" in this crate's README.
     ///
-    /// **Default-graph semantics.** With the default build, a bare default-graph pattern
-    /// (`{ ?s ?p ?o }`) ranges over the union of the session's authorized named graphs
-    /// (the always-on per-pattern GRAPH wrap). With the opt-in **`solid-sparql-query`**
-    /// feature (OFF by default), this method instead follows the *Access-Controlled SPARQL
-    /// Query over a Solid Pod* Editor's Draft §4: the default graph is **empty** (a bare
-    /// pattern matches nothing) UNLESS the query opts in with
+    /// **Default-graph semantics (spec-conformant by default).** Per the
+    /// *Access-Controlled SPARQL Query over a Solid Pod* Editor's Draft (issue #1546), the
+    /// standing default graph is **empty**: a bare default-graph pattern (`{ ?s ?p ?o }`)
+    /// matches nothing UNLESS the query opts in per request with
     /// `FROM <http://www.w3.org/ns/solid/sparql#union-default-graph>` (the reserved
-    /// `union_default_graph_iri` — a code span here to avoid a feature-gated intra-doc
-    /// link), which makes the default graph the union of the authorized named graphs FOR
-    /// THAT REQUEST ONLY. Either way an explicit `GRAPH` pattern is unaffected. See the
-    /// crate README + the access-control SKILL for the honest scope.
+    /// [`UNION_DEFAULT_GRAPH_IRI`]), which makes the default graph the RDF merge of the
+    /// authorized named graphs FOR THAT REQUEST ONLY. The opt-in **`legacy-union-default-graph`**
+    /// feature (OFF by default) reverts to the pre-flip behaviour, where a bare pattern
+    /// always ranges over the authorized union. Either way an explicit `GRAPH` pattern is
+    /// unaffected, and NEITHER variant widens the readable set beyond the session's
+    /// authorized named graphs. See the crate README + the access-control SKILL.
     ///
     /// # Errors
     ///
@@ -888,9 +893,9 @@ impl PodStore {
     /// # "#;
     /// # let mut store = PodStore::new(sparq_core::Graph::load_dataset(nquads, "nquads")?);
     /// # store.materialize_wac()?;
-    /// // An explicit GRAPH pattern ranges over the session's authorized named graphs in
-    /// // either feature state (a bare default-graph pattern needs the `solid-sparql-query`
-    /// // union-default opt-in — see "Default-graph semantics" above).
+    /// // An explicit GRAPH pattern ranges over the session's authorized named graphs; a bare
+    /// // default-graph pattern would need the union-default opt-in (`FROM <…#union-default-graph>`)
+    /// // — see "Default-graph semantics" above.
     /// let q = "SELECT ?title WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?title } }";
     /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
     /// assert_eq!(store.query_as(&alice, Mode::Read, q)?.rows.len(), 1);
