@@ -1,7 +1,7 @@
 //! Unit tests for YearMonthDuration functions
 
 use dep::xpath::{
-    months_from_duration, XsdYearMonthDuration, years_from_duration, ym_duration_add,
+    months_from_duration, XsdDouble, XsdYearMonthDuration, years_from_duration, ym_duration_add,
     ym_duration_divide, ym_duration_divide_by_duration, ym_duration_equal, ym_duration_ge,
     ym_duration_greater_than, ym_duration_le, ym_duration_less_than, ym_duration_multiply,
     ym_duration_negate, ym_duration_subtract,
@@ -106,10 +106,11 @@ fn test_ym_duration_divide() {
 
 #[test]
 fn test_ym_duration_divide_by_duration() {
-    let d1 = XsdYearMonthDuration::new(24); // 2 years
+    let d1 = XsdYearMonthDuration::new(24); // 2 years = 24 months
     let d2 = XsdYearMonthDuration::new(6); // 6 months
+    // Oracle: 24/6 = 4 exactly; Python: struct.pack('<d', 4.0) -> 0x4010000000000000
     let result = ym_duration_divide_by_duration(d1, d2);
-    assert(result == 4);
+    assert(result == XsdDouble::from_bits(0x4010000000000000));
 }
 
 #[test]

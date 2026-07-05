@@ -6,7 +6,8 @@
 //! XPath operators implemented:
 //! - op:add-yearMonthDurations, op:subtract-yearMonthDurations
 //! - op:multiply-yearMonthDuration, op:divide-yearMonthDuration
-//! - op:divide-yearMonthDuration-by-yearMonthDuration
+//! - op:divide-yearMonthDuration-by-yearMonthDuration (xs:decimal ratio,
+//!   modelled as an IEEE 754 double -- the tree's decimal representation)
 //! - op:add-yearMonthDuration-to-dateTime, op:subtract-yearMonthDuration-from-dateTime
 //! - op:add-yearMonthDuration-to-date, op:subtract-yearMonthDuration-from-date
 //! - op:yearMonthDuration-equal, op:yearMonthDuration-less-than, op:yearMonthDuration-greater-than
@@ -14,6 +15,7 @@
 //! - fn:years-from-duration, fn:months-from-duration (for yearMonthDuration)
 
 use crate::date::{date_from_components_with_tz, day_from_date, month_from_date, year_from_date};
+use crate::numeric_types::{numeric_divide_int_as_double, XsdDouble};
 use crate::datetime::{
     datetime_from_components_with_tz, day_from_datetime, hours_from_datetime,
     microseconds_from_datetime, minutes_from_datetime, month_from_datetime, seconds_from_datetime,
@@ -306,10 +308,24 @@ pub fn ym_duration_divide(dur: XsdYearMonthDuration, divisor: i32) -> XsdYearMon
 }
 
 /// op:divide-yearMonthDuration-by-yearMonthDuration
-/// Divides two yearMonthDurations, returning a ratio
-pub fn ym_duration_divide_by_duration(a: XsdYearMonthDuration, b: XsdYearMonthDuration) -> i32 {
+///
+/// F&O 3.1 sec. 8.4.5: returns the ratio of two xs:yearMonthDurations "as an
+/// xs:decimal number" -- it NEVER truncates: P3Y div P2Y = 1.5. The old
+/// `i32` return silently truncated that to 1 (sq-3x7dl.19).
+///
+/// DECIMAL REPRESENTATION: this codebase has no arbitrary-precision
+/// xs:decimal type -- decimals are modelled as IEEE 754 doubles throughout
+/// (the documented approximation in `numeric_divide_int_as_double`,
+/// numeric_types.nr). Each signed month count converts exactly for
+/// |months| <= 2^53 (far beyond any realistic duration), so the quotient is
+/// the correctly-rounded double of the true rational month ratio.
+///
+/// Division by zero duration raises err:FOAR0001 in XPath (F&O 3.1
+/// sec. 8.4.5 error clause); this tree represents F&O dynamic errors as
+/// fail-closed asserts. [SONNET-4.6] (sq-3x7dl.19)
+pub fn ym_duration_divide_by_duration(a: XsdYearMonthDuration, b: XsdYearMonthDuration) -> XsdDouble {
     assert(b.total_months != 0, "Division by zero duration");
-    a.total_months / b.total_months
+    numeric_divide_int_as_double(a.total_months as i64, b.total_months as i64)
 }
 
 /// Negates a yearMonthDuration
@@ -698,4 +714,78 @@ fn test_ym_duration_from_string() {
     let input_no_p = "1Y2M".as_bytes();
     let (_dur_no_p, valid_no_p) = ym_duration_from_string(input_no_p, 4);
     assert(!valid_no_p);
+}
+
+// ============================================================================
+// op:divide-yearMonthDuration-by-yearMonthDuration -> xs:decimal ratio
+// (sq-3x7dl.19) [SONNET-4.6]
+//
+// F&O 3.1 sec. 8.4.5: the ratio of two yearMonthDurations is an xs:decimal and
+// never truncates. xs:decimal is modelled as an IEEE 754 double here -- the
+// documented approximation defined in numeric_types.nr on
+// `numeric_divide_int_as_double` (exact operand conversion for all practical
+// month counts, correctly-rounded IEEE 754 division).
+//
+// Oracle (independent Python, exact rational + hardware IEEE 754 double):
+//   from fractions import Fraction; import struct
+//   Fraction(36, 24)                                    -> Fraction(3, 2)
+//   struct.unpack('<Q', struct.pack('<d', 36/24))[0]    -> 0x3FF8000000000000  (1.5)
+// ============================================================================
+
+#[test]
+fn test_ym_duration_divide_by_duration_exact_ratio() {
+    // Oracle: P3Y div P2Y = Fraction(36,24) = Fraction(3,2) = 1.5 exactly (0x3FF8000000000000).
+    // The pre-fix truncating i32 impl returned 1 -- the sq-3x7dl.19 bug.
+    let p3y = XsdYearMonthDuration::new(36);
+    let p2y = XsdYearMonthDuration::new(24);
+    assert(ym_duration_divide_by_duration(p3y, p2y) == XsdDouble::from_bits(0x3FF8000000000000));
+}
+
+#[test]
+fn test_ym_duration_divide_by_duration_non_terminating_ratio() {
+    // Oracle: P1Y div P3Y = Fraction(12,36) = Fraction(1,3), a non-terminating decimal.
+    // Under the tree's decimal-as-double convention (numeric_types.nr,
+    // numeric_divide_int_as_double: "DOCUMENTED APPROXIMATION") the result is
+    // the correctly-rounded double of 1/3:
+    //   Python: float(Fraction(12, 36)) == 12/36 -> True
+    //   struct.pack('<d', 12/36) -> 0x3FD5555555555555 (0.3333333333333333)
+    let p1y = XsdYearMonthDuration::new(12);
+    let p3y = XsdYearMonthDuration::new(36);
+    assert(ym_duration_divide_by_duration(p1y, p3y) == XsdDouble::from_bits(0x3FD5555555555555));
+}
+
+#[test]
+fn test_ym_duration_divide_by_duration_signs() {
+    // Oracle: (-P3Y) div (-P2Y) = 1.5 (0x3FF8000000000000) -- negatives cancel.
+    //         P3Y div (-P2Y) = -1.5 (0xBFF8000000000000) -- mixed sign.
+    // Python: (-36)/(-24) -> 1.5;  36/(-24) -> -1.5
+    let p3y = XsdYearMonthDuration::new(36);
+    let neg_p3y = XsdYearMonthDuration::new(-36);
+    let neg_p2y = XsdYearMonthDuration::new(-24);
+    assert(
+        ym_duration_divide_by_duration(neg_p3y, neg_p2y)
+            == XsdDouble::from_bits(0x3FF8000000000000),
+    );
+    assert(
+        ym_duration_divide_by_duration(p3y, neg_p2y) == XsdDouble::from_bits(0xBFF8000000000000),
+    );
+}
+
+#[test]
+fn test_ym_duration_divide_by_duration_self_is_one() {
+    // Oracle: any non-zero duration divided by itself is exactly 1.0
+    // (0x3FF0000000000000). P2Y3M = 27 months;
+    // Python: 27/27 -> 1.0
+    let dur = XsdYearMonthDuration::new(27);
+    assert(ym_duration_divide_by_duration(dur, dur) == XsdDouble::from_bits(0x3FF0000000000000));
+}
+
+#[test(should_fail_with = "Division by zero duration")]
+fn test_ym_duration_divide_by_duration_zero_divisor_foar0001() {
+    // F&O 3.1 sec. 8.4.5 error clause: dividing by a zero yearMonthDuration
+    // raises err:FOAR0001 (division by zero). This tree represents F&O
+    // dynamic errors as fail-closed asserts (see numeric.nr /
+    // numeric_divide_int_as_double), so the assert must fire.
+    let p3y = XsdYearMonthDuration::new(36);
+    let _ = ym_duration_divide_by_duration(p3y, XsdYearMonthDuration::zero());
 }
