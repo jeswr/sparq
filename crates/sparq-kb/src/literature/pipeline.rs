@@ -85,13 +85,72 @@ pub struct PipelineOutput {
     pub turtle: String,
     /// The run sidecar (the Phase-5 metric + quarantine list).
     pub sidecar: Sidecar,
+    /// The timestamp (UTC ISO 8601 xsd:dateTime) stamped on all emitted Findings and
+    /// their extraction Activities via `prov:generatedAtTime`. In CI, this is injectable
+    /// from the test fixtures; in live use, it defaults to the wall-clock instant.
+    /// (sq-tzars.2 [HAIKU-4.5])
+    pub generated_at_time: String,
+}
+
+/// Generate the current UTC time as an ISO 8601 xsd:dateTime string (e.g.,
+/// `2026-07-05T14:30:00Z`). Used as the default `prov:generatedAtTime` when the caller
+/// does not inject a fixed timestamp (as CI tests do for determinism).
+/// (sq-tzars.2 [HAIKU-4.5])
+fn current_generated_at_time() -> String {
+    // [HAIKU-4.5] In production, this would use `std::time::SystemTime::now()` or
+    // similar to get the wall-clock instant; for now, we use a deterministic format.
+    // Tests inject a fixed instant via the caller's `generated_at_time` param.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    // Format as ISO 8601 UTC.
+    let secs = now.as_secs();
+    let nanos = now.subsec_nanos();
+    // Days since UNIX epoch (1970-01-01).
+    let days = secs / 86400;
+    let secs_today = secs % 86400;
+    let hours = secs_today / 3600;
+    let mins = (secs_today % 3600) / 60;
+    let secs_min = secs_today % 60;
+    // Julian day to calendar date (Gregorian calendar).
+    let a = (days + 32044) as i64;
+    let b = (4 * a + 3) / 146097;
+    let c = a - (146097 * b) / 4;
+    let d = (4 * c + 3) / 1461;
+    let e = c - (1461 * d) / 4;
+    let m = (5 * e + 2) / 153;
+    let day = e - (153 * m + 2) / 5 + 1;
+    let month = m + 3 - 12 * (m / 10);
+    let year = 100 * b + d - 4800 + m / 10;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
+        year,
+        month,
+        day,
+        hours,
+        mins,
+        secs_min,
+        nanos / 1000
+    )
 }
 
 /// Run the full pipeline over a recorded connector batch + a pluggable [`Extractor`]
 /// (in CI, the replay [`super::extract::RecordedExtractor`]). Pure + deterministic; the
 /// ONLY non-determinism a real run would have is inside the extractor, which is exactly
 /// why it is a trait. NO network.
-pub fn run<E: Extractor>(connector_json: &str, extractor: &E) -> Result<PipelineOutput, String> {
+///
+/// # Arguments
+///
+/// * `connector_json` - The OpenAlex batch JSON fixture (string)
+/// * `extractor` - A trait object implementing [`Extractor`]
+/// * `generated_at_time` - Optional override for the `prov:generatedAtTime` timestamp.
+///   If `None`, uses the current UTC time. CI tests pass a fixed instant for determinism.
+///   (sq-tzars.2 [HAIKU-4.5])
+pub fn run_with_time<E: Extractor>(
+    connector_json: &str,
+    extractor: &E,
+    generated_at_time: Option<String>,
+) -> Result<PipelineOutput, String> {
     // 1. connector -> normalise.
     let (stubs, sources_skipped) = parse_openalex_batch(connector_json)?;
     // 2. extract (replay in CI).
@@ -134,9 +193,21 @@ pub fn run<E: Extractor>(connector_json: &str, extractor: &E) -> Result<Pipeline
         }
     }
 
+    let gen_time = generated_at_time.unwrap_or_else(current_generated_at_time);
     // 4. emit TTL.
-    let turtle = emit_turtle(&stubs, &grounded_by_doi)?;
-    Ok(PipelineOutput { turtle, sidecar })
+    let turtle = emit_turtle(&stubs, &grounded_by_doi, &gen_time)?;
+    Ok(PipelineOutput {
+        turtle,
+        sidecar,
+        generated_at_time: gen_time,
+    })
+}
+
+/// Run the full pipeline with the default (current) timestamp.
+/// Convenience wrapper around [`run_with_time`] for callers that do not need to inject
+/// a fixed instant. (sq-tzars.2 [HAIKU-4.5])
+pub fn run<E: Extractor>(connector_json: &str, extractor: &E) -> Result<PipelineOutput, String> {
+    run_with_time(connector_json, extractor, None)
 }
 
 /// Record a quarantined candidate (truncating the justification for triage).
@@ -183,9 +254,14 @@ fn machine_tier(confidence: f64) -> f64 {
 /// Emit the Turtle document: prefixes + the machine agent + each Source (with its grounded
 /// Findings + extraction Activity + full PROV-O lineage). Deterministic ordering (input
 /// order) so the output is stable. Returns a parseable graph string.
+///
+/// Each Finding and its extraction Activity are stamped with `prov:generatedAtTime`
+/// (the `generated_at_time` parameter, an ISO 8601 xsd:dateTime string), as required
+/// by the literature-tier SHACL shapes. (sq-tzars.2 [HAIKU-4.5])
 fn emit_turtle(
     stubs: &[SourceStub],
     grounded_by_doi: &std::collections::HashMap<String, Vec<&CandidateFinding>>,
+    generated_at_time: &str,
 ) -> Result<String, String> {
     let mut t = String::new();
     // Prefixes (the secx: namespace is the CANONICAL pkg one: w3id zkp-sparql sec-prop).
@@ -242,6 +318,8 @@ fn emit_turtle(
                 let conf = machine_tier(c.confidence);
                 // Full PROV-O lineage: derived-from the Source, generated-by the extraction
                 // Activity, attributed-to the machine agent. Machine tier => secx:Conjectured.
+                // [HAIKU-4.5] sq-tzars.2: stamp prov:generatedAtTime on both the Finding
+                // and the Activity so the SHACL timestamp requirement can be verified.
                 writeln!(
                     t,
                     "<{f}> a pkg:Finding ;\n  \
@@ -252,10 +330,12 @@ fn emit_turtle(
                      prov:wasDerivedFrom <{src}> ;\n  \
                      prov:wasGeneratedBy <{act}> ;\n  \
                      prov:wasAttributedTo <{agent}> ;\n  \
+                     prov:generatedAtTime \"{generated_at_time}\"^^xsd:dateTime ;\n  \
                      cito:citesAsEvidence <{src}> .\n\
                      <{act}> a prov:Activity ;\n  \
                      prov:used <{src}> ;\n  \
-                     prov:wasAssociatedWith <{agent}> .\n",
+                     prov:wasAssociatedWith <{agent}> ;\n  \
+                     prov:generatedAtTime \"{generated_at_time}\"^^xsd:dateTime .\n",
                     f = f,
                     verdict = ttl_escape(&c.verdict),
                     just = ttl_escape(&c.justification),
@@ -263,6 +343,7 @@ fn emit_turtle(
                     src = src,
                     act = act,
                     agent = MACHINE_AGENT_IRI,
+                    generated_at_time = generated_at_time,
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -324,6 +405,15 @@ mod tests {
         assert!(out.turtle.contains("prov:wasAttributedTo"));
         assert!(out.turtle.contains("prov:wasGeneratedBy"));
         assert!(out.turtle.contains("a pkg:MachineAgent"));
+        // [HAIKU-4.5] sq-tzars.2: prov:generatedAtTime stamped on Findings + Activities.
+        assert!(
+            out.turtle.contains("prov:generatedAtTime"),
+            "emitted Findings must carry prov:generatedAtTime for SHACL conformance"
+        );
+        assert!(
+            out.turtle.contains("^^xsd:dateTime"),
+            "prov:generatedAtTime must be typed as xsd:dateTime"
+        );
     }
 
     #[test]
@@ -333,5 +423,26 @@ mod tests {
         assert_eq!(out.sidecar.sources_explored, 3);
         assert_eq!(out.sidecar.sources_dead_end, 0);
         assert!(out.turtle.contains("pkg:exploredStatus pkg:Explored"));
+    }
+
+    #[test]
+    fn run_with_time_accepts_injected_timestamp_for_deterministic_tests() {
+        // [HAIKU-4.5] sq-tzars.2: direct unit test for the new public `run_with_time`
+        // function. Verify that an injected timestamp is used instead of the wall-clock
+        // instant, enabling deterministic test fixtures.
+        let extractor = RecordedExtractor::from_fixture().unwrap();
+        let fixed_time = "2026-07-05T14:30:00Z";
+        let out = run_with_time(crate::literature::FIXTURE_OPENALEX_BATCH, &extractor, Some(fixed_time.to_string())).unwrap();
+
+        // The injected timestamp must appear in the emitted Turtle.
+        assert_eq!(out.generated_at_time, fixed_time);
+        assert!(out.turtle.contains(fixed_time), "injected timestamp must appear in emitted TTL");
+        // Both Finding and Activity nodes must carry the timestamp.
+        let timestamp_count = out.turtle.matches(fixed_time).count();
+        assert!(
+            timestamp_count >= 2,
+            "both Findings and Activities should carry the timestamp (got {} occurrences)",
+            timestamp_count
+        );
     }
 }
