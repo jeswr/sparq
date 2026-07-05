@@ -2125,9 +2125,20 @@ jobs:
         # consts. HONESTLY sparq-EXTENSION ratchets over the SCOPED FRAGMENT the
         # layered checker implements — NOT full OWL 2 DL, never summed into a
         # conformance number. `--nocapture` so the ratchet lines reach stdout.
+        # [SONNET-4.6] sq-25q5q: run this lane `--release`. The sparq-reason-dl L4
+        # tableau does a per-rule-application O(nodes×labels) rescan (a pre-existing
+        # property found during sq-pbz04.4.5), so the DEBUG test-RUNTIME dominated the
+        # whole inference-conformance job (~9 min of an ~11 min job in CI history vs
+        # seconds for every sibling lane). `--release` collapses that runtime; the one-
+        # time optimized compile of sparq-reason-dl + the dl_suite harness is amortized
+        # by the Swatinem release cache (the `Run inference suites` step above already
+        # warms the release profile via `cargo run --release`). COVERAGE IS UNCHANGED:
+        # same test target, same `dl-direct` feature, same EXACT `==` pins (68 profile /
+        # 184 direct) asserted in-runner and re-grepped from source — only the codegen
+        # optimization level changes, never the assertions or the fail-closed behavior.
         run: |
           set -uo pipefail
-          cargo test -p sparq-conformance --features dl-direct --test dl_suite -- --nocapture \
+          cargo test --release -p sparq-conformance --features dl-direct --test dl_suite -- --nocapture \
             | tee dl-direct-conformance.out
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::OWL 2 Direct-Semantics arm test failed (exit $rc)"; exit "$rc"; }
