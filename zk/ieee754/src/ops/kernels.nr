@@ -13,6 +13,29 @@ fn exponent_offset() -> u16 {
     32768_u16
 }
 
+/// Underflow-safe biased-exponent subtraction for mul/div (sq-25mgo).
+///
+/// The internal work exponent lives in an offset domain (`offset + true_exp`).
+/// A deep-underflow product/quotient can drive `sum - subtrahend` below zero,
+/// which is not representable as a `u16` and would abort the circuit on an
+/// unsigned underflow (an unprovable constraint) instead of yielding the
+/// correctly-signed zero required by IEEE 754-2019 section 7.5. Widen the
+/// operands to `u32` and saturate the result's lower bound at 0.
+///
+/// Saturating at 0 never flushes a legitimate subnormal: any representable
+/// (sub)normal result has a work exponent far above `offset` (the smallest
+/// subnormal work exponent is ~offset/2 for every supported format), so the
+/// `sum <= subtrahend` branch is only ever reached by inputs whose true result
+/// is orders of magnitude below the smallest subnormal. `round_pack_normalized`
+/// then flushes the 0-exponent significand to a signed zero.
+fn saturating_biased_exponent(sum: u32, subtrahend: u32) -> u16 {
+    if sum > subtrahend {
+        (sum - subtrahend) as u16
+    } else {
+        0_u16
+    }
+}
+
 fn hidden_bit() -> u128 {
     hidden_bit_typed::<u128>(112_u8)
 }
@@ -757,7 +780,12 @@ pub(crate) fn mul_wide(
     } else {
         let (left_significand, left_exponent) = normalized_finite(left);
         let (right_significand, right_exponent) = normalized_finite(right);
-        let mut result_exponent = ((left_exponent as u32) + (right_exponent as u32) - (exponent_offset() as u32)) as u16;
+        // sq-25mgo: saturate the deep-underflow product exponent at 0 (see
+        // `saturating_biased_exponent`) instead of aborting on a u16 underflow.
+        let mut result_exponent = saturating_biased_exponent(
+            (left_exponent as u32) + (right_exponent as u32),
+            exponent_offset() as u32,
+        );
         let divisor = (1 as u128) << 109;
         let product = (left_significand as Field) * (right_significand as Field);
         // Safety: the product reconstruction and strict-remainder complement pin the split.
@@ -796,14 +824,20 @@ pub(crate) fn div_wide(
     } else if right_infinite | left_zero {
         zero_parts(result_sign)
     } else {
-        let (mut left_significand, mut result_exponent) = normalized_finite(left);
+        let (mut left_significand, left_work_exponent) = normalized_finite(left);
         let (right_significand, right_exponent) = normalized_finite(right);
-        result_exponent = ((result_exponent as u32) + (exponent_offset() as u32) - (right_exponent as u32)) as u16;
 
-        if less_than_u128_bounded::<112>(left_significand, right_significand) {
+        let needs_shift = less_than_u128_bounded::<112>(left_significand, right_significand);
+        if needs_shift {
             left_significand = left_significand * 2;
-            result_exponent = result_exponent - 1;
         }
+        // sq-25mgo: fold the pre-scale decrement into the subtrahend and saturate
+        // the deep-underflow quotient exponent at 0 (see `saturating_biased_exponent`)
+        // instead of aborting on a u16 underflow.
+        let result_exponent = saturating_biased_exponent(
+            (left_work_exponent as u32) + (exponent_offset() as u32),
+            (right_exponent as u32) + (needs_shift as u32),
+        );
 
         // Safety: reconstruction and the strict-remainder complement pin the unique split.
         let (quotient, remainder): (u128, u128) = unsafe {
@@ -1374,7 +1408,13 @@ where
     } else {
         let (left_significand, left_exponent) = normalized_finite_u64::<EXPONENT_BITS, MANTISSA_BITS>(left_work);
         let (right_significand, right_exponent) = normalized_finite_u64::<EXPONENT_BITS, MANTISSA_BITS>(right_work);
-        let mut result_exponent = ((left_exponent as u32) + (right_exponent as u32) - (exponent_offset() as u32)) as u16;
+        // sq-25mgo: the narrow-format work exponents cluster near `offset`, so this
+        // sum cannot underflow today, but apply the same underflow-safe idiom
+        // defensively (identical semantics on every representable input).
+        let mut result_exponent = saturating_biased_exponent(
+            (left_exponent as u32) + (right_exponent as u32),
+            exponent_offset() as u32,
+        );
         let hidden = hidden_bit_u64(MANTISSA_BITS);
         let product = (left_significand as Field) * (right_significand as Field);
         let overflow_threshold = (hidden as Field) * (hidden as Field) * 2;
@@ -1439,13 +1479,18 @@ where
     } else if right_infinite | left_zero {
         zero_parts_u64(result_sign)
     } else {
-        let (mut left_significand, mut result_exponent) = normalized_finite_u64::<EXPONENT_BITS, MANTISSA_BITS>(left_work);
+        let (mut left_significand, left_work_exponent) = normalized_finite_u64::<EXPONENT_BITS, MANTISSA_BITS>(left_work);
         let (right_significand, right_exponent) = normalized_finite_u64::<EXPONENT_BITS, MANTISSA_BITS>(right_work);
-        result_exponent = ((result_exponent as u32) + (exponent_offset() as u32) - (right_exponent as u32)) as u16;
 
         let needs_shift = left_significand < right_significand;
         left_significand = left_significand * (1 + (needs_shift as u64));
-        result_exponent = result_exponent - (needs_shift as u16);
+        // sq-25mgo: fold the pre-scale decrement into the subtrahend and apply the
+        // underflow-safe saturating idiom defensively (narrow work exponents cannot
+        // underflow today; identical semantics on every representable input).
+        let result_exponent = saturating_biased_exponent(
+            (left_work_exponent as u32) + (exponent_offset() as u32),
+            (right_exponent as u32) + (needs_shift as u32),
+        );
 
         // Safety: reconstruction and typed remainder comparison pin the unique split.
         let (quotient, remainder): (u64, u64) = unsafe {
