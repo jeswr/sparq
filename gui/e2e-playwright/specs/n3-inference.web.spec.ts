@@ -1,40 +1,65 @@
 // [SONNET-4.6] sq-glo5r — N3 inference journey (browser / web persona):
-//   (a) Load data + N3 rule → derived triple appears in ASK query results when reasoner is ready.
-//   (b) BULK upload: setInputFiles on the hidden data-n3-dropzone input → both rules appear.
-//   (c) Toggle a rule off → inference re-settles; derived triple gone (or status off/error).
-//   (d) Rules persist: workspace localStorage entry has rulesDocs array after adding a rule.
+//   (a) Load data + an N3 rule → the SPECIFIC derived triple (ex:x a ex:B) answers an ASK true.
+//   (b) BULK upload: setInputFiles with two .n3 files in one action → both listed, each with a
+//       per-source enable toggle.
+//   (c) Toggling a rule off removes its derivations after re-materialisation (ASK flips false).
+//   (d) Rules persist per workspace: the localStorage record carries rulesDocs, and a full page
+//       reload restores the rule list + the N3 regime.
 //
-// Uses the chromium-web project (webTest fixture): no Tauri globals, pure browser code path.
-// The W-reason WASM bundle may or may not be present in the test build.  Where status reaches
-// "error" (bundle absent) the test still validates the UI state is honest — it never asserts
-// a vacuous "passed because inference was off".
+// NON-VACUOUS by design: the gating Playwright lane (gui.yml) BUILDS the W-reason bundle
+// (npm run build:reason-wasm) before exporting the app, so `reasonN3` is present and these
+// tests REQUIRE the reasoner to reach "ready" and the derived triple to appear. A missing
+// bundle fails this spec loudly — that is a build/sync regression, not a tolerated state.
+// (The app itself still degrades honestly at runtime: a missing bundle hard-fails queries
+// with a clear message while N3 is on — that error UI is product behaviour, but this spec
+// never accepts it as a pass.)
+//
+// Runs under the chromium-web project (support/web-fixtures.ts): no Tauri globals, pure
+// browser code path — the deployed /app persona.
 //
 // Stable selectors (sq-glo5r data-* contract):
-//   [data-inference-mode="n3"]       — the N3 mode button
-//   [data-n3-rules]                  — the N3 rules panel (visible when inference==="n3")
+//   [data-tool="inference"] / [data-tool="query"] — left-rail tool nav buttons
+//   [data-inference-mode="n3"]       — the N3 mode button (in InferenceControl; see scoping note)
+//   [data-n3-rules]                  — the N3 rules panel (visible when inference === "n3")
 //   [data-n3-rule-row]               — one rule row (keyed by addedAt)
 //   [data-n3-rule-toggle]            — enable/disable checkbox inside a rule row
 //   [data-n3-rule-remove]            — remove button inside a rule row
-//   [data-n3-author-textarea]        — wrapper div for the inline N3 editor
 //   [data-n3-author-name]            — the rule-name input
+//   #n3-author-textarea              — the inline N3 editor textarea
 //   [data-n3-add-rule]               — the "Add rule" button
-//   [data-n3-dropzone]               — wrapper div + the hidden file input for Playwright
+//   [data-n3-file-input]             — stable hidden <input type="file"> for bulk upload
 //   [data-inference-status]          — live status pill (loading / ready / error)
 //
-// Determinism rules: NO waitForTimeout; web-first assertions only.
+// SCOPING NOTE: InferenceControl is rendered in BOTH the query-toolbar (QueryWorkbench) and the
+// inference tool panel (InferenceTool).  Once the Inference tab is opened, both are in the DOM
+// simultaneously (the inactive tab is hidden via the HTML `hidden` attribute, not unmounted).
+// Playwright strict mode counts ALL matching elements regardless of visibility, so an unscoped
+// `[data-inference-mode="n3"]` resolves to 2 elements → strict-mode violation.
+// Fix: scope those selectors through the inference tab panel: `[data-tab="inference"]`.
+// Selectors that live ONLY in InferenceTool (data-n3-rules, data-n3-rule-row, etc.) are safe
+// without scoping.
+//
+// Determinism notes: NO waitForTimeout; web-first assertions only. The workspace mutators
+// (addRulesDocs / setRulesDocEnabled) push the rules into the engine SYNCHRONOUSLY inside the
+// click handler (engineRef.current.setN3Rules), and run() re-derives the closure cache key from
+// the live rules on every query — so an ASK issued after a toggle deterministically sees the
+// post-toggle closure with no sleep.
 
-import { webTest as test, webExpect as expect } from "../support/index.ts";
+import { webTest as test, webExpect as expect, waitForEngineReady } from "../support/index.ts";
+
+type Page = import("@playwright/test").Page;
+type Locator = import("@playwright/test").Locator;
+
+const RULE_A_TO_B = "@prefix ex: <http://example.org/> . { ?s a ex:A } => { ?s a ex:B . }";
+const DATA_X_A = "@prefix ex: <http://example.org/> . ex:x a ex:A .";
+const ASK_DERIVED = "PREFIX ex: <http://example.org/> ASK { ex:x a ex:B }";
 
 // ---------------------------------------------------------------------------
-// Helper: set a React-controlled textarea value via the native setter + input event.
-// WorkbenchTurtleEditor uses a controlled <textarea> — direct `.fill()` may not trigger
-// React's onChange reliably on all versions, so we use the native prototype setter approach.
+// Helpers.
 // ---------------------------------------------------------------------------
-async function fillReactTextarea(
-  page: import("@playwright/test").Page,
-  selector: string,
-  value: string,
-): Promise<void> {
+
+/** Set a React-controlled textarea via the native setter + input event. */
+async function fillReactTextarea(page: Page, selector: string, value: string): Promise<void> {
   await page.evaluate(
     ([sel, text]) => {
       const el = document.querySelector<HTMLTextAreaElement>(sel);
@@ -51,195 +76,163 @@ async function fillReactTextarea(
   );
 }
 
+/** Paste-import a Turtle document in REPLACE mode and wait for the ok feedback. */
+async function importPasteReplace(page: Page, turtle: string): Promise<void> {
+  await page.locator('[data-import-trigger="rail"]').click();
+  const drawer = page.locator("[data-import-drawer]");
+  await expect(drawer).toBeVisible();
+  await drawer.locator('[data-import-tab="paste"]').click();
+  await drawer.locator("textarea").first().fill(turtle);
+  await drawer.getByRole("button", { name: "Replace store" }).click();
+  await drawer.getByRole("button", { name: /Import \(replace store\)/ }).click();
+  await expect(drawer.locator('[data-import-feedback="ok"]')).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+}
+
+/**
+ * Open the Inference tool and switch the workspace to the N3 regime.
+ *
+ * Returns the inference tab-panel locator (`[data-tab="inference"]`) so callers can scope
+ * follow-up `[data-inference-mode]` / `[data-inference-status]` queries through it and avoid
+ * the strict-mode collision with the query-toolbar's InferenceControl (see SCOPING NOTE above).
+ */
+async function selectN3(page: Page): Promise<Locator> {
+  await page.locator('[data-tool="inference"]').click();
+  // Scope to the inference tab panel — avoids the query-toolbar's InferenceControl duplicate.
+  const panel = page.locator('[data-tab="inference"]');
+  const n3Btn = panel.locator('[data-inference-mode="n3"]');
+  await expect(n3Btn).toBeVisible();
+  await n3Btn.click();
+  await expect(n3Btn).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("[data-n3-rules]")).toBeVisible();
+  return panel;
+}
+
+/** Author an inline rule in the N3 rules panel; waits for its row to appear. */
+async function authorRule(page: Page, name: string, text: string): Promise<void> {
+  const before = await page.locator("[data-n3-rule-row]").count();
+  await page.getByRole("button", { name: /Author a rule/i }).click();
+  await page.locator("[data-n3-author-name]").fill(name);
+  await fillReactTextarea(page, "#n3-author-textarea", text);
+  await page.locator("[data-n3-add-rule]").click();
+  await expect(page.locator("[data-n3-rule-row]")).toHaveCount(before + 1);
+}
+
+/** Run an ASK in the Query tool and assert its boolean rendering. */
+async function runAsk(page: Page, query: string, expected: "true" | "false"): Promise<void> {
+  await page.locator('[data-tool="query"]').click();
+  await fillReactTextarea(page, "#repl-query", query);
+  await page.getByRole("button", { name: "Run query" }).click();
+  const result = page.locator('[data-result-kind="ask"]');
+  await expect(result).toBeVisible({ timeout: 60_000 });
+  await expect(result).toContainText(expected);
+}
+
 test.describe("n3-inference", () => {
   // The webPersona auto-fixture navigates to "/" and waits for engine ready before each test.
 
-  test("(a) load data + N3 rule → derived triple in ASK when ready", async ({ page }) => {
-    // 1. Import base data via the Import drawer (paste mode): ex:x a ex:A
-    await page.locator('[data-import-trigger="rail"]').click();
-    const drawer = page.locator("[data-import-drawer]");
-    await expect(drawer).toBeVisible();
+  test("(a) data + an N3 rule derives a specific triple visible to queries", async ({ page }) => {
+    // 1. Replace the store with exactly one asserted triple: ex:x a ex:A.
+    await importPasteReplace(page, DATA_X_A);
 
-    // Switch to Paste tab (the browser persona opens on Paste by default).
-    await drawer.locator('[data-import-tab="paste"]').click();
-    // Fill the paste editor and import (replace mode).
-    const pasteInput = drawer.locator("textarea").first();
-    await pasteInput.fill("@prefix ex: <http://example.org/> . ex:x a ex:A .");
+    // 2. Switch to the N3 regime and attach the {A}=>{B} rule.
+    const panel = await selectN3(page);
+    await authorRule(page, "test-rule", RULE_A_TO_B);
 
-    // Click the Import / replace button.
-    const importBtn = drawer.getByRole("button", { name: /Import/ }).first();
-    await importBtn.click();
+    // 3. The reasoner must reach READY (the Playwright lane always ships the W-reason bundle;
+    //    "error" here is a real regression, never a tolerated alternative).
+    //    Scope through `panel` to avoid the query-toolbar's duplicate InferenceStatusPill.
+    await expect(panel.locator('[data-inference-status="ready"]')).toBeVisible({
+      timeout: 60_000,
+    });
 
-    // Close the drawer.
-    await page.getByRole("button", { name: "Close import drawer" }).click();
-    await expect(drawer).not.toBeVisible();
+    // 4. The SPECIFIC derived triple: ex:x a ex:B was never asserted — only the rule can put it
+    //    in query results. This is the non-vacuous core assertion of sq-glo5r.
+    await runAsk(page, ASK_DERIVED, "true");
 
-    // 2. Open the Inference tab from the left rail (tool button).
-    // The left rail renders tool buttons; click the one labelled "Inference".
-    await page.getByRole("button", { name: "Inference" }).click();
-    // The N3 mode button should now be visible (from WORKSPACE_INFERENCE_MODES auto-map).
-    const n3Btn = page.locator('[data-inference-mode="n3"]');
-    await expect(n3Btn).toBeVisible();
-
-    // 3. Select N3 mode.
-    await n3Btn.click();
-    await expect(n3Btn).toHaveAttribute("aria-pressed", "true");
-
-    // The N3 rules panel should appear.
-    await expect(page.locator("[data-n3-rules]")).toBeVisible();
-
-    // 4. Author a rule in the inline pane: expand the collapsible.
-    await page.getByRole("button", { name: /Author a rule/i }).click();
-
-    // Fill the rule name.
-    await page.locator("[data-n3-author-name]").fill("test-rule");
-
-    // Fill the N3 rule text via native setter (React-controlled textarea).
-    await fillReactTextarea(
-      page,
-      "#n3-author-textarea",
-      "@prefix ex: <http://example.org/> . { ?s a ex:A } => { ?s a ex:B . }",
-    );
-
-    // Click "Add rule".
-    await page.locator("[data-n3-add-rule]").click();
-
-    // The rule row should appear in the list.
-    await expect(page.locator("[data-n3-rule-row]").first()).toBeVisible();
-
-    // 5. Wait for inference to settle (ready or error — both are valid depending on the build).
-    const statusEl = page.locator(
-      '[data-inference-status="ready"], [data-inference-status="error"]',
-    );
-    await expect(statusEl).toBeVisible({ timeout: 60_000 });
-
-    // 6. If reasoner is ready, run an ASK query to verify the derived triple.
-    const isReady = await page.locator('[data-inference-status="ready"]').isVisible();
-    if (isReady) {
-      // Navigate to Query tab.
-      await page.getByRole("button", { name: "Query" }).click();
-
-      // Set the editor value via native setter + input event.
-      await page.evaluate(() => {
-        const el = document.querySelector<HTMLTextAreaElement>("#repl-query");
-        if (!el) throw new Error("Editor not found");
-        const setter = Object.getOwnPropertyDescriptor(
-          window.HTMLTextAreaElement.prototype,
-          "value",
-        )?.set;
-        setter?.call(
-          el,
-          "PREFIX ex: <http://example.org/> ASK { ex:x a ex:B }",
-        );
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-      });
-
-      await page.getByRole("button", { name: "Run query" }).click();
-
-      // Wait for an ASK result.
-      await expect(page.locator('[data-result-kind="ask"]')).toBeVisible({ timeout: 30_000 });
-      // The derived triple ex:x a ex:B should be present → ASK = true.
-      await expect(page.locator('[data-result-kind="ask"]')).toContainText("true");
-    } else {
-      // Honest-unavailable: status is "error" — confirm the error UI is visible.
-      await expect(page.locator('[data-inference-status="error"]')).toBeVisible();
-    }
+    // 5. Fail-closed sanity: the derived triple is query-time only. Switching inference Off
+    //    returns exactly the asserted data (the derivation disappears).
+    //    Navigate back to inference, then scope the mode button through the panel.
+    await page.locator('[data-tool="inference"]').click();
+    await panel.locator('[data-inference-mode="off"]').click();
+    await runAsk(page, ASK_DERIVED, "false");
   });
 
-  test("(b) bulk upload: two .n3 files via hidden input → both rules appear", async ({ page }) => {
-    // Open Inference tab.
-    await page.getByRole("button", { name: "Inference" }).click();
+  test("(b) BULK upload: two .n3 files in one action, each listed with a toggle", async ({
+    page,
+  }) => {
+    await selectN3(page);
 
-    // Select N3 mode.
-    await page.locator('[data-inference-mode="n3"]').click();
-    await expect(page.locator("[data-n3-rules]")).toBeVisible();
-
-    // Use setInputFiles on the hidden file input inside the dropzone wrapper.
-    const dropzoneInput = page.locator("[data-n3-dropzone] input[type=file]");
-    await expect(dropzoneInput).toBeAttached();
-
-    await dropzoneInput.setInputFiles([
+    // One setInputFiles call = one user action carrying BOTH files (the bulk contract).
+    const input = page.locator("[data-n3-file-input]");
+    await expect(input).toBeAttached();
+    await input.setInputFiles([
       {
         name: "rule-a.n3",
         mimeType: "text/plain",
-        buffer: Buffer.from("@prefix ex: <http://example.org/> . { ?s a ex:A } => { ?s a ex:B . }"),
+        buffer: Buffer.from(RULE_A_TO_B),
       },
       {
         name: "rule-b.n3",
         mimeType: "text/plain",
-        buffer: Buffer.from("@prefix ex: <http://example.org/> . { ?s a ex:C } => { ?s a ex:D . }"),
+        buffer: Buffer.from(
+          "@prefix ex: <http://example.org/> . { ?s a ex:C } => { ?s a ex:D . }",
+        ),
       },
     ]);
 
-    // Both rule rows should appear in the list.
-    await expect(page.locator("[data-n3-rule-row]")).toHaveCount(2, { timeout: 5_000 });
+    // Both rules are listed, each row carrying its own per-source enable toggle.
+    const rows = page.locator("[data-n3-rule-row]");
+    await expect(rows).toHaveCount(2);
+    await expect(page.locator("[data-n3-rules]")).toContainText("rule-a.n3");
+    await expect(page.locator("[data-n3-rules]")).toContainText("rule-b.n3");
+    await expect(page.locator("[data-n3-rule-toggle]")).toHaveCount(2);
+    for (const i of [0, 1]) {
+      await expect(page.locator("[data-n3-rule-toggle]").nth(i)).toBeChecked();
+    }
   });
 
-  test("(c) toggle a rule off → closure rebuilds (derived triple absent or status non-ready)", async ({
+  test("(c) toggling a rule off removes its derivations after re-materialisation", async ({
     page,
   }) => {
-    // Open Inference, select N3, add one rule.
-    await page.getByRole("button", { name: "Inference" }).click();
-    await page.locator('[data-inference-mode="n3"]').click();
-    await expect(page.locator("[data-n3-rules]")).toBeVisible();
+    // Full chain first: data + rule + N3 → the derived triple answers true.
+    await importPasteReplace(page, DATA_X_A);
+    const panel = await selectN3(page);
+    await authorRule(page, "toggle-test", RULE_A_TO_B);
+    // Scope status check through the panel (avoids the toolbar's InferenceStatusPill duplicate).
+    await expect(panel.locator('[data-inference-status="ready"]')).toBeVisible({
+      timeout: 60_000,
+    });
+    await runAsk(page, ASK_DERIVED, "true");
 
-    // Author a rule.
-    await page.getByRole("button", { name: /Author a rule/i }).click();
-    await page.locator("[data-n3-author-name]").fill("toggle-test");
-    await fillReactTextarea(
-      page,
-      "#n3-author-textarea",
-      "@prefix ex: <http://example.org/> . { ?s a ex:A } => { ?s a ex:B . }",
-    );
-    await page.locator("[data-n3-add-rule]").click();
-    await expect(page.locator("[data-n3-rule-row]").first()).toBeVisible();
-
-    // Wait for the status to settle.
-    await expect(
-      page.locator('[data-inference-status="ready"], [data-inference-status="error"]'),
-    ).toBeVisible({ timeout: 60_000 });
-
-    // Toggle the rule off (uncheck).
+    // Toggle the rule OFF. setRulesDocEnabled pushes the new rules list into the engine
+    // synchronously, so the next query re-materialises without the rule.
+    await page.locator('[data-tool="inference"]').click();
     const toggle = page.locator("[data-n3-rule-toggle]").first();
     await expect(toggle).toBeChecked();
     await toggle.uncheck();
-
-    // Status must transition back to loading then settle.
-    await expect(
-      page.locator(
-        '[data-inference-status="loading"], [data-inference-status="ready"], [data-inference-status="error"]',
-      ),
-    ).toBeVisible({ timeout: 5_000 });
-    // Settle again.
-    await expect(
-      page.locator('[data-inference-status="ready"], [data-inference-status="error"]'),
-    ).toBeVisible({ timeout: 60_000 });
-
-    // The toggle must now be unchecked in the UI.
     await expect(toggle).not.toBeChecked();
+
+    // The derivation is GONE from query results after re-materialisation — while N3 stays ON
+    // and the base data is untouched.
+    await runAsk(page, ASK_DERIVED, "false");
+    await runAsk(page, "PREFIX ex: <http://example.org/> ASK { ex:x a ex:A }", "true");
+
+    // And the re-materialised closure reports zero entailed triples in the status pill.
+    await page.locator('[data-tool="inference"]').click();
+    // Scope through the panel to avoid the toolbar's InferenceStatusPill duplicate.
+    await expect(panel.locator('[data-inference-status="ready"]')).toContainText("+0 entailed", {
+      timeout: 60_000,
+    });
   });
 
-  test("(d) rules persist: localStorage contains rulesDocs after adding a rule", async ({
-    page,
-  }) => {
-    // Open Inference, select N3, author a rule.
-    await page.getByRole("button", { name: "Inference" }).click();
-    await page.locator('[data-inference-mode="n3"]').click();
-    await expect(page.locator("[data-n3-rules]")).toBeVisible();
+  test("(d) rules persist per workspace and survive a reload", async ({ page }) => {
+    await selectN3(page);
+    await authorRule(page, "persist-test", RULE_A_TO_B);
 
-    await page.getByRole("button", { name: /Author a rule/i }).click();
-    await page.locator("[data-n3-author-name]").fill("persist-test");
-    await fillReactTextarea(
-      page,
-      "#n3-author-textarea",
-      "@prefix ex: <http://example.org/> . { ?s a ex:X } => { ?s a ex:Y . }",
-    );
-    await page.locator("[data-n3-add-rule]").click();
-
-    // Rule row must be visible before checking persistence.
-    await expect(page.locator("[data-n3-rule-row]").first()).toBeVisible();
-
-    // Poll localStorage: workspace record must have a non-empty rulesDocs array.
+    // The workspace record in localStorage carries the rulesDocs array (deterministic flush:
+    // poll until the persisted record contains the rule — same pattern as workspace-restore).
     await expect
       .poll(
         () =>
@@ -251,11 +244,18 @@ test.describe("n3-inference", () => {
               if (k.endsWith("__index__") || k.endsWith("__last__")) continue;
               try {
                 const ws = JSON.parse(localStorage.getItem(k) ?? "{}") as {
-                  rulesDocs?: unknown[];
+                  inference?: string;
+                  rulesDocs?: Array<{ name?: string }>;
                 };
-                if (Array.isArray(ws.rulesDocs) && ws.rulesDocs.length > 0) return true;
+                if (
+                  ws.inference === "n3" &&
+                  Array.isArray(ws.rulesDocs) &&
+                  ws.rulesDocs.some((d) => d?.name === "persist-test")
+                ) {
+                  return true;
+                }
               } catch {
-                continue;
+                /* skip corrupt entries */
               }
             }
             return false;
@@ -263,5 +263,21 @@ test.describe("n3-inference", () => {
         { timeout: 5_000 },
       )
       .toBe(true);
+
+    // RELOAD — the restored workspace must come back in the N3 regime with the rule listed.
+    await page.reload();
+    await waitForEngineReady(page, { timeout: 90_000 });
+
+    // After reload only the Query tab is open; open Inference and get a fresh panel locator.
+    await page.locator('[data-tool="inference"]').click();
+    const panel = page.locator('[data-tab="inference"]');
+    // Scope through panel to avoid the toolbar's InferenceControl duplicate (SCOPING NOTE).
+    await expect(panel.locator('[data-inference-mode="n3"]')).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(page.locator("[data-n3-rules]")).toBeVisible();
+    await expect(page.locator("[data-n3-rule-row]")).toHaveCount(1);
+    await expect(page.locator("[data-n3-rules]")).toContainText("persist-test");
   });
 });

@@ -150,14 +150,16 @@ function N3RulesPanel() {
           hint=".n3 · .ttl"
           browseLabel="Browse rule files…"
         />
-        {/* Stable hidden input for Playwright setInputFiles() */}
+        {/* Stable hidden input for Playwright setInputFiles() — mirrors data-global-drop-input
+            (sq-eydh9): sr-only + a real aria-label, never aria-hidden on a focusable control. */}
         <input
           ref={hiddenInputRef}
           type="file"
           multiple
           accept={N3_ACCEPT.join(",")}
+          data-n3-file-input
+          aria-label="Select N3 rule files to add"
           className="sr-only"
-          aria-hidden="true"
           onChange={handleHiddenInput}
         />
       </div>
