@@ -1,0 +1,77 @@
+name: pkg-ingest
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/sparq-kb/ingest/**'
+      - 'crates/sparq-kb/ontology/**'
+      - 'crates/sparq-kb/shapes/**'
+      - '.beads/**'
+      - 'skills/**'
+  workflow_dispatch: {}
+
+concurrency:
+  group: pkg-ingest
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    name: pkg-ingest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938 # v4.2.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Run ingest
+        run: |
+          python3 crates/sparq-kb/ingest/ingest_pkg.py \
+              --beads .beads/issues.jsonl \
+              --skills-dir skills \
+              --findings-yamlld crates/sparq-kb/ingest/agents-findings.yaml.ld \
+              --out crates/sparq-kb/ingest/pkg-instances.ttl
+        shell: bash
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1482605baf623a1be434c2297f1ccf42f4271c6c # master
+        with:
+          toolchain: stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@82a92a6e8fbeee090b81b47073ec8925ba6ecf63 # v2.7.5
+
+      - name: Build validate-pkg
+        run: |
+          cargo build --bin validate-pkg --features validate -p sparq-kb --release
+        shell: bash
+
+      - name: Validate ingest against SHACL shapes
+        run: |
+          ./target/release/validate-pkg crates/sparq-kb/ingest/pkg-instances.ttl
+        shell: bash
+
+      - name: Upload quarantine sidecar
+        if: always()
+        uses: actions/upload-artifact@3cea5372237819ed907bc075d0a19be3688a5be3 # v4.0.0
+        with:
+          name: pkg-ingest-quarantine
+          path: crates/sparq-kb/ingest/pkg-instances.ttl.stale-edges.tsv
+          if-no-files-found: warn
+
+      - name: Upload ingested PKG
+        if: success()
+        uses: actions/upload-artifact@3cea5372237819ed907bc075d0a19be3688a5be3 # v4.0.0
+        with:
+          name: pkg-ingested
+          path: crates/sparq-kb/ingest/pkg-instances.ttl
+          if-no-files-found: error
