@@ -1,4 +1,4 @@
-//! Auto-generated tests for op:string-less-than (uses stub function)
+//! Auto-generated tests for op:string-less-than
 //! Source: https://github.com/w3c/qt3tests
 
 mod chunk_0;
