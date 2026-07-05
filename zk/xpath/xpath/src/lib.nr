@@ -160,7 +160,7 @@ pub use duration::{
     duration_from_components, duration_from_microseconds, duration_ge, duration_greater_than,
     duration_is_negative, duration_le, duration_less_than, duration_multiply, duration_negate,
     duration_subtract, duration_to_microseconds, duration_zero, hours_from_duration,
-    minutes_from_duration, seconds_from_duration,
+    minutes_from_duration, months_from_duration_dt, seconds_from_duration, years_from_duration_dt,
 };
 
 // Re-export date functions

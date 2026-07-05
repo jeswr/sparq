@@ -289,3 +289,15 @@ pub use crate::year_month_duration::years_from_duration as years_from_duration;
 
 // fn:months-from-duration (for yearMonthDuration)
 pub use crate::year_month_duration::months_from_duration as months_from_duration;
+
+// ============================================================================
+// DayTimeDuration Component Extraction (sq-u91ki) [SONNET-4.6]
+// F&O sec. 8.4.3 / 8.4.4: fn:years-from-duration and fn:months-from-duration
+// applied to xs:dayTimeDuration always return 0.
+// ============================================================================
+
+// fn:years-from-duration (for dayTimeDuration) -- returns 0, F&O sec. 8.4.3
+pub use crate::duration::years_from_duration_dt as years_from_duration_dt;
+
+// fn:months-from-duration (for dayTimeDuration) -- returns 0, F&O sec. 8.4.4
+pub use crate::duration::months_from_duration_dt as months_from_duration_dt;

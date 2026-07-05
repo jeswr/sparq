@@ -8,6 +8,9 @@
 //! - op:multiply-dayTimeDuration, op:divide-dayTimeDuration
 //! - op:add-dayTimeDuration-to-dateTime, op:subtract-dayTimeDuration-from-dateTime
 //! - op:dayTimeDuration-equal, op:dayTimeDuration-less-than, op:dayTimeDuration-greater-than
+//! XPath functions implemented (DayTimeDuration overloads):
+//! - fn:years-from-duration (xs:dayTimeDuration -> 0, F&O sec. 8.4.3)
+//! - fn:months-from-duration (xs:dayTimeDuration -> 0, F&O sec. 8.4.4)
 
 use crate::types::{XsdDateTime, XsdDayTimeDuration};
 
@@ -104,6 +107,24 @@ pub fn seconds_from_duration(dur: XsdDayTimeDuration) -> u8 {
     let abs_micros: i64 = if micros < 0 { -micros } else { micros };
     let minute_remainder = abs_micros % MICROS_PER_MINUTE;
     (minute_remainder / MICROS_PER_SECOND) as u8
+}
+
+/// fn:years-from-duration applied to xs:dayTimeDuration (F&O sec. 8.4.3)
+///
+/// An xs:dayTimeDuration has no years component; the accessor always returns 0.
+/// Contrast: applied to xs:yearMonthDuration the real year count is returned
+/// (see year_month_duration.nr::years_from_duration). [SONNET-4.6] (sq-u91ki)
+pub fn years_from_duration_dt(_dur: XsdDayTimeDuration) -> i32 {
+    0
+}
+
+/// fn:months-from-duration applied to xs:dayTimeDuration (F&O sec. 8.4.4)
+///
+/// An xs:dayTimeDuration has no months component; the accessor always returns 0.
+/// Contrast: applied to xs:yearMonthDuration the real month remainder is returned
+/// (see year_month_duration.nr::months_from_duration). [SONNET-4.6] (sq-u91ki)
+pub fn months_from_duration_dt(_dur: XsdDayTimeDuration) -> i32 {
+    0
 }
 
 // ============================================================================
@@ -374,4 +395,57 @@ fn test_datetime_negative_epoch_crosses_back_over_1970() {
     assert((crossed.epoch_microseconds as i64) == 43_200_000_000);
     // The positive result's raw Field equals the plain unsigned value too.
     assert(crossed.epoch_microseconds == 43_200_000_000);
+}
+
+// ============================================================================
+// DayTimeDuration overloads for fn:years-from-duration / fn:months-from-duration
+// (sq-u91ki) [SONNET-4.6]
+//
+// F&O sec. 8.4.3 (fn:years-from-duration) and sec. 8.4.4 (fn:months-from-duration):
+// when the argument is xs:dayTimeDuration, both accessors return the xs:integer 0
+// because a dayTimeDuration carries no months or years component.
+//
+// Oracle: Python reference
+//   import isodate; d = isodate.parse_duration("P1D")
+//   # d is datetime.timedelta(days=1); no years/months attribute -> 0
+// ============================================================================
+
+#[test]
+fn test_years_from_duration_dt_positive() {
+    // Oracle: xs:dayTimeDuration("P1D") has no years component -> fn:years-from-duration = 0
+    // (F&O sec. 8.4.3)
+    let one_day = duration_from_components(false, 1, 0, 0, 0, 0);
+    assert(years_from_duration_dt(one_day) == 0);
+}
+
+#[test]
+fn test_years_from_duration_dt_negative() {
+    // Oracle: xs:dayTimeDuration("-P365D") has no years component -> fn:years-from-duration = 0
+    // (F&O sec. 8.4.3)
+    let neg_year = duration_from_components(true, 365, 0, 0, 0, 0);
+    assert(years_from_duration_dt(neg_year) == 0);
+}
+
+#[test]
+fn test_months_from_duration_dt_positive() {
+    // Oracle: xs:dayTimeDuration("P30D") has no months component -> fn:months-from-duration = 0
+    // (F&O sec. 8.4.4)
+    let thirty_days = duration_from_components(false, 30, 0, 0, 0, 0);
+    assert(months_from_duration_dt(thirty_days) == 0);
+}
+
+#[test]
+fn test_months_from_duration_dt_negative() {
+    // Oracle: xs:dayTimeDuration("-P30D") has no months component -> fn:months-from-duration = 0
+    // (F&O sec. 8.4.4)
+    let neg_thirty_days = duration_from_components(true, 30, 0, 0, 0, 0);
+    assert(months_from_duration_dt(neg_thirty_days) == 0);
+}
+
+#[test]
+fn test_years_months_dt_zero_duration() {
+    // Regression: zero dayTimeDuration -> both return 0 (degenerate case, F&O sec. 8.4.3/8.4.4)
+    let zero = duration_zero();
+    assert(years_from_duration_dt(zero) == 0);
+    assert(months_from_duration_dt(zero) == 0);
 }
