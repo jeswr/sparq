@@ -79,24 +79,53 @@ LEAK_PATTERNS_GLOBAL: list[tuple[re.Pattern | None, str | None, str]] = [
 
 # Restricted-projection specific: the metadata-only PUBLIC projection must carry
 # ZERO abstract-derived text.  These markers are only checked on the projection file.
+#
+# Two defence layers per predicate/class:
+#   1. Prefixed-name string  (e.g. "sigimpl:justification") — catches common serialisations.
+#   2. IRI-substring string  (e.g. "sig-impl#justification") — catches full-IRI and any
+#      non-standard prefix serialisations that evade the prefixed form.
+# Additionally, _rdflib_check_restricted_projection() parses the Turtle graph with rdflib
+# (when available) and asserts zero matching triples by full IRI — catching rdflib's
+# auto-prefixed forms (e.g. "ns1:justification") that evade BOTH string patterns above.
 LEAK_PATTERNS_RESTRICTED_PROJECTION: list[tuple[re.Pattern | None, str | None, str]] = [
+    # ── sigimpl:justification ─────────────────────────────────────────────────
     (
         None,
         "sigimpl:justification",
-        "abstract-derived justification text — restricted full tier only; "
+        "abstract-derived justification text (prefixed form) — restricted full tier only; "
         "the public projection must not carry any sigimpl:justification triple",
     ),
     (
         None,
+        "sig-impl#justification",
+        "abstract-derived justification text (IRI-substring form) — catches full-IRI "
+        "<https://w3id.org/zkp-sparql/sig-impl#justification> serialisation",
+    ),
+    # ── dcterms:abstract ─────────────────────────────────────────────────────
+    (
+        None,
         "dcterms:abstract",
-        "raw abstract text — restricted full tier only; "
+        "raw abstract text (prefixed form) — restricted full tier only; "
         "the public projection must not carry any dcterms:abstract triple",
     ),
     (
         None,
+        "dc/terms/abstract",
+        "raw abstract text (IRI-substring form) — catches full-IRI "
+        "<http://purl.org/dc/terms/abstract> serialisation",
+    ),
+    # ── pkg:Finding ──────────────────────────────────────────────────────────
+    (
+        None,
         "a pkg:Finding",
-        "full Finding triple — the restricted projection carries only source metadata, "
-        "never Finding nodes",
+        "full Finding triple (prefixed form) — the restricted projection carries only "
+        "source metadata, never Finding nodes",
+    ),
+    (
+        None,
+        "pkg#Finding",
+        "full Finding triple (IRI-substring form) — catches full-IRI "
+        "<https://sparq.dev/ns/pkg#Finding> serialisation",
     ),
 ]
 
@@ -239,6 +268,72 @@ def leak_check_file(
     return violations
 
 
+def _rdflib_check_restricted_projection(
+    filename: str, content: str
+) -> list[LeakViolation]:
+    """
+    Parse *content* as Turtle using rdflib and assert zero restricted-tier triples
+    by full IRI — serialisation-independent check that catches auto-prefixed forms
+    (e.g. "ns1:justification") which evade both the prefixed-name and IRI-substring
+    string patterns.
+
+    Returns an empty list if rdflib is unavailable or the Turtle is unparseable
+    (let the string patterns handle those cases).
+    """
+    try:
+        import rdflib  # noqa: PLC0415
+    except ImportError:
+        return []
+
+    RESTRICTED_PREDICATES = [
+        rdflib.URIRef("https://w3id.org/zkp-sparql/sig-impl#justification"),
+        rdflib.URIRef("http://purl.org/dc/terms/abstract"),
+    ]
+    FINDING_CLASS = rdflib.URIRef("https://sparq.dev/ns/pkg#Finding")
+
+    violations: list[LeakViolation] = []
+    try:
+        g = rdflib.Graph()
+        g.parse(data=content, format="turtle")
+    except Exception:
+        # Unparseable Turtle — the string patterns will still flag obvious markers;
+        # also the prov round-trip test will catch invalid Turtle in provenance.
+        return []
+
+    for pred in RESTRICTED_PREDICATES:
+        for subj, _, obj in g.triples((None, pred, None)):
+            snippet = f"<{subj}> <{pred}> {obj!r}"[:120]
+            violations.append(
+                LeakViolation(
+                    filename=filename,
+                    marker=str(pred),
+                    reason=(
+                        f"rdflib IRI-match: predicate <{pred}> found in restricted "
+                        f"projection — serialisation-independent check"
+                    ),
+                    line_no=0,
+                    snippet=snippet,
+                )
+            )
+
+    for subj, _, _ in g.triples((None, rdflib.RDF.type, FINDING_CLASS)):
+        snippet = f"<{subj}> a <{FINDING_CLASS}>"[:120]
+        violations.append(
+            LeakViolation(
+                filename=filename,
+                marker=str(FINDING_CLASS),
+                reason=(
+                    f"rdflib IRI-match: pkg:Finding instance <{subj}> found in restricted "
+                    f"projection — serialisation-independent check"
+                ),
+                line_no=0,
+                snippet=snippet,
+            )
+        )
+
+    return violations
+
+
 def run_leak_check(
     dump_files: dict[str, str],
     restricted_projection_key: str | None = None,
@@ -247,7 +342,8 @@ def run_leak_check(
     Run the full leak check over *dump_files* (mapping filename → text content).
 
     *restricted_projection_key* names the file that must pass the additional
-    restricted-projection patterns (sigimpl:justification, dcterms:abstract, a pkg:Finding).
+    restricted-projection patterns — checked via both string patterns (prefixed and
+    IRI-substring forms) AND rdflib graph parsing (serialisation-independent).
 
     Returns (passed, violations). *passed* is True iff the violation list is empty.
     """
@@ -259,6 +355,12 @@ def run_leak_check(
             extra = list(LEAK_PATTERNS_RESTRICTED_PROJECTION)
         violations = leak_check_file(filename, content, extra_patterns=extra)
         all_violations.extend(violations)
+
+        # Additional rdflib-based IRI check for the restricted projection
+        if filename == restricted_projection_key:
+            all_violations.extend(
+                _rdflib_check_restricted_projection(filename, content)
+            )
 
     return (len(all_violations) == 0), all_violations
 
@@ -273,15 +375,27 @@ def make_dump_provenance(
     tier_file_iris: list[str],
 ) -> str:
     """
-    Produce a PROV-O Turtle document describing this dump as a prov:Activity.
-    The dump carries its OWN provenance activity per the sq-tzars.8 design.
+    Produce a PROV-O Turtle document for this dump.
+
+    Domain correctness:
+      prov:generatedAtTime  — domain prov:Entity  → on the dump Entity
+      prov:startedAtTime /
+      prov:endedAtTime      — domain prov:Activity → on the dump Activity
+
+    The Entity represents the dump artifact; the Activity represents the assembly run.
     """
-    dump_activity_iri = f"https://sparq.dev/ns/kb/dump/{dump_date}"
+    dump_entity_iri = f"https://sparq.dev/ns/kb/dump/{dump_date}"
+    dump_activity_iri = f"https://sparq.dev/ns/kb/dump/{dump_date}/activity"
     used_triples = "\n".join(
-        f'  prov:used <{iri}> ;' for iri in tier_file_iris
+        f"  prov:used <{iri}> ;" for iri in tier_file_iris
+    )
+    comment_text = (
+        "Assembled by scripts/export-kb-dump.py. "
+        "The LICENSE-RESTRICTED tier is never exported; "
+        "only its metadata-only projection is included."
     )
     return f"""\
-# dump-provenance.ttl — PROV-O activity record for the KB dump of {dump_date}
+# dump-provenance.ttl — PROV-O record for the KB dump of {dump_date}
 # Generated by scripts/export-kb-dump.py (sq-tzars.8) [SONNET-4.6]
 # 🤖 SPARQ agent — do not hand-edit.
 
@@ -289,17 +403,21 @@ def make_dump_provenance(
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
-@prefix sparq:   <https://sparq.dev/ns/> .
 
+# The dump artifact (Entity) — prov:generatedAtTime has domain prov:Entity.
+<{dump_entity_iri}> a prov:Entity ;
+  rdfs:label "KB dump for {dump_date}"@en ;
+  prov:generatedAtTime "{generated_at}"^^xsd:dateTime ;
+  prov:wasGeneratedBy <{dump_activity_iri}> .
+
+# The assembly run (Activity) — startedAtTime/endedAtTime stay on the Activity.
 <{dump_activity_iri}> a prov:Activity ;
   rdfs:label "KB dump activity for {dump_date}"@en ;
   prov:startedAtTime "{generated_at}"^^xsd:dateTime ;
   prov:endedAtTime "{generated_at}"^^xsd:dateTime ;
-  prov:generatedAtTime "{generated_at}"^^xsd:dateTime ;
 {used_triples}
   dcterms:source <https://github.com/sparq-org/sparq/commit/{source_commit}> ;
-  rdfs:comment "Assembled by scripts/export-kb-dump.py. The LICENSE-RESTRICTED tier "
-               "is never exported; only its metadata-only projection is included."@en .
+  rdfs:comment "{comment_text}"@en .
 """
 
 
@@ -358,30 +476,34 @@ def assemble_dump(
     generated_at: str | None = None,
 ) -> dict:
     """
-    Compress and write tier artifacts to *out_dir*, produce manifest.json and
-    dump-provenance.ttl, run the leak check, and return the manifest dict.
+    Assemble ALL dump content in memory, run the leak check over EVERYTHING
+    (tier TTL files + manifest.json + dump-provenance.ttl), and only THEN write
+    to *out_dir*.  No file is written before the leak check passes — fail-closed
+    is guaranteed.
 
     Raises SystemExit(1) on any leak check failure.
     """
     dump_date = dump_date or _today()
     generated_at = generated_at or _now_iso()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # out_dir is NOT created here — only after the leak check passes.
 
     file_entries: list[dict] = []
     dump_texts: dict[str, str] = {}  # filename → text (for leak check)
+    pending_gz: dict[str, bytes] = {}  # filename → compressed bytes (deferred write)
     restricted_proj_key: str | None = None
     used_tier_iris: list[str] = []
 
-    def _write_tier(
+    def _collect_tier(
         filename: str,
         content: str,
         tier: str,
         license_class: str,
         graph_iri: str,
     ) -> None:
+        """Compress and record a tier artifact — does NOT write to disk yet."""
         nonlocal restricted_proj_key
         compressed = _compress(content.encode("utf-8"))
-        (out_dir / filename).write_bytes(compressed)
+        pending_gz[filename] = compressed  # deferred until after leak check
         triple_count = _count_triples(content)
         raw_sha = _sha256(content.encode("utf-8"))
         file_entries.append(
@@ -402,7 +524,7 @@ def assemble_dump(
 
     # 1. Ontology (optional — present if the ontology file exists)
     if ontology_content is not None:
-        _write_tier(
+        _collect_tier(
             "pkg-ontology.ttl.gz",
             ontology_content,
             tier="ontology",
@@ -412,7 +534,7 @@ def assemble_dump(
 
     # 2. Hand-authored tier
     if hand_authored_content is not None:
-        _write_tier(
+        _collect_tier(
             "pkg-hand-authored.ttl.gz",
             hand_authored_content,
             tier="hand-authored",
@@ -422,7 +544,7 @@ def assemble_dump(
 
     # 3. Machine tier (optional — may not exist yet)
     if machine_content is not None:
-        _write_tier(
+        _collect_tier(
             "pkg-machine.ttl.gz",
             machine_content,
             tier="machine",
@@ -432,7 +554,7 @@ def assemble_dump(
 
     # 4. Restricted projection (optional — may not exist yet)
     if restricted_projection_content is not None:
-        _write_tier(
+        _collect_tier(
             "pkg-restricted-projection.ttl.gz",
             restricted_projection_content,
             tier="restricted-projection",
@@ -440,7 +562,17 @@ def assemble_dump(
             graph_iri=TIER_LICENSE_RESTRICTED_GRAPH,
         )
 
-    # ── Leak check (mandatory, fail-closed) ───────────────────────────────────
+    # ── Build manifest + provenance in memory (included in leak check) ────────
+    manifest = make_manifest(dump_date, generated_at, source_commit, file_entries)
+    manifest_text = json.dumps(manifest, indent=2) + "\n"
+    dump_texts["manifest.json"] = manifest_text
+
+    prov_ttl = make_dump_provenance(dump_date, generated_at, source_commit, used_tier_iris)
+    dump_texts["dump-provenance.ttl"] = prov_ttl
+
+    # ── Leak check (mandatory, fail-closed, before ANY write) ─────────────────
+    # Scans ALL content: tier TTL files + manifest.json + dump-provenance.ttl.
+    # No file is written until this passes.
     passed, violations = run_leak_check(dump_texts, restricted_proj_key)
     if not passed:
         print("\n[FAIL] Leak check detected restricted-tier content or secrets:", file=sys.stderr)
@@ -458,14 +590,16 @@ def assemble_dump(
         file=sys.stdout,
     )
 
-    # ── manifest.json ─────────────────────────────────────────────────────────
-    manifest = make_manifest(dump_date, generated_at, source_commit, file_entries)
+    # ── Write everything only after leak check passes ─────────────────────────
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for fname, compressed_bytes in pending_gz.items():
+        (out_dir / fname).write_bytes(compressed_bytes)
+
     manifest_path = out_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    manifest_path.write_text(manifest_text, encoding="utf-8")
     print(f"[OK]   manifest.json written ({len(file_entries)} file(s)).", file=sys.stdout)
 
-    # ── dump-provenance.ttl ───────────────────────────────────────────────────
-    prov_ttl = make_dump_provenance(dump_date, generated_at, source_commit, used_tier_iris)
     (out_dir / "dump-provenance.ttl").write_text(prov_ttl, encoding="utf-8")
     print("[OK]   dump-provenance.ttl written.", file=sys.stdout)
 
@@ -589,25 +723,51 @@ kb:finding-machine-1 a pkg:Finding ;
 
         print("[self-test] Step 1 PASSED — clean dump clears the leak check.")
 
+        # ── Step 1b: prov round-trip — parse the generated dump-provenance.ttl ─
+        print("\n[self-test] Step 1b: parse dump-provenance.ttl with rdflib")
+        prov_file = out_path / "dump-provenance.ttl"
+        try:
+            import rdflib as _rdflib  # noqa: PLC0415
+
+            _g = _rdflib.Graph()
+            _g.parse(str(prov_file), format="turtle")
+            print(
+                f"[self-test] Step 1b PASSED — dump-provenance.ttl is valid Turtle "
+                f"({len(_g)} triples)."
+            )
+        except ImportError:
+            print(
+                "[self-test] Step 1b SKIPPED — rdflib not available; "
+                "string-scan only for provenance validation."
+            )
+        except Exception as exc:
+            print(
+                f"[FAIL] self-test step 1b: dump-provenance.ttl is not valid Turtle: {exc}",
+                file=sys.stderr,
+            )
+            return False
+
         # ── Step 2: injected-leak negative — expect FAIL ──────────────────────
         print(
-            "\n[self-test] Step 2: inject restricted-tier content into the projection "
-            "— leak check must FAIL (this is the NEGATIVE test proving the scanner works)"
+            "\n[self-test] Step 2: inject bare full-IRI restricted-tier triple into the "
+            "projection — leak check must FAIL and report the injected value.\n"
+            "  (No comment naming the predicate; scanner must catch the TRIPLE itself.)"
         )
 
-        # Inject a sigimpl:justification with the known restricted marker
+        # Inject the BARE full-IRI triple — no comment naming sigimpl:justification.
+        # The scanner must detect this via IRI-substring or rdflib graph parsing,
+        # NOT via the comment line (which was the previous vacuous pass mechanism).
         INJECTED_PROJECTION = SYNTHETIC_RESTRICTED_PROJECTION + (
-            f'\n# INJECTED LEAK (self-test negative) — sigimpl:justification must be caught\n'
-            f'<https://doi.org/10.5555/selftest.restricted.1>\n'
-            f'  <https://w3id.org/zkp-sparql/sig-impl#justification>'
+            f"\n<https://doi.org/10.5555/selftest.restricted.1>"
+            f"\n  <https://w3id.org/zkp-sparql/sig-impl#justification>"
             f' "{INJECTED_LEAK_MARKER}" .\n'
         )
 
         # Redirect stderr to capture the failure message, then verify it
-        import io
+        import io  # noqa: PLC0415
+        import contextlib  # noqa: PLC0415
 
         captured_err = io.StringIO()
-        import contextlib
 
         # We WANT assemble_dump to call sys.exit(1) here; catch it.
         exited_with_failure = False
@@ -634,26 +794,97 @@ kb:finding-machine-1 a pkg:Finding ;
         if not exited_with_failure:
             print(
                 "[FAIL] self-test step 2: injected-leak dump did NOT fail the leak check "
-                "— the scanner is not catching sigimpl:justification in the projection.",
+                "— the scanner is not catching the bare full-IRI sigimpl:justification "
+                "triple in the projection.",
                 file=sys.stderr,
             )
             print(f"  stderr was: {err_output!r}", file=sys.stderr)
             return False
 
-        # Verify the error output mentions the injected marker
-        if INJECTED_LEAK_MARKER not in err_output and "sigimpl:justification" not in err_output:
+        # Require INJECTED_LEAK_MARKER itself to appear in the violation report.
+        # This proves the scanner hit the actual triple value — not merely a comment
+        # that names the predicate (the previous vacuous pass mechanism).
+        if INJECTED_LEAK_MARKER not in err_output:
             print(
-                "[FAIL] self-test step 2: leak check failed as expected but did not "
-                f"mention {INJECTED_LEAK_MARKER!r} or 'sigimpl:justification' in stderr.",
+                "[FAIL] self-test step 2: leak check exited 1 as expected but did not "
+                f"report the injected value {INJECTED_LEAK_MARKER!r} in stderr.\n"
+                "  The scanner may have matched a comment rather than the actual triple.",
                 file=sys.stderr,
             )
             print(f"  stderr was: {err_output!r}", file=sys.stderr)
             return False
 
-        print("[self-test] Step 2 PASSED — injected-leak correctly caught by scanner.")
+        print("[self-test] Step 2 PASSED — bare full-IRI injected triple correctly caught.")
         print(
-            "  (Scanner reported the violation; stderr suppressed during the negative test.)"
+            "  (INJECTED_LEAK_MARKER appeared in the violation report — "
+            "scanner hit the actual triple, not a comment.)"
         )
+
+        # ── Step 3: evasion probe verification ────────────────────────────────
+        # Re-run all four of the reviewer's evasion probes against run_leak_check
+        # directly to confirm each is now caught.
+        print(
+            "\n[self-test] Step 3: evasion probe verification — "
+            "all four reviewer probes must be CAUGHT"
+        )
+
+        PROJ_KEY = "pkg-restricted-projection.ttl.gz"
+
+        def _probe(label: str, content: str) -> bool:
+            """Run run_leak_check on *content* as the restricted projection; return True if caught."""
+            passed_probe, viols = run_leak_check(
+                {PROJ_KEY: content},
+                restricted_projection_key=PROJ_KEY,
+            )
+            if passed_probe:
+                print(
+                    f"  [PROBE {label}] EVADED — scanner did NOT catch this form.",
+                    file=sys.stderr,
+                )
+                return False
+            print(f"  [PROBE {label}] CAUGHT — {len(viols)} violation(s).")
+            return True
+
+        # Probe A: full-IRI sigimpl:justification predicate (no prefix declaration)
+        probe_a_ok = _probe(
+            "A (full-IRI sigimpl)",
+            "<https://doi.org/10.5555/probe.a>"
+            " <https://w3id.org/zkp-sparql/sig-impl#justification>"
+            ' "abstract-derived text" .\n',
+        )
+
+        # Probe B: rdflib auto-prefix form (ns1: with explicit @prefix binding)
+        probe_b_ok = _probe(
+            "B (ns1: auto-prefix)",
+            "@prefix ns1: <https://w3id.org/zkp-sparql/sig-impl#> .\n"
+            '<https://doi.org/10.5555/probe.b> ns1:justification "auto-prefix text" .\n',
+        )
+
+        # Probe C: bare full-IRI triple (no comment; the previous self-test blind-spot)
+        probe_c_ok = _probe(
+            "C (bare triple, no comment)",
+            "<https://doi.org/10.5555/probe.c>"
+            " <https://w3id.org/zkp-sparql/sig-impl#justification>"
+            f' "{INJECTED_LEAK_MARKER}" .\n',
+        )
+
+        # Probe D: full-IRI pkg#Finding + full-IRI dcterms:abstract
+        probe_d_ok = _probe(
+            "D (full-IRI pkg#Finding + dcterms:abstract)",
+            "<https://doi.org/10.5555/probe.d>"
+            " a <https://sparq.dev/ns/pkg#Finding> ;\n"
+            "  <http://purl.org/dc/terms/abstract>"
+            ' "raw abstract text" .\n',
+        )
+
+        if not all([probe_a_ok, probe_b_ok, probe_c_ok, probe_d_ok]):
+            print(
+                "[FAIL] self-test step 3: one or more evasion probes were NOT caught.",
+                file=sys.stderr,
+            )
+            return False
+
+        print("[self-test] Step 3 PASSED — all four evasion probes caught.")
 
     print("\n── Self-test result: ALL PASSED ────────────────────────────────────────")
     return True
