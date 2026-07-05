@@ -144,7 +144,7 @@ This document details the implementation status of SPARQL 1.1 functions in noir_
 | duration - duration | op:subtract-dayTimeDurations | ✅ | Implemented as `duration_subtract` |
 | duration * number | op:multiply-dayTimeDuration | ✅ | Implemented as `duration_multiply` |
 | duration / number | op:divide-dayTimeDuration | ✅ | Implemented as `duration_divide` |
-| duration / duration | op:divide-dayTimeDuration-by-dayTimeDuration | ✅ | Implemented as `duration_divide_by_duration` |
+| duration / duration | op:divide-dayTimeDuration-by-dayTimeDuration | ✅ | Implemented as `duration_divide_by_duration` — xs:decimal ratio (never truncates; modelled as IEEE 754 double, the tree's documented decimal approximation) |
 | dateTime + duration | op:add-dayTimeDuration-to-dateTime | ✅ | Implemented as `datetime_add_duration` |
 | dateTime - duration | op:subtract-dayTimeDuration-from-dateTime | ✅ | Implemented as `datetime_subtract_duration` |
 | dateTime - dateTime | op:subtract-dateTimes | ✅ | Implemented as `datetime_difference` |

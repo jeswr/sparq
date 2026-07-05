@@ -1894,7 +1894,8 @@ def convert_xpath_expr(
                         setup = f"let dur = duration_from_microseconds({micros});"
                         return (setup, f"{noir_func}(dur, {divisor})", None)
 
-            # duration div duration -> i64 ratio
+            # duration div duration -> xs:decimal ratio (IEEE 754 double,
+            # F&O 3.1 sec. 8.4.10; sq-3x7dl.9)
             if symbol == "div" and noir_func == "duration_divide_by_duration":
                 if (
                     arg1_symbol == "dayTimeDuration"
@@ -2885,6 +2886,9 @@ def generate_noir_test(test: TestCase, function_name: str) -> Optional[str]:
         "ceil_double",
         "floor_double",
         "cast_integer_to_double",  # xs:double(integer)
+        # op:divide-dayTimeDuration-by-dayTimeDuration returns the xs:decimal
+        # ratio, modelled as an IEEE 754 double (F&O 3.1 sec. 8.4.10; sq-3x7dl.9)
+        "duration_divide_by_duration",
     ]
 
     # Functions that return Option<i64>
@@ -3506,6 +3510,12 @@ xpath = {{ path = "../../xpath" }}
             if "float" in func_lower or "float" in noir_func_lower:
                 imports.append("    XsdFloat,")
             if "double" in func_lower or "double" in noir_func_lower:
+                imports.append("    XsdDouble,")
+            # Emitted code can reference XsdDouble even when neither name
+            # mentions "double" (e.g. duration_divide_by_duration's xs:decimal
+            # ratio compares against XsdDouble::zero(); sq-3x7dl.9). The
+            # dedup pass below removes any double-add.
+            if "XsdDouble" in all_test_code:
                 imports.append("    XsdDouble,")
         else:
             # For unimplemented functions, import the stub function

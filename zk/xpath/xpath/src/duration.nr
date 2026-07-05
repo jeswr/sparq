@@ -6,6 +6,8 @@
 //! XPath operators implemented:
 //! - op:add-dayTimeDurations, op:subtract-dayTimeDurations
 //! - op:multiply-dayTimeDuration, op:divide-dayTimeDuration
+//! - op:divide-dayTimeDuration-by-dayTimeDuration (xs:decimal ratio,
+//!   modelled as an IEEE 754 double -- the tree's decimal representation)
 //! - op:add-dayTimeDuration-to-dateTime, op:subtract-dayTimeDuration-from-dateTime
 //! - op:dayTimeDuration-equal, op:dayTimeDuration-less-than, op:dayTimeDuration-greater-than
 //! XPath functions implemented (generic dispatch on the duration subtype):
@@ -14,6 +16,7 @@
 //! - fn:months-from-duration (xs:dayTimeDuration -> 0 per F&O sec. 8.4.4,
 //!   xs:yearMonthDuration -> real months)
 
+use crate::numeric_types::{numeric_divide_int_as_double, XsdDouble};
 use crate::types::{XsdDateTime, XsdDayTimeDuration};
 use crate::year_month_duration::XsdYearMonthDuration;
 
@@ -201,11 +204,29 @@ pub fn duration_divide(dur: XsdDayTimeDuration, divisor: i64) -> XsdDayTimeDurat
 }
 
 /// op:divide-dayTimeDuration-by-dayTimeDuration
-/// Divides two durations, returning a ratio as i64
-pub fn duration_divide_by_duration(a: XsdDayTimeDuration, b: XsdDayTimeDuration) -> i64 {
+///
+/// F&O 3.1 sec. 8.4.10: returns the ratio of two xs:dayTimeDurations "as an
+/// xs:decimal number" -- it NEVER truncates: PT1H div PT40M = 1.5. The old
+/// `i64` return silently truncated that to 1 (sq-3x7dl.9).
+///
+/// DECIMAL REPRESENTATION: this codebase has no arbitrary-precision
+/// xs:decimal type -- decimals are modelled as IEEE 754 doubles throughout
+/// (the documented approximation in `numeric_divide_int_as_double`,
+/// numeric_types.nr). Each signed microsecond count converts exactly for
+/// |micros| <= 2^53 (durations up to ~285 years), so the quotient is the
+/// correctly-rounded double of the true rational ratio there; beyond that
+/// the i64 -> f64 conversion itself rounds to nearest first (at most two
+/// roundings total, the same contract as op:numeric-divide on integers).
+///
+/// Division by zero duration raises err:FOAR0001 in XPath (F&O 3.1
+/// sec. 8.4.10 error clause); this tree represents F&O dynamic errors as
+/// fail-closed asserts, so we assert with the duration-specific message
+/// BEFORE delegating (the delegate's own `b != 0` assert is then
+/// unreachable). [FABLE-5] (sq-3x7dl.9)
+pub fn duration_divide_by_duration(a: XsdDayTimeDuration, b: XsdDayTimeDuration) -> XsdDouble {
     let b_micros = b.to_signed_micros();
     assert(b_micros != 0, "Division by zero duration");
-    a.to_signed_micros() / b_micros
+    numeric_divide_int_as_double(a.to_signed_micros(), b_micros)
 }
 
 /// Negates a duration
@@ -488,6 +509,83 @@ fn test_years_months_dt_zero_duration() {
     let zero = duration_zero();
     assert(years_from_duration(zero) == 0);
     assert(months_from_duration(zero) == 0);
+}
+
+// ============================================================================
+// op:divide-dayTimeDuration-by-dayTimeDuration -> xs:decimal ratio
+// (sq-3x7dl.9) [FABLE-5]
+//
+// F&O 3.1 sec. 8.4.10: the ratio of two dayTimeDurations is an xs:decimal and
+// never truncates. xs:decimal is modelled as an IEEE 754 double here -- the
+// documented approximation defined in numeric_types.nr on
+// `numeric_divide_int_as_double` (exact operand conversion for
+// |micros| <= 2^53, correctly-rounded IEEE 754 division), so every expected
+// value below is the correctly-rounded double of the exact rational ratio.
+//
+// Oracle (independent Python, exact rational + hardware IEEE 754 double):
+//   from fractions import Fraction; import struct
+//   Fraction(3_600_000_000, 2_400_000_000)          -> Fraction(3, 2)
+//   struct.unpack('<Q', struct.pack('<d', 3_600_000_000/2_400_000_000))[0]
+//     -> 0x3FF8000000000000  (1.5)
+// ============================================================================
+
+#[test]
+fn test_duration_divide_by_duration_exact_ratio() {
+    // Oracle: PT1H div PT40M = Fraction(3,2) = 1.5 exactly (0x3FF8000000000000).
+    // The pre-fix truncating i64 impl returned 1 -- the sq-3x7dl.9 bug.
+    let pt1h = duration_from_components(false, 0, 1, 0, 0, 0);
+    let pt40m = duration_from_components(false, 0, 0, 40, 0, 0);
+    assert(duration_divide_by_duration(pt1h, pt40m) == XsdDouble::from_bits(0x3FF8000000000000));
+}
+
+#[test]
+fn test_duration_divide_by_duration_non_terminating_ratio() {
+    // Oracle: PT1S div PT3S = Fraction(1,3), a non-terminating decimal. Under
+    // the tree's decimal-as-double convention (numeric_types.nr,
+    // numeric_divide_int_as_double: "DOCUMENTED APPROXIMATION") the result is
+    // the correctly-rounded double of 1/3:
+    //   Python: float(Fraction(1,3)) == 1_000_000/3_000_000 -> True
+    //   struct.pack('<d', 1/3) -> 0x3FD5555555555555 (0.3333333333333333)
+    let pt1s = duration_from_components(false, 0, 0, 0, 1, 0);
+    let pt3s = duration_from_components(false, 0, 0, 0, 3, 0);
+    assert(duration_divide_by_duration(pt1s, pt3s) == XsdDouble::from_bits(0x3FD5555555555555));
+}
+
+#[test]
+fn test_duration_divide_by_duration_signs() {
+    // Oracle: (-PT1H) div (-PT40M) = 1.5 (0x3FF8000000000000) -- negatives cancel.
+    //         PT1H div (-PT40M) = -1.5 (0xBFF8000000000000) -- mixed sign.
+    // Python: (-3_600_000_000)/(-2_400_000_000) -> 1.5;
+    //         3_600_000_000/(-2_400_000_000) -> -1.5
+    let pt1h = duration_from_components(false, 0, 1, 0, 0, 0);
+    let neg_pt1h = duration_from_components(true, 0, 1, 0, 0, 0);
+    let neg_pt40m = duration_from_components(true, 0, 0, 40, 0, 0);
+    assert(
+        duration_divide_by_duration(neg_pt1h, neg_pt40m)
+            == XsdDouble::from_bits(0x3FF8000000000000),
+    );
+    assert(
+        duration_divide_by_duration(pt1h, neg_pt40m) == XsdDouble::from_bits(0xBFF8000000000000),
+    );
+}
+
+#[test]
+fn test_duration_divide_by_duration_self_is_one() {
+    // Oracle: any non-zero duration divided by itself is exactly 1.0
+    // (0x3FF0000000000000). P1DT2H3M4.5S = 93_784_500_000 us;
+    // Python: 93_784_500_000/93_784_500_000 -> 1.0
+    let dur = duration_from_components(false, 1, 2, 3, 4, 500_000);
+    assert(duration_divide_by_duration(dur, dur) == XsdDouble::from_bits(0x3FF0000000000000));
+}
+
+#[test(should_fail_with = "Division by zero duration")]
+fn test_duration_divide_by_duration_zero_divisor_foar0001() {
+    // F&O 3.1 sec. 8.4.10 error clause: dividing by a zero dayTimeDuration
+    // raises err:FOAR0001 (division by zero). This tree represents F&O
+    // dynamic errors as fail-closed asserts (see numeric.nr /
+    // numeric_divide_int_as_double), so the assert must fire.
+    let pt1h = duration_from_components(false, 0, 1, 0, 0, 0);
+    let _ = duration_divide_by_duration(pt1h, duration_zero());
 }
 
 #[test]
