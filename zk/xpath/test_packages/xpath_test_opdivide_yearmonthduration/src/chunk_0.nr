@@ -2,7 +2,7 @@
 //! Contains 15 tests
 
 use dep::xpath::{
-    fn_string_from_ym_duration, XsdYearMonthDuration, ym_duration_divide,
+    fn_string_from_ym_duration, XsdDouble, XsdYearMonthDuration, ym_duration_divide,
     ym_duration_divide_by_duration, ym_duration_equal, ym_duration_ge, ym_duration_le,
 };
 
@@ -100,12 +100,13 @@ fn op_divide_yearmonthduration_11() {
     //  ******************************************************* Test:
     // XPath: (xs:yearMonthDuration("P20Y11M") div 2.0) div (xs:yearMonthDuration("P20Y11M") div 2.0)
     // Expected: assert-eq 1
+    // Oracle: x div x = 1.0 exactly (0x3FF0000000000000)
     assert(
         ym_duration_divide_by_duration(
             ym_duration_divide(XsdYearMonthDuration::new(251), 2),
             ym_duration_divide(XsdYearMonthDuration::new(251), 2),
         )
-            == 1,
+            == XsdDouble::from_bits(0x3FF0000000000000),
     );
 }
 
