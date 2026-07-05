@@ -1,4 +1,4 @@
-//! Auto-generated tests for fn:escape-html-uri (uses stub function)
+//! Auto-generated tests for fn:escape-html-uri
 //! Source: https://github.com/w3c/qt3tests
 
 mod chunk_0;

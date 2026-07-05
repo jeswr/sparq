@@ -1,40 +1,8 @@
 //! Test chunk 0 for fn:default-language
-//! Contains 4 tests
-
-use dep::xpath::stub_fndefault_language;
+//! Contains 1 tests
 
 #[test]
-fn default_language_002() {
-    // Consistency with format-integer
-    // XPath: format-integer(17, \"Ww\") eq format-integer(17, \"Ww\", def
-    // Expected: true
-    // Calls stub function - will fail until fn:default-language is implemented
-    let _ = stub_fndefault_language();
-}
-
-#[test]
-fn default_language_003() {
-    // Consistency with format-date
-    // XPath: format-date(current-date(), \"[FNn] [D] [MNn] [Y]\") eq
-    // Expected: true
-    // Calls stub function - will fail until fn:default-language is implemented
-    let _ = stub_fndefault_language();
-}
-
-#[test]
-fn default_language_004() {
-    // Dynamic call
-    // XPath: let $f := (fn:default-language#0, fn:default-language#0) ret
-    // Expected: true
-    // Calls stub function - will fail until fn:default-language is implemented
-    let _ = stub_fndefault_language();
-}
-
-#[test]
-fn default_language_005() {
-    // Lookup
-    // XPath: let $f := function-lookup(QName(\"http://www.w3.org/2005/xpa
-    // Expected: true
-    // Calls stub function - will fail until fn:default-language is implemented
-    let _ = stub_fndefault_language();
+fn fndefault_language_no_converted_tests() {
+    // Placeholder: 4 qt3tests cases could not be converted.
+    assert(false, "No qt3tests cases could be converted for fn:default-language");
 }
