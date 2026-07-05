@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 import unittest
@@ -52,6 +53,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 FM_YML = REPO_ROOT / ".github" / "workflows" / "feature-matrix.yml"
 FUZZ_YML = REPO_ROOT / ".github" / "workflows" / "fuzz.yml"  # [OPUS-4.8] sq-fmx4u.6
+BENCH_YML = REPO_ROOT / ".github" / "workflows" / "bench.yml"  # [SONNET-4.6] sq-mel85
 SELECT_YML = REPO_ROOT / ".github" / "workflows" / "ci-select.yml"
 GATE_PY = REPO_ROOT / "scripts" / "ci_summary_gate.py"
 CI_SELECT_PY = REPO_ROOT / "scripts" / "ci_select.py"  # [OPUS-4.8] sq-fmx4u.6
@@ -110,6 +112,7 @@ class TestWiring(unittest.TestCase):
         cls.ci = _load(CI_YML)
         cls.fm = _load(FM_YML)
         cls.fuzz = _load(FUZZ_YML)  # [OPUS-4.8] sq-fmx4u.6
+        cls.bench = _load(BENCH_YML)  # [SONNET-4.6] sq-mel85
         cls.sel = _load(SELECT_YML)
         cls.members = _workspace_members()
         cls.gate = _gate_module()
@@ -120,7 +123,7 @@ class TestWiring(unittest.TestCase):
         """Any job-level `if:` mentioning the selection outputs must include the
         `mode != 'selected'` disjunct, so empty/missing outputs mean RUN."""
         for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz)):
+                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
             for job_id, job in wf["jobs"].items():
                 cond = job.get("if", "")
                 if "needs.select.outputs" in str(cond):
@@ -133,7 +136,7 @@ class TestWiring(unittest.TestCase):
     def test_selection_guarded_jobs_need_select(self):
         """A guard reading needs.select.* only resolves if `select` is in needs."""
         for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz)):
+                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
             for job_id, job in wf["jobs"].items():
                 if "needs.select.outputs" in str(job.get("if", "")):
                     needs = job.get("needs", [])
@@ -148,7 +151,8 @@ class TestWiring(unittest.TestCase):
     # ---- crate needles are real --------------------------------------------------
     def test_every_affected_needle_is_a_workspace_member(self):
         text = (CI_YML.read_text(encoding="utf-8") + FM_YML.read_text(encoding="utf-8")
-                + FUZZ_YML.read_text(encoding="utf-8"))  # [OPUS-4.8] sq-fmx4u.6
+                + FUZZ_YML.read_text(encoding="utf-8")  # [OPUS-4.8] sq-fmx4u.6
+                + BENCH_YML.read_text(encoding="utf-8"))  # [SONNET-4.6] sq-mel85
         needles = NEEDLE_RE.findall(text)
         self.assertTrue(needles, "expected contains(affected, ...) guards to exist")
         unknown = sorted({n for n in needles if n not in self.members})
@@ -177,7 +181,7 @@ class TestWiring(unittest.TestCase):
         evaluates empty, which under enforcement would skip every leg. The
         per-shard guard must live in a STEP (env/run), never the job `if:`."""
         for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz)):
+                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
             for job_id, job in wf["jobs"].items():
                 self.assertNotIn(
                     "matrix.", str(job.get("if", "")),
@@ -187,7 +191,7 @@ class TestWiring(unittest.TestCase):
     # ---- select job shape ----------------------------------------------------------
     def test_select_caller_jobs_are_unconditional_and_use_the_reusable_workflow(self):
         for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz)):
+                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
             job = wf["jobs"].get("select")
             self.assertIsNotNone(job, f"{wf_name}: missing the select job")
             self.assertEqual(job.get("uses"), "./.github/workflows/ci-select.yml", wf_name)
@@ -247,7 +251,7 @@ class TestWiring(unittest.TestCase):
         both selection-consuming workflows react to labeled/unlabeled — and must NOT
         drop the default `synchronize` (push-to-PR) trigger while doing so."""
         for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz)):
+                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
             on = _on_block(wf)
             pr = on.get("pull_request") or {}
             self.assertIsInstance(
@@ -329,6 +333,7 @@ class TestPhase2LaneScoping(unittest.TestCase):
     def setUpClass(cls):
         cls.ci = _load(CI_YML)
         cls.fuzz = _load(FUZZ_YML)
+        cls.bench = _load(BENCH_YML)  # [SONNET-4.6] sq-mel85
         cls.members = _workspace_members()
         cls.lane_seeds = _ci_select_module()._LANE_SEEDS
 
@@ -366,6 +371,67 @@ class TestPhase2LaneScoping(unittest.TestCase):
         on = _on_block(self.fuzz)
         self.assertIn("schedule", on, "fuzz.yml must keep its nightly schedule backstop")
         self.assertIn("merge_group", on, "fuzz.yml must run on merge_group for the gate")
+
+    # ---- bench (perf-gate) lane (bench.yml) — [SONNET-4.6] sq-mel85 ----------------
+    def test_bench_job_guarded_by_its_seed_closure(self):
+        job = self.bench["jobs"]["bench"]
+        cond = str(job.get("if", ""))
+        self.assertIn(FAIL_CLOSED_DISJUNCT, cond,
+                      "bench guard must be fail-closed (empty output => RUN)")
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        self.assertIn("select", needs, "bench job must need the select pre-job")
+        self.assertEqual(self._guard_needles(cond), self.lane_seeds["bench"],
+                         "bench guard needles must equal ci_select.py _LANE_SEEDS['bench']")
+
+    def test_bench_has_unconditional_select_caller(self):
+        job = self.bench["jobs"].get("select")
+        self.assertIsNotNone(job, "bench.yml must carry the select pre-job")
+        self.assertEqual(job.get("uses"), "./.github/workflows/ci-select.yml")
+        self.assertNotIn("if", job, "select must be unconditional (gate needs it green)")
+        self.assertNotIn("needs", job)
+
+    def test_bench_runs_on_schedule_backstop(self):
+        # sq-mel85 added a nightly schedule to bench.yml as the full-run backstop: a
+        # schedule event carries no PR diff => selector mode=full => the fail-closed
+        # disjunct RUNS the whole suite. merge_group is retained for the perf gate.
+        on = _on_block(self.bench)
+        self.assertIn("schedule", on, "bench.yml must have the nightly schedule backstop")
+        self.assertIn("merge_group", on, "bench.yml must run on merge_group for the gate")
+
+    def test_bench_main_history_and_ratchet_exclude_schedule(self):
+        # CRITICAL (design §6.1 continuity, criterion (d)): the auto-ratchet + history +
+        # dashboard writes must stay on the push-to-main path and NOT fire on the new
+        # nightly `schedule` backstop (a scheduled run shares the last main commit's SHA,
+        # so writing history would append a duplicate point + ratchet off a non-landing
+        # run). Every such step's guard must exclude schedule.
+        steps = self.bench["jobs"]["bench"]["steps"]
+        names = [
+            "Auto-ratchet the perf floor (commit improvements back to main)",
+            "Ensure benchmark-data history branch exists",
+            "Seed Pages dashboard onto benchmark-data (if absent)",
+            # [SONNET-4.6] sq-mel85 nit: the cleanup step (restores Cargo.lock churn before
+            # the benchmark-data branch switch) must also be schedule-excluded — the nightly
+            # backstop never switches branches, so it needs no cleanup, and running it on
+            # schedule would be a no-op that can't break anything, but pinning the guard
+            # prevents silent removal of the schedule-exclusion that would leave the step
+            # active on a path where `git checkout -- .` could discard useful artefacts.
+            "Clean bench-induced tracked churn before history switch (main only)",
+        ]
+        by_name = {s.get("name"): s for s in steps}
+        for n in names:
+            self.assertIn(n, by_name, f"bench.yml lost the '{n}' step")
+            cond = str(by_name[n].get("if", ""))
+            self.assertIn("github.event_name != 'schedule'", cond,
+                          f"'{n}' must exclude the schedule backstop (main continuity)")
+            self.assertIn("refs/heads/main", cond,
+                          f"'{n}' must stay push-to-main scoped")
+        # The github-action-benchmark auto-push must also be schedule-excluded.
+        store = by_name.get("Store + compare against history")
+        self.assertIsNotNone(store, "bench.yml lost the history Store step")
+        self.assertIn("github.event_name != 'schedule'",
+                      str(store.get("with", {}).get("auto-push", "")),
+                      "history auto-push must not fire on the schedule backstop")
 
     # ---- wasm lane (ci.yml) --------------------------------------------------------
     def test_wasm_job_guarded_by_its_seed_closure(self):
@@ -412,6 +478,157 @@ class TestPhase2LaneScoping(unittest.TestCase):
         mirror = data.get("lanes", {})
         self.assertEqual(mirror, self.lane_seeds,
                          "ci/path-ownership.toml [lanes] mirror drifted from _LANE_SEEDS")
+
+
+# [SONNET-4.6] sq-mel85: bench metric tier invariant.
+#
+# INVARIANT: every mode:auto metric in bench/perf-baseline.json is either
+#   (a) produced by a main-tier-only ci-bench.sh hook (a GITHUB_REF guard skips it
+#       whenever GITHUB_REF != refs/heads/main, so it only runs on push-to-main and
+#       local dev runs where GITHUB_REF is unset; every such event is mode=full by
+#       construction, so no bench seed is needed), OR
+#   (b) measured on the PR/merge_group tier, in which case its source crate must reach
+#       a bench seed so a PR touching it triggers the gate.
+#
+# RATIONALE: the danger is a future PR-tier PROMOTION of a currently-main-tier-only
+# metric (removing its GITHUB_REF guard). Without this test, that change would:
+#   1. Start measuring, say, fts_bytes_per_doc on PRs that skip the bench lane (because
+#      sparq-text is not a bench seed), and
+#   2. Have the perf gate silently pass because the bench lane was skipped.
+# This would be exactly the unsound skip the design forbids (§2). With this test:
+#   - Moving a metric from main-tier-only to PR-tier fails assertion (b) in
+#     _EXPECTED_MAIN_TIER below, forcing a conscious update.
+#   - The update requires either adding a GITHUB_REF guard (keeping it main-only) OR
+#     adding the source crate to _LANE_SEEDS["bench"] (making it a bench seed).
+#
+# Guard detection uses ci-bench.sh's top-level `if [...] != "refs/heads/main"` blocks
+# (identified by the guard pattern at column 0) to build ranges, then checks that each
+# metric's `add` call falls within a range — no hardcoded line numbers.
+class TestBenchMetricTierInvariant(unittest.TestCase):
+    """[SONNET-4.6] sq-mel85: pin the invariant that every mode:auto metric in
+    bench/perf-baseline.json is either main-tier-only (GITHUB_REF guard in ci-bench.sh)
+    or PR-tier with a bench seed covering its source crate."""
+
+    # Pattern that identifies a top-level GITHUB_REF main-tier guard start line
+    _GUARD_START_RE = re.compile(r'^if\b.*!=\s*["\']refs/heads/main["\']')
+    # Pattern for any top-level `fi` (column 0, no leading whitespace)
+    _TOP_FI_RE = re.compile(r'^fi\b')
+
+    @classmethod
+    def setUpClass(cls):
+        baseline_path = REPO_ROOT / "bench" / "perf-baseline.json"
+        with open(baseline_path, encoding="utf-8") as f:
+            baseline = json.load(f)
+        cls.auto_metrics = frozenset(
+            k for k, v in baseline["metrics"].items() if v.get("mode") == "auto"
+        )
+        cls.cibench_lines = (
+            REPO_ROOT / "scripts" / "ci-bench.sh"
+        ).read_text(encoding="utf-8").splitlines()
+        cls.lane_seeds = _ci_select_module()._LANE_SEEDS
+
+    def _guard_ranges(self) -> list[tuple[int, int]]:
+        """Return (start, end) 0-indexed inclusive ranges for each main-tier guard block.
+        A block spans from the guard `if` to the next top-level `fi` at column 0.
+        This relies on the verified structure of ci-bench.sh: each GITHUB_REF guard block
+        opens with a top-level `if [...] != 'refs/heads/main'` and closes with a top-level
+        `fi` at column 0; no nested top-level `if`/`fi` appear inside these blocks."""
+        lines = self.cibench_lines
+        ranges: list[tuple[int, int]] = []
+        i = 0
+        while i < len(lines):
+            if self._GUARD_START_RE.match(lines[i]):
+                start = i
+                j = i + 1
+                while j < len(lines) and not self._TOP_FI_RE.match(lines[j]):
+                    j += 1
+                ranges.append((start, j))  # j is the `fi` line (0-indexed)
+                i = j + 1
+            else:
+                i += 1
+        return ranges
+
+    def _add_line_indices(self, metric: str) -> list[int]:
+        """Return 0-indexed line numbers of add-call(s) for this metric in ci-bench.sh.
+        Handles both literal names and the dynamic `add "vectors_${name}"` pattern used
+        for the vectors metrics."""
+        if metric.startswith("vectors_"):
+            # Emitted dynamically as `add "vectors_${name}"` — match the shell expansion
+            pat = re.compile(r'\badd\s+["\']?vectors_\$\{')
+        else:
+            pat = re.compile(r'\badd\s+["\']?' + re.escape(metric) + r'["\']?\s')
+        return [i for i, ln in enumerate(self.cibench_lines) if pat.search(ln)]
+
+    def _is_main_tier_only(self, metric: str, ranges: list[tuple[int, int]]) -> bool:
+        """Return True iff every add-call for this metric falls inside a main-tier guard
+        block (start < line_index < end, exclusive of the guard `if` and `fi` lines)."""
+        indices = self._add_line_indices(metric)
+        if not indices:
+            return False  # metric not found → conservatively PR-tier
+        return all(
+            any(start < idx < end for start, end in ranges)
+            for idx in indices
+        )
+
+    def test_auto_metric_tier_invariant(self):
+        """Pin the main-tier-only vs PR-tier classification for every mode:auto metric.
+
+        EXPECTED_MAIN_TIER: metrics behind a GITHUB_REF guard in ci-bench.sh — measured
+        only on push-to-main (and local dev runs). No bench seed required (mode=full on
+        all main-tier events).
+
+        EXPECTED_PR_TIER: metrics measured on every CI tier, incl. PRs. Their source crates
+        must reach a bench seed — verified by the acceptance tests in test_ci_select.py
+        (test_core_pr_runs_bench / test_wasm_only_pr_runs_bench / test_engine_pr_runs_bench).
+
+        IF THIS TEST FAILS after a change to ci-bench.sh or bench/perf-baseline.json:
+          - New metric added? Classify it: add a GITHUB_REF guard (→ EXPECTED_MAIN_TIER) OR
+            add its source crate to _LANE_SEEDS["bench"] (→ EXPECTED_PR_TIER).
+          - Metric promoted from main-tier to PR-tier? Add its source crate to
+            _LANE_SEEDS["bench"] AND move it from EXPECTED_MAIN_TIER to EXPECTED_PR_TIER.
+          - NEVER leave a PR-tier hard-gated metric without a matching bench seed.
+        """
+        _EXPECTED_MAIN_TIER = frozenset({
+            # ci-bench.sh measures these ONLY on push-to-main (GITHUB_REF guard skips on PRs):
+            "fts_bytes_per_doc",           # sparq-text example; FTS_REF guard
+            "vectors_diskann_recall_at10",  # sparq-vectors example; VECTOR_REF guard
+            "vectors_pq_recall_at10",       # sparq-vectors example; VECTOR_REF guard
+            "geo_compliance_deficit",       # sparq-geo example; GEO_REF guard
+        })
+        _EXPECTED_PR_TIER = frozenset({
+            # ci-bench.sh measures these on EVERY tier (no GITHUB_REF guard); bench seeds cover:
+            "store_bytes_per_triple",       # sparq-core (via sparq-cli + sparq-bench seeds)
+            "store_bytes_per_triple_small", # sparq-core (via sparq-cli + sparq-bench seeds)
+            "dict_bytes_per_term",          # sparq-core (via sparq-cli + sparq-bench seeds)
+            "wasm_bundle_bytes",            # sparq-wasm (direct bench seed)
+        })
+        # 1. The union must be exactly the full auto-metric set from perf-baseline.json.
+        self.assertEqual(
+            self.auto_metrics,
+            _EXPECTED_MAIN_TIER | _EXPECTED_PR_TIER,
+            "bench/perf-baseline.json mode:auto metrics changed. Update the expected "
+            "sets in this test. See the docstring for the required update procedure.",
+        )
+        # 2. Guard detection must agree with the expected classification for each metric.
+        ranges = self._guard_ranges()
+        self.assertTrue(ranges, "no GITHUB_REF guard blocks found in ci-bench.sh — "
+                        "guard detection is broken (check _GUARD_START_RE)")
+        for metric in sorted(_EXPECTED_MAIN_TIER):
+            self.assertTrue(
+                self._is_main_tier_only(metric, ranges),
+                f"{metric!r} is expected to be main-tier-only, but ci-bench.sh has no "
+                f"GITHUB_REF main-tier guard enclosing its `add` call. Either add the "
+                f"guard or move it to _EXPECTED_PR_TIER and add a bench seed.",
+            )
+        for metric in sorted(_EXPECTED_PR_TIER):
+            self.assertFalse(
+                self._is_main_tier_only(metric, ranges),
+                f"{metric!r} is expected to be PR-tier, but seems to be behind a "
+                f"GITHUB_REF guard. Move it to _EXPECTED_MAIN_TIER.",
+            )
+        # 3. Bench seed set must be non-empty (sanity guard for the invariant).
+        self.assertGreater(len(self.lane_seeds["bench"]), 0,
+                           "_LANE_SEEDS['bench'] is empty — no PR-tier gate exists")
 
 
 # [SONNET-4.6] sq-fmx4u.4: required-check anchor tests.
