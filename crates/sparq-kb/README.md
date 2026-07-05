@@ -91,10 +91,10 @@ the write/merge/latency/CLI estate buys nothing (`part2_four_criterion_replaceme
 - **SHACL guardrails** — `pkg.shapes.ttl` makes a source + a confidence value + an
   assurance basis + non-filler content **mandatory** on every `pkg:Finding`, and
   enforces a valid status / bounded priority / no-stale-edge on every `pkg:Task`.
-- **Literature ingestion** (`literature`/`literature-live`, `sq-2489d.5`/`sq-tzars.1`) — the
+- **Literature ingestion** (`literature`/`literature-live`, `sq-2489d.5`/`sq-tzars.1`/`.6`) — the
   `[connector]→[extract]→[ground]→[SHACL gate]→[sidecar]` pipeline on **committed fixtures,
   ZERO network in CI** (grounding **quarantines**, never drops; machine tier ≤ `secx:Conjectured`);
-  a CORE v3 **live** connector adds paged search + retry + **fail-closed license** (unknown ⇒ restricted).
+  live (`literature-live`) adds a CORE v3 connector (paged search + retry + **fail-closed license**) and a subprocess-seam **live extractor** (record/replay preserved; defensive caps — confidence ≤ 0.7, never `Proven`, non-span justification rejected).
 - **Opt-in by construction** — default build is data + constants only; the
   `validate` feature is the only thing that pulls in `sparq-core` + `sparq-shacl`.
 - **No-drift guard** — `vocab.rs` is byte-pinned against `pkg.ttl` by a sync test.

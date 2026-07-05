@@ -64,6 +64,14 @@ pub mod connector;
 pub mod connector_core;
 #[cfg(feature = "literature")]
 pub mod extract;
+/// The LIVE cheap-model batch extractor behind the `extract::Extractor` trait
+/// (`extract_live::LiveExtractor` + the JSON-only prompt / transcript parse / defensive
+/// machine-tier caps). The pure prompt + parse + cap logic is available under `literature`;
+/// the subprocess seam that actually invokes a sub-agent (`extract_live::CommandRunner`,
+/// default-unset + configurable) is behind `literature-live`. Never driven in CI —
+/// record/replay stays the only test path. [SONNET-4.6] sq-tzars.6
+#[cfg(feature = "literature")]
+pub mod extract_live;
 #[cfg(feature = "literature")]
 pub mod ground;
 #[cfg(feature = "literature")]
