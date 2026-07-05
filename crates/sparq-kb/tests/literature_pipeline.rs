@@ -169,6 +169,91 @@ ex:human a pkg:Finding ;
 }
 
 #[test]
+fn a_machine_timestamped_finding_passes_shacl() {
+    // [HAIKU-4.5] sq-tzars.2: positive SHACL case — a machine-extracted Finding with
+    // prov:generatedAtTime (and all other required constraints) must pass the literature
+    // shapes. This is the "happy path" for RULE 4.
+    const TIMESTAMPED: &str = r#"
+@prefix pkg:     <https://sparq.dev/ns/pkg#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix cito:    <http://purl.org/spar/cito/> .
+@prefix sigimpl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix secx:    <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:      <https://sparq.dev/ns/pkg/example#> .
+
+ex:agent a pkg:MachineAgent ; rdfs:label "extractor"@en .
+
+ex:src a pkg:Source ;
+  dcterms:title "A source paper" ;
+  pkg:exploredStatus pkg:Explored .
+
+ex:good a pkg:Finding ;
+  rdfs:label "a compliant machine finding"@en ;
+  sigimpl:justification "A sufficiently-long, non-filler justification span string." ;
+  pkg:confidence 0.6 ;
+  pkg:assurance secx:Conjectured ;
+  prov:wasDerivedFrom ex:src ;
+  prov:wasAttributedTo ex:agent ;
+  prov:generatedAtTime "2026-07-05T14:30:00Z"^^xsd:dateTime ;
+  cito:citesAsEvidence ex:src .
+"#;
+    let (conforms, report) = gate(TIMESTAMPED);
+    assert!(
+        conforms,
+        "a machine-extracted Finding with prov:generatedAtTime must pass the literature \
+         shapes (RULE 4), but got:\n{report}"
+    );
+}
+
+#[test]
+fn a_machine_finding_without_timestamp_is_rejected_by_shacl() {
+    // [HAIKU-4.5] sq-tzars.2: negative SHACL case — a machine-extracted Finding without
+    // prov:generatedAtTime must be rejected by RULE 4, even if all other constraints are
+    // satisfied. This proves the timestamp requirement is enforced (fail-closed).
+    const MISSING_TIMESTAMP: &str = r#"
+@prefix pkg:     <https://sparq.dev/ns/pkg#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix cito:    <http://purl.org/spar/cito/> .
+@prefix sigimpl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix secx:    <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex:      <https://sparq.dev/ns/pkg/example#> .
+
+ex:agent a pkg:MachineAgent ; rdfs:label "extractor"@en .
+
+ex:src a pkg:Source ;
+  dcterms:title "A source paper" ;
+  pkg:exploredStatus pkg:Explored .
+
+# A machine-extracted Finding that ILLEGALLY omits prov:generatedAtTime (RULE 4 violation).
+# All other constraints are satisfied, so the ONLY violation is the missing timestamp.
+ex:no_timestamp a pkg:Finding ;
+  rdfs:label "a machine finding without prov:generatedAtTime"@en ;
+  sigimpl:justification "A sufficiently-long, non-filler justification span string." ;
+  pkg:confidence 0.6 ;
+  pkg:assurance secx:Conjectured ;
+  prov:wasDerivedFrom ex:src ;
+  prov:wasAttributedTo ex:agent ;
+  cito:citesAsEvidence ex:src .
+"#;
+    let (conforms, report) = gate(MISSING_TIMESTAMP);
+    assert!(
+        !conforms,
+        "a machine-extracted Finding without prov:generatedAtTime must be REJECTED by \
+         RULE 4 (fail-closed quarantine), but the graph conformed:\n{report}"
+    );
+    // RULE 4 message must be cited in the report.
+    assert!(
+        report.contains("prov:generatedAtTime") || report.contains("extraction instant"),
+        "RULE 4 (prov:generatedAtTime requirement) should fire:\n{report}"
+    );
+}
+
+#[test]
 fn base_example_still_conforms_under_the_combined_shapes() {
     // Regression: adding literature.shapes.ttl must not break the existing base shapes on
     // the existing example graph (the literature shapes are additive + machine-tier-scoped).
