@@ -62,3 +62,63 @@ try {
       `            live. Build it:  (cd ../../js && npm run build:reason-wasm)`,
   );
 }
+
+// [HAIKU-4.5] sq-9ifq4 — also sync the tier-b "W-text" bundle that powers the Full-text tool
+// (crates/sparq-text-wasm, built with `npm run build:text-wasm` by js/'s wasm build, exactly
+// as the marketing site syncs it). Its wasm-pack output stays in the crate's own pkg/, so we copy
+// it from there into public/wasm/text/. This bundle is OPTIONAL: if it has not been built (e.g. a
+// `next dev` that skips it), we WARN and skip rather than fail — the Full-text tool then
+// surfaces a clear "bundle unavailable" state at runtime and degrades gracefully.
+const textSrc = join(here, "..", "..", "..", "crates", "sparq-text-wasm", "pkg");
+const textDest = join(dest, "text");
+const textFiles = [
+  "sparq_text_wasm.js",
+  "sparq_text_wasm_bg.wasm",
+  "sparq_text_wasm.d.ts",
+];
+
+try {
+  await access(join(textSrc, "sparq_text_wasm_bg.wasm"));
+  await mkdir(textDest, { recursive: true });
+  for (const f of textFiles) {
+    await copyFile(join(textSrc, f), join(textDest, f));
+  }
+  console.log(
+    `[sync-wasm] copied ${textFiles.length} files → public/wasm/text/ (W-text)`,
+  );
+} catch {
+  console.warn(
+    `[sync-wasm] W-text bundle not found at ${textSrc}; the Full-text tool will not run\n` +
+      `            live. Build it:  (cd ../../js && npm run build:text-wasm)`,
+  );
+}
+
+// [HAIKU-4.5] sq-9ifq4 — also sync the tier-b "W-rsp" bundle that powers the Streaming tool
+// (crates/sparq-rsp-wasm, built with `npm run build:rsp-wasm` by js/'s wasm build, exactly
+// as the marketing site syncs it). Its wasm-pack output stays in the crate's own pkg/, so we copy
+// it from there into public/wasm/rsp/. This bundle is OPTIONAL: if it has not been built (e.g. a
+// `next dev` that skips it), we WARN and skip rather than fail — the Streaming tool then
+// surfaces a clear "bundle unavailable" state at runtime and degrades gracefully.
+const rspSrc = join(here, "..", "..", "..", "crates", "sparq-rsp-wasm", "pkg");
+const rspDest = join(dest, "rsp");
+const rspFiles = [
+  "sparq_rsp_wasm.js",
+  "sparq_rsp_wasm_bg.wasm",
+  "sparq_rsp_wasm.d.ts",
+];
+
+try {
+  await access(join(rspSrc, "sparq_rsp_wasm_bg.wasm"));
+  await mkdir(rspDest, { recursive: true });
+  for (const f of rspFiles) {
+    await copyFile(join(rspSrc, f), join(rspDest, f));
+  }
+  console.log(
+    `[sync-wasm] copied ${rspFiles.length} files → public/wasm/rsp/ (W-rsp)`,
+  );
+} catch {
+  console.warn(
+    `[sync-wasm] W-rsp bundle not found at ${rspSrc}; the Streaming tool will not run\n` +
+      `            live. Build it:  (cd ../../js && npm run build:rsp-wasm)`,
+  );
+}

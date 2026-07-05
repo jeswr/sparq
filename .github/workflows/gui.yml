@@ -230,6 +230,26 @@ jobs:
         working-directory: js
         run: npm run build:reason-wasm
 
+      # [HAIKU-4.5] sq-9ifq4 — also build the tier-b W-text bundle (the BM25 inverted index +
+      # text: magic predicates) so the GUI's Full-text tool runs LIVE in the exported artifact.
+      # The GUI's sync-wasm copies it from the crate's pkg/ into public/wasm/text/; it is
+      # OPTIONAL at build time (sync warn-skips when absent), but building it here makes the hosted
+      # "Try the GUI live" export ship real full-text search rather than the honest "unavailable"
+      # fallback.
+      - name: Build W-text wasm bundle (BM25 full-text search)
+        working-directory: js
+        run: npm run build:text-wasm
+
+      # [HAIKU-4.5] sq-9ifq4 — also build the tier-b W-rsp bundle (the windowed RSP-QL stream
+      # processor) so the GUI's Streaming tool runs LIVE in the exported artifact. The GUI's
+      # sync-wasm copies it from the crate's pkg/ into public/wasm/rsp/; it is OPTIONAL at build
+      # time (sync warn-skips when absent), but building it here makes the hosted "Try the GUI
+      # live" export ship real streaming SPARQL processing rather than the honest "unavailable"
+      # fallback.
+      - name: Build W-rsp wasm bundle (windowed RSP-QL stream processor)
+        working-directory: js
+        run: npm run build:rsp-wasm
+
       - name: Install workspace dependencies
         run: npm install
 
@@ -304,6 +324,18 @@ jobs:
       - name: Build W-reason WASM bundle (RDFS / OWL 2 RL reasoner)
         working-directory: js
         run: npm run build:reason-wasm
+
+      # [HAIKU-4.5] sq-9ifq4 — also build the tier-b W-text bundle (BM25 full-text search)
+      # for the Full-text tool to run live in the browser.
+      - name: Build W-text WASM bundle (BM25 full-text search)
+        working-directory: js
+        run: npm run build:text-wasm
+
+      # [HAIKU-4.5] sq-9ifq4 — also build the tier-b W-rsp bundle (windowed RSP-QL stream
+      # processor) for the Streaming tool to run live in the browser.
+      - name: Build W-rsp WASM bundle (windowed RSP-QL stream processor)
+        working-directory: js
+        run: npm run build:rsp-wasm
 
       - name: Install workspace dependencies
         run: npm install
