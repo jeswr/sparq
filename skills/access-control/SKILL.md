@@ -148,10 +148,6 @@ Materialize the authorization view from the access-control documents, then enfor
   the view, never widen it). **NB the `solid-sparql-query` union-default opt-in applies to
   the view path (`query_as`) only** — this v1 portability path keeps its union-always
   emulation regardless of the feature (it predates the draft).
-- `store.query_as_rewrite(&Session, Mode, sparql)` — the v1 **`FROM NAMED` rewrite**
-  portability path: enforces the same policy on any standard SPARQL 1.1 engine (one
-  deliberate semantic difference noted in-source: a caller `FROM <g>` can only restrict
-  the view, never widen it).
 - `store.update_as(&Session, sparql)` / `store.update_as_acp(...)` — **write-path
   gating**: check every graph an update could mutate *before* applying, and
   auto-re-materialize on `.acl`/`.acr` writes.
