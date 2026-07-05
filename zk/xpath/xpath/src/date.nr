@@ -276,23 +276,36 @@ fn test_date_roundtrip_various_samples() {
 // Date + Duration Arithmetic
 // ============================================================================
 
-/// op:add-dayTimeDuration-to-date
-/// Adds a dayTimeDuration to a date, returning a new date
+/// op:add-dayTimeDuration-to-date -- XPath F&O 3.1 (9.7.2)
+///
+/// F&O defines this as: cast $arg1 to an xs:dateTime with time 00:00:00, add the
+/// dayTimeDuration, then cast the result back to xs:date. Casting a dateTime back
+/// to a date takes its date component, i.e. FLOORS the instant to the whole day.
+/// So a sub-day / negative duration that crosses midnight must shift the calendar
+/// day (e.g. 1970-01-01 + (-PT1H) = 1969-12-31). Noir integer `/` truncates toward
+/// zero, which is WRONG for negative durations; `floor_div_i64` is exact.
+/// Identity used: floor((epoch_days*DAY + dur)/DAY) == epoch_days + floor(dur/DAY),
+/// because epoch_days*DAY is an exact multiple of DAY -- so flooring the duration
+/// to days and adding is equivalent to the F&O dateTime round-trip.
+/// Oracle (Python datetime, cast->dateTime@midnight->add->.date()): verified. [OPUS-4.8] (sq-3x7dl.18)
 pub fn date_add_duration(date: XsdDate, dur: XsdDayTimeDuration) -> XsdDate {
     let dur_micros = dur.to_signed_micros();
-    // Convert microseconds to days (integer division)
-    let dur_days: i32 = (dur_micros / 86_400_000_000) as i32;
+    let dur_days: i32 = floor_div_i64(dur_micros, 86_400_000_000) as i32;
     let new_days = date.epoch_days + dur_days;
     XsdDate::new_with_tz(new_days, date.tz_offset_minutes)
 }
 
-/// op:subtract-dayTimeDuration-from-date
-/// Subtracts a dayTimeDuration from a date, returning a new date
+/// op:subtract-dayTimeDuration-from-date -- XPath F&O 3.1 (9.7.4)
+///
+/// Equivalent to op:add-dayTimeDuration-to-date with the negated duration, then
+/// floored to the day (see `date_add_duration`). We `floor_div_i64` the NEGATED
+/// duration so the midnight-crossing shift is correct under floor semantics:
+/// e.g. 1970-01-01 - PT1H = 1969-12-31 (truncating `/` wrongly stays 1970-01-01).
+/// Oracle (Python datetime): verified. [OPUS-4.8] (sq-3x7dl.18)
 pub fn date_subtract_duration(date: XsdDate, dur: XsdDayTimeDuration) -> XsdDate {
     let dur_micros = dur.to_signed_micros();
-    // Convert microseconds to days (integer division)
-    let dur_days: i32 = (dur_micros / 86_400_000_000) as i32;
-    let new_days = date.epoch_days - dur_days;
+    let dur_days: i32 = floor_div_i64(-dur_micros, 86_400_000_000) as i32;
+    let new_days = date.epoch_days + dur_days;
     XsdDate::new_with_tz(new_days, date.tz_offset_minutes)
 }
 
@@ -355,4 +368,58 @@ pub fn fn_dateTime(date: XsdDate, time: crate::types::XsdTime) -> crate::types::
     let total_micros_u64: u64 = total_micros as u64;
     // Use the timezone from the date (or time if they match)
     crate::types::XsdDateTime::new_with_tz(total_micros_u64 as Field, date.tz_offset_minutes)
+}
+
+// ============================================================================
+// Date +/- dayTimeDuration FLOOR-semantics tests (sq-3x7dl.18) [OPUS-4.8]
+//
+// XPath F&O 3.1 op:add/subtract-dayTimeDuration-(to/from)-date cast the date to
+// an xs:dateTime at midnight, apply the duration, then take the date component --
+// which FLOORS the instant to the whole day. Noir integer `/` truncates toward
+// zero, so a sub-day / negative duration crossing midnight was mishandled.
+// Expected calendar values are quoted from a Python oracle:
+//   (datetime(y,m,d, tzinfo=timezone.utc) -/+ timedelta(...)).date()
+//   epoch_days via (date(y,m,d) - date(1970,1,1)).days
+// ============================================================================
+
+#[test]
+fn test_date_subtract_subday_duration_crosses_midnight() {
+    // Oracle: 1970-01-01 - PT1H = 1969-12-31 (epoch_days -1). Truncating `/`
+    // would wrongly keep 1970-01-01 (epoch_days 0).
+    let epoch = date_from_epoch_days(0);
+    let one_hour = XsdDayTimeDuration::from_signed_micros(3_600_000_000);
+    let r = date_subtract_duration(epoch, one_hour);
+    assert(r.epoch_days == -1);
+    assert(year_from_date(r) == 1969);
+    assert(month_from_date(r) == 12);
+    assert(day_from_date(r) == 31);
+}
+
+#[test]
+fn test_date_add_negative_subday_duration_crosses_midnight() {
+    let epoch = date_from_epoch_days(0);
+    // Oracle: 1970-01-01 + (-PT1H) = 1969-12-31 (epoch_days -1).
+    let neg_one_hour = XsdDayTimeDuration::from_signed_micros(-3_600_000_000);
+    let r = date_add_duration(epoch, neg_one_hour);
+    assert(r.epoch_days == -1);
+
+    // Oracle: 1970-01-01 - PT25H = 1969-12-30 (epoch_days -2); truncating `/` -> -1.
+    let twentyfive_hours = XsdDayTimeDuration::from_signed_micros(90_000_000_000);
+    let r2 = date_subtract_duration(epoch, twentyfive_hours);
+    assert(r2.epoch_days == -2);
+    assert(day_from_date(r2) == 30);
+}
+
+#[test]
+fn test_date_add_duration_positive_whole_and_subday() {
+    // Positive path unchanged (floor == trunc for non-negative durations).
+    // Oracle: 2004-10-30 + P2DT2H30M = 2004-11-01 (epoch_days 12723).
+    let d = date_from_components(2004, 10, 30);
+    // P2DT2H30M = 2*86400e6 + 2*3600e6 + 30*60e6 = 181_800_000_000 microseconds.
+    let dur = XsdDayTimeDuration::from_signed_micros(181_800_000_000);
+    let r = date_add_duration(d, dur);
+    assert(r.epoch_days == 12723);
+    assert(year_from_date(r) == 2004);
+    assert(month_from_date(r) == 11);
+    assert(day_from_date(r) == 1);
 }

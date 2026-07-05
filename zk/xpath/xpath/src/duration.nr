@@ -158,24 +158,32 @@ pub fn duration_negate(dur: XsdDayTimeDuration) -> XsdDayTimeDuration {
 
 /// op:add-dayTimeDuration-to-dateTime
 /// Adds a duration to a dateTime
+///
+/// SIGNED EPOCH ENCODING (sq-3x7dl.7): the result may be a valid pre-1970
+/// (negative) instant -- e.g. 1970-01-01T00:00:00Z + (-P1D) = 1969-12-31T00:00:00Z
+/// is a perfectly valid xs:dateTime. We decode the operand epoch to i64, add the
+/// signed duration, and store the two's-complement 64-bit pattern of the signed
+/// result (`(e as u64) as Field`), exactly like datetime.nr's construction path.
+/// The old `assert(result >= 0, ...)` aborted the circuit on every valid
+/// pre-epoch op, so it is dropped. [OPUS-4.8] (sq-3x7dl.18)
 pub fn datetime_add_duration(dt: XsdDateTime, dur: XsdDayTimeDuration) -> XsdDateTime {
     let dt_micros: i64 = dt.epoch_microseconds as i64;
     let dur_micros = dur.to_signed_micros();
-    let result = dt_micros + dur_micros;
-    assert(result >= 0, "DateTime cannot be negative");
-    let result_u64: u64 = result as u64;
-    XsdDateTime::new(result_u64 as Field)
+    let result: i64 = dt_micros + dur_micros;
+    XsdDateTime::new((result as u64) as Field)
 }
 
 /// op:subtract-dayTimeDuration-from-dateTime
 /// Subtracts a duration from a dateTime
+///
+/// See `datetime_add_duration`: the difference may be a valid negative epoch, so
+/// we encode the signed result via `(result as u64) as Field` and drop the old
+/// non-negativity assert. [OPUS-4.8] (sq-3x7dl.18)
 pub fn datetime_subtract_duration(dt: XsdDateTime, dur: XsdDayTimeDuration) -> XsdDateTime {
     let dt_micros: i64 = dt.epoch_microseconds as i64;
     let dur_micros = dur.to_signed_micros();
-    let result = dt_micros - dur_micros;
-    assert(result >= 0, "DateTime cannot be negative");
-    let result_u64: u64 = result as u64;
-    XsdDateTime::new(result_u64 as Field)
+    let result: i64 = dt_micros - dur_micros;
+    XsdDateTime::new((result as u64) as Field)
 }
 
 /// op:subtract-dateTimes
@@ -308,4 +316,62 @@ fn test_duration_comparison() {
 
     assert(duration_greater_than(d2, d1) == true);
     assert(duration_greater_than(d1, d2) == false);
+}
+
+// ============================================================================
+// Signed-epoch (pre-1970) DateTime +/- Duration tests (sq-3x7dl.18) [OPUS-4.8]
+//
+// The signed-i64 epoch encoding (sq-3x7dl.7) makes pre-1970 instants valid
+// NEGATIVE epochs, so datetime_add_duration / datetime_subtract_duration must
+// NOT assert `result >= 0`. Every expected epoch below is quoted from an
+// INDEPENDENT timezone-aware Python oracle (datetime + timedelta):
+//   (dt - datetime(1970,1,1, tzinfo=timezone.utc)) // timedelta(microseconds=1)
+// ============================================================================
+
+/// Encode a signed i64 epoch as the canonical Field bit pattern (test helper,
+/// mirrors datetime.nr::signed_epoch).
+fn signed_epoch_us(e: i64) -> Field {
+    (e as u64) as Field
+}
+
+#[test]
+fn test_datetime_subtract_duration_epoch_minus_one_day() {
+    // (a) Oracle: 1970-01-01T00:00:00Z - P1D = 1969-12-31T00:00:00Z, epoch_us=-86400000000
+    let epoch = XsdDateTime::new(0);
+    let one_day = duration_from_components(false, 1, 0, 0, 0, 0);
+    let result = datetime_subtract_duration(epoch, one_day);
+    assert((result.epoch_microseconds as i64) == -86_400_000_000);
+
+    // Adding a NEGATIVE duration lands on the same negative epoch.
+    let neg_one_day = duration_from_components(true, 1, 0, 0, 0, 0);
+    let via_add = datetime_add_duration(epoch, neg_one_day);
+    assert((via_add.epoch_microseconds as i64) == -86_400_000_000);
+}
+
+#[test]
+fn test_datetime_negative_epoch_stays_negative() {
+    // (b) base 1969-07-20T20:17:40Z, epoch_us=-14182940000000
+    let base = XsdDateTime::new(signed_epoch_us(-14_182_940_000_000));
+
+    // minus P2D stays negative. Oracle: 1969-07-18T20:17:40Z, epoch_us=-14355740000000
+    let two_days = duration_from_components(false, 2, 0, 0, 0, 0);
+    let minus = datetime_subtract_duration(base, two_days);
+    assert((minus.epoch_microseconds as i64) == -14_355_740_000_000);
+
+    // plus PT1H stays negative. Oracle: 1969-07-20T21:17:40Z, epoch_us=-14179340000000
+    let one_hour = duration_from_components(false, 0, 1, 0, 0, 0);
+    let plus = datetime_add_duration(base, one_hour);
+    assert((plus.epoch_microseconds as i64) == -14_179_340_000_000);
+}
+
+#[test]
+fn test_datetime_negative_epoch_crosses_back_over_1970() {
+    // (c) base 1969-12-31T12:00:00Z, epoch_us=-43200000000
+    let base = XsdDateTime::new(signed_epoch_us(-43_200_000_000));
+    // plus P1D crosses forward to 1970-01-01T12:00:00Z, epoch_us=43200000000 (positive)
+    let one_day = duration_from_components(false, 1, 0, 0, 0, 0);
+    let crossed = datetime_add_duration(base, one_day);
+    assert((crossed.epoch_microseconds as i64) == 43_200_000_000);
+    // The positive result's raw Field equals the plain unsigned value too.
+    assert(crossed.epoch_microseconds == 43_200_000_000);
 }
