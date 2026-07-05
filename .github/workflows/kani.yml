@@ -226,9 +226,12 @@ jobs:
             log="kani-${SUITE_CRATE}-${h}.log"
             start=$(date +%s)
             # shellcheck disable=SC2086  # SUITE_FEATURES is an intentional word-split arg list.
+            # `&& ec=0 || ec=$?` — capture exit code without triggering `set -e` (bash -e {0}).
+            # Plain `cmd; ec=$?` would cause bash to abort the script on the first non-zero exit
+            # (timeout returns 124, cargo-kani returns non-zero on proof failure) BEFORE ec=$? runs.
+            # The `&&`/`||` list is `-e`-exempt; $? inside `|| ec=$?` is the exit of the left side.
             timeout -k 30s "$tmo" cargo kani -p "$SUITE_CRATE" $SUITE_FEATURES --harness "$h" \
-              > "$log" 2>&1
-            ec=$?
+              > "$log" 2>&1 && ec=0 || ec=$?
             # Anti-OOM invariant: guarantee the memory-hungry solver is gone before the next
             # harness starts (on a timeout the CBMC child can be orphaned when cargo-kani is
             # SIGKILLed). This job runs nothing but Kani, so any cbmc process is ours.
