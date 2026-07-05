@@ -465,7 +465,7 @@ export function QueryWorkbench() {
   // query survives a reload / workspace switch (the persisted editor state was never restored
   // before). `workspace` starts null (restore is async); we seed the editor from it once, on the
   // first restore AND on every workspace-id change, and write the text back (debounced) below.
-  const { workspace, setEditorQuery } = useWorkspace();
+  const { workspace, setEditorQuery, recordUpdateSnapshot } = useWorkspace();
   const [query, setQuery] = React.useState(DEFAULT_QUERY);
   // The id of the workspace whose editor text is currently loaded — guards the write-back from
   // firing (and clobbering the saved query) before the restore has hydrated the editor.
@@ -517,6 +517,12 @@ export function QueryWorkbench() {
         const result = await run(query, { mode, signal: controller.signal });
         setOutcome(result.outcome);
         setRunLatencyMs(result.latencyMs);
+        // (sq-7gdfp) — snapshot the live store after a successful SPARQL UPDATE so INSERT/DELETE
+        // data survives a page reload. A failed update yields outcome.kind === "error" and never
+        // reaches here, so the snapshot is never taken on failure.
+        if (result.outcome.kind === "update") {
+          void recordUpdateSnapshot();
+        }
         // Pick the most useful default view for the result shape.
         if (result.outcome.kind === "graph") {
           if (view === "table" || view === "json") setView("graph");
@@ -528,7 +534,7 @@ export function QueryWorkbench() {
         setRunning(false);
       }
     },
-    [run, query, view, recordRecent],
+    [run, query, view, recordRecent, recordUpdateSnapshot],
   );
 
   const onStop = React.useCallback(() => {

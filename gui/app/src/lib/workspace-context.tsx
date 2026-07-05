@@ -117,6 +117,12 @@ export interface WorkspaceContextValue {
    * is excluded from the N3 closure (its cache-key hash changes, triggering a rebuild).
    */
   setRulesDocEnabled: (addedAt: number, enabled: boolean) => Promise<void>;
+  /**
+   * (sq-7gdfp) Persist a snapshot of the live store into the active workspace after a
+   * successful SPARQL UPDATE (INSERT/DELETE). Best-effort: a write failure never breaks the
+   * in-memory state. Call this whenever engine.run() returns outcome.kind === "update".
+   */
+  recordUpdateSnapshot: () => Promise<void>;
 }
 
 const WorkspaceContext = React.createContext<WorkspaceContextValue | null>(null);
@@ -304,6 +310,38 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     [applyWorkspace, persist],
   );
 
+  // (sq-7gdfp) — snapshot the live store into the active workspace after a successful SPARQL UPDATE.
+  // Best-effort: a write failure (persistence layer down) never breaks the in-memory state.
+  const recordUpdateSnapshot = React.useCallback(async (): Promise<void> => {
+    const base = workspaceRef.current;
+    if (!base) return;
+    const snapshot = engineRef.current.snapshotStore();
+    if (snapshot === null) return; // engine not ready — skip; a failed UPDATE never reaches here anyway
+    const next: Workspace = { ...base, dataSnapshot: snapshot, updatedAt: Date.now() };
+    applyWorkspace(next);
+    persist(next);
+  }, [applyWorkspace, persist]);
+
+  // (sq-7gdfp) — belt-and-suspenders save: on page unload, snapshot the live engine store into
+  // the active workspace one final time. This catches any in-flight state that was not yet
+  // persisted (e.g. if the debounce had not fired yet). For the localStorage backend the
+  // store.save() call completes synchronously before the page unloads; for the Tauri FS backend
+  // it is async and may not complete, but the explicit recordUpdateSnapshot after each UPDATE is
+  // the primary mechanism — this is a safety net only.
+  React.useEffect(() => {
+    const handleBeforeUnload = () => {
+      const current = workspaceRef.current;
+      const store = storeRef.current;
+      if (!current || !store) return;
+      const snapshot = engineRef.current.snapshotStore();
+      if (snapshot === null) return;
+      const next: Workspace = { ...current, dataSnapshot: snapshot, updatedAt: Date.now() };
+      void store.save(next).catch(() => {});
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, []); // storeRef, workspaceRef, engineRef are all refs — stable, no deps needed
+
   const createWorkspace = React.useCallback(
     async (name: string): Promise<Workspace> => {
       // 1. SAVE the current workspace's live snapshot first — no data loss on leaving it.
@@ -474,6 +512,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       addRulesDocs,
       removeRulesDoc,
       setRulesDocEnabled,
+      recordUpdateSnapshot,
     }),
     [
       workspace,
@@ -489,6 +528,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       addRulesDocs,
       removeRulesDoc,
       setRulesDocEnabled,
+      recordUpdateSnapshot,
     ],
   );
 
