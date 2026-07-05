@@ -81,7 +81,7 @@ use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashMap;
 use sparq_core::Graph;
 use sparq_engine::{DatasetView, DefaultGraphMode, FxHashSet, QueryResult};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// The reserved named graph holding the materialized authorization view.
 ///
@@ -192,6 +192,25 @@ pub struct PodStore {
     pub graph: Graph,
     auth: Arc<AuthIndex>,
     epoch: u64,
+    // [OPUS-4.8] sq-j8qtt (issue #1570): the PERSISTENT structural ACL index — the
+    // `.acl`/`.acr` control-document set + `<urn:sparq:auth>`-materialized flag that
+    // `decide` / `decide_batch` / `resolve_acl` walk to discover the governing ACL. It is
+    // a pure function of the current named-graph NAMES, so it is built LAZILY on the first
+    // point decision of a generation and then reused across the whole generation instead of
+    // rebuilt per call (the pre-fix `AclIndex::build(&self.graph)` was an O(named-graph-
+    // count) whole-store scan on EVERY `decide`). `OnceLock` gives the interior mutability
+    // the `&self` decision surface needs while keeping `PodStore: Sync` (a per-request LDP
+    // server shares `&PodStore` across threads): steady-state reads are a lock-free
+    // `get()`, and the first caller of a generation wins the one-time build.
+    //
+    // INVALIDATION — airtight by construction: it is dropped ONLY in `reindex`, the single
+    // seam that also rebuilds `auth` and clears the session cache (`self.auth` is assigned
+    // NOWHERE else). So it invalidates *exactly* when the authorization view does — a
+    // `put_acl`/`delete_acl`/`materialize_*`/bridge/trust change re-materializes, `reindex`
+    // empties this cell, and the next decision rebuilds from the new graph. It can never be
+    // more stale than `auth` itself, so it introduces no fail-open window. (sq-b7k7u's
+    // incremental reindex + sq-cnuqd's shared `&self` session cache compose on this seam.)
+    acl_index: OnceLock<decide::AclIndex>,
     // [OPUS-4.8] sq-3jtd.6: the cache key ([`SessionKey`]) spans all three session
     // dimensions — agent, client, AND issuer — so two sessions differing only by issuer
     // (e.g. the same WebID vouched for by a trusted vs an untrusted IdP) never collide on
@@ -251,6 +270,7 @@ impl PodStore {
             graph,
             auth: Arc::new(AuthIndex::default()),
             epoch: 0,
+            acl_index: OnceLock::new(), // [OPUS-4.8] sq-j8qtt: built lazily on first decide
             cache: FxHashMap::default(),
             #[cfg(feature = "odrl-bridge")]
             bridge_ledger: odrl_bridge::BridgeLedger::new(),
@@ -368,6 +388,21 @@ impl PodStore {
         self.auth = Arc::new(AuthIndex::from_graph(&self.graph));
         self.epoch += 1;
         self.cache.clear(); // D3: the cache is transient; the triples are the storage
+        // [OPUS-4.8] sq-j8qtt: drop the persistent structural ACL index in lock-step with
+        // the auth rebuild — the SAME seam that clears the session cache — so a rule change
+        // (put_acl/delete_acl/materialize_*/bridge/trust) is reflected by the next decision
+        // and no stale ACL discovery can survive it. `take` empties the cell; the next
+        // `decide`/`resolve_acl` rebuilds from the just-re-materialized graph.
+        self.acl_index.take();
+    }
+
+    /// The persistent structural ACL index for the current generation, built lazily on the
+    /// first point decision after a (re-)materialization and reused across the whole
+    /// generation ([OPUS-4.8] sq-j8qtt). Shared by [`PodStore::decide`] / `decide_batch` /
+    /// [`PodStore::resolve_acl`] so a decision is a point lookup, not a per-call whole-store
+    /// scan. `reindex` empties the cell, so this can never outlive an ACL change.
+    fn acl_index(&self) -> &decide::AclIndex {
+        self.acl_index.get_or_init(|| decide::AclIndex::build(&self.graph))
     }
 
     /// The sorted named-graph set this session may access in `mode`
@@ -538,8 +573,9 @@ impl PodStore {
     /// # Ok::<(), String>(())
     /// ```
     pub fn decide(&self, session: &Session, resource: &str, mode: Mode) -> WacDecision {
-        let index = decide::AclIndex::build(&self.graph);
-        decide::decide_one(&index, &self.auth, session, resource, mode)
+        // [OPUS-4.8] sq-j8qtt: reuse the persistent per-generation index (built once,
+        // dropped on `reindex`) instead of rebuilding it on every call.
+        decide::decide_one(self.acl_index(), &self.auth, session, resource, mode)
     }
 
     /// [OPUS-4.8] issue #992 FR-1 (sq-snopa.1) — [`PodStore::decide`] for a BATCH of
@@ -550,10 +586,12 @@ impl PodStore {
     ///
     /// **API tier-1 (proposed-stable)** — see [`PodStore::decide`].
     pub fn decide_batch(&self, session: &Session, requests: &[(&str, Mode)]) -> Vec<WacDecision> {
-        let index = decide::AclIndex::build(&self.graph);
+        // [OPUS-4.8] sq-j8qtt: the index now persists ACROSS calls too, not just within one
+        // batch — a batch and a stream of single `decide`s share the one per-generation build.
+        let index = self.acl_index();
         requests
             .iter()
-            .map(|(resource, mode)| decide::decide_one(&index, &self.auth, session, resource, *mode))
+            .map(|(resource, mode)| decide::decide_one(index, &self.auth, session, resource, *mode))
             .collect()
     }
 
@@ -590,7 +628,8 @@ impl PodStore {
     /// # Ok::<(), String>(())
     /// ```
     pub fn resolve_acl(&self, resource: &str) -> Option<EffectiveAcl> {
-        decide::AclIndex::build(&self.graph).resolve_acl(resource)
+        // [OPUS-4.8] sq-j8qtt: reuse the persistent per-generation index.
+        self.acl_index().resolve_acl(resource)
     }
 
     fn session_sets(&mut self, s: &Session, mode: Mode) -> &SessionSets {
