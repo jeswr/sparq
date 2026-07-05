@@ -45,6 +45,13 @@ export type Tier =
   | "walkthrough"
   | "soon";
 
+/**
+ * [FABLE-5] sq-5lyme — rail grouping for the later honesty regroup (sq-1odi9): `working` tools
+ * have a live panel today; `coming-soon` tools are honest stubs. Data-only for now — nothing
+ * renders the group yet.
+ */
+export type ToolGroup = "working" | "coming-soon";
+
 export interface ToolDef {
   /** Stable id — the tab key + the Cmd-K (later) index key. */
   id: string;
@@ -56,6 +63,27 @@ export interface ToolDef {
   icon: LucideIcon;
   /** Does a working tab exist yet, or is this an honest stub the later phases fill? */
   built: boolean;
+  /** Rail group (sq-5lyme): working panel vs coming-soon honest stub. Not yet rendered. */
+  group: ToolGroup;
+}
+
+/**
+ * [FABLE-5] sq-5lyme — an optional honesty-metadata override a per-tool PANEL FILE exports
+ * (see the tool-panel registry), merged over the base `ToolDef` by `applyToolOverride`. This
+ * is the seam that lets a later tool bead flip its tier/copy/group INSIDE its own panel file
+ * when the working panel lands — never by editing this shared file. OMIT fields you do not
+ * override (an explicit `undefined` field would clobber the base value).
+ */
+export interface ToolOverride {
+  tier?: Tier;
+  blurb?: string;
+  built?: boolean;
+  group?: ToolGroup;
+}
+
+/** Merge a panel file's override (if any) over the base tool definition. */
+export function applyToolOverride(tool: ToolDef, override?: ToolOverride): ToolDef {
+  return override ? { ...tool, ...override } : tool;
 }
 
 /** The TOOLS list, in the rail order from research/gui-design.md §A.2. */
@@ -67,6 +95,7 @@ export const TOOLS: ToolDef[] = [
     tier: "live",
     icon: Database,
     built: true,
+    group: "working",
   },
   {
     id: "graph-view",
@@ -75,6 +104,7 @@ export const TOOLS: ToolDef[] = [
     tier: "soon",
     icon: GraphIcon,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "shacl",
@@ -83,6 +113,7 @@ export const TOOLS: ToolDef[] = [
     tier: "live",
     icon: ShieldCheck,
     built: true,
+    group: "working",
   },
   {
     id: "inference",
@@ -93,6 +124,7 @@ export const TOOLS: ToolDef[] = [
     tier: "live-new-wasm",
     icon: Brain,
     built: true,
+    group: "working",
   },
   {
     id: "full-text",
@@ -101,6 +133,7 @@ export const TOOLS: ToolDef[] = [
     tier: "live-new-wasm",
     icon: Search,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "vector",
@@ -109,6 +142,7 @@ export const TOOLS: ToolDef[] = [
     tier: "walkthrough",
     icon: Binary,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "geosparql",
@@ -117,6 +151,7 @@ export const TOOLS: ToolDef[] = [
     tier: "walkthrough",
     icon: MapPin,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "streaming",
@@ -125,6 +160,7 @@ export const TOOLS: ToolDef[] = [
     tier: "live-new-wasm",
     icon: Radio,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "zk",
@@ -134,6 +170,7 @@ export const TOOLS: ToolDef[] = [
     tier: "live-bbjs",
     icon: Lock,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "mpc",
@@ -143,6 +180,7 @@ export const TOOLS: ToolDef[] = [
     tier: "live-sim",
     icon: Users,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "server",
@@ -152,6 +190,7 @@ export const TOOLS: ToolDef[] = [
     tier: "walkthrough",
     icon: Server,
     built: false,
+    group: "coming-soon",
   },
 ];
 
