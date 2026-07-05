@@ -3,11 +3,13 @@
 // WHAT IT GUARDS. The redesign removed the persistent w-64 sidebar tree + the duplicate top-tab
 // bar, leaving ONE slim top bar of content destinations (research/website-redesign.md §2, §7).
 // [OPUS-4.8] sq-4hiqe — the /try SPARQL playground was removed entirely: the top-nav "Try" item is
-// GONE and /try now hard-redirects to /app (a redirect stub, like the legacy /gui path). The slim
-// bar's destinations are now Home · Capabilities · App · Benchmarks · Download, where "App" → /app
-// is the live operational GUI. This test asserts the slim bar's five destinations route correctly,
-// that the old full sidebar tree is GONE, that there is NO "Try" nav item, and that both the
-// legacy /gui path and the removed /try path redirect to /app.
+// GONE and /try now hard-redirects to /app (a redirect stub, like the legacy /gui path).
+// [OPUS-4.8] sq-1scgk — "Papers" was promoted INTO the slim bar (maintainer 2026-07-04 item 9b:
+// make the paper-factory output prominently findable). The slim bar's destinations are now
+// Home · Capabilities · App · Benchmarks · Papers · Download, where "App" → /app is the live
+// operational GUI. This test asserts the slim bar's six destinations route correctly, that the old
+// full sidebar tree is GONE, that there is NO "Try" nav item, and that both the legacy /gui path
+// and the removed /try path redirect to /app.
 // [OPUS-4.8] sq-ymr2e.1 — migrated onto the shared E2E foundation: the hermetic + deterministic
 // `test` (e2e/support) and the shared `gotoAppReady` barrier, which absorbs the coi-serviceworker
 // one-time reload via the SW-controller signal and waits for the app-shell hydration — replacing
@@ -26,17 +28,19 @@ async function gotoSettled(page: Page, route: string): Promise<void> {
   await gotoAppReady(page, route);
 }
 
-test("the slim top bar shows the 5 destinations (no Try item) and no full sidebar tree", async ({
+test("the slim top bar shows the 6 destinations (no Try item) and no full sidebar tree", async ({
   page,
 }) => {
   await gotoSettled(page, "");
 
   const primary = page.getByRole("navigation", { name: "Primary" }).first();
+  // [OPUS-4.8] sq-1scgk — "Papers" is now a first-class bar destination alongside the rest.
   for (const label of [
     "Home",
     "Capabilities",
     "App",
     "Benchmarks",
+    "Papers",
     "Download",
   ]) {
     await expect(primary.getByRole("link", { name: label, exact: true })).toBeVisible();
@@ -116,6 +120,19 @@ test("Download is a reachable destination", async ({ page }) => {
     .click();
   await page.waitForURL("**/download/**", { timeout: 30_000 });
   expect(new URL(page.url()).pathname).toContain("/download");
+});
+
+// [OPUS-4.8] sq-1scgk — "Papers" is promoted into the slim bar (maintainer 2026-07-04 item 9b);
+// assert the new bar link routes to the /papers index (the paper-factory output surface).
+test("Papers is a reachable destination", async ({ page }) => {
+  await gotoSettled(page, "");
+  await page
+    .getByRole("navigation", { name: "Primary" })
+    .first()
+    .getByRole("link", { name: "Papers", exact: true })
+    .click();
+  await page.waitForURL("**/papers/**", { timeout: 30_000 });
+  expect(new URL(page.url()).pathname).toContain("/papers");
 });
 
 test("the legacy /gui path client-redirects to /app", async ({ page }) => {

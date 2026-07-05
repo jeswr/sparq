@@ -20,11 +20,13 @@
 // soft navigation: soft-navigating across two distinct Next builds fetches the WRONG app's RSC
 // Flight payload (/app/index.txt) and lands on a raw .txt instead of the GUI. See NavLink.
 //
-// Destinations (research §2 + the maintainer's discoverability gaps), slim at 6:
-//   Home · Capabilities · App · Benchmarks · Download
+// Destinations (research §2 + the maintainer's discoverability gaps):
+//   Home · Capabilities · App · Benchmarks · Papers · Download
 //   utility cluster: { Cmd-K · GitHub · theme }
-// Papers stays a real route but lives in Cmd-K (overflow) to keep the bar slim, not bloated.
-// (/examples and the deep-page rebuild are sequenced in sq-vw3ax.6 / .4 — not this PR.)
+// [OPUS-4.8] sq-1scgk (maintainer 2026-07-04 item 9b) — "Papers" is PROMOTED into the slim
+// top bar so the paper-factory output is prominently findable, not buried in Cmd-K overflow.
+// It stays in Cmd-K too (the palette indexes every top-bar page). The bar stays lean at 6 short
+// labels. (/examples and the deep-page rebuild are sequenced in sq-vw3ax.6 / .4 — not this PR.)
 
 import * as React from "react";
 import Link from "next/link";
@@ -57,16 +59,18 @@ const REPO_URL = "https://github.com/jeswr/sparq";
 // The slim top bar's content destinations. Capabilities is the single gallery that replaces
 // the collapsed /surface/* tree; App is the live operational GUI destination (the single
 // workbench — /try redirects here); Download surfaces the desktop GUI + CLI binaries (the
-// maintainer's discoverability ask). Each is a real, built route. Papers is intentionally NOT in
-// the bar (it stays a route, reachable via Cmd-K) so the bar stays slim at 6, not bloated.
-// `external: true` marks a destination that is served by a SEPARATE deployed app at the same
-// origin (here: /app = the gui/app workbench overlaid at /app/). Such a slot must be a hard,
-// full-page navigation — see NavLink — not a next/link soft nav (sq-vw3ax.11).
+// maintainer's discoverability ask). Each is a real, built route. [OPUS-4.8] sq-1scgk — Papers
+// is now a first-class bar destination (maintainer 2026-07-04 item 9b: make the paper-factory
+// output prominently findable), sitting between Benchmarks and Download; it remains reachable
+// via Cmd-K too. `external: true` marks a destination that is served by a SEPARATE deployed app
+// at the same origin (here: /app = the gui/app workbench overlaid at /app/). Such a slot must be
+// a hard, full-page navigation — see NavLink — not a next/link soft nav (sq-vw3ax.11).
 const NAV_ITEMS: { href: string; label: string; external?: boolean }[] = [
   { href: "/", label: "Home" },
   { href: "/capabilities", label: "Capabilities" },
   { href: "/app", label: "App", external: true },
   { href: "/benchmarks", label: "Benchmarks" },
+  { href: "/papers", label: "Papers" },
   { href: "/download", label: "Download" },
 ];
 
