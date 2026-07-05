@@ -473,6 +473,9 @@ export default function AssurancePage() {
           </a>
         </Button>
         <Button asChild variant="outline" size="sm">
+          <Link href="/assurance/served-conformance">Served-surface conformance</Link>
+        </Button>
+        <Button asChild variant="outline" size="sm">
           <Link href="/benchmarks">Benchmarks dashboard</Link>
         </Button>
       </section>

@@ -1,0 +1,312 @@
+{
+  "provenance": {
+    "commit": "84aa1e4a8a508f941a961b78b8645696a83fc5c5",
+    "generated_at": "2026-07-05T14:10:00Z",
+    "generated_at_unix": 1783260600,
+    "note": "Re-runs the sq-jaj38 (http-protocol) and sq-1uuxz (federation-descriptors) served-surface lanes in-process against the sparq-server loopback endpoint. Pass/divergence/fail counts are conformance facts; `floor` is each suite's ratchet floor (may only rise) from crates/sparq-conformance/src/scoreboard.rs. Documented divergences are reported per-assertion and are NEVER summed into `pass`, so a documented gap can never inflate the conformance number.",
+    "run_source": "https://github.com/jeswr/sparq/actions (per-build artifact); authoritative per-release reports attach to each GitHub Release",
+    "runner": "sparq-conformance served-conformance-report",
+    "version": "main (snapshot)"
+  },
+  "schema": "sparq.served-conformance/v1",
+  "suites": [
+    {
+      "ci_job": "service-federation-conformance",
+      "counts": {
+        "divergence": 2,
+        "fail": 0,
+        "pass": 21,
+        "total": 23
+      },
+      "family": "W3C SPARQL",
+      "feature": "http-protocol",
+      "floor": 21,
+      "floor_basis": "pass",
+      "id": "http-protocol",
+      "label": "W3C SPARQL 1.1 Protocol (HTTP)",
+      "note": "SPARQL 1.1 Protocol operations (GET/POST query+update, the QUERY method, dataset overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/406/415) over RAW HTTP against the in-process loopback server; a present-but-unsatisfiable Accept now returns 406 (Oxigraph parity, sq-406acc); the absent/*/* Accept JSON default + ASK-in-CSV are documented divergences, NOT summed into the floor",
+      "tests": [
+        {
+          "label": "query via GET (?query=…) → 200 + SRJ, 1 default-graph row",
+          "outcome": "pass"
+        },
+        {
+          "label": "query via POST urlencoded (query= body) → 200 + SRJ",
+          "outcome": "pass"
+        },
+        {
+          "label": "query via POST direct (application/sparql-query) → 200 + SRJ",
+          "outcome": "pass"
+        },
+        {
+          "label": "query via the HTTP QUERY method (application/sparql-query) → 200 + SRJ",
+          "outcome": "pass"
+        },
+        {
+          "label": "QUERY method rejects application/sparql-update body → 415",
+          "outcome": "pass"
+        },
+        {
+          "label": "QUERY method rejects update= form field → 400",
+          "outcome": "pass"
+        },
+        {
+          "label": "SELECT Accept application/sparql-results+json → 200 + SRJ",
+          "outcome": "pass"
+        },
+        {
+          "label": "SELECT Accept application/sparql-results+xml → 200 + SRX",
+          "outcome": "pass"
+        },
+        {
+          "label": "SELECT Accept text/csv → 200 + text/csv",
+          "outcome": "pass"
+        },
+        {
+          "label": "SELECT Accept text/tab-separated-values → 200 + TSV",
+          "outcome": "pass"
+        },
+        {
+          "label": "ASK Accept application/sparql-results+json → 200 + SRJ boolean true",
+          "outcome": "pass"
+        },
+        {
+          "label": "ASK Accept application/sparql-results+xml → 200 + SRX",
+          "outcome": "pass"
+        },
+        {
+          "label": "default-graph-uri=g1 re-scopes the default graph → 1 row (g1's triple)",
+          "outcome": "pass"
+        },
+        {
+          "label": "named-graph-uri=g1 exposes exactly g1 as a named graph → 1 row",
+          "outcome": "pass"
+        },
+        {
+          "label": "update via POST (application/sparql-update INSERT DATA) → 2xx",
+          "outcome": "pass"
+        },
+        {
+          "label": "POST update genuinely mutated the store (ASK new triple → true)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GET /sparql with no query parameter → 400",
+          "outcome": "pass"
+        },
+        {
+          "label": "GET /sparql with a malformed query → 400",
+          "outcome": "pass"
+        },
+        {
+          "label": "POST /sparql with an unsupported Content-Type (text/plain) → 415",
+          "outcome": "pass"
+        },
+        {
+          "label": "DELETE /sparql → 405 with an Allow header",
+          "outcome": "pass"
+        },
+        {
+          "label": "unsatisfiable Accept (image/png) on SELECT → 406 Not Acceptable (Oxigraph parity, sq-406acc)",
+          "outcome": "pass"
+        },
+        {
+          "detail": "absent / */* Accept defaults to SPARQL-results JSON (W3C-permitted default representation); only a present-but-unsatisfiable Accept is 406",
+          "label": "absent / */* Accept on SELECT still defaults to SRJ, not 406 (sq-406acc)",
+          "outcome": "divergence"
+        },
+        {
+          "detail": "CSV/TSV have no SPARQL boolean serialisation, so an ASK with Accept: text/csv falls back to a JSON boolean (ask_content_type)",
+          "label": "ASK Accept text/csv falls back to a JSON boolean (CSV has no boolean form)",
+          "outcome": "divergence"
+        }
+      ]
+    },
+    {
+      "ci_job": "service-federation-conformance",
+      "counts": {
+        "divergence": 1,
+        "fail": 0,
+        "pass": 39,
+        "total": 40
+      },
+      "family": "W3C SPARQL",
+      "feature": "federation-descriptors",
+      "floor": 39,
+      "floor_basis": "pass",
+      "id": "sd-gsp",
+      "label": "SPARQL 1.1 Service Description + Graph Store Protocol",
+      "note": "the GET /sparql (no query) Service-Description advertises exactly the formats/languages/versions/features the server genuinely implements (no over-advertising), PLUS a GET/PUT/POST/DELETE Graph-Store-Protocol round-trip (named + default graph, indirect + direct identification) verifying store state after each op; absent-graph 200-empty read is a documented divergence, NOT summed in",
+      "tests": [
+        {
+          "label": "Service Description: GET /sparql (no query) → 200 + N-Triples",
+          "outcome": "pass"
+        },
+        {
+          "label": "SD types an sd:Service with an sd:endpoint",
+          "outcome": "pass"
+        },
+        {
+          "label": "SD advertises sd:SPARQL11Query + the version-agnostic sd:SPARQLQuery",
+          "outcome": "pass"
+        },
+        {
+          "label": "SD advertises sd:SPARQL11Update + sd:SPARQLUpdate (anonymous Update possible, no write-token)",
+          "outcome": "pass"
+        },
+        {
+          "label": "advertised sd:SPARQL11Update is genuine (anonymous POST update succeeds → 2xx)",
+          "outcome": "pass"
+        },
+        {
+          "label": "SD advertises sd:supportedVersion 1.0 / 1.1 / 1.2",
+          "outcome": "pass"
+        },
+        {
+          "label": "SD advertises full version-1.2, NOT the -basic profile",
+          "outcome": "pass"
+        },
+        {
+          "label": "SD advertises sd:resultFormat for SRJ / SRX / CSV / TSV (solution sets)",
+          "outcome": "pass"
+        },
+        {
+          "label": "SD advertises sd:resultFormat for Turtle / N-Triples / RDF-XML (graphs)",
+          "outcome": "pass"
+        },
+        {
+          "label": "SD advertises sd:inputFormat for Turtle / N-Triples / RDF-XML",
+          "outcome": "pass"
+        },
+        {
+          "label": "SD advertises sd:BasicFederatedQuery (the SERVICE clause is genuinely compiled in)",
+          "outcome": "pass"
+        },
+        {
+          "label": "SD does NOT over-advertise JSON-LD (sparq-server/jsonld is not on in this build)",
+          "outcome": "pass"
+        },
+        {
+          "label": "advertised sd:resultFormat SRJ is genuinely served (SELECT Accept → that media type)",
+          "outcome": "pass"
+        },
+        {
+          "label": "advertised sd:resultFormat SRX is genuinely served (SELECT Accept → that media type)",
+          "outcome": "pass"
+        },
+        {
+          "label": "advertised sd:resultFormat CSV is genuinely served (SELECT Accept → that media type)",
+          "outcome": "pass"
+        },
+        {
+          "label": "advertised sd:resultFormat TSV is genuinely served (SELECT Accept → that media type)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP PUT new named graph (indirect ?graph=) → 201 Created",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP GET the PUT graph returns it equal (PUT→GET round-trip)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP PUT existing named graph REPLACES → 204 No Content",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP PUT replaced the graph (old triple gone, new present)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP POST to existing named graph MERGES → 204",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP POST merged additively (both s2 and s3 present)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP DELETE named graph → 204 No Content",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP DELETE removed the graph (GET returns empty)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP DELETE an absent named graph → 404 Not Found",
+          "outcome": "pass"
+        },
+        {
+          "detail": "sparq serialises an absent graph as the empty graph (200, empty body) on a GSP read; it does not 404 (the GSP spec permits treating an empty graph as existing)",
+          "label": "GSP GET an absent named graph is 200 + empty graph, not 404 (GSP-permitted empty-graph read)",
+          "outcome": "divergence"
+        },
+        {
+          "label": "GSP PUT new graph (direct /graphs/<path>) → 201 Created",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP GET the direct-form graph returns it equal",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP DELETE via indirect ?graph= naming the direct IRI → 204 (forms address one graph)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP direct + indirect identification address the SAME graph (GET now empty)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP PUT default graph (?default) → 2xx",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP PUT default graph replaced it (new triple present, fixture triple gone)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP POST default graph (?default) MERGES → 204",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP POST default graph merged (both default triples present)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP DELETE default graph (?default) → 204 (empties it)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP DELETE default graph emptied it (GET returns empty)",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP PUT with a malformed RDF body → 400",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP PUT with an unsupported Content-Type (image/png) → 415",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP GET /sparql/graph with no graph selector → 400",
+          "outcome": "pass"
+        },
+        {
+          "label": "GSP unsupported verb (TRACE) → 405 with an Allow header",
+          "outcome": "pass"
+        }
+      ]
+    }
+  ],
+  "title": "Served-surface SPARQL 1.1 Protocol conformance",
+  "totals": {
+    "divergence": 3,
+    "fail": 0,
+    "pass": 60,
+    "total": 63
+  }
+}
