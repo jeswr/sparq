@@ -1,7 +1,8 @@
 "use client";
 
-// [OPUS-4.8] sq-vw3ax (bold /try redesign) — the data-tool result rendering for the REPL's
-// SELECT table + its inline aggregate mini-viz. Faithful to the mockup
+// [OPUS-4.8] sq-vw3ax — the data-tool result rendering (a SELECT table + its inline aggregate
+// mini-viz), now used by the home hero's in-fold runner (src/components/home/hero-runner.tsx)
+// after the /try REPL was removed (sq-4hiqe). Faithful to the mockup
 // (sparq-design-system/proposals/web-try.html): typed-value colouring that reuses the
 // foundation's `--chart-*` syntax tokens (IRI / literal / number), CURIE abbreviation of IRIs,
 // and a tiny bar strip derived from the LIVE result set (never a hardcoded shape).

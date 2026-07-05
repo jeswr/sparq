@@ -73,7 +73,7 @@
   /* [OPUS-4.8] sq-vw3ax (bold redesign foundation) — derived BOLD-direction tokens.
      All are mixed/derived from the existing OKLCH teal palette above; NO new hue is
      invented. They power the atmospheric glow, the hero gradient, hairline rules, and
-     the elevation scale that the home/try/capabilities redesigns build on. Light values
+     the elevation scale that the home/capabilities redesigns build on. Light values
      here; the .dark strip below carries the lead (dark-first) values. */
   --teal-glow: oklch(0.52 0.094 205 / 0.25);
   --teal-soft: color-mix(in oklch, var(--primary) 10%, transparent);
@@ -247,8 +247,8 @@
 
 /* [OPUS-4.8] sq-vw3ax — BOLD DARK-FIRST FOUNDATION utilities.
    The shared visual language extracted VERBATIM from the approved mockups
-   (sparq-design-system/proposals/web-{home,try,capabilities}.html). These are the base
-   the home/try/capabilities surface redesigns build on; they are OPT-IN (a page must add
+   (sparq-design-system/proposals/web-{home,capabilities}.html). These are the base
+   the home/capabilities surface redesigns build on; they are OPT-IN (a page must add
    the class), so un-redesigned routes are unaffected. All effects are pure CSS — no
    runtime, no new dependency — and read in BOTH themes via the design tokens above.
    ──────────────────────────────────────────────────────────────────────────────── */
@@ -641,7 +641,7 @@
 /* [OPUS-4.8] sq-ymr2e.4 / sq-ymr2e.14 — WCAG 2.1 AA color-contrast on the Sonner `richColors`
    error toast. Sonner 2.x's default light-theme error palette is hsl(360 100% 45%) (#e60000)
    text on hsl(359 100% 97%) (#fff0f0) → 4.34:1, below the AA 4.5:1 minimum (axe flags it on the
-   "Engine failed to load" toast the /try REPL raises when the in-tab engine can't load — the
+   "Engine failed to load" toast the home in-tab runner raises when the in-tab engine can't load — the
    wasm-free CI lane, and any real browser where the engine genuinely fails). Darken the error
    text/border/icon to hsl(360 100% 38%) ≈ #c20000, which is ~5.8:1 on the same background — a
    comfortable AA margin while staying unmistakably red. Sonner exposes the colour as the

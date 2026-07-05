@@ -28,7 +28,6 @@ import {
   Terminal,
   Code2,
   Info,
-  PlayCircle,
 } from "lucide-react";
 
 /** Live-execution tier — drives the honesty badge colour + label. */
@@ -119,7 +118,7 @@ export const FLAGSHIPS: Surface[] = [
 // [OPUS-4.8] sq-vw3ax.2 — the 5 capability THEMES (research/website-redesign.md §2).
 // Surfaces are mapped to themes by what they DO, keeping every existing surface, route,
 // blurb and tier verbatim:
-//   1. Query & data      — the REPL + SPARQL + the data-format/JS-WASM/geo query surfaces
+//   1. Query & data      — SPARQL + the data-format/JS-WASM/geo query surfaces
 //   2. Reason & validate — inference + SHACL
 //   3. Search & GenAI    — full-text BM25, vector, GenAI/NLQ
 //   4. Privacy (ZK / MPC)— ZK query proofs + MPC federation (the Solid flagship sits in
@@ -132,18 +131,11 @@ export const GROUPS: SurfaceGroup[] = [
   {
     id: "query-data",
     label: "Query & data",
+    // [OPUS-4.8] sq-4hiqe — the in-tab workbench now lives at /app (the /try REPL was removed);
+    // this description is user-facing copy, so it stays clean (no route/bead cross-reference).
     description:
-      "Run SPARQL 1.1/1.2 over RDF — the live REPL, the query engine, and the formats it ingests.",
+      "Run SPARQL 1.1/1.2 over RDF — the query engine and the formats it ingests.",
     surfaces: [
-      {
-        slug: "try",
-        href: "/try",
-        title: "Live SPARQL REPL",
-        blurb: "Run real SPARQL against a sample graph — the engine compiled to wasm, in your tab.",
-        tier: "live",
-        icon: PlayCircle,
-        built: true,
-      },
       {
         slug: "sparql",
         href: "/surface/sparql",

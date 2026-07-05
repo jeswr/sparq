@@ -37,7 +37,6 @@
 // BOTH states — no overclaiming.
 
 import * as React from "react";
-import Link from "next/link";
 import { toast } from "sonner";
 import {
   Apple,
@@ -56,6 +55,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { withBasePath } from "@/lib/base-path";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -519,18 +519,20 @@ export function DownloadClient() {
       <header className="space-y-3">
         <h1 className="text-2xl font-semibold">Download sparq</h1>
         <p className="measure text-muted-foreground">
-          The sparq desktop GUI bundles the engine and the playground into a
+          The sparq desktop GUI bundles the engine and the workbench into a
           native app for macOS, Windows, and Linux. Prefer not to install
-          anything? The full SPARQL playground runs entirely in your browser at{" "}
+          anything? The full SPARQL workbench runs entirely in your browser at{" "}
           {/* [OPUS-4.8] sq-ymr2e.4 — inline prose links carry a PERSISTENT underline (WCAG 2.1
               §1.4.1 Use of Color / axe `link-in-text-block`): distinguishable without relying on
-              the teal colour alone, which fails the 3:1 contrast vs the surrounding muted text. */}
-          <Link
+              the teal colour alone, which fails the 3:1 contrast vs the surrounding muted text.
+              [OPUS-4.8] sq-4hiqe — /app is the single workbench (the /try REPL was removed); it is a
+              separate overlaid Next app, so this is a HARD anchor, not a next/link soft nav. */}
+          <a
             className="text-primary underline underline-offset-4"
-            href="/try"
+            href={withBasePath("/app/")}
           >
-            /try
-          </Link>{" "}
+            /app
+          </a>{" "}
           — no download required.
         </p>
       </header>
@@ -756,10 +758,10 @@ export function DownloadClient() {
         </p>
         <div className="flex flex-wrap items-center gap-3">
           <Button asChild variant="default" size="sm">
-            <Link href="/try">
-              Open the playground
+            <a href={withBasePath("/app/")}>
+              Open the workbench
               <ExternalLink className="size-4" />
-            </Link>
+            </a>
           </Button>
           <Badge variant="success" className="h-6 gap-1.5">
             <ShieldCheck className="size-3.5" aria-hidden />

@@ -4,8 +4,9 @@
 // artifact). It replaces the heavy full REPL that used to be duplicated on the home page: a
 // LIGHTWEIGHT runner that fits in-fold on the right of the split hero — a two-tab editor
 // (Query | Data, both editable so the sample is inspectable), a big teal Run button bound to
-// Ctrl/Cmd+Enter, and a typed results table below. The full workbench lives at /try; "Open in
-// workbench →" hands the current query + data off there (src/lib/try-handoff.ts).
+// Ctrl/Cmd+Enter, and a typed results table below. The full workbench lives at /app; "Open in
+// workbench →" is a HARD full-page navigation to it (sq-4hiqe: /try was removed, /app is the
+// single workbench; /app is a separate overlaid Next app so a soft nav would fetch its RSC .txt).
 //
 // HONESTY (load-bearing). The idle state is an explicit, dimmed PREVIEW of the expected answer
 // behind a "Preview — press Run to compute it live in your tab" pill — never a fake skeleton and
@@ -20,7 +21,6 @@
 // a first Run before warm-up finishes simply shows a one-time "Starting engine…" substate.
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
 import { Play, Loader2, ArrowRight, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -43,7 +43,7 @@ import {
   HERO_RESULT_VARS,
   HERO_PREVIEW_ROWS,
 } from "@/data/hero-sample";
-import { writeHandoff } from "@/lib/try-handoff";
+import { withBasePath } from "@/lib/base-path";
 
 const XSD = "http://www.w3.org/2001/XMLSchema#";
 const NUMERIC_XSD = new Set(
@@ -184,7 +184,6 @@ function PreviewTable() {
 }
 
 export function HeroQueryRunner() {
-  const router = useRouter();
   const [tab, setTab] = React.useState<"query" | "data">("query");
   // [FABLE-5] sq-ymr2e.9 — APG tabs keyboard contract (arrow-key roving focus).
   const tablistKeys = useRovingTablist();
@@ -271,9 +270,10 @@ export function HeroQueryRunner() {
   );
 
   const openInWorkbench = React.useCallback(() => {
-    writeHandoff({ query, data, format: HERO_SAMPLE_FORMAT });
-    router.push("/try");
-  }, [data, query, router]);
+    // [OPUS-4.8] sq-4hiqe — /app is the single workbench (the in-tab /try REPL was removed). It is
+    // a SEPARATE Next app overlaid at /app/, so hard-navigate the whole page rather than soft-push.
+    window.location.assign(withBasePath("/app/"));
+  }, []);
 
   const running = phase === "running";
   const rowCount = results?.results?.bindings?.length ?? 0;

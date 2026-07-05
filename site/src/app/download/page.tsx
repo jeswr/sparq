@@ -13,7 +13,7 @@ import { DownloadClient } from "./download-client";
 export const metadata: Metadata = {
   title: "Download",
   description:
-    "Download the sparq desktop GUI (macOS/Windows/Linux) and the CLI/server binaries — one click, straight to the right file for your platform. Desktop bundles are unsigned developer builds; the web playground at /try needs no install.",
+    "Download the sparq desktop GUI (macOS/Windows/Linux) and the CLI/server binaries — one click, straight to the right file for your platform. Desktop bundles are unsigned developer builds; the web workbench at /app needs no install.",
 };
 
 export default function DownloadPage() {

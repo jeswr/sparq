@@ -23,7 +23,7 @@
 // It is a CORRECTNESS smoke test, not a benchmark: it asserts the report's DOM, never a
 // wall-clock threshold (timings on a work-box / CI runner are non-canonical).
 //
-// WASM PREREQ. Like repl-results.spec.ts, the validator loads the wasm bundle from
+// WASM PREREQ. Like home-runner.spec.ts, the validator loads the wasm bundle from
 // `public/wasm/` (a gitignored build artifact synced from `js`'s `build:wasm`, which builds
 // `--features shacl,jsonld,…` so `validate` exists). The light site-e2e CI lane has no Rust
 // toolchain to build it, so this whole spec SKIPS when the bundle is absent and runs in full

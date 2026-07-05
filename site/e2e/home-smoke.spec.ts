@@ -11,8 +11,8 @@
 //
 // NO WASM NEEDED. The hero + nav are server-rendered shell — they paint without the wasm engine,
 // so this spec runs on EVERY lane (including the light site-e2e CI lane that builds no wasm
-// bundle). The heavy in-tab REPL below the hero is its own (wasm-gated) concern, covered by
-// repl-results.spec.ts + try-query-smoke.spec.ts; here we only assert the shell boots clean.
+// bundle). The in-tab hero runner below the fold is its own (wasm-gated) concern, covered by
+// home-runner.spec.ts; here we only assert the shell boots clean.
 //
 // It is a CORRECTNESS smoke test, not a benchmark: it asserts the DOM + console, never a
 // wall-clock threshold (timings on a work-box / CI runner are non-canonical).

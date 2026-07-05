@@ -3,6 +3,7 @@ import { Database } from "lucide-react";
 
 import { SurfaceContent } from "@/components/surface-content";
 import { DataFormatsDemo } from "@/components/data-formats-demo";
+import { withBasePath } from "@/lib/base-path";
 
 export const metadata: Metadata = {
   title: "Data formats",
@@ -65,7 +66,7 @@ export default function DataFormatsSurfacePage() {
       }
       readmeHref="https://github.com/jeswr/sparq/tree/main/crates/sparq-core"
       skillHref="https://github.com/jeswr/sparq/blob/main/skills/data-formats/SKILL.md"
-      links={[{ href: "/try", label: "Open the full SPARQL REPL" }]}
+      links={[{ href: withBasePath("/app/"), label: "Open the SPARQL workbench", external: true }]}
     >
       <DataFormatsDemo />
     </SurfaceContent>
