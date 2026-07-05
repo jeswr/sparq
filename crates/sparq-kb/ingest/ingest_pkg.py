@@ -45,6 +45,11 @@ from yamlld_compile import compile_yaml_ld  # noqa: E402
 
 PKG = "https://sparq.dev/ns/pkg#"
 KB = "https://sparq.dev/ns/pkg/kb#"
+# [SONNET-4.6] sq-tzars.7: the HAND-AUTHORED tier named-graph IRI (byte-pinned in Rust as
+# crates/sparq-kb/src/vocab.rs::TIER_HAND_AUTHORED_GRAPH). This script's output IS the
+# hand-authored tier, so it stamps that graph IRI so a tier-aware loader/exporter
+# (sq-tzars.8) can keep the hand-authored tier queryable-apart from the machine tier.
+TIER_HAND_AUTHORED_GRAPH = "https://sparq.dev/ns/pkg/graph#hand-authored"
 
 # [OPUS-4.8] sq-2m6zm.5 (bd-bridge eval). A `research/<doc>.md` reference inside a
 # bead's `design` / `description` is the bd `--spec-id` style knowledge link. Project
@@ -324,7 +329,16 @@ def main():
         "# the script header + the SHACL honesty report).\n\n"
     )
 
-    parts = [header, PREFIXES, "\n# === Tasks (mechanical bd projection) ===\n"]
+    # [SONNET-4.6] sq-tzars.7: stamp this output as the HAND-AUTHORED tier. The stamp is a
+    # single untyped node (no rdf:type), so it is not targeted by any SHACL shape and does
+    # not affect the 0-violation conformance; it names the tier so downstream tooling can
+    # keep the tiers queryable-apart (per-tier ARTIFACTS, not in-store named graphs).
+    tier_stamp = (
+        "\n# === Tier stamp (sq-tzars.7): this graph IS the hand-authored tier ===\n"
+        f"<{TIER_HAND_AUTHORED_GRAPH}> rdfs:label "
+        '"hand-authored tier -- the human-curated PKG (ingest_pkg.py projector output)"@en .\n'
+    )
+    parts = [header, PREFIXES, tier_stamp, "\n# === Tasks (mechanical bd projection) ===\n"]
     bead_lines, bstats = project_beads(args.beads)
     parts.extend(bead_lines)
     parts.append("\n\n# === Sources + Techniques (skills front-matter parse) ===\n")
