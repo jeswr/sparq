@@ -306,10 +306,54 @@ dual-tagged tests' RDF-Based runs stay in the RL `owl_suite` / `el-suite` lanes 
 semantics). Functional-syntax-only inputs (27 cases) and `owl:imports` are OutOfScope;
 `test:status test:Rejected` is excluded.
 
+**Scoped-fragment decision table — NOT full OWL 2 DL (grounded in code).** Deferral ledger
+(live source of truth): `sparq-conformance/tests/dl_suite.rs` — `DOCUMENTED_DIVERGENCES`
+(5 named rows; audited mechanisms M3/M5/M6; M1/M2/M4 FIXED and removed from the pin),
+abstention counters `DL_DIRECT_ABSTAINED` / `DL_PROFILE_ABSTAINED`, pass floors
+`DL_DIRECT_FLOOR` / `DL_PROFILE_FLOOR` — all EXACT-pinned (`==` not `>=`; both inflation and
+regression fail CI). Design record: `research/owl2-direct-semantics-scoping.md`. [OPUS-4.8]
+sq-pbz04.4.6
+
+**L1 extraction boundary** (`extract.rs` `ExtractError` — one out-of-fragment triple refuses
+the whole graph, never a partial extraction):
+
+| Construct | L1 outcome | `ExtractError` variant |
+|---|---|---|
+| Named classes; ⊤/⊥; ⊓/⊔/¬; ∃R.C/∀R.C over a named property; GCIs; SubProperty; domain/range; ground ABox (`ClassAssertion`, `ObjectPropertyAssertion`) | Accepted | — |
+| Cardinality (min/max/exact/qualified) | Refused | `OutOfFragment` |
+| Nominals (`owl:oneOf`, `owl:hasValue`, `owl:hasSelf`); inverse properties (`owl:inverseOf`); property characteristics (Transitive/Functional/IFP/Sym/Asym/Refl/Irr) | Refused | `OutOfFragment` |
+| `owl:sameAs` / `owl:differentFrom`; property chains; keys; `owl:disjointUnionOf` | Refused | `OutOfFragment` |
+| Datatypes / data properties / data-range restrictions | Refused | `DataConstruct` |
+| Malformed RDF list (unterminated, cyclic, branching, empty, orphan cell, `rdf:nil` as list cell) | Refused | `MalformedList` |
+| Malformed class expression (missing filler/property, conflicting shapes, cyclic, bare blank) | Refused | `MalformedClassExpression` |
+| Undeclared predicate (role-vs-annotation ambiguous); RDF 1.2 triple term | Refused | `Unclassifiable` |
+
+**L4 dispatch — consistency** (`check.rs` `UnknownReason`; in-order, non-falling-through;
+`Branch` set for traceability on every verdict):
+
+| Branch | Decides `Consistent` | Decides `Inconsistent` | Abstains (`UnknownReason`) |
+|---|---|---|---|
+| RL (in-RL; PR1 preconditions pass; no divergence-guarded construct) | Yes (past divergence guard) | Yes (PR1-checked) | `RlPr1Preconditions`, `RlDivergenceGuard` |
+| EL (in-EL; ⊤-free TBox; no ABox; no skipped/unapplied axioms) | Yes (empty-interpretation model construction) | Never | `ElSkippedAxioms`, `ElUnappliedAxioms`, `ElTopGuard` |
+| QL (in-QL) | Never | Never | `QlConsistencyPending` (always — deferred to sq-pbz04.3.4) |
+| ALCH (all else the L1 extractor accepted) | Yes (complete for L1 fragment) | Yes (complete for L1 fragment) | `ResourceBudget` |
+
+**L4 dispatch — entailment** (all conclusion kinds routed through the complete ALCH tableau):
+
+| Conclusion kind | Decides `Entailed` / `NotEntailed` | Abstains (`UnknownReason`) |
+|---|---|---|
+| `SubClassOf`, `ClassAssertion`, `EquivalentClasses`, `DisjointClasses`, `ObjectPropertyDomain` / `ObjectPropertyRange` | Yes (sound + complete via refutation encoding) | — |
+| `ObjectPropertyAssertion` (fresh-class encoding — sound and complete, `check.rs` §4) | Yes | — |
+| Tree-shaped conclusion blank node (rolls up to an existential class assertion; sq-pbz04.4.13) | Yes | — |
+| Non-tree conclusion blank node (shared / cyclic / named-successor / free-existential root) | Never | `ConclusionAnonymousIndividual` |
+| `SubObjectPropertyOf` conclusion | Never | `UnencodedConclusion` |
+| Deterministic count budget exhausted mid-search | Never | `ResourceBudget` |
+
 Deferred constructs — inverse roles, cardinality/functionality, nominals, transitivity,
 `sameAs`/`differentFrom`, datatypes, keys — are each **rejected, never mis-mapped**, with a
-named reason and unlock path in the design record's deferral ledger. See
-`research/owl2-direct-semantics-scoping.md`.
+named reason and unlock path in the deferral ledger: `sparq-conformance/tests/dl_suite.rs`
+(`DOCUMENTED_DIVERGENCES`, `DL_DIRECT_ABSTAINED`, `DL_PROFILE_ABSTAINED`) and the design
+record `research/owl2-direct-semantics-scoping.md`.
 
 ## Common recipes
 
