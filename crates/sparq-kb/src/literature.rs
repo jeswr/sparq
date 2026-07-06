@@ -74,6 +74,13 @@ pub mod extract;
 pub mod extract_live;
 #[cfg(feature = "literature")]
 pub mod ground;
+/// The hard-capped, dry-run-first pilot ITERATION LOOP (`sq-tzars.9`): pre-registered
+/// audit bar (written before extraction, enforced by type-state), append-only sidecar
+/// chain, fail-stop caps, and the maintainer-armed live-emit gate (`live_emit_allowed`).
+/// Pure — the networked wiring is the `literature-pilot` binary (`literature-live`).
+/// [FABLE-5] sq-tzars.9
+#[cfg(feature = "literature")]
+pub mod pilot;
 #[cfg(feature = "literature")]
 pub mod pipeline;
 

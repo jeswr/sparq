@@ -246,14 +246,33 @@ pub struct TieredOutput {
     pub completeness: BatchCompleteness,
 }
 
+/// Convert days-since-Unix-epoch (1970-01-01) to a Gregorian `(year, month, day)`.
+///
+/// The Fliegel–Van Flandern-style algorithm below expects a **Julian Day Number**, so
+/// the epoch day is first shifted by `2_440_588` (the JDN of 1970-01-01). The original
+/// sq-tzars.2 version omitted that shift and produced year `-4656` dates for the
+/// current epoch — a bug CI never saw because every test injects a fixed timestamp;
+/// caught + fixed by the sq-tzars.9 pilot, which keys its daily API-request ledger off
+/// this clock. Direct unit tests below pin known dates incl. leap days. [FABLE-5]
+pub(crate) fn civil_from_epoch_days(days: u64) -> (i64, i64, i64) {
+    let a = days as i64 + 2_440_588 + 32044;
+    let b = (4 * a + 3) / 146097;
+    let c = a - (146097 * b) / 4;
+    let d = (4 * c + 3) / 1461;
+    let e = c - (1461 * d) / 4;
+    let m = (5 * e + 2) / 153;
+    let day = e - (153 * m + 2) / 5 + 1;
+    let month = m + 3 - 12 * (m / 10);
+    let year = 100 * b + d - 4800 + m / 10;
+    (year, month, day)
+}
+
 /// Generate the current UTC time as an ISO 8601 xsd:dateTime string (e.g.,
 /// `2026-07-05T14:30:00Z`). Used as the default `prov:generatedAtTime` when the caller
 /// does not inject a fixed timestamp (as CI tests do for determinism).
-/// (sq-tzars.2 [HAIKU-4.5])
-fn current_generated_at_time() -> String {
-    // [HAIKU-4.5] In production, this would use `std::time::SystemTime::now()` or
-    // similar to get the wall-clock instant; for now, we use a deterministic format.
-    // Tests inject a fixed instant via the caller's `generated_at_time` param.
+/// (sq-tzars.2 [HAIKU-4.5]; shared with the pilot module for its `created_at` /
+/// daily-ledger date — [FABLE-5] sq-tzars.9)
+pub(crate) fn current_generated_at_time() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -266,16 +285,7 @@ fn current_generated_at_time() -> String {
     let hours = secs_today / 3600;
     let mins = (secs_today % 3600) / 60;
     let secs_min = secs_today % 60;
-    // Julian day to calendar date (Gregorian calendar).
-    let a = (days + 32044) as i64;
-    let b = (4 * a + 3) / 146097;
-    let c = a - (146097 * b) / 4;
-    let d = (4 * c + 3) / 1461;
-    let e = c - (1461 * d) / 4;
-    let m = (5 * e + 2) / 153;
-    let day = e - (153 * m + 2) / 5 + 1;
-    let month = m + 3 - 12 * (m / 10);
-    let year = 100 * b + d - 4800 + m / 10;
+    let (year, month, day) = civil_from_epoch_days(days);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
         year,
@@ -777,6 +787,31 @@ fn emit_restricted_projection(
 mod tests {
     use super::*;
     use crate::literature::extract::RecordedExtractor;
+
+    #[test]
+    fn civil_from_epoch_days_matches_known_dates() {
+        // Pins the JDN-offset fix ([FABLE-5] sq-tzars.9): the unshifted original mapped
+        // the current epoch to year -4656. Expected values are independent calendar
+        // facts (days since 1970-01-01), including leap days + a century leap year.
+        assert_eq!(civil_from_epoch_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_epoch_days(20_640), (2026, 7, 6));
+        assert_eq!(civil_from_epoch_days(11_016), (2000, 2, 29));
+        assert_eq!(civil_from_epoch_days(11_017), (2000, 3, 1));
+        assert_eq!(civil_from_epoch_days(18_321), (2020, 2, 29));
+        assert_eq!(civil_from_epoch_days(19_419), (2023, 3, 3));
+    }
+
+    #[test]
+    fn current_generated_at_time_is_iso8601_shaped() {
+        // The live default (not injectable): shape + a sane current-era year.
+        let t = current_generated_at_time();
+        assert_eq!(&t[4..5], "-");
+        assert_eq!(&t[7..8], "-");
+        assert_eq!(&t[10..11], "T");
+        assert!(t.ends_with('Z'));
+        let year: i64 = t[..4].parse().unwrap();
+        assert!((2026..2200).contains(&year), "sane wall-clock year, got {}", t);
+    }
 
     fn run_fixture() -> PipelineOutput {
         let extractor = RecordedExtractor::from_fixture().unwrap();
