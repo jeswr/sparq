@@ -31,8 +31,11 @@ fn parse(body: &str) -> (Dict, Vec<[Id; 3]>) {
 }
 
 /// Parse a premise and a conclusion document into ONE shared dict (the conclusion's ids are
-/// re-interned into the premise dict term-by-term). Conclusion documents in these tests are
-/// blank-node-free, so label re-interning cannot alias distinct blank nodes.
+/// re-interned into the premise dict term-by-term). Re-interning shares the blank-node label
+/// space across both documents: each distinct label (`_:foo`) maps to one dict id regardless
+/// of which document introduced it. Tests that use blank nodes in BOTH the premise and the
+/// conclusion must therefore use disjoint blank-node labels to avoid aliasing distinct
+/// anonymous individuals. [OPUS-4.8] sq-pbz04.4.6 — stale "blank-node-free" claim removed.
 fn parse_two(premise: &str, conclusion: &str) -> (Dict, Vec<[Id; 3]>, Vec<[Id; 3]>) {
     let (mut dict, prem) = parse(premise);
     let (cdict, ctriples) = parse(conclusion);
