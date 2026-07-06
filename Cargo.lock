@@ -3707,6 +3707,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-acbench"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "oxrdf 0.3.3",
+ "oxttl 0.2.3",
+ "rand 0.8.6",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "sparq-algos"
 version = "0.1.0"
 dependencies = [
