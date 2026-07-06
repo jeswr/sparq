@@ -44,15 +44,19 @@ const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
 ///
 /// The classifier is SOUND but only COMPLETE for the fragment it recognises. By default that is
 /// EL+⊥-minus-RBox (the E1 MVP) **plus safe nominals** (sq-pbz04.2.1: singleton `owl:oneOf` and
-/// object-valued `owl:hasValue` — the `{a}` / `∃r.{a}` concepts, completion rule **CR6**); with
+/// object-valued `owl:hasValue` — the `{a}` / `∃r.{a}` concepts, completion rule **CR6**) **and
+/// self-restrictions** (sq-pbz04.2.6: `owl:hasSelf "true"^^xsd:boolean` — the `∃r.Self` local
+/// reflexivity concept, completion rules **CR-Self**); with
 /// the `rbox` feature it adds the RBox role automaton (`rdfs:subPropertyOf` role inclusions,
 /// `owl:propertyChainAxiom` chains, `owl:TransitiveProperty` — completion rules CR10/CR11).
 /// Axioms using constructs outside the active fragment are NOT applied and their class-axiom
 /// occurrences are counted in [`Report::skipped_axioms`] (honest incompleteness rather than a
 /// silent wrong answer). Two kinds of skip are distinguished by the EL theory:
 /// - **Outside EL entirely** — `owl:unionOf`, `owl:complementOf`, `owl:allValuesFrom`, cardinality,
-///   `owl:hasSelf`, and a MULTI-individual `owl:oneOf` (the profile's `ObjectOneOf` admits exactly
-///   one individual; more is a disjunction): these need ALC / Horn-SHIQ expressivity.
+///   and a MULTI-individual `owl:oneOf` (the profile's `ObjectOneOf` admits exactly one individual;
+///   more is a disjunction): these need ALC / Horn-SHIQ expressivity. (`owl:hasSelf` is NOT in this
+///   list since sq-pbz04.2.6 — `ObjectHasSelf` is IN the EL profile and reasoned over by CR-Self;
+///   only a malformed `owl:hasSelf` — non-`true`/non-boolean, or missing `owl:onProperty` — skips.)
 /// - **Concrete domains (CR7–CR9)** — gated behind the `cdomain` feature (sq-pbz04.2.2).
 ///   WITHOUT it, every concrete-domain occurrence (`owl:onDataRange` / `owl:withRestrictions` /
 ///   `owl:onDatatype` and the literal-valued `owl:hasValue`/`owl:oneOf` forms, i.e.
@@ -510,6 +514,71 @@ mod tests {
         }
         let (g, hh) = (iri(&dict, "http://ex/G"), iri(&dict, "http://ex/H"));
         assert!(h.is_subclass_of(g, hh), "the EL part (G ⊑ H) must still classify");
+    }
+
+    #[test]
+    fn tbox_self_restriction_subsumption() {
+        // [OPUS-4.8] sq-pbz04.2.6: A ⊑ ∃r.Self, ∃r.Self ⊑ D ⊨ A ⊑ D. Both hasSelf restriction
+        // bnodes are distinct but share (onProperty r, hasSelf true), so they decode to the SAME
+        // ∃r.Self atom; CR1 threads A ⊑ ∃r.Self ⊑ D (CR-Self-2 realised via the self-concept).
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; owl:hasSelf \"true\"^^xsd:boolean ] .
+             [ a owl:Restriction ; owl:onProperty :r ; owl:hasSelf \"true\"^^xsd:boolean ] rdfs:subClassOf :D ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let h = Classifier::classify(&dict, &triples);
+        let (a, d) = (iri(&dict, "http://ex/A"), iri(&dict, "http://ex/D"));
+        assert!(h.is_subclass_of(a, d), "A ⊑ ∃r.Self ⊑ D must classify");
+        assert_eq!(h.report().skipped_axioms, 0, "owl:hasSelf is in-fragment (CR-Self)");
+    }
+
+    #[test]
+    fn general_self_link_does_not_trigger_cr_self_2() {
+        // The load-bearing CR-Self-2 side-condition: `A ⊑ ∃r.A` creates a general link (A,A) ∈
+        // R(r) whose invariant is only A ⊑ ∃r.A, NOT A ⊑ ∃r.Self (the successor is a FRESH A-node,
+        // not A itself). So `∃r.Self ⊑ D` must NOT derive A ⊑ D — firing CR-Self-2 off the raw
+        // link would be UNSOUND. No derivation without a positive rule premise.
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; owl:someValuesFrom :A ] .
+             [ a owl:Restriction ; owl:onProperty :r ; owl:hasSelf \"true\"^^xsd:boolean ] rdfs:subClassOf :D ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let h = Classifier::classify(&dict, &triples);
+        let (a, d) = (iri(&dict, "http://ex/A"), iri(&dict, "http://ex/D"));
+        assert!(
+            !h.is_subclass_of(a, d),
+            "a general (A,A) link is not ∃r.Self — CR-Self-2 must not fire"
+        );
+        assert_eq!(h.report().skipped_axioms, 0, "someValuesFrom + hasSelf are both in-fragment");
+    }
+
+    #[test]
+    fn malformed_has_self_is_skipped() {
+        // [OPUS-4.8] sq-pbz04.2.6 (fail-closed): a `hasSelf "false"` and a `hasSelf true` WITHOUT
+        // owl:onProperty are BOTH counted skips, never a guessed self-restriction; the EL part
+        // still classifies and the skipped axioms fabricate nothing.
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; owl:hasSelf \"false\"^^xsd:boolean ] .
+             :B rdfs:subClassOf [ a owl:Restriction ; owl:hasSelf \"true\"^^xsd:boolean ] .
+             :E rdfs:subClassOf :F ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let h = Classifier::classify(&dict, &triples);
+        assert_eq!(
+            h.report().skipped_axioms,
+            2,
+            "hasSelf false + hasSelf-without-onProperty are both counted skips"
+        );
+        let (e, f) = (iri(&dict, "http://ex/E"), iri(&dict, "http://ex/F"));
+        assert!(h.is_subclass_of(e, f), "the EL part (E ⊑ F) still classifies");
+        let a = iri(&dict, "http://ex/A");
+        assert!(h.super_classes(a).is_empty(), "a skipped hasSelf axiom fabricates no subsumption");
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //
 //   {a} ⊑ C   (C a NAMED class, incl. owl:Thing)  ⇒  `a rdf:type C`
 //   {a} ⊑ {b} (a derived nominal subsumption)      ⇒  `a owl:sameAs b`
+//   ∃r.Self ∈ S({a})  (owl:hasSelf, sq-pbz04.2.6)  ⇒  `a r a`   (the CR-Self self-loop readoff)
 //   {a} ⊑ ⊥   OR  ⊤ ⊑ ⊥                            ⇒  a whole-ontology `inconsistent` verdict
 //
 // SOUNDNESS (the load-bearing invariant — soundness over completeness). The saturation maintains
@@ -51,6 +52,9 @@ pub struct Realization {
     hierarchy: ClassHierarchy,
     types: Vec<(Id, Id)>,
     same_as: Vec<(Id, Id)>,
+    /// [OPUS-4.8] sq-pbz04.2.6: `(individual, object-property)` pairs for each derived
+    /// `owl:hasSelf` self-loop `a r a` (`∃r.Self ∈ S({a})`), sorted + deduplicated.
+    self_loops: Vec<(Id, Id)>,
 }
 
 impl Realization {
@@ -70,6 +74,15 @@ impl Realization {
     /// sorted + deduplicated. EMPTY when the ontology is inconsistent.
     pub fn same_as(&self) -> &[(Id, Id)] {
         &self.same_as
+    }
+
+    /// [OPUS-4.8] sq-pbz04.2.6: realised `owl:hasSelf` self-loops as `(individual, object-property)`
+    /// pairs — each denotes the derived property assertion `a r a` from `∃r.Self ∈ S({a})` (i.e.
+    /// `{a} ⊑ ∃r.Self`; the OWL WG `New-Feature-SelfRestriction-001` "Peter likes Peter" readoff).
+    /// Sorted + deduplicated; EMPTY when the ontology is inconsistent. SOUND because `{a}` is the
+    /// singleton `{a^I}`, so `{a} ⊑ ∃r.Self` forces `(a^I, a^I) ∈ r^I`.
+    pub fn self_assertions(&self) -> &[(Id, Id)] {
+        &self.self_loops
     }
 
     /// Whether the WHOLE ontology is inconsistent (`{a} ⊑ ⊥` for an asserted individual, or a
@@ -121,9 +134,9 @@ pub fn realize(dict: &Dict, triples: &[[Id; 3]]) -> Realization {
             .any(|(_, c)| sat.s[c as usize].contains(&BOTTOM));
     hierarchy.inconsistent = inconsistent;
 
-    let (types, same_as) = if inconsistent {
+    let (types, same_as, self_loops) = if inconsistent {
         // An inconsistent ontology entails everything — surface ONLY the verdict, not a flood.
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     } else {
         readoff(dict, &sat, &ex.names)
     };
@@ -131,18 +144,20 @@ pub fn realize(dict: &Dict, triples: &[[Id; 3]]) -> Realization {
         hierarchy,
         types,
         same_as,
+        self_loops,
     }
 }
 
 /// Reads the realised type assertions + `owl:sameAs` pairs off a saturated (CONSISTENT)
 /// classification. `owl:Thing` typing is emitted per individual only when `owl:Thing` is interned
 /// (it is a trivially-true type; [`realize_graph`] interns it so it is always emitted there).
-fn readoff(dict: &Dict, sat: &classify::Saturation, names: &Names) -> (Pairs, Pairs) {
+fn readoff(dict: &Dict, sat: &classify::Saturation, names: &Names) -> (Pairs, Pairs, Pairs) {
     let owl_thing = lookup(dict, OWL_THING);
     // concept → individual dict id, for the sameAs reverse mapping.
     let rev: FxHashMap<Concept, Id> = names.nominals().map(|(id, c)| (c, id)).collect();
     let mut types: Pairs = Vec::new();
     let mut same_as: Pairs = Vec::new();
+    let mut self_loops: Pairs = Vec::new();
     for (ind, nc) in names.nominals() {
         if owl_thing != NO_ID {
             types.push((ind, owl_thing));
@@ -160,6 +175,13 @@ fn readoff(dict: &Dict, sat: &classify::Saturation, names: &Names) -> (Pairs, Pa
                         same_as.push((other, ind));
                     }
                 }
+            } else if let Some(r) = names.self_role(d) {
+                // [OPUS-4.8] sq-pbz04.2.6: `∃r.Self ∈ S({ind})` ⟹ `{ind} ⊑ ∃r.Self`; since
+                // `{ind}` is the singleton `{ind^I}`, the r-self-loop is at `ind` itself, so
+                // `ind r ind` holds in EVERY model. (The role is always a named property.)
+                if let Some(rd) = names.role_dict_of(r) {
+                    self_loops.push((ind, rd));
+                }
             } else if let Some(cd) = names.dict_of(d) {
                 types.push((ind, cd));
             }
@@ -169,7 +191,9 @@ fn readoff(dict: &Dict, sat: &classify::Saturation, names: &Names) -> (Pairs, Pa
     types.dedup();
     same_as.sort_unstable();
     same_as.dedup();
-    (types, same_as)
+    self_loops.sort_unstable();
+    self_loops.dedup();
+    (types, same_as, self_loops)
 }
 
 /// The report of a materializing [`realize_graph`] run: the base [`Report`] (skipped assertions,
@@ -186,6 +210,8 @@ pub struct AboxReport {
     pub emitted_type_assertions: usize,
     /// NEW `a owl:sameAs b` triples appended.
     pub emitted_same_as: usize,
+    /// [OPUS-4.8] sq-pbz04.2.6: NEW `a r a` `owl:hasSelf` self-loop triples appended.
+    pub emitted_self_assertions: usize,
 }
 
 /// Classifies + realises the ABox and MATERIALIZES the readoff IN PLACE: appends every derived
@@ -212,6 +238,7 @@ pub fn realize_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> AboxReport 
     let mut present: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
     let mut emitted_type_assertions = 0usize;
     let mut emitted_same_as = 0usize;
+    let mut emitted_self_assertions = 0usize;
     if !inconsistent {
         for &(ind, cls) in r.type_assertions() {
             let t = [ind, rdf_type, cls];
@@ -227,12 +254,23 @@ pub fn realize_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> AboxReport 
                 emitted_same_as += 1;
             }
         }
+        // [OPUS-4.8] sq-pbz04.2.6: `owl:hasSelf` self-loops `a r a`. The role predicate `r` is
+        // already interned (it occurred as an `owl:onProperty` object in the input), so no new
+        // vocabulary is minted; hasSelf-free inputs read off no self-loops (byte-identical).
+        for &(ind, role) in r.self_assertions() {
+            let t = [ind, role, ind];
+            if present.insert(t) {
+                triples.push(t);
+                emitted_self_assertions += 1;
+            }
+        }
     }
     AboxReport {
         report,
         inconsistent,
         emitted_type_assertions,
         emitted_same_as,
+        emitted_self_assertions,
     }
 }
 
@@ -495,6 +533,98 @@ mod tests {
         let sa = r.same_as();
         assert!(sa.contains(&(a, b)), "a owl:sameAs b");
         assert!(sa.contains(&(b, a)), "owl:sameAs is emitted symmetrically");
+    }
+
+    // --- New-Feature-SelfRestriction-001: `Peter a [hasSelf likes]` ⊨ `Peter likes Peter`. -----
+    // [OPUS-4.8] sq-pbz04.2.6: the E1 realisation readoff of the CR-Self-1 self-loop.
+    #[test]
+    fn self_restriction_001_peter_likes_peter() {
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             :Peter a [ a owl:Restriction ;
+                        owl:onProperty :likes ;
+                        owl:hasSelf \"true\"^^xsd:boolean ] ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent());
+        let (peter, likes) = (iri(&dict, "http://ex/Peter"), iri(&dict, "http://ex/likes"));
+        assert!(
+            r.self_assertions().contains(&(peter, likes)),
+            "{{Peter}} ⊑ ∃likes.Self ⊨ Peter likes Peter (CR-Self-1 self-loop readoff)"
+        );
+        // Sound + fail-closed: the ONLY realised self-loop is Peter's own.
+        assert_eq!(r.self_assertions(), &[(peter, likes)]);
+    }
+
+    // --- realize_graph materializes the self-loop and is idempotent. ---------------------------
+    #[test]
+    fn self_restriction_001_realize_graph_materializes_self_loop() {
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             :Peter a [ a owl:Restriction ; owl:onProperty :likes ; owl:hasSelf \"true\"^^xsd:boolean ] ."
+        );
+        let (mut dict, mut triples) = parse(&ttl);
+        let rep = realize_graph(&mut dict, &mut triples);
+        assert!(!rep.inconsistent);
+        assert_eq!(rep.emitted_self_assertions, 1, "Peter likes Peter emitted once");
+        let (peter, likes) = (iri(&dict, "http://ex/Peter"), iri(&dict, "http://ex/likes"));
+        assert!(triples.contains(&[peter, likes, peter]), "Peter likes Peter materialized");
+        let rep2 = realize_graph(&mut dict, &mut triples);
+        assert_eq!(rep2.emitted_self_assertions, 0, "second call is idempotent");
+    }
+
+    // --- The CR-Self-1 self-loop LINK threads a typing through CR4 (not just a readoff trick). --
+    // ∃likes.Person ⊑ Sociable ; Peter a [hasSelf likes] , Person ⊨ Peter : Sociable, because
+    // Peter's own likes-self-loop witnesses an r-successor (Peter) that is a Person.
+    #[test]
+    fn self_loop_threads_a_typing_through_cr4() {
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             [ a owl:Restriction ; owl:onProperty :likes ; owl:someValuesFrom :Person ]
+                 rdfs:subClassOf :Sociable .
+             :Peter a [ a owl:Restriction ; owl:onProperty :likes ; owl:hasSelf \"true\"^^xsd:boolean ] .
+             :Peter a :Person ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent());
+        let (peter, sociable) = (iri(&dict, "http://ex/Peter"), iri(&dict, "http://ex/Sociable"));
+        assert!(
+            r.type_assertions().contains(&(peter, sociable)),
+            "the likes-self-loop must let CR4 derive Peter : Sociable"
+        );
+    }
+
+    // --- New-Feature-SelfRestriction-002 (converse): honest incompleteness boundary. -----------
+    // The corpus -002 conclusion types Peter INTO ∃likes.Self from `Peter likes Peter`. That is
+    // the CONVERSE of CR-Self-1 (a raw self-link ⇒ the ∃r.Self concept) — a nominal-only readoff
+    // that is a documented follow-up (captured in this PR's notes), NOT one of the two E2 rules. This
+    // pins the load-bearing soundness invariant: the general self-link `(peter,peter) ∈ R(likes)`
+    // that `Peter likes Peter` creates must NOT be treated as ∃likes.Self, so `∃likes.Self ⊑
+    // SelfLover` must NOT (yet) fire — no derivation without a positive rule premise.
+    #[test]
+    fn self_restriction_002_converse_is_not_over_derived() {
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             [ a owl:Restriction ; owl:onProperty :likes ; owl:hasSelf \"true\"^^xsd:boolean ]
+                 rdfs:subClassOf :SelfLover .
+             :Peter :likes :Peter ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent(), "a self-loving individual is consistent");
+        let (peter, self_lover) = (iri(&dict, "http://ex/Peter"), iri(&dict, "http://ex/SelfLover"));
+        assert!(
+            !r.type_assertions().contains(&(peter, self_lover)),
+            "the raw self-link is NOT ∃likes.Self — CRs2 must not fire without a positive premise"
+        );
+        // And the asserted OPA is never mistaken for a hasSelf readoff.
+        assert!(r.self_assertions().is_empty(), "no ∃r.Self concept exists in S({{Peter}})");
     }
 
     // --- An empty / TBox-only graph realises to nothing and is consistent. ----------------------
