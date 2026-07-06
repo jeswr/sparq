@@ -306,6 +306,105 @@ pinned `ql_dllite_suite` floor never regresses.**
 - `sq-4ldc4` → **closed as superseded** by `sq-pbz04.3.5` (tree-witness half landed in
   `treewitness.rs`; the H-complete/combined half re-scoped as an evaluate-first spike).
 
+## 10. Combined-approach / H-complete-ABox evaluate-first spike (`sq-pbz04.3.5`) — reasoned NON-ADOPTION
+
+[OPUS-4.8] `sq-pbz04.3.5` (supersedes `sq-4ldc4`). This is the §0-item-3 evaluation, executed
+measure-first. The combined approach (Kontchakov, Lutz, Toman, Wolter, Zakharyaschev — *The
+Combined Approach to Query Answering in DL-Lite*, IJCAI 2011) trades a large query **rewriting**
+for a hierarchy-completed (**H-complete**) ABox plus a small filtering step. It is a **performance
+lever, not a soundness gap**, and it wins **only when pure PerfectRef rewriting blows the UCQ up
+while ABox saturation stays cheap**. Whether it pays off here is therefore an empirical question
+about the **measured UCQ-size distribution** on the real corpus — not the literature's worst-case
+claim. **Verdict: NON-ADOPTION.** The numbers are below; no combined-approach code is added.
+
+### 10.1 What was measured (deterministic; counts, not wall-clock)
+
+The minimised-UCQ size (`rewrite_production`: PerfectRef ∪ tree-witness ∪ containment
+minimisation) is a **pure function of the (TBox, query)**, so every count is a closed form. The
+reproducible harness is `crates/sparq-reason-ql/examples/ql_rewrite_bench.rs` (the
+`run_corpus_profile` section — self-asserting closed forms, no fetched fixtures). Two axes:
+
+- **Realistic corpus** — the 11 graduated DL-Lite_R oracle shapes (mirror of
+  `sparq-conformance`'s `QL_DLLITE_ORACLE` C1..C11) **plus** the answered W3C `pr:QL`
+  extensional-CQ shapes (single/double class atom over a shallow RDFS hierarchy, a literal-object
+  role atom): **14 answered cases**.
+- **Adversarial ceiling probes** — multi-atom CQs over **independent** subclass chains (the
+  product shape), the only construction that forces a blow-up.
+
+### 10.2 The measured distribution
+
+| Corpus | Answered | min UCQ | median | max UCQ | Blow-up? |
+| --- | --- | --- | --- | --- | --- |
+| Realistic (oracle ∪ W3C answered) | 14 | 1 | 2 | **4** | none |
+
+Realistic distribution (minimised UCQ size): `[1] = 4`, `[2–4] = 10`, `[5–16] = 0`, `[17+] = 0`.
+**Nothing in the realistic corpus exceeds 4 disjuncts.**
+
+The full W3C `pr:QL` entailment corpus is **31 cases**; the always-present CQ-shape gate splits it
+**17 admitted / 14 held** (7 BIND-arithmetic, 3 variable-predicate, 4 intensional-schema atoms —
+each `permanently-outside` sound rewriting per §5/§6). Of the 17 admitted, twelve are single-atom
+and only three are multi-atom (`sparqldl-04` at 3 atoms, `sparqldl-06`/`-07` at 4) — **and those
+three carry OWL-DL TBoxes (property chains, `owl:sameAs`) that fall outside DL-Lite_R and are
+`skipped`**, so PerfectRef returns the identity UCQ (≈1 disjunct) despite the atom count. The
+answered class/role-atom cases sit over depth-1/2 RDFS hierarchies, giving 1–3 disjuncts.
+
+Ceiling probes (the shape that *does* blow up), closed forms `(k+1)^atoms`:
+
+| Probe | k = 2 | k = 3 | k = 5 | k = 8 |
+| --- | --- | --- | --- | --- |
+| product, 2 class atoms, same var | 9 | 16 | 36 | 81 |
+| product, 3 class atoms, same var | 27 | 64 | — | — |
+
+For every product probe the pre-minimisation and minimised counts are **equal** — the product
+disjuncts are mutually **incomparable**, so containment minimisation cannot collapse them. This is
+precisely the case the combined approach would remove (one CQ over an H-complete ABox instead of
+`(k+1)^atoms` CQs).
+
+### 10.3 Why NON-ADOPTION is the honest verdict
+
+1. **No blow-up on the real corpus.** The maximum measured realistic UCQ is **4 disjuncts**; the
+   median is 2. A 4-way (or 36-way, or 81-way) union of BGPs is trivially evaluable by the
+   in-memory engine — there is no rewriting cost for the combined approach to amortise.
+2. **The two blow-up sources that the corpus *does* exhibit are already handled.** The existential
+   chase is captured by **bounded tree-witness folding** (`treewitness.rs`), and redundant
+   disjuncts are dropped by **UCQ-containment minimisation** (`minimise.rs`) — both landed and
+   oracle-verified. The one blow-up the corpus does **not** exhibit (the incomparable product) is
+   the *only* thing the combined approach would add, and it is absent.
+3. **The blow-up requires a shape the corpus never produces:** a multi-atom conjunctive query
+   whose atoms sit over **independent, non-trivial (depth ≥ 1) class hierarchies**. It is **not**
+   the CQ-shape gate that bounds the UCQ (the gate admits multi-atom CQs) — it is the realistic
+   **query and TBox shapes** (single-atom-dominated queries, shallow hierarchies, and multi-atom
+   queries whose schema is outside DL-Lite_R). This distinction is the close-out lever below.
+4. **Adopting it cuts against the crate's load-bearing architecture.** The crate is a **pure
+   query-rewriter over the unmodified ABox**, reusing the engine's query path with **no store or
+   planner changes** (README "Query-rewriter seam"). The combined approach requires **materialising
+   an H-complete ABox** (data saturation) **plus** an anonymous-individual **filtering step** — a
+   store-side write path and a non-standard evaluation the engine does not have. Paying that
+   architectural cost for a UCQ that is already ≤ 4 disjuncts is a net regression, not a win.
+
+This mirrors the EL/QL substrate **reasoned non-adoption** precedent (the CR1–CR5 substrate joins,
+`research/owl2-rl-el-wave2-disposition.md` §3.1) and the RSP substrate non-adoption: adopt only
+when a measurement — not a worst-case bound — shows the lever pays.
+
+### 10.4 Close-out criteria — what would flip the calculus (revisit triggers)
+
+Re-open the spike (a fresh child bead, not a reopen of this record) **iff** a future change makes
+the product shape realistic AND the measured distribution shifts into the `[17+]` bucket:
+
+- **Fragment broadening lands multi-atom CQs over deep independent hierarchies** — e.g. graduating
+  a real-ontology QL benchmark whose TBox has wide/deep class hierarchies **and** whose query load
+  joins several such class atoms on one variable (LUBM/NPD-style analytic CQs). The gate already
+  admits the shape; only the corpus is missing.
+- **A DL-Lite_R TBox with deep hierarchies enters the answered set** (e.g. `owl:equivalentClass`
+  capture from `sq-pbz04.3.3` pulling in a large real vocabulary) so that a **single** rewritten
+  atom's UCQ contribution itself grows past a handful.
+- **Re-run `run_corpus_profile` after any such change**: if the realistic max/median climbs out of
+  the `≤ 4` band and minimisation demonstrably cannot collapse the product, the combined approach
+  becomes worth an evaluate-first **spike behind the `experimental` feature**, soundness-first,
+  with a **differential oracle vs `rewrite_production`** (certain-answer set equality on the whole
+  oracle suite) before any default-path change. Until then: no code, `rewrite_production` unchanged,
+  fail-closed gate untouched.
+
 ## References
 
 - Calvanese, De Giacomo, Lembo, Lenzerini, Rosati — *Tractable Reasoning and Efficient Query
@@ -313,6 +412,10 @@ pinned `ql_dllite_suite` floor never regresses.**
   over UCQs).
 - W3C — *OWL 2 Profiles* §3 (OWL 2 QL); *SPARQL 1.1 Entailment Regimes* (the regime semantics
   `.4` must pin its coincidence condition against).
+- Kontchakov, Lutz, Toman, Wolter, Zakharyaschev — *The Combined Approach to Query Answering in
+  DL-Lite*, IJCAI 2011 (the H-complete-ABox + filtering alternative to pure rewriting; §10). Cf.
+  Kontchakov, Rodríguez-Muro, Zakharyaschev — *Ontology-Based Data Access with Databases: A Short
+  Course*, RW 2013 (tree-witness rewriting, the landed `treewitness.rs`).
 - `research/owl2-el-ql-reasoning-spike.md` (the QL track; the applicability trap) and
   `research/reasoner-suite-on-substrate.md` §2.5 (the PerfectRef trap; sequencing).
 - Repo estate: `crates/sparq-reason-ql/` (`sq-t5bne`, `sq-g19x0`), the graduated DL-Lite_R
