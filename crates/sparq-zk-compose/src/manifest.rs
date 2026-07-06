@@ -1209,6 +1209,89 @@ pub struct JoinEdge {
     pub join_proof: usize,
 }
 
+/// One DISCLOSED term of an extended-fragment solution (sq-1zf94): an IRI or a
+/// literal the relying party reads off the presented solution. Blank nodes are
+/// NOT expressible (they are existential in the committed model, so a disclosed
+/// solution never names one) — an endpoint that binds to a blank node stays
+/// existential/undisclosed and is not term-bound by this layer.
+///
+/// The verifier RE-ENCODES the term itself (`sparq_zk::encode::encode_term`,
+/// salt-independent for IRIs/literals) and byte-matches the recomputed encoding
+/// against the proof-bound `PathReach` `src_enc`/`dst_enc` / the query's `VALUES`
+/// cell — it never trusts a prover-supplied encoding. So this carries the
+/// PREIMAGE the relying party reads, and the gate proves that preimage is the one
+/// the proof attests.
+// [OPUS-4.8] sq-1zf94: disclosed-solution term. Opt-in (`extended-fragment`),
+// research-grade, NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DisclosedTerm {
+    /// An IRI (a `NamedNode`). `value` is the raw IRI (no `<>`).
+    Iri {
+        /// The IRI string.
+        value: String,
+    },
+    /// A literal. Exactly one shape is well-formed: a plain literal (`value`
+    /// only), a language-tagged literal (`value` + `language`, datatype implicitly
+    /// `rdf:langString`), or a typed literal (`value` + `datatype`). A literal
+    /// carrying BOTH a `language` and a non-`rdf:langString` `datatype` is
+    /// malformed and rejected fail-closed (`to_term` returns `None`).
+    Literal {
+        /// The lexical value.
+        value: String,
+        /// The datatype IRI (typed literals; mutually exclusive with `language`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        datatype: Option<String>,
+        /// The BCP-47 language tag (language-tagged literals).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
+}
+
+#[cfg(feature = "extended-fragment")]
+impl DisclosedTerm {
+    /// Rebuild the `oxrdf::Term` (verifier-side) so the encoding can be
+    /// recomputed. Returns `None` (fail-closed) on an unparseable IRI / datatype
+    /// / language tag, or a literal that carries both a language and a
+    /// non-`rdf:langString` datatype.
+    pub fn to_term(&self) -> Option<oxrdf::Term> {
+        const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+        match self {
+            DisclosedTerm::Iri { value } => {
+                oxrdf::NamedNode::new(value).ok().map(oxrdf::Term::NamedNode)
+            }
+            DisclosedTerm::Literal { value, datatype, language } => {
+                let lit = match (datatype.as_deref(), language.as_deref()) {
+                    (Some(dt), Some(_)) if dt != RDF_LANG_STRING => return None,
+                    (_, Some(lang)) => {
+                        oxrdf::Literal::new_language_tagged_literal(value, lang).ok()?
+                    }
+                    (Some(dt), None) => {
+                        oxrdf::Literal::new_typed_literal(value, oxrdf::NamedNode::new(dt).ok()?)
+                    }
+                    (None, None) => oxrdf::Literal::new_simple_literal(value),
+                };
+                Some(oxrdf::Term::Literal(lit))
+            }
+        }
+    }
+}
+
+/// One disclosed variable binding of an extended-fragment solution (sq-1zf94):
+/// `var` (a query variable name, no leading `?`) is bound to the disclosed
+/// [`DisclosedTerm`]. The verifier binds this to the proof-bound term encodings
+/// (see [`crate::verifier::bind_fragment_solution`]).
+// [OPUS-4.8] sq-1zf94: disclosed-solution binding. Opt-in (`extended-fragment`).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolutionBinding {
+    /// The query variable name (no leading `?`).
+    pub var: String,
+    /// The disclosed term the variable is bound to in this solution.
+    pub term: DisclosedTerm,
+}
+
 /// The PER-SOLUTION UNION branch attribution + obligation binding (sq-3kd2g.6).
 ///
 /// `UNION` semantics under the extended fragment is PER-SOLUTION branch
@@ -1235,14 +1318,22 @@ pub struct JoinEdge {
 /// manifest carries a single `BranchWitness { branch: 0, .. }` per disclosed
 /// solution.
 ///
-/// # Honest scope (the binding this gate does NOT do yet)
-/// This gate is the STRUCTURAL ROUTING layer: it binds each construct to a bound
-/// sub-proof of the correct circuit member (and surfaces the depth bound). The
-/// TERM-encoding binding of a path's `pred_enc`/`src_enc`/`dst_enc` and a VALUES
-/// row's cell terms to the disclosed SOLUTION bindings — the analogue of the
-/// scan slot binding / `bind_joins` commitment binding — is a documented
-/// follow-up (it needs the disclosed-solution model; tracked as a child bead).
-/// Like every gate here, it asserts NO soundness / privacy property (sq-qhy4).
+/// # Honest scope (the disclosed-solution term binding — sq-1zf94)
+/// `dispatch_fragment` is the STRUCTURAL ROUTING layer: it binds each construct to
+/// a bound sub-proof of the correct circuit member (and surfaces the depth bound).
+/// The TERM-encoding binding of a path's `pred_enc`/`src_enc`/`dst_enc` and a
+/// `VALUES` row's cell terms to the disclosed SOLUTION bindings (the [`solution`]
+/// field) — the composition analogue of the flat scan-slot binding /
+/// `bind_joins` commitment binding — is done by
+/// [`crate::verifier::bind_fragment_solution`] (run by
+/// [`crate::verifier::verify_fragment_manifest`]). What that gate STILL DEFERS is
+/// explicit: the BGP-scan-slot binding of a disclosed solution's variables to a
+/// scan sub-proof's disclosed rows (a scan discloses `r` rows — the
+/// per-solution row-selection model is the remaining sq-1zf94 residual), and the
+/// flat cross-graph Q6 non-bnode obligation per branch. Like every gate here, it
+/// asserts NO soundness / privacy property (sq-qhy4).
+///
+/// [`solution`]: BranchWitness::solution
 // [OPUS-4.8] sq-3kd2g.6: per-solution UNION branch attribution + obligation
 // binding schema. Opt-in (`extended-fragment`), NOT-yet-sound.
 #[cfg(feature = "extended-fragment")]
@@ -1268,6 +1359,19 @@ pub struct BranchWitness {
     /// (out-of-range => fail-closed).
     #[serde(default)]
     pub values_rows: Vec<usize>,
+    /// The DISCLOSED solution bindings (sq-1zf94): the variable→term assignment
+    /// the relying party reads for THIS solution. The verifier re-encodes each
+    /// term itself and binds it to the proof-bound `PathReach`
+    /// `src_enc`/`dst_enc` and the query's `VALUES` cells
+    /// ([`crate::verifier::bind_fragment_solution`]) — so an accepted proof's
+    /// disclosed path endpoints / VALUES-constrained variables are tied to the
+    /// specific terms here (fail-closed on any mismatch). Every PROJECTED path
+    /// endpoint variable MUST appear here; an EXISTENTIAL (non-projected) endpoint
+    /// stays hidden and is not term-bound. Empty => no disclosed-term binding
+    /// (only the query-CONSTANT path predicate/endpoints are bound).
+    // [OPUS-4.8] sq-1zf94: disclosed-solution term binding.
+    #[serde(default)]
+    pub solution: Vec<SolutionBinding>,
 }
 
 /// The full query-result proof manifest.
@@ -2388,10 +2492,70 @@ mod path_schema_tests {
             scan_proofs: vec![0, 2],
             path_proofs: vec![1],
             values_rows: vec![3],
+            solution: vec![SolutionBinding {
+                var: "o".to_string(),
+                term: DisclosedTerm::Iri { value: "http://ex/b".to_string() },
+            }],
         };
         let json = serde_json::to_string(&bw).expect("serializes");
         let back: BranchWitness = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back, bw);
+    }
+
+    #[test]
+    fn disclosed_term_to_term_builds_iris_and_literal_shapes() {
+        // IRI.
+        assert_eq!(
+            DisclosedTerm::Iri { value: "http://ex/a".into() }.to_term(),
+            Some(oxrdf::Term::NamedNode(oxrdf::NamedNode::new("http://ex/a").unwrap()))
+        );
+        // Plain literal.
+        assert_eq!(
+            DisclosedTerm::Literal { value: "x".into(), datatype: None, language: None }.to_term(),
+            Some(oxrdf::Term::Literal(oxrdf::Literal::new_simple_literal("x")))
+        );
+        // Typed literal.
+        assert_eq!(
+            DisclosedTerm::Literal {
+                value: "1".into(),
+                datatype: Some("http://www.w3.org/2001/XMLSchema#integer".into()),
+                language: None,
+            }
+            .to_term(),
+            Some(oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+                "1",
+                oxrdf::NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+            )))
+        );
+        // Language-tagged literal.
+        assert_eq!(
+            DisclosedTerm::Literal { value: "x".into(), datatype: None, language: Some("en".into()) }
+                .to_term(),
+            Some(oxrdf::Term::Literal(
+                oxrdf::Literal::new_language_tagged_literal("x", "en").unwrap()
+            ))
+        );
+        // Fail-closed: an unparseable IRI, a bad datatype, a bad language tag, and
+        // a language + non-langString datatype all return None.
+        assert_eq!(DisclosedTerm::Iri { value: "not an iri".into() }.to_term(), None);
+        assert_eq!(
+            DisclosedTerm::Literal {
+                value: "x".into(),
+                datatype: Some("not an iri".into()),
+                language: None,
+            }
+            .to_term(),
+            None
+        );
+        assert_eq!(
+            DisclosedTerm::Literal {
+                value: "x".into(),
+                datatype: Some("http://www.w3.org/2001/XMLSchema#string".into()),
+                language: Some("en".into()),
+            }
+            .to_term(),
+            None
+        );
     }
 
     #[test]
@@ -2424,6 +2588,7 @@ mod path_schema_tests {
                 scan_proofs: vec![],
                 path_proofs: vec![0],
                 values_rows: vec![],
+                solution: vec![],
             }],
         );
         assert_eq!(fm.r#type, "urn:sparq:zk:FragmentManifest");

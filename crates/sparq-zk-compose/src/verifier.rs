@@ -138,9 +138,10 @@ use sparq_zk::verify::{
 };
 // [OPUS-4.8] sq-3kd2g.6: the wave-1 extended-fragment query re-derivation the
 // fail-closed `dispatch_fragment` routing gate consumes (never trusting the
-// manifest). Opt-in (`extended-fragment`).
+// manifest). Opt-in (`extended-fragment`). [OPUS-4.8] sq-1zf94: `SlotPattern` is
+// the shape of a re-derived path endpoint the disclosed-solution binding matches on.
 #[cfg(feature = "extended-fragment")]
-use sparq_zk::verify::fragment_query;
+use sparq_zk::verify::{fragment_query, SlotPattern};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -1528,6 +1529,14 @@ pub enum CheckError {
     /// structured error alongside the stage-1 gates. Opt-in (`extended-fragment`).
     #[cfg(feature = "extended-fragment")]
     FragmentDispatch(FragmentDispatchError),
+    /// [OPUS-4.8] sq-1zf94: the FAIL-CLOSED extended-fragment DISCLOSED-SOLUTION
+    /// term binding ([`bind_fragment_solution`]) refused the presentation — a
+    /// `PathReach` `pred_enc`/`src_enc`/`dst_enc` or a `VALUES` cell does not equal
+    /// the encoding the verifier re-derives from the disclosed solution + query
+    /// text (never the manifest's encodings). Carried into
+    /// [`verify_fragment_manifest`]. Opt-in (`extended-fragment`).
+    #[cfg(feature = "extended-fragment")]
+    FragmentSolution(FragmentSolutionError),
 }
 
 impl std::fmt::Display for CheckError {
@@ -1847,6 +1856,10 @@ impl std::fmt::Display for CheckError {
             #[cfg(feature = "extended-fragment")]
             CheckError::FragmentDispatch(e) => {
                 write!(f, "extended-fragment dispatch rejected: {}", e)
+            }
+            #[cfg(feature = "extended-fragment")]
+            CheckError::FragmentSolution(e) => {
+                write!(f, "extended-fragment disclosed-solution binding rejected: {}", e)
             }
         }
     }
@@ -5204,16 +5217,15 @@ impl std::error::Error for FragmentDispatchError {}
 /// # Honest scope (load-bearing)
 /// This is the STRUCTURAL ROUTING gate. It binds each construct to a bound
 /// sub-proof of the correct member and surfaces the depth bound; it is the
-/// composition analogue of `verify::branch_obligations`. It does NOT yet run the
-/// bb proof verification (that is the existing [`verify_manifest`] loop, which
-/// `reconstruct_public_inputs` now serializes `PathReach` inputs for) and does
-/// NOT yet bind a path's `pred_enc`/`src_enc`/`dst_enc` or a VALUES row's cell
-/// terms to the disclosed SOLUTION bindings — that term-binding layer needs the
-/// disclosed-solution model and is a documented follow-up bead. Wiring an
-/// end-to-end path/`UNION`/`VALUES` ACCEPT into `verify_manifest` (routing its
-/// stage-1 `recheck` through `fragment_query`) is that same follow-up. The
-/// verifier stack is internally re-audited but NOT externally audited (sq-qhy4
-/// pending); NO soundness / privacy property is asserted as achieved.
+/// composition analogue of `verify::branch_obligations`. It does NOT itself run
+/// the bb proof verification (that is the [`verify_manifest`] loop, which
+/// `reconstruct_public_inputs` serializes `PathReach` inputs for) NOR the disclosed
+/// TERM binding of a path's `pred_enc`/`src_enc`/`dst_enc` or a VALUES row's cells
+/// — that disclosed-solution term binding is [`bind_fragment_solution`] (sq-1zf94),
+/// and both run together in [`verify_fragment_manifest`] for an end-to-end
+/// path/`UNION`/`VALUES` accept. The verifier stack is internally re-audited but
+/// NOT externally audited (sq-qhy4 pending); NO soundness / privacy property is
+/// asserted as achieved.
 // [OPUS-4.8] sq-3kd2g.6: fail-closed fragment dispatch routing gate.
 #[cfg(feature = "extended-fragment")]
 pub fn dispatch_fragment(
@@ -5367,6 +5379,346 @@ pub fn dispatch_fragment(
     Ok(())
 }
 
+/// Which endpoint of a `PathReach` obligation a disclosed-solution binding refers
+/// to (`src_enc` vs `dst_enc`). Used by [`FragmentSolutionError`] (sq-1zf94).
+// [OPUS-4.8] sq-1zf94. Opt-in (`extended-fragment`).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathEndpoint {
+    /// The chain SOURCE (`src_enc`, the path subject).
+    Src,
+    /// The chain DESTINATION (`dst_enc`, the path object).
+    Dst,
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::fmt::Display for PathEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PathEndpoint::Src => write!(f, "src"),
+            PathEndpoint::Dst => write!(f, "dst"),
+        }
+    }
+}
+
+/// Why the FAIL-CLOSED extended-fragment DISCLOSED-SOLUTION term binding
+/// ([`bind_fragment_solution`], sq-1zf94) REJECTED a presentation. Every variant
+/// is a fail-closed refusal: the verifier RE-ENCODES the query predicate / query
+/// constant / disclosed solution term ITSELF and demands byte-equality with the
+/// proof-bound `PathReach` `pred_enc`/`src_enc`/`dst_enc` and the query's inline
+/// `VALUES` cells — a mismatch never silently accepts.
+// [OPUS-4.8] sq-1zf94. Opt-in (`extended-fragment`), NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FragmentSolutionError {
+    /// A disclosed [`crate::manifest::SolutionBinding`] term is malformed (an
+    /// unparseable IRI / datatype / language tag, a language + non-`rdf:langString`
+    /// datatype, or a term the encoder rejects) — the verifier cannot re-derive its
+    /// encoding, so it refuses fail-closed.
+    MalformedSolutionTerm { witness: usize, var: String },
+    /// A `PathReach` sub-proof's `pred_enc` does not equal the encoding of the
+    /// query-text path predicate: a chain proved over the WRONG predicate.
+    PathPredMismatch { witness: usize, obligation: usize },
+    /// A `PathReach` sub-proof's endpoint encoding (`src_enc` / `dst_enc`) does not
+    /// equal the encoding the verifier re-derives from the query-CONSTANT endpoint
+    /// or the disclosed solution's binding for the endpoint VARIABLE — the proof's
+    /// disclosed endpoint is not the term the presented solution claims.
+    PathEndpointMismatch { witness: usize, obligation: usize, endpoint: PathEndpoint },
+    /// A PROJECTED path endpoint VARIABLE is absent from the disclosed solution.
+    /// The relying party MUST disclose every projected endpoint so it can be bound;
+    /// omitting it to dodge the binding is fail-closed.
+    UnboundProjectedEndpoint {
+        witness: usize,
+        obligation: usize,
+        endpoint: PathEndpoint,
+        var: String,
+    },
+    /// A `VALUES` cell for a PROJECTED variable does not match the disclosed
+    /// solution's binding for that variable — a wrong disclosed row, or a solution
+    /// term inconsistent with the query's inline `VALUES` data.
+    ValuesCellMismatch { witness: usize, block: usize, column: usize, var: String },
+    /// A `VALUES` cell for a PROJECTED variable has NO disclosed-solution binding
+    /// (fail-closed — a projected VALUES-constrained variable must be disclosed).
+    UnboundProjectedValuesVar { witness: usize, block: usize, column: usize, var: String },
+    /// A path endpoint slot was an unnamed wildcard (the property-path fragment
+    /// never produces one; refused for totality).
+    WildcardEndpoint { witness: usize, obligation: usize, endpoint: PathEndpoint },
+    /// A structural inconsistency the routing gate normally rules out first (a
+    /// branch / obligation / row index out of range, or a path obligation naming a
+    /// non-`PathReach` sub-proof). Kept so this gate is SELF-CONTAINED and never
+    /// panics on an index — a fail-closed refusal even if reached directly.
+    Structure { witness: usize, what: &'static str },
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::fmt::Display for FragmentSolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FragmentSolutionError::MalformedSolutionTerm { witness, var } => write!(
+                f,
+                "branch witness {} discloses a malformed solution term for ?{} (fail-closed)",
+                witness, var
+            ),
+            FragmentSolutionError::PathPredMismatch { witness, obligation } => write!(
+                f,
+                "branch witness {} path obligation {}: pred_enc does not match the query-text path predicate (path proved over the wrong predicate)",
+                witness, obligation
+            ),
+            FragmentSolutionError::PathEndpointMismatch { witness, obligation, endpoint } => write!(
+                f,
+                "branch witness {} path obligation {}: {}_enc does not match the disclosed solution / query-constant endpoint",
+                witness, obligation, endpoint
+            ),
+            FragmentSolutionError::UnboundProjectedEndpoint { witness, obligation, endpoint, var } => {
+                write!(
+                    f,
+                    "branch witness {} path obligation {}: projected {} endpoint ?{} is not disclosed in the solution (fail-closed)",
+                    witness, obligation, endpoint, var
+                )
+            }
+            FragmentSolutionError::ValuesCellMismatch { witness, block, column, var } => write!(
+                f,
+                "branch witness {} VALUES block {} column {} (?{}): the disclosed solution does not match the chosen row's cell (wrong disclosed row / inconsistent term)",
+                witness, block, column, var
+            ),
+            FragmentSolutionError::UnboundProjectedValuesVar { witness, block, column, var } => {
+                write!(
+                    f,
+                    "branch witness {} VALUES block {} column {} (?{}): projected VALUES variable is not disclosed in the solution (fail-closed)",
+                    witness, block, column, var
+                )
+            }
+            FragmentSolutionError::WildcardEndpoint { witness, obligation, endpoint } => write!(
+                f,
+                "branch witness {} path obligation {}: {} endpoint is an unnamed wildcard (fail-closed)",
+                witness, obligation, endpoint
+            ),
+            FragmentSolutionError::Structure { witness, what } => write!(
+                f,
+                "branch witness {} disclosed-solution structure error: {} out of range (fail-closed)",
+                witness, what
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::error::Error for FragmentSolutionError {}
+
+/// Whether a proof-bound `FieldHex` parses to EXACTLY the expected field element
+/// `want`. A malformed hex is treated as a mismatch (fail-closed) — the crypto
+/// stage additionally rejects it as [`CheckError::MalformedField`].
+// [OPUS-4.8] sq-1zf94.
+#[cfg(feature = "extended-fragment")]
+fn field_hex_is(h: &FieldHex, want: &Fr) -> bool {
+    h.to_field().map(|f| f == *want).unwrap_or(false)
+}
+
+/// Bind ONE `PathReach` endpoint (`src_enc` or `dst_enc`) to the query-re-derived
+/// endpoint slot: a query CONSTANT binds to its own encoding; a PROJECTED query
+/// VARIABLE binds to the disclosed solution's encoding for it; a non-projected
+/// (existential) variable stays hidden and is NOT term-bound here (documented
+/// residual). Fail-closed on any mismatch / missing projected binding / wildcard.
+// [OPUS-4.8] sq-1zf94.
+#[cfg(feature = "extended-fragment")]
+#[allow(clippy::too_many_arguments)]
+fn bind_path_endpoint(
+    witness: usize,
+    obligation: usize,
+    endpoint: PathEndpoint,
+    slot: &SlotPattern,
+    enc: &FieldHex,
+    mu: &std::collections::BTreeMap<String, Fr>,
+    projected: &BTreeSet<String>,
+    salt: &Fr,
+) -> Result<(), FragmentSolutionError> {
+    match slot {
+        SlotPattern::Term(t) => {
+            let want = encode_term(t, salt).ok_or(FragmentSolutionError::PathEndpointMismatch {
+                witness,
+                obligation,
+                endpoint,
+            })?;
+            if field_hex_is(enc, &want) {
+                Ok(())
+            } else {
+                Err(FragmentSolutionError::PathEndpointMismatch { witness, obligation, endpoint })
+            }
+        }
+        SlotPattern::Var(v) => {
+            // A non-projected endpoint is existential (hidden by design) — the
+            // disclosed solution says nothing about it, so it is not term-bound.
+            if !projected.contains(v) {
+                return Ok(());
+            }
+            match mu.get(v) {
+                None => Err(FragmentSolutionError::UnboundProjectedEndpoint {
+                    witness,
+                    obligation,
+                    endpoint,
+                    var: v.clone(),
+                }),
+                Some(want) if field_hex_is(enc, want) => Ok(()),
+                Some(_) => {
+                    Err(FragmentSolutionError::PathEndpointMismatch { witness, obligation, endpoint })
+                }
+            }
+        }
+        SlotPattern::Wildcard => {
+            Err(FragmentSolutionError::WildcardEndpoint { witness, obligation, endpoint })
+        }
+    }
+}
+
+/// FAIL-CLOSED wave-1 extended-fragment DISCLOSED-SOLUTION term binding
+/// (sq-1zf94): the composition analogue of the flat query-text term binding
+/// (`bind_query_correctness`'s scan-const check + the `bind_joins` slot binding),
+/// for the extended constructs `dispatch_fragment` routes but does NOT term-bind.
+///
+/// For each disclosed solution (one [`crate::manifest::BranchWitness`], attributed
+/// to a branch the routing gate already validated), the verifier RE-DERIVES the
+/// branch structure from the query TEXT alone ([`fragment_query`], never the
+/// manifest), re-encodes each disclosed [`crate::manifest::SolutionBinding`] term
+/// ITSELF, and demands, fail-closed:
+///
+/// 1. **Path predicate.** Each bound `PathReach`'s `pred_enc` equals the encoding
+///    of the query-text path predicate — a chain proved over a DIFFERENT predicate
+///    than the query names is refused.
+/// 2. **Path endpoints.** Each `src_enc` / `dst_enc` equals the encoding the
+///    verifier re-derives from the query-CONSTANT endpoint, or (for a PROJECTED
+///    endpoint variable) from the disclosed solution's binding for that variable —
+///    a proof whose disclosed endpoint is not the claimed term is refused, and a
+///    projected endpoint omitted from the solution is refused.
+/// 3. **VALUES cells.** For each disclosed `VALUES` row, every PROJECTED
+///    variable's disclosed solution binding equals the encoding of that row's cell
+///    — a "wrong disclosed row" (`values_rows` pointing at a row whose cell does
+///    not match the disclosed term) is refused.
+///
+/// Because `PathReach.pred_enc`/`src_enc`/`dst_enc` are byte-bound into the bb
+/// public inputs by `reconstruct_public_inputs` (audit #1), a solution that
+/// passes THIS structural gate AND the crypto stage has its disclosed path
+/// endpoints / VALUES-constrained variables both equal to the query + disclosed
+/// terms and bound into a valid sub-proof, so the disclosed terms are genuinely
+/// tied to the proofs.
+///
+/// # Honest scope — the RESIDUAL still deferred (load-bearing)
+/// This SHRINKS the #1665 unbound surface but does not eliminate it. Still NOT
+/// bound: (a) the BGP-SCAN-slot binding of a disclosed solution's variables to a
+/// scan sub-proof's disclosed rows (a scan discloses `r` rows; the per-solution
+/// row-selection model is the remaining residual), (b) the flat cross-graph Q6
+/// non-bnode obligation per branch, and (c) an EXISTENTIAL (non-projected) path
+/// endpoint's value (hidden by design — disclosed only as an opaque encoding).
+/// The whole verifier stack is internally re-audited but NOT externally audited
+/// (sq-qhy4). NO soundness / privacy property is asserted as achieved.
+// [OPUS-4.8] sq-1zf94: disclosed-solution term binding. Opt-in
+// (`extended-fragment`), research-grade, NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+pub fn bind_fragment_solution(
+    fm: &crate::manifest::FragmentManifest,
+) -> Result<(), FragmentSolutionError> {
+    let manifest = &fm.manifest;
+    // Re-derive the fragment from the query TEXT alone (never the manifest). An
+    // outside-fragment / unparseable query is normally caught first by
+    // `dispatch_fragment`; refuse fail-closed if we somehow reach here.
+    let fq = fragment_query(&manifest.query)
+        .map_err(|_| FragmentSolutionError::Structure { witness: 0, what: "query" })?;
+    let projected: BTreeSet<String> = fq.projected.iter().cloned().collect();
+    // IRIs / literals (the only disclosable term kinds, and every query constant /
+    // VALUES cell) are salt-INDEPENDENT, so salt 0 matches the prover's encoding
+    // (`build_path_reach` uses the graph salt, identical for non-bnode terms).
+    let salt = Fr::from(0u64);
+
+    for (wi, bw) in fm.branch_witnesses.iter().enumerate() {
+        let Some(branch) = fq.branches.get(bw.branch) else {
+            return Err(FragmentSolutionError::Structure { witness: wi, what: "branch" });
+        };
+
+        // Re-encode the disclosed solution: var -> Fr, VERIFIER-recomputed (never a
+        // prover-supplied encoding).
+        let mut mu: std::collections::BTreeMap<String, Fr> = std::collections::BTreeMap::new();
+        for sb in &bw.solution {
+            let term = sb.term.to_term().ok_or_else(|| {
+                FragmentSolutionError::MalformedSolutionTerm { witness: wi, var: sb.var.clone() }
+            })?;
+            let enc = encode_term(&term, &salt).ok_or_else(|| {
+                FragmentSolutionError::MalformedSolutionTerm { witness: wi, var: sb.var.clone() }
+            })?;
+            mu.insert(sb.var.clone(), enc);
+        }
+
+        // (1)+(2) Path predicate + endpoint binding.
+        for (oi, &pi) in bw.path_proofs.iter().enumerate() {
+            let Some(obl) = branch.path_reach.get(oi) else {
+                return Err(FragmentSolutionError::Structure { witness: wi, what: "path obligation" });
+            };
+            let sp = manifest.sub_proofs.get(pi).ok_or(FragmentSolutionError::Structure {
+                witness: wi,
+                what: "path proof index",
+            })?;
+            let ProofInputs::PathReach { pred_enc, src_enc, dst_enc, .. } = &sp.inputs else {
+                return Err(FragmentSolutionError::Structure { witness: wi, what: "path proof kind" });
+            };
+            let want_pred = encode_term(&oxrdf::Term::NamedNode(obl.predicate.clone()), &salt)
+                .ok_or(FragmentSolutionError::PathPredMismatch { witness: wi, obligation: oi })?;
+            if !field_hex_is(pred_enc, &want_pred) {
+                return Err(FragmentSolutionError::PathPredMismatch { witness: wi, obligation: oi });
+            }
+            bind_path_endpoint(wi, oi, PathEndpoint::Src, &obl.subject, src_enc, &mu, &projected, &salt)?;
+            bind_path_endpoint(wi, oi, PathEndpoint::Dst, &obl.object, dst_enc, &mu, &projected, &salt)?;
+        }
+
+        // (3) VALUES cell binding — the disclosed solution must agree with the
+        // CHOSEN row's inline query constants for every PROJECTED variable.
+        for (bi, &row) in bw.values_rows.iter().enumerate() {
+            let Some(block) = branch.values.get(bi) else {
+                return Err(FragmentSolutionError::Structure { witness: wi, what: "values block" });
+            };
+            let Some(cells) = block.rows.get(row) else {
+                return Err(FragmentSolutionError::Structure { witness: wi, what: "values row" });
+            };
+            for (col, var) in block.variables.iter().enumerate() {
+                // A non-projected VALUES variable is existential here (not term-bound).
+                if !projected.contains(var) {
+                    continue;
+                }
+                // `None` (UNDEF) cell => no constraint on this variable.
+                let Some(Some(term)) = cells.get(col) else {
+                    continue;
+                };
+                let want = encode_term(term, &salt).ok_or_else(|| {
+                    FragmentSolutionError::ValuesCellMismatch {
+                        witness: wi,
+                        block: bi,
+                        column: col,
+                        var: var.clone(),
+                    }
+                })?;
+                match mu.get(var) {
+                    None => {
+                        return Err(FragmentSolutionError::UnboundProjectedValuesVar {
+                            witness: wi,
+                            block: bi,
+                            column: col,
+                            var: var.clone(),
+                        })
+                    }
+                    Some(sol) if *sol == want => {}
+                    Some(_) => {
+                        return Err(FragmentSolutionError::ValuesCellMismatch {
+                            witness: wi,
+                            block: bi,
+                            column: col,
+                            var: var.clone(),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// FAIL-CLOSED wave-1 extended-fragment END-TO-END verification (sq-h732x):
 /// route a [`crate::manifest::FragmentManifest`]'s property-path / `UNION` /
 /// `VALUES` presentation all the way through the cryptographic gate, so an
@@ -5374,7 +5726,7 @@ pub fn dispatch_fragment(
 /// [`verify_manifest`] alone CANNOT do, because its stage-1 `recheck` rejects
 /// every extended query at `fragment_patterns` before any sub-proof runs.
 ///
-/// Two layers, both fail-closed:
+/// Three layers, all fail-closed:
 /// 1. [`dispatch_fragment`] re-derives the query fragment from the query TEXT
 ///    alone (`fragment_query`, never the manifest), REFUSES anything outside the
 ///    wave-1 fragment, and routes each disclosed solution's branch witness to a
@@ -5382,26 +5734,34 @@ pub fn dispatch_fragment(
 ///    [`CheckError::FragmentDispatch`]. It runs FIRST, before the verifier nonce
 ///    is burnt or any `bb` subprocess starts, so an outside-fragment / mis-routed
 ///    presentation is refused without side effects.
-/// 2. the embedded [`crate::manifest::FragmentManifest::manifest`] is then run
+/// 2. [`bind_fragment_solution`] (sq-1zf94) binds each bound path's
+///    `pred_enc`/`src_enc`/`dst_enc` and each disclosed `VALUES` cell to the
+///    encoding the verifier RE-DERIVES from the query text + the disclosed solution
+///    — mapped into [`CheckError::FragmentSolution`]. Also before the nonce is
+///    burnt, so a proof whose disclosed endpoints are not the claimed terms is
+///    refused with no side effects.
+/// 3. the embedded [`crate::manifest::FragmentManifest::manifest`] is then run
 ///    through the SAME crypto stage as [`verify_manifest`] (the per-sub-proof
 ///    public-input reconstruction + canonical-vk + `bb verify`, the
 ///    verifier-nonce single-use + challenge binding, holder PoP, issuer
 ///    attestation, revocation, and the hidden gates), EXCEPT that stage-1a's
 ///    query-fragment acceptance is routed through `fragment_query` (so the
-///    extended query is not rejected) and the flat per-branch TERM binding is
-///    deferred — see below.
+///    extended query is not rejected) and the FLAT per-branch term-binding gates
+///    (`bind_query_correctness`/`bind_attributions`/`bind_joins`) are replaced by
+///    layer 2's extended analogue.
 ///
 /// # Honest scope (LOAD-BEARING — read before relying on this)
-/// This binds each construct to a bound sub-proof of the right member and runs
-/// that member's `bb verify`; it does **NOT** bind a path's
-/// `pred_enc`/`src_enc`/`dst_enc`, a `VALUES` row's cell terms, or the scan
-/// pattern constants to the DISCLOSED SOLUTION bindings, and it does NOT enforce
-/// the flat cross-graph Q6 non-bnode obligation for a branch. That
-/// disclosed-solution TERM binding is a SEPARATE, deliberately-scoped bead
-/// (**sq-1zf94**); until it lands an accepted extended-fragment proof is **NOT
-/// fully bound** — its sub-proofs are cryptographically valid statements of the
-/// right circuit member but are not yet tied to the specific disclosed terms. The
-/// whole verifier stack is internally re-audited but **NOT externally audited**
+/// Layer 2 (sq-1zf94) binds the disclosed path predicate/endpoints and `VALUES`
+/// cells to the proofs (via the audit-#1 byte binding of those public inputs), so
+/// an accepted proof's disclosed path endpoints and VALUES-constrained variables
+/// ARE now tied to the specific disclosed terms. What remains UNBOUND (documented
+/// on [`bind_fragment_solution`]): (a) the BGP-scan-slot binding of a disclosed
+/// solution's variables to a scan sub-proof's disclosed rows (the per-solution
+/// row-selection model), (b) the flat cross-graph Q6 non-bnode obligation per
+/// branch, and (c) an EXISTENTIAL (non-projected) path endpoint's value (hidden by
+/// design). So an accepted extended-fragment proof is **more bound than #1665 but
+/// not yet FULLY bound** — the residual is enumerated, not hidden. The whole
+/// verifier stack is internally re-audited but **NOT externally audited**
 /// (sq-qhy4). NO soundness / privacy property is asserted as achieved.
 // [OPUS-4.8] sq-h732x: extended-fragment end-to-end routing. Opt-in
 // (`extended-fragment`), research-grade, NOT-yet-sound (sq-qhy4).
@@ -5425,7 +5785,16 @@ pub fn verify_fragment_manifest(
     // the correct member.
     dispatch_fragment(fm).map_err(CheckError::FragmentDispatch)?;
 
-    // (2) Crypto stage over the EMBEDDED manifest, with stage-1a routed through
+    // (2) FAIL-CLOSED DISCLOSED-SOLUTION term binding (sq-1zf94): bind each bound
+    // path's pred_enc/src_enc/dst_enc and each disclosed VALUES cell to the encoding
+    // the verifier re-derives from the query text + the disclosed solution (never a
+    // prover-supplied encoding). Also before the nonce is burnt or any bb runs, so a
+    // proof whose disclosed endpoints are not the claimed terms is refused with no
+    // side effects. The residual still-deferred surface is documented on
+    // `bind_fragment_solution`.
+    bind_fragment_solution(fm).map_err(CheckError::FragmentSolution)?;
+
+    // (3) Crypto stage over the EMBEDDED manifest, with stage-1a routed through
     // `fragment_query` (`skip_query_binding = true`) so the extended query is not
     // rejected. Every other gate is identical to `verify_manifest` (see
     // `verify_manifest_impl` / `prefilter_manifest_structure_impl`). The deferred
@@ -6432,7 +6801,13 @@ mod fragment_dispatch_tests {
         "SELECT * WHERE { ?s <http://ex/p> ?o VALUES ?o { <http://ex/x> <http://ex/y> } }";
 
     fn bw(branch: usize, scan: Vec<usize>, path: Vec<usize>, values: Vec<usize>) -> BranchWitness {
-        BranchWitness { branch, scan_proofs: scan, path_proofs: path, values_rows: values }
+        BranchWitness {
+            branch,
+            scan_proofs: scan,
+            path_proofs: path,
+            values_rows: values,
+            solution: vec![],
+        }
     }
 
     // --- ACCEPT paths (a bound path member of the right member routes) -------
@@ -6904,5 +7279,320 @@ mod fragment_dispatch_tests {
             matches!(err, CheckError::CircuitIdMismatch { proof: 0, .. }),
             "extended regime must still run stage-1b id hygiene, got {err:?}"
         );
+    }
+
+    // --- sq-1zf94: DISCLOSED-SOLUTION term binding (bind_fragment_solution) ----
+    //
+    // Non-vacuous, no nargo/bb: the disclosed path pred/endpoints + VALUES cells
+    // are bound to encodings the verifier re-derives from the query text + the
+    // disclosed solution. A mismatch REFUSES before the sub-proof loop; a
+    // consistent solution reaches the SAME downstream gate as the #1665 routing.
+
+    use crate::manifest::{DisclosedTerm, SolutionBinding};
+
+    /// A path with variable endpoints (both projected).
+    const VPATH: &str = "SELECT * WHERE { ?s <http://ex/p>+ ?o }";
+
+    fn iri(s: &str) -> oxrdf::Term {
+        oxrdf::Term::NamedNode(oxrdf::NamedNode::new(s).unwrap())
+    }
+
+    /// The canonical `FieldHex` encoding of a term (salt 0 — IRIs/literals are
+    /// salt-independent), exactly as the verifier re-derives it.
+    fn enc_hex(t: &oxrdf::Term) -> FieldHex {
+        FieldHex(field_to_hex(&encode_term(t, &Fr::from(0u64)).unwrap()))
+    }
+
+    /// A `PathReach` input with REAL pred/src/dst encodings (over IRIs).
+    fn path_real(d: u32, k: u32, n: u32, allow_zero: bool, pred: &str, src: &str, dst: &str) -> ProofInputs {
+        ProofInputs::PathReach {
+            id: CircuitId::PathReach { d, k, n },
+            commitments: (0..k).map(|i| fh(&format!("0x{:x}", i + 1))).collect(),
+            pred_enc: enc_hex(&iri(pred)),
+            src_enc: enc_hex(&iri(src)),
+            dst_enc: enc_hex(&iri(dst)),
+            allow_zero,
+            depth_bound: d,
+            attribution: vec![true; k as usize],
+        }
+    }
+
+    /// Disclosed IRI solution bindings from `(var, iri)` pairs.
+    fn sol(pairs: &[(&str, &str)]) -> Vec<SolutionBinding> {
+        pairs
+            .iter()
+            .map(|(v, i)| SolutionBinding {
+                var: v.to_string(),
+                term: DisclosedTerm::Iri { value: i.to_string() },
+            })
+            .collect()
+    }
+
+    fn bw_sol(
+        branch: usize,
+        scan: Vec<usize>,
+        path: Vec<usize>,
+        values: Vec<usize>,
+        solution: Vec<SolutionBinding>,
+    ) -> BranchWitness {
+        BranchWitness { branch, scan_proofs: scan, path_proofs: path, values_rows: values, solution }
+    }
+
+    #[test]
+    fn bind_solution_accepts_a_consistent_constant_source_path() {
+        // PLUS: subject <http://ex/a> (constant), object ?o (projected) = <b>.
+        // pred_enc = enc(<p>), src_enc = enc(<a>), dst_enc = enc(<b>) all consistent.
+        let m = fm(
+            PLUS,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/b"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+        );
+        assert_eq!(bind_fragment_solution(&m), Ok(()));
+    }
+
+    #[test]
+    fn bind_solution_rejects_a_wrong_path_predicate() {
+        // pred_enc encodes <q>, but the query names <p> => PathPredMismatch.
+        let m = fm(
+            PLUS,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/q", "http://ex/a", "http://ex/b"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::PathPredMismatch { witness: 0, obligation: 0 })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_src_enc_not_matching_the_disclosed_solution() {
+        // VPATH: subject ?s (projected) disclosed = <a>, but src_enc encodes <zzz>
+        // => PathEndpointMismatch{Src}. This is the load-bearing sq-1zf94 negative.
+        let m = fm(
+            VPATH,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/zzz", "http://ex/b"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("s", "http://ex/a"), ("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::PathEndpointMismatch {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Src,
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_dst_enc_not_matching_the_disclosed_solution() {
+        // PLUS: object ?o disclosed = <b>, but dst_enc encodes <other> => Dst mismatch.
+        let m = fm(
+            PLUS,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/other"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::PathEndpointMismatch {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Dst,
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_a_projected_endpoint_omitted_from_the_solution() {
+        // VPATH: ?s is projected but the solution omits it => UnboundProjectedEndpoint.
+        let m = fm(
+            VPATH,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/b"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::UnboundProjectedEndpoint {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Src,
+                var: "s".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_accepts_a_values_row_consistent_with_the_solution() {
+        // VALUES ?o { <x> <y> }; row 1 = <y>, solution ?o = <y> => consistent.
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw_sol(0, vec![0], vec![], vec![1], sol(&[("o", "http://ex/y")]))],
+        );
+        assert_eq!(bind_fragment_solution(&m), Ok(()));
+    }
+
+    #[test]
+    fn bind_solution_rejects_a_values_cell_mismatch() {
+        // Row 1 = <y>, but the disclosed solution claims ?o = <z> => ValuesCellMismatch.
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw_sol(0, vec![0], vec![], vec![1], sol(&[("o", "http://ex/z")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::ValuesCellMismatch {
+                witness: 0,
+                block: 0,
+                column: 0,
+                var: "o".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_pointing_at_the_wrong_disclosed_row() {
+        // The solution ?o = <y>, but values_rows picks row 0 (<x>) => the "wrong
+        // disclosed row" rejection (ValuesCellMismatch).
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw_sol(0, vec![0], vec![], vec![0], sol(&[("o", "http://ex/y")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::ValuesCellMismatch {
+                witness: 0,
+                block: 0,
+                column: 0,
+                var: "o".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_a_projected_values_var_with_no_disclosure() {
+        // ?o is a projected VALUES variable but the solution is empty => fail-closed.
+        let m = fm(VALUES, vec![sub(scan_min())], vec![bw_sol(0, vec![0], vec![], vec![1], vec![])]);
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::UnboundProjectedValuesVar {
+                witness: 0,
+                block: 0,
+                column: 0,
+                var: "o".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_a_malformed_disclosed_term() {
+        // A disclosed IRI that does not parse => MalformedSolutionTerm (fail-closed).
+        let m = fm(
+            VPATH,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/b"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("s", "not an iri"), ("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::MalformedSolutionTerm { witness: 0, var: "s".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_solution_does_not_bind_an_existential_endpoint() {
+        // ASK projects nothing, so both endpoints are existential (hidden) — the
+        // src/dst encodings are NOT term-bound, only the query-constant predicate is.
+        // A garbage src/dst therefore still passes the disclosed-solution gate.
+        let ask = "ASK { ?s <http://ex/p>+ ?o }";
+        let m = fm(
+            ask,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/whatever", "http://ex/junk"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], vec![])],
+        );
+        assert_eq!(bind_fragment_solution(&m), Ok(()));
+    }
+
+    #[test]
+    fn verify_fragment_manifest_refuses_inconsistent_solution_before_bb() {
+        // End-to-end: a VALUES cell that disagrees with the disclosed solution is
+        // refused as a structured CheckError::FragmentSolution — BEFORE the nonce is
+        // burnt or any bb subprocess runs.
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw_sol(0, vec![0], vec![], vec![1], sol(&[("o", "http://ex/z")]))],
+        );
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CheckError::FragmentSolution(FragmentSolutionError::ValuesCellMismatch { .. })
+            ),
+            "an inconsistent disclosed solution must fail-closed as FragmentSolution, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fragment_manifest_consistent_solution_reaches_the_crypto_gate() {
+        // The accept path: a CONSISTENT disclosed solution passes both the routing
+        // and the disclosed-solution binding, then reaches the SAME downstream
+        // crypto/attestation gate as the #1665 routing test (empty K =>
+        // UnattestedCommitment) — NOT a fragment-stage rejection. No bb.
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw_sol(0, vec![0], vec![], vec![1], sol(&[("o", "http://ex/y")]))],
+        );
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::UnattestedCommitment { .. }),
+            "a consistent solution must route past the binding into the attestation gate, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fragment_solution_error_display_is_non_empty_for_each_variant() {
+        // Cheap Display coverage (the error is `pub` + `impl Error`).
+        let errs = [
+            FragmentSolutionError::MalformedSolutionTerm { witness: 0, var: "s".into() },
+            FragmentSolutionError::PathPredMismatch { witness: 0, obligation: 0 },
+            FragmentSolutionError::PathEndpointMismatch {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Src,
+            },
+            FragmentSolutionError::UnboundProjectedEndpoint {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Dst,
+                var: "o".into(),
+            },
+            FragmentSolutionError::ValuesCellMismatch {
+                witness: 0,
+                block: 0,
+                column: 0,
+                var: "o".into(),
+            },
+            FragmentSolutionError::UnboundProjectedValuesVar {
+                witness: 0,
+                block: 0,
+                column: 0,
+                var: "o".into(),
+            },
+            FragmentSolutionError::WildcardEndpoint {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Src,
+            },
+            FragmentSolutionError::Structure { witness: 0, what: "branch" },
+        ];
+        for e in &errs {
+            assert!(!format!("{}", e).is_empty());
+        }
     }
 }

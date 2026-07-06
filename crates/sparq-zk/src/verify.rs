@@ -38,7 +38,13 @@
 //! gate the stage-1 compose verifier, whose manifest schema and circuit
 //! dispatch cannot express the extensions yet (`sq-3kd2g.6` migrates it).
 
-use sparq_engine::zk::{PatternKey, SlotPattern};
+// [OPUS-4.8] sq-1zf94: `PatternKey`/`SlotPattern` are the SHAPES of a re-derived
+// pattern's slots — already exposed through the `pub` fields of the values this
+// module returns (`fragment_patterns`, `FragmentBranch.patterns`,
+// `PathReach.subject`/`object`). Re-export them so a downstream verifier
+// (`sparq-zk-compose`) can name and MATCH on them (the disclosed-solution term
+// binding) without a direct `sparq-engine` dependency.
+pub use sparq_engine::zk::{PatternKey, SlotPattern};
 use spargebra::algebra::{Expression, GraphPattern, PropertyPathExpression};
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
