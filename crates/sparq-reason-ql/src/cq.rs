@@ -44,16 +44,39 @@
 //     `OutOfScope("intensional/schema-vocabulary atom")`. Annotation predicates
 //     (rdfs:label/comment/seeAlso/isDefinedBy) remain admitted as plain role atoms.
 //
+// B5. Non-recursive property-path desugaring (sq-pbz04.3.2, design record §5 B5). The three
+//     recursion-free path constructors are SPARQL-1.1-algebra query equivalences, applied to the
+//     peeled body BEFORE the entailment rewrite (after which B1/PerfectRef soundness applies to
+//     the result):
+//       - sequence      `X p1/p2 Y  ≡  X p1 ?f . ?f p2 Y`   (fresh NON-distinguished `?f`);
+//       - inverse       `X ^p Y     ≡  Y p X`               (subject/object swap);
+//       - alternation   `X p1|p2 Y  ≡  { X p1 Y } UNION { X p2 Y }`  (branch multiplication
+//                                                            into the B1 UCQ machinery).
+//     STEP 0 finding (verified against the vendored spargebra parser, `add_to_triple_or_path_patterns`):
+//     the PARSER already lowers a top-level SEQUENCE to a BGP joined by a fresh blank node, and a
+//     top-level INVERSE of a simple predicate to a swapped BGP triple — so those never reach the
+//     gate as a `Path`; the emitter already lifts the blank-node intermediate to a fresh
+//     existential (sq-pbz04.3.6). The ONLY non-recursive form that survives parsing as a
+//     `GraphPattern::Path` is ALTERNATION (whose arms may nest sequence/inverse/named-node), so
+//     [`desugar_paths_dnf`] desugars exactly those surviving `Path` nodes — it does NOT
+//     re-translate what the parser already normalised (no double-translation). The fresh
+//     sequence intermediate is a SHARED variable across its two atoms, so PerfectRef's
+//     applicability condition correctly treats it as bound (identical to the blank-node path).
+//     `+` / `*` / `?` (zero-length-path semantics) and negated property sets stay
+//     PERMANENT-REJECT (fail-closed) — they reintroduce the recursion/reflexivity QL excludes.
+//
 // ## Unchanged PERMANENT-REJECT shapes
 //
-// OPTIONAL (non-monotone), MINUS (non-monotone), property paths (reintroduces recursion),
-// GRAPH (named-graph rewriting semantics unsettled), BIND/Extend (arithmetic, not CQ),
-// aggregation, SERVICE, sub-SELECT, LATERAL, RDF-star quoted triples, variable predicates —
-// all stay REJECTED with their original reason strings.
+// OPTIONAL (non-monotone), MINUS (non-monotone), recursive / zero-length / negated property
+// paths (`+`/`*`/`?`/`!p` — reintroduce recursion/reflexivity), GRAPH (named-graph rewriting
+// semantics unsettled), BIND/Extend (arithmetic, not CQ), aggregation, SERVICE, sub-SELECT,
+// LATERAL, RDF-star quoted triples, variable predicates — all stay REJECTED with their
+// original reason strings.
 
-use spargebra::algebra::GraphPattern;
+use spargebra::algebra::{GraphPattern, PropertyPathExpression};
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
+use std::collections::HashSet;
 
 /// Why a query is not a conjunctive query the QL rewriter may soundly handle. Carries a
 /// human-readable reason naming the offending construct, so a caller (or the conformance
@@ -233,12 +256,21 @@ pub fn as_ucq(query: &Query) -> Result<Ucq, CqError> {
         })?
     };
 
-    // Collect branches: the body is either a single CQ or a UNION tree of CQs.
-    let mut branches_raw: Vec<&GraphPattern> = Vec::new();
-    collect_union_branches(body, &mut branches_raw);
+    // B5 (sq-pbz04.3.2): desugar non-recursive property paths (`/`, `^`, `|`) and split the
+    // top-level UNION tree, in ONE DNF pass, into a list of path-free conjunction bodies. This
+    // subsumes the old top-level-union split: `desugar_paths_dnf` handles `Union` (concatenate
+    // disjuncts), alternation `Path` nodes (branch multiplication), sequence/inverse nested in
+    // an alternation arm (fresh non-distinguished intermediate / swap), and distributes `Join`
+    // and `Filter` over unions so each resulting disjunct is a plain conjunction. It is a NO-OP
+    // (single unchanged clone) for a path-free, single-branch body — so all existing CQ/UCQ
+    // shapes are preserved exactly. Recursive/zero-length/negated path forms are REJECTED
+    // fail-closed here. Non-conjunctive operators (OPTIONAL/MINUS/GRAPH/…) pass through unchanged
+    // and are rejected downstream by `collect_conjunction` with their precise reason strings.
+    let mut fresh = FreshVars::new(collect_body_var_names_owned(body));
+    let disjuncts = desugar_paths_dnf(body, &mut fresh)?;
 
-    let mut branches: Vec<ConjunctiveQuery> = Vec::with_capacity(branches_raw.len());
-    for branch in branches_raw {
+    let mut branches: Vec<ConjunctiveQuery> = Vec::with_capacity(disjuncts.len());
+    for branch in &disjuncts {
         let cq = parse_cq_body(branch, &distinguished, distinct, ask)?;
         branches.push(cq);
     }
@@ -255,15 +287,278 @@ pub fn as_ucq(query: &Query) -> Result<Ucq, CqError> {
     })
 }
 
-/// Collect the leaves of a top-level `Union` tree. A non-Union body becomes a single-element
-/// slice. This is the UCQ-B1 structural split: each leaf is then validated as a CQ.
-fn collect_union_branches<'a>(p: &'a GraphPattern, out: &mut Vec<&'a GraphPattern>) {
-    match p {
-        GraphPattern::Union { left, right } => {
-            collect_union_branches(left, out);
-            collect_union_branches(right, out);
+/// A cap on the number of DNF disjuncts (UCQ branches) that property-path desugaring +
+/// union-splitting may produce, before the gate rejects fail-closed. Alternation multiplies
+/// branches (`2^k` for `k` independent 2-way alternations, more for `n`-way), so a bound keeps
+/// a pathological path from blowing up the rewrite. Chosen well above any realistic CQ; a query
+/// exceeding it is out of the sound-and-tractable fragment. [OPUS-4.8] sq-pbz04.3.2
+const MAX_UCQ_BRANCHES: usize = 256;
+
+/// A generator of FRESH non-distinguished variables for property-path sequence intermediates
+/// (B5). Names use the distinctive `__ql_seq_` prefix and are collision-checked against every
+/// variable name in the source query, so a fresh intermediate can never capture a user variable
+/// (nor be projected — it is never added to the distinguished set). [OPUS-4.8] sq-pbz04.3.2
+struct FreshVars {
+    used: HashSet<String>,
+    counter: usize,
+}
+
+impl FreshVars {
+    fn new(used: HashSet<String>) -> Self {
+        Self { used, counter: 0 }
+    }
+
+    /// A fresh variable whose name is present in neither the source query nor any earlier
+    /// fresh name. The intermediate is inherently non-distinguished (never projected).
+    fn next(&mut self) -> Variable {
+        loop {
+            let name = format!("__ql_seq_{}", self.counter);
+            self.counter += 1;
+            if self.used.insert(name.clone()) {
+                return Variable::new_unchecked(name);
+            }
         }
-        other => out.push(other),
+    }
+}
+
+/// Collect every variable NAME appearing anywhere in `p` (all triple/path/values positions and
+/// filter expressions), recursing through the whole pattern tree, so [`FreshVars`] can avoid
+/// capturing any of them. Best-effort-thorough: an unrecognised operator is still traversed via
+/// its child patterns where the shape is known. [OPUS-4.8] sq-pbz04.3.2
+fn collect_body_var_names(p: &GraphPattern, out: &mut HashSet<String>) {
+    let push_term = |t: &TermPattern, out: &mut HashSet<String>| {
+        if let TermPattern::Variable(v) = t {
+            out.insert(v.as_str().to_string());
+        }
+    };
+    match p {
+        GraphPattern::Bgp { patterns } => {
+            for tp in patterns {
+                push_term(&tp.subject, out);
+                if let NamedNodePattern::Variable(v) = &tp.predicate {
+                    out.insert(v.as_str().to_string());
+                }
+                push_term(&tp.object, out);
+            }
+        }
+        GraphPattern::Path { subject, object, .. } => {
+            push_term(subject, out);
+            push_term(object, out);
+        }
+        GraphPattern::Join { left, right }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right }
+        | GraphPattern::LeftJoin { left, right, .. }
+        | GraphPattern::Lateral { left, right } => {
+            collect_body_var_names(left, out);
+            collect_body_var_names(right, out);
+        }
+        GraphPattern::Filter { expr, inner } => {
+            for v in expression_vars(expr) {
+                out.insert(v.as_str().to_string());
+            }
+            collect_body_var_names(inner, out);
+        }
+        GraphPattern::Extend { inner, variable, expression } => {
+            out.insert(variable.as_str().to_string());
+            for v in expression_vars(expression) {
+                out.insert(v.as_str().to_string());
+            }
+            collect_body_var_names(inner, out);
+        }
+        GraphPattern::Values { variables, .. } => {
+            for v in variables {
+                out.insert(v.as_str().to_string());
+            }
+        }
+        GraphPattern::Project { inner, variables } => {
+            for v in variables {
+                out.insert(v.as_str().to_string());
+            }
+            collect_body_var_names(inner, out);
+        }
+        GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Graph { inner, .. }
+        | GraphPattern::Group { inner, .. }
+        | GraphPattern::Service { inner, .. } => {
+            collect_body_var_names(inner, out);
+        }
+    }
+}
+
+/// Convenience wrapper for [`FreshVars::new`] that first collects the query's variable names.
+fn collect_body_var_names_owned(p: &GraphPattern) -> HashSet<String> {
+    let mut out = HashSet::new();
+    collect_body_var_names(p, &mut out);
+    out
+}
+
+/// Desugar all non-recursive property paths in `body` and split the top-level `UNION` tree, in
+/// ONE pass, into the DNF DISJUNCT LIST — each disjunct a path-free conjunction body (a `Bgp`,
+/// or a `Join`/`Filter`/`Values` tree of them) with NO top-level `Union`. FAIL-CLOSED on
+/// recursive/zero-length/negated path forms. [OPUS-4.8] sq-pbz04.3.2 (design record §5 B5)
+///
+/// Distribution identities applied (all SPARQL-algebra equivalences, certain-answer preserving
+/// by the B1 union argument): `Join(A, Union(B,C)) ≡ Union(Join(A,B), Join(A,C))` and
+/// `Filter(e, Union(B,C)) ≡ Union(Filter(e,B), Filter(e,C))`. A path-free, union-free body maps
+/// to a single unchanged disjunct, so every previously-accepted CQ/UCQ shape is preserved.
+///
+/// Non-conjunctive operators (OPTIONAL/MINUS/GRAPH/BIND/aggregation/SERVICE/ORDER BY/Slice/
+/// nested Project/Distinct/LATERAL) are returned UNCHANGED as a single disjunct — the downstream
+/// [`collect_conjunction`] walk then rejects them with their precise reason strings (we do NOT
+/// recurse into them: the whole query is out of scope regardless of any path nested inside).
+fn desugar_paths_dnf(body: &GraphPattern, fresh: &mut FreshVars) -> Result<Vec<GraphPattern>, CqError> {
+    match body {
+        // A BGP carries no property paths (spargebra lowers simple predicates + top-level
+        // sequence/inverse into BGP triples during parsing). Return it unchanged; any blank-node
+        // path intermediate the parser introduced is lifted to a fresh existential by the emitter.
+        GraphPattern::Bgp { .. } => Ok(vec![body.clone()]),
+
+        // A surviving `Path` node is a non-recursive alternation (whose arms may nest
+        // sequence/inverse/named-node) — or a recursive/negated form that must be rejected.
+        GraphPattern::Path { subject, path, object } => desugar_path(subject, path, object, fresh),
+
+        // Join distributes over the union produced by desugaring either side (DNF).
+        GraphPattern::Join { left, right } => {
+            let dl = desugar_paths_dnf(left, fresh)?;
+            let dr = desugar_paths_dnf(right, fresh)?;
+            let product = dl.len().saturating_mul(dr.len());
+            if product > MAX_UCQ_BRANCHES {
+                return Err(too_many_branches());
+            }
+            let mut out = Vec::with_capacity(product);
+            for a in &dl {
+                for b in &dr {
+                    out.push(GraphPattern::Join {
+                        left: Box::new(a.clone()),
+                        right: Box::new(b.clone()),
+                    });
+                }
+            }
+            Ok(out)
+        }
+
+        // Union: concatenate the disjunct lists (top-level UCQ split + alternation-induced union).
+        GraphPattern::Union { left, right } => {
+            let mut out = desugar_paths_dnf(left, fresh)?;
+            out.extend(desugar_paths_dnf(right, fresh)?);
+            if out.len() > MAX_UCQ_BRANCHES {
+                return Err(too_many_branches());
+            }
+            Ok(out)
+        }
+
+        // Filter distributes over the union produced by desugaring its inner pattern. When the
+        // inner has a single disjunct (the common no-path case) this re-wraps it unchanged, so a
+        // plain distinguished-only FILTER keeps behaving exactly as before. When it splits (a
+        // path alternation under a FILTER), each branch carries the filter — behaving identically
+        // to a hand-written `{ … FILTER } UNION { … FILTER }` (the existing multi-branch-modifier
+        // emitter guard in lib.rs then rejects it fail-closed).
+        GraphPattern::Filter { expr, inner } => {
+            let di = desugar_paths_dnf(inner, fresh)?;
+            Ok(di
+                .into_iter()
+                .map(|d| GraphPattern::Filter {
+                    expr: expr.clone(),
+                    inner: Box::new(d),
+                })
+                .collect())
+        }
+
+        // VALUES carries only ground terms (no paths, no unions) — a single unchanged disjunct.
+        GraphPattern::Values { .. } => Ok(vec![body.clone()]),
+
+        // Everything else is outside the conjunctive fragment. Return UNCHANGED as one disjunct
+        // so `collect_conjunction` rejects it with its precise message (fail-closed preserved).
+        _ => Ok(vec![body.clone()]),
+    }
+}
+
+/// Reject a query whose path desugaring exceeds [`MAX_UCQ_BRANCHES`] (fail-closed).
+fn too_many_branches() -> CqError {
+    CqError::OutOfScope(format!(
+        "property-path / UNION desugaring produced more than {} UCQ branches — out of the \
+         tractable CQ fragment (fail-closed)",
+        MAX_UCQ_BRANCHES
+    ))
+}
+
+/// Desugar a single property-path atom `subject PATH object` into a DNF disjunct list — each
+/// disjunct a `Bgp` or `Join` of `Bgp`s. Introduces a fresh NON-distinguished variable for each
+/// sequence intermediate (shared across the two atoms it joins), swaps subject/object for an
+/// inverse, and multiplies alternation into separate disjuncts (branch multiplication). The
+/// recursion-reintroducing forms — `+` (`OneOrMore`), `*` (`ZeroOrMore`), `?` (`ZeroOrOne`) —
+/// and negated property sets (`!p`) are REJECTED fail-closed. [OPUS-4.8] sq-pbz04.3.2
+fn desugar_path(
+    subject: &TermPattern,
+    path: &PropertyPathExpression,
+    object: &TermPattern,
+    fresh: &mut FreshVars,
+) -> Result<Vec<GraphPattern>, CqError> {
+    match path {
+        // Named predicate → a single role/class triple `subject p object`.
+        PropertyPathExpression::NamedNode(p) => {
+            let tp = TriplePattern {
+                subject: subject.clone(),
+                predicate: NamedNodePattern::NamedNode(p.clone()),
+                object: object.clone(),
+            };
+            Ok(vec![GraphPattern::Bgp { patterns: vec![tp] }])
+        }
+        // Inverse: `X ^p Y ≡ Y p X` — swap subject/object and recurse. Spargebra already lowers a
+        // TOP-LEVEL inverse of a simple predicate; this arm fires for an inverse nested inside an
+        // alternation arm (e.g. `^:p1 | :p2`).
+        PropertyPathExpression::Reverse(inner) => desugar_path(object, inner, subject, fresh),
+        // Sequence: `X a/b Y ≡ X a ?f . ?f b Y` with a fresh non-distinguished `?f` SHARED across
+        // the two atoms (so PerfectRef's applicability condition treats it as bound). Fires for a
+        // sequence nested inside an alternation arm (a top-level sequence is lowered by spargebra).
+        PropertyPathExpression::Sequence(a, b) => {
+            let mid = TermPattern::Variable(fresh.next());
+            let da = desugar_path(subject, a, &mid, fresh)?;
+            let db = desugar_path(&mid, b, object, fresh)?;
+            let product = da.len().saturating_mul(db.len());
+            if product > MAX_UCQ_BRANCHES {
+                return Err(too_many_branches());
+            }
+            let mut out = Vec::with_capacity(product);
+            for x in &da {
+                for y in &db {
+                    out.push(GraphPattern::Join {
+                        left: Box::new(x.clone()),
+                        right: Box::new(y.clone()),
+                    });
+                }
+            }
+            Ok(out)
+        }
+        // Alternation: `X a|b Y ≡ { X a Y } UNION { X b Y }` — concatenate the two disjunct lists
+        // (branch multiplication into the B1 UCQ machinery).
+        PropertyPathExpression::Alternative(a, b) => {
+            let mut out = desugar_path(subject, a, object, fresh)?;
+            out.extend(desugar_path(subject, b, object, fresh)?);
+            if out.len() > MAX_UCQ_BRANCHES {
+                return Err(too_many_branches());
+            }
+            Ok(out)
+        }
+        // `+` / `*` / `?` — recursion / zero-length-path semantics QL deliberately excludes.
+        // The reason string carries "property path" so the fail-closed classification is stable.
+        PropertyPathExpression::OneOrMore(_)
+        | PropertyPathExpression::ZeroOrMore(_)
+        | PropertyPathExpression::ZeroOrOne(_) => Err(CqError::OutOfScope(
+            "recursive / zero-length property path (+, *, ?) reintroduces the recursion / \
+             reflexivity OWL 2 QL excludes — out of scope (fail-closed)"
+                .into(),
+        )),
+        // Negated property set `!p` — not a DL-Lite atom (it is a complement over predicates).
+        PropertyPathExpression::NegatedPropertySet(_) => Err(CqError::OutOfScope(
+            "negated property set (!p) in a property path is not a DL-Lite atom — out of scope \
+             (fail-closed)"
+                .into(),
+        )),
     }
 }
 
