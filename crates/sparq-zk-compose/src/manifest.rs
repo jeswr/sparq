@@ -1330,12 +1330,16 @@ pub struct SolutionBinding {
 /// disclosed solution's variables to a scan sub-proof's disclosed rows (a scan
 /// discloses `r` rows; the per-solution row-selection model is the [`scan_rows`]
 /// field) is done by [`crate::verifier::bind_fragment_scans`] (sq-qyfth, also run
-/// by [`crate::verifier::verify_fragment_manifest`]). What those gates STILL DEFER
-/// is explicit: the flat cross-graph Q6 non-bnode obligation per branch (the
-/// existential scan↔scan / scan↔path join over a bnode value across graphs —
-/// sq-ygk6x), and an EXISTENTIAL (non-projected) path endpoint's value (hidden by
-/// design). Like every gate here, they assert NO soundness / privacy property
-/// (sq-qhy4).
+/// by [`crate::verifier::verify_fragment_manifest`]). The flat cross-graph Q6
+/// non-bnode obligation per branch AND the existential coherence of a variable
+/// shared between a scan slot and a `PathReach` endpoint (`src_enc`/`dst_enc`) are
+/// enforced by [`crate::verifier::bind_fragment_join_coherence`] (sq-ygk6x, also run
+/// by [`crate::verifier::verify_fragment_manifest`]). What those gates STILL DEFER is
+/// explicit: the salt-uniqueness gate covers only SCAN-referenced committed graphs
+/// (so a cross-graph join through a single-graph PATH graph is an agreement check
+/// pending path-graph salt coverage; a multi-graph path is refused fail-closed), and
+/// an EXISTENTIAL (non-projected) path endpoint's VALUE (hidden by design). Like
+/// every gate here, they assert NO soundness / privacy property (sq-qhy4).
 ///
 /// [`solution`]: BranchWitness::solution
 /// [`scan_rows`]: BranchWitness::scan_rows
