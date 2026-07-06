@@ -7,10 +7,14 @@
 # (research/web-gui-test-program.md §4). The wasm build runs on the HOST (normal toolchain +
 # cargo cache); only the browser/render step is containerised.
 #
-# ADVISORY (continue-on-error on the visual step, per §6.3): the lane starts advisory and must
-# earn gating separately (50 consecutive green runs spanning ≥10 distinct PRs, or two weeks —
-# whichever is longer). It is NOT in the ci-summary required set and never enters the merge
-# queue. On failure it uploads the readable *-actual/*-expected/*-diff artifacts.
+# ADVISORY (continue-on-error on the visual step; the whole word `advisory` in the job NAME also
+# excludes it from the `ci-summary` aggregator). Per the checked-in gating/probation policy
+# `.github/E2E-GATING-POLICY.md` (bead sq-ymr2e.12; design §6.3) the visual subset promotes
+# SEPARATELY and LAST — pixel snapshots are the most brittleness-prone lane, so it earns its own
+# probation window (50 consecutive green runs spanning ≥10 distinct PRs, or two weeks — whichever
+# is longer) AFTER the functional lanes are stable. It is NOT in the ci-summary required set and
+# never enters the merge queue. Promotion is the one-line flip in §4 of that policy. On failure it
+# uploads the readable *-actual/*-expected/*-diff artifacts.
 #
 # SCOPE: path-scoped to site/** + the root workspace lock inputs (same reasoning as
 # site-e2e.yml — `npm ci` resolves from the root lockfile) + this workflow. A Rust-/docs-only
