@@ -66,6 +66,19 @@ hasse = []
 # honest deferral, never a guessed sat/unsat verdict (see src/cdomain.rs).
 cdomain = ["dep:sparq-substrate", "sparq-substrate/numeric"]
 
+# [OPUS-4.8] sq-pbz04.2.5 (epic sq-pbz04.2): ABox internalization + realisation + whole-ontology
+# consistency. Encodes `ClassAssertion`/`ObjectPropertyAssertion` as safe-nominal axioms over the
+# landed CR6 machinery (`a rdf:type C` ⇒ `{a} ⊑ C`; `a p b` ⇒ `{a} ⊑ ∃p.{b}`), then reads off
+# instance typings (`a rdf:type C`), individual equality (`a owl:sameAs b`) and a NEW
+# whole-ontology `inconsistent` verdict (`{a} ⊑ ⊥` or `⊤ ⊑ ⊥`). OFF by default so the TBox
+# classifier — `Classifier::classify` / `classify_graph` — stays byte-identical (they NEVER
+# internalize assertions, regardless of this feature; the ABox path is the separate `realize` /
+# `realize_graph` entry). Every emitted typing/sameAs/inconsistency holds in every model
+# (soundness over completeness, the CR6 reachability side-condition preserved); unsupported
+# assertion shapes (data-property assertions, non-EL class expressions) stay counted skips
+# (fail-closed). No new dependency — reuses oxrdf + rustc-hash.
+abox = []
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).

@@ -168,6 +168,24 @@ impl Names {
         self.to_dict.get(c as usize).copied().flatten()
     }
 
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): every minted nominal as `(individual dict id, concept)`.
+    /// The bijection `nominal_by_dict` drives the ABox realisation readoff (per-individual typing
+    /// plus the concept→individual reverse map for `owl:sameAs`); it spans BOTH the
+    /// assertion-minted individuals (`abox`) and any TBox `owl:hasValue`/singleton-`owl:oneOf`
+    /// nominals.
+    #[cfg(feature = "abox")]
+    pub fn nominals(&self) -> impl Iterator<Item = (Id, Concept)> + '_ {
+        self.nominal_by_dict.iter().map(|(&id, &c)| (id, c))
+    }
+
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): the internal role for `dict_id` IF one was already
+    /// minted, WITHOUT minting a new one (unlike [`Names::role`]). Used to append the
+    /// `owl:bottomObjectProperty` empty-role axiom only when that property actually occurs.
+    #[cfg(feature = "abox")]
+    pub fn role_of(&self, dict_id: Id) -> Option<Role> {
+        self.role_by_dict.get(&dict_id).copied()
+    }
+
     /// The number of concepts minted so far (the dense index upper bound).
     pub fn concept_count(&self) -> usize {
         self.to_dict.len()

@@ -5,13 +5,20 @@
 //! entry points are [`classify_graph`] (emit the complete subsumption lattice into a
 //! `(Dict, triples)` pair) and [`Classifier`] (the typed [`ClassHierarchy`] API). The
 //! algorithm lives in private modules: `normal` (Baader–Brandt–Lutz normalization),
-//! `classify` (CR1–CR6 saturation), `extract` (RDF → EL+⊥ axioms), and — under the
-//! `cdomain` feature — `cdomain` (CR7–CR9 concrete-domain facet satisfiability on the
-//! shared `sparq_substrate::numeric` value tower).
+//! `classify` (CR1–CR6 saturation), `extract` (RDF → EL+⊥ axioms), under the
+//! `cdomain` feature `cdomain` (CR7–CR9 concrete-domain facet satisfiability on the
+//! shared `sparq_substrate::numeric` value tower), and under the `abox` feature `abox`
+//! (ABox assertion internalization as safe nominals + the realisation readoff — the
+//! `realize` / `realize_graph` entry points, code spans not intra-doc links so this
+//! always-compiled note stays clean under the no-`--all-features` rustdoc check).
 
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{Dict, Id};
 
+// [OPUS-4.8] sq-pbz04.2.5: ABox internalization + realisation + whole-ontology consistency —
+// only under `abox`, so the default TBox classifier carries zero assertion-reasoning code.
+#[cfg(feature = "abox")]
+mod abox;
 // [FABLE-5] sq-pbz04.2.2: CR7–CR9 (concrete domains) — only under `cdomain`, so the
 // default build carries zero concrete-domain code and no sparq-substrate dependency.
 #[cfg(feature = "cdomain")]
@@ -24,6 +31,8 @@ mod normal;
 #[cfg(feature = "rbox")]
 mod rbox;
 
+#[cfg(feature = "abox")]
+pub use abox::{realize, realize_graph, AboxReport, Realization};
 #[cfg(feature = "hasse")]
 pub use hasse::{classify_hasse_graph, DirectHierarchy};
 
@@ -57,9 +66,14 @@ const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
 ///
 /// Nominal honesty notes (sq-pbz04.2.1): CR6 uses the classic reachability side-condition — every
 /// derived subsumption is sound, but completeness is claimed only for the typical "safe" nominal
-/// usage, not every EL++ nominal interplay (see `classify.rs` `cr6_pass` for the boundary); and
-/// ABox `rdf:type` assertions are NOT internalized as nominal axioms (TBox classification only —
-/// materializing instance closures is the RL path's job).
+/// usage, not every EL++ nominal interplay (see `classify.rs` `cr6_pass` for the boundary). The
+/// TBox [`Classifier::classify`] / [`classify_graph`] do NOT internalize ABox assertions — that
+/// stays their documented contract in EVERY feature state. Under the opt-in `abox` feature
+/// (sq-pbz04.2.5) a SEPARATE `realize` / `realize_graph` entry internalizes
+/// `ClassAssertion`/`ObjectPropertyAssertion` as safe-nominal axioms over exactly this CR6
+/// machinery and reads off instance typings, `owl:sameAs`, and a whole-ontology `inconsistent`
+/// verdict (the `realize`/`realize_graph` names are code spans, not intra-doc links, so this
+/// always-compiled note stays clean under the no-`--all-features` rustdoc check).
 ///
 /// Without `rbox`, RBox axioms (`rdfs:subPropertyOf` / property chains / transitivity) are also
 /// left unapplied (roles are compared for equality only) — but those are gated capability, not the
@@ -84,6 +98,14 @@ pub struct Report {
     pub emitted_subsumptions: usize,
     /// Named classes found unsatisfiable (`⊑ owl:Nothing`).
     pub unsatisfiable_classes: usize,
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): ABox assertions the realiser DEFERRED as counted skips
+    /// — a `DataPropertyAssertion` (literal object; the `cdomain` point-range rescue is a
+    /// sequenced follow-up) or a `ClassAssertion` whose class expression is outside the EL
+    /// fragment. Set only by [`realize`] / [`realize_graph`]; the TBox `Classifier::classify` /
+    /// `classify_graph` leave it `0`. A non-zero count is the honest "n instance facts not
+    /// internalized" signal (fail-closed — never a guessed typing).
+    #[cfg(feature = "abox")]
+    pub skipped_assertions: usize,
 }
 
 /// The complete class-subsumption lattice for the named classes of a TBox, as a typed view
@@ -98,6 +120,12 @@ pub struct ClassHierarchy {
     /// Dict ids of the unsatisfiable named classes (`⊑ owl:Nothing`).
     unsatisfiable: Vec<Id>,
     report: Report,
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): whole-ontology inconsistency (`{a} ⊑ ⊥` for an asserted
+    /// individual, or a global `⊤ ⊑ ⊥`). `false` for a TBox `Classifier::classify` (which by its
+    /// documented contract decides NAMED-class satisfiability, not whole-ontology consistency);
+    /// set true only by the `abox` realiser.
+    #[cfg(feature = "abox")]
+    inconsistent: bool,
 }
 
 impl ClassHierarchy {
@@ -121,6 +149,18 @@ impl ClassHierarchy {
     /// needs an asserted instance of an unsatisfiable class — ABox reasoning, out of scope).
     pub fn unsatisfiable_classes(&self) -> &[Id] {
         &self.unsatisfiable
+    }
+
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): whether the WHOLE ontology is inconsistent — an asserted
+    /// individual forced into `owl:Nothing` (`{a} ⊑ ⊥`, e.g. two disjoint `ClassAssertion`s) or a
+    /// global `⊤ ⊑ ⊥`. Only ever `true` on a hierarchy produced by [`realize`] / [`realize_graph`]
+    /// (the ABox path); a plain [`Classifier::classify`] result is always `false` (it decides
+    /// named-class satisfiability, not whole-ontology consistency — see [`unsatisfiable_classes`]).
+    ///
+    /// [`unsatisfiable_classes`]: ClassHierarchy::unsatisfiable_classes
+    #[cfg(feature = "abox")]
+    pub fn is_inconsistent(&self) -> bool {
+        self.inconsistent
     }
 
     /// The extraction/classification [`Report`] (named-class count, skipped non-EL axioms,
@@ -168,45 +208,65 @@ impl Classifier {
     /// subsumption [`ClassHierarchy`]. Does NOT mutate the graph; use [`classify_graph`] to
     /// materialize the lattice as triples. Single-threaded.
     pub fn classify(dict: &Dict, triples: &[[Id; 3]]) -> ClassHierarchy {
-        let extract::Extracted {
-            axioms,
-            names,
-            mut report,
-            #[cfg(feature = "rbox")]
-            role_axioms,
-        } = extract::extract(dict, triples);
-        // The role box (CR10/CR11 saturation) is built only under `rbox`; without it the
-        // saturator runs the E1 calculus (roles compared for equality only). Building it here
-        // before `names` is borrowed by `saturate` keeps role ids consistent.
-        #[cfg(feature = "rbox")]
-        let role_box = rbox::RoleBox::build(&role_axioms, names.role_count());
-        #[cfg(feature = "rbox")]
-        let sat = classify::saturate(&axioms, &names, &role_box);
-        #[cfg(not(feature = "rbox"))]
-        let sat = classify::saturate(&axioms, &names);
-        let cls = classify::classify(&sat, &names);
-        // Re-key the named-concept lattice onto dict ids for the public view.
-        let mut subsumers: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
-        for (&c, sups) in &cls.subsumers {
-            let Some(cid) = names.dict_of(c) else {
-                continue;
-            };
-            let row: Vec<Id> = sups.iter().filter_map(|&d| names.dict_of(d)).collect();
-            if !row.is_empty() {
-                subsumers.insert(cid, row);
-            }
+        // TBox only: `ExtractOpts::default()` never internalizes ABox assertions, so this path is
+        // byte-identical in every `abox` feature state (the ABox reasoning is the separate
+        // `abox::realize` entry — `classify` / `classify_graph` keep their documented TBox-only
+        // contract, which is exactly what the conformance lane pins).
+        let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
+        let sat = saturate_extracted(&ex);
+        let cls = classify::classify(&sat, &ex.names);
+        hierarchy_from(cls, &ex.names, ex.report)
+    }
+}
+
+/// Runs the CR saturation for an [`extract::Extracted`], branching on the `rbox` feature to build
+/// the role automaton first (so every asserted existential link is closed under role
+/// inclusion/composition before CR4/CR5 fire). Shared by [`Classifier::classify`] (TBox) and the
+/// `abox` realiser so both reason over the same fixpoint.
+pub(crate) fn saturate_extracted(ex: &extract::Extracted) -> classify::Saturation {
+    #[cfg(feature = "rbox")]
+    {
+        let role_box = rbox::RoleBox::build(&ex.role_axioms, ex.names.role_count());
+        classify::saturate(&ex.axioms, &ex.names, &role_box)
+    }
+    #[cfg(not(feature = "rbox"))]
+    {
+        classify::saturate(&ex.axioms, &ex.names)
+    }
+}
+
+/// Projects a [`classify::Classification`] onto dict ids: the named-class subsumption lattice +
+/// the unsatisfiable classes, filling `Report::unsatisfiable_classes`. The whole-ontology
+/// `abox`-inconsistency verdict is a separate concern the realiser sets afterwards; a plain TBox
+/// classification leaves it `false`.
+pub(crate) fn hierarchy_from(
+    cls: classify::Classification,
+    names: &normal::Names,
+    mut report: Report,
+) -> ClassHierarchy {
+    // Re-key the named-concept lattice onto dict ids for the public view.
+    let mut subsumers: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    for (&c, sups) in &cls.subsumers {
+        let Some(cid) = names.dict_of(c) else {
+            continue;
+        };
+        let row: Vec<Id> = sups.iter().filter_map(|&d| names.dict_of(d)).collect();
+        if !row.is_empty() {
+            subsumers.insert(cid, row);
         }
-        let unsatisfiable: Vec<Id> = cls
-            .unsatisfiable
-            .iter()
-            .filter_map(|&c| names.dict_of(c))
-            .collect();
-        report.unsatisfiable_classes = unsatisfiable.len();
-        ClassHierarchy {
-            subsumers,
-            unsatisfiable,
-            report,
-        }
+    }
+    let unsatisfiable: Vec<Id> = cls
+        .unsatisfiable
+        .iter()
+        .filter_map(|&c| names.dict_of(c))
+        .collect();
+    report.unsatisfiable_classes = unsatisfiable.len();
+    ClassHierarchy {
+        subsumers,
+        unsatisfiable,
+        report,
+        #[cfg(feature = "abox")]
+        inconsistent: false,
     }
 }
 
