@@ -53,8 +53,12 @@ pub use derivation::{regime_admits, DerivationStep, EntailmentRule};
 #[cfg(feature = "dual-leaf")]
 pub use dispatch::{resolve_circuit, resolve_circuit_for_scheme, DispatchError};
 // [OPUS-4.8] sq-3kd2g.6: the fail-closed wave-1 fragment DISPATCH routing gate.
+// [OPUS-4.8] sq-h732x: + `verify_fragment_manifest`, the end-to-end extended-
+// fragment verification entry point (dispatch routing + the shared crypto stage,
+// stage-1a routed through `fragment_query`). NOT-yet-sound (sq-qhy4); the
+// disclosed-solution term binding is deferred to sq-1zf94.
 #[cfg(feature = "extended-fragment")]
-pub use verifier::{dispatch_fragment, FragmentDispatchError};
+pub use verifier::{dispatch_fragment, verify_fragment_manifest, FragmentDispatchError};
 pub use verifier::EntailmentPolicy;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
