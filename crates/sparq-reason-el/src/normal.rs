@@ -226,11 +226,13 @@ impl Names {
     }
 
     /// [OPUS-4.8] sq-pbz04.2.6 (`abox`): the source dict id of a role, if it is a NAMED object
-    /// property. Used by the self-loop realisation readoff to name the predicate of a derived
-    /// `a r a` assertion. A fresh anonymous chain role (`rbox`, sentinel `Id::MAX`) has no dict
-    /// id and returns `None`; a self-restriction's role is always a named property, so this
-    /// resolves for every self-loop the readoff emits.
-    #[cfg(feature = "abox")]
+    /// property. Used by the self-loop realisation readoff (`abox`) to name the predicate of a
+    /// derived `a r a` assertion, and by the role-lattice readoff (`rbox`, sq-pbz04.2.7) to map
+    /// role-index pairs back to dict ids for `rdfs:subPropertyOf` emission. A fresh anonymous
+    /// chain role (`rbox`, sentinel `Id::MAX`) has no dict id and returns `None`; a
+    /// self-restriction's role is always a named property, so this resolves for every self-loop
+    /// the `abox` readoff emits.
+    #[cfg(any(feature = "abox", feature = "rbox"))]
     pub fn role_dict_of(&self, r: Role) -> Option<Id> {
         match self.role_to_dict.get(r as usize).copied() {
             Some(id) if id != Id::MAX => Some(id),
