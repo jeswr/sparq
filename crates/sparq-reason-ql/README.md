@@ -81,8 +81,8 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
 > no answers. (Dropping a non-contained disjunct would be an unsoundness bug.)
 
 **Scope (honest):** positive-inclusion rewriting + tree-witness folding + containment minimisation.
-**No consistency checking**, no qualified existentials. The rewriter is oracle-tested
-(`tests/oracle.rs`, incl. the tree-witness + minimisation cases).
+**No consistency checking**, no qualified existentials; the **combined-approach / H-complete-ABox** lever was **evaluated + NOT adopted** (measured minimised UCQ ≤ 4 on the real corpus, no blow-up to amortise — `sq-pbz04.3.5`, profile in `examples/ql_rewrite_bench.rs`, rationale in `research/owl2-ql-cq-gate-broadening.md` §10).
+The rewriter is oracle-tested (`tests/oracle.rs`, incl. the tree-witness + minimisation cases).
 
 **Two conformance arms, two honesty stances (sq-qo1a9):**
 
