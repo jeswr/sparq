@@ -38,6 +38,11 @@ pub use hasse::{classify_hasse_graph, DirectHierarchy};
 
 const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
+/// [SONNET-4.6] sq-pbz04.2.7 (`rbox`): the `rdfs:subPropertyOf` predicate IRI — interned by
+/// `classify_graph` when the `rbox` feature is on so the role-lattice readoff can emit
+/// non-reflexive inclusion pairs as triples.
+#[cfg(feature = "rbox")]
+const RDFS_SUB_PROPERTY_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
 
 /// A tally of what the extractor read and what it could not (so an honest
 /// "n axioms outside the EL fragment were ignored" can be surfaced).
@@ -110,6 +115,14 @@ pub struct Report {
     /// internalized" signal (fail-closed — never a guessed typing).
     #[cfg(feature = "abox")]
     pub skipped_assertions: usize,
+    /// [SONNET-4.6] sq-pbz04.2.7 (`rbox`): new `rdfs:subPropertyOf` triples emitted by
+    /// `classify_graph` for the told-inclusion role-lattice closure — the count of NON-REFLEXIVE
+    /// closure pairs that were NOT already present in the graph (i.e. the purely-derived
+    /// transitive-closure edges, excluding told inclusions already in the input). `0` without the
+    /// `rbox` feature; `0` on a second (idempotent) call. Set only by `classify_graph`; the
+    /// typed `Classifier::classify` API leaves it `0`.
+    #[cfg(feature = "rbox")]
+    pub emitted_role_subsumptions: usize,
 }
 
 /// The complete class-subsumption lattice for the named classes of a TBox, as a typed view
@@ -280,12 +293,27 @@ pub(crate) fn hierarchy_from(
 /// clashes are surfaced via [`Report::unsatisfiable_classes`] (not emitted as triples — the
 /// caller decides whether to flag them, matching the RL `inconsistencies()` reporting shape).
 ///
-/// Returns the [`Report`] with `emitted_subsumptions` set to the number of NEW triples added.
-/// Idempotent: a second call adds nothing. This is the seam the CLI/`Graph` integration uses —
-/// the emitted edges are ordinary triples queryable by plain BGP eval, exactly like the RL
-/// `scm-*` output.
+/// With the `rbox` feature on, ALSO materializes the NON-REFLEXIVE told-inclusion role-lattice
+/// closure as `rdfs:subPropertyOf` triples: every `(r, s)` pair with `r != s` and `s` in the
+/// reflexive-transitive closure of the told `rdfs:subPropertyOf` / `owl:propertyChainAxiom` /
+/// `owl:TransitiveProperty` role inclusions. This is a READOFF of the already-computed
+/// `RoleBox::super_of` table — no new saturation. The `emitted_role_subsumptions` field of the
+/// returned `Report` counts the NEW role triples added (told pairs already present are not
+/// re-emitted). Idempotent: a second call adds nothing.
+///
+/// Returns the [`Report`] with `emitted_subsumptions` set to the number of NEW class triples
+/// added. This is the seam the CLI/`Graph` integration uses — the emitted edges are ordinary
+/// triples queryable by plain BGP eval, exactly like the RL `scm-*` output.
 pub fn classify_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> Report {
-    let hierarchy = Classifier::classify(dict, triples);
+    // [SONNET-4.6] sq-pbz04.2.7: share the extraction so the role box is available for the
+    // readoff without a second triple scan. Without `rbox` this is byte-identical to the
+    // previous `Classifier::classify` call (same three extraction/saturation/project steps,
+    // same `ExtractOpts::default()` — never internalizes ABox assertions).
+    let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
+    let sat = saturate_extracted(&ex);
+    let cls = classify::classify(&sat, &ex.names);
+    let hierarchy = hierarchy_from(cls, &ex.names, ex.report);
+
     let sub_class_of = dict.intern_iri(RDFS_SUB_CLASS_OF);
     let _ = dict.intern_iri(OWL_NOTHING); // ensure the term exists for downstream clash checks.
 
@@ -305,9 +333,56 @@ pub fn classify_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> Report {
             }
         }
     }
+
+    // [SONNET-4.6] sq-pbz04.2.7 (`rbox`): role-lattice readoff. Emit the non-reflexive
+    // told-inclusion closure as `rdfs:subPropertyOf` triples. READOFF ONLY — builds the
+    // RoleBox a second time (cheap: O(role_count) BFS over a tiny graph) to read off
+    // `super_of` without changing `saturate_extracted`'s internal structure.
+    #[cfg(feature = "rbox")]
+    let emitted_roles = emit_role_pairs(dict, &ex, &mut present, triples);
+
     let mut report = hierarchy.report;
     report.emitted_subsumptions = emitted;
+    #[cfg(feature = "rbox")]
+    {
+        report.emitted_role_subsumptions = emitted_roles;
+    }
     report
+}
+
+/// [SONNET-4.6] sq-pbz04.2.7 (`rbox`): builds the `RoleBox` from the already-extracted role
+/// axioms and emits every non-reflexive told-inclusion pair as a `rdfs:subPropertyOf` triple,
+/// deduplicating against `present` so idempotency holds. Returns the count of NEW triples added.
+/// Anonymous chain-intermediate roles (`Id::MAX` sentinel) are skipped — they never appear in
+/// the output vocabulary.
+#[cfg(feature = "rbox")]
+fn emit_role_pairs(
+    dict: &mut Dict,
+    ex: &extract::Extracted,
+    present: &mut rustc_hash::FxHashSet<[Id; 3]>,
+    triples: &mut Vec<[Id; 3]>,
+) -> usize {
+    let role_box = rbox::RoleBox::build(&ex.role_axioms, ex.names.role_count());
+    let sub_prop_of = dict.intern_iri(RDFS_SUB_PROPERTY_OF);
+    // Collect, filter anonymous roles, sort for deterministic output order.
+    let mut pairs: Vec<(Id, Id)> = role_box
+        .inclusion_pairs()
+        .filter_map(|(r, s)| {
+            let r_id = ex.names.role_dict_of(r)?;
+            let s_id = ex.names.role_dict_of(s)?;
+            Some((r_id, s_id))
+        })
+        .collect();
+    pairs.sort_unstable();
+    let mut n = 0usize;
+    for (r_id, s_id) in pairs {
+        let t = [r_id, sub_prop_of, s_id];
+        if present.insert(t) {
+            triples.push(t);
+            n += 1;
+        }
+    }
+    n
 }
 
 #[cfg(test)]

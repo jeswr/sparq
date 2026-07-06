@@ -55,11 +55,12 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   never triggers it (the load-bearing side-condition). Any malformed shape (non-`true`/non-boolean
   object, missing `owl:onProperty`) stays a counted skip. Under `abox` the self-loop realises as
   the property assertion `a r a` (the WG `New-Feature-SelfRestriction-001` "Peter likes Peter").
-- **RBox role automaton** *(opt-in `rbox` feature, Phase E2)* — `rdfs:subPropertyOf` role
-  inclusions (**CR10**), `owl:propertyChainAxiom` + `owl:TransitiveProperty` compositions
-  (**CR11**), incl. the SNOMED-critical right-identity `r ∘ s ⊑ s`. OFF by default: zero
-  role-automaton code without it, and RBox axioms are then left unapplied (roles compared for
-  equality only).
+- **RBox role automaton + lattice readoff** *(opt-in `rbox` feature, Phases E2/E3)* —
+  `rdfs:subPropertyOf` inclusions (**CR10**), `owl:propertyChainAxiom` + `owl:TransitiveProperty`
+  compositions (**CR11**), incl. the SNOMED-critical right-identity `r ∘ s ⊑ s`; and a
+  **role-lattice readoff**: `classify_graph` also emits the NON-REFLEXIVE told-inclusion closure
+  as `rdfs:subPropertyOf` triples (`Report::emitted_role_subsumptions` counts the new ones). OFF
+  by default: zero role-automaton code without it.
 - **Transitive reduction → Hasse diagram** *(opt-in `hasse` feature, Phase E3)* — `DirectHierarchy`
   reduces the full closure to the **direct (immediate) subsumers**, collapses **equivalence
   cliques**, and `classify_hasse_graph` emits the COMPACT taxonomy (direct `rdfs:subClassOf` +

@@ -129,6 +129,25 @@ impl RoleBox {
     pub fn has_compositions(&self) -> bool {
         self.has_compositions
     }
+
+    /// [SONNET-4.6] sq-pbz04.2.7: yields every NON-REFLEXIVE `(sub, sup)` role-inclusion pair
+    /// from the already-computed told-inclusion closure — every `(r, s)` where `r != s` and
+    /// `s ∈ super_of[r]`. This is a READOFF of the closure built by [`RoleBox::build`]; no new
+    /// saturation is performed. The pairs cover the full reflexive-transitive closure minus the
+    /// self-pairs, matching the `rdfs:subPropertyOf` emission contract in
+    /// `crate::classify_graph` (under the `rbox` feature).
+    pub fn inclusion_pairs(&self) -> impl Iterator<Item = (Role, Role)> + '_ {
+        self.super_of.iter().enumerate().flat_map(|(r, sups)| {
+            let r = r as Role;
+            sups.iter().filter_map(move |&s| {
+                if r != s {
+                    Some((r, s))
+                } else {
+                    None
+                }
+            })
+        })
+    }
 }
 
 #[cfg(test)]
@@ -166,5 +185,45 @@ mod tests {
     fn pure_hierarchy_has_no_compositions() {
         let rb = RoleBox::build(&[RoleAxiom::Sub(0, 1)], 2);
         assert!(!rb.has_compositions());
+    }
+
+    // [SONNET-4.6] sq-pbz04.2.7: unit tests for `inclusion_pairs` (the role-lattice readoff).
+
+    #[test]
+    fn inclusion_pairs_chain_closure() {
+        // r0 ⊑ r1 ⊑ r2: non-reflexive closure = (0,1), (0,2), (1,2). Self-pairs excluded.
+        let rb = RoleBox::build(&[RoleAxiom::Sub(0, 1), RoleAxiom::Sub(1, 2)], 3);
+        let mut pairs: Vec<(Role, Role)> = rb.inclusion_pairs().collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(0, 1), (0, 2), (1, 2)], "chain yields 3 non-reflexive pairs");
+        // No self-pairs.
+        assert!(
+            !pairs.iter().any(|&(r, s)| r == s),
+            "no self-pair may appear in inclusion_pairs"
+        );
+    }
+
+    #[test]
+    fn inclusion_pairs_mutual_inclusion() {
+        // r0 ⊑ r1, r1 ⊑ r0 (equivalent roles): both directions emitted, no self-pairs.
+        let rb = RoleBox::build(&[RoleAxiom::Sub(0, 1), RoleAxiom::Sub(1, 0)], 2);
+        let mut pairs: Vec<(Role, Role)> = rb.inclusion_pairs().collect();
+        pairs.sort_unstable();
+        assert_eq!(
+            pairs,
+            vec![(0, 1), (1, 0)],
+            "mutual inclusion emits both directions"
+        );
+    }
+
+    #[test]
+    fn inclusion_pairs_isolated_role() {
+        // A role with NO inclusions: only the reflexive self-entry in super_of, so inclusion_pairs
+        // yields nothing for it.
+        let rb = RoleBox::build(&[], 2);
+        assert!(
+            rb.inclusion_pairs().next().is_none(),
+            "no told inclusions => no inclusion pairs"
+        );
     }
 }
