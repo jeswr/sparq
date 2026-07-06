@@ -43,11 +43,18 @@ pub use manifest::{
     HiddenIndexRevocation, HolderPokProof, HolderSetProof, ProofInputs, ProofManifest,
     RevocationStatus, StatusListSnapshot, SubProof,
 };
+// [OPUS-4.8] sq-3kd2g.6: the wave-1 extended-fragment presentation wrapper +
+// per-solution UNION branch attribution schema. Opt-in (`extended-fragment`).
+#[cfg(feature = "extended-fragment")]
+pub use manifest::{BranchWitness, FragmentManifest};
 // [OPUS-4.8] sq-314: derivation-step capability + entailment regime end-to-end.
 pub use derivation::{regime_admits, DerivationStep, EntailmentRule};
 // [OPUS-4.8] sq-cfmv: the fail-closed (method × circuit) dispatch resolver.
 #[cfg(feature = "dual-leaf")]
 pub use dispatch::{resolve_circuit, resolve_circuit_for_scheme, DispatchError};
+// [OPUS-4.8] sq-3kd2g.6: the fail-closed wave-1 fragment DISPATCH routing gate.
+#[cfg(feature = "extended-fragment")]
+pub use verifier::{dispatch_fragment, FragmentDispatchError};
 pub use verifier::EntailmentPolicy;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
