@@ -33,8 +33,10 @@
 //! blocker is gone. However, this crate is a dev-only **oracle** crate with a load-bearing
 //! *zero dependency on `sparq-core` / `sparq-engine` / `sparq-solid`* (Cargo.toml) — it
 //! cannot link the system under test. Driving a live `PodStore::query_as` concurrently
-//! therefore belongs to a `sparq-solid`-linked driver under `bench/ac/` (beads
-//! `sq-i6du2.7` / `.9`), NOT to this oracle crate. The W4 query sub-lane is consequently
+//! therefore belongs to the `sparq-solid`-linked live DRIVER under `bench/ac/` — bead
+//! `sq-kvvcl`, the FILES-scoped owner of that driver (surfaced by the #1627 review:
+//! `sq-i6du2.7` is scripts/registry-only and `.9` is RESULTS-only, so neither actually
+//! links the SUT). It is NOT this oracle crate's job. The W4 query sub-lane is consequently
 //! [`RunOutcome::Skipped`] here with the accurate reason
 //! [`W4_QUERY_SKIP_REASON`] — never a fabricated concurrency number.
 //!
@@ -48,10 +50,11 @@ use crate::{AcModel, Decision, GenParams, IntentRow, QueryClass, Request, oracle
 /// The `&self` read-side (#1569 / PR #1612) has merged, so the reason is NOT "blocked on
 /// an unmerged dependency". The remaining blocker is architectural: this oracle crate is
 /// forbidden (by the Cargo.toml zero-dependency constraint) from linking `sparq-solid`, so
-/// the concurrent live-`query_as` driver lives outside this crate. This string is asserted
-/// in `tests/workloads.rs` so the reason cannot silently drift back to a false claim.
+/// the concurrent live-`query_as` driver lives outside this crate — in the FILES-scoped
+/// live driver bead `sq-kvvcl` under `bench/ac/`. This string is asserted in
+/// `tests/workloads.rs` so the reason cannot silently drift back to a false claim.
 pub const W4_QUERY_SKIP_REASON: &str =
-    "W4 query sub-lane runs in the sparq-solid-linked bench/ac driver (sq-i6du2.7/.9), \
+    "W4 query sub-lane runs in the sparq-solid-linked bench/ac live driver (sq-kvvcl), \
      not this zero-dependency oracle crate; #1569/#1612 (the &self read-side) has merged, \
      so the API blocker is gone but this crate must not link the system under test";
 

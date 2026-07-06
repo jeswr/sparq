@@ -34,6 +34,18 @@ fn agent_allow(agent: &str, resource: &str) -> IntentRow {
     }
 }
 
+fn agent_deny(agent: &str, resource: &str) -> IntentRow {
+    IntentRow { effect: Effect::Deny, ..agent_allow(agent, resource) }
+}
+
+/// An Allow intent for `agent` on `resource` carrying a temporal ODRL condition.
+fn agent_allow_temporal(agent: &str, resource: &str, start: &str, end: &str) -> IntentRow {
+    IntentRow {
+        condition: Condition::Temporal { start: start.to_string(), end: end.to_string() },
+        ..agent_allow(agent, resource)
+    }
+}
+
 fn req(agent: &str, resource: &str) -> Request {
     Request {
         agent: agent.to_string(),
@@ -46,6 +58,23 @@ fn req(agent: &str, resource: &str) -> Request {
 const ALICE: &str = "https://alice.example/card#me";
 const BOB: &str = "https://bob.example/card#me";
 const RES: &str = "https://alice.example/docs/notes.ttl";
+
+// The pinned benchmark evaluation instant is `2026-07-06T00:00:00Z` (oracle::BENCH_EVAL_INSTANT).
+// A window that CONTAINS it is valid (permission granted); one that ended before it is expired.
+const WINDOW_VALID_START: &str = "2026-01-01T00:00:00Z";
+const WINDOW_VALID_END: &str = "2027-01-01T00:00:00Z";
+const WINDOW_EXPIRED_START: &str = "2020-01-01T00:00:00Z";
+const WINDOW_EXPIRED_END: &str = "2021-01-01T00:00:00Z";
+
+/// Build a single-request W1 batch and return its `RunOutcome` for `(model, expected)`.
+///
+/// Because the batch's `expected` is exactly `want`, a *pass* proves the by-construction
+/// oracle for `model` agrees with `want`, and a *failure* proves it disagrees. This is the
+/// lever that makes the ODRL oracle arm actually get DISPATCHED (Finding 1): W1's `model`
+/// field routes `oracle::evaluate` through the arm under test.
+fn w1_single(model: AcModel, intents: Vec<IntentRow>, request: Request, want: Decision) -> RunOutcome {
+    W1DecisionBatch { requests: vec![request], expected: vec![want], model, intents }.run_oracle()
+}
 
 // ── RunOutcome helpers (retained from scaffold) ───────────────────────────────────────
 
@@ -163,6 +192,153 @@ fn anti_vacuity_miscompiled_deny_intent_cannot_grant() {
     assert!(
         batch.run_oracle().is_failure(),
         "a Deny intent must never produce Allow under WAC (anti-vacuity)"
+    );
+}
+
+// ── W1 per-model dispatch: model-differentiating fixtures ─────────────────────────────
+//
+// These tests dispatch the SAME (request, intents) through W1 under EACH of WAC, ACP, and
+// ODRL, over fixtures the three models decide DIFFERENTLY. Before them, no workload test
+// ever routed `oracle::evaluate` through the ODRL arm (W2's `model` was inert), so swapping
+// the `Acp`↔`Odrl` arms of the router survived the whole suite. With them, W1's `model`
+// field forces the arm under test, so the swap is caught (see the mutation note below).
+
+/// Fixture (i) — matching Allow **and** matching Deny for the same agent/resource.
+/// The three models diverge by design:
+/// - **WAC** has no deny (it skips Deny rows) → the Allow stands → `Allow`.
+/// - **ACP** is deny-wins → the Deny overrides the Allow → `Deny`.
+/// - **ODRL** is permission-overrides-prohibition → the Permission wins → `Allow`.
+///
+/// This single fixture pins all three arms; in particular ACP=`Deny` vs ODRL=`Allow` is the
+/// exact behaviour the `Acp`↔`Odrl` router swap inverts, so the swap must fail here.
+#[test]
+fn w1_allow_and_deny_same_target_differs_by_model() {
+    let intents = vec![agent_allow(ALICE, RES), agent_deny(ALICE, RES)];
+
+    // WAC: Deny row is unsupported/skipped → the Allow stands.
+    assert!(
+        w1_single(AcModel::Wac, intents.clone(), req(ALICE, RES), Decision::Allow).is_pass(),
+        "WAC has no deny: a matching Allow with a co-located Deny must still Allow"
+    );
+    // ACP: deny-wins.
+    assert!(
+        w1_single(AcModel::Acp, intents.clone(), req(ALICE, RES), Decision::Deny).is_pass(),
+        "ACP is deny-wins: a matching Deny must override the Allow"
+    );
+    // ODRL: permission-overrides-prohibition.
+    assert!(
+        w1_single(AcModel::Odrl, intents.clone(), req(ALICE, RES), Decision::Allow).is_pass(),
+        "ODRL: a matching Permission overrides a co-located Prohibition → Allow"
+    );
+
+    // Guard against a lazy fixture: the ACP and ODRL truths genuinely differ here, so a
+    // model that returns the *other* model's decision must FAIL. This is what the arm-swap
+    // mutation trips on.
+    assert!(
+        w1_single(AcModel::Acp, intents.clone(), req(ALICE, RES), Decision::Allow).is_failure(),
+        "ACP must NOT return the ODRL answer (Allow) — arm-swap tripwire"
+    );
+    assert!(
+        w1_single(AcModel::Odrl, intents, req(ALICE, RES), Decision::Deny).is_failure(),
+        "ODRL must NOT return the ACP answer (Deny) — arm-swap tripwire"
+    );
+}
+
+/// Fixture (ii) — an Allow carrying a `Condition::Temporal` window that CONTAINS the pinned
+/// benchmark instant. The three models diverge:
+/// - **WAC** cannot express conditions (skips conditioned rows) → `Deny`.
+/// - **ACP** cannot express conditions (skips conditioned rows) → `Deny`.
+/// - **ODRL** evaluates the condition; the window is valid at the pinned instant → `Allow`.
+///
+/// So ACP=`Deny` vs ODRL=`Allow` again separate the two arms; the swap must fail here too,
+/// and this fixture additionally exercises the real temporal condition evaluation (Finding 2).
+#[test]
+fn w1_temporal_allow_differs_by_model_valid_window() {
+    let intents = vec![agent_allow_temporal(ALICE, RES, WINDOW_VALID_START, WINDOW_VALID_END)];
+
+    assert!(
+        w1_single(AcModel::Wac, intents.clone(), req(ALICE, RES), Decision::Deny).is_pass(),
+        "WAC cannot express a temporal condition → the conditioned Allow is skipped → Deny"
+    );
+    assert!(
+        w1_single(AcModel::Acp, intents.clone(), req(ALICE, RES), Decision::Deny).is_pass(),
+        "ACP cannot express a temporal condition → the conditioned Allow is skipped → Deny"
+    );
+    assert!(
+        w1_single(AcModel::Odrl, intents.clone(), req(ALICE, RES), Decision::Allow).is_pass(),
+        "ODRL evaluates the temporal window; it contains the pinned instant → Allow"
+    );
+
+    // Arm-swap tripwire: ODRL must not return the ACP answer (Deny) for a valid window.
+    assert!(
+        w1_single(AcModel::Odrl, intents, req(ALICE, RES), Decision::Deny).is_failure(),
+        "ODRL with a valid window must Allow, not return the ACP Deny — arm-swap tripwire"
+    );
+}
+
+// ── W1 clock-free temporal condition evaluation (Finding 2) ───────────────────────────
+//
+// The ODRL oracle decides `Condition::Temporal { start, end }` against the pinned benchmark
+// instant with the half-open test `start ≤ now < end` — clock-free, deterministic, no
+// wall-clock read. An expired window is a Deny; a valid window is an Allow. This is the
+// ground truth the constraint-rich U3/U4 corpora depend on.
+
+/// A permission whose temporal window has EXPIRED (ended before the pinned instant) must be
+/// a Deny under ODRL — otherwise an expired retention/embargo grant would wrongly Allow.
+#[test]
+fn w1_temporal_expired_window_is_deny_odrl() {
+    let intents = vec![agent_allow_temporal(ALICE, RES, WINDOW_EXPIRED_START, WINDOW_EXPIRED_END)];
+    assert!(
+        w1_single(AcModel::Odrl, intents.clone(), req(ALICE, RES), Decision::Deny).is_pass(),
+        "an expired temporal window must Deny under ODRL (clock-free ground truth)"
+    );
+    // Anti-vacuity: claiming the expired grant still Allows must FAIL — proves the oracle
+    // is not an always-true stub for Temporal.
+    assert!(
+        w1_single(AcModel::Odrl, intents, req(ALICE, RES), Decision::Allow).is_failure(),
+        "an expired window must NOT Allow — the Temporal stub would have wrongly passed this"
+    );
+}
+
+/// A permission whose temporal window CONTAINS the pinned instant must Allow under ODRL.
+#[test]
+fn w1_temporal_valid_window_is_allow_odrl() {
+    let intents = vec![agent_allow_temporal(ALICE, RES, WINDOW_VALID_START, WINDOW_VALID_END)];
+    assert!(
+        w1_single(AcModel::Odrl, intents.clone(), req(ALICE, RES), Decision::Allow).is_pass(),
+        "a currently-valid temporal window must Allow under ODRL"
+    );
+    // And the mirror anti-vacuity: claiming a valid window Denies must fail.
+    assert!(
+        w1_single(AcModel::Odrl, intents, req(ALICE, RES), Decision::Deny).is_failure(),
+        "a valid window must NOT Deny"
+    );
+}
+
+/// W3 embargo flip via the temporal window: the SAME conditioned intent is Deny while its
+/// window is in the future and Allow once a churn write replaces it with a window that
+/// contains the pinned instant. This mirrors the U4 "public-after-embargo flip" as a churn
+/// delta, proving the temporal oracle is live inside the invalidation lane too.
+#[test]
+fn w3_temporal_embargo_flip_produces_allow_delta() {
+    let future = agent_allow_temporal(ALICE, RES, "2099-01-01T00:00:00Z", "2100-01-01T00:00:00Z");
+    let opened = agent_allow_temporal(ALICE, RES, WINDOW_VALID_START, WINDOW_VALID_END);
+    let script = W3ChurnScript {
+        initial_intents: vec![future.clone()],
+        // Revoke the still-embargoed grant, then grant the now-open window.
+        writes: vec![AclWrite::Revoke(future), AclWrite::Grant(opened)],
+        probes: vec![
+            // Before any write: the window is in the future → Deny.
+            ChurnProbe { request: req(ALICE, RES), after_step: 0, expected: Decision::Deny },
+            // After the flip: the window contains the pinned instant → Allow.
+            ChurnProbe { request: req(ALICE, RES), after_step: 2, expected: Decision::Allow },
+        ],
+        model: AcModel::Odrl,
+    };
+    assert!(
+        script.run_oracle().is_pass(),
+        "embargo-flip churn must move the temporal grant from Deny to Allow: {:?}",
+        script.run_oracle()
     );
 }
 
