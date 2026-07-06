@@ -59,4 +59,15 @@ members = [
     "join_eq_na16_nb64",
     "join_eq_na64_nb16",
     "join_eq_na64_nb64",
+    # [FABLE-5] sq-3kd2g.2 (#1591): bounded-depth path-reachability members
+    # (property paths p+/p* under the bounded EXISTENCE-ONLY statement of
+    # research/zksparql-fragment-extension.md sec 4). The compile-time depth D
+    # is each member's identity -- distinct D => distinct deterministic VK
+    # (mechanism (a), maintainer-confirmed on #1591). NOT a soundness change:
+    # the verifier remains NOT-yet-sound (sq-qhy4); verifier-side path syntax
+    # acceptance + manifest dispatch are follow-ups (sq-3kd2g.3 / sq-3kd2g.6).
+    "path_reach_d2_k1_n16",
+    "path_reach_d4_k1_n16",
+    "path_reach_d8_k1_n16",
+    "path_reach_d4_k2_n16",
 ]
