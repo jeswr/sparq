@@ -15,7 +15,9 @@
 //! - `numeric::Num::binop` — `+` / `*` arithmetic on the `Int` / `Dec` / `Double`
 //!   tiers.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+// [OPUS-4.8] criterion 0.8 deprecated its own black_box in favour of std::hint::black_box.
+use std::hint::black_box;
 use sparq_substrate::{
     join::{build_table, hash_probe_serial, merge_join, JoinKeys, NoBudget},
     numeric::{ArithOp, Dec, Num},

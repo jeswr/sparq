@@ -170,10 +170,6 @@ criteria = "safe-to-deploy"
 version = "0.6.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.bzip2-sys]]
-version = "0.1.13+1.0.8"
-criteria = "safe-to-deploy"
-
 [[exemptions.cc]]
 version = "1.2.63"
 criteria = "safe-to-deploy"
@@ -258,11 +254,6 @@ version = "0.5.1"
 criteria = "safe-to-run"
 notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
 
-[[exemptions.criterion-plot]]
-version = "0.5.0"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
-
 [[exemptions.crossbeam-deque]]
 version = "0.8.6"
 criteria = "safe-to-deploy"
@@ -297,10 +288,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.data-encoding]]
 version = "2.11.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.der]]
-version = "0.7.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.digest]]
@@ -350,10 +337,6 @@ criteria = "safe-to-deploy"
 [[exemptions.fastrand]]
 version = "2.4.1"
 criteria = "safe-to-run"
-
-[[exemptions.fiat-crypto]]
-version = "0.2.9"
-criteria = "safe-to-deploy"
 
 [[exemptions.find-msvc-tools]]
 version = "0.1.9"
@@ -535,10 +518,6 @@ criteria = "safe-to-deploy"
 version = "0.1.65"
 criteria = "safe-to-deploy"
 
-[[exemptions.iana-time-zone-haiku]]
-version = "0.1.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.icu_collections]]
 version = "2.2.0"
 criteria = "safe-to-deploy"
@@ -586,11 +565,6 @@ criteria = "safe-to-deploy"
 [[exemptions.ipnet]]
 version = "2.12.0"
 criteria = "safe-to-deploy"
-
-[[exemptions.is-terminal]]
-version = "0.4.17"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
 
 [[exemptions.itertools]]
 version = "0.14.0"
@@ -742,14 +716,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.num-complex]]
 version = "0.4.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.num-iter]]
-version = "0.1.45"
-criteria = "safe-to-deploy"
-
-[[exemptions.num-rational]]
-version = "0.4.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.num_cpus]]
@@ -1023,10 +989,6 @@ criteria = "safe-to-deploy"
 version = "2.1.3"
 criteria = "safe-to-deploy"
 
-[[exemptions.rustc_version]]
-version = "0.4.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.rustix]]
 version = "1.1.4"
 criteria = "safe-to-run"
@@ -1117,10 +1079,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.signal-hook-registry]]
 version = "1.4.8"
-criteria = "safe-to-deploy"
-
-[[exemptions.signature]]
-version = "2.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.simd-adler32]]
