@@ -1009,9 +1009,9 @@ pub const SUITES: &[Suite] = &[
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \
                deterministic count budget; fail-closed abstentions are reported, never \
-               passes, and all 11 wrong-verdict divergences are pinned by name with audited \
-               mechanisms (M1 fixed by sq-pbz04.4.11; M4 orphan-list fidelity gap still \
-               open, held by follow-up bead sq-pbz04.4.12)",
+               passes, and all 6 remaining wrong-verdict divergences are pinned by name \
+               with audited mechanisms (M1 FIXED sq-pbz04.4.11; M4 FIXED sq-pbz04.4.12 \
+               — those 4 rows now correctly abstain; remaining divergences: M2/M3/M5/M6)",
     },
 ];
 

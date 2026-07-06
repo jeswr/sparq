@@ -33,11 +33,10 @@
 //! export's expectation. Every such row is pinned BY NAME in
 //! [`gated::DOCUMENTED_DIVERGENCES`] with an audited mechanism (exact SET equality: an
 //! unpinned new fail AND a stale entry that stops failing both go RED). The mechanisms
-//! are NOT laundered as acceptable: **M4 is a genuine fidelity gap in the merged
-//! L1 extractor that this conformance arm DISCOVERED** (it contradicts L1's own
-//! "understood in full or refused" contract), captured as follow-up work in the PR's
-//! bead list; when the fix lands these entries stop failing and the pin forces a
-//! deliberate re-audit. M1 was FIXED by sq-pbz04.4.11. The mechanisms:
+//! are NOT laundered as acceptable: M4 was a genuine fidelity gap in the merged L1
+//! extractor that this conformance arm DISCOVERED; it was FIXED by sq-pbz04.4.12 (see
+//! M4 below) and the 4 entries removed from the divergence pin as promised. M1 was
+//! FIXED by sq-pbz04.4.11. The mechanisms:
 //!
 //! - **M1 — FIXED (sq-pbz04.4.11).** Named-composite inlining previously lost the
 //!   name↔expression binding; `extract()` now emits `EquivalentClasses(A, expr)` for
@@ -51,11 +50,12 @@
 //!   reserved IRIs (`rdfs:Class ≡ owl:Class`, `owl:imports` domain/range, `rdf:type`
 //!   domain) extract as ordinary names; the legacy dual-tagged expectation assumes the
 //!   reserved semantics.
-//! - **M4 — orphan/cyclic list or class-expression structure treated as inert.** Bare
-//!   `rdf:first`/`rdf:rest` cells (even on `rdf:nil`, even cyclic) and unconsumed
-//!   class-expression backbones extract to an EMPTY/lossy ontology instead of a
-//!   refusal — yielding a wrong `Consistent` (I5.5 inconsistency cases) or a trivial
-//!   `Entailed` of an emptied non-conclusion.
+//! - **M4 — FIXED (sq-pbz04.4.12).** Orphan/cyclic `rdf:first`/`rdf:rest` cells (including
+//!   `rdf:nil rdf:rest _:b`, cyclic lists) and unconsumed anonymous class-expression
+//!   backbones now correctly refuse extraction (`MalformedList` /
+//!   `MalformedClassExpression`), yielding an `OutOfFragment` abstention instead of a wrong
+//!   `Consistent` verdict (I5.5-003/004) or a trivially-entailed empty non-conclusion
+//!   (I5.5-006/007). The 4 M4 corpus cases now ABSTAIN (honest fail-closed). [OPUS-4.8]
 //! - **M5 — ontology-header stripping vs a header-sensitive legacy expectation.** The
 //!   harness strips `owl:Ontology` typings on both sides (the RL/EL-lane convention);
 //!   WebOnt-Ontology-003's OWL-1-era non-entailment hinges on the stripped header.
@@ -114,6 +114,8 @@ mod gated {
     /// 4 consistency cases shift from Pass to abstain because their updated ontology
     /// models now include EquivalentClasses axioms that, combined with the existing TBox,
     /// cause budget exhaustion — an honest abstention, not a regression. Net: +8.
+    /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): pass count UNCHANGED (the 4 M4
+    /// rows moved from Fail → OutOfFragment, not from Fail → Pass). [OPUS-4.8]
     pub const DL_DIRECT_FLOOR: usize = 192;
 
     /// Abstained (fail-closed OutOfFragment / guard / deferred / budget) row totals,
@@ -123,16 +125,19 @@ mod gated {
     /// See [`DL_PROFILE_ABSTAINED`].
     /// Re-pinned by sq-pbz04.4.11: +4 from the 4 consistency cases that shifted from
     /// Pass to OutOfFragment (budget exhaustion on the now-more-complete model).
-    pub const DL_DIRECT_ABSTAINED: usize = 456;
+    /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): +4 from the 4 M4 rows that
+    /// moved from Fail (wrong definitive verdict) to OutOfFragment (fail-closed refusal).
+    /// [OPUS-4.8] sq-pbz04.4.12
+    pub const DL_DIRECT_ABSTAINED: usize = 460;
 
     /// Audited, PINNED divergence rows (module docs — mechanisms M2–M7): every row
     /// where a checker verdict contradicts the export expectation, keyed by the
     /// runner's row key. EXACT set equality is asserted: an UNPINNED new fail and a
     /// STALE entry that stops failing both turn the lane RED (the el-suite /
-    /// ql_entailment_floor discipline). M4 rows are DISCOVERED L1 fidelity gaps
-    /// held open by follow-up beads — never acceptable-by-design, never passes.
-    /// M1 (named-composite name-binding) was FIXED by sq-pbz04.4.11 and removed from
-    /// this list — those 12 cases now PASS. [FABLE-5] sq-pbz04.4.5
+    /// ql_entailment_floor discipline). M4 was FIXED by sq-pbz04.4.12 and removed from
+    /// this list — those 4 cases now ABSTAIN (OutOfFragment refusal) rather than producing
+    /// wrong definitive verdicts. M1 (named-composite name-binding) was FIXED by
+    /// sq-pbz04.4.11. [FABLE-5] sq-pbz04.4.5 / [OPUS-4.8] sq-pbz04.4.12
     const DOCUMENTED_DIVERGENCES: &[(&str, &str)] = &[
         // --- M2: anonymous individuals in the conclusion read as constants (L4 gap) ---
         (
@@ -160,26 +165,10 @@ mod gated {
             "M3 — premise gives rdf:type an rdfs:domain (reserved vocabulary); the \
              expected subclass conclusion needs that OWL-Full reading",
         ),
-        // --- M4: orphan/cyclic list structure treated as inert (L1 gap) ---
-        (
-            "owl2-dl/inconsistency: WebOnt-I5.5-003",
-            "M4 — `rdf:nil rdf:rest _:b` is an ill-formed-list inconsistency; L1 treats \
-             the bare cell as inert and extracts an empty (consistent) ontology",
-        ),
-        (
-            "owl2-dl/inconsistency: WebOnt-I5.5-004",
-            "M4 — as WebOnt-I5.5-003 with `rdf:nil rdf:first _:b`",
-        ),
-        (
-            "owl2-dl/negative-entailment: WebOnt-I5.5-006",
-            "M4 — the non-conclusion's cyclic orphan list extracts to an EMPTY ontology, \
-             which is trivially (wrongly) entailed",
-        ),
-        (
-            "owl2-dl/negative-entailment: WebOnt-I5.5-007",
-            "M4 — the non-conclusion's cyclic union backbone is never consumed by an \
-             axiom, extracting to an EMPTY ontology (trivially entailed)",
-        ),
+        // M4 (orphan/cyclic list and unconsumed backbone) FIXED by sq-pbz04.4.12 —
+        // WebOnt-I5.5-003/-004/-006/-007 now correctly ABSTAIN (OutOfFragment refusal)
+        // instead of producing wrong Consistent / Entailed verdicts. [OPUS-4.8]
+        //
         // --- M5: header-stripping vs a header-sensitive legacy expectation ---
         (
             "owl2-dl/negative-entailment: WebOnt-Ontology-003",

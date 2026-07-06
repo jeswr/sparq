@@ -1063,3 +1063,115 @@ fn named_union_with_class_assertion_emits_both_equiv_and_assertion() {
         equiv_pos, assert_pos
     );
 }
+
+// ============================== REJECT (M4: orphan/cyclic list and unconsumed backbone) ======
+// [OPUS-4.8] sq-pbz04.4.12: the M4 fail-closed fix — orphan/cyclic rdf:first/rdf:rest cells
+// and unconsumed class-expression backbones must be REFUSED, not silently treated as inert.
+// These four cases correspond to the four M4 W3C Direct-Semantics corpus divergences:
+// I5.5-003, I5.5-004, I5.5-006, I5.5-007.
+//
+// Soundness invariant: an empty or partial extraction from a malformed/cyclic backbone is an
+// UNSOUND basis for entailment — the downstream reasoner must never reason over such a model.
+
+/// rdf:nil rdf:rest _:b — `rdf:nil` cannot be a list cell (W3C I5.5-003 analog).
+/// Before sq-pbz04.4.12, this extracted to an empty ontology (consistent).
+/// After: refused as MalformedList. [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn reject_rdf_nil_rdf_rest() {
+    // Directly build the triple <rdf:nil rdf:rest _:b> in Turtle.
+    // In Turtle we must reference rdf:nil explicitly.
+    let (d, t) = parse(
+        "_:holder rdf:type owl:Class .\n\
+         rdf:nil rdf:rest _:b .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedList(_))),
+        "rdf:nil rdf:rest _:b must be refused as MalformedList (I5.5-003 analog)"
+    );
+}
+
+/// rdf:nil rdf:first _:b — `rdf:nil` cannot be a list cell (W3C I5.5-004 analog).
+/// Before sq-pbz04.4.12, this extracted to an empty ontology (consistent).
+/// After: refused as MalformedList. [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn reject_rdf_nil_rdf_first() {
+    let (d, t) = parse(
+        "_:holder rdf:type owl:Class .\n\
+         rdf:nil rdf:first _:b .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedList(_))),
+        "rdf:nil rdf:first _:b must be refused as MalformedList (I5.5-004 analog)"
+    );
+}
+
+/// A cyclic orphan list — `_:l rdf:first :a; rdf:rest _:l` — never consumed by any axiom.
+/// Before sq-pbz04.4.12, this extracted to an empty ontology.
+/// After: refused as MalformedList (W3C I5.5-006 analog). [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn reject_cyclic_orphan_list_i5_5_006() {
+    // A cyclic rdf:List with no owl:intersectionOf/unionOf pointing to it.
+    let (d, t) = parse(
+        "_:l rdf:first :a .\n\
+         _:l rdf:rest _:l .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedList(_))),
+        "cyclic orphan list cell must be refused as MalformedList (I5.5-006 analog)"
+    );
+}
+
+/// An anonymous class with an unconsumed union backbone, whose list itself is cyclic
+/// (the non-conclusion of W3C I5.5-007). Before sq-pbz04.4.12, this extracted to an
+/// empty ontology. After: refused with MalformedList or MalformedClassExpression
+/// (whichever orphan is detected first — both are the correct fail-closed response).
+/// [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn reject_unconsumed_union_backbone_i5_5_007() {
+    // _:x owl:unionOf ( :a :b ) — _:x is an anonymous blank, never referenced by any
+    // axiom predicate. Mirrors the structure of I5.5-007's non-conclusion ontology.
+    // The list cells _:l1, _:l2 are also anonymous and orphaned; either _:x or a list
+    // cell may be detected first (the iteration order over the structural-node set is
+    // unspecified). Both MalformedClassExpression and MalformedList are correct refusals.
+    let (d, t) = parse("_:x owl:unionOf ( :a :b ) .");
+    let result = extract(&d, &t);
+    assert!(
+        matches!(
+            result,
+            Err(ExtractError::MalformedClassExpression(_)) | Err(ExtractError::MalformedList(_))
+        ),
+        "unconsumed anonymous union backbone must be refused (I5.5-007 analog); got {:?}",
+        result
+    );
+}
+
+/// Control: an anonymous union backbone that IS consumed via a subClassOf still decodes
+/// normally. Ensures the new validation does not over-reject valid anonymous expressions.
+/// [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn accept_consumed_anonymous_union_backbone() {
+    // _:x owl:unionOf (:a :b) consumed by :C rdfs:subClassOf _:x.
+    let (d, t) = parse(":C rdfs:subClassOf [ owl:unionOf ( :a :b ) ] .");
+    assert!(
+        extract(&d, &t).is_ok(),
+        "anonymous union backbone consumed by an axiom must still be accepted"
+    );
+}
+
+/// Control: a named class with an inline intersectionOf definition consumed via a use-site
+/// axiom — should still produce the EquivalentClasses binding and the use-site axiom.
+/// The M4 fix must not regress the M1 fix. [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn accept_named_intersection_with_use_site() {
+    // :A owl:intersectionOf (:B :C) and :D rdfs:subClassOf :A — consumed.
+    let (d, t) = parse(
+        ":A owl:intersectionOf ( :B :C ) .\n\
+         :D rdfs:subClassOf :A .",
+    );
+    let o = extract(&d, &t).expect("named intersectionOf with use-site should be accepted");
+    assert!(
+        o.axioms.iter().any(|ax| matches!(ax, Axiom::EquivalentClasses(CE::Class(_), _))),
+        "named intersectionOf must still emit EquivalentClasses; got {:?}",
+        o.axioms
+    );
+}
