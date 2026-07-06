@@ -92,6 +92,22 @@ substrate-join = ["dep:sparq-substrate", "dep:smallvec", "sparq-substrate/rows",
 # `numeric` (the exact Num/Dec tower the f64-collapse recheck needs) slices ONLY when
 # enabled — NO new transitive crate.
 substrate-compare = ["dep:sparq-substrate", "sparq-substrate/compare", "sparq-substrate/numeric"]
+# [FABLE-5] sq-zgbso.3 (epic sq-zgbso, issue #1582) — OPT-IN id-level COMPILED-rule
+# evaluation for the scoped N3 subset the Solid access-control rules use: `n3::compiled`
+# lowers N3 rule text (parsed ONCE by the existing `n3::parser`) to a rule IR whose
+# constants are a symbol table pre-interned into the caller's `Dict`, then runs a
+# semi-naive forward fixpoint DIRECTLY over `[Id; 3]` facts on the SHARED
+# `sparq-substrate::join` hash-join kernels (`build_table` + `hash_probe_serial` /
+# `probe_emit` — the same monomorphic bodies the SPARQL engine and the RDFS
+# materialiser drive; NO third join implementation, NO `Box<dyn>`). This removes the
+# per-call fact round-trip (graph -> N3 text -> re-parse -> String-term fixpoint) that
+# `reason_n3` pays; the result-equivalence oracle is tests/compiled_equivalence.rs
+# (closure set-equality vs `reason_n3` on the WAC/ACP/ODRL-spike rule corpus).
+# NON-DEFAULT by design (the substrate-join posture): when off, the module is cfg'd out
+# entirely — the lean default build carries zero of it and the byte/bundle ratchets are
+# unchanged. Pulls the substrate `rows` + `join` slices ONLY when enabled — NO new
+# transitive crate (`sparq-core`/`smallvec`/`rustc-hash`/`regex` are already in-tree).
+compiled-rules = ["dep:sparq-substrate", "dep:smallvec", "sparq-substrate/rows", "sparq-substrate/join"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -140,3 +156,21 @@ sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 [[test]]
 name = "compare_parity"
 required-features = ["substrate-compare"]
+
+# [FABLE-5] sq-zgbso.3: the compiled-vs-text result-equivalence oracle (closure
+# set-equality vs `reason_n3` over the sparq-solid WAC/ACP/ODRL-spike rule corpus, read
+# READ-ONLY from ../sparq-solid/rules at runtime). Compiled only with the feature it
+# exercises (default `--all-targets` builds carry none of it); run in CI by the
+# `sparq-reason (compiled-rules)` feature-matrix leg.
+[[test]]
+name = "compiled_equivalence"
+required-features = ["compiled-rules"]
+
+# [FABLE-5] sq-zgbso.3: the in-crate measurement instrument for the sq-zgbso.1 spike's
+# open question — the fraction of a WAC/ACP-shaped materialize the per-call fact
+# TEXT round-trip (serialize -> re-parse -> String-term fixpoint) costs vs the id-level
+# compiled path, on loader-shaped fixture facts. Wall-clock output is NON-canonical
+# (work-box only; reported in bead/PR comments, never baked into docs or tests).
+[[example]]
+name = "compiled_rules_bench"
+required-features = ["compiled-rules"]
