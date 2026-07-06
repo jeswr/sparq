@@ -1017,20 +1017,21 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 189,
+        ratchet_floor: 190,
         floor_basis: "definitive expected verdicts through the L4 dispatch, EXACT-pinned \
                       (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL); \
-                      re-pinned by sq-pbz04.4.11 (M1 named-composite fix: +12 positive- \
-                      entailment passes, -4 consistency passes shifted to abstain, net +8); \
-                      re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix: -3, three graphs with \
-                      an unconsumed anonymous composite now honestly abstain, 192 -> 189)",
+                      re-pinned by sq-pbz04.4.11 (M1 named-composite fix, net +8); \
+                      re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix: -3, 192 -> 189); \
+                      re-pinned by sq-pbz04.4.13 (M2 conclusion-bnode existential-reading fix: \
+                      +1, 189 -> 190 — both M2 rows graduate to passes, one free-existential- \
+                      root conclusion bnode shifts to an honest abstention)",
         note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \
                deterministic count budget; fail-closed abstentions are reported, never \
-               passes, and all 6 remaining wrong-verdict divergences are pinned by name \
-               with audited mechanisms (M1 FIXED sq-pbz04.4.11; M4 FIXED sq-pbz04.4.12 \
-               — those 4 rows now correctly abstain; remaining divergences: M2/M3/M5/M6)",
+               passes, and all 5 remaining wrong-verdict divergences are pinned by name \
+               with audited mechanisms (M1 FIXED sq-pbz04.4.11; M4 FIXED sq-pbz04.4.12; \
+               M2 FIXED sq-pbz04.4.13 — those rows now pass/abstain; remaining: M3/M5/M6)",
     },
 ];
 

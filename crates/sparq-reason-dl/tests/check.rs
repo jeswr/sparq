@@ -452,3 +452,127 @@ fn entailment_empty_conclusion_is_trivially_entailed() {
     assert_eq!(v, EntailmentVerdict::Entailed);
     assert_eq!(b, Branch::AlchTableau);
 }
+
+// -------------------------------------------------------------------------------------------
+// Conclusion anonymous individuals — existential reading + rolling-up ([OPUS-4.8] sq-pbz04.4.13)
+// -------------------------------------------------------------------------------------------
+
+#[test]
+fn entailment_conclusion_bnode_somevaluesfrom2bnode() {
+    // Faithful reconstruction of the W3C DIRECT PositiveEntailmentTest `somevaluesfrom2bnode`
+    // ("Shows that a BNode is an existential variable"): the premise types `a` into ∃p.⊤, the
+    // conclusion asserts `a p _:x`. Under the official existential reading this IS entailed;
+    // rolling `a p _:x` into `a : ∃p.owl:Thing` lets the complete tableau certify it. Before
+    // the fix, `_:x` was read as a skolem CONSTANT and the refutation stayed satisfiable → a
+    // WRONG NotEntailed (the pinned M2 divergence).
+    let premise = ":p a owl:ObjectProperty . \
+                   :a rdf:type [ owl:onProperty :p ; owl:someValuesFrom owl:Thing ] .";
+    let conclusion = ":p a owl:ObjectProperty . :a :p _:x .";
+    let (v, b) = entail(premise, conclusion);
+    assert_eq!(v, EntailmentVerdict::Entailed, "somevaluesfrom2bnode must be Entailed");
+    assert_eq!(b, Branch::AlchTableau);
+}
+
+#[test]
+fn entailment_conclusion_bnode_webont_somevaluesfrom_003() {
+    // Faithful reconstruction of W3C DIRECT PositiveEntailmentTest `WebOnt-someValuesFrom-003`
+    // ("A simple infinite loop for implementors to avoid"): premise `person ≡ ∃parent.person`
+    // with `fred : person`; conclusion an anonymous parent-CHAIN `fred parent _:b1 parent _:b2`
+    // (each an owl:Thing). The chain rolls into `fred : ∃parent.(⊤ ⊓ ∃parent.⊤)`, decided by
+    // the tableau (termination via blocking) — genuinely Entailed, not the M2 skolem NotEntailed.
+    let premise = ":parent a owl:ObjectProperty . \
+                   :person owl:equivalentClass [ owl:onProperty :parent ; owl:someValuesFrom :person ] . \
+                   :fred a :person .";
+    let conclusion = ":parent a owl:ObjectProperty . \
+                      :fred a owl:Thing . \
+                      :fred :parent _:b1 . _:b1 a owl:Thing . \
+                      _:b1 :parent _:b2 . _:b2 a owl:Thing .";
+    let (v, b) = entail(premise, conclusion);
+    assert_eq!(v, EntailmentVerdict::Entailed, "WebOnt-someValuesFrom-003 must be Entailed");
+    assert_eq!(b, Branch::AlchTableau);
+}
+
+#[test]
+fn entailment_conclusion_bnode_rollable_notentailed_is_sound() {
+    // A rollable conclusion bnode whose existential is genuinely NOT entailed: premise only
+    // says `a : A` (a need not have any p-successor), conclusion asserts `a p _:x`. Rolling to
+    // `a : ∃p.⊤` and refuting on the COMPLETE tableau yields a SOUND NotEntailed — rolling is
+    // sound in BOTH directions, so a definitive negative verdict here is legitimate (it is NOT
+    // the unsound skolem-constant NotEntailed, which the non-rollable shapes below abstain on).
+    let premise = ":p a owl:ObjectProperty . :a a :A .";
+    let conclusion = ":p a owl:ObjectProperty . :a :p _:x .";
+    let (v, b) = entail(premise, conclusion);
+    assert_eq!(v, EntailmentVerdict::NotEntailed);
+    assert_eq!(b, Branch::AlchTableau);
+}
+
+#[test]
+fn entailment_conclusion_bnode_shared_abstains_never_notentailed() {
+    // NEGATIVE PROBE: `_:x` is SHARED between two property assertions (`a p _:x` and `b p _:x`)
+    // — a non-tree shape. The rolling-up is not applicable, so the checker must ABSTAIN
+    // fail-closed, NEVER emit a skolem-constant NotEntailed.
+    let premise = ":p a owl:ObjectProperty . :a a :A . :b a :A .";
+    let conclusion = ":p a owl:ObjectProperty . :a :p _:x . :b :p _:x .";
+    let (v, b) = entail(premise, conclusion);
+    assert!(
+        matches!(
+            v,
+            EntailmentVerdict::Unknown(UnknownReason::ConclusionAnonymousIndividual(_))
+        ),
+        "shared conclusion bnode must abstain (ConclusionAnonymousIndividual), got {:?}",
+        v
+    );
+    assert!(!v.is_not_entailed(), "must NOT be a skolem NotEntailed");
+    assert_eq!(b, Branch::AlchTableau);
+}
+
+#[test]
+fn entailment_conclusion_bnode_cyclic_abstains_never_notentailed() {
+    // NEGATIVE PROBE: a cyclic anonymous shape `_:x p _:y . _:y p _:x .` with no named anchor —
+    // not tree-shaped, so abstain fail-closed, never a skolem NotEntailed.
+    let premise = ":p a owl:ObjectProperty . :a a :A .";
+    let conclusion = ":p a owl:ObjectProperty . _:x :p _:y . _:y :p _:x .";
+    let (v, b) = entail(premise, conclusion);
+    assert!(
+        matches!(
+            v,
+            EntailmentVerdict::Unknown(UnknownReason::ConclusionAnonymousIndividual(_))
+        ),
+        "cyclic conclusion bnode must abstain (ConclusionAnonymousIndividual), got {:?}",
+        v
+    );
+    assert!(!v.is_not_entailed());
+    assert_eq!(b, Branch::AlchTableau);
+}
+
+#[test]
+fn entailment_conclusion_bnode_named_successor_abstains() {
+    // NEGATIVE PROBE: an anonymous individual with a NAMED successor (`a p _:x . _:x q :c .`)
+    // would roll up only through a nominal `{c}`, which is out of the ALCH fragment — abstain.
+    let premise = ":p a owl:ObjectProperty . :q a owl:ObjectProperty . :a a :A .";
+    let conclusion = ":p a owl:ObjectProperty . :q a owl:ObjectProperty . \
+                      :a :p _:x . _:x :q :c .";
+    let (v, _) = entail(premise, conclusion);
+    assert!(
+        matches!(
+            v,
+            EntailmentVerdict::Unknown(UnknownReason::ConclusionAnonymousIndividual(_))
+        ),
+        "named-successor conclusion bnode must abstain, got {:?}",
+        v
+    );
+    assert!(!v.is_not_entailed());
+}
+
+#[test]
+fn entailment_premise_side_bnode_unaffected_skolemisation_stays() {
+    // Premise-side blank nodes are UNAFFECTED — skolemisation is entailment-preserving on the
+    // premise. The premise `a p _:pb`, `_:pb : C`, `C ⊑ D` (a has an anonymous p-successor that
+    // is a C, hence a D) entails the bnode-FREE conclusion `a : ∃p.D` — a definitive verdict,
+    // proving the abstention is CONCLUSION-triggered only and premise bnodes still reason.
+    let premise = ":p a owl:ObjectProperty . :a :p _:pb . _:pb a :C . :C rdfs:subClassOf :D .";
+    let conclusion = ":a rdf:type [ owl:onProperty :p ; owl:someValuesFrom :D ] .";
+    let (v, b) = entail(premise, conclusion);
+    assert_eq!(v, EntailmentVerdict::Entailed);
+    assert_eq!(b, Branch::AlchTableau);
+}
