@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# [OPUS-4.8] sq-i6du2.7 (epic sq-i6du2, #1613). 🤖 SPARQ agent — the AC-query benchmark
-# harness runner. Written while Fable unavailable; flag for re-review when Fable returns.
+# [OPUS-4.8] sq-i6du2.7 (epic sq-i6du2, #1613). [SONNET-4.6] sq-kvvcl (W2/W4 live lanes).
+# 🤖 SPARQ agent — the AC-query benchmark harness runner.
+# Written while Fable unavailable; flag for re-review when Fable returns.
 # Spec: research/ac-query-benchmark.md (§2–§3). Substrate: crates/sparq-acbench (#1627).
 #
 # The self-contained, self-asserting entry point CI + scripts/bench/run-all-benchmarks.sh
@@ -12,31 +13,30 @@
 #   2. runs the W1 (decision) / W2-oracle (result-set) / W3 (ACL-write churn) oracle lanes
 #      over every USE-CASE generator that is PRESENT (a not-yet-implemented generator is
 #      Skipped-with-reason, never a fabricated pass);
-#   3. propagates the driver's FAIL-CLOSED exit code: any W1/W2/W3 mismatch against the
-#      by-construction oracle => the driver exits non-zero => this script exits non-zero.
+#   3. builds the `ac-bench-live` live driver (bench/ac/live — its own [workspace]; it
+#      links sparq-solid + the real engine so W2 live query_as + W4 concurrent-reader
+#      lanes run against the actual authorization surface — see bead sq-kvvcl); and
+#   4. propagates the FAIL-CLOSED exit code of BOTH drivers: any W1/W2/W3 oracle mismatch
+#      OR any W2/W4 live OVER-SHARE (unauthorized data returned) => non-zero exit.
 #
-# SCOPE BOUNDARY (bead sq-i6du2.7): scripts + registry ONLY. This runs the oracle lanes
-# that need NO engine link. The W2 live `query_as` sub-lane and the W4 concurrency QUERY
-# sub-lane require linking `sparq-solid` / the real engine and belong to the separate
-# live-driver bead sq-kvvcl; the driver records them Skipped-with-reason (visible, never
-# a silent drop). This script does NOT link sparq-solid.
-#
-# HONESTY: the driver prints an indicative wall-clock per lane, but every such number is
+# HONESTY: the drivers print indicative wall-clock numbers, but every such number is
 # advisory + NON-CANONICAL on this shared work box (see the QUIET-BOX convention in
-# bench/CATALOG.md). The HARD, load-robust contract is the fail-closed oracle exit code —
-# a deterministic pass/fail, not a timing.
+# bench/CATALOG.md). The HARD, load-robust contract is the fail-closed exit code.
+# AUTHORIZATION SURFACE: the live driver links sparq-solid + runs real WAC/ACP decisions.
 #
 # Usage: bench/ac/run.sh [--smoke] [--sf N]   (run from anywhere)
 #   --smoke   quick fixed-seed smoke vector (GenParams::smoke) — the CI/per-commit tier.
 #   --sf N    scale factor for a nightly/EC2 tier (default 1 when not --smoke).
 # Env knobs:
-#   ACBENCH_SMOKE=1   force --smoke even with no argument (per-commit default).
-# stdout: the driver's per-suite TSV table (# comment header + one row per lane) plus a
-#         per-suite pass/fail/skip summary. Exit 0 iff every oracle lane agreed.
+#   ACBENCH_SMOKE=1    force --smoke even with no argument (per-commit default).
+#   ACBENCH_NO_LIVE=1  skip the live driver (oracle-only run; e.g. offline, no sparq-solid).
+# stdout: the drivers' per-suite TSV tables (# comment header + one row per lane) plus a
+#         per-suite pass/fail/skip summary. Exit 0 iff every lane agreed (or skipped).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$ROOT/bench/ac"
+LIVE="$ROOT/bench/ac/live"
 cd "$HERE"
 
 # Default to the smoke tier for the per-commit lane; pass-through explicit args otherwise.
@@ -45,6 +45,7 @@ if [ ${#ARGS[@]} -eq 0 ] && [ "${ACBENCH_SMOKE:-0}" = "1" ]; then
   ARGS=(--smoke)
 fi
 
+# ── Oracle driver (bench/ac — links NO engine crate) ──────────────────────────────────
 echo "[ac] building the standalone ac-bench driver (bench/ac; links no engine crate)…" >&2
 # Standalone workspace root — resolve against bench/ac/Cargo.lock, exactly like bench/parse
 # and bench/dict. --locked keeps the run reproducible (fail if the lockfile is stale).
@@ -61,14 +62,48 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
-echo "[ac] running the W1/W2-oracle/W3 fail-closed oracle lanes…" >&2
-# The driver streams its own TSV table to stdout and exits non-zero on any oracle mismatch.
+echo "[ac] running W1/W2-oracle/W3 fail-closed oracle lanes…" >&2
 "$BIN" "${ARGS[@]}"
-rc=$?
+ORACLE_RC=$?
 
-if [ "$rc" -eq 0 ]; then
-  echo "[ac] OK: every oracle lane agreed with the by-construction oracle (fail-closed)." >&2
+if [ "$ORACLE_RC" -eq 0 ]; then
+  echo "[ac] oracle OK: every lane agreed with the by-construction oracle (fail-closed)." >&2
 else
-  echo "[ac] FAILED: an oracle lane mismatched the by-construction oracle (rc=$rc)." >&2
+  echo "[ac] oracle FAILED: an oracle lane mismatched (rc=$ORACLE_RC)." >&2
 fi
-exit "$rc"
+
+# ── Live driver (bench/ac/live — links sparq-solid, runs real WAC/ACP) ────────────────
+LIVE_RC=0
+if [ "${ACBENCH_NO_LIVE:-0}" = "1" ]; then
+  echo "[ac] ACBENCH_NO_LIVE=1: skipping live driver (oracle-only run)." >&2
+elif [ ! -d "$LIVE" ]; then
+  echo "[ac] bench/ac/live/ not found — live W2/W4 lanes skipped (sq-kvvcl)." >&2
+else
+  echo "[ac] building the ac-bench-live driver (bench/ac/live; links sparq-solid)…" >&2
+  cd "$LIVE"
+  cargo build --release --locked >/dev/null 2>&1 || {
+    echo "[ac] live --locked build failed; retrying without --locked…" >&2
+    cargo build --release >/dev/null 2>&1
+  }
+  LIVE_BIN="$LIVE/target/release/ac-bench-live"
+  if [ ! -x "$LIVE_BIN" ]; then
+    echo "[ac] ERROR: ac-bench-live binary not found at $LIVE_BIN after build" >&2
+    LIVE_RC=1
+  else
+    echo "[ac] running W2-live/W4-live fail-closed lanes (authorization surface)…" >&2
+    "$LIVE_BIN" "${ARGS[@]}"
+    LIVE_RC=$?
+    if [ "$LIVE_RC" -eq 0 ]; then
+      echo "[ac] live OK: no over-share detected (fail-closed security check passed)." >&2
+    else
+      echo "[ac] live FAILED: an over-share or concurrency mismatch was detected (rc=$LIVE_RC)." >&2
+    fi
+  fi
+  cd "$HERE"
+fi
+
+# ── Aggregate exit code ────────────────────────────────────────────────────────────────
+if [ "$ORACLE_RC" -ne 0 ] || [ "$LIVE_RC" -ne 0 ]; then
+  exit 1
+fi
+exit 0
