@@ -92,6 +92,14 @@ pub struct RewriteReport {
 /// variables are all distinguished and whose rows are fully bound constants is passed through
 /// and re-applied after rewriting. `UNDEF` cells or non-distinguished variables → rejected.
 ///
+/// **Per-branch FILTER/VALUES in a multi-branch UCQ (sq-sg542):** when the UCQ has more than one
+/// branch and a branch carries its own FILTER/VALUES — e.g. an alternation path under a FILTER
+/// (`?x :p1|:p2 ?y FILTER(?x != :Bad)`, whose desugaring distributes the FILTER into every
+/// branch), or a hand-written `{ … FILTER } UNION { … }` — each branch emits ITS OWN modifiers
+/// over ITS OWN sub-union, so a branch's FILTER constrains only that branch (never hoisted over
+/// the whole union, never dropped). Each branch's modifier still obeys the B3/B4 distinguished-only
+/// discipline. This shape was previously rejected fail-closed; it is now soundly answered.
+///
 /// **Intensional-atom guard (B6):** a role atom whose predicate is semantics-bearing schema
 /// vocabulary (`rdfs:subClassOf`, `rdfs:subPropertyOf`, `rdfs:domain`, `rdfs:range`, any
 /// `owl:` predicate) is **rejected** as `OutOfScope` — the rewriter evaluates over ABox data
@@ -135,37 +143,51 @@ pub fn rewrite(query: &Query, tbox: &[oxrdf::Triple]) -> Result<Rewritten, CqErr
     let ucq = as_ucq(query)?;
     // 2. Extract the DL-Lite_R TBox once (shared across branches).
     let tbox_model = TBox::extract(tbox);
+    // 3. Fold each branch's PerfectRef UCQ back into a spargebra body.
+    //
+    //    BRANCH-AWARE emission (sq-sg542): when the UCQ has MORE THAN ONE branch AND at least one
+    //    branch carries a per-branch FILTER/VALUES — e.g. `?x :p1|:p2 ?y FILTER(?x != :Bad)`, whose
+    //    #1671 alternation desugaring distributes the top-level FILTER into EACH branch, or a
+    //    hand-written `{ ?x a :A FILTER(...) } UNION { ?x a :B }` — each branch emits ITS OWN
+    //    modifiers over ITS OWN sub-union (`emit::ucq_to_pattern_per_branch`). A branch's FILTER
+    //    then constrains only that branch, never hoisted over the whole union (the old
+    //    single-passthrough emitter would have applied branch[0]'s filter to every branch AND
+    //    dropped later branches' filters — the unsoundness this bead closes, formerly rejected
+    //    fail-closed here). The gate enforces the distinguished-only B3/B4 discipline PER BRANCH,
+    //    so every such multi-branch-modifier UCQ is now soundly ANSWERED rather than abstained.
+    if ucq.branches.len() > 1 && any_branch_has_modifier(&ucq) {
+        let mut per_branch: Vec<(Vec<perfectref::Cq>, &ConjunctiveQuery)> =
+            Vec::with_capacity(ucq.branches.len());
+        let mut disjuncts = 0usize;
+        for branch in &ucq.branches {
+            let (atoms, answer) = emit::cq_to_atoms(branch)?;
+            let branch_ucq = perfectref::perfect_ref(atoms, answer, &tbox_model);
+            disjuncts += branch_ucq.len();
+            per_branch.push((branch_ucq, branch));
+        }
+        let body = emit::ucq_to_pattern_per_branch(per_branch);
+        let rewritten = rewrap(query, &ucq, body);
+        return Ok(Rewritten {
+            query: rewritten,
+            report: RewriteReport {
+                disjuncts,
+                skipped_axioms: tbox_model.skipped,
+                disjuncts_before_minimisation: disjuncts,
+            },
+        });
+    }
+
+    //    FLAT path — a single-branch UCQ (the one branch IS the whole query, so its own
+    //    filter_exprs/values_blocks are re-applied soundly by `ucq_to_pattern`) OR a multi-branch
+    //    UCQ with NO per-branch modifier (branch[0] carries nothing to hoist). Byte-identical to
+    //    the pre-sq-sg542 emission for every previously-accepted shape.
     let mut all_disjuncts: Vec<perfectref::Cq> = Vec::new();
-    // 3. Rewrite each UCQ branch independently and collect all disjuncts.
     for branch in &ucq.branches {
         let (atoms, answer) = emit::cq_to_atoms(branch)?;
         let branch_ucq = perfectref::perfect_ref(atoms, answer, &tbox_model);
         all_disjuncts.extend(branch_ucq);
     }
     let disjuncts = all_disjuncts.len();
-    // 4. Fold the combined UCQ back into a spargebra body. For a multi-branch UCQ where ANY
-    //    branch carries per-branch FILTER or VALUES, the single-passthrough emitter would
-    //    hoist branch[0]'s filter/values over the ENTIRE union — dropping real answers (branch-0
-    //    filter applied to branches that do not own it) and/or silently applying no filter to
-    //    later branches (invents answers). That is an unsoundness. THE SAFE FIX (fail-closed,
-    //    deferred to sq-pbz04.3.2): REJECT any multi-branch UCQ where ANY branch carries
-    //    per-branch filter_exprs or values_blocks. [SONNET-4.6] sq-pbz04.3.1
-    //
-    //    Single-branch UCQ (the common case): the one branch IS the whole query, so its
-    //    filter_exprs/values_blocks are re-applied soundly by ucq_to_pattern. Still accepted.
-    if ucq.branches.len() > 1 {
-        let has_per_branch_modifier = ucq.branches.iter().any(|b| {
-            !b.filter_exprs.is_empty() || !b.values_blocks.is_empty()
-        });
-        if has_per_branch_modifier {
-            return Err(CqError::OutOfScope(
-                "multi-branch UCQ with per-branch FILTER or VALUES is not yet \
-                 supported (branch-aware emitter deferred to sq-pbz04.3.2 — \
-                 fail-closed to prevent hoisting branch-0's filter over the whole union)"
-                    .into(),
-            ));
-        }
-    }
     let cq_for_passthrough = &ucq.branches[0];
     let body = emit::ucq_to_pattern(all_disjuncts, cq_for_passthrough);
     let rewritten = rewrap(query, &ucq, body);
@@ -177,6 +199,16 @@ pub fn rewrite(query: &Query, tbox: &[oxrdf::Triple]) -> Result<Rewritten, CqErr
             disjuncts_before_minimisation: disjuncts,
         },
     })
+}
+
+/// Whether any branch of `ucq` carries a per-branch FILTER or VALUES — the condition that
+/// selects the BRANCH-AWARE emitter (`emit::ucq_to_pattern_per_branch`, sq-sg542) over the flat
+/// single-passthrough fold. A single-branch UCQ never needs it (the branch IS the whole query).
+#[cfg(feature = "experimental")]
+fn any_branch_has_modifier(ucq: &Ucq) -> bool {
+    ucq.branches
+        .iter()
+        .any(|b| !b.filter_exprs.is_empty() || !b.values_blocks.is_empty())
 }
 
 /// Rewrite a conjunctive SPARQL query into the **minimised** union of conjunctive queries via the
@@ -225,8 +257,55 @@ pub fn rewrite_production(query: &Query, tbox: &[oxrdf::Triple]) -> Result<Rewri
     let ucq = as_ucq(query)?;
     // 2. Extract the DL-Lite_R TBox once (shared across branches).
     let tbox_model = TBox::extract(tbox);
+    let answer_for_minimise: Vec<String> = ucq.distinguished.iter()
+        .map(|v| v.as_str().to_string())
+        .collect();
+
+    // 3. BRANCH-AWARE production path (sq-sg542): a multi-branch UCQ where any branch carries a
+    //    per-branch FILTER/VALUES is minimised PER BRANCH — cross-branch minimisation would be
+    //    unsound here, since a disjunct in branch i carries branch i's modifier and is NOT
+    //    interchangeable with a disjunct in branch j — then each branch's minimal UCQ is wrapped in
+    //    ITS OWN modifier and the branches are top-unioned. Same per-branch-isolation soundness as
+    //    `rewrite`; minimisation stays fail-closed (a disjunct is dropped only when PROVEN contained
+    //    in a RETAINED disjunct of the SAME branch, so no answer of any branch is removed).
+    if ucq.branches.len() > 1 && any_branch_has_modifier(&ucq) {
+        let mut per_branch: Vec<(Vec<perfectref::Cq>, &ConjunctiveQuery)> =
+            Vec::with_capacity(ucq.branches.len());
+        let mut before = 0usize;
+        let mut disjuncts = 0usize;
+        for branch in &ucq.branches {
+            let (atoms, answer) = emit::cq_to_atoms(branch)?;
+            let perfect = perfectref::perfect_ref(atoms, answer.clone(), &tbox_model);
+            let mut augmented: Vec<perfectref::Cq> = Vec::new();
+            for disjunct in perfect {
+                for folded in treewitness::tree_witness_ucq(disjunct, &tbox_model) {
+                    augmented.push(folded);
+                }
+            }
+            // De-duplicate structurally WITHIN the branch (honest pre-minimisation tally).
+            let mut seen = rustc_hash::FxHashSet::default();
+            augmented.retain(|c| seen.insert(c.clone()));
+            before += augmented.len();
+            let minimal = minimise::minimise_ucq(augmented, &answer_for_minimise);
+            disjuncts += minimal.len();
+            per_branch.push((minimal, branch));
+        }
+        let body = emit::ucq_to_pattern_per_branch(per_branch);
+        let rewritten = rewrap(query, &ucq, body);
+        return Ok(Rewritten {
+            query: rewritten,
+            report: RewriteReport {
+                disjuncts,
+                skipped_axioms: tbox_model.skipped,
+                disjuncts_before_minimisation: before,
+            },
+        });
+    }
+
+    // 4. FLAT path (unchanged): cross-branch dedup + containment minimisation for a single-branch
+    //    UCQ or a multi-branch UCQ with NO per-branch modifier. Byte-identical to the pre-sq-sg542
+    //    emission for every previously-accepted shape.
     let mut augmented: Vec<perfectref::Cq> = Vec::new();
-    // 3. For each UCQ branch: PerfectRef → tree-witness augmentation.
     for branch in &ucq.branches {
         let (atoms, answer) = emit::cq_to_atoms(branch)?;
         let perfect = perfectref::perfect_ref(atoms, answer.clone(), &tbox_model);
@@ -236,34 +315,14 @@ pub fn rewrite_production(query: &Query, tbox: &[oxrdf::Triple]) -> Result<Rewri
             }
         }
     }
-    let answer_for_minimise: Vec<String> = ucq.distinguished.iter()
-        .map(|v| v.as_str().to_string())
-        .collect();
     let before = {
         // De-duplicate structurally for the honest "before minimisation" tally.
         let mut seen = rustc_hash::FxHashSet::default();
         augmented.retain(|c| seen.insert(c.clone()));
         augmented.len()
     };
-    // 4. UCQ-containment minimisation.
     let minimal = minimise::minimise_ucq(augmented, &answer_for_minimise);
     let disjuncts = minimal.len();
-    // 5. Fold the minimised UCQ back. Same multi-branch-modifier guard as `rewrite`: a
-    //    multi-branch UCQ where ANY branch carries per-branch FILTER or VALUES is rejected
-    //    fail-closed (sq-pbz04.3.2 defers the branch-aware emitter). [SONNET-4.6] sq-pbz04.3.1
-    if ucq.branches.len() > 1 {
-        let has_per_branch_modifier = ucq.branches.iter().any(|b| {
-            !b.filter_exprs.is_empty() || !b.values_blocks.is_empty()
-        });
-        if has_per_branch_modifier {
-            return Err(CqError::OutOfScope(
-                "multi-branch UCQ with per-branch FILTER or VALUES is not yet \
-                 supported (branch-aware emitter deferred to sq-pbz04.3.2 — \
-                 fail-closed to prevent hoisting branch-0's filter over the whole union)"
-                    .into(),
-            ));
-        }
-    }
     let cq_for_passthrough = &ucq.branches[0];
     let body = emit::ucq_to_pattern(minimal, cq_for_passthrough);
     let rewritten = rewrap(query, &ucq, body);
@@ -390,17 +449,20 @@ mod tests {
         );
     }
 
-    // ---- FIX (a) differential tests: multi-branch UCQ with per-branch FILTER or VALUES ----
-    // These test the FAIL-CLOSED guard added to close the B1×B3/B4 soundness bug.
-    // Reviewer's exact repro: UNION × FILTER must be rejected (OutOfScope), not mis-answered.
-    // [SONNET-4.6] sq-pbz04.3.1 fix
+    // ---- BRANCH-AWARE emitter (sq-sg542): multi-branch UCQ with per-branch FILTER/VALUES ----
+    // These shapes were previously REJECTED fail-closed (the single-passthrough emitter would have
+    // hoisted branch[0]'s modifier over the WHOLE union — constraining branches that do not own it
+    // and dropping later branches' modifiers). The branch-aware emitter now ANSWERS them: each
+    // branch emits ITS OWN filter/values over ITS OWN sub-union. Full result-equivalence + the
+    // leak-in-both-directions probes live in tests/branch_aware_emit.rs (with a faithful UCQ
+    // evaluator); these unit tests pin ACCEPTANCE + emitted structure via both entry points.
+    // [OPUS-4.8] sq-sg542
 
-    /// `SELECT ?x { { ?x a :A FILTER(?x != :Bad) } UNION { ?x a :B } }` — the
-    /// branch[0] FILTER would be hoisted over the entire union body, dropping real
-    /// answers from branch[1] and potentially inventing wrong answers. Rejected as
-    /// OutOfScope (fail-closed, deferred to sq-pbz04.3.2). [SONNET-4.6]
+    /// `SELECT ?x { { ?x a :A FILTER(?x != :Bad) } UNION { ?x a :B } }` — branch[0] carries a
+    /// FILTER. The branch-aware emitter wraps it around branch[0]'s sub-union ONLY, so branch[1]
+    /// is unconstrained. Accepted + answered (formerly OutOfScope). [OPUS-4.8] sq-sg542
     #[test]
-    fn union_with_branch_filter_is_rejected() {
+    fn union_with_branch_filter_now_answered() {
         let query = q(&format!(
             "PREFIX : <http://ex/> \
              SELECT ?x WHERE {{ \
@@ -409,27 +471,31 @@ mod tests {
                {{ ?x <{TYPE}> :B }} \
              }}"
         ));
-        let err = rewrite(&query, &[]).unwrap_err();
-        assert!(
-            matches!(err, CqError::OutOfScope(ref r) if
-                r.contains("multi-branch") && r.contains("FILTER")),
-            "UNION with per-branch FILTER must be rejected OutOfScope (fail-closed B1×B3); got {:?}",
-            err
+        let r = rewrite(&query, &[]).unwrap();
+        assert_eq!(
+            r.report.disjuncts, 2,
+            "two branches, identity rewrite each (no TBox); report = {:?}",
+            r.report
         );
-        // Same rejection via rewrite_production.
-        let err2 = rewrite_production(&query, &[]).unwrap_err();
         assert!(
-            matches!(err2, CqError::OutOfScope(_)),
-            "rewrite_production must also reject UNION×FILTER; got {:?}",
-            err2
+            r.query.to_string().to_uppercase().contains("FILTER"),
+            "branch[0]'s FILTER must be re-applied in the rewritten query; got: {}",
+            r.query
+        );
+        // The production path accepts + answers it too.
+        let r2 = rewrite_production(&query, &[]).unwrap();
+        assert_eq!(
+            r2.report.disjuncts, 2,
+            "rewrite_production: same two branches; report = {:?}",
+            r2.report
         );
     }
 
     /// Branch[1]-filter variant: `SELECT ?x { { ?x a :A } UNION { ?x a :B FILTER(?x != :Bad) } }`.
-    /// Branch[1]'s FILTER would be silently dropped (never applied) because the emitter only
-    /// uses branch[0] for pass-through. Rejected as OutOfScope. [SONNET-4.6]
+    /// Branch[1]'s FILTER used to be silently dropped by the single-passthrough emitter; it is now
+    /// applied to branch[1]'s sub-union only. Accepted + answered. [OPUS-4.8] sq-sg542
     #[test]
-    fn union_with_branch1_filter_is_rejected() {
+    fn union_with_branch1_filter_now_answered() {
         let query = q(&format!(
             "PREFIX : <http://ex/> \
              SELECT ?x WHERE {{ \
@@ -438,20 +504,20 @@ mod tests {
                {{ ?x <{TYPE}> :B FILTER(?x != :Bad) }} \
              }}"
         ));
-        let err = rewrite(&query, &[]).unwrap_err();
+        let r = rewrite(&query, &[]).unwrap();
+        assert_eq!(r.report.disjuncts, 2, "two branches; report = {:?}", r.report);
         assert!(
-            matches!(err, CqError::OutOfScope(ref r) if
-                r.contains("multi-branch") && r.contains("FILTER")),
-            "UNION with per-branch FILTER on branch[1] must be rejected OutOfScope; got {:?}",
-            err
+            r.query.to_string().to_uppercase().contains("FILTER"),
+            "branch[1]'s FILTER must be re-applied; got: {}",
+            r.query
         );
     }
 
-    /// `SELECT ?x { { ?x a :A } UNION { ?x a :B VALUES ?x { :C } } }` — the
-    /// branch[1] VALUES would be silently dropped by the single-passthrough emitter.
-    /// Rejected as OutOfScope (fail-closed, deferred to sq-pbz04.3.2). [SONNET-4.6]
+    /// `SELECT ?x { { ?x a :A } UNION { ?x a :B VALUES ?x { :C } } }` — branch[1] carries a
+    /// VALUES block. It used to be silently dropped by the single-passthrough emitter; the
+    /// branch-aware emitter joins it onto branch[1]'s sub-union only. Accepted. [OPUS-4.8] sq-sg542
     #[test]
-    fn union_with_branch_values_is_rejected() {
+    fn union_with_branch_values_now_answered() {
         let query = q(&format!(
             "PREFIX : <http://ex/> \
              SELECT ?x WHERE {{ \
@@ -460,19 +526,15 @@ mod tests {
                {{ ?x <{TYPE}> :B VALUES ?x {{ :C }} }} \
              }}"
         ));
-        let err = rewrite(&query, &[]).unwrap_err();
+        let r = rewrite(&query, &[]).unwrap();
+        assert_eq!(r.report.disjuncts, 2, "two branches; report = {:?}", r.report);
         assert!(
-            matches!(err, CqError::OutOfScope(ref r) if
-                r.contains("multi-branch") && r.contains("VALUES")),
-            "UNION with per-branch VALUES must be rejected OutOfScope (fail-closed B1×B4); got {:?}",
-            err
+            r.query.to_string().to_uppercase().contains("VALUES"),
+            "branch[1]'s VALUES must be re-applied; got: {}",
+            r.query
         );
-        let err2 = rewrite_production(&query, &[]).unwrap_err();
-        assert!(
-            matches!(err2, CqError::OutOfScope(_)),
-            "rewrite_production must also reject UNION×VALUES; got {:?}",
-            err2
-        );
+        let r2 = rewrite_production(&query, &[]).unwrap();
+        assert_eq!(r2.report.disjuncts, 2, "rewrite_production: same; report = {:?}", r2.report);
     }
 
     /// The SOUND case: a single-branch CQ with a FILTER on the distinguished variable
