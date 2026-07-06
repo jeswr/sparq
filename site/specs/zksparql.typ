@@ -118,8 +118,10 @@ implementable from this text together with the cited source:
 + the committed-data-model algorithm identities — RDFC-1.0 canonicalisation, the term/leaf
   encoding, and the per-graph Poseidon2/BN254 sponge commitment (section 6.1) — and the
   cryptosuite resolution rule (section 6.3);
-+ the fragment boundary and its algebraic semantics (sections 7.1–7.2), including the ban on
-  representing a disclosed-base entailment re-check as a zero-knowledge proof (section 7.4);
++ the fragment boundary and its algebraic semantics (sections 7.1–7.2), the bounded-depth
+  statement and its depth-disclosure requirements for property paths (section 7.5), the
+  admitted FILTER-expression shape (section 7.6), and the ban on representing a disclosed-base
+  entailment re-check as a zero-knowledge proof (section 7.4);
 + the manifest type identifier and the trust-status of each declared member (sections 8.1–8.2);
 + the verifier-nonce discipline (section 9);
 + the verifier's fail-closed discipline: fail closed on any check that cannot be completed
@@ -388,22 +390,82 @@ An issuer attests a committed graph by signing its commitment (`sparq-zk` `sig` 
 
 == The supported SPARQL fragment
 
-The provable fragment of SPARQL #cite("SPARQL11-QUERY") is deliberately small and bucketed
-(`sparq-zk-compose` `build` module):
+The provable fragment of SPARQL #cite("SPARQL11-QUERY") is small and is extended along a single
+principle: a construct is admitted only when *result membership* (section 7.2) is *monotone* —
+a disclosed witness stays valid as the world gains data — and its statement is realisable in
+the fixed circuit family (section 7.3) without a hidden completeness claim. That is the
+open-world-assumption-conforming, federation-free core; closed-world negation, whole-pattern
+completeness, and federation are excluded on semantics, not on cost. The design record
+`research/zksparql-fragment-extension.md` derives the disposition of every construct.
 
-- basic graph pattern (BGP) scans over committed graphs, with per-graph commitment recompute,
-  row soundness, and scan completeness proved in-circuit;
-- value `FILTER` constraints, bucketed by datatype lane: non-negative integer (`filter_int`),
-  the integer-valued `xsd:double` fragment (`filter_f64`), signed integer
-  (`filter_signed_int`), fixed-point `xsd:decimal` (`filter_decimal`), and, behind the
-  off-by-default `dual-leaf` feature, the value-dictionary lanes (`filter_value_dl*`);
-- a single-prover equality `JOIN` across hidden credentials (`join_eq`), where the join term
-  stays private.
+Each row of the table below carries one implementation tier, so a claim of coverage traces to
+implemented behaviour or is labelled a proposal:
 
-`OPTIONAL`, `UNION`, property paths, aggregation, and subqueries are *not* part of the
-fragment; the general fractional/scientific `xsd:double` filter is deferred. A prover
-#strong[MUST NOT] emit a manifest claiming coverage of a construct outside this fragment, and
-a verifier encountering such a claim #strong[MUST] reject it.
+- *core* — provable end-to-end today (`sparq-zk-compose` `build` / `verifier`): BGP scans
+  (per-graph commitment recompute, row soundness, in-circuit scan completeness); the value
+  `FILTER` lanes — non-negative integer (`filter_int`), the integer-valued `xsd:double`
+  fragment (`filter_f64`), signed integer (`filter_signed_int`), fixed-point `xsd:decimal`
+  (`filter_decimal`), and, behind the off-by-default `dual-leaf` feature, the value-dictionary
+  lanes (`filter_value_dl*`) — whose accepted *expression* shape is section 7.6; and the
+  single-prover equality `JOIN` (`join_eq`) over hidden credentials, where the join term stays
+  private;
+- *gate* — accepted by the query-side fragment gate (`sparq-zk::verify::fragment_query`), which
+  re-derives the extended structure from the query text, and, for bounded paths, backed by the
+  realised `path_reach` circuit family (section 7.5) — but *not yet bound end-to-end*: the
+  manifest schema and verifier dispatch that tie an extended query to sub-proofs are in
+  progress, so the live stage-1 compose verifier still fails closed on every *gate* construct
+  until that work lands;
+- *proposal* — designed in the record, not yet in any gate.
+
+#table(
+  columns: 3,
+  align: (left, left, left),
+  table.header[Construct][Tier][Disposition and reason],
+  [`SELECT` / `ASK`], [core], [Membership, resp. non-emptiness, of a solution mapping.],
+  [BGP], [core], [Scan circuits (row soundness + per-scan completeness in-circuit).],
+  [`JOIN`], [core], [`join_eq` hidden equality join; cross-graph blank-node exclusion (the "Q6"
+    guard, section 7.2) retained.],
+  [`FILTER`], [core], [Value comparison over the datatype lanes; monotone under
+    error-as-unsatisfied. Accepted expression shape: section 7.6.],
+  [`DISTINCT` / `REDUCED` / `LIMIT` / `OFFSET` / projection], [core], [Membership-indifferent
+    modifiers (outer level only; a `LIMIT`/`OFFSET` *inside* a subquery is rejected).],
+  [Property path: predicate `iri`, inverse `^p`, sequence `p1/p2`, alternative `p1|p2`],
+    [gate], [Rewrites into BGP / `UNION` (section 7.5); no new statement.],
+  [Property path closure `p?` / `p*` / `p+` over an atomic step], [gate], [Bounded-depth
+    existence within a disclosed depth (section 7.5).],
+  [`UNION`], [gate], [Per-solution branch attribution; eval is the set union of branch evals.],
+  [`VALUES`], [gate], [Inline public rows re-derived from the query text; `UNDEF` cells are
+    wildcards; a triple-term cell is rejected (no committed leaf lane).],
+  [Subquery (nested `SELECT`)], [gate], [Monotone when composed of in-fragment operators; inner
+    non-projected variables are existential and renamed apart.],
+  [`BIND` (`Extend`)], [proposal], [Deterministic expression over the section 7.6 estate;
+    fail-closed today.],
+  [Extended `FILTER` expressions], [proposal], [The general expression estate (section 7.6).],
+  [`FILTER EXISTS` (positive)], [proposal], [Monotone, but deferred until the SPARQL 1.2
+    `EXISTS` substitution semantics is pinned.],
+  [Negated property set `!(p1|…|pn)`], [proposal], [Monotone existence of a differently-predicated
+    triple; deferred until after the `path_reach` family binds.],
+  [`ORDER BY`], [OUT], [Membership-indifferent but implies an unproved top-k claim; may re-enter
+    only with an explicit "order-not-proved" manifest flag.],
+  [`OPTIONAL` (`LeftJoin`)], [OUT], [Non-monotone: an unbound optional side asserts no
+    compatible extension exists — a closed-world claim. Rewrite to `JOIN` or a `UNION` of cases.],
+  [`MINUS`], [OUT], [Closed-world set difference; non-monotone.],
+  [`FILTER NOT EXISTS`], [OUT], [Closed-world negation; non-monotone.],
+  [Aggregation (`GROUP BY`, `HAVING`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, …)], [OUT],
+    [An aggregate value is a completeness claim over the whole pattern; composed-pattern
+    completeness is not proved.],
+  [`GRAPH`], [OUT], [Naming graphs discloses the attribution the trust model hides.],
+  [`SERVICE`], [OUT], [Federation, excluded by the fragment principle.],
+  [`CONSTRUCT` / `DESCRIBE`], [OUT], [Result form outside the membership property; instantiate
+    templates client-side from a proved mapping.],
+)
+
+Outside the fragment, a prover #strong[MUST NOT] emit a manifest claiming coverage of an
+excluded or not-yet-implemented construct, and a verifier encountering such a claim
+#strong[MUST] reject it (fail-closed). The gate rejects every form not tiered *core* or *gate*
+above with a fixed reason — additionally including `FROM` / `FROM NAMED` dataset clauses, a
+closure over a non-atomic path (section 7.5), and a `LIMIT`/`OFFSET` inside a subquery — and
+never silently drops or downgrades an unrecognised construct.
 
 == Formal semantics of the fragment
 
@@ -474,6 +536,19 @@ only if μ is a member of eval(P) — respectively eval(P) is non-empty — as d
   implementation-independent successor.
 ]
 
+*The extended constructs.* The grammar above is the end-to-end *core* (section 7.1). The
+*gate*-tier extensions take their standard SPARQL 1.1 semantics under this same set semantics
+and preserve the membership property: `UNION` (and the path alternative `p1|p2`) evaluates to
+the set union of its branches, so a solution is attributed to the branch that witnesses it;
+`VALUES` restricts eval to solutions compatible with an inline row, treating an `UNDEF` cell as
+a wildcard; a subquery projects its inner evaluation existentially, so its non-projected
+variables never bind an outer variable of the same name. The non-recursive path forms —
+predicate, inverse (endpoint swap), and sequence (a fresh non-projected intermediate) — are the
+SPARQL 1.1 path translation into BGP and `UNION` and add no new statement. The recursive
+closures `p?`/`p*`/`p+` are the one construct whose proved statement is *weaker* than the
+SPARQL operator — bounded existence rather than full reachability — and are defined separately
+in section 7.5, where eval_k(P) ⊆ eval(P) makes the one-directional equivalence explicit.
+
 == The circuit family
 
 Each sub-proof is generated against exactly one circuit of a fixed, named family
@@ -513,6 +588,13 @@ circuit identifier from the statement each sub-proof is bound to (section 10.3),
 #strong[MUST NOT] be accepted on its self-declared identifier alone. An
 out-of-bucket shape is a clean rejection, never a silently unprovable member.
 
+The bounded-depth path family `path_reach_d{k}` (section 7.5) is realised in `zk/compose` — as
+compiled `path_reach_d{depth}_k{graphs}_n{slots}` members over the same shape lattice — but is
+*not yet* a `manifest::CircuitId` member: binding it into the manifest schema and verifier
+dispatch is in progress (the *gate* tier of section 7.1). The compile-time depth is the
+member's identity — a distinct depth is a distinct verification key — so a verifier learns the
+disclosed bound from which member it accepts; the `depth_bound` public input re-states it.
+
 == Entailment regimes
 
 Only *simple entailment* is proved in zero knowledge (`manifest::EntailmentRegime::Simple`;
@@ -523,6 +605,88 @@ instance whose antecedents are grounded in an earlier step or a disclosed scan r
 non-`Simple` regime with no grounded steps is rejected (fail-closed). The derivation bases are
 revealed to the verifier; the in-circuit closure proof is deferred. A prover #strong[MUST NOT]
 represent a disclosed-base re-check as a zero-knowledge entailment proof.
+
+== Bounded-depth property paths
+
+The recursive path operators `p+`, `p*`, and `p?` are admitted under an *explicitly bounded*
+statement: the circuit proves reachability within a disclosed depth, never unbounded closure.
+Only a closure over an *atomic* step — a predicate IRI, possibly inverted (`(^p)+` proves `p+`
+between the swapped endpoints) — is expressible; the `path_reach` family
+(`sparq_zk_compose_core::path`, section 7.3) proves chains all carrying a single predicate, so a
+closure over a sequence, alternative, nested closure, or negated property set is rejected
+fail-closed. The non-recursive path forms are rewrites into the *core* fragment (section 7.2)
+and carry no new statement.
+
+For a closure over predicate `p` from `s` to `o`, a `path_reach` sub-proof proves — and a
+manifest #strong[MUST] be read as claiming — exactly the boxed statement, no more:
+
+#note[
+  There exists a chain of committed triples (t_1, …, t_ℓ) with 1 ≤ ℓ ≤ k
+  (0 ≤ ℓ ≤ k for `*` and `?`; k = 1 for `?`), each t_i a member of a committed graph in
+  the disclosed attribution set, each carrying predicate p, chained object-to-subject,
+  connecting μ(s) to μ(o) — where *k is a public input* disclosed in the manifest and fixed by
+  the circuit member (the `depth_bound` input; a distinct k is a distinct circuit and
+  verification key). The exact length ℓ within the bound stays hidden.
+]
+
+The following are normative; each is a realised in-circuit constraint of `path_reach_check`
+together with a verifier obligation the composition layer (the *gate* tier, section 7.1) must
+carry:
+
++ *k is public and surfaced.* Proofs at different k are *different statements*. A verifier
+  #strong[MUST] expose k to the consumer and #strong[MUST] reject a manifest whose claimed
+  path depth exceeds the bound of the circuit member it is bound to. A surface that renders
+  "path exists" without k misstates the claim.
++ *Existence only — never absence.* A bounded path proof is monotone: it #strong[MUST NOT] be
+  read as asserting that no longer path exists, nor that the reachable set is complete. Failure
+  to prove at depth k proves nothing. Every bounded witness is a genuine SPARQL `p+`/`p*`
+  solution — eval_k(P) ⊆ eval(P) (section 7.2) — so membership is preserved and
+  completeness holds only up to k. (Any walk between two nodes has a simple walk of length at
+  most the committed union's node count, so a k at least that count restores per-pair
+  completeness; worth stating, never assumed.)
++ *Zero-length case.* For `p*` and `p?` the zero-length path holds only when μ(s) = μ(o)
+  #strong[and] that term occurs as a subject or object of a committed triple: the circuit
+  #strong[requires] an occurrence witness, matching SPARQL's zero-length-path term universe;
+  bare equality is not sufficient, and a predicate-position occurrence does not count. `p+`
+  #strong[MUST NOT] admit the zero-length case.
++ *Inert padding.* A chain shorter than k pads with pass-through steps that #strong[MUST NOT]
+  advance the endpoint or draw a graph into the attribution set; padding rows are the family's
+  primary forgery surface and are covered by dedicated forge-negative tests.
++ *Cross-graph chain links.* When a path's attribution set admits more than one graph, every
+  chain-equated term — the interior chain nodes and the zero-length endpoint equality —
+  #strong[MUST] carry the coarse non-blank-node obligation, extending the cross-graph
+  blank-node exclusion (the "Q6" guard, section 7.2) from join edges to path links.
++ *Cycles.* Path semantics is existence-based set semantics, so a witness chain need not be
+  simple; cycles are harmless for membership.
+
+Source attribution is *chain-relative*: the attribution bits attest the graphs of the
+existential witness the prover chose — exact within that witness (a triple present in several
+graphs sets every such graph's bit) — not of every possible chain between the endpoints. Like
+the rest of the estate these circuits are research-grade and #strong[not] externally audited
+(section 17.1): they *expand* the internally-re-audited surface, and a bounded path proof is
+not a production guarantee while the external audit gate (sq-qhy4) is open.
+
+== FILTER expressions
+
+A `FILTER` is admitted only as a *conjunction* (`&&`, flattened) of atomic value comparisons of
+the form `?var op c`, where `op` is one of `=`, `!=`, `<`, `<=`, `>`, `>=` and `c` is a typed
+literal constant bindable by one of the value `FILTER` lanes (section 7.1). `?var != c` is
+recognised as its `Not(Equal(…))` parse; a `const op ?var` comparison is flipped so the
+variable is on the left; a non-canonical numeric lexical form (leading zero, sign, whitespace)
+is rejected because no honest proof could bind it. Each comparison binds slot-wise to a scan
+row, and error-as-unsatisfied (section 7.2) makes the shape monotone.
+
+Every other `FILTER` form is rejected fail-closed and #strong[MUST NOT] be silently disclosed
+unproven: a variable–variable comparison (`?a op ?b`), disjunction (`||`), a general negation
+`!(…)` other than the `!=` shape, an arithmetic operand (`?a + c op d`), a function call,
+`IN` / `NOT IN`, `BOUND`, and `EXISTS` / `NOT EXISTS`.
+
+The broader expression estate is a *proposal* (design record §5), not part of the accepted
+fragment: the general SPARQL 1.1 function library, the three-valued (error-carrying) logical
+layer for `&&` / `||` / `!` / `IF` / `COALESCE`, the term accessors (`isIRI`, `datatype`,
+`lang`, `str`, …), and the string, numeric, date-component, and hash functions. Admitting them
+is the composition work of the fragment-extension program's later phases; until a lane lands,
+the gate #strong[MUST] reject a query that uses it.
 
 = The proof manifest
 
