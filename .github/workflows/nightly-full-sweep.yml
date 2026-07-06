@@ -251,11 +251,15 @@ jobs:
 
       # SMOKE: enumerate the visual specs (SPARQ_VR defines the visual projects; the host guard
       # is bypassed for LISTING only — no screenshots are taken, so nothing is compared).
+      # SPARQ_NIGHTLY_VR=1 so the testMatch expands to ALL e2e/visual/**/*.spec.ts — full-surface
+      # must appear in the nightly listing to confirm it is wired (it would be invisible without
+      # the flag since testMatch defaults to key-layouts only).
       - name: Smoke — visual harness is runnable (--list)
         if: needs.config.outputs.mode == 'smoke'
         env:
           SPARQ_VR: "1"
           SPARQ_VR_ALLOW_HOST: "1"
+          SPARQ_NIGHTLY_VR: "1"
         run: npx playwright test --list e2e/visual
 
       # FULL: mirror site-visual.yml. Unlike the per-PR lane (which keeps the vr step
@@ -286,8 +290,14 @@ jobs:
       - name: Determinism grep gate (no waitForTimeout calls)
         if: needs.config.outputs.mode == 'full'
         run: npm run test:e2e:grep-gate
+      # [SONNET-4.6] sq-ledny — SPARQ_NIGHTLY_VR=1 is forwarded into the container by vr.sh
+      # so the visual-desktop/visual-mobile testMatch expands to ALL e2e/visual/**/*.spec.ts
+      # (including full-surface.spec.ts). Without this flag, vr.sh only runs key-layouts.spec.ts
+      # (the per-PR subset) and the full-surface captures are skipped.
       - name: Visual full-surface sweep vs committed baselines (digest-pinned container)
         if: needs.config.outputs.mode == 'full'
+        env:
+          SPARQ_NIGHTLY_VR: "1"
         run: npm run vr
       - name: Upload visual diff artifacts on failure
         if: failure() && needs.config.outputs.mode == 'full'

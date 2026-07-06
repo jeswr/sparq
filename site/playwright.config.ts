@@ -46,6 +46,14 @@ const SPARQ_NIGHTLY_BROWSERS = !!process.env.SPARQ_NIGHTLY_BROWSERS;
 // nightly-full-sweep a11y job. Same chromium browser + determinism defaults as the per-PR
 // project; testMatch restricted to e2e/nightly/ so it does NOT double-run the main suite.
 const SPARQ_NIGHTLY_A11Y = !!process.env.SPARQ_NIGHTLY_A11Y;
+
+// [SONNET-4.6] sq-ledny — the NIGHTLY full-surface visual flag. The per-PR visual-desktop
+// and visual-mobile projects match ONLY the committed key-layouts spec by default; the
+// full-surface sweep (e2e/visual/full-surface.spec.ts) has no committed baselines on first
+// land and is nightly-only by design. The nightly workflow sets SPARQ_NIGHTLY_VR=1 so the
+// visual-sweep job (via vr.sh) matches ALL e2e/visual/**/*.spec.ts. Without the flag the
+// per-PR site-visual.yml lane keeps running exactly the pre-existing key-layouts tests.
+const SPARQ_NIGHTLY_VR = !!process.env.SPARQ_NIGHTLY_VR;
 if (SPARQ_VR && !existsSync("/ms-playwright") && !process.env.SPARQ_VR_ALLOW_HOST) {
   throw new Error(
     "SPARQ_VR=1 outside the pinned Playwright container (/ms-playwright not found). " +
@@ -132,16 +140,27 @@ export default defineConfig({
     // Two pinned viewports per §4: 1280×720 desktop + 390×844 mobile. Plain viewports (no
     // isMobile/deviceScaleFactor emulation): the site is responsive via CSS breakpoints, and
     // DSF=1 keeps baselines small + byte-stable.
+    //
+    // [SONNET-4.6] sq-ledny — testMatch is split on SPARQ_NIGHTLY_VR:
+    //   • Without the flag (per-PR site-visual.yml): only key-layouts.spec.ts — the specs
+    //     whose baselines ARE committed. full-surface.spec.ts is excluded so missing baselines
+    //     never advisory-fail the per-PR lane.
+    //   • With SPARQ_NIGHTLY_VR=1 (nightly visual-sweep via vr.sh): all e2e/visual/**/*.spec.ts
+    //     — includes full-surface and any future specs added to e2e/visual/.
     ...(SPARQ_VR
       ? [
           {
             name: "visual-desktop",
-            testMatch: /e2e[\\/]visual[\\/].*\.spec\.ts/,
+            testMatch: SPARQ_NIGHTLY_VR
+              ? /e2e[\\/]visual[\\/].*\.spec\.ts/
+              : /e2e[\\/]visual[\\/]key-layouts\.spec\.ts/,
             use: { viewport: { width: 1280, height: 720 } },
           },
           {
             name: "visual-mobile",
-            testMatch: /e2e[\\/]visual[\\/].*\.spec\.ts/,
+            testMatch: SPARQ_NIGHTLY_VR
+              ? /e2e[\\/]visual[\\/].*\.spec\.ts/
+              : /e2e[\\/]visual[\\/]key-layouts\.spec\.ts/,
             use: { viewport: { width: 390, height: 844 } },
           },
         ]

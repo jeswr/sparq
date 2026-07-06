@@ -50,6 +50,7 @@ exec docker run --rm --init --ipc=host \
   -u "$(id -u):$(id -g)" \
   -e HOME=/tmp \
   -e SPARQ_VR=1 \
+  -e SPARQ_NIGHTLY_VR="${SPARQ_NIGHTLY_VR:-}" \
   -e CI="${CI:-}" \
   -v "${REPO_ROOT}:/work" \
   -w /work/site \
