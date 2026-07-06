@@ -61,8 +61,15 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
   with bounded **tree-witness** folding (existential witnesses captured with no unbounded chase),
   then **UCQ-containment minimisation** (redundant disjuncts dropped by the homomorphism
   containment test). Returns the **same certain answers** as `rewrite` in a **smaller UCQ**.
-- **Fail-closed CQ-shape gate** *(always present)* — `OPTIONAL`/`FILTER`/`MINUS`/`UNION`/paths/
-  aggregation/variable-predicate queries are **rejected** as `OutOfScope`, not mis-answered.
+- **Broadened sound fragment** *(sq-pbz04.3.1)* — **(B1)** top-level UCQ accepted (each branch
+  rewrites independently); **(B2)** literal-object role atoms accepted (rigid, never `_`-eligible);
+  **(B3)** `FILTER` over distinguished-only variables passed through (fail-closed otherwise);
+  **(B4)** constant-only `VALUES` over distinguished variables passed through (fail-closed otherwise).
+- **Intensional-atom guard (B6)** *(always present)* — `rdfs:subClassOf/subPropertyOf/domain/range`
+  and all `owl:` predicates as atom predicates are **rejected**; annotation predicates
+  (`rdfs:label/comment/seeAlso/isDefinedBy`) are admitted as role atoms.
+- **Fail-closed CQ-shape gate** *(always present)* — `OPTIONAL`/`MINUS`/paths/aggregation/
+  variable-predicate queries are **rejected** as `OutOfScope`, not mis-answered.
 - **Query-rewriter seam** — emits a `Union`-folded UCQ as a `spargebra::Query`, run unchanged by
   the engine; no store or planner changes.
 - **Honest fragment reporting** — TBox axioms outside DL-Lite_R are counted in

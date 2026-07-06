@@ -224,13 +224,15 @@ pub struct Suite {
 ///   UCQ evaluated over the unmodified ABox returns EXACTLY the hand-derived certain
 ///   answers; the broader `pr:QL` entailment-arm intensional gap stays
 ///   experimental/OutOfScope, never summed in).
-/// * OWL 2 QL entailment-regime graduated subset 9 — `sparq-conformance`
-///   `tests/ql_entailment_floor.rs` `QL_ENTAILMENT_FLOOR = 9` (sq-pbz04.3.4; opt-in
+/// * OWL 2 QL entailment-regime graduated subset 11 — `sparq-conformance`
+///   `tests/ql_entailment_floor.rs` `QL_ENTAILMENT_FLOOR = 11` (sq-pbz04.3.4; opt-in
 ///   `ql-experimental` feature; a sparq EXTENSION ratchet, NOT an OWL 2 QL /
 ///   entailment-regime conformance claim — the floor is the PINNED NAMED-CASE list
 ///   of `pr:QL` `sparql11/entailment` cases passing ALL SIX graduation conditions,
 ///   exact set equality: regressions AND unpinned additions both fail CI; every
-///   non-graduated case carries an exhaustive hold-reason taxonomy).
+///   non-graduated case carries an exhaustive hold-reason taxonomy; raised 9→11 by
+///   sq-pbz04.3.1 B2 literal-object broadening: `lang` + `plainLit` both graduate
+///   [SONNET-4.6]).
 /// * OWL 2 EL classification 50 — `sparq-conformance` `tests/el_suite.rs`
 ///   `EL_SUITE_FLOOR = 50` (sq-pbz04.2.4; opt-in `el-suite` feature; a sparq EXTENSION
 ///   ratchet, NOT a full-OWL-2-EL-conformance claim — CR7–CR9 concrete domains + ABox
@@ -894,7 +896,11 @@ pub const SUITES: &[Suite] = &[
             feature: "ql-experimental",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 9,
+        // [SONNET-4.6] sq-pbz04.3.1 raised 9 → 11: `lang` + `plainLit` graduate under the
+        // B2 literal-object broadening (SELECT ?x WHERE { ?x foaf:name "name"@en }, TBox
+        // foaf:name a owl:DatatypeProperty — fully_captured, no existential generators,
+        // identity rewrite returns exactly {:b}, result-equivalent to the W3C oracle).
+        ratchet_floor: 11,
         floor_basis: "graduated named pr:QL cases — six-condition soundness predicate (sparq \
                       EXTENSION over the QL fragment sparq rewrites, NOT an OWL 2 QL / \
                       entailment-regime conformance claim)",

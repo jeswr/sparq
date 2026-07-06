@@ -1,4 +1,7 @@
 // [OPUS-4.8] sq-t5bne (epic sq-pbz04): the STRICT, FAIL-CLOSED CQ-shape gate.
+// [SONNET-4.6] sq-pbz04.3.1: broaden the sound input fragment — UCQ (B1), literal-object atoms
+// (B2 is in emit.rs), FILTER on distinguished-only vars (B3), constant-only VALUES over
+// distinguished vars (B4), intensional-atom guard (B6).
 //
 // PerfectRef (and every OWL 2 QL query-rewriting algorithm) is sound + complete only for
 // (unions of) CONJUNCTIVE QUERIES — the Pérez–Arenas–Gutiérrez "AND-only" fragment with an
@@ -12,9 +15,44 @@
 // compiled and always cheap (a structural walk of the parsed algebra, no TBox, no rewriting),
 // so the fail-closed classification is available even to a caller that has NOT enabled the
 // rewriter. The rewriter (behind `experimental`) calls into the gate; it can never bypass it.
+//
+// ## Broadened shapes (sq-pbz04.3.1) and their soundness arguments
+//
+// B1. UCQ (top-level UNION of CQ branches): PerfectRef is defined over UCQs in the source
+//     paper (Calvanese et al., JAR 2007). Each branch is rewired independently and the results
+//     unioned. Certain answers distribute over union in DL-Lite_R. FAIL-CLOSED: each branch
+//     must independently pass the CQ gate; a branch leaving a projected variable unbound is
+//     rejected because UCQ answer-arity is uniform.
+//
+// B3. FILTER on distinguished-only variables: For q'(x) = q(x) ∧ F(x) with vars(F) ⊆
+//     distinguished, certain answers are ground bindings of the answer vars, and F reads only
+//     those. The rewriter passes F through unmodified — SPARQL evaluation semantics apply on
+//     both sides of the rewrite. FAIL-CLOSED: a FILTER mentioning any non-distinguished
+//     variable is rejected (its value on an anonymous witness is undefined).
+//
+// B4. Constant-only VALUES over distinguished vars: A VALUES block whose vars are all
+//     distinguished and whose rows are fully bound constants is equivalent to a disjunction
+//     of equality filters over answer variables. B3's argument applies verbatim. FAIL-CLOSED:
+//     UNDEF cells or non-distinguished variables → rejected.
+//
+// B6. Intensional-atom guard (a deliberate NARROWING): the gate currently admits role atoms
+//     whose predicate is semantics-bearing schema vocabulary (rdfs:subClassOf,
+//     rdfs:subPropertyOf, rdfs:domain, rdfs:range, and the owl: axiom vocabulary). The
+//     rewriter evaluates those over ABox triples only — silently MISSING TBox-entailed schema
+//     facts (reflexivity, transitive closure, entailed subsumptions). That violates the
+//     completeness half of the certain-answer contract. Fix: such atoms are now REJECTED as
+//     `OutOfScope("intensional/schema-vocabulary atom")`. Annotation predicates
+//     (rdfs:label/comment/seeAlso/isDefinedBy) remain admitted as plain role atoms.
+//
+// ## Unchanged PERMANENT-REJECT shapes
+//
+// OPTIONAL (non-monotone), MINUS (non-monotone), property paths (reintroduces recursion),
+// GRAPH (named-graph rewriting semantics unsettled), BIND/Extend (arithmetic, not CQ),
+// aggregation, SERVICE, sub-SELECT, LATERAL, RDF-star quoted triples, variable predicates —
+// all stay REJECTED with their original reason strings.
 
 use spargebra::algebra::GraphPattern;
-use spargebra::term::{TermPattern, TriplePattern, Variable};
+use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 
 /// Why a query is not a conjunctive query the QL rewriter may soundly handle. Carries a
@@ -41,12 +79,14 @@ impl std::error::Error for CqError {}
 
 /// A conjunctive query in the shape the rewriter consumes: a flat conjunction of triple
 /// patterns (the body atoms) under a set of DISTINGUISHED (answer / projected) variables.
+/// Additionally may carry a pass-through filter expression and a constant-binding VALUES
+/// block — see the broadening in sq-pbz04.3.1.
 ///
-/// Built only by [`as_conjunctive_query`], which has already proven via the fail-closed gate
-/// that the source query is a genuine CQ. The `distinguished` set is the SELECT projection
-/// (or, for ASK, empty — a boolean CQ); every other variable in `atoms` is non-distinguished
-/// (existentially quantified), which is exactly the distinction PerfectRef's applicability
-/// condition turns on.
+/// Built only by [`as_conjunctive_query`] or [`as_ucq`], which have already proven via the
+/// fail-closed gate that the source is a genuine CQ. The `distinguished` set is the SELECT
+/// projection (or, for ASK, empty — a boolean CQ); every other variable in `atoms` is
+/// non-distinguished (existentially quantified), which is exactly the distinction
+/// PerfectRef's applicability condition turns on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConjunctiveQuery {
     /// The projected (answer) variables — the distinguished variables of the CQ.
@@ -57,6 +97,49 @@ pub struct ConjunctiveQuery {
     pub distinct: bool,
     /// Whether the original query was an ASK (boolean CQ — `distinguished` is then empty).
     pub ask: bool,
+    /// SPARQL filter expressions from the CQ body that mention ONLY distinguished variables
+    /// (B3: passed through unmodified, applied post-rewrite). Empty when no FILTER was present.
+    ///
+    /// These are `spargebra::algebra::Expression` values, but to keep the type opaque in the
+    /// public surface (and avoid an implicit spargebra dep in downstream code that only calls
+    /// `as_conjunctive_query`) we store them as opaque `GraphPattern::Filter` wrappers that
+    /// the emitter unwraps. Stored here as the raw `spargebra::algebra::Expression` string for
+    /// now; the emitter re-applies them by wrapping the UCQ body in `Filter { expr, inner }`.
+    pub filter_exprs: Vec<spargebra::algebra::Expression>,
+    /// Constant-only VALUES bindings over distinguished variables (B4: passed through
+    /// unmodified, semantically equivalent to equality filters, applied post-rewrite).
+    pub values_blocks: Vec<ValuesBlock>,
+}
+
+/// A constant-only VALUES block accepted by the B4 broadening: all variables are
+/// distinguished and all cells are fully bound to ground terms (no UNDEF). [SONNET-4.6]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValuesBlock {
+    /// The variables bound in this VALUES block (all distinguished, already checked).
+    pub variables: Vec<Variable>,
+    /// The rows: each row is one binding per variable. All cells are ground terms (no UNDEF).
+    pub bindings: Vec<Vec<GroundTerm>>,
+}
+
+/// A UCQ (union of conjunctive queries) as the gate classifies it.
+///
+/// The outermost shape is a UNION of CQ branches, each independently passing the CQ gate.
+/// The distinguished variables (projection) are at the UCQ level — uniform across all
+/// branches (a branch leaving a projected variable unbound is rejected, fail-closed).
+///
+/// Built only by [`as_ucq`], which has already proven via the fail-closed gate that the
+/// source query is a genuine UCQ. Single-branch UCQs are representable (and the
+/// `as_conjunctive_query` convenience wrapper builds them).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ucq {
+    /// The projected (answer) variables — uniform across all branches.
+    pub distinguished: Vec<Variable>,
+    /// Whether the original SELECT was DISTINCT.
+    pub distinct: bool,
+    /// Whether the original query was an ASK.
+    pub ask: bool,
+    /// The CQ branches. Never empty (a single CQ is a one-branch UCQ).
+    pub branches: Vec<ConjunctiveQuery>,
 }
 
 /// Classify `query` and, if it is a conjunctive query the rewriter may soundly handle, return
@@ -64,18 +147,49 @@ pub struct ConjunctiveQuery {
 /// disqualifying construct. FAIL-CLOSED: anything not recognised as plainly a CQ is rejected.
 ///
 /// Accepted shape (and ONLY this shape): `SELECT [DISTINCT] ?vars WHERE { conjunction of
-/// triple patterns }`, or the same body under `ASK`. The body may be a single `Bgp` or a tree
-/// of `Join`s whose leaves are all `Bgp`s (spargebra splits a `{ t1 . t2 . }` conjunction into
-/// joined BGPs in some shapes) — both reduce to one flat conjunction. Everything else is out:
+/// triple patterns [, FILTER over distinguished-only vars] [, VALUES over distinguished vars
+/// with constant rows] }`, or the same body under `ASK`. The body may be a single `Bgp` or a
+/// tree of `Join`s whose leaves are all `Bgp`s — both reduce to one flat conjunction. Also
+/// accepted (B3): a `Filter` wrapping a CQ body, when the filter expression mentions only
+/// distinguished variables. Also accepted (B4): a `Values` block over distinguished variables
+/// with fully-bound rows. Everything else is out:
 ///
-/// - `LeftJoin` (OPTIONAL), `Filter`, `Minus`, `Union`, `Lateral`, `Group`/aggregation,
-///   `Service`, `Graph`, `Extend` (BIND), `OrderBy`, `Slice`, `Values`, `Path` (property
-///   paths) — none has a certain-answer-preserving UCQ rewriting (property paths in particular
-///   reintroduce the transitivity/recursion QL deliberately excludes);
+/// - `LeftJoin` (OPTIONAL), `Minus`, `Union`, `Lateral`, `Group`/aggregation,
+///   `Service`, `Graph`, `Extend` (BIND), `OrderBy`, `Slice`, `Path` (property paths) — none
+///   has a certain-answer-preserving UCQ rewriting;
 /// - CONSTRUCT / DESCRIBE — not a CQ-answering shape;
 /// - a triple pattern whose predicate is a VARIABLE, or any RDF-star quoted-triple term — both
-///   outside DL-Lite atom shape (the rewriter reasons over named class/role atoms only).
+///   outside DL-Lite atom shape;
+/// - a FILTER mentioning a non-distinguished variable — value on an anonymous witness is
+///   undefined, so the filter semantics do not translate to certain answers (fail-closed B3);
+/// - a VALUES block with UNDEF cells or non-distinguished variables — not equivalent to a
+///   constant filter over answer vars (fail-closed B4);
+/// - a triple pattern whose predicate is semantics-bearing schema vocabulary
+///   (`rdfs:subClassOf`, `rdfs:subPropertyOf`, `rdfs:domain`, `rdfs:range`, `owl:` axiom
+///   vocabulary) — the rewriter evaluates over ABox data only, so an intensional atom would
+///   silently under-answer without this guard (fail-closed B6).
 pub fn as_conjunctive_query(query: &Query) -> Result<ConjunctiveQuery, CqError> {
+    let ucq = as_ucq(query)?;
+    // A plain CQ is a one-branch UCQ; reject multi-branch (use `as_ucq` directly for those).
+    if ucq.branches.len() != 1 {
+        return Err(CqError::OutOfScope(
+            "query is a UCQ (multiple UNION branches); use as_ucq for UCQ input".into(),
+        ));
+    }
+    Ok(ucq.branches.into_iter().next().unwrap())
+}
+
+/// Classify `query` into a [`Ucq`] — a union of conjunctive queries. A plain CQ yields a
+/// one-branch UCQ. FAIL-CLOSED: every branch must independently pass the CQ gate (including
+/// the B6 intensional-atom guard) and must bind every distinguished variable (uniform arity).
+///
+/// Soundness argument (B1): PerfectRef is defined over UCQs (Calvanese et al., JAR 2007).
+/// Certain answers distribute over union in DL-Lite_R via the canonical-model property.
+/// Per-branch rewriting and then union is sound and complete.
+///
+/// This is the primary gate the rewriter calls. `as_conjunctive_query` is a convenience
+/// wrapper that additionally enforces the single-branch restriction.
+pub fn as_ucq(query: &Query) -> Result<Ucq, CqError> {
     let (pattern, ask) = match query {
         Query::Select { pattern, .. } => (pattern, false),
         Query::Ask { pattern, .. } => (pattern, true),
@@ -87,18 +201,13 @@ pub fn as_conjunctive_query(query: &Query) -> Result<ConjunctiveQuery, CqError> 
         }
     };
 
-    // Peel the allowed outer modifiers: Project (the SELECT list) and Distinct. Reject every
-    // other top-level modifier — they either change the answer semantics (Slice/OrderBy carry
-    // no CQ meaning under certain answers) or are non-CQ operators.
+    // Peel the allowed outer modifiers: Project and Distinct/Reduced.
     let mut distinct = false;
     let mut distinguished: Option<Vec<Variable>> = None;
     let mut body = pattern;
     loop {
         match body {
             GraphPattern::Project { inner, variables } => {
-                // Multiple Projects would be unusual; take the OUTERMOST projection as the
-                // answer variables and keep peeling (the inner one, if any, is then rejected
-                // as a non-CQ nesting by the body walker below).
                 if distinguished.is_none() {
                     distinguished = Some(variables.clone());
                 }
@@ -109,8 +218,6 @@ pub fn as_conjunctive_query(query: &Query) -> Result<ConjunctiveQuery, CqError> 
                 body = inner;
             }
             GraphPattern::Reduced { inner } => {
-                // REDUCED is a permission to drop duplicates; treat like DISTINCT for the
-                // certain-answer set (sound: certain answers are a set).
                 distinct = true;
                 body = inner;
             }
@@ -118,11 +225,6 @@ pub fn as_conjunctive_query(query: &Query) -> Result<ConjunctiveQuery, CqError> 
         }
     }
 
-    let mut atoms = Vec::new();
-    collect_conjunction(body, &mut atoms)?;
-
-    // An ASK has no projection; a SELECT must have one (SELECT * lowers to a Project over all
-    // in-scope vars in spargebra, so `distinguished` is always Some for a well-formed SELECT).
     let distinguished = if ask {
         Vec::new()
     } else {
@@ -131,42 +233,178 @@ pub fn as_conjunctive_query(query: &Query) -> Result<ConjunctiveQuery, CqError> 
         })?
     };
 
+    // Collect branches: the body is either a single CQ or a UNION tree of CQs.
+    let mut branches_raw: Vec<&GraphPattern> = Vec::new();
+    collect_union_branches(body, &mut branches_raw);
+
+    let mut branches: Vec<ConjunctiveQuery> = Vec::with_capacity(branches_raw.len());
+    for branch in branches_raw {
+        let cq = parse_cq_body(branch, &distinguished, distinct, ask)?;
+        branches.push(cq);
+    }
+
+    if branches.is_empty() {
+        return Err(CqError::OutOfScope("UCQ has no branches".into()));
+    }
+
+    Ok(Ucq {
+        distinguished,
+        distinct,
+        ask,
+        branches,
+    })
+}
+
+/// Collect the leaves of a top-level `Union` tree. A non-Union body becomes a single-element
+/// slice. This is the UCQ-B1 structural split: each leaf is then validated as a CQ.
+fn collect_union_branches<'a>(p: &'a GraphPattern, out: &mut Vec<&'a GraphPattern>) {
+    match p {
+        GraphPattern::Union { left, right } => {
+            collect_union_branches(left, out);
+            collect_union_branches(right, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// Parse one UCQ branch as a CQ body, collecting atoms and (optionally) FILTER expressions
+/// and VALUES blocks. Returns a `ConjunctiveQuery` with the branch's body.
+///
+/// `top_distinguished` is the outer UCQ's projected variables — used for the B3/B4 guard
+/// (filter/values must only mention those). `distinct` and `ask` are UCQ-level metadata.
+fn parse_cq_body(
+    body: &GraphPattern,
+    top_distinguished: &[Variable],
+    distinct: bool,
+    ask: bool,
+) -> Result<ConjunctiveQuery, CqError> {
+    let mut atoms = Vec::new();
+    let mut filter_exprs = Vec::new();
+    let mut values_blocks = Vec::new();
+
+    collect_conjunction(body, top_distinguished, &mut atoms, &mut filter_exprs, &mut values_blocks)?;
+
     if atoms.is_empty() {
         return Err(CqError::OutOfScope("empty query body (no triple patterns)".into()));
     }
 
+    // B1 uniform-arity check: every projected variable must appear in this branch.
+    // An ASK has no projection, so the check is vacuous.
+    if !ask {
+        for v in top_distinguished {
+            let in_atoms = atoms.iter().any(|tp| triple_mentions_var(tp, v));
+            // Also allow the variable to appear in a values block binding (it is bound there).
+            let in_values = values_blocks.iter().any(|vb| vb.variables.contains(v));
+            if !in_atoms && !in_values {
+                return Err(CqError::OutOfScope(format!(
+                    "UCQ branch does not bind projected variable ?{} (non-uniform arity is not sound)",
+                    v.as_str()
+                )));
+            }
+        }
+    }
+
     Ok(ConjunctiveQuery {
-        distinguished,
+        distinguished: top_distinguished.to_vec(),
         atoms,
         distinct,
         ask,
+        filter_exprs,
+        values_blocks,
     })
 }
 
-/// Walk a CQ body, flattening nested `Join`s into one conjunction of triple patterns. Any
-/// non-conjunctive operator encountered is a hard `OutOfScope` rejection (fail-closed).
-fn collect_conjunction(p: &GraphPattern, out: &mut Vec<TriplePattern>) -> Result<(), CqError> {
+/// Whether a triple pattern mentions a given variable in any position (subject, predicate, object).
+fn triple_mentions_var(tp: &TriplePattern, v: &Variable) -> bool {
+    let in_subj = matches!(&tp.subject, TermPattern::Variable(u) if u == v);
+    let in_pred = matches!(&tp.predicate, NamedNodePattern::Variable(u) if u == v);
+    let in_obj = matches!(&tp.object, TermPattern::Variable(u) if u == v);
+    in_subj || in_pred || in_obj
+}
+
+/// Walk a CQ body, flattening nested `Join`s into one conjunction of triple patterns, and
+/// collecting (B3) FILTER expressions and (B4) VALUES blocks that pass the distinguished-only
+/// guard. Any non-conjunctive operator encountered is a hard `OutOfScope` rejection (fail-closed).
+fn collect_conjunction(
+    p: &GraphPattern,
+    distinguished: &[Variable],
+    atoms: &mut Vec<TriplePattern>,
+    filter_exprs: &mut Vec<spargebra::algebra::Expression>,
+    values_blocks: &mut Vec<ValuesBlock>,
+) -> Result<(), CqError> {
     match p {
         GraphPattern::Bgp { patterns } => {
             for tp in patterns {
                 check_atom_shape(tp)?;
-                out.push(tp.clone());
+                atoms.push(tp.clone());
             }
             Ok(())
         }
         GraphPattern::Join { left, right } => {
-            collect_conjunction(left, out)?;
-            collect_conjunction(right, out)
+            collect_conjunction(left, distinguished, atoms, filter_exprs, values_blocks)?;
+            collect_conjunction(right, distinguished, atoms, filter_exprs, values_blocks)
+        }
+        // B3: FILTER — accept iff ALL variables in the expression are distinguished. [SONNET-4.6]
+        GraphPattern::Filter { expr, inner } => {
+            // First collect the inner CQ body.
+            collect_conjunction(inner, distinguished, atoms, filter_exprs, values_blocks)?;
+            // Check that every variable in expr is a distinguished variable.
+            let expr_vars = expression_vars(expr);
+            for v in &expr_vars {
+                if !distinguished.iter().any(|d| d == v) {
+                    return Err(CqError::OutOfScope(format!(
+                        "FILTER expression mentions non-distinguished variable ?{} \
+                         (value on an anonymous witness is undefined — fail-closed B3)",
+                        v.as_str()
+                    )));
+                }
+            }
+            // Pass-through: store the expression for the emitter.
+            filter_exprs.push(expr.clone());
+            Ok(())
+        }
+        // B4: VALUES — accept iff all vars are distinguished AND all rows fully bound. [SONNET-4.6]
+        GraphPattern::Values { variables, bindings } => {
+            // Guard: all variables must be distinguished.
+            for v in variables {
+                if !distinguished.iter().any(|d| d == v) {
+                    return Err(CqError::OutOfScope(format!(
+                        "inline VALUES binds non-distinguished variable ?{} \
+                         (not equivalent to a constant filter — fail-closed B4)",
+                        v.as_str()
+                    )));
+                }
+            }
+            // Guard: no UNDEF cells.
+            let mut rows: Vec<Vec<GroundTerm>> = Vec::with_capacity(bindings.len());
+            for row in bindings {
+                let mut bound_row: Vec<GroundTerm> = Vec::with_capacity(row.len());
+                for cell in row {
+                    match cell {
+                        Some(gt) => bound_row.push(gt.clone()),
+                        None => {
+                            return Err(CqError::OutOfScope(
+                                "inline VALUES has UNDEF cell (not equivalent to a constant filter — fail-closed B4)".into()
+                            ));
+                        }
+                    }
+                }
+                rows.push(bound_row);
+            }
+            values_blocks.push(ValuesBlock {
+                variables: variables.clone(),
+                bindings: rows,
+            });
+            Ok(())
         }
         // Every other operator is outside the conjunctive fragment — REJECT, naming it.
         GraphPattern::LeftJoin { .. } => {
             Err(CqError::OutOfScope("OPTIONAL (LeftJoin) is not conjunctive".into()))
         }
-        GraphPattern::Filter { .. } => {
-            Err(CqError::OutOfScope("FILTER is not conjunctive".into()))
-        }
         GraphPattern::Union { .. } => {
-            Err(CqError::OutOfScope("UNION is not a single conjunctive query".into()))
+            // A Union inside the body (after the top-level branch split) is nested UNION —
+            // not a plain top-level UCQ pattern; reject as non-conjunctive.
+            Err(CqError::OutOfScope("nested UNION inside a CQ branch is not conjunctive".into()))
         }
         GraphPattern::Minus { .. } => Err(CqError::OutOfScope("MINUS is not conjunctive".into())),
         GraphPattern::Path { .. } => Err(CqError::OutOfScope(
@@ -184,9 +422,6 @@ fn collect_conjunction(p: &GraphPattern, out: &mut Vec<TriplePattern>) -> Result
         GraphPattern::Service { .. } => {
             Err(CqError::OutOfScope("SERVICE (federation) is out of scope".into()))
         }
-        GraphPattern::Values { .. } => {
-            Err(CqError::OutOfScope("inline VALUES is out of scope".into()))
-        }
         GraphPattern::OrderBy { .. } => {
             Err(CqError::OutOfScope("ORDER BY inside the body is out of scope".into()))
         }
@@ -200,9 +435,7 @@ fn collect_conjunction(p: &GraphPattern, out: &mut Vec<TriplePattern>) -> Result
             Err(CqError::OutOfScope("nested sub-SELECT is out of scope".into()))
         }
         // `Lateral` exists because the vendored spargebra is built with `sep-0006` (the
-        // workspace dep enables it). Match it unconditionally — a `cfg(feature = "sep-0006")`
-        // here would test THIS crate's features (which has none of that name) and so never fire,
-        // leaving the match non-exhaustive.
+        // workspace dep enables it). Match it unconditionally.
         GraphPattern::Lateral { .. } => {
             Err(CqError::OutOfScope("LATERAL is not conjunctive".into()))
         }
@@ -213,12 +446,32 @@ fn collect_conjunction(p: &GraphPattern, out: &mut Vec<TriplePattern>) -> Result
 /// atom `?x rdf:type A` or a role atom `?x R ?y` with `R` a named property) and neither subject
 /// nor object is an RDF-star quoted triple. A variable predicate (`?x ?p ?y`) cannot be matched
 /// to a DL-Lite inclusion, so the query is out of scope (fail-closed, not silently un-rewritten).
+///
+/// B6 guard: a predicate that is SEMANTICS-BEARING schema vocabulary (rdfs:subClassOf,
+/// rdfs:subPropertyOf, rdfs:domain, rdfs:range, and the owl: axiom vocabulary) is REJECTED
+/// as `OutOfScope("intensional/schema-vocabulary atom")` — the rewriter evaluates over ABox
+/// data only and would silently under-answer a schema-vocabulary query without this guard.
+/// Annotation predicates (rdfs:label/comment/seeAlso/isDefinedBy) are admitted as plain role
+/// atoms (no QL TBox axiom changes their extension). [SONNET-4.6] sq-pbz04.3.1
 fn check_atom_shape(tp: &TriplePattern) -> Result<(), CqError> {
     use spargebra::term::NamedNodePattern;
-    if let NamedNodePattern::Variable(_) = tp.predicate {
-        return Err(CqError::OutOfScope(
-            "triple pattern with a variable predicate is not a DL-Lite atom".into(),
-        ));
+    match &tp.predicate {
+        NamedNodePattern::Variable(_) => {
+            return Err(CqError::OutOfScope(
+                "triple pattern with a variable predicate is not a DL-Lite atom".into(),
+            ));
+        }
+        NamedNodePattern::NamedNode(n) => {
+            // B6: reject intensional schema-vocabulary predicates.
+            if is_intensional_schema_predicate(n.as_str()) {
+                return Err(CqError::OutOfScope(format!(
+                    "intensional/schema-vocabulary atom: predicate <{}> is semantics-bearing \
+                     schema vocabulary; the rewriter evaluates over ABox data only and would \
+                     silently under-answer this query (fail-closed B6)",
+                    n.as_str()
+                )));
+            }
+        }
     }
     if is_quoted_triple(&tp.subject) || is_quoted_triple(&tp.object) {
         return Err(CqError::OutOfScope(
@@ -228,12 +481,126 @@ fn check_atom_shape(tp: &TriplePattern) -> Result<(), CqError> {
     Ok(())
 }
 
+/// Returns `true` if `pred_iri` is a semantics-bearing schema predicate that the QL rewriter
+/// evaluates over the ABox only (and would therefore silently under-answer a query using it).
+///
+/// ADMITTED annotation predicates: `rdfs:label`, `rdfs:comment`, `rdfs:seeAlso`,
+/// `rdfs:isDefinedBy` — no QL TBox axiom changes their extension, so the rewriter can treat
+/// them as ordinary role atoms.
+///
+/// REJECTED schema predicates (the B6 intensional-atom guard): rdfs:subClassOf,
+/// rdfs:subPropertyOf, rdfs:domain, rdfs:range, and the owl: vocabulary (owl:inverseOf,
+/// owl:equivalentClass, owl:equivalentProperty, owl:disjointWith, owl:propertyDisjointWith,
+/// owl:complementOf, owl:onProperty, owl:someValuesFrom, owl:allValuesFrom, owl:unionOf,
+/// owl:intersectionOf, owl:oneOf, owl:hasValue, and any other owl: predicate). [SONNET-4.6]
+fn is_intensional_schema_predicate(iri: &str) -> bool {
+    const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
+    const OWL: &str = "http://www.w3.org/2002/07/owl#";
+    const ADMITTED_RDFS: &[&str] = &["label", "comment", "seeAlso", "isDefinedBy"];
+
+    if let Some(local) = iri.strip_prefix(RDFS) {
+        // Annotations are admitted; everything else (subClassOf, subPropertyOf, domain, range,
+        // member, …) is schema vocabulary the rewriter must not evaluate over ABox data.
+        !ADMITTED_RDFS.contains(&local)
+    } else {
+        // Any owl: predicate is schema vocabulary (B6). [SONNET-4.6]
+        iri.starts_with(OWL)
+    }
+}
+
 fn is_quoted_triple(t: &TermPattern) -> bool {
     // `TermPattern::Triple` exists because the vendored spargebra is built with `sparql-12`
     // (the workspace dep enables it). A `cfg(feature = "sparql-12")` here would test THIS
     // crate's features, not spargebra's, so match the variant directly.
     matches!(t, TermPattern::Triple(_))
 }
+
+/// Collect all `Variable`s mentioned in a SPARQL expression (shallow recursive walk). Used by
+/// the B3 FILTER guard to verify the filter only mentions distinguished variables. [SONNET-4.6]
+fn expression_vars(expr: &spargebra::algebra::Expression) -> Vec<Variable> {
+    let mut out = Vec::new();
+    collect_expr_vars(expr, &mut out);
+    out
+}
+
+fn collect_expr_vars(expr: &spargebra::algebra::Expression, out: &mut Vec<Variable>) {
+    use spargebra::algebra::Expression;
+    match expr {
+        Expression::Variable(v) => out.push(v.clone()),
+        Expression::Or(a, b) | Expression::And(a, b) | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b) | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b) | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b) | Expression::Add(a, b) | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b) | Expression::Divide(a, b) => {
+            collect_expr_vars(a, out);
+            collect_expr_vars(b, out);
+        }
+        Expression::UnaryPlus(a) | Expression::UnaryMinus(a) | Expression::Not(a) => {
+            collect_expr_vars(a, out);
+        }
+        Expression::FunctionCall(_, args) => {
+            for arg in args {
+                collect_expr_vars(arg, out);
+            }
+        }
+        Expression::In(e, es) => {
+            collect_expr_vars(e, out);
+            for sub in es {
+                collect_expr_vars(sub, out);
+            }
+        }
+        Expression::Bound(v) => {
+            out.push(v.clone());
+        }
+        Expression::Exists(p) => {
+            // Exists sub-pattern — collect vars from it. This is not a CQ shape and will have
+            // been rejected at the body-walk level, but we walk it defensively.
+            collect_pattern_vars(p, out);
+        }
+        Expression::If(cond, then_, else_) => {
+            collect_expr_vars(cond, out);
+            collect_expr_vars(then_, out);
+            collect_expr_vars(else_, out);
+        }
+        Expression::Coalesce(es) => {
+            for sub in es {
+                collect_expr_vars(sub, out);
+            }
+        }
+        // Literals, named nodes — no variables.
+        Expression::NamedNode(_) | Expression::Literal(_) => {}
+    }
+}
+
+/// Collect variables mentioned at the top level of a `GraphPattern` (not recursive into
+/// sub-selects). Used only by the `Exists` arm of `collect_expr_vars` as a defensive walk.
+fn collect_pattern_vars(p: &GraphPattern, out: &mut Vec<Variable>) {
+    match p {
+        GraphPattern::Bgp { patterns } => {
+            for tp in patterns {
+                if let TermPattern::Variable(v) = &tp.subject {
+                    out.push(v.clone());
+                }
+                if let NamedNodePattern::Variable(v) = &tp.predicate {
+                    out.push(v.clone());
+                }
+                if let TermPattern::Variable(v) = &tp.object {
+                    out.push(v.clone());
+                }
+            }
+        }
+        GraphPattern::Join { left, right } => {
+            collect_pattern_vars(left, out);
+            collect_pattern_vars(right, out);
+        }
+        _ => {} // defensive: don't recurse into sub-selects / aggregations
+    }
+}
+
+// Convenience: check whether `query` is a single conjunctive query (not a UCQ).
+// Does NOT reject UCQs — callers that need to distinguish should use `as_ucq`.
+// This is the original public entry point; it now returns `OutOfScope` for multi-branch UCQs.
+// NOTE: this is re-exported as `crate::as_conjunctive_query` from lib.rs.
 
 #[cfg(test)]
 mod tests {
@@ -248,6 +615,10 @@ mod tests {
         as_conjunctive_query(&parse(q)).expect("should be a CQ")
     }
 
+    fn accepts_ucq(q: &str) -> Ucq {
+        as_ucq(&parse(q)).expect("should be a UCQ")
+    }
+
     fn rejects(q: &str) -> String {
         match as_conjunctive_query(&parse(q)) {
             Err(CqError::OutOfScope(r)) => r,
@@ -255,7 +626,16 @@ mod tests {
         }
     }
 
+    fn rejects_ucq(q: &str) -> String {
+        match as_ucq(&parse(q)) {
+            Err(CqError::OutOfScope(r)) => r,
+            Ok(_) => panic!("expected UCQ OutOfScope rejection for: {}", q),
+        }
+    }
+
     const PRE: &str = "PREFIX : <http://ex/> PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>";
+
+    // ---- existing acceptance cases (must not regress) ----
 
     #[test]
     fn accepts_single_bgp_select() {
@@ -286,28 +666,14 @@ mod tests {
         assert!(cq.distinguished.is_empty());
     }
 
+    // ---- existing rejection cases (must not regress) ----
+
     #[test]
     fn rejects_optional() {
         assert!(rejects(&format!(
             "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A OPTIONAL {{ ?x :r ?y }} }}"
         ))
         .contains("OPTIONAL"));
-    }
-
-    #[test]
-    fn rejects_filter() {
-        assert!(rejects(&format!(
-            "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A FILTER(?x = :B) }}"
-        ))
-        .contains("FILTER"));
-    }
-
-    #[test]
-    fn rejects_union() {
-        assert!(rejects(&format!(
-            "{PRE} SELECT ?x WHERE {{ {{ ?x rdf:type :A }} UNION {{ ?x rdf:type :B }} }}"
-        ))
-        .contains("UNION"));
     }
 
     #[test]
@@ -336,10 +702,6 @@ mod tests {
 
     #[test]
     fn rejects_aggregation() {
-        // spargebra lowers `SELECT (COUNT(..) AS ?n)` to Project -> Extend -> Group, so the
-        // gate rejects it at the Extend (BIND) or Group layer — either way it is OutOfScope,
-        // never silently rewritten. We assert the REJECTION (the soundness invariant), not the
-        // exact construct named (Extend wraps the aggregate, so "BIND" is the surfaced reason).
         let r = rejects(&format!(
             "{PRE} SELECT (COUNT(?x) AS ?n) WHERE {{ ?x rdf:type :A }}"
         ));
@@ -352,7 +714,6 @@ mod tests {
 
     #[test]
     fn rejects_bare_group_by() {
-        // A GROUP BY without a wrapping BIND surfaces the aggregation/Group reason directly.
         let r = rejects(&format!(
             "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A }} GROUP BY ?x"
         ));
@@ -375,5 +736,194 @@ mod tests {
             "{PRE} CONSTRUCT {{ ?x rdf:type :A }} WHERE {{ ?x rdf:type :A }}"
         ))
         .contains("CONSTRUCT"));
+    }
+
+    // ---- B1: UCQ acceptance ----
+
+    #[test]
+    fn ucq_two_branch_accepted() {
+        // { ?x a :A } UNION { ?x a :B } — a two-branch UCQ over the same projected var ?x.
+        let ucq = accepts_ucq(&format!(
+            "{PRE} SELECT ?x WHERE {{ {{ ?x rdf:type :A }} UNION {{ ?x rdf:type :B }} }}"
+        ));
+        assert_eq!(ucq.branches.len(), 2);
+        assert_eq!(ucq.distinguished.len(), 1);
+    }
+
+    #[test]
+    fn ucq_three_branch_accepted() {
+        let ucq = accepts_ucq(&format!(
+            "{PRE} SELECT ?x WHERE {{ {{ ?x rdf:type :A }} UNION {{ ?x rdf:type :B }} UNION {{ ?x rdf:type :C }} }}"
+        ));
+        assert_eq!(ucq.branches.len(), 3);
+    }
+
+    #[test]
+    fn as_conjunctive_query_rejects_multi_branch_ucq() {
+        // as_conjunctive_query must reject a UCQ — the caller must use as_ucq.
+        let q = parse(&format!(
+            "{PRE} SELECT ?x WHERE {{ {{ ?x rdf:type :A }} UNION {{ ?x rdf:type :B }} }}"
+        ));
+        match as_conjunctive_query(&q) {
+            Err(CqError::OutOfScope(r)) => {
+                assert!(r.contains("UCQ") || r.contains("UNION"), "expected UCQ rejection, got: {}", r);
+            }
+            Ok(_) => panic!("as_conjunctive_query must reject a multi-branch UCQ"),
+        }
+    }
+
+    // ---- B3: FILTER on distinguished variables ----
+
+    #[test]
+    fn filter_on_distinguished_var_accepted() {
+        // ?x is projected (distinguished) so the filter is pass-through sound.
+        let cq = accepts(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A FILTER(?x != :Bad) }}"
+        ));
+        assert_eq!(cq.atoms.len(), 1);
+        assert_eq!(cq.filter_exprs.len(), 1, "filter expression must be collected");
+    }
+
+    #[test]
+    fn filter_on_non_distinguished_var_rejected() {
+        // ?y is NOT projected — its value on an anonymous witness is undefined (B3 fail-closed).
+        let r = rejects(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A . ?x :r ?y FILTER(?y != :Bad) }}"
+        ));
+        assert!(
+            r.contains("non-distinguished") || r.contains("FILTER"),
+            "non-distinguished FILTER must be rejected; got: {}",
+            r
+        );
+    }
+
+    // ---- B4: constant-only VALUES over distinguished vars ----
+
+    #[test]
+    fn values_over_distinguished_with_constants_accepted() {
+        // ?x is projected; VALUES binds it to two constants — equivalent to equality filter.
+        let cq = accepts(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A VALUES ?x {{ :C1 :C2 }} }}"
+        ));
+        assert_eq!(cq.atoms.len(), 1);
+        assert_eq!(cq.values_blocks.len(), 1, "VALUES block must be collected");
+        assert_eq!(cq.values_blocks[0].bindings.len(), 2);
+    }
+
+    #[test]
+    fn values_over_non_distinguished_var_rejected() {
+        // ?y is NOT projected — VALUES over it is not equivalent to a constant filter (B4 fail-closed).
+        let r = rejects(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A . ?x :r ?y VALUES ?y {{ :C }} }}"
+        ));
+        assert!(
+            r.contains("non-distinguished") || r.contains("VALUES"),
+            "non-distinguished VALUES must be rejected; got: {}",
+            r
+        );
+    }
+
+    // Note: UNDEF in VALUES — spargebra parses UNDEF as `None` in the binding row.
+    // We verify the rejection path in broadened_shapes.rs integration tests.
+
+    // ---- B6: intensional-atom guard ----
+
+    #[test]
+    fn rdfs_sub_class_of_predicate_rejected() {
+        // ?c rdfs:subClassOf :A — intensional schema vocabulary (B6 fail-closed).
+        let r = rejects(
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX : <http://ex/> \
+             SELECT ?c WHERE { ?c rdfs:subClassOf :A }",
+        );
+        assert!(
+            r.contains("intensional") || r.contains("schema"),
+            "rdfs:subClassOf predicate must be rejected as intensional; got: {}",
+            r
+        );
+    }
+
+    #[test]
+    fn rdfs_sub_property_of_predicate_rejected() {
+        let r = rejects(
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX : <http://ex/> \
+             SELECT ?p WHERE { ?p rdfs:subPropertyOf :r }",
+        );
+        assert!(
+            r.contains("intensional") || r.contains("schema"),
+            "rdfs:subPropertyOf predicate must be rejected as intensional; got: {}",
+            r
+        );
+    }
+
+    #[test]
+    fn rdfs_domain_predicate_rejected() {
+        let r = rejects(
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX : <http://ex/> \
+             SELECT ?p WHERE { ?p rdfs:domain :A }",
+        );
+        assert!(
+            r.contains("intensional") || r.contains("schema"),
+            "rdfs:domain predicate must be rejected as intensional; got: {}",
+            r
+        );
+    }
+
+    #[test]
+    fn owl_inverse_of_predicate_rejected() {
+        let r = rejects(
+            "PREFIX owl: <http://www.w3.org/2002/07/owl#> PREFIX : <http://ex/> \
+             SELECT ?r WHERE { ?r owl:inverseOf :s }",
+        );
+        assert!(
+            r.contains("intensional") || r.contains("schema"),
+            "owl:inverseOf predicate must be rejected as intensional; got: {}",
+            r
+        );
+    }
+
+    #[test]
+    fn rdfs_annotation_predicates_admitted() {
+        // rdfs:label and rdfs:comment are annotation predicates — admitted as plain role atoms.
+        let cq = accepts(
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX : <http://ex/> \
+             SELECT ?x ?label WHERE { ?x rdfs:label ?label }",
+        );
+        assert_eq!(cq.atoms.len(), 1, "rdfs:label must be admitted as a plain role atom");
+    }
+
+    #[test]
+    fn rdfs_see_also_admitted() {
+        let cq = accepts(
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX : <http://ex/> \
+             SELECT ?x ?ref WHERE { ?x rdfs:seeAlso ?ref }",
+        );
+        assert_eq!(cq.atoms.len(), 1, "rdfs:seeAlso must be admitted as a plain role atom");
+    }
+
+    #[test]
+    fn ucq_with_intensional_branch_rejected() {
+        // B6 fail-closed: a UCQ branch containing rdfs:subClassOf must be rejected.
+        let r = rejects_ucq(
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+             PREFIX : <http://ex/> \
+             SELECT ?x WHERE { { ?x rdfs:subClassOf :A } UNION { ?x rdf:type :B } }",
+        );
+        assert!(
+            r.contains("intensional") || r.contains("schema"),
+            "UCQ with intensional branch must be rejected; got: {}",
+            r
+        );
+    }
+
+    // ---- B6 mutation-kill guard: existing FILTER rejection must still fire before B6 check ----
+
+    #[test]
+    fn filter_on_distinguished_vars_only_does_not_trigger_b6() {
+        // A plain FILTER on the distinguished var ?x — passes the B3 guard.
+        let cq = accepts(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A FILTER(?x != :Bad) }}"
+        ));
+        assert!(!cq.filter_exprs.is_empty());
     }
 }

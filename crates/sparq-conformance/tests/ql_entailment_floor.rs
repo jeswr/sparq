@@ -75,7 +75,7 @@ mod gated {
     /// TEXTUALLY by `tests/scoreboard_floors.rs`. It may only RISE — raise it
     /// (with the named list) as gate broadenings make more cases genuinely pass
     /// all six conditions. [FABLE-5] sq-pbz04.3.4
-    pub const QL_ENTAILMENT_FLOOR: usize = 9;
+    pub const QL_ENTAILMENT_FLOOR: usize = 11;
 
     /// The PINNED NAMED-CASE floor: the manifest-entry ids (the stable `#frag`
     /// of each entry IRI — `mf:name` is NOT unique in this suite) of every
@@ -84,16 +84,37 @@ mod gated {
     /// additions fail CI too until pinned here with evidence (the ratchet only
     /// moves deliberately).
     ///
-    /// What the nine are (the evidence of record): plain extensional
+    /// What the eleven are (the evidence of record): plain extensional
     /// conjunctive queries over class/role atoms whose TBoxes are fully
     /// captured positive DL-Lite_R inclusions with NO existential generators —
     /// `rdf04` (plain BGP match), `rdfs02`/`rdfs10` (subPropertyOf incl.
     /// transitivity), `rdfs04`/`rdfs09` (subClassOf incl. transitivity),
     /// `rdfs06`/`rdfs07` (domain/range), `sparqldl-01`/`sparqldl-04`
-    /// (type + role conjunctions). Each rewrote through the REAL
-    /// `rewrite_production` and returned EXACTLY the W3C oracle's answers over
-    /// the unmodified data.
+    /// (type + role conjunctions). Plus two new graduates from the B2
+    /// (literal-object atoms) broadening in sq-pbz04.3.1:
+    ///
+    /// - `lang` (`SELECT ?x WHERE { ?x foaf:name "name"@en }`, data
+    ///   `:a foaf:name "name" . :b foaf:name "name"@en`, TBox
+    ///   `foaf:name a owl:DatatypeProperty` — a QL-legal declaration,
+    ///   silently ignored, `fully_captured() == true`, `skipped == 0`,
+    ///   `exists_super` empty, `consistency_relevant == 0`; `?x` is
+    ///   projected so condition (5) passes; the B2-broadened gate accepts the
+    ///   literal-object atom; `rewrite_production` produces 1 disjunct
+    ///   (identity rewrite, no applicable TBox inclusions); evaluated over
+    ///   the UNMODIFIED data returns exactly `{:b}` — `"name"@en != "name"`
+    ///   in SPARQL term equality, so only `:b` matches; W3C oracle is `{:b}`.
+    ///   Result-equivalent. All six conditions pass.)
+    ///
+    /// - `plainLit` (IDENTICAL query, data, TBox, and oracle to `lang` —
+    ///   same manifest files, same rewrite, same result; the case name differs
+    ///   only in its manifest fragment; the per-case evidence is the same as
+    ///   `lang` above. All six conditions pass for the same reasons.)
+    ///
+    /// Each rewrote through the REAL `rewrite_production` and returned EXACTLY
+    /// the W3C oracle's answers over the unmodified data. [SONNET-4.6]
     pub const QL_ENTAILMENT_FLOOR_CASES: &[&str] = &[
+        "lang",
+        "plainLit",
         "rdf04",
         "rdfs02",
         "rdfs04",
