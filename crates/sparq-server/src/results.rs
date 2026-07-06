@@ -163,6 +163,91 @@ pub fn select_to_csv(r: &QueryResult) -> String {
     s
 }
 
+/// Flush threshold for [`select_to_csv_chunks`] / [`select_to_tsv_chunks`]: mirrors the
+/// engine's `JSON_CHUNK_BYTES` constant (64 KiB) so all three SELECT formats share the same
+/// chunking granularity — large enough that per-chunk overhead is negligible, small enough
+/// that a streamed body never holds a second whole-result copy in memory. [SONNET-4.6]
+const CSV_TSV_CHUNK_BYTES: usize = 64 * 1024;
+
+/// [`select_to_csv`] as an ordered sequence of string chunks whose concatenation is
+/// **byte-identical** to the single-string result.
+///
+/// Row-oriented chunking: rows are accumulated into the current chunk until the chunk
+/// exceeds `CSV_TSV_CHUNK_BYTES`, at which point the chunk is flushed and a new one
+/// starts. The HTTP server streams these via `chunked_response` (the same path as JSON /
+/// T16) so peak memory never holds a second full-result copy. [SONNET-4.6]
+pub fn select_to_csv_chunks(r: &QueryResult) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    // Header row (same logic as select_to_csv).
+    for (i, v) in r.vars.iter().enumerate() {
+        if i > 0 {
+            current.push(',');
+        }
+        csv_field(&mut current, v.as_str());
+    }
+    current.push_str("\r\n");
+    // Data rows — flush when the current chunk reaches the threshold.
+    for row in &r.rows {
+        for (vi, cell) in row.iter().enumerate() {
+            if vi > 0 {
+                current.push(',');
+            }
+            if let Some(term) = cell {
+                let mut buf = String::new();
+                term_lexical_csv(&mut buf, term);
+                csv_field(&mut current, &buf);
+            }
+        }
+        current.push_str("\r\n");
+        if current.len() >= CSV_TSV_CHUNK_BYTES {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+/// [`select_to_tsv`] as an ordered sequence of string chunks whose concatenation is
+/// **byte-identical** to the single-string result.
+///
+/// Row-oriented chunking: mirrors [`select_to_csv_chunks`] — rows are accumulated until
+/// the current chunk exceeds `CSV_TSV_CHUNK_BYTES`. [SONNET-4.6]
+pub fn select_to_tsv_chunks(r: &QueryResult) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    // Header row (same logic as select_to_tsv).
+    for (i, v) in r.vars.iter().enumerate() {
+        if i > 0 {
+            current.push('\t');
+        }
+        current.push('?');
+        current.push_str(v.as_str());
+    }
+    current.push('\n');
+    // Data rows — flush when the current chunk reaches the threshold.
+    for row in &r.rows {
+        for (vi, cell) in row.iter().enumerate() {
+            if vi > 0 {
+                current.push('\t');
+            }
+            if let Some(term) = cell {
+                term_to_tsv(&mut current, term);
+            }
+        }
+        current.push('\n');
+        if current.len() >= CSV_TSV_CHUNK_BYTES {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 /// Serialises a SELECT result to SPARQL Results TSV.
 ///
 /// Per the spec: header variables are written WITH the leading `?`; values use the
@@ -699,6 +784,97 @@ mod tests {
             line_ends_with(&tsv, "\t\"NaN\"^^<http://www.w3.org/2001/XMLSchema#double>"),
             "NaN must stay quoted+typed: {tsv}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Chunked serialiser tests (sq-7d3dj.12) [SONNET-4.6]
+    // -----------------------------------------------------------------------
+
+    /// select_to_csv_chunks concatenates to exactly select_to_csv for a typical small result.
+    #[test]
+    fn csv_chunks_byte_identical_small() {
+        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }").unwrap();
+        let single = select_to_csv(&r);
+        let chunks = select_to_csv_chunks(&r);
+        assert!(!chunks.is_empty(), "chunks must not be empty");
+        assert_eq!(chunks.concat(), single, "CSV chunks must concatenate to the single-string form");
+    }
+
+    /// select_to_tsv_chunks concatenates to exactly select_to_tsv for a typical small result.
+    #[test]
+    fn tsv_chunks_byte_identical_small() {
+        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }").unwrap();
+        let single = select_to_tsv(&r);
+        let chunks = select_to_tsv_chunks(&r);
+        assert!(!chunks.is_empty(), "chunks must not be empty");
+        assert_eq!(chunks.concat(), single, "TSV chunks must concatenate to the single-string form");
+    }
+
+    /// An empty result (zero rows) produces exactly the header row as a single chunk.
+    #[test]
+    fn csv_chunks_empty_result() {
+        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age 9999 }").unwrap();
+        assert!(r.rows.is_empty(), "expected no rows");
+        let single = select_to_csv(&r);
+        let chunks = select_to_csv_chunks(&r);
+        assert_eq!(chunks.concat(), single, "empty CSV must still produce a header chunk");
+    }
+
+    /// An empty result (zero rows) for TSV produces exactly the header row as a single chunk.
+    #[test]
+    fn tsv_chunks_empty_result() {
+        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age 9999 }").unwrap();
+        assert!(r.rows.is_empty(), "expected no rows");
+        let single = select_to_tsv(&r);
+        let chunks = select_to_tsv_chunks(&r);
+        assert_eq!(chunks.concat(), single, "empty TSV must still produce a header chunk");
+    }
+
+    /// A large result (> CSV_TSV_CHUNK_BYTES bytes) produces multiple CSV chunks, all
+    /// concatenating byte-identically to the single-string form. [SONNET-4.6]
+    #[test]
+    fn csv_chunks_splits_large_result() {
+        // ~2 000 rows × ~80 bytes/row ≈ 160 KiB > 64 KiB chunk threshold.
+        let mut data = String::new();
+        for i in 0..2000_u32 {
+            data.push_str(&format!(
+                "<http://ex/s{}> <http://ex/p> \"{:0>60}\" .\n",
+                i, i
+            ));
+        }
+        let g = Graph::load_str(&data, "ntriples").unwrap();
+        let r = query(&g, "SELECT ?s ?o WHERE { ?s ?p ?o }").unwrap();
+        let single = select_to_csv(&r);
+        let chunks = select_to_csv_chunks(&r);
+        assert!(
+            chunks.len() > 1,
+            "expected multiple CSV chunks for a large result; got {} chunk(s)",
+            chunks.len()
+        );
+        assert_eq!(chunks.concat(), single, "large CSV chunk concat must equal single-string form");
+    }
+
+    /// A large result (> CSV_TSV_CHUNK_BYTES bytes) produces multiple TSV chunks, all
+    /// concatenating byte-identically to the single-string form. [SONNET-4.6]
+    #[test]
+    fn tsv_chunks_splits_large_result() {
+        let mut data = String::new();
+        for i in 0..2000_u32 {
+            data.push_str(&format!(
+                "<http://ex/s{}> <http://ex/p> \"{:0>60}\" .\n",
+                i, i
+            ));
+        }
+        let g = Graph::load_str(&data, "ntriples").unwrap();
+        let r = query(&g, "SELECT ?s ?o WHERE { ?s ?p ?o }").unwrap();
+        let single = select_to_tsv(&r);
+        let chunks = select_to_tsv_chunks(&r);
+        assert!(
+            chunks.len() > 1,
+            "expected multiple TSV chunks for a large result; got {} chunk(s)",
+            chunks.len()
+        );
+        assert_eq!(chunks.concat(), single, "large TSV chunk concat must equal single-string form");
     }
 
     /// Helper: true iff some line of `tsv` ends with `suffix` (TSV rows are LF-terminated).
