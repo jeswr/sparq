@@ -26,7 +26,8 @@
 //! RIF-Core feature axes:
 //!
 //! * **positive atoms**: frame (`o[p->v]`), membership (`o # c`), subclass
-//!   (`c1 ## c2`), equality propagation;
+//!   (`c1 ## c2`); Equal-atom body semantics in the `equal_atom_audit` axis
+//!   (sq-pbz04.5.4);
 //! * **recursion / transitivity** (the monotone Horn fixpoint);
 //! * the **builtin** families with SAFETY enforced: numeric predicates
 //!   (`<`/`>`/`=`/`<=`/`>=`) + functions (`+`/`-`/`*`/`/`), string predicates
@@ -89,7 +90,11 @@ mod gated {
     // soundly-mapped builtins (NumericNotEqual, StringUpperCase, StringLowerCase,
     // StringEncodeForUri, ListConcatenate): 1 positive + 1 negative per builtin
     // (10 total) + 1 extra positive for NumericNotEqual = 11 net new assertions.
-    pub const RIF_CORE_FLOOR: usize = 58;
+    // [SONNET-4.6] sq-pbz04.5.4 — raised 58 → 61: Equal-atom audit:
+    // removed "equality lowers to owl:sameAs" (-1, was testing buggy behaviour),
+    // added Equal-in-conclusion rejection (+1), closure refuses Equal-in-conclusion (+1),
+    // ground-identity body Equal fires (+1), DistinctGroundEqual fail-closed (+1) = net +3.
+    pub const RIF_CORE_FLOOR: usize = 61;
 
     /// RIF surface DOCUMENTED out-of-scope for this front-end (the honest move: a
     /// floor reflecting reality + a recorded gap, never a faked pass). Mirrors
@@ -183,6 +188,7 @@ mod gated {
         string_builtins(&mut tally);
         list_builtins(&mut tally);
         new_builtins(&mut tally); // [SONNET-4.6] sq-pbz04.5.2
+        equal_atom_audit(&mut tally); // [SONNET-4.6] sq-pbz04.5.4
         monotonicity(&mut tally);
         safety_rejections(&mut tally);
         canonical_uncle(&mut tally);
@@ -203,7 +209,11 @@ mod gated {
         );
     }
 
-    /// frame / membership / subclass / equality positive atoms.
+    /// frame / membership / subclass positive atoms.
+    /// [SONNET-4.6] sq-pbz04.5.4 — removed the prior "equality lowers to owl:sameAs"
+    /// assertion (it was testing buggy behaviour — a fact with Equal in the head,
+    /// which RIF-Core now correctly rejects). Equal-atom semantics are exercised in
+    /// `equal_atom_audit` instead.
     fn positive_atoms(t: &mut Tally) {
         // Frame propagation: { ?x p ?y } => { ?x q ?y } ; a p b.
         let mut doc = Document::new();
@@ -235,14 +245,6 @@ mod gated {
         t.ok(has(&dict, &c, &ns("a"), RDF_TYPE, &ns("C")), "membership fact present");
         t.ok(has(&dict, &c, &ns("C"), RDFS_SUBCLASS_OF, &ns("D")), "subclass fact present");
         t.ok(has(&dict, &c, &ns("a"), RDF_TYPE, &ns("D")), "membership+subclass derives a # D");
-
-        // Equality propagation via owl:sameAs lowering.
-        let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Equal { left: iri("a"), right: iri("b") }));
-        let mut dict = Dict::new();
-        let c = doc.closure(&mut dict).expect("safe equality doc");
-        let same = "http://www.w3.org/2002/07/owl#sameAs";
-        t.ok(has(&dict, &c, &ns("a"), same, &ns("b")), "equality lowers to owl:sameAs");
     }
 
     /// Recursion / transitivity — the monotone Horn fixpoint.
@@ -688,6 +690,94 @@ mod gated {
                 Err(RifError::BadBuiltinArity { op: Builtin::ListConcatenate, got: 1, .. })
             ),
             "func:concatenate: too few args (< min 2) rejected",
+        );
+    }
+
+    /// Equal-atom audit (sq-pbz04.5.4): three semantic requirements exercised
+    /// through the REAL `Document::validate` + `Document::closure` path.
+    ///
+    /// 1. Equal in a conclusion is rejected (non-vacuous — fact head and rule head).
+    /// 2. Ground-identity body Equal is trivially true and eliminated at lowering
+    ///    (the rule fires as if the atom were absent).
+    /// 3. Distinct ground constants in a body Equal are fail-closed (pending sq-v5evr).
+    ///
+    /// [SONNET-4.6] sq-pbz04.5.4
+    fn equal_atom_audit(t: &mut Tally) {
+        // --- 1. Equal in a CONCLUSION is rejected ---
+        // (a) as a fact head
+        let mut d = Document::new();
+        d.push(Rule::fact(Atom::Equal { left: iri("a"), right: iri("b") }));
+        t.ok(
+            matches!(d.validate(), Err(RifError::EqualInConclusion)),
+            "Equal as a fact head (conclusion) is rejected with EqualInConclusion",
+        );
+        {
+            let mut dict = Dict::new();
+            t.ok(
+                d.closure(&mut dict).is_err(),
+                "closure refuses a document with Equal in a conclusion",
+            );
+        }
+        // (b) as a rule head atom
+        let mut d2 = Document::new();
+        d2.push(Rule::implies(
+            vec![Atom::Equal { left: var("x"), right: iri("b") }],
+            vec![Atom::Member { obj: var("x"), class: iri("C") }],
+        ));
+        t.ok(
+            matches!(d2.validate(), Err(RifError::EqualInConclusion)),
+            "Equal in a rule head is rejected with EqualInConclusion",
+        );
+
+        // --- 2. Ground-identity body Equal: trivially true, rule fires ---
+        // Rule: ?x # Adult :- ?x age ?n , ?n = ?n
+        // The `?n = ?n` is ground-identical (after substitution) → eliminated at
+        // lowering. The rule fires correctly on the membership test.
+        let mut doc = Document::new();
+        doc.push(Rule::fact(Atom::Frame {
+            obj: iri("alice"),
+            pred: iri("age"),
+            val: Term::int(30),
+        }));
+        doc.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("Adult") }],
+            vec![
+                Atom::Frame { obj: var("x"), pred: iri("age"), val: var("n") },
+                Atom::Equal { left: var("n"), right: var("n") },
+            ],
+        ));
+        doc.validate().expect("ground-identity body Equal is valid (sq-pbz04.5.4)");
+        let mut dict = Dict::new();
+        let closure = doc.closure(&mut dict).expect("closure succeeds");
+        t.ok(
+            has(&dict, &closure, &ns("alice"), RDF_TYPE, &ns("Adult")),
+            "rule with ground-identity body Equal fires correctly",
+        );
+
+        // --- 3. Distinct ground constants in body Equal are fail-closed ---
+        // "1"^^xsd:integer = "1.0"^^xsd:decimal requires value-space equality
+        // (sq-v5evr); the validator must reject rather than guess.
+        let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
+        let mut d3 = Document::new();
+        d3.push(Rule::implies(
+            vec![Atom::Member { obj: var("x"), class: iri("C") }],
+            vec![
+                Atom::Member { obj: var("x"), class: iri("D") },
+                Atom::Equal {
+                    left: Term::Lit {
+                        lex: "1".into(),
+                        datatype: format!("{}integer", xsd_prefix),
+                    },
+                    right: Term::Lit {
+                        lex: "1.0".into(),
+                        datatype: format!("{}decimal", xsd_prefix),
+                    },
+                },
+            ],
+        ));
+        t.ok(
+            matches!(d3.validate(), Err(RifError::DistinctGroundEqual { .. })),
+            "distinct ground constants in body Equal fail-closed pending sq-v5evr",
         );
     }
 
