@@ -61,8 +61,9 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   form the W3C SPARQL expected-result files use for computed arithmetic, e.g. `6`) — and the
   shared lexical helpers (`split_decimal`, `parse_xsd_f32` / `parse_xsd_f64`, `fmt_xsd_double`).
   `parse_xsd_f64`/`f32` accept the XSD `INF` / `+INF` / `-INF` / `NaN` spellings and reject the
-  Rust-`FromStr`-only `inf` / `infinity` / `nan`, so the engine's lenient compare seam agrees
-  with the exact classifier on which lexicals are numeric.
+  Rust-`FromStr`-only `inf` / `infinity` / `nan`. `Num::cmp_relational` is the XPath relational
+  comparison (`<`/`>` FILTER, value-space equality) — partial (NaN → `None`), vs `cmp_total`
+  which totalises NaN for `ORDER BY` [OPUS-4.8] sq-v5evr.
 - **`join`** — the four id-tuple join kernels over `&[Row]` slices: `merge_join` (sorted),
   `hash_probe_serial` / `build_table` / `build_partitioned` / `probe_emit` (hash, with a
   radix-partitioned parallel build), `bind_combine` (index-nested-loop), and `lftj_recurse`

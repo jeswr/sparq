@@ -157,6 +157,13 @@ sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 name = "compare_parity"
 required-features = ["substrate-compare"]
 
+# [SONNET-4.6] sq-qonbz.2: cross-assert — OWL-RL DeltaAdj path (prp-fp/ifp/trp probes)
+# produces byte-identical closures to the OWL-RL spec semantics. Compiled only with the
+# feature it exercises; the default build carries zero of it.
+[[test]]
+name = "substrate_join_owl"
+required-features = ["substrate-join"]
+
 # [FABLE-5] sq-zgbso.3: the compiled-vs-text result-equivalence oracle (closure
 # set-equality vs `reason_n3` over the sparq-solid WAC/ACP/ODRL-spike rule corpus, read
 # READ-ONLY from ../sparq-solid/rules at runtime). Compiled only with the feature it

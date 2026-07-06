@@ -33,18 +33,16 @@
 //! export's expectation. Every such row is pinned BY NAME in
 //! [`gated::DOCUMENTED_DIVERGENCES`] with an audited mechanism (exact SET equality: an
 //! unpinned new fail AND a stale entry that stops failing both go RED). The mechanisms
-//! are NOT laundered as acceptable: **M1 and M4 are genuine fidelity gaps in the merged
-//! L1 extractor that this conformance arm DISCOVERED** (they contradict L1's own
+//! are NOT laundered as acceptable: **M4 is a genuine fidelity gap in the merged
+//! L1 extractor that this conformance arm DISCOVERED** (it contradicts L1's own
 //! "understood in full or refused" contract), captured as follow-up work in the PR's
-//! bead list; when the fixes land these entries stop failing and the pin forces a
-//! deliberate re-audit. The mechanisms:
+//! bead list; when the fix lands these entries stop failing and the pin forces a
+//! deliberate re-audit. M1 was FIXED by sq-pbz04.4.11. The mechanisms:
 //!
-//! - **M1 — named-composite inlining loses the name↔expression binding.** L1 inlines a
-//!   NAMED class carrying an inline definition (`:A owl:unionOf (…)` /
-//!   `owl:intersectionOf` / a restriction backbone) at each occurrence and emits NO
-//!   `EquivalentClasses(A, expr)` axiom, so a conclusion that mentions the NAME is
-//!   underivable — the approved corpus expectation (e.g. `c owl:intersectionOf (x y)` ⊨
-//!   `c ⊑ x`) proves the "inlining is model-preserving" claim wrong for entailment.
+//! - **M1 — FIXED (sq-pbz04.4.11).** Named-composite inlining previously lost the
+//!   name↔expression binding; `extract()` now emits `EquivalentClasses(A, expr)` for
+//!   every NAMED class carrying an inline backbone definition, and the 12 corpus cases
+//!   that required this binding now PASS.
 //! - **M2 — anonymous individuals in a conclusion read as constants.** The official
 //!   expectation reads conclusion bnodes EXISTENTIALLY; the L1 model treats them as
 //!   (skolem) constants, so the refutation is satisfiable and the checker certifies a
@@ -109,79 +107,33 @@ mod gated {
     /// `tests/scoreboard_floors.rs`. A sparq EXTENSION measurement over the scoped
     /// fragment — NOT full OWL 2 DL.
     ///
-    /// COMPOSITION: 111 consistency + 14 inconsistency + 57 positive-entailment +
+    /// COMPOSITION: 107 consistency + 14 inconsistency + 69 positive-entailment +
     /// 2 negative-entailment. [FABLE-5] sq-pbz04.4.5
-    pub const DL_DIRECT_FLOOR: usize = 184;
+    /// Re-pinned by sq-pbz04.4.11 (M1 named-composite fix): 12 positive-entailment cases
+    /// now PASS (the EquivalentClasses name-binding axioms enable their entailments);
+    /// 4 consistency cases shift from Pass to abstain because their updated ontology
+    /// models now include EquivalentClasses axioms that, combined with the existing TBox,
+    /// cause budget exhaustion — an honest abstention, not a regression. Net: +8.
+    pub const DL_DIRECT_FLOOR: usize = 192;
 
     /// Abstained (fail-closed OutOfFragment / guard / deferred / budget) row totals,
     /// EXACT-pinned so the tri-state accounting is closed: profile lane, then the four
     /// reasoning lanes summed. [FABLE-5] sq-pbz04.4.5
     pub const DL_PROFILE_ABSTAINED: usize = 114;
     /// See [`DL_PROFILE_ABSTAINED`].
-    pub const DL_DIRECT_ABSTAINED: usize = 452;
+    /// Re-pinned by sq-pbz04.4.11: +4 from the 4 consistency cases that shifted from
+    /// Pass to OutOfFragment (budget exhaustion on the now-more-complete model).
+    pub const DL_DIRECT_ABSTAINED: usize = 456;
 
-    /// Audited, PINNED divergence rows (module docs — mechanisms M1–M7): every row
+    /// Audited, PINNED divergence rows (module docs — mechanisms M2–M7): every row
     /// where a checker verdict contradicts the export expectation, keyed by the
     /// runner's row key. EXACT set equality is asserted: an UNPINNED new fail and a
     /// STALE entry that stops failing both turn the lane RED (the el-suite /
-    /// ql_entailment_floor discipline). M1/M4 rows are DISCOVERED L1 fidelity gaps
+    /// ql_entailment_floor discipline). M4 rows are DISCOVERED L1 fidelity gaps
     /// held open by follow-up beads — never acceptable-by-design, never passes.
-    /// [FABLE-5] sq-pbz04.4.5
+    /// M1 (named-composite name-binding) was FIXED by sq-pbz04.4.11 and removed from
+    /// this list — those 12 cases now PASS. [FABLE-5] sq-pbz04.4.5
     const DOCUMENTED_DIVERGENCES: &[(&str, &str)] = &[
-        // --- M1: named-composite inlining loses the name↔expression binding (L1 gap) ---
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-bool-intersection-inst-comp",
-            "M1 — premise defines NAMED c by owl:intersectionOf; inlining drops \
-             EquivalentClasses(c, x⊓y), so c(z) is underivable",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-bool-intersection-term",
-            "M1 — `c owl:intersectionOf (x y)` ⊨ c ⊑ x ∧ c ⊑ y needs the name binding \
-             the inlining drops",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-bool-union-inst-comp",
-            "M1 — the union dual of rdfbased-sem-bool-intersection-inst-comp",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-bool-union-term",
-            "M1 — the union dual of rdfbased-sem-bool-intersection-term",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-restrict-allvalues-cmp-class",
-            "M1 — NAMED x1/x2 defined by ∀p.c restriction backbones; c1 ⊑ c2 ⊨ x1 ⊑ x2 \
-             needs both name bindings",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-restrict-allvalues-cmp-prop",
-            "M1 — as rdfbased-sem-restrict-allvalues-cmp-class with the property compared",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-restrict-somevalues-cmp-class",
-            "M1 — the ∃ dual of rdfbased-sem-restrict-allvalues-cmp-class",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-restrict-somevalues-cmp-prop",
-            "M1 — the ∃ dual of rdfbased-sem-restrict-allvalues-cmp-prop",
-        ),
-        (
-            "owl2-dl/positive-entailment: rdfbased-sem-restrict-somevalues-inst-subj",
-            "M1 — NAMED z defined by an ∃p.c backbone; p(w,x) ∧ c(x) ⊨ z(w) needs the \
-             name binding",
-        ),
-        (
-            "owl2-dl/positive-entailment: WebOnt-unionOf-001",
-            "M1 — `A owl:unionOf (Human Animal)` ∧ Human(John) ⊨ A(John) needs \
-             EquivalentClasses(A, Human⊔Animal)",
-        ),
-        (
-            "owl2-dl/positive-entailment: WebOnt-unionOf-002",
-            "M1 — as WebOnt-unionOf-001 with the subclass direction (B ⊒ union member)",
-        ),
-        (
-            "owl2-dl/positive-entailment: WebOnt-intersectionOf-001",
-            "M1 — the intersection sibling of WebOnt-unionOf-001",
-        ),
         // --- M2: anonymous individuals in the conclusion read as constants (L4 gap) ---
         (
             "owl2-dl/positive-entailment: somevaluesfrom2bnode",

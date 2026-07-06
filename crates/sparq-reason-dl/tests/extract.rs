@@ -896,3 +896,170 @@ fn fail_closed_rejects_whole_graph_on_one_bad_triple() {
         "one out-of-fragment triple must reject the whole graph"
     );
 }
+
+// ============================== sq-pbz04.4.11 — named-composite EquivalentClasses (M1 fix) ======
+
+// [SONNET-4.6] sq-pbz04.4.11: the M1 fidelity gap — a NAMED class carrying an inline backbone
+// definition must emit EquivalentClasses(name, expr) so entailment through the name works.
+// These tests are the acceptance tests for the 12 M1 divergence cases identified by the
+// conformance arm in tests/dl_suite.rs.
+
+/// A NAMED class carrying an owl:intersectionOf definition must produce
+/// EquivalentClasses(A, x⊓y) — the M1 fix for intersection cases.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_class_intersection_emits_equivalent_classes() {
+    // :A owl:intersectionOf (:B :C) — A is named; must produce EquivalentClasses(A, B⊓C).
+    let (d, t) = parse(":A owl:intersectionOf ( :B :C ) .");
+    let o = extract(&d, &t).expect("accept");
+    let a = class(&d, "A");
+    let expected_expr = CE::ObjectIntersectionOf(vec![class(&d, "B"), class(&d, "C")]);
+    assert!(
+        o.axioms.contains(&Axiom::EquivalentClasses(a.clone(), expected_expr.clone())),
+        "named intersectionOf must emit EquivalentClasses(A, B⊓C); got {:?}",
+        o.axioms
+    );
+    // Exactly one axiom: the name-binding.
+    assert_eq!(
+        o.len(),
+        1,
+        "only the EquivalentClasses name-binding should be emitted; got {:?}",
+        o.axioms
+    );
+}
+
+/// A NAMED class carrying an owl:unionOf definition must produce
+/// EquivalentClasses(A, x⊔y) — the M1 fix for union cases.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_class_union_emits_equivalent_classes() {
+    let (d, t) = parse(":A owl:unionOf ( :Human :Animal ) .");
+    let o = extract(&d, &t).expect("accept");
+    let a = class(&d, "A");
+    let expected_expr = CE::ObjectUnionOf(vec![class(&d, "Human"), class(&d, "Animal")]);
+    assert!(
+        o.axioms.contains(&Axiom::EquivalentClasses(a, expected_expr)),
+        "named unionOf must emit EquivalentClasses(A, Human⊔Animal); got {:?}",
+        o.axioms
+    );
+}
+
+/// A NAMED class carrying an owl:complementOf definition must produce
+/// EquivalentClasses(A, ¬B).
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_class_complement_emits_equivalent_classes() {
+    let (d, t) = parse(":A owl:complementOf :B .");
+    let o = extract(&d, &t).expect("accept");
+    let a = class(&d, "A");
+    let expected_expr = CE::ObjectComplementOf(Box::new(class(&d, "B")));
+    assert!(
+        o.axioms.contains(&Axiom::EquivalentClasses(a, expected_expr)),
+        "named complementOf must emit EquivalentClasses(A, ¬B); got {:?}",
+        o.axioms
+    );
+}
+
+/// A NAMED class carrying an owl:Restriction backbone must produce
+/// EquivalentClasses(A, ∃r.C) — the M1 fix for restriction cases.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_class_restriction_backbone_emits_equivalent_classes() {
+    // :z a owl:Restriction; owl:onProperty :p; owl:someValuesFrom :C  (z is named IRI)
+    let (d, t) = parse(":z a owl:Restriction .\n:z owl:onProperty :p .\n:z owl:someValuesFrom :C .");
+    let o = extract(&d, &t).expect("accept");
+    let z = class(&d, "z");
+    let expected_expr = CE::ObjectSomeValuesFrom(prop(&d, "p"), Box::new(class(&d, "C")));
+    assert!(
+        o.axioms.contains(&Axiom::EquivalentClasses(z, expected_expr)),
+        "named restriction must emit EquivalentClasses(z, ∃p.C); got {:?}",
+        o.axioms
+    );
+}
+
+/// The name-binding EquivalentClasses axiom must be PREPENDED before any use-site axioms,
+/// so the structural model sees "define name, then use name". This is the ordering contract
+/// the downstream tableau depends on.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_composite_equiv_prepended_before_use_site_axioms() {
+    // :A owl:intersectionOf (:B :C); then a subClassOf using :A.
+    let (d, t) = parse(
+        ":A owl:intersectionOf ( :B :C ) .\n\
+         :D rdfs:subClassOf :A .",
+    );
+    let o = extract(&d, &t).expect("accept");
+    assert!(o.len() >= 2, "expected at least 2 axioms, got {:?}", o.axioms);
+    // The FIRST axiom must be the name-binding EquivalentClasses.
+    assert!(
+        matches!(&o.axioms[0], Axiom::EquivalentClasses(CE::Class(_), _)),
+        "first axiom must be EquivalentClasses (name-binding); got {:?}",
+        o.axioms[0]
+    );
+}
+
+/// A BLANK node carrying a backbone definition must NOT emit EquivalentClasses —
+/// only NAMED classes (IRIs) get the binding; anonymous nodes are just inline expressions.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn blank_node_backbone_does_not_emit_equivalent_classes() {
+    // _:x owl:intersectionOf (:A :B) used in :D rdfs:subClassOf _:x — anonymous expression.
+    let (d, t) = parse(":D rdfs:subClassOf [ owl:intersectionOf ( :A :B ) ] .");
+    let o = extract(&d, &t).expect("accept");
+    // The only axiom must be the SubClassOf (the anonymous blank carries no binding).
+    assert_eq!(o.len(), 1, "blank backbone must yield only SubClassOf, got {:?}", o.axioms);
+    assert!(
+        matches!(&o.axioms[0], Axiom::SubClassOf { .. }),
+        "sole axiom must be SubClassOf, got {:?}",
+        o.axioms[0]
+    );
+    // Verify: no EquivalentClasses axiom.
+    for ax in &o.axioms {
+        assert!(
+            !matches!(ax, Axiom::EquivalentClasses(..)),
+            "blank backbone must NOT produce EquivalentClasses"
+        );
+    }
+}
+
+/// The M1 fix must not regress the existing union-name case: a named union class
+/// (like `A owl:unionOf (Human Animal)`) used with a ClassAssertion must now
+/// allow the downstream checker to derive A(John) from Human(John) — the
+/// EquivalentClasses binding is what makes that entailment possible.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_union_with_class_assertion_emits_both_equiv_and_assertion() {
+    // :A owl:unionOf (:Human :Animal) — named union; :John a :Human.
+    let (d, t) = parse(
+        ":A owl:unionOf ( :Human :Animal ) .\n\
+         :John a :Human .",
+    );
+    let o = extract(&d, &t).expect("accept");
+    let a = class(&d, "A");
+    let equiv = Axiom::EquivalentClasses(
+        a,
+        CE::ObjectUnionOf(vec![class(&d, "Human"), class(&d, "Animal")]),
+    );
+    let assertion = Axiom::ClassAssertion {
+        class: class(&d, "Human"),
+        individual: ex(&d, "John"),
+    };
+    assert!(
+        o.axioms.contains(&equiv),
+        "EquivalentClasses(A, Human⊔Animal) must be present; got {:?}",
+        o.axioms
+    );
+    assert!(
+        o.axioms.contains(&assertion),
+        "ClassAssertion(Human, John) must be present; got {:?}",
+        o.axioms
+    );
+    // The EquivalentClasses axiom must come BEFORE the ClassAssertion (name binding first).
+    let equiv_pos = o.axioms.iter().position(|ax| ax == &equiv).unwrap();
+    let assert_pos = o.axioms.iter().position(|ax| ax == &assertion).unwrap();
+    assert!(
+        equiv_pos < assert_pos,
+        "EquivalentClasses must precede ClassAssertion (position {} vs {})",
+        equiv_pos, assert_pos
+    );
+}

@@ -994,16 +994,18 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 184,
+        ratchet_floor: 192,
         floor_basis: "definitive expected verdicts through the L4 dispatch, EXACT-pinned \
-                      (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL)",
+                      (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL); \
+                      re-pinned by sq-pbz04.4.11 (M1 named-composite fix: +12 positive- \
+                      entailment passes, -4 consistency passes shifted to abstain, net +8)",
         note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \
                deterministic count budget; fail-closed abstentions are reported, never \
-               passes, and all 23 wrong-verdict divergences are pinned by name with audited \
-               mechanisms (incl. the L1 named-composite + orphan-list fidelity gaps this \
-               arm discovered, held open by follow-up beads)",
+               passes, and all 11 wrong-verdict divergences are pinned by name with audited \
+               mechanisms (M1 fixed by sq-pbz04.4.11; M4 orphan-list fidelity gap still \
+               open, held by follow-up bead sq-pbz04.4.12)",
     },
 ];
 

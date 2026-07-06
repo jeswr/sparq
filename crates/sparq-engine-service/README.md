@@ -40,7 +40,10 @@ let _ = out;
 - **Streaming result parse** — SPARQL-Results-**JSON** (`serde` `DeserializeSeed`, one
   binding at a time — never a whole-document DOM) and SPARQL-Results-**XML** (`quick-xml`,
   event-driven), content-sniffed by the first byte. Bounded by a body-byte cap so an
-  adversarial endpoint cannot exhaust memory.
+  adversarial endpoint cannot exhaust memory. The `ReaderTransport` seam
+  (`eval_remote_into_read`) feeds the parser directly from a `Read` stream so the HTTP
+  response body is never materialised into a `String` — peak memory stays below the
+  body size regardless of result cardinality (sq-my8wd.5).
 - **Bound join (`VALUES` pushdown)** — when the SERVICE is the right side of a join whose
   join variables are already bound, a *block* of those bindings is pushed as a `VALUES`
   clause so the remote returns only rows that can survive the local join (brTPF/FedX bound

@@ -122,7 +122,129 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]]) -> Result<Ontology, ExtractErro
         classify_triple(dict, &v, &idx, s, p, o, &mut onto)?;
     }
 
+    // [SONNET-4.6] sq-pbz04.4.11 — named-composite EquivalentClasses pass.
+    //
+    // CORRECTNESS GAP (M1, discovered by the conformance arm):
+    // When a NAMED class IRI carries an inline backbone definition — `:A owl:intersectionOf
+    // (…)`, `:A owl:unionOf (…)`, `:A owl:complementOf :B`, or `:A a owl:Restriction ;
+    // owl:onProperty :r ; owl:someValuesFrom :C` — the main triple loop inlines the decoded
+    // expression at every use site of `:A` (in subClassOf / equivalentClass / domain / range
+    // / classAssertion / restriction objects etc.) but NEVER emits the name↔expression
+    // binding `EquivalentClasses(A, expr)`.
+    //
+    // This violates L1's own "understood in full or refused" contract: a conclusion
+    // `:A rdfs:subClassOf :x` (where x is an operand of `:A`'s intersection) is
+    // underivable from the inlined representation alone — the entailment requires the axiom
+    // `EquivalentClasses(A, x⊓y)` to exist in the structural model so that the downstream
+    // tableau can reason `A ≡ x⊓y ⊨ A ⊑ x`.
+    //
+    // FIX: after the main loop, collect every NAMED class IRI (not blank, not inline, not
+    // a triple-term) that has exactly one composite backbone predicate in the Index, decode
+    // its expression, and prepend `EquivalentClasses(Class(A), expr)` to the axiom list.
+    // Prepend (not append) so the name-binding axioms come before any axioms that use the
+    // name — consistent with a "declare, then use" reading the downstream tableau expects.
+    //
+    // BLANK nodes are excluded: an anonymous blank node `:_x owl:intersectionOf (…)`
+    // denotes an anonymous (unnamed) expression, not a named class binding, and has no
+    // meaningful class IRI to equate.
+    //
+    // No new `is_inline` / `TermParts::Iri` check is needed: the index already records
+    // exactly the backbone-carrying nodes; we just filter to IRI nodes among them.
+    //
+    // Deduplication: `EquivalentClasses(A, expr)` is emitted once per named class, even if
+    // the backbone predicate appears multiple times (the Index de-duplicates backbone
+    // values; a contradicting second value is already an error from `Index::build`).
+    emit_named_composite_equiv(dict, &v, &idx, &mut onto)?;
+
     Ok(onto)
+}
+
+/// Emits one `EquivalentClasses(Class(A), expr)` axiom for every NAMED class IRI that
+/// carries an inline composite backbone definition in the Index (sq-pbz04.4.11, M1 fix).
+///
+/// See the inline comment in [`extract`] for the full correctness rationale. This function
+/// is a pure second-pass over the Index — it never looks at the raw triple slice again.
+fn emit_named_composite_equiv(
+    dict: &Dict,
+    v: &Vocab,
+    idx: &Index,
+    onto: &mut Ontology,
+) -> Result<(), ExtractError> {
+    // Collect the set of named-class candidates: every node that carries at least one
+    // composite backbone predicate and is an IRI (not blank, not inline, not triple-term).
+    // Use a BTreeSet for sorted, deterministic iteration (no hash-map ordering
+    // nondeterminism in the structural model).
+    use std::collections::BTreeSet;
+
+    let mut named_composite_ids: BTreeSet<Id> = BTreeSet::new();
+
+    // Only IRI nodes. `is_named_iri` = not inline, TermParts::Iri.
+    let is_named_iri = |id: Id| -> bool {
+        !is_inline(id) && matches!(dict.term_parts(id), TermParts::Iri { .. })
+    };
+
+    for &id in idx.intersection_of.keys() {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+    for &id in idx.union_of.keys() {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+    for &id in idx.complement_of.keys() {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+    // Restrictions: any node in is_restriction, some_values_from, or all_values_from
+    // that is also a named IRI.
+    for &id in &idx.is_restriction {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+    for &id in idx.some_values_from.keys() {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+    for &id in idx.all_values_from.keys() {
+        if is_named_iri(id) {
+            named_composite_ids.insert(id);
+        }
+    }
+
+    if named_composite_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Prepend the EquivalentClasses axioms so they precede all use-site axioms.
+    let mut prepend: Vec<Axiom> = Vec::with_capacity(named_composite_ids.len());
+    for id in named_composite_ids {
+        // Decode the composite expression for this named class. We use a fresh call
+        // through decode_class (which creates a fresh `visiting` set), so the cycle guard
+        // works correctly for each named class independently.
+        let expr = decode_class(dict, v, idx, id)?;
+        let name = ClassExpression::Class(id);
+        // Emit only if the expression is not the named class itself (a trivially cyclic
+        // case is caught by the visiting guard already; this guard just avoids emitting
+        // EquivalentClasses(A, A) for any degenerate case that slips through).
+        if expr != name {
+            prepend.push(Axiom::EquivalentClasses(name, expr));
+        }
+    }
+
+    // Prepend: insert the name-binding axioms before the use-site axioms so that
+    // the structural model reads "declare name, then use name" — the downstream
+    // tableau iterates axioms in order and sees the binding before any GCI/assertion
+    // that mentions the named class.
+    if !prepend.is_empty() {
+        let tail = std::mem::replace(&mut onto.axioms, prepend);
+        onto.axioms.extend(tail);
+    }
+    Ok(())
 }
 
 /// Routes one non-backbone triple: into an [`Axiom`] on `onto`, silently past an ignorable
@@ -393,9 +515,20 @@ fn decode_class_inner(
     // Boolean / quantifier shapes, detected by the presence of their defining predicate. This
     // fires for BLANK anonymous nodes AND for a NAMED class that carries an inline definition
     // (`:A owl:intersectionOf (…)`): `owl:intersectionOf`/`unionOf`/`complementOf`/a
-    // `owl:Restriction` on a class node denotes a COMPLETE equivalence, so inlining the decoded
-    // expression at every occurrence of the node is model-preserving (sound). Decoding is
-    // deterministic, so a named node inlines to the same expression consistently everywhere.
+    // `owl:Restriction` on a class node denotes a COMPLETE equivalence.
+    //
+    // ANONYMOUS blank nodes: inlining the decoded expression at every use site is
+    // model-preserving and sufficient — there is no class NAME to bind.
+    //
+    // NAMED class IRIs: inlining alone is NOT sufficient (sq-pbz04.4.11, M1 gap). A
+    // conclusion that mentions the NAME as a class constant is underivable from inlined
+    // expressions alone — the entailment `:A subClassOf :x` (where :x is an operand of
+    // `:A owl:intersectionOf (…)`) requires the axiom `EquivalentClasses(A, x⊓y)` in
+    // the structural model. `extract()` emits that axiom in the post-loop pass
+    // `emit_named_composite_equiv`; this function still inlines so that use-site axioms
+    // (where `:A` appears as a class argument) already hold the full decoded expression.
+    // Decoding is deterministic, so the inlined form and the EquivalentClasses expression
+    // are always the same expression structurally.
     let is_inter = idx.intersection_of.contains_key(&id);
     let is_union = idx.union_of.contains_key(&id);
     let is_compl = idx.complement_of.contains_key(&id);

@@ -94,6 +94,7 @@ CATALOG=(
   "incremental-reason|standard|2700|4|inference-incremental|incremental maintenance vs re-materialization (olympics corpus)"
   "solid-wac|standard|2700|2|solid-wac-bench|Solid WAC auth-view materialization + per-query cost"
   "policy-odrl|standard|2700|2|policy-odrl-eval|ODRL policy parse + per-request evaluation latency"
+  "ac-oracle|fast|1800|2|ac-oracle|access-controlled-query oracle (WAC/ACP/ODRL, sparq-acbench), fail-closed self-asserting, no engine link"
   "serve-core|standard|2700|2|serve-core-bench|sparq-serve core example bench"
   "serve-throughput-smoke|standard|2700|2|serve-throughput|canonical loopback HTTP throughput harness, --smoke profile"
   "mcp-roundtrip|standard|2700|2|mcp-dispatch-overhead|MCP dispatch round-trip overhead"
@@ -205,11 +206,17 @@ suite_cmd() {
     watdiv) echo 'bench/watdiv/run.sh 1' ;;
     bsbm) echo 'bench/bsbm/run.sh' ;;
     lubm) echo 'bench/lubm/run.sh' ;;
-    shacl) echo 'bench/shacl/run.sh' ;;
+    # bench/shacl/run.sh reads target/release/examples/bench_shacl (sparq-shacl is NOT a
+    # sparq-cli dependency, so build-core does not produce it) — pre-build it like fts/rsp/
+    # hdt/geo/vector-ann do, else the suite ENOENT-fails on a missing artifact (sq-k0pml).
+    shacl) echo 'cargo build --release -p sparq-shacl --example bench_shacl && bench/shacl/run.sh' ;;
     vector-ann) echo 'cargo build --release -p sparq-vectors --example bench_vectors --features approx-ann && bench/vector/run.sh' ;;
     selective-bindjoin) echo 'python3 bench/selective/gen.py 500000 > "$SCRATCH/selective.nt" && "$CLI" bench "$SCRATCH/selective.nt" ntriples bench/selective/queries 3 count' ;;
     u64-valueids) echo 'python3 bench/u64-valueids/gen.py 1000000 "$SCRATCH/t3-literals.nt" && "$CLI" bench "$SCRATCH/t3-literals.nt" ntriples bench/u64-valueids/queries 3 materialize' ;;
-    ingest-index) echo '"$GEN" dump 100000 "$SCRATCH/data.nt" && "$CLI" ingest "$SCRATCH/data.nt" full && "$CLI" save "$SCRATCH/data.nt" ntriples "$SCRATCH/idx" && "$CLI" probe-compress "$SCRATCH/idx/spo.perm" && "$CLI" compare-compress "$SCRATCH/data.nt" ntriples && "$CLI" bench-mmap "$SCRATCH/idx" bench/qlever-synthetic/queries 3 count' ;;
+    # `save` writes each permutation as perm<i>.bin (i=0 is SPO — see sparq-core store.rs
+    # Perm::ALL / save_with); the old `idx/spo.perm` path never existed, so probe-compress
+    # ENOENT-failed the whole chain. Probe the SPO permutation at perm0.bin (sq-k0pml).
+    ingest-index) echo '"$GEN" dump 100000 "$SCRATCH/data.nt" && "$CLI" ingest "$SCRATCH/data.nt" full && "$CLI" save "$SCRATCH/data.nt" ntriples "$SCRATCH/idx" && "$CLI" probe-compress "$SCRATCH/idx/perm0.bin" && "$CLI" compare-compress "$SCRATCH/data.nt" ntriples && "$CLI" bench-mmap "$SCRATCH/idx" bench/qlever-synthetic/queries 3 count' ;;
     bench-remap) echo '"$CLI" bench-remap 5000000 12500000 3 && SPARQ_NO_PREFETCH=1 "$CLI" bench-remap 5000000 12500000 3' ;;
     parse-baseline) echo '(cd bench/parse && cargo build --release) && "$GEN" dump 200000 "$SCRATCH/parse.nt" && bench/parse/target/release/parse-baseline bench-nt "$SCRATCH/parse.nt"' ;;
     hdt-stage-split) echo '(cd bench/parse && cargo build --release) && "$GEN" dump 125000 "$SCRATCH/h.nt" && bench/parse/target/release/parse-baseline gen-hdt "$SCRATCH/h.nt" "$SCRATCH/h.hdt" && bench/parse/target/release/parse-baseline bench-hdt "$SCRATCH/h.hdt"' ;;
@@ -218,6 +225,11 @@ suite_cmd() {
     incremental-reason) echo 'cargo run -p sparq-reason --example incremental_olympics_bench --release' ;;
     solid-wac) echo 'cargo run -p sparq-solid --example bench --release' ;;
     policy-odrl) echo 'cargo run -p sparq-policy --example bench --release' ;;
+    # bench/ac is a standalone [workspace] (like bench/parse + bench/dict); run.sh builds
+    # + runs the fail-closed ac-bench driver and propagates its non-zero exit on any oracle
+    # mismatch. Links no engine crate, so build-core is not a prerequisite (the driver only
+    # path-depends on the dev-only crate sparq-acbench). See bead sq-i6du2.7.
+    ac-oracle) echo 'bench/ac/run.sh --smoke' ;;
     serve-core) echo 'cargo run -p sparq-serve --example bench --release' ;;
     serve-throughput-smoke) echo 'scripts/serve-throughput-bench.sh --smoke --json "$SUITE_OUT/serve-throughput.json"' ;;
     serve-throughput-full) echo 'scripts/serve-throughput-bench.sh --json "$SUITE_OUT/serve-throughput.json"' ;;
