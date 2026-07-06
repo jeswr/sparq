@@ -1,0 +1,47 @@
+# [SONNET-4.6] sq-kvvcl — AC-query benchmark LIVE DRIVER (epic sq-i6du2, #1613).
+#
+# DELIBERATELY a STANDALONE cargo project (own `[workspace]` table, same isolation
+# pattern as bench/ac/, bench/parse, bench/dict, bench/zk). It is NOT a workspace
+# member; it path-depends on both `sparq-acbench` (the oracle crate) AND on
+# `sparq-solid` (the system under test). This is the SEPARATION that makes the
+# oracle crate's zero-SUT-dependency invariant work: bench/ac/ never links sparq-solid;
+# bench/ac/live/ is the separate component that DOES.
+#
+# SCOPE (bead sq-kvvcl): this is the live driver that fills in the two SKIPPED-with-reason
+# lanes that bench/ac/ records for sq-kvvcl:
+#   W2 live `query_as`: load the generator dataset + policies into a real PodStore,
+#     materialize WAC/ACP, run query_as for each QueryFixture, compare against the
+#     generator's by-construction expected rows. Fail-closed: any over-share or
+#     under-share => non-zero exit, no timing for a failed lane.
+#   W4 concurrent readers: Arc<PodStore> shared across N threads via the &self read-side
+#     (PodStore::decide_batch + PodStore::query_as both take &self since PR #1612 merged),
+#     asserting decision consistency across concurrent readers.
+#
+# HONESTY: work-box measurements NON-CANONICAL (see bench/CATALOG.md QUIET-BOX); every
+# wall-clock number emitted is advisory. The HARD contract is the fail-closed oracle exit
+# code. Authorization surface noted in run.sh: escalated review after, NOT self-armed.
+[package]
+name = "ac-bench-live"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace root — keeps this driver out of the root workspace.
+[workspace]
+
+[dependencies]
+# The by-construction generator + oracle crate (the generator's closed-form expected
+# rows are the ground truth this driver validates against).
+sparq-acbench = { path = "../../../crates/sparq-acbench" }
+# The SYSTEM UNDER TEST — explicitly linked here, never in bench/ac/. This is the
+# isolation contract: the oracle is structurally independent; this driver is the live lane.
+sparq-solid = { path = "../../../crates/sparq-solid" }
+# sparq-core: Graph::load_dataset; sparq-engine: QueryResult.
+sparq-core = { path = "../../../crates/sparq-core", default-features = false }
+sparq-engine = { path = "../../../crates/sparq-engine", default-features = false }
+# oxrdf::Term: for result-row normalization (re-export from sparq-engine/sparq-solid).
+oxrdf = { version = "0.3", features = ["rdf-12"] }
+
+[[bin]]
+name = "ac-bench-live"
+path = "src/main.rs"

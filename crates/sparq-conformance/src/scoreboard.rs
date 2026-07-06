@@ -224,22 +224,32 @@ pub struct Suite {
 ///   UCQ evaluated over the unmodified ABox returns EXACTLY the hand-derived certain
 ///   answers; the broader `pr:QL` entailment-arm intensional gap stays
 ///   experimental/OutOfScope, never summed in).
-/// * OWL 2 QL entailment-regime graduated subset 9 — `sparq-conformance`
-///   `tests/ql_entailment_floor.rs` `QL_ENTAILMENT_FLOOR = 9` (sq-pbz04.3.4; opt-in
+/// * OWL 2 QL entailment-regime graduated subset 15 — `sparq-conformance`
+///   `tests/ql_entailment_floor.rs` `QL_ENTAILMENT_FLOOR = 15` (sq-pbz04.3.4; opt-in
 ///   `ql-experimental` feature; a sparq EXTENSION ratchet, NOT an OWL 2 QL /
 ///   entailment-regime conformance claim — the floor is the PINNED NAMED-CASE list
 ///   of `pr:QL` `sparql11/entailment` cases passing ALL SIX graduation conditions,
 ///   exact set equality: regressions AND unpinned additions both fail CI; every
-///   non-graduated case carries an exhaustive hold-reason taxonomy).
-/// * OWL 2 EL classification 50 — `sparq-conformance` `tests/el_suite.rs`
-///   `EL_SUITE_FLOOR = 50` (sq-pbz04.2.4; opt-in `el-suite` feature; a sparq EXTENSION
-///   ratchet, NOT a full-OWL-2-EL-conformance claim — CR7–CR9 concrete domains + ABox
-///   inconsistency are deferred; floor = the MEASURED count of W3C OWL 2 EL
-///   (test:EL ∧ test:RDF-BASED, Approved) check rows on which `sparq_reason_el`'s
+///   non-graduated case carries an exhaustive hold-reason taxonomy; raised 9→11 by
+///   sq-pbz04.3.1 B2 literal-object broadening: `lang` + `plainLit` both graduate
+///   [SONNET-4.6]; raised 11→15 by sq-pbz04.3.6 body-blank-node lifting +
+///   shared-existential join preservation in the emitter: `sparqldl-05`/`-06`
+///   (undistinguished-variable ASK, declaration-only TBox so `exists_super` empty)
+///   and `sparqldl-07`/`-08` (SHARED-blank-node JOIN SELECT — graduate once the
+///   emitter maps a repeated `Unbound` id to ONE variable, identity rewrite
+///   result-equivalent to the W3C oracle) all graduate [OPUS-4.8]).
+/// * OWL 2 EL classification 51 — `sparq-conformance` `tests/el_suite.rs`
+///   `EL_SUITE_FLOOR = 51` (sq-pbz04.2.4 base; sq-pbz04.2.9 raised 50→51: opt-in
+///   `el-suite` feature now also pulls `sparq-reason-el/rbox` + `sparq-reason-el/cdomain`
+///   (the CI lane exercises the full shipped feature set); the mutual-subsumption →
+///   owl:equivalentClass output-vocabulary completion graduates WebOnt-equivalentClass-003
+///   from the divergence list; a sparq EXTENSION ratchet, NOT a full-OWL-2-EL-conformance
+///   claim — ABox inconsistency remains deferred; floor = the MEASURED count of W3C OWL 2
+///   EL (test:EL ∧ test:RDF-BASED, Approved) check rows on which `sparq_reason_el`'s
 ///   consequence-based classifier computes the expected outcome via `classify_graph` +
-///   the shared bnode-homomorphism entailment check; 28 audited PERMANENT divergences
-///   (ABox / RBox / owl:unionOf / owl:equivalentClass-form) are reported separately,
-///   never summed in). [SONNET-4.6]
+///   the shared bnode-homomorphism entailment check; 27 audited PERMANENT divergences
+///   (ABox / RBox-output-vocabulary / owl:unionOf) are reported separately, never summed
+///   in). [SONNET-4.6]
 pub const SUITES: &[Suite] = &[
     Suite {
         label: "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
@@ -806,7 +816,16 @@ pub const SUITES: &[Suite] = &[
         // [SONNET-4.6] sq-pbz04.5.2 — raised 47 → 58: 11 new assertions for the 5
         // new soundly-mapped builtins (NumericNotEqual, StringUpperCase, StringLowerCase,
         // StringEncodeForUri, ListConcatenate).
-        ratchet_floor: 58,
+        // [SONNET-4.6] sq-pbz04.5.4 — Equal-atom audit: equal_atom_audit added FIVE
+        // assertions (Equal-in-fact-head + closure-refuses + Equal-in-rule-head +
+        // ground-identity fires + DistinctGroundEqual fail-closed) and positive_atoms
+        // dropped 1 (the removed "equality lowers to owl:sameAs"). NB: the earlier
+        // "4 added" note undercounted — it was 5 added, 1 removed.
+        // [OPUS-4.8] sq-26vwp — raised to 73: +10 assertions for variable/mixed body
+        // Equal resolved by compile-time substitution/unification (V1/V2, ?x=<t>
+        // substitution, head-var bind, chained collapse, distinct-ground fail-closed).
+        // Mirrors RIF_CORE_FLOOR in rif_core_suite.rs (scoreboard_floors guard checks sync).
+        ratchet_floor: 73,
         floor_basis: "expressivity assertions (sparq EXTENSION over the RIF-Core subset, \
                       NOT the normative W3C SPARQL-RIF conformance suite)",
         note: "EXTENSION ratchet — sparq's own faithful expressivity battery over the \
@@ -894,7 +913,20 @@ pub const SUITES: &[Suite] = &[
             feature: "ql-experimental",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 9,
+        // [SONNET-4.6] sq-pbz04.3.1 raised 9 → 11: `lang` + `plainLit` graduate under the
+        // B2 literal-object broadening (SELECT ?x WHERE { ?x foaf:name "name"@en }, TBox
+        // foaf:name a owl:DatatypeProperty — fully_captured, no existential generators,
+        // identity rewrite returns exactly {:b}, result-equivalent to the W3C oracle).
+        // [OPUS-4.8] sq-pbz04.3.6 raised 11 → 15: the body-blank-node lifting graduates the four
+        // undistinguished-variable `sparqldl` cases. `sparqldl-05` (ASK { _:a rdf:type :Person })
+        // + `sparqldl-06` (ASK over a 4-hop blank-node cycle) graduate directly. `sparqldl-07` +
+        // `sparqldl-08` (SELECT * with a SHARED body blank node = an existential JOIN) graduate
+        // only because the same bead ALSO fixed emit::cq_to_bgp to map a repeated Unbound id to
+        // ONE emitted variable (preserving the join; the prior per-occurrence naming emitted a
+        // cartesian product that condition (6) correctly held as oracle-divergent). All four TBoxes
+        // are declaration-only (exists_super empty, condition (5) holds); each identity rewrite is
+        // result-equivalent to the W3C oracle.
+        ratchet_floor: 15,
         floor_basis: "graduated named pr:QL cases — six-condition soundness predicate (sparq \
                       EXTENSION over the QL fragment sparq rewrites, NOT an OWL 2 QL / \
                       entailment-regime conformance claim)",
@@ -913,17 +945,19 @@ pub const SUITES: &[Suite] = &[
     // folded into the conformance total — even though OWL 2 EL is a real W3C profile,
     // this lane compares each W3C OWL 2 EL test (test:EL ∧ test:RDF-BASED, Approved,
     // no-imports) against what `sparq-reason-el`'s consequence-based classifier
-    // (CR1–CR6 + safe nominals; `rbox`/`cdomain` are SEPARATELY gated) genuinely
-    // computes over the EL fragment it implements — it is NOT a full OWL 2 EL
-    // conformance claim. The runner classifies each premise through the REAL
+    // genuinely computes. [SONNET-4.6] sq-pbz04.2.9: the `el-suite` feature now also
+    // forwards `sparq-reason-el/rbox` + `sparq-reason-el/cdomain` so the CI lane
+    // exercises the FULL shipped feature set; the mutual-subsumption →
+    // owl:equivalentClass output-vocabulary completion graduates WebOnt-equivalentClass-003.
+    // The runner classifies each premise through the REAL
     // `sparq_reason_el::classify_graph` (materializing the complete rdfs:subClassOf
     // subsumption lattice IN PLACE) and checks: consistency (no unsatisfiable named
     // class), inconsistency (some unsatisfiable named class — the TBox clash it can
     // see), positive-entailment (the materialized lattice ENTAILS the conclusion under
-    // the shared bnode-homomorphism `entail::entails`), and negative-entailment (the
-    // non-conclusion is NOT entailed). The floor is the MEASURED PASS count; the 28
-    // audited PERMANENT divergences (ABox-only inconsistency / individual facts, RBox
-    // property reasoning, owl:unionOf, or the owl:equivalentClass output-form) are
+    // the shared bnode-homomorphism `entail::entails` after output-vocabulary augmentation),
+    // and negative-entailment (the non-conclusion is NOT entailed). The floor is the
+    // MEASURED PASS count; the 27 audited PERMANENT divergences (ABox-only inconsistency /
+    // individual facts, RBox-driven property-axiom output vocabulary, owl:unionOf) are
     // reported separately and NEVER summed into the floor. `EL_SUITE_FLOOR` is mirrored
     // here and kept in lock-step by `tests/scoreboard_floors.rs` (read textually).
     Suite {
@@ -935,17 +969,22 @@ pub const SUITES: &[Suite] = &[
             feature: "el-suite",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 50,
+        // [SONNET-4.6] sq-pbz04.2.9 — RAISED 50 → 51: WebOnt-equivalentClass-003
+        // graduates via the equivalentClass output-vocabulary completion (mutual-
+        // subsumption → owl:equivalentClass is a semantic identity, not a test
+        // weakening); rbox + cdomain now on in the el-suite CI lane.
+        ratchet_floor: 51,
         floor_basis: "pass — classifier computes the expected outcome (sparq EXTENSION over \
                       the EL fragment the classifier implements, NOT a full-OWL-2-EL-conformance \
-                      claim; CR7–CR9 concrete domains + ABox inconsistency deferred)",
+                      claim; ABox inconsistency deferred)",
         note: "EXTENSION ratchet — the W3C OWL 2 EL suite checks classification/subsumption \
                semantics and this runner compares against what sparq-reason-el's classifier \
-               computes over the EL fragment it implements (CR1–CR6 + safe nominals): each \
+               computes over the EL fragment it implements (CR1–CR6 + rbox + cdomain): each \
                premise classified through the REAL classify_graph, then consistency / \
                inconsistency / positive- / negative-entailment via the shared \
-               bnode-homomorphism check; the 28 audited ABox / RBox / owl:unionOf / \
-               equivalentClass-form divergences are reported separately, never faked as passes",
+               bnode-homomorphism check (with output-vocabulary completions: datatypes + \
+               mutual-subsumption → equivalentClass); the 27 audited ABox / RBox-output / \
+               owl:unionOf divergences are reported separately, never faked as passes",
     },
     // [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OWL 2 DIRECT-SEMANTICS arm's two
     // ratchets (runner: `inference::dl_suite` + the crate-local `tests/dl_suite.rs`,
@@ -983,7 +1022,7 @@ pub const SUITES: &[Suite] = &[
                POSITIVE test:profile tags the L2 syntactic checker reproduces through the \
                REAL fail-closed L1 extraction + grammar walk; explicit-negative and species \
                assertions are not checked (documented), abstentions are never passes, and \
-               the 30 singleton-intersection divergences are pinned by name",
+               the 27 singleton-intersection divergences are pinned by name",
     },
     Suite {
         label: "OWL 2 Direct-Semantics consistency + entailment (scoped fragment)",
@@ -994,16 +1033,21 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 184,
+        ratchet_floor: 190,
         floor_basis: "definitive expected verdicts through the L4 dispatch, EXACT-pinned \
-                      (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL)",
+                      (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL); \
+                      re-pinned by sq-pbz04.4.11 (M1 named-composite fix, net +8); \
+                      re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix: -3, 192 -> 189); \
+                      re-pinned by sq-pbz04.4.13 (M2 conclusion-bnode existential-reading fix: \
+                      +1, 189 -> 190 — both M2 rows graduate to passes, one free-existential- \
+                      root conclusion bnode shifts to an honest abstention)",
         note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \
                deterministic count budget; fail-closed abstentions are reported, never \
-               passes, and all 23 wrong-verdict divergences are pinned by name with audited \
-               mechanisms (incl. the L1 named-composite + orphan-list fidelity gaps this \
-               arm discovered, held open by follow-up beads)",
+               passes, and all 5 remaining wrong-verdict divergences are pinned by name \
+               with audited mechanisms (M1 FIXED sq-pbz04.4.11; M4 FIXED sq-pbz04.4.12; \
+               M2 FIXED sq-pbz04.4.13 — those rows now pass/abstain; remaining: M3/M5/M6)",
     },
 ];
 

@@ -51,6 +51,17 @@ pub enum ProverTomlError {
     /// ([`filter_value_dl_decimal_prover_toml`]) sibling members.
     #[cfg(feature = "dual-leaf")]
     FilterValueDlUseDedicatedFn,
+    /// A [`ProofInputs::PathReach`] (bounded-depth property path) was passed to the
+    /// general `prover_toml_for`: its private witness is the chain-shaped
+    /// [`crate::build::PathReachWitness`] (`path_len` + `nodes` + `counts` + `enc`),
+    /// a different shape from the scalar/digit witnesses the general entry threads,
+    /// so the path Prover.toml is emitted by the DEDICATED
+    /// [`path_reach_prover_toml`] instead (obtain the witness from
+    /// [`crate::build::build_path_reach`]). This keeps the general entry's
+    /// signature unchanged (the path lane is opt-in, `extended-fragment` feature).
+    // [OPUS-4.8] sq-3kd2g.6.
+    #[cfg(feature = "extended-fragment")]
+    PathReachUseDedicatedFn,
 }
 
 impl std::fmt::Display for ProverTomlError {
@@ -76,6 +87,14 @@ impl std::fmt::Display for ProverTomlError {
                  filter_value_dl_prover_toml(challenge, operand_enc, op, bound, \
                  datatype_const, expected, value_hook, lexical_component) — its private \
                  witness is two field elements, not digit bytes"
+            ),
+            #[cfg(feature = "extended-fragment")]
+            ProverTomlError::PathReachUseDedicatedFn => write!(
+                f,
+                "bounded-depth path Prover.toml is emitted by the dedicated \
+                 path_reach_prover_toml — its private witness is the chain-shaped \
+                 PathReachWitness (path_len/nodes/counts/enc) from build_path_reach, \
+                 not the scalar/digit witnesses the general entry threads"
             ),
         }
     }
@@ -422,6 +441,67 @@ pub fn join_prover_toml(
     s
 }
 
+/// Render the `Prover.toml` body for a bounded-depth `path_reach` proof
+/// (sq-3kd2g.6). Order MUST match `path_reach_d{d}_k{k}_n{n}/src/main.nr`:
+/// PUBLIC `challenge, commitments, pred_enc, src_enc, dst_enc, allow_zero,
+/// depth_bound, attribution` then PRIVATE `path_len, nodes, counts, enc`. `nodes`
+/// is padded to `d` and each graph's `enc` to `n` by the caller (mirrors the scan
+/// arm's padding of `enc` to `n`).
+// [OPUS-4.8] sq-3kd2g.6.
+#[cfg(feature = "extended-fragment")]
+#[allow(clippy::too_many_arguments)]
+pub fn path_reach_prover_toml(
+    challenge: &FieldHex,
+    commitments: &[FieldHex],
+    pred_enc: &FieldHex,
+    src_enc: &FieldHex,
+    dst_enc: &FieldHex,
+    allow_zero: bool,
+    depth_bound: u32,
+    attribution: &[bool],
+    path_len: u32,
+    nodes: &[FieldHex],
+    counts: &[u32],
+    enc: &[Vec<[FieldHex; 3]>],
+) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("challenge = \"{}\"\n", challenge.0));
+    s.push_str(&format!("commitments = {}\n", hex_array(commitments)));
+    s.push_str(&format!("pred_enc = \"{}\"\n", pred_enc.0));
+    s.push_str(&format!("src_enc = \"{}\"\n", src_enc.0));
+    s.push_str(&format!("dst_enc = \"{}\"\n", dst_enc.0));
+    s.push_str(&format!("allow_zero = {allow_zero}\n"));
+    s.push_str(&format!("depth_bound = \"{depth_bound}\"\n"));
+    s.push_str(&format!(
+        "attribution = [{}]\n",
+        attribution
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    s.push_str(&format!("path_len = \"{path_len}\"\n"));
+    s.push_str(&format!("nodes = {}\n", hex_array(nodes)));
+    s.push_str(&format!(
+        "counts = [{}]\n",
+        counts
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    // enc: [[[Field;3];N];K]
+    s.push_str("enc = [");
+    for (gi, graph) in enc.iter().enumerate() {
+        if gi > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(&rows_array(graph));
+    }
+    s.push_str("]\n");
+    s
+}
+
 fn hex_array(items: &[FieldHex]) -> String {
     format!(
         "[{}]",
@@ -680,6 +760,16 @@ pub fn prover_toml_for(
                 &w.blinding,
             );
             (id.clone(), toml)
+        }
+        // [OPUS-4.8] sq-3kd2g.6: bounded-depth path. Its private witness is the
+        // chain-shaped `PathReachWitness` (path_len/nodes/counts/enc), a different
+        // shape from the scalar/digit witnesses this general entry threads, so the
+        // path Prover.toml is emitted by the dedicated `path_reach_prover_toml`
+        // (fed the `build_path_reach` witness). Surface a recoverable error here,
+        // never a panic — mirrors the dual-leaf value-lane arm.
+        #[cfg(feature = "extended-fragment")]
+        ProofInputs::PathReach { .. } => {
+            return Err(ProverTomlError::PathReachUseDedicatedFn);
         }
     };
     Ok(out)
@@ -1050,5 +1140,60 @@ mod toml_glue_tests {
             let r = prover_toml_for(&inputs, &fh("0x01"), &[], &[], &[], None, None);
             assert_eq!(r, Err(ProverTomlError::FilterValueDlUseDedicatedFn));
         }
+    }
+
+    // [OPUS-4.8] sq-3kd2g.6: the bounded-depth path Prover.toml renderer emits the
+    // public + private fields in the EXACT `main` declaration order, and the
+    // general `prover_toml_for` routes a PathReach input to the dedicated-fn error.
+    #[cfg(feature = "extended-fragment")]
+    #[test]
+    fn path_reach_toml_shape_and_order() {
+        let toml = path_reach_prover_toml(
+            &fh("0x01"),                     // challenge
+            &[fh("0x0a"), fh("0x0b")],       // commitments (k=2)
+            &fh("0x11"),                     // pred_enc
+            &fh("0x22"),                     // src_enc
+            &fh("0x33"),                     // dst_enc
+            true,                            // allow_zero
+            4,                               // depth_bound
+            &[true, false],                  // attribution (k=2)
+            2,                               // path_len
+            &[fh("0x44"), fh("0x55"), fh("0x55"), fh("0x55")], // nodes (padded to d=4)
+            &[2, 0],                         // counts (k=2)
+            &[vec![[fh("0x1"), fh("0x2"), fh("0x3")]], vec![]], // enc[k][*][3]
+        );
+        let lines: Vec<&str> = toml.lines().collect();
+        assert!(lines[0].starts_with("challenge = "));
+        assert!(lines[1].starts_with("commitments = ["));
+        assert!(lines[2].starts_with("pred_enc = "));
+        assert!(lines[3].starts_with("src_enc = "));
+        assert!(lines[4].starts_with("dst_enc = "));
+        assert_eq!(lines[5], "allow_zero = true");
+        assert_eq!(lines[6], "depth_bound = \"4\"");
+        assert_eq!(lines[7], "attribution = [true, false]");
+        assert_eq!(lines[8], "path_len = \"2\"");
+        assert!(lines[9].starts_with("nodes = ["));
+        assert!(lines[10].starts_with("counts = ["));
+        assert!(lines[11].starts_with("enc = ["));
+    }
+
+    #[cfg(feature = "extended-fragment")]
+    #[test]
+    fn prover_toml_for_path_reach_is_recoverable_error() {
+        // A PathReach input routes to the dedicated-fn error in the general entry
+        // (its chain-shaped witness does not fit the scalar/digit threading).
+        let inputs = ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 1, n: 16 },
+            commitments: vec![fh("0x0a")],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: false,
+            depth_bound: 4,
+            attribution: vec![true],
+        };
+        let r = prover_toml_for(&inputs, &fh("0x01"), &[], &[], &[], None, None);
+        assert_eq!(r, Err(ProverTomlError::PathReachUseDedicatedFn));
+        assert!(r.unwrap_err().to_string().contains("path_reach_prover_toml"));
     }
 }

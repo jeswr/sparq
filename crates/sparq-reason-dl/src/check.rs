@@ -98,6 +98,23 @@
 //! `Entailed`. Fresh names are minted as `urn:` IRIs checked against every id occurring in
 //! the premise AND conclusion models.
 //!
+//! ## Conclusion anonymous individuals ([OPUS-4.8] sq-pbz04.4.13)
+//!
+//! Official OWL 2 Direct-Semantics entailment reads a blank-node individual in the CONCLUSION
+//! EXISTENTIALLY (`a p _:x` means "`a` has *some* `p`-successor", not "`a p c` for a specific
+//! constant `c`"). L1 maps a blank node to an ordinary (skolem) constant: entailment-preserving
+//! on the PREMISE side (kept), but UNSOUND on the CONCLUSION side — the skolem refutation of
+//! `a p _:x` stays satisfiable even when the premise's `∃p.⊤` typing grants the existential, so
+//! it would certify a WRONG `NotEntailed`. Before the refutation loop, `roll_conclusion_anonymous`
+//! resolves conclusion blank nodes under the existential reading: a TREE-shaped anonymous
+//! assertion set (each blank node the object of exactly one property edge, reaching only blank
+//! successors, acyclic, anchored to a named root) ROLLS UP into an existential class assertion
+//! `root : ∃p.(⊓ types ⊓ ⊓ ∃q.⟨child⟩)` the tableau decides SOUNDLY in both directions (so
+//! somevaluesfrom2bnode / WebOnt-someValuesFrom-003 become genuine passes). Any non-rollable
+//! shape — shared between two assertions, cyclic, a named/nominal successor, or an unanchored
+//! free-existential root — abstains fail-closed ([`UnknownReason::ConclusionAnonymousIndividual`]),
+//! NEVER a skolem-constant `NotEntailed`.
+//!
 //! # Honest boundary
 //!
 //! This module never claims completeness beyond the argued fragment: the only complete
@@ -106,11 +123,11 @@
 //! uncertain case is a typed [`UnknownReason`].
 
 use crate::extract::extract;
-use crate::model::{Axiom, ClassExpression, Ontology};
+use crate::model::{Axiom, ClassExpression, ObjectPropertyExpression, Ontology};
 use crate::profile::profiles;
 use crate::tableau::{self, Budget, ExhaustedBudget};
-use rustc_hash::FxHashSet;
-use sparq_core::dict::{Dict, Id};
+use rustc_hash::{FxHashMap, FxHashSet};
+use sparq_core::dict::{is_inline, Dict, Id, TermParts};
 use sparq_reason::{inconsistencies, materialize, Profile};
 use sparq_reason_el::Classifier;
 
@@ -165,6 +182,14 @@ pub enum UnknownReason {
     /// Entailment only: the conclusion-axiom kind has no argued refutation encoding
     /// (property-axiom conclusions are deferred by the design record).
     UnencodedConclusion(String),
+    /// Entailment only: the CONCLUSION ontology mentions a blank-node individual in a shape
+    /// that does NOT roll up into a tree-shaped existential class assertion (it is shared
+    /// between two assertions, cyclic, has a named or a nominal successor, or is a free
+    /// existential root). Official OWL 2 Direct-Semantics entailment reads a conclusion
+    /// blank node EXISTENTIALLY, so the L1 skolem-constant reading would be UNSOUND for a
+    /// `NotEntailed` verdict — the checker abstains fail-closed instead (sq-pbz04.4.13).
+    /// The payload names the first offending anonymous individual. [OPUS-4.8]
+    ConclusionAnonymousIndividual(String),
 }
 
 /// Tri-state Direct-Semantics consistency verdict (design record §4).
@@ -356,9 +381,27 @@ impl DirectChecker {
             Ok(onto) => onto,
             Err(e) => return unknown_extraction(format!("conclusion: {}", e)),
         };
+        // [OPUS-4.8] sq-pbz04.4.13 — conclusion anonymous individuals are EXISTENTIAL under
+        // the official OWL 2 Direct-Semantics entailment reading. L1 maps a conclusion blank
+        // node to an ordinary (skolem) constant; that reading is entailment-preserving on the
+        // PREMISE side but UNSOUND on the conclusion side (it would certify a `NotEntailed`
+        // that is wrong existentially — the pinned M2 divergences somevaluesfrom2bnode /
+        // WebOnt-someValuesFrom-003). `roll_conclusion_anonymous` rolls a tree-shaped bnode
+        // assertion set into an existential class assertion the tableau decides SOUNDLY (both
+        // directions); a non-rollable shape (shared / cyclic / nominal / free-root bnode)
+        // abstains fail-closed, never a skolem `NotEntailed`.
+        let concl_axioms = match roll_conclusion_anonymous(dict, &concl) {
+            Ok(axioms) => axioms,
+            Err(reason) => {
+                return EntailmentOutcome {
+                    verdict: EntailmentVerdict::Unknown(reason),
+                    branch: Branch::AlchTableau,
+                }
+            }
+        };
         let mut fresh = FreshNames::new(dict, [&prem, &concl]);
         let mut first_unknown: Option<UnknownReason> = None;
-        for axiom in concl.axioms() {
+        for axiom in &concl_axioms {
             match self.axiom_entailed(&prem, axiom, &mut fresh) {
                 AxiomVerdict::Entailed => {}
                 AxiomVerdict::NotEntailed => {
@@ -797,4 +840,225 @@ fn refutation_checks(conclusion: &Axiom, fresh: &mut FreshNames) -> Option<Vec<V
         // Property-axiom conclusions are deferred by the record (§4): no encoding here.
         Axiom::SubObjectPropertyOf { .. } => None,
     }
+}
+
+// -------------------------------------------------------------------------------------------
+// Conclusion anonymous-individual rolling ([OPUS-4.8] sq-pbz04.4.13)
+// -------------------------------------------------------------------------------------------
+//
+// Official OWL 2 Direct-Semantics entailment reads a blank-node individual in the CONCLUSION
+// ontology EXISTENTIALLY (an "existential variable" — the somevaluesfrom2bnode test's own
+// description). L1 maps every blank node to an ordinary dict id, i.e. a (skolem) CONSTANT. On
+// the PREMISE side skolemisation is entailment-preserving and stays; on the CONCLUSION side it
+// is NOT — a `NotEntailed` certificate from the skolem reading is UNSOUND, because the premise
+// may entail the conclusion existentially (a p _:x) without entailing it for any specific
+// constant. So a conclusion blank-node assertion set must be resolved BEFORE the refutation
+// loop: rolled up into an existential class assertion when it is tree-shaped, or refused
+// fail-closed otherwise (never a skolem `NotEntailed`).
+//
+// ROLLING-UP is the standard tree-shaped-query technique: an anonymous individual reached by a
+// single property edge `s p _:x`, whose asserted types are `C₁ … Cₙ` and whose own outgoing
+// edges are `_:x qⱼ _:yⱼ`, denotes exactly `s : ∃p.(C₁ ⊓ … ⊓ Cₙ ⊓ ∃q₁.⟨roll _:y₁⟩ ⊓ …)`. This
+// is SOUND and COMPLETE for the tree shape (no inverse roles, no shared variables, no nominals
+// — all guaranteed by the rollability checks + the ALCH fragment), so a `NotEntailed` from a
+// ROLLED existential class assertion is decided by the complete tableau and is genuinely
+// sound, and the graduated cases (somevaluesfrom2bnode / WebOnt-someValuesFrom-003) become
+// real passes rather than abstentions.
+
+/// Whether `id` is an anonymous (blank-node) individual in `dict`.
+fn is_anonymous_individual(dict: &Dict, id: Id) -> bool {
+    !is_inline(id) && matches!(dict.term_parts(id), TermParts::Blank(_))
+}
+
+/// Render an id for a fail-closed diagnostic (positional-arg friendly — CodeQL note).
+fn term_of(dict: &Dict, id: Id) -> String {
+    if is_inline(id) {
+        return format!("(inline literal id {})", id);
+    }
+    match dict.term_parts(id) {
+        TermParts::Iri { prefix, suffix } => format!("<{}{}>", prefix, suffix),
+        TermParts::Lit { value, .. } => format!("\"{}\"", value),
+        TermParts::Blank(label) => format!("_:{}", label),
+        TermParts::Triple(_) => "<<triple term>>".to_string(),
+    }
+}
+
+/// Resolve the CONCLUSION ontology's anonymous (blank-node) individuals under the official
+/// EXISTENTIAL reading (module note above; sq-pbz04.4.13).
+///
+/// Returns the blank-node-FREE conclusion axiom list the caller decides by refutation:
+/// - if the conclusion mentions no blank-node individual, its axioms unchanged (clone);
+/// - otherwise, the blank-node ABox assertions ROLLED UP into existential class assertions on
+///   their named roots, with every blank-node-free conclusion axiom kept verbatim.
+///
+/// # Errors
+/// [`UnknownReason::ConclusionAnonymousIndividual`] when a blank-node individual is NOT in a
+/// tree-shaped roll-up: it must be the object of EXACTLY ONE property assertion (its unique
+/// parent edge), reach only blank-node successors (a named/literal successor would need a
+/// nominal, out of the ALCH fragment), and be acyclic / anchored to a named root. Fail-closed
+/// — the caller abstains, never a skolem-constant `NotEntailed`.
+fn roll_conclusion_anonymous(dict: &Dict, concl: &Ontology) -> Result<Vec<Axiom>, UnknownReason> {
+    // Fast path: no anonymous individual anywhere → decide the conclusion verbatim, so the
+    // blank-node-free path (every existing entailment case) is byte-identical to before.
+    let mentions_bnode = concl.axioms().iter().any(|axiom| match axiom {
+        Axiom::ClassAssertion { individual, .. } => is_anonymous_individual(dict, *individual),
+        Axiom::ObjectPropertyAssertion { source, target, .. } => {
+            is_anonymous_individual(dict, *source) || is_anonymous_individual(dict, *target)
+        }
+        _ => false,
+    });
+    if !mentions_bnode {
+        return Ok(concl.axioms().to_vec());
+    }
+
+    // Build the roll-up structure over the ABox. `in_degree` counts parent property edges per
+    // blank individual; `types` collects each blank individual's asserted class types;
+    // `outgoing` its child property edges; `top_edges` the named→blank edges that ANCHOR a
+    // tree; `clean` keeps every blank-node-free axiom verbatim.
+    let mut in_degree: FxHashMap<Id, usize> = FxHashMap::default();
+    let mut types: FxHashMap<Id, Vec<ClassExpression>> = FxHashMap::default();
+    let mut outgoing: FxHashMap<Id, Vec<(Id, Id)>> = FxHashMap::default();
+    let mut top_edges: Vec<(Id, Id, Id)> = Vec::new();
+    let mut clean: Vec<Axiom> = Vec::new();
+
+    for axiom in concl.axioms() {
+        match axiom {
+            Axiom::ClassAssertion { class, individual } => {
+                if is_anonymous_individual(dict, *individual) {
+                    in_degree.entry(*individual).or_insert(0);
+                    types.entry(*individual).or_default().push(class.clone());
+                } else {
+                    clean.push(axiom.clone());
+                }
+            }
+            Axiom::ObjectPropertyAssertion {
+                property,
+                source,
+                target,
+            } => {
+                let s_anon = is_anonymous_individual(dict, *source);
+                let t_anon = is_anonymous_individual(dict, *target);
+                match (s_anon, t_anon) {
+                    (false, false) => clean.push(axiom.clone()),
+                    (false, true) => {
+                        // named --p--> blank : a top edge anchoring a tree.
+                        *in_degree.entry(*target).or_insert(0) += 1;
+                        top_edges.push((property.named(), *source, *target));
+                    }
+                    (true, true) => {
+                        // blank --p--> blank : an internal tree edge.
+                        in_degree.entry(*source).or_insert(0);
+                        *in_degree.entry(*target).or_insert(0) += 1;
+                        outgoing
+                            .entry(*source)
+                            .or_default()
+                            .push((property.named(), *target));
+                    }
+                    (true, false) => {
+                        // blank --p--> named : the anonymous individual has a NAMED successor,
+                        // rollable only through a nominal {named} — out of ALCH. Recorded so
+                        // `roll_bnode` refuses at the exact offending node.
+                        in_degree.entry(*source).or_insert(0);
+                        outgoing
+                            .entry(*source)
+                            .or_default()
+                            .push((property.named(), *target));
+                    }
+                }
+            }
+            other => clean.push(other.clone()),
+        }
+    }
+
+    // Every blank-node individual must have EXACTLY ONE parent edge: in-degree 0 is an
+    // unanchored free existential root, in-degree ≥ 2 is a node SHARED between two assertions.
+    // Both are outside the tree-shaped roll-up (and exactly the negative-probe shapes).
+    for (&b, &deg) in &in_degree {
+        if deg != 1 {
+            return Err(UnknownReason::ConclusionAnonymousIndividual(format!(
+                "anonymous individual {} has {} parent property-assertion(s); a tree-shaped \
+                 roll-up needs exactly one (shared / unanchored anonymous individual)",
+                term_of(dict, b),
+                deg
+            )));
+        }
+    }
+
+    // Fold each named-anchored subtree into an existential class assertion on its named root.
+    // `consumed` records every blank node folded into a tree; a blank node reached from no
+    // named root (a pure cycle / an anchorless component) stays unconsumed and is refused.
+    let mut rolled: Vec<Axiom> = clean;
+    let mut consumed: FxHashSet<Id> = FxHashSet::default();
+    for &(property, source, target) in &top_edges {
+        let mut visiting: FxHashSet<Id> = FxHashSet::default();
+        let filler = roll_bnode(dict, target, &types, &outgoing, &mut visiting, &mut consumed)?;
+        rolled.push(Axiom::ClassAssertion {
+            class: ClassExpression::ObjectSomeValuesFrom(
+                ObjectPropertyExpression::ObjectProperty(property),
+                Box::new(filler),
+            ),
+            individual: source,
+        });
+    }
+
+    // Any blank-node individual not folded into a named-rooted tree is a cyclic / anchorless
+    // shape (each has in-degree 1 from the check above, so a component with no named anchor is
+    // necessarily cyclic) — refuse fail-closed.
+    for &b in in_degree.keys() {
+        if !consumed.contains(&b) {
+            return Err(UnknownReason::ConclusionAnonymousIndividual(format!(
+                "anonymous individual {} is not reachable from a named root (cyclic or \
+                 anchorless anonymous shape)",
+                term_of(dict, b)
+            )));
+        }
+    }
+    Ok(rolled)
+}
+
+/// Roll one blank-node subtree (rooted at `b`) into the class expression whose existential the
+/// parent edge asserts: the conjunction of `b`'s asserted class types and `∃p.⟨child subtree⟩`
+/// per outgoing edge. An empty conjunction is `owl:Thing`. Cycle- and nominal-guarded.
+fn roll_bnode(
+    dict: &Dict,
+    b: Id,
+    types: &FxHashMap<Id, Vec<ClassExpression>>,
+    outgoing: &FxHashMap<Id, Vec<(Id, Id)>>,
+    visiting: &mut FxHashSet<Id>,
+    consumed: &mut FxHashSet<Id>,
+) -> Result<ClassExpression, UnknownReason> {
+    if !visiting.insert(b) {
+        return Err(UnknownReason::ConclusionAnonymousIndividual(format!(
+            "anonymous individual {} lies on a cycle (no tree-shaped roll-up)",
+            term_of(dict, b)
+        )));
+    }
+    // A node reachable through two named-anchored paths would already have in-degree ≥ 2 and be
+    // refused before we get here; `consumed` insertion is the fold record.
+    consumed.insert(b);
+    let mut members: Vec<ClassExpression> = types.get(&b).cloned().unwrap_or_default();
+    if let Some(edges) = outgoing.get(&b) {
+        for &(property, target) in edges {
+            if !is_anonymous_individual(dict, target) {
+                // A named/literal successor of an anonymous individual needs a nominal {t}.
+                return Err(UnknownReason::ConclusionAnonymousIndividual(format!(
+                    "anonymous individual {} has a non-anonymous successor {} (a nominal \
+                     roll-up is out of the ALCH fragment)",
+                    term_of(dict, b),
+                    term_of(dict, target)
+                )));
+            }
+            let filler = roll_bnode(dict, target, types, outgoing, visiting, consumed)?;
+            members.push(ClassExpression::ObjectSomeValuesFrom(
+                ObjectPropertyExpression::ObjectProperty(property),
+                Box::new(filler),
+            ));
+        }
+    }
+    visiting.remove(&b);
+    Ok(match members.len() {
+        0 => ClassExpression::Thing,
+        1 => members.pop().expect("len checked == 1"),
+        _ => ClassExpression::ObjectIntersectionOf(members),
+    })
 }

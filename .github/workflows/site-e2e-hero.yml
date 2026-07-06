@@ -4,10 +4,13 @@
 # with the lean wasm bundle built from source — so the "engine-computed rows" and "zero-network
 # invariant" are verified against the actual Rust engine on every site/ change.
 #
-# ADVISORY (continue-on-error: true on both Playwright steps). The heroic run of all five
-# journeys + the stress (--repeat-each=5) needs a full wasm build (~25 min with warm cache).
-# Making it advisory keeps PR CI snappy on Rust-only changes while surfacing failures as a
-# visible check that the maintainer can inspect.
+# ADVISORY (continue-on-error: true on both Playwright steps; the whole word `advisory` in the job
+# NAME also excludes it from the `ci-summary` aggregator). The heroic run of all five journeys +
+# the stress (--repeat-each=5) needs a full wasm build with a warm cache. Making it advisory keeps
+# PR CI snappy on Rust-only changes while surfacing failures as a visible check the maintainer can
+# inspect. Promotion to a required check is governed by `.github/E2E-GATING-POLICY.md` (probation
+# bar + flake-quarantine — bead sq-ymr2e.12; design research/web-gui-test-program.md §6.3); it is
+# the one-line flip in §4 (drop ` (advisory)` from the job name + the step `continue-on-error`).
 #
 # SCOPE: path-scoped to site/**, the root lock files (same reasoning as site-e2e.yml — npm ci
 # resolves from the root lockfile, so a lockfile bump can break the install), and this workflow.

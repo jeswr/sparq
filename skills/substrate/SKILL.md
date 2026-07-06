@@ -40,7 +40,10 @@ The XSD numeric value tower: `Num` (`Int(i64)` / `Dec(Dec)` / `Float(f32)` / `Do
 the fixed-point `Dec` struct (EXACT integer/decimal arithmetic, no f64 rounding), `ArithOp`
 (`Add`/`Sub`/`Mul`/`Div`), `RoundMode`, `as_numeric` (classifies an `oxrdf::Literal` into the
 tower), and the XSD lexical helpers `split_decimal`, `parse_xsd_f64`, `parse_xsd_f32`,
-`fmt_xsd_double`. Pulls `oxrdf` only when enabled.
+`fmt_xsd_double`. Pulls `oxrdf` only when enabled. Two ordering methods on `Num`:
+- `Num::cmp_total` — ORDER BY / MIN/MAX total order; NaN totalised FIRST.
+- `Num::cmp_relational` — SPARQL `<`/`>` / D-entailment / RIF numeric equality; NaN → `None`
+  (type error). [OPUS-4.8] sq-v5evr.
 
 ```toml
 [dependencies]
