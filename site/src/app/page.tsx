@@ -1,21 +1,19 @@
 import Link from "next/link";
 
-// [OPUS-4.8] sq-vw3ax.5 — the BOLD homepage redesign, built on the merged dark-first
-// foundation (#1261) and faithful to the approved mockup
-// (sparq-design-system/proposals/web-home.html). It reimagines the landing as:
-//   1. an atmospheric teal HERO (.bg-atmos/.bg-grid + .text-gradient .display-1 headline +
-//      mono .kicker rhythm) with a four-stat STRUCTURAL strip (count-badge style figures);
-//   2. the live-REPL "moment" — the heavy <ReplLazy> framed (USED AS-IS; the /try redesign
-//      owns the REPL internals) as the killer artifact, immediately after the hero;
+// [OPUS-4.8] sq-vw3ax.11 — the homepage, with the SPLIT hero making the in-browser runner the
+// hero artifact (the full REPL workbench, which was duplicated with /try, is REMOVED from home).
+// The landing is now:
+//   1. a SPLIT atmospheric HERO — text on the left, a lightweight LIVE in-browser runner
+//      (HeroQueryRunner) on the right, so Run is in-fold (≤3 interactions to a live result);
+//   2. a slim four-stat STRUCTURAL band under the hero (StatBand);
 //   3. the bold "See it work" flagship showcase (the real FLAGSHIPS) and the five capability
 //      THEME cards with per-surface honesty-tier dots; and
 //   4. the "How it runs" honesty strip — the tier legend + a "How tiers work" <details>.
 //
 // REAL DATA / HONESTY (load-bearing): every figure is a STRUCTURAL fact derived from the
 // single GROUPS/FLAGSHIPS source (data/surfaces.ts) or a query-form/format list — NOT a
-// performance/timing claim and NOT fabricated. The REPL's results come from the real engine
-// at runtime; nothing here hardcodes a result row, triple count, or timing.
-import { ReplLazy } from "@/components/repl-lazy";
+// performance/timing claim and NOT fabricated. The hero runner's results come from the real
+// engine at runtime; nothing here hardcodes a result row, triple count, or timing.
 import { Badge } from "@/components/ui/badge";
 import {
   FLAGSHIPS,
@@ -25,6 +23,7 @@ import {
   type Tier,
 } from "@/data/surfaces";
 import { Hero } from "@/components/home/hero";
+import { StatBand } from "@/components/home/stat-band";
 import { SectionHeader } from "@/components/home/section-header";
 import { FlagshipCard } from "@/components/home/flagship-card";
 import { CapabilityCard } from "@/components/home/capability-card";
@@ -45,24 +44,11 @@ const TIER_LEGEND: { tier: Tier; note: string }[] = [
 export default function HomePage() {
   return (
     <div className="space-y-20">
-      {/* 1 — Hero: atmospheric ground, gradient display headline, structural stat strip. */}
-      <Hero />
-
-      {/* 2 — The live REPL: the killer artifact, framed. ReplLazy is used AS-IS. */}
-      <section id="repl" className="scroll-mt-20 space-y-5">
-        <SectionHeader
-          kicker="The killer artifact"
-          title="A live SPARQL REPL — real engine, real graph, real results"
-          note="Edit the query, pick an example, hit Run. The lean wasm bundle parses the sample Turtle and answers in-tab."
-        />
-        <ReplLazy />
-        <p className="text-xs text-muted-foreground">
-          This REPL loads the lean sparq wasm bundle and runs your SPARQL against
-          the sample graph using the real Rust engine — the same code that ships as{" "}
-          <code className="font-mono text-foreground">@jeswr/sparq</code>. Nothing
-          is sent to a server.
-        </p>
-      </section>
+      {/* 1 — Split hero + slim stat band (the band sits close under the hero, one visual group). */}
+      <div className="space-y-6">
+        <Hero />
+        <StatBand />
+      </div>
 
       {/* 3 — See it work: the real flagship showcases, large. */}
       <section className="space-y-6">
@@ -73,9 +59,11 @@ export default function HomePage() {
             <>
               From a live in-tab proof to a faithful protocol simulation — pick one,
               or{" "}
+              {/* [OPUS-4.8] sq-ymr2e.4 — persistent underline so the inline link is distinguishable
+                  without relying on colour (WCAG 2.1 §1.4.1 / axe `link-in-text-block`). */}
               <Link
                 href="/examples"
-                className="text-primary underline-offset-4 hover:underline"
+                className="text-primary underline underline-offset-4"
               >
                 browse the examples gallery
               </Link>
@@ -101,7 +89,7 @@ export default function HomePage() {
               its honesty tier.{" "}
               <Link
                 href="/capabilities"
-                className="text-primary underline-offset-4 hover:underline"
+                className="text-primary underline underline-offset-4"
               >
                 Browse all surfaces
               </Link>
@@ -168,7 +156,7 @@ export default function HomePage() {
             </p>
             <p className="flex flex-wrap gap-4">
               <a
-                className="text-primary underline-offset-4 hover:underline"
+                className="text-primary underline underline-offset-4"
                 href={REPO_URL}
                 target="_blank"
                 rel="noopener noreferrer"
@@ -176,7 +164,7 @@ export default function HomePage() {
                 Source on GitHub
               </a>
               <Link
-                className="text-primary underline-offset-4 hover:underline"
+                className="text-primary underline underline-offset-4"
                 href="/capabilities"
               >
                 Every surface, by theme

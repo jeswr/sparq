@@ -29,6 +29,12 @@ pub enum Regime {
     Rdf,
     Rdfs,
     OwlRl,
+    /// [OPUS-4.8] sq-e5atd — D-entailment (datatype / value-space, RDF 1.1
+    /// Semantics §7-8): the rdfD1 datatype-typing closure under the recognized
+    /// datatype map, computed THROUGH `sparq_reason::Profile::D` (the materializer
+    /// under test). OPT-IN, behind the crate's `d-entail` feature.
+    #[cfg(feature = "d-entail")]
+    D,
 }
 
 pub fn triple_row(t: &Triple) -> Row {
@@ -88,6 +94,15 @@ pub fn close(premise: &[Row], conclusion: &[Row], regime: Regime, d: &Recognized
         Regime::Simple => return set.into_iter().collect(),
         Regime::OwlRl => {
             materialize_through_dict(&mut set, sparq_reason::Profile::OwlRl);
+            return set.into_iter().collect();
+        }
+        // [OPUS-4.8] sq-e5atd — D-entailment: simple entailment PLUS the rdfD1
+        // datatype-typing closure, computed THROUGH the materializer under test
+        // (`sparq_reason::materialize_d`) with the test's recognized datatype map.
+        // No RDF/RDFS axiomatic layer (D-entailment is over simple, not RDFS).
+        #[cfg(feature = "d-entail")]
+        Regime::D => {
+            materialize_d_through_dict(&mut set, d);
             return set.into_iter().collect();
         }
         Regime::Rdf | Regime::Rdfs => {}
@@ -216,6 +231,27 @@ fn materialize_through_dict(set: &mut FxHashSet<Row>, profile: sparq_reason::Pro
         triples.push([dict.intern(s), dict.intern(p), dict.intern(o)]);
     }
     sparq_reason::materialize(profile, &mut dict, &mut triples);
+    for [s, p, o] in triples {
+        set.insert([dict.term(s), dict.term(p), dict.term(o)]);
+    }
+}
+
+/// [OPUS-4.8] sq-e5atd — round-trips the row set through
+/// `sparq_reason::materialize_d` (the D-entailment materializer under test), with
+/// the test's recognized datatype map `d` translated into the reasoner's
+/// [`sparq_reason::Recognized`]. The rdfD1 typing triples it emits are GENERALIZED
+/// (literal in subject position), exactly the shape the homomorphism checker
+/// expects (`lg`/`gl` literal generalization). Like `materialize_through_dict`,
+/// term-level lexical forms survive the dictionary round-trip.
+#[cfg(feature = "d-entail")]
+fn materialize_d_through_dict(set: &mut FxHashSet<Row>, d: &Recognized) {
+    let recognized = sparq_reason::Recognized::new(d.0.iter().cloned());
+    let mut dict = Dict::new();
+    let mut triples: Vec<[sparq_core::dict::Id; 3]> = Vec::with_capacity(set.len());
+    for [s, p, o] in set.iter() {
+        triples.push([dict.intern(s), dict.intern(p), dict.intern(o)]);
+    }
+    sparq_reason::materialize_d(&recognized, &mut dict, &mut triples);
     for [s, p, o] in triples {
         set.insert([dict.term(s), dict.term(p), dict.term(o)]);
     }

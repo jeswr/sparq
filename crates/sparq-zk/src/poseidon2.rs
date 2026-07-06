@@ -182,4 +182,16 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c, "length must enter the IV");
     }
+
+    // [OPUS-4.8] sq-qcnn.25: the empty-input branch. An empty input still runs the
+    // final permutation (`(in_len == 0) | (in_len % RATE != 0)`), so the digest is
+    // the permuted state[0], NOT the pre-permutation zero. Deterministic + distinct
+    // from a single explicit zero element (which carries a different length IV).
+    #[test]
+    fn hash_empty_input_runs_final_permutation() {
+        let e = hash(&[]);
+        assert_eq!(e, hash(&[]), "empty-input hash is deterministic");
+        assert_ne!(e, Fr::from(0u64), "empty input runs the final permutation, not identity");
+        assert_ne!(e, hash(&[Fr::from(0u64)]), "length enters the IV (0 vs 1 element)");
+    }
 }

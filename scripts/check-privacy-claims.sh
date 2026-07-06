@@ -119,7 +119,7 @@ SOUNDNESS_CLAIMS=(
 NEGATOR_HEDGE_RE="$(_phrases_field negatorHedge)"
 
 # Path surface to scan = the OUTWARD claim surface (docs/READMEs/skills/site copy /
-# the compliance index / the published-paper Typst sources). Excludes:
+# the compliance index / the published-paper + /specs Typst sources). Excludes:
 #   - research/ + the audit docs : design records that must name the properties to
 #     argue (un)soundness — the honesty source of truth, not a claim surface.
 #   - this script + its CI wiring : they QUOTE the forbidden phrases by definition.
@@ -138,6 +138,15 @@ NEGATOR_HEDGE_RE="$(_phrases_field negatorHedge)"
 # This catches the COARSE unqualified-claim class; a subtle semantic overclaim phrased
 # around the patterns remains Stage-5 human review.
 #
+# [OPUS-4.8] bead sq-rvgr2.5: the spec-factory `.typ` sources (`site/specs/*.typ` +
+# `site/specs/**/*.typ`, i.e. every Proposed-Specification draft AND `_lib/*.typ`) are added
+# for the SAME reason — a published /specs draft is an outward claim surface, and the ZK/MPC
+# spec CONTENT (zkSPARQL / MPC-SPARQL, beads sq-rvgr2.2/.3) will author real cryptographic
+# prose. Extending this surface BEFORE that content lands closes the gap the sq-rvgr2.1 infra
+# left open (the claim-free template is unaffected). The inline-allow marker + the negator/
+# hedge exemption apply UNCHANGED; the per-line classification below is reused verbatim, so a
+# spec draft may hedge, negate, or `privacy-claims-allow:`-mark a line exactly like a paper.
+#
 # [OPUS-4.8] bead sq-4hga: the paper-factory EVIDENCE file
 # `site/src/data/paper-evidence.json` is also added — its human `note` / free-text fields
 # are published-paper provenance prose (they surface inline via the `provenance()` helper),
@@ -150,6 +159,7 @@ mapfile -t FILES < <(
   git ls-files \
     '*.md' '*.mdx' '*.tsx' '*.ts' \
     'site/papers/*.typ' 'site/papers/**/*.typ' \
+    'site/specs/*.typ' 'site/specs/**/*.typ' \
     'site/src/data/paper-evidence.json' \
     ':!:research/**' \
     ':!:**/*audit*.md' \

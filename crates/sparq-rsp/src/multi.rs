@@ -1,4 +1,7 @@
 //! [OPUS-4.8] Multi-window continuous queries (sq-9u1).
+//! [SONNET-4.6] sq-2n1q3.3: 3+-window joins and ISTREAM/DSTREAM over multi-window joins.
+//! [SONNET-4.6] sq-2n1q3.5: substrate-join adoption analysis — REASONED NON-ADOPTION
+//! (see the "Substrate join: why it does not apply here" section below).
 //!
 //! [`ContinuousQuery`](crate::ContinuousQuery) is *one stream, one window, one
 //! query*. RSP-QL allows a query to open SEVERAL named windows — possibly over
@@ -39,16 +42,81 @@
 //! contributes the empty graph — `GRAPH <w> { … }` then yields no rows, so the
 //! join correctly produces nothing until every joined window has content.
 //!
+//! ## 3+-window joins ([SONNET-4.6] sq-2n1q3.3)
+//!
+//! The `windows` field is a `Vec<WindowState>` so `ContinuousMultiQuery` handles
+//! two, three, or any number of named windows identically: each window gets its
+//! own S2R state, all share the same synchronized clock, and the named-graph
+//! materialization loop over `self.windows` naturally scales. The `register` API
+//! enforces ≥ 2 windows (use `ContinuousQuery` for one); three or more require
+//! no additional code.
+//!
+//! ## ISTREAM/DSTREAM over a multi-window join ([SONNET-4.6] sq-2n1q3.3)
+//!
+//! At each tick the FULL join result is computed first; when the `R2S` operator
+//! is `ISTREAM` or `DSTREAM` the diff against the previous tick's full result
+//! is applied (reusing `crate::query::diff_rows`). The diff base advances after
+//! every tick, exactly as in `ContinuousQuery`.
+//!
+//! * **ISTREAM** — each tick emits the rows that APPEARED relative to the
+//!   previous tick (`cur ∖ prev`, multiset hash diff).
+//! * **DSTREAM** — each tick emits the rows that DISAPPEARED (`prev ∖ cur`).
+//!
+//! The `REGISTER ISTREAM <out> AS` / `REGISTER DSTREAM <out> AS` RSP-QL header
+//! form selects the operator; the programmatic `r2s` field is read from the
+//! parsed header.
+//!
+//! ## Substrate join: why it does not apply here (sq-2n1q3.5 analysis)
+//!
+//! [SONNET-4.6] sq-2n1q3.5 investigated whether the cross-window join in
+//! `eval_tick` / `materialize_named` should adopt
+//! `sparq_substrate::join::delta::DeltaTable` (the semi-naive probe kernel), as
+//! `eval.rs` did for its consecutive-window diff in sq-2n1q3.4.
+//!
+//! **Conclusion: reasoned non-adoption.** The substrate kernels are not
+//! applicable to this join surface for the following reasons:
+//!
+//! 1. **The engine already uses the substrate internally.** The cross-window
+//!    join is a general SPARQL `GRAPH <w1> { } GRAPH <w2> { }` pattern;
+//!    `sparq_engine::query_prepared` evaluates it via the engine's own
+//!    bind-join / hash-join paths, which already drive the substrate kernels
+//!    internally. There is no substrate bypass in this path.
+//!
+//! 2. **Different problem shape.** `eval.rs` adopted the substrate to replace
+//!    a per-slide term-level hash-set diff between CONSECUTIVE windows of a
+//!    SINGLE stream (the INSERT/DELETE membership test). That is a triple-level
+//!    set-membership operation with a persistent `DeltaTable` build side. The
+//!    cross-window join here is a full multi-graph SPARQL evaluation: arbitrary
+//!    query shape (filters, aggregates, OPTIONAL, UNION, aggregates), N windows,
+//!    variable bindings flowing across `GRAPH` patterns. No persistent build
+//!    side is applicable — each tick's named-graph assembly is fresh.
+//!
+//! 3. **Key projection is inaccessible without planner integration.** Using the
+//!    substrate for the cross-window join directly would require extracting the
+//!    variable-to-column layout from the prepared query's algebra — information
+//!    that lives in the engine's private `Bindings`/`LocalVocab` layer and
+//!    cannot be computed here without coupling to engine internals. The engine
+//!    seam (`research/shared-eval-substrate.md` §2.3) deliberately keeps that
+//!    projection private.
+//!
+//! 4. **Correct incremental evaluation is a planner change, not a multi.rs
+//!    change.** A genuinely incremental multi-window join (semi-naive evaluation
+//!    at the SPARQL algebra level, only re-evaluating the sub-patterns whose
+//!    window's content changed at this tick) would be a new feature of the query
+//!    planner, not a drop-in replacement in this module. That is a different
+//!    bead and a larger, non-behaviour-neutral scope.
+//!
+//! This non-adoption is therefore correct and sound: `multi.rs` continues to
+//! delegate the cross-window join to `sparq_engine::query_prepared` which
+//! drives the substrate through the engine's planned algebra. The RSP
+//! expressivity / SRBench correctness ratchet (`tests/srbench_oracle.rs`) is
+//! byte-identical before and after this analysis.
+//!
 //! ## Scope (honest)
 //!
-//! * Time windows only (the surface grammar has no `ROWS`); R2S is RSTREAM (the
-//!   per-tick FULL join result). ISTREAM/DSTREAM over a multi-window join are a
-//!   documented follow-up (the diff base would be the previous tick's full
-//!   result; mechanically the single-window [`diff_rows`](crate::query) applies,
-//!   but it is not wired here).
-//! * The output operator is `R2S::RStream`; `output_stream`/entailment metadata
-//!   parsed by [`RspqlQuery`] is retained but not acted on (this is a library,
-//!   not a stream-router).
+//! * Time windows only (the surface grammar has no `ROWS`).
+//! * The `output_stream` / entailment metadata parsed by `RspqlQuery` is
+//!   retained but not acted on (this is a library, not a stream-router).
 
 use std::collections::BTreeSet;
 
@@ -58,7 +126,8 @@ use sparq_core::Graph;
 use sparq_engine::PreparedQuery;
 use spargebra::Query;
 
-use crate::query::{R2S, WindowResult};
+// [SONNET-4.6] sq-2n1q3.3: import diff_rows for ISTREAM/DSTREAM support.
+use crate::query::{diff_rows, R2S, WindowResult};
 use crate::rspql::{RspqlQuery, WindowDecl};
 use crate::window::{Window, WindowedStream};
 
@@ -117,6 +186,11 @@ pub struct ContinuousMultiQuery {
     windows: Vec<WindowState>,
     r2s: R2S,
     output_stream: Option<NamedNode>,
+    /// [SONNET-4.6] sq-2n1q3.3: previous tick's FULL join result rows — the
+    /// ISTREAM/DSTREAM diff base. Empty and unused when `r2s == RStream`.
+    prev_rows: Vec<Vec<Option<Term>>>,
+    /// Row hashes of `prev_rows` (computed once; reused for the multiset diff).
+    prev_hashes: Vec<u64>,
 }
 
 impl ContinuousMultiQuery {
@@ -176,6 +250,11 @@ impl ContinuousMultiQuery {
             windows,
             r2s: parsed.r2s,
             output_stream: parsed.output_stream.clone(),
+            // [SONNET-4.6] sq-2n1q3.3: ISTREAM/DSTREAM diff base — empty until the
+            // first tick fires (the first window diffs against the empty multiset,
+            // so it emits everything for ISTREAM and nothing for DSTREAM).
+            prev_rows: Vec::new(),
+            prev_hashes: Vec::new(),
         })
     }
 
@@ -200,10 +279,16 @@ impl ContinuousMultiQuery {
         self.output_stream.as_ref()
     }
 
-    /// The relation-to-stream operator from the `REGISTER` header. Currently
-    /// only [`R2S::RStream`] (the full per-tick join result) is acted on;
-    /// ISTREAM/DSTREAM over a multi-window join are a documented follow-up, so
-    /// this is retained metadata.
+    /// The relation-to-stream operator from the `REGISTER` header.
+    ///
+    /// * `R2S::RStream` (default) — every tick emits the FULL join result.
+    /// * `R2S::IStream` — every tick emits only the rows that appeared relative
+    ///   to the previous tick (multiset diff `cur ∖ prev`). The first tick
+    ///   diffs against the empty multiset and so emits everything.
+    /// * `R2S::DStream` — every tick emits only the rows that disappeared
+    ///   (`prev ∖ cur`). The first tick always emits nothing.
+    ///
+    /// [SONNET-4.6] sq-2n1q3.3: ISTREAM/DSTREAM are now wired.
     pub fn r2s(&self) -> R2S {
         self.r2s
     }
@@ -285,7 +370,9 @@ impl ContinuousMultiQuery {
     }
 
     /// Builds the combined named-graph [`Graph`] for the current per-window
-    /// snapshots and evaluates the registered query against it.
+    /// snapshots and evaluates the registered query against it, then applies the
+    /// configured R2S operator (RSTREAM / ISTREAM / DSTREAM) before firing the
+    /// callback. [SONNET-4.6] sq-2n1q3.3: wired ISTREAM/DSTREAM.
     fn eval_tick(
         &mut self,
         tick: u64,
@@ -293,9 +380,19 @@ impl ContinuousMultiQuery {
     ) -> Result<(), String> {
         let graph = self.materialize_named();
         let result = sparq_engine::query_prepared(&graph, &self.prepared)?;
-        // RSTREAM: the full join result. (R2S diffing over a multi-window join
-        // is a documented follow-up.)
-        let rows = result.rows;
+        // [SONNET-4.6] sq-2n1q3.3: apply the R2S operator.
+        // RSTREAM: emit the full join result.
+        // ISTREAM/DSTREAM: diff the full result against the previous tick's
+        // full result (reusing the single-window diff_rows helper from
+        // crate::query), then advance the diff base.
+        let rows = match self.r2s {
+            R2S::RStream => result.rows,
+            R2S::IStream | R2S::DStream => {
+                diff_rows(self.r2s, result.rows, &mut self.prev_rows, &mut self.prev_hashes)
+            }
+        };
+        // For RSTREAM we skip updating prev_rows / prev_hashes — they are never
+        // read, and keeping them empty avoids a pointless clone. [SONNET-4.6]
         // The reported bounds: the tick's span is the join boundary. We report
         // [start, end) where end = tick and start = the min snapshot start, so
         // the window result carries a meaningful interval for the embedder.

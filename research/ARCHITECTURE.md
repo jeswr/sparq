@@ -64,11 +64,14 @@ The decisions, and why:
   `[wcoj-leapfrog-triejoin]`, `[wcoj-when-which]`, `[wcoj-hybrid-optimizer]`,
   `[join-01-lockfree-hash-join-tagged]`, `[join-02-merge-join-sorted-intersection]`.
 
-- **Planner: spargebra → own physical IR → filter pushdown → DP join ordering
-  (DPccp/DPhyp) under a budget, greedy (GOO) above it.** Connected components are
-  planned independently and combined by cartesian product. The DP table keeps
-  multiple *interesting orders* per subset so merge-join-friendly plans survive
-  pruning. Cardinality comes from block-metadata counts (free, exact for small
+- **Planner: spargebra → own physical IR → filter pushdown → cardinality-cost greedy
+  (GOO) join ordering by DEFAULT.** An OPT-IN `dp-planner` feature (bead `sq-iywur`)
+  adds a connected-subgraph-complement-pair (DPccp) DP that finds a `Cout`-optimal
+  *bushy* tree, falling back to GOO above a connected-subgraph-count budget (and on
+  disconnected BGPs); it is order-only (result-identical to GOO) and OFF by default.
+  Hypergraph DPhyp and interesting-orders-in-the-DP-table (below) remain future work.
+  Connected components are planned independently and combined by cartesian product.
+  Cardinality comes from block-metadata counts (free, exact for small
   scans), per-relation multiplicities (stored at build), and **characteristic
   sets** for star subqueries — the single highest-value RDF estimator.
   `[plan-01]`, `[plan-02]`, `[qlever-dp-goo-planner]`, `[plan-04]`, `[plan-13]`,

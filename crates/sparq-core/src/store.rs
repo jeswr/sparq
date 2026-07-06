@@ -263,6 +263,67 @@ pub struct TripleStore {
     overlay: Option<Box<Overlay>>,
 }
 
+/// LSD radix sort of `[Id; 3]` rows into ascending lexicographic order — column 0
+/// major, then 1, then 2 — the exact ordering a comparison `sort_unstable()`
+/// produces on the same rows (an `[Id; 3]` compares lexicographically, and with
+/// `Id = u32` the row packs into a 96-bit key whose numeric order IS that
+/// lexicographic order). This is the O(n) index-build sort that replaces the
+/// branchy comparison quicksort over the packed permutation tuples — the single
+/// largest ingest self-time bucket (`research/engine-performance-review.md` §1.1,
+/// sq-7d3dj.17). [OPUS-4.8]
+///
+/// Output equivalence is exact and gated: for any input, the multiset is preserved
+/// and the result is fully sorted, so it is BYTE-IDENTICAL to `sort_unstable()`
+/// (equal rows are indistinguishable, so stability is irrelevant). See the
+/// `radix_sort_equiv_comparison_sort` differential-fuzz test.
+///
+/// Twelve least-significant-digit passes over the 12 key bytes (least-significant
+/// first): passes 0..4 = column 2, 4..8 = column 1, 8..12 = column 0. A pass whose
+/// digit is constant across every row (e.g. the high bytes of a small dictionary)
+/// is a no-op and skipped; the double-buffer invariant keeps the current partial
+/// result in `v` whether or not a pass runs, so the final result is always in `v`.
+fn radix_sort_rows(v: &mut Vec<[Id; 3]>) {
+    let n = v.len();
+    if n < 2 {
+        return;
+    }
+    // Scratch back-buffer; `v` and `scratch` are swapped after each executed pass so
+    // the sorted-so-far data always lives in `v` (a skipped pass leaves it there too).
+    let mut scratch: Vec<[Id; 3]> = vec![[0; 3]; n];
+    for pass in 0..12usize {
+        // Byte `pass` of the packed key, LSB first. col2 holds bytes 0..4, col1 4..8,
+        // col0 8..12 — so the most-significant byte (pass 11) is column 0's top byte.
+        let col = 2 - pass / 4;
+        let shift = ((pass % 4) * 8) as u32;
+        let digit = |row: &[Id; 3]| ((row[col] >> shift) & 0xff) as usize;
+
+        // Histogram of this pass's digit.
+        let mut count = [0usize; 256];
+        for row in v.iter() {
+            count[digit(row)] += 1;
+        }
+        // If every row shares one digit value this pass is a stable no-op — skip the
+        // scatter (and the buffer swap), leaving the correct partial result in `v`.
+        if count[digit(&v[0])] == n {
+            continue;
+        }
+        // Prefix-sum the histogram into per-digit start offsets.
+        let mut sum = 0usize;
+        for c in count.iter_mut() {
+            let here = *c;
+            *c = sum;
+            sum += here;
+        }
+        // Stable scatter into the back-buffer, then make it the live buffer.
+        for row in v.iter() {
+            let d = digit(row);
+            scratch[count[d]] = *row;
+            count[d] += 1;
+        }
+        std::mem::swap(v, &mut scratch);
+    }
+}
+
 impl TripleStore {
     /// Builds the [`BUILT`] permutation indexes from canonical s,p,o triples (all
     /// six by default; just SPO/POS/OSP under `compact-index`). SPO is sorted (in
@@ -296,19 +357,28 @@ impl TripleStore {
     /// six by default; just SPO/POS/OSP under `compact-index`). SPO is sorted (in
     /// parallel) and deduplicated first; the rest are independent and built concurrently.
     fn build_raw_perms(mut triples: Vec<[Id; 3]>) -> [PermData; 6] {
-        // Deduplicate via the SPO ordering first.
+        // Deduplicate via the SPO ordering first. This single large array keeps the
+        // parallel comparison sort: measured on this box, `par_sort_unstable` beats the
+        // sequential radix for one 2M-row array (all cores vs one), so radix here would
+        // REGRESS the SPO/dedup step. The win is below — the FIVE non-SPO permutations move
+        // to the O(n) LSD radix (sq-7d3dj.17), which beats the sequential comparison sort
+        // and is where the flagged sort-family self-time lives (they build concurrently via
+        // par_iter, each a sequential radix). The no-threads build has no parallel sort, so
+        // radix wins the SPO step there too. [OPUS-4.8]
         #[cfg(feature = "parallel")]
         triples.par_sort_unstable();
         #[cfg(not(feature = "parallel"))]
-        triples.sort_unstable();
+        radix_sort_rows(&mut triples);
         triples.dedup();
 
         let build = |order: [usize; 3]| -> Vec<[Id; 3]> {
+            // Pre-sized exactly from the known triple count (the mapped iterator is
+            // ExactSize, so `collect` reserves `triples.len()` up front — no grow tail).
             let mut v: Vec<[Id; 3]> = triples
                 .iter()
                 .map(|t| [t[order[0]], t[order[1]], t[order[2]]])
                 .collect();
-            v.sort_unstable();
+            radix_sort_rows(&mut v);
             v
         };
 
@@ -722,8 +792,19 @@ impl TripleStore {
         // base range is returned untouched (borrowed, zero copies); with an overlay the
         // deleted triples are filtered out and the inserted ones merge-interleaved, so
         // the rows keep the permutation's sort order (merge joins stay valid).
+        //
+        // ZERO-COPY FAST PATH (sq-7d3dj.3) [OPUS-4.8]: even WITH an overlay, most ranges a small
+        // overlay does not touch. `count_correction` (O(|overlay|)) tells us exactly how
+        // many `added`/`deleted` triples fall in this range; when it is `(0, 0)` the
+        // overlay contributes nothing here — no `added` row projects into `[lo, hi]` (so
+        // nothing is interleaved) and no in-range base row is deleted (so nothing is
+        // dropped) — hence `merge` would reproduce `base` verbatim, rows AND sort order.
+        // We therefore return the BORROWED base slice directly, restoring allocation-free
+        // scans for every untouched range (the read-mostly mutated-server common case)
+        // instead of copying+re-sorting the whole range through the owned merge path.
         let rows = match &self.overlay {
             None => base,
+            Some(ov) if ov.count_correction(perm, lo, hi) == (0, 0) => base,
             Some(ov) => std::borrow::Cow::Owned(ov.merge(&base, perm, lo, hi)),
         };
         Scan { rows, perm }
@@ -781,6 +862,120 @@ fn upper_bound(rows: &[[Id; 3]], key: &[Id; 3]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MANDATORY differential-fuzz equivalence gate (sq-7d3dj.17): the O(n) LSD
+    /// `radix_sort_rows` used to build every permutation index MUST produce output
+    /// BYTE-IDENTICAL to the comparison `sort_unstable()` it replaces, for every input.
+    /// The permutations back index range lookups and merge-join order, so any divergence
+    /// is a silent correctness bug — this test is the gate that forbids it.
+    ///
+    /// Covers the degenerate shapes the ingest path can hand the sorter: empty, single,
+    /// two (ordered + reversed), all-identical rows, all-same-subject, heavy duplicates,
+    /// the `Id::MAX` boundary (top key bytes = `0xFF`, exercising the no-op-pass skip on a
+    /// non-constant digit), small-range ids (high bytes constant → passes skipped), and
+    /// full 32-bit-range ids (every one of the 12 passes active).
+    #[test]
+    fn radix_sort_equiv_comparison_sort() {
+        // Assert radix output == comparison-sort output on one row set, non-vacuously
+        // (the reference is the exact sort the radix path replaces).
+        fn check(rows: &[[Id; 3]]) {
+            let mut reference = rows.to_vec();
+            reference.sort_unstable();
+            let mut radixed = rows.to_vec();
+            radix_sort_rows(&mut radixed);
+            assert_eq!(radixed, reference, "radix diverged from sort_unstable for {rows:?}");
+        }
+
+        // Fixed degenerate + boundary shapes.
+        check(&[]);
+        check(&[[7, 7, 7]]);
+        check(&[[1, 2, 3], [1, 2, 3]]); // duplicate pair
+        check(&[[2, 0, 0], [1, 0, 0]]); // reversed pair (col-0 tiebreak)
+        check(&[[9; 3]; 64]); // all identical
+        check(&[[5, 1, 9], [5, 3, 2], [5, 2, 2], [5, 2, 1]]); // all-same-subject
+        check(&[
+            [Id::MAX, Id::MAX, Id::MAX],
+            [0, 0, 0],
+            [Id::MAX, 0, Id::MAX],
+            [0, Id::MAX, 0],
+            [Id::MAX, Id::MAX, 0],
+            [1, Id::MAX, Id::MAX],
+        ]); // max-id boundary, high bytes 0xFF but non-constant
+
+        // Randomized sets across several id-range regimes (some keep high key bytes
+        // constant → passes skipped; the full-range regime activates all 12 passes).
+        let mut st = 0x9E3779B9u32;
+        let mut rng = || {
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            st
+        };
+        for regime in 0..4 {
+            for _ in 0..40 {
+                let n = (rng() % 3000) as usize;
+                let mut rows: Vec<[Id; 3]> = Vec::with_capacity(n);
+                for _ in 0..n {
+                    // Three raw draws, then shape per regime: tiny (byte 0 only), two low
+                    // bytes, ragged per-column widths, or the full 32-bit range.
+                    let (a, b, c) = (rng(), rng(), rng());
+                    let cell = |raw: u32, bits: u32| match regime {
+                        0 => 1 + raw % 16,
+                        1 => 1 + raw % 60_000,
+                        2 => raw & ((1u32 << bits) - 1).max(1),
+                        _ => raw,
+                    };
+                    rows.push([cell(a, 20), cell(b, 12), cell(c, 28)]);
+                }
+                // Salt in exact duplicates + a boundary row so ties + max-id are exercised.
+                if !rows.is_empty() {
+                    rows.push(rows[rows.len() / 2]);
+                    rows.push([Id::MAX, Id::MAX, Id::MAX]);
+                    rows.push([0, 0, 0]);
+                }
+                check(&rows);
+            }
+        }
+    }
+
+    /// End-to-end build equivalence: each BUILT permutation of a radix-built store must
+    /// equal the reference the comparison sort would produce — deduped SPO triples,
+    /// column-permuted, `sort_unstable()`ed. Proves the wiring in `build_raw_perms`, not
+    /// just the sort primitive, and is non-vacuous (the reference is computed independently
+    /// of the store). Runs across both index sets (`compact-index` builds three perms).
+    #[test]
+    fn from_triples_perms_match_reference_sort() {
+        let mut st = 0xC0FFEEu32;
+        let mut rng = || {
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            st
+        };
+        for _ in 0..8 {
+            let n = 500 + (rng() % 4000) as usize;
+            let mut triples: Vec<[Id; 3]> = Vec::with_capacity(n);
+            for _ in 0..n {
+                triples.push([1 + rng() % 300, 1 + rng() % 20, 1 + rng() % 1500]);
+            }
+            // Reference deduped SPO set (independent of the store under test).
+            let mut deduped = triples.clone();
+            deduped.sort_unstable();
+            deduped.dedup();
+
+            let store = TripleStore::from_triples(triples);
+            for &perm in BUILT {
+                let order = perm.order();
+                let mut want: Vec<[Id; 3]> = deduped
+                    .iter()
+                    .map(|t| [t[order[0]], t[order[1]], t[order[2]]])
+                    .collect();
+                want.sort_unstable();
+                let got = store.perms[perm as usize].as_slice();
+                assert_eq!(got, &want[..], "permutation {perm:?} differs from the comparison-sort reference");
+            }
+        }
+    }
 
     /// The compressed store must answer EVERY triple pattern with the exact same rows
     /// (and the same `estimate`) as the raw store — across all bound/unbound shapes and
@@ -1028,5 +1223,74 @@ mod tests {
         let mut orig: Vec<[Id; 3]> = triples.clone();
         orig.sort_unstable();
         assert_eq!(full.rows.as_ref(), &orig[..]);
+    }
+
+    /// The overlay zero-copy fast path (sq-7d3dj.3) must be PERF-ONLY: a scanned range the
+    /// overlay does not touch (`count_correction == (0, 0)`) returns the BORROWED base
+    /// slice, byte-identical (rows AND sort order) to the general merge path, while a range
+    /// the overlay DOES touch still takes the owned merge path and reflects the correction.
+    /// Proven directly — the `Cow` variant witnesses which path ran (a raw base range
+    /// borrows; `merge` allocates an owned `Vec`), so the equality checks are non-vacuous.
+    #[test]
+    fn overlay_zero_copy_fast_path() {
+        use std::borrow::Cow;
+
+        // Base: subjects 1..=100, predicate 1, objects 1..=10 (1000 triples, several perms).
+        let mut triples: Vec<[Id; 3]> = Vec::new();
+        for s in 1..=100u32 {
+            for o in 1..=10u32 {
+                triples.push([s, 1, o]);
+            }
+        }
+        // A no-overlay reference store: EVERY scan already borrows (the `None` branch).
+        let base_store = TripleStore::from_triples(triples.clone());
+        assert!(!base_store.has_overlay());
+
+        // A small overlay touching ONLY subject 50: insert (50,1,11), delete (50,1,1).
+        let mut store = TripleStore::from_triples(triples.clone());
+        store.apply_delta(&[[50, 1, 11]], &[[50, 1, 1]]);
+        assert!(store.has_overlay(), "the overlay must exist for a non-vacuous test");
+
+        // A full rebuild of the corrected triple set (the general-path oracle).
+        let mut reference: Vec<[Id; 3]> = triples.clone();
+        reference.retain(|t| *t != [50, 1, 1]);
+        reference.push([50, 1, 11]);
+        let rebuilt = TripleStore::from_triples(reference);
+
+        // (i) UNTOUCHED range (subject 7): fast path — rows are BORROWED and identical to
+        // the no-overlay base store (which also borrows). This is the "store WITH an
+        // overlay, scanned range clean" case the fast path exists for.
+        for s in [1u32, 7, 49, 51, 100] {
+            let pat: Pattern = [Some(s), None, None];
+            let scan = store.scan(&pat);
+            assert!(matches!(scan.rows, Cow::Borrowed(_)), "untouched subject {} must be zero-copy borrowed", s);
+            assert_eq!(scan.rows, base_store.scan(&pat).rows, "fast-path rows must equal the base for subject {}", s);
+            // A clean range is untouched by the overlay, so the rebuild agrees too.
+            assert_eq!(scan.rows, rebuilt.scan(&pat).rows, "fast-path rows must equal the rebuild for subject {}", s);
+        }
+
+        // (ii) TOUCHED range (subject 50): general merge path — rows are OWNED, reflect the
+        // correction (object 1 gone, 11 added), and match the rebuild in sort order.
+        let touched: Pattern = [Some(50), None, None];
+        let scan = store.scan(&touched);
+        assert!(matches!(scan.rows, Cow::Owned(_)), "a range the overlay touches must take the merge path");
+        assert_eq!(scan.rows, rebuilt.scan(&touched).rows, "merge-path rows must equal the rebuild");
+        assert!(scan.rows.windows(2).all(|w| w[0] <= w[1]), "merge-path rows must stay sorted");
+
+        // (iii) A full unbound scan intersects the overlay -> merge path, equals rebuild.
+        let all: Pattern = [None, None, None];
+        let scan = store.scan(&all);
+        assert!(matches!(scan.rows, Cow::Owned(_)), "an overlay-intersecting full scan takes the merge path");
+        assert_eq!(scan.rows, rebuilt.scan(&all).rows, "full merge-path scan must equal the rebuild");
+
+        // (iv) An overlay that touches a range only via a DELETE (no insert) must still take
+        // the merge path there (count_correction = (0, 1) != (0, 0)) and drop the row.
+        let mut del_store = TripleStore::from_triples(triples.clone());
+        del_store.apply_delta(&[], &[[7, 1, 5]]);
+        let pat: Pattern = [Some(7), None, None];
+        let scan = del_store.scan(&pat);
+        assert!(matches!(scan.rows, Cow::Owned(_)), "a delete-only touched range must take the merge path");
+        assert!(!scan.rows.contains(&[7, 1, 5]), "the deleted row must be absent");
+        assert_eq!(scan.rows.len(), base_store.scan(&pat).rows.len() - 1, "exactly one row dropped");
     }
 }

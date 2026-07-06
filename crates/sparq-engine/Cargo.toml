@@ -49,13 +49,21 @@ cs-planner = []
 zk = []
 # SPARQL 1.1 federated query (SERVICE): evaluate `SERVICE <iri> { pattern }` by
 # sending the inner pattern as a SPARQL SELECT to the remote endpoint over HTTP and
-# joining the parsed SPARQL-Results-JSON solutions back into the surrounding query.
-# OPT-IN and OFF by default: SERVICE makes no sense in the browser (no arbitrary
-# cross-origin HTTP, no blocking I/O) so the `service` deps (ureq + serde_json) are
-# additionally `cfg(not(wasm32))`-gated and never enter the wasm bundle even if the
-# feature were turned on for a wasm target. When off, zero federation/HTTP code
-# compiles. [OPUS-4.8]
-service = ["dep:serde_json", "dep:ureq", "dep:quick-xml"]
+# joining the parsed SPARQL-Results solutions back into the surrounding query. OPT-IN
+# and OFF by default. [OPUS-4.8]
+# [OPUS-4.8] (sq-6vshe.4) Seam A2 of the facade split (RFC research/engine-split-rfc.md §4
+# Option A / §7 Phase A2): the `service` module (federation SERVICE client — HTTP transport,
+# SPARQL-Results JSON/XML parse, bound-join batching, SSRF egress policy) moved to the internal
+# `sparq-engine-service` sub-crate. This feature now FORWARDS to that crate's own `service`
+# feature (which pulls serde / serde_json / quick-xml + the native-only ureq client, all
+# `cfg(not(wasm32))`-safe: SERVICE makes no sense in the browser). `sparq-engine-service` is an
+# OPTIONAL dependency, so the DEFAULT + wasm builds — with `service` OFF — never compile it or
+# its HTTP/TLS stack: the lean bundles + the byte-identical feature-off dependency graph are
+# unchanged, and every public path (`sparq_engine::with_service_egress_allow`, …) + this feature
+# NAME are preserved for external users. The executor references the client as
+# `sparq_engine_service::service::*` (src/exec.rs), keeping the one allowlisted per-SERVICE-call
+# `Box<dyn Transport>` install point — never a per-row crossing (#1303 / RFC §D4).
+service = ["dep:sparq-engine-service", "sparq-engine-service/service"]
 # [OPUS-4.8] (sq-678h) RDF serializer matrix: Turtle / TriG / N-Quads writers
 # (`serialize` module). The base build can already *parse* every format but only
 # *write* N-Triples (`triples_to_ntriples`, always on). This feature adds the missing
@@ -63,7 +71,15 @@ service = ["dep:serde_json", "dep:ureq", "dep:quick-xml"]
 # nothing — the writers reuse the existing oxrdf term/IRI/literal infrastructure and
 # pull in ZERO new dependencies (oxrdf is already a direct dep), so the default build's
 # dependency graph is byte-for-byte unchanged when this is off.
-serialize-rdf = []
+# [OPUS-4.8] (sq-6vshe.4) Seam 1 of the facade split (RFC research/engine-split-rfc.md §4
+# Option A / §7 Phase A1): the `serialize` module moved to the internal `sparq-engine-serialize`
+# sub-crate, re-exported here verbatim as `sparq_engine::serialize`. This feature now FORWARDS
+# to that crate's own `serialize-rdf` (which pulls the zero-dependency `sparq-jsonld` crate for
+# the JSON-LD writer's `Json` AST). `sparq-engine-serialize` is an OPTIONAL dependency, so the
+# DEFAULT + wasm builds — with `serialize-rdf` OFF — never compile it or `sparq-jsonld`: the lean
+# bundles + the byte-identical feature-off dependency graph are unchanged, and every public path
+# (`sparq_engine::serialize::*`) + this feature NAME are preserved for external users.
+serialize-rdf = ["dep:sparq-engine-serialize", "sparq-engine-serialize/serialize-rdf"]
 # [OPUS-4.8] (sq-townn, survey §A7) Streaming Turtle / TriG serialisation. The buffered
 # `write_turtle` / `write_trig` build a FULL in-memory `String` for the whole graph, so a
 # CONSTRUCT/DESCRIBE over a large graph holds BOTH the materialised triples AND the fully
@@ -76,8 +92,9 @@ serialize-rdf = []
 # (the whole writer matrix, incl. the shared rendering helpers it reuses, lives there). OPT-IN
 # and OFF by default: when off, zero streaming code compiles and the existing buffered path is
 # byte-identical to before. Pulls in ZERO new dependencies (std `io::Write` only) and contains
-# no `unsafe`.
-streaming-serialization = ["serialize-rdf"]
+# no `unsafe`. [OPUS-4.8] (sq-6vshe.4) now also FORWARDS to the moved sub-crate's own
+# `streaming-serialization` (see the `serialize-rdf` note above).
+streaming-serialization = ["serialize-rdf", "sparq-engine-serialize/streaming-serialization"]
 # [OPUS-4.8] (sq-5qz9) SPARQL window functions + custom aggregate registry.
 # Two extension surfaces, OFF by default:
 #   * a `CustomAggregateRegistry` whose named (IRI) user aggregates are callable in
@@ -103,6 +120,18 @@ window-functions = []
 # Pulls in ZERO new dependencies (sparq-core is already a direct dep) and contains no
 # `unsafe` — the kernels are plain index loops the compiler auto-vectorises.
 vectorized = []
+# [OPUS-4.8] (sq-iywur) Opt-in DP join-order enumerator (`dp` module): a connected-
+# subgraph-complement-pair (DPccp; Moerkotte & Neumann, VLDB 2006) dynamic program that
+# finds a Cout-optimal BUSHY join tree for a BGP, with a greedy-GOO fallback ABOVE a
+# connected-subgraph-count budget (and on disconnected BGPs) to bound planning blow-up.
+# `with_dp_planner` / `with_dp_planner_budget` install it per-thread, exactly like
+# `with_cs_table`. The default planner stays greedy GOO. ORDER-ONLY: a BGP is a
+# commutative/associative natural join, so every tree yields the SAME bindings — the DP
+# only changes join order, never the answer (asserted by tests/dp_planner_differential.rs
+# in BOTH feature states). OPT-IN and OFF by default: when off, zero DP code compiles and
+# the default native + wasm builds are byte-identical. Pulls in ZERO new dependencies
+# (rustc-hash is already a direct dep) and contains no `unsafe`.
+dp-planner = []
 # [OPUS-4.8] (sq-a9cn) Materialised-view / query-result cache: a bounded, version-aware
 # LRU (`cache::ResultCache`) that stores a SELECT/ASK `QueryResult` keyed by `(parsed
 # query algebra, caller graph-version)`. Vendor-parity operational-perf feature for
@@ -200,10 +229,33 @@ semijoin-bitmap = []
 # baked-in number.
 yannakakis = ["semijoin-bitmap"]
 
+# [OPUS-4.8] (sq-pntvh.1) M4 Phase 1 native FILTER/aggregate micro-bench over a synthetic
+# numeric column — the perf baseline every later vectorized (M4) phase measures against.
+# `required-features` gates it behind `vectorized`, so the DEFAULT build (and
+# `cargo clippy --all-targets` with the feature off) never compiles it: byte-identical
+# feature-OFF bundle preserved. Emits `metric_us` lines (the repo's bench idiom); registered
+# in bench/benchmarks.toml as `vectorized-eval-micro` (featured = false).
+[[example]]
+name = "bench_vectorized"
+required-features = ["vectorized"]
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+# [OPUS-4.8] sq-ev41x + sq-hknqs + sq-vezew (epic sq-qonbz): the shared id-level evaluation
+# substrate — the numeric value tower (`Num` / `Dec` / `as_numeric` + XSD lexical helpers,
+# Phase 2), the four id-tuple join kernels (merge / hash / bind / leapfrog-trie behind the
+# `JoinKeys` descriptor, Phase 3) AND the SPARQL term total order (`compare::compare_terms` —
+# the engine's `compare_values`, over a generic `CompareTerm` trait, Phase 4) — moved out of
+# `exec.rs` into the `sparq-substrate` leaf crate so the engine AND the reasoners can share one
+# definition with NO `Box<dyn>` on the hot path (research/shared-eval-substrate.md, Option C).
+# The engine uses all three unconditionally (FILTER / BIND / ORDER BY arithmetic + comparison;
+# every BGP/Join), so `numeric` + `join` (which also enables `rows`) + `compare` are enabled
+# here, not optionally — `oxrdf` and `rustc-hash` (which `numeric`/`join` pull) are already in
+# the engine's dep tree and `compare` is pure-`std`, so this pulls no new crate and the lean
+# wasm bundle delta is only the moved code itself.
+sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-features = false, features = ["numeric", "join", "compare"] }
 oxrdf.workspace = true
 spargebra.workspace = true
 # Relative-IRI resolution for IRI()/URI() against the query's BASE (already in the
@@ -212,37 +264,32 @@ oxiri = "0.2"
 rustc-hash.workspace = true
 smallvec.workspace = true
 rayon = { workspace = true, optional = true }
+# [OPUS-4.8] (sq-6vshe.4) Seam 1 of the facade split: the RDF `serialize` module (Turtle /
+# TriG / N-Quads / JSON-LD writers) moved to this internal sub-crate, re-exported verbatim as
+# `sparq_engine::serialize` (see src/lib.rs). OPTIONAL + pulled in ONLY by `serialize-rdf`
+# (which forwards to its own `serialize-rdf`/`streaming-serialization`), so the default + wasm
+# builds never compile it or its transitive `sparq-jsonld` dependency — the byte-identical
+# feature-off contract is preserved. `default-features = false`: an empty (feature-off) build.
+sparq-engine-serialize = { path = "../sparq-engine-serialize", version = "0.1.0", optional = true, default-features = false }
+# [OPUS-4.8] (sq-6vshe.4) Seam A2 of the facade split: the SPARQL 1.1 federated-SERVICE client
+# (`service` module — HTTP transport, SPARQL-Results JSON/XML parse, bound-join batching, SSRF
+# egress policy) moved to this internal sub-crate, re-exported through the facade (src/lib.rs + the
+# `service` feature above). OPTIONAL + pulled in ONLY by `service` (which forwards to its own
+# `service` feature), so the default + wasm builds never compile it or its ureq/serde/serde_json/
+# quick-xml stack — the byte-identical feature-off contract is preserved. `default-features = false`.
+sparq-engine-service = { path = "../sparq-engine-service", version = "0.1.0", optional = true, default-features = false }
 regex = { version = "1", optional = true }
 md-5 = { version = "0.11", optional = true }
 sha1 = { version = "0.11", optional = true }
 sha2 = { version = "0.11", optional = true }
-# SPARQL-Results-JSON parsing for the `service` (federation) feature. serde_json is
-# already in the workspace tree (sparq-conformance, sparq-server) and is
-# platform-independent, but it is only ever pulled in when `service` is on.
-serde_json = { version = "1", optional = true }
-# [OPUS-4.8] (sq-ycu) SPARQL-Results-XML (SRX) parsing for the `service` feature. Some
-# endpoints ignore the `Accept: …+json` header and return XML; without an SRX parser the
-# whole SERVICE call fails. quick-xml is platform-independent (it carries no HTTP/TLS, so
-# it is safe in the main dep block, like serde_json) and is already in the workspace tree
-# (sparq-conformance, sparq-geo). Pulled in only when `service` is on. `default-features =
-# false` drops its (unused) serde derive support.
-quick-xml = { version = "0.40", default-features = false, optional = true }
 
 # UUID()/STRUUID() need an OS RNG; depending on uuid from the wasm build would drag
 # getrandom into the browser dependency graph, so the functions are native-only.
-# `ureq` (the SERVICE feature's blocking HTTP client) lives here too: a tiny,
-# synchronous client (no async runtime) gated off wasm so the browser bundle never
-# pulls an HTTP/TLS stack. `tls-native-root` reuses the OS trust store for https
-# endpoints without bundling webpki-roots. [OPUS-4.8]
+# [OPUS-4.8] (sq-6vshe.4) The SERVICE feature's blocking HTTP client (ureq) moved with
+# the `service` module to the `sparq-engine-service` sub-crate (seam A2), where it keeps
+# the same `cfg(not(wasm32))` gating so no HTTP/TLS stack ever enters the browser bundle.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 uuid = { version = "1", features = ["v4"] }
-# [OPUS-4.8] sq-g2xs: ureq 3 (was 2) to migrate off the archived/unmaintained `rustls-pemfile`
-# (RUSTSEC-2025-0134). ureq 2 pulled it transitively via `rustls-native-certs 0.7`; ureq 3 uses
-# `rustls-native-certs 0.8` (which dropped `rustls-pemfile` in favour of `rustls-pki-types`'
-# `PemObject`). `rustls,platform-verifier` is the faithful successor of ureq 2's
-# `tls,native-certs`: TLS via rustls, server-cert validation against the OS trust store (via
-# `rustls-platform-verifier`) rather than a bundled CA set — same runtime trust behaviour as before.
-ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
 
 [dev-dependencies]
 # The dict-consolidation differential test compares the serial, sharded-parallel and
@@ -254,9 +301,18 @@ rayon.workspace = true
 # The cs-planner q-error gate builds its characteristic-set tables through the
 # dict-id accessor (dev-only; the library never depends on introspection).
 sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
-# [OPUS-4.8] (sq-e3pj) The JSON-LD writer's round-trip tests parse the emitted document
-# back to RDF to assert isomorphism. serde_json reads the JSON DOM in the test only — it
-# is a DEV dependency, so the opt-in `serialize-rdf` feature itself stays dependency-free
-# (the native writer emits JSON by hand and pulls in nothing). serde_json is already in
-# the workspace tree (sparq-server / the `service` feature).
+# [OPUS-4.8] (sq-e3pj, sq-6vshe.4) DEV-only serde_json: the `explain_json` structured-EXPLAIN
+# tests parse the hand-emitted JSON DOM back to assert every field round-trips (and `chunk`'s
+# `impl PartialEq<serde_json::Value>` test helper), so the opt-in `explain-json` feature itself
+# stays dependency-free (the production writer emits JSON by hand). NB: the JSON-LD writer's own
+# round-trip tests moved WITH the writer to `sparq-engine-serialize` in seam 1 of the facade
+# split. serde_json is already in the workspace tree (sparq-server / the `service` feature).
 serde_json = "1"
+
+# [SONNET-4.6] sq-sqtk2.3 — register the `kani` cfg so the `#[cfg(all(kani, feature =
+# "vectorized"))]` bounded-proof harnesses in `reduce.rs` do not trip `-D warnings`
+# (unexpected_cfgs) on the normal build. `cargo kani` sets this cfg itself when it
+# model-checks; under a normal build the harness module is stripped. Mirrors
+# crates/sparq-core/Cargo.toml and crates/sparq-vectors/Cargo.toml.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

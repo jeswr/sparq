@@ -17,20 +17,45 @@
       "unviable": 3
     },
     "sparq-canon": {
-      "caught": 28,
-      "caught_pct": 80.0,
-      "ceiling": 9,
-      "measured_surviving": 7,
+      "_note": "[OPUS-4.8] sq-qcnn.14: measured with --features rdf12-triple-terms (the rdf12.rs NON-STANDARD RDF-1.2 triple-term profile is gated behind this feature; without it, cargo-mutants generates rdf12.rs mutations but they are trivially missed because the module is not compiled). 4 surviving mutations are all comparison-operator variants in CanonState::hash_n_degree_quads path-pruning logic (lines 429, 430, 448, 459) — a hard-to-distinguish HNDQ optimization boundary guard.",
+      "caught": 104,
+      "caught_pct": 96.3,
+      "ceiling": 6,
+      "measured_surviving": 4,
       "timeout": 0,
-      "unviable": 8
+      "unviable": 32
+    },
+    "sparq-introspect": {
+      "caught": 179,
+      "caught_pct": 75.37,
+      "ceiling": 68,
+      "measured_surviving": 66,
+      "timeout": 23,
+      "unviable": 5
     },
     "sparq-parse": {
-      "caught": 25,
-      "caught_pct": 72.09,
-      "ceiling": 14,
-      "measured_surviving": 12,
-      "timeout": 6,
-      "unviable": 0
+      "caught": 73,
+      "caught_pct": 83.17,
+      "ceiling": 19,
+      "measured_surviving": 17,
+      "timeout": 11,
+      "unviable": 1
+    },
+    "sparq-prov": {
+      "caught": 151,
+      "caught_pct": 74.15,
+      "ceiling": 55,
+      "measured_surviving": 53,
+      "timeout": 1,
+      "unviable": 22
+    },
+    "sparq-substrate": {
+      "caught": 183,
+      "caught_pct": 60.98,
+      "ceiling": 130,
+      "measured_surviving": 128,
+      "timeout": 17,
+      "unviable": 21
     }
   },
   "margin": 2

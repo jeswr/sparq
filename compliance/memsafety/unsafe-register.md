@@ -46,9 +46,12 @@ register distinguishes two trust classes of `unsafe`:
 
 ## Register
 
-**63 `unsafe` sites** across 6 crates (the other 30 crates are `#![forbid(unsafe_code)]`).
+**67 `unsafe` sites** across 7 crates (the other crates are `#![forbid(unsafe_code)]`).
 Counts and the file:line list are produced by `scripts/unsafe-gate.py --list` and
-must equal `bench/unsafe-snapshot.json`.
+must equal `bench/unsafe-snapshot.json`. The 7th crate, **`sparq-engine`**, is a special
+case: its **library** stays `#![forbid(unsafe_code)]` (zero shipped `unsafe`) — the 4 sites
+are confined to a single **integration test's** byte-counting `#[global_allocator]`, which a
+custom allocator unavoidably requires (see the `sparq-engine` subsection below).
 
 Recurring invariant shorthands used below:
 - **POD-bytes** — `[u32;3]` / `u32` / `u64` / `f64` are plain-old-data with no invalid
@@ -168,11 +171,43 @@ capsule destructor's drop is idempotent.
 | `src/arrow_export.rs:123` | `ffi::PyCapsule_GetPointer` (CPython FFI) | `capsule` is the live capsule CPython passes; name matches the `'static` CStr it was created under | returns the leaked `*mut FFI_ArrowArrayStream` (or null on a name mismatch — guarded by the `!ptr.is_null()` check below). Raw CPython call, GIL held inside the destructor. |
 | `src/arrow_export.rs:125` | `Box::from_raw` (reclaim) | `ptr` is exactly the pointer leaked at :107 via `Box::into_raw`, of the same type, same allocator | reconstitutes and drops the `Box<FFI_ArrowArrayStream>` exactly once per capsule (null-guarded, so never on a name mismatch). `FFI_ArrowArrayStream::Drop` is idempotent on an already-released stream (`release` is set `None` after the first call), so no double free / no leak whether or not pyarrow consumed it. |
 
+### `sparq-engine` — 4 sites (test-only byte-counting global allocator) [OPUS-4.8]
+
+(sq-my8wd.4.) The engine **library** is `#![forbid(unsafe_code)]` and ships **zero**
+`unsafe`. These 4 sites live entirely in one integration test,
+`tests/service_stream_bounded.rs`, which pins the DoS-relevant invariant of streaming
+SERVICE consumption: a large/duplicate-heavy remote SPARQL result must be consumed in
+memory **O(body)**, not O(parsed DOM + a term-level relation copy) — the old
+collect-everything path amplified a remote result into a multiple of its wire size. The
+test proves this with a **thread-local byte-counting allocator**, and a `#[global_allocator]`
+unavoidably requires `unsafe` (the `GlobalAlloc` trait is `unsafe` by definition; there is
+no safe substitute for a deterministic per-thread allocation counter). It is deliberately
+placed in the integration-test crate, not the lib, precisely so the lib keeps its
+`forbid(unsafe_code)` posture. **Not** a B5 (untrusted-input) surface: every method is a
+verbatim forward to the process `System` allocator with the identical arguments, so
+`System` discharges all of `GlobalAlloc`'s obligations; the wrapper only reads
+`Layout::size()`/`new_size` and mutates a thread-local `Cell<isize>` — no pointer `System`
+returns is ever dereferenced, retained, or aliased. Bounded by **review + the trivial
+forward-to-`System` argument** and enforced by the file-local
+`#![warn(clippy::undocumented_unsafe_blocks)]` (every site carries a `// SAFETY:` comment);
+Miri does not cover it (Miri supplies its own allocator and does not model a
+`#[global_allocator]` that calls `System`), but the test itself runs on the standard
+`cargo test -p sparq-engine --features service` lane.
+
+| File:line | Kind | Invariant relied on | Why sound / how bounded |
+|---|---|---|---|
+| `tests/service_stream_bounded.rs:83` | `unsafe impl GlobalAlloc for Counting` | forward-to-`System` | every method delegates verbatim to `System` with the same args, so `System` upholds the trait contract; the wrapper adds only size reads + a thread-local counter. TEST-only; lib stays `forbid(unsafe_code)`. |
+| `tests/service_stream_bounded.rs:87` | `unsafe fn alloc` | caller's `layout` contract forwarded | `System.alloc(layout)` unchanged; only the returned pointer's nullness is inspected before recording `layout.size()`. |
+| `tests/service_stream_bounded.rs:98` | `unsafe fn dealloc` | `ptr` came from this allocator with this `layout` | `System.dealloc(ptr, layout)` unchanged; holds because every `alloc`/`realloc` also forwarded to `System`. |
+| `tests/service_stream_bounded.rs:106` | `unsafe fn realloc` | caller's `ptr`/`layout`/`new_size` contract forwarded | `System.realloc(ptr, layout, new_size)` unchanged; only the returned pointer's nullness is inspected before recording the delta. |
+
 ## NEEDS-REVIEW
 
-**None.** Every one of the 63 sites now carries a literal `// SAFETY:` comment
+**None.** Every one of the 67 sites now carries a literal `// SAFETY:` comment
 immediately preceding the `unsafe` block/impl, mechanically enforced by
-`clippy::undocumented_unsafe_blocks` (MS-G2 closed, sq-8wbn, [OPUS-4.8]). The 6 sites that
+`clippy::undocumented_unsafe_blocks` (MS-G2 closed, sq-8wbn, [OPUS-4.8]) — set
+crate-root on the 5 unsafe-bearing lib crates and file-local on the one `sparq-engine`
+integration test that carries the byte-counting allocator. The 6 sites that
 previously relied on an adjacent block comment — the two `unsafe impl Send`/`Sync for
 SlotPtr` pairs (`dict.rs` + `dictspill.rs`), the `MmapMut` `from_raw_parts_mut` view, and
 the test `remove_var` — were reworded so the `// SAFETY:` token sits on the line directly

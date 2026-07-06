@@ -161,3 +161,188 @@ fn unicode_in_body_survives_rewrite() {
     assert!(parsed.sparql.contains("naïve café ☕"), "string literal preserved");
     assert_eq!(parsed.sparql.matches("GRAPH").count(), 2);
 }
+
+// ----------------------------------------------------------------- [SONNET-4.6] sq-2n1q3.2 new forms
+
+/// `TUMBLING RANGE r` is accepted as an explicit tumbling-window keyword:
+/// semantically equivalent to `RANGE r` (step == range).
+#[test]
+fn parses_tumbling_keyword() {
+    let cases = [
+        "TUMBLING RANGE PT10S",
+        "TUMBLING RANGE 30",
+        "[TUMBLING RANGE PT2H]",
+    ];
+    for op in cases {
+        let q = format!(
+            "SELECT * WHERE {{ WINDOW <http://ex/w1> {{ ?s ?p ?o }} \
+             WINDOW <http://ex/w2> {{ ?s ?q ?r }} }}\n\
+             FROM NAMED WINDOW <http://ex/w1> ON <http://ex/s1> {op}\n\
+             FROM NAMED WINDOW <http://ex/w2> ON <http://ex/s2> RANGE 5"
+        );
+        let parsed = RspqlQuery::parse(&q).expect(op);
+        let w = &parsed.windows[0].spec;
+        // A tumbling window has step == range.
+        assert!(
+            matches!(w, WindowSpec::Time { range, step, .. } if range == step),
+            "op `{op}`: expected tumbling (step == range), got {:?}",
+            w
+        );
+    }
+}
+
+/// `SLIDING RANGE r STEP s` is accepted as an explicit sliding-window keyword:
+/// semantically equivalent to `RANGE r STEP s` (step < range).
+#[test]
+fn parses_sliding_keyword() {
+    let cases = [
+        ("SLIDING RANGE PT10S STEP PT5S", WindowSpec::time(10, 5)),
+        ("SLIDING RANGE 100 STEP 25", WindowSpec::time(100, 25)),
+        ("[SLIDING RANGE PT1M STEP PT30S]", WindowSpec::time(60, 30)),
+    ];
+    for (op, expect) in cases {
+        let q = format!(
+            "SELECT * WHERE {{ WINDOW <http://ex/w1> {{ ?s ?p ?o }} \
+             WINDOW <http://ex/w2> {{ ?s ?q ?r }} }}\n\
+             FROM NAMED WINDOW <http://ex/w1> ON <http://ex/s1> {op}\n\
+             FROM NAMED WINDOW <http://ex/w2> ON <http://ex/s2> RANGE 5"
+        );
+        let parsed = RspqlQuery::parse(&q).expect(op);
+        assert_eq!(parsed.windows[0].spec, expect, "op `{op}`");
+    }
+}
+
+/// The three new window-operator forms round-trip through the existing SPARQL
+/// rewrite without disturbing the rest of the query structure.
+#[test]
+fn new_window_forms_parse_and_rewrite_correctly() {
+    // Tumbling via TUMBLING keyword in one window, sliding via SLIDING keyword
+    // in another; both WINDOW references rewrite to GRAPH in the body.
+    let q = "\
+REGISTER RSTREAM <http://ex/out> AS
+SELECT ?s ?v WHERE {
+  WINDOW <http://ex/tw> { ?s <http://ex/value> ?v }
+  WINDOW <http://ex/sw> { ?s <http://ex/in> ?room }
+}
+FROM NAMED WINDOW <http://ex/tw> ON <http://ex/temp> TUMBLING RANGE PT10S
+FROM NAMED WINDOW <http://ex/sw> ON <http://ex/meta> [SLIDING RANGE PT20S STEP PT10S]";
+
+    let parsed = RspqlQuery::parse(q).unwrap();
+    assert_eq!(parsed.windows.len(), 2);
+    // TUMBLING RANGE PT10S → tumbling (step == range == 10).
+    assert_eq!(parsed.windows[0].spec, WindowSpec::time(10, 10));
+    // SLIDING RANGE PT20S STEP PT10S → sliding (range 20, step 10).
+    assert_eq!(parsed.windows[1].spec, WindowSpec::time(20, 10));
+    // Both WINDOW keywords became GRAPH in the rewritten SPARQL.
+    assert!(parsed.sparql.contains("GRAPH"), "WINDOW rewritten to GRAPH");
+    assert!(!parsed.sparql.contains("WINDOW"), "no WINDOW keyword survives");
+    sparq_engine::PreparedQuery::parse(&parsed.sparql).expect("rewritten SPARQL parses");
+}
+
+/// `ROWS n` in the textual surface grammar must fail CLOSED with a clear error
+/// mentioning "ROWS" — never silently produce a wrong window spec.
+#[test]
+fn rejects_rows_window_textual_form() {
+    let rows_q = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                  FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> ROWS 10";
+    let err = RspqlQuery::parse(rows_q).unwrap_err();
+    assert!(
+        err.to_lowercase().contains("rows"),
+        "expected error mentioning ROWS, got: {err}"
+    );
+    assert!(
+        err.contains("WindowSpec::count") || err.contains("programmatic"),
+        "expected diagnostic pointing to programmatic API, got: {err}"
+    );
+
+    // Also rejected inside brackets.
+    let rows_bracketed = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                          FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> [ROWS 10]";
+    let err2 = RspqlQuery::parse(rows_bracketed).unwrap_err();
+    assert!(
+        err2.to_lowercase().contains("rows"),
+        "expected error mentioning ROWS (bracketed), got: {err2}"
+    );
+}
+
+/// `NOW`-relative window bounds must fail CLOSED with a clear error mentioning
+/// "NOW" — never silently fall through to a wrong parse.
+#[test]
+fn rejects_now_relative_bounds() {
+    let now_q = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                 FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> NOW-PT10S TO NOW";
+    let err = RspqlQuery::parse(now_q).unwrap_err();
+    assert!(
+        err.to_uppercase().contains("NOW"),
+        "expected error mentioning NOW, got: {err}"
+    );
+
+    // Also inside brackets.
+    let now_bracketed = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                         FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> [NOW-PT1H TO NOW]";
+    let err2 = RspqlQuery::parse(now_bracketed).unwrap_err();
+    assert!(
+        err2.to_uppercase().contains("NOW"),
+        "expected error mentioning NOW (bracketed), got: {err2}"
+    );
+}
+
+/// `TUMBLING RANGE r STEP s` must fail CLOSED with a clear error mentioning
+/// "TUMBLING" and "STEP" — a `STEP` clause is contradictory with `TUMBLING`
+/// (which already implies `step == range`). Silently accepting it would produce
+/// an inconsistent window spec. [SONNET-4.6]
+#[test]
+fn rejects_tumbling_with_explicit_step() {
+    let tumbling_step = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                         FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> \
+                         TUMBLING RANGE PT10S STEP PT5S";
+    let err = RspqlQuery::parse(tumbling_step).unwrap_err();
+    assert!(
+        err.to_lowercase().contains("tumbling"),
+        "expected error mentioning TUMBLING, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("step"),
+        "expected error mentioning STEP, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("sliding"),
+        "expected error hinting SLIDING alternative, got: {err}"
+    );
+
+    // Also rejected inside brackets.
+    let tumbling_step_br = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                            FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> \
+                            [TUMBLING RANGE 30 STEP 10]";
+    let err2 = RspqlQuery::parse(tumbling_step_br).unwrap_err();
+    assert!(
+        err2.to_lowercase().contains("tumbling"),
+        "expected error mentioning TUMBLING (bracketed), got: {err2}"
+    );
+    assert!(
+        err2.to_lowercase().contains("step"),
+        "expected error mentioning STEP (bracketed), got: {err2}"
+    );
+}
+
+/// `SLIDING RANGE r` without a following `STEP` must fail CLOSED with a clear
+/// error — a bare `SLIDING RANGE r` is ambiguous (what is the slide cadence?).
+#[test]
+fn rejects_sliding_without_step() {
+    let no_step = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                   FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> SLIDING RANGE PT10S";
+    let err = RspqlQuery::parse(no_step).unwrap_err();
+    assert!(
+        err.to_lowercase().contains("sliding") || err.to_lowercase().contains("step"),
+        "expected error mentioning SLIDING/STEP, got: {err}"
+    );
+
+    // Also inside brackets.
+    let no_step_br = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                      FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> [SLIDING RANGE 30]";
+    let err2 = RspqlQuery::parse(no_step_br).unwrap_err();
+    assert!(
+        err2.to_lowercase().contains("sliding") || err2.to_lowercase().contains("step"),
+        "expected error mentioning SLIDING/STEP (bracketed), got: {err2}"
+    );
+}

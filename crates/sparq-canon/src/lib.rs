@@ -419,6 +419,209 @@ mod tests {
         NamedNode::new(s).unwrap()
     }
 
+    // [OPUS-4.8] sq-qcnn.14 — direct unit tests per public fn, asserting exact values.
+    // One test per uncovered public fn; each assert is non-vacuous (flip a value → red).
+
+    /// Direct test for `parse_nquads` (public wrapper). Asserts exact quad content,
+    /// killing "return empty vec" / "skip error propagation" mutation classes.
+    #[test]
+    fn parse_nquads_exact_content() {
+        let doc = "<http://ex/s> <http://ex/p> \"hello\" .\n";
+        let quads = parse_nquads(doc).unwrap();
+        assert_eq!(quads.len(), 1, "one line -> one quad");
+        assert_eq!(quads[0].subject.to_string(), "<http://ex/s>");
+        assert_eq!(quads[0].predicate.to_string(), "<http://ex/p>");
+        assert_eq!(quads[0].object.to_string(), "\"hello\"");
+        // Multiple quads: ensure each is returned.
+        let two = "<http://ex/s> <http://ex/p> <http://ex/a> .\n\
+                   <http://ex/s> <http://ex/q> <http://ex/b> .\n";
+        assert_eq!(parse_nquads(two).unwrap().len(), 2, "two lines -> two quads");
+    }
+
+    /// `parse_nquads` error path: malformed N-Quads must return `CanonError::Bridge`,
+    /// not silently succeed. Kills the "always return Ok" mutation.
+    #[test]
+    fn parse_nquads_rejects_malformed() {
+        let result = parse_nquads("not n-quads !!!\n");
+        assert!(
+            matches!(result, Err(CanonError::Bridge(_))),
+            "malformed input must return Bridge error, got: {:?}",
+            result
+        );
+    }
+
+    /// Direct test for `issue_quads_with` (hash-generic issuer, SHA-384 profile).
+    /// Asserts the EXACT issued label: "c14n0" for a single bnode. Kills mutations
+    /// that change the prefix, omit the counter, or skip inserting into the map.
+    #[test]
+    fn issue_quads_with_sha384_exact_label() {
+        use sha2::Sha384;
+        let q = Quad::new(
+            NamedOrBlankNode::BlankNode(BlankNode::new("b0").unwrap()),
+            iri("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("val")),
+            GraphName::DefaultGraph,
+        );
+        let map = issue_quads_with::<Sha384>(&[q]).unwrap();
+        assert_eq!(map.len(), 1, "one bnode -> one issued id");
+        assert_eq!(
+            map.get("b0").map(String::as_str),
+            Some("c14n0"),
+            "single bnode must issue as c14n0 under SHA-384: {map:?}"
+        );
+    }
+
+    /// Direct test for `canonicalize_quads_with` (hash-generic, SHA-384 profile).
+    /// Asserts exact structural properties so mutations to the format string or
+    /// the hash dispatch are killed.
+    #[test]
+    fn canonicalize_quads_with_sha384_canonical_form() {
+        use sha2::Sha384;
+        let q = Quad::new(
+            NamedOrBlankNode::BlankNode(BlankNode::new("b0").unwrap()),
+            iri("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("val")),
+            GraphName::DefaultGraph,
+        );
+        let canon = canonicalize_quads_with::<Sha384>(&[q]).unwrap();
+        assert!(
+            canon.contains("_:c14n0"),
+            "bnode must be relabelled to c14n0: {canon:?}"
+        );
+        assert!(
+            canon.contains("<http://ex/p>"),
+            "predicate must appear in canonical output: {canon:?}"
+        );
+        assert!(
+            canon.ends_with('\n'),
+            "canonical doc must end with newline: {canon:?}"
+        );
+        // Isomorphism: relabelling the bnode gives byte-identical output.
+        let q2 = Quad::new(
+            NamedOrBlankNode::BlankNode(BlankNode::new("other").unwrap()),
+            iri("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("val")),
+            GraphName::DefaultGraph,
+        );
+        assert_eq!(
+            canon,
+            canonicalize_quads_with::<Sha384>(&[q2]).unwrap(),
+            "isomorphic datasets must agree under SHA-384"
+        );
+    }
+
+    /// Direct test for `issue_triples` (single-graph, SHA-256 issuer map).
+    /// Asserts the EXACT issued label "c14n0". Kills bnode-label prefix mutations.
+    #[test]
+    fn issue_triples_exact_label() {
+        let t = Triple::new(
+            NamedOrBlankNode::BlankNode(BlankNode::new("x").unwrap()),
+            iri("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("v")),
+        );
+        let map = issue_triples(&[t]).unwrap();
+        assert_eq!(map.len(), 1, "one bnode -> one issued id");
+        assert_eq!(
+            map.get("x").map(String::as_str),
+            Some("c14n0"),
+            "single bnode must issue as c14n0: {map:?}"
+        );
+    }
+
+    /// `issue_triples` must reject triple-term objects (same guard as `canonicalize_triples`).
+    /// Kills the "skip the triple-term check" mutation class.
+    #[test]
+    fn issue_triples_rejects_triple_terms() {
+        let inner = Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/s")),
+            iri("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("v")),
+        );
+        let t = Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/a")),
+            iri("http://ex/asserts"),
+            Term::Triple(Box::new(inner)),
+        );
+        assert!(
+            matches!(issue_triples(&[t]), Err(CanonError::TripleTerm)),
+            "`issue_triples` must fail closed on triple-term objects"
+        );
+    }
+
+    /// Direct test for `graph_triples` — materializes a `sparq_core::Graph`'s triples
+    /// as oxrdf Terms, asserting EXACT count + each term. Kills "return empty vec" and
+    /// "skip one term" mutation classes.
+    #[test]
+    fn graph_triples_materializes_exact_terms() {
+        use sparq_core::Graph;
+        let g = Graph::load_str(
+            "<http://ex/s> <http://ex/p> <http://ex/o> .\n",
+            "ntriples",
+        )
+        .expect("load_str");
+        let triples = graph_triples(&g).unwrap();
+        assert_eq!(triples.len(), 1, "one stored triple -> one materialized triple");
+        let t = &triples[0];
+        assert_eq!(t.subject.to_string(), "<http://ex/s>", "subject preserved");
+        assert_eq!(t.predicate.to_string(), "<http://ex/p>", "predicate preserved");
+        assert_eq!(t.object.to_string(), "<http://ex/o>", "object preserved");
+    }
+
+    /// Direct test for `canonicalize_graph_content` — the ZK pipeline's per-graph entry
+    /// point over a `sparq_core::Graph`. Asserts bnode relabelling and exact line count,
+    /// so mutations to the bnode-relabelling logic or the graph→triples extraction are killed.
+    #[test]
+    fn canonicalize_graph_content_relabels_bnode() {
+        use sparq_core::Graph;
+        let g = Graph::load_str(
+            "_:b0 <http://ex/p> <http://ex/o> .\n",
+            "ntriples",
+        )
+        .expect("load_str");
+        let c = canonicalize_graph_content(&g).unwrap();
+        assert_eq!(c.lines.len(), 1, "one stored triple -> one canonical line");
+        assert!(
+            c.lines[0].contains("_:c14n0"),
+            "bnode must be relabelled to c14n0: {:?}",
+            c.lines[0]
+        );
+        assert!(
+            c.lines[0].contains("<http://ex/p>"),
+            "predicate must be preserved: {:?}",
+            c.lines[0]
+        );
+        // The `triples` slice must match the canonical line (re-parsed canonical triple).
+        assert_eq!(c.triples.len(), 1, "one line -> one canonical triple");
+    }
+
+    /// `to_nquads` on a multi-triple graph must join ALL lines, each newline-terminated.
+    /// Kills mutations that omit `push('\n')`, or return only the first line.
+    #[test]
+    fn to_nquads_multi_line_joins_all_lines() {
+        let b1 = BlankNode::new("x").unwrap();
+        let b2 = BlankNode::new("y").unwrap();
+        let t1 = Triple::new(
+            NamedOrBlankNode::BlankNode(b1),
+            iri("http://ex/p"),
+            Term::BlankNode(b2.clone()),
+        );
+        let t2 = Triple::new(
+            NamedOrBlankNode::BlankNode(b2),
+            iri("http://ex/q"),
+            Term::Literal(Literal::new_simple_literal("leaf")),
+        );
+        let c = canonicalize_triples(&[t1, t2]).unwrap();
+        assert_eq!(c.lines.len(), 2, "two triples -> two canonical lines");
+        let doc = c.to_nquads();
+        let expected = format!("{}\n{}\n", c.lines[0], c.lines[1]);
+        assert_eq!(doc, expected, "to_nquads must join all lines with newlines");
+        // Each line must appear in order and be newline-terminated.
+        let parts: Vec<&str> = doc.lines().collect();
+        assert_eq!(parts.len(), 2, "two lines in doc");
+        assert_eq!(parts[0], c.lines[0]);
+        assert_eq!(parts[1], c.lines[1]);
+    }
+
     #[test]
     fn canonical_labels_and_order() {
         let b1 = BlankNode::new("zzz").unwrap();

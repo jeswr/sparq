@@ -17,3 +17,12 @@
   crate: "sparq-geo"
   features: "reproject"
   test: true
+
+# sparq-geo: the OGC GeoSPARQL query-rewrite extension (topology PROPERTY forms).
+# OPT-IN and OFF by default so the rewrite surface compiles out of the default build
+# and standard SPARQL behaviour is unchanged; this leg builds + tests it in isolation
+# (including the ogc_query_rewrite_ratchet). [OPUS-4.8] sq-wf9qg
+- name: "sparq-geo (geosparql_rewrite)"
+  crate: "sparq-geo"
+  features: "geosparql_rewrite"
+  test: true

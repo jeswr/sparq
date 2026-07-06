@@ -10,13 +10,17 @@
 //   (3) TOOLS list — each a VERB opened as a tab with an honesty-tier dot (NOT a page).
 
 import * as React from "react";
-import { ChevronDown, Plus, Circle, Database, FolderTree, FileUp, Link2 } from "lucide-react";
+import { ChevronRight, Plus, Database, FolderTree, FileUp, Link2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useEngine } from "@/lib/engine-context";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useImportDrawer } from "@/components/workbench/import-drawer";
+import { ExportDataMenu } from "@/components/workbench/store-export";
 import { TIER_META, type ToolDef } from "@/data/tools";
+import { resolveTool } from "@/components/workbench/tool-panel";
+// [SONNET-4.6] sq-lmlch — the real workspace switcher UI (replaces the dead stub).
+import { WorkspaceSwitcher } from "@/components/workbench/workspace-switcher";
 
 interface LeftRailProps {
   tools: ToolDef[];
@@ -108,6 +112,11 @@ function DatasetsTree() {
       >
         <Plus className="size-3" /> Import data…
       </button>
+
+      {/* [OPUS-4.8] sq-xvj9 — the sibling EXPORT entry point: serialise the whole live store to a
+          pretty Turtle / TriG / JSON-LD document and download it (disabled while the store is
+          cold/empty). */}
+      <ExportDataMenu />
     </div>
   );
 }
@@ -133,18 +142,56 @@ function Section({
 }
 
 export function LeftRail({ tools, activeId, onOpenTool }: LeftRailProps) {
+  // [SONNET-4.6] sq-1odi9 — rail honesty regrouping: split working tools from coming-soon stubs.
+  const [comingSoonOpen, setComingSoonOpen] = React.useState(false);
+
+  // Grouping is DATA-DRIVEN off resolveTool(id).group so panel-file overrides (sq-lxomy /
+  // sq-9nwab / sq-kwb74 / sq-iemfq) auto-move tools when they flip their panel override.
+  const workingTools = tools.filter((t) => (resolveTool(t.id) ?? t).group === "working");
+  const comingSoonTools = tools.filter((t) => (resolveTool(t.id) ?? t).group === "coming-soon");
+
+  function renderToolButton(tool: ToolDef, toolGroup: "working" | "coming-soon") {
+    const Icon = tool.icon;
+    const resolved = resolveTool(tool.id) ?? tool;
+    const tier = TIER_META[resolved.tier];
+    const isActive = tool.id === activeId;
+    return (
+      <li key={tool.id}>
+        {/* [OPUS-4.8] sq-ixc3.11 — `data-tool` is a stable e2e/test hook for selecting a
+            tool in the rail (the tauri-driver smoke clicks data-tool="shacl"). */}
+        <button
+          data-tool={tool.id}
+          data-tool-group={toolGroup}
+          onClick={() => onOpenTool(tool.id)}
+          className={cn(
+            "group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-sidebar-accent/50",
+            // [OPUS-4.8] sq-vw3ax (#820 redesign) — the active tool gets the accent-lit
+            // teal spine (a glowing left bar), not just a tint, so the brand leads.
+            isActive && "sq-active-spine font-medium",
+          )}
+          title={`${resolved.blurb} — ${tier.label}`}
+        >
+          <Icon
+            className={cn(
+              "size-3.5 shrink-0",
+              isActive ? "text-primary" : "text-muted-foreground",
+            )}
+          />
+          <span className="min-w-0 flex-1 truncate">{tool.label}</span>
+          <span
+            className={cn("size-2 shrink-0 rounded-full", tier.dot)}
+            aria-hidden
+          />
+        </button>
+      </li>
+    );
+  }
+
   return (
     <nav className="flex w-56 shrink-0 flex-col overflow-y-auto border-r bg-sidebar text-sidebar-foreground">
-      {/* (1) Workspace switcher — the persistent model is sq-atb0; foundation = default. */}
+      {/* (1) Workspace switcher — [SONNET-4.6] sq-lmlch: replaced stub with real switcher. */}
       <div className="border-b px-2 py-2">
-        <button
-          className="flex w-full items-center gap-1.5 rounded-md border bg-background px-2 py-1.5 text-left text-xs hover:bg-sidebar-accent/40"
-          title="Workspace switcher — persistent workspaces are a later phase (sq-atb0)"
-        >
-          <Circle className="size-2.5 fill-[var(--success)] text-[var(--success)] drop-shadow-[0_0_5px_var(--success)]" />
-          <span className="flex-1 truncate font-medium">default workspace</span>
-          <ChevronDown className="size-3 text-muted-foreground" />
-        </button>
+        <WorkspaceSwitcher />
       </div>
 
       {/* (2) Datasets tree of the LIVE store. */}
@@ -152,44 +199,33 @@ export function LeftRail({ tools, activeId, onOpenTool }: LeftRailProps) {
         <DatasetsTree />
       </Section>
 
-      {/* (3) TOOLS — each a VERB opened as a tab with its honesty-tier dot. */}
+      {/* (3) TOOLS — each a VERB opened as a tab with its honesty-tier dot.
+          [SONNET-4.6] sq-1odi9 — split into working (visible) + coming-soon (collapsed subgroup). */}
       <Section label="Tools">
-        <ul className="px-1 pb-2">
-          {tools.map((tool) => {
-            const Icon = tool.icon;
-            const tier = TIER_META[tool.tier];
-            const isActive = tool.id === activeId;
-            return (
-              <li key={tool.id}>
-                {/* [OPUS-4.8] sq-ixc3.11 — `data-tool` is a stable e2e/test hook for selecting a
-                    tool in the rail (the tauri-driver smoke clicks data-tool="shacl"). */}
-                <button
-                  data-tool={tool.id}
-                  onClick={() => onOpenTool(tool.id)}
-                  className={cn(
-                    "group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-sidebar-accent/50",
-                    // [OPUS-4.8] sq-vw3ax (#820 redesign) — the active tool gets the accent-lit
-                    // teal spine (a glowing left bar), not just a tint, so the brand leads.
-                    isActive && "sq-active-spine font-medium",
-                  )}
-                  title={`${tool.blurb} — ${tier.label}`}
-                >
-                  <Icon
-                    className={cn(
-                      "size-3.5 shrink-0",
-                      isActive ? "text-primary" : "text-muted-foreground",
-                    )}
-                  />
-                  <span className="min-w-0 flex-1 truncate">{tool.label}</span>
-                  <span
-                    className={cn("size-2 shrink-0 rounded-full", tier.dot)}
-                    aria-hidden
-                  />
-                </button>
-              </li>
-            );
-          })}
+        <ul className="px-1 pb-1">
+          {workingTools.map((tool) => renderToolButton(tool, "working"))}
         </ul>
+
+        {/* Coming soon subgroup — collapsed by default; expand to see honest stubs. */}
+        <div className="px-1 pb-2">
+          <button
+            data-rail-section="coming-soon-toggle"
+            aria-expanded={comingSoonOpen}
+            onClick={() => setComingSoonOpen((o) => !o)}
+            className="flex w-full items-center gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
+          >
+            <ChevronRight
+              className={cn("size-3 shrink-0 transition-transform", comingSoonOpen && "rotate-90")}
+            />
+            <span>Coming soon</span>
+            <span className="ml-1 tabular-nums">({comingSoonTools.length})</span>
+          </button>
+          {comingSoonOpen && (
+            <ul className="mt-0.5">
+              {comingSoonTools.map((tool) => renderToolButton(tool, "coming-soon"))}
+            </ul>
+          )}
+        </div>
       </Section>
     </nav>
   );

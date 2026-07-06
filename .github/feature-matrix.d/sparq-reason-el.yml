@@ -44,3 +44,30 @@
   crate: "sparq-reason-el"
   features: "hasse"
   test: true
+
+# [FABLE-5] sq-pbz04.2.2: sparq-reason-el's `cdomain` feature — concrete domains
+# (CR7–CR9): faceted `owl:onDatatype`/`owl:withRestrictions` satisfiability +
+# `DataHasValue`/singleton-`DataOneOf` point ranges on the shared
+# `sparq_substrate::numeric` exact tier. Same gap as the rbox/hasse legs above:
+# tests/cdomain.rs is `#![cfg(feature = "cdomain")]` (the CR7 unsat / CR8 containment /
+# deferral-boundary closure oracles) and the whole cdomain.rs module + the extract.rs
+# hooks are `#[cfg(feature = "cdomain")]`, so the default build compiles them EMPTY and
+# runs ZERO of them — this leg is the only thing that executes them. New OPTIONAL dep:
+# sparq-substrate (numeric slice only), linked ONLY by this feature.
+- name: "sparq-reason-el (cdomain — CR7–CR9 concrete domains)"
+  crate: "sparq-reason-el"
+  features: "cdomain"
+  test: true
+
+# [OPUS-4.8] sq-pbz04.2.5: sparq-reason-el's `abox` feature — ABox realisation +
+# whole-ontology consistency. Same gap as the rbox/hasse/cdomain legs above: the
+# behavioral tests in `src/abox.rs` are gated `#[cfg(feature = "abox")]` (the whole
+# module is feature-gated), so the default build (and ci.yml's `--workspace
+# --all-targets` archive, which passes NO `--features`) compiles them EMPTY and runs
+# ZERO of them — this leg is the ONLY thing that executes them in CI. No new dep
+# (`abox = []`, reuses sparq-core + rustc-hash + oxrdf already in the default dep
+# set). Verified locally: `cargo test -p sparq-reason-el --features abox` green.
+- name: "sparq-reason-el (abox — ABox realisation + whole-ontology consistency)"
+  crate: "sparq-reason-el"
+  features: "abox"
+  test: true

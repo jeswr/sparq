@@ -81,11 +81,11 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Set up Java (for the Jena reference engine)
-        uses: actions/setup-java@ad2b38190b15e4d6bdf0c97fb4fca8412226d287 # v5.3.0
+        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
         with:
           distribution: temurin
           java-version: "21"
@@ -106,7 +106,7 @@ jobs:
       # through to the download+verify step below.
       - name: Cache Apache Jena
         id: jena-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/apache-jena
           key: apache-jena-${{ env.JENA_VERSION }}
@@ -130,7 +130,7 @@ jobs:
       # every day. A cache miss falls through to the `npm ci` step.
       - name: Cache Node reference adapter node_modules
         id: node-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: crates/sparq-shacl/tests/diff_fuzz/node_modules
           key: shacl-node-adapter-${{ hashFiles('crates/sparq-shacl/tests/diff_fuzz/package-lock.json') }}

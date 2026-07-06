@@ -9,16 +9,24 @@
 // is the Cmd-K palette (sq-vw3ax.1), which is WHY removing the sidebar is now safe — Cmd-K
 // shipped first. A mobile Sheet drawer mirrors the same slim links (no full tree).
 //
-// OPTION-B (the maintainer's decision after #1004 opened, sq-rclb8). Two DISTINCT destinations,
-// not one "Try the GUI": "Try" → /try is the lightweight in-browser SPARQL REPL playground (kept
-// unchanged); "App" → /app is the live operational GUI (a placeholder today; the GUI track fills
-// it). The old single "Try the GUI" → /gui slot is dropped (/gui now client-redirects to /app).
+// OPTION-B (the maintainer's decision after #1004 opened, sq-rclb8 / sq-vnd0i). The single
+// operational destination is "App" → /app, the LIVE GUI. That GUI is a SEPARATE Next.js app
+// (gui/app), overlaid at /app/ by the Pages deploy (pages.yml) — it is NOT a route of this site.
+// The old single "Try the GUI" → /gui slot, and the in-tab /try REPL playground, both redirect
+// to /app (sq-4hiqe, maintainer directive 2026-07-05: /try was "very broken" and the app has
+// everything you need — /app is now the ONE workbench).
 //
-// Destinations (research §2 + the maintainer's discoverability gaps), slim at 6:
-//   Home · Capabilities · Try · App · Benchmarks · Download
+// [OPUS-4.8] sq-vw3ax.11 — the "App" slot is therefore a HARD (full-page) link, not a next/link
+// soft navigation: soft-navigating across two distinct Next builds fetches the WRONG app's RSC
+// Flight payload (/app/index.txt) and lands on a raw .txt instead of the GUI. See NavLink.
+//
+// Destinations (research §2 + the maintainer's discoverability gaps):
+//   Home · Capabilities · App · Benchmarks · Papers · Download
 //   utility cluster: { Cmd-K · GitHub · theme }
-// Papers stays a real route but lives in Cmd-K (overflow) to keep the bar slim, not bloated.
-// (/examples and the deep-page rebuild are sequenced in sq-vw3ax.6 / .4 — not this PR.)
+// [OPUS-4.8] sq-1scgk (maintainer 2026-07-04 item 9b) — "Papers" is PROMOTED into the slim
+// top bar so the paper-factory output is prominently findable, not buried in Cmd-K overflow.
+// It stays in Cmd-K too (the palette indexes every top-bar page). The bar stays lean at 6 short
+// labels. (/examples and the deep-page rebuild are sequenced in sq-vw3ax.6 / .4 — not this PR.)
 
 import * as React from "react";
 import Link from "next/link";
@@ -26,6 +34,7 @@ import { usePathname } from "next/navigation";
 import { Github, Menu } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { withBasePath } from "@/lib/base-path";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -40,23 +49,28 @@ import {
   CommandPaletteTrigger,
 } from "@/components/command-palette";
 // [OPUS-4.8] sq-ixc3.10 — the operational-command registry. Mounted once inside the palette so
-// the workbench (the REPL) can contribute live run / EXPLAIN / connect / export / import /
-// switch-workspace / named-graph / recent-query commands to the keyboard-first spine.
+// interactive surfaces can contribute live commands to the keyboard-first spine. On this
+// marketing site the registry now degrades to pure navigation (the in-tab REPL that used to
+// register run / EXPLAIN / connect verbs was removed with /try, sq-4hiqe — /app owns them).
 import { PaletteCommandsProvider } from "@/components/palette-commands";
 
 const REPO_URL = "https://github.com/jeswr/sparq";
 
 // The slim top bar's content destinations. Capabilities is the single gallery that replaces
-// the collapsed /surface/* tree; Try is the lightweight in-browser SPARQL REPL playground; App
-// is the live operational GUI destination; Download surfaces the desktop GUI + CLI binaries (the
-// maintainer's discoverability ask). Each is a real, built route. Papers is intentionally NOT in
-// the bar (it stays a route, reachable via Cmd-K) so the bar stays slim at 6, not bloated.
-const NAV_ITEMS: { href: string; label: string }[] = [
+// the collapsed /surface/* tree; App is the live operational GUI destination (the single
+// workbench — /try redirects here); Download surfaces the desktop GUI + CLI binaries (the
+// maintainer's discoverability ask). Each is a real, built route. [OPUS-4.8] sq-1scgk — Papers
+// is now a first-class bar destination (maintainer 2026-07-04 item 9b: make the paper-factory
+// output prominently findable), sitting between Benchmarks and Download; it remains reachable
+// via Cmd-K too. `external: true` marks a destination that is served by a SEPARATE deployed app
+// at the same origin (here: /app = the gui/app workbench overlaid at /app/). Such a slot must be
+// a hard, full-page navigation — see NavLink — not a next/link soft nav (sq-vw3ax.11).
+const NAV_ITEMS: { href: string; label: string; external?: boolean }[] = [
   { href: "/", label: "Home" },
   { href: "/capabilities", label: "Capabilities" },
-  { href: "/try", label: "Try" },
-  { href: "/app", label: "App" },
+  { href: "/app", label: "App", external: true },
   { href: "/benchmarks", label: "Benchmarks" },
+  { href: "/papers", label: "Papers" },
   { href: "/download", label: "Download" },
 ];
 
@@ -70,24 +84,48 @@ function NavLink({
   href,
   children,
   active,
+  external,
   onNavigate,
 }: {
   href: string;
   children: React.ReactNode;
   active: boolean;
+  external?: boolean;
   onNavigate?: () => void;
 }) {
+  const className = cn(
+    "rounded-md px-3 py-1.5 text-sm transition-colors",
+    active
+      ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+      : "text-foreground/70 hover:bg-muted hover:text-foreground",
+  );
+
+  // [OPUS-4.8] sq-vw3ax.11 — an `external` destination (e.g. /app) is served in production by a
+  // DIFFERENT Next.js app overlaid at /app/ (gui/app, sq-vnd0i), so it must be a hard,
+  // full-page navigation. A next/link soft nav across two distinct Next builds would fetch the
+  // foreign RSC Flight payload (/app/index.txt) and render a raw .txt instead of the GUI —
+  // exactly the bug this fixes. withBasePath prefixes the hand-written absolute href for the
+  // /sparq (Pages) vs "" (Tauri) hosts — Next does NOT auto-prefix a plain <a>. The trailing
+  // slash matches `trailingSlash: true` so the static export's directory index resolves.
+  if (external) {
+    return (
+      <a
+        href={withBasePath(href.endsWith("/") ? href : `${href}/`)}
+        onClick={onNavigate}
+        aria-current={active ? "page" : undefined}
+        className={className}
+      >
+        {children}
+      </a>
+    );
+  }
+
   return (
     <Link
       href={href}
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
-      className={cn(
-        "rounded-md px-3 py-1.5 text-sm transition-colors",
-        active
-          ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
-          : "text-foreground/70 hover:bg-muted hover:text-foreground",
-      )}
+      className={className}
     >
       {children}
     </Link>
@@ -96,6 +134,13 @@ function NavLink({
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = React.useState(false);
+  // [OPUS-4.8] sq-ymr2e.1 — post-hydration readiness marker for E2E. Set in a mount effect, so
+  // `[data-app-ready]` appears only after React has hydrated the shell — and, because the attribute
+  // is applied on the RE-RENDER after the passive-effect batch, strictly after the wrapping
+  // <CommandPalette>'s global ⌘K keydown effect has been registered. The E2E navigation barrier
+  // waits on this instead of a fixed sleep (site/e2e/support/app-ready.ts); no user-facing effect.
+  const [appReady, setAppReady] = React.useState(false);
+  React.useEffect(() => setAppReady(true), []);
   const isActive = useIsActive();
 
   return (
@@ -106,7 +151,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     // and the workbench (register side) share one operational-command registry.
     <CommandPalette>
       <PaletteCommandsProvider>
-      <div className="flex min-h-svh flex-col">
+      <div
+        className="flex min-h-svh flex-col"
+        data-app-ready={appReady ? "true" : undefined}
+      >
         {/* Sticky slim top bar (h-16, backdrop blur) — the ONE navigation. */}
         <header className="sticky top-0 z-30 flex h-16 items-center gap-2 border-b bg-background/90 px-4 backdrop-blur md:px-6">
           {/* Mobile hamburger → left Sheet drawer with the SAME slim links (no full tree). */}
@@ -137,6 +185,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     key={item.href}
                     href={item.href}
                     active={isActive(item.href)}
+                    external={item.external}
                     onNavigate={() => setMobileOpen(false)}
                   >
                     {item.label}
@@ -156,7 +205,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             aria-label="Primary"
           >
             {NAV_ITEMS.map((item) => (
-              <NavLink key={item.href} href={item.href} active={isActive(item.href)}>
+              <NavLink
+                key={item.href}
+                href={item.href}
+                active={isActive(item.href)}
+                external={item.external}
+              >
                 {item.label}
               </NavLink>
             ))}

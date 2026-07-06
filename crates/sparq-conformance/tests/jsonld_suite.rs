@@ -104,6 +104,8 @@ mod gated {
     use oxrdf::{Dataset, Quad};
     use serde_json::Value;
     use sparq_core::Graph;
+    // [SONNET-4.6] sq-kk1mq — native expand() for the document-level expand oracle.
+    use sparq_jsonld::{expand as jsonld_expand, JsonLdOptions, NoopLoader, ProcessingMode};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
@@ -201,6 +203,95 @@ mod gated {
     /// RISE — a child of sq-oy1f); SKIP is reserved for genuinely-unsupported cases,
     /// never used to hide a divergence.
     pub const FRAME_FLOOR: usize = 61;
+
+    /// [SONNET-4.6] sq-kk1mq (oracle-correction re-baseline; supersedes the old
+    /// sq-oy1f RDF-equivalence oracle below) — `expand` pass floor over the
+    /// `expand` category of `w3c/json-ld-api`, now measured with the NATIVE
+    /// DOCUMENT-LEVEL oracle: `sparq_jsonld::expand(input, opts, &NoopLoader)`
+    /// produces a `Json` value; that value is deep-compared against the suite's
+    /// expected expanded document using [`json_ld_equal`] (object key order
+    /// insignificant; array order SIGNIFICANT only inside `@list` values,
+    /// insignificant elsewhere; numeric equality as f64).
+    ///
+    /// ## Oracle-correction rationale
+    ///
+    /// The OLD oracle (sq-oy1f, merged before this bead) compared the RDF dataset
+    /// produced by the engine's JSON-LD WRITER (`graph_to_jsonld(Expanded)`) against
+    /// the RDF produced by re-parsing the suite's expected document. That oracle
+    /// measured the writer's RDF fidelity, not the expansion algorithm. A case could
+    /// "pass" by coincidence (writer happened to produce equivalent RDF) even when the
+    /// expansion JSON shape differed from the spec, or fail spuriously when the input
+    /// had no RDF projection but the expander output was correct. The new oracle
+    /// measures JSON-LD data-model (semantic) equivalence — order-insensitive outside
+    /// `@list` per bead sq-kk1mq — NOT structural identity with the reference output.
+    ///
+    /// NOTE: ~18 of the 240 passes are semantically-equal-but-reordered vs. the W3C
+    /// reference (@type order #tpr30, @id-map #tm001, @index #tpi06, multi-value
+    /// #tn004/#t0030 families); a strict order-sensitive harness would fail these 18
+    /// (strict-ordered count = 222).  The comparator is intentionally order-insensitive
+    /// per the JSON-LD data model (elements outside `@list` are a set).
+    ///
+    /// This is an HONEST REBASE, not a ratchet weakening: the new floor may be lower
+    /// than 247 (old oracle measured 247/385) because some old passes were oracle
+    /// artefacts (the writer round-tripped to equivalent RDF while the JSON was wrong).
+    /// The gain is precision: passes now mean the expander produced a semantically
+    /// correct expanded document (data-model equivalence, not byte-identical structure).
+    /// See `run_expand_native` for the skip buckets and the PR body for the full
+    /// old-vs-new breakdown (bead sq-kk1mq).
+    ///
+    /// ## What changed from the old oracle
+    ///
+    /// * OLD (sq-oy1f, EXPAND_FLOOR = 247): RDF-equivalence —
+    ///   `reparse_rdf(write_expanded(ingest_rdf(input))) ≡ reparse_rdf(expected)`.
+    ///   Forwarded NO options; skipped empty-RDF inputs, 1.0-mode cases.
+    /// * NEW (sq-kk1mq, EXPAND_FLOOR = measured): document-level JSON comparison —
+    ///   `json_ld_equal(expand(input, opts), expected_json)`. Forwards base,
+    ///   expandContext, processingMode from the manifest; attempts all positive tests
+    ///   regardless of RDF projection emptiness.
+    ///
+    /// ## Honest SKIP buckets (recorded, not passed, not failed)
+    ///
+    /// * `requires` optional-feature cases — out of the gated surface (same as before).
+    /// * NegativeEvaluationTests — sparq's expander raises some spec errors but
+    ///   error-code completeness is unverified; deferred to a child bead of sq-oy1f.
+    ///   SKIP (honest), never a counted pass.
+    /// * Remote `input` URLs — no network (SKIP).
+    /// * No `expect` file — nothing to compare (SKIP).
+    ///
+    /// ## RATCHET: may only RISE
+    ///
+    /// This floor is the MEASURED pass count with the new oracle at the pinned
+    /// suite revision. It is NOT aspirational. Future rises land when the native
+    /// expander fixes known divergences (tracked as children of sq-oy1f).
+    /// MEASURED 240/385 at the pinned revision under the new document-level oracle
+    /// (sq-kk1mq): 240 pass / 36 fail / 109 skip.  Breakdown vs. old oracle (247/10/128):
+    ///   - 7 fewer passes (247→240): NET of 20 old-pass→new-fail flips (old oracle over-passed;
+    ///     writer happened to produce equivalent RDF while JSON structure differed from spec),
+    ///     offset by 13 recoveries: 8 old-fail→new-pass via oracle precision (new oracle
+    ///     correctly passes cases the old oracle spuriously failed), plus 5 old-skip→new-pass
+    ///     via options forwarding (processingMode/expandContext now forwarded; previously skipped)
+    ///   - 26 more fails (10→36): honest divergences the new oracle reveals (JSON-level
+    ///     mismatches invisible to the old RDF oracle, options-driven, or @direction shapes)
+    ///   - 19 fewer skips (128→109): the old 1.0-mode and empty-RDF skip buckets are gone
+    ///     (the new oracle forwards processingMode and doesn't require a non-empty RDF
+    ///     projection); the 109 that remain are the NegativeEvaluationTests (deferred)
+    pub const EXPAND_FLOOR: usize = 240;
+
+    /// [OPUS-4.8] sq-oy1f — `flatten` (RDF → flattened JSON-LD via the
+    /// ALREADY-SHIPPING writer `graph_to_jsonld(JsonLdForm::Flattened)`, the
+    /// `serialize-rdf` feature) pass floor over the `flatten` category of
+    /// `w3c/json-ld-api`. RATCHET: may only RISE. This is the MEASURED pass count
+    /// at the pinned suite revision — the number of `jld:FlattenTest` cases for
+    /// which flattening the input's RDF and re-parsing the produced flattened
+    /// document reconstructs the SAME RDF dataset as re-parsing the suite's
+    /// NORMATIVE expected flattened document (`reparse(flatten(D)) ≡ reparse(expected)`).
+    /// Same oracle, SKIP buckets, and caveat as `EXPAND_FLOOR` (flattening is the
+    /// node-merged normal form; the oracle anchors on the expected document, not the
+    /// input). MEASURED 50/58 at the pinned revision: flatten 50 pass / 0 fail / 8
+    /// skip — every flatten case the writer drives round-trips to the normative
+    /// expected document; the 8 SKIP are the documented buckets (1
+    /// NegativeEvaluationTest, JSON-LD-1.0-only positives, and empty-RDF inputs).
+    pub const FLATTEN_FLOOR: usize = 50;
 
     /// [OPUS-4.8] sq-oy1f.19 — the framing suite's declared base (its
     /// `baseIri`), used to resolve each frame test's input path into the document
@@ -310,6 +401,11 @@ mod gated {
         /// does not model (it never raises the spec's frame-validation errors), the
         /// same honesty posture the compact lane takes toward its negatives.
         expect_error_code: Option<String>,
+        /// [SONNET-4.6] sq-kk1mq — `option.expandContext`: a path (relative to the
+        /// suite root) to a context file. Forwarded to the native expand() oracle as
+        /// `JsonLdOptions.expand_context`; `None` for the toRdf/fromRdf/compact/frame
+        /// manifests (the expand manifest is the only one that has this option).
+        expand_context_path: Option<String>,
     }
 
     /// Read `<cat>-manifest.jsonld` and return its `sequence` entries.
@@ -379,6 +475,12 @@ mod gated {
                 .get("expectErrorCode")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            // [SONNET-4.6] sq-kk1mq — expand-only manifest option: `option.expandContext`
+            // is a path (relative to the suite root) to a context file.
+            let expand_context_path = opt
+                .and_then(|o| o.get("expandContext"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
             out.push(Entry {
                 id,
                 is_negative,
@@ -391,6 +493,7 @@ mod gated {
                 processing_mode,
                 frame,
                 expect_error_code,
+                expand_context_path,
             });
         }
         Ok(out)
@@ -955,6 +1058,606 @@ mod gated {
         s
     }
 
+    /// [OPUS-4.8] sq-oy1f — run a W3C JSON-LD `flatten` category (or the superseded
+    /// RDF-equivalence expand oracle) against the ALREADY-SHIPPING native writer
+    /// (`graph_to_jsonld(graph, form)`, the `serialize-rdf` feature).
+    ///
+    /// [SONNET-4.6] sq-kk1mq — the `expand` category now uses `run_expand_native`
+    /// (document-level JSON oracle via `sparq_jsonld::expand()`); this function is
+    /// retained for the `flatten` category whose native algorithm is deferred.
+    /// `form` = [`JsonLdForm::Flattened`] for `flatten`.
+    ///
+    /// ## Pipeline (the REAL writer path)
+    ///
+    /// 1. Parse the case `input` (`.jsonld`) → RDF via the real oxjsonld ingest path
+    ///    (`parse_jsonld_dataset`).
+    /// 2. Re-emit that dataset as N-Quads and load it into a sparq [`Graph`]
+    ///    (preserving named graphs) — the writer takes a `Graph`, not a JSON-LD doc,
+    ///    because sparq's expand/flatten OUTPUT is a projection of RDF (exactly the
+    ///    bridge `run_compact` / `run_frame` use).
+    /// 3. Run `graph_to_jsonld(&graph, form)` — the shipping writer, NOT a stub.
+    /// 4. **Invariant (normative answer-equivalence):** re-parse BOTH sparq's output
+    ///    AND the suite's NORMATIVE expected document (`*-out.jsonld`) to canonical
+    ///    [`Dataset`]s and require they are equal:
+    ///    `reparse(write(D, form)) ≡ reparse(expected)`. Expansion/flattening are the
+    ///    JSON-LD normal forms (they drop free-floating nodes / merge nodes), so the
+    ///    oracle anchors on the W3C-expected document, NOT the input — the same
+    ///    posture as the frame lane. This is envelope-insensitive and value-faithful
+    ///    while NOT requiring sparq's JSON layout to match byte-for-byte.
+    ///
+    /// ## Honest SKIP buckets (recorded, not passed, not failed) — see `EXPAND_FLOOR`
+    fn run_expand_or_flatten(
+        root: &Path,
+        cat: &str,
+        form: sparq_engine::serialize::JsonLdForm,
+    ) -> Score {
+        use sparq_engine::serialize::graph_to_jsonld;
+        let mut s = Score::default();
+        let entries = match read_manifest(root, cat) {
+            Ok(e) => e,
+            Err(why) => {
+                s.fail(&format!("{cat}-manifest"), why);
+                return s;
+            }
+        };
+        for e in &entries {
+            if e.requires.is_some() {
+                s.skip();
+                continue;
+            }
+            // NegativeEvaluationTest: sparq's writer is TOTAL and does not raise the
+            // spec's expansion/flattening errors, so a faithful 1.1 writer cannot
+            // "pass" by rejecting — SKIP (honest), never a counted pass.
+            if e.is_negative {
+                s.skip();
+                continue;
+            }
+            // JSON-LD-1.0-only positives (processing-mode shape differences a 1.1
+            // writer is not obliged to reproduce): SKIP.
+            if e.spec_version.as_deref() == Some("json-ld-1.0")
+                || e.processing_mode.as_deref() == Some("json-ld-1.0")
+            {
+                s.skip();
+                continue;
+            }
+            let Some(expect_rel) = &e.expect else {
+                s.skip();
+                continue;
+            };
+            // Remote input (no network) — guard (the toRdf lane already gates ingest).
+            if e.input.starts_with("http://") || e.input.starts_with("https://") {
+                s.skip();
+                continue;
+            }
+
+            // 1. Parse the input JSON-LD → RDF (the source dataset). An input the
+            //    real oxjsonld path rejects, or `option`-driven cases the writer does
+            //    not apply (e.g. `expandContext`), produce RDF that legitimately
+            //    differs from `expected`; those that fail to parse are SKIPPED (out of
+            //    the gated surface), those that parse but diverge are honest FAILs.
+            let input_path = root.join(&e.input);
+            let in_text = match std::fs::read_to_string(&input_path) {
+                Ok(t) => t,
+                Err(why) => {
+                    s.fail(&e.id, format!("read input: {why}"));
+                    continue;
+                }
+            };
+            let base = doc_base(e);
+            let input_ds = match parse_jsonld_dataset(&in_text, &base) {
+                Ok(ds) => ds,
+                Err(_) => {
+                    s.skip();
+                    continue;
+                }
+            };
+            // No triples → nothing to project; the round-trip is vacuous. SKIP.
+            if input_ds.is_empty() {
+                s.skip();
+                continue;
+            }
+
+            // 2. Load the input RDF into a sparq Graph (named graphs preserved) and
+            //    run the REAL shipping writer in the requested form.
+            let nq = dataset_to_nquads(&input_ds);
+            let graph = match Graph::load_dataset(&nq, "nquads") {
+                Ok(g) => g,
+                Err(why) => {
+                    s.fail(&e.id, format!("load input rdf into graph: {why}"));
+                    continue;
+                }
+            };
+            let out_doc = graph_to_jsonld(&graph, form);
+
+            // 3. Re-parse sparq's output and the suite's NORMATIVE expected document,
+            //    require RDF-dataset equivalence (the normative answer-equivalence
+            //    invariant).
+            let got = match jsonld_to_canonical_dataset(&out_doc, &base) {
+                Ok(ds) => ds,
+                Err(why) => {
+                    s.fail(&e.id, format!("re-parse {cat} output: {why}"));
+                    continue;
+                }
+            };
+            let expect_path = root.join(expect_rel);
+            let exp_text = match std::fs::read_to_string(&expect_path) {
+                Ok(t) => t,
+                Err(why) => {
+                    s.fail(&e.id, format!("read expect: {why}"));
+                    continue;
+                }
+            };
+            let want = match jsonld_to_canonical_dataset(&exp_text, &base) {
+                Ok(ds) => ds,
+                Err(why) => {
+                    s.fail(&e.id, format!("re-parse expected output: {why}"));
+                    continue;
+                }
+            };
+            if got == want {
+                s.pass();
+            } else {
+                s.fail(
+                    &e.id,
+                    format!(
+                        "{cat} RDF != expected RDF ({} vs {} quads)",
+                        got.len(),
+                        want.len()
+                    ),
+                );
+            }
+        }
+        s
+    }
+
+    // ── JSON-LD document-level equality comparator ──────────────────────────────
+    //
+    // [SONNET-4.6] sq-kk1mq — the comparator for the native expand() oracle.
+    //
+    // Semantics (PINNED IN CODE per sq-kk1mq):
+    //   • Object key order: insignificant.  Two objects are equal iff they have the
+    //     same keys with deeply-equal values.
+    //   • Array element order: SIGNIFICANT only when the array is the **direct value
+    //     of a `"@list"` key**; insignificant everywhere else (multiset / set
+    //     semantics).  In expanded JSON-LD `@list` is the only structured-sequence
+    //     construct; all other arrays are bags.
+    //   • Numbers: integral (i64/u64-representable) compared exactly so integers
+    //     ≥ 2^53 remain distinct; non-integral (either side is a JSON float) fall
+    //     back to f64, so `1` ≡ `1.0`.  [SONNET-4.6] sq-kk1mq numeric-guard.
+    //   • Strings, booleans, null: exact equality.
+    //
+    // Why document-level rather than RDF-level?  The expansion algorithm operates
+    // purely at the JSON-LD document level.  Two expansions can produce the same
+    // RDF yet differ in JSON structure (e.g. `@direction` handling, `@json` literals,
+    // `@list` vs plain-array shapes) — the RDF oracle missed those differences.
+    //
+    // PRECISION NOTE: this comparator measures JSON-LD data-model (semantic)
+    // equivalence — order-insensitive outside `@list` — NOT structural identity
+    // with the reference output.  ~18 of 240 passes are semantically-equal-but-
+    // reordered vs. the W3C reference (strict-ordered count 222).  Tracked as
+    // part of bead sq-kk1mq.
+
+    /// Returns `true` iff `a` and `b` are equal under the JSON-LD comparison rules
+    /// described in the module-level comment.
+    ///
+    /// [SONNET-4.6] sq-kk1mq
+    fn json_ld_equal(a: &Value, b: &Value) -> bool {
+        json_ld_equal_inner(a, b, false)
+    }
+
+    /// Recursive inner: `in_list` means the IMMEDIATE parent is a `"@list"` key, so
+    /// this value (an array) must be compared in ORDER.
+    fn json_ld_equal_inner(a: &Value, b: &Value, in_list: bool) -> bool {
+        match (a, b) {
+            (Value::Null, Value::Null) => true,
+            (Value::Bool(x), Value::Bool(y)) => x == y,
+            (Value::Number(x), Value::Number(y)) => {
+                // JSON-LD numeric equality [SONNET-4.6] sq-kk1mq numeric-guard:
+                // • Both i64-representable: compare exactly so integers ≥ 2^53 are
+                //   not wrongly collapsed by f64 rounding
+                //   (e.g. 9007199254740992 ≢ 9007199254740993 must remain distinct).
+                // • Both u64-representable (one side exceeds i64::MAX): compare exactly.
+                // • Otherwise: fall back to f64 so integer JSON `1` ≡ float JSON `1.0`.
+                if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
+                    xi == yi
+                } else if let (Some(xu), Some(yu)) = (x.as_u64(), y.as_u64()) {
+                    xu == yu
+                } else {
+                    match (x.as_f64(), y.as_f64()) {
+                        (Some(xf), Some(yf)) => xf == yf,
+                        // Fallback for numbers outside f64 range (unlikely in JSON-LD).
+                        _ => x == y,
+                    }
+                }
+            }
+            (Value::String(x), Value::String(y)) => x == y,
+            (Value::Array(xs), Value::Array(ys)) => {
+                if xs.len() != ys.len() {
+                    return false;
+                }
+                if in_list {
+                    // @list: element order is SIGNIFICANT.
+                    xs.iter()
+                        .zip(ys.iter())
+                        .all(|(x, y)| json_ld_equal_inner(x, y, false))
+                } else {
+                    // Set semantics: order INSIGNIFICANT (multiset match).
+                    json_ld_array_equal_unordered(xs, ys)
+                }
+            }
+            (Value::Object(xa), Value::Object(ya)) => {
+                if xa.len() != ya.len() {
+                    return false;
+                }
+                for (k, va) in xa {
+                    let Some(vb) = ya.get(k) else {
+                        return false;
+                    };
+                    // The array VALUE of a "@list" key is ORDER-SIGNIFICANT.
+                    let child_in_list = k == "@list";
+                    if !json_ld_equal_inner(va, vb, child_in_list) {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Multiset-equality for arrays that are NOT inside a `@list` value: every element
+    /// of `xs` must match exactly one unused element of `ys`, regardless of position.
+    /// O(n²) but conformance-suite arrays are small (typically ≤ 10 elements).
+    fn json_ld_array_equal_unordered(xs: &[Value], ys: &[Value]) -> bool {
+        let mut used = vec![false; ys.len()];
+        'outer: for x in xs {
+            for (j, y) in ys.iter().enumerate() {
+                if !used[j] && json_ld_equal_inner(x, y, false) {
+                    used[j] = true;
+                    continue 'outer;
+                }
+            }
+            return false;
+        }
+        true
+    }
+
+    // ── Native expand() oracle ────────────────────────────────────────────────
+    //
+    // [SONNET-4.6] sq-kk1mq — replaces the old RDF-equivalence oracle for the
+    // `expand` category.  The flatten category KEEPS `run_expand_or_flatten`
+    // (still RDF-based; a separate bead will switch it when the native flatten
+    // algorithm lands).
+
+    /// Convert a `sparq_jsonld::Json` value to a `serde_json::Value` by
+    /// round-tripping through a JSON string.  Used to bridge the two ASTs so the
+    /// `json_ld_equal` comparator can operate on both the expand() output and the
+    /// expected-document JSON that `serde_json::from_str` produces.
+    fn sparq_json_to_serde(j: &sparq_jsonld::Json) -> Result<Value, String> {
+        let mut buf = String::new();
+        j.write(&mut buf);
+        serde_json::from_str(&buf).map_err(|e| format!("parse serialized JSON as serde_json::Value: {}", e))
+    }
+
+    /// [SONNET-4.6] sq-kk1mq — run the W3C JSON-LD `expand` category with the
+    /// NATIVE DOCUMENT-LEVEL oracle: call `sparq_jsonld::expand()` directly on the
+    /// input document and deep-compare the result to the suite's expected expanded
+    /// document via [`json_ld_equal`].
+    ///
+    /// ## Pipeline (the native expand path)
+    ///
+    /// 1. Parse the case `input` (`.jsonld`) as a `sparq_jsonld::Json` AST —
+    ///    the expander's native input type.
+    /// 2. Build `JsonLdOptions` from the manifest entry (`base`, `expandContext`,
+    ///    `processingMode`/`specVersion`).  `expandContext` is a path to a context
+    ///    file; it is read and parsed as a `sparq_jsonld::Json` and forwarded as
+    ///    `options.expand_context`.
+    /// 3. Call `sparq_jsonld::expand(&input_json, &opts, &NoopLoader)`.
+    ///    Remote `@context` / `@import` references raise `loading document failed`
+    ///    from the `NoopLoader` (deny-by-default).
+    /// 4. Convert the `Result<Json, JsonLdError>` output to a `serde_json::Value`
+    ///    by writing and re-parsing (no structural loss — both ASTs are JSON).
+    /// 5. Parse the suite's expected document as a `serde_json::Value`.
+    /// 6. Compare with `json_ld_equal` (object key order insignificant; array
+    ///    order significant only inside `@list`; integers compared exactly,
+    ///    non-integral numbers compared as f64 so `1` ≡ `1.0`).
+    ///
+    /// ## Honest SKIP buckets (recorded, not passed, not failed)
+    ///
+    /// * `requires` optional-feature cases (same as all other lanes).
+    /// * NegativeEvaluationTests — expander error-code completeness is unverified;
+    ///   deferred to a child bead of sq-oy1f.  SKIP (honest), never a counted pass.
+    /// * Remote `input` URL — no network.
+    /// * No `expect` file — nothing to compare.
+    fn run_expand_native(root: &Path) -> Score {
+        let mut s = Score::default();
+        let entries = match read_manifest(root, "expand") {
+            Ok(e) => e,
+            Err(why) => {
+                s.fail("expand-manifest", why);
+                return s;
+            }
+        };
+        for e in &entries {
+            if e.requires.is_some() {
+                s.skip();
+                continue;
+            }
+            // NegativeEvaluationTests: expander raises some errors but error-code
+            // completeness is unverified — SKIP honestly (deferred).
+            if e.is_negative {
+                s.skip();
+                continue;
+            }
+            let Some(expect_rel) = &e.expect else {
+                s.skip();
+                continue;
+            };
+            // Remote input (no network) — guard.
+            if e.input.starts_with("http://") || e.input.starts_with("https://") {
+                s.skip();
+                continue;
+            }
+
+            // 1. Read and parse the input document as sparq_jsonld::Json.
+            let input_path = root.join(&e.input);
+            let in_text = match std::fs::read_to_string(&input_path) {
+                Ok(t) => t,
+                Err(why) => {
+                    s.fail(&e.id, format!("read input: {}", why));
+                    continue;
+                }
+            };
+            let input_json = match sparq_jsonld::Json::parse(&in_text) {
+                Ok(j) => j,
+                Err(why) => {
+                    s.fail(&e.id, format!("parse input JSON: {}", why));
+                    continue;
+                }
+            };
+
+            // 2. Build JsonLdOptions from the manifest entry.
+            let base = doc_base(e);
+            let processing_mode = match (
+                e.processing_mode.as_deref(),
+                e.spec_version.as_deref(),
+            ) {
+                (Some("json-ld-1.0"), _) | (_, Some("json-ld-1.0")) => {
+                    ProcessingMode::JsonLd10
+                }
+                _ => ProcessingMode::JsonLd11,
+            };
+            // JsonLdOptions is #[non_exhaustive] — build via default() + field mutation.
+            let mut opts = JsonLdOptions::default();
+            opts.base = Some(base.clone());
+            opts.processing_mode = processing_mode;
+
+            // Forward expandContext if present: read the context file and parse as
+            // sparq_jsonld::Json.  The expander unwraps one "@context" layer itself
+            // (options.expand_context.get("@context").unwrap_or(&ctx)).
+            if let Some(ctx_rel) = &e.expand_context_path {
+                let ctx_path = root.join(ctx_rel);
+                let ctx_text = match std::fs::read_to_string(&ctx_path) {
+                    Ok(t) => t,
+                    Err(why) => {
+                        s.fail(&e.id, format!("read expandContext file: {}", why));
+                        continue;
+                    }
+                };
+                match sparq_jsonld::Json::parse(&ctx_text) {
+                    Ok(ctx_json) => opts.expand_context = Some(ctx_json),
+                    Err(why) => {
+                        s.fail(&e.id, format!("parse expandContext JSON: {}", why));
+                        continue;
+                    }
+                }
+            }
+
+            // 3. Call the native expand() algorithm.
+            let expanded = match jsonld_expand(&input_json, &opts, &NoopLoader) {
+                Ok(j) => j,
+                Err(why) => {
+                    s.fail(&e.id, format!("expand() error: {}", why));
+                    continue;
+                }
+            };
+
+            // 4. Convert the expand() output to serde_json::Value.
+            let got: Value = match sparq_json_to_serde(&expanded) {
+                Ok(v) => v,
+                Err(why) => {
+                    s.fail(&e.id, format!("convert expand output: {}", why));
+                    continue;
+                }
+            };
+
+            // 5. Read and parse the expected document.
+            let expect_path = root.join(expect_rel);
+            let exp_text = match std::fs::read_to_string(&expect_path) {
+                Ok(t) => t,
+                Err(why) => {
+                    s.fail(&e.id, format!("read expect: {}", why));
+                    continue;
+                }
+            };
+            let want: Value = match serde_json::from_str(&exp_text) {
+                Ok(v) => v,
+                Err(why) => {
+                    s.fail(&e.id, format!("parse expect JSON: {}", why));
+                    continue;
+                }
+            };
+
+            // 6. Document-level JSON-LD equality (oracle pinned per sq-kk1mq).
+            // Report the JSON kind (with size for array/object) so a mismatch on
+            // a non-array structure is immediately diagnosable rather than always
+            // showing "0 nodes".
+            fn json_kind_desc(v: &Value) -> String {
+                match v {
+                    Value::Array(a) => format!("array({} items)", a.len()),
+                    Value::Object(o) => format!("object({} keys)", o.len()),
+                    Value::String(_) => "string".to_owned(),
+                    Value::Null => "null".to_owned(),
+                    Value::Bool(b) => format!("bool({})", b),
+                    Value::Number(n) => format!("number({})", n),
+                }
+            }
+            if json_ld_equal(&got, &want) {
+                s.pass();
+            } else {
+                s.fail(
+                    &e.id,
+                    format!(
+                        "expand JSON mismatch: got {}, want {}",
+                        json_kind_desc(&got),
+                        json_kind_desc(&want),
+                    ),
+                );
+            }
+        }
+        s
+    }
+
+    #[cfg(test)]
+    mod comparator_tests {
+        use super::*;
+        use serde_json::json;
+
+        // ── json_ld_equal unit tests (sq-kk1mq) ─────────────────────────────
+
+        /// Arrays outside @list are unordered (set semantics).
+        #[test]
+        fn arrays_outside_list_are_unordered() {
+            let a = json!([1, 2, 3]);
+            let b = json!([3, 1, 2]);
+            assert!(json_ld_equal(&a, &b), "permuted array outside @list must be equal");
+        }
+
+        /// Arrays outside @list with different elements are not equal.
+        #[test]
+        fn arrays_outside_list_different_elements() {
+            let a = json!([1, 2, 3]);
+            let b = json!([1, 2, 4]);
+            assert!(!json_ld_equal(&a, &b));
+        }
+
+        /// Arrays that are the VALUE of a "@list" key are ORDER-SIGNIFICANT.
+        #[test]
+        fn array_inside_list_is_ordered_fail() {
+            let a = json!({"@list": [1, 2, 3]});
+            let b = json!({"@list": [3, 1, 2]});
+            assert!(!json_ld_equal(&a, &b), "permuted @list must NOT be equal");
+        }
+
+        /// Arrays that are the VALUE of a "@list" key with the same order pass.
+        #[test]
+        fn array_inside_list_same_order_passes() {
+            let a = json!({"@list": [1, 2, 3]});
+            let b = json!({"@list": [1, 2, 3]});
+            assert!(json_ld_equal(&a, &b));
+        }
+
+        /// Outer array is unordered, but each inner @list is ordered.
+        #[test]
+        fn nested_outer_unordered_inner_list_ordered() {
+            // Two @list objects in different outer-array positions → equal (outer unordered).
+            let a = json!([{"@list": [1, 2]}, {"@list": [3, 4]}]);
+            let b = json!([{"@list": [3, 4]}, {"@list": [1, 2]}]);
+            assert!(json_ld_equal(&a, &b), "outer array unordered");
+
+            // But the @list contents themselves are ordered.
+            let c = json!({"@list": [2, 1]});
+            let d = json!({"@list": [1, 2]});
+            assert!(!json_ld_equal(&c, &d), "@list contents are ordered");
+        }
+
+        /// Deeply nested @list: an @list inside an outer @list is still ordered.
+        #[test]
+        fn nested_list_within_list_is_ordered() {
+            // value arrays inside @list elements: those inner arrays are NOT @list
+            // values, so they are unordered.
+            let a = json!({"@list": [{"foo": [1, 2]}, {"foo": [3, 4]}]});
+            let b = json!({"@list": [{"foo": [2, 1]}, {"foo": [4, 3]}]});
+            // @list order matters (outer), but "foo" arrays inside are unordered.
+            assert!(json_ld_equal(&a, &b));
+        }
+
+        /// Object key order is insignificant.
+        #[test]
+        fn object_key_order_insignificant() {
+            let a = json!({"@id": "http://example.org/a", "@type": ["http://example.org/T"]});
+            let b = json!({"@type": ["http://example.org/T"], "@id": "http://example.org/a"});
+            assert!(json_ld_equal(&a, &b));
+        }
+
+        /// Numeric equality: JSON integer `1` equals JSON float `1.0`.
+        #[test]
+        fn numeric_equality_int_float() {
+            let a: Value = serde_json::from_str("1").unwrap();
+            let b: Value = serde_json::from_str("1.0").unwrap();
+            assert!(
+                json_ld_equal(&a, &b),
+                "1 and 1.0 must be equal under f64 numeric comparison"
+            );
+        }
+
+        /// Different numeric values are not equal.
+        #[test]
+        fn numeric_inequality() {
+            let a = json!(1);
+            let b = json!(2);
+            assert!(!json_ld_equal(&a, &b));
+        }
+
+        /// Large integers ≥ 2^53 that are distinct as i64 must not be collapsed by f64
+        /// rounding.  Under the old f64-only path 9007199254740992 and 9007199254740993
+        /// round to the same f64 and would be wrongly equal.  The numeric-guard fix
+        /// [SONNET-4.6] sq-kk1mq compares integral values exactly via i64/u64.
+        #[test]
+        fn large_integer_numeric_guard() {
+            // 2^53 and 2^53+1 are distinct i64 values but collapse to the same f64.
+            let a: Value = serde_json::from_str("9007199254740992").unwrap();
+            let b: Value = serde_json::from_str("9007199254740993").unwrap();
+            assert!(
+                !json_ld_equal(&a, &b),
+                "2^53 and 2^53+1 must be UNEQUAL under exact i64 comparison"
+            );
+        }
+
+        /// Integer JSON `1` equals float JSON `1.0` (f64 fallback when one side
+        /// is non-integral; already covered by numeric_equality_int_float but
+        /// kept as an explicit guard for the mixed-representation case).
+        #[test]
+        fn integer_equals_float_one() {
+            let a: Value = serde_json::from_str("1").unwrap();
+            let b: Value = serde_json::from_str("1.0").unwrap();
+            assert!(
+                json_ld_equal(&a, &b),
+                "integer JSON 1 and float JSON 1.0 must be EQUAL"
+            );
+        }
+
+        /// Duplicate elements in unordered arrays use multiset semantics.
+        #[test]
+        fn unordered_array_multiset_duplicates() {
+            let a = json!([1, 1, 2]);
+            let b = json!([1, 2, 1]);
+            assert!(json_ld_equal(&a, &b), "multiset: [1,1,2] == [1,2,1]");
+
+            let c = json!([1, 1, 2]);
+            let d = json!([1, 2, 2]);
+            assert!(!json_ld_equal(&c, &d), "multiset: [1,1,2] != [1,2,2]");
+        }
+
+        /// Type mismatch: null != false, string != number.
+        #[test]
+        fn type_mismatch_not_equal() {
+            assert!(!json_ld_equal(&json!(null), &json!(false)));
+            assert!(!json_ld_equal(&json!("1"), &json!(1)));
+            assert!(!json_ld_equal(&json!([]), &json!({})));
+        }
+    }
+
     /// The known-gap categories: present in the W3C suite but NOT a sparq-shipped
     /// gateable surface yet. Reported as not-implemented (never failed). The size
     /// is read from each manifest so the scoreboard shows the real backlog and
@@ -962,11 +1665,12 @@ mod gated {
     ///
     /// [OPUS-4.8] sq-3uos5 — `compact` GRADUATED out of this bucket: it is now a
     /// gated category (`run_compact`, `COMPACT_FLOOR`). [OPUS-4.8] sq-oy1f.19 —
-    /// `frame` likewise GRADUATED: it is now a gated category (`run_frame`,
-    /// `FRAME_FLOOR`) over the separate `w3c/json-ld-framing` suite.
+    /// `frame` likewise GRADUATED. [OPUS-4.8] sq-oy1f — `expand` + `flatten` now
+    /// GRADUATED too: each is a gated category (`run_expand_or_flatten`,
+    /// `EXPAND_FLOOR` / `FLATTEN_FLOOR`) driving the shipping
+    /// `graph_to_jsonld(JsonLdForm::Expanded|Flattened)` writer, compared by
+    /// re-parse RDF-equivalence to the suite's normative expected document.
     const NOT_IMPLEMENTED_CATS: &[(&str, &str)] = &[
-        ("expand", "Expansion — output-vs-W3C-document comparison not wired (sq-oy1f)"),
-        ("flatten", "Flattening — output-vs-W3C-document comparison not wired (sq-oy1f)"),
         ("html", "HTML script extraction not implemented"),
         ("remote-doc", "remote @context loader not wired (oxjsonld needs a LoadDocumentCallback)"),
     ];
@@ -991,9 +1695,18 @@ mod gated {
             return;
         }
 
+        use sparq_engine::serialize::JsonLdForm;
         let tordf = run_tordf(&root);
         let fromrdf = run_fromrdf(&root);
         let compact = run_compact(&root);
+        // [SONNET-4.6] sq-kk1mq — expand now uses the NATIVE DOCUMENT-LEVEL oracle
+        // (sparq_jsonld::expand() + json_ld_equal comparator) instead of the old
+        // RDF-equivalence oracle.  See run_expand_native() and EXPAND_FLOOR doc
+        // for the oracle-correction rationale and old-vs-new breakdown.
+        let expand = run_expand_native(&root);
+        // flatten keeps the RDF-equivalence oracle (native flatten algorithm is
+        // deferred to a separate bead; the writer path is still the right oracle).
+        let flatten = run_expand_or_flatten(&root, "flatten", JsonLdForm::Flattened);
         let not_impl = not_implemented_counts(&root);
 
         // [OPUS-4.8] sq-oy1f.19 — framing lives in the SEPARATE w3c/json-ld-framing
@@ -1021,6 +1734,17 @@ mod gated {
         println!(
             "TOTAL compact {} {} {} (floor {})",
             compact.pass, compact.fail, compact.skip, COMPACT_FLOOR
+        );
+        // [OPUS-4.8] sq-oy1f — the expand + flatten ratchets. The CI grep depends on
+        // these exact `^TOTAL expand `/`^TOTAL flatten ` prefixes with the pass count
+        // in field $3 (same shape as the other lanes).
+        println!(
+            "TOTAL expand {} {} {} (floor {})",
+            expand.pass, expand.fail, expand.skip, EXPAND_FLOOR
+        );
+        println!(
+            "TOTAL flatten {} {} {} (floor {})",
+            flatten.pass, flatten.fail, flatten.skip, FLATTEN_FLOOR
         );
         // [OPUS-4.8] sq-oy1f.19 — the frame ratchet. The CI grep depends on this
         // exact `^TOTAL frame ` prefix with the pass count in field $3 (same shape
@@ -1059,6 +1783,18 @@ mod gated {
                 println!("  {}: {}", id, why);
             }
         }
+        if !expand.failures.is_empty() {
+            println!("\nexpand failures (first 40):");
+            for (id, why) in expand.failures.iter().take(40) {
+                println!("  {}: {}", id, why);
+            }
+        }
+        if !flatten.failures.is_empty() {
+            println!("\nflatten failures (first 40):");
+            for (id, why) in flatten.failures.iter().take(40) {
+                println!("  {}: {}", id, why);
+            }
+        }
         if let Some(frame) = &frame {
             if !frame.failures.is_empty() {
                 println!("\nframe failures (first 40):");
@@ -1088,6 +1824,20 @@ mod gated {
             "JSON-LD compact pass count regressed: {} < floor {} — see failures above",
             compact.pass,
             COMPACT_FLOOR
+        );
+        // [OPUS-4.8] sq-oy1f — the expand + flatten ratchets (normative
+        // answer-equivalence floors over the shipping writer).
+        assert!(
+            expand.pass >= EXPAND_FLOOR,
+            "JSON-LD expand pass count regressed: {} < floor {} — see failures above",
+            expand.pass,
+            EXPAND_FLOOR
+        );
+        assert!(
+            flatten.pass >= FLATTEN_FLOOR,
+            "JSON-LD flatten pass count regressed: {} < floor {} — see failures above",
+            flatten.pass,
+            FLATTEN_FLOOR
         );
         // [OPUS-4.8] sq-oy1f.19 — the frame ratchet (normative answer-equivalence
         // floor), asserted only when the separate framing suite is present.

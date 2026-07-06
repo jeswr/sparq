@@ -34,6 +34,11 @@ assert_eq!(count, 1);
   the lean default/wasm build). `load_reader*` accepts any `Read`, so you can wrap a `gzip` /
   `bzip2` / `zstd` decoder around your file and stream it in — sparq does not content-sniff or
   auto-decompress ([guide](../../skills/data-formats/SKILL.md)).
+- **Opt-in validated fast ingest** — the `iri-fast` feature (OFF by default) has the byte-level
+  N-Triples/N-Quads loader validate every IRI against RFC-3987 through a prefix-memoized fast
+  path in front of `oxiri` — accepting *exactly* what `oxiri` accepts (a mandatory
+  differential-fuzz equivalence gate), so the parallel loader reaches conformance parity with
+  the serial oxttl path at fast-path cost. Zero new dependency (`oxiri` is already in-tree).
 - **Triple-pattern scans** — look up any triple pattern over the loaded graph.
 - **Incremental updates** — start from `Graph::new()` / `Graph::default()` (an empty graph) and
   `insert_triple(s, p, o)` / `remove_triple(s, p, o)` a single triple from `oxrdf` terms, or apply
@@ -55,7 +60,7 @@ assert_eq!(count, 1);
 - **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md); the indexing,
   compression and parsing verdicts live across the [`research/`](../../research) tree.
 - **Performance** — numbers are not baked into docs; see the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+  [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

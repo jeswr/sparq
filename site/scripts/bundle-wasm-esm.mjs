@@ -4,7 +4,7 @@
 // issue asked for works WITHOUT a third-party ESM CDN:
 //
 //     <script type="module">
-//       import { Dataset } from "https://jeswr.github.io/sparq/wasm/sparq.js";
+//       import { Dataset } from "https://sparq.jeswr.org/wasm/sparq.js";
 //       const ds = await Dataset.fromString('<a> <b> <c> .', 'ntriples'); // wasm lazy-fetched HERE
 //     </script>
 //
@@ -81,9 +81,9 @@ await build({
   banner: {
     js:
       "/* sparq — RDF/JS Dataset + SPARQL engine (Rust→WASM), self-hosted ESM build.\n" +
-      "   import { Dataset } from \"https://jeswr.github.io/sparq/wasm/sparq.js\"\n" +
+      "   import { Dataset } from \"https://sparq.jeswr.org/wasm/sparq.js\"\n" +
       "   The ~MB engine wasm is fetched lazily by the first `await Dataset.…`, not by this import.\n" +
-      "   Docs: https://jeswr.github.io/sparq/surface/javascript-wasm  •  npm: @jeswr/sparq */",
+      "   Docs: https://sparq.jeswr.org/surface/javascript-wasm  •  npm: @jeswr/sparq */",
   },
 });
 

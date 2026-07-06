@@ -10,9 +10,15 @@
 //! batch of solutions *column-major* and applies one tight, branch-predictable,
 //! auto-vectorisable loop per column.
 //!
-//! This module provides that columnar intermediate, [`DataChunk`], plus the two
-//! kernels a vector-at-a-time FILTER needs:
+//! This module provides that columnar intermediate, [`DataChunk`], plus the kernels a
+//! vector-at-a-time FILTER needs:
 //!
+//! * a **decode kernel** ([`DataChunk::decode_numeric_column`]) — the actual SIMD
+//!   enabler — that gathers one id column into a *contiguous* `Vec<f64>` value column
+//!   **once** (a `f64::NAN` sentinel for a non-numeric cell), with a gather-free fast
+//!   path for an all-inline-integer column (the value is in the id). Decoding once is
+//!   what turns the per-element cache gather into a straight-line loop the compiler can
+//!   auto-vectorise;
 //! * a **comparison kernel** ([`DataChunk::select_numeric`]) that scans one column
 //!   through the graph's f64 value cache and produces a [`SelVec`] (the indices that
 //!   pass) — never materialising a term, mirroring the row evaluator's sargable
@@ -38,7 +44,7 @@
 //! into the evaluator later (roadmap T1.3 morsel-driven pipelining) without changing
 //! query results.
 
-use sparq_core::dict::Id;
+use sparq_core::dict::{is_inline, Id, INLINE_BASE};
 use sparq_core::Graph;
 
 /// A numeric comparison operator for the vectorized FILTER kernel. Mirrors the
@@ -121,15 +127,19 @@ impl DataChunk {
 
     /// Transposes a slice of row-major tuples into a column-major chunk. All rows must
     /// have the same `width`; returns `None` otherwise. The inverse of [`Self::to_rows`].
+    ///
+    /// Generic over the row representation (`impl AsRef<[Id]>`) so it transposes the engine's
+    /// `SmallVec<[Id; 4]>` rows directly — no intermediate `Vec<Id>` per row — as well as plain
+    /// `Vec<Id>` rows in tests.
     #[must_use]
-    pub fn from_rows(rows: &[Vec<Id>], width: usize) -> Option<Self> {
-        if rows.iter().any(|r| r.len() != width) {
+    pub fn from_rows<R: AsRef<[Id]>>(rows: &[R], width: usize) -> Option<Self> {
+        if rows.iter().any(|r| r.as_ref().len() != width) {
             return None;
         }
         let mut columns: Vec<Vec<Id>> =
             (0..width).map(|_| Vec::with_capacity(rows.len())).collect();
         for row in rows {
-            for (c, &id) in row.iter().enumerate() {
+            for (c, &id) in row.as_ref().iter().enumerate() {
                 columns[c].push(id);
             }
         }
@@ -173,6 +183,49 @@ impl DataChunk {
         self.columns.get(c).map(Vec::as_slice)
     }
 
+    /// **Decode kernel — the actual SIMD enabler.** Gathers id column `c` into a
+    /// *contiguous* `Vec<f64>` value column: each id's numeric value where it has one, and
+    /// the `f64::NAN` **sentinel** where it does not (a non-numeric / unparseable cell — the
+    /// `Graph::numeric_value` cache yields `None`). Returns an empty `Vec` (not a column of
+    /// `NaN`) if `c` is out of range, mirroring `select_numeric`.
+    ///
+    /// Why a separate decode step rather than reusing `select_numeric`: that kernel
+    /// re-gathers `numeric_value(id)` per element — a random-access value-cache lookup plus a
+    /// branch, the *same* access pattern the row path pays and **not** auto-vectorisable.
+    /// Decoding **once** into a contiguous `f64` column lets every subsequent compare / reduce
+    /// run as one branchless loop over `f64` that the compiler auto-vectorises (NEON/AVX on
+    /// native, `+simd128` on wasm). It therefore pays only when the decoded column is *reused*
+    /// by ≥1 downstream kernel, or when the column is inline-int (below).
+    ///
+    /// The **NaN sentinel** is chosen so the decoded column drops straight into the numeric
+    /// kernels with no separate validity bitmap: `VecCmp::test` already rejects `NaN` under
+    /// every operator (IEEE-754), so a non-numeric cell is excluded at the compare step exactly
+    /// as the row FILTER's type-error path excludes it.
+    ///
+    /// **Inline-integer gather-free fast path.** An `xsd:integer` in the inline range carries
+    /// its value in the id itself (`numeric_value` returns `id - INLINE_BASE` with no lookup).
+    /// When *every* id in the column is inline, the decode is a straight-line
+    /// `id - INLINE_BASE` map with no cache access and no per-cell numeric branch — the
+    /// portable, wasm-friendly best case. Its result is bit-identical to the general path (an
+    /// all-inline column contains no `NaN` sentinel), so it is a pure speed specialisation.
+    #[must_use]
+    pub fn decode_numeric_column(&self, graph: &Graph, c: usize) -> Vec<f64> {
+        let Some(col) = self.columns.get(c) else {
+            return Vec::new();
+        };
+        // Fast path: an all-inline-integer column decodes gather-free — the value is in the id,
+        // so this stays a branchless straight-line loop the compiler is free to vectorise. The
+        // `is_inline` scan is itself a tight branch-predictable pass over the contiguous column.
+        if col.iter().all(|&id| is_inline(id)) {
+            return col.iter().map(|&id| f64::from(id - INLINE_BASE)).collect();
+        }
+        // General path: one gather through the value cache; a non-numeric id becomes the NaN
+        // sentinel so `VecCmp` (and later reducers) exclude it without a side validity mask.
+        col.iter()
+            .map(|&id| graph.numeric_value(id).unwrap_or(f64::NAN))
+            .collect()
+    }
+
     /// **Vectorized comparison kernel.** Scans column `c` through the graph's f64 value
     /// cache and returns the [`SelVec`] of row positions whose value passes `cmp`. A
     /// non-numeric / unparseable cell (the cache yields `None`) never passes — the row
@@ -190,6 +243,31 @@ impl DataChunk {
         let mut sel = SelVec::new();
         for (r, &id) in col.iter().enumerate() {
             if graph.numeric_value(id).is_some_and(|x| cmp.test(x)) {
+                sel.push(r);
+            }
+        }
+        sel
+    }
+
+    /// **Vectorized compare over a pre-decoded column — the auto-vectorising kernel.**
+    /// Given a contiguous value column `decoded` (as produced by
+    /// [`Self::decode_numeric_column`]), returns the ascending [`SelVec`] of positions whose
+    /// value passes `cmp`. Unlike [`Self::select_numeric`], this does **no** per-element cache
+    /// gather — it is one branchless straight-line loop over contiguous `f64`, so the compiler
+    /// is free to auto-vectorise it (NEON/AVX on native, `+simd128` on wasm). It is the
+    /// "select over the decoded column" step: decode **once**, then compare (and, later, reuse
+    /// the same decoded column for a reducer aggregate) without re-touching the value cache.
+    ///
+    /// The `f64::NAN` sentinel a non-numeric cell decodes to never passes any comparison
+    /// (IEEE-754), so a non-numeric / unbound cell is excluded here exactly as the row FILTER's
+    /// type-error path excludes it — the selection is identical to
+    /// `select_numeric` over the same column (see the `decode_then_compare_matches_select_numeric`
+    /// test).
+    #[must_use]
+    pub fn select_decoded(decoded: &[f64], cmp: VecCmp) -> SelVec {
+        let mut sel = SelVec::with_capacity(decoded.len());
+        for (r, &x) in decoded.iter().enumerate() {
+            if cmp.test(x) {
                 sel.push(r);
             }
         }
@@ -248,6 +326,45 @@ mod tests {
             })
             .collect();
         (g, obj_ids)
+    }
+
+    /// A graph whose object column spans the three decode cases in one column:
+    /// **inline** integers (`5`, `9`), **non-inline cache-backed** numerics (a negative
+    /// integer `-7` and a decimal `3.5`, neither of which inlines), and **non-numeric**
+    /// terms (an IRI and a plain-string literal). Returns the object-id column in subject
+    /// order — the mixed input the decode primitive must handle.
+    fn mixed_column() -> (Graph, Vec<Id>) {
+        let nt = concat!(
+            "<http://ex/s0> <http://ex/p> \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/s1> <http://ex/p> \"9\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/s2> <http://ex/p> \"-7\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/s3> <http://ex/p> \"3.5\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n",
+            "<http://ex/s4> <http://ex/p> <http://ex/thing> .\n",
+            "<http://ex/s5> <http://ex/p> \"hello\" .\n",
+        );
+        let g = Graph::load_str(nt, "ntriples").unwrap();
+        let int = |v: &str| {
+            oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+                v,
+                oxrdf::NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+            ))
+        };
+        let terms = [
+            int("5"),
+            int("9"),
+            int("-7"),
+            oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+                "3.5",
+                oxrdf::NamedNode::new("http://www.w3.org/2001/XMLSchema#decimal").unwrap(),
+            )),
+            oxrdf::Term::NamedNode(oxrdf::NamedNode::new("http://ex/thing").unwrap()),
+            oxrdf::Term::Literal(oxrdf::Literal::new_simple_literal("hello")),
+        ];
+        let ids: Vec<Id> = terms
+            .iter()
+            .map(|t| g.id_of(t).expect("term interned"))
+            .collect();
+        (g, ids)
     }
 
     #[test]
@@ -335,6 +452,136 @@ mod tests {
                 assert!(g.numeric_value(id).is_some_and(|x| cmp.test(x)));
             }
         }
+    }
+
+    #[test]
+    fn decode_numeric_column_matches_scalar_mixed_and_nan_sentinel() {
+        let (g, ids) = mixed_column();
+        let n = ids.len();
+        let chunk = DataChunk::from_columns(vec![ids.clone()], n).unwrap();
+        // Mixed column => the general (gather) path runs, not the inline fast path.
+        assert!(!ids.iter().all(|&id| is_inline(id)), "column must be mixed");
+
+        let decoded = chunk.decode_numeric_column(&g, 0);
+        assert_eq!(decoded.len(), n);
+
+        // (1) Bit-exact against the scalar decode the row path computes per id
+        //     (`.to_bits()` compares the NaN sentinel too — both paths use `f64::NAN`).
+        for (r, &id) in ids.iter().enumerate() {
+            let scalar = g.numeric_value(id).unwrap_or(f64::NAN);
+            assert_eq!(
+                decoded[r].to_bits(),
+                scalar.to_bits(),
+                "decode[{}] must equal scalar numeric_value",
+                r
+            );
+        }
+
+        // (2) Pin the concrete numeric values (inline + cache-backed).
+        assert_eq!(decoded[0], 5.0);
+        assert_eq!(decoded[1], 9.0);
+        assert_eq!(decoded[2], -7.0);
+        assert_eq!(decoded[3], 3.5);
+
+        // (3) Non-vacuous sentinel check: the two non-numeric cells decode to the NaN
+        //     sentinel, NOT a spurious value. A wrong sentinel (e.g. 0.0) would (a) not be
+        //     NaN and (b) spuriously PASS `>= 0.0` — so each assert independently catches it.
+        for r in [4usize, 5] {
+            assert!(
+                decoded[r].is_nan(),
+                "non-numeric cell {} must be the NaN sentinel",
+                r
+            );
+            assert!(
+                !VecCmp::Ge(0.0).test(decoded[r]),
+                "NaN sentinel at {} must not pass any comparison",
+                r
+            );
+        }
+    }
+
+    #[test]
+    fn decode_numeric_column_inline_fast_path_is_exact() {
+        // An all-inline-integer column exercises the gather-free fast path; its output
+        // must be bit-identical to the general (scalar) path and carry no NaN.
+        let (g, obj_ids) = ages_graph(48);
+        assert!(
+            obj_ids.iter().all(|&id| is_inline(id)),
+            "0..n are canonical non-negative integers => inline ids (fast-path precondition)"
+        );
+        let chunk = DataChunk::from_columns(vec![obj_ids.clone()], obj_ids.len()).unwrap();
+        let decoded = chunk.decode_numeric_column(&g, 0);
+
+        let expected: Vec<f64> = (0..48u32).map(f64::from).collect();
+        assert_eq!(decoded, expected);
+        assert!(
+            decoded.iter().all(|x| !x.is_nan()),
+            "no NaN in an all-inline column"
+        );
+        for (r, &id) in obj_ids.iter().enumerate() {
+            assert_eq!(
+                decoded[r].to_bits(),
+                g.numeric_value(id).unwrap().to_bits(),
+                "fast path must match the scalar path at {}",
+                r
+            );
+        }
+    }
+
+    #[test]
+    fn decode_then_compare_matches_select_numeric() {
+        // The decoded column + `VecCmp` must select exactly the rows the row-shaped
+        // `select_numeric` kernel keeps — proving the NaN sentinel yields the same
+        // filtering (non-numeric cells excluded) as the direct per-id gather.
+        let (g, ids) = mixed_column();
+        let n = ids.len();
+        let chunk = DataChunk::from_columns(vec![ids], n).unwrap();
+        let decoded = chunk.decode_numeric_column(&g, 0);
+        for cmp in [
+            VecCmp::Gt(0.0),
+            VecCmp::Ge(-7.0),
+            VecCmp::Lt(5.0),
+            VecCmp::Le(3.5),
+            VecCmp::Eq(9.0),
+        ] {
+            let via_decode: SelVec = (0..n).filter(|&r| cmp.test(decoded[r])).collect();
+            let via_kernel = chunk.select_numeric(&g, 0, cmp);
+            // The `select_decoded` kernel (compare over the pre-decoded column) must agree
+            // with both the hand loop and the direct `select_numeric` gather.
+            let via_select_decoded = DataChunk::select_decoded(&decoded, cmp);
+            assert_eq!(
+                via_decode, via_kernel,
+                "decode+compare != select_numeric for {:?}",
+                cmp
+            );
+            assert_eq!(
+                via_select_decoded, via_kernel,
+                "select_decoded != select_numeric for {:?}",
+                cmp
+            );
+        }
+    }
+
+    #[test]
+    fn select_decoded_rejects_nan_sentinel_and_is_ascending() {
+        // A hand-built decoded column mixing real values with the NaN sentinel: the kernel
+        // keeps exactly the passing NON-NaN positions, ascending, and never the NaN cells.
+        let decoded = [1.0, f64::NAN, 5.0, 5.0, f64::NAN, 9.0];
+        assert_eq!(DataChunk::select_decoded(&decoded, VecCmp::Ge(5.0)), vec![2, 3, 5]);
+        assert_eq!(DataChunk::select_decoded(&decoded, VecCmp::Eq(5.0)), vec![2, 3]);
+        assert_eq!(DataChunk::select_decoded(&decoded, VecCmp::Lt(5.0)), vec![0]);
+        // No comparison ever selects a NaN-sentinel position (1 and 4).
+        for cmp in [VecCmp::Gt(-1e18), VecCmp::Ge(-1e18), VecCmp::Le(1e18)] {
+            let sel = DataChunk::select_decoded(&decoded, cmp);
+            assert!(!sel.contains(&1) && !sel.contains(&4), "{cmp:?} must skip NaN cells");
+        }
+    }
+
+    #[test]
+    fn decode_numeric_column_out_of_range_is_empty() {
+        let (g, _ids) = ages_graph(4);
+        let chunk = DataChunk::empty(1);
+        assert!(chunk.decode_numeric_column(&g, 5).is_empty());
     }
 
     #[test]

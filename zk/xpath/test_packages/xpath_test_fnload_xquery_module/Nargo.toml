@@ -1,7 +1,0 @@
-[package]
-name = "xpath_test_fnload_xquery_module"
-type = "lib"
-authors = ["auto-generated"]
-
-[dependencies]
-xpath = { path = "../../xpath" }

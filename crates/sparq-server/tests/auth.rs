@@ -344,6 +344,50 @@ async fn reads_gated_when_read_gate_on() {
     assert_eq!(count_rows_authed(&cl, &base, TOKEN).await, 1);
 }
 
+/// [OPUS-4.8] sq-b3df9 (w3c/sparql-protocol#40): the HTTP `QUERY` method enforces the SAME
+/// `--auth-token-read` gate as GET/POST — it is a read on the dataset and must NOT bypass the
+/// hot auth path. No header => 401 + `WWW-Authenticate: Bearer`; correct token => 200.
+#[tokio::test]
+async fn query_method_gated_when_read_gate_on() {
+    let base = spawn_with(token_config(true)).await;
+    let cl = client();
+    let query_method = reqwest::Method::from_bytes(b"QUERY").unwrap();
+
+    // QUERY with NO Authorization header => 401 (the read gate), NOT 200/400 — the auth gate
+    // runs before the query handler ever sees the body.
+    let unauth = cl
+        .request(query_method.clone(), format!("{base}/sparql"))
+        .header("content-type", "application/sparql-query")
+        .body(SELECT)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unauth.status(),
+        401,
+        "QUERY must be gated with --auth-token-read"
+    );
+    assert_eq!(
+        unauth
+            .headers()
+            .get("www-authenticate")
+            .map(|v| v.to_str().unwrap()),
+        Some("Bearer")
+    );
+
+    // With the Bearer token => 200 (the request reaches the shared query path).
+    let authed = cl
+        .request(query_method, format!("{base}/sparql"))
+        .header("content-type", "application/sparql-query")
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("accept", "application/sparql-results+json")
+        .body(SELECT)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authed.status(), 200, "QUERY with the read token must pass");
+}
+
 // ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-9jrx: /metrics is a READ (it leaks the live triple count and the
 // active-subscription count), so it is gated by --auth-token-read like any other

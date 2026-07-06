@@ -56,7 +56,7 @@ ALLOW_LINE_SUBSTRINGS = [
     # platform / spec limits
     "wasm32", "4 GB", "2 GB", "4 GiB",
     # the canonical perf homes — a line that POINTS to them is fine
-    "jeswr.github.io/sparq/dev/bench", "benchmarks.toml", "bench/CATALOG.md",
+    "sparq.jeswr.org/dev/bench", "benchmarks.toml", "bench/CATALOG.md",
     "perf-baseline.json", "perf dashboard",
     # explicit opt-out marker a reviewer can add on a justified line
     "<!-- perf-ok -->", "perf-ok:",
@@ -82,31 +82,36 @@ ALLOW_PATH_PREFIXES = [
 ]
 
 # Globs of files to scan. Markdown is the original surface; the published-paper Typst
-# sources (`site/papers/**/*.typ`) are ALSO scanned so a hard-coded perf figure typed
-# directly into a paper — the highest-stakes OUTWARD surface — trips the gate too
-# (bead sq-mkza). The `.typ` glob is git-tracked workspace-wide, so it is narrowed to
-# the paper tree by TYPST_SCAN_PREFIX below; non-paper `.typ` (if any ever appear) are
-# left alone. Result numbers in a paper are meant to flow through the Typst data
-# accessor (`paper-evidence.json` → `#headline(...)` / `#ev(...)`), NOT be typed inline.
+# sources (`site/papers/**/*.typ`) AND the /specs Proposed-Specification Typst sources
+# (`site/specs/**/*.typ`) are ALSO scanned so a hard-coded perf figure typed directly into
+# a paper or a spec draft — the highest-stakes OUTWARD surfaces — trips the gate too
+# (beads sq-mkza + sq-rvgr2.5). The `.typ` glob is git-tracked workspace-wide, so it is
+# narrowed to those two trees by TYPST_SCAN_PREFIXES below; any other `.typ` (if one ever
+# appears) is left alone. Result numbers in a paper flow through the Typst data accessor
+# (`paper-evidence.json` → `#headline(...)` / `#ev(...)`) rather than being typed inline;
+# a spec is a DESIGN surface and should carry no benchmark figure at all.
 SCAN_GLOBS = ["*.md", "*.typ"]
 
-# Only `.typ` files under this prefix are scanned (the paper-factory sources). The
-# accessor-aware, result-shaped-only `.typ` scan (scan_typst_file) is deliberately
-# NARROWER than the markdown scan — see its docstring and design record
-# research/paper-factory-honesty-gate-coverage.md §7 (Option b: scan for result-shaped
-# numerics only, leave free-typed setup counts — dataset sizes / dimensions / k — alone,
-# for author ergonomics). It catches only the COARSE perf-number class; subtle semantic
-# overclaims remain Stage-5 human review.
-TYPST_SCAN_PREFIX = "site/papers/"
+# Only `.typ` files under one of these prefixes are scanned (the paper-factory sources and
+# the /specs spec-factory sources). The accessor-aware, result-shaped-only `.typ` scan
+# (scan_typst_file) is deliberately NARROWER than the markdown scan — see its docstring and
+# design record research/paper-factory-honesty-gate-coverage.md §7 (Option b: scan for
+# result-shaped numerics only, leave free-typed setup counts — dataset sizes / dimensions /
+# k — alone, for author ergonomics). It catches only the COARSE perf-number class; subtle
+# semantic overclaims remain Stage-5 human review. `str.startswith` accepts a tuple, so a
+# path matches if it lives under ANY listed prefix. [OPUS-4.8] sq-rvgr2.5 added site/specs/.
+TYPST_SCAN_PREFIXES = ("site/papers/", "site/specs/")
 
 
 def is_typst_paper(path: str) -> bool:
-    return path.endswith(".typ") and path.startswith(TYPST_SCAN_PREFIX)
+    # [OPUS-4.8] sq-rvgr2.5: "paper" is historical — this is any scanned `.typ`, i.e. one
+    # under the paper-factory OR the /specs spec-factory tree (TYPST_SCAN_PREFIXES).
+    return path.endswith(".typ") and path.startswith(TYPST_SCAN_PREFIXES)
 
 
 def tracked_sources() -> list[str]:
     """All git-tracked files in scope (markdown everywhere; `.typ` only under the
-    paper tree). Deterministic, no untracked scratch."""
+    paper / specs trees). Deterministic, no untracked scratch."""
     out = subprocess.run(
         ["git", "ls-files", *SCAN_GLOBS],
         capture_output=True, text=True, check=True,

@@ -2,11 +2,20 @@
 //! how each closed window becomes the [`sparq_core::Graph`] the engine
 //! evaluates. See [`EvalMode`] for the four strategies and the crate README
 //! for the measured throughput of each.
+//!
+//! [FABLE-5] (sq-2n1q3.4) The `Delta`/`Snapshot` consecutive-window diff (the
+//! ISTREAM/DSTREAM-shaped slide) runs on the shared eval substrate: each window
+//! is interned into a persistent diff dictionary and diffed as `Id = u32`
+//! id-rows via `sparq_substrate::join::delta::DeltaTable` — see `WindowDiff`
+//! for the semi-naive shape and the behaviour-neutrality argument.
 
 use oxrdf::Term;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{is_inline, Dict, Id};
 use sparq_core::Graph;
+use sparq_substrate::join::delta::DeltaTable;
+use sparq_substrate::join::{JoinKeys, NoBudget};
+use sparq_substrate::rows::Row;
 
 use crate::window::{Window, WindowSpec, WindowedStream};
 
@@ -43,14 +52,21 @@ pub enum EvalMode {
     #[default]
     PersistentDict,
     /// ONE live graph maintained by `Graph::apply_delta(inserts, deletes)` per
-    /// slide (the set-semantic diff between consecutive windows), compacted
-    /// when the pending overlay outgrows the live window. Measured SLOWER than
-    /// `PersistentDict` in every benchmark scenario (the per-slide work is
-    /// term-level — interning inserts, `id_of` lookups for deletes — and
-    /// overlay rows are re-sorted per scan); kept as an option because its
-    /// per-slide cost is O(changes), so it can win when windows are huge and
-    /// the engine evaluation itself is cheap relative to an index rebuild.
-    /// Like `PersistentDict`, the live graph's dictionary grows monotonically.
+    /// slide — the set-semantic diff between consecutive windows, computed on
+    /// the shared eval substrate ([FABLE-5] sq-2n1q3.4: each window is interned
+    /// into a persistent diff dictionary and diffed as `Id = u32` id-rows
+    /// against the previous window's persisted
+    /// `sparq_substrate::join::delta::DeltaTable`, the semi-naive Δ-vs-full
+    /// probe shape; see `WindowDiff`) — compacted when the pending overlay
+    /// outgrows the live window. Measured SLOWER than `PersistentDict` in every
+    /// benchmark scenario (`Graph::apply_delta` still does term-level work —
+    /// interning inserts, `id_of` lookups for deletes — and overlay rows are
+    /// re-sorted per scan); kept as an option because its per-slide cost is
+    /// O(changes), so it can win when windows are huge and the engine
+    /// evaluation itself is cheap relative to an index rebuild. Like
+    /// `PersistentDict`, the live graph's dictionary grows monotonically (as
+    /// does the separate diff dictionary, which tracks the same all-time
+    /// vocabulary).
     Delta,
     /// [OPUS-4.8] (sq-j39) The TRUE overlay-snapshot mode: identical per-slide
     /// maintenance to [`Delta`](Self::Delta) — ONE live mutable graph evolved by
@@ -132,9 +148,11 @@ enum Materializer {
         /// Boxed: a `Graph` (dictionary + indexes) is much larger than the
         /// other variants' state.
         graph: Box<Graph>,
-        /// The previous window's content as a deduplicated triple set (the
-        /// diff base for the next slide).
-        prev: Vec<[Term; 3]>,
+        /// [FABLE-5] (sq-2n1q3.4) The persistent id-level diff state — the diff
+        /// dictionary, the previous window's deduplicated id-rows + terms, and
+        /// the substrate `DeltaTable` build side (the diff base for the next
+        /// slide).
+        diff: WindowDiff,
         /// Inserts + deletes applied since the last compaction.
         churn: usize,
     },
@@ -144,7 +162,7 @@ enum Materializer {
     Snapshot {
         window: WindowedStream<[Term; 3]>,
         graph: Box<Graph>,
-        prev: Vec<[Term; 3]>,
+        diff: WindowDiff,
         churn: usize,
     },
 }
@@ -168,13 +186,13 @@ impl WindowEval {
             EvalMode::Delta => Materializer::Delta {
                 window: WindowedStream::empty(spec),
                 graph: Box::new(Graph::from_parts(Dict::new(), Vec::new())),
-                prev: Vec::new(),
+                diff: WindowDiff::new(),
                 churn: 0,
             },
             EvalMode::Snapshot => Materializer::Snapshot {
                 window: WindowedStream::empty(spec),
                 graph: Box::new(Graph::from_parts(Dict::new(), Vec::new())),
-                prev: Vec::new(),
+                diff: WindowDiff::new(),
                 churn: 0,
             },
         };
@@ -271,17 +289,17 @@ impl WindowEval {
                     Self::compact_dict(dict, window, dict_len_at_compact);
                 }
             }
-            Materializer::Delta { window, graph, prev, churn } => {
+            Materializer::Delta { window, graph, diff, churn } => {
                 for w in take(window, flush) {
-                    apply_window_delta(&w, graph, prev, churn)?;
+                    apply_window_delta(&w, graph, diff, churn)?;
                     // Delta hands the engine a direct borrow into the live graph:
                     // it is read, then the next slide mutates it in place.
                     f(w.start, w.end, graph)?;
                 }
             }
-            Materializer::Snapshot { window, graph, prev, churn } => {
+            Materializer::Snapshot { window, graph, diff, churn } => {
                 for w in take(window, flush) {
-                    apply_window_delta(&w, graph, prev, churn)?;
+                    apply_window_delta(&w, graph, diff, churn)?;
                     // [OPUS-4.8] (sq-j39) The true overlay-snapshot step: evaluate
                     // this window over a cheap O(overlay) IMMUTABLE point-in-time
                     // view of the live graph, not a borrow into it. The snapshot
@@ -394,32 +412,148 @@ fn remap_id(id: Id, remap: &FxHashMap<Id, Id>) -> Id {
     }
 }
 
+/// [FABLE-5] (sq-2n1q3.4) The persistent id-level window-diff state shared by
+/// `EvalMode::Delta` and `EvalMode::Snapshot` — the consecutive-window set-diff
+/// (the ISTREAM/DSTREAM shape) computed on the shared eval substrate
+/// (`sparq_substrate::join::delta::DeltaTable` over `sparq_substrate::rows::Row`)
+/// instead of per-slide term-level hash sets.
+///
+/// ## Semi-naive shape
+///
+/// Per slide, the previous window is the persisted BUILD side and the closed
+/// window is the probe (Δ) side, keyed on the full triple (all three id
+/// columns): a probe miss against `prev_table` is an INSERT, a previous row
+/// missing from the window's own freshly-built table is a DELETE, and that
+/// fresh table then BECOMES `prev_table` — the previous window is never
+/// re-hashed. That carried-over build side is exactly the extendable-table
+/// property `DeltaTable` was built for (`research/substrate-remaining-design.md`
+/// §3), where the old code rebuilt BOTH term-level hash sets on every slide.
+///
+/// ## Behaviour-neutrality (the load-bearing argument)
+///
+/// Diffing id-rows computes EXACTLY the sets the term-level diff computed,
+/// because interning is injective on lexically-distinct terms: `Dict::intern`
+/// assigns equal ids iff the terms are equal — inline ids exist only for the
+/// CANONICAL `xsd:integer` lexical form (`"042"^^xsd:integer` stays a distinct
+/// dictionary entry) and stored terms dedup on the exact
+/// (value, datatype, lang) tuple — which is `oxrdf::Term` equality. The terms
+/// handed to `Graph::apply_delta` are the ORIGINAL pushed terms (kept in
+/// `prev_terms`), never a dictionary reconstruction, so the live graph receives
+/// the same insert/delete SETS as before the substrate adoption. Pinned by the
+/// four-EvalMode cross-check tests and the SRBench expressivity ratchet.
+///
+/// ## Monomorphic (no dynamic dispatch)
+///
+/// The probe path carries no trait object: `NoBudget` is a zero-sized generic
+/// `Budget`, the emit hook is a monomorphised closure, and the key projection
+/// is plain `Id = u32` column data — `scripts/check-no-dyn-dispatch.py` guards
+/// this file structurally (the #1303 invariant, consumer side of the seam).
+///
+/// ## Memory bound
+///
+/// `dict` grows monotonically with the stream's all-time vocabulary — the SAME
+/// documented bound as the live graph's own dictionary in these two modes. It
+/// is deliberately SEPARATE from the live graph's dict so the graph's
+/// id-assignment order (and thus its observable behaviour) is untouched by the
+/// substrate adoption.
+struct WindowDiff {
+    /// Persistent term→id dictionary for the diff (see the memory-bound note
+    /// above for why it is separate from the live graph's dictionary).
+    dict: Dict,
+    /// The previous window's DISTINCT triples as id-rows, in first-appearance
+    /// order (parallel to `prev_terms`; the arena order of `prev_table`).
+    prev_rows: Vec<Row>,
+    /// The original `Term` form of each `prev_rows` entry — deletes hand
+    /// `Graph::apply_delta` these exact terms.
+    prev_terms: Vec<[Term; 3]>,
+    /// The substrate build-side table over `prev_rows`, persisted across
+    /// slides.
+    prev_table: DeltaTable,
+    /// The full-triple key projection: all three id columns on both sides.
+    keys: JoinKeys,
+}
+
+impl WindowDiff {
+    fn new() -> Self {
+        WindowDiff {
+            dict: Dict::new(),
+            prev_rows: Vec::new(),
+            prev_terms: Vec::new(),
+            prev_table: DeltaTable::new(),
+            keys: JoinKeys { key_cols: vec![(0, 0), (1, 1), (2, 2)], right_only: Vec::new() },
+        }
+    }
+
+    /// Whether `row` has a match in `table` under the full-triple key: one hash
+    /// probe through the substrate kernel. Distinct rows carry distinct keys
+    /// (the key IS the whole row), so the emit hook fires at most once.
+    #[inline]
+    fn contains(&self, table: &DeltaTable, row: &Row) -> bool {
+        let mut hit = false;
+        table.probe_emit(std::slice::from_ref(row), &self.keys, &NoBudget, &mut |_, _| {
+            hit = true;
+        });
+        hit
+    }
+}
+
 /// [OPUS-4.8] (sq-j39) One slide of the live-graph maintenance shared by
 /// [`EvalMode::Delta`] and [`EvalMode::Snapshot`]: diff the closed window `w`
-/// against the previous window (`prev`) under RDF set semantics — a triple
-/// present at several timestamps counts once, so inserts/deletes are computed
-/// over the DISTINCT triple sets — apply the diff to the live `graph`, advance
-/// the diff base, and fold the overlay back into the base once cumulative churn
+/// against the previous window under RDF set semantics — a triple present at
+/// several timestamps counts once, so inserts/deletes are computed over the
+/// DISTINCT triple sets — apply the diff to the live `graph`, advance the diff
+/// base, and fold the overlay back into the base once cumulative churn
 /// outgrows the live window (overlay rows are re-sorted per scan). After this
 /// returns, `graph` holds exactly the distinct triples of `w`; the two modes
 /// differ only in WHAT they then hand the engine (a live borrow vs an immutable
 /// snapshot).
+///
+/// [FABLE-5] (sq-2n1q3.4) The diff itself runs on the shared eval substrate —
+/// the semi-naive Δ-vs-full probe shape of
+/// `sparq_substrate::join::delta::DeltaTable` over `Id = u32` id-rows; see
+/// `WindowDiff` for the exact-equivalence argument.
 fn apply_window_delta(
     w: &Window<[Term; 3]>,
     graph: &mut Graph,
-    prev: &mut Vec<[Term; 3]>,
+    diff: &mut WindowDiff,
     churn: &mut usize,
 ) -> Result<(), String> {
-    let cur: FxHashSet<&[Term; 3]> = w.triples.iter().map(|t| &t.triple).collect();
-    let old: FxHashSet<&[Term; 3]> = prev.iter().collect();
-    let inserts: Vec<[Term; 3]> =
-        cur.iter().filter(|t| !old.contains(**t)).map(|t| (*t).clone()).collect();
-    let deletes: Vec<[Term; 3]> =
-        old.iter().filter(|t| !cur.contains(**t)).map(|t| (*t).clone()).collect();
-    let next_prev: Vec<[Term; 3]> = cur.iter().map(|t| (*t).clone()).collect();
-    drop(cur);
-    drop(old);
-    *prev = next_prev;
+    // Intern + dedup the closed window into id-rows, probing as we go.
+    let mut cur_table = DeltaTable::new();
+    let mut cur_rows: Vec<Row> = Vec::with_capacity(w.triples.len());
+    let mut cur_terms: Vec<[Term; 3]> = Vec::with_capacity(w.triples.len());
+    let mut inserts: Vec<[Term; 3]> = Vec::new();
+    for t in &w.triples {
+        let row = Row::from_slice(&[
+            diff.dict.intern(&t.triple[0]),
+            diff.dict.intern(&t.triple[1]),
+            diff.dict.intern(&t.triple[2]),
+        ]);
+        // RDF set semantics: a triple present at several timestamps counts
+        // once — the window's OWN build table doubles as the dedup set.
+        if diff.contains(&cur_table, &row) {
+            continue;
+        }
+        // ISTREAM half: in the current window but not the previous one.
+        if !diff.contains(&diff.prev_table, &row) {
+            inserts.push(t.triple.clone());
+        }
+        cur_table.extend(std::slice::from_ref(&row), &diff.keys);
+        cur_rows.push(row);
+        cur_terms.push(t.triple.clone());
+    }
+    // DSTREAM half: in the previous window but not the current one.
+    let mut deletes: Vec<[Term; 3]> = Vec::new();
+    for (i, row) in diff.prev_rows.iter().enumerate() {
+        if !diff.contains(&cur_table, row) {
+            deletes.push(diff.prev_terms[i].clone());
+        }
+    }
+    // Advance the diff base: this window's table IS the next slide's build
+    // side (the previous window is never re-hashed).
+    diff.prev_rows = cur_rows;
+    diff.prev_terms = cur_terms;
+    diff.prev_table = cur_table;
     *churn += inserts.len() + deletes.len();
     graph.apply_delta(&inserts, &deletes)?;
     if *churn >= graph.len().max(MIN_COMPACT_CHURN) {
@@ -453,7 +587,8 @@ fn materialize(w: &Window<[Term; 3]>) -> Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxrdf::NamedNode;
+    use oxrdf::vocab::xsd;
+    use oxrdf::{Literal, NamedNode};
     use sparq_core::GraphSnapshot;
 
     fn triple(s: &str, p: &str, o: &str) -> [Term; 3] {
@@ -516,6 +651,105 @@ mod tests {
         // The windows genuinely differ in size, so a stale/aliasing view would
         // be caught (every capture would read the last window's count).
         assert!(counts.windows(2).all(|w| w[0] < w[1]), "windows strictly grow, so views must differ");
+    }
+
+    /// [FABLE-5] (sq-2n1q3.4) Per-window solutions for one mode, sorted
+    /// order-insensitively (ties between value-equal literals may order
+    /// differently across materialisation strategies).
+    fn windows_of(mode: EvalMode, spec: WindowSpec, pushes: &[([Term; 3], u64)]) -> Vec<Vec<String>> {
+        let mut ev = WindowEval::new(spec, mode);
+        for (t, ts) in pushes {
+            ev.push(t.clone(), *ts);
+        }
+        let mut out = Vec::new();
+        ev.eval_closed(true, &mut |_s, _e, g: &Graph| {
+            let rows =
+                sparq_engine::query(g, "SELECT ?o WHERE { ?s ?p ?o }").expect("window eval");
+            let mut objs: Vec<String> = rows.rows.iter().map(|r| format!("{:?}", r)).collect();
+            objs.sort();
+            out.push(objs);
+            Ok(())
+        })
+        .unwrap();
+        out
+    }
+
+    /// [FABLE-5] (sq-2n1q3.4) The substrate-backed id-level diff must stay
+    /// LEXICAL, exactly like the term-level hash-set diff it replaced:
+    /// `"42"^^xsd:integer` and `"042"^^xsd:integer` are value-equal but
+    /// lexically DISTINCT terms (only the canonical form takes an inline id; a
+    /// non-canonical lexical form stays its own dictionary entry), so a window
+    /// swapping one form for the other must register a real insert + delete. A
+    /// diff that conflated the two ids would leave a stale triple in the live
+    /// graph and diverge from the diff-free `Rebuild` baseline here.
+    #[test]
+    fn delta_diff_distinguishes_lexically_distinct_value_equal_literals() {
+        let lit = |lex: &str| -> [Term; 3] {
+            [
+                NamedNode::new_unchecked("http://ex/s").into(),
+                NamedNode::new_unchecked("http://ex/p").into(),
+                Literal::new_typed_literal(lex, xsd::INTEGER).into(),
+            ]
+        };
+        let spec = WindowSpec::time(10, 10); // tumbling
+        let pushes = vec![
+            (lit("42"), 0),   // w0: the canonical form only
+            (lit("42"), 12),  // w1: BOTH lexical forms of the value 42
+            (lit("042"), 13),
+            (lit("042"), 25), // w2: non-canonical only — "42" must be deleted
+        ];
+        let rebuild = windows_of(EvalMode::Rebuild, spec, &pushes);
+        assert_eq!(rebuild.len(), 3, "three tumbling windows");
+        assert_eq!(rebuild[1].len(), 2, "w1 holds TWO lexically-distinct objects");
+        assert_eq!(rebuild[2].len(), 1, "w2 holds only the non-canonical form");
+        assert_eq!(
+            windows_of(EvalMode::Delta, spec, &pushes),
+            rebuild,
+            "Delta's id-level diff diverged from the Rebuild baseline"
+        );
+        assert_eq!(
+            windows_of(EvalMode::Snapshot, spec, &pushes),
+            rebuild,
+            "Snapshot's id-level diff diverged from the Rebuild baseline"
+        );
+    }
+
+    /// [FABLE-5] (sq-2n1q3.4) The `DeltaTable`-backed slide end to end:
+    /// duplicate timestamps dedup to one triple (RDF set semantics via the
+    /// window's own build table), a partially-overlapping next window diffs to
+    /// exactly the changed triples, an empty window deletes everything, and the
+    /// stream refills after it — each window's content matching the diff-free
+    /// `Rebuild` baseline exactly.
+    #[test]
+    fn substrate_diff_matches_rebuild_on_dedup_partial_overlap_and_empty_windows() {
+        let spec = WindowSpec::time(10, 10); // tumbling
+        let pushes = vec![
+            // w0 [0,10): {a, b}, with `a` present at two timestamps.
+            (triple("s", "p", "a"), 0),
+            (triple("s", "p", "a"), 3),
+            (triple("s", "p", "b"), 5),
+            // w1 [10,20): {b, c} — partial overlap: insert c, delete a.
+            (triple("s", "p", "b"), 12),
+            (triple("s", "p", "c"), 15),
+            // w2 [20,30): empty — everything is deleted.
+            // w3 [30,40): {d} — refill after the empty window.
+            (triple("s", "p", "d"), 30),
+        ];
+        let rebuild = windows_of(EvalMode::Rebuild, spec, &pushes);
+        assert_eq!(rebuild.len(), 4, "w0..w3 including the empty w2");
+        assert_eq!(rebuild[0].len(), 2, "duplicate timestamps dedup to {{a, b}}");
+        assert!(rebuild[2].is_empty(), "w2 is the empty window");
+        assert_eq!(rebuild[3].len(), 1, "w3 refills after the empty window");
+        assert_eq!(
+            windows_of(EvalMode::Delta, spec, &pushes),
+            rebuild,
+            "Delta's id-level diff diverged from the Rebuild baseline"
+        );
+        assert_eq!(
+            windows_of(EvalMode::Snapshot, spec, &pushes),
+            rebuild,
+            "Snapshot's id-level diff diverged from the Rebuild baseline"
+        );
     }
 
     /// `Snapshot` mode produces the same per-window triple counts as `Delta`

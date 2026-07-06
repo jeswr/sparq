@@ -10,7 +10,8 @@ returns). Numbers below were measured by Opus 4.8.
 
 1. **Gate counts** (`bb gates -s ultra_honk`, ground truth per the
    noir-optimisation skill) for every compiled circuit-family member, in the
-   `zk/ieee754` JSON convention (`circuit_size`).
+   `sparq_ieee754` JSON convention (`circuit_size`) — the shape that originated
+   in the ieee754 lineage, now the `sparq-org/noir_IEEE754` face repo.
 2. **Wall-clock prove/verify** for the small credential-scale e2e cases.
 3. **SPARQL feature → ZK gate-cost catalog** (`sparql_feature_catalog.json`) — a
    coverage map AND an optimisation-target list spanning SPARQL 1.1, joining each

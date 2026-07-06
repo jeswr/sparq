@@ -2848,4 +2848,550 @@ mod tests {
         assert_ne!(sidecar_path_for("g.nt"), sidecar_path_for("g.ttl"));
         assert_eq!(SIDECAR_EXTENSION, "introspect");
     }
+
+    // ---- [OPUS-4.8] sq-qcnn.21: mutation-kill direct unit tests ------------------
+
+    /// [OPUS-4.8] sq-qcnn.21: `keep_min_sample` keeps the `cap` lex-smallest values.
+    /// Kills mutations on `samples.len() < cap` (line 409) and `s < *last` (line 413):
+    /// - `len < cap` → `<=`: would push a 3rd sample when len already equals cap.
+    /// - `s < *last` → `>`: would keep larger values instead of smaller ones.
+    ///   (Note: `<=` on `s < *last` is an equivalent mutation when s==last because
+    ///   replacing *last with itself leaves the vec unchanged; this is by design.)
+    #[test]
+    fn keep_min_sample_exact_semantics() {
+        // -- Cap boundary: exact count when full -----------------------------------
+        let mut s: Vec<String> = Vec::new();
+        keep_min_sample(&mut s, 2, "b".to_string());
+        keep_min_sample(&mut s, 2, "a".to_string());
+        // Both fit (len < cap = 2).
+        assert_eq!(s, vec!["a", "b"], "two values in cap=2 both fit");
+
+        // Strictly smaller than current max ("b"): replaces "b".
+        keep_min_sample(&mut s, 2, "aa".to_string());
+        assert_eq!(
+            s,
+            vec!["a", "aa"],
+            "value smaller than last replaces last; mutation s>*last would keep [a,b]"
+        );
+
+        // Strictly larger ("z"): rejected, vec unchanged.
+        keep_min_sample(&mut s, 2, "z".to_string());
+        assert_eq!(s, vec!["a", "aa"], "larger value is rejected");
+
+        // -- len < cap vs <= cap -------------------------------------------------
+        // With cap=3 and 3 items already, the 4th push must be rejected (len NOT < cap).
+        let mut t: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        keep_min_sample(&mut t, 3, "aa".into()); // "aa" < last "c"
+        // Correct: replaces "c" → ["a","aa","b"].  Mutation `len <= cap` would push a 4th.
+        assert_eq!(t.len(), 3, "cap enforced: len must stay at 3");
+        assert_eq!(t, vec!["a", "aa", "b"], "smaller value replaced the max");
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `keep_min_sample_distinct` must reject a duplicate even
+    /// when capacity remains — the `contains` guard is the ONLY de-dup path for the
+    /// class-scoped sample set. Kills `replace keep_min_sample_distinct with ()`.
+    #[test]
+    fn keep_min_sample_distinct_dedup_guard() {
+        let mut s: Vec<String> = vec!["a".into()];
+        // Duplicate of an already-retained value — must be silently skipped.
+        keep_min_sample_distinct(&mut s, 5, "a".to_string());
+        assert_eq!(
+            s,
+            vec!["a"],
+            "duplicate must not be added even when cap is not full"
+        );
+        // A distinct new value is added normally.
+        keep_min_sample_distinct(&mut s, 5, "b".to_string());
+        assert_eq!(s, vec!["a", "b"], "distinct value is added");
+        // Another duplicate is still rejected.
+        keep_min_sample_distinct(&mut s, 5, "a".to_string());
+        assert_eq!(s.len(), 2, "second duplicate still rejected");
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `truncate_chars` exact boundary — exactly `max` chars
+    /// must NOT be truncated; `max + 1` must produce `take(max-1)` chars + `…`.
+    /// Kills mutation `replace <= with >` (line 1763) and tests `saturating_sub(1)`.
+    #[test]
+    fn truncate_chars_exact_boundary() {
+        // Exactly max chars: no truncation (condition `<= max` is true, returns as-is).
+        // Mutation `> max` would invert: strings of exactly max chars would be truncated!
+        assert_eq!(
+            truncate_chars("abc", 3),
+            "abc",
+            "3 chars at max=3: no truncation"
+        );
+        // One over max: truncated to take(max - 1) chars + "…".
+        // take(3-1=2) = "ab", then append "…".
+        assert_eq!(
+            truncate_chars("abcd", 3),
+            "ab\u{2026}",
+            "4 chars at max=3: truncated to 2+ellipsis"
+        );
+        // max=1: take(0) = "" + "…" (saturating_sub(1) of 1 is 0, not -1).
+        assert_eq!(truncate_chars("xy", 1), "\u{2026}", "max=1 yields bare ellipsis");
+        // max=0: saturating_sub(1) = 0, take(0) = "" + "…".
+        assert_eq!(truncate_chars("a", 0), "\u{2026}", "max=0 yields bare ellipsis");
+        // Exactly 1 char at max=1: no truncation.
+        assert_eq!(truncate_chars("a", 1), "a", "1 char at max=1: no truncation");
+        // Empty string: always returned unchanged regardless of max.
+        assert_eq!(truncate_chars("", 0), "", "empty string is never truncated");
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `BudgetWriter::line` exact +2 reserve and > vs >= boundary.
+    /// Kills mutations: `replace + with -/×` (line 1840), `replace > with >=` (line 1840).
+    ///
+    /// Design: "hello" = 5 chars + 1 newline = cost 6.
+    /// - limit=7: 0 + 6 + 2 = 8 > 7 → REJECT. Mutation `+1` reserve gives 7 > 7 → false → fits (WRONG).
+    /// - limit=8: 0 + 6 + 2 = 8 > 8 → false → FITS. Mutation `>=` gives 8 >= 8 → true → rejects (WRONG).
+    #[test]
+    fn budget_writer_line_plus2_reserve_exact() {
+        // limit=7: the line does NOT fit because 0 + 6 + 2 = 8 > 7.
+        let mut w7 = BudgetWriter::new(7);
+        assert!(
+            !w7.line("hello"),
+            "limit=7, cost=6: 0+6+2=8 > 7 should reject (mutation +1 would accept)"
+        );
+        assert!(w7.full(), "writer is in truncated state after first rejection");
+
+        // limit=8: the line DOES fit because 0 + 6 + 2 = 8 > 8 is FALSE.
+        let mut w8 = BudgetWriter::new(8);
+        assert!(
+            w8.line("hello"),
+            "limit=8, cost=6: 0+6+2=8 > 8 is false — must accept (mutation >= would reject)"
+        );
+        assert_eq!(w8.finish(), "hello\n", "accepted line appears in output");
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `BudgetWriter::finish` elision-marker exact threshold.
+    /// Kills mutations: `replace <= with >` and `replace + with -/×` in finish (line 1855).
+    ///
+    /// After "hello" (used=6) fails to fit "world" (truncated=true), limit=8:
+    /// `used + 2 = 6 + 2 = 8 <= 8` → TRUE → "…\n" is appended.
+    /// Mutation `< 8`: `8 < 8 = false` → no marker (WRONG).
+    /// Also verifies `&&` semantics: when NOT truncated, no marker even with headroom.
+    #[test]
+    fn budget_writer_finish_elision_marker_exact() {
+        // -- Elision marker appears when truncated AND used+2 fits exactly -----------
+        let mut w = BudgetWriter::new(8);
+        assert!(w.line("hello")); // cost=6, used=6
+        assert!(!w.line("world")); // cost=6, 6+6+2=14 > 8 → truncated
+        let out = w.finish();
+        // used=6, limit=8: 6+2=8 <= 8 → marker appended.
+        assert_eq!(
+            out,
+            "hello\n\u{2026}\n",
+            "elision marker must appear when used+2 exactly equals limit"
+        );
+
+        // -- No marker when NOT truncated (kills && → || mutation) ------------------
+        let mut w2 = BudgetWriter::new(100);
+        assert!(w2.line("hello"));
+        let out2 = w2.finish();
+        assert!(
+            !out2.contains('\u{2026}'),
+            "no elision marker when nothing was truncated"
+        );
+
+        // -- No marker when limit is too small for the marker itself (used+2 > limit) ----
+        // The elision marker "…\n" costs 2 chars. With limit=1 no line can ever fit
+        // (min cost = 1 char + 1 newline = 2 > 1), so used stays 0 but truncated=true.
+        // finish: 0+2=2 > 1=limit → the elision marker has no room and is not emitted.
+        // [OPUS-4.8] sq-qcnn.21
+        let mut w3 = BudgetWriter::new(1);
+        assert!(!w3.line("x"), "no line fits when limit=1");
+        assert_eq!(w3.finish(), "", "no marker emitted when limit=1 (no room for the marker)");
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `PrefixAssigner::compact` exact `i + 1` split point.
+    /// Kills mutation `replace + with -/×` (line 1795): `rfind` index ± 1 off-by-one.
+    ///
+    /// For `http://ex.org/Foo`: last `/` is at byte 13, `cut = 14`.
+    /// ns = `http://ex.org/`, local = `Foo` → `ns1:Foo`.
+    /// Mutation `i - 1` (cut=13): ns = `http://ex.org`, local = `/Foo` → `ns1:/Foo` (WRONG).
+    #[test]
+    fn prefix_assigner_compact_split_exact() {
+        let mut pa = PrefixAssigner::new();
+
+        // Standard IRI: last `/` is the delimiter; local part excludes the `/`.
+        let r = pa.compact("http://ex.org/Foo");
+        assert_eq!(r, "ns1:Foo", "local part must start AFTER the slash, not include it");
+
+        // Well-known namespace: gets its canonical prefix, not `ns2`.
+        let r2 = pa.compact("http://xmlns.com/foaf/0.1/Person");
+        assert_eq!(r2, "foaf:Person", "FOAF IRI gets well-known prefix");
+
+        // Fragment-separated IRI: last `#` is the delimiter.
+        let r3 = pa.compact("http://ex.org/onto#Concept");
+        // Last delimiter is `#` at some index i → cut = i+1.
+        // ns = "http://ex.org/onto#", local = "Concept".
+        // Since `http://ex.org/onto#` is not well-known, it becomes `ns2:Concept`.
+        assert!(
+            r3.ends_with(":Concept") && !r3.ends_with("/#Concept"),
+            "fragment IRI: local = 'Concept' not '#Concept', got: {r3}"
+        );
+
+        // No delimiter: pass through unchanged.
+        let r4 = pa.compact("plain");
+        assert_eq!(r4, "plain", "no '#' or '/' → unchanged");
+
+        // Starts with '"': quoted sample, pass through unchanged.
+        let r5 = pa.compact("\"hello\"");
+        assert_eq!(r5, "\"hello\"", "quoted sample is returned as-is");
+
+        // Trailing delimiter only (empty local part): pass through unchanged.
+        let r6 = pa.compact("http://ex.org/");
+        assert_eq!(r6, "http://ex.org/", "empty local part → unchanged");
+
+        // rfind returns LAST delimiter — `http://a.org/b/c` splits at the last `/`.
+        let r7 = pa.compact("http://a.org/b/c");
+        assert!(
+            r7.ends_with(":c"),
+            "must split at the LAST '/', not the first; got: {r7}"
+        );
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `render_object_sample` inline integer exact value.
+    /// Kills `replace render_object_sample -> String with String::new()/"xyzzy"`.
+    /// Also pins the `o - INLINE_BASE` arithmetic: if mutated to `o + INLINE_BASE`,
+    /// the sample would be a huge number rather than the expected integer string.
+    #[test]
+    fn render_object_sample_inline_integer_exact() {
+        // A predicate whose sole object is an inline integer (xsd:integer literal).
+        // Inline integers encode as id = INLINE_BASE + value; render must decode back.
+        let g = graph(":a :p 5 .");
+        let ix = Introspection::build(&g);
+        let p = ix.predicates.iter().find(|p| p.predicate == ex("p")).unwrap();
+        // render_object_sample for inline id (INLINE_BASE+5) → format!("\"{}\"", 5u64) = "\"5\"".
+        assert_eq!(
+            p.samples,
+            vec!["\"5\""],
+            "inline integer 5 must render as \"5\", not as INLINE_BASE+5 or empty"
+        );
+
+        // Two inline integers: lex-smallest kept first.
+        let g2 = graph(":a :p 3 , 7 , 1 .");
+        let ix2 = Introspection::build(&g2);
+        let p2 = ix2.predicates.iter().find(|p| p.predicate == ex("p")).unwrap();
+        // Lex order on rendered strings: "\"1\"" < "\"3\"" < "\"7\"".
+        // Cap=3 (default), so all three fit.
+        assert_eq!(
+            p2.samples,
+            vec!["\"1\"", "\"3\"", "\"7\""],
+            "inline integers rendered as quoted decimal strings, lex-sorted"
+        );
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `to_void_with_cs` avg multiplicity: exact `/ subjects`
+    /// arithmetic. Kills `replace / with %` and `replace / with *` (line 1198).
+    ///
+    /// 2 subjects each emitting 3 triples via `:p` → avg = 6/2 = 3.0000.
+    /// Mutation `/→%`: 6%2=0 → "0.0000" (WRONG).
+    /// Mutation `/→*`: 6*2=12 → "12.0000" (WRONG).
+    #[test]
+    fn void_with_cs_avg_multiplicity_exact() {
+        // Two subjects, each with 3 :p triples (6 total), same predicate set.
+        let g = graph(":a :p :x , :y , :z . :b :p :u , :v , :w .");
+        let ix = Introspection::build(&g);
+        let withcs = ix.to_void_with_cs("http://ex.org/ds");
+        // avg = 6 triples / 2 subjects = 3.0000 (not 6%2=0 or 6*2=12).
+        assert!(
+            withcs.contains("3.0000"),
+            "avg multiplicity 3.0000 must appear; mutation /→% gives 0.0000, /→* gives 12.0000: {withcs}"
+        );
+
+        // Single subject with 1 triple → avg = 1/1 = 1.0000.
+        let g2 = graph(":a :p :x .");
+        let ix2 = Introspection::build(&g2);
+        let wcs2 = ix2.to_void_with_cs("http://ex.org/ds");
+        assert!(
+            wcs2.contains("1.0000"),
+            "avg multiplicity 1.0000 for single triple: {wcs2}"
+        );
+
+        // Two subjects with 4 triples total (2 each) → avg = 4/2 = 2.0000.
+        let g3 = graph(":a :p :x , :y . :b :p :u , :v .");
+        let ix3 = Introspection::build(&g3);
+        let wcs3 = ix3.to_void_with_cs("http://ex.org/ds");
+        assert!(
+            wcs3.contains("2.0000"),
+            "avg multiplicity 2.0000: {wcs3}"
+        );
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `to_void` exact class and property counts — ensures
+    /// `void:classes` is `classes.len()` and `void:properties` is `predicates.len()`,
+    /// with distinct values so any swap is observable.
+    #[test]
+    fn void_exact_class_and_property_counts() {
+        // 2 classes (A, B), 3 predicates (rdf:type, :p, :q).
+        // classes(2) != predicates(3): any count-swap mutation is observable.
+        let g = graph(":a rdf:type :A ; :p :x . :b rdf:type :B ; :q :y .");
+        let ix = Introspection::build(&g);
+        assert_eq!(ix.classes.len(), 2, "2 distinct rdf:type classes");
+        assert_eq!(ix.predicates.len(), 3, "3 predicates: rdf:type, :p, :q");
+        let nt = ix.to_void("http://ex.org/ds");
+        let re: std::collections::HashMap<(String, String), String> =
+            oxttl::NTriplesParser::new()
+                .for_slice(nt.as_bytes())
+                .map(|t| {
+                    let t = t.expect("valid N-Triples");
+                    (
+                        (t.subject.to_string(), t.predicate.to_string()),
+                        t.object.to_string(),
+                    )
+                })
+                .collect();
+        let ds = "<http://ex.org/ds>".to_string();
+        let lit = |n: u64| {
+            oxrdf::Literal::new_typed_literal(n.to_string(), oxrdf::vocab::xsd::INTEGER)
+                .to_string()
+        };
+        let vp = |l: &str| format!("<{VOID_NS}{l}>");
+        // void:classes must be 2 (number of class profiles), not 3 (predicate count).
+        assert_eq!(
+            re.get(&(ds.clone(), vp("classes"))),
+            Some(&lit(2)),
+            "void:classes = 2 (distinct rdf:type classes)"
+        );
+        // void:properties must be 3 (predicate count), not 2 (class count).
+        assert_eq!(
+            re.get(&(ds.clone(), vp("properties"))),
+            Some(&lit(3)),
+            "void:properties = 3 (all predicates including rdf:type)"
+        );
+        assert_eq!(
+            re.get(&(ds.clone(), vp("triples"))),
+            Some(&lit(4)),
+            "void:triples = 4 (2 rdf:type + :p + :q)"
+        );
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `to_shacl` exact `triples == subjects` guard for `sh:maxCount 1`.
+    /// Kills `replace == with !=` (line 1296): would emit maxCount for multi-valued predicates.
+    /// Also kills `replace == with !=` (line 1285): would skip maxCount for single-valued ones.
+    #[test]
+    fn shacl_maxcount_exact_triples_eq_subjects_guard() {
+        // Two subjects each with exactly 1 :name triple → triples=2, subjects=2, triples==subjects.
+        // Must get sh:maxCount 1.
+        // One subject with 2 :worksAt triples → triples=2, subjects=1, triples != subjects.
+        // Must NOT get sh:maxCount 1.
+        let g = graph(
+            ":a rdf:type :T ; :name \"Alice\" ; :worksAt :x , :y .
+             :b rdf:type :T ; :name \"Bob\" ; :worksAt :z .",
+        );
+        let ix = Introspection::build(&g);
+        // Both subjects (:a, :b) are in one characteristic set {type, name, worksAt}.
+        // Wait — :a worksAt 2, :b worksAt 1. Different multiplicity but same CS.
+        // predicate_triples for :worksAt = 3 (2+1), subjects = 2 → 3 != 2.
+        // predicate_triples for :name = 2, subjects = 2 → 2 == 2 → maxCount 1 for name.
+        let shacl = ix.to_shacl();
+
+        let triples: Vec<oxrdf::Triple> = oxttl::NTriplesParser::new()
+            .for_slice(shacl.as_bytes())
+            .map(|t| t.expect("SHACL export is valid N-Triples"))
+            .collect();
+        let sh = |l: &str| format!("{SHACL_NS}{l}");
+        let int1 =
+            oxrdf::Literal::new_typed_literal("1", oxrdf::vocab::xsd::INTEGER).to_string();
+        let path_of: std::collections::HashMap<String, String> = triples
+            .iter()
+            .filter(|t| t.predicate.as_str() == sh("path"))
+            .map(|t| (t.subject.to_string(), t.object.to_string()))
+            .collect();
+        let has_max_count = |pred_iri: &str| -> bool {
+            triples.iter().any(|t| {
+                t.predicate.as_str() == sh("maxCount")
+                    && t.object.to_string() == int1
+                    && path_of
+                        .get(&t.subject.to_string())
+                        .map(|p| p == &format!("<{}>", pred_iri))
+                        .unwrap_or(false)
+            })
+        };
+        // :name: triples==subjects=2 → must get sh:maxCount 1.
+        assert!(
+            has_max_count(&ex("name")),
+            "single-valued :name must get sh:maxCount 1"
+        );
+        // :worksAt: triples=3 != subjects=2 → must NOT get sh:maxCount 1.
+        assert!(
+            !has_max_count(&ex("worksAt")),
+            "multi-valued :worksAt must NOT get sh:maxCount 1"
+        );
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `characteristic_set_ids` exact multiplicity counting.
+    /// Kills `replace - with +` (line 495): `(k - j) as u64` off-by-one.
+    /// Kills `replace += with -=/×=` (lines 500, 502, 492): counter corruption.
+    #[test]
+    fn characteristic_set_ids_multiplicity_exact() {
+        // :a has :p twice and :q once (2 distinct values of :p).
+        // :b has :p once and :q once.
+        // Both in the same CS. predicate_triples[:p]=3 (2+1), predicate_triples[:q]=2 (1+1).
+        let g = graph(":a :p :x , :y ; :q :z . :b :p :u ; :q :v .");
+        let ids = characteristic_set_ids(&g);
+        assert_eq!(ids.len(), 1, "one characteristic set: both subjects share same predicate set");
+        let set = &ids[0];
+        assert_eq!(set.subjects, 2, "two subjects in the set");
+        // Find predicate_triples for :p and :q.
+        // Predicates are in ascending id order; resolve to strings to identify them.
+        let preds_with_triples: Vec<(String, u64)> = set
+            .predicates
+            .iter()
+            .zip(set.predicate_triples.iter())
+            .map(|(&p, &t)| {
+                let raw = g.dict.term(p).to_string();
+                let iri = raw.trim_matches(['<', '>']).to_string();
+                (iri, t)
+            })
+            .collect();
+        let triples_for = |suffix: &str| -> u64 {
+            preds_with_triples
+                .iter()
+                .find(|(iri, _)| iri.ends_with(suffix))
+                .map(|(_, t)| *t)
+                .unwrap_or(0)
+        };
+        // :p emitted 2 times by :a and 1 time by :b → total 3.
+        // Mutation `k - j` → `k + j` would give a much larger number.
+        assert_eq!(triples_for("/p"), 3, ":p triples = 3 (2 from :a + 1 from :b)");
+        // :q emitted 1 time by each → total 2.
+        assert_eq!(triples_for("/q"), 2, ":q triples = 2 (1 from each subject)");
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: class coverage is `subjects / instances` exactly.
+    /// Kills `replace / with %` and `replace / with *` (line 851 in build_with).
+    /// Also kills `replace / with %/*` on literal_fraction (line 892 in build_with).
+    #[test]
+    fn class_coverage_and_literal_fraction_exact_arithmetic() {
+        // :T has 3 instances; :p used by 2 of them; :q (literal) used by all 3.
+        let g = graph(
+            ":a rdf:type :T ; :p :x ; :q \"v\" .
+             :b rdf:type :T ; :p :y ; :q \"w\" .
+             :c rdf:type :T ; :q \"z\" .",
+        );
+        let ix = Introspection::build(&g);
+        let t = ix.classes.iter().find(|c| c.class == ex("T")).unwrap();
+        assert_eq!(t.instances, 3);
+        let cp = t.predicates.iter().find(|cp| cp.predicate == ex("p")).unwrap();
+        // coverage = 2 subjects / 3 instances = 0.6666...
+        // Mutation *: 2 * 3 = 6 (wrong). Mutation %: 2 % 3 = 2 (wrong).
+        assert!(
+            (cp.coverage - 2.0 / 3.0).abs() < 1e-10,
+            "coverage must be 2/3 = {}, got {}",
+            2.0 / 3.0,
+            cp.coverage
+        );
+        // literal_fraction for :q: 3 literal objects / 3 triples = 1.0.
+        let pq = ix.predicates.iter().find(|p| p.predicate == ex("q")).unwrap();
+        // Mutation *: 3 * 3 = 9 (wrong). Mutation %: 3 % 3 = 0 (wrong).
+        assert!(
+            (pq.literal_fraction - 1.0).abs() < 1e-10,
+            "literal_fraction must be 1.0, got {}",
+            pq.literal_fraction
+        );
+        // :p has 0 literal objects / 2 triples = 0.0.
+        let pp = ix.predicates.iter().find(|p| p.predicate == ex("p")).unwrap();
+        assert!(
+            pp.literal_fraction.abs() < 1e-10,
+            "literal_fraction for IRI-only predicate must be 0.0"
+        );
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `minimalize_type_set` — the `len <= 1` early return
+    /// keeps single-element lists unchanged even with a non-trivial supers map,
+    /// and duplicates in a two-element list collapse to one.
+    /// Kills `replace <= with >` (line 1705): would skip the early return, potentially
+    /// dropping the single type when the closure has phantom self-edges.
+    #[test]
+    fn minimalize_type_set_short_circuit_and_dedup() {
+        // Two subjects: one typed only :A (single element → untouched).
+        // One typed :A, :A (duplicate → collapsed to one :A).
+        // :A rdfs:subClassOf :B, so :A ⊑ :B. A subject typed both :A and :B keeps only :A.
+        let g = graph(
+            ":x rdf:type :A .
+             :y rdf:type :A , :B .
+             :A rdfs:subClassOf :B .",
+        );
+        let opts = BuildOptions {
+            minimalize_types: true,
+            ..BuildOptions::default()
+        };
+        let ix = Introspection::build_with(&g, &opts);
+        // :x has only :A → must still be typed :A (single-element early return).
+        let a_prof = ix.classes.iter().find(|c| c.class == ex("A")).unwrap();
+        assert_eq!(
+            a_prof.instances, 2,
+            ":A must have 2 instances (x + y after minimalization)"
+        );
+        // :B is the superclass of :A — must be dropped from :y's type set.
+        assert!(
+            ix.classes.iter().all(|c| c.class != ex("B")),
+            ":B is a superclass; minimalization must drop it from :y's type set"
+        );
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `to_text_summary` arithmetic — percent coverage and
+    /// "avg X/subj" label appear at exact computed values. Kills `replace * with +/÷`
+    /// on coverage (line 1337) and `replace > with </<=/==` on the 1.05 threshold (line 1339).
+    #[test]
+    fn to_text_summary_coverage_pct_and_avg_mult_exact() {
+        // :T has 4 instances; :p used by 2 of them once each; :q used by all 4 twice each.
+        // coverage(:p) = 2/4 = 50%; coverage(:q) = 4/4 = 100%.
+        // avg_mult(:p) = 2/2 = 1.0 (not > 1.05 → no "avg" label).
+        // avg_mult(:q) = 8/4 = 2.0 (> 1.05 → "avg 2.0/subj").
+        let g = graph(
+            ":a rdf:type :T ; :p :x ; :q :u , :v .
+             :b rdf:type :T ; :p :y ; :q :w , :z2 .
+             :c rdf:type :T ; :q :r1 , :r2 .
+             :d rdf:type :T ; :q :s1 , :s2 .",
+        );
+        let ix = Introspection::build(&g);
+        let s = ix.to_text_summary(4000);
+        // :p line: 2/4 subjects = 50%.
+        // Mutation `* → +`: (0.5 + 100.0).round() = 100 → "100%" instead of "50%".
+        assert!(
+            s.contains("50%"),
+            "coverage of :p must appear as 50% in summary (mutation *→+ gives 100%): {s}"
+        );
+        // :q line: avg 2.0/subj label must appear (2.0 > 1.05).
+        // Mutation `> → <`: 2.0 < 1.05 is false → no avg label.
+        // Mutation `> → >=`: 2.0 >= 1.05 same as > here; coverage=1.0 gives "avg 1.0/subj" (harmless).
+        assert!(
+            s.contains("avg 2.0/subj"),
+            "avg multiplicity 2.0 must be labelled: {s}"
+        );
+    }
+
+    /// [OPUS-4.8] sq-qcnn.21: `build_superclass_closure` `c != d` self-loop guard.
+    /// Kills `replace != with ==` (line 1652): would accept only self-loops, rejecting
+    /// real A⊑B edges, breaking minimalization.
+    #[test]
+    fn build_superclass_closure_self_loop_guard() {
+        // :A rdfs:subClassOf :A (self-loop) and :A rdfs:subClassOf :B (real edge).
+        // After closure: A's supers must contain B but NOT A.
+        // Minimalization: subject typed [:A, :B] → drops :B (A ⊑ B).
+        let g = graph(
+            ":x rdf:type :A , :B .
+             :A rdfs:subClassOf :A .
+             :A rdfs:subClassOf :B .",
+        );
+        let opts = BuildOptions {
+            minimalize_types: true,
+            ..BuildOptions::default()
+        };
+        let ix = Introspection::build_with(&g, &opts);
+        // :A must survive (the minimal type). :B must be dropped as superclass.
+        let classes: Vec<&str> = ix.classes.iter().map(|c| c.class.as_str()).collect();
+        assert!(
+            classes.contains(&ex("A").as_str()),
+            "minimal type :A must survive: {:?}",
+            classes
+        );
+        assert!(
+            !classes.contains(&ex("B").as_str()),
+            ":B must be dropped as superclass of :A; mutation `!=→==` would keep it: {:?}",
+            classes
+        );
+    }
 }

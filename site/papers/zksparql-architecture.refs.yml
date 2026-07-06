@@ -1,0 +1,244 @@
+# [FABLE-5] sq-3kd2g.1 — bibliography for the single-prover zkSPARQL architecture paper
+# (Hayagriva format). Standards, textbook cryptography, and the verifiable-query /
+# anonymous-credential systems literature; the Braun-Wright-Kaefer entry was verified
+# against the Springer chapter listing (2026-07-06).
+
+sparql11:
+  type: reference
+  title: "SPARQL 1.1 Query Language"
+  author:
+    - Harris, Steve
+    - Seaborne, Andy
+  date: 2013
+  publisher: W3C
+  url: "https://www.w3.org/TR/sparql11-query/"
+
+rdf11:
+  type: reference
+  title: "RDF 1.1 Concepts and Abstract Syntax"
+  author:
+    - Cyganiak, Richard
+    - Wood, David
+    - Lanthaler, Markus
+  date: 2014
+  publisher: W3C
+  url: "https://www.w3.org/TR/rdf11-concepts/"
+
+rdfc10:
+  type: reference
+  title: "RDF Dataset Canonicalization"
+  author:
+    - Longley, Dave
+    - Kellogg, Gregg
+    - Yamamoto, Dan
+  date: 2024
+  publisher: W3C
+  url: "https://www.w3.org/TR/rdf-canon/"
+
+vcdm2:
+  type: reference
+  title: "Verifiable Credentials Data Model v2.0"
+  author:
+    - Sporny, Manu
+    - Longley, Dave
+    - Chadwick, David
+    - Steele, Orie
+  date: 2025
+  publisher: W3C
+  url: "https://www.w3.org/TR/vc-data-model-2.0/"
+
+pag09:
+  type: article
+  title: "Semantics and Complexity of SPARQL"
+  author:
+    - Pérez, Jorge
+    - Arenas, Marcelo
+    - Gutiérrez, Claudio
+  date: 2009
+  parent:
+    type: periodical
+    title: "ACM Transactions on Database Systems"
+    volume: 34
+    issue: 3
+
+poseidon2:
+  type: article
+  title: "Poseidon2: A Faster Version of the Poseidon Hash Function"
+  author:
+    - Grassi, Lorenzo
+    - Khovratovich, Dmitry
+    - Schofnegger, Markus
+  date: 2023
+  parent:
+    type: proceedings
+    title: "Progress in Cryptology — AFRICACRYPT 2023"
+
+pedersen91:
+  type: article
+  title: "Non-Interactive and Information-Theoretic Secure Verifiable Secret Sharing"
+  author:
+    - Pedersen, Torben Pryds
+  date: 1991
+  parent:
+    type: proceedings
+    title: "Advances in Cryptology — CRYPTO '91"
+
+schnorr91:
+  type: article
+  title: "Efficient Signature Generation by Smart Cards"
+  author:
+    - Schnorr, Claus-Peter
+  date: 1991
+  parent:
+    type: periodical
+    title: "Journal of Cryptology"
+    volume: 4
+    issue: 3
+
+eip2494:
+  type: reference
+  title: "EIP-2494: Baby Jubjub Elliptic Curve"
+  author:
+    - Bellés-Muñoz, Marta
+    - Baylina, Jordi
+  date: 2020
+  url: "https://eips.ethereum.org/EIPS/eip-2494"
+
+noir:
+  type: reference
+  title: "The Noir Programming Language"
+  author: "Aztec Labs"
+  date: 2026
+  url: "https://noir-lang.org/"
+
+barretenberg:
+  type: reference
+  title: "Barretenberg: the Aztec proving backend (UltraHonk)"
+  author: "Aztec Labs"
+  date: 2026
+  url: "https://github.com/AztecProtocol/aztec-packages/tree/master/barretenberg"
+
+carroll03:
+  type: article
+  title: "Signing RDF Graphs"
+  author:
+    - Carroll, Jeremy J.
+  date: 2003
+  parent:
+    type: proceedings
+    title: "The Semantic Web — ISWC 2003"
+
+cl01:
+  type: article
+  title: "An Efficient System for Non-transferable Anonymous Credentials with Optional Anonymity Revocation"
+  author:
+    - Camenisch, Jan
+    - Lysyanskaya, Anna
+  date: 2001
+  parent:
+    type: proceedings
+    title: "Advances in Cryptology — EUROCRYPT 2001"
+
+zkcreds:
+  type: article
+  title: "zk-creds: Flexible Anonymous Credentials from zkSNARKs and Existing Identity Infrastructure"
+  author:
+    - Rosenberg, Michael
+    - White, Jacob
+    - Garman, Christina
+    - Miers, Ian
+  date: 2023
+  parent:
+    type: proceedings
+    title: "IEEE Symposium on Security and Privacy (S&P)"
+
+bbs:
+  type: reference
+  title: "The BBS Signature Scheme"
+  author:
+    - Looker, Tobias
+    - Kalos, Vasilis
+    - Whitehead, Andrew
+    - Lodder, Mike
+  date: 2025
+  publisher: "IRTF CFRG Internet-Draft"
+  url: "https://datatracker.ietf.org/doc/draft-irtf-cfrg-bbs-signatures/"
+
+integridb:
+  type: article
+  title: "IntegriDB: Verifiable SQL for Outsourced Databases"
+  author:
+    - Zhang, Yupeng
+    - Katz, Jonathan
+    - Papamanthou, Charalampos
+  date: 2015
+  parent:
+    type: proceedings
+    title: "ACM SIGSAC Conference on Computer and Communications Security (CCS)"
+
+vsql:
+  type: article
+  title: "vSQL: Verifying Arbitrary SQL Queries over Dynamic Outsourced Databases"
+  author:
+    - Zhang, Yupeng
+    - Genkin, Daniel
+    - Katz, Jonathan
+    - Papadopoulos, Dimitrios
+    - Papamanthou, Charalampos
+  date: 2017
+  parent:
+    type: proceedings
+    title: "IEEE Symposium on Security and Privacy (S&P)"
+
+zksql:
+  type: article
+  title: "ZKSQL: Verifiable and Efficient Query Evaluation with Zero-Knowledge Proofs"
+  author:
+    - Li, Xiling
+    - Weng, Chenkai
+    - Xu, Yongxin
+    - Wang, Xiao
+    - Rogers, Jennie
+  date: 2023
+  parent:
+    type: periodical
+    title: "Proceedings of the VLDB Endowment"
+    volume: 16
+
+ozdemir22:
+  type: article
+  title: "Experimenting with Collaborative zk-SNARKs: Zero-Knowledge Proofs for Distributed Secrets"
+  author:
+    - Ozdemir, Alex
+    - Boneh, Dan
+  date: 2022
+  parent:
+    type: proceedings
+    title: "USENIX Security Symposium"
+
+garg25:
+  type: article
+  title: "Malicious Security in Collaborative zk-SNARKs: More than Meets the Eye"
+  author:
+    - Garg, Sanjam
+    - Goel, Aarushi
+    - Jain, Abhishek
+    - Roberts, Bhaskar
+    - Sekar, Sruthi
+  date: 2025
+  parent:
+    type: repository
+    title: "IACR Cryptology ePrint Archive, Report 2025/1026"
+  url: "https://eprint.iacr.org/2025/1026"
+
+braun26:
+  type: article
+  title: "Proving Soundness of SPARQL Query Results Using Selective Disclosure of RDF Datasets and Zero-Knowledge Proofs"
+  author:
+    - Braun, Christoph H.-J.
+    - Wright, Jesse
+    - Käfer, Tobias
+  date: 2026
+  parent:
+    type: proceedings
+    title: "The Semantic Web (ESWC 2026)"

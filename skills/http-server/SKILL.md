@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST (plus the query-only HTTP QUERY method, w3c/sparql-protocol#40, for Oxigraph interop), content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and generation-pinned snapshot reads (a Sparq-Generation header + ?generation=N pin in the DEFAULT build, bounded to the ring's concurrency-retention window; opt-in time-travel widens it). Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -97,6 +97,14 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
 curl http://127.0.0.1:3030/sparql -H 'Content-Type: application/sparql-query' \
      --data 'ASK { ?s ?p ?o }'
 
+# HTTP QUERY method (sq-b3df9, w3c/sparql-protocol#40) — query-only, interoperates with
+# Oxigraph: body IS the query under Content-Type application/sparql-query; graph params
+# (default-graph-uri / named-graph-uri) ride the URL query string. Same downstream query
+# execution + Accept negotiation as POST; an update= form or application/sparql-update body
+# is rejected (400 / 415).
+curl -X QUERY http://127.0.0.1:3030/sparql -H 'Content-Type: application/sparql-query' \
+     -H 'Accept: application/sparql-results+json' --data 'SELECT * WHERE { ?s ?p ?o } LIMIT 5'
+
 # POST url-encoded form, negotiate CSV
 curl http://127.0.0.1:3030/sparql -H 'Accept: text/csv' \
      --data-urlencode 'query=SELECT * WHERE { ?s ?p ?o }'
@@ -139,7 +147,9 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   generation is published; returns that generation number (read-your-writes token). Call
   off the async workers (`spawn_blocking`).
 - `AppState::at(&self, number: u64) -> Option<PinnedGen>` — pin a retained generation
-  (**`time-travel` feature only**).
+  (**`time-travel` feature only**; the HTTP `?generation=N` pin does NOT need this — it
+  resolves against the ring's concurrency-retention window directly, so it works in the
+  default build via `sq-ci2d6`).
 - `struct ServerConfig { query_timeout: Option<Duration>, update_where_timeout: Option<Duration>,
   max_body_bytes: usize,
   max_concurrent: usize, header_read_timeout: Option<Duration>, body_read_timeout: Option<Duration>, max_results: Option<usize>, max_query_rows: Option<usize>,
@@ -206,8 +216,11 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   into the axum endpoint and the canonical perf-validation are follow-ups (the perf
   targets need a canonical host).
 - Serializer/negotiation helpers (always compiled, no `server` feature): module
-  `sparq_server::negotiate` — `fn negotiate(accept: Option<&str>) -> Format`,
-  `fn negotiate_graph(accept: Option<&str>) -> GraphFormat`; module
+  `sparq_server::negotiate` — `fn negotiate(accept: Option<&str>) -> Format` (lenient, always
+  yields a format), `fn negotiate_or_406(accept: Option<&str>) -> Result<Format, NotAcceptable>`
+  (Oxigraph-parity strict — the query path uses this; a present-but-unsatisfiable `Accept` is
+  `Err(NotAcceptable)` → 406), `fn negotiate_graph(accept: Option<&str>) -> GraphFormat` and its
+  strict sibling `fn negotiate_graph_or_406(...) -> Result<GraphFormat, NotAcceptable>`; module
   `sparq_server::exec` — `fn prepare(&str) -> Result<Prepared, PrepareError>` and
   `fn prepare_with_dataset(&str, &DatasetOverride) -> Result<Prepared, PrepareError>` (applies the
   SPARQL-Protocol `default-graph-uri`/`named-graph-uri` override, sq-z33x),
@@ -236,8 +249,9 @@ re-export of the runtime-agnostic concurrency wrapper. No axum/tokio, no HTTP.
   `TimeTravelConfig`) — the SAME `fork → update → publish` + generation-pinning model
   `sparq-server` wraps behind its endpoint. A reader `ring.current()` pins an
   immutable snapshot; the writer publishes new generations without blocking readers.
-- **Stability:** the INTENDED stable embedding API, but **NOT yet a frozen
-  semver-tier-1 surface** — the formal freeze is the maintainer's to ratify on #1248
+- **Stability — API tier-1 (proposed-stable):** the proposed semver-stable embedding
+  surface in the [API stability & deprecation policy](../../docs/api-stability.md), but
+  **NOT yet frozen** — the formal freeze is the maintainer's to ratify on #1248 / #1346
   (pre-`1.0` minor releases MAY still change it). Pin to `sparq_serve::embed` rather
   than reaching into `sparq-core` / `sparq-engine` directly so the freeze, when
   ratified, has one well-defined shape.
@@ -246,7 +260,11 @@ re-export of the runtime-agnostic concurrency wrapper. No axum/tokio, no HTTP.
 
 **1. Query forms and result negotiation.** Default result media is SPARQL-JSON. Set
 `Accept` to choose (q-value aware, defaults to JSON for SELECT/ASK, N-Triples for
-CONSTRUCT/DESCRIBE):
+CONSTRUCT/DESCRIBE). <!-- [OPUS-4.8] sq-406acc --> An **absent / empty / `*/*` `Accept` gets
+that default**; a present `Accept` that names **only unsupported media types and no wildcard is
+`406 Not Acceptable`** (Oxigraph parity, w3c/sparql-protocol#40) — sparq no longer silently
+falls back to JSON in that case (the EXPLAIN `Accept: text/x-sparq-explain` short-circuits this
+and the Graph-Store-Protocol read path keeps its lenient default):
 
 | Query form | Accept | Content-Type returned |
 | --- | --- | --- |
@@ -280,6 +298,76 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
      --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
 ```
 
+> **HTTP `QUERY` method (sq-b3df9, w3c/sparql-protocol#40, epic sq-my8wd) — query-only,
+> Oxigraph-interop.** `/sparql` accepts the registered HTTP `QUERY` verb in addition to
+> GET/POST. It is a new INPUT path that feeds the SAME query execution + Accept negotiation as
+> POST, so all the result-media rows above apply unchanged. Mirroring Oxigraph
+> (`("/sparql", "POST" | "QUERY")`, `let is_query = method == "QUERY"`):
+> - **Send the query** as the raw `application/sparql-query` body (preferred), OR as the
+>   `query=` value of an `application/x-www-form-urlencoded` body. No other Content-Type is
+>   accepted (else **415**); missing Content-Type is **415**.
+> - **Dataset graphs** (`default-graph-uri` / `named-graph-uri` / `union-default-graph`) ride
+>   the **URL query string**, never the body — even when the query is the raw body.
+> - **Query-only:** an `update=` form field is a **400** and an `application/sparql-update`
+>   body is a **415** (it is not a valid operation under QUERY). Use POST for an update.
+> - It enforces the SAME auth / egress gates as GET/POST (a QUERY is a read — gated by
+>   `--auth-token-read`). It does **not** emit `Cache-Control` / `Content-Location` headers
+>   (Oxigraph does not either). [OPUS-4.8]
+> ```sh
+> curl -X QUERY 'http://127.0.0.1:3030/sparql?default-graph-uri=http://ex/g1' \
+>      -H 'Content-Type: application/sparql-query' \
+>      -H 'Accept: text/csv' \
+>      --data 'SELECT * WHERE { ?s ?p ?o }'
+> ```
+
+<!-- [OPUS-4.8] sq-jaj38: comment separates the two adjacent blockquotes (markdownlint MD028). -->
+
+> **SPARQL 1.1 Protocol conformance lane (sq-jaj38, epic sq-my8wd) — what is ratcheted.** The
+> protocol surface above is now covered by a dedicated W3C **SPARQL 1.1 Protocol (HTTP)**
+> conformance suite in `sparq-conformance` (opt-in `http-protocol` feature, OFF by default; it
+> reuses the in-process loopback server — `sparq_server::serve` on an ephemeral `127.0.0.1:0`
+> port — and drives RAW HTTP at the bound port, NOT the federated SERVICE transport, so it does
+> not touch the engine's egress allowlist). It ratchets a MEASURED PASS floor over: query via
+> GET / POST-urlencoded / POST-direct, the `QUERY` method, update via POST, the
+> `default-graph-uri` / `named-graph-uri` overrides, SELECT/ASK negotiation (SRJ / SRX / CSV /
+> TSV), a **present-but-unsatisfiable `Accept` → 406 Not Acceptable** (Oxigraph parity,
+> w3c/sparql-protocol#40 — <!-- [OPUS-4.8] sq-406acc --> formerly a divergence, now a genuine
+> PASS that raised the floor 20→21), and the **200 / 400 / 405 (with `Allow`) / 406 / 415**
+> status codes. **Honest boundary:** two behaviours remain DOCUMENTED DIVERGENCES (reported
+> separately, NOT summed into the floor, so they never inflate the conformance number): an
+> **absent / `*/*` `Accept` defaults to SPARQL-results JSON** (a W3C-permitted default
+> representation — only a *present-but-unsatisfiable* `Accept` is a 406), and an **ASK with
+> `Accept: text/csv` falls back to a JSON boolean** (CSV/TSV have no boolean serialisation). Run
+> it with
+> `cargo test -p sparq-conformance --features http-protocol --test http_protocol_suite`; the row
+> is in the central scoreboard (`W3C SPARQL 1.1 Protocol (HTTP)`). [OPUS-4.8]
+
+<!-- [OPUS-4.8] sq-1uuxz: comment separates the two adjacent blockquotes (markdownlint MD028). -->
+
+> **Service Description + Graph Store Protocol conformance lane (sq-1uuxz, epic sq-my8wd) — what
+> is ratcheted.** The federation-descriptor + GSP write surfaces (see "Federation discovery" and
+> the Graph-Store-Protocol section below) are covered by a dedicated **SD + GSP** conformance suite
+> in `sparq-conformance` (opt-in `federation-descriptors` feature, OFF by default; it reuses the
+> in-process loopback server — `sparq_server::serve` on an ephemeral `127.0.0.1:0` port, stood up
+> with the server's `federation-descriptors` runtime flag ON — and drives RAW HTTP at the bound
+> port, so it does not touch the engine's egress allowlist). It ratchets a MEASURED PASS floor
+> over **(A) the Service Description** (`GET /sparql` with no query): the `sd:Service` advertises
+> exactly the result/input formats (SRJ/SRX/CSV/TSV + Turtle/N-Triples/RDF-XML), the query/update
+> languages, the SPARQL versions (`sd:supportedVersion` 1.0/1.1/1.2) and `sd:BasicFederatedQuery`
+> that the server GENUINELY implements — **no over-advertising** (each advertised result format is
+> cross-checked against a real SELECT request, and JSON-LD — not served in this build — must NOT
+> appear) — and **(B) the Graph Store Protocol**: a GET/PUT/POST/DELETE round-trip on a named graph
+> (indirect `?graph=<iri>` + direct `/graphs/<path>`) and the default graph (`?default`), VERIFYING
+> store state after every op (PUT→GET-back-equal; PUT replaces; POST merges; DELETE removes;
+> **200/201/204/400/404/405 (with `Allow`)/415**). **Honest boundary:** a GSP read of an ABSENT
+> named graph is **200 + empty graph, NOT 404** (GSP-permitted — sparq treats an empty graph as
+> existing); this is a DOCUMENTED DIVERGENCE, reported separately and NOT summed into the floor. Run
+> it with `cargo test -p sparq-conformance --features federation-descriptors --test sd_gsp_suite`;
+> the row is in the central scoreboard (`SPARQL 1.1 Service Description + Graph Store Protocol`).
+> [OPUS-4.8]
+
+<!-- [OPUS-4.8] sq-b3df9: comment separates the two adjacent blockquotes (markdownlint MD028). -->
+
 > **JSON-LD content negotiation (`jsonld` feature — default-on, [OPUS-4.8] sq-oy1f.4).** The
 > server speaks `application/ld+json` out of the box (the `jsonld` feature is in the default set —
 > a maintainer-directed exception to opt-in-by-default). `application/ld+json` joins the
@@ -302,23 +390,44 @@ curl -G 'http://127.0.0.1:3030/sparql?explain=true' \
      --data-urlencode 'query=SELECT * WHERE { ?a <http://ex/knows> ?b . ?b <http://ex/age> ?age }'
 ```
 
-**3. Time-travel reads (opt-in feature).** Build with `--features time-travel`. Every
-`/sparql` response carries the `Sparq-Generation` header; capture it and pin a later read
-with `?generation=N` (URL param or url-encoded body — body wins). Updates' 204 carries the
-generation containing the write:
+**3. Generation-pinned snapshot reads (DEFAULT build — `sq-ci2d6`).** Every `/sparql` response
+carries the `Sparq-Generation` header (the generation the response was produced against; an
+update's `204` carries the generation *containing* the write — the read-your-writes token).
+Capture it and pin a later read with `?generation=N` (URL param or url-encoded body — body wins)
+to get an **immutable snapshot** of the store as of that generation. This is available with **no
+feature enabled**: the pin is bounded to the generation ring's **concurrency-retention window** —
+the last **K = 4** generations older than current are always kept (`sparq_serve::ring::DEFAULT_RETAIN`;
+`RingConfig::retain`). That is exactly the window that makes **multi-request `LIMIT`/`OFFSET`
+pagination snapshot-consistent**: pin one generation, page it, and the pages union to the
+single-shot result at that generation even if writes interleave (with a deterministic order —
+add `ORDER BY`, or rely on the stable order over the immutable snapshot):
 
 ```sh
-cargo run -p sparq-server --features time-travel -- data.ttl --time-travel-generations 32
-# read-your-writes: capture the generation an update lands in
+# read-your-writes: capture the generation an update lands in (default build — no feature)
 G=$(curl -si http://127.0.0.1:3030/sparql -H 'content-type: application/sparql-update' \
       --data 'INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> }' \
       | grep -i sparq-generation | tr -d '\r' | awk '{print $2}')
-# later, read the store AS OF that generation (old data even after more updates)
-curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s ?p ?o }' \
-     --data-urlencode "generation=$G"
+# page a large read pinned to that generation — page 1, then page 2, still consistent
+# even if another client writes between the two requests:
+curl -G http://127.0.0.1:3030/sparql --data-urlencode "generation=$G" \
+     --data-urlencode 'query=SELECT ?child WHERE { <c> <member> ?child } ORDER BY ?child LIMIT 1000 OFFSET 0'
+curl -G http://127.0.0.1:3030/sparql --data-urlencode "generation=$G" \
+     --data-urlencode 'query=SELECT ?child WHERE { <c> <member> ?child } ORDER BY ?child LIMIT 1000 OFFSET 1000'
+```
+**Honest boundary (the retention contract).** The default window is bounded by the ring's
+*concurrency* retention (K = 4), **not** a durable history: a pin more than K generations behind
+current has **aged out** → `410 Gone` (the snapshot is gone; re-read the current generation and
+restart pagination — the server **never** silently substitutes a different generation). If a
+pagination sweep must survive more than K interleaved writes, build with the opt-in **`time-travel`**
+feature, which EXTENDS retention (`--time-travel-generations N`, `--time-travel-max-age SECS`) so
+`?generation=N` reaches far older snapshots — same header/pin mechanics, wider window:
+
+```sh
+cargo run -p sparq-server --features time-travel -- data.ttl --time-travel-generations 32
 ```
 Status: aged-out generation → `410 Gone`; never-published / unparsable / pinning an
-*update* → `400`.
+*update* (an update always applies to current) → `400`. All identical in both feature states —
+`time-travel` only changes how far back a pin can reach.
 
 **4. WebSocket subscriptions (SEPA-style live SELECT).** Connect to
 `ws://127.0.0.1:3030/subscriptions`, send `subscribe`, get `subscribed` + an initial
@@ -564,8 +673,8 @@ stream is on. The `ChangeSink` broker trait stays a separate later opt-in (`sq-l
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
 `application/sparql-update` operation uses — so they share its atomicity, snapshot
-consistency, blocking-on-commit semantics, the `Sparq-Generation` header (time-travel
-feature), AND its **auth gate** (a GSP write is as powerful as an UPDATE, so `PUT`/`POST`/
+consistency, blocking-on-commit semantics, the `Sparq-Generation` header (default build,
+`sq-ci2d6`), AND its **auth gate** (a GSP write is as powerful as an UPDATE, so `PUT`/`POST`/
 `DELETE`/`PATCH` are gated by `--auth-token` exactly like an UPDATE; `GET`/`HEAD` are reads). A
 malformed body → `400`; an unsupported body Content-Type → `415`.
 
@@ -880,7 +989,7 @@ env overrides the default.
 | `--auth-token TOKEN` | `SPARQ_AUTH_TOKEN` | off (no auth) | require `Authorization: Bearer TOKEN` on every WRITE (SPARQL Update + GSP PUT/POST/DELETE) → `401` + `WWW-Authenticate: Bearer` otherwise; constant-time compared (QLever's `-a`) |
 | `--auth-token-read` | `SPARQ_AUTH_TOKEN_READ` | off | ALSO gate reads with the same token (only meaningful with a token set) |
 | `--allow-remote` | `SPARQ_ALLOW_REMOTE` | off | opt in to a non-loopback bind; without it a non-loopback `--addr` is **refused** unless the surface is fully authenticated (`--auth-token` AND `--auth-token-read`), with it it warns and proceeds |
-| `--service-allow HOST\|*.SUFFIX` (repeatable) | `SPARQ_SERVICE_ALLOW` (comma/ws-sep) | empty = **deny ALL SERVICE** | (feature `service`) allowlist a SERVICE egress host (exact or `*.suffix` wildcard); CLI + file + env are all merged (combined additively) |
+| `--service-allow HOST[:PORT]\|*.SUFFIX[:PORT]` (repeatable) | `SPARQ_SERVICE_ALLOW` (comma/ws-sep) | empty = **deny ALL SERVICE** | (feature `service`) allowlist a SERVICE egress host (exact or `*.suffix` wildcard); a `:PORT` makes it **port-scoped** — that host on THAT port only (else every port) (`sq-a7jw4`); CLI + file + env are all merged (combined additively) |
 | `--service-allow-file PATH` | — | — | (feature `service`) load allowlist entries, one per line (`#` comments + blanks ignored) |
 | `--cors-allow-origin ORIGIN` (repeatable) | `SPARQ_CORS_ALLOW_ORIGIN` (comma/ws-sep) | empty = **no CORS headers** | allowlist a first-party browser origin (`scheme://host[:port]`); a listed `Origin` is reflected into `Access-Control-Allow-Origin` (never `*`, never credentials) + `Vary: Origin`, preflight `OPTIONS` answered; CLI + file + env merged additively — see "CORS" |
 | `--cors-allow-origin-file PATH` | — | — | load CORS origins, one per line (`#` comments + blanks ignored) |
@@ -976,7 +1085,8 @@ quota:
    SSRF; worst case the `169.254.169.254` cloud-metadata IP), so it reaches **nothing**
    unless its host is allowlisted, enforced on the *resolved* IP before any socket opens
    (DNS-rebinding-safe), uniformly across queries / ASK / CONSTRUCT/DESCRIBE / subscriptions
-   / federated `INSERT … WHERE`.
+   / federated `INSERT … WHERE`. An entry may be **port-scoped** (`host:port`) to permit a
+   host on exactly one port — strictly narrower than the bare host (`sq-a7jw4`).
 
 Library callers set these on `ServerConfig` (`query_timeout`, `max_query_rows`,
 `max_query_bytes`, `max_decompress_ratio`, `service_allow`). Embedders driving the engine
@@ -1167,7 +1277,14 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   host (textbook SSRF; worst case the `169.254.169.254` cloud-metadata IP), so the
   network-exposed surface must opt in to every reachable host. Matching is
   case-insensitive against the SERVICE IRI authority; a `*.example.org` entry matches the
-  apex `example.org` and any subdomain. Unlike the engine's standalone default (which lets
+  apex `example.org` and any subdomain. An entry may be **host-level** (`192.0.2.10` — every
+  port) or **port-scoped** (`192.0.2.10:8080`, `[::1]:8053`, `sparql.example.org:8443`,
+  `*.example.org:443` — that host on THAT port ONLY, rejecting every other port) (`sq-a7jw4`):
+  a port-scoped entry is strictly NARROWER — the way to permit exactly one ephemeral loopback
+  endpoint for in-process SERVICE federation without re-opening the whole host. (This TIGHTENS
+  earlier behaviour: a `host:port` entry used to have its port stripped and widen to every
+  port; it now means EXACTLY that port. A port-LESS entry is unchanged — still every port.)
+  Unlike the engine's standalone default (which lets
   public IPs through and only blocks private ones), the server is **strict**: even a public
   host must be on the allowlist. The allowlist applies uniformly to queries, ASK,
   CONSTRUCT/DESCRIBE, subscriptions and federated `INSERT … WHERE` updates, and is enforced
@@ -1196,9 +1313,11 @@ identities and resource IRIs by design (see the privacy-boundary note above).
     tokens), so federated `INSERT … WHERE` updates continue to use the operator's static
     `service_allow`.
 - **Feature flags.** `server` (default-on) pulls axum/tokio/tower — the binary needs it
-  (`required-features = ["server"]`). `time-travel` (default **off**) enables
-  `?generation=N` pinning, the `Sparq-Generation` header, `AppState::at`, and the
-  retention flags. `geo` (default **off**) installs sparq-geo's `geof:` GeoSPARQL
+  (`required-features = ["server"]`). `?generation=N` pinning + the `Sparq-Generation`
+  header are in the **default build** (bounded to the ring's concurrency-retention window —
+  `sq-ci2d6`); `time-travel` (default **off**) only EXTENDS the retention window (the
+  `--time-travel-generations` / `--time-travel-max-age` flags, `AppState::at`, and the wider
+  `?generation=N` reach). `geo` (default **off**) installs sparq-geo's `geof:` GeoSPARQL
   functions on query/update/subscription paths; without it an unknown `geof:` IRI is a
   `500`. `federation-descriptors` (default **off**, `sq-d3d8`) pulls the light
   `sparq-introspect` crate and serves the OPT-IN VoID + Service-Description discovery
@@ -1303,6 +1422,15 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   truncation. **Classify on the status code, not the body text** (bodies are sanitised generic
   classes — see the next bullet). There is **no `Retry-After`** header today. Full contract +
   rationale: the `sparq_server::status_contract` crate doc, asserted by `tests/status_contract.rs`.
+- **The versioned HTTP wire contract ([FABLE-5] sq-fdurb / gh-1416, PSS ask).** The endpoints,
+  params, media types, negotiation rules, status codes and error-body shape an **HTTP-only
+  consumer** may rely on are enumerated as the **v1 wire contract** in
+  [`docs/http-wire-contract.md`](../../docs/http-wire-contract.md) — frozen-vs-unstable
+  partition, plus the wire-semver policy (breaking vs additive). Pinned end-to-end by the
+  served-surface snapshot suite `tests/wire_contract.rs` (one direct test per documented
+  endpoint behaviour / error class), so an accidental wire break fails CI. Status: **PROPOSED**
+  — the freeze ratification is the maintainer's call, like the embedding freeze in
+  [`docs/api-stability.md`](../../docs/api-stability.md).
 - **Error bodies are sanitized — no information leak (sq-cz89 / sq-j9zs).** On the
   no-auth-by-default path an error body carries only a **stable, generic CLASS message**
   (e.g. `malformed query`, `malformed RDF body`, `malformed gzip body`,

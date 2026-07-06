@@ -5,8 +5,9 @@
 //! - [`distance`] — `geof:distance(geom1, geom2, units)`. Units are selected
 //!   by IRI ([`Unit::from_iri`]). Metric units on geographic-CRS geometries
 //!   use the haversine great-circle distance (exact for point/point and
-//!   point/geometry via the spherical closest point; a local equirectangular
-//!   approximation between two EXTENDED geometries — see [`distance_meters`]).
+//!   point/geometry via the spherical closest point; for two EXTENDED geometries
+//!   uses vertex-`HaversineClosestPoint` iteration — see [`distance_meters`]).
+//!   [SONNET-4.6] sq-lk3aw.3
 //! - the eight simple-features relations (`geof:sfEquals`, `sfDisjoint`,
 //!   `sfIntersects`, `sfTouches`, `sfCrosses`, `sfWithin`, `sfContains`,
 //!   `sfOverlaps`) — DE-9IM intersection matrices via `geo`'s `Relate` — plus
@@ -138,9 +139,13 @@ pub fn point_to_geometry_meters(p: Point<f64>, g: &Geometry<f64>) -> Result<f64,
 
 /// Great-circle metres between two geometries in a GEOGRAPHIC CRS (long/lat
 /// degrees). Exact (haversine) when either side is a point; between two
-/// extended geometries it falls back to a local equirectangular projection
-/// about the geometries' mean latitude — accurate at local scale, documented
-/// as an approximation in the README.
+/// extended geometries uses **vertex-`HaversineClosestPoint` iteration**
+/// (sq-lk3aw.3): for each vertex of each geometry the haversine distance to
+/// the nearest point on the other geometry is computed, and the minimum taken.
+/// This resolves the prior equirectangular projection distortion for
+/// continent-spanning extended↔extended pairs. Remaining approximation:
+/// interior-of-segment↔interior-of-segment closest pairs (uncommon; bounded
+/// by the vertex arc spacing on each side). [SONNET-4.6]
 pub fn distance_meters(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<f64, GeoError> {
     if a.intersects(b) {
         return Ok(0.0);
@@ -149,20 +154,45 @@ pub fn distance_meters(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<f64, GeoE
         (Geometry::Point(p), _) => point_to_geometry_meters(*p, b),
         (_, Geometry::Point(p)) => point_to_geometry_meters(*p, a),
         _ => {
-            let (ra, rb) = match (a.bounding_rect(), b.bounding_rect()) {
-                (Some(ra), Some(rb)) => (ra, rb),
-                _ => {
-                    return Err(GeoError::Unsupported(
-                        "distance between empty geometries".to_string(),
-                    ))
+            // [SONNET-4.6] sq-lk3aw.3: vertex-HaversineClosestPoint iteration,
+            // replacing the local equirectangular approximation. For each vertex
+            // of a, find the haversine distance to b via HaversineClosestPoint
+            // (exact point-to-nearest-on-b); likewise for each vertex of b
+            // against a. The minimum is exact when the closest pair involves at
+            // least one vertex; interior-to-interior segment pairs are bounded
+            // by vertex arc spacing (typically small for GeoSPARQL geometries).
+            let mut min_dist = f64::INFINITY;
+            for coord in a.coords_iter() {
+                let p = Point::from(coord);
+                match b.haversine_closest_point(&p) {
+                    Closest::Intersection(_) => return Ok(0.0),
+                    Closest::SinglePoint(c) => {
+                        let d = Haversine.distance(p, c);
+                        if d < min_dist {
+                            min_dist = d;
+                        }
+                    }
+                    Closest::Indeterminate => {}
                 }
-            };
-            let lat0 = (ra.center().y + rb.center().y) / 2.0;
-            let kx = METERS_PER_DEGREE * lat0.to_radians().cos();
-            let project = |g: &Geometry<f64>| {
-                g.map_coords(|c: Coord<f64>| Coord { x: c.x * kx, y: c.y * METERS_PER_DEGREE })
-            };
-            Ok(euclidean_distance(&project(a), &project(b)))
+            }
+            for coord in b.coords_iter() {
+                let p = Point::from(coord);
+                match a.haversine_closest_point(&p) {
+                    Closest::Intersection(_) => return Ok(0.0),
+                    Closest::SinglePoint(c) => {
+                        let d = Haversine.distance(p, c);
+                        if d < min_dist {
+                            min_dist = d;
+                        }
+                    }
+                    Closest::Indeterminate => {}
+                }
+            }
+            if min_dist.is_infinite() {
+                Err(GeoError::Unsupported("distance between empty geometries".to_string()))
+            } else {
+                Ok(min_dist)
+            }
         }
     }
 }

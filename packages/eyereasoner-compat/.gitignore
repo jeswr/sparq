@@ -1,0 +1,6 @@
+# Built artifacts — rebuilt by `npm run build` (wasm-pack + tsc). Shipped in the published
+# tarball via the `files` allowlist + the `prepack` hook, and rebuilt on a git-pin install by
+# the `prepare` hook. Never committed.
+dist/
+wasm/
+node_modules/

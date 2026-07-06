@@ -12,12 +12,20 @@
 # installs the PINNED Noir toolchain and runs those `#[ignore]`d tests, so a forge that
 # verifies (or a serialization drift that breaks an empirical bb anchor) fails visibly.
 #
+# [OPUS-4.8] sq-5reoy (#1599): the zk/ieee754 and zk/xpath in-tree Noir trees were
+# externalized to the sparq-org/noir_IEEE754 (v0.10.0) and sparq-org/noir_XPath (v0.2.0)
+# face repos, which now own their own CI (nargo unit tests + the ieee754 differential
+# oracle). The two jobs that ran those suites here (`nargo-unit-tests`, `differential-ieee754`)
+# were RETIRED with the trees — the face-repo CI is the single source now. This lane keeps
+# ONLY the sparq-specific `forge-suite` (the verifier-soundness estate over crates/sparq-zk*,
+# which compiles zk/compose — and now transitively fetches the released sparq_ieee754 git dep).
+#
 # TRIGGER (deliberately OFF the fast per-PR critical path — the toolchain install +
 # real proving is slow):
 #   • schedule (nightly 04:23 UTC)  — the standing safety net.
 #   • workflow_dispatch             — on demand.
 #   • pull_request / push to main RESTRICTED by a path filter to ZK-touching paths
-#     (crates/sparq-zk*/**, zk/**, this workflow) — so a ZK change DOES get the forge
+#     (crates/sparq-zk*/**, zk/compose/**, this workflow) — so a ZK change DOES get the forge
 #     suite run (and gates that PR via ci-summary, which is correct), while a non-ZK PR
 #     never triggers this workflow at all (no check-run created => ci-summary doesn't
 #     wait on it; it stays a nightly safety net, not a per-PR tax).
@@ -32,6 +40,12 @@
 # — matching the box that captured the empirical bb anchors in verifier.rs. A toolchain
 # bump is therefore an explicit edit here (and re-captures the anchors), never a silent
 # floating "latest".
+#
+# [OPUS-4.8] sq-5reoy toolchain-drift note: sparq's pins (NARGO/BB below) and the two face
+# repos' pins (nargo 1.0.0-beta.21) agree today but are now maintained independently — a face
+# bump that sparq does not follow (or vice versa) recompiles the released circuits differently.
+# When bumping NARGO_VERSION here, check the released sparq_ieee754 tag was cut on a compatible
+# nargo, and re-run the forge suite (which now compiles the git dep).
 name: zk-toolchain
 
 on:
@@ -44,7 +58,11 @@ on:
     paths:
       - "crates/sparq-zk/**"
       - "crates/sparq-zk-compose/**"
-      - "zk/**"
+      # [OPUS-4.8] sq-5reoy: narrowed from zk/** to zk/compose/** — the zk/ieee754 and
+      # zk/xpath trees were externalized to the sparq-org/noir_IEEE754 and
+      # sparq-org/noir_XPath face repos (#1599), whose own CI covers their nargo tests
+      # and the ieee754 differential oracle. zk/compose is the only in-tree Noir tree left.
+      - "zk/compose/**"
       - ".github/workflows/zk-toolchain.yml"
   # [OPUS-4.8] Merge queue: zk-toolchain surfaces a check on zk-touching PRs, so it
   # must also run on the queue's merge_group ref or the required ci-summary would wait
@@ -72,7 +90,9 @@ on:
     paths:
       - "crates/sparq-zk/**"
       - "crates/sparq-zk-compose/**"
-      - "zk/**"
+      # [OPUS-4.8] sq-5reoy: narrowed from zk/** to zk/compose/** (see the pull_request
+      # paths note above — the ieee754/xpath trees moved to their face repos, #1599).
+      - "zk/compose/**"
       - ".github/workflows/zk-toolchain.yml"
 
 # Least-privilege: this lane only reads the repo + runs tests.
@@ -130,7 +150,7 @@ jobs:
       # any ZK-relevant path; the heavy steps below are gated on its `zk` output.
       #
       # The path set MUST stay in lock-step with the `pull_request`/`push` paths filter
-      # above (crates/sparq-zk/**, crates/sparq-zk-compose/**, zk/**, this workflow file).
+      # above (crates/sparq-zk/**, crates/sparq-zk-compose/**, zk/compose/**, this workflow).
       #
       # SAFE-BY-DEFAULT: zk defaults to "true". Only the `merge_group` branch can flip it
       # to "false", and only after a SUCCESSFUL diff that found no ZK paths. So:
@@ -173,8 +193,9 @@ jobs:
               echo "Changed files in queued batch (${MG_BASE_SHA}..${MG_HEAD_SHA}):"
               printf '%s\n' "${changed}"
               # ZK-relevant paths — SAME set as the pull_request/push paths filter.
+              # [OPUS-4.8] sq-5reoy: zk/ narrowed to zk/compose/ (ieee754/xpath externalized, #1599).
               if printf '%s\n' "${changed}" | grep -Eq \
-                '^(crates/sparq-zk/|crates/sparq-zk-compose/|zk/|\.github/workflows/zk-toolchain\.yml$)'; then
+                '^(crates/sparq-zk/|crates/sparq-zk-compose/|zk/compose/|\.github/workflows/zk-toolchain\.yml$)'; then
                 zk=true
               else
                 zk=false
@@ -282,6 +303,12 @@ jobs:
       # from contending for the runner; nextest is NOT used here because these are slow,
       # serialized, toolchain-bound cases (the retry/process-isolation nextest buys us on
       # the fast lane is not what this lane needs).
+      #
+      # [OPUS-4.8] sq-5reoy: compiling zk/compose here now transitively fetches the
+      # released sparq_ieee754 git dependency (sparq-org/noir_IEEE754 @ v0.10.0) from
+      # GitHub, exactly as it already fetches the poseidon v0.3.0 git dep — so this lane
+      # needs network access to github.com on a cold ~/.nargo cache (the rust-cache above
+      # does not cache ~/.nargo; nargo's own per-machine cache warms after the first fetch).
       - name: Run the ignored ZK forge + anchor + e2e suite (real bb)
         if: steps.changes.outputs.zk == 'true'
         run: |

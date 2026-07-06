@@ -9,6 +9,12 @@ pub mod dict;
 pub mod dictspill;
 #[cfg(feature = "mmap")]
 pub mod extsort;
+// [OPUS-4.8] (sq-7d3dj.18) Prefix-memoized IRI-validation fast path in FRONT of the full
+// `oxiri` RFC-3987 automaton. OPT-IN behind `iri-fast` (OFF by default) so the lean default /
+// wasm build never names `oxiri` as a direct dep and pays nothing; when on, the parallel
+// N-Triples / N-Quads loader validates each IRI through it (fast path, oxiri-equivalent).
+#[cfg(feature = "iri-fast")]
+pub mod iri;
 mod nt;
 // [OPUS-4.8] sq-yj76l (gh #1121): the opt-in `SharedGraph` server-sharing handle. OFF by
 // default so the lean default / wasm build never links it (it is `std::sync` only — no new
@@ -5495,7 +5501,17 @@ fn parse_block(bytes: &[u8]) -> Result<ChunkPartials, String> {
     let partials: Vec<(Dict, Vec<[Id; 3]>)> = bounds
         .par_iter()
         .map(|&(s, e)| {
-            let mut d = Dict::new();
+            // [OPUS-4.8] (sq-7d3dj.2) Pre-size the per-chunk partial dict from the chunk's byte
+            // length (`bytes / AVG_NT_LINE_BYTES` ≈ triple/term count) so its term arena + lookup
+            // table are reserved up front instead of rehashing/re-growing while we intern — the
+            // ~5% `reserve_rehash` cost the ingest profile flagged. Capacity-only: the interned
+            // term set, the term↔id bijection, and the id-assignment order are byte-identical to a
+            // `Dict::new()` start (pinned by `presizing_is_pure_capacity_hint`), and this partial
+            // is consumed then dropped by `merge_partials` — which builds the FINAL dict
+            // independently — so the reservation never reaches `dict_bytes_per_term` /
+            // `store_bytes_per_triple`. The estimate is self-bounded by the real chunk length, so
+            // (unlike HDT's untrusted `num_strings`) no clamp is needed.
+            let mut d = Dict::with_capacity((e - s) / nt::AVG_NT_LINE_BYTES);
             let t = nt::parse_chunk(&bytes[s..e], &mut d)?;
             Ok::<_, String>((d, t))
         })
@@ -8610,6 +8626,70 @@ mod tests {
         let obj_of = |subj: Id| sharded.1.iter().find(|t| t[0] == subj).map(|t| t[2]);
         assert_eq!(obj_of(r1), Some(tt_id), "<r1>'s object is the shared triple term");
         assert_eq!(obj_of(r1b), Some(tt_id), "<r1b>'s object is the SAME shared triple-term id");
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.2) End-to-end proof that pre-sizing the per-chunk partial `Dict` on
+    /// the parallel ingest path is a PURE capacity hint. Consolidating partials whose dicts were
+    /// reserved with `Dict::with_capacity((e-s)/AVG_NT_LINE_BYTES)` (the change under test) vs
+    /// partials built from `Dict::new()` (the pre-change baseline) must yield: byte-identical
+    /// id-triples INCLUDING order, an identical term↔id bijection, AND an identical final
+    /// `dict.heap_bytes()`. The last assertion is the ratchet guard: `dict_bytes_per_term` /
+    /// `store_bytes_per_triple` count `capacity()`, and this pins that a partial's reservation
+    /// never leaks into the final dict (`merge_partials` builds it independently), so the
+    /// deterministic byte ratchets are provably neutral.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn presizing_is_pure_capacity_hint() {
+        // Multi-block corpus: repeated predicate/type IRIs (heavy dict reuse), distinct
+        // subjects/objects, typed + language literals, blank nodes, and a nested triple term.
+        let mut nt = String::new();
+        for i in 0..2000u32 {
+            nt.push_str(&format!("<http://ex/n{}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Person> .\n", i));
+            nt.push_str(&format!("<http://ex/n{}> <http://ex/name> \"name{}\"@en .\n", i, i));
+            nt.push_str(&format!("<http://ex/n{}> <http://ex/age> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", i, i % 91));
+            nt.push_str(&format!("_:b{} <http://ex/reifies> <<( <http://ex/n{}> <http://ex/knows> <http://ex/n{}> )>> .\n", i, i, (i + 1) % 2000));
+        }
+        let bytes = nt.as_bytes();
+
+        // Split at newline boundaries into several chunks (the same shape `parse_block` produces),
+        // then build TWO partial sets differing ONLY in the partial dict's reserved capacity.
+        // `parse_chunk` is identical in both, so the sole variable is the partial-dict capacity.
+        let bounds = newline_chunk_bounds(bytes, 8);
+        let build = |presize: bool| -> Vec<(Dict, Vec<[Id; 3]>)> {
+            bounds
+                .iter()
+                .map(|&(s, e)| {
+                    let mut d = if presize {
+                        Dict::with_capacity((e - s) / nt::AVG_NT_LINE_BYTES)
+                    } else {
+                        Dict::new()
+                    };
+                    let t = nt::parse_chunk(&bytes[s..e], &mut d).unwrap();
+                    (d, t)
+                })
+                .collect()
+        };
+
+        // Consolidate BOTH through the identical merge under one fixed thread pool, so the two
+        // runs take the same merge branch and differ only by the isolated capacity variable.
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let (dict_pre, tri_pre) = pool.install(|| merge_partials(build(true)));
+        let (dict_plain, tri_plain) = pool.install(|| merge_partials(build(false)));
+
+        // (1) Identical id-triples INCLUDING order.
+        assert_eq!(tri_pre, tri_plain, "pre-sizing changed the merged id-triples or their order");
+        // (2) Identical term set + bijection.
+        assert_eq!(dict_pre.len(), dict_plain.len(), "pre-sizing changed the distinct-term count");
+        for id in 1..=dict_pre.len() as Id {
+            assert_eq!(dict_pre.term(id), dict_plain.term(id), "pre-sizing changed the term for id {}", id);
+        }
+        // (3) Identical FINAL dict footprint — `heap_bytes` counts `capacity()`, so this pins
+        // that the partial reservation does NOT reach the ratcheted final dict.
+        assert_eq!(
+            dict_pre.heap_bytes(),
+            dict_plain.heap_bytes(),
+            "pre-sizing changed the final dict heap bytes (the dict_bytes_per_term ratchet would move)"
+        );
     }
 
     /// The streaming pipelined loader must be byte-exact against the serial loader for

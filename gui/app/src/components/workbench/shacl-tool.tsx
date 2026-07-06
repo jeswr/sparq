@@ -1,6 +1,9 @@
 "use client";
 
 // [OPUS-4.8] sq-ixc3.11 — the SHACL tool: a surface turned into an operational VERB.
+// (sq-txrui) [SONNET-4.6] — upgraded with Turtle syntax highlighting (WorkbenchTurtleEditor,
+// sq-5sjub) + bulk multi-file shapes upload with per-source enable/disable toggle (ShaclSources,
+// sq-vnh1v / sq-txrui).
 //
 // Translation rule (research/gui-design.md §A.4/§A.5): the website's /surface/shacl PAGE
 // validates a pasted DATA document against pasted SHAPES, wrapped in marketing chrome — a hero,
@@ -16,6 +19,21 @@
 // shapes via the shacl binding (Store.validate), all in-tab. This is the same SHACL Core +
 // SHACL-SPARQL engine the native crate ships; the `live` tier is honest because the bundle
 // genuinely carries it.
+//
+// SHAPES INPUT — three inputs concatenated (Turtle docs concatenate safely; prefix redeclaration
+// is legal per the Turtle spec):
+//   1. The inline editor (WorkbenchTurtleEditor with syntax highlighting — sq-5sjub).
+//   2. Each ENABLED source in the ShaclSources strip (bulk .ttl upload — sq-txrui).
+//   Disabled sources contribute nothing; with zero sources behaviour is identical to before.
+//
+// INVARIANT (sq-txrui): with zero uploaded sources the tool behaves exactly as before (editor
+// doc only). A disabled source contributes nothing. The highlight layer never desyncs from the
+// edited text (WorkbenchTurtleEditor owned contract).
+//
+// Stable E2E hooks preserved from sq-ixc3.11:
+//   id="shacl-shapes"             — the textarea inside WorkbenchTurtleEditor
+//   [data-result-kind="shacl"]    — the report pane container
+//   [data-result-kind="error"]    — the error <pre> inside the report pane
 
 import * as React from "react";
 import { Play, Loader2, CheckCircle2, XCircle } from "lucide-react";
@@ -27,9 +45,11 @@ import { useEngine } from "@/lib/engine-context";
 import { sparqShaclValidate, type ShaclReport, type ShaclResult } from "@sparq/client";
 import { basePath } from "@/lib/base-path";
 import { TIER_META, toolById } from "@/data/tools";
+import { WorkbenchTurtleEditor } from "@/components/workbench/turtle-editor";
+import { ShaclSources, type ShapeSource } from "@/components/workbench/shacl-sources";
 
 // A starter shapes graph the operator edits — NOT a fixture wrapped in a "try me" pitch; just a
-// minimal valid SHACL document so the empty textarea is not the first thing the operator faces.
+// minimal valid SHACL document so the empty editor is not the first thing the operator faces.
 // It targets nothing specific in the store; the operator points it at their own classes.
 const STARTER_SHAPES = `@prefix sh:   <http://www.w3.org/ns/shacl#> .
 @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
@@ -101,6 +121,8 @@ function Violation({ r }: { r: ShaclResult }) {
 export function ShaclTool() {
   const { status, storeSize, serializeStore } = useEngine();
   const [shapes, setShapes] = React.useState(STARTER_SHAPES);
+  // (sq-txrui) uploaded shape sources — each has an id, name, text and enabled flag.
+  const [sources, setSources] = React.useState<ShapeSource[]>([]);
   const [state, setState] = React.useState<RunState>({ kind: "idle" });
 
   const ready = status.kind === "ready";
@@ -120,10 +142,15 @@ export function ShaclTool() {
     }
     const t0 = performance.now();
     try {
+      // (sq-txrui) — concatenate the inline editor doc + every ENABLED source. Turtle docs
+      // concatenate safely; prefix redeclaration is legal per the Turtle spec.
+      const allShapes = [shapes, ...sources.filter((s) => s.enabled).map((s) => s.text)].join(
+        "\n",
+      );
       // Validate the LIVE store (serialised to TriG) against the operator's shapes. The shapes
       // are Turtle; the data is TriG — both are accepted by the validate binding, which folds
       // named graphs into the data graph SHACL validates.
-      const report = await sparqShaclValidate(data, shapes, "trig", {
+      const report = await sparqShaclValidate(data, allShapes, "trig", {
         basePath: basePath(),
       });
       setState({
@@ -138,7 +165,7 @@ export function ShaclTool() {
         message: err instanceof Error ? err.message : String(err),
       });
     }
-  }, [serializeStore, shapes, storeSize]);
+  }, [serializeStore, shapes, sources, storeSize]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -149,9 +176,10 @@ export function ShaclTool() {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Shapes editor — the only input; the DATA is the live store, not a pasted fixture. */}
+      {/* Shapes editor + sources strip — the shapes input: the DATA is the live store. */}
       <div className="flex min-h-0 flex-[3] flex-col border-b">
-        <div className="flex items-center gap-2 border-b bg-card px-3 py-1.5">
+        {/* Editor header: label, tier dot, validate button */}
+        <div className="flex shrink-0 items-center gap-2 border-b bg-card px-3 py-1.5">
           <span className="text-xs font-medium text-muted-foreground">SHACL shapes</span>
           {tier ? (
             <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -170,16 +198,20 @@ export function ShaclTool() {
           </Button>
           <span className="text-[11px] text-muted-foreground">⌘↵</span>
         </div>
-        <textarea
+
+        {/* (sq-txrui) Turtle overlay editor — replaces the plain <textarea>. The id="shacl-shapes"
+            hook is preserved on the inner <textarea> (WorkbenchTurtleEditor passes it through). */}
+        <WorkbenchTurtleEditor
           id="shacl-shapes"
           value={shapes}
-          onChange={(e) => setShapes(e.target.value)}
+          onChange={setShapes}
           onKeyDown={onKeyDown}
-          spellCheck={false}
-          className="min-h-0 flex-1 resize-none bg-background p-3 font-mono text-sm outline-none"
+          ariaLabel="SHACL shapes editor"
           placeholder="Paste a SHACL shapes graph (Turtle)…"
-          aria-label="SHACL shapes editor"
         />
+
+        {/* (sq-txrui) SHAPES SOURCES strip — bulk .ttl upload, per-source toggle. */}
+        <ShaclSources sources={sources} onChange={setSources} />
       </div>
 
       {/* Report pane — conformance flag + per-violation W3C report over the live store. */}

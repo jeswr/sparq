@@ -80,6 +80,12 @@
 //! `log:conclusion` parity on deep multi-document closures (cwm_includes
 //! conclusion.n3 is the one remaining honest reasoner-suite fail).
 
+// [FABLE-5] sq-zgbso.3 (epic sq-zgbso, issue #1582): OPT-IN id-level compiled-rule
+// evaluation for the scoped access-control N3 subset — see the module's own docs for the
+// honest builtin/feature envelope. When the `compiled-rules` feature is off, zero of it
+// is compiled (this hook is the module's only footprint in the default build).
+#[cfg(feature = "compiled-rules")]
+pub mod compiled;
 mod model;
 pub mod parser;
 
@@ -3796,5 +3802,129 @@ mod tests {
         // Exactly two :Parent existentials exist (no spurious extra / no collapse to one).
         let n_parents = triples.iter().filter(|[_, p, o]| *p == ty && *o == parent).count();
         assert_eq!(n_parents, 2, "one fresh :Parent per firing — two firings, two parents");
+    }
+
+    // ---- [OPUS-4.8] sq-qcnn.16: coverage gap tests for uncovered builtin paths ----
+
+    /// `time:hours`, `time:minutes`, `time:seconds` — the H:M:S arm of `datetime_part`.
+    /// The existing `time_components_and_unary_math` test only exercises year/month/day.
+    #[test]
+    fn time_hours_minutes_seconds() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix time: <http://www.w3.org/2000/10/swap/time#> .
+            :e :when "2024-03-15T10:30:45"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+            { ?x :when ?d .
+              ?d time:hours ?h .
+              ?d time:minutes ?mi .
+              ?d time:seconds ?s }
+            => { ?x :h ?h ; :mi ?mi ; :s ?s } .
+        "#;
+        let (mut d, s) = closure(src);
+        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        let e = id(&d, "http://ex/e");
+        assert!(s.contains(&[e, id(&d, "http://ex/h"),  d.intern_lit("10", int, None)]), "time:hours = 10");
+        assert!(s.contains(&[e, id(&d, "http://ex/mi"), d.intern_lit("30", int, None)]), "time:minutes = 30");
+        assert!(s.contains(&[e, id(&d, "http://ex/s"),  d.intern_lit("45", int, None)]), "time:seconds = 45");
+    }
+
+    /// `time:dayOfWeek` and `time:inSeconds` (forward epoch encoding) — exercise the
+    /// `DayOfWeek | InSeconds` arm of `datetime_part` and the `days_from_civil` helper.
+    /// 1970-01-01 = day 0 (epoch), a Thursday (cwm: 4).
+    #[test]
+    fn time_day_of_week_and_in_seconds_forward() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix time: <http://www.w3.org/2000/10/swap/time#> .
+            :e :when "1970-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+            { ?x :when ?d . ?d time:dayOfWeek ?dow . ?d time:inSeconds ?secs }
+            => { ?x :dow ?dow ; :secs ?secs } .
+        "#;
+        let (mut d, s) = closure(src);
+        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        let e = id(&d, "http://ex/e");
+        // 1970-01-01 is epoch second 0, and a Thursday = day-of-week 4 (cwm indexing).
+        assert!(s.contains(&[e, id(&d, "http://ex/secs"), d.intern_lit("0", int, None)]),
+            "1970-01-01T00:00:00Z = epoch 0");
+        assert!(s.contains(&[e, id(&d, "http://ex/dow"), d.intern_lit("4", int, None)]),
+            "1970-01-01 is Thursday (dayOfWeek=4 in cwm indexing)");
+    }
+
+    /// `time:inSeconds` **reverse** mode: an epoch integer → UTC dateTime string.
+    /// Drives the `Func::InSeconds` arm inside `eval_functional`'s reverse-mode block.
+    #[test]
+    fn time_in_seconds_reverse() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix time: <http://www.w3.org/2000/10/swap/time#> .
+            :seed :p :o .
+            { ?dt time:inSeconds 0 } => { :r :dt ?dt } .
+        "#;
+        let (mut d, s) = closure(src);
+        let xsd_str = "http://www.w3.org/2001/XMLSchema#string";
+        let epoch = d.intern_lit("1970-01-01T00:00:00Z", xsd_str, None);
+        assert!(s.contains(&[id(&d, "http://ex/r"), id(&d, "http://ex/dt"), epoch]),
+            "reverse time:inSeconds 0 = 1970-01-01T00:00:00Z");
+    }
+
+    /// `time:timeZone` — extracts the explicit ±hh:mm timezone offset from a dateTime.
+    /// Drives the `Func::TimeZone` branch of `eval_functional`.
+    #[test]
+    fn time_timezone_explicit_offset() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix time: <http://www.w3.org/2000/10/swap/time#> .
+            :e :when "2024-03-15T10:30:45+05:30"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+            { ?x :when ?d . ?d time:timeZone ?tz } => { ?x :tz ?tz } .
+        "#;
+        let (mut d, s) = closure(src);
+        let xsd_str = "http://www.w3.org/2001/XMLSchema#string";
+        let tz = d.intern_lit("+05:30", xsd_str, None);
+        let e = id(&d, "http://ex/e");
+        assert!(s.contains(&[e, id(&d, "http://ex/tz"), tz]),
+            "time:timeZone = +05:30 from explicit offset");
+    }
+
+    /// `log:langlit` — constructs a language-tagged literal from (lexical-form, lang-tag).
+    /// Drives the `Func::Langlit` branch of `eval_functional`.
+    #[test]
+    fn log_langlit_construct() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :seed :p :o .
+            { ("Hola" "es") log:langlit ?lit } => { :r :greeting ?lit } .
+        "#;
+        let (mut d, s) = closure(src);
+        let lang_string = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+        let greeting = d.intern_lit("Hola", lang_string, Some("es"));
+        let r = id(&d, "http://ex/r");
+        assert!(s.contains(&[r, id(&d, "http://ex/greeting"), greeting]),
+            "log:langlit ( \"Hola\" \"es\" ) = \"Hola\"@es");
+    }
+
+    /// `string:encodeForURI` (cwm variant, keeps #'()~ but encodes /) and
+    /// `string:encodeForFragID` (keeps / but encodes #'()~). Both drive the
+    /// `EncodeForUriCwm | EncodeForFragId` branch of `eval_functional`.
+    #[test]
+    fn string_encode_for_uri_cwm_and_fragid() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix string: <http://www.w3.org/2000/10/swap/string#> .
+            :seed :p :o .
+            { "hello/world#test" string:encodeForURI ?cwm } => { :r :cwm ?cwm } .
+            { "hello/world#test" string:encodeForFragID ?frag } => { :r :frag ?frag } .
+        "#;
+        let (mut d, s) = closure(src);
+        let xsd_str = "http://www.w3.org/2001/XMLSchema#string";
+        let r = id(&d, "http://ex/r");
+        // cwm keeps #'()~ but encodes /; so "hello/world#test" → "hello%2Fworld#test"
+        let cwm_enc = d.intern_lit("hello%2Fworld#test", xsd_str, None);
+        assert!(s.contains(&[r, id(&d, "http://ex/cwm"), cwm_enc]),
+            "string:encodeForURI (cwm) encodes / but keeps #");
+        // fragID keeps / but encodes #; so "hello/world#test" → "hello/world%23test"
+        let frag_enc = d.intern_lit("hello/world%23test", xsd_str, None);
+        assert!(s.contains(&[r, id(&d, "http://ex/frag"), frag_enc]),
+            "string:encodeForFragID keeps / but encodes #");
     }
 }

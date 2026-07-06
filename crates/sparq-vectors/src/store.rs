@@ -1115,7 +1115,21 @@ mod kani_proofs {
     /// of `open_from_bytes` does an aligned-copy + the full validation; the failure path is a
     /// plain `Err`. Neither may abort.
     #[kani::proof]
-    #[kani::unwind(40)] // > MAX_LEN so every bounded slice/index loop fully unrolls.
+    // (sq-kycq5) [SONNET-4.6] Loop census for this harness: the setup loop `for b in
+    // bytes.iter_mut()` runs up to `len` times where `len <= MAX_LEN`; the
+    // `AlignedBytes::from_vec` aligned copy covers the same `len` bytes; the fingerprint
+    // scan in `Fingerprint::from_bytes_opt` covers FINGERPRINT_LEN = 24 bytes; and the
+    // index-validation loop `for i in 0..count` runs at most 2 times within MAX_LEN = 88
+    // (a dim=1 count=2 store needs 56 + 8 + 16 = 80 bytes; count=3 needs 92 > 88).
+    // All loops are bounded by MAX_LEN = HEADER_LEN + 32 = 56 + 32 = 88.
+    // Therefore the required unwind bound is MAX_LEN + 1 = 89. The previous bound of 40
+    // was LESS than MAX_LEN (40 < 88) and its comment "// > MAX_LEN" was factually wrong;
+    // that bound fired an unwinding assertion in the nightly Kani lane (an INCOMPLETE proof,
+    // not a counterexample). See the sq-gnvfc fix for the sibling harness for the same
+    // pattern. NOTE: raising the bound may make this harness slower (more unwinding steps);
+    // that is acceptable — the lane's per-harness timeout keeps it visible, and an honest
+    // timeout beats a false incomplete proof.
+    #[kani::unwind(89)] // MAX_LEN + 1 = 88 + 1; bounds every loop in the harness cone
     fn open_from_bytes_never_panics() {
         // A symbolic length in `0..=MAX_LEN`, then a symbolic buffer of that length.
         let len: usize = kani::any();
@@ -1135,7 +1149,12 @@ mod kani_proofs {
     /// shrinks the symbolic surface so Kani spends its budget on the arithmetic/loop logic
     /// (the part the corpus is least likely to have exhausted) rather than on the magic byte.
     #[kani::proof]
-    #[kani::unwind(40)]
+    // [OPUS-4.8] (sq-gnvfc) The harness buffer is HEADER_LEN + 16 = 72 concrete bytes. The
+    // setup loop `bytes[8..].iter_mut()` runs 64 iterations, and every other per-element pass
+    // over the full 72-byte buffer (aligned copy, the fingerprint scan, the index loop) needs
+    // at most 72 steps; 73 > 72 bounds them all. The old bound of 40 < 64 fired an unwinding
+    // assertion (an INCOMPLETE proof, not a counterexample) on the setup loop.
+    #[kani::unwind(73)]
     fn open_validated_v2_tail_never_panics() {
         let mut bytes = vec![0u8; HEADER_LEN + 16];
         bytes[0..4].copy_from_slice(&SPQV_MAGIC);
@@ -1147,6 +1166,50 @@ mod kani_proofs {
         }
         let _ = VectorStore::open_from_bytes(bytes);
     }
+
+    // DOMAIN-COVERAGE SELF-CHECK, part 1 of 2 (the sq-og8u8 anti-vacuity pattern). Lesson of
+    // sq-sqtk2.1 (2026-07-04): a bound can SILENTLY prune the very inputs a harness means to
+    // cover, so it passes VACUOUSLY while reporting nothing wrong. The two totality harnesses
+    // above prove `open_from_bytes` NEVER panics over a bounded symbolic byte domain — but
+    // that is worthless if the ACCEPT path (the aligned copy + the full header / version /
+    // size / fingerprint validation) is unreachable within `MAX_LEN` and every in-domain
+    // buffer is rejected at the first size check.
+    //
+    // The self-check is split in two because a `#[kani::proof]` form of the accept-path pin
+    // does NOT terminate practically under Kani 0.67 (measured locally: > 20 min, dominated by
+    // CBMC's memory-model churn in the `AlignedBytes` raw-pointer copy + the error-arm
+    // `format!`/alloc machinery — the same cost class that keeps the two totality harnesses
+    // above over the nightly lane's per-harness budget). Splitting loses nothing: the input is
+    // fully CONCRETE, so native execution checks the identical property, and the buffer lies
+    // INSIDE the symbolic harnesses' domain, so their (eventual) no-panic/no-UB verdict covers
+    // it symbolically too.
+    //
+    //   part 1 (here, compile-time, evaluated whenever Kani builds this crate): the bounded
+    //   domain is big enough to CONTAIN a well-formed store — `MAX_LEN >= HEADER_LEN`. A
+    //   re-scope that shrank the fuzzed domain below the minimal valid store goes red at
+    //   kani-build time.
+    //
+    //   part 2 (`domain_bounded_buffer_contains_an_accepted_store` in `fingerprint_tests`,
+    //   every `cargo test` run): the minimal well-formed `HEADER_LEN`-byte version-2 buffer —
+    //   which part 1 proves in-domain — actually validates `Ok`, so the totality harnesses'
+    //   domain genuinely contains an ACCEPTED store and their proof is not vacuously
+    //   reject-only. [OPUS-4.8] sq-og8u8
+    const _DOMAIN_ADMITS_A_WELL_FORMED_STORE: () =
+        assert!(MAX_LEN >= HEADER_LEN, "the fuzzed domain must contain a minimal valid store");
+
+    // DOMAIN-COVERAGE SELF-CHECK for the v2-tail harness (sq-og8u8 anti-vacuity pattern): the
+    // focused `open_validated_v2_tail_never_panics` harness fixes a 72-byte (HEADER_LEN + 16)
+    // buffer with the magic + version-2 prefix. Its interesting tail is the index-validation
+    // loop (`for i in 0..count`), which is only reached when count >= 1 — a bound or budget that
+    // silently forced count = 0 would make the harness pass VACUOUSLY over the reject/skip path.
+    // With version 2 (data_offset = HEADER_LEN) the body budget is HEADER_LEN + 16 - HEADER_LEN =
+    // 16 bytes; a minimal 1-entry dim=1 store needs count*dim*4 + count*8 = 1*4 + 8 = 12 <= 16. ✓
+    // Its runtime companion `v2_tail_domain_admits_an_indexed_store` (in `fingerprint_tests`)
+    // proves a concrete such buffer validates `Ok`. [OPUS-4.8] sq-gnvfc
+    const _V2_TAIL_DOMAIN_ADMITS_AN_INDEXED_STORE: () = assert!(
+        HEADER_LEN + 16 >= HEADER_LEN + 4 + 8,
+        "v2-tail harness domain must fit >= 1 index entry (dim=1 count=1: 4-byte vector + 8-byte slot)"
+    );
 }
 
 #[cfg(test)]
@@ -1201,6 +1264,71 @@ mod fingerprint_tests {
         s.put(carol, &[0.0, 0.0, 0.0, 1.0]).unwrap(); // far from alice
         s.finalize().unwrap();
         s
+    }
+
+    /// DOMAIN-COVERAGE SELF-CHECK, part 2 of 2 (the sq-og8u8 anti-vacuity pattern — part 1,
+    /// the compile-time `MAX_LEN >= HEADER_LEN` binding, lives in `kani_proofs`; see the
+    /// rationale there): the minimal well-formed version-2 buffer — exactly `HEADER_LEN`
+    /// bytes: magic + version 2 + `dim = 1` + `count = 0` (no data, no index) + an all-zero
+    /// fingerprint (decodes to `None`/unverifiable, still valid) — validates `Ok`. Because
+    /// part 1 proves this buffer lies INSIDE the Kani totality harnesses' `MAX_LEN` domain,
+    /// this test going green means those harnesses' domain genuinely CONTAINS an accepted
+    /// store: their no-panic proof is not vacuously covering only the reject branches. If a
+    /// format change makes every in-domain buffer rejectable, this goes red on every
+    /// `cargo test` run. [OPUS-4.8] sq-og8u8
+    #[test]
+    fn domain_bounded_buffer_contains_an_accepted_store() {
+        let mut bytes = vec![0u8; 56]; // HEADER_LEN — pinned numerically on purpose:
+        assert_eq!(bytes.len(), HEADER_LEN, "minimal v2 store is exactly the header");
+        bytes[0..4].copy_from_slice(&SPQV_MAGIC);
+        bytes[4..8].copy_from_slice(&SPQV_VERSION.to_le_bytes());
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes()); // dim = 1 (dim == 0 is rejected)
+        // count = 0 (bytes 12..20 stay zero) ⇒ no data + no index; reserved + fingerprint
+        // stay all-zero (a valid v2 store finalized without `with_fingerprint`).
+        let store = VectorStore::open_from_bytes(bytes)
+            .expect("a minimal well-formed v2 store must validate — else the accept path is vacuous");
+        assert_eq!(store.dim(), 1);
+        assert!(store.fingerprint().is_none(), "all-zero fingerprint decodes to None");
+    }
+
+    /// DOMAIN-COVERAGE SELF-CHECK for the v2-tail harness (sq-og8u8 anti-vacuity pattern,
+    /// sq-gnvfc — companion to the compile-time `_V2_TAIL_DOMAIN_ADMITS_AN_INDEXED_STORE`
+    /// const in `kani_proofs`). Proves a concrete 72-byte buffer in the
+    /// `open_validated_v2_tail_never_panics` harness's domain (the magic + version-2 prefix,
+    /// count = 1, dim = 2) validates `Ok` — so the index-validation loop `for i in 0..count`
+    /// runs exactly once. This confirms the focused harness genuinely covers the indexed-store
+    /// path, not only the size-mismatch / bad-index reject branches. [OPUS-4.8] sq-gnvfc
+    #[test]
+    fn v2_tail_domain_admits_an_indexed_store() {
+        // Buffer layout for a valid v2 store with dim = 2, count = 1:
+        //   [0..4]   SPQV_MAGIC
+        //   [4..8]   version = 2 (LE u32)
+        //   [8..12]  dim = 2 (LE u32)
+        //   [12..20] count = 1 (LE u64)
+        //   [20..32] reserved (zeros) — fills the rest of HEADER_LEN_V1 (32 bytes)
+        //   [32..56] fingerprint block (all-zero = no fingerprint, still a valid v2) — HEADER_LEN
+        //   [56..64] vector data: one dim=2 f32 vector (2 * 4 = 8 bytes)
+        //   [64..72] index: one entry — id = 1 (u32 LE) + slot = 0 (u32 LE) = 8 bytes
+        //   total = 72 bytes = HEADER_LEN + 16
+        let mut bytes = vec![0u8; HEADER_LEN + 16];
+        assert_eq!(bytes.len(), 72, "buffer must be HEADER_LEN + 16 = 72 bytes");
+        bytes[0..4].copy_from_slice(&SPQV_MAGIC);
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes()); // version 2
+        bytes[8..12].copy_from_slice(&2u32.to_le_bytes()); // dim = 2
+        bytes[12..20].copy_from_slice(&1u64.to_le_bytes()); // count = 1
+        // fingerprint block [32..56] stays all-zero (valid: no fingerprint).
+        // vector data [56..64]: f32 values [1.0, 0.0] in LE.
+        bytes[56..60].copy_from_slice(&1.0f32.to_le_bytes());
+        bytes[60..64].copy_from_slice(&0.0f32.to_le_bytes());
+        // index [64..72]: entry 0 — id = 1 (u32 LE), slot = 0 (u32 LE).
+        bytes[64..68].copy_from_slice(&1u32.to_le_bytes()); // id = 1
+        bytes[68..72].copy_from_slice(&0u32.to_le_bytes()); // slot = 0
+        let store = VectorStore::open_from_bytes(bytes).expect(
+            "72-byte v2 store with dim=2 count=1 must validate — the index loop must be reachable \
+             in the focused harness domain",
+        );
+        assert_eq!(store.dim(), 2);
+        assert!(store.fingerprint().is_none(), "all-zero fingerprint block decodes to None");
     }
 
     #[test]

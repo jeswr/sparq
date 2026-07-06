@@ -17,7 +17,7 @@ import { useCommandPalette } from "@/components/workbench/command-palette";
 import { useImportDrawer } from "@/components/workbench/import-drawer";
 
 /** The honesty-website link target (the marketing site, opened in a NEW tab / system browser). */
-const WEBSITE_URL = "https://jeswr.github.io/sparq/";
+const WEBSITE_URL = "https://sparq.jeswr.org/";
 
 function StatusLed() {
   const { status } = useEngine();

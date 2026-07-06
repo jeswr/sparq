@@ -107,6 +107,36 @@ engine instead (no compressed-file / HDT path — the drawer says so). A success
 `WorkspaceSourceMeta` + a workspace snapshot (the `sq-atb0` save/open cache). The full on-disk
 workspace persistence path activates once the shell grants the `fs` capability (`sq-ixc3.6`).
 
+## File ingest library (`lib/file-ingest.ts`, sq-vnh1v)
+
+The **file ingest library** is a shared zero-server multi-file upload harness for the RDF import (sq-eydh9), SHACL shapes (sq-txrui), and N3 rules (sq-glo5r) surfaces. It operates on a single `IngestResult` contract: every file is `accepted[]` (name, text, bytes) or `rejected[]` (name, reason) — **no silent drops**. 
+
+**Entry points** — `pickTextFiles(opts)` opens a file picker using File System Access `showOpenFilePicker` where available, falling back to `<input type="file" multiple>` for browser parity (the floor); `readDroppedFiles(dataTransfer, opts)` extracts files from a drop event (must be called synchronously from the drop handler). Both work in the static `/app` export with no server and no Tauri global.
+
+**UI layer** — `<Dropzone>` (standalone dashed panel + keyboard-accessible button), `<DropTarget>` (wraps children as a drop surface with a hover overlay), and `useFileDrop` (raw drag/drop wiring for custom affordances). All three consume the same `IngestResult` contract, so callers surface accepted and rejected files identically.
+
+## Inference (per-workspace entailment) — `sq-tp1m`
+
+The **Inference tool** (and a compact selector in the Query action row) applies an **RDFS / OWL 2
+RL** entailment regime to queries over the live store, **per workspace**. It is real
+forward-chaining, not a mock: a non-`off` mode lazily loads the tier-b **W-reason** wasm bundle
+(`crates/sparq-reason-wasm`, the same reasoner the site's `/surface/inference` page runs),
+materialises the deductive **closure** over the whole dataset (named graphs folded into the
+default graph), and runs **read** queries against that closure so an *entailed* triple can match.
+It is a **query-time** regime — it never mutates the persisted store; an `UPDATE` always targets
+the asserted data and invalidates the cached closure. The chosen mode is **persisted on the
+workspace** (`Workspace.inference`) and restored on reopen.
+
+The W-reason bundle is **optional at build time**: `app/scripts/sync-wasm.mjs` copies it into
+`public/wasm/reason/` when present and warns-and-skips otherwise, so the frontend build never
+hard-fails on it. The CI `gui-app` job builds it (`js`: `npm run build:reason-wasm`) so the
+exported artifact ships live inference; a build without it degrades **honestly** — the tool shows
+a "reasoner unavailable" state, and a query issued while a non-`off` mode is active then fails with
+a clear message (turn inference **Off** to query the asserted data, or rebuild the bundle) rather
+than silently returning un-reasoned results. **N3** rule reasoning is
+deferred (it needs a rules-authoring surface + a store that can hold rule/formula terms, which the
+in-tab ground-triple store cannot represent) — tracked as a follow-up.
+
 ## Shared TS client
 
 The frontend consumes the framework-agnostic `@sparq/client`

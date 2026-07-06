@@ -11,20 +11,20 @@ import type { NextConfig } from "next";
 //     `beforeBuildCommand` runs `build:tauri`, which sets NEXT_PUBLIC_BASE_PATH='' → basePath ''.
 //   * Hosted "Try the GUI live" web target ("build:web"): served under a sub-path on the same
 //     GitHub-Pages-style host. The maintainer picked the URL slot (bead sq-vnd0i, Option B):
-//     the live GUI is hosted at the `/sparq/app` sub-path (the site's "App" nav destination;
-//     "/try" stays the lightweight REPL). This app defaults the web build to `/sparq/app`,
+//     the live GUI is hosted at the `/app` sub-path (the site's "App" nav destination;
+//     "/try" stays the lightweight REPL). This app defaults the web build to `/app`,
 //     overridable via the env var.
 //
-// An UNSET var keeps the web default (`/sparq/app`); an explicit empty string selects the
+// An UNSET var keeps the web default (`/app`); an explicit empty string selects the
 // root-relative (Tauri) export. Next requires basePath to be empty or start with `/` (no
 // trailing slash), so we honour only `''` or a `/`-leading value and otherwise fall back.
 const rawBasePath = process.env.NEXT_PUBLIC_BASE_PATH;
 const basePath =
   rawBasePath === undefined
-    ? "/sparq/app" // unset → hosted-web default (the live-GUI "/app" sub-path)
+    ? "/app" // unset → hosted-web default (the live-GUI "/app" sub-path)
     : rawBasePath === "" || rawBasePath.startsWith("/")
       ? rawBasePath // '' (Tauri root-relative) or an explicit '/prefix'
-      : "/sparq/app";
+      : "/app";
 
 const nextConfig: NextConfig = {
   output: "export",

@@ -2555,6 +2555,17 @@ parser! {
                 #[cfg(feature = "sparql-12")]{Ok(Expression::FunctionCall(Function::IsTriple, vec![e]))}
                 #[cfg(not(feature = "sparql-12"))]{Err("The isTriple function is only available in SPARQL 1.2")}
             } /
+            // [OPUS-4.8] (sq-v411r, SPARQ-PATCH) Zero-argument `MULTIPLICITY()` extension builtin
+            // (the SPARQL 1.2 algebra `multiplicity` device): like `NOW()`/`RAND()` it takes an
+            // empty arg list. To keep the shared `Function` enum byte-compatible with downstream
+            // crates that exhaustively match it (sparopt/spareval), it is represented as a
+            // `Function::Custom` with a reserved `urn:sparq:fn:multiplicity` IRI rather than a new
+            // enum variant; the sparq engine recognises that IRI. NOT a W3C-standard callable
+            // builtin — see `SPARQ-PATCHES.md`.
+            i("MULTIPLICITY") _ NIL() {?
+                #[cfg(feature = "sparql-12")]{Ok(Expression::FunctionCall(Function::Custom(NamedNode::new_unchecked("urn:sparq:fn:multiplicity")), vec![]))}
+                #[cfg(not(feature = "sparql-12"))]{Err("The MULTIPLICITY function is only available in SPARQL 1.2")}
+            } /
             i("ADJUST") _ "("  _ a:Expression() _ "," _ b:Expression() _ ")" {?
                 #[cfg(feature = "sep-0002")]{Ok(Expression::FunctionCall(Function::Adjust, vec![a, b]))}
                 #[cfg(not(feature = "sep-0002"))]{Err("The ADJUST function is only available in SPARQL-dev SEP 0002")}

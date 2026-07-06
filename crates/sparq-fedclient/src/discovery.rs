@@ -649,12 +649,14 @@ impl ureq::unversioned::resolver::Resolver for EgressFilterResolver {
         _config: &ureq::config::Config,
         _timeout: ureq::unversioned::transport::NextTimeout,
     ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
-        let (host_port, host) = crate::ureq_egress::uri_host_port(uri).ok_or_else(|| {
+        let (host_port, host, port) = crate::ureq_egress::uri_host_port(uri).ok_or_else(|| {
             crate::ureq_egress::egress_refused(format!(
                 "discovery egress refused: request URI {uri} has no host authority to vet"
             ))
         })?;
-        let allowed = self.allow_private.contains(&host);
+        // Port-scoped allowlist: a `host:port` entry re-opens a private host only on its exact
+        // dialled port (shared host:port rule with the engine SERVICE guard; sq-vbnyc).
+        let allowed = crate::ureq_egress::allowlist_permits(&self.allow_private, &host, port);
         crate::ureq_egress::filter_resolved(&host_port, allowed, is_forbidden_ip, || {
             format!(
                 "discovery egress refused: {host_port} resolves only to private/internal \

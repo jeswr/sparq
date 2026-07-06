@@ -1,0 +1,660 @@
+#!/usr/bin/env python3
+# [OPUS-4.8] Change-based CI test-selection: the affected-set selector.
+# Bead sq-fmx4u.1 (epic sq-fmx4u). Design: research/change-based-test-selection.md
+# §3 (affected-set algorithm), §4 (fail-safe rules), §7 (positions P1-P4).
+# Authored by Opus 4.8 (Fable unavailable; flag for re-review when Fable returns).
+#
+# WHAT THIS IS (and is NOT):
+#   Given the set of paths changed in a PR (a git diff), compute the set of
+#   workspace crates whose tests/benchmarks MUST run = the reverse-dependency
+#   closure (transitive dependents) of every changed crate, derived from
+#   `cargo metadata`. Emits JSON: {"mode": "selected"|"full", "reason", "affected"}.
+#
+#   This is the SELECTOR LIBRARY (design §3). The CI WIRING — the `select`
+#   pre-job (.github/workflows/ci-select.yml), the job-level `if:` guards, the
+#   nextest filterset narrowing, ci-summary semantics — landed with bead
+#   sq-fmx4u.3 [FABLE-5]; the rollout backstops (nightly full, ci-full label,
+#   the enforcement flip) are bead sq-fmx4u.5. This file stays workflow-
+#   agnostic: it reads a diff + cargo metadata and emits {mode, reason,
+#   affected} plus the $GITHUB_OUTPUT lines (mode/affected/filterset) that the
+#   wiring consumes.
+#
+# THE CORE INVARIANT (design §2, normative):
+#   *A test is skipped => provably no change could affect it.* Skipping is an
+#   optimization applied to a proof of non-interference; ABSENCE OF PROOF MEANS
+#   RUN. Every branch below defaults to running MORE, never less:
+#     - any §4.1 full-run trigger changed  => mode=full
+#     - any changed path we cannot confidently attribute to a crate => mode=full
+#     - ANY internal error (metadata parse, diff failure, unfetchable base,
+#       malformed map) => mode=full, exit 0  (fail-closed, design §4.3)
+#
+# OWNERSHIP MAP (ci/path-ownership.toml, design §4.2):
+#   The §4.1 full-run trigger table is baked in here as built-in DEFAULTS so the
+#   selector fail-closes correctly on a clean clone even before the map file
+#   exists. When `ci/path-ownership.toml` IS present it EXTENDS behaviour:
+#   attributes non-crate paths to the crates whose tests read them, or marks a
+#   path SAFE (proven inert for the Rust matrix). Bead sq-fmx4u.2 ships + audits
+#   that map; this selector merely reads it. Absent map => built-in triggers +
+#   crate-prefix ownership only (unmapped/unowned path => full).
+#
+# Usage:
+#   ci_select.py                                   # real: git diff HEAD vs merge-base, cargo metadata
+#   ci_select.py --base <sha> --head <sha>         # explicit revision pair
+#   ci_select.py --event schedule                  # no diff => mode=full
+#   ci_select.py --full                            # forced full (e.g. the `ci-full` label)
+#   ci_select.py --shadow ...                      # report-only: compute + report the
+#                                                  #   selection but emit mode=shadow so no
+#                                                  #   downstream guard skips (design §6.4)
+#   ci_select.py --changed-file paths.txt \        # hermetic inputs (tests): newline-delimited
+#                --metadata-file meta.json          # cargo metadata JSON snapshot
+#
+# Stdlib only (design §7 P1): no third-party deps, no compile step. Runs under
+# the CI setup-python 3.12; `tomllib` (stdlib >= 3.11) is imported lazily and
+# only when a map file is actually present.
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import PurePosixPath
+
+# --- §4.1 unconditional full-run triggers (built-in defaults) ----------------
+# Each entry is (pattern, reason). A pattern ending in "/" is a directory prefix
+# (matches the dir itself or anything beneath it); otherwise it is an EXACT
+# repo-relative path. Root "Cargo.toml" therefore matches ONLY the workspace
+# root manifest — a crate's "crates/x/Cargo.toml" is attributed to crate x by
+# ownership (and a version bump there rewrites Cargo.lock => full anyway, §3.3).
+_FULL_TRIGGERS: list[tuple[str, str]] = [
+    ("Cargo.lock", "Cargo.lock changed (resolved versions feed every build)"),
+    ("Cargo.toml", "root Cargo.toml changed (workspace members / deps / lints / profiles / [patch])"),
+    ("rust-toolchain", "toolchain pin changed (compiler version affects all codegen)"),
+    ("rust-toolchain.toml", "toolchain pin changed (compiler version affects all codegen)"),
+    (".cargo/", "cargo config changed (global rustflags / registries / build config)"),
+    (".github/", "CI definition changed (including the selection wiring itself)"),
+    ("scripts/", "shared CI/gate/coverage script changed (executed by CI)"),
+    ("deny.toml", "cargo-deny config changed (redefines a supply-chain green)"),
+    ("supply-chain/", "cargo-vet / supply-chain config changed"),
+    ("ci/path-ownership.toml", "selection policy (ownership map) changed"),
+]
+
+
+# --- phase-2 singleton-lane -> seed crates (design §5.2; beads sq-fmx4u.6, sq-mel85)
+# [OPUS-4.8] A "lane" is a SINGLETON CI job (not a per-crate matrix leg) that
+# always exercises a FIXED set of crates: the fuzz smoke (fuzz.yml), the wasm
+# bundle build (ci.yml `wasm`), and the perf-gate benchmark (bench.yml `bench` —
+# added by sq-mel85 [SONNET-4.6]). Phase 1 left these always-run (design P7); phase 2
+# maps each to the crate closure it exercises and skips it when that closure is
+# provably unaffected. A lane is affected iff any SEED crate is in the affected
+# closure — and because `affected` is the REVERSE-dependency closure of the diff,
+# a seed is in it iff the seed itself OR anything it transitively depends on
+# changed, which is exactly "could this lane's build/behaviour differ" (design
+# §3.3). So the forward-dependency reasoning is captured by a membership test on
+# the reverse closure — no separate forward walk is needed here.
+#
+# SEEDS (single source of truth; the fuzz.yml + ci.yml `wasm` + bench.yml `bench`
+# job `if:` guards MUST reference exactly these crate names — pinned by
+# scripts/tests/test_ci_select_wiring.py, mirrored informationally in
+# ci/path-ownership.toml `[lanes]`):
+#   * fuzz — the cargo-fuzz targets. The out-of-workspace fuzz crate
+#     (fuzz/Cargo.toml) depends on exactly these three: sparq-core (RDF parsers +
+#     mmap loader), sparq-engine (SPARQL parse), sparq-shacl (SHACL validation).
+#   * wasm — the ci.yml `wasm` job builds every browser bundle it names; each seed
+#     pulls its own engine/core wasm32 graph, so the seed set is the bundle crates.
+#   * bench — [SONNET-4.6] sq-mel85: the perf-gate benchmark (bench.yml). Seeds are
+#     the benchmarked-crate closure of the HARD-GATED (merge-blocking) metrics that
+#     scripts/perf-gate.py enforces on PRs: the store/dict byte-layout + parse
+#     metrics come from sparq-core (exercised via the release binaries the bench job
+#     builds — sparq-cli + sparq-bench — which both depend on sparq-core, so a core
+#     change lands in this reverse closure), and the wasm_bundle_bytes floor comes
+#     from the sparq-wasm browser bundle ci-bench.sh builds + measures. sparq-wasm
+#     is a DIRECT seed on purpose: that floor is enforced ONLY in bench.yml and a
+#     wasm-only diff does NOT flow up into engine/cli/bench (they do not depend on
+#     sparq-wasm), so omitting it would silently drop the bundle gate for a wasm-only
+#     PR — exactly the unsound skip §2 forbids. sparq-engine is the headline
+#     benchmarked crate (and is embedded in the wasm bundle).
+#     TRUE INVARIANT FOR SEED SOUNDNESS: every hard-gated metric measured on the
+#     PR/merge_group tier must have its source crate reach a bench seed (store/dict/parse
+#     ← sparq-core via the release binaries; wasm_bundle ← sparq-wasm). The four
+#     additional mode:auto ratchets in bench/perf-baseline.json — fts_bytes_per_doc
+#     (sparq-text), vectors_diskann_recall_at10 / vectors_pq_recall_at10 (sparq-vectors),
+#     geo_compliance_deficit (sparq-geo) — need NO bench seed because scripts/ci-bench.sh
+#     measures them on the MAIN tier only (GITHUB_REF guards skip them on any non-main
+#     ref); every main-tier event is mode=full by construction. vectors/geo additionally
+#     reach the sparq-cli seed transitively, but the soundness rests on the main-tier-only
+#     measurement, not on that incidental reachability. On push-to-main the selector
+#     returns mode=full (push is not a pull_request/merge_group event), so the FULL suite
+#     always runs on main and the auto-ratchet + benchmark-data history stay continuous
+#     (design §6.1).
+# FAIL-CLOSED (design §2/§4.3): `lane_runs` runs the lane whenever mode != selected
+# (full/shadow/error) OR any seed is not a current workspace member (a typo'd or
+# renamed seed can never silently skip a lane — it forces the lane to run). The
+# YAML guards inherit the same posture: an empty/missing `mode`/`affected` output
+# satisfies the `mode != 'selected'` disjunct => RUN.
+_LANE_SEEDS: dict[str, list[str]] = {
+    "fuzz": ["sparq-core", "sparq-engine", "sparq-shacl"],
+    "wasm": [
+        "sparq-wasm",
+        "sparq-reason-wasm",
+        "sparq-rsp-wasm",
+        "sparq-text-wasm",
+        "sparq-shacl-wasm",
+        "sparq-introspect",
+        "sparq-solid",
+    ],
+    # [SONNET-4.6] sq-mel85: perf-gate bench closure (see the `bench` bullet above).
+    "bench": [
+        "sparq-engine",
+        "sparq-cli",
+        "sparq-bench",
+        "sparq-wasm",
+    ],
+}
+
+
+class SelectorError(Exception):
+    """Any internal failure. main() traps this => mode=full, exit 0 (§4.3)."""
+
+
+@dataclass
+class Selection:
+    """Rich selection result. main() serialises only {mode, reason, affected}."""
+
+    mode: str  # "selected" | "full"
+    reason: str
+    affected: list[str]  # sorted workspace-member names
+    # Transparency detail for the step-summary (design §5.1); not in the JSON contract.
+    changed_crates: list[str] = field(default_factory=list)
+    file_owners: list[tuple[str, str]] = field(default_factory=list)  # (path, owner-label)
+    all_members: list[str] = field(default_factory=list)
+
+    def to_json_obj(self) -> dict:
+        return {"mode": self.mode, "reason": self.reason, "affected": self.affected}
+
+
+# --- metadata model ----------------------------------------------------------
+@dataclass
+class Workspace:
+    root: str
+    members: set[str]  # workspace-member package names
+    # in-repo path packages (members + non-member in-repo path deps): name -> rel dir
+    owners: list[tuple[str, str]]  # (rel_dir, name), only non-empty dirs, sorted longest-first
+    reverse_adj: dict[str, set[str]]  # dep-name -> {packages that depend on it}
+
+
+def _rel_dir(manifest_path: str, root: str) -> str:
+    """Repo-relative POSIX dir of a Cargo.toml, or '' if outside root / at root."""
+    mp = PurePosixPath(manifest_path)
+    rt = PurePosixPath(root)
+    try:
+        rel = mp.parent.relative_to(rt)
+    except ValueError:
+        return ""  # manifest lives outside the repo root
+    s = rel.as_posix()
+    return "" if s == "." else s
+
+
+def parse_workspace(meta: dict) -> Workspace:
+    """Build the in-repo dependency model from `cargo metadata` JSON.
+
+    In-repo path packages = packages whose `source` is null (path/workspace, not
+    a registry/git dep) AND whose manifest lives under `workspace_root`. This
+    covers workspace members PLUS any non-member in-repo path dependency
+    (design §3.2, P3). Edges are the package-level dependency lists — normal +
+    dev + build kinds, optional regardless of feature, target-specific
+    regardless of host (design §3.3, P2): a conservative superset of any
+    feature-resolved graph.
+    """
+    try:
+        root = meta["workspace_root"]
+        packages = meta["packages"]
+        member_ids = set(meta["workspace_members"])
+    except (KeyError, TypeError) as exc:
+        raise SelectorError(f"cargo metadata missing expected keys: {exc}") from exc
+
+    id_to_name: dict[str, str] = {}
+    inrepo_names: set[str] = set()
+    inrepo_dirs: dict[str, str] = {}
+    inrepo_deps: dict[str, list[dict]] = {}
+
+    for pkg in packages:
+        pid = pkg.get("id")
+        name = pkg.get("name")
+        if pid is not None and name is not None:
+            id_to_name[pid] = name
+        # source == null AND manifest under root => an in-repo path package.
+        if pkg.get("source") is None and name is not None:
+            rel = _rel_dir(pkg.get("manifest_path", ""), root)
+            # A manifest outside the root yields '' here; skip those (external
+            # path deps live outside the repo and cannot own a changed path).
+            manifest_under_root = str(pkg.get("manifest_path", "")).startswith(str(root))
+            if manifest_under_root:
+                inrepo_names.add(name)
+                inrepo_dirs[name] = rel
+                inrepo_deps[name] = pkg.get("dependencies", [])
+
+    members = {id_to_name[i] for i in member_ids if i in id_to_name}
+
+    # Reverse edges among in-repo packages only. A dependency is matched to an
+    # in-repo package by NAME (our crate names are distinctive `sparq-*`); this
+    # is deliberately conservative — if in doubt, an edge is included (run more).
+    reverse_adj: dict[str, set[str]] = {n: set() for n in inrepo_names}
+    for name, deps in inrepo_deps.items():
+        for dep in deps:
+            dn = dep.get("name")
+            if dn in inrepo_names and dn != name:
+                reverse_adj[dn].add(name)
+
+    owners = sorted(
+        ((d, n) for n, d in inrepo_dirs.items() if d),  # drop empty-dir (root) owners: fail-safe
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+    return Workspace(root=root, members=members, owners=owners, reverse_adj=reverse_adj)
+
+
+def reverse_closure(crate: str, reverse_adj: dict[str, set[str]]) -> set[str]:
+    """{crate} U all transitive dependents of crate."""
+    seen = {crate}
+    stack = [crate]
+    while stack:
+        cur = stack.pop()
+        for dependent in reverse_adj.get(cur, ()):  # .get() tolerates a missing key
+            if dependent not in seen:
+                seen.add(dependent)
+                stack.append(dependent)
+    return seen
+
+
+def lane_runs(sel: "Selection", seeds: list[str]) -> bool:
+    """[OPUS-4.8] sq-fmx4u.6 / sq-mel85: does a singleton lane (fuzz / wasm /
+    bench) need to run for this Selection? This is the EXECUTABLE SPEC of the
+    fuzz.yml + ci.yml `wasm` + bench.yml `bench` job `if:` guards — the YAML
+    expresses the identical rule inline
+    (`mode != 'selected' || contains(affected, '"<seed>"') || ...`), and
+    scripts/tests/test_ci_select_wiring.py pins the guards' seed set against
+    `_LANE_SEEDS` so the two cannot drift.
+
+    Runs (returns True) unless the lane is PROVABLY inert (design §2):
+      * mode != "selected" (full / shadow / error path) => run everything;
+      * any seed is not a current workspace member => run (fail-closed: a
+        typo'd/renamed seed must never silently skip its lane);
+      * otherwise run iff some seed is in the affected reverse-dep closure.
+    """
+    if sel.mode != "selected":
+        return True
+    members = set(sel.all_members)
+    if any(s not in members for s in seeds):
+        return True  # unknown seed: cannot prove inert => run (fail-closed)
+    affected = set(sel.affected)
+    return any(s in affected for s in seeds)
+
+
+# --- ownership matching ------------------------------------------------------
+def _trigger_match(path: str) -> str | None:
+    for pattern, reason in _FULL_TRIGGERS:
+        if pattern.endswith("/"):
+            if path == pattern.rstrip("/") or path.startswith(pattern):
+                return reason
+        elif path == pattern:
+            return reason
+    return None
+
+
+def owning_package(path: str, owners: list[tuple[str, str]]) -> str | None:
+    """Longest-prefix crate that owns `path`, or None (design §3.2)."""
+    for reldir, name in owners:  # owners is pre-sorted longest-first
+        if path == reldir or path.startswith(reldir + "/"):
+            return name
+    return None
+
+
+def _glob_match(path: str, pattern: str) -> bool:
+    """Match an ownership-map pattern. `dir/**` => any path under dir; else fnmatch."""
+    if pattern.endswith("/**"):
+        root = pattern[:-3]
+        return path == root or path.startswith(root + "/")
+    return fnmatch.fnmatch(path, pattern)
+
+
+def apply_ownership_map(path: str, map_entries: list[dict]) -> tuple[str, list[str]] | None:
+    """First matching map entry wins.
+
+    Returns ("safe", []) for a SAFE-listed path, ("crates", [names]) for an
+    attributed path, or None if no entry matches (=> caller treats as unowned).
+    """
+    for entry in map_entries:
+        pattern = entry.get("pattern")
+        if not isinstance(pattern, str) or not _glob_match(path, pattern):
+            continue
+        if entry.get("safe") is True:
+            return ("safe", [])
+        crates = entry.get("crates")
+        if isinstance(crates, list) and all(isinstance(c, str) for c in crates):
+            return ("crates", list(crates))
+        # Malformed entry (matched but neither safe nor a crate list) => fail-safe.
+        raise SelectorError(f"ownership-map entry for {pattern!r} is neither safe nor a crate list")
+    return None
+
+
+# --- the selection ----------------------------------------------------------
+def select(
+    changed_paths: list[str],
+    meta: dict,
+    map_entries: list[dict] | None = None,
+) -> Selection:
+    """Pure core: changed paths + cargo metadata + optional map -> Selection.
+
+    Raises SelectorError on any malformed input; main() traps that to mode=full.
+    """
+    map_entries = map_entries or []
+    ws = parse_workspace(meta)
+    all_members = sorted(ws.members)
+
+    def full(reason: str) -> Selection:
+        return Selection(
+            mode="full",
+            reason=reason,
+            affected=all_members,  # "return ALL crates" (run everything)
+            all_members=all_members,
+        )
+
+    changed_crates: set[str] = set()
+    file_owners: list[tuple[str, str]] = []
+
+    for path in changed_paths:
+        path = path.strip()
+        if not path:
+            continue
+        trig = _trigger_match(path)
+        if trig is not None:
+            file_owners.append((path, "FULL-TRIGGER"))
+            return full(trig)
+        owner = owning_package(path, ws.owners)
+        if owner is not None:
+            changed_crates.add(owner)
+            file_owners.append((path, owner))
+            continue
+        verdict = apply_ownership_map(path, map_entries)
+        if verdict is None:
+            file_owners.append((path, "UNOWNED"))
+            return full(f"unowned, unmapped path forces full run: {path}")
+        kind, crates = verdict
+        if kind == "safe":
+            file_owners.append((path, "SAFE"))
+            continue
+        # kind == "crates": every mapped crate must be a real workspace member,
+        # else the map is stale/invalid => fail-safe (design §4.2 validity rule).
+        for c in crates:
+            if c not in ws.members:
+                return full(f"ownership map attributes {path} to unknown crate {c!r}")
+        changed_crates.update(crates)
+        file_owners.append((path, "+".join(crates)))
+
+    affected: set[str] = set()
+    for c in changed_crates:
+        affected |= reverse_closure(c, ws.reverse_adj)
+    affected &= ws.members
+
+    if changed_crates and not affected:
+        # A non-member in-repo path dep changed but nothing member-facing depends
+        # on it; still surface it as changed but with an empty member set.
+        reason = "changed in-repo package(s) have no member dependents"
+    elif not changed_crates:
+        reason = "all changed paths are SAFE-listed or non-crate; no crate affected"
+    else:
+        skipped = len(ws.members) - len(affected)
+        reason = f"{len(affected)} of {len(ws.members)} members affected ({skipped} skippable)"
+
+    return Selection(
+        mode="selected",
+        reason=reason,
+        affected=sorted(affected),
+        changed_crates=sorted(changed_crates),
+        file_owners=file_owners,
+        all_members=all_members,
+    )
+
+
+# --- map validity (design §4.2; #1392 refinement) ---------------------------
+def validate_map(
+    map_entries: list[dict],
+    members: set[str],
+    known_generated_roots: set[str] | None = None,
+    repo_root: str | None = None,
+) -> list[str]:
+    """Return a list of map-validity problems (empty == valid).
+
+    Refinement from #1392: pattern-root existence is checked against a
+    FETCHED/GENERATED allowlist, not a brittle on-disk check — otherwise a
+    perfectly valid pattern like `tests/w3c/**` (the W3C suite is FETCHED by
+    scripts/fetch-conformance.sh and gitignored) would falsely fail on a clean
+    clone. The crate allowlist is likewise GENERATED from `cargo metadata`
+    (`members`), so it never rots when crates move.
+    """
+    known_generated_roots = known_generated_roots or set()
+    problems: list[str] = []
+    for i, entry in enumerate(map_entries):
+        pattern = entry.get("pattern")
+        if not isinstance(pattern, str):
+            problems.append(f"entry #{i}: missing/invalid `pattern`")
+            continue
+        is_safe = entry.get("safe") is True
+        crates = entry.get("crates")
+        if not is_safe and crates is None:
+            problems.append(f"{pattern!r}: neither `safe` nor `crates` set")
+        if crates is not None:
+            if not isinstance(crates, list):
+                problems.append(f"{pattern!r}: `crates` must be a list")
+            else:
+                for c in crates:
+                    if c not in members:
+                        problems.append(f"{pattern!r}: unknown crate {c!r} (not a workspace member)")
+        # Pattern-root existence, tolerant of fetched/generated dirs.
+        root = pattern[:-3] if pattern.endswith("/**") else pattern
+        root = root.split("*", 1)[0].rstrip("/")
+        if root and root not in known_generated_roots and repo_root is not None:
+            on_disk = os.path.exists(os.path.join(repo_root, root))
+            if not on_disk:
+                problems.append(f"{pattern!r}: pattern root {root!r} does not exist and is not allowlisted")
+    return problems
+
+
+# --- input gathering (real, non-hermetic) -----------------------------------
+def _run(cmd: list[str], cwd: str | None = None) -> str:
+    try:
+        out = subprocess.run(
+            cmd, cwd=cwd, check=True, capture_output=True, text=True, timeout=180
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        raise SelectorError(f"command failed: {' '.join(cmd)}: {exc}") from exc
+    return out.stdout
+
+
+def git_changed_paths(base: str, head: str, repo_root: str | None) -> list[str]:
+    # Three-dot = diff against the merge-base; --no-renames reports a move as
+    # delete+add so BOTH crate dirs are attributed (design §3.1).
+    out = _run(
+        ["git", "diff", "--name-only", "--no-renames", f"{base}...{head}"],
+        cwd=repo_root,
+    )
+    return [ln for ln in out.splitlines() if ln.strip()]
+
+
+def load_metadata(metadata_file: str | None, repo_root: str | None) -> dict:
+    if metadata_file:
+        with open(metadata_file, encoding="utf-8") as fh:
+            return json.load(fh)
+    out = _run(["cargo", "metadata", "--format-version", "1", "--locked"], cwd=repo_root)
+    return json.loads(out)
+
+
+def load_ownership_map(map_file: str | None) -> list[dict]:
+    """Read ci/path-ownership.toml if present. Absent => []. Malformed => error."""
+    if not map_file or not os.path.exists(map_file):
+        return []
+    try:
+        import tomllib  # stdlib >= 3.11
+    except ModuleNotFoundError as exc:  # pragma: no cover - CI is 3.12
+        raise SelectorError("tomllib unavailable (needs Python >= 3.11) but a map file exists") from exc
+    try:
+        with open(map_file, "rb") as fh:
+            data = tomllib.load(fh)
+    except (tomllib.TOMLDecodeError, OSError) as exc:
+        raise SelectorError(f"malformed ownership map {map_file}: {exc}") from exc
+    entries = data.get("map", [])
+    if not isinstance(entries, list):
+        raise SelectorError("ownership map: [[map]] must be an array of tables")
+    return entries
+
+
+# --- shadow mode (design §6.4; wired by sq-fmx4u.3, flipped by sq-fmx4u.5) ---
+def shadow_wrap(sel: Selection) -> Selection:
+    """[FABLE-5] Report-only rollout mode: keep the computed selection for the
+    step summary but emit mode="shadow", which every downstream guard treats
+    exactly like any non-"selected" mode — RUN EVERYTHING. The wrap is applied
+    UNIFORMLY (even over a computed mode=full / the error path) so the emitted
+    contract is one rule: --shadow => mode is never "selected" => nothing skips.
+    """
+    return Selection(
+        mode="shadow",
+        reason=f"SHADOW (computed mode={sel.mode}; report-only, nothing is skipped): {sel.reason}",
+        affected=sel.affected,
+        changed_crates=sel.changed_crates,
+        file_owners=sel.file_owners,
+        all_members=sel.all_members,
+    )
+
+
+def filterset(sel: Selection) -> str:
+    """[FABLE-5] The nextest filterset over the affected members, e.g.
+    "package(a) + package(b)". Consumed by the cross-crate bulk test shards to
+    NARROW (never skip) their partition when mode == "selected" (design §5.2).
+    nextest fails loud on a package() naming no package in the archive, so a
+    stale name here cannot silently select nothing."""
+    return " + ".join(f"package({m})" for m in sel.affected)
+
+
+# --- step summary + outputs --------------------------------------------------
+def render_summary(sel: Selection) -> str:
+    lines = ["### CI test-selection", "", f"**Mode:** `{sel.mode}` — {sel.reason}", ""]
+    if sel.mode == "shadow":
+        lines.append(
+            "**SHADOW MODE** — selection is REPORT-ONLY on this run: every job still "
+            "runs; the closure below is what enforcement WOULD run (flip: sq-fmx4u.5)."
+        )
+        lines.append("")
+    if sel.file_owners:
+        lines += ["| Changed file | Owning crate |", "|---|---|"]
+        for path, owner in sel.file_owners:
+            lines.append(f"| `{path}` | {owner} |")
+        lines.append("")
+    if sel.mode in ("selected", "shadow"):
+        total = len(sel.all_members)
+        run = len(sel.affected)
+        lines.append(f"**Affected closure ({run} of {total}):** " + (", ".join(sel.affected) or "_none_"))
+        lines.append("")
+        lines.append(f"**Skipped by selection:** {total - run} of {total} members")
+    else:
+        lines.append("**Full matrix:** every crate runs.")
+    return "\n".join(lines) + "\n"
+
+
+def _write_outputs(sel: Selection, output_file: str | None, summary_file: str | None) -> None:
+    if output_file:
+        with open(output_file, "a", encoding="utf-8") as fh:
+            fh.write(f"mode={sel.mode}\n")
+            fh.write("affected=" + json.dumps(sel.affected) + "\n")
+            fh.write("filterset=" + filterset(sel) + "\n")
+    if summary_file:
+        with open(summary_file, "a", encoding="utf-8") as fh:
+            fh.write(render_summary(sel))
+
+
+# --- main --------------------------------------------------------------------
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Change-based CI test-selection (design §3).")
+    p.add_argument("--event", default="pull_request",
+                   help="GitHub event; anything but pull_request/merge_group => full (no PR diff)")
+    p.add_argument("--full", action="store_true", help="force mode=full (e.g. the ci-full label)")
+    p.add_argument("--shadow", action="store_true",
+                   help="report-only rollout mode (design §6.4): compute + report the "
+                        "selection but emit mode=shadow so no downstream guard skips")
+    p.add_argument("--base", help="base SHA/ref for the three-dot diff")
+    p.add_argument("--head", default="HEAD", help="head SHA/ref (default HEAD)")
+    p.add_argument("--changed-file", help="hermetic: newline-delimited changed paths")
+    p.add_argument("--metadata-file", help="hermetic: cargo metadata JSON snapshot")
+    p.add_argument("--map", dest="map_file", help="ownership map toml (default ci/path-ownership.toml)")
+    p.add_argument("--repo-root", help="repo root (default: git toplevel / workspace_root)")
+    p.add_argument("--summary-file", help="write markdown step-summary (default $GITHUB_STEP_SUMMARY)")
+    p.add_argument("--output-file", help="write mode/affected outputs (default $GITHUB_OUTPUT)")
+    return p.parse_args(argv)
+
+
+def _resolve_repo_root(explicit: str | None) -> str | None:
+    if explicit:
+        return explicit
+    try:
+        return _run(["git", "rev-parse", "--show-toplevel"]).strip()
+    except SelectorError:
+        return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    summary_file = args.summary_file or os.environ.get("GITHUB_STEP_SUMMARY")
+    output_file = args.output_file or os.environ.get("GITHUB_OUTPUT")
+
+    try:
+        repo_root = _resolve_repo_root(args.repo_root)
+
+        # Events with no PR diff, or the explicit override => full (design §3.1, §6).
+        # [FABLE-5] sq-fmx4u.3: only pull_request and merge_group carry a sound
+        # (base, head) revision pair; push/schedule/workflow_dispatch (and any
+        # future event) get the full matrix by construction, not by error-trap.
+        if args.full or args.event not in ("pull_request", "merge_group"):
+            reason = "forced full run (ci-full override)" if args.full else f"{args.event} event: no PR diff"
+            meta = load_metadata(args.metadata_file, repo_root)
+            ws = parse_workspace(meta)
+            sel = Selection(mode="full", reason=reason, affected=sorted(ws.members),
+                            all_members=sorted(ws.members))
+        else:
+            if args.changed_file:
+                with open(args.changed_file, encoding="utf-8") as fh:
+                    changed = [ln for ln in fh.read().splitlines() if ln.strip()]
+            else:
+                if not args.base:
+                    raise SelectorError("--base is required for a diff-based run")
+                changed = git_changed_paths(args.base, args.head, repo_root)
+
+            map_file = args.map_file
+            if map_file is None and repo_root is not None:
+                candidate = os.path.join(repo_root, "ci", "path-ownership.toml")
+                map_file = candidate if os.path.exists(candidate) else None
+            map_entries = load_ownership_map(map_file)
+
+            meta = load_metadata(args.metadata_file, repo_root)
+            sel = select(changed, meta, map_entries)
+
+    except Exception as exc:  # fail-closed boundary: ANY error => full run (design §4.3)
+        # We could not even build the member list; emit full with an empty
+        # affected is still "run everything" downstream (mode != 'selected').
+        sel = Selection(mode="full", reason=f"selector error, failing to full run: {exc}", affected=[])
+
+    if args.shadow:  # [FABLE-5] report-only rollout (design §6.4; flip: sq-fmx4u.5)
+        sel = shadow_wrap(sel)
+
+    print(json.dumps(sel.to_json_obj(), indent=2))
+    try:
+        _write_outputs(sel, output_file, summary_file)
+    except OSError:
+        pass  # never let a summary/output write turn a full run into a failure
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

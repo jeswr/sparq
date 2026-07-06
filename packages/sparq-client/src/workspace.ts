@@ -65,6 +65,50 @@ export interface WorkspaceSourceMeta {
 export type WorkspaceRunMode = "run" | "explain" | "analyze";
 
 /**
+ * [OPUS-4.8] sq-tp1m (#757) — the per-workspace INFERENCE (entailment) regime applied to
+ * QUERIES over the live store. `"off"` runs plain SPARQL over the asserted data; `"rdfs"` and
+ * `"owl-rl"` forward-chain the deductive closure under that entailment profile (OWL 2 RL
+ * includes RDFS) BEFORE the query runs, so an entailed triple can match. This is applied by the
+ * engine's real forward-chaining reasoner (`sparq-reason`, via the tier-b W-reason wasm
+ * bundle) — NOT a mock. It is a query-time regime: it never mutates the persisted store, only
+ * what queries see. `"n3"` applies per-workspace N3 rules ({@link WorkspaceRulesDoc}) via the
+ * same reasoner's `reasonN3` path — derived GROUND triples appear in query results; formula
+ * conclusions are dropped (sq-glo5r).
+ */
+export type WorkspaceInferenceMode = "off" | "rdfs" | "owl-rl" | "n3";
+
+/** The persisted inference modes, in selector order (the UI mirrors this). */
+export const WORKSPACE_INFERENCE_MODES: readonly WorkspaceInferenceMode[] = [
+  "off",
+  "rdfs",
+  "owl-rl",
+  "n3",
+] as const;
+
+/** Normalise an arbitrary value to a {@link WorkspaceInferenceMode}, defaulting to `"off"`. */
+export function parseInferenceMode(value: unknown): WorkspaceInferenceMode {
+  return value === "rdfs" || value === "owl-rl" || value === "n3" ? value : "off";
+}
+
+/**
+ * [sq-glo5r] One N3 rule document attached to a workspace. Each document is an N3 Turtle file
+ * (prefix declarations + one or more `{ antecedent } => { consequent }` rules). Rules are
+ * applied at query time in `"n3"` inference mode — derived GROUND triples appear in query
+ * results; formula / quoted-graph conclusions are dropped and not visible in the triple store.
+ * `enabled` defaults to `true` when absent (backward-compatible).
+ */
+export interface WorkspaceRulesDoc {
+  /** Human-readable label for the rule document (e.g. a filename or authored name). */
+  name: string;
+  /** The N3 Turtle source text of the rule document. */
+  text: string;
+  /** Epoch milliseconds when the document was added (used as a stable unique key). */
+  addedAt: number;
+  /** Whether this document is applied; defaults to `true` when absent. */
+  enabled?: boolean;
+}
+
+/**
  * The saved SPARQL editor state. `query` is the editor text; `mode` is the Run/EXPLAIN/ANALYZE
  * selector; `endpointActive` + `endpointUrl` capture whether the editor was pointed at a
  * running server (so the panel restores that view) — but the bearer TOKEN is NEVER persisted
@@ -98,6 +142,18 @@ export interface Workspace {
   dataSnapshot?: string;
   /** The saved SPARQL editor state. */
   editor: WorkspaceEditorState;
+  /**
+   * [OPUS-4.8] sq-tp1m (#757) — the per-workspace inference regime applied to queries (see
+   * {@link WorkspaceInferenceMode}). Optional + backward-compatible: a workspace persisted
+   * before this field existed simply omits it and loads as `"off"` (no schema bump needed).
+   */
+  inference?: WorkspaceInferenceMode;
+  /**
+   * [sq-glo5r] Per-workspace N3 rule documents. Applied when inference is `"n3"`. Optional +
+   * backward-compatible: an older record without this field loads with an empty rules list.
+   * Schema stays at 1 (the field is purely additive and defaults gracefully).
+   */
+  rulesDocs?: WorkspaceRulesDoc[];
   /**
    * The schema version of this persisted record. Bumped if the on-disk shape changes so a
    * loader can migrate or discard an incompatible old record rather than crash.
@@ -140,6 +196,7 @@ export function newWorkspace(name: string, query: string): Workspace {
     updatedAt: now,
     sources: [],
     editor: { query, mode: "run", endpointActive: false },
+    inference: "off",
     schema: WORKSPACE_SCHEMA,
   };
 }
@@ -191,6 +248,10 @@ export function parseWorkspace(value: unknown): Workspace | null {
       endpointUrl:
         typeof editor.endpointUrl === "string" ? editor.endpointUrl : undefined,
     },
+    // [OPUS-4.8] sq-tp1m — backward-compatible: an older record without `inference` → "off".
+    inference: parseInferenceMode(v.inference),
+    // [sq-glo5r] — backward-compatible: an older record without `rulesDocs` → empty array.
+    rulesDocs: parseRulesDocs(v.rulesDocs),
     schema: WORKSPACE_SCHEMA,
   };
 }
@@ -208,6 +269,30 @@ function parseSource(value: unknown): WorkspaceSourceMeta | null {
     bytes: typeof s.bytes === "number" ? s.bytes : undefined,
     importedAt: typeof s.importedAt === "number" ? s.importedAt : Date.now(),
   };
+}
+
+/** [sq-glo5r] Validate + normalise one persisted {@link WorkspaceRulesDoc}, or `null` if malformed. */
+function parseRulesDoc(value: unknown): WorkspaceRulesDoc | null {
+  if (typeof value !== "object" || value === null) return null;
+  const d = value as Record<string, unknown>;
+  if (typeof d.name !== "string" || typeof d.text !== "string") return null;
+  if (typeof d.addedAt !== "number") return null;
+  return {
+    name: d.name,
+    text: d.text,
+    addedAt: d.addedAt,
+    // `enabled` is only persisted when false (absent = true by default).
+    enabled: d.enabled === false ? false : undefined,
+  };
+}
+
+/** [sq-glo5r] Parse an arbitrary value into a {@link WorkspaceRulesDoc} array (empty when absent / invalid). */
+function parseRulesDocs(value: unknown): WorkspaceRulesDoc[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((d) => {
+    const doc = parseRulesDoc(d);
+    return doc ? [doc] : [];
+  });
 }
 
 // ---------------------------------------------------------------------------

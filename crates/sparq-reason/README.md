@@ -35,12 +35,55 @@ let g = Graph::from_parts(dict, triples);
 
 - **RDFS entailment** — the non-explosive subset (rdfs2/3/5/7/9/11), materialized in one pass.
 - **OWL 2 RL** — property/class axioms (`sameAs`, `inverseOf`, Transitive / Symmetric,
-  `equivalentClass` / `equivalentProperty`, …) over the same fixpoint engine.
+  `equivalentClass` / `equivalentProperty`, …) over the same fixpoint engine. Complete for the
+  assertion-style RL/RDF rules (W3C OWL-RL conformance row is at the profile ceiling — the
+  documented divergences are conclusions provably outside RL, not missing rules); use
+  `sparq-reason-el` for complete class classification.
+- **D-entailment** (opt-in `d-entail`) — `Profile::D`: the rdfD1 datatype-typing rule under
+  a recognized datatype map, with **correct typed value-space equality**
+  (`"1"^^xsd:integer` is the same value as `"1.0"^^xsd:decimal`, never an f64 fast path).
 - **Notation3** — `{ … } => { … }` rules with EYE-validated builtins (a separate subsystem).
+- **RIF-Core** (opt-in `rif-core`) — the W3C RIF **Core** dialect (the **monotone Horn**
+  common subset of RIF-BLD/PRD) as a `rif::Document` rule front-end over the N3 chainer:
+  frame/membership/subclass atoms + numeric/string/list builtins with **range-restriction
+  safety** enforced (unsafe rules are rejected, never looped). **Equal-atom semantics
+  (sq-pbz04.5.4 + sq-26vwp):** Equal in a rule head is rejected (Core syntactic restriction);
+  body Equal is resolved at **compile time by substitution/unification** (not an `owl:sameAs`
+  triple) — `t=t` eliminated, `?x=t` substituted (binds `?x`), `?x=?y` unified — so same-node
+  reflexivity fires without a `sameAs` assertion and an asserted `sameAs` never over-derives;
+  distinct **ground** constants stay rejected fail-closed pending the value-space comparator
+  (sq-v5evr/#1646). **Monotone, NAF excluded by design.** Full RIF-BLD/PRD + the SPARQL-RIF
+  entailment regime are documented out-of-scope (`rif::UNIMPLEMENTED`), not faked.
 - **Incremental maintenance** — `MaterializedGraph` keeps the closure current under
   inserts/deletes by exact derivation counting; cost scales with the change, not a re-run.
 - **Proof trees** (`explain` feature) — `why(triple)` returns which rule fired from which
   premises, recursively down to asserted facts (a flat, ZK-witness-friendly shape).
+- **RIF/XML importer** (opt-in `rif-xml`) — parse the W3C RIF-Core XML presentation
+  syntax into a `rif::Document` with Or-split and Exists-flatten desugaring; fail-closed
+  taxonomy rejects `Import` directives, non-Core elements, unknown builtins, and
+  malformed XML with named error variants. See the `rif_xml` module docs.
+- **Shared join kernels** (opt-in `substrate-join`) — the RDFS predicate join (rdfs2/3/7)
+  and the rdfs9 type join drive the *same* `sparq-substrate::join` hash-join body the SPARQL
+  engine drives, supplying the reasoner's own key projection + budget monomorphically.
+  Also covers the OWL-RL semi-naive Δ⋈full adjacency (`prp-fp`, `prp-ifp`, `prp-trp`): a
+  persistent `DeltaAdj` (two `DeltaTable`s, `sq-qonbz.2`) replaces the per-round `FxHashMap`
+  probes — same closure output, only the join machinery changes.
+  Off by default; byte/bundle ratchets unchanged.
+- **Shared term total order** (opt-in `substrate-compare`) — `compare::IdTerm` implements the
+  substrate's `CompareTerm` for dictionary ids, so ordering entailed solutions
+  (`compare::sort_ids` / `compare::compare_ids`) is parity-identical to the SPARQL engine's `ORDER BY`
+  total order (pinned byte-for-byte against a real engine query by `tests/compare_parity.rs`).
+  Since sq-wjl8i this is a genuine TOTAL order across mixed literal kinds — kind-first rank,
+  exact mixed-tier numeric ties, NaN totalised first (see the substrate `compare` docs).
+  Monomorphic (no trait object on the sort loop) and purely additive — no materialiser calls
+  it, so the entailed closure and its emission order are unchanged. Off by default.
+- **Compiled rules** (opt-in `compiled-rules`) — `n3::compiled`: lower N3 rule text ONCE to
+  an id-level IR (constants pre-interned into the caller's `Dict`) and run the semi-naive
+  fixpoint DIRECTLY over `[Id; 3]` facts on the shared substrate join kernels — no per-call
+  graph→text→re-parse round-trip. Scoped to the access-control subset (`log:notIncludes`/
+  `log:uri`/`log:(not)equalTo`, `string:` concatenation/encodeForUri/scrape/notGreaterThan);
+  everything else is a loud compile error. Closure set-equality vs `reason_n3` is pinned by
+  `tests/compiled_equivalence.rs` over the sparq-solid WAC/ACP rule corpus. Off by default.
 
 ## 📚 Learn more
 
@@ -49,7 +92,7 @@ let g = Graph::from_parts(dict, triples);
 - **API reference** — [docs.rs/sparq-reason](https://docs.rs/sparq-reason).
 - **Design** — the inference verdicts in [`research/`](../../research) and
   [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md).
-- **Performance** — see the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+- **Performance** — see the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

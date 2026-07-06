@@ -221,6 +221,81 @@ class NewBenchTest(unittest.TestCase):
         self.assertIn("widgets", dash[0].title)
 
 
+class ZkCircuitGatecountTest(unittest.TestCase):
+    """[OPUS-4.8] sq-fyzq7 (#1655): the `new-zk-circuit-gatecount` rule must fire
+    ONLY for a genuinely-new top-level `zk/<family>/` circuit — never for a new
+    member inside the existing `zk/compose/` family (those are already covered by
+    the hard `snapshot_covers_every_member` gate) — and must name the circuit from
+    `zk/`, never from a `bench/` output dir."""
+
+    def setUp(self):
+        self.rules = flow_on.load_rules(RULES)
+
+    def _zk_follow_ons(self, fos):
+        return [fo for fo in fos if fo.rule_id == "new-zk-circuit-gatecount"]
+
+    def test_new_compose_member_does_not_fire(self):
+        # REGRESSION (mis-fired #1655): merged #1608 added `zk/compose/<member>/`
+        # path_reach members (already baselined + covered by
+        # snapshot_covers_every_member) and modified the bench gate-count JSON.
+        # `fnmatch`'s `*` crosses `/`, so `zk/*/Nargo.toml` matched the two-level
+        # member manifest; `exclude_new_paths = ["zk/compose/**"]` now drops it.
+        added = [
+            "zk/compose/path_reach_d2_k1_n16/Nargo.toml",
+            "zk/compose/path_reach_d2_k1_n16/src/main.nr",
+        ]
+        changed = added + [
+            "bench/zk-compose/gate_counts_latest.json",  # MODIFIED, not added
+            "crates/sparq-zk-compose/tests/gate_count_snapshot.json",
+        ]
+        fos = flow_on.evaluate(
+            self.rules, 1608, "feat(zk/compose): path_reach family", changed, added, []
+        )
+        self.assertEqual(self._zk_follow_ons(fos), [])
+        # And no phantom `zk-compose` key leaks from any rule.
+        self.assertNotIn("zk-gatecount-zk-compose", {fo.dedup_key for fo in fos})
+
+    def test_new_top_level_family_fires_with_zk_derived_name(self):
+        # A genuinely-new top-level family under zk/ DOES fire, and the circuit is
+        # named from `zk/` (here `arith`), NOT from a co-changed `bench/` dir.
+        added = ["zk/arith/Nargo.toml", "zk/arith/src/main.nr"]
+        changed = added + ["bench/zk-compose/gate_counts_latest.json"]
+        fos = flow_on.evaluate(
+            self.rules, 2000, "feat(zk): arith circuit", changed, added, []
+        )
+        zk = self._zk_follow_ons(fos)
+        self.assertEqual(len(zk), 1)
+        self.assertEqual(zk[0].dedup_key, "zk-gatecount-arith")
+        self.assertIn("zk/arith", zk[0].body)
+        # The bench dir name must NOT contaminate the zk circuit name.
+        self.assertNotIn("zk-compose", zk[0].dedup_key)
+        self.assertNotIn("zk/zk-compose", zk[0].body)
+
+    def test_new_family_with_member_subdir_fires_once(self):
+        # A new WORKSPACE family (root + a member circuit) still yields exactly one
+        # follow-on, named for the family root.
+        added = [
+            "zk/lattice/Nargo.toml",
+            "zk/lattice/scan_a/Nargo.toml",
+            "zk/lattice/scan_a/src/main.nr",
+        ]
+        fos = flow_on.evaluate(
+            self.rules, 2100, "feat(zk): lattice family", added, added, []
+        )
+        zk = self._zk_follow_ons(fos)
+        self.assertEqual(len(zk), 1)
+        self.assertEqual(zk[0].dedup_key, "zk-gatecount-lattice")
+
+    def test_modified_only_zk_family_does_not_fire(self):
+        # Editing an EXISTING top-level circuit (changed, not added) must not fire
+        # the new-family rule.
+        changed = ["zk/arith/src/main.nr"]
+        fos = flow_on.evaluate(
+            self.rules, 2200, "tweak arith circuit", changed, [], []
+        )
+        self.assertEqual(self._zk_follow_ons(fos), [])
+
+
 class IdempotencyTest(unittest.TestCase):
     """The dedup-key marker is what open_issue_exists() searches for; verify the
     key is stable + embedded so a re-run is a no-op once the issue is open."""

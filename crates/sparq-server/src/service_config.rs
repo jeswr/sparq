@@ -27,9 +27,15 @@
 //!
 //! Each entry is one of:
 //!   * an **exact host** — `sparql.example.org`, `192.0.2.10`, `localhost`
-//!     (matched case-insensitively against the SERVICE IRI authority);
-//!   * a **suffix wildcard** — `*.example.org`, matching the apex `example.org` and
-//!     any subdomain (`a.example.org`, `a.b.example.org`) but not `notexample.org`.
+//!     (matched case-insensitively against the SERVICE IRI authority — every port);
+//!   * a **port-scoped host** — `sparql.example.org:8443`, `192.0.2.10:8080`,
+//!     `[::1]:8053` ([OPUS-4.8] sq-a7jw4): permits that host ONLY on that exact port and
+//!     rejects every other port on the same host — strictly NARROWER than the bare host.
+//!     This is the way to permit exactly one ephemeral loopback endpoint for in-process
+//!     SERVICE federation without re-opening the whole host;
+//!   * a **suffix wildcard** — `*.example.org` (optionally port-scoped,
+//!     `*.example.org:443`), matching the apex `example.org` and any subdomain
+//!     (`a.example.org`, `a.b.example.org`) but not `notexample.org`.
 //!
 //! Entries come from (union of all three, deduplicated):
 //!   * the repeatable `--service-allow <entry>` CLI flag;
@@ -73,16 +79,18 @@ impl ServiceAllowlist {
     /// error string for a malformed entry so the caller can fail fast at startup
     /// rather than silently dropping a host the operator meant to allow.
     ///
-    /// Accepted forms: a bare host, or `*.suffix` (suffix wildcard). The entry is
-    /// lower-cased; surrounding whitespace is trimmed. A `*` anywhere other than a
-    /// leading `*.` is rejected (we deliberately support only the simple
-    /// apex-and-subdomain suffix wildcard, not arbitrary globs).
+    /// Accepted forms: a bare host, a port-scoped `host:port`, or `*.suffix` (suffix
+    /// wildcard, optionally port-scoped `*.suffix:port`). The entry is lower-cased;
+    /// surrounding whitespace is trimmed. A `*` anywhere other than a leading `*.` is
+    /// rejected (we deliberately support only the simple apex-and-subdomain suffix wildcard,
+    /// not arbitrary globs).
     ///
-    /// [OPUS-4.8] sq-4w18: exact-host entries are NORMALISED to the bare host the
-    /// engine actually compares against (see `Self::normalize_host`), so a copy-
-    /// pasted endpoint like `example.org:443` or a bracketed IPv6 `[::1]` matches
-    /// instead of silently never matching (which would make the allowlist look
-    /// configured but be inert — a fail-open footgun).
+    /// [OPUS-4.8] sq-4w18 / sq-a7jw4: exact-host entries are NORMALISED to the `host` /
+    /// `host:port` form the engine actually compares against (see `Self::normalize_host`), so
+    /// a copy-pasted endpoint like `example.org:443` or a bracketed IPv6 `[::1]` matches
+    /// instead of silently never matching (which would make the allowlist look configured but
+    /// be inert — a fail-open footgun). A `host:port` entry is **port-scoped** (exact port
+    /// only); a bare host stays every-port.
     pub fn add(&mut self, raw: &str) -> Result<(), String> {
         let e = raw.trim().to_ascii_lowercase();
         if e.is_empty() {
@@ -92,7 +100,9 @@ impl ServiceAllowlist {
             if suffix.is_empty() || suffix.contains('*') {
                 return Err(format!("invalid SERVICE allow pattern {raw:?}: expected '*.<suffix>'"));
             }
-            // Engine form: leading dot. Matches the apex + any subdomain.
+            // Engine form: leading dot. Matches the apex + any subdomain. A trailing
+            // `:port` ([OPUS-4.8] sq-a7jw4) is carried through so the wildcard is
+            // port-scoped too (`.suffix:port`); `split_entry` parses it on the engine side.
             self.suffix.insert(format!(".{suffix}"));
             return Ok(());
         }
@@ -105,33 +115,41 @@ impl ServiceAllowlist {
         Ok(())
     }
 
-    /// [OPUS-4.8] sq-4w18: normalise an exact-host entry to the EXACT string the
-    /// engine's egress resolver compares the SERVICE IRI authority against.
+    /// [OPUS-4.8] sq-4w18 / sq-a7jw4: normalise an exact-host entry to the EXACT string
+    /// the engine's egress resolver compares the SERVICE IRI authority against.
     ///
-    /// The engine ([`sparq_engine`]'s `EgressFilterResolver`) is handed `netloc` as
-    /// `host:port` (IPv6 bracketed: `[::1]:80`) and derives the bare host by
-    /// (1) dropping a trailing `:port` via `rsplit_once(':')` and (2) stripping a
-    /// surrounding `[ ]`. An allowlist entry that still carries a port or brackets
-    /// would therefore NEVER equal what the engine looks up. We apply the same two
-    /// transforms here so an operator can paste an authority verbatim:
+    /// The engine ([`sparq_engine`]'s `EgressFilterResolver` + `egress_policy::split_entry`)
+    /// looks up the bare host (IPv6 brackets stripped, lower-cased) AND, for a port-scoped
+    /// entry, the authority's port. An allowlist entry must therefore be in the engine's
+    /// `host` (host-level) or `host:port` / `[ipv6]:port` (port-scoped) form. We normalise so
+    /// an operator can paste an authority verbatim:
     ///
-    ///   * `example.org:443`  -> `example.org`        (port stripped)
-    ///   * `[::1]`            -> `::1`                 (brackets stripped)
-    ///   * `[::1]:443`        -> `::1`                 (port + brackets stripped)
-    ///   * `192.0.2.10:8080`  -> `192.0.2.10`         (port stripped)
-    ///   * `example.org`      -> `example.org`        (unchanged)
-    ///   * `::1` (bare IPv6)  -> `::1`                 (unchanged — NOT mangled)
+    ///   * `example.org`       -> `example.org`        (host-level; unchanged)
+    ///   * `[::1]`             -> `::1`                 (brackets stripped; host-level)
+    ///   * `::1` (bare IPv6)   -> `::1`                 (unchanged — NOT mangled; host-level)
+    ///   * `example.org:443`   -> `example.org:443`    ([OPUS-4.8] sq-a7jw4 PORT PRESERVED)
+    ///   * `192.0.2.10:8080`   -> `192.0.2.10:8080`    (port preserved — exact port only)
+    ///   * `[::1]:8053`        -> `[::1]:8053`          (brackets kept so the engine parses the IPv6 host out from the port)
     ///
-    /// A trailing `:port` is only stripped when the entry is unambiguously
-    /// `host:port`: either bracketed (`[...]:port`) or a single-colon `host:digits`
-    /// form. A bare IPv6 literal (multiple colons, unbracketed) is left intact so we
-    /// never amputate its last hextet.
+    /// **[OPUS-4.8] sq-a7jw4 — this TIGHTENS scoping.** Previously a `host:port` entry had
+    /// its port STRIPPED, silently widening it to "every port on that host" (a fail-open
+    /// footgun). It now means EXACTLY that port — strictly narrower. A bare host (no `:port`)
+    /// is unchanged (every port), so an existing port-less config is byte-for-byte
+    /// unaffected. A `:port` is only honoured when the entry is unambiguously `host:port`
+    /// (bracketed `[...]:port`, or a single-colon `host:digits`); a bare IPv6 literal
+    /// (multiple colons, unbracketed) keeps its last hextet.
     fn normalize_host(e: &str) -> String {
-        // Bracketed IPv6: `[addr]` or `[addr]:port`. Strip the optional `:port`
-        // that follows the closing bracket, then strip the brackets themselves.
+        // Bracketed IPv6: `[addr]` or `[addr]:port`.
         if let Some(rest) = e.strip_prefix('[') {
-            if let Some((inner, _after)) = rest.split_once(']') {
-                // `_after` is either empty or `:port`; the engine drops it either way.
+            if let Some((inner, after)) = rest.split_once(']') {
+                // A trailing `:port` (port-scoped) is KEPT, bracketed, so the engine's
+                // `split_entry` can separate the IPv6 host from the port; a bare `[addr]`
+                // is host-level and stored with brackets stripped.
+                if let Some(port) = after.strip_prefix(':') {
+                    if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+                        return format!("[{inner}]:{port}");
+                    }
+                }
                 return inner.to_string();
             }
             // Malformed (no closing bracket) — leave verbatim; it just won't match.
@@ -141,7 +159,8 @@ impl ServiceAllowlist {
         // anything with more than one colon is a bare IPv6 literal we must NOT touch.
         if let Some((host, port)) = e.split_once(':') {
             if !host.contains(':') && !port.contains(':') && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
-                return host.to_string();
+                // [OPUS-4.8] sq-a7jw4: PRESERVE the port (port-scoped, exact port only).
+                return e.to_string();
             }
         }
         e.to_string()
@@ -256,28 +275,55 @@ mod tests {
     }
 
     #[test]
-    fn exact_host_normalised_to_engine_bare_host() {
-        // [OPUS-4.8] sq-4w18: the engine compares the SERVICE IRI authority with the
-        // port dropped and IPv6 brackets stripped, so `add` must normalise to the same
-        // form or the entry would silently never match (fail-open).
+    fn exact_host_normalised_to_engine_host_form() {
+        // [OPUS-4.8] sq-4w18 / sq-a7jw4: `add` normalises to the engine's `host` (host-level)
+        // or `host:port` / `[ipv6]:port` (port-scoped) form. A bare host has its IPv6 brackets
+        // stripped; a `host:port` PRESERVES the port (sq-a7jw4 — exact port only, NOT widened
+        // to every port the way sq-4w18 used to strip it).
         for (raw, want) in [
-            ("example.org:443", "example.org"),    // host:port -> bare host
-            ("192.0.2.10:8080", "192.0.2.10"),     // ipv4:port -> bare ip
+            // host-level (no port): brackets stripped, bare IPv6 untouched.
             ("[::1]", "::1"),                       // bracketed ipv6 -> bare ipv6
-            ("[::1]:443", "::1"),                   // bracketed ipv6 + port -> bare ipv6
-            ("[2001:db8::1]:80", "2001:db8::1"),    // full bracketed ipv6 + port
             ("example.org", "example.org"),         // already bare -> unchanged
             ("::1", "::1"),                          // bare (unbracketed) ipv6 -> NOT mangled
             ("2001:db8::1", "2001:db8::1"),          // bare full ipv6 -> NOT mangled
+            // port-scoped: port PRESERVED.
+            ("example.org:443", "example.org:443"), // host:port -> port preserved
+            ("192.0.2.10:8080", "192.0.2.10:8080"), // ipv4:port -> port preserved
+            ("[::1]:443", "[::1]:443"),             // bracketed ipv6 + port -> kept bracketed
+            ("[2001:db8::1]:80", "[2001:db8::1]:80"), // full bracketed ipv6 + port
         ] {
             let mut a = ServiceAllowlist::default();
             a.add(raw).unwrap();
             assert_eq!(
                 a.engine_entries(),
                 vec![want.to_string()],
-                "{raw:?} should normalise to the bare host {want:?} the engine compares against",
+                "{raw:?} should normalise to the engine form {want:?}",
             );
         }
+    }
+
+    #[test]
+    fn port_scoped_entry_is_distinct_from_bare_host() {
+        // [OPUS-4.8] sq-a7jw4: `host` and `host:port` are DIFFERENT entries — the port-scoped
+        // one does not subsume or collapse into the bare host, so the operator's intent
+        // (exact port) survives all the way to the engine.
+        let mut a = ServiceAllowlist::default();
+        a.add("127.0.0.1").unwrap();
+        a.add("127.0.0.1:8053").unwrap();
+        assert_eq!(a.len(), 2);
+        let mut e = a.engine_entries();
+        e.sort();
+        assert_eq!(e, vec!["127.0.0.1".to_string(), "127.0.0.1:8053".to_string()]);
+    }
+
+    #[test]
+    fn port_scoped_suffix_wildcard_carries_port() {
+        // [OPUS-4.8] sq-a7jw4: `*.example.org:443` -> `.example.org:443` (engine form), and
+        // display round-trips to the user-facing `*.example.org:443`.
+        let mut a = ServiceAllowlist::default();
+        a.add("*.example.org:443").unwrap();
+        assert_eq!(a.engine_entries(), vec![".example.org:443".to_string()]);
+        assert_eq!(a.display(), "*.example.org:443");
     }
 
     #[test]

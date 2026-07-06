@@ -492,44 +492,94 @@ fn subject_is(t: &Triple, agent: &NamedNode) -> bool {
 
 #[cfg(feature = "secprop-precheck")]
 #[cfg_attr(docsrs, doc(cfg(feature = "secprop-precheck")))]
-pub use precheck::{admit_with_precheck, AdmissibilityPreference, PrecheckOutcome};
+pub use precheck::{
+    admit_with_precheck, AdmissibilityConstraint, AdmissibilityPreference, PrecheckOutcome,
+};
 
 #[cfg(feature = "secprop-precheck")]
 mod precheck {
     use super::{admit, AdmittedFact, PresentedCredential, Session};
     use crate::admissibility::admissible;
+    use crate::secprop as secx;
     use oxrdf::NamedNode;
+    use sparq_zk::secprop::{parse_annotations, Assurance, MethodAnnotations, Scope};
+    use std::sync::LazyLock;
+
+    /// The bundled secprop annotations, parsed **once** and cached for the process
+    /// lifetime. `parse_annotations()` reparses the compiled-in `secprop-methods.ttl` and
+    /// rebuilds the whole `BTreeMap` on every call; since [`resolve_bundled_annotations_n3`]
+    /// runs on the real admission path when `secprop-precheck` is enabled, caching removes
+    /// that per-admission reparse/allocation (and the DoS-amplification surface a frequent
+    /// admission caller would otherwise expose). The bundled graph is a compile-time
+    /// constant, so a single parse is always sound.
+    static BUNDLED_ANNOTATIONS: LazyLock<std::collections::BTreeMap<String, MethodAnnotations>> =
+        LazyLock::new(parse_annotations);
+
+    /// One `gteq` admissibility constraint the requester requires (design §4.3.2): the
+    /// method's asserted level for `left_operand`'s dimension must be `secx:atLeast`
+    /// `right_operand`. The operator is always `odrl:gteq` — the only operator the
+    /// reduction discharges (a richer ODRL profile is a later phase, `sq-uor3g`).
+    ///
+    /// Both operands are `NamedNode` IRIs. This is deliberate: the pre-check synthesises
+    /// the policy N3 from these IRIs itself (never from caller-supplied raw N3), and emits
+    /// each operand ONLY as an `odrl:` object inside a `<…>` IRIREF term, so a caller has
+    /// **no channel** to inject an annotation / order / `secx:satisfies` triple or an N3
+    /// rule into the reasoning document (the `sq-nrwqs` tamper-resistance property — see
+    /// [`AdmissibilityPreference`]). A `NamedNode` built via `NamedNode::new` cannot carry
+    /// a term-breaking character (RFC 3987), but these fields are `pub` and
+    /// `NamedNode::new_unchecked` bypasses that validation; the synthesiser therefore
+    /// RE-VALIDATES each operand at the emission site and **fails closed**
+    /// ([`PrecheckOutcome::MalformedConstraint`]) on any non-IRIREF-safe operand, so the
+    /// escape channel is structurally absent even off the `NamedNode::new` path
+    /// (`sq-ddbm8` defence in depth).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AdmissibilityConstraint {
+        /// The `odrl:leftOperand` — a `secx:requires…` leftOperand (e.g.
+        /// `secx:requiresAssurance`). The reduction maps it to a property dimension via
+        /// the bundled `secx:overDimension` fact base; an unmapped leftOperand satisfies
+        /// nothing (fail-closed).
+        pub left_operand: NamedNode,
+        /// The `odrl:rightOperand` — the required threshold level (e.g. `secx:Proven`).
+        pub right_operand: NamedNode,
+    }
 
     /// A requester's machine-reasonable ODRL **privacy preference** to enforce against
-    /// the presented proof method BEFORE admission (design §5b). It pairs the method's
-    /// recorded `secprop` property annotations with the `gteq` constraints the requester
-    /// requires — exactly the four inputs the Phase-2 `crate::admissibility::admissible`
-    /// reduction reads.
+    /// the presented proof method BEFORE admission (design §5b). The caller supplies
+    /// only the presented method's IRI and the requester's `gteq` constraints as
+    /// **structured, validated IRIs** — it supplies **no raw N3 at all**. The method's
+    /// `secprop` property annotations are resolved from the bundled, drift-pinned
+    /// sparq-zk `secprop-methods.ttl`, and the policy triples are synthesised internally
+    /// from the [`AdmissibilityConstraint`] IRIs (the `sq-nrwqs` Phase-5.1 input-trust-
+    /// boundary hardening).
     ///
-    /// The honesty of the verdict is exactly the honesty of the `annotations` graph: it
-    /// reasons over recorded (method, property)→level claims, **not** over cryptography,
-    /// and every sparq ZK property is at most `secx:Claimed` while the external audit
-    /// (`sq-qhy4`) is open. A `requiresAssurance gteq secx:Proven` constraint therefore
-    /// mechanically denies **every** sparq ZK method today — the principled refusal.
+    /// This makes the admissibility check **self-contained and tamper-resistant**: because
+    /// there is no caller-supplied raw-N3 channel — neither for the method annotations nor
+    /// for the policy — a caller **cannot** inject a `secx:hasProperty` / `secx:atLeast` /
+    /// `secx:satisfies` triple (or an N3 rule) to widen a method's recorded posture, and
+    /// an unknown method fails closed. (The Phase-5 `policy_n3`/`annotations_n3` raw-string
+    /// fields, which raw-concatenated caller text into the reasoning document, are gone.)
+    ///
+    /// The honesty of the verdict is exactly the honesty of the **bundled** annotation
+    /// graph: it reasons over recorded (method, property)→level claims, **not** over
+    /// cryptography, and every positive sparq ZK property is at most `secx:Claimed`
+    /// while the external audit (`sq-qhy4`) is open. A `requiresAssurance gteq
+    /// secx:Proven` constraint therefore mechanically denies **every** sparq ZK method
+    /// today — the principled refusal. This hardens the input boundary only; it makes
+    /// **no** new soundness/privacy claim.
     #[derive(Debug, Clone)]
     pub struct AdmissibilityPreference {
         /// The presented proof's method IRI (the `zk:scheme` / `zk:cryptosuite` the
         /// `sparq-zk` registry records, e.g. `zk:poseidon2-rdfc10-v1`). The annotation
-        /// graph is keyed on this IRI; a method with no matching annotation block
-        /// satisfies nothing and is denied (fail-closed).
+        /// graph is resolved from the bundled ontology keyed on this IRI; a method with
+        /// no bundled annotation block is an **unknown method** and fails closed
+        /// ([`PrecheckOutcome::UnknownMethod`]).
         pub method_iri: NamedNode,
-        /// The requester's policy constraint IRIs — each an `odrl:Constraint` carrying
-        /// `odrl:leftOperand` (a `secx:requires…` leftOperand) / `operator odrl:gteq` /
-        /// `rightOperand`. The method must satisfy **every** one (default-deny). An
-        /// EMPTY set is vacuously satisfied — the caller is responsible for not handing
-        /// an empty preference where one is required (the `admissible` contract).
-        pub constraint_iris: Vec<String>,
-        /// The constraints' triples as an N3/Turtle fragment **without** the `@prefix`
-        /// preamble (it is prepended by the reduction).
-        pub policy_n3: String,
-        /// The method's `secprop` `secx:hasProperty` annotation graph as an N3/Turtle
-        /// fragment **without** the `@prefix` preamble.
-        pub annotations_n3: String,
+        /// The requester's `gteq` constraints. The method must satisfy **every** one
+        /// (default-deny). An EMPTY set is vacuously satisfied for a KNOWN method — the
+        /// caller is responsible for not handing an empty preference where one is
+        /// required (the `admissible` contract). An **unknown** method is denied
+        /// regardless.
+        pub constraints: Vec<AdmissibilityConstraint>,
     }
 
     /// Why a pre-check DENIED admission — the honest, machine-readable refusal detail
@@ -538,19 +588,44 @@ mod precheck {
     pub enum PrecheckOutcome {
         /// The method satisfied every constraint — admission proceeded normally.
         Admitted,
+        /// The presented method IRI has **no annotation block in the bundled
+        /// `secprop-methods.ttl`** — an unknown method. Fail-closed (default-deny): a
+        /// method the estate does not record a posture for admits **nothing**,
+        /// regardless of the (possibly empty) constraint set. Carries the method IRI.
+        UnknownMethod {
+            /// The presented method IRI that is not in the bundled annotation graph.
+            method: String,
+        },
         /// The method failed at least one constraint; admission was refused
-        /// (fail-closed). Carries the **sorted** constraint IRIs the method does not
-        /// `secx:satisfies` — the "why no admissible proof" detail.
+        /// (fail-closed). Carries the **sorted, de-duplicated** `left_operand` IRIs of
+        /// the constraints the method does not `secx:satisfies` — the "why no admissible
+        /// proof" dimensions (e.g. `secx:requiresAssurance`).
         Denied {
-            /// The policy constraint IRIs the method fails (sorted, non-empty).
+            /// The `left_operand` IRIs of the constraints the method fails (sorted,
+            /// de-duplicated, non-empty).
             unsatisfied: Vec<String>,
         },
-        /// The reduction itself errored (a malformed policy/annotation fragment). This
-        /// is **also** a fail-closed denial — a pre-check that cannot be evaluated must
-        /// NEVER admit. Carries the reasoner's error string.
+        /// The reduction itself errored (a malformed policy fragment). This is **also**
+        /// a fail-closed denial — a pre-check that cannot be evaluated must NEVER admit.
+        /// Carries the reasoner's error string.
         ReductionError {
             /// The `sparq-reason` parse/closure error the reduction returned.
             error: String,
+        },
+        /// A constraint carried an operand IRI that is **not a well-formed IRIREF** — it
+        /// contains a character the N3 `<…>` term grammar excludes (`>` / whitespace /
+        /// `<` / `"` / `{` / `}` / `|` / `^` / `` ` `` / `\` / any control char) that could
+        /// otherwise let the value **break out of object position** and inject a
+        /// `secx:hasProperty` / `secx:satisfies` triple or an N3 rule into the synthesised
+        /// policy. `NamedNode::new` (oxiri, RFC 3987) already rejects these, so this can
+        /// only arise from a `NamedNode::new_unchecked` / future unvalidated-`Deserialize`
+        /// operand; the pre-check **re-checks and fails closed** (`sq-ddbm8` defence in
+        /// depth) rather than emitting a policy it cannot trust. Admits **nothing**. This
+        /// is input-sanitisation hardening only; it makes no new soundness/privacy claim.
+        MalformedConstraint {
+            /// The offending operand IRI (inert — echoed only for the honest refusal
+            /// detail; it is never re-emitted into any reasoning document).
+            operand: String,
         },
     }
 
@@ -559,19 +634,27 @@ mod precheck {
     /// With `preference == None` this is **byte-identical** to `admit` (strict
     /// additivity — the opt-in property): no reasoning runs, no behaviour changes.
     ///
-    /// With `preference == Some(p)` the gate FIRST consults
-    /// `crate::admissibility::admissible` over `p`'s method IRI, constraints, policy, and
-    /// annotation graph. If the method does **not** satisfy every constraint — or the
-    /// reduction errors — the gate **fails closed**: it returns an EMPTY admitted set and
-    /// the `PrecheckOutcome` explaining the refusal, and the existing signature /
-    /// freshness / holder checks are **never reached**. Only when the pre-check is
-    /// satisfied does the unchanged `admit` gate run.
+    /// With `preference == Some(p)` the gate FIRST **resolves `p.method_iri`'s secprop
+    /// annotation graph from the bundled, drift-pinned sparq-zk `secprop-methods.ttl`**
+    /// (`sq-nrwqs` Phase 5.1) — the caller does NOT supply the annotations, so it cannot
+    /// widen the method's recorded posture. An unknown method (no bundled block) fails
+    /// closed ([`PrecheckOutcome::UnknownMethod`]). It then **synthesises** the policy N3
+    /// from `p`'s structured [`AdmissibilityConstraint`]s (the caller supplies no raw N3,
+    /// so it cannot inject annotation / order / `secx:satisfies` triples or rules) and
+    /// consults `crate::admissibility::admissible` over the method IRI, the synthesised
+    /// policy, and the **bundled** annotation graph. If the method does **not** satisfy
+    /// every constraint — or the reduction errors — the gate **fails closed**: it returns
+    /// an EMPTY admitted set and the `PrecheckOutcome` explaining the refusal, and the
+    /// existing signature / freshness / holder checks are **never reached**. Only when the
+    /// pre-check is satisfied does the unchanged `admit` gate run.
     ///
     /// The pre-check is **default-deny and orthogonal** to the cryptographic checks: it
     /// constrains *which proof method* is acceptable, NOT whether the signature
     /// verifies. A satisfied pre-check does NOT weaken any downstream check — `admit`
     /// still verifies the checked issuer signature, freshness, statement-type scope, and
     /// the clear-WebID holder binding. The pre-check can only ever DENY, never broaden.
+    /// It hardens the input trust boundary; it makes **no** new soundness/privacy claim
+    /// (the estate stays externally UNAUDITED, `sq-qhy4`).
     ///
     /// Returns the admitted facts (empty on a pre-check denial — default-deny) and the
     /// `PrecheckOutcome`.
@@ -590,28 +673,254 @@ mod precheck {
             );
         };
 
-        let constraint_refs: Vec<&str> = pref.constraint_iris.iter().map(String::as_str).collect();
+        // Resolve the method's annotation graph from the BUNDLED ontology (NOT the
+        // caller). An unknown method fails closed: it admits nothing, whatever the
+        // constraint set.
+        let Some(annotations_n3) = resolve_bundled_annotations_n3(pref.method_iri.as_str()) else {
+            return (
+                Vec::new(),
+                PrecheckOutcome::UnknownMethod {
+                    method: pref.method_iri.as_str().to_owned(),
+                },
+            );
+        };
+
+        // Synthesise the policy N3 from the STRUCTURED constraints. Each constraint gets a
+        // fresh internal `urn:sparq:` constraint IRI, and its VALIDATED left/right operand
+        // IRIs are emitted only as `odrl:` objects — the caller supplies no raw N3, so it
+        // has no way to inject a `secx:hasProperty` / `secx:atLeast` / `secx:satisfies`
+        // triple (or an N3 rule) into the reasoning document. `cid -> left_operand` lets
+        // us report the failed dimensions.
+        //
+        // [OPUS-4.8] sq-ddbm8 DEFENCE-IN-DEPTH: `synthesise_policy` re-validates that every
+        // operand is a well-formed IRIREF before writing it inside a `<…>` term. A
+        // `NamedNode::new_unchecked` / unvalidated-`Deserialize` operand carrying a
+        // term-breaking char (only reachable OUTSIDE the `NamedNode::new` path) is refused
+        // BEFORE it can reach the reasoning document — fail closed, admit nothing.
+        let (constraint_iris, policy_n3) = match synthesise_policy(&pref.constraints) {
+            Ok(v) => v,
+            Err(operand) => {
+                return (Vec::new(), PrecheckOutcome::MalformedConstraint { operand });
+            }
+        };
+        let cid_to_left: std::collections::BTreeMap<&str, &str> = constraint_iris
+            .iter()
+            .zip(pref.constraints.iter())
+            .map(|(cid, c)| (cid.as_str(), c.left_operand.as_str()))
+            .collect();
+        let constraint_refs: Vec<&str> = constraint_iris.iter().map(String::as_str).collect();
         match admissible(
             pref.method_iri.as_str(),
             &constraint_refs,
-            &pref.policy_n3,
-            &pref.annotations_n3,
+            &policy_n3,
+            &annotations_n3,
         ) {
             // The method satisfies every constraint: proceed to the unchanged gate.
             Ok(a) if a.admissible => (
                 admit(cred, rules, session, target),
                 PrecheckOutcome::Admitted,
             ),
-            // The method fails at least one constraint: fail-closed, admit nothing.
-            Ok(a) => (
-                Vec::new(),
-                PrecheckOutcome::Denied {
-                    unsatisfied: a.unsatisfied,
-                },
-            ),
+            // The method fails at least one constraint: fail-closed, admit nothing. Map
+            // the failed synthetic constraint IRIs back to their left_operand dimensions
+            // (sorted, de-duplicated) for the honest "why not admissible" detail.
+            Ok(a) => {
+                let unsatisfied: Vec<String> = a
+                    .unsatisfied
+                    .iter()
+                    .filter_map(|cid| cid_to_left.get(cid.as_str()))
+                    .map(|lo| (*lo).to_owned())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                (Vec::new(), PrecheckOutcome::Denied { unsatisfied })
+            }
             // The reduction errored: ALSO fail-closed (a pre-check that cannot be
             // evaluated must never admit).
             Err(error) => (Vec::new(), PrecheckOutcome::ReductionError { error }),
+        }
+    }
+
+    /// Synthesise the policy N3 (and the parallel internal constraint IRIs) from the
+    /// requester's STRUCTURED `gteq` constraints. Each constraint `i` becomes a fresh
+    /// internal `urn:sparq:secprop:c{i}` `odrl:Constraint` whose `odrl:leftOperand` /
+    /// `odrl:rightOperand` are the caller's **validated** operand IRIs emitted as `<…>`
+    /// objects and a fixed `odrl:operator odrl:gteq`. The fragment has NO `@prefix`
+    /// preamble (the reduction prepends it).
+    ///
+    /// SECURITY (`sq-nrwqs` + `sq-ddbm8`): the only caller-controlled text placed in the
+    /// reasoning document is the operand IRIs, and always as `odrl:` OBJECTS — never as a
+    /// predicate or a method-subject triple. Each operand is emitted inside a `<…>` IRIREF
+    /// term, so breaking out of that term to inject a `secx:hasProperty` / `secx:atLeast`
+    /// / `secx:satisfies` triple or an N3 rule would require the IRI to carry the term
+    /// closer `>` (or the whitespace / control / `< " { } | ^` `` ` `` `\` characters that
+    /// also delimit an IRIREF). `NamedNode::new` validates against RFC 3987 (oxiri), which
+    /// excludes exactly those characters — but the operand fields are `pub` and a
+    /// `NamedNode::new_unchecked` / future unvalidated-`Deserialize` operand bypasses that
+    /// validation. So this synthesiser **re-checks each operand with [`is_iriref_safe`]
+    /// at the emission site** and **fails closed** (`Err(offending_operand)`) if any is
+    /// not a well-formed IRIREF, rather than emitting a term a caller could escape. That
+    /// makes the widening channel structurally absent even off the `NamedNode::new` path —
+    /// not merely renamed — and the guard cannot be bypassed by a future caller of this fn.
+    ///
+    /// # Errors
+    /// Returns the offending operand IRI string if any constraint's `left_operand` or
+    /// `right_operand` is not IRIREF-safe (the caller turns this into a fail-closed
+    /// [`PrecheckOutcome::MalformedConstraint`]).
+    fn synthesise_policy(
+        constraints: &[AdmissibilityConstraint],
+    ) -> Result<(Vec<String>, String), String> {
+        use std::fmt::Write as _;
+        let mut iris = Vec::with_capacity(constraints.len());
+        let mut n3 = String::new();
+        for (i, c) in constraints.iter().enumerate() {
+            // [OPUS-4.8] sq-ddbm8: re-validate BOTH operands are IRIREF-safe before either
+            // is written inside a `<…>` term. Fail closed on the first unsafe operand — an
+            // operand that could break out of object position must NEVER reach the policy.
+            for operand in [c.left_operand.as_str(), c.right_operand.as_str()] {
+                if !is_iriref_safe(operand) {
+                    return Err(operand.to_owned());
+                }
+            }
+            let cid = format!("urn:sparq:secprop:c{}", i);
+            // [OPUS-4.8] Write the per-constraint fragment straight into `n3` — writing to
+            // an in-memory `String` is infallible, so no temporary `String` allocation on
+            // the admission path. Byte-output-identical (same fragment, trailing `.\n`).
+            writeln!(
+                n3,
+                "<{}> odrl:leftOperand <{}> ; odrl:operator odrl:gteq ; odrl:rightOperand <{}> .",
+                cid,
+                c.left_operand.as_str(),
+                c.right_operand.as_str(),
+            )
+            .expect("writing to an in-memory String is infallible");
+            iris.push(cid);
+        }
+        Ok((iris, n3))
+    }
+
+    /// Whether `iri` is safe to embed verbatim inside an N3/Turtle `<…>` IRIREF term —
+    /// i.e. it contains **none** of the characters the IRIREF grammar excludes and that
+    /// would otherwise let the value break out of object position and inject a triple or
+    /// rule into the synthesised policy. The excluded set is exactly the N-Triples/Turtle
+    /// `IRIREF` production's: every code point `<= U+0020` (all C0 controls **and** space),
+    /// plus `<`, `>`, `"`, `{`, `}`, `|`, `^`, `` ` ``, `\`. This is precisely the set
+    /// oxiri (`NamedNode::new`, RFC 3987) already rejects, so a `NamedNode::new`-validated
+    /// operand ALWAYS passes; the check only ever catches a `NamedNode::new_unchecked` /
+    /// unvalidated-`Deserialize` operand (`sq-ddbm8` defence in depth). An empty IRI is
+    /// also rejected (a degenerate operand that is never a real dimension/level).
+    fn is_iriref_safe(iri: &str) -> bool {
+        !iri.is_empty()
+            && iri.chars().all(|ch| {
+                ch > '\u{20}' && !matches!(ch, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\')
+            })
+    }
+
+    /// Resolve the presented method's secprop annotation graph from the **bundled,
+    /// drift-pinned** sparq-zk `secprop-methods.ttl` (the canonical source of truth,
+    /// behind sparq-zk's `secprop-annotations` feature), serialised into the N3 fragment
+    /// [`admissible`] reads. Returns `None` iff `method_iri` has no bundled annotation
+    /// block — an **unknown method**, which the caller turns into a fail-closed
+    /// [`PrecheckOutcome::UnknownMethod`].
+    ///
+    /// This is the `sq-nrwqs` hardening: the annotations are NEVER taken from the
+    /// caller, so a caller cannot inject a widened posture. The bundled graph is parsed
+    /// once and cached in [`BUNDLED_ANNOTATIONS`]; this call only looks up `method_iri`
+    /// and serialises its per-method fragment.
+    fn resolve_bundled_annotations_n3(method_iri: &str) -> Option<String> {
+        let ann = BUNDLED_ANNOTATIONS.get(method_iri)?;
+        Some(annotations_n3_from_bundled(ann))
+    }
+
+    /// Serialise the **query-proof-layer** assertions of one bundled method annotation
+    /// into the `secx:hasProperty [ secx:property … ; secx:level … ]` N3 fragment the
+    /// admissibility reduction reads, plus a derived method-wide `secx:AssuranceLevel`
+    /// block (see [`derived_assurance_level`]).
+    ///
+    /// SOURCE-LAYER-ONLY assertions are EXCLUDED (the §5a rule 2 non-transfer rule): a
+    /// property of a source credential's cryptosuite must never satisfy a query-proof
+    /// constraint. Only `secx:property` + `secx:level` are emitted (the two the
+    /// discharge rule reads); the assurance/audit/scope reification is not needed by the
+    /// reduction. The subject is the full method IRI so it matches the `method` argument
+    /// `admissible` filters on.
+    fn annotations_n3_from_bundled(ann: &MethodAnnotations) -> String {
+        let mut blocks: Vec<String> = Vec::new();
+        for a in ann
+            .assertions
+            .iter()
+            .filter(|a| a.scope == Scope::QueryProofLayer)
+        {
+            if let Some(level) = &a.level {
+                blocks.push(format!(
+                    "[ secx:property <{}> ; secx:level <{}> ]",
+                    a.property, level
+                ));
+            }
+        }
+        if let Some(level) = derived_assurance_level(ann) {
+            blocks.push(format!(
+                "[ secx:property <{}> ; secx:level <{}> ]",
+                secx::SECX_ASSURANCE_LEVEL,
+                level
+            ));
+        }
+        if blocks.is_empty() {
+            return String::new();
+        }
+        format!(
+            "<{}> secx:hasProperty {} .\n",
+            ann.method,
+            blocks.join(" ,\n  ")
+        )
+    }
+
+    /// The method-wide `secx:AssuranceLevel` for the `requiresAssurance` dimension =
+    /// the **weakest** assurance across the method's POSITIVE, query-proof-layer
+    /// property claims (`None` if it has none — then `requiresAssurance` denies). A
+    /// settled-NEGATIVE level (`PQForgeable` / `Replayable` / `SchemeRevealed`) may be
+    /// `secx:Proven` and is EXCLUDED: it is a fact ABOUT the construction, not a
+    /// positive assurance the requester relies on. While `sq-qhy4` is open every
+    /// positive sparq ZK claim is `secx:Claimed`, so this is `Claimed` for every sparq
+    /// method today — a `requiresAssurance gteq secx:Proven` constraint therefore denies
+    /// every method (the principled refusal, unchanged from Phase 5). This derivation is
+    /// bounded by the honesty of the bundled graph; it makes no new soundness claim.
+    fn derived_assurance_level(ann: &MethodAnnotations) -> Option<&'static str> {
+        // rank: Conjectured < Claimed < Proven; take the MIN over positive QP claims.
+        let mut min_rank: Option<u8> = None;
+        for a in ann
+            .assertions
+            .iter()
+            .filter(|a| a.scope == Scope::QueryProofLayer)
+        {
+            if is_settled_negative_level(a.level.as_deref()) {
+                continue;
+            }
+            let rank = match a.assurance {
+                Assurance::Conjectured => 0u8,
+                Assurance::Claimed => 1,
+                Assurance::Proven => 2,
+            };
+            min_rank = Some(min_rank.map_or(rank, |m| m.min(rank)));
+        }
+        match min_rank? {
+            0 => Some(secx::SECX_CONJECTURED),
+            1 => Some(secx::SECX_CLAIMED),
+            _ => Some(secx::SECX_PROVEN),
+        }
+    }
+
+    /// Whether `level` is one of the three SETTLED-NEGATIVE levels that may legitimately
+    /// carry `secx:Proven` (a fact about the construction, not a positive assurance).
+    /// Excluded from [`derived_assurance_level`] so a Proven negative never inflates a
+    /// method's positive assurance. Mirrors sparq-zk `secprop`'s own `is_positive`
+    /// negative set; the level IRIs are the drift-pinned `crate::secprop` constants.
+    fn is_settled_negative_level(level: Option<&str>) -> bool {
+        match level {
+            Some(l) => {
+                l == secx::SECX_PQ_FORGEABLE
+                    || l == secx::SECX_REPLAYABLE
+                    || l == secx::SECX_SCHEME_REVEALED
+            }
+            None => false,
         }
     }
 
@@ -622,24 +931,29 @@ mod precheck {
         use oxrdf::NamedNode;
 
         const METHOD: &str = "https://sparq.dev/ns/zk#poseidon2-rdfc10-v1";
+        // Requester leftOperand IRIs (the §4.3.2 `secx:requires…` operands). They map to
+        // property dimensions via the bundled `secx:overDimension` fact base.
+        const REQ_UNLINK: &str = "https://w3id.org/zkp-sparql/sec-prop#requiresUnlinkabilityScope";
+        const REQ_ASSUR: &str = "https://w3id.org/zkp-sparql/sec-prop#requiresAssurance";
+        const REQ_SOUND: &str = "https://w3id.org/zkp-sparql/sec-prop#requiresSoundness";
+        const REQ_ZK: &str = "https://w3id.org/zkp-sparql/sec-prop#requiresZeroKnowledge";
 
-        /// The string-canonical method's annotation block (the §4.3.3 levels) — keyed on
-        /// the method IRI the pre-check is handed. Used by every test below.
-        const ANNOTATIONS: &str = "\
-zk:poseidon2-rdfc10-v1\n\
-  secx:hasProperty [ secx:property secx:UnlinkabilityScope ; secx:level secx:PerPresentation ] ,\n\
-                   [ secx:property secx:AssuranceLevel ; secx:level secx:Claimed ] .\n";
+        /// A single `gteq` constraint from two IRI strings.
+        fn c(left: &str, right: &str) -> AdmissibilityConstraint {
+            AdmissibilityConstraint {
+                left_operand: NamedNode::new(left).unwrap(),
+                right_operand: NamedNode::new(right).unwrap(),
+            }
+        }
 
-        fn pref(
-            method: &str,
-            constraint_iris: &[&str],
-            policy_n3: &str,
-        ) -> AdmissibilityPreference {
+        /// Build a preference. The method's property annotations are NOT supplied here —
+        /// they are resolved from the bundled `secprop-methods.ttl` by the pre-check, and
+        /// the policy N3 is synthesised from the STRUCTURED constraints (the `sq-nrwqs`
+        /// hardening — the caller supplies no raw N3).
+        fn pref(method: &str, constraints: Vec<AdmissibilityConstraint>) -> AdmissibilityPreference {
             AdmissibilityPreference {
                 method_iri: NamedNode::new(method).unwrap(),
-                constraint_iris: constraint_iris.iter().map(|s| (*s).to_owned()).collect(),
-                policy_n3: policy_n3.to_owned(),
-                annotations_n3: ANNOTATIONS.to_owned(),
+                constraints,
             }
         }
 
@@ -672,83 +986,381 @@ zk:poseidon2-rdfc10-v1\n\
             assert_eq!(run(None), PrecheckOutcome::Admitted);
         }
 
-        /// A satisfiable `gteq` preference admits: the method holds PerPresentation, which
-        /// is `atLeast` the required PerPresentation (reflexive), and Claimed ≥ Claimed.
+        /// A satisfiable `gteq` preference admits — resolved from the BUNDLED graph: the
+        /// string-canonical method holds `UnlinkabilityScope PerPresentation` (`atLeast`
+        /// the required PerPresentation, reflexive) and its derived AssuranceLevel is
+        /// `Claimed` (≥ Claimed).
         #[test]
         fn satisfiable_preference_admits() {
-            let policy = "\
-zk:cUnlink odrl:leftOperand secx:requiresUnlinkabilityScope ; odrl:operator odrl:gteq ; odrl:rightOperand secx:PerPresentation .\n\
-zk:cAssur  odrl:leftOperand secx:requiresAssurance          ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .\n";
             let p = pref(
                 METHOD,
-                &[
-                    "https://sparq.dev/ns/zk#cUnlink",
-                    "https://sparq.dev/ns/zk#cAssur",
+                vec![
+                    c(REQ_UNLINK, crate::secprop::SECX_PER_PRESENTATION),
+                    c(REQ_ASSUR, crate::secprop::SECX_CLAIMED),
                 ],
-                policy,
+            );
+            assert_eq!(run(Some(&p)), PrecheckOutcome::Admitted);
+        }
+
+        /// BUNDLED-RESOLUTION direct test: a constraint over a dimension present ONLY in
+        /// the bundled ontology (`Soundness KnowledgeSound`, which no caller ever
+        /// supplied here) is satisfiable — proving the annotations are resolved from the
+        /// shipped `secprop-methods.ttl`, not from any caller-supplied fragment.
+        #[test]
+        fn bundled_resolution_uses_the_shipped_ontology() {
+            let p = pref(
+                METHOD,
+                vec![c(REQ_SOUND, crate::secprop::SECX_KNOWLEDGE_SOUND)],
             );
             assert_eq!(run(Some(&p)), PrecheckOutcome::Admitted);
         }
 
         /// An unsatisfiable constraint FAILS CLOSED: `requiresAssurance gteq Proven`
         /// removes the Claimed-only method — every sparq ZK method while `sq-qhy4` is
-        /// open. The outcome names the unsatisfied constraint (the honest refusal).
+        /// open. The outcome names the unsatisfied dimension (the honest refusal).
         #[test]
         fn assurance_gteq_proven_denies_fail_closed() {
-            let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Proven .";
-            let p = pref(METHOD, &["https://sparq.dev/ns/zk#cAssur"], policy);
+            let p = pref(METHOD, vec![c(REQ_ASSUR, crate::secprop::SECX_PROVEN)]);
             assert_eq!(
                 run(Some(&p)),
                 PrecheckOutcome::Denied {
-                    unsatisfied: vec!["https://sparq.dev/ns/zk#cAssur".to_owned()]
+                    unsatisfied: vec![REQ_ASSUR.to_owned()]
                 },
             );
         }
 
-        /// A constraint over a dimension the method is NOT annotated for also fails
-        /// closed (the method satisfies nothing on that dimension).
+        /// TAMPER-RESISTANCE (answers the residual-channel review): a caller cannot widen
+        /// the method's recorded posture through the POLICY either. A caller that TRIES to
+        /// inject a `secx:hasProperty [ secx:property secx:AssuranceLevel ; secx:level
+        /// secx:Proven ]` fact — the exact Phase-5 raw-`policy_n3` exploit — has NO channel
+        /// to do so: operands are validated `NamedNode`s emitted only as `odrl:` objects.
+        /// Even naming the injection predicate/level as operands cannot forge a
+        /// `secx:satisfies` fact, so `requiresAssurance gteq Proven` STILL denies (the
+        /// bundled graph pins the method at `Claimed`). This is the `sq-nrwqs` fail-closed
+        /// input-boundary hardening; no new soundness claim.
         #[test]
-        fn unannotated_dimension_denies_fail_closed() {
-            let policy = "zk:cZk odrl:leftOperand secx:requiresZeroKnowledge ; odrl:operator odrl:gteq ; odrl:rightOperand secx:PerfectZK .";
-            let p = pref(METHOD, &["https://sparq.dev/ns/zk#cZk"], policy);
-            assert!(matches!(run(Some(&p)), PrecheckOutcome::Denied { .. }));
-        }
-
-        /// A method IRI with NO annotation block satisfies nothing ⇒ fail closed (the
-        /// graph is keyed on the IRI; a wrong/unknown method is denied).
-        #[test]
-        fn unknown_method_denies_fail_closed() {
-            let policy = "zk:cAssur odrl:leftOperand secx:requiresAssurance ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .";
-            let p = pref(
-                "https://sparq.dev/ns/zk#no-such-method",
-                &["https://sparq.dev/ns/zk#cAssur"],
+        fn caller_cannot_widen_bundled_assurance_via_policy_injection() {
+            // The closest a structured caller can get to the old raw-N3 injection: name
+            // the annotation predicate + a Proven level as the constraint operands. These
+            // are inert as `odrl:` objects — they cannot assert a method posture.
+            let inject = pref(
+                METHOD,
+                vec![
+                    c(REQ_ASSUR, crate::secprop::SECX_PROVEN),
+                    c(
+                        crate::secprop::SECX_HAS_PROPERTY,
+                        crate::secprop::SECX_ASSURANCE_LEVEL,
+                    ),
+                ],
+            );
+            assert!(
+                matches!(run(Some(&inject)), PrecheckOutcome::Denied { .. }),
+                "no structured-operand injection can widen the method to Proven",
+            );
+            // And the derived AssuranceLevel the reduction sees is Claimed, never Proven.
+            let ann = super::parse_annotations();
+            let m = ann.get(METHOD).expect("string-canonical is bundled");
+            assert_eq!(
+                super::derived_assurance_level(m),
+                Some(crate::secprop::SECX_CLAIMED),
+                "the bundled method's derived assurance must be Claimed, never Proven",
+            );
+            // The synthesised policy contains ONLY `odrl:` predicates — no `secx:` sink.
+            let (_iris, policy) = super::synthesise_policy(&inject.constraints)
+                .expect("validated operands synthesise a policy");
+            assert!(
+                !policy.contains("secx:hasProperty")
+                    && !policy.contains("secx:level")
+                    && !policy.contains("secx:satisfies")
+                    && !policy.contains("secx:atLeast"),
+                "the synthesised policy must never carry a secx annotation/order/satisfies predicate: {}",
                 policy,
             );
+        }
+
+        /// Requiring a STRONGER level than the bundled method actually holds fails closed:
+        /// the method holds `ZeroKnowledgeType ComputationalZK`, which is NOT `atLeast`
+        /// the required `PerfectZK`.
+        #[test]
+        fn stronger_level_than_bundled_denies_fail_closed() {
+            let p = pref(METHOD, vec![c(REQ_ZK, crate::secprop::SECX_PERFECT_ZK)]);
             assert!(matches!(run(Some(&p)), PrecheckOutcome::Denied { .. }));
         }
 
-        /// An EMPTY constraint set is vacuously satisfied (the `admissible` contract) —
-        /// admitted. (A caller wanting deny-on-empty must not hand an empty preference.)
+        /// A method IRI with NO bundled annotation block is an UNKNOWN method ⇒ fail
+        /// closed with the dedicated `UnknownMethod` outcome — regardless of the
+        /// constraints (the graph is the source of truth; a wrong/unknown method is
+        /// denied).
         #[test]
-        fn empty_constraint_set_is_vacuously_admitted() {
-            let p = pref(METHOD, &[], "");
+        fn unknown_method_denies_fail_closed() {
+            let p = pref(
+                "https://sparq.dev/ns/zk#no-such-method",
+                vec![c(REQ_ASSUR, crate::secprop::SECX_CLAIMED)],
+            );
+            assert_eq!(
+                run(Some(&p)),
+                PrecheckOutcome::UnknownMethod {
+                    method: "https://sparq.dev/ns/zk#no-such-method".to_owned()
+                },
+            );
+        }
+
+        /// An unknown method fails closed EVEN with an EMPTY constraint set — the
+        /// fail-closed-on-unknown-method rule (`sq-nrwqs`) is stronger than the vacuous
+        /// admit for a known method.
+        #[test]
+        fn unknown_method_with_no_constraints_denies() {
+            let p = pref("https://sparq.dev/ns/zk#no-such-method", vec![]);
+            assert!(matches!(run(Some(&p)), PrecheckOutcome::UnknownMethod { .. }));
+        }
+
+        /// An EMPTY constraint set is vacuously satisfied for a KNOWN method (the
+        /// `admissible` contract) — admitted. (A caller wanting deny-on-empty must not
+        /// hand an empty preference.)
+        #[test]
+        fn empty_constraint_set_is_vacuously_admitted_for_known_method() {
+            let p = pref(METHOD, vec![]);
             assert_eq!(run(Some(&p)), PrecheckOutcome::Admitted);
         }
 
-        /// A malformed policy fragment makes the reduction ERROR — and that is a
-        /// fail-closed denial (a pre-check that cannot be evaluated must never admit).
+        /// The synthesised policy is well-formed and carries every constraint's operands
+        /// as `odrl:` triples with a fresh internal `urn:sparq:` constraint IRI — the
+        /// only caller text in the reasoning document, always in object position.
         #[test]
-        fn reduction_error_fails_closed() {
-            // Unterminated/garbage N3 the reasoner cannot parse.
-            let p = pref(
+        fn synthesised_policy_is_well_formed_and_secx_free() {
+            let (iris, policy) = super::synthesise_policy(&[
+                c(REQ_ASSUR, crate::secprop::SECX_CLAIMED),
+                c(REQ_SOUND, crate::secprop::SECX_KNOWLEDGE_SOUND),
+            ])
+            .expect("validated operands synthesise a policy");
+            assert_eq!(iris.len(), 2);
+            assert!(iris.iter().all(|i| i.starts_with("urn:sparq:secprop:c")));
+            assert!(policy.contains(REQ_ASSUR) && policy.contains(REQ_SOUND));
+            assert!(policy.contains("odrl:operator odrl:gteq"));
+            // No `secx:` predicate is ever emitted by the policy synthesiser.
+            for pred in ["secx:hasProperty", "secx:level", "secx:property", "secx:satisfies"] {
+                assert!(!policy.contains(pred), "policy leaked a secx predicate: {}", pred);
+            }
+        }
+
+        /// DEFENCE-IN-DEPTH (`sq-ddbm8`): [`is_iriref_safe`] accepts every IRI the real
+        /// admission path uses and rejects **exactly** the characters the N-Triples/Turtle
+        /// `IRIREF` grammar excludes — the chars that could break an operand out of its
+        /// `<…>` object term. This is the closure the injection guard rests on.
+        #[test]
+        fn is_iriref_safe_accepts_valid_iris_and_rejects_term_breaking_chars() {
+            for ok in [
                 METHOD,
-                &["https://sparq.dev/ns/zk#c"],
-                "this is not valid n3 @@@ {",
+                REQ_ASSUR,
+                REQ_SOUND,
+                REQ_ZK,
+                REQ_UNLINK,
+                crate::secprop::SECX_PROVEN,
+                crate::secprop::SECX_CLAIMED,
+                "urn:sparq:secprop:c0",
+            ] {
+                assert!(super::is_iriref_safe(ok), "must accept valid IRI: {}", ok);
+            }
+            // An empty operand is a degenerate, never-real dimension/level — rejected.
+            assert!(!super::is_iriref_safe(""));
+            // Every excluded IRIREF character makes an otherwise-valid IRI unsafe.
+            for bad in [
+                '>', '<', '"', '{', '}', '|', '^', '`', '\\', ' ', '\t', '\n', '\r', '\u{0}',
+                '\u{1f}',
+            ] {
+                let iri = format!("urn:x{}y", bad);
+                assert!(
+                    !super::is_iriref_safe(&iri),
+                    "must reject term-breaking char {:?}",
+                    bad,
+                );
+            }
+        }
+
+        /// INJECTION CLOSURE (`sq-ddbm8`): a caller that constructs an operand via
+        /// `NamedNode::new_unchecked` — the ONLY route past `NamedNode::new`'s RFC-3987
+        /// validation — and tries to close the `<…>` object term with `>` and inject a
+        /// `<METHOD> secx:hasProperty [ … secx:level secx:Proven ]` widening triple is
+        /// **rejected before synthesis**: the pre-check fails closed with
+        /// `MalformedConstraint`, the synthesiser returns `Err` (never emits the payload),
+        /// and the bundled method's derived assurance stays `Claimed` — the injection could
+        /// not (and did not) widen it. Input-sanitisation hardening only; no soundness claim.
+        #[test]
+        fn new_unchecked_escaping_left_operand_fails_closed_no_widening() {
+            let payload = format!(
+                "urn:x> secx:hasProperty [ secx:property secx:AssuranceLevel ; secx:level \
+                 secx:Proven ] . <{}> secx:hasProperty [ secx:property secx:AssuranceLevel ; \
+                 secx:level secx:Proven ] . <urn:sink",
+                METHOD,
             );
-            assert!(matches!(
+            let p = AdmissibilityPreference {
+                method_iri: NamedNode::new(METHOD).unwrap(),
+                constraints: vec![AdmissibilityConstraint {
+                    left_operand: NamedNode::new_unchecked(payload.clone()),
+                    right_operand: NamedNode::new(crate::secprop::SECX_PROVEN).unwrap(),
+                }],
+            };
+            // Fail closed: the pre-check refuses the malformed operand and admits nothing.
+            assert_eq!(
                 run(Some(&p)),
-                PrecheckOutcome::ReductionError { .. }
-            ));
+                PrecheckOutcome::MalformedConstraint {
+                    operand: payload.clone(),
+                },
+            );
+            // The synthesiser NEVER emits the payload: it returns Err with the operand.
+            assert_eq!(
+                super::synthesise_policy(&p.constraints).unwrap_err(),
+                payload,
+            );
+            // Belt-and-braces: the bundled method's derived assurance is STILL Claimed.
+            let ann = super::parse_annotations();
+            let m = ann.get(METHOD).expect("string-canonical is bundled");
+            assert_eq!(
+                super::derived_assurance_level(m),
+                Some(crate::secprop::SECX_CLAIMED),
+                "an injection attempt must never widen the bundled method to Proven",
+            );
+        }
+
+        /// The RIGHT operand is guarded identically (`sq-ddbm8`): an escaping
+        /// `new_unchecked` `right_operand` also fails closed with `MalformedConstraint`.
+        #[test]
+        fn new_unchecked_escaping_right_operand_fails_closed() {
+            let payload = "urn:x> . <urn:sink";
+            let p = AdmissibilityPreference {
+                method_iri: NamedNode::new(METHOD).unwrap(),
+                constraints: vec![AdmissibilityConstraint {
+                    left_operand: NamedNode::new(REQ_ASSUR).unwrap(),
+                    right_operand: NamedNode::new_unchecked(payload),
+                }],
+            };
+            assert_eq!(
+                run(Some(&p)),
+                PrecheckOutcome::MalformedConstraint {
+                    operand: payload.to_owned(),
+                },
+            );
+        }
+
+        /// A malformed operand fails closed EVEN when a first, VALID constraint precedes it
+        /// (`sq-ddbm8`): the guard is per-operand and the whole pre-check denies — the
+        /// injection can never be "diluted" into a vacuous admit by neutralising it.
+        #[test]
+        fn one_malformed_operand_among_valid_ones_fails_the_whole_precheck() {
+            let bad = "urn:evil> . <urn:sink";
+            let p = AdmissibilityPreference {
+                method_iri: NamedNode::new(METHOD).unwrap(),
+                constraints: vec![
+                    c(REQ_ASSUR, crate::secprop::SECX_CLAIMED),
+                    AdmissibilityConstraint {
+                        left_operand: NamedNode::new_unchecked(bad),
+                        right_operand: NamedNode::new(crate::secprop::SECX_PROVEN).unwrap(),
+                    },
+                ],
+            };
+            assert_eq!(
+                run(Some(&p)),
+                PrecheckOutcome::MalformedConstraint {
+                    operand: bad.to_owned(),
+                },
+            );
+        }
+
+        /// INVARIANT (`sq-ddbm8`): `synthesise_policy` emits every caller operand ONLY as an
+        /// `odrl:` OBJECT under an internally-generated `urn:sparq:secprop:c{i}` subject.
+        /// This pins the positional structure of each synthesised statement, so it FAILS if
+        /// the synthesiser is ever extended to emit an operand as a SUBJECT or a PREDICATE —
+        /// the exact regression that would reopen the widening channel.
+        #[test]
+        fn synthesise_policy_emits_operands_only_as_objects() {
+            const L0: &str = "urn:test:left-operand-zero";
+            const R0: &str = "urn:test:right-operand-zero";
+            const L1: &str = "urn:test:left-operand-one";
+            const R1: &str = "urn:test:right-operand-one";
+            let (iris, policy) = super::synthesise_policy(&[c(L0, R0), c(L1, R1)])
+                .expect("validated operands synthesise a policy");
+            assert_eq!(iris, vec!["urn:sparq:secprop:c0", "urn:sparq:secprop:c1"]);
+            let operands = [L0, R0, L1, R1];
+            let expected = [(L0, R0), (L1, R1)];
+            let lines: Vec<&str> = policy.lines().filter(|l| !l.trim().is_empty()).collect();
+            assert_eq!(lines.len(), 2, "one statement per constraint: {}", policy);
+            for (i, line) in lines.iter().enumerate() {
+                let tok: Vec<&str> = line.split_whitespace().collect();
+                // Deterministic `S P O ; P O ; P O .` shape (operands carry no whitespace).
+                assert_eq!(tok.len(), 10, "unexpected statement shape: {}", line);
+                // SUBJECT (token 0) is the INTERNAL cid — never a caller operand.
+                assert_eq!(tok[0], format!("<urn:sparq:secprop:c{}>", i).as_str());
+                assert!(
+                    !operands.iter().any(|o| tok[0] == format!("<{}>", o)),
+                    "an operand appeared in SUBJECT position: {}",
+                    line,
+                );
+                // PREDICATES (tokens 1, 4, 7) are fixed `odrl:` predicates — never an operand.
+                for p in [tok[1], tok[4], tok[7]] {
+                    assert!(p.starts_with("odrl:"), "non-odrl predicate {}: {}", p, line);
+                    assert!(
+                        !operands.iter().any(|o| p == format!("<{}>", o)),
+                        "an operand appeared in PREDICATE position: {}",
+                        line,
+                    );
+                }
+                assert_eq!(tok[4], "odrl:operator");
+                assert_eq!(tok[5], "odrl:gteq");
+                // OBJECTS (tokens 2, 8) are exactly this constraint's operands.
+                let (l, r) = expected[i];
+                assert_eq!(tok[2], format!("<{}>", l).as_str());
+                assert_eq!(tok[8], format!("<{}>", r).as_str());
+            }
+            // No statement BEGINS with an operand IRI (belt-and-braces subject check).
+            for o in operands {
+                assert!(
+                    !policy
+                        .lines()
+                        .any(|l| l.trim_start().starts_with(&format!("<{}>", o))),
+                    "operand {} began a statement (subject position)",
+                    o,
+                );
+            }
+        }
+
+        /// DIRECT resolver test: the resolved N3 fragment for a known method carries the
+        /// bundled `Soundness`/`KnowledgeSound` pair and a derived `AssuranceLevel`, and
+        /// an unknown method resolves to `None` (fail-closed).
+        #[test]
+        fn resolver_serialises_bundled_levels_and_derives_assurance() {
+            let n3 = super::resolve_bundled_annotations_n3(METHOD)
+                .expect("string-canonical is bundled");
+            assert!(
+                n3.contains(crate::secprop::SECX_SOUNDNESS)
+                    && n3.contains(crate::secprop::SECX_KNOWLEDGE_SOUND),
+                "the resolved fragment must carry the bundled Soundness/KnowledgeSound pair: {}",
+                n3,
+            );
+            assert!(
+                n3.contains(crate::secprop::SECX_ASSURANCE_LEVEL)
+                    && n3.contains(crate::secprop::SECX_CLAIMED),
+                "the resolved fragment must carry a derived AssuranceLevel of Claimed: {}",
+                n3,
+            );
+            assert!(
+                super::resolve_bundled_annotations_n3("https://sparq.dev/ns/zk#no-such-method")
+                    .is_none(),
+                "an unknown method must resolve to None (fail-closed)",
+            );
+        }
+
+        /// DIRECT test that a settled-NEGATIVE Proven level (`PQForgeable`) is EXCLUDED
+        /// from the derived assurance, so a method's positive assurance is never inflated
+        /// by a negative Proven fact about the construction.
+        #[test]
+        fn settled_negative_is_excluded_from_derived_assurance() {
+            assert!(super::is_settled_negative_level(Some(
+                crate::secprop::SECX_PQ_FORGEABLE
+            )));
+            assert!(!super::is_settled_negative_level(Some(
+                crate::secprop::SECX_KNOWLEDGE_SOUND
+            )));
+            assert!(!super::is_settled_negative_level(None));
         }
     }
 }

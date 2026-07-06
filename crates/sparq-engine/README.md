@@ -31,8 +31,8 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
 ## ✨ Features
 
 - **SPARQL query** — run [SPARQL 1.1](https://www.w3.org/TR/sparql11-query/) and
-  [1.2](https://www.w3.org/TR/sparql12-query/) over your data; conformance is tracked by the
-  CI ratchets (see the root [`README.md`](../../README.md)).
+  [1.2](https://www.w3.org/TR/sparql12-query/) over your data (conformance tracked by the CI
+  ratchets), plus the *non-standard* `MULTIPLICITY()` aggregate extension — see the SKILL.
 - **Named graphs** — query across an active dataset with `GRAPH` and `FROM` / `FROM NAMED`.
 - **RDF 1.2 triple terms** — match [triple terms](https://www.w3.org/TR/rdf12-concepts/),
   including variables inside them.
@@ -66,16 +66,16 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   `is_cacheable`). When off, zero cache code compiles, the default build is byte-identical, no new
   deps (std `HashMap`/`Mutex`/`Arc`).
 - **MVCC / ACID transaction isolation** *(opt-in `txn` feature, OFF by default)* —
-  a `txn::TransactionManager` over one logical `Graph` giving **snapshot-isolation** reads
-  (`begin_read` → a cheap point-in-time `GraphSnapshot`, immune to later commits) and serialized
-  **write** transactions (`begin_write` → a private COW fork) with **first-committer-wins** write-write
-  conflict detection (OCC). A `WriteTxn` has read-your-own-writes, applies `UPDATE`s to its fork, and
-  on `commit` either publishes a new generation (advancing a `u64` version) or returns
-  `CommitError::Conflict` on an overlapping concurrent write set (atomic rollback); a stale but
-  *non*-conflicting writer has its delta replayed (no lost update). For a *single writer* SI is
-  serializability (see `research/concurrent-serving-litreview-A-mvcc-benchmarks.md` §A.1); durability
-  is inherited from a directory-backed `Graph`'s WAL. Built entirely on the existing COW delta-overlay
-  substrate; off, zero code compiles, the default build is byte-identical, no new deps.
+  a `txn::TransactionManager` over one logical `Graph`: **snapshot-isolation** reads (`begin_read` → a
+  cheap point-in-time `GraphSnapshot`, immune to later commits) and serialized **write** transactions
+  (`begin_write` → a private COW fork) with **first-committer-wins** OCC conflict detection (`commit`
+  publishes a new generation advancing a `u64` version, or returns `CommitError::Conflict`; a stale
+  *non*-conflicting writer is replayed, no lost update). Single-writer SI = serializability (see
+  `research/concurrent-serving-litreview-A-mvcc-benchmarks.md` §A.1); built on the existing COW
+  delta-overlay substrate. Off, zero code compiles, the default build is byte-identical, no new deps.
+- **DP join-order planner (DPccp)** *(opt-in `dp-planner` feature, OFF by default)* — the default greedy GOO planner gains an opt-in connected-subgraph-complement-pair DP (Moerkotte & Neumann, VLDB 2006) that finds a `Cout`-optimal *bushy* join order — seeded from the SAME cardinality estimator — via `with_dp_planner` / `with_dp_planner_budget` (per-thread, like `with_cs_table`), **falling back to greedy above a connected-subgraph budget** and on disconnected BGPs.
+  ORDER-ONLY: identical answers to greedy, proven by the on-vs-off `tests/dp_planner_differential.rs`.
+  Off, zero DP code compiles, the default build is byte-identical, no new deps.
 - **RDF writer matrix** *(`serialize-rdf` feature — OFF for a library embedder, but the `sparq-cli`/`sparq-server`
   BINARIES enable it via their default-on `jsonld` feature, [OPUS-4.8] sq-oy1f.4)* — write a `Graph` (or
   `&[oxrdf::Triple]`) back out as Turtle / TriG / N-Quads / JSON-LD 1.1
@@ -112,7 +112,7 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
 - **Design** — [`research/ARCHITECTURE.md`](../../research/ARCHITECTURE.md) and the planning /
   parallelism verdicts in [`research/`](../../research).
 - **Performance** — numbers live on the
-  [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench), not in docs.
+  [benchmarks dashboard](https://sparq.jeswr.org/dev/bench), not in docs.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md) and [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## License

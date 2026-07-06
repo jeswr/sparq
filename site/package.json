@@ -5,19 +5,27 @@
   "description": "sparq feature-showcase website — a live-interactive demonstration of the sparq RDF + SPARQL engine, statically exported for GitHub Pages.",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/sync-wasm.mjs && node scripts/bundle-wasm-esm.mjs && node scripts/sync-benchmarks.mjs && node scripts/sync-zk-catalog.mjs && node scripts/build-papers.mjs && next dev",
+    "dev": "node scripts/sync-wasm.mjs && node scripts/bundle-wasm-esm.mjs && node scripts/sync-benchmarks.mjs && node scripts/sync-zk-catalog.mjs && node scripts/build-papers.mjs && node scripts/build-specs.mjs && next dev",
     "sync-wasm": "node scripts/sync-wasm.mjs",
     "bundle-wasm-esm": "node scripts/bundle-wasm-esm.mjs",
     "sync-benchmarks": "node scripts/sync-benchmarks.mjs",
     "sync-zk-catalog": "node scripts/sync-zk-catalog.mjs",
     "build-papers": "node scripts/build-papers.mjs",
-    "prebuild": "node scripts/sync-wasm.mjs && node scripts/bundle-wasm-esm.mjs && node scripts/sync-benchmarks.mjs && node scripts/sync-zk-catalog.mjs && node scripts/build-papers.mjs",
+    "build-specs": "node scripts/build-specs.mjs",
+    "prebuild": "node scripts/sync-wasm.mjs && node scripts/bundle-wasm-esm.mjs && node scripts/sync-benchmarks.mjs && node scripts/sync-zk-catalog.mjs && node scripts/build-papers.mjs && node scripts/build-specs.mjs",
     "build": "next build",
+    "postbuild": "node scripts/check-bundle.mjs",
+    "check:bundle": "node scripts/check-bundle.mjs",
     "build:tauri": "cross-env NEXT_PUBLIC_BASE_PATH= npm run build",
     "start": "npx --yes serve out",
     "lint": "next lint",
     "test:unit": "node --import ./test-support/register-ts.mjs --test test/*.test.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:stress": "playwright test --repeat-each=5 --retries=0",
+    "test:e2e:grep-gate": "bash e2e/support/no-timeout-gate.sh",
+    "vr": "bash scripts/vr.sh",
+    "vr:update": "bash scripts/vr.sh --update-snapshots=all",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@aztec/bb.js": "5.0.0-nightly.20260324",
@@ -38,6 +46,7 @@
     "postcss": ">=8.5.10"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
     "@eslint/eslintrc": "^3.2.0",
     "@playwright/test": "^1.61.0",
     "@tailwindcss/postcss": "^4.1.0",

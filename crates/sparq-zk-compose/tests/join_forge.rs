@@ -209,7 +209,13 @@ fn join_manifest() -> ProofManifest {
         key_set: vec![public_key_to_hex(&sk.public_key())],
         commitment_attestations: vec![attest_full(ca, sa, &sk), attest_full(cb, sb, &sk)],
         attributions: vec![vec![0], vec![0]],
-        join_obligations: vec![],
+        // [OPUS-4.8] sq-en5dx: `graph_a`/`graph_b` are DISTINCT commitments, so the
+        // shared `?p` is a genuine cross-graph join whose non-bnode obligation the Q6
+        // gate now requires (keyed on committed-graph identity). Declare it so these
+        // slot/edge forge vectors reach `bind_joins` (the gate under test) instead of
+        // failing earlier on the missing obligation; the omitted-obligation case is
+        // pinned by `join_gates::finding_a_cross_scan_alias_forge_rejected_by_q6`.
+        join_obligations: vec![("p".to_string(), 0, 1)],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },

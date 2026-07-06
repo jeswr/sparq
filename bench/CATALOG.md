@@ -63,9 +63,9 @@ conventions first, then a per-category map that points at the registry, then a
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `dict-baseline`, `hdt-load-bench`, `hdt-stage-split`, `hdt-suite`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
 | **scaling** | parallel thread sweep + cross-commit/hardware tracking | `cli-scaling`, `ci-bench`, `ci-bench-ec2`, `hw-bench` |
-| **inference** | N3 / RDFS / OWL closure + incremental maintenance | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench` |
+| **inference** | N3 / RDFS / OWL closure + incremental maintenance; access-control (WAC/ACP/ODRL) oracle | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `owl-sameas`, `solid-wac-bench`, `policy-odrl-eval`, `ac-oracle` |
 | **zk** | commitment pipeline, trace seam, circuit gates, prove/verify | `zk-commit-throughput`, `zk-trace-overhead`, `zk-compose-gates`, `zk-compose-prove-verify` |
-| **serve** | concurrent-serving + memory-tiering research spikes; PSS write-path parity gate | `serve-spikes`, `memtier-spikes`, `pss-update-parity` |
+| **serve** | canonical loopback HTTP throughput harness; concurrent-serving + memory-tiering research spikes; PSS write-path parity gate | `serve-throughput`, `serve-spikes`, `memtier-spikes`, `pss-update-parity` |
 | **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance` |
 | **competitors** | versioned external-engine comparison (Oxigraph / QLever / Fuseki+TDB2 / eye + the SHACL/geo/FTS/vector peers) + version+env capture | `competitor-gather` (registry: [`competitors.json`](./competitors.json)) |
 
@@ -74,6 +74,15 @@ Notes on a few that need care:
 - **`bench/serve` + `bench/memtier` are research SPIKES, not maintained
   regression benchmarks.** Their numbers calibrate research docs; re-run on the
   target hardware before trusting any absolute value.
+- **`serve-throughput` (`bench/serve-throughput`) IS a maintained canonical harness**
+  (unlike the `bench/serve` spikes) — see
+  [`bench/serve-throughput/README.md`](./serve-throughput/README.md). It stands up the
+  REAL in-process `sparq_server::serve` stack on a loopback port and reports
+  {req/s, p50/p99 ms, peak RSS} for a small SELECT + an ASK at concurrency 1/8/32. req/s
+  + latency are wall-clock sensitive → **NON-CANONICAL on a shared box**; canonical
+  numbers come only from a quiet EC2 runner, and it is deliberately NOT wired into
+  `scripts/ci-bench.sh` / `scripts/perf-gate.py` (req/s is a trend/EC2 metric). It is the
+  prerequisite that unblocks the HTTP opt lane (sq-7d3dj.10/.12/.13).
 - **`sp2b` (SP2Bench) is tiered** — see [`bench/sp2b/README.md`](./sp2b/README.md).
   The per-commit path builds+caches the real Freiburg generator (BSD; sha256-pinned, g++
   `-O2` not `-O3`) and runs 14 sub-second queries on a fixed 250k-triple corpus, emitting
@@ -370,6 +379,8 @@ python3 bench/u64-valueids/gen.py 1000000 /tmp/t3-literals.nt
 SPARQ_CLI=target/release/sparq-cli bench/inference/owl-bench.sh
 EYE=$HOME/.local/bin/eye SPARQ_CLI=target/release/sparq-cli bench/inference/eye-comparison.sh
 cargo run -p sparq-reason --example incremental_olympics_bench --release
+# access-controlled-query oracle (WAC/ACP/ODRL, sparq-acbench) — fail-closed pass/fail, no engine link:
+bench/ac/run.sh --smoke                              # per-commit smoke tier (bench/ac/run.sh --sf N = nightly)
 
 # --- zk (standalone projects + Noir toolchain) ---
 ( cd bench/zk        && cargo bench )

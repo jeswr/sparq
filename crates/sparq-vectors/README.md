@@ -107,7 +107,7 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
 - **Design** — [`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md).
 - **Accuracy & throughput** — not baked into docs; the recall / DiskANN / PQ / throughput gates
   are `cargo test`s (`tests/recall.rs`, `diskann.rs`, `quant.rs`, `throughput.rs`), with live
-  numbers on the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench).
+  numbers on the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench).
 - **Verified against an established ANN library (sq-6te5)** — `tests/ref_lib_verify.rs` anchors
   recall against **hnswlib** via a committed capture (`tests/fixtures/hnswlib_ref.tsv`):
   `nearest_exact` reproduces the numpy exact-kNN oracle, and DiskANN (and HNSW under `approx-ann`)

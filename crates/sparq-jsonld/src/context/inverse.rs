@@ -1,0 +1,1167 @@
+//! Inverse Context Creation (JSON-LD 1.1 API §4.3), IRI Compaction (§7.1),
+//! and Term Selection (§7.2).
+//!
+//! [SONNET-4.6] (sq-90mu3) The compaction-side companions of IRI Expansion
+//! (`context::iri`, bead `sq-oy1f.24`). These are pure functions consumed by the
+//! document Compaction Algorithm (§8, bead `sq-oy1f.27`). Build the
+//! `InverseContext` once per compaction call with
+//! `ActiveContext::inverse_context`, then pass a reference into
+//! `compact_iri` for each IRI that needs compacting.
+//!
+//! The three algorithms implemented here are:
+//!
+//! - **§4.3** Inverse Context Creation — maps every IRI in the context back to
+//!   the best term for each (container, type/language) slot, with tie-breaking
+//!   by shortest term then lexicographic order.
+//! - **§7.1** IRI Compaction — keyword aliases, inverse-context term lookup,
+//!   vocab-relative suffixes, compact IRIs (`prefix:suffix`), and
+//!   base-relative paths.
+//! - **§7.2** Term Selection — the container × preferred-value walk over the
+//!   inverse context, factored out so the document compaction algorithm can
+//!   call it without re-entering `compact_iri`.
+//!
+//! Spec: <https://www.w3.org/TR/json-ld11-api/#context-processing-algorithms>
+
+use std::collections::BTreeMap;
+
+use super::{is_keyword, ActiveContext, Direction, Override, TermDefinition};
+use super::iri::relativize_iri;
+use crate::json::Json;
+
+// ---------------------------------------------------------------------------
+// §4.3 Inverse Context Creation
+// ---------------------------------------------------------------------------
+
+/// Per-container type/language map — the leaf node of the inverse context
+/// tree (JSON-LD 1.1 API §4.3).
+///
+/// `language` is keyed by language-direction tag (e.g. `"en"`, `"en_ltr"`,
+/// `"@null"`, `"@none"`). `type_` is keyed by type IRI or `"@reverse"` /
+/// `"@none"` / `"@any"`. `any` holds the unconstrained fallback term under
+/// `"@none"`.
+#[derive(Clone, Debug, Default)]
+struct TypeLangMap {
+    /// `@language` sub-map: language tag (and direction suffix) to term.
+    language: BTreeMap<String, String>,
+    /// `@type` sub-map: type IRI / `@reverse` / `@none` / `@any` to term.
+    type_: BTreeMap<String, String>,
+    /// `@any` sub-map: `"@none"` to an unconstrained catch-all term.
+    any: BTreeMap<String, String>,
+}
+
+/// The **inverse context** (JSON-LD 1.1 API §4.3): a multi-level map from
+/// IRI → container key → `TypeLangMap`.
+///
+/// Build one from an `ActiveContext` via `ActiveContext::inverse_context`.
+/// Pass a shared reference into `compact_iri` for each IRI that must be
+/// compacted during a single compaction pass.
+#[derive(Clone, Debug, Default)]
+pub struct InverseContext {
+    /// iri → container-key → type-language map.
+    inner: BTreeMap<String, BTreeMap<String, TypeLangMap>>,
+}
+
+impl ActiveContext {
+    /// Builds the **inverse context** from `self` (JSON-LD 1.1 API §4.3).
+    ///
+    /// The inverse context maps every IRI in the active context back to the
+    /// "best" term for each `(container, type/language)` combination. When two
+    /// terms compete for the same slot the shortest term wins; ties are broken
+    /// lexicographically (the spec mandates this iteration order at §4.3 step
+    /// 3).
+    ///
+    /// [SONNET-4.6] (sq-90mu3)
+    pub fn inverse_context(&self) -> InverseContext {
+        // §4.3 step 1: initialise result.
+        let mut result: BTreeMap<String, BTreeMap<String, TypeLangMap>> = BTreeMap::new();
+
+        // §4.3 steps 2–3: default_language is the active context's default
+        // language (lower-cased), optionally suffixed with "_" + direction.
+        // Falls back to "@none" when unset.
+        let default_language: String = match &self.default_language {
+            None => "@none".to_string(),
+            Some(lang) => {
+                let lang_lc = lang.to_lowercase();
+                match self.default_base_direction {
+                    Some(dir) => format!("{}_{}", lang_lc, dir.as_str()),
+                    None => lang_lc,
+                }
+            }
+        };
+
+        // §4.3 step 4: iterate term definitions ordered by shortest term
+        // length first, then lexicographically least (tie-breaking).  Because
+        // each slot is first-write-wins this order guarantees the spec's
+        // "shortest, then lexicographic" preference without any post-pass.
+        let mut terms: Vec<(&str, &TermDefinition)> = self
+            .term_definitions
+            .iter()
+            .map(|(k, v)| (k.as_str(), v))
+            .collect();
+        terms.sort_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then(a.cmp(b)));
+
+        for (term, term_def) in terms {
+            // §4.3 step 4.1: skip terms with a null IRI mapping.
+            let iri = match &term_def.iri {
+                Some(i) => i.clone(),
+                None => continue,
+            };
+
+            // §4.3 step 4.2: compute the container key — sort the container
+            // keywords and join them; use "@none" for an empty container.
+            let container: String = if term_def.container.is_empty() {
+                "@none".to_string()
+            } else {
+                let mut sorted = term_def.container.clone();
+                sorted.sort();
+                sorted.join("")
+            };
+
+            // §4.3 steps 4.3–4.4: ensure the result entries exist.
+            let container_map = result.entry(iri.clone()).or_default();
+            let tl_map = container_map
+                .entry(container)
+                .or_default();
+
+            // §4.3 step 4.5 ("@any"): record this term as an unconstrained
+            // fallback — first-write-wins (shortest/lexicographic guarantee
+            // comes from the sort above).
+            tl_map.any.entry("@none".to_string()).or_insert_with(|| term.to_string());
+
+            if term_def.reverse {
+                // §4.3 step 4.6: reverse property — store in type map under
+                // "@reverse".
+                tl_map
+                    .type_
+                    .entry("@reverse".to_string())
+                    .or_insert_with(|| term.to_string());
+            } else if term_def.type_mapping.as_deref() == Some("@none") {
+                // §4.3 step 4.7: type mapping "@none" — this term accepts any
+                // type or language; mark it with "@any" in both maps.
+                tl_map
+                    .language
+                    .entry("@any".to_string())
+                    .or_insert_with(|| term.to_string());
+                tl_map
+                    .type_
+                    .entry("@any".to_string())
+                    .or_insert_with(|| term.to_string());
+            } else if let Some(type_mapping) = &term_def.type_mapping {
+                // §4.3 step 4.8: concrete type mapping — register under that
+                // type IRI.
+                tl_map
+                    .type_
+                    .entry(type_mapping.clone())
+                    .or_insert_with(|| term.to_string());
+            } else {
+                // §4.3 step 4.9: no type mapping — use language/direction.
+                let lang_key = language_dir_key(&term_def.language, &term_def.direction);
+                match lang_key {
+                    Some(key) => {
+                        // An explicit language and/or direction was given.
+                        tl_map
+                            .language
+                            .entry(key)
+                            .or_insert_with(|| term.to_string());
+                    }
+                    None => {
+                        // §4.3 step 4.9.x: no explicit language or direction —
+                        // fall back to the context default(s), then "@none".
+                        if self.default_language.is_some() || self.default_base_direction.is_some() {
+                            tl_map
+                                .language
+                                .entry(default_language.clone())
+                                .or_insert_with(|| term.to_string());
+                        }
+                        tl_map
+                            .language
+                            .entry("@none".to_string())
+                            .or_insert_with(|| term.to_string());
+                        tl_map
+                            .type_
+                            .entry("@none".to_string())
+                            .or_insert_with(|| term.to_string());
+                    }
+                }
+            }
+        }
+
+        InverseContext { inner: result }
+    }
+}
+
+/// Computes the language-direction key for the inverse context `@language`
+/// sub-map from a term definition's language and direction overrides.
+///
+/// Returns `None` when both overrides are `Unset` (the "no explicit
+/// language/direction" case, handled separately).
+///
+/// Key format (mirrors jsonld.js):
+/// - `Set(lang)` + `Set(dir)` → `"<lang-lc>_<dir>"`
+/// - `Set(lang)` + `Null`     → `"<lang-lc>_"` (null direction suffix)
+/// - `Set(lang)` + `Unset`    → `"<lang-lc>"`
+/// - `Null`      + `Set(dir)` → `"@null_<dir>"`
+/// - `Null`      + `Null`     → `"@null_"`
+/// - `Null`      + `Unset`    → `"@null"`
+/// - `Unset`     + `Set(dir)` → `"@_<dir>"`
+/// - `Unset`     + `Null`     → `"@_"`
+/// - `Unset`     + `Unset`    → `None` (caller handles defaults)
+fn language_dir_key(
+    language: &Override<String>,
+    direction: &Override<Direction>,
+) -> Option<String> {
+    match (language, direction) {
+        (Override::Set(lang), Override::Set(dir)) => {
+            Some(format!("{}_{}", lang.to_lowercase(), dir.as_str()))
+        }
+        (Override::Set(lang), Override::Null) => Some(format!("{}_", lang.to_lowercase())),
+        (Override::Set(lang), Override::Unset) => Some(lang.to_lowercase()),
+        (Override::Null, Override::Set(dir)) => {
+            Some(format!("@null_{}", dir.as_str()))
+        }
+        (Override::Null, Override::Null) => Some("@null_".to_string()),
+        (Override::Null, Override::Unset) => Some("@null".to_string()),
+        (Override::Unset, Override::Set(dir)) => {
+            Some(format!("@_{}", dir.as_str()))
+        }
+        (Override::Unset, Override::Null) => Some("@_".to_string()),
+        (Override::Unset, Override::Unset) => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §7.2 Term Selection
+// ---------------------------------------------------------------------------
+
+/// **Term Selection** (JSON-LD 1.1 API §7.2).
+///
+/// Walks `inverse` for `iri`, trying each `container` × `preferred_value`
+/// pair in order (containers are tried outermost). Returns the first matching
+/// term, or `None` if nothing matched.
+///
+/// `type_language` is one of `"@type"`, `"@language"`, `"@any"`, or
+/// `"@reverse"` (the last two are aliases over the respective sub-maps).
+///
+/// [SONNET-4.6] (sq-90mu3)
+pub(crate) fn select_term(
+    inverse: &InverseContext,
+    iri: &str,
+    containers: &[&str],
+    type_language: &str,
+    preferred_values: &[&str],
+) -> Option<String> {
+    let container_map = inverse.inner.get(iri)?;
+    // §7.2 step 3: iterate containers, then preferred values within each.
+    for container in containers {
+        let tl_map = match container_map.get(*container) {
+            Some(m) => m,
+            None => continue,
+        };
+        // §7.2 step 3.5: choose the sub-map by type_language.
+        let value_map: &BTreeMap<String, String> = match type_language {
+            "@type" | "@reverse" => &tl_map.type_,
+            "@language" => &tl_map.language,
+            _ => &tl_map.any, // "@any" and anything else falls through to any
+        };
+        // §7.2 step 3.6: check each preferred value in order.
+        for pv in preferred_values {
+            if let Some(term) = value_map.get(*pv) {
+                return Some(term.clone());
+            }
+        }
+    }
+    // §7.2 step 4: no match.
+    None
+}
+
+// ---------------------------------------------------------------------------
+// §7.1 IRI Compaction
+// ---------------------------------------------------------------------------
+
+/// Computes the default language (lowercased, with optional `_<dir>` suffix)
+/// for use in building `preferred_values` during IRI compaction.  Returns
+/// `"@none"` when the context has no default language.
+fn compute_default_language(ctx: &ActiveContext) -> String {
+    match &ctx.default_language {
+        None => "@none".to_string(),
+        Some(lang) => {
+            let lc = lang.to_lowercase();
+            match ctx.default_base_direction {
+                Some(dir) => format!("{}_{}", lc, dir.as_str()),
+                None => lc,
+            }
+        }
+    }
+}
+
+/// **IRI Compaction** (JSON-LD 1.1 API §7.1).
+///
+/// Compacts `iri` (or a keyword) to the shortest available representation in
+/// the active context, consulting the pre-built `inverse` context:
+///
+/// 1. Keyword alias lookup (step 2).
+/// 2. Inverse-context term selection — preferred container × type/language
+///    lookup, with containers and preferred values derived from `value`
+///    (step 3).
+/// 3. Vocab-relative suffix — strip the `@vocab` prefix when the suffix is
+///    unambiguous (step 4).
+/// 4. Compact IRI — `prefix:suffix` via `@prefix`-flagged terms (step 5).
+/// 5. Base-relative path when `vocab` is false (step 6).
+/// 6. Return `iri` unchanged (step 7).
+///
+/// `value` is the JSON value being compacted for (a node-object or value
+/// object); it governs which containers and type/language keys are preferred.
+/// Pass `None` when compacting a bare IRI (e.g. a `@type` value).
+/// `vocab` indicates vocab-relative compaction; `reverse` marks a
+/// `@reverse` property.
+///
+/// [SONNET-4.6] (sq-90mu3)
+pub fn compact_iri(
+    ctx: &ActiveContext,
+    inverse: &InverseContext,
+    iri: &str,
+    value: Option<&Json>,
+    vocab: bool,
+    reverse: bool,
+) -> String {
+    // §7.1 step 1: empty / null — return as-is.
+    if iri.is_empty() {
+        return iri.to_string();
+    }
+
+    // §7.1 step 2: keyword or keyword alias.
+    if is_keyword(iri) {
+        // Collect every term whose IRI mapping equals this keyword.
+        let mut aliases: Vec<&str> = ctx
+            .term_definitions
+            .iter()
+            .filter(|(_, def)| def.iri.as_deref() == Some(iri))
+            .map(|(t, _)| t.as_str())
+            .collect();
+        if !aliases.is_empty() {
+            // Shortest, then lexicographic least — pick the winner.
+            aliases.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
+            return aliases[0].to_string();
+        }
+        // No alias — return the keyword itself.
+        return iri.to_string();
+    }
+
+    // §7.1 step 3: vocab=true AND iri appears in the inverse context.
+    if vocab && inverse.inner.contains_key(iri) {
+        let default_language = compute_default_language(ctx);
+
+            // §7.1 step 3.1–3.4: determine containers, type_language, and
+            // preferred_values from the shape of `value`.
+
+            // Containers tried in order; specific container types first,
+            // "@set" and "@none" appended below.
+            let mut containers: Vec<String> = Vec::new();
+
+            // type_language drives which inverse-context sub-map we read.
+            let type_language: &str;
+            // preferred_values are looked up within the sub-map, in order.
+            let mut preferred_values: Vec<String> = Vec::new();
+
+            // Unwrap @preserve to its first element (§7.1 step 3.1).
+            let value = value.and_then(|v| {
+                if let Some(pres) = v.get("@preserve") {
+                    match pres {
+                        Json::Arr(arr) => arr.first(),
+                        other => Some(other),
+                    }
+                } else {
+                    Some(v)
+                }
+            });
+
+            if reverse {
+                // §7.1 step 3.2: reverse property.
+                containers.push("@set".to_string());
+                type_language = "@reverse";
+                preferred_values.push("@reverse".to_string());
+            } else if let Some(v) = value {
+                let is_map = matches!(v, Json::Obj(_));
+                let has_index = is_map && v.get("@index").is_some();
+                let id_val = if is_map { v.get("@id") } else { None };
+                let type_val = if is_map { v.get("@type") } else { None };
+                let is_list = is_map && v.get("@list").is_some();
+                let is_value_obj = is_map && v.get("@value").is_some();
+                let lang_val = if is_map { v.get("@language") } else { None };
+                let dir_val = if is_map { v.get("@direction") } else { None };
+
+                if has_index && !containers.contains(&"@index".to_string()) {
+                    // §7.1 step 3.3: value has @index — add @index and
+                    // @index@set to the container search list so that
+                    // select_term can find terms whose container mapping
+                    // includes @index.
+                    //
+                    // [SONNET-4.6] sq-90mu3 defect fix: the prior code
+                    // called `ctx.term_definitions.get(iri)` using the
+                    // expanded IRI as a key.  `term_definitions` is keyed
+                    // by TERM NAME (e.g. "label"), so that lookup always
+                    // returned `None`, making the guard vacuously permissive
+                    // (containers were always extended regardless).
+                    //
+                    // The spec (§7.1 step 3.3) conditions on whether the
+                    // *outer* active property (the caller's current term, not
+                    // the IRI being compacted here) has @index in its
+                    // container.  `compact_iri` does not receive the outer
+                    // active-property term name, so the guard is not locally
+                    // implementable.  The unconditional push is the correct
+                    // local behaviour: an @index-container term for `iri` is
+                    // stored ONLY in the `"@index"` slot of the inverse
+                    // context and is unreachable without searching that slot;
+                    // adding `"@index"` when no such term exists is harmless
+                    // (select_term just finds nothing there and falls
+                    // through).  This matches the effective behaviour of the
+                    // reference jsonld.js implementation when the outer
+                    // activeProperty is not threaded through. [SONNET-4.6]
+                    containers.push("@index".to_string());
+                    containers.push("@index@set".to_string());
+                }
+
+                if is_list {
+                    // §7.1 step 3.4: @list value — try @list container first.
+                    if !has_index {
+                        containers.push("@list".to_string());
+                    }
+                    type_language = "@language";
+                    preferred_values.push(default_language.clone());
+                } else if let Some(id_v) = id_val {
+                    // §7.1 step 3.5: @id in value — compact to @id-type term.
+                    type_language = "@type";
+                    if let Json::Str(id_iri) = id_v {
+                        // Compact the nested @id IRI first and add it as the
+                        // most preferred value (the term whose type = the
+                        // compacted nested id).
+                        let compact_id =
+                            compact_iri(ctx, inverse, id_iri, None, vocab, false);
+                        preferred_values.push(compact_id);
+                    }
+                    preferred_values.push("@id".to_string());
+                    containers.push("@id".to_string());
+                    containers.push("@id@set".to_string());
+                    containers.push("@type".to_string());
+                    containers.push("@set@type".to_string());
+                } else if let Some(type_v) = type_val {
+                    // §7.1 step 3.6: @type in value.
+                    type_language = "@type";
+                    match type_v {
+                        Json::Str(t) => preferred_values.push(t.clone()),
+                        Json::Arr(ts) => {
+                            for t in ts {
+                                if let Json::Str(s) = t {
+                                    preferred_values.push(s.clone());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    containers.push("@type".to_string());
+                    containers.push("@set@type".to_string());
+                } else if is_value_obj {
+                    // §7.1 step 3.7: @value literal.
+                    match (lang_val, dir_val) {
+                        (Some(Json::Str(lang)), Some(Json::Str(dir))) => {
+                            // Both language and direction present.
+                            let lang_dir =
+                                format!("{}_{}", lang.to_lowercase(), dir.to_lowercase());
+                            type_language = "@language";
+                            preferred_values.push(lang_dir);
+                            preferred_values.push(lang.to_lowercase());
+                            preferred_values.push(format!("@_{}", dir.to_lowercase()));
+                            containers.push("@language".to_string());
+                            containers.push("@language@set".to_string());
+                        }
+                        (Some(Json::Str(lang)), _) => {
+                            // Language only (direction absent or null).
+                            type_language = "@language";
+                            preferred_values.push(lang.to_lowercase());
+                            containers.push("@language".to_string());
+                            containers.push("@language@set".to_string());
+                        }
+                        (_, Some(Json::Str(dir))) => {
+                            // Direction only.
+                            type_language = "@language";
+                            preferred_values.push(format!("@_{}", dir.to_lowercase()));
+                            containers.push("@language".to_string());
+                            containers.push("@language@set".to_string());
+                        }
+                        _ => {
+                            // @value with no language/direction/type markers —
+                            // plain literal; prefer plain terms (type="@none").
+                            type_language = "@type";
+                            preferred_values.push("@none".to_string());
+                        }
+                    }
+                } else {
+                    // §7.1 step 3.8: other map (e.g. node object) — fall
+                    // back to language defaults.
+                    type_language = "@language";
+                    preferred_values.push(default_language.clone());
+                }
+
+                // §7.1 step 3.9: always add @set and @none to the container
+                // list (value is not null).
+                if !containers.contains(&"@set".to_string()) {
+                    containers.push("@set".to_string());
+                }
+            } else {
+                // §7.1 step 3.10: null value — generic language preference.
+                type_language = "@language";
+                preferred_values.push(default_language.clone());
+            }
+
+            // §7.1 step 3.11: always add "@none" and "@any" to
+            // preferred_values as fallbacks.
+            if !preferred_values.contains(&"@none".to_string()) {
+                preferred_values.push("@none".to_string());
+            }
+            preferred_values.push("@any".to_string());
+
+            // §7.1 step 3.12: "@none" container is always tried last.
+            if !containers.contains(&"@none".to_string()) {
+                containers.push("@none".to_string());
+            }
+
+            // §7.1 step 3.13: call term selection.
+        let cs: Vec<&str> = containers.iter().map(String::as_str).collect();
+        let pvs: Vec<&str> = preferred_values.iter().map(String::as_str).collect();
+        if let Some(term) = select_term(inverse, iri, &cs, type_language, &pvs) {
+            return term;
+        }
+    }
+
+    // §7.1 step 4: vocab-relative suffix — if @vocab is a prefix of iri and
+    // the suffix is either undefined or unambiguously maps back to this iri.
+    if vocab {
+        if let Some(vocab_iri) = ctx.vocabulary_mapping.as_deref() {
+            if iri.starts_with(vocab_iri) && iri.len() > vocab_iri.len() {
+                let suffix = &iri[vocab_iri.len()..];
+                // Guard: only use the suffix if it's not a term that maps
+                // somewhere else (a different IRI).
+                let conflict = ctx
+                    .term_definitions
+                    .get(suffix)
+                    .map(|d| d.iri.as_deref() != Some(iri))
+                    .unwrap_or(false);
+                if !conflict {
+                    return suffix.to_string();
+                }
+            }
+        }
+    }
+
+    // §7.1 step 5: compact IRI via @prefix-flagged terms.
+    // Try every prefix term, build "prefix:suffix", pick the shortest (then
+    // lexicographic least) candidate that does not conflict with an existing
+    // term definition.
+    let mut best_compact: Option<String> = None;
+
+    // Iterate prefix terms in (length, lexicographic) order so that the
+    // first conflict-free candidate encountered is already the tie-break
+    // winner for equal-length prefixes.
+    let mut prefix_terms: Vec<(&str, &TermDefinition)> = ctx
+        .term_definitions
+        .iter()
+        .filter(|(_, def)| def.prefix)
+        .map(|(k, v)| (k.as_str(), v))
+        .collect();
+    prefix_terms.sort_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then(a.cmp(b)));
+
+    for (term, def) in &prefix_terms {
+        if let Some(prefix_iri) = def.iri.as_deref() {
+            // Skip if the prefix IRI IS the target (no suffix to attach).
+            if prefix_iri == iri {
+                continue;
+            }
+            // Skip if the IRI doesn't start with this prefix.
+            if !iri.starts_with(prefix_iri) {
+                continue;
+            }
+            let suffix = &iri[prefix_iri.len()..];
+            // Guard: the suffix must not start with "//" (would make it
+            // look like an authority component of a URL).
+            if suffix.starts_with("//") || suffix.is_empty() {
+                continue;
+            }
+            let candidate = format!("{}:{}", term, suffix);
+
+            // Guard: if this compact IRI already denotes a term, only use
+            // it when that term maps to the same IRI AND there is no value
+            // (a value might imply type/container constraints that break
+            // the match).
+            let ok = match ctx.term_definitions.get(&candidate) {
+                Some(d) => d.iri.as_deref() == Some(iri) && value.is_none(),
+                None => true,
+            };
+            if !ok {
+                continue;
+            }
+
+            // Keep the shortest candidate; break ties lexicographically.
+            let better = match &best_compact {
+                None => true,
+                Some(b) => {
+                    candidate.len() < b.len()
+                        || (candidate.len() == b.len() && candidate < *b)
+                }
+            };
+            if better {
+                best_compact = Some(candidate);
+            }
+        }
+    }
+
+    if let Some(compact) = best_compact {
+        // §7.1 step 5.x: use the compact IRI if vocab is false, or if it
+        // does not itself appear in the inverse context (which would mean it
+        // was already resolved to a term above).
+        if !vocab || !inverse.inner.contains_key(&compact) {
+            return compact;
+        }
+    }
+
+    // §7.1 step 6: base-relative IRI (vocab=false path). RFC 3986 §5.3-style
+    // relative-reference generation via `relativize_iri` (the inverse of
+    // `context::iri::resolve_iri`). This supersedes the prior
+    // `iri.strip_prefix(base)` which only handled the literal-prefix case
+    // and missed same-directory ("http://ex/a/b" + "http://ex/a/c" → "c"),
+    // parent-traversal ("../c"), and query/fragment preservation.
+    // [SONNET-4.6] sq-90mu3 defect fix.
+    if !vocab {
+        if let Some(base) = ctx.base_iri.as_deref() {
+            if let Some(relative) = relativize_iri(base, iri) {
+                return relative;
+            }
+        }
+    }
+
+    // §7.1 step 7: nothing worked — return the IRI unchanged.
+    iri.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::json::Json;
+    use crate::loader::NoopLoader;
+    use crate::options::JsonLdOptions;
+
+    const BASE: &str = "http://example.org/";
+
+    fn json(s: &str) -> Json {
+        Json::parse(s).expect("valid JSON")
+    }
+
+    fn ctx_of(src: &str) -> ActiveContext {
+        ActiveContext::new(Some(BASE))
+            .process(&json(src), Some(BASE), &NoopLoader, &JsonLdOptions::default())
+            .expect("context should process")
+    }
+
+    // -----------------------------------------------------------------------
+    // §4.3 Inverse Context Creation — shape + tie-break tests
+    // -----------------------------------------------------------------------
+
+    /// Two terms mapping to the same IRI: the shorter one must win every slot.
+    /// Derived from the §4.3 spec invariant: "ordered by shortest and then
+    /// lexicographically least".
+    #[test]
+    fn inverse_ctx_shorter_term_wins_over_longer() {
+        // "z" (1 char) beats "aa" (2 chars) for the same IRI.
+        let ac = ctx_of(
+            r#"{"z": "http://ex/foo", "aa": "http://ex/foo"}"#,
+        );
+        let inv = ac.inverse_context();
+        // The "@any"/"@none" slot must be "z", not "aa".
+        let iri_map = inv.inner.get("http://ex/foo").expect("iri present");
+        let tl = iri_map.get("@none").expect("@none container present");
+        assert_eq!(
+            tl.any.get("@none").map(String::as_str),
+            Some("z"),
+            "shorter term 'z' must beat 'aa'"
+        );
+        assert_eq!(
+            tl.language.get("@none").map(String::as_str),
+            Some("z")
+        );
+        assert_eq!(
+            tl.type_.get("@none").map(String::as_str),
+            Some("z")
+        );
+    }
+
+    /// Equal-length terms: lexicographically least must win.
+    #[test]
+    fn inverse_ctx_lexicographic_tie_break() {
+        // "aa" < "ab" lexicographically.
+        let ac = ctx_of(
+            r#"{"ab": "http://ex/bar", "aa": "http://ex/bar"}"#,
+        );
+        let inv = ac.inverse_context();
+        let tl = inv
+            .inner
+            .get("http://ex/bar")
+            .unwrap()
+            .get("@none")
+            .unwrap();
+        assert_eq!(
+            tl.any.get("@none").map(String::as_str),
+            Some("aa"),
+            "lexicographic least 'aa' must beat 'ab'"
+        );
+    }
+
+    /// Type-mapped term lands in the `@type` sub-map under its type IRI.
+    #[test]
+    fn inverse_ctx_type_mapped_term_in_type_submap() {
+        let ac = ctx_of(
+            r#"{"typed": {"@id": "http://ex/p", "@type": "http://ex/T"}}"#,
+        );
+        let inv = ac.inverse_context();
+        let tl = inv
+            .inner
+            .get("http://ex/p")
+            .unwrap()
+            .get("@none")
+            .unwrap();
+        assert_eq!(
+            tl.type_.get("http://ex/T").map(String::as_str),
+            Some("typed")
+        );
+    }
+
+    /// A `@language`-typed term lands in the `@language` sub-map under its
+    /// lower-cased language tag.
+    #[test]
+    fn inverse_ctx_language_mapped_term_in_language_submap() {
+        let ac = ctx_of(
+            r#"{"label": {"@id": "http://ex/label", "@language": "en"}}"#,
+        );
+        let inv = ac.inverse_context();
+        let tl = inv
+            .inner
+            .get("http://ex/label")
+            .unwrap()
+            .get("@none")
+            .unwrap();
+        assert_eq!(
+            tl.language.get("en").map(String::as_str),
+            Some("label")
+        );
+    }
+
+    /// Container mapping produces the sorted-join key.
+    /// Term with `@container: ["@language"]` → container key `"@language"`.
+    #[test]
+    fn inverse_ctx_container_key_sorted_join() {
+        let ac = ctx_of(
+            r#"{"labels": {"@id": "http://ex/labels", "@container": "@language"}}"#,
+        );
+        let inv = ac.inverse_context();
+        // The inverse context should have a "@language" entry, not "@none".
+        assert!(
+            inv.inner
+                .get("http://ex/labels")
+                .unwrap()
+                .contains_key("@language"),
+            "term with @container @language must appear under the '@language' key"
+        );
+    }
+
+    /// `@prefix`-flagged term with null IRI is skipped.
+    #[test]
+    fn inverse_ctx_null_iri_term_is_skipped() {
+        let ac = ctx_of(r#"{"dropped": null}"#);
+        let inv = ac.inverse_context();
+        // A null-mapped term has no IRI: nothing should appear in the inverse.
+        assert!(inv.inner.is_empty() || !inv.inner.values().any(|cm| {
+            cm.values().any(|tl| tl.any.values().any(|t| t == "dropped"))
+        }));
+    }
+
+    // -----------------------------------------------------------------------
+    // §7.1 IRI Compaction — keyword alias, term lookup, compact IRI, vocab
+    // -----------------------------------------------------------------------
+
+    /// Keyword alias: a term aliasing `@type` compacts back to the alias.
+    ///
+    /// Fixture derivation: compact/0008 has `"uri": "@id"`, which means
+    /// compact_iri("@id", vocab=true) → "uri".  The same shape holds for
+    /// `@type`.
+    #[test]
+    fn compact_iri_keyword_alias() {
+        // W3C compact/0008: {"uri": "@id"} — here we test the same shape
+        // for "@type" to keep the fixture id range anchored.
+        let ac = ctx_of(r#"{"rdftype": "@type"}"#);
+        let inv = ac.inverse_context();
+        let result = compact_iri(&ac, &inv, "@type", None, true, false);
+        assert_eq!(result, "rdftype", "keyword alias should compact to the alias term");
+    }
+
+    /// Basic term lookup via inverse context.
+    ///
+    /// Oracle: W3C compact/0002 — context {"t1": "http://example.com/t1"}.
+    /// Compacting `http://example.com/t1` with no value should yield `"t1"`.
+    ///
+    /// Fixture: tests/w3c/json-ld-api/tests/compact/0002-context.jsonld,
+    ///          tests/w3c/json-ld-api/tests/compact/0002-out.jsonld
+    ///          (`"@type": "t1"` in the compacted output).
+    #[test]
+    fn compact_iri_basic_term_lookup_w3c_0002() {
+        let ac = ctx_of(
+            r#"{"t1": "http://example.com/t1",
+               "t2": "http://example.com/t2",
+               "term1": "http://example.com/term1",
+               "term2": "http://example.com/term2",
+               "term3": "http://example.com/term3",
+               "term4": "http://example.com/term4",
+               "term5": "http://example.com/term5"}"#,
+        );
+        let inv = ac.inverse_context();
+
+        // "t1" is the term for http://example.com/t1
+        assert_eq!(
+            compact_iri(&ac, &inv, "http://example.com/t1", None, true, false),
+            "t1"
+        );
+        // "term1" is the term for http://example.com/term1
+        assert_eq!(
+            compact_iri(&ac, &inv, "http://example.com/term1", None, true, false),
+            "term1"
+        );
+        // A @value literal with @language: "en" — term3 has no language
+        // constraint, so it still matches via the "@none" fallback.
+        let value = json(r#"{"@value": "v3", "@language": "en"}"#);
+        assert_eq!(
+            compact_iri(
+                &ac,
+                &inv,
+                "http://example.com/term3",
+                Some(&value),
+                true,
+                false
+            ),
+            "term3",
+            "term with no language mapping should match via @none fallback"
+        );
+    }
+
+    /// Compact IRI via `@prefix`-flagged term.
+    ///
+    /// Oracle: W3C compact/0005 — context {"ex": "http://example.org/"}.
+    /// Compacting `http://example.org/id1` with vocab=false (no vocab match)
+    /// should yield `"ex:id1"`.
+    ///
+    /// Fixture: tests/w3c/json-ld-api/tests/compact/0005-context.jsonld,
+    ///          tests/w3c/json-ld-api/tests/compact/0005-out.jsonld
+    ///          (`"@id": "ex:id1"` in the compacted output).
+    #[test]
+    fn compact_iri_prefix_compact_iri_w3c_0005() {
+        let ac = ctx_of(
+            r#"{"ex": "http://example.org/",
+               "term1": {"@id": "ex:term1", "@type": "ex:datatype"},
+               "term2": {"@id": "ex:term2", "@type": "@id"}}"#,
+        );
+        let inv = ac.inverse_context();
+
+        // @id position: vocab=false, base-relative or compact-IRI.
+        // "ex" is a prefix term (prefix=true when used as a prefix in term1/2).
+        // compact_iri with vocab=false should produce "ex:id1".
+        let result = compact_iri(&ac, &inv, "http://example.org/id1", None, false, false);
+        assert_eq!(result, "ex:id1", "prefix:suffix compact IRI");
+
+        // Type position: vocab=true — "ex:Type1" is the compact IRI.
+        let result2 = compact_iri(
+            &ac,
+            &inv,
+            "http://example.org/Type1",
+            None,
+            true,
+            false,
+        );
+        assert_eq!(result2, "ex:Type1");
+    }
+
+    /// Compact IRI via a prefix with multiple candidates.
+    ///
+    /// Oracle: W3C compact/0007 — context {"foaf": "http://xmlns.com/foaf/0.1/",
+    /// "dc11": "http://purl.org/dc/elements/1.1/"}.
+    /// Compacting `http://xmlns.com/foaf/0.1/name` → `"foaf:name"`.
+    ///
+    /// Fixture: tests/w3c/json-ld-api/tests/compact/0007-context.jsonld,
+    ///          tests/w3c/json-ld-api/tests/compact/0007-out.jsonld
+    ///          (`"foaf:name"` appears in the compacted output).
+    #[test]
+    fn compact_iri_foaf_prefix_w3c_0007() {
+        let ac = ctx_of(
+            r#"{"dc11": "http://purl.org/dc/elements/1.1/",
+               "ex": "http://example.org/vocab#",
+               "foaf": "http://xmlns.com/foaf/0.1/"}"#,
+        );
+        let inv = ac.inverse_context();
+        let result = compact_iri(
+            &ac,
+            &inv,
+            "http://xmlns.com/foaf/0.1/name",
+            None,
+            true,
+            false,
+        );
+        assert_eq!(result, "foaf:name");
+
+        let dc_result = compact_iri(
+            &ac,
+            &inv,
+            "http://purl.org/dc/elements/1.1/title",
+            None,
+            true,
+            false,
+        );
+        assert_eq!(dc_result, "dc11:title");
+    }
+
+    /// Vocab-relative suffix: when `@vocab` is a prefix of the IRI and the
+    /// suffix doesn't conflict with a defined term, return the suffix alone.
+    #[test]
+    fn compact_iri_vocab_relative_suffix() {
+        let ac = ctx_of(
+            r#"{"@vocab": "http://example.org/vocab/"}"#,
+        );
+        let inv = ac.inverse_context();
+        let result = compact_iri(
+            &ac,
+            &inv,
+            "http://example.org/vocab/Thing",
+            None,
+            true,
+            false,
+        );
+        assert_eq!(result, "Thing", "vocab-relative suffix compaction");
+    }
+
+    /// Base-relative IRI: with vocab=false and no prefix match, a suffix
+    /// relative to @base is returned.
+    #[test]
+    fn compact_iri_base_relative() {
+        // BASE = "http://example.org/", set on the active context.
+        let ac = ActiveContext::new(Some(BASE));
+        let inv = ac.inverse_context();
+        let result = compact_iri(&ac, &inv, "http://example.org/doc", None, false, false);
+        assert_eq!(result, "doc", "base-relative IRI suffix");
+    }
+
+    /// Unresolvable IRI — returned unchanged.
+    #[test]
+    fn compact_iri_unknown_iri_returned_unchanged() {
+        let ac = ctx_of(r#"{"ex": "http://example.org/"}"#);
+        let inv = ac.inverse_context();
+        let unrelated = "https://other.example/foo";
+        let result = compact_iri(&ac, &inv, unrelated, None, true, false);
+        assert_eq!(result, unrelated);
+    }
+
+    // -----------------------------------------------------------------------
+    // §7.2 Term Selection — preference order
+    // -----------------------------------------------------------------------
+
+    /// select_term prefers the first matching preferred_value.
+    #[test]
+    fn select_term_preference_order() {
+        let ac = ctx_of(
+            r#"{"en_label": {"@id": "http://ex/label", "@language": "en"},
+               "any_label": {"@id": "http://ex/label"}}"#,
+        );
+        let inv = ac.inverse_context();
+
+        // With preferred_values = ["en", "@none"], "en" should match
+        // "en_label" before "@none" matches "any_label".
+        let result = select_term(
+            &inv,
+            "http://ex/label",
+            &["@none"],
+            "@language",
+            &["en", "@none"],
+        );
+        assert_eq!(result.as_deref(), Some("en_label"), "specific language term preferred");
+
+        // With preferred_values = ["fr", "@none"], "fr" has no match, so
+        // "@none" fallback picks "any_label".
+        let result2 = select_term(
+            &inv,
+            "http://ex/label",
+            &["@none"],
+            "@language",
+            &["fr", "@none"],
+        );
+        assert_eq!(result2.as_deref(), Some("any_label"), "@none fallback");
+    }
+
+    /// select_term returns None when nothing matches.
+    #[test]
+    fn select_term_no_match_returns_none() {
+        let inv = InverseContext::default();
+        assert!(select_term(&inv, "http://ex/unknown", &["@none"], "@language", &["@none"]).is_none());
+    }
+
+    /// Reverse property: type_language "@reverse" looks in the type_ sub-map
+    /// for the "@reverse" key.
+    #[test]
+    fn select_term_reverse_property() {
+        let ac = ctx_of(
+            r#"{"parentOf": {"@reverse": "http://ex/childOf"}}"#,
+        );
+        let inv = ac.inverse_context();
+
+        let result = select_term(
+            &inv,
+            "http://ex/childOf",
+            &["@set", "@none"],
+            "@reverse",
+            &["@reverse", "@none"],
+        );
+        assert_eq!(
+            result.as_deref(),
+            Some("parentOf"),
+            "reverse term should be found under '@reverse' key"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 1 regression: §7.1 step 3.3 wrong-key lookup
+    // [SONNET-4.6] sq-90mu3 — old code: ctx.term_definitions.get(iri) where
+    // iri is the expanded IRI; term_definitions keyed by term NAME, so the
+    // lookup returned None when iri ≠ any term name, making the guard vacuous
+    // (always extended containers).  The old code is ALSO broken in the
+    // opposite direction when a term happens to be NAMED with the IRI being
+    // compacted: it returns the wrong term definition (one that maps to a
+    // DIFFERENT IRI) and incorrectly suppresses the @index search, causing
+    // compact_iri to miss the correct @index-container term.
+    //
+    // Verify by reverting the fix: the old code returns "http://ex/p"
+    // (absolute IRI, step 7 fallback) instead of "idx_term".
+    // -----------------------------------------------------------------------
+
+    /// §7.1 step 3.3 — wrong-key lookup regression.
+    ///
+    /// The old code called `ctx.term_definitions.get(iri)` using the
+    /// EXPANDED IRI as a key.  `term_definitions` is keyed by TERM NAME, so
+    /// the lookup only succeeds when a term happens to be NAMED with the same
+    /// string as the expanded IRI (an "IRI-named term").  When that term also
+    /// has `@index` in its container, the old code incorrectly suppressed the
+    /// `@index` container search — causing `select_term` to miss a
+    /// shorter-named term that also maps to the same IRI via `@index`, and
+    /// falling back to returning the full IRI at §7.1 step 7.
+    ///
+    /// The fixed code (unconditionally add `@index`/`@index@set` when value
+    /// has `@index`) finds the shorter-named term and returns it.
+    #[test]
+    fn compact_iri_index_guard_iri_keyed_term_regression() {
+        // Context:
+        //   "http://ex/p"  — IRI-named term; maps to itself with @index
+        //                    container (no @id needed: the term name is the IRI).
+        //   "idx_term"     — shorter normal term; also maps to "http://ex/p"
+        //                    with @index container.
+        //
+        // compact_iri("http://ex/p", value_with_@index, vocab=true):
+        //
+        //   Old code: ctx.term_definitions.get("http://ex/p") returns the
+        //   IRI-named term definition (iri="http://ex/p", container=["@index"]).
+        //   Its container has @index → !ctx_containers.contains("@index") = false
+        //   → DOES NOT push @index to containers → select_term searches
+        //   "@set"/"@none" but both terms are stored under "@index" in the
+        //   inverse context → nothing found → falls through to §7.1 step 7
+        //   → returns "http://ex/p" (full IRI). WRONG.
+        //
+        //   New code: unconditionally pushes @index → select_term finds the
+        //   SHORTER term "idx_term" (8 chars < 12 chars) in the "@index" slot
+        //   → returns "idx_term". CORRECT.
+        let ac = ctx_of(
+            r#"{
+                "http://ex/p": {"@container": "@index"},
+                "idx_term":    {"@id": "http://ex/p", "@container": "@index"}
+            }"#,
+        );
+        let inv = ac.inverse_context();
+        let value = json(r#"{"@index": "key", "@value": "hello"}"#);
+        let result = compact_iri(&ac, &inv, "http://ex/p", Some(&value), true, false);
+        assert_eq!(
+            result, "idx_term",
+            "compact_iri must find the shorter @index-container term via the @index \
+             slot; the old wrong-key lookup suppressed that search and returned the \
+             full IRI"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 2: §7.1 step 6 base-relative IRI via relativize_iri
+    // [SONNET-4.6] sq-90mu3 — old code: iri.strip_prefix(base) only worked
+    // for literal-prefix cases.  The new code uses the full RFC 3986
+    // relativization that handles same-directory, parent-traversal,
+    // query/fragment preservation.
+    // -----------------------------------------------------------------------
+
+    /// §7.1 step 6 — same-directory base-relative compaction.
+    ///
+    /// base = "http://example.org/" (= BASE const)
+    /// compact_iri("http://example.org/a/c", vocab=false) should yield a
+    /// relative ref.  With strip_prefix the literal-prefix case works only
+    /// when the base itself is a literal prefix (which it is here: "a/c").
+    /// The relativize_iri path also covers same-directory siblings.
+    #[test]
+    fn compact_iri_base_relative_same_directory() {
+        // BASE = "http://example.org/" — parent of "a/b" and "a/c".
+        // A fresh context with just a base IRI set.
+        let ac = ActiveContext::new(Some("http://example.org/a/b"));
+        let inv = ac.inverse_context();
+        let result = compact_iri(&ac, &inv, "http://example.org/a/c", None, false, false);
+        // With RFC 3986 relativization: "http://example.org/a/b" + "c" → "http://example.org/a/c"
+        assert_eq!(result, "c", "same-directory relative compaction");
+    }
+
+    /// §7.1 step 6 — parent-traversal relative compaction.
+    ///
+    /// old `strip_prefix("http://example.org/a/b/c")` cannot produce "../d";
+    /// `relativize_iri` correctly generates "../../d".
+    #[test]
+    fn compact_iri_base_relative_parent_traversal() {
+        let ac = ActiveContext::new(Some("http://example.org/a/b/c"));
+        let inv = ac.inverse_context();
+        let result = compact_iri(&ac, &inv, "http://example.org/a/d", None, false, false);
+        assert_eq!(result, "../d", "parent-traversal relative compaction");
+    }
+
+    /// §7.1 step 6 — query and fragment are preserved in the relative ref.
+    #[test]
+    fn compact_iri_base_relative_query_fragment() {
+        let ac = ActiveContext::new(Some("http://example.org/a/b"));
+        let inv = ac.inverse_context();
+        let result = compact_iri(
+            &ac,
+            &inv,
+            "http://example.org/a/c?q=1#sec",
+            None,
+            false,
+            false,
+        );
+        assert_eq!(result, "c?q=1#sec", "query and fragment preserved in relative ref");
+    }
+
+    /// §7.1 step 6 — cross-scheme IRI is returned unchanged (relativize returns None).
+    #[test]
+    fn compact_iri_cross_scheme_returned_unchanged() {
+        let ac = ActiveContext::new(Some("http://example.org/a/b"));
+        let inv = ac.inverse_context();
+        let result = compact_iri(&ac, &inv, "https://example.org/a/c", None, false, false);
+        assert_eq!(
+            result, "https://example.org/a/c",
+            "cross-scheme IRI must be returned unchanged"
+        );
+    }
+}

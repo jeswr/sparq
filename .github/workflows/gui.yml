@@ -66,6 +66,16 @@ on:
       - "js/**"
       - "package-lock.json"
       - ".github/workflows/gui.yml"
+  # [SONNET-4.6] sq-ymr2e.6 — manual flake probe: run the tauri-driver smoke N times in sequence
+  # to measure consecutive-green rate. Trigger via "Run workflow" in the GitHub Actions UI.
+  # The `probe_runs` input defaults to 20 (the acceptance-criteria bar); the tauri-e2e-probe job
+  # below runs only when this event fires. Use this to gather evidence before promotion.
+  workflow_dispatch:
+    inputs:
+      probe_runs:
+        description: "Number of consecutive smoke runs (flake probe)"
+        required: false
+        default: "20"
 
 # Least-privilege default (Scorecard TokenPermissions): read-only; this lane never writes.
 permissions:
@@ -121,7 +131,7 @@ jobs:
           node-version: 22
 
       - name: Cache cargo
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -196,7 +206,7 @@ jobs:
           node-version: 22
 
       - name: Cache cargo
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -210,6 +220,35 @@ jobs:
       - name: Build wasm bundle (shacl,jsonld)
         working-directory: js
         run: npm run build:wasm
+
+      # [OPUS-4.8] sq-tp1m (#757) — also build the tier-b W-reason bundle (the RDFS / OWL 2 RL
+      # forward-chaining reasoner) so the GUI's Inference tool runs LIVE in the exported artifact.
+      # The GUI's sync-wasm copies it from the crate's pkg/ into public/wasm/reason/; it is
+      # OPTIONAL at build time (sync warn-skips when absent), but building it here makes the hosted
+      # "Try the GUI live" export ship real inference rather than the honest "unavailable" fallback.
+      - name: Build W-reason wasm bundle (RDFS / OWL 2 RL reasoner)
+        working-directory: js
+        run: npm run build:reason-wasm
+
+      # [HAIKU-4.5] sq-9ifq4 — also build the tier-b W-text bundle (the BM25 inverted index +
+      # text: magic predicates) so the GUI's Full-text tool runs LIVE in the exported artifact.
+      # The GUI's sync-wasm copies it from the crate's pkg/ into public/wasm/text/; it is
+      # OPTIONAL at build time (sync warn-skips when absent), but building it here makes the hosted
+      # "Try the GUI live" export ship real full-text search rather than the honest "unavailable"
+      # fallback.
+      - name: Build W-text wasm bundle (BM25 full-text search)
+        working-directory: js
+        run: npm run build:text-wasm
+
+      # [HAIKU-4.5] sq-9ifq4 — also build the tier-b W-rsp bundle (the windowed RSP-QL stream
+      # processor) so the GUI's Streaming tool runs LIVE in the exported artifact. The GUI's
+      # sync-wasm copies it from the crate's pkg/ into public/wasm/rsp/; it is OPTIONAL at build
+      # time (sync warn-skips when absent), but building it here makes the hosted "Try the GUI
+      # live" export ship real streaming SPARQL processing rather than the honest "unavailable"
+      # fallback.
+      - name: Build W-rsp wasm bundle (windowed RSP-QL stream processor)
+        working-directory: js
+        run: npm run build:rsp-wasm
 
       - name: Install workspace dependencies
         run: npm install
@@ -232,6 +271,101 @@ jobs:
       - name: GUI frontend static export (Tauri target)
         working-directory: gui/app
         run: npm run build:tauri
+
+  # [SONNET-4.6] sq-ymr2e.5 — Playwright mocked-IPC deterministic desktop lane.
+  #
+  # Drives the GUI FRONTEND (gui/app/out, the Tauri-target static export) in headless Chromium
+  # with window.__TAURI__ + window.__TAURI_INTERNALS__ stubbed via page.addInitScript.  No Tauri
+  # binary, no display server, no real IPC — fully deterministic.
+  #
+  # GATING TODAY (no `advisory` keyword): unlike the tauri-driver e2e (which needs webkit2gtk + a
+  # headless webview and keeps `advisory` for runner-image reliability), this lane is pure
+  # Playwright + Chromium on ubuntu-latest — reproducible on every Linux CI runner. It was made
+  # gating at creation (sq-ymr2e.5) on the deterministic-lane rationale (retries=0, mocked IPC).
+  #
+  # [OPUS-4.8] sq-ymr2e.12 — GOVERNANCE NOTE: the checked-in gating/probation policy
+  # `.github/E2E-GATING-POLICY.md` (design research/web-gui-test-program.md §6.3) classifies this
+  # lane as a member of the deterministic PROMOTION SET, which is meant to EARN gating on a
+  # probation bar (§3 there) rather than gate from day one. This early promotion pre-dates that
+  # governance and is FLAGGED for the maintainer to ratify (keep gating) or reset to advisory —
+  # see §6 of the policy + tracking issue #1656. This bead does NOT unilaterally demote a green,
+  # deterministic gate; the
+  # lane keeps its current gating status until the maintainer decides. Do not silently flip it.
+  #
+  # PATH SCOPE: gui/** + packages/** (changes to the shared @sparq/client can affect the frontend).
+  # The job is NOT in the `merge_group` event (ci-summary.yml cannot cross-workflow `needs:`); it
+  # participates in the `ci-summary / gate` aggregator by name (no advisory token).
+  gui-mock-ipc:
+    name: "GUI Playwright mocked-IPC lane"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: gui-mock-ipc-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      # The in-tab WASM engine (shacl,jsonld bundle) is required for queries to run in the browser.
+      - name: Build WASM bundle (shacl,jsonld)
+        working-directory: js
+        run: npm run build:wasm
+
+      # The W-reason bundle enables live RDFS / OWL 2 RL inference in the browser — needed for
+      # the inference-toggle journey to reach "ready" rather than "reasoner unavailable".
+      - name: Build W-reason WASM bundle (RDFS / OWL 2 RL reasoner)
+        working-directory: js
+        run: npm run build:reason-wasm
+
+      # [HAIKU-4.5] sq-9ifq4 — also build the tier-b W-text bundle (BM25 full-text search)
+      # for the Full-text tool to run live in the browser.
+      - name: Build W-text WASM bundle (BM25 full-text search)
+        working-directory: js
+        run: npm run build:text-wasm
+
+      # [HAIKU-4.5] sq-9ifq4 — also build the tier-b W-rsp bundle (windowed RSP-QL stream
+      # processor) for the Streaming tool to run live in the browser.
+      - name: Build W-rsp WASM bundle (windowed RSP-QL stream processor)
+        working-directory: js
+        run: npm run build:rsp-wasm
+
+      - name: Install workspace dependencies
+        run: npm install
+
+      # Build the Tauri-target static export (root-relative; the Playwright server serves it).
+      - name: Build GUI frontend static export (Tauri target → gui/app/out/)
+        working-directory: gui/app
+        run: npm run build:tauri
+
+      # Install only the Chromium browser binary (the mock-IPC lane uses only Chromium).
+      - name: Install Playwright Chromium
+        working-directory: gui/e2e-playwright
+        run: npx playwright install --with-deps chromium
+
+      # No-timeout gate: forbids waitForTimeout in specs/ + support/ (determinism doctrine §1.1).
+      - name: Determinism gate — no waitForTimeout
+        working-directory: gui/e2e-playwright
+        run: bash support/no-timeout-gate.sh
+
+      - name: Run Playwright mocked-IPC tests
+        working-directory: gui/e2e-playwright
+        run: npm test
 
   # [OPUS-4.8] sq-bu69 — per-platform Tauri build + clippy matrix.
   #
@@ -292,7 +426,7 @@ jobs:
           components: clippy
 
       - name: Cache cargo (gui crate)
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -313,30 +447,33 @@ jobs:
       - name: Test (engine command layer)
         run: cargo test
 
-  # [OPUS-4.8] sq-pnnl — tauri-driver (WebDriver) e2e: REAL launch + run-a-query assertion.
+  # [SONNET-4.6] sq-ymr2e.6 — SHRUNK tauri-driver smoke: max-3-assertion real-IPC test.
   #
-  # This REPLACES the earlier no-op scaffold smoke (sq-bu69), which only confirmed
-  # tauri-driver / WebKitWebDriver / xvfb were on PATH. The job now builds the frontend the
-  # webview embeds, builds the desktop shell binary, and drives it through tauri-driver: it
-  # launches the shell headless (xvfb), waits for the in-tab WASM REPL to mount + the engine
-  # to warm, ENTERS a SPARQL SELECT into the editor, clicks Run, and ASSERTS the result table
-  # renders with the expected binding. The harness lives in gui/e2e (run-e2e.mjs, webdriverio).
+  # Shrunk from the multi-step sq-pnnl harness to exactly 3 meaningful assertions:
+  #   [1/3] LAUNCH    — real binary launched + React frontend mounted in the native webview.
+  #   [2/3] IPC LIVE  — native engine signalled "Engine ready" over real IPC.
+  #   [3/3] ROUND-TRIP — SELECT executed through real IPC, returned "Alice", status bar updated.
   #
-  # The design (research/gui-design.md §3 E2E) is explicit that Tauri's webview e2e uses
-  # tauri-driver (WebDriver), NOT Playwright's Chromium — so this is a NEW harness, not a reuse
-  # of site-e2e.yml. tauri-driver supports Linux (via WebKitWebDriver, headless under xvfb) and
-  # Windows (via Edge WebDriver); macOS has no WKWebView WebDriver, so the e2e is Linux-only.
+  # Everything beyond these three (EXPLAIN, SHACL, Import) is owned by the deterministic
+  # Playwright mock-IPC lane (gui/e2e-playwright, sq-ymr2e.5). Small surface = small flake budget.
   #
-  # ADVISORY — DELIBERATELY KEPT (the #748-class risk). The frontend-build + shell-build
-  # prerequisites are reproduced locally, but the headless WebKitWebDriver + tauri-driver +
-  # xvfb webview session itself is a NEW surface whose CI reliability is not yet proven across
-  # multiple runs, and it cannot be reproduced on a box without the webkit2gtk system libs. So
-  # the job NAME keeps the whole-word `advisory` token (the `ci-summary / gate` aggregator
-  # excludes `\b(advisory|informational)\b`) AND `continue-on-error: true`, so a flaky webview
-  # session can NEVER turn `ci-summary` red for every PR. The assertion RUNS (it is no longer a
-  # no-op) — it is just non-gating until proven reliably green. Promotion to a hard gate (drop
-  # the token + continue-on-error, add gui to branch-protection required contexts, a
-  # `needs:user` repo-settings action) is the separate follow-up tracked by bead sq-var9.
+  # STABILIZATION (research/web-gui-test-program.md §5.3):
+  #   * tauri-driver PINNED to 2.0.6 (compatible with Tauri 2.11.x on this workspace).
+  #   * WebKitWebDriver: installed from the runner's webkit2gtk-driver apt package (intentionally
+  #     matched to the runner image's webkit2gtk; its version is logged in CI for debugging).
+  #   * xvfb-run --auto-servernum (already present; a virtual display is mandatory on Linux).
+  #   * workers=1: the smoke is a single-process script (no parallelism; inherent).
+  #   * No arbitrary sleeps: all waits use waitForExist / waitUntil with explicit conditions;
+  #     validated by support/no-sleep-gate.sh (step below). The startup port-poll uses a
+  #     callback-style setTimeout (not an awaited sleep) — gate-safe.
+  #   * Shell-level retry 1: if the first attempt fails (driver start flake, display-server
+  #     race), the step retries once before counting as a failure. Evidence of failure is
+  #     captured as artifacts (screenshot + driver logs) on BOTH attempts.
+  #
+  # ADVISORY — DELIBERATELY KEPT. The job NAME carries the whole-word `advisory` token so
+  # the `ci-summary / gate` aggregator excludes it. `continue-on-error: true` ensures a
+  # driver/webview flake never turns ci-summary red. Promotion to a hard gate (bead sq-var9)
+  # requires 20 consecutive green runs of the flake probe (workflow_dispatch trigger above).
   tauri-e2e:
     name: "GUI tauri-driver e2e (Linux, advisory)"
     runs-on: ubuntu-latest
@@ -349,7 +486,9 @@ jobs:
         run: |
           sudo apt-get update
           # webkit2gtk-driver provides WebKitWebDriver, the WebDriver server tauri-driver
-          # proxies on Linux; xvfb gives the headless runner a virtual display for the webview.
+          # proxies on Linux. The version is intentionally matched to the runner image's
+          # webkit2gtk (pinned by the runner; see version-check step below).
+          # xvfb gives the headless runner a virtual display for the webview.
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
@@ -361,6 +500,15 @@ jobs:
             webkit2gtk-driver \
             xvfb
 
+      # Log the installed WebKitWebDriver version. The apt package is matched to the runner
+      # image's webkit2gtk — not independently pinned, but logged here so any drift across
+      # runner image updates is immediately visible in the CI log.
+      - name: Log WebKitWebDriver version
+        run: |
+          WKVER=$(WebKitWebDriver --version 2>&1 || echo "unknown")
+          echo "WebKitWebDriver: $WKVER"
+          echo "webkit2gtk-driver apt: $(dpkg -l webkit2gtk-driver 2>/dev/null | tail -1)"
+
       # wasm32 target is needed to build the lean WASM bundle the in-tab REPL runs.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -371,7 +519,7 @@ jobs:
           node-version: 22
 
       - name: Cache cargo (gui e2e)
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -401,25 +549,164 @@ jobs:
           npm install
           (cd gui/app && npm run build:tauri)
 
-      # Build the desktop shell binary (debug). With site/out present, tauri_build embeds the
-      # frontend into the `sparq-gui` binary tauri-driver will launch.
+      # Build the desktop shell binary (debug). With gui/app/out present, tauri_build embeds
+      # the frontend into the `sparq-gui` binary tauri-driver will launch.
       - name: Build the GUI shell (debug, embeds the frontend)
         working-directory: gui/src-tauri
         run: cargo build
 
-      - name: Install tauri-driver
-        run: cargo install tauri-driver --locked
+      # Pin tauri-driver to 2.0.6 — the version published for Tauri 2.x (workspace uses 2.11.x).
+      # Pinning prevents a crates.io update from silently changing driver behaviour mid-run.
+      - name: Install tauri-driver@2.0.6 (pinned)
+        run: cargo install tauri-driver@2.0.6 --locked
 
       - name: Install the e2e harness dependencies
         working-directory: gui/e2e
         run: npm ci
 
-      # The REAL assertion: launch the shell through tauri-driver under a virtual display, run
-      # a SPARQL SELECT in the in-tab WASM REPL, and assert the result table renders. APP_BINARY
-      # is the absolute path to the just-built debug binary. `continue-on-error` above keeps a
-      # webview/driver flake strictly non-gating while this NEW harness is proven on CI.
-      - name: Run the tauri-driver WebDriver e2e (headless under xvfb)
+      # Determinism gate — forbids await sleep / waitForTimeout in the harness.
+      - name: Determinism gate — no arbitrary sleeps (no-sleep-gate)
+        working-directory: gui/e2e
+        run: bash support/no-sleep-gate.sh
+
+      # [1/3] LAUNCH [2/3] IPC LIVE [3/3] ROUND-TRIP — see run-e2e.mjs for the assertion map.
+      #
+      # Shell-level retry 1: xvfb display-server startup races are the primary source of
+      # first-attempt failures; a single retry keeps the job honest (a pass-on-retry is still
+      # logged as a defect to investigate, per §6.3 quarantine policy) without masking real bugs.
+      # Failure artifacts are written by the harness on both attempts (artifacts/ dir).
+      - name: Run the tauri-driver smoke (headless under xvfb; retry once on failure)
+        id: tauri-smoke
         working-directory: gui/e2e
         env:
           APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
-        run: xvfb-run --auto-servernum npm run test:e2e
+        run: |
+          # [SONNET-4.6] Give each attempt its own artifacts subdir so a second failure does
+          # not overwrite the first attempt's screenshot/driver-log evidence.
+          ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-1" \
+            xvfb-run --auto-servernum npm run test:e2e && exit 0
+          echo "[tauri-e2e-ci] first attempt failed; retrying once (xvfb startup flake check)…"
+          ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/attempt-2" \
+            xvfb-run --auto-servernum npm run test:e2e
+
+      # Upload failure artifacts (screenshot + driver log) even if the step above succeeded on
+      # the retry — the artifacts are only written by the harness when an assertion fails, so
+      # uploading unconditionally is safe (the action no-ops when the directory is empty).
+      # Both attempt-1/ and attempt-2/ subdirs are captured by the glob below.
+      - name: Upload failure artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tauri-e2e-artifacts-${{ github.run_attempt }}
+          path: gui/e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # [SONNET-4.6] sq-ymr2e.6 — flake probe: run the smoke N times to gather consecutive-green
+  # evidence. Only triggered by `workflow_dispatch` (the per-PR lane is the `tauri-e2e` job
+  # above). Requires the same build prerequisites — shares the same setup steps.
+  #
+  # Usage: GitHub Actions UI → "Run workflow" → set probe_runs (default 20). The promotion bar
+  # (sq-ymr2e.6 acceptance criteria) is 20 consecutive greens; link the run in the PR body.
+  tauri-e2e-probe:
+    name: "GUI tauri-driver flake probe (Linux, advisory)"
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Tauri system dependencies (+ WebKitWebDriver, xvfb)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            webkit2gtk-driver \
+            xvfb
+
+      - name: Log WebKitWebDriver version
+        run: |
+          echo "WebKitWebDriver: $(WebKitWebDriver --version 2>&1 || echo 'unknown')"
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Cache cargo (gui probe)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gui/src-tauri/target
+          key: gui-e2e-probe-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build the WASM bundle (shacl,jsonld; the in-tab engine)
+        working-directory: js
+        run: |
+          npm install
+          npm run build:wasm
+
+      - name: Build the GUI frontend static export (root-relative)
+        run: |
+          npm install
+          (cd gui/app && npm run build:tauri)
+
+      - name: Build the GUI shell (debug)
+        working-directory: gui/src-tauri
+        run: cargo build
+
+      - name: Install tauri-driver@2.0.6 (pinned)
+        run: cargo install tauri-driver@2.0.6 --locked
+
+      - name: Install the e2e harness dependencies
+        working-directory: gui/e2e
+        run: npm ci
+
+      # Run the smoke N times, counting greens. A pass-on-N/N means the lane is stable.
+      # [SONNET-4.6] Each iteration writes to its own artifacts/probe-run-$i subdir so earlier
+      # failure evidence is not overwritten by later runs; all subdirs are uploaded below.
+      - name: Run flake probe (${{ inputs.probe_runs }} consecutive runs)
+        working-directory: gui/e2e
+        env:
+          APP_BINARY: ${{ github.workspace }}/gui/src-tauri/target/debug/sparq-gui
+        run: |
+          RUNS=${{ inputs.probe_runs }}
+          GREENS=0
+          FAILS=0
+          for i in $(seq 1 "$RUNS"); do
+            echo "--- probe run $i / $RUNS ---"
+            if ARTIFACTS_DIR="${{ github.workspace }}/gui/e2e/artifacts/probe-run-$i" \
+                xvfb-run --auto-servernum npm run test:e2e; then
+              GREENS=$((GREENS + 1))
+            else
+              FAILS=$((FAILS + 1))
+              echo "FAIL on run $i"
+            fi
+          done
+          echo ""
+          echo "=== FLAKE PROBE RESULT: $GREENS / $RUNS green, $FAILS failures ==="
+          # Exit 0 regardless — the probe is informational; CI captures the count.
+
+      - name: Upload probe failure artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tauri-e2e-probe-artifacts
+          path: gui/e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

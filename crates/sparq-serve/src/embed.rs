@@ -24,17 +24,20 @@
 //!    of `sparq-server`'s axum/tokio glue); the embedding seam is the documented
 //!    front door to it.
 //!
-//! # Stability — INTENDED stable, semver-tier-1 freeze PENDING ratification
+//! # Stability — **API tier-1 (proposed-stable)**, semver freeze PENDING ratification
 //!
-//! This is the surface the maintainer **intends** to commit to as the stable
-//! embedding API (the request in [issue #1248]). It is **NOT yet a frozen
-//! semver-tier-1 surface**: the formal commitment is the maintainer's to ratify on
-//! #1248, and until that ratification a minor pre-`1.0` release MAY still change it.
-//! It is documented as the embedding seam so an embedder pins ONE module rather than
-//! a scatter of functions the underlying crates mark "unstable", and so the freeze,
-//! when ratified, has a single well-defined shape. No behaviour here is new: every
-//! call is the same engine path `sparq-server` already exercises in production.
+//! This whole module is the proposed **tier-1** (semver-stable) embedding surface in the
+//! [API stability & deprecation policy]. It is the surface the maintainer **intends** to
+//! commit to as the stable embedding API (the request in [issue #1248]). It is **NOT yet a
+//! frozen semver-tier-1 surface**: the formal commitment is the maintainer's to ratify on
+//! #1248, and until that ratification a minor pre-`1.0` release MAY still change it — the
+//! marker asserts a *proposal*, not an active guarantee. It is documented as the embedding
+//! seam so an embedder pins ONE module rather than a scatter of functions the underlying
+//! crates mark "unstable", and so the freeze, when ratified, has a single well-defined
+//! shape. No behaviour here is new: every call is the same engine path `sparq-server`
+//! already exercises in production.
 //!
+//! [API stability & deprecation policy]: https://github.com/jeswr/sparq/blob/main/docs/api-stability.md
 //! [issue #1248]: https://github.com/jeswr/sparq/issues/1248
 //!
 //! # Example — embed one resource graph behind the generation ring

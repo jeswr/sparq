@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/jeswr/sparq/actions/workflows/ci.yml"><img src="https://github.com/jeswr/sparq/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="https://jeswr.github.io/sparq/dev/bench"><img src="https://img.shields.io/badge/benchmarks-dashboard-f5a623.svg" alt="Benchmarks dashboard"></a>
+  <a href="https://sparq.jeswr.org/dev/bench"><img src="https://img.shields.io/badge/benchmarks-dashboard-f5a623.svg" alt="Benchmarks dashboard"></a>
   <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="MSRV 1.88">
   <img src="https://img.shields.io/badge/status-experimental-yellow.svg" alt="Status: experimental">
 </p>
@@ -161,11 +161,14 @@ See [`AGENTS.md`](AGENTS.md) for the full crate map and what each one does.
   [completion audit](research/roadmap-completion-audit.md). The `research/` tree holds the design
   notes and measured verdicts for the engine internals.
 - **Performance** — numbers are **not baked into the docs** (they drift). Live per-commit metrics
-  are at the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench); the registry and
+  are at the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench); the registry and
   exact invocations are in [`bench/benchmarks.toml`](bench/benchmarks.toml) and
   [`bench/CATALOG.md`](bench/CATALOG.md). The QLever comparison methodology is in
   [`bench/qlever-baselines.md`](bench/qlever-baselines.md) and the continuous Oxigraph
   differential harness in [`research/BENCHMARKS.md`](research/BENCHMARKS.md).
+- **Trust it** — [`ASSURANCE.md`](ASSURANCE.md): the 15-minute walkthrough of the assurance
+  estate (conformance ratchets, independent oracles, fuzzing, bounded proofs, honesty gates) —
+  how to check sparq works as claimed without reading the codebase.
 - **Contribute** — [`CONTRIBUTING.md`](CONTRIBUTING.md) (the build/test/lint gate, the
   conformance ratchets, and the crate-README conventions) and [`SECURITY.md`](SECURITY.md).
 

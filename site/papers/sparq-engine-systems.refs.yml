@@ -1,0 +1,389 @@
+# [OPUS-4.8] sq-gum8.8 — bibliography for the engine systems paper (Hayagriva).
+#
+# Every entry was checked against its publisher/author page or the project's
+# search-verified paper-selection record (research/paper-selection.md §3.4/§3.5/§3.6)
+# on 2026-07-05. Component-technique attributions are the honesty-invariant of the
+# bead: LFTJ = Veldhuizen ICDT 2014; six-permutation exhaustive indexing = RDF-3X;
+# inline / tagged term ids = QLever + Virtuoso lineage. No performance number is
+# quoted from any of these works in the paper text.
+
+sparql11-query:
+  type: reference
+  title: "SPARQL 1.1 Query Language"
+  author:
+    - Harris, Steve
+    - Seaborne, Andy
+  date: 2013-03-21
+  publisher: W3C
+  url: https://www.w3.org/TR/sparql11-query/
+  note: "W3C Recommendation"
+
+sparql12-query:
+  type: reference
+  title: "SPARQL 1.2 Query Language"
+  date: 2025
+  publisher: W3C
+  url: https://www.w3.org/TR/sparql12-query/
+  note: "W3C RDF & SPARQL Working Group, standards-track revision of SPARQL 1.1"
+
+owl2-profiles:
+  type: reference
+  title: "OWL 2 Web Ontology Language Profiles (Second Edition)"
+  author:
+    - Motik, Boris
+    - Cuenca Grau, Bernardo
+    - Horrocks, Ian
+    - Wu, Zhe
+    - Fokoue, Achille
+    - Lutz, Carsten
+  date: 2012-12-11
+  publisher: W3C
+  url: https://www.w3.org/TR/owl2-profiles/
+  note: "W3C Recommendation; defines the OWL 2 RL, EL, and QL profiles"
+
+rif-core:
+  type: reference
+  title: "RIF Core Dialect (Second Edition)"
+  author:
+    - Boley, Harold
+    - Hawke, Sandro
+    - Polleres, Axel
+  date: 2013-02-05
+  publisher: W3C
+  url: https://www.w3.org/TR/rif-core/
+  note: "W3C Recommendation, Rule Interchange Format Core"
+
+shacl:
+  type: reference
+  title: "Shapes Constraint Language (SHACL)"
+  author:
+    - Knublauch, Holger
+    - Kontokostas, Dimitris
+  date: 2017-07-20
+  publisher: W3C
+  url: https://www.w3.org/TR/shacl/
+  note: "W3C Recommendation"
+
+geosparql:
+  type: reference
+  title: "OGC GeoSPARQL — A Geographic Query Language for RDF Data (Version 1.1)"
+  date: 2024
+  publisher: Open Geospatial Consortium
+  url: https://www.ogc.org/standard/geosparql/
+  note: "OGC Standard"
+
+rsp-ql:
+  type: article
+  title: "RSP-QL Semantics: A Unifying Query Model to Explain Heterogeneity of RDF Stream Processing Systems"
+  author:
+    - Dell'Aglio, Daniele
+    - Della Valle, Emanuele
+    - Calbimonte, Jean-Paul
+    - Corcho, Oscar
+  date: 2014
+  parent:
+    type: periodical
+    title: "International Journal on Semantic Web and Information Systems"
+    volume: 10
+    issue: 4
+
+perez-tods:
+  type: article
+  title: "Semantics and Complexity of SPARQL"
+  author:
+    - Pérez, Jorge
+    - Arenas, Marcelo
+    - Gutierrez, Claudio
+  date: 2009
+  parent:
+    type: periodical
+    title: "ACM Transactions on Database Systems"
+    volume: 34
+    issue: 3
+
+triejoin:
+  type: article
+  title: "Triejoin: A Simple, Worst-Case Optimal Join Algorithm"
+  author:
+    - Veldhuizen, Todd L.
+  date: 2014
+  parent:
+    type: proceedings
+    title: "Proceedings of the 17th International Conference on Database Theory (ICDT)"
+  note: "Leapfrog Triejoin; the worst-case optimal multiway join adopted for the WCOJ path"
+
+wcoj-ngo:
+  type: article
+  title: "Worst-Case Optimal Join Algorithms"
+  author:
+    - Ngo, Hung Q.
+    - Porat, Ely
+    - Ré, Christopher
+    - Rudra, Atri
+  date: 2018
+  parent:
+    type: periodical
+    title: "Journal of the ACM"
+    volume: 65
+    issue: 3
+
+rdf3x:
+  type: article
+  title: "RDF-3X: A RISC-Style Engine for RDF"
+  author:
+    - Neumann, Thomas
+    - Weikum, Gerhard
+  date: 2008
+  parent:
+    type: periodical
+    title: "Proceedings of the VLDB Endowment"
+    volume: 1
+    issue: 1
+  note: "Exhaustive six-permutation indexing of the SPO columns; the lineage of the six-index design"
+
+hexastore:
+  type: article
+  title: "Hexastore: Sextuple Indexing for Semantic Web Data Management"
+  author:
+    - Weiss, Cathrin
+    - Karras, Panagiotis
+    - Bernstein, Abraham
+  date: 2008
+  parent:
+    type: periodical
+    title: "Proceedings of the VLDB Endowment"
+    volume: 1
+    issue: 1
+
+qlever:
+  type: article
+  title: "QLever: A Query Engine for Efficient SPARQL+Text Search"
+  author:
+    - Bast, Hannah
+    - Buchhold, Björn
+  date: 2017
+  parent:
+    type: proceedings
+    title: "Proceedings of the 26th ACM International Conference on Information and Knowledge Management (CIKM)"
+  note: "Inline/tagged numeric ids and compact id encoding; part of the inline-id lineage"
+
+sparqloscope:
+  type: article
+  title: "Sparqloscope: A Comprehensive and Fair SPARQL Benchmark"
+  author:
+    - Bast, Hannah
+    - Kalmbach, Johannes
+  date: 2025
+  parent:
+    type: proceedings
+    title: "Proceedings of the 24th International Semantic Web Conference (ISWC)"
+  note: "The Bast-group benchmark the systems evaluation is hard-gated to run; author list to be pinned at camera-ready"
+
+qendpoint:
+  type: article
+  title: "The qEndpoint: Wikidata on Commodity Hardware"
+  author:
+    - Willerval, Antoine
+    - Diefenbach, Dennis
+    - Bonifati, Angela
+  date: 2024
+  parent:
+    type: periodical
+    title: "Semantic Web Journal"
+  note: "The closest prior memory-frugality claim; the memory-honesty comparison targets it"
+
+rdfox:
+  type: article
+  title: "RDFox: A Highly-Scalable RDF Store"
+  author:
+    - Nenov, Yavor
+    - Piro, Robert
+    - Motik, Boris
+    - Horrocks, Ian
+    - Wu, Zhe
+    - Banerjee, Jay
+  date: 2015
+  parent:
+    type: proceedings
+    title: "Proceedings of the 14th International Semantic Web Conference (ISWC)"
+
+tentris:
+  type: article
+  title: "Tentris — A Tensor-Based Triple Store"
+  author:
+    - Bigerl, Alexander
+    - Conrads, Felix
+    - Behning, Charlotte
+    - Sherif, Mohamed Ahmed
+    - Saleem, Muhammad
+    - Ngonga Ngomo, Axel-Cyrille
+  date: 2020
+  parent:
+    type: proceedings
+    title: "Proceedings of the 19th International Semantic Web Conference (ISWC)"
+
+millenniumdb:
+  type: article
+  title: "MillenniumDB: An Open-Source Graph Database System"
+  author:
+    - Vrgoč, Domagoj
+    - Rojas, Carlos
+    - Angles, Renzo
+    - Arenas, Marcelo
+    - others
+  date: 2023
+  parent:
+    type: periodical
+    title: "Data Intelligence"
+    volume: 5
+    issue: 3
+
+virtuoso:
+  type: article
+  title: "RDF Support in the Virtuoso DBMS"
+  author:
+    - Erling, Orri
+    - Mikhailov, Ivan
+  date: 2009
+  parent:
+    type: proceedings
+    title: "Networked Knowledge — Networked Media"
+  publisher: Springer
+
+jena:
+  type: article
+  title: "Jena: Implementing the Semantic Web Recommendations"
+  author:
+    - Carroll, Jeremy J.
+    - Dickinson, Ian
+    - Dollin, Chris
+    - Reynolds, Dave
+    - Seaborne, Andy
+    - Wilkinson, Kevin
+  date: 2004
+  parent:
+    type: proceedings
+    title: "Proceedings of the 13th International World Wide Web Conference (WWW), Alternate Track"
+
+owlim:
+  type: article
+  title: "OWLIM: A Family of Scalable Semantic Repositories"
+  author:
+    - Bishop, Barry
+    - Kiryakov, Atanas
+    - Ognyanoff, Damyan
+    - Peikov, Ivan
+    - Tashev, Zdravko
+    - Velkov, Ruslan
+  date: 2011
+  parent:
+    type: periodical
+    title: "Semantic Web Journal"
+    volume: 2
+    issue: 1
+  note: "The engine now marketed as GraphDB"
+
+oxigraph:
+  type: web
+  title: "Oxigraph: A SPARQL Graph Database Written in Rust"
+  author:
+    - Pellissier Tanon, Thomas
+  date: 2024
+  url: https://github.com/oxigraph/oxigraph
+  note: "No peer-reviewed engine paper exists (verified in the paper-selection venue search); cited as software"
+
+comunica:
+  type: article
+  title: "Comunica: A Modular SPARQL Query Engine for the Web"
+  author:
+    - Taelman, Ruben
+    - Van Herwegen, Joachim
+    - Vander Sande, Miel
+    - Verborgh, Ruben
+  date: 2018
+  parent:
+    type: proceedings
+    title: "Proceedings of the 17th International Semantic Web Conference (ISWC)"
+
+duckdb-wasm:
+  type: article
+  title: "DuckDB-Wasm: Fast Analytical Processing for the Web"
+  author:
+    - Kohn, André
+    - Moerkotte, Guido
+    - Neumann, Thomas
+  date: 2022
+  parent:
+    type: periodical
+    title: "Proceedings of the VLDB Endowment"
+    volume: 15
+    issue: 12
+  note: "The bar for X-in-WASM as a first-tier contribution; its deltas were async workers, a paged browser filesystem, and JS UDFs"
+
+hdt:
+  type: article
+  title: "Binary RDF Representation for Publication and Exchange (HDT)"
+  author:
+    - Fernández, Javier D.
+    - Martínez-Prieto, Miguel A.
+    - Gutiérrez, Claudio
+    - Polleres, Axel
+    - Arias, Mario
+  date: 2013
+  parent:
+    type: periodical
+    title: "Journal of Web Semantics"
+    volume: 19
+
+watdiv:
+  type: article
+  title: "Diversified Stress Testing of RDF Data Management Systems (WatDiv)"
+  author:
+    - Aluç, Güneş
+    - Hartig, Olaf
+    - Özsu, M. Tamer
+    - Daudjee, Khuzaima
+  date: 2014
+  parent:
+    type: proceedings
+    title: "Proceedings of the 13th International Semantic Web Conference (ISWC)"
+
+sp2bench:
+  type: article
+  title: "SP2Bench: A SPARQL Performance Benchmark"
+  author:
+    - Schmidt, Michael
+    - Hornung, Thomas
+    - Lausen, Georg
+    - Pinkel, Christoph
+  date: 2009
+  parent:
+    type: proceedings
+    title: "Proceedings of the 25th IEEE International Conference on Data Engineering (ICDE)"
+
+lubm:
+  type: article
+  title: "LUBM: A Benchmark for OWL Knowledge Base Systems"
+  author:
+    - Guo, Yuanbo
+    - Pan, Zhengxiang
+    - Heflin, Jeff
+  date: 2005
+  parent:
+    type: periodical
+    title: "Journal of Web Semantics"
+    volume: 3
+    issue: 2-3
+
+bsbm:
+  type: article
+  title: "The Berlin SPARQL Benchmark"
+  author:
+    - Bizer, Christian
+    - Schultz, Andreas
+  date: 2009
+  parent:
+    type: periodical
+    title: "International Journal on Semantic Web and Information Systems"
+    volume: 5
+    issue: 2

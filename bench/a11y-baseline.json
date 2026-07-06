@@ -1,0 +1,75 @@
+{
+  "_comment": [
+    "[OPUS-4.8] A11Y RATCHET (sq-ymr2e.4) — automated axe-core WCAG 2.1 AA violation counts per P1",
+    "interactive surface x UI state, reviewed in diffs exactly like the coverage-floor counts.",
+    "GATE (e2e/support/a11y.ts): two tiers. ZERO-tier surfaces (no allowedSeriousRules) HARD-FAIL on",
+    "any serious/critical (unconditional). KNOWN-GAP surfaces (allowedSeriousRules + bead) tolerate",
+    "EXACTLY the listed, beaded serious rule-ids and FAIL on any NEW one — the allowance may only",
+    "SHRINK. In both tiers moderate+minor are a CEILING that may only FALL. Color-contrast and form-",
+    "label rules are explicitly on and cannot be excluded. Re-seed after a fix or a new state:",
+    "A11Y_SEED=1 npm run test:e2e -- a11y.spec.ts  (needs the wasm bundle for the results/error",
+    "states — synced from `(cd ../js && npm run build:wasm)`; the light CI lane has no wasm, so it",
+    "scans only the wasm-free states and never trips a wasm-state ratchet). Counts are measured on a",
+    "non-canonical work box / CI runner — a REGRESSION ratchet, not a canonical audit number, and a",
+    "FLOOR not a certificate (axe covers ~the mechanical half of WCAG; the keyboard/focus half is",
+    "sq-ymr2e.9). We claim 'zero known serious/critical automated violations at WCAG 2.1 AA' on the",
+    "gated surfaces, never 'WCAG-compliant'."
+  ],
+  "wcagTags": [
+    "wcag2a",
+    "wcag2aa",
+    "wcag21a",
+    "wcag21aa"
+  ],
+  "ruleExclusions": {},
+  "surfaces": {
+    "download:no-release": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    },
+    "download:release": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    },
+    "home:idle": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    },
+    "home:results": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    },
+    "try:connect-drawer-open": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    },
+    "try:default": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    },
+    "try:error": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    },
+    "try:palette-open": {
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0
+    }
+  }
+}

@@ -112,7 +112,7 @@ capture replayable fixtures; `--features nlq-endpoint` points `endpoint::Endpoin
   (§4.3), [`research/genai-design.md`](../../research/genai-design.md) (§4), and schema
   grounding in [`sparq-introspect`](../sparq-introspect).
 - **Performance** — the eval harnesses run network-free in CI; tracked figures live on
-  the [benchmarks dashboard](https://jeswr.github.io/sparq/dev/bench), not in docs.
+  the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench), not in docs.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 
 ## License

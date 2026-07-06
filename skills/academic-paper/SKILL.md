@@ -322,6 +322,29 @@ same-box benchmark methodology (a methods/reproducibility contribution that stre
 eval). See `research/paper-contributions-inventory.md` (Part 2) and
 `research/paper-factory-design.md` (§6).
 
+## Paper P2 instrument — the SPARQL logic-bug harness (`crates/sparq-metamorph`)
+
+[FABLE-5] sq-gum8.6. Paper **P2** (draft bead `sq-gum8.7`) is the first dedicated
+logic-bug testing paper for SPARQL engines (SQL/Datalog/Cypher are covered by
+SQLancer/queryFuzz/GDsmith; SPARQL is not). Its instrument is the opt-in
+`crates/sparq-metamorph` crate (`publish = false`; nothing in the shipping graph links
+it): **TLP re-derived for SPARQL** — partitioning on `FILTER(c)` / `FILTER(!c)` /
+`FILTER(COALESCE(IF(c, false, false), true))`, where the third branch reifies SPARQL's
+evaluation-*error* outcome (type errors + unbound variables), which unlike SQL's `NULL`
+is not a testable value — the spec-cited case analysis in the `tlp` module docs IS the
+paper's core claim; **NoREC for SPARQL** (predicate moved to projection position);
+a **differential oracle** reusing `sparq-difftest`'s engine-independent comparators;
+a **seeded deterministic generator** (in-crate SplitMix64 — a ledger seed reproduces
+its case exactly); SPARQL-protocol **drivers** (`protocol-drivers` cargo feature,
+off by default) for Fuseki/Virtuoso/Oxigraph-class endpoints; and the **found-bug
+ledger** (JSONL; an entry REQUIRES an upstream issue URL + developer-confirmation
+status — the paper counts developer-confirmed bugs, never raw oracle alarms; the
+wrong-result class is strictly separated from engine errors). The bug-hunting
+campaign itself runs **off-CI** (work box / EC2; docker endpoints fine); CI runs the
+network-free mutation self-tests (a seeded wrong-result mutant must be flagged by all
+three oracles — non-vacuity). sparq is itself a campaign target: finding our own bugs
+is honest and reportable.
+
 ## Notes
 
 - This skill was **authored in-repo** (not installed). The strongest external pipeline

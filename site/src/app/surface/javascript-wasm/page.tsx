@@ -4,6 +4,7 @@ import { Boxes } from "lucide-react";
 import { SurfaceContent } from "@/components/surface-content";
 import { JavascriptWasmDemo } from "@/components/javascript-wasm-demo";
 import { EsmImportSnippet } from "./esm-import-snippet";
+import { withBasePath } from "@/lib/base-path";
 
 export const metadata: Metadata = {
   title: "JavaScript / WASM",
@@ -79,7 +80,7 @@ export default function JavascriptWasmSurfacePage() {
       readmeHref="https://github.com/jeswr/sparq/tree/main/crates/sparq-wasm"
       skillHref="https://github.com/jeswr/sparq/blob/main/skills/javascript-wasm/SKILL.md"
       links={[
-        { href: "/try", label: "Open the live REPL" },
+        { href: withBasePath("/app/"), label: "Open the SPARQL workbench", external: true },
         {
           href: "https://www.npmjs.com/package/@jeswr/sparq",
           label: "@jeswr/sparq on npm",

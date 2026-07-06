@@ -1,7 +1,8 @@
 // [OPUS-4.8] sq-evb1: EL+⊥ completion (CR1–CR5) over S(C) and R(r).
+// [FABLE-5] sq-pbz04.2.1: + CR6 (safe nominals).
 //
 // The saturator computes the least fixpoint of the Baader–Brandt–Lutz completion rules with
-// bottom (the SAME calculus ELK's core implements, restricted to the EL+⊥-minus-RBox MVP):
+// bottom (the SAME calculus ELK's core implements, restricted to the recognised fragment):
 //
 //   init   S(C) := {C, ⊤}                                     for every concept C
 //   CR1    C ⊑ D ∈ T,  C ∈ S(X)            ⇒  D ∈ S(X)
@@ -9,12 +10,99 @@
 //   CR3    C ⊑ ∃r.D ∈ T,  C ∈ S(X)         ⇒  (X,D) ∈ R(r)
 //   CR4    ∃r.D ⊑ E ∈ T,  (X,Y) ∈ R(r),  D ∈ S(Y)   ⇒  E ∈ S(X)
 //   CR5    (X,Y) ∈ R(r),  ⊥ ∈ S(Y)         ⇒  ⊥ ∈ S(X)
+//   CR6    {a} ∈ S(X) ∩ S(Y),  X ⇝_R Y     ⇒  S(X) := S(X) ∪ S(Y)
+//   CRs1   ∃r.Self ∈ S(X)                  ⇒  (X,X) ∈ R(r)                       [sq-pbz04.2.6]
+//   CRs2   (X,X) ∈ R(r),  ∃r.Self ⊑ D ∈ T  ⇒  D ∈ S(X)   (self-concept atom + CR1; see below)
+//
+// [OPUS-4.8] sq-pbz04.2.6 — the two EL++ self-restriction (`owl:hasSelf` / `ObjectHasSelf`)
+// completion rules. `∃r.Self` (the LOCAL reflexivity concept `{x | (x,x) ∈ r}`) is extracted as
+// a distinguished basic concept atom (`Names::self_concept`), so `X ⊑ ∃r.Self` and `∃r.Self ⊑ D`
+// reduce to ordinary `Normal::Sub` axioms and CR1/CR2/CR4 propagate `∃r.Self` memberships for
+// free. CRs1 is the ONE genuinely new rule (implemented in the worklist below): when the atom
+// `∃r.Self` lands in S(X) — i.e. `X ⊑ ∃r.Self` — it adds the reflexive link `(X,X) ∈ R(r)` (which
+// then feeds CR4/CR5). CRs2 is realised BY CR1: `∃r.Self ⊑ D` is the axiom `Sub(self_r, D)`, so
+// `∃r.Self ∈ S(X)` fires `D ∈ S(X)` directly. SOUNDNESS side-condition (load-bearing): CRs2's
+// premise `(X,X) ∈ R(r)` is tracked as the self-concept membership `∃r.Self ∈ S(X)`, NOT the raw
+// R-link — a general self-link from CR3 (`X ⊑ ∃r.X`, whose invariant is only `X ⊑ ∃r.X`, NOT
+// `X ⊑ ∃r.Self`) must NEVER trigger CRs2. CRs1 IS sound to add to the ordinary link set because
+// `X ⊑ ∃r.Self ⟹ X ⊑ ∃r.X` (the self-successor is X itself), so the R-invariant holds.
 //
 // CR4 is the load-bearing existential-traversal rule that OWL 2 RL lacks (spike §1.2): it is
 // the only rule that reasons THROUGH an r-successor, and it is why running `--reason owl` over
 // an EL ontology returns a silently-incomplete hierarchy. The implementation is a worklist
 // saturation: a per-concept queue of newly-derived subsumers drives rule application, so each
-// derived membership is processed once. Single-threaded (Phase E1; concurrency is E4).
+// derived membership is processed once. CR6 (the nominal rule, "Pushing the EL Envelope"
+// IJCAI-05) runs as a between-fixpoint pass — see `cr6_pass` for the rule, the ⇝_R
+// side-condition, and the soundness argument. Single-threaded (Phase E1; concurrency is E4).
+//
+// ## Substrate adoption evaluation -- REASONED NON-ADOPTION [SONNET-4.6] sq-pbz04.2.3
+//
+// Bead sq-pbz04.2.3 evaluated whether the CR1-CR5 saturation joins can adopt the shared
+// `sparq_substrate::join` kernels (the `build_table`/`probe_emit`/`hash_probe_serial` and
+// `join::delta::DeltaTable` path, analogously to `sparq-reason/src/substrate_join.rs`
+// which drives rdfs2/3/7 on the substrate). Disposition: DOCUMENTED NON-ADOPTION.
+// Referenced from `research/reasoner-federation-program.md` sections 3 and 6.
+//
+// Five structural reasons this module's join shapes are not profitable substrate consumers:
+//
+// 1. PER-EVENT WORKLIST, NOT BATCH BUILD/PROBE. The substrate `build_table`+`probe_emit`
+//    requires two static `&[Row]` slices: a build side and a batch of probe rows. The EL
+//    fixpoint processes memberships one at a time from a `Vec<(Concept, Concept)>` worklist;
+//    each dequeued `(X, D)` immediately fires rules whose outputs re-enter the queue before
+//    the outer loop resumes. Batching would require collecting an entire delta round first,
+//    but the five rules have heterogeneous triggers and no meaningful "round" boundary --
+//    unlike the OWL-RL semi-naive `delta join full` pattern `DeltaTable` was designed for.
+//
+// 2. SIMULTANEOUS READ AND WRITE ON THE SAME RELATIONS. CR2 reads `S(X)` (checks whether
+//    a partner conjunct is already present) while CR1/CR3/CR4/CR5 write new members into
+//    `S(X)` within the same worklist pass. The substrate kernels assume `&[Row]` immutability
+//    at probe time; there is no safe seam to hand `S(X)` to a kernel as a probe slice while
+//    also holding it mutably for insertion. The `add()` helper at the bottom of this file is
+//    called inside rule-specific borrows that cannot be widened to a whole-relation borrow.
+//
+// 3. AXIOMINDEX IS ALREADY AN OPTIMAL SINGLE-KEY HASH TABLE. The `AxiomIndex` fields are
+//    `FxHashMap<Concept, Vec<...>>` keyed by `Concept = u32` -- a direct O(1) lookup using
+//    the native integer hash. Reshaping to substrate `Row` (`SmallVec<[u32; 4]>`) build
+//    tables would add per-axiom `Row::from_slice` allocation and per-lookup key projection
+//    through `JoinKeys`, replacing a 4-byte integer hash with a `SmallVec` hash over the
+//    same data. Asymptotic complexity is identical; the per-lookup constant is strictly
+//    higher with no algorithmic benefit.
+//
+// 4. CR4 IS A 3-WAY TRIANGLE JOIN WITH THREE GROWING SIDES. CR4 combines S(Y) memberships,
+//    R(r) predecessor links, and axiom index lookups, where both S(Y) and R(r) grow during
+//    the same pass. The substrate handles 2-way binary joins (static build probed by a
+//    batch probe slice) and the 2-way semi-naive delta/full shape. The EL triangle -- where
+//    S-sets, R-links, and AxiomIndex all inform the same rule firing -- has no direct
+//    mapping to any of the four substrate kernels (merge-join, hash-join, bind-join,
+//    trie-join) or to the `DeltaTable` seam. Forcing it would require rebuilding all three
+//    sides at each queue step, which is strictly worse than the current per-event probe.
+//
+// 5. THE QL PRECEDENT APPLIES IN FULL. The OWL 2 QL certain-answer oracle (sq-qo1a9) is a
+//    documented non-consumer of the substrate join kernels: its query-rewriting shape
+//    (PerfectRef + tree-witness + UCQ minimisation) is not a build/probe or semi-naive
+//    fixpoint. The EL worklist fixpoint is a cleaner non-consumer still: QL at least
+//    evaluates CQ answers over a static dataset, which could use the engine join path;
+//    EL saturation joins never produce a relational tuple output -- they grow set-based
+//    state incrementally, and every "join" is a membership test, not a tuple production.
+//
+// Comparison with the RDFS precedent (`sparq-reason/src/substrate_join.rs`, sq-yk6or):
+// rdfs2/3/7 are profitable substrate consumers because (a) the schema closure maps are
+// built ONCE and probed many times without mutation, and (b) the output is a multiset
+// of triples, exactly what `probe_emit`'s combined-row output models. Neither condition
+// holds here: S(X) and R(r) grow during every worklist step, and the output is
+// side-effectful set membership, not a combinatorial tuple join.
+//
+// Also mirroring the note in `substrate_join.rs` module doc: "The OWL-RL semi-naive
+// fixpoint (owl.rs): a delta-driven delta/full join with union-find sameAs
+// canonicalisation. Genuinely a different (incremental, mutating) join shape than the
+// substrate's static &[Row] build/probe kernel." The EL worklist is even more tightly
+// coupled, with no round boundary to hang a delta on.
+//
+// Conclusion: this module stays on its hand-rolled FxHashMap worklist. There is no
+// profitable behaviour-neutral seam to the substrate kernels for CR1-CR5. If a
+// concurrency refactor (Phase E4) eventually batches derivations by concept, that is
+// the point to reconsider whether a per-batch substrate probe makes sense -- that
+// decision belongs to E4, not here.
 
 use crate::normal::{Concept, Names, Normal, Role, BOTTOM, TOP};
 #[cfg(feature = "rbox")]
@@ -66,30 +154,41 @@ pub struct Saturation {
     pub r_succ: FxHashMap<Role, FxHashMap<Concept, FxHashSet<Concept>>>,
 }
 
-/// Runs CR1–CR5 (and, under the `rbox` feature, CR10/CR11 role saturation) to a fixpoint over
-/// `axioms` for `n` concepts (the dense count from [`Names`]). Returns the saturated
-/// [`Saturation`]; `S[c]` then holds every concept subsuming `c`.
+/// Runs CR1–CR6 (and, under the `rbox` feature, CR10/CR11 role saturation) to a fixpoint over
+/// `axioms` for the concepts of `names`. Returns the saturated [`Saturation`]; `S[c]` then
+/// holds every concept subsuming `c`.
 #[cfg(feature = "rbox")]
-pub fn saturate(axioms: &[Normal], n: usize, role_box: &RoleBox) -> Saturation {
-    saturate_inner(axioms, n, role_box)
+pub fn saturate(axioms: &[Normal], names: &Names, role_box: &RoleBox) -> Saturation {
+    saturate_inner(axioms, names, role_box)
 }
 
-/// Runs CR1–CR5 to a fixpoint (no role hierarchy — roles are compared for equality only). The
-/// E1 entry point; the `rbox` build uses the [`RoleBox`]-aware overload above.
+/// Runs CR1–CR6 to a fixpoint (no role hierarchy — roles are compared for equality only). The
+/// E1 entry point; the `rbox` build uses the `RoleBox`-aware overload above.
 #[cfg(not(feature = "rbox"))]
-pub fn saturate(axioms: &[Normal], n: usize) -> Saturation {
-    saturate_inner(axioms, n)
+pub fn saturate(axioms: &[Normal], names: &Names) -> Saturation {
+    saturate_inner(axioms, names)
 }
 
-/// The shared CR1–CR5 (+CR10/CR11 under `rbox`) fixpoint. The `role_box` argument exists only
-/// in the `rbox` build; CR3 link insertion routes through it so every asserted existential link
-/// is closed under role inclusion + composition before CR4/CR5 fire.
+/// The shared CR1–CR5 (+CR10/CR11 under `rbox`) worklist fixpoint, alternated with the CR6
+/// nominal pass (sq-pbz04.2.1) until neither derives anything new. The `role_box` argument
+/// exists only in the `rbox` build; CR3 link insertion routes through it so every asserted
+/// existential link is closed under role inclusion + composition before CR4/CR5 fire.
+///
+/// All rules are monotone (S-sets and R-links only ever grow, bounded by the concept count),
+/// so the alternation terminates and reaches the SAME least fixpoint regardless of rule
+/// order — classification stays deterministic. On a nominal-free ontology `cr6_pass` returns
+/// `false` on its first O(1) check, so the loop runs the CR1–CR5 worklist exactly once —
+/// byte-for-byte the pre-CR6 behaviour and cost.
 fn saturate_inner(
     axioms: &[Normal],
-    n: usize,
+    names: &Names,
     #[cfg(feature = "rbox")] role_box: &RoleBox,
 ) -> Saturation {
     let ix = AxiomIndex::build(axioms);
+    let n = names.concept_count();
+    // [OPUS-4.8] sq-pbz04.2.6: O(1) fast-path guard — on a hasSelf-free ontology CRs1 is skipped
+    // entirely, so classification is byte-identical (behaviour AND cost) to the pre-CR-Self path.
+    let has_self = names.has_self_restrictions();
     let mut sat = Saturation {
         s: vec![FxHashSet::default(); n],
         r_pred: FxHashMap::default(),
@@ -108,59 +207,190 @@ fn saturate_inner(
         }
     }
 
-    while let Some((x, d)) = queue.pop() {
-        // CR1: every `D ⊑ E` axiom adds E to S(X).
-        if let Some(es) = ix.sub.get(&d) {
-            for &e in es {
-                add(&mut sat.s[x as usize], x, e, &mut queue);
-            }
-        }
-        // CR2: every `D ⊓ C2 ⊑ E` axiom fires if C2 also already ∈ S(X).
-        if let Some(parts) = ix.and_by_conjunct.get(&d) {
-            for &(other, e) in parts {
-                if sat.s[x as usize].contains(&other) {
+    loop {
+        while let Some((x, d)) = queue.pop() {
+            // CR1: every `D ⊑ E` axiom adds E to S(X).
+            if let Some(es) = ix.sub.get(&d) {
+                for &e in es {
                     add(&mut sat.s[x as usize], x, e, &mut queue);
                 }
             }
-        }
-        // CR3: every `D ⊑ ∃r.F` axiom adds the link (X, F) to R(r). Under `rbox` the link is
-        // closed under CR10 (role inclusion) + CR11 (composition) before CR4/CR5 fire.
-        if let Some(links) = ix.exists.get(&d) {
-            for &(r, f) in links {
-                #[cfg(feature = "rbox")]
-                add_link_rbox(&mut sat, r, x, f, &ix, role_box, &mut queue);
-                #[cfg(not(feature = "rbox"))]
-                add_link(&mut sat, r, x, f, &ix, &mut queue);
-            }
-        }
-        // CR4 / CR5 with the new membership `D ∈ S(X)` as the trigger, where X is the
-        // SUCCESSOR `Y` of some link `(P, X) ∈ R(r)`. Collect the (predecessor, concept) work
-        // FIRST (releasing the immutable `r_pred` borrow) before mutating `sat.s`.
-        let mut derived: Vec<(Concept, Concept)> = Vec::new();
-        for (&r, preds_by_succ) in &sat.r_pred {
-            let Some(preds) = preds_by_succ.get(&x) else {
-                continue;
-            };
-            // CR4: `∃r.D ⊑ E` and (P, X) ∈ R(r) and D ∈ S(X)  ⇒  E ∈ S(P).
-            if let Some(es) = ix.exists_sub.get(&(r, d)) {
-                for &p in preds {
-                    for &e in es {
-                        derived.push((p, e));
+            // CR2: every `D ⊓ C2 ⊑ E` axiom fires if C2 also already ∈ S(X).
+            if let Some(parts) = ix.and_by_conjunct.get(&d) {
+                for &(other, e) in parts {
+                    if sat.s[x as usize].contains(&other) {
+                        add(&mut sat.s[x as usize], x, e, &mut queue);
                     }
                 }
             }
-            // CR5: ⊥ ∈ S(X) and (P, X) ∈ R(r)  ⇒  ⊥ ∈ S(P).
-            if d == BOTTOM {
-                for &p in preds {
-                    derived.push((p, BOTTOM));
+            // CR3: every `D ⊑ ∃r.F` axiom adds the link (X, F) to R(r). Under `rbox` the link
+            // is closed under CR10 (role inclusion) + CR11 (composition) before CR4/CR5 fire.
+            if let Some(links) = ix.exists.get(&d) {
+                for &(r, f) in links {
+                    #[cfg(feature = "rbox")]
+                    add_link_rbox(&mut sat, r, x, f, &ix, role_box, &mut queue);
+                    #[cfg(not(feature = "rbox"))]
+                    add_link(&mut sat, r, x, f, &ix, &mut queue);
                 }
             }
+            // CRs1 (sq-pbz04.2.6): the self-restriction concept `∃r.Self` just entered S(X) —
+            // i.e. `X ⊑ ∃r.Self` — so add the reflexive link `(X,X) ∈ R(r)`. `add_link` fires
+            // CR4/CR5 for it, and under `rbox` `add_link_rbox` closes it under role
+            // inclusion/composition. SOUND: `X ⊑ ∃r.Self ⟹ X ⊑ ∃r.X` (the r-successor is X
+            // itself), so `(X,X) ∈ R(r)` respects the `(C,D) ∈ R(r) ⟹ T ⊨ C ⊑ ∃r.D` invariant.
+            // CRs2 needs NO code here: `∃r.Self ⊑ D` is the axiom `Sub(self_r, D)`, so the `D ∈
+            // S(X)` conclusion already fired via CR1 above when `∃r.Self` entered S(X).
+            if has_self {
+                if let Some(r) = names.self_role(d) {
+                    #[cfg(feature = "rbox")]
+                    add_link_rbox(&mut sat, r, x, x, &ix, role_box, &mut queue);
+                    #[cfg(not(feature = "rbox"))]
+                    add_link(&mut sat, r, x, x, &ix, &mut queue);
+                }
+            }
+            // CR4 / CR5 with the new membership `D ∈ S(X)` as the trigger, where X is the
+            // SUCCESSOR `Y` of some link `(P, X) ∈ R(r)`. Collect the (predecessor, concept)
+            // work FIRST (releasing the immutable `r_pred` borrow) before mutating `sat.s`.
+            let mut derived: Vec<(Concept, Concept)> = Vec::new();
+            for (&r, preds_by_succ) in &sat.r_pred {
+                let Some(preds) = preds_by_succ.get(&x) else {
+                    continue;
+                };
+                // CR4: `∃r.D ⊑ E` and (P, X) ∈ R(r) and D ∈ S(X)  ⇒  E ∈ S(P).
+                if let Some(es) = ix.exists_sub.get(&(r, d)) {
+                    for &p in preds {
+                        for &e in es {
+                            derived.push((p, e));
+                        }
+                    }
+                }
+                // CR5: ⊥ ∈ S(X) and (P, X) ∈ R(r)  ⇒  ⊥ ∈ S(P).
+                if d == BOTTOM {
+                    for &p in preds {
+                        derived.push((p, BOTTOM));
+                    }
+                }
+            }
+            for (p, e) in derived {
+                add(&mut sat.s[p as usize], p, e, &mut queue);
+            }
         }
-        for (p, e) in derived {
-            add(&mut sat.s[p as usize], p, e, &mut queue);
+        // CR6 (safe nominals): merges may enqueue new memberships, which can in turn create
+        // new links / reachability — re-run the worklist, then re-check, until neither moves.
+        if !cr6_pass(&mut sat, names, &mut queue) {
+            break;
         }
     }
     sat
+}
+
+/// [FABLE-5] sq-pbz04.2.1 — CR6, the safe-nominal completion rule (Baader–Brandt–Lutz,
+/// "Pushing the EL Envelope", IJCAI-05):
+///
+/// ```text
+///   CR6   {a} ∈ S(X) ∩ S(Y),  X ⇝_R Y   ⇒   S(X) := S(X) ∪ S(Y)
+/// ```
+///
+/// where the side-condition `X ⇝_R Y` holds iff Y is reachable from X — or from some nominal
+/// `{b}` — via the (role-erased) link graph `∪_r R(r)`, taking reachability reflexively (so
+/// `Y = X`, or Y itself a nominal, trivially qualify).
+///
+/// SOUNDNESS (the load-bearing invariant; the side-condition is exactly what makes the merge
+/// valid). The saturation maintains: `D ∈ S(C)` ⟹ `T ⊨ C ⊑ D`, and `(C,D) ∈ R(r)` ⟹
+/// `T ⊨ C ⊑ ∃r.D`. In any model, an R-path start being NON-EMPTY forces every set on the
+/// path non-empty (each element needs a successor), and a nominal `{b}` is ALWAYS non-empty.
+/// So for a firing pair (X, Y): if Y is nominal-rooted, Y is non-empty outright; if Y is
+/// reached from X, either X is empty (then `X ⊑ E` holds vacuously for every E) or Y is
+/// non-empty. A non-empty Y with `Y ⊑ {a}` is EXACTLY `{a}`; with `X ⊑ {a}` that gives
+/// `X ⊆ {a} = Y ⊆ E` for every `E ∈ S(Y)` — so every merged membership is entailed. WITHOUT
+/// the side-condition the merge would be UNSOUND: from `X ⊑ {a}` and `Y ⊑ {a}` alone, Y may
+/// be empty while X is not, and `X ⊑ E` need not hold (pinned by a negative test).
+///
+/// COMPLETENESS (honest boundary): this is the classic reachability-based rule — complete for
+/// the profile's typical "safe" nominal usage (`hasValue` values, singleton `oneOf` classes)
+/// but NOT claimed complete for every EL++ nominal interplay: the ELK line of work (Kazakov &
+/// Krötzsch, KR 2012) showed unrestricted nominal interaction needs a stronger calculus.
+/// Missing consequences are an incompleteness, never an unsound derivation. Likewise a
+/// nominal clash (`⊥ ∈ S({a})`) propagates ⊥ only to concepts CR6 relates to `{a}` — a
+/// global-inconsistency verdict (everything entailed) is deliberately out of scope here.
+///
+/// Runs AFTER the CR1–CR5 worklist drains: one pass over the current saturation, applying
+/// every firing merge and queueing new memberships. Returns `true` iff anything was added
+/// (the caller then re-runs the worklist and re-checks). Cost on nominal-free input: one
+/// `has_nominals` check. With nominals: one scan of the S-sets plus per-candidate BFS over
+/// the link graph — fine at the scale nominals occur; revisit if a nominal-heavy corpus shows
+/// up.
+fn cr6_pass(sat: &mut Saturation, names: &Names, queue: &mut Vec<(Concept, Concept)>) -> bool {
+    if !names.has_nominals() {
+        return false;
+    }
+    // Group the concepts whose S-set holds a given nominal: candidates[{a}] = every X with
+    // {a} ∈ S(X). Only these can pair in CR6.
+    let mut candidates: FxHashMap<Concept, Vec<Concept>> = FxHashMap::default();
+    for (x, s) in sat.s.iter().enumerate() {
+        for &m in s {
+            if names.is_nominal(m) {
+                candidates.entry(m).or_default().push(x as Concept);
+            }
+        }
+    }
+    // Role-erased successor adjacency of ∪_r R(r), for the ⇝_R reachability side-condition.
+    let mut adj: FxHashMap<Concept, FxHashSet<Concept>> = FxHashMap::default();
+    for succ_by_x in sat.r_succ.values() {
+        for (&x, succs) in succ_by_x {
+            adj.entry(x).or_default().extend(succs.iter().copied());
+        }
+    }
+    let bfs = |roots: &[Concept]| -> FxHashSet<Concept> {
+        let mut seen: FxHashSet<Concept> = roots.iter().copied().collect();
+        let mut stack: Vec<Concept> = roots.to_vec();
+        while let Some(c) = stack.pop() {
+            if let Some(nexts) = adj.get(&c) {
+                for &nx in nexts {
+                    if seen.insert(nx) {
+                        stack.push(nx);
+                    }
+                }
+            }
+        }
+        seen
+    };
+    // Concepts provably non-empty regardless of context: reachable from a nominal root
+    // (reflexively — every nominal is its own root).
+    let nominal_rooted = bfs(names.nominal_concepts());
+
+    // Fire every merge the current saturation justifies. Deterministic iteration is not
+    // required for the RESULT (the least fixpoint is order-independent), only termination:
+    // each firing merge strictly grows an S-set.
+    let mut changed = false;
+    let mut reach_from: FxHashMap<Concept, FxHashSet<Concept>> = FxHashMap::default();
+    let mut mates: Vec<Concept> = Vec::new();
+    for xs in candidates.values() {
+        for &x in xs {
+            mates.clear();
+            mates.extend(xs.iter().copied().filter(|&y| {
+                y != x
+                    && (nominal_rooted.contains(&y)
+                        || reach_from
+                            .entry(x)
+                            .or_insert_with(|| bfs(&[x]))
+                            .contains(&y))
+            }));
+            for &y in &mates {
+                // S(X) := S(X) ∪ S(Y). Collect first: two rows of `sat.s` cannot be borrowed
+                // mutably at once, and Y's row is only read.
+                let extra: Vec<Concept> = sat.s[y as usize]
+                    .difference(&sat.s[x as usize])
+                    .copied()
+                    .collect();
+                for e in extra {
+                    add(&mut sat.s[x as usize], x, e, queue);
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
 }
 
 /// Inserts `e` into `S(x)`, queueing `(x, e)` if it is new. The set is borrowed mutably by the

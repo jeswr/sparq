@@ -949,10 +949,15 @@ infs=$("$CLI" reason "$TMP/inf.ttl" turtle rdfs 2>&1 | grep -oE 'in [0-9.]+s' | 
 
 # WASM bundle size (bytes, deterministic) — enforces the "zero wasm bundle impact" rule for
 # opt-in features: any feature that leaks into the browser bundle shows up here per commit.
-# Skipped gracefully when the wasm target isn't installed.
+# [OPUS-4.8] sq-7d3dj.1: built with the `release-wasm` profile (NOT plain `release`) so the
+# GATE BUILDS UNDER THE SAME CARGO PROFILE AS THE SHIPPED BUNDLE — js `build:wasm{,:lean}`
+# builds the same profile via `wasm-pack --profile release-wasm` (size-optimised cold parse
+# crates + strip=symbols; hot engine crates stay opt-level 3). This ratchets the raw `cargo
+# build` `.wasm`, not the post-wasm-bindgen/wasm-opt npm artifact, so it tracks the profile
+# the shipped bundle uses. Skipped gracefully when the wasm target isn't installed.
 if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
-  if cargo build --release -q -p sparq-wasm --target wasm32-unknown-unknown 2>/dev/null; then
-    WASM_BIN=$(ls target/wasm32-unknown-unknown/release/*.wasm 2>/dev/null | head -1)
+  if cargo build --profile release-wasm -q -p sparq-wasm --target wasm32-unknown-unknown 2>/dev/null; then
+    WASM_BIN=$(ls target/wasm32-unknown-unknown/release-wasm/*.wasm 2>/dev/null | head -1)
     if [ -n "${WASM_BIN:-}" ]; then
       add wasm_bundle_bytes bytes "$(wc -c < "$WASM_BIN" | tr -d ' ')"
     fi

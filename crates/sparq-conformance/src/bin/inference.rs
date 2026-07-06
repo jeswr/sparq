@@ -109,6 +109,26 @@ fn main() {
         sparql_entail::notes(),
         &|results| sparql_entail::run_suite(&rdf_tests, results),
     );
+    // [OPUS-4.8] sq-kuvu3 (epic sq-pbz04) — the EXPERIMENTAL OWL 2 QL (DL-Lite_R)
+    // query-rewriting arm over the BROAD `pr:QL` `sparql11/entailment` set, opt-in
+    // behind `ql-experimental`. Every row it adds is in the experimental
+    // OUT-OF-SCOPE bucket (NOT a graduated conformance pass), so the section's
+    // pass-rate is `—`/0 and the overall conformance totals are unchanged — and the
+    // DEFAULT binary (feature off) is byte-for-byte unchanged (this section is
+    // `#[cfg]`-stripped). It records, honestly, what `sparq-reason-ql` computes over
+    // that broad set (which is NOT the formal DL-Lite_R suite — it mixes intensional
+    // certain-answer cases outside sound rewriting). The FORMAL DL-Lite_R
+    // certain-answer oracle GRADUATED to a pinned floor in sq-qo1a9 — it is enforced
+    // by the `tests/ql_dllite_suite.rs` `--test` runner (a sparq-EXTENSION row in the
+    // central scoreboard, `QL_DLLITE_FLOOR`), not summed into this binary's totals.
+    #[cfg(feature = "ql-experimental")]
+    run_section(
+        "OWL 2 QL query-rewriting (EXPERIMENTAL, sparql11/entailment pr:QL — NOT the formal \
+         DL-Lite_R suite, NOT a conformance floor; the formal DL-Lite_R oracle graduated in \
+         sq-qo1a9 via tests/ql_dllite_suite.rs)",
+        sparql_entail::ql_experimental_notes(),
+        &|results| sparql_entail::run_ql_experimental_arm(&rdf_tests, results),
+    );
     // [OPUS-4.8] (B4) W3C rdf-turtle suite through the SPARQ Turtle parser — the
     // rejection/acceptance oracle that gates the Turtle T1 spike. Reuses the rdf-tests clone.
     run_section(

@@ -24,7 +24,19 @@
 //
 // This is a CORRECTNESS smoke test, not a benchmark: it asserts the cold-start COUNT,
 // never a wall-clock threshold (timings on a work-box / CI runner are non-canonical).
-import { test, expect, type Page } from "@playwright/test";
+// [OPUS-4.8] sq-ymr2e.1 — runs under the shared foundation `test` (e2e/support) for the
+// DETERMINISM harness (frozen clock via page.clock.setFixedTime — timers stay LIVE so the
+// prewarm/prove flow is not deadlocked — seeded random that leaves WebCrypto untouched, and
+// animations-off). It opts OUT of the hermetic-network block (`hermeticNetwork: false`): the ZK
+// prover's bb.js SharedArrayBuffer multithreading requires the coi-serviceworker's cross-origin
+// isolation (COOP/COEP header injection), which blanket `context.route` interception disrupts, so
+// the prover would never reach ready under it. That is safe to skip here — the prover's deps are
+// bundled and the circuit is fetched same-origin from public/zk (zero-network by construction), so
+// the block would only ever be a no-op. See e2e/support/fixtures.ts (the hermeticNetwork option).
+import { test, expect } from "./support";
+import { type Page } from "@playwright/test";
+
+test.use({ hermeticNetwork: false });
 
 // Relative (no leading slash) so it resolves UNDER the baseURL's `/sparq/` basePath —
 // a leading slash would target the origin root and miss the basePath entirely.

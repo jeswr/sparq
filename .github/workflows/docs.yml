@@ -8,7 +8,7 @@
 #
 # WHY IT DOES NOT DEPLOY TO PAGES (the deferred half, reported as a blocker):
 #   GitHub Pages exposes exactly ONE deploy slot. The live site at
-#   https://jeswr.github.io/sparq/ is ALREADY published by pages.yml — the Next.js
+#   https://sparq.jeswr.org/ is ALREADY published by pages.yml — the Next.js
 #   feature-showcase at the root, with the benchmark dashboard overlaid at
 #   /sparq/dev/. A SECOND `actions/deploy-pages` workflow here would race pages.yml
 #   on every main/benchmark-data push (last-writer-wins) AND replace the live
@@ -86,7 +86,7 @@ jobs:
       # Pinned, prebuilt mdbook (GitHub Releases binary — reproducible + fast, no
       # cargo compile). Explicit `tool:` is required by the sq-ur7o install-action lint.
       - name: Install mdbook (pinned)
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: mdbook@0.4.40
 

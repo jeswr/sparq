@@ -10,7 +10,7 @@ only when the dataset or QLever version changes (note the date + commit if so).
 > tables below are point-in-time snapshots** of this machine and *will drift*;
 > regenerate them with the `sparq-cli bench … count` / `bench-mmap` commands shown
 > in each section (see also `bench/benchmarks.toml`, `bench/CATALOG.md`, and the
-> per-commit perf dashboard <https://jeswr.github.io/sparq/dev/bench>). This is the
+> per-commit perf dashboard <https://sparq.jeswr.org/dev/bench>). This is the
 > single source for the QLever comparison; other docs link here rather than restate it.
 
 All times are **min-of-N cold** query-time-ms reported by QLever (`query-time-ms`),

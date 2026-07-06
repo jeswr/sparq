@@ -24,6 +24,46 @@ pub mod run;
 // `sparq-conformance-scoreboard` binary renders it; a guard test keeps the
 // crate-local SHACL/geo floors in sync.
 pub mod scoreboard;
+// [OPUS-4.8] sq-ushvx (epic sq-my8wd) — the in-process SERVICE-federation test harness.
+// A reusable fixture that stands up a REAL `sparq_server::serve` endpoint on an ephemeral
+// `127.0.0.1:0` loopback port and drives a federated SERVICE query through the engine's
+// REAL `ureq` transport. Behind the OPT-IN `service-loopback` feature (tokio + axum +
+// ureq), `#[cfg]`-stripped from the default build. The federation keystone the later
+// `sparql11/service` + HTTP-protocol conformance lanes (sq-my8wd) wire onto.
+#[cfg(feature = "service-loopback")]
+pub mod service_loopback;
+// [OPUS-4.8] sq-ddpgx (epic sq-my8wd) — the W3C `sparql11/service` EVALUATION
+// conformance lane, driven through the loopback harness above. For each manifest
+// test it stands up a REAL loopback endpoint per `qt:serviceData` block, rewrites
+// the well-known endpoint IRIs to the bound loopback URLs, runs the federated
+// query through the engine's REAL `ureq` transport, and compares to the `.srx`
+// oracle. Behind the same opt-in `service-loopback` deps (the crate `service`
+// feature forwards to it); the gating runner is `tests/service_eval_suite.rs`.
+#[cfg(feature = "service-loopback")]
+pub mod service_eval;
+// [OPUS-4.8] sq-jaj38 (epic sq-my8wd) — the W3C SPARQL 1.1 **Protocol** (HTTP layer)
+// conformance lane. Drives raw HTTP requests (GET/POST query+update, the QUERY method,
+// dataset overrides, result-format content negotiation, the documented status codes)
+// DIRECTLY at the in-process loopback server's bound `127.0.0.1:0` port — exercising the
+// SPARQL Protocol request/response contract, not the federated SERVICE transport. Behind the
+// same opt-in `service-loopback` deps (the crate `http-protocol` feature forwards to it); the
+// gating runner is `tests/http_protocol_suite.rs`. Connects a plain std `TcpStream` to the
+// loopback port (no engine egress involved), so it does not widen the SSRF allowlist.
+#[cfg(feature = "service-loopback")]
+pub mod http_protocol;
+// [OPUS-4.8] sq-1uuxz (epic sq-my8wd) — the SPARQL 1.1 **Service-Description** (SD) +
+// **Graph-Store Protocol** (GSP) conformance lane. Drives raw HTTP requests DIRECTLY at the
+// in-process loopback server's bound `127.0.0.1:0` port — (A) fetching the `GET /sparql` (no
+// query) Service-Description document and asserting it advertises exactly the formats / languages
+// / versions / features the server genuinely implements (no over-advertising), and (B) a full
+// GET/PUT/POST/DELETE Graph-Store-Protocol round-trip on a named graph (indirect `?graph=` + direct
+// `/graphs/<path>`) and the default graph (`?default`), verifying store state after each op. Behind
+// the opt-in `federation-descriptors` feature (forwards to `service-loopback` for the loopback
+// harness/HTTP client AND turns on `sparq-server/federation-descriptors` so the SD endpoint is
+// live); the gating runner is `tests/sd_gsp_suite.rs`. Connects a plain std `TcpStream` to the
+// loopback port (no engine egress involved), so it does not widen the SSRF allowlist.
+#[cfg(feature = "federation-descriptors")]
+pub mod sd_gsp;
 // [OPUS-4.8] (B4) W3C rdf-turtle suite run THROUGH the sparq Turtle parser
 // (`Graph::parse_to_triples`) — the rejection/acceptance oracle for the Turtle T1 spike,
 // distinct from the oxttl-differential chunked-vs-serial test and the N3-parser TurtleTests.

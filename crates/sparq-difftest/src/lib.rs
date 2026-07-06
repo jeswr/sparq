@@ -1,0 +1,68 @@
+//! Engine-independent value normalisation for value-level SPARQL differential testing.
+//!
+//! This is **node A** of the value-level multi-oracle differential-testing DAG designed in
+//! `research/differential-testing-value-level.md` (bead `sq-qcnn.4`, epic `sq-qcnn`). It is a
+//! self-contained library for comparing SPARQL solution *values* across independent engines
+//! ("oracles"), so a query that returns the right *number* of rows with a **wrong bound value**
+//! (wrong number, wrong term, wrong datatype, wrong order within a tie) can no longer slip past
+//! a cardinality-only cross-check.
+//!
+//! # The load-bearing independence constraint
+//!
+//! The comparison here **must not** reuse the engine-under-test's own value code (sparq's numeric
+//! tower or term comparator). If both sparq's and an oracle's results were canonicalised through
+//! sparq's own comparator, any bug in that comparator would apply identically to both sides and
+//! **cancel** — the differential would go blind exactly where it must see. So every rule below is
+//! implemented from the XSD spec on top of mature third-party exact arithmetic
+//! ([`num_bigint`] / [`bigdecimal`]), with **no dependency on any sparq crate**. This is a hard
+//! architectural property of the crate, enforced structurally by its dependency list.
+//!
+//! Honest caveat: an independent normaliser is itself new code and a bug surface of its own. It is
+//! only as good as its own tests (one direct unit test per public fn, per the coverage ratchet);
+//! the structural mitigation is the *second* independent oracle (a later DAG node), whose orthogonal
+//! value model makes a correlated normaliser bug far less likely to hide a real divergence. This
+//! crate raises the cost of a value bug surviving; it does not certify absence of bugs.
+//!
+//! # Two comparison regimes
+//!
+//! The correct equality differs by term provenance (see the design record §3), and this crate
+//! exposes both so the harness-wiring layer (a later DAG node) can pick per query form:
+//!
+//! * **Strict RDF term equality** ([`term::term_equal_rdf`]) — a variable bound *directly* to a
+//!   term in the input graph must be the **same RDF term** in every engine; RDF does not
+//!   canonicalise lexical form on parse, so `"01"^^xsd:integer` stays distinct from
+//!   `"1"^^xsd:integer`. The only two RDF-1.1 equalities folded in are simple-literal ≡
+//!   `xsd:string` and case-insensitive language tags.
+//! * **Value-canonical keying** ([`term::canonical_key`]) — for a *computed* term both engines
+//!   should emit a canonical form, but they may differ in canonical *lexical* (`6` vs `6.0E0`,
+//!   `1.0` vs `1`); keying by exact **value** (arbitrary-precision int/decimal, canonical double,
+//!   UTC instant) makes cross-engine canonical-lexical variance — the dominant spurious-mismatch
+//!   source — not a false positive, while still catching a genuinely wrong value. This trades away
+//!   detection of a pure lexical-preservation difference, which the strict comparator covers.
+//!
+//! # What is here (and what is deliberately not)
+//!
+//! Implemented: the neutral term model + the two regimes ([`term`]); exact numeric value equality
+//! for arbitrary-precision integer / decimal and `xsd:double`/`float` incl. `INF`/`-INF`/`NaN`
+//! ([`numeric`]); `xsd:dateTime`/`date`/`duration` value comparison with timezone normalisation and
+//! the ±14h indeterminate window ([`temporal`]); a SPARQL-Results-JSON reader into the neutral
+//! `{var → term}` model ([`json`]); and the multiset + `ORDER BY` sort-key-equivalence-class
+//! comparators ([`multiset`]).
+//!
+//! Deliberately **not** here (separate DAG nodes / beads): blank-node isomorphism across oracles
+//! (`sq-qcnn.7`), wiring these comparators into the fuzz harness (`sq-qcnn.5`), the query/data
+//! generator extension (`sq-qcnn.6`), and the pluggable second-oracle adapter (`sq-qcnn.8`).
+
+pub mod json;
+pub mod multiset;
+pub mod numeric;
+pub mod temporal;
+pub mod term;
+
+pub use json::{parse_results_json, QueryResults, Solution};
+pub use multiset::{multiset_equal, order_by_equal};
+pub use numeric::{canonical_double_string, numeric_equal, parse_numeric, NumericValue};
+pub use temporal::{
+    duration_compare, dt_compare, parse_datetime, parse_duration, Duration, TemporalOrder,
+};
+pub use term::{canonical_key, term_equal_rdf, Term};

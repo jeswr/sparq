@@ -129,3 +129,145 @@ load-bearing (adopt-or-not), measure the real transcripts. The proxy was useful 
 direction-finder, but the proxy's verdict must not be trusted over the measurement.
 
 Licensed MIT (repo default).
+
+
+---
+
+## RE-RUN — Fable subject (sq-2m6zm.9, 2026-07-05): the A-vs-B verdict SHIFTS
+
+> 🤖 **SPARQ agent** [FABLE-5]. Append-only re-run record for bead **sq-2m6zm.9**
+> (#1111 re-attempt program, thread A rung 1; design record
+> `research/neurosymbolic-fable-program.md`). Everything above this line is the
+> original **Opus-subject** record, unchanged. Harness **byte-unchanged**: frozen
+> `tasks/abm_tasks.json`, `tokens_real.py`, `analyze3.py` (verified `git diff` clean
+> against `origin/main`). Subject substitution only: **Fable (`claude-fable-5`)
+> replaces Opus in arms A and B**; arm C stays a Haiku NL-tool.
+
+### Method delta (vs the original run)
+
+- Same 30 frozen tasks × 3 arms = 90 cells; **one fresh headless `claude -p` session
+  per cell** (`--model claude-fable-5` for A/B, `claude-haiku-4-5` for C;
+  `--allowedTools Bash Read Grep Glob Skill`; brief opens with the `[ABM task= arm=]`
+  tag), transcripts mined by the frozen `tokens_real.py`.
+- **Serving-model gate (bead invariant).** Fable sessions can silently serve a
+  different model mid-run, so each transcript's `message.model` was mined **per
+  assistant line** (`model_ids.py`, committed alongside this record). A cell is valid
+  only if *every* assistant line was served by the expected subject; mixed cells are
+  excluded, never counted. **Result: 90/90 cells VALID, 0 excluded** — arms A/B:
+  811/811 assistant lines `claude-fable-5`; arm C: 329/329 lines
+  `claude-haiku-4-5-20251001`. Per-task evidence table below.
+- **Operational note (recorded for honesty).** The first dispatch wave
+  (2026-07-05 ≈ 18:07–18:25 UTC) hit the account session limit mid-window; 12 of the
+  90 cells (t27–t30 × 3 arms) returned 429 error results. Those cells were **discarded
+  entirely and re-run after the window reset** (≈ 20:10 UTC) under the same briefs —
+  no partial or mixed transcript was counted.
+
+### The measured result (verbatim `analyze3.py` output)
+
+```
+=== 3-ARM VERDICT (N=30 tasks, real cache-discounted tokens) ===
+prices/Mtok (list approx): Opus $15 in/$75 out  Haiku $1 in/$5 out
+
+arm                             med eff_in  med out   total $  med $/task  quality
+A=Opus read-docs                   154,440    2,516    91.246      2.4592     0.96
+B=Opus pkg-query                   185,678    7,551   103.651      3.3475     0.97
+C=Haiku pkg-query (NL-tool)        131,532    3,439     5.209      0.1589     0.92
+
+=== $-COST RATIOS (total over the task set) ===
+  A read-docs total: $91.246
+  B pkg-query total: $103.651   -> A is 0.9x B
+  C Haiku NL-tool:   $5.209   -> A is 17.5x C ; B is 19.9x C
+
+=== QUALITY per arm per stratum (mean gold-coverage) ===
+  stratum           A      B      C
+  point-lookup   0.88   1.00   0.94
+  multi-hop      0.97   0.89   0.78
+  synthesis      1.00   1.00   1.00
+  negative       1.00   1.00   1.00
+
+wrote /tmp/sq2m6zm9/verdict_fable.json
+```
+
+`analyze3.py` prices arms A/B at its frozen **Opus-era $15/$75** — kept verbatim per
+the re-run-not-rebuild invariant. Re-priced at the **actual subject-model list prices**
+(Fable $10 in / $50 out; Haiku $1 / $5 per Mtok — same token rows, reporting script
+`fable_dollars.py` in the run scratch, frozen analyzer untouched):
+
+```
+arm A: n=30 total=$60.831 median/task=$1.6395
+arm B: n=30 total=$69.101 median/task=$2.2317
+arm C: n=30 total=$5.209 median/task=$0.1589
+A/C=11.7x  B/C=13.3x  A/B=0.9x
+```
+
+Per-task pairing on the same frozen rows: **B beats A on effective input tokens on
+only 12/30 tasks; median B/A eff-token ratio 1.11** (median assistant turns: A 7.5,
+B 15).
+
+### Verdict vs the Opus-era record — SHIFTED on A-vs-B; delegation holds in direction
+
+| Opus-era claim (record above) | Fable-subject outcome |
+|---|---|
+| **B (pkg-query) ≈ halves A (read-docs) eff tokens** (B cheaper on 29/30 tasks) | **Does NOT hold.** B is *more* expensive than A: median B/A ratio **1.11**, B cheaper on **12/30**; A ≈ 0.9× B in $ under both pricings. Fable reads docs efficiently (7.5 median turns) but drives a much longer introspect→ground→ask loop (15 median turns). |
+| **C (Haiku NL-tool) ≈ 30× cheaper than A at equal-or-better quality — ADOPTED** | **Direction holds; magnitude compresses; a quality gap appears.** C ≈ **11.7×** cheaper than A at actual subject prices (17.5× at the analyzer's frozen Opus-era prices). Quality: C 0.92 vs A 0.96 / B 0.97 — C loses on multi-hop (0.78) this run, so "equal or better" weakens to "slightly below, at ≈ 1/12 the cost". |
+
+The model-dependence #1111 predicted is real, and it points the **opposite way** on
+this benchmark: with Opus, read-docs was the *worst*-quality arm (0.92 vs 1.00); with
+Fable, read-docs is cheap **and** near-top quality (0.96) while the pkg-query middle
+spends twice the turns for no quality gain. **A stronger orchestrator needs the
+symbolic middle less.** The cheap path for a Fable orchestrator is: read the docs, or
+delegate to the Haiku NL-tool — not run `pkg-query` itself. (The decision consequence
+belongs to the `query-pkg` skill owner / epic `sq-2m6zm`, not this record.)
+
+### Per-task serving-model ids (validity evidence)
+
+<details>
+<summary>90-cell model-id table (mined from transcript <code>message.model</code>; all VALID)</summary>
+
+| task | arm A | arm B | arm C |
+|---|---|---|---|
+| t01 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t02 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t03 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t04 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t05 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t06 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t07 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t08 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t09 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t10 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t11 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t12 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t13 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t14 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t15 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t16 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t17 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t18 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t19 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t20 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t21 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t22 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t23 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t24 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t25 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t26 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t27 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t28 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t29 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+| t30 | claude-fable-5 | claude-fable-5 | claude-haiku-4-5-20251001 |
+
+</details>
+
+### Honest caveats
+
+- **N = 30, single counterbalanced run per subject.** Cross-run deltas (e.g. arm C
+  quality 1.00 → 0.92) carry run-to-run and grader-style variance; the load-bearing
+  signal is the **within-run** arm ordering, measured by the same frozen grader.
+- **Answer-style sensitivity.** The frozen gold-key grader rewards verbatim,
+  row-shaped answers; Fable's synthesizing style can under-resolve keys a row-reading
+  agent surfaces verbatim (same caveat class as the original record's "gold keys
+  mildly favour pkg-query").
+- **All numbers runtime / NON-CANONICAL** (work-box transcripts, list-price
+  approximations, stated openly). Run artifacts are regenerable and git-ignored per
+  the existing policy; the committed artifacts are this record + `model_ids.py`.
