@@ -39,7 +39,7 @@ fn opt_in(body: &str) -> String {
 /// A bare default-graph pattern with NO opt-in matches nothing — for every session.
 #[test]
 fn bare_default_graph_pattern_is_empty_without_opt_in() {
-    let mut s = store();
+    let s = store();
     assert_eq!(s.query_as(&alice(), Mode::Read, BARE).unwrap().rows.len(), 0, "alice");
     assert_eq!(s.query_as(&carol(), Mode::Read, BARE).unwrap().rows.len(), 0, "carol");
     assert_eq!(s.query_as(&Session::default(), Mode::Read, BARE).unwrap().rows.len(), 0, "anon");
@@ -49,7 +49,7 @@ fn bare_default_graph_pattern_is_empty_without_opt_in() {
 /// the union of the session's authorized named graphs — reproducing today's union counts.
 #[test]
 fn union_default_opt_in_reproduces_authorized_union() {
-    let mut s = store();
+    let s = store();
     let q = opt_in("?s <https://ex.dev/ns#title> ?title");
     assert_eq!(s.query_as(&alice(), Mode::Read, &q).unwrap().rows.len(), 599, "alice union");
     assert_eq!(s.query_as(&carol(), Mode::Read, &q).unwrap().rows.len(), 407, "carol union");
@@ -65,7 +65,7 @@ fn union_default_opt_in_reproduces_authorized_union() {
 /// session never leaks the union view into a subsequent bare request.
 #[test]
 fn opt_in_is_per_request_with_no_state_leak() {
-    let mut s = store();
+    let s = store();
     let q = opt_in("?s <https://ex.dev/ns#title> ?title");
     assert_eq!(s.query_as(&alice(), Mode::Read, &q).unwrap().rows.len(), 599, "opt-in 1");
     // A following BARE request must be empty — the previous opt-in did not stick.
@@ -78,7 +78,7 @@ fn opt_in_is_per_request_with_no_state_leak() {
 /// named graphs with or without the opt-in (only the empty/union DEFAULT graph is gated).
 #[test]
 fn explicit_graph_pattern_unaffected_by_feature() {
-    let mut s = store();
+    let s = store();
     let q = "SELECT ?title WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?title } }";
     assert_eq!(s.query_as(&alice(), Mode::Read, q).unwrap().rows.len(), 599, "alice GRAPH");
     assert_eq!(s.query_as(&Session::default(), Mode::Read, q).unwrap().rows.len(), 144, "anon GRAPH");
@@ -89,7 +89,7 @@ fn explicit_graph_pattern_unaffected_by_feature() {
 /// authorized set (leaving it would wrongly collapse the named-graph set to empty).
 #[test]
 fn reserved_iri_in_from_named_is_absent_graph_stays_usable() {
-    let mut s = store();
+    let s = store();
     let with_reserved = format!(
         "SELECT ?title FROM NAMED <{}> WHERE {{ GRAPH ?g {{ ?s <https://ex.dev/ns#title> ?title }} }}",
         UNION_DEFAULT_GRAPH_IRI
@@ -109,7 +109,7 @@ fn reserved_iri_in_from_named_is_absent_graph_stays_usable() {
 /// binds it, and it never appears in results.
 #[test]
 fn reserved_iri_never_binds_graph_variable() {
-    let mut s = store();
+    let s = store();
     // Opt into the union default graph AND enumerate graph names with `GRAPH ?g`.
     let q = format!(
         "SELECT ?g FROM <{}> WHERE {{ GRAPH ?g {{ ?s <https://ex.dev/ns#title> ?o }} }}",
@@ -130,7 +130,7 @@ fn reserved_iri_never_binds_graph_variable() {
 /// opt-in — it must NOT silently enable the union default graph.
 #[test]
 fn near_miss_iri_does_not_enable_union_fail_closed() {
-    let mut s = store();
+    let s = store();
     let q = "SELECT ?title FROM <http://www.w3.org/ns/solid/sparql#union-default-graphX> \
              WHERE { ?s <https://ex.dev/ns#title> ?title }";
     assert_eq!(
@@ -145,7 +145,7 @@ fn near_miss_iri_does_not_enable_union_fail_closed() {
 /// pattern is 0 without the opt-in.
 #[test]
 fn ask_json_and_aggregate_honour_opt_in() {
-    let mut s = store();
+    let s = store();
     // ASK: false on the bare pattern (empty default), true on the opt-in.
     assert!(!s.ask_as(&alice(), Mode::Read, "ASK { ?s <https://ex.dev/ns#title> ?t }").unwrap());
     let ask_opt = format!("ASK FROM <{}> {{ ?s <https://ex.dev/ns#title> ?t }}", UNION_DEFAULT_GRAPH_IRI);

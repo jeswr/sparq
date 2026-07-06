@@ -188,6 +188,28 @@ Materialize the authorization view from the access-control documents, then enfor
   `store.accessible_set(...)` / `store.view_for(...) -> DatasetView` /
   `store.auth() -> &AuthIndex` — inspect the authorized graph set or the materialized
   index directly.
+- **Concurrent reads — the read side is `&self`** ([FABLE-5] sq-cnuqd, issue #1569). Every
+  read entry point (`accessible`, `accessible_set`, `view_for`, `query_as`, `query_json_as`,
+  `ask_as`, `query_as_rewrite`, `wac_allow`, `decide`) takes `&self`, so **N threads sharing
+  one `Arc<PodStore>` query the same materialized generation at once** — a per-request
+  Solid/SPARQL server no longer serialises every reader through one exclusive borrow. The
+  session cache behind these is **sharded + bounded**: `session_cache::SessionCache` stripes
+  the memoized per-session graph sets across independent `RwLock` shards keyed by the session
+  hash, so a warm hit is a shard *read* lock (+ two `Arc` clones) and only a miss/re-derive
+  takes that one shard's write lock; each shard is **LRU-bounded** (`SHARD_CAP`, with a
+  compacted recency queue) so a server keying per-request `now` timestamps cannot grow the
+  cache without bound. **Writes stay `&mut self`** (`materialize_*`, `put_acl`/`delete_acl`,
+  `update_as`) — they need exclusive access, so a server interleaves reads and writes by
+  wrapping the store in an `RwLock<PodStore>`/arc-swap (readers take the read lock, a write
+  takes the write lock). **Snapshot consistency (fail-closed, no torn set):** each read pins
+  ONE `Arc<AuthIndex>` snapshot for the whole set computation, and because writes are
+  `&mut self` (exclusive), a read observes either the whole pre-write generation or the whole
+  post-write one, never a half-and-half mix (generation pinning composes with #1584);
+  invalidation (`SessionCache::clear` / `invalidate_origin`, the diff-based #1585 path) visits
+  every shard so it reaches a session regardless of which shard it hashed into, and an
+  evicted/dropped set is re-derived on the current auth view — never assumed still authorized.
+  Covered by `tests/concurrent_readers.rs` (16 threads on one `Arc<PodStore>`; a revoke under
+  concurrent read observes only the two atomic snapshots and converges on the revoked view).
 - `store.wac_allow(&Session, &NamedNode) -> String` — build the public
   [`WAC-Allow`](https://solidproject.org/TR/wac#wac-allow) response-header value
   (`user="…",public="…"`) advertising the modes the session (and the public) hold on a
@@ -332,21 +354,25 @@ fn session_from_request<'a>(webid: Option<&'a str>, origin: Option<&'a str>) -> 
 }
 
 // Does this session have `mode` on the graph backing `resource`? (fail-closed)
-fn may(store: &mut PodStore, s: &Session, mode: Mode, resource: &NamedNode) -> bool {
+// [FABLE-5] sq-cnuqd: `&PodStore` (shared) — many request handlers call this at once.
+fn may(store: &PodStore, s: &Session, mode: Mode, resource: &NamedNode) -> bool {
     store.accessible(s, mode).iter().any(|g| g == resource)
 }
 
 // Build the WAC-Allow header value for the request, e.g. `user="read write",public="read"`.
-fn wac_allow_header(store: &mut PodStore, s: &Session, resource: &NamedNode) -> String {
+fn wac_allow_header(store: &PodStore, s: &Session, resource: &NamedNode) -> String {
     store.wac_allow(s, resource)
 }
 ```
 
-Per request: `session_from_request(...)` → `may(&mut store, &s, Mode::Read, &resource)`
+Per request: `session_from_request(...)` → `may(&store, &s, Mode::Read, &resource)`
 to allow/deny (a deny is `403`/`404` per your fail-closed policy) → set the response's
 `WAC-Allow` header to `store.wac_allow(&s, &resource)`. `wac_allow` runs four
 `accessible` sweeps that share the per-session cache (each an O(1) hash check over the
-materialized index), so it is cheap. To pair the `WAC-Allow` advertisement with the WAC
+materialized index), so it is cheap. Because these read helpers take **`&self`** (sq-cnuqd),
+a concurrent server shares ONE `Arc<PodStore>` (or `Arc<RwLock<PodStore>>` if it also serves
+writes) across all request workers — they read in parallel through the sharded session cache;
+only a `put_acl`/materialize write needs the exclusive (`&mut`/write-lock) side. To pair the `WAC-Allow` advertisement with the WAC
 **ACL-discovery** header, run `store.decide(&s, "<resource-iri>", Mode::Read)` and emit its
 `acl_link_header()` (`Some("<acl-iri>; rel=\"acl\"")`) as the response `Link` header value
 when present (FR-5) — fail-closed: it is `None` when no governing ACL was discovered, so
