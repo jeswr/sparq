@@ -8,7 +8,7 @@
 # sparq-org/noir_IEEE754 face repo — sq-5reoy/#1599).
 #
 # [OPUS-4.8] sq-5reoy: `nargo compile` of zk/compose now fetches the
-# sparq_ieee754 dependency from the sparq-org/noir_IEEE754 git tag (v0.10.0),
+# sparq_ieee754 dependency from the sparq-org/noir_IEEE754 git tag (v0.11.0),
 # so this script needs network access to GitHub on first run of a fresh
 # ~/.nargo cache (same as the existing poseidon v0.3.0 git dep it already
 # fetches).
