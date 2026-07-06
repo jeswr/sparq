@@ -1326,14 +1326,19 @@ pub struct SolutionBinding {
 /// field) — the composition analogue of the flat scan-slot binding /
 /// `bind_joins` commitment binding — is done by
 /// [`crate::verifier::bind_fragment_solution`] (run by
-/// [`crate::verifier::verify_fragment_manifest`]). What that gate STILL DEFERS is
-/// explicit: the BGP-scan-slot binding of a disclosed solution's variables to a
-/// scan sub-proof's disclosed rows (a scan discloses `r` rows — the
-/// per-solution row-selection model is the remaining sq-1zf94 residual), and the
-/// flat cross-graph Q6 non-bnode obligation per branch. Like every gate here, it
-/// asserts NO soundness / privacy property (sq-qhy4).
+/// [`crate::verifier::verify_fragment_manifest`]). The BGP-scan-slot binding of a
+/// disclosed solution's variables to a scan sub-proof's disclosed rows (a scan
+/// discloses `r` rows; the per-solution row-selection model is the [`scan_rows`]
+/// field) is done by [`crate::verifier::bind_fragment_scans`] (sq-qyfth, also run
+/// by [`crate::verifier::verify_fragment_manifest`]). What those gates STILL DEFER
+/// is explicit: the flat cross-graph Q6 non-bnode obligation per branch (the
+/// existential scan↔scan / scan↔path join over a bnode value across graphs —
+/// sq-ygk6x), and an EXISTENTIAL (non-projected) path endpoint's value (hidden by
+/// design). Like every gate here, they assert NO soundness / privacy property
+/// (sq-qhy4).
 ///
 /// [`solution`]: BranchWitness::solution
+/// [`scan_rows`]: BranchWitness::scan_rows
 // [OPUS-4.8] sq-3kd2g.6: per-solution UNION branch attribution + obligation
 // binding schema. Opt-in (`extended-fragment`), NOT-yet-sound.
 #[cfg(feature = "extended-fragment")]
@@ -1359,6 +1364,23 @@ pub struct BranchWitness {
     /// (out-of-range => fail-closed).
     #[serde(default)]
     pub values_rows: Vec<usize>,
+    /// The PER-SOLUTION BGP-scan ROW SELECTION (sq-qyfth): for each BGP-scan
+    /// obligation (one per `branch.patterns`, parallel to [`scan_proofs`]), the
+    /// index of the DISCLOSED matched row of that scan sub-proof
+    /// ([`ProofInputs::Scan::rows`]) that supports THIS solution. The verifier
+    /// ([`crate::verifier::bind_fragment_scans`]) binds each solution variable
+    /// occurring in the scan pattern to the selected row's slot value (re-derived
+    /// from the disclosed solution + query text, never a prover encoding) and
+    /// checks join coherence across atoms sharing a variable. Empty (or shorter
+    /// than [`scan_proofs`]) is back-compatible for a branch whose scan patterns
+    /// are all-constant; a scan pattern that carries ANY variable with no selected
+    /// row is refused fail-closed. An index outside the scan's ACTIVE disclosed
+    /// rows is refused fail-closed.
+    ///
+    /// [`scan_proofs`]: BranchWitness::scan_proofs
+    // [OPUS-4.8] sq-qyfth: per-solution BGP scan-slot row selection.
+    #[serde(default)]
+    pub scan_rows: Vec<usize>,
     /// The DISCLOSED solution bindings (sq-1zf94): the variable→term assignment
     /// the relying party reads for THIS solution. The verifier re-encodes each
     /// term itself and binds it to the proof-bound `PathReach`
@@ -2492,6 +2514,7 @@ mod path_schema_tests {
             scan_proofs: vec![0, 2],
             path_proofs: vec![1],
             values_rows: vec![3],
+            scan_rows: vec![0, 1],
             solution: vec![SolutionBinding {
                 var: "o".to_string(),
                 term: DisclosedTerm::Iri { value: "http://ex/b".to_string() },
@@ -2500,6 +2523,16 @@ mod path_schema_tests {
         let json = serde_json::to_string(&bw).expect("serializes");
         let back: BranchWitness = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back, bw);
+    }
+
+    #[test]
+    fn branch_witness_scan_rows_is_serde_default_back_compatible() {
+        // [OPUS-4.8] sq-qyfth: a pre-scan_rows manifest (no `scan_rows` key) still
+        // deserializes, defaulting the row-selection to empty — additive back-compat.
+        let json = r#"{"branch":0,"scan_proofs":[0],"path_proofs":[],"values_rows":[]}"#;
+        let back: BranchWitness = serde_json::from_str(json).expect("deserializes");
+        assert!(back.scan_rows.is_empty());
+        assert_eq!(back.scan_proofs, vec![0]);
     }
 
     #[test]
@@ -2588,6 +2621,7 @@ mod path_schema_tests {
                 scan_proofs: vec![],
                 path_proofs: vec![0],
                 values_rows: vec![],
+                scan_rows: vec![],
                 solution: vec![],
             }],
         );
