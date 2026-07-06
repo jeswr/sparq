@@ -374,6 +374,132 @@
       "family": "SPARQL logic-bug testing instrument",
       "source": "crates/sparq-metamorph/src/generate.rs::generated_predicates_respect_the_exclusion_list (for seed in 0..200)",
       "note": "Number of seeds over which the grammar exclusion-list check asserts that no generated predicate contains a banned non-deterministic construct (RAND, NOW, UUID, STRUUID, BNODE, EXISTS). A deterministic range constant in the committed generate.rs test; ensures the seeded generator never produces non-reproducible predicates, making every campaign ledger entry's test case reproducible from its seed alone. [SONNET-4.6 sq-gum8.9]"
+    },
+    "zkarch.circuit_members": {
+      "value": 31,
+      "unit": "compiled-circuit-members",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members (coverage enforced by tests/gate_count.rs::snapshot_covers_every_member)",
+      "note": "Number of compiled Noir proving members in the fixed zk/compose circuit family (the scan (k,n,r) lattice, the datatype-bucketed filter lanes, the join_eq (n_a,n_b) buckets, revocation, hidden-issuer, and the two hidden-holder members). A deterministic count over the committed, regression-gated gate-count snapshot; not a measurement. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.circuit_kinds": {
+      "value": 13,
+      "unit": "circuit-identifier-kinds",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/src/manifest.rs::CircuitId (13 enum variants: Scan, FilterInt, FilterF64, FilterSignedInt, FilterDecimal, FilterValueDl, FilterValueDlF64, FilterValueDlDecimal, RevokeUnset, HiddenIssuer, HolderPok, HolderSet, JoinEq)",
+      "note": "Number of statement kinds in the fixed circuit-identifier space the verifier re-derives; each kind instantiates one or more compiled members on its size lattice. A deterministic enum-variant count over committed code. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.binding_obligations": {
+      "value": 12,
+      "unit": "verifier-obligations",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/src/verifier.rs (the twelve bind_* obligation functions: bind_query_correctness, bind_attributions, bind_issuer_attestations, bind_revocation, bind_joins, bind_entailment, bind_holder_pop, bind_holder_binding, bind_hidden_revocation, bind_hidden_issuer_attestations, bind_holder_pok, bind_holder_set); glossed in site/specs/zksparql.typ section 10.3",
+      "note": "Number of fail-closed binding obligations the reference verifier enforces on every manifest. A deterministic function count over committed code; enforcement quality is NOT asserted by this count (external audit gate sq-qhy4 open). [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.audit_gates": {
+      "value": 4,
+      "unit": "audit-gates",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "site/specs/zksparql.typ section 10.4 (public-input reconstruction; canonical verification key; issuer signature + external key set; nonce single-use and binding), each implemented in crates/sparq-zk-compose/src/verifier.rs",
+      "note": "Number of cross-cutting binding checks whose individual failure would each void the intended soundness on its own; layered around backend proof verification. A deterministic structural count over the committed spec + verifier; the gates are internally re-audited, NOT externally audited (sq-qhy4 open). [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_scan_min": {
+      "value": 5991,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['scan_k1_n16_r4'] (bb gates -s ultra_honk; regression-gated by tests/gate_count.rs, 3% tolerance)",
+      "note": "Committed circuit_size baseline of the smallest scan member (k=1 graph, n=16 slots, r=4 disclosed rows). A deterministic artifact fact of the committed circuit under the pinned toolchain (bb 5.0.0-nightly.20260324, nargo 1.0.0-beta.21); gate counts of scan members vary <1% across build platforms, absorbed by the regression gate's tolerance. Not a wall-clock measurement. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_scan_max": {
+      "value": 34821,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['scan_k2_n64_r8'] (bb gates -s ultra_honk; regression-gated by tests/gate_count.rs, 3% tolerance)",
+      "note": "Committed circuit_size baseline of the largest scan member (k=2 graphs, n=64 slots, r=8 disclosed rows). Deterministic artifact fact under the pinned toolchain; not a wall-clock measurement. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_filter_lane": {
+      "value": 17416,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['filter_int_d1'] (identical for filter_int_d{1,2,4}, filter_f64_d{1..4}, filter_signed_int_d{2,4}, filter_decimal_i3_f2; bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline shared by every manifest-composable string-canonical filter lane: the blake3 binding of the canonical literal token dominates and the token fits one 64-byte blake3 block for all digit counts <= 19, so digit count does not move the gate count. Deterministic artifact fact under the pinned toolchain. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_filter_value_dl_int": {
+      "value": 3033,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['filter_value_dl_int'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the opt-in dual-leaf integer value-lane filter, which replaces the blake3 token binding with a value-leaf equality and carries a documented, accepted invariant downgrade (INV-VL); OFF by default and unaudited. Cited to quantify the cost of the blake3 binding, not to recommend the lane. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_join_min": {
+      "value": 7025,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['join_eq_na16_nb16'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the smallest hidden equality-join member (both sides in the n=16 slot bucket). Deterministic artifact fact under the pinned toolchain. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_join_max": {
+      "value": 18681,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['join_eq_na64_nb64'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the largest hidden equality-join member (both sides in the n=64 slot bucket). Deterministic artifact fact under the pinned toolchain. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_revoke": {
+      "value": 899,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['revoke_unset_d10'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the hidden-index revocation member (Merkle inclusion + bit-unset at depth 10) - the cheapest member of the family. Deterministic artifact fact under the pinned toolchain. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_hidden_issuer": {
+      "value": 16946,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['hidden_issuer_d4'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the hidden-issuer attestation member (in-circuit Schnorr-over-Baby-Jubjub verification + key-set Merkle membership at depth 4). Deterministic artifact fact under the pinned toolchain. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_holder_pok": {
+      "value": 10334,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['holder_pok'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the hidden-holder proof-of-knowledge member. The hidden-holder tiers are explicitly labelled NOT yet sound in the implementation and are opt-in only; the count quantifies circuit cost, it does NOT assert the tier's security. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.forge_findings_mapped": {
+      "value": 12,
+      "unit": "forge-regression-tests",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/audit_forge_map.rs (bead sq-1gir): one named forge-and-verify regression test per historical audit finding #1-#12, each constructing that finding's specific forgery and asserting the mapped verifier reject path",
+      "note": "Number of historical single-prover audit findings (research/zk-soundness-audit.md) that carry a standing 1:1 forge-negative regression test pinning the remediation closed. A deterministic structural count over the committed test file; the map is internal evidence and does NOT substitute for the open external audit (sq-qhy4). [FABLE-5 sq-3kd2g.1]"
     }
   }
 }
