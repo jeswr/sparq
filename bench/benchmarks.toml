@@ -1194,6 +1194,51 @@ status      = "ok"
 # query micro-bench (sq-5pnl, a NEW wasm_query_us metric) is a SEPARATE concern.
 featured    = false
 
+# [SONNET-4.6] sq-7icaw (drift catch-up) — sparq-substrate in-crate criterion
+# micro-bench for the four join kernels and the Num arithmetic tower. Closes
+# the bench-missing drift item for sparq-substrate (GitHub #1649). The bench
+# already existed in crates/sparq-substrate/benches/substrate.rs (sq-qonbz.4);
+# this entry registers it in the catalog so the drift-scanner goes quiet.
+# HONESTY: criterion wall-clock timings are NON-CANONICAL on a shared box; the
+# bench is trend-only. `featured = false` is the documented escape hatch for
+# in-crate micro-benches that are NOT head-to-head dashboard cards.
+[[benchmark]]
+id          = "substrate-join-numeric"
+name        = "sparq-substrate join kernels + Num arithmetic micro-bench"
+category    = "query"
+measures    = "criterion min-of-N wall-clock latency (ns/iter) for merge_join, hash build, hash probe-serial over rows of 100/1k/10k elements, and Num::binop (int_add, dec_mul, double_add) over 1k value pairs; all at throughput = Elements(n)"
+invoke      = "cargo bench -p sparq-substrate --features join,numeric"
+source      = "crates/sparq-substrate/benches/substrate.rs"
+dataset     = "synthetic in-bench (deterministic Row::new() enumeration, no external data)"
+quiet_box_sensitive = true
+featured    = false
+pinning     = "row counts {100, 1000, 10000} and value counts (1000) are fixed in the bench source; corpus is deterministic; pin these for comparable Criterion baselines"
+records_to  = "target/criterion/ (Criterion HTML + JSON baselines, gitignored)"
+status      = "ok"
+
+# [SONNET-4.6] sq-7icaw (drift catch-up) — sparq-fedplan in-crate criterion
+# micro-bench for select_sources + plan_bgp. Closes the bench-missing drift
+# item for sparq-fedplan (GitHub #1648). The bench already existed in
+# crates/sparq-fedplan/benches/fedplan.rs (sq-my8wd.3); this entry registers
+# it in the catalog so the drift-scanner goes quiet.
+# HONESTY: fedplan is a planning crate whose execution cost is dominated by the
+# engine at runtime; the in-crate bench measures the planner's own overhead in
+# isolation over a synthetic 3-source/3-pattern BGP. `featured = false` is the
+# documented escape hatch for in-crate micro-benches.
+[[benchmark]]
+id          = "fedplan-source-selection"
+name        = "sparq-fedplan source selection + join planning micro-bench"
+category    = "query"
+measures    = "criterion min-of-N wall-clock latency (ns/iter) for select_sources and plan_bgp over a 3-predicate chain BGP at n_sources in {1, 3, 10}; isolates the planner overhead from engine execution cost"
+invoke      = "cargo bench -p sparq-fedplan --features fedplan"
+source      = "crates/sparq-fedplan/benches/fedplan.rs"
+dataset     = "synthetic in-bench (SourceDescriptor::builder with 5 predicates x 10 000 triples/pred; chain BGP with distinct predicate IRIs; no external data)"
+quiet_box_sensitive = true
+featured    = false
+pinning     = "n_sources {1, 3, 10} and descriptor shape are fixed in the bench source; corpus is deterministic; pin these for comparable Criterion baselines"
+records_to  = "target/criterion/ (Criterion HTML + JSON baselines, gitignored)"
+status      = "ok"
+
 # =============================================================================
 # CONFORMANCE — correctness against official W3C suites (NOT perf)
 # =============================================================================
