@@ -56,9 +56,11 @@
 //! ## Feature gating (both states)
 //!
 //! The whole lane is behind this crate's opt-in `el-suite` feature (forwards to the
-//! OPT-IN `sparq-reason-el` crate). With the feature OFF this file compiles to a
-//! single self-SKIP `#[test]` (no EL classifier links — the lean opt-in posture, so
-//! the default + `--workspace` byte/bundle ratchets are byte-for-byte unchanged).
+//! OPT-IN `sparq-reason-el` crate AND also enables `sparq-reason-el/rbox` +
+//! `sparq-reason-el/cdomain` so the CI lane exercises the full shipped feature set —
+//! sq-pbz04.2.9). With the feature OFF this file compiles to a single self-SKIP
+//! `#[test]` (no EL classifier links — the lean opt-in posture, so the default +
+//! `--workspace` byte/bundle ratchets are byte-for-byte unchanged).
 //! The `all.rdf` export is fetched by `scripts/fetch-inference-suites.sh` into the
 //! gitignored `tests/w3c/owl2/`; when absent the runner SKIPS so a fresh offline
 //! checkout stays green. `EL_SUITE_FLOOR` is read TEXTUALLY by
@@ -101,13 +103,17 @@ mod gated {
     /// an aspirational target. HONESTLY a sparq EXTENSION-shaped ratchet over the EL
     /// fragment the classifier implements, NOT a full-OWL-2-EL-conformance claim.
     ///
-    /// FLOOR COMPOSITION (50 total): 45 consistency / 0 inconsistency /
-    /// 2 positive-entailment / 3 negative-entailment. Only 2 W3C rows exercise actual
-    /// derivation (WebOnt-equivalentClass-002: trivial equivalentClass → 2 subClassOf).
-    /// The lane-local `el_cr4_derivation_canary` test below closes the gap for CR4
-    /// existential/conjunction derivation — it is NOT counted into this floor.
-    /// [SONNET-4.6] sq-pbz04.2.4
-    pub const EL_SUITE_FLOOR: usize = 50;
+    /// FLOOR COMPOSITION (51 total): 45 consistency / 0 inconsistency /
+    /// 3 positive-entailment / 3 negative-entailment. The 3 positive-entailment passes
+    /// are WebOnt-equivalentClass-002 (trivial equivalentClass → 2 subClassOf directions),
+    /// WebOnt-equivalentClass-003 (mutual subClassOf → owl:equivalentClass via the
+    /// output-vocabulary augment_equivalent_classes completion, sq-pbz04.2.9), and one
+    /// further W3C positive-entailment case. The lane-local `el_cr4_derivation_canary`
+    /// test below closes the gap for CR4 existential/conjunction derivation — it is NOT
+    /// counted into this floor.
+    /// [SONNET-4.6] sq-pbz04.2.4 / sq-pbz04.2.9 (RAISED 50→51: WebOnt-equivalentClass-003
+    /// graduates via the equivalentClass output-vocabulary completion; rbox+cdomain now on)
+    pub const EL_SUITE_FLOOR: usize = 51;
 
     const T: &str = "http://www.w3.org/2007/OWL/testOntology#";
     const OWL_ONTOLOGY: &str = "http://www.w3.org/2002/07/owl#Ontology";
@@ -163,13 +169,16 @@ mod gated {
         (
             "New-Feature-ObjectPropertyChain-001",
             "PERMANENT — conclusion is the ABox property assertion `Stewie hasAunt Carol` via an \
-             owl:propertyChainAxiom; role chains (CR10/CR11) are the OFF-by-default `rbox` feature \
-             and the conclusion is an instance fact, neither in this lane's TBox subsumption output",
+             owl:propertyChainAxiom; the TBox subsumption classifier emits rdfs:subClassOf lattice \
+             edges only — instance-level property assertions are ABox and outside its output \
+             vocabulary (rbox/CR10/CR11 is on but drives TBox class-subsumption derivation, not \
+             ABox instance-fact emission)",
         ),
         (
             "New-Feature-ObjectPropertyChain-BJP-003",
-            "PERMANENT — ABox property assertion `a p c` via a property chain; RBox (CR10/CR11) is \
-             the OFF-by-default `rbox` feature and the conclusion is an instance fact",
+            "PERMANENT — conclusion is the ABox property assertion `a p c` via a property chain; \
+             the TBox subsumption classifier does not emit instance-level property assertions even \
+             with rbox/CR10/CR11 on (rbox drives class-subsumption derivation, not ABox output)",
         ),
         (
             "New-Feature-ReflexiveProperty-001",
@@ -209,8 +218,9 @@ mod gated {
         (
             "WebOnt-equivalentProperty-001",
             "PERMANENT — conclusion is the ABox property assertion `X hasHead Y` via property \
-             equivalence; property (RBox) reasoning is the OFF-by-default `rbox` feature and the \
-             conclusion is an instance fact",
+             equivalence; the conclusion is an ABox instance fact outside the TBox classifier's \
+             output vocabulary (even with rbox on, the classifier emits class-subsumption edges, \
+             not individual property assertions)",
         ),
         (
             "WebOnt-sameAs-001",
@@ -222,26 +232,25 @@ mod gated {
         (
             "chain2trans1",
             "PERMANENT — conclusion is the TBox property axiom `p rdf:type owl:TransitiveProperty` \
-             (from a self property-chain); role reasoning (CR10/CR11) is the OFF-by-default `rbox` \
-             feature and no rule emits owl:TransitiveProperty",
-        ),
-        (
-            "WebOnt-equivalentClass-003",
-            "PERMANENT — the classifier materializes the two-way rdfs:subClassOf edges \
-             (Car ⊑ Automobile ∧ Automobile ⊑ Car) but emits them as rdfs:subClassOf, not the \
-             owl:equivalentClass axiom the conclusion asserts, so the syntactic bnode-homomorphism \
-             check does not match (an output-vocabulary divergence, not an inference gap)",
+             (from a self property-chain); rbox/CR10/CR11 is on but no EL rule emits the \
+             owl:TransitiveProperty axiom form — the classifier emits rdfs:subClassOf and role-inclusion \
+             edges, not property-type declarations",
         ),
         (
             "WebOnt-equivalentProperty-002",
             "PERMANENT — conclusion is the property subsumption `hasHead rdfs:subPropertyOf \
-             hasLeader` (both directions); property/RBox reasoning is the OFF-by-default `rbox` \
-             feature (roles are compared for equality only here)",
+             hasLeader` (both directions); the EL classifier emits class-subsumption \
+             (rdfs:subClassOf) edges, not property-subsumption (rdfs:subPropertyOf) edges — \
+             property-hierarchy output is outside its output vocabulary (rbox/CR10/CR11 is on \
+             but its role-inclusion derivations feed class-subsumption computation, not \
+             rdfs:subPropertyOf emission)",
         ),
         (
             "WebOnt-equivalentProperty-003",
-            "PERMANENT — conclusion is `hasHead owl:equivalentProperty hasLeader`; property/RBox \
-             reasoning is the OFF-by-default `rbox` feature",
+            "PERMANENT — conclusion is `hasHead owl:equivalentProperty hasLeader`; the EL \
+             classifier does not emit owl:equivalentProperty axioms (output vocabulary is \
+             rdfs:subClassOf only; rbox is on but role inclusions feed class-subsumption, \
+             not property-equivalence-axiom emission)",
         ),
         (
             "WebOnt-I5.5-005",
@@ -509,17 +518,19 @@ mod gated {
             }
         }
 
-        // [SONNET-4.6] Positive-entailment sub-floor: at least 2 of the counted passes
+        // [SONNET-4.6] Positive-entailment sub-floor: at least 3 of the counted passes
         // must be positive-entailment checks. A neutered classifier (empty saturation)
-        // loses the 2 W3C positive-entailment passes, dropping this to 0 and turning
+        // loses all W3C positive-entailment passes, dropping this to 0 and turning
         // THIS assert RED before `fails.is_empty()` gets a chance to fire — so the
         // derivation gap is caught even if all new undocumented fails are added to the
         // divergence list first. See FLOOR COMPOSITION note on EL_SUITE_FLOOR.
+        // [SONNET-4.6] sq-pbz04.2.9: raised from 2 to 3 — WebOnt-equivalentClass-003
+        // now graduates via the augment_equivalent_classes output-vocabulary completion.
         assert!(
-            positive_entailment_passes >= 2,
-            "OWL 2 EL positive-entailment sub-floor: expected >= 2 positive-entailment \
+            positive_entailment_passes >= 3,
+            "OWL 2 EL positive-entailment sub-floor: expected >= 3 positive-entailment \
              passes, got {} — floor composition (45 consistency / 0 inconsistency / \
-             2 positive-entailment / 3 negative-entailment) has shifted; a neutered \
+             3 positive-entailment / 3 negative-entailment) has shifted; a neutered \
              classifier scores 0 here",
             positive_entailment_passes
         );
@@ -654,7 +665,11 @@ mod gated {
                     Some(xml) => match parse_ontology(xml, &base) {
                         Err(e) => Outcome::Fail(format!("conclusion RDF/XML parse error: {}", e)),
                         Ok(conclusion) => {
+                            // [SONNET-4.6] sq-pbz04.2.9 — chain both augmentations:
+                            // (1) datatype axiomatic set (existing), then (2) the
+                            // output-vocabulary equivalentClass completion (new).
                             let closure = augment_datatypes(&classified.closure, &conclusion, &d);
+                            let closure = augment_equivalent_classes(&closure);
                             if entail::entails(&closure, &conclusion, &d) {
                                 Outcome::Pass
                             } else {
@@ -757,6 +772,61 @@ mod gated {
             }
         }
         closure
+    }
+
+    /// Output-vocabulary completion: T ⊨ 'A owl:equivalentClass B' iff BOTH
+    /// `A rdfs:subClassOf B` AND `B rdfs:subClassOf A` are in the materialized closure
+    /// (mutual subsumption is the semantic identity for owl:equivalentClass in OWL 2
+    /// RDF-based semantics — Table 8 of OWL 2 Mapping to RDF Graphs). The classifier
+    /// emits `rdfs:subClassOf` edges but not the axiom-form `owl:equivalentClass` triple;
+    /// adding it here is an EXACT output-vocabulary completion, NOT a test weakening.
+    ///
+    /// This mirrors the `augment_datatypes` precedent and is applied ONLY to the closure
+    /// used for the positive-entailment bnode-homomorphism check (the negative-entailment
+    /// path keeps the un-augmented closure, per the fail-closed invariant).
+    ///
+    /// [SONNET-4.6] sq-pbz04.2.9
+    fn augment_equivalent_classes(closure: &[Row]) -> Vec<Row> {
+        const RDFS_SUBCLASSOF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+        const OWL_EQUIVALENT_CLASS: &str = "http://www.w3.org/2002/07/owl#equivalentClass";
+
+        // Collect all (subject, object) pairs of rdfs:subClassOf where both subject and
+        // object are named nodes (not blank nodes).  A blank-node restriction keeps the
+        // augmentation conservative: anonymous restriction nodes are structural, not
+        // named classes, and the W3C equivalentClass tests only assert pairs of IRIs.
+        use std::collections::HashSet;
+        let mut sub_of: HashSet<(String, String)> = HashSet::new();
+        for [s, p, o] in closure {
+            if let (Term::NamedNode(sn), Term::NamedNode(pn), Term::NamedNode(on)) = (s, p, o) {
+                if pn.as_str() == RDFS_SUBCLASSOF {
+                    sub_of.insert((sn.as_str().to_string(), on.as_str().to_string()));
+                }
+            }
+        }
+
+        let mut extra: Vec<Row> = Vec::new();
+        let eq_prop = Term::NamedNode(oxrdf::NamedNode::new_unchecked(OWL_EQUIVALENT_CLASS));
+        for (a, b) in &sub_of {
+            if sub_of.contains(&(b.clone(), a.clone())) {
+                // Both A ⊑ B and B ⊑ A hold — emit A owl:equivalentClass B (one direction;
+                // the symmetric B owl:equivalentClass A will be emitted when (b,a) is the
+                // outer loop iteration).
+                let an = Term::NamedNode(oxrdf::NamedNode::new_unchecked(a.clone()));
+                let bn = Term::NamedNode(oxrdf::NamedNode::new_unchecked(b.clone()));
+                let row: Row = [an, eq_prop.clone(), bn];
+                if !closure.contains(&row) {
+                    extra.push(row);
+                }
+            }
+        }
+
+        if extra.is_empty() {
+            closure.to_vec()
+        } else {
+            let mut augmented = closure.to_vec();
+            augmented.extend(extra);
+            augmented
+        }
     }
 
     /// Parses an inline RDF/XML ontology literal, dropping the ontology header
