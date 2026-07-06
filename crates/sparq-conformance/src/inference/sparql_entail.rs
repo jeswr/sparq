@@ -1091,6 +1091,14 @@ fn classify_gate_rejection(query: &Query, reason: &str) -> QlHoldReason {
             ))
         };
     }
+    // B6 gate-side intensional-atom guard (sq-pbz04.3.1): `check_atom_shape` now emits
+    // `"intensional/schema-vocabulary atom: predicate <...> ..."` for rdfs: schema
+    // vocabulary and owl: predicates used as role atoms.  This is a PERMANENT-REJECT
+    // (the rewriter evaluates over ABox data only; using a schema-vocabulary predicate
+    // as a data atom has no sound certain-answer rewriting in this design). [SONNET-4.6]
+    if reason.contains("intensional") {
+        return QlHoldReason::PermanentlyOutside(reason.to_string());
+    }
     // The design record §5 PERMANENT-REJECT list (+ degenerate shapes).
     const PERMANENT: [&str; 15] = [
         "OPTIONAL",
@@ -1143,6 +1151,15 @@ fn classify_rewrite_abstain(reason: &str) -> QlHoldReason {
         // A class-name-position variable is an intensional/schema query.
         return QlHoldReason::PermanentlyOutside(format!(
             "{} (class-name-position variable — an intensional schema query)",
+            reason
+        ));
+    }
+    // Multi-branch UCQ with per-branch FILTER/VALUES (sq-pbz04.3.1 fail-closed guard):
+    // the branch-aware emitter is deferred to sq-pbz04.3.2, so this is pending-gate. The
+    // reason string starts with "multi-branch UCQ with per-branch FILTER or VALUES". [SONNET-4.6]
+    if reason.contains("multi-branch") && (reason.contains("FILTER") || reason.contains("VALUES")) {
+        return QlHoldReason::PendingGate(format!(
+            "{} (branch-aware emitter deferred to sq-pbz04.3.2)",
             reason
         ));
     }
