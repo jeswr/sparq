@@ -55,7 +55,14 @@
 //!   backbones now correctly refuse extraction (`MalformedList` /
 //!   `MalformedClassExpression`), yielding an `OutOfFragment` abstention instead of a wrong
 //!   `Consistent` verdict (I5.5-003/004) or a trivially-entailed empty non-conclusion
-//!   (I5.5-006/007). The 4 M4 corpus cases now ABSTAIN (honest fail-closed). [OPUS-4.8]
+//!   (I5.5-006/007). The load-bearing part of the fix (the escalated-review REFUTATION of
+//!   the first attempt): the orphan-reachability seed must NOT count an ignorable declaration
+//!   typing (`_:list a rdf:List`, `_:x a owl:Class`) as a consumer — that bypass wrongly
+//!   rescued the very cyclic/orphan cells the check exists to catch. Beyond I5.5-006/-007,
+//!   closing it also correctly refuses three graphs that carry an anonymous composite
+//!   appearing in NO axiom and had been passing only by that accident (I5.26-001, I5.26-006
+//!   consistency; I5.5-005 positive-entailment) — all honest fail-closed abstentions, never
+//!   wrong verdicts. [OPUS-4.8]
 //! - **M5 — ontology-header stripping vs a header-sensitive legacy expectation.** The
 //!   harness strips `owl:Ontology` typings on both sides (the RL/EL-lane convention);
 //!   WebOnt-Ontology-003's OWL-1-era non-entailment hinges on the stripped header.
@@ -65,7 +72,9 @@
 //!   L2 requires `ObjectIntersectionOf` arity ≥ 2 (the structural-spec arity); the
 //!   official tagging accepts the RDF singleton-intersection encoding (normalizing it
 //!   to its sole member), so positively-tagged cases carrying `owl:intersectionOf (x)`
-//!   come back `NotIn`.
+//!   come back `NotIn`. (WebOnt-I5.26-001 left this pin under sq-pbz04.4.12: its input's
+//!   anonymous singleton intersection appears in no axiom, so the M4 fix now ABSTAINS on it
+//!   rather than reaching the arity rule.)
 //!
 //! ## Feature gating (both states)
 //!
@@ -107,28 +116,51 @@ mod gated {
     /// `tests/scoreboard_floors.rs`. A sparq EXTENSION measurement over the scoped
     /// fragment — NOT full OWL 2 DL.
     ///
-    /// COMPOSITION: 107 consistency + 14 inconsistency + 69 positive-entailment +
-    /// 2 negative-entailment. [FABLE-5] sq-pbz04.4.5
+    /// COMPOSITION: 105 consistency + 14 inconsistency + 68 positive-entailment +
+    /// 2 negative-entailment = 189. [FABLE-5] sq-pbz04.4.5 / [OPUS-4.8] sq-pbz04.4.12
     /// Re-pinned by sq-pbz04.4.11 (M1 named-composite fix): 12 positive-entailment cases
     /// now PASS (the EquivalentClasses name-binding axioms enable their entailments);
     /// 4 consistency cases shift from Pass to abstain because their updated ontology
     /// models now include EquivalentClasses axioms that, combined with the existing TBox,
     /// cause budget exhaustion — an honest abstention, not a regression. Net: +8.
-    /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): pass count UNCHANGED (the 4 M4
-    /// rows moved from Fail → OutOfFragment, not from Fail → Pass). [OPUS-4.8]
-    pub const DL_DIRECT_FLOOR: usize = 192;
+    /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): −3 (192 → 189). Beyond the 2 M4
+    /// negative-entailment rows (I5.5-006/-007) moving from Fail → abstain, closing the
+    /// declaration-typing reachability bypass also correctly REFUSES three graphs that
+    /// previously extracted (and happened to pass) despite carrying an anonymous composite
+    /// class-expression that appears in NO axiom — a genuinely unconsumed backbone the
+    /// `a owl:Class` / `a rdf:List` declaration typing was wrongly rescuing:
+    ///   - `WebOnt-I5.26-001` (consistency): `[ owl:intersectionOf (:C _:B) ]` in no axiom;
+    ///   - `WebOnt-I5.26-006` (consistency): a nested intersection/union backbone in no axiom;
+    ///   - `WebOnt-I5.5-005` (positive-entailment): the conclusion is a bare
+    ///     `[ owl:unionOf (:a) ]` that "does not appear in an axiom" (its own description).
+    ///
+    /// These are HONEST fail-closed abstentions (the checker refuses to give a definitive
+    /// verdict over a graph it cannot map in full), not wrong verdicts — exactly the M4
+    /// contract. [OPUS-4.8] sq-pbz04.4.12
+    pub const DL_DIRECT_FLOOR: usize = 189;
 
     /// Abstained (fail-closed OutOfFragment / guard / deferred / budget) row totals,
     /// EXACT-pinned so the tri-state accounting is closed: profile lane, then the four
     /// reasoning lanes summed. [FABLE-5] sq-pbz04.4.5
-    pub const DL_PROFILE_ABSTAINED: usize = 114;
+    /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): +3 (114 → 117). Closing the
+    /// declaration-typing reachability bypass makes the profile lane's extraction refuse the
+    /// three `WebOnt-I5.26-001` profile rows (EL/QL/RL): the input carries an anonymous
+    /// `owl:intersectionOf` that appears in no axiom, so extraction now fails → the profile
+    /// set is `Unknown` → abstain (previously it extracted and answered a wrong `NotIn`, the
+    /// M7 singleton-intersection divergence — now superseded by the honest abstention).
+    /// [OPUS-4.8] sq-pbz04.4.12
+    pub const DL_PROFILE_ABSTAINED: usize = 117;
     /// See [`DL_PROFILE_ABSTAINED`].
     /// Re-pinned by sq-pbz04.4.11: +4 from the 4 consistency cases that shifted from
     /// Pass to OutOfFragment (budget exhaustion on the now-more-complete model).
-    /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): +4 from the 4 M4 rows that
-    /// moved from Fail (wrong definitive verdict) to OutOfFragment (fail-closed refusal).
-    /// [OPUS-4.8] sq-pbz04.4.12
-    pub const DL_DIRECT_ABSTAINED: usize = 460;
+    /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): MEASURED 463 against the pinned
+    /// export. Closing the declaration-typing reachability bypass moves the 2 M4
+    /// negative-entailment rows (I5.5-006/-007) from Fail (wrong definitive verdict) to
+    /// OutOfFragment (fail-closed refusal), and additionally REFUSES 3 previously-passing
+    /// rows that carried an unconsumed anonymous composite the declaration typing had been
+    /// rescuing (I5.26-001, I5.26-006 consistency; I5.5-005 positive-entailment) — all
+    /// honest abstentions, never wrong verdicts. [OPUS-4.8] sq-pbz04.4.12
+    pub const DL_DIRECT_ABSTAINED: usize = 463;
 
     /// Audited, PINNED divergence rows (module docs — mechanisms M2–M7): every row
     /// where a checker verdict contradicts the export expectation, keyed by the
@@ -191,9 +223,10 @@ mod gated {
     /// one-member list — which the export tags in-EL/QL/RL but L2's structural-spec
     /// arity rule (≥ 2 members) rejects. [FABLE-5] sq-pbz04.4.5
     const PROFILE_DIVERGENCES: &[(&str, &str)] = &[
-        ("owl2-dl/profile-EL: WebOnt-I5.26-001", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-QL: WebOnt-I5.26-001", "M7 — singleton owl:intersectionOf operand list"),
-        ("owl2-dl/profile-RL: WebOnt-I5.26-001", "M7 — singleton owl:intersectionOf operand list"),
+        // WebOnt-I5.26-001 (EL/QL/RL) REMOVED by sq-pbz04.4.12: its input carries an anonymous
+        // `owl:intersectionOf` that appears in no axiom, so the M4 orphan fix now makes
+        // extraction refuse it → the profile set is `Unknown` → the row ABSTAINS rather than
+        // producing the wrong `NotIn` (the M7 singleton divergence no longer applies). [OPUS-4.8]
         ("owl2-dl/profile-EL: WebOnt-I5.26-002", "M7 — singleton owl:intersectionOf operand list"),
         ("owl2-dl/profile-QL: WebOnt-I5.26-002", "M7 — singleton owl:intersectionOf operand list"),
         ("owl2-dl/profile-RL: WebOnt-I5.26-002", "M7 — singleton owl:intersectionOf operand list"),

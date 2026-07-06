@@ -295,9 +295,19 @@ fn emit_named_composite_equiv(
 ///
 /// # Algorithm
 ///
-/// Seed the reachable set from BOTH the subjects and objects of every non-backbone triple,
-/// then BFS through the backbone index (intersectionOf → list head → list cells → members,
-/// etc.). Any anonymous blank structural node NOT reachable is an orphan → refused.
+/// Seed the reachable set from BOTH the subjects and objects of every non-backbone triple
+/// that actually PLACES the node in an axiom or class-expression position (see
+/// `is_consuming_triple`), then BFS through the backbone index (intersectionOf → list head →
+/// list cells → members, etc.). Any anonymous blank structural node NOT reachable is an
+/// orphan → refused.
+///
+/// **Ignorable declaration/annotation triples do NOT seed reachability** ([OPUS-4.8]
+/// sq-pbz04.4.12): a triple whose only relationship to a structural node is a declaration
+/// typing (`rdf:type` → an ignorable `DECLARATION_TYPE_LOCALS` meta-class such as `rdf:List`)
+/// or an annotation predicate produces NO axiom in `classify_type`/`classify_triple`, so it
+/// is not a consumer. Seeding from it wrongly rescued cyclic/orphan list cells carrying the
+/// standard `_:list a rdf:List` typing (WebOnt-I5.5-006/-007), letting them slip past the
+/// refusal into an empty (wrongly-consistent) ontology.
 ///
 /// **rdf:nil special case**: `rdf:nil` is the list terminator. If it appears as a SUBJECT
 /// of `rdf:first` or `rdf:rest`, the graph is unconditionally malformed — refused before
@@ -351,10 +361,19 @@ fn validate_no_orphan_structural_nodes(
     //    cells or fillers that are only reachable through them.
     //
     // 2. Every structural node that appears as the SUBJECT OR OBJECT of a non-backbone
-    //    triple (directly consumed by an axiom):
+    //    triple that actually PLACES the node in an axiom or class-expression position:
     //   - Subject: e.g. `[ owl:intersectionOf (…) ] rdfs:subClassOf :C` — the blank node
-    //     is the SUBJECT of the non-backbone triple `rdfs:subClassOf`.
+    //     is the SUBJECT of the axiom triple `rdfs:subClassOf`.
     //   - Object: e.g. `:C rdfs:subClassOf _:x` — `_:x` is an OBJECT.
+    //
+    // [OPUS-4.8] sq-pbz04.4.12 — SOUNDNESS FIX: an IGNORABLE declaration or annotation
+    // triple is NOT a consumer and must NOT seed reachability. Crucially `_:list a rdf:List`
+    // (rdf:type whose object is an ignorable DECLARATION_TYPE_LOCALS meta-class, exactly the
+    // WebOnt-I5.5-006/-007 encoding) produces NO axiom in `classify_type` — treating it as a
+    // consumer wrongly seeded the cyclic/orphan list cell reachable, letting it slip past the
+    // refusal and extract to an empty ontology (a WRONG definitive verdict, not abstention).
+    // Reachability is seeded ONLY from triples that route into an actual axiom / class-
+    // expression position; `is_consuming_triple` mirrors `classify_triple`'s ignorable arms.
     let mut reachable: FxHashSet<Id> = FxHashSet::default();
     let mut worklist: Vec<Id> = Vec::new();
 
@@ -366,9 +385,12 @@ fn validate_no_orphan_structural_nodes(
         }
     }
 
-    // Seed from subjects and objects of non-backbone triples.
+    // Seed from subjects and objects of CONSUMING (axiom-placing) non-backbone triples only.
     for &[s, p, o] in triples {
         if v.backbone.contains(&p) {
+            continue;
+        }
+        if !is_consuming_triple(v, idx, p, o) {
             continue;
         }
         for &id in &[s, o] {
@@ -435,6 +457,33 @@ fn validate_no_orphan_structural_nodes(
         }
     }
     Ok(())
+}
+
+/// Whether a non-backbone triple `_ p o` actually CONSUMES a structural node — i.e. places it
+/// in an axiom or class-expression position — for the orphan-reachability seeding in
+/// [`validate_no_orphan_structural_nodes`]. [OPUS-4.8] sq-pbz04.4.12.
+///
+/// It is `false` for exactly the triples `classify_triple`/`classify_type` treat as IGNORABLE
+/// (produce no axiom):
+/// - a declaration typing `_ rdf:type o` where `o` is an ignorable `DECLARATION_TYPE_LOCALS`
+///   meta-class (`rdf:List`, `owl:Class`, `owl:Restriction`, …) — notably `_:list a rdf:List`,
+///   the WebOnt-I5.5-006/-007 encoding whose presence must NOT rescue a cyclic/orphan list;
+/// - an annotation triple (a built-in annotation predicate or a declared annotation property).
+///
+/// Every other non-backbone triple routes into a real axiom (subClassOf / equivalentClass /
+/// disjointWith / domain / range / a ClassAssertion via a non-declaration `rdf:type` object /
+/// a role assertion / an out-of-fragment refusal), so it genuinely references the node. The
+/// caller (the backbone predicates are already skipped) passes only non-backbone triples.
+fn is_consuming_triple(v: &Vocab, idx: &Index, p: Id, o: Id) -> bool {
+    // Declaration typing (`rdf:type` → ignorable meta-class) — no axiom emitted.
+    if p == v.ty && v.declaration_types.contains(&o) {
+        return false;
+    }
+    // Built-in or declared annotation predicate — no axiom emitted.
+    if v.annotation.contains(&p) || idx.annotation_props.contains(&p) {
+        return false;
+    }
+    true
 }
 
 /// Routes one non-backbone triple: into an [`Axiom`] on `onto`, silently past an ignorable

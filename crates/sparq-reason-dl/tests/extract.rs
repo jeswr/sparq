@@ -1106,41 +1106,90 @@ fn reject_rdf_nil_rdf_first() {
 }
 
 /// A cyclic orphan list — `_:l rdf:first :a; rdf:rest _:l` — never consumed by any axiom.
-/// Before sq-pbz04.4.12, this extracted to an empty ontology.
-/// After: refused as MalformedList (W3C I5.5-006 analog). [OPUS-4.8] sq-pbz04.4.12
+/// FAITHFUL reconstruction of W3C WebOnt-I5.5-006: the corpus non-conclusion is
+/// `<rdf:List rdf:nodeID="list"> … <rdf:rest rdf:nodeID="list"/></rdf:List>`, which emits the
+/// `_:l rdf:type rdf:List` typing triple. That declaration typing is the BYPASS the [OPUS-4.8]
+/// sq-pbz04.4.12 fix closes: it produces no axiom, so it must NOT seed the cyclic cell
+/// reachable. Before the fix this (with the typing) extracted to an empty ontology — a WRONG
+/// definitive verdict. After: refused as MalformedList (abstention). [OPUS-4.8]
 #[test]
 fn reject_cyclic_orphan_list_i5_5_006() {
-    // A cyclic rdf:List with no owl:intersectionOf/unionOf pointing to it.
+    // A cyclic rdf:List with the `a rdf:List` typing and no owl:intersectionOf/unionOf
+    // pointing to it — exactly the corpus WebOnt-I5.5-006 encoding.
     let (d, t) = parse(
-        "_:l rdf:first :a .\n\
+        "_:l rdf:type rdf:List .\n\
+         _:l rdf:first :a .\n\
          _:l rdf:rest _:l .",
     );
     assert!(
         matches!(extract(&d, &t), Err(ExtractError::MalformedList(_))),
-        "cyclic orphan list cell must be refused as MalformedList (I5.5-006 analog)"
+        "cyclic orphan list cell (with `a rdf:List` typing) must be refused as MalformedList \
+         (WebOnt-I5.5-006); got {:?}",
+        extract(&d, &t)
     );
 }
 
-/// An anonymous class with an unconsumed union backbone, whose list itself is cyclic
-/// (the non-conclusion of W3C I5.5-007). Before sq-pbz04.4.12, this extracted to an
-/// empty ontology. After: refused with MalformedList or MalformedClassExpression
+/// FAITHFUL reconstruction of W3C WebOnt-I5.5-007: an anonymous `owl:Class` whose
+/// `owl:unionOf` list's first member is an anonymous `owl:Class` with a CYCLIC
+/// `owl:intersectionOf` list (`_:il rdf:rest _:il`), and every `rdf:List` node carries the
+/// `a rdf:List` typing. None of it is referenced by any axiom predicate. Before [OPUS-4.8]
+/// sq-pbz04.4.12 the `a rdf:List` declaration typing seeded the cyclic intersection cell
+/// reachable, so the whole graph slipped past the refusal and extracted to an empty ontology
+/// (a WRONG definitive verdict). After: refused with MalformedList or MalformedClassExpression
 /// (whichever orphan is detected first — both are the correct fail-closed response).
 /// [OPUS-4.8] sq-pbz04.4.12
 #[test]
 fn reject_unconsumed_union_backbone_i5_5_007() {
-    // _:x owl:unionOf ( :a :b ) — _:x is an anonymous blank, never referenced by any
-    // axiom predicate. Mirrors the structure of I5.5-007's non-conclusion ontology.
-    // The list cells _:l1, _:l2 are also anonymous and orphaned; either _:x or a list
-    // cell may be detected first (the iteration order over the structural-node set is
-    // unspecified). Both MalformedClassExpression and MalformedList are correct refusals.
-    let (d, t) = parse("_:x owl:unionOf ( :a :b ) .");
+    // Nested cyclic union/intersection with the `a rdf:List` typings, exactly the corpus
+    // WebOnt-I5.5-007 non-conclusion encoding (the outer union head is an anonymous
+    // owl:Class; the intersection list `_:il` is self-cyclic via rdf:rest). Nothing here is
+    // consumed by an axiom, so it must be refused. Both MalformedClassExpression and
+    // MalformedList are correct fail-closed refusals (iteration order over the structural-node
+    // set is unspecified).
+    let (d, t) = parse(
+        "_:u rdf:type owl:Class .\n\
+         _:u owl:unionOf _:ul .\n\
+         _:ul rdf:type rdf:List .\n\
+         _:ul rdf:first _:inner .\n\
+         _:ul rdf:rest rdf:nil .\n\
+         _:inner rdf:type owl:Class .\n\
+         _:inner owl:intersectionOf _:il .\n\
+         _:il rdf:type rdf:List .\n\
+         _:il rdf:first :a .\n\
+         _:il rdf:rest _:il .",
+    );
     let result = extract(&d, &t);
     assert!(
         matches!(
             result,
             Err(ExtractError::MalformedClassExpression(_)) | Err(ExtractError::MalformedList(_))
         ),
-        "unconsumed anonymous union backbone must be refused (I5.5-007 analog); got {:?}",
+        "unconsumed cyclic union/intersection backbone (with `a rdf:List` typings) must be \
+         refused (WebOnt-I5.5-007); got {:?}",
+        result
+    );
+}
+
+/// Companion minimal case: a single unconsumed anonymous `owl:unionOf` list with the
+/// `a rdf:List` typing, ensuring the declaration typing does not rescue the orphan even
+/// without the full I5.5-007 nesting. [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn reject_unconsumed_union_backbone_typed_list() {
+    // _:x owl:unionOf ( :a :b ) where the list head carries `a rdf:List`. _:x is an
+    // anonymous blank, never referenced by any axiom predicate.
+    let (d, t) = parse(
+        "_:x owl:unionOf _:l .\n\
+         _:l rdf:type rdf:List .\n\
+         _:l rdf:first :a .\n\
+         _:l rdf:rest rdf:nil .",
+    );
+    let result = extract(&d, &t);
+    assert!(
+        matches!(
+            result,
+            Err(ExtractError::MalformedClassExpression(_)) | Err(ExtractError::MalformedList(_))
+        ),
+        "unconsumed anonymous union backbone with a typed list must be refused; got {:?}",
         result
     );
 }
