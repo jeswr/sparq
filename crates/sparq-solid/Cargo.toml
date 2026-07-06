@@ -109,6 +109,16 @@ legacy-union-default-graph = []
 [dev-dependencies]
 serde_json = "1"
 
+# [OPUS-4.8] sq-zgbso.1 MEASURED SPIKE (issue #1582, design record
+# research/odrl-n3-compiled-rules.md): ODRL permission evaluation as N3 rules
+# (rules/odrl-spike.n3) differentially tested against the hand-written Rust path. Gated on
+# `odrl-bridge` (it drives the real `sparq_policy::evaluate` + `odrl_bridge::materialize_policy`),
+# so it is NOT built in the default (feature-OFF) state and adds zero default-build cost.
+# Measurement-only: no production wiring, no new public API.
+[[example]]
+name = "odrl_n3_spike"
+required-features = ["odrl-bridge"]
+
 # [OPUS-4.8] sq-pfae PoC: the trust-graph end-to-end test (tests/trust_graph.rs, fully
 # `#![cfg(feature = "trust-graph")]`) drives the admission gate through the real
 # PodStore. These are dev-only — they do not touch the default build or publish. Scoped
