@@ -136,6 +136,11 @@ use sparq_zk::verify::{
     fragment_filters, fragment_pattern_consts, fragment_patterns, recheck, variable_slots,
     FilterCmp, JoinEdge, QueryFilter, VerifyError,
 };
+// [OPUS-4.8] sq-3kd2g.6: the wave-1 extended-fragment query re-derivation the
+// fail-closed `dispatch_fragment` routing gate consumes (never trusting the
+// manifest). Opt-in (`extended-fragment`).
+#[cfg(feature = "extended-fragment")]
+use sparq_zk::verify::fragment_query;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -1963,6 +1968,27 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
                 _ => return None,
             };
             derive_join_eq_id(n_a, n_b)
+        }
+        // [OPUS-4.8] sq-3kd2g.6: bounded-depth path reachability. The declared id
+        // carries the depth bound `d` and slot bucket `n`; `k` is re-derived from
+        // `commitments.len()` (the arity a wrong-length attribution cannot fake —
+        // it changes the reconstructed public-input vector's length). The disclosed
+        // `depth_bound` MUST equal the member's `d` (it is constant-constrained to
+        // `D` in-circuit, soundness req 1), so a manifest disclosing a different
+        // bound derives NO id (fail-closed). `derive_path_reach_id` then requires
+        // `(d, k, n)` to be an EXACTLY compiled member (a wrong `k` bucket => a
+        // different / no derived id => `CircuitIdMismatch` upstream).
+        #[cfg(feature = "extended-fragment")]
+        ProofInputs::PathReach { commitments, depth_bound, .. } => {
+            let (d, n) = match inputs.circuit_id() {
+                CircuitId::PathReach { d, n, .. } => (*d, *n),
+                _ => return None,
+            };
+            if *depth_bound != d {
+                return None;
+            }
+            let k = commitments.len() as u32;
+            crate::build::derive_path_reach_id(d, k, n)
         }
     }
 }
@@ -4897,6 +4923,318 @@ pub fn verify_manifest(
     Ok(())
 }
 
+/// Why a wave-1 extended-fragment manifest was REJECTED by [`dispatch_fragment`]
+/// (sq-3kd2g.6). Every variant is a FAIL-CLOSED refusal — the gate never falls
+/// through to a default / silent accept for anything outside the proven-sound
+/// fragment.
+// [OPUS-4.8] sq-3kd2g.6. Opt-in (`extended-fragment`), NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FragmentDispatchError {
+    /// The query is OUTSIDE the wave-1 extended fragment: `fragment_query`
+    /// (re-derived from the query text alone, never the manifest) rejected it
+    /// (e.g. `OPTIONAL` / `MINUS` / `GRAPH` / `SERVICE` / a non-atomic closure).
+    /// Carries the underlying reason.
+    OutsideFragment(String),
+    /// A [`crate::manifest::BranchWitness`] attributes a disclosed solution to a
+    /// `UNION` branch index that does not exist (the "wrong branch" rejection).
+    BranchOutOfRange { witness: usize, branch: usize, branches: usize },
+    /// A branch witness's per-obligation arity (`scan_proofs` / `path_proofs` /
+    /// `values_rows`) does not match the re-derived branch's obligation count.
+    ObligationArityMismatch { witness: usize, what: &'static str, expected: usize, got: usize },
+    /// A named `sub_proofs` index is out of range of the embedded manifest.
+    DanglingProof { witness: usize, proof: usize },
+    /// A sub-proof carries an unknown / uncompiled circuit id (`derive_id` =>
+    /// None) — e.g. a `PathReach` whose disclosed `depth_bound` is not a compiled
+    /// member's bound.
+    UnknownCircuit { proof: usize },
+    /// A sub-proof's DECLARED circuit id does not equal the id re-derived from its
+    /// public inputs — the "k (or n/d) mismatch between claim and circuit member"
+    /// rejection (e.g. a `PathReach` declaring `k = 2` but carrying one
+    /// commitment). Same invariant `prefilter_manifest_structure` stage-1b
+    /// enforces, checked here too so the routing gate is self-contained.
+    CircuitIdMismatch { proof: usize, declared: CircuitId, derived: CircuitId },
+    /// A BGP-scan obligation's named sub-proof is not a [`ProofInputs::Scan`].
+    NotAScanProof { witness: usize, obligation: usize, proof: usize },
+    /// A bounded-path obligation has NO bound [`ProofInputs::PathReach`] sub-proof
+    /// of the right member at its named index (the "path claimed without a bound
+    /// sub-proof" rejection).
+    ///
+    /// The depth-overflow / mismatch case — a `PathReach` whose disclosed
+    /// `depth_bound` is not the member's compiled `d` (soundness req 1) — is
+    /// rejected EARLIER, by the id-hygiene check, as
+    /// [`FragmentDispatchError::UnknownCircuit`] (`derive_id` returns `None` when
+    /// `depth_bound != d`), so it never reaches this per-obligation stage.
+    PathReachMissing { witness: usize, obligation: usize, proof: usize },
+    /// A path sub-proof's `allow_zero` disagrees with the query-re-derived
+    /// closure (`p+` cannot be presented as `p*`/`p?` or vice versa).
+    PathClosureMismatch { witness: usize, obligation: usize },
+    /// A FIXED-depth closure (`p?`, whose bound is pinned to 1) is bound to a
+    /// member whose depth `d` exceeds that fixed bound.
+    PathDepthExceedsClosure { witness: usize, obligation: usize, member_d: u32, fixed: usize },
+    /// A VALUES-row index is out of range of the re-derived block's rows.
+    ValuesRowOutOfRange { witness: usize, block: usize, row: usize, rows: usize },
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::fmt::Display for FragmentDispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FragmentDispatchError::OutsideFragment(why) => {
+                write!(f, "query is outside the wave-1 extended fragment: {}", why)
+            }
+            FragmentDispatchError::BranchOutOfRange { witness, branch, branches } => write!(
+                f,
+                "branch witness {} attributes a solution to branch {} but the query \
+                 re-derives only {} branch(es) (fail-closed: wrong branch)",
+                witness, branch, branches
+            ),
+            FragmentDispatchError::ObligationArityMismatch { witness, what, expected, got } => write!(
+                f,
+                "branch witness {} has {} {} proof-refs but the branch has {} {} obligation(s)",
+                witness, got, what, expected, what
+            ),
+            FragmentDispatchError::DanglingProof { witness, proof } => write!(
+                f,
+                "branch witness {} names sub-proof {} which is out of range",
+                witness, proof
+            ),
+            FragmentDispatchError::UnknownCircuit { proof } => write!(
+                f,
+                "sub-proof {} carries an unknown / uncompiled circuit id (fail-closed)",
+                proof
+            ),
+            FragmentDispatchError::CircuitIdMismatch { proof, declared, derived } => write!(
+                f,
+                "sub-proof {}: declared circuit id {:?} but its public inputs re-derive {:?} \
+                 (fail-closed: claim / circuit-member mismatch)",
+                proof, declared, derived
+            ),
+            FragmentDispatchError::NotAScanProof { witness, obligation, proof } => write!(
+                f,
+                "branch witness {} BGP obligation {} names sub-proof {}, which is not a scan proof",
+                witness, obligation, proof
+            ),
+            FragmentDispatchError::PathReachMissing { witness, obligation, proof } => write!(
+                f,
+                "branch witness {} path obligation {} names sub-proof {}, which is not a \
+                 bound path_reach proof (fail-closed: path claimed without a bound sub-proof)",
+                witness, obligation, proof
+            ),
+            FragmentDispatchError::PathClosureMismatch { witness, obligation } => write!(
+                f,
+                "branch witness {} path obligation {}: allow_zero disagrees with the query closure",
+                witness, obligation
+            ),
+            FragmentDispatchError::PathDepthExceedsClosure { witness, obligation, member_d, fixed } => {
+                write!(
+                    f,
+                    "branch witness {} path obligation {}: member depth {} exceeds the closure's fixed \
+                     bound {} (fail-closed)",
+                    witness, obligation, member_d, fixed
+                )
+            }
+            FragmentDispatchError::ValuesRowOutOfRange { witness, block, row, rows } => write!(
+                f,
+                "branch witness {} VALUES block {}: row index {} out of range ({} row(s))",
+                witness, block, row, rows
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::error::Error for FragmentDispatchError {}
+
+/// FAIL-CLOSED wave-1 extended-fragment DISPATCH (sq-3kd2g.6): route a
+/// [`crate::manifest::FragmentManifest`] to the circuit members the query's
+/// property-path / `UNION` / `VALUES` constructs require, REFUSING anything
+/// outside the proven-sound fragment — never a silent fallback.
+///
+/// The gate re-derives the query's branch structure from the query TEXT alone
+/// (`sparq_zk::verify::fragment_query`, never trusting the manifest) and enforces,
+/// fail-closed, the load-bearing routing invariant (design record §3–§4):
+///
+/// 1. the query is IN the wave-1 fragment ([`FragmentDispatchError::OutsideFragment`]
+///    otherwise — everything the record excludes still rejects);
+/// 2. EVERY embedded sub-proof carries a KNOWN, compiled circuit id (an unknown /
+///    uncompiled id => [`FragmentDispatchError::UnknownCircuit`]);
+/// 3. each disclosed solution's [`crate::manifest::BranchWitness`] attributes it to
+///    a REAL branch ([`FragmentDispatchError::BranchOutOfRange`] — the "wrong
+///    branch" rejection) and names EXACTLY one bound sub-proof per branch
+///    obligation, of the RIGHT member: a BGP obligation => a [`ProofInputs::Scan`],
+///    a bounded-path obligation => a [`ProofInputs::PathReach`] of a member whose
+///    disclosed `depth_bound` equals its compiled `d` (soundness req 1) and whose
+///    `allow_zero` matches the closure — a path claimed WITHOUT a bound path
+///    sub-proof, a `k`/depth mismatch, or a closure mismatch all REJECT;
+/// 4. each disclosed VALUES row-index is in range of the re-derived block.
+///
+/// # Honest scope (load-bearing)
+/// This is the STRUCTURAL ROUTING gate. It binds each construct to a bound
+/// sub-proof of the correct member and surfaces the depth bound; it is the
+/// composition analogue of `verify::branch_obligations`. It does NOT yet run the
+/// bb proof verification (that is the existing [`verify_manifest`] loop, which
+/// `reconstruct_public_inputs` now serializes `PathReach` inputs for) and does
+/// NOT yet bind a path's `pred_enc`/`src_enc`/`dst_enc` or a VALUES row's cell
+/// terms to the disclosed SOLUTION bindings — that term-binding layer needs the
+/// disclosed-solution model and is a documented follow-up bead. Wiring an
+/// end-to-end path/`UNION`/`VALUES` ACCEPT into `verify_manifest` (routing its
+/// stage-1 `recheck` through `fragment_query`) is that same follow-up. The
+/// verifier stack is internally re-audited but NOT externally audited (sq-qhy4
+/// pending); NO soundness / privacy property is asserted as achieved.
+// [OPUS-4.8] sq-3kd2g.6: fail-closed fragment dispatch routing gate.
+#[cfg(feature = "extended-fragment")]
+pub fn dispatch_fragment(
+    fm: &crate::manifest::FragmentManifest,
+) -> Result<(), FragmentDispatchError> {
+    let manifest = &fm.manifest;
+    // (1) Re-derive the fragment from the query text alone — fail-closed on
+    // anything outside the wave-1 extended fragment.
+    let fq = fragment_query(&manifest.query)
+        .map_err(|e| FragmentDispatchError::OutsideFragment(e.to_string()))?;
+
+    // (2) Every embedded sub-proof MUST carry a known, compiled circuit id whose
+    // DECLARED value equals the id re-derived from its public inputs — no unknown /
+    // uncompiled member, and no claim/member mismatch (e.g. a wrong `k` bucket),
+    // reaches the routing (fail-closed hygiene, independent of branch attribution).
+    for (i, sp) in manifest.sub_proofs.iter().enumerate() {
+        match derive_id(&sp.inputs) {
+            None => return Err(FragmentDispatchError::UnknownCircuit { proof: i }),
+            Some(derived) if &derived != sp.inputs.circuit_id() => {
+                return Err(FragmentDispatchError::CircuitIdMismatch {
+                    proof: i,
+                    declared: sp.inputs.circuit_id().clone(),
+                    derived,
+                })
+            }
+            Some(_) => {}
+        }
+    }
+
+    // A manifest with no branch attribution carries no extended-fragment claim to
+    // route (a stage-1 presentation): the query-hygiene + id checks above are all
+    // that apply. This keeps the gate a strict no-op on stage-1 manifests.
+    if fm.branch_witnesses.is_empty() {
+        return Ok(());
+    }
+
+    for (wi, bw) in fm.branch_witnesses.iter().enumerate() {
+        let branch =
+            fq.branches
+                .get(bw.branch)
+                .ok_or(FragmentDispatchError::BranchOutOfRange {
+                    witness: wi,
+                    branch: bw.branch,
+                    branches: fq.branches.len(),
+                })?;
+
+        // (3) Per-obligation arity: EXACTLY one bound sub-proof per BGP-scan and
+        // per bounded-path obligation, and one chosen row per VALUES block.
+        if bw.scan_proofs.len() != branch.patterns.len() {
+            return Err(FragmentDispatchError::ObligationArityMismatch {
+                witness: wi,
+                what: "scan",
+                expected: branch.patterns.len(),
+                got: bw.scan_proofs.len(),
+            });
+        }
+        if bw.path_proofs.len() != branch.path_reach.len() {
+            return Err(FragmentDispatchError::ObligationArityMismatch {
+                witness: wi,
+                what: "path",
+                expected: branch.path_reach.len(),
+                got: bw.path_proofs.len(),
+            });
+        }
+        if bw.values_rows.len() != branch.values.len() {
+            return Err(FragmentDispatchError::ObligationArityMismatch {
+                witness: wi,
+                what: "values",
+                expected: branch.values.len(),
+                got: bw.values_rows.len(),
+            });
+        }
+
+        // Each BGP obligation must name a bound scan sub-proof.
+        for (oi, &pi) in bw.scan_proofs.iter().enumerate() {
+            let sp = manifest
+                .sub_proofs
+                .get(pi)
+                .ok_or(FragmentDispatchError::DanglingProof { witness: wi, proof: pi })?;
+            if !matches!(sp.inputs, ProofInputs::Scan { .. }) {
+                return Err(FragmentDispatchError::NotAScanProof {
+                    witness: wi,
+                    obligation: oi,
+                    proof: pi,
+                });
+            }
+        }
+
+        // Each bounded-path obligation must name a bound PathReach sub-proof of the
+        // member the closure requires (depth surfaced + matching, allow_zero
+        // consistent, fixed-depth closures pinned).
+        for (oi, &pi) in bw.path_proofs.iter().enumerate() {
+            let obligation = &branch.path_reach[oi];
+            let sp = manifest
+                .sub_proofs
+                .get(pi)
+                .ok_or(FragmentDispatchError::DanglingProof { witness: wi, proof: pi })?;
+            let ProofInputs::PathReach { allow_zero, id, .. } = &sp.inputs else {
+                return Err(FragmentDispatchError::PathReachMissing {
+                    witness: wi,
+                    obligation: oi,
+                    proof: pi,
+                });
+            };
+            let CircuitId::PathReach { d, .. } = id else {
+                return Err(FragmentDispatchError::PathReachMissing {
+                    witness: wi,
+                    obligation: oi,
+                    proof: pi,
+                });
+            };
+            // The sub-proof's disclosed `depth_bound` is already pinned to this
+            // member's `d` by the id-hygiene check above (`derive_id` => None when
+            // `depth_bound != d`) — the depth-surfacing / anti-overflow gate
+            // (soundness req 1). `d` is re-used here only for the fixed-closure check.
+            // Closure <-> allow_zero: the zero-length case is admitted iff the
+            // closure's minimum length is 0 (`*`/`?`), never for `+`.
+            let expect_allow_zero = obligation.closure.min_len() == 0;
+            if *allow_zero != expect_allow_zero {
+                return Err(FragmentDispatchError::PathClosureMismatch { witness: wi, obligation: oi });
+            }
+            // A fixed-depth closure (`p?`, bound pinned to 1) must not bind a
+            // deeper member — that would let a 2-step chain masquerade as `p?`.
+            if let Some(fixed) = obligation.closure.fixed_k() {
+                if *d as usize != fixed {
+                    return Err(FragmentDispatchError::PathDepthExceedsClosure {
+                        witness: wi,
+                        obligation: oi,
+                        member_d: *d,
+                        fixed,
+                    });
+                }
+            }
+        }
+
+        // (4) Each disclosed VALUES row-index must be in range of the re-derived
+        // block (the rows are public constants of the query text).
+        for (bi, &row) in bw.values_rows.iter().enumerate() {
+            let rows = branch.values[bi].rows.len();
+            if row >= rows {
+                return Err(FragmentDispatchError::ValuesRowOutOfRange {
+                    witness: wi,
+                    block: bi,
+                    row,
+                    rows,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Reconstruct the bb `public_inputs` byte vector from the DECLARED
 /// `ProofInputs` (audit #1), in each member's `main` declaration order, using
 /// the verifier's `challenge` as public-input field 0. bb's layout (determined
@@ -5122,6 +5460,45 @@ fn reconstruct_public_inputs(
             push_field(&mut out, join_commitment, proof, "join_commitment")?;
             push_uint(&mut out, u64::from(*slot_a));
             push_uint(&mut out, u64::from(*slot_b));
+        }
+        // [OPUS-4.8] sq-3kd2g.6: bounded-depth path reachability public inputs, in
+        // the `path_reach_d{d}_k{k}_n{n}` member's `main` declaration order:
+        // challenge (pushed above), commitments[k], pred_enc, src_enc, dst_enc,
+        // allow_zero (bool -> {0,1}), depth_bound (u32), attribution[k] (bool ->
+        // {0,1}). Cross-reference `zk/compose/path_reach_d{d}_k{k}_n{n}/src/main.nr`
+        // — do not reorder. The `commitments` / `attribution` length is the declared
+        // `CircuitId.k` (re-derived from `commitments.len()` in stage 1b), so a
+        // wrong-length attribution yields a wrong-length vector that cannot
+        // byte-match the real member's proof. `depth_bound` is the PUBLIC bound the
+        // consumer sees (soundness req 1); it is also constant-constrained to the
+        // member's `D` in-circuit.
+        #[cfg(feature = "extended-fragment")]
+        ProofInputs::PathReach {
+            commitments,
+            pred_enc,
+            src_enc,
+            dst_enc,
+            allow_zero,
+            depth_bound,
+            attribution,
+            ..
+        } => {
+            for c in commitments {
+                push_field(&mut out, c, proof, "commitments")?;
+            }
+            push_field(&mut out, pred_enc, proof, "pred_enc")?;
+            push_field(&mut out, src_enc, proof, "src_enc")?;
+            push_field(&mut out, dst_enc, proof, "dst_enc")?;
+            push_uint(&mut out, u64::from(*allow_zero));
+            push_uint(&mut out, u64::from(*depth_bound));
+            let k = match inputs.circuit_id() {
+                CircuitId::PathReach { k, .. } => *k as usize,
+                _ => return Err(CheckError::MalformedField { proof, what: "path id" }),
+            };
+            for g in 0..k {
+                let bit = attribution.get(g).copied().unwrap_or(false);
+                push_uint(&mut out, u64::from(bit));
+            }
         }
     }
     Ok(out)
@@ -5708,5 +6085,418 @@ mod tests {
             reconstruct_public_inputs(&inputs, &fh("0x2a"), 0),
             Err(CheckError::MalformedField { proof: 0, what: "operand_enc" })
         ));
+    }
+}
+
+// [OPUS-4.8] sq-3kd2g.6: FAIL-CLOSED wave-1 fragment DISPATCH tests — the
+// acceptance-set negatives (a path claimed without a bound sub-proof; a k / member
+// mismatch; branch attribution at the wrong branch) plus the accept + closure +
+// VALUES routing. Structural (no bb): the crypto binding is the verify_manifest
+// loop; the term binding to disclosed solutions is a documented follow-up.
+#[cfg(all(test, feature = "extended-fragment"))]
+mod fragment_dispatch_tests {
+    use super::*;
+    use crate::manifest::{BranchWitness, FragmentManifest, SubProof};
+
+    fn fh(s: &str) -> FieldHex {
+        FieldHex(s.to_string())
+    }
+
+    /// A `PathReach` input whose id is EXACTLY `(d, k, n)` and whose
+    /// `commitments`/`attribution` have length `k` and `depth_bound == d` (a
+    /// consistent, id-hygiene-passing member).
+    fn path_ok(d: u32, k: u32, n: u32, allow_zero: bool) -> ProofInputs {
+        ProofInputs::PathReach {
+            id: CircuitId::PathReach { d, k, n },
+            commitments: (0..k).map(|i| fh(&format!("0x{:x}", i + 1))).collect(),
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero,
+            depth_bound: d,
+            attribution: vec![true; k as usize],
+        }
+    }
+
+    fn scan_min() -> ProofInputs {
+        ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![fh("0x1")],
+            pattern_is_const: [true, true, false],
+            pattern_const_enc: [fh("0x1"), fh("0x2"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false],
+        }
+    }
+
+    fn sub(inputs: ProofInputs) -> SubProof {
+        SubProof { inputs, proof_hex: String::new() }
+    }
+
+    fn base_manifest(query: &str, sub_proofs: Vec<SubProof>) -> ProofManifest {
+        ProofManifest {
+            r#type: "urn:sparq:zk:ProofManifest".to_string(),
+            query: query.to_string(),
+            issuers: vec![],
+            key_set: vec![],
+            commitment_attestations: vec![],
+            attributions: vec![],
+            join_obligations: vec![],
+            entailment_regime: EntailmentRegime::Simple,
+            derivation_steps: vec![],
+            binding: BindingMode::Challenge { challenge: fh("0x2a") },
+            revocation: None,
+            status_snapshots: vec![],
+            sub_proofs,
+            binding_edges: vec![],
+            join_edges: vec![],
+            hidden_revocation: None,
+            hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
+        }
+    }
+
+    fn fm(query: &str, sub_proofs: Vec<SubProof>, witnesses: Vec<BranchWitness>) -> FragmentManifest {
+        FragmentManifest::new(base_manifest(query, sub_proofs), witnesses)
+    }
+
+    const PLUS: &str = "SELECT * WHERE { <http://ex/a> <http://ex/p>+ ?o }";
+    const STAR: &str = "SELECT * WHERE { <http://ex/a> <http://ex/p>* ?o }";
+    const OPT: &str = "SELECT * WHERE { <http://ex/a> <http://ex/p>? ?o }";
+    const UNION: &str =
+        "SELECT * WHERE { { ?s <http://ex/p> ?o } UNION { ?o <http://ex/q> ?s } }";
+    const VALUES: &str =
+        "SELECT * WHERE { ?s <http://ex/p> ?o VALUES ?o { <http://ex/x> <http://ex/y> } }";
+
+    fn bw(branch: usize, scan: Vec<usize>, path: Vec<usize>, values: Vec<usize>) -> BranchWitness {
+        BranchWitness { branch, scan_proofs: scan, path_proofs: path, values_rows: values }
+    }
+
+    // --- ACCEPT paths (a bound path member of the right member routes) -------
+
+    #[test]
+    fn accepts_bounded_plus_path_with_a_bound_member() {
+        // `p+` => allow_zero false; a d=4,k=1,n=16 member is a valid bound.
+        let m = fm(PLUS, vec![sub(path_ok(4, 1, 16, false))], vec![bw(0, vec![], vec![0], vec![])]);
+        assert_eq!(dispatch_fragment(&m), Ok(()));
+    }
+
+    #[test]
+    fn accepts_star_path_zero_length_admitted() {
+        // `p*` => allow_zero true.
+        let m = fm(STAR, vec![sub(path_ok(4, 1, 16, true))], vec![bw(0, vec![], vec![0], vec![])]);
+        assert_eq!(dispatch_fragment(&m), Ok(()));
+    }
+
+    #[test]
+    fn accepts_union_with_per_branch_solution_attribution() {
+        // Two solutions, one per branch; each branch is a single BGP scan.
+        let m = fm(
+            UNION,
+            vec![sub(scan_min()), sub(scan_min())],
+            vec![bw(0, vec![0], vec![], vec![]), bw(1, vec![1], vec![], vec![])],
+        );
+        assert_eq!(dispatch_fragment(&m), Ok(()));
+    }
+
+    #[test]
+    fn accepts_values_row_in_range() {
+        // One BGP scan + a VALUES block of 2 rows; the solution picks row 1.
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw(0, vec![0], vec![], vec![1])],
+        );
+        assert_eq!(dispatch_fragment(&m), Ok(()));
+    }
+
+    #[test]
+    fn empty_branch_witnesses_is_a_noop_on_a_fragment_query() {
+        // No attribution => the gate only re-derives the fragment + checks the
+        // sub-proof ids; a stage-1-style presentation is a pass-through.
+        let m = fm(PLUS, vec![], vec![]);
+        assert_eq!(dispatch_fragment(&m), Ok(()));
+    }
+
+    // --- ACCEPTANCE NEGATIVE 1: PathReach claimed without a bound sub-proof ---
+
+    #[test]
+    fn rejects_path_obligation_pointing_at_a_scan_proof() {
+        // The path obligation names sub-proof 0, which is a SCAN (not a bound
+        // path_reach) => PathReachMissing (fail-closed).
+        let m = fm(PLUS, vec![sub(scan_min())], vec![bw(0, vec![], vec![0], vec![])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::PathReachMissing { witness: 0, obligation: 0, proof: 0 })
+        ));
+    }
+
+    #[test]
+    fn rejects_path_obligation_naming_an_out_of_range_proof() {
+        // No sub-proofs at all, but the path obligation names index 0 => dangling.
+        let m = fm(PLUS, vec![], vec![bw(0, vec![], vec![0], vec![])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::DanglingProof { witness: 0, proof: 0 })
+        ));
+    }
+
+    // --- ACCEPTANCE NEGATIVE 2: k / member mismatch between claim and circuit --
+
+    #[test]
+    fn rejects_path_member_k_mismatch() {
+        // Declared id says k=2 but only ONE commitment is carried => the id
+        // re-derives PathReach{4,1,16} != the declared {4,2,16} => CircuitIdMismatch.
+        let inputs = ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 2, n: 16 },
+            commitments: vec![fh("0x1")], // len 1, not 2
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: false,
+            depth_bound: 4,
+            attribution: vec![true],
+        };
+        let m = fm(PLUS, vec![sub(inputs)], vec![]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::CircuitIdMismatch {
+                proof: 0,
+                declared: CircuitId::PathReach { d: 4, k: 2, n: 16 },
+                derived: CircuitId::PathReach { d: 4, k: 1, n: 16 },
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_path_depth_bound_not_a_compiled_member() {
+        // depth_bound (5) != the member's d (4) => derive_id returns None =>
+        // UnknownCircuit (the depth-overflow / mismatch rejection, req 1).
+        let inputs = ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 1, n: 16 },
+            commitments: vec![fh("0x1")],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: false,
+            depth_bound: 5, // != d
+            attribution: vec![true],
+        };
+        let m = fm(PLUS, vec![sub(inputs)], vec![]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::UnknownCircuit { proof: 0 })
+        ));
+    }
+
+    // --- ACCEPTANCE NEGATIVE 3: branch attribution pointing at the wrong branch -
+
+    #[test]
+    fn rejects_branch_attribution_out_of_range() {
+        // The UNION query has 2 branches; attributing a solution to branch 5 =>
+        // BranchOutOfRange (the "wrong branch" rejection).
+        let m = fm(UNION, vec![sub(scan_min())], vec![bw(5, vec![0], vec![], vec![])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::BranchOutOfRange { witness: 0, branch: 5, branches: 2 })
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_branch_obligation_shape() {
+        // Attributing to branch 0 (a single BGP scan) but naming a PATH proof for
+        // it => the branch has 0 path obligations, so the path arity mismatches.
+        let m = fm(
+            UNION,
+            vec![sub(path_ok(4, 1, 16, false))],
+            vec![bw(0, vec![], vec![0], vec![])],
+        );
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::ObligationArityMismatch {
+                witness: 0,
+                what: "scan",
+                expected: 1,
+                got: 0
+            })
+        ));
+    }
+
+    // --- closure / allow_zero + fixed-depth + VALUES range rejections ---------
+
+    #[test]
+    fn rejects_plus_presented_as_star() {
+        // A `p+` obligation (allow_zero expected false) bound to a path proof with
+        // allow_zero = true => PathClosureMismatch.
+        let m = fm(PLUS, vec![sub(path_ok(4, 1, 16, true))], vec![bw(0, vec![], vec![0], vec![])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::PathClosureMismatch { witness: 0, obligation: 0 })
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_or_one_bound_to_a_deeper_member() {
+        // `p?` pins the depth bound to 1, but the smallest compiled member is d=2:
+        // binding a d=4 member (allow_zero true, matching the ? closure) still
+        // rejects because d != the fixed bound => PathDepthExceedsClosure.
+        let m = fm(OPT, vec![sub(path_ok(4, 1, 16, true))], vec![bw(0, vec![], vec![0], vec![])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::PathDepthExceedsClosure {
+                witness: 0,
+                obligation: 0,
+                member_d: 4,
+                fixed: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_scan_obligation_pointing_at_a_path_proof() {
+        // The VALUES query's single BGP obligation names sub-proof 0, which is a
+        // PATH proof (not a scan) => NotAScanProof.
+        let m = fm(
+            VALUES,
+            vec![sub(path_ok(4, 1, 16, false))],
+            vec![bw(0, vec![0], vec![], vec![0])],
+        );
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::NotAScanProof { witness: 0, obligation: 0, proof: 0 })
+        ));
+    }
+
+    #[test]
+    fn rejects_values_row_out_of_range() {
+        // The VALUES block has 2 rows (indices 0,1); claiming row 2 => out of range.
+        let m = fm(VALUES, vec![sub(scan_min())], vec![bw(0, vec![0], vec![], vec![2])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::ValuesRowOutOfRange {
+                witness: 0,
+                block: 0,
+                row: 2,
+                rows: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_query_outside_the_fragment() {
+        // OPTIONAL is non-monotone => outside the wave-1 fragment, fail-closed.
+        let m = fm(
+            "SELECT * WHERE { ?s <http://ex/p> ?o OPTIONAL { ?o <http://ex/q> ?x } }",
+            vec![sub(scan_min())],
+            vec![],
+        );
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::OutsideFragment(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_circuit_id_in_a_sub_proof() {
+        // A scan id outside the compiled family (k=3 is not a SCAN_K_VALUES member)
+        // => derive_id None => UnknownCircuit, independent of branch attribution.
+        let inputs = ProofInputs::Scan {
+            id: CircuitId::Scan { k: 3, n: 16, r: 4 },
+            commitments: vec![fh("0x1"), fh("0x2"), fh("0x3")],
+            pattern_is_const: [true, true, false],
+            pattern_const_enc: [fh("0x1"), fh("0x2"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false, false, false],
+        };
+        let m = fm(PLUS, vec![sub(inputs)], vec![]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::UnknownCircuit { proof: 0 })
+        ));
+    }
+
+    #[test]
+    fn reconstruct_path_reach_public_inputs_layout() {
+        // Declaration order after challenge: commitments[k], pred_enc, src_enc,
+        // dst_enc, allow_zero, depth_bound, attribution[k]. k=2 =>
+        // 1 (challenge) + 2 (commit) + 3 (enc) + 1 (allow_zero) + 1 (depth) + 2
+        // (attr) = 10 words * 32 bytes.
+        let inputs = ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 2, n: 16 },
+            commitments: vec![fh("0x1"), fh("0x2")],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: true,
+            depth_bound: 4,
+            attribution: vec![true, false],
+        };
+        let bytes = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
+        assert_eq!(bytes.len(), 10 * 32, "1 challenge + 2 commit + 3 enc + allow_zero + depth + 2 attr");
+        // allow_zero (word index 6) is 1, depth_bound (word 7) is 4.
+        assert_eq!(bytes[6 * 32 + 31], 1, "allow_zero = true -> 1");
+        assert_eq!(bytes[7 * 32 + 31], 4, "depth_bound word = 4");
+        // attribution[0]=true (word 8), attribution[1]=false (word 9).
+        assert_eq!(bytes[8 * 32 + 31], 1);
+        assert_eq!(bytes[9 * 32 + 31], 0);
+    }
+
+    #[test]
+    fn derive_id_path_reach_binds_k_and_depth() {
+        // A consistent member re-derives itself.
+        assert_eq!(
+            derive_id(&path_ok(4, 1, 16, false)),
+            Some(CircuitId::PathReach { d: 4, k: 1, n: 16 })
+        );
+        // depth_bound != d => None (the depth-overflow / mismatch rejection).
+        let bad_depth = ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 1, n: 16 },
+            commitments: vec![fh("0x1")],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: false,
+            depth_bound: 7,
+            attribution: vec![true],
+        };
+        assert_eq!(derive_id(&bad_depth), None);
+    }
+
+    #[test]
+    fn error_display_is_non_empty_for_each_variant() {
+        // Cheap Display coverage (the error is `pub` + `impl Error`).
+        let errs = [
+            FragmentDispatchError::OutsideFragment("x".into()),
+            FragmentDispatchError::BranchOutOfRange { witness: 0, branch: 1, branches: 1 },
+            FragmentDispatchError::ObligationArityMismatch {
+                witness: 0,
+                what: "path",
+                expected: 1,
+                got: 0,
+            },
+            FragmentDispatchError::DanglingProof { witness: 0, proof: 9 },
+            FragmentDispatchError::UnknownCircuit { proof: 0 },
+            FragmentDispatchError::CircuitIdMismatch {
+                proof: 0,
+                declared: CircuitId::PathReach { d: 4, k: 2, n: 16 },
+                derived: CircuitId::PathReach { d: 4, k: 1, n: 16 },
+            },
+            FragmentDispatchError::NotAScanProof { witness: 0, obligation: 0, proof: 0 },
+            FragmentDispatchError::PathReachMissing { witness: 0, obligation: 0, proof: 0 },
+            FragmentDispatchError::PathClosureMismatch { witness: 0, obligation: 0 },
+            FragmentDispatchError::PathDepthExceedsClosure {
+                witness: 0,
+                obligation: 0,
+                member_d: 4,
+                fixed: 1,
+            },
+            FragmentDispatchError::ValuesRowOutOfRange { witness: 0, block: 0, row: 2, rows: 2 },
+        ];
+        for e in &errs {
+            assert!(!format!("{}", e).is_empty());
+        }
     }
 }

@@ -32,6 +32,19 @@ dual-leaf = ["sparq-zk/dual-leaf"]
 # default; a benchmark/research dial only (never production). Enabling it also
 # turns the value-lane on.
 commitment-value-only = ["dual-leaf", "sparq-zk/commitment-value-only"]
+# [FABLE-5]-era / [OPUS-4.8] sq-3kd2g.6: the WAVE-1 EXTENDED-FRAGMENT surface —
+# the bounded-depth property-path circuit-family member id
+# (`CircuitId::PathReach` / `ProofInputs::PathReach`, over `zk/compose/`'s
+# `path_reach_d{d}_k{k}_n{n}` family, sq-3kd2g.2), the per-solution UNION
+# branch-attribution + VALUES row-index disclosure schema
+# (`manifest::BranchWitness`), and the FAIL-CLOSED fragment dispatch gate
+# (`verifier::dispatch_fragment`) that routes a manifest to the right member and
+# REFUSES anything outside the proven-sound fragment. OFF by default: the default
+# verifier surface is byte-unchanged. LEAN — adds NO new dependency (it consumes
+# `sparq-zk`'s already-present `verify::fragment_query`). Soundness posture
+# UNCHANGED: the verifier is internally re-audited but NOT externally audited
+# (sq-qhy4 pending); no soundness/privacy claim.
+extended-fragment = []
 
 [dependencies]
 sparq-zk = { path = "../sparq-zk" }
